@@ -16,19 +16,19 @@ const MIN_CLI_VERSION = "0.6.4";
  * Returns null for unparseable versions. Accepts extra parts (only first 3 used).
  */
 function parseSemver(v: string): [number, number, number] | null {
-	const clean = v.replace(/^v/, "").split("-")[0];
-	const parts = clean.split(".").map(Number);
-	if (parts.length < 3 || parts.some(Number.isNaN)) return null;
-	return [parts[0], parts[1], parts[2]];
+  const clean = v.replace(/^v/, "").split("-")[0];
+  const parts = clean.split(".").map(Number);
+  if (parts.length < 3 || parts.some(Number.isNaN)) return null;
+  return [parts[0], parts[1], parts[2]];
 }
 
 function isVersionBelow(version: string, minimum: string): boolean | null {
-	const v = parseSemver(version);
-	const m = parseSemver(minimum);
-	if (!v || !m) return null;
-	if (v[0] !== m[0]) return v[0] < m[0];
-	if (v[1] !== m[1]) return v[1] < m[1];
-	return v[2] < m[2];
+  const v = parseSemver(version);
+  const m = parseSemver(minimum);
+  if (!v || !m) return null;
+  if (v[0] !== m[0]) return v[0] < m[0];
+  if (v[1] !== m[1]) return v[1] < m[1];
+  return v[2] < m[2];
 }
 
 /**
@@ -37,47 +37,47 @@ function isVersionBelow(version: string, minimum: string): boolean | null {
  * Apply selectively to routes that require a minimum CLI version.
  */
 export const cliVersionGuard = async (
-	c: Context<{ Bindings: Bindings; Variables: Variables }>,
-	next: Next,
+  c: Context<{ Bindings: Bindings; Variables: Variables }>,
+  next: Next,
 ) => {
-	const cliVersion = c.req.header("X-CLI-Version");
+  const cliVersion = c.req.header("X-CLI-Version");
 
-	if (!cliVersion) {
-		return c.json(
-			{
-				error: "CLI version too old",
-				message: `This operation requires NEMAR CLI v${MIN_CLI_VERSION} or newer. Run: bun install -g nemar@latest`,
-				minimum_version: MIN_CLI_VERSION,
-			},
-			426,
-		);
-	}
+  if (!cliVersion) {
+    return c.json(
+      {
+        error: "CLI version too old",
+        message: `This operation requires NEMAR CLI v${MIN_CLI_VERSION} or newer. Run: bun install -g nemar@latest`,
+        minimum_version: MIN_CLI_VERSION,
+      },
+      426,
+    );
+  }
 
-	const result = isVersionBelow(cliVersion, MIN_CLI_VERSION);
+  const result = isVersionBelow(cliVersion, MIN_CLI_VERSION);
 
-	if (result === null) {
-		return c.json(
-			{
-				error: "Invalid CLI version",
-				message: `Could not parse CLI version "${cliVersion}". Run: bun install -g nemar@latest`,
-				minimum_version: MIN_CLI_VERSION,
-				current_version: cliVersion,
-			},
-			400,
-		);
-	}
+  if (result === null) {
+    return c.json(
+      {
+        error: "Invalid CLI version",
+        message: `Could not parse CLI version "${cliVersion}". Run: bun install -g nemar@latest`,
+        minimum_version: MIN_CLI_VERSION,
+        current_version: cliVersion,
+      },
+      400,
+    );
+  }
 
-	if (result) {
-		return c.json(
-			{
-				error: "CLI version too old",
-				message: `Your CLI version (${cliVersion}) is below the minimum required (${MIN_CLI_VERSION}). Run: bun install -g nemar@latest`,
-				minimum_version: MIN_CLI_VERSION,
-				current_version: cliVersion,
-			},
-			426,
-		);
-	}
+  if (result) {
+    return c.json(
+      {
+        error: "CLI version too old",
+        message: `Your CLI version (${cliVersion}) is below the minimum required (${MIN_CLI_VERSION}). Run: bun install -g nemar@latest`,
+        minimum_version: MIN_CLI_VERSION,
+        current_version: cliVersion,
+      },
+      426,
+    );
+  }
 
-	await next();
+  await next();
 };

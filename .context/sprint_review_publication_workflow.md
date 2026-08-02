@@ -1,4 +1,8 @@
 # Sprint Review: Publication Workflow Infrastructure
+
+> **STATUS: HISTORICAL.** Sprint review snapshot.
+> Current decisions live in [`.context/decisions/`](decisions/README.md); where this document and an ADR disagree, the ADR wins.
+
 **Date:** 2026-01-27
 **Reviewer:** Claude
 **Sprint Period:** Jan 20-24, 2026

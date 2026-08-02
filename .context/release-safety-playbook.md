@@ -1,5 +1,7 @@
 # Release & Promotion Safety Playbook
 
+> **Decision recorded:** [ADR 0016 - CI owns version bumping and tagging](decisions/0016-release-versioning-is-owned-by-ci.md).
+
 How a change travels feature -> dev -> production, what is tested at each stage,
 and the go/no-go ritual for a `dev -> main` release.
 This is the "child instructions" for keeping production safe as NEMAR approaches general release.

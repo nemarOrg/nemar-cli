@@ -991,6 +991,60 @@ export async function sendPasswordlessCodeEmail(
 }
 
 /**
+ * Ownership-proof code for a self-service email change (#911). Sent to the
+ * NEW address; nothing is written to the account until the code is verified.
+ * Same code hygiene as the sign-in mail: code kept out of the subject line.
+ */
+export async function sendEmailChangeCodeEmail(
+  to: string,
+  code: string,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+): Promise<void> {
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #2563eb;">Confirm your new NEMAR email address</h1>
+
+  <p>Someone asked to make this address the sign-in email for a NEMAR account. Enter the code below on the Settings page to confirm the change:</p>
+
+  <p style="text-align: center; margin: 30px 0;">
+    <span style="display: inline-block; font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 32px; letter-spacing: 8px; padding: 16px 24px; background-color: #f4f4f5; border-radius: 8px; color: #111;">
+      ${escapeHtml(code)}
+    </span>
+  </p>
+
+  <p style="color: #666; font-size: 14px;">This code expires in 10 minutes. After 5 incorrect attempts the code is invalidated; request a new one if that happens.</p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource<br>
+    Didn't request this? You can safely ignore this email. Your account has not been changed.
+  </p>
+</body>
+</html>
+  `;
+
+  await sendEmail(
+    to,
+    "Confirm your new NEMAR email address",
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+  );
+}
+
+/**
  * Warn a dataset owner that their private, unpublished dataset is approaching
  * the 90-day inactivity deadline and will be removed unless they act (#662).
  * Sent at 30/14/7/2/1 days remaining; the 1-day notice uses urgent red styling

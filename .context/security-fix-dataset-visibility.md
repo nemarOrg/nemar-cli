@@ -1,5 +1,7 @@
 # Security Fix: Dataset Visibility and Privacy Filtering
 
+> **Decision recorded:** [ADR 0017 - Dataset visibility is enforced server-side](decisions/0017-dataset-visibility-is-filtered-server-side.md).
+
 **Date:** 2026-01-27
 **Issue:** All users could see all datasets, including private datasets they don't own
 **Severity:** Critical - Privacy/Security Vulnerability

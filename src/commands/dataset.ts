@@ -68,7 +68,7 @@ import {
   updateValidatorCache,
   validateBidsDataset,
 } from "../lib/bids-validator.js";
-import { requireAuth } from "../lib/cli-output.js";
+import { printPartialRetrieval, requireAuth } from "../lib/cli-output.js";
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
 import { NO_DESCRIPTION, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
 import {
@@ -866,6 +866,10 @@ datasetCommand
     "--skip-port-check",
     "Skip the porting-in-progress check (use if falsely blocked on an OpenNeuro-sourced dataset)",
   )
+  .option(
+    "--require-complete",
+    "Exit non-zero if any file is unavailable from the archive (for strict pipelines)",
+  )
   .addHelpText(
     "after",
     `
@@ -1260,11 +1264,14 @@ Examples:
         credentials: s3Creds,
         paths: updatePaths,
         extraArgs: matchArgs,
+        requireComplete: Boolean(options.requireComplete),
         onProgress: (line) => tracker.processLine(line),
       });
 
       if (!getResult.success) {
-        tracker.finish(0);
+        // Counts are honest on the failure arm too: --require-complete can
+        // fail a run that still landed files, and the tracker should say so.
+        tracker.finish(getResult.filesDownloaded);
         console.log(chalk.red(`Failed to download data files: ${getResult.error}`));
         console.log(chalk.dim("The dataset was cloned but data files are not available locally."));
         console.log(chalk.dim(`You can try again with: cd ${absoluteOutput} && nemar dataset get`));
@@ -1274,8 +1281,12 @@ Examples:
         process.exit(1);
       }
 
-      tracker.finish(getResult.filesDownloaded || 0);
-      console.log(chalk.green(`Data downloaded (${getResult.filesDownloaded || 0} files)`));
+      tracker.finish(getResult.filesDownloaded);
+      if (getResult.outcome === "partial") {
+        printPartialRetrieval(getResult);
+      } else {
+        console.log(chalk.green(`Data downloaded (${getResult.filesDownloaded} files)`));
+      }
     }
 
     // --prune: drop annex objects that are no longer referenced by any branch
@@ -3425,6 +3436,10 @@ datasetCommand
     "--skip-port-check",
     "Skip the porting-in-progress check (use if falsely blocked on an OpenNeuro-sourced dataset)",
   )
+  .option(
+    "--require-complete",
+    "Exit non-zero if any file is unavailable from the archive (for strict pipelines)",
+  )
   .addHelpText(
     "after",
     `
@@ -3599,10 +3614,13 @@ Examples:
       paths,
       credentials: getS3Creds,
       extraArgs: matchArgs,
+      requireComplete: Boolean(options.requireComplete),
       onProgress: (line) => tracker.processLine(line),
     });
     if (!result.success) {
-      tracker.finish(0);
+      // Counts are honest on the failure arm too: --require-complete can fail
+      // a run that still landed files, and the tracker should say so.
+      tracker.finish(result.filesDownloaded);
       console.log(chalk.red(`  ${result.error}`));
       if (getCreds) {
         await clearAnnexCredentials(cwd);
@@ -3610,14 +3628,16 @@ Examples:
       process.exit(1);
     }
 
-    tracker.finish(result.filesDownloaded || 0);
+    tracker.finish(result.filesDownloaded);
 
     // Clear cached S3 credentials so future operations request fresh tokens
     if (getCreds) {
       await clearAnnexCredentials(cwd);
     }
 
-    if (result.filesDownloaded === 0) {
+    if (result.outcome === "partial") {
+      printPartialRetrieval(result);
+    } else if (result.filesDownloaded === 0) {
       console.log(chalk.green("All data files already present"));
     } else {
       console.log(chalk.green(`Downloaded ${result.filesDownloaded} file(s)`));

@@ -6,10 +6,13 @@
  * password + API-token flow in `auth.ts` is untouched; these routes
  * exist alongside it under the same `/auth` mount.
  *
- *   POST /auth/code/request - mail a code
- *   POST /auth/code/verify  - check the code, set a session cookie
- *   POST /auth/logout       - clear the cookie + revoke the session row
- *   GET  /auth/me           - current user, or { user: null }
+ *   POST  /auth/code/request         - mail a code
+ *   POST  /auth/code/verify          - check the code, set a session cookie
+ *   POST  /auth/logout               - clear the cookie + revoke the session row
+ *   GET   /auth/me                   - current user, or { user: null }
+ *   PATCH /auth/profile              - self-service profile edit (#912)
+ *   POST  /auth/email/change/request - mail an ownership code to a NEW address (#911)
+ *   POST  /auth/email/change/verify  - verify it, move users.email (#911)
  *
  * Notes for readers:
  *   - In development and test environments the `request` response
@@ -21,14 +24,18 @@
  *     `signup_source='web'`. Admin approval (out of scope here) lifts
  *     them to `'approved'`. Until then the dashboard sees
  *     `status: 'pending'` and can render an onboarding screen.
- *   - Per-email rate limit is enforced inline by counting
- *     `auth_codes` rows in the relevant window. No KV / new table —
- *     `idx_auth_codes_email_active` covers the lookup.
+ *   - Rate limits are enforced inline by counting `auth_codes` rows
+ *     in the relevant window: per-email buckets on both request
+ *     endpoints, plus a per-account bucket on /email/change/request
+ *     (keyed on the 0066 user_id column). No KV / new table —
+ *     `idx_auth_codes_email_active` covers the email lookups; the
+ *     user_id count is unindexed, which is fine at auth_codes' size.
  */
 
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
+import { auditLogStatement } from "../db/audit-log";
 import { webSessionMiddleware } from "../middleware/webSession";
 import {
   constantTimeEqualHex,
@@ -38,7 +45,18 @@ import {
   nonProdCodeEchoAllowed,
   nonProdCodeRequestAllowed,
 } from "../services/auth-code";
-import { resolveEmailConfig, sendPasswordlessCodeEmail } from "../services/email";
+import {
+  resolveEmailConfig,
+  sendEmailChangeCodeEmail,
+  sendPasswordlessCodeEmail,
+} from "../services/email";
+import { validateGitHubUsername } from "../services/github";
+import { getDatasetsToken } from "../services/github-auth";
+import {
+  type ProfilePatchInput,
+  githubHandleChanged,
+  normalizeProfilePatch,
+} from "../services/profile";
 import {
   buildClearedSessionCookie,
   buildSessionCookie,
@@ -53,8 +71,10 @@ export const authWebRoutes = new Hono<{ Bindings: Bindings; Variables: Variables
 
 const CODE_TTL_MINUTES = 10;
 const MAX_CODE_ATTEMPTS = 5;
-const PER_MINUTE_LIMIT = 1;
-const PER_HOUR_LIMIT = 5;
+// Exported (with the SQL consts below) for the engine-level rate-bucket and
+// code-binding tests, which run the production SQL against real SQLite.
+export const PER_MINUTE_LIMIT = 1;
+export const PER_HOUR_LIMIT = 5;
 
 const emailSchema = z.object({
   email: z
@@ -126,8 +146,9 @@ function publicUser(row: {
     city: row.city,
     country: row.country,
     affiliation: row.affiliation,
-    // Tiered access (ADR 0010): base accounts are false until an admin
-    // grants service (upload + compute) access.
+    // Tiered access (website ADR 0010, epic #1013 — NOT this repo's ADR
+    // 0010): base accounts are false until an admin grants service
+    // (upload + compute) access.
     service_access: row.service_access,
   };
 }
@@ -279,6 +300,16 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
 // POST /auth/code/verify
 // ---------------------------------------------------------------
 
+/** The sign-in code lookup. user_id IS NULL: sign-in codes are the
+ *  unauthenticated kind (0066). Email-change codes carry the requester's
+ *  user_id and are consumed only by /email/change/verify — this filter keeps
+ *  the two flows from ever redeeming each other's codes. Exported so the
+ *  code-binding test runs the production SQL, not a copy. */
+export const SIGNIN_CODE_LOOKUP_SQL = `SELECT id, code_hash, attempts FROM auth_codes
+          WHERE email = ? AND user_id IS NULL
+            AND used_at IS NULL AND expires_at > datetime('now')
+          ORDER BY created_at DESC LIMIT 1`;
+
 authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) => {
   const origin = c.req.header("Origin");
   if (!isAllowedOrigin(origin)) {
@@ -290,11 +321,7 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
 
   try {
     const row = await db
-      .prepare(
-        `SELECT id, code_hash, attempts FROM auth_codes
-          WHERE email = ? AND used_at IS NULL AND expires_at > datetime('now')
-          ORDER BY created_at DESC LIMIT 1`,
-      )
+      .prepare(SIGNIN_CODE_LOOKUP_SQL)
       .bind(email)
       .first<{ id: number; code_hash: string; attempts: number }>();
     if (!row) {
@@ -476,3 +503,524 @@ authWebRoutes.get("/me", webSessionMiddleware, async (c) => {
 
   return c.json({ user: publicUser(webUser) });
 });
+
+// ---------------------------------------------------------------
+// PATCH /auth/profile
+// ---------------------------------------------------------------
+
+// Loose shape bounds only; the field semantics (trim, @-strip, non-empty
+// city/country, empty-string-clears) live in normalizeProfilePatch so they
+// are unit-testable. Bounds match finalizeSchema in auth-orcid.ts where the
+// same columns are first written (city/country 120, affiliation 200).
+const profilePatchSchema = z.object({
+  github_username: z.string().max(60).optional(),
+  city: z.string().max(120).optional(),
+  country: z.string().max(120).optional(),
+  affiliation: z.string().max(200).optional(),
+});
+
+// The schema above and ProfilePatchInput in profile.ts describe the same
+// body from two sides (runtime bounds here, field semantics there). They
+// cannot share a declaration without the service importing this route, so
+// lock them together structurally: the assignment below fails to compile
+// (the alias resolves to never) if either side gains, loses, or retypes a
+// field the other does not.
+type MutuallyAssignable<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
+export const _profilePatchShapesAgree: MutuallyAssignable<
+  z.infer<typeof profilePatchSchema>,
+  ProfilePatchInput
+> = true;
+
+/**
+ * Self-service profile edit (#912; nemarOrg/website#135). Accepts any subset
+ * of github_username / city / country / affiliation — see profile.ts for the
+ * per-field rules. Name is ORCID-canonical (#835) and not editable here.
+ *
+ * A changed GitHub handle gets the same three checks as CLI signup: direct
+ * dup (COLLATE NOCASE, 409 even when the handle no longer resolves), live
+ * existence against the GitHub API, and a canonical-login re-dedup when
+ * GitHub normalises what was typed. Re-saving the current handle skips all
+ * three so a routine "Save profile" never spends a GitHub call.
+ */
+authWebRoutes.patch(
+  "/profile",
+  webSessionMiddleware,
+  zValidator("json", profilePatchSchema),
+  async (c) => {
+    if (!isAllowedOrigin(c.req.header("Origin"))) {
+      return c.json({ error: "Origin not allowed" }, 403);
+    }
+    const webUser = c.var.webUser;
+    if (!webUser) {
+      return c.json({ error: "Authentication required" }, 401);
+    }
+
+    const normalized = normalizeProfilePatch(c.req.valid("json"));
+    if (!normalized.ok) {
+      return c.json({ error: normalized.error, message: normalized.message }, 400);
+    }
+    const patch = normalized.patch;
+    const db = c.env.DB;
+
+    try {
+      if (
+        typeof patch.github_username === "string" &&
+        githubHandleChanged(patch.github_username, webUser.github_username)
+      ) {
+        const dup = await db
+          .prepare(
+            `SELECT id FROM users
+              WHERE github_username = ? COLLATE NOCASE AND id != ? AND deleted_at IS NULL
+              LIMIT 1`,
+          )
+          .bind(patch.github_username, webUser.id)
+          .first<{ id: number }>();
+        if (dup) {
+          return c.json(
+            { error: "github_in_use", message: "GitHub account already linked to another user" },
+            409,
+          );
+        }
+
+        // Known limitation shared with CLI signup: validateGitHubUsername
+        // returns null for any non-OK GitHub response, so a GitHub-side
+        // outage reads as "does not exist" here rather than a 5xx.
+        const githubUser = await validateGitHubUsername(
+          patch.github_username,
+          await getDatasetsToken(c.env),
+        );
+        if (!githubUser) {
+          return c.json(
+            {
+              error: "invalid_github_username",
+              message: `The GitHub username '${patch.github_username}' does not exist`,
+            },
+            400,
+          );
+        }
+        // GitHub resolves renames/case variants to a canonical login; store
+        // that, and re-run the dup check when it differs from what was typed
+        // beyond case (the COLLATE NOCASE check above already covered case).
+        if (githubUser.login.toLowerCase() !== patch.github_username.toLowerCase()) {
+          const canonicalDup = await db
+            .prepare(
+              `SELECT id FROM users
+                WHERE github_username = ? COLLATE NOCASE AND id != ? AND deleted_at IS NULL
+                LIMIT 1`,
+            )
+            .bind(githubUser.login, webUser.id)
+            .first<{ id: number }>();
+          if (canonicalDup) {
+            return c.json(
+              { error: "github_in_use", message: "GitHub account already linked to another user" },
+              409,
+            );
+          }
+        }
+        patch.github_username = githubUser.login;
+      }
+
+      const sets: string[] = [];
+      const binds: (string | null)[] = [];
+      if (patch.github_username !== undefined) {
+        sets.push("github_username = ?");
+        binds.push(patch.github_username);
+      }
+      if (patch.city !== undefined) {
+        sets.push("city = ?");
+        binds.push(patch.city);
+      }
+      if (patch.country !== undefined) {
+        sets.push("country = ?");
+        binds.push(patch.country);
+      }
+      if (patch.affiliation !== undefined) {
+        sets.push("affiliation = ?");
+        binds.push(patch.affiliation);
+      }
+
+      // One D1 batch == one implicit transaction: the update and its audit
+      // row land together. Details carry the new values — profile fields,
+      // not secrets — so an admin can reconstruct what changed.
+      await db.batch([
+        db
+          .prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ? AND deleted_at IS NULL`)
+          .bind(...binds, webUser.id),
+        auditLogStatement(db, {
+          userId: webUser.id,
+          action: "profile_updated",
+          resourceType: "user",
+          resourceId: String(webUser.id),
+          details: JSON.stringify(patch),
+        }),
+      ]);
+
+      // Re-read so the response reflects what actually landed (the website
+      // also re-reads /auth/me on reload; this keeps both in agreement).
+      const user = await fetchPublicUserById(db, webUser.id);
+      if (!user) {
+        // Session resolved but the row is gone (tombstoned mid-request).
+        return c.json({ error: "Account not found" }, 403);
+      }
+
+      return c.json({ ok: true, user });
+    } catch (err) {
+      // Safety net for the TOCTOU window past the dedup SELECTs: two
+      // concurrent PATCHes claiming the same free handle both pass the
+      // pre-check, and the loser's UPDATE hits idx_users_github (0012,
+      // COLLATE NOCASE). Same net CLI signup carries in auth.ts.
+      const msg = String(err);
+      if (msg.includes("UNIQUE constraint failed") && msg.includes("users.github_username")) {
+        return c.json(
+          { error: "github_in_use", message: "GitHub account already linked to another user" },
+          409,
+        );
+      }
+      console.error("[auth-web] /profile PATCH failed", err);
+      return c.json({ error: "Failed to update profile" }, 500);
+    }
+  },
+);
+
+// ---------------------------------------------------------------
+// POST /auth/email/change/{request,verify}
+// ---------------------------------------------------------------
+
+const emailChangeVerifySchema = z.object({
+  email: z
+    .string()
+    .email()
+    .max(320)
+    .transform((e) => e.trim().toLowerCase()),
+  code: z.string().regex(/^\d{6}$/, "code must be 6 digits"),
+});
+
+/** Re-read a user by id and shape the dashboard payload (same SELECT the
+ *  /code/verify path runs by email). Null when the row is gone/tombstoned. */
+async function fetchPublicUserById(
+  db: D1Database,
+  userId: number,
+): Promise<ReturnType<typeof publicUser> | null> {
+  const row = await db
+    .prepare(
+      `SELECT id, email, role, status,
+              given_name, family_name, orcid, orcid_verified,
+              github_username, city, country, affiliation, service_access
+         FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+    )
+    .bind(userId)
+    .first<{
+      id: number;
+      email: string;
+      role: string | null;
+      status: string;
+      given_name: string | null;
+      family_name: string | null;
+      orcid: string | null;
+      // NOT NULL DEFAULT 0 in D1 (0050), so plain number.
+      orcid_verified: number;
+      github_username: string | null;
+      city: string | null;
+      country: string | null;
+      affiliation: string | null;
+      // NOT NULL DEFAULT 0 in D1 (0062), so plain number.
+      service_access: number;
+    }>();
+  if (!row) return null;
+  return publicUser({
+    id: row.id,
+    email: row.email,
+    role: parseRole(row.role, row.email),
+    status: row.status,
+    given_name: row.given_name,
+    family_name: row.family_name,
+    orcid: row.orcid,
+    orcid_verified: row.orcid_verified === 1,
+    github_username: row.github_username,
+    city: row.city,
+    country: row.country,
+    affiliation: row.affiliation,
+    service_access: row.service_access === 1,
+  });
+}
+
+/**
+ * Self-service email change, step 1 (#911; nemarOrg/website#133). The
+ * authenticated user submits a NEW address; a 6-digit code is mailed to that
+ * address to prove ownership before anything is written. Reuses the
+ * auth_codes table and the /code/request mechanics (atomic rate-limited
+ * insert, rotation, rollback-on-send-failure, dev_code echo rules).
+ *
+ * Purpose-mixing with sign-in codes is structurally impossible, twice over:
+ * a change code is only ever issued for an address with NO users row
+ * (collisions are refused here), while /code/verify requires a users row for
+ * the address; and since 0066 the queries themselves are disjoint — change
+ * codes carry the requester's user_id, /code/verify filters user_id IS NULL,
+ * and /email/change/verify filters user_id = <session user>.
+ */
+/** Atomic rate-limited insert for email-change codes. Keyed by the TARGET
+ *  address (same shape and limits as /code/request; see that route for the
+ *  race reasoning), binding the code to the requesting session's user via
+ *  user_id (0066). The third guard caps one ACCOUNT's change requests per
+ *  hour across ALL targets (the per-email guards only throttle repeats to
+ *  one address) — without it a single session could cycle distinct
+ *  addresses to spray codes or enumerate faster than the per-IP floor.
+ *  Binds: email, code_hash, expires_at, user_id, email, PER_MINUTE_LIMIT,
+ *  email, PER_HOUR_LIMIT, user_id, PER_HOUR_LIMIT. Exported so the
+ *  rate-bucket test runs the production SQL, not a copy. */
+export const EMAIL_CHANGE_CODE_INSERT_SQL = `INSERT INTO auth_codes (email, code_hash, expires_at, user_id)
+           SELECT ?, ?, ?, ?
+           WHERE (SELECT COUNT(*) FROM auth_codes
+                   WHERE email = ?
+                     AND created_at > datetime('now','-1 minute')) < ?
+             AND (SELECT COUNT(*) FROM auth_codes
+                   WHERE email = ?
+                     AND created_at > datetime('now','-1 hour')) < ?
+             AND (SELECT COUNT(*) FROM auth_codes
+                   WHERE user_id = ?
+                     AND created_at > datetime('now','-1 hour')) < ?`;
+
+/** The change-code lookup: user_id = the redeeming session's user (0066), so
+ *  the code must have been requested by the SAME account. A code read from a
+ *  shared inbox by a different signed-in user finds no row here. */
+export const EMAIL_CHANGE_CODE_LOOKUP_SQL = `SELECT id, code_hash, attempts FROM auth_codes
+            WHERE email = ? AND user_id = ?
+              AND used_at IS NULL AND expires_at > datetime('now')
+            ORDER BY created_at DESC LIMIT 1`;
+
+authWebRoutes.post(
+  "/email/change/request",
+  webSessionMiddleware,
+  zValidator("json", emailSchema),
+  async (c) => {
+    if (!isAllowedOrigin(c.req.header("Origin"))) {
+      return c.json({ error: "Origin not allowed" }, 403);
+    }
+    const webUser = c.var.webUser;
+    if (!webUser) {
+      return c.json({ error: "Authentication required" }, 401);
+    }
+    const { email } = c.req.valid("json");
+    const db = c.env.DB;
+
+    try {
+      if (email === webUser.email.toLowerCase()) {
+        return c.json({ error: "same_email" }, 409);
+      }
+      // Deliberate, bounded enumeration tradeoff (PR #1053 review): unlike
+      // /code/request's #595 silent skip, this DOES tell the caller whether
+      // an address is registered — without it, a legitimate rename to a
+      // taken address dead-ends on a code that can never verify. The oracle
+      // is bounded: caller must hold a session, the route sits in the
+      // auth-ip bucket (10/min/IP, rateLimit.ts), and the per-user cap
+      // below throttles how fast one account can cycle targets.
+      const collision = await db
+        .prepare("SELECT id FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1")
+        .bind(email)
+        .first<{ id: number }>();
+      if (collision) {
+        return c.json({ error: "email_in_use" }, 409);
+      }
+
+      // #1008 analogue: the non-production D1 mirrors real production users,
+      // so a staging session must not be able to mail an arbitrary real
+      // address — this endpoint targets addresses precisely because they're
+      // NOT registered, so /code/request's registered-user allowlist can't
+      // apply. Outside production only synthetic test targets get a send,
+      // with no role bypass (an admin session must not be a mail-anyone
+      // primitive either). Same silent-ok shape as /code/request.
+      if (isDevOrTest(c.env) && !nonProdCodeEchoAllowed(email)) {
+        return c.json({ ok: true, masked_email: maskEmail(email), dev_skip: "not_allowlisted" });
+      }
+
+      const code = generateAuthCode();
+      const codeHash = await hashAuthCode(code, c.env);
+      const expiresAt = new Date(Date.now() + CODE_TTL_MINUTES * 60 * 1000).toISOString();
+
+      // Atomic rate-limited INSERT binding the code to THIS session's user:
+      // only the account that asked for the change can redeem it, so a second
+      // person reading a shared inbox cannot attach the address to their own
+      // account by pasting the code first. See EMAIL_CHANGE_CODE_INSERT_SQL.
+      const insertResult = await db
+        .prepare(EMAIL_CHANGE_CODE_INSERT_SQL)
+        .bind(
+          email,
+          codeHash,
+          expiresAt,
+          webUser.id,
+          email,
+          PER_MINUTE_LIMIT,
+          email,
+          PER_HOUR_LIMIT,
+          webUser.id,
+          PER_HOUR_LIMIT,
+        )
+        .run();
+      if ((insertResult.meta?.changes ?? 0) === 0) {
+        return c.json({ error: "Too many requests. Try again later." }, 429);
+      }
+      const newCodeId = insertResult.meta?.last_row_id ?? 0;
+
+      // Rotate only THIS user's earlier change codes for the address; another
+      // user's pending request must not be silently invalidated (their code
+      // is unusable by anyone else anyway, per the user_id binding).
+      await db
+        .prepare(
+          `UPDATE auth_codes SET used_at = datetime('now')
+            WHERE email = ? AND user_id = ? AND used_at IS NULL AND id != ?`,
+        )
+        .bind(email, webUser.id, newCodeId)
+        .run();
+
+      try {
+        const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
+        await sendEmailChangeCodeEmail(
+          email,
+          code,
+          c.env.RESEND_API_KEY,
+          fromEmail,
+          replyTo,
+          isDev,
+        );
+      } catch (emailError) {
+        console.error("[auth-web] failed to send email-change code email", emailError);
+        await db
+          .prepare("DELETE FROM auth_codes WHERE id = ?")
+          .bind(newCodeId)
+          .run()
+          .catch((cleanupErr) =>
+            console.error("[auth-web] failed to roll back auth_codes row", cleanupErr),
+          );
+        return c.json({ error: "Could not deliver the code; try again shortly." }, 503);
+      }
+
+      const body: Record<string, unknown> = { ok: true, masked_email: maskEmail(email) };
+      if (isDevOrTest(c.env) && nonProdCodeEchoAllowed(email)) body.dev_code = code;
+
+      // Same belt-and-braces as /code/request: never ship a code in a
+      // production response body.
+      if (c.env.ENVIRONMENT === "production" && "dev_code" in body) {
+        console.error(
+          "[auth-web] FATAL: dev_code present in production response — refusing to ship the response",
+        );
+        return c.json({ error: "Internal error" }, 500);
+      }
+
+      return c.json(body);
+    } catch (err) {
+      console.error("[auth-web] /email/change/request failed", err);
+      return c.json({ error: "Failed to send code" }, 500);
+    }
+  },
+);
+
+/**
+ * Self-service email change, step 2 (#911). Verifies the code sent to the
+ * new address (same compare/attempts/consume semantics as /code/verify),
+ * then moves users.email in the same D1 batch as the audit row. The session
+ * cookie is NOT rotated: web_sessions reference the user id, not the email,
+ * so every existing session stays valid across the change.
+ */
+authWebRoutes.post(
+  "/email/change/verify",
+  webSessionMiddleware,
+  zValidator("json", emailChangeVerifySchema),
+  async (c) => {
+    if (!isAllowedOrigin(c.req.header("Origin"))) {
+      return c.json({ error: "Origin not allowed" }, 403);
+    }
+    const webUser = c.var.webUser;
+    if (!webUser) {
+      return c.json({ error: "Authentication required" }, 401);
+    }
+    const { email, code } = c.req.valid("json");
+    const db = c.env.DB;
+
+    try {
+      if (email === webUser.email.toLowerCase()) {
+        return c.json({ error: "same_email" }, 409);
+      }
+      // Re-check the collision: an account for this address may have been
+      // created between request and verify. The users.email UNIQUE
+      // constraint below is the authoritative backstop for the write race.
+      const collision = await db
+        .prepare("SELECT id FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1")
+        .bind(email)
+        .first<{ id: number }>();
+      if (collision) {
+        return c.json({ error: "email_in_use" }, 409);
+      }
+
+      const row = await db
+        .prepare(EMAIL_CHANGE_CODE_LOOKUP_SQL)
+        .bind(email, webUser.id)
+        .first<{ id: number; code_hash: string; attempts: number }>();
+      if (!row) {
+        return c.json({ error: "code_incorrect" }, 401);
+      }
+
+      const submittedHash = await hashAuthCode(code, c.env);
+      if (!constantTimeEqualHex(submittedHash, row.code_hash)) {
+        const newAttempts = row.attempts + 1;
+        if (newAttempts >= MAX_CODE_ATTEMPTS) {
+          await db
+            .prepare(`UPDATE auth_codes SET attempts = ?, used_at = datetime('now') WHERE id = ?`)
+            .bind(newAttempts, row.id)
+            .run();
+        } else {
+          await db
+            .prepare("UPDATE auth_codes SET attempts = ? WHERE id = ?")
+            .bind(newAttempts, row.id)
+            .run();
+        }
+        return c.json({ error: "code_incorrect" }, 401);
+      }
+
+      // Consume-once, same conditional UPDATE as /code/verify.
+      const consumeResult = await db
+        .prepare("UPDATE auth_codes SET used_at = datetime('now') WHERE id = ? AND used_at IS NULL")
+        .bind(row.id)
+        .run();
+      if ((consumeResult.meta?.changes ?? 0) === 0) {
+        return c.json({ error: "code_incorrect" }, 401);
+      }
+
+      // The change + its audit row in one batch. email_verified=1: the user
+      // just proved control of the new inbox. A concurrent claim of the
+      // address lands here as a UNIQUE violation -> 409, matching the
+      // pre-checks.
+      try {
+        await db.batch([
+          db
+            .prepare("UPDATE users SET email = ?, email_verified = 1 WHERE id = ?")
+            .bind(email, webUser.id),
+          auditLogStatement(db, {
+            userId: webUser.id,
+            action: "email_changed",
+            resourceType: "user",
+            resourceId: String(webUser.id),
+            details: JSON.stringify({ from: webUser.email, to: email }),
+          }),
+        ]);
+      } catch (writeErr) {
+        // Column-scoped, matching the profile PATCH and signup precedents: a
+        // UNIQUE hit on anything OTHER than users.email must not be
+        // mislabeled as an address collision — rethrow to the generic 500.
+        const msg = String(writeErr);
+        if (msg.includes("UNIQUE constraint failed") && msg.includes("users.email")) {
+          return c.json({ error: "email_in_use" }, 409);
+        }
+        throw writeErr;
+      }
+
+      const user = await fetchPublicUserById(db, webUser.id);
+      if (!user) {
+        return c.json({ error: "Account not found" }, 403);
+      }
+      return c.json({ ok: true, user });
+    } catch (err) {
+      console.error("[auth-web] /email/change/verify failed", err);
+      return c.json({ error: "Verification failed" }, 500);
+    }
+  },
+);

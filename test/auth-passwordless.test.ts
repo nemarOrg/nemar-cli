@@ -23,7 +23,7 @@
  * to produce, so the rest of the assertions are unchanged.
  */
 
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import "./setup";
 import { TEST_CONFIG } from "./setup";
 
@@ -534,5 +534,343 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
     // Bearer must win — the returned email must NOT be the
     // cookie holder's seeded address.
     expect(meBody.user.email).not.toBe(cookieEmail);
+  });
+});
+
+describe.skipIf(PROD_GUARD_ACTIVE)("PATCH /auth/profile (#912)", () => {
+  interface PatchResponse {
+    ok?: boolean;
+    user?: { id: number; email: string } & Partial<PublicUserProfile>;
+    error?: string;
+  }
+
+  async function patchProfile(
+    cookieValue: string | null,
+    body: unknown,
+    origin: string | null = ORIGIN,
+  ): Promise<{ status: number; body: PatchResponse }> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...baseHeaders,
+    };
+    if (origin) headers.Origin = origin;
+    if (cookieValue) headers.Cookie = `nemar_session=${cookieValue}`;
+    const r = await fetch(`${API}/auth/profile`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify(body),
+    });
+    return { status: r.status, body: (await r.json()) as PatchResponse };
+  }
+
+  async function signIn(email: string): Promise<string> {
+    const req = await requestCode(email);
+    expect(req.status).toBe(200);
+    const code = req.body.dev_code as string;
+    const v = await verifyCode(email, code, false);
+    expect(v.status).toBe(200);
+    const m = v.setCookie?.match(/nemar_session=([^;]+)/);
+    expect(m).toBeTruthy();
+    return m?.[1] as string;
+  }
+
+  // FIXED email, deliberately not freshEmail(): the GitHub-handle test below
+  // stores a real handle ("octocat"), and github_username is unique across
+  // users (COLLATE NOCASE dedup). With a fresh email each run, run N's row
+  // would keep the handle and 409 every later run. A fixed email means the
+  // handle only ever lives on this one row, and the dedup check excludes
+  // self — so the suite is rerun-safe with no cleanup step. Costs one
+  // /code/request per run on this address (per-email limit is 5/hour, so
+  // more than ~5 local runs in an hour will see a 429 here).
+  const PROFILE_EMAIL = "pl-profile-patch@nemar.test";
+  let cookie: string;
+
+  beforeAll(async () => {
+    await seedWebUser(PROFILE_EMAIL, "approved");
+    cookie = await signIn(PROFILE_EMAIL);
+  });
+
+  test("happy path: city/country/affiliation land and ride /auth/me", async () => {
+    const r = await patchProfile(cookie, {
+      city: " San Diego ",
+      country: "USA",
+      affiliation: "UCSD",
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(true);
+    expect(r.body.user?.city).toBe("San Diego"); // trimmed
+    expect(r.body.user?.country).toBe("USA");
+    expect(r.body.user?.affiliation).toBe("UCSD");
+
+    const me = await fetch(`${API}/auth/me`, {
+      headers: { ...baseHeaders, Cookie: `nemar_session=${cookie}` },
+    });
+    const meBody = (await me.json()) as MeResponse;
+    expect(meBody.user?.city).toBe("San Diego");
+    expect(meBody.user?.country).toBe("USA");
+    expect(meBody.user?.affiliation).toBe("UCSD");
+
+    // The write and its audit row land in one batch; read the row back via
+    // the admin surface to prove the batch really carried both.
+    const audit = await fetch(`${API}/admin/audit?limit=10`, {
+      headers: {
+        ...baseHeaders,
+        Authorization: `Bearer ${TEST_CONFIG.adminApiKey}`,
+      },
+    });
+    expect(audit.status).toBe(200);
+    const auditBody = (await audit.json()) as {
+      logs: { action: string; details: string | null }[];
+    };
+    const row = auditBody.logs.find(
+      (l) =>
+        l.action === "profile_updated" &&
+        l.details != null &&
+        l.details.includes('"San Diego"') &&
+        l.details.includes('"UCSD"'),
+    );
+    expect(row).toBeTruthy();
+    expect(JSON.parse(row?.details ?? "{}")).toEqual({
+      city: "San Diego",
+      country: "USA",
+      affiliation: "UCSD",
+    });
+  });
+
+  test("empty affiliation clears to null; city/country untouched", async () => {
+    const r = await patchProfile(cookie, { affiliation: "" });
+    expect(r.status).toBe(200);
+    expect(r.body.user?.affiliation).toBeNull();
+    expect(r.body.user?.city).toBe("San Diego");
+    expect(r.body.user?.country).toBe("USA");
+  });
+
+  test("github handle: clear, then set a real handle via the live GitHub check", async () => {
+    // Clear first so the set below is a *changed* handle every run — a
+    // same-handle re-save deliberately skips the GitHub existence call,
+    // and rerun N+1 would otherwise test nothing.
+    //
+    // NOT "octocat": test/api.test.ts asserts /auth/check-github reports
+    // octocat as UNregistered, so parking it on this fixture row turns the
+    // api-test CI job red. "mojombo" is equally real and unasserted-on.
+    const cleared = await patchProfile(cookie, { github_username: "" });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.user?.github_username).toBeNull();
+
+    const set = await patchProfile(cookie, { github_username: "@Mojombo" });
+    expect(set.status).toBe(200);
+    // "@" stripped, and GitHub's canonical casing stored, not what was typed.
+    expect(set.body.user?.github_username).toBe("mojombo");
+
+    // Re-saving the stored handle takes the unchanged-skip path (no GitHub
+    // call, no dedup) and must still 200 with the value intact.
+    const resave = await patchProfile(cookie, { github_username: "mojombo" });
+    expect(resave.status).toBe(200);
+    expect(resave.body.user?.github_username).toBe("mojombo");
+
+    // Leave the fixture row with no handle: a real handle parked on a
+    // persistent dev-DB row is exactly how the octocat incident broke CI.
+    const teardown = await patchProfile(cookie, { github_username: "" });
+    expect(teardown.status).toBe(200);
+    expect(teardown.body.user?.github_username).toBeNull();
+  });
+
+  test("nonexistent github handle is a 400 from the live existence check", async () => {
+    const nope = `nemar-e2e-nope-${Date.now().toString(36)}`;
+    const r = await patchProfile(cookie, { github_username: nope });
+    expect(r.status).toBe(400);
+    expect(r.body.error).toBe("invalid_github_username");
+  });
+
+  test("github handle held by another user is a 409, case-insensitively", async () => {
+    // The victim is seeded with a per-run unique handle (fixture write, no
+    // GitHub call) and never signs in.
+    const otherEmail = freshEmail("profile-dup");
+    const handle = `gh-dup-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    await seedWebUser(otherEmail, "approved", { github_username: handle });
+
+    const exact = await patchProfile(cookie, { github_username: handle });
+    expect(exact.status).toBe(409);
+    expect(exact.body.error).toBe("github_in_use");
+
+    const upper = await patchProfile(cookie, { github_username: handle.toUpperCase() });
+    expect(upper.status).toBe(409);
+    expect(upper.body.error).toBe("github_in_use");
+  });
+
+  test("validation errors: bad handle, empty city, empty country, empty body", async () => {
+    const badHandle = await patchProfile(cookie, { github_username: "-bad-" });
+    expect(badHandle.status).toBe(400);
+    expect(badHandle.body.error).toBe("invalid_github_username");
+
+    const emptyCity = await patchProfile(cookie, { city: "  ", country: "USA" });
+    expect(emptyCity.status).toBe(400);
+    expect(emptyCity.body.error).toBe("city_required");
+
+    const emptyCountry = await patchProfile(cookie, { city: "San Diego", country: "" });
+    expect(emptyCountry.status).toBe(400);
+    expect(emptyCountry.body.error).toBe("country_required");
+
+    const empty = await patchProfile(cookie, {});
+    expect(empty.status).toBe(400);
+    expect(empty.body.error).toBe("empty_patch");
+
+    // Over the zod bound (affiliation max 200): rejected at the schema
+    // layer. That 400 is zod-shaped, not {error, message} — the website
+    // shows its generic copy for it, which is the accepted contract.
+    const oversize = await patchProfile(cookie, { affiliation: "x".repeat(201) });
+    expect(oversize.status).toBe(400);
+  });
+
+  test("no session is 401; wrong Origin is 403", async () => {
+    const anon = await patchProfile(null, { city: "San Diego", country: "USA" });
+    expect(anon.status).toBe(401);
+
+    const badOrigin = await patchProfile(
+      cookie,
+      { city: "San Diego", country: "USA" },
+      "https://evil.example",
+    );
+    expect(badOrigin.status).toBe(403);
+  });
+
+  test("name fields are not editable here (ORCID-canonical)", async () => {
+    // Unknown keys are not part of the schema; a body carrying ONLY name
+    // fields normalizes to an empty patch and is refused — proving the
+    // endpoint cannot be used to overwrite the ORCID-canonical name.
+    const r = await patchProfile(cookie, { given_name: "X", family_name: "Y" });
+    expect(r.status).toBe(400);
+    expect(r.body.error).toBe("empty_patch");
+  });
+});
+
+describe.skipIf(PROD_GUARD_ACTIVE)("email change flow (#911)", () => {
+  async function post(
+    path: string,
+    cookieValue: string | null,
+    body: unknown,
+    origin: string | null = ORIGIN,
+  ): Promise<{ status: number; body: Record<string, unknown> }> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...baseHeaders,
+    };
+    if (origin) headers.Origin = origin;
+    if (cookieValue) headers.Cookie = `nemar_session=${cookieValue}`;
+    const r = await fetch(`${API}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
+    return { status: r.status, body: (await r.json()) as Record<string, unknown> };
+  }
+
+  async function signIn(email: string): Promise<string> {
+    const req = await requestCode(email);
+    expect(req.status).toBe(200);
+    const v = await verifyCode(email, req.body.dev_code as string, false);
+    expect(v.status).toBe(200);
+    const m = v.setCookie?.match(/nemar_session=([^;]+)/);
+    expect(m).toBeTruthy();
+    return m?.[1] as string;
+  }
+
+  const originalEmail = freshEmail("emailchange");
+  const newEmail = freshEmail("emailchange-new");
+  let cookie: string;
+
+  beforeAll(async () => {
+    await seedWebUser(originalEmail, "approved");
+    cookie = await signIn(originalEmail);
+  });
+
+  test("request guards: same email 409, taken email 409, anon 401, bad origin 403", async () => {
+    const same = await post("/auth/email/change/request", cookie, { email: originalEmail });
+    expect(same.status).toBe(409);
+    expect(same.body.error).toBe("same_email");
+
+    const takenEmail = freshEmail("emailchange-taken");
+    await seedWebUser(takenEmail);
+    const taken = await post("/auth/email/change/request", cookie, { email: takenEmail });
+    expect(taken.status).toBe(409);
+    expect(taken.body.error).toBe("email_in_use");
+
+    const anon = await post("/auth/email/change/request", null, { email: newEmail });
+    expect(anon.status).toBe(401);
+
+    const badOrigin = await post(
+      "/auth/email/change/request",
+      cookie,
+      { email: newEmail },
+      "https://evil.example",
+    );
+    expect(badOrigin.status).toBe(403);
+  });
+
+  test("non-synthetic target from a plain member is silently skipped off-prod (#1008)", async () => {
+    // The dev D1 mirrors real production users; a QA session must not be
+    // able to mail an arbitrary real address from staging.
+    const r = await post("/auth/email/change/request", cookie, {
+      email: `ec-real-${Date.now().toString(36)}@example.com`,
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(true);
+    expect(r.body.dev_code).toBeUndefined();
+    expect(r.body.dev_skip).toBe("not_allowlisted");
+  });
+
+  test("happy path: request -> wrong code -> cross-user attempt -> verify -> email moved", async () => {
+    const req = await post("/auth/email/change/request", cookie, { email: newEmail });
+    expect(req.status).toBe(200);
+    expect(req.body.ok).toBe(true);
+    const code = req.body.dev_code as string;
+    expect(code).toMatch(/^\d{6}$/);
+
+    const wrong = await post("/auth/email/change/verify", cookie, {
+      email: newEmail,
+      code: code === "000000" ? "000001" : "000000",
+    });
+    expect(wrong.status).toBe(401);
+    expect(wrong.body.error).toBe("code_incorrect");
+
+    // Session binding (migration 0066): a DIFFERENT signed-in user holding
+    // the correct code — the shared-inbox scenario — cannot redeem it. The
+    // per-user lookup finds no row for them, and the code stays live for
+    // the legitimate requester below.
+    const bystanderEmail = freshEmail("emailchange-bystander");
+    await seedWebUser(bystanderEmail, "approved");
+    const bystanderCookie = await signIn(bystanderEmail);
+    const hijack = await post("/auth/email/change/verify", bystanderCookie, {
+      email: newEmail,
+      code,
+    });
+    expect(hijack.status).toBe(401);
+    expect(hijack.body.error).toBe("code_incorrect");
+
+    const ok = await post("/auth/email/change/verify", cookie, { email: newEmail, code });
+    expect(ok.status).toBe(200);
+    const user = ok.body.user as { email: string };
+    expect(user.email).toBe(newEmail);
+
+    // The session cookie survives the change (sessions key on user id).
+    const me = await fetch(`${API}/auth/me`, {
+      headers: { ...baseHeaders, Cookie: `nemar_session=${cookie}` },
+    });
+    expect(me.status).toBe(200);
+    const meBody = (await me.json()) as MeResponse;
+    expect(meBody.user?.email).toBe(newEmail);
+
+    // A repeat submit is short-circuited by the same_email guard (the
+    // session user's email now IS the target) — this asserts the guard
+    // ordering, NOT single-use consumption. The consume-once conditional
+    // UPDATE mirrors /code/verify verbatim and only matters for concurrent
+    // double-submits, which an E2E suite can't force deterministically; the
+    // cross-user attempt above covers the security-relevant redemption path.
+    const replay = await post("/auth/email/change/verify", cookie, { email: newEmail, code });
+    expect(replay.status).toBe(409);
+    expect(replay.body.error).toBe("same_email");
+  });
+
+  test("the old address no longer backs an account (sign-in code is a silent skip)", async () => {
+    const req = await requestCode(originalEmail);
+    expect(req.status).toBe(200);
+    expect(req.body.dev_code).toBeUndefined();
+    expect(req.body.dev_skip).toBe("unregistered");
   });
 });

@@ -1,5 +1,12 @@
 # Epic state: Centralize manifest generation (PR-1)
 
+> **Decision recorded:** [ADR 0020 - Dataset automation runs from central shared workflows](decisions/0020-dataset-automation-runs-from-central-shared-workflows.md).
+> This document holds the wire contracts (dispatch payload, callback shape, artifact keys).
+
+
+> **STATUS: HISTORICAL.** Epic state file for #559, now merged. The wire contracts remain accurate; the ops sequence references the retired personal Cloudflare account (see ADR 0008).
+> Current decisions live in [`.context/decisions/`](decisions/README.md); where this document and an ADR disagree, the ADR wins.
+
 integration_branch: dev
 epic_issue: 559
 epic_branch: feature/issue-559-epic-central-manifest

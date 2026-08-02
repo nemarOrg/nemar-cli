@@ -2,6 +2,24 @@
 
 > Tool-agnostic project instructions for any coding agent (Codex, Cursor, Copilot, Windsurf, Claude Code, ...). Claude Code reads this via `@AGENTS.md` in `CLAUDE.md`.
 
+## START HERE: Architecture Decision Records
+
+**[`.context/decisions/`](.context/decisions/README.md) records what was decided and why.** Read the
+index before designing anything, and before "fixing" something that looks wrong — several of the
+oddities in this codebase are deliberate, and the ADR says which.
+
+- **Where an ADR and any other doc disagree, the ADR wins.** Design docs under `.context/` keep the
+  analysis; the ADR is the verdict.
+- **Never delete an ADR. Supersede it** (see ADR 0019 for what a superseded one looks like).
+- **Write a new one** when a decision is expensive to reverse, closes off other reasonable paths, has
+  been argued more than once, or encodes a constraint that is not obvious from the code. Copy
+  `0000-template.md`, number sequentially, and add it to the index in `README.md` — a test enforces
+  that the index and the files on disk agree.
+
+Load-bearing ones to know before touching the relevant area: 0005 (partial data still serves),
+0009 (dev D1 is not a prod mirror), 0010 (never client-stream an import), 0012 (archive size policy),
+0016 (never hand-bump versions), 0020 (workflow edits hit ~785 repos at once).
+
 ## CRITICAL: Live Datasets
 
 **nm000103-nm000107 are LIVE datasets.** Do NOT modify their visibility, S3 data, DOIs, or repo settings during development/testing. They are kept private during dev for maximum control but contain real data.
@@ -65,11 +83,23 @@ The backend code (`ORG_NAME = "nemarDatasets"` in `backend/src/services/github.t
   miniflare D1, then `wrangler dev`). Both live in `nemarOrg/nemar-db-backup`.
 
 ### Public Browser Sites
-Two user-facing dataset browsers exist during the cutover; **prefer ww2 for new references**.
 
-- **`https://ww2.nemar.org`** — **current dataset browser** (Astro SSR, lives in `nemarOrg/website`). Dataset pages at `ww2.nemar.org/dataset/<id>`. Reads `api.nemar.org` and `data.nemar.org` directly. DOIs land on the canonical `https://nemar.org/dataset/<id>` (versions `?v=v<version>`), which a Cloudflare redirect on the `nemar.org` zone forwards to ww2.
-- **`https://nemar.org/dataexplorer/...`** — **legacy PHP site, being retired.** As of epic #837 NEMAR no longer syncs to or from it: the outgoing datapipeline push and the incoming 4h catalog pull are removed, our `nm`/`on` records are purged from its `dataexplorer_*` tables, and the legacy `ds######` shadow rows are dropped from our D1. It may still serve its own OpenNeuro `ds` catalog independently.
-- **Default in docs/comments:** when something says "the website," "the browser," or "the UI" without further qualification, mean ww2.nemar.org. Name `nemar.org` explicitly only when referring to the legacy dataexplorer or the `nemar.org/dataset/<id>` DOI landing target.
+**The cutover is done: `https://nemar.org` IS the dataset browser** (Astro SSR, lives in
+`nemarOrg/website`). Dataset pages at `nemar.org/dataset/<id>`, versions `?v=v<version>`. Reads
+`api.nemar.org` and `data.nemar.org` directly. This is also the canonical DOI landing target
+(`datasetLandingUrl` / `datasetVersionLandingUrl` in `shared/datacite-constants.ts`), so DOIs now
+resolve straight to the site they name instead of being forwarded.
+
+- **`https://ww2.nemar.org`** — the pre-cutover hostname for the same Astro site. Still resolves;
+  treat it as a legacy alias, not a deployment target. Do not use it in new code, docs, or comments.
+- **`https://nemar.org/dataexplorer/...`** — **the legacy PHP site is gone.** Its URLs now 301 to
+  `nemar.org/dataset/<id>`. Epic #837 had already severed the data coupling (outgoing datapipeline
+  push and the incoming 4h catalog pull removed, our `nm`/`on` records purged from its
+  `dataexplorer_*` tables, legacy `ds######` shadow rows dropped from our D1); the hostname handover
+  completed it.
+- **Default in docs/comments:** "the website," "the browser," or "the UI" unqualified means
+  `nemar.org`. There is no longer a distinction to draw — if you find a comment contrasting
+  ww2 with nemar.org, or calling nemar.org "legacy," it predates the cutover and is wrong.
 
 ### S3 Bucket Structure
 ```
@@ -90,7 +120,7 @@ It is served by the existing dev worker (`nemar-api-dev`), not a new one.
 | API | `api.nemar.org` | `api-test.nemar.org` |
 | Data plane | `data.nemar.org` | `data-test.nemar.org` |
 | Zarr | `zarr.nemar.org` | `zarr-test.nemar.org` |
-| Website | `ww2.nemar.org` (`nemar-website` Pages) | `test.nemar.org` (`nemar-website-test` Pages) |
+| Website | `nemar.org` (`nemar-website` Pages) | `test.nemar.org` (`nemar-website-test` Pages) |
 | S3 | `s3://nemar` | `s3://nemar-dev` |
 | D1 | `nemar-db` | `nemar-db-dev` |
 
@@ -176,6 +206,13 @@ CLI keeps password + API-token. Dashboard (currently at `nemar.org`, moving to `
 - `POST /auth/code/request` — emails a 6-digit code. Per-email rate limit 1/min, 5/hour (counted from `auth_codes.created_at`). In `ENVIRONMENT=development|test` the response includes `dev_code` so tests can finish without an inbox; production must never see this field.
 - `POST /auth/code/verify` — Origin-allow-listed, returns `{ user }`, sets `nemar_session` HttpOnly + Secure + SameSite=Lax cookie.
 - `POST /auth/logout` / `GET /auth/me` — cookie-bearing.
+- Settings self-service (epic #1019), all cookie-bearing + Origin-allow-listed:
+  `PATCH /auth/profile` (#912, github/city/country/affiliation; name is
+  ORCID-canonical), `POST /auth/email/change/{request,verify}` (#911, codes
+  mailed to the NEW address, bound to the requesting session via
+  `auth_codes.user_id`, migration 0066), and ORCID re-link via
+  `POST /auth/orcid/start?mode=relink` (#913, ADR 0022 — relink intent is
+  never minted on a GET).
 
 Cookie domain is env-driven via `WEB_SESSION_COOKIE_DOMAIN` (prod: `app.nemar.org`, dev: host-only). Flip the prod value at the website#46 cutover; no code change.
 
@@ -229,12 +266,14 @@ ssh mcm "zsh -i -c 'nemar admin users'"
 ```
 
 ## Development Workflow
-1. **Check context:** Review .context/plan.md for current tasks
-2. **Branch:** `git checkout -b feature/short-description`
-3. **Code:** Follow patterns in .rules/javascript.md
-4. **Test:** Real tests only with `bun test`
-5. **Commit:** Atomic, <50 chars, no emojis, no co-author tags
-6. **PR:** Reference context and issue
+1. **Check decisions:** Skim `.context/decisions/README.md` for anything binding on the area you are about to change
+2. **Check context:** Review .context/plan.md for current tasks
+3. **Branch:** `git checkout -b feature/short-description`
+4. **Code:** Follow patterns in .rules/javascript.md
+5. **Test:** Real tests only with `bun test`
+6. **Commit:** Atomic, <50 chars, no emojis, no co-author tags
+7. **PR:** Reference context and issue
+8. **Record the decision:** if the change settled something an ADR should own, add one (or supersede the ADR it contradicts) in the same PR
 
 ### Epic / multi-phase development (REQUIRED)
 For any multi-phase feature (an epic with sub-issues, phased delivery, or anything spanning more than one PR), you MUST drive it with the **`/project:epic-dev`** skill (`project:epic-dev`). Do not hand-roll the epic/sprint flow. The skill owns: epic + sub-issue creation and linking (`gh sub-issue`), the epic/phase git-worktree structure, per-phase plan -> implement -> PR -> `/review-pr` -> squash-merge cycle, and the `.claude/epic.local.md` state file that tracks `current_phase`.
@@ -330,8 +369,15 @@ If build fails, the script restores the original version.
 - `.rules/ci_cd.md` - GitHub Actions setup
 
 ## Context Files
+- **[`.context/README.md`](.context/README.md) - map of this directory** (current vs research vs historical)
+- **`.context/decisions/` - Architecture Decision Records. Read these first.** One file per
+  significant decision, with the alternatives that lost and why. `decisions/README.md` is the
+  index and the convention (numbering, statuses, when to write one). Where a design doc below
+  and an ADR disagree, **the ADR wins** — the docs keep the analysis, the ADR records the verdict.
+  Write a new ADR when a decision is expensive to reverse, closes off other reasonable paths, has
+  been argued more than once, or encodes a non-obvious constraint. Never delete one; supersede it.
 - `.context/plan.md` - Development phases and tasks
-- `.context/ideas.md` - Design decisions and alternatives
+- `.context/ideas.md` - Design decisions and alternatives (exploratory; promote settled ones to an ADR)
 - `.context/research.md` - Technical investigations
 - `.context/validated_workflows.md` - **Tested and proven workflows** (use these!)
 - `.context/prototyping_plan.md` - Prototypes to validate assumptions

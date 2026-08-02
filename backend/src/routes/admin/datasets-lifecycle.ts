@@ -16,9 +16,9 @@ import { auditLogStatement } from "../../db/audit-log";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import { shouldSkipArchive } from "../../services/archive-policy";
 import {
+  AVAILABILITY_REPORT_SWEEP_MAX,
   AvailabilityReportError,
-  availabilityReportSweepCandidateQuery,
-  availabilityReportSweepRemainingQuery,
+  runAvailabilityReportSweep,
   writeAvailabilityReport,
 } from "../../services/availability-report";
 import { stampDatasetIntegrity, writeVersionHed } from "../../services/dataset-metadata-columns";
@@ -823,11 +823,14 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
    * (data_complete = 0, migration 0059) — for a targeted re-run once recovery
    * work lands, without re-touching every already-complete dataset.
    *
-   * Bounded per invocation (default 10, max 10 -- deliberately lower than a
-   * read-only sweep like hed-sweep/data-integrity-sweep (max 30): each
-   * candidate here does a GitHub commit (createOrUpdateFile, 2 API calls), and
-   * a burst of write calls can trip GitHub's secondary rate limit (the same
-   * failure mode the bulk-approval-rate-limit precedent hit). No in-Worker
+   * Bounded per invocation by AVAILABILITY_REPORT_SWEEP_MAX (30, matching the
+   * read-only sweeps; see the rationale on that constant). Each candidate here
+   * still does a GitHub commit (createOrUpdateFile, 2 API calls) unlike
+   * hed-sweep/data-integrity-sweep, and a burst of write calls can trip
+   * GitHub's secondary rate limit (the same failure mode the
+   * bulk-approval-rate-limit precedent hit); what keeps 30 safe is that the
+   * loop is sequential and each iteration is dominated by an S3 LIST plus a
+   * manifest walk, so the writes are naturally spread. No in-Worker
    * sleep between writes (that would eat into the Worker's request duration
    * budget) -- createOrUpdateFile itself has no 403 backoff either (its retry
    * loop only covers a stale-SHA conflict, not rate limiting), so a
@@ -856,16 +859,15 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     }
 
     const limitRaw = Number.parseInt(c.req.query("limit") || "10", 10);
-    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 10) : 10;
+    const limit = Number.isFinite(limitRaw) ? limitRaw : AVAILABILITY_REPORT_SWEEP_MAX;
     const missingOnly = c.req.query("missing-only") === "1";
 
-    let candidates: { dataset_id: string }[];
+    // One implementation, shared with the daily cron (#1041) -- the candidate
+    // query, the cap, the stamp-only-on-success rule and the error collection
+    // all live in runAvailabilityReportSweep so the two callers cannot drift.
     try {
-      const rows = await db
-        .prepare(availabilityReportSweepCandidateQuery(missingOnly))
-        .bind(limit)
-        .all<{ dataset_id: string }>();
-      candidates = rows.results ?? [];
+      const result = await runAvailabilityReportSweep(c.env, { limit, missingOnly });
+      return c.json(result);
     } catch (err) {
       console.error("[availability-report-sweep] candidate query failed:", err);
       return c.json(
@@ -873,37 +875,6 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
         500,
       );
     }
-
-    let written = 0;
-    const errors: { dataset_id: string; error: string }[] = [];
-
-    for (const { dataset_id } of candidates) {
-      try {
-        await writeAvailabilityReport(c.env, dataset_id);
-        // Stamp only after a successful write -- a failure above leaves the
-        // row unstamped so it stays a candidate and a plain re-run retries it.
-        await db
-          .prepare(
-            "UPDATE datasets SET availability_report_at = datetime('now') WHERE dataset_id = ?",
-          )
-          .bind(dataset_id)
-          .run();
-        written++;
-      } catch (err) {
-        errors.push({ dataset_id, error: errorMessage(err) });
-      }
-    }
-
-    const remainingRow = await db
-      .prepare(availabilityReportSweepRemainingQuery(missingOnly))
-      .first<{ n: number }>();
-
-    return c.json({
-      processed: candidates.length,
-      written,
-      errors,
-      remaining: remainingRow?.n ?? null,
-    });
   });
 
   // ============================================================================

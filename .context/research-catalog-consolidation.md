@@ -3,6 +3,9 @@
 
 # nemar-cli Dataset Store Consolidation — Final Design
 
+> **Decision recorded:** [ADR 0003 - `datasets` is the single table of record](decisions/0003-datasets-is-the-single-table-of-record.md).
+> This document keeps the option analysis and migration design that produced the choice.
+
 ## 1. TL;DR
 
 **Winner: Approach A (Single Table of Record + FTS5 + ID-only Vectorize), hardened with grafts from B and C.** Collapse all 600 datasets into the `datasets` table as the sole source of truth per fact (legacy catalog-only rows folded in under a sentinel system owner, keeping the `NOT NULL` FK intact), replace the three competing `nemar_catalog` writers with a real driftless **FTS5 external-content** index kept in sync by `AFTER` triggers, and make Vectorize store **only the vector id** so every search result is hydrated from the live `datasets` row at query time.

@@ -1,0 +1,15 @@
+-- Bind email-change codes to the session that requested them (#911 review).
+--
+-- auth_codes was built for the passwordless SIGN-IN flow, where there is no
+-- session yet — rows are keyed by email alone. The email-change flow (#911)
+-- reuses the table, but there the requester IS authenticated, and an
+-- email-keyed code means whichever signed-in user submits it gets the address
+-- attached to THEIR account (shared lab inboxes make that a real scenario,
+-- not a contrived one).
+--
+-- user_id records who requested a change code; sign-in codes leave it NULL.
+-- The change-verify lookup filters user_id = <session user>, and the sign-in
+-- verify filters user_id IS NULL, so neither flow can consume the other's
+-- codes — the purpose separation becomes structural instead of emergent.
+-- Additive + nullable: no rebuild, existing rows unaffected.
+ALTER TABLE auth_codes ADD COLUMN user_id INTEGER;
