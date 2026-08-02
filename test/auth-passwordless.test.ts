@@ -775,7 +775,7 @@ describe.skipIf(PROD_GUARD_ACTIVE)("email change flow (#911)", () => {
   const newEmail = freshEmail("emailchange-new");
   let cookie: string;
 
-  test("setup: seed + sign in", async () => {
+  beforeAll(async () => {
     await seedWebUser(originalEmail, "approved");
     cookie = await signIn(originalEmail);
   });
