@@ -743,3 +743,116 @@ describe.skipIf(PROD_GUARD_ACTIVE)("PATCH /auth/profile (#912)", () => {
     expect(r.body.error).toBe("empty_patch");
   });
 });
+
+describe.skipIf(PROD_GUARD_ACTIVE)("email change flow (#911)", () => {
+  async function post(
+    path: string,
+    cookieValue: string | null,
+    body: unknown,
+    origin: string | null = ORIGIN,
+  ): Promise<{ status: number; body: Record<string, unknown> }> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...baseHeaders,
+    };
+    if (origin) headers.Origin = origin;
+    if (cookieValue) headers.Cookie = `nemar_session=${cookieValue}`;
+    const r = await fetch(`${API}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
+    return { status: r.status, body: (await r.json()) as Record<string, unknown> };
+  }
+
+  async function signIn(email: string): Promise<string> {
+    const req = await requestCode(email);
+    expect(req.status).toBe(200);
+    const v = await verifyCode(email, req.body.dev_code as string, false);
+    expect(v.status).toBe(200);
+    const m = v.setCookie?.match(/nemar_session=([^;]+)/);
+    expect(m).toBeTruthy();
+    return m?.[1] as string;
+  }
+
+  const originalEmail = freshEmail("emailchange");
+  const newEmail = freshEmail("emailchange-new");
+  let cookie: string;
+
+  test("setup: seed + sign in", async () => {
+    await seedWebUser(originalEmail, "approved");
+    cookie = await signIn(originalEmail);
+  });
+
+  test("request guards: same email 409, taken email 409, anon 401, bad origin 403", async () => {
+    const same = await post("/auth/email/change/request", cookie, { email: originalEmail });
+    expect(same.status).toBe(409);
+    expect(same.body.error).toBe("same_email");
+
+    const takenEmail = freshEmail("emailchange-taken");
+    await seedWebUser(takenEmail);
+    const taken = await post("/auth/email/change/request", cookie, { email: takenEmail });
+    expect(taken.status).toBe(409);
+    expect(taken.body.error).toBe("email_in_use");
+
+    const anon = await post("/auth/email/change/request", null, { email: newEmail });
+    expect(anon.status).toBe(401);
+
+    const badOrigin = await post(
+      "/auth/email/change/request",
+      cookie,
+      { email: newEmail },
+      "https://evil.example",
+    );
+    expect(badOrigin.status).toBe(403);
+  });
+
+  test("non-synthetic target from a plain member is silently skipped off-prod (#1008)", async () => {
+    // The dev D1 mirrors real production users; a QA session must not be
+    // able to mail an arbitrary real address from staging.
+    const r = await post("/auth/email/change/request", cookie, {
+      email: `ec-real-${Date.now().toString(36)}@example.com`,
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(true);
+    expect(r.body.dev_code).toBeUndefined();
+    expect(r.body.dev_skip).toBe("not_allowlisted");
+  });
+
+  test("happy path: request -> wrong code 401 -> verify -> email moved, session survives", async () => {
+    const req = await post("/auth/email/change/request", cookie, { email: newEmail });
+    expect(req.status).toBe(200);
+    expect(req.body.ok).toBe(true);
+    const code = req.body.dev_code as string;
+    expect(code).toMatch(/^\d{6}$/);
+
+    const wrong = await post("/auth/email/change/verify", cookie, {
+      email: newEmail,
+      code: code === "000000" ? "000001" : "000000",
+    });
+    expect(wrong.status).toBe(401);
+    expect(wrong.body.error).toBe("code_incorrect");
+
+    const ok = await post("/auth/email/change/verify", cookie, { email: newEmail, code });
+    expect(ok.status).toBe(200);
+    const user = ok.body.user as { email: string };
+    expect(user.email).toBe(newEmail);
+
+    // The session cookie survives the change (sessions key on user id).
+    const me = await fetch(`${API}/auth/me`, {
+      headers: { ...baseHeaders, Cookie: `nemar_session=${cookie}` },
+    });
+    expect(me.status).toBe(200);
+    const meBody = (await me.json()) as MeResponse;
+    expect(meBody.user?.email).toBe(newEmail);
+
+    // Replaying is refused: the session user's email now IS the target, so
+    // the same_email guard fires before the (consumed) code is even read.
+    const replay = await post("/auth/email/change/verify", cookie, { email: newEmail, code });
+    expect(replay.status).toBe(409);
+    expect(replay.body.error).toBe("same_email");
+  });
+
+  test("the old address no longer backs an account (sign-in code is a silent skip)", async () => {
+    const req = await requestCode(originalEmail);
+    expect(req.status).toBe(200);
+    expect(req.body.dev_code).toBeUndefined();
+    expect(req.body.dev_skip).toBe("unregistered");
+  });
+});

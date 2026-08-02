@@ -6,11 +6,13 @@
  * password + API-token flow in `auth.ts` is untouched; these routes
  * exist alongside it under the same `/auth` mount.
  *
- *   POST  /auth/code/request - mail a code
- *   POST  /auth/code/verify  - check the code, set a session cookie
- *   POST  /auth/logout       - clear the cookie + revoke the session row
- *   GET   /auth/me           - current user, or { user: null }
- *   PATCH /auth/profile      - self-service profile edit (#912)
+ *   POST  /auth/code/request         - mail a code
+ *   POST  /auth/code/verify          - check the code, set a session cookie
+ *   POST  /auth/logout               - clear the cookie + revoke the session row
+ *   GET   /auth/me                   - current user, or { user: null }
+ *   PATCH /auth/profile              - self-service profile edit (#912)
+ *   POST  /auth/email/change/request - mail an ownership code to a NEW address (#911)
+ *   POST  /auth/email/change/verify  - verify it, move users.email (#911)
  *
  * Notes for readers:
  *   - In development and test environments the `request` response
@@ -40,7 +42,11 @@ import {
   nonProdCodeEchoAllowed,
   nonProdCodeRequestAllowed,
 } from "../services/auth-code";
-import { resolveEmailConfig, sendPasswordlessCodeEmail } from "../services/email";
+import {
+  resolveEmailConfig,
+  sendEmailChangeCodeEmail,
+  sendPasswordlessCodeEmail,
+} from "../services/email";
 import { validateGitHubUsername } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
 import { githubHandleChanged, normalizeProfilePatch } from "../services/profile";
@@ -685,6 +691,303 @@ authWebRoutes.patch(
       }
       console.error("[auth-web] /profile PATCH failed", err);
       return c.json({ error: "Failed to update profile" }, 500);
+    }
+  },
+);
+
+// ---------------------------------------------------------------
+// POST /auth/email/change/{request,verify}
+// ---------------------------------------------------------------
+
+const emailChangeVerifySchema = z.object({
+  email: z
+    .string()
+    .email()
+    .max(320)
+    .transform((e) => e.trim().toLowerCase()),
+  code: z.string().regex(/^\d{6}$/, "code must be 6 digits"),
+});
+
+/** Re-read a user by id and shape the dashboard payload (same SELECT the
+ *  /code/verify path runs by email). Null when the row is gone/tombstoned. */
+async function fetchPublicUserById(
+  db: D1Database,
+  userId: number,
+): Promise<ReturnType<typeof publicUser> | null> {
+  const row = await db
+    .prepare(
+      `SELECT id, email, role, status,
+              given_name, family_name, orcid, orcid_verified,
+              github_username, city, country, affiliation, service_access
+         FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+    )
+    .bind(userId)
+    .first<{
+      id: number;
+      email: string;
+      role: string | null;
+      status: string;
+      given_name: string | null;
+      family_name: string | null;
+      orcid: string | null;
+      // NOT NULL DEFAULT 0 in D1 (0050), so plain number.
+      orcid_verified: number;
+      github_username: string | null;
+      city: string | null;
+      country: string | null;
+      affiliation: string | null;
+      // NOT NULL DEFAULT 0 in D1 (0062), so plain number.
+      service_access: number;
+    }>();
+  if (!row) return null;
+  return publicUser({
+    id: row.id,
+    email: row.email,
+    role: parseRole(row.role, row.email),
+    status: row.status,
+    given_name: row.given_name,
+    family_name: row.family_name,
+    orcid: row.orcid,
+    orcid_verified: row.orcid_verified === 1,
+    github_username: row.github_username,
+    city: row.city,
+    country: row.country,
+    affiliation: row.affiliation,
+    service_access: row.service_access === 1,
+  });
+}
+
+/**
+ * Self-service email change, step 1 (#911; nemarOrg/website#133). The
+ * authenticated user submits a NEW address; a 6-digit code is mailed to that
+ * address to prove ownership before anything is written. Reuses the
+ * auth_codes table and the /code/request mechanics (atomic rate-limited
+ * insert, rotation, rollback-on-send-failure, dev_code echo rules).
+ *
+ * Purpose-mixing with sign-in codes is structurally impossible: a change
+ * code is only ever issued for an address with NO users row (collisions are
+ * refused here), while /code/verify requires a users row for the address —
+ * so a change code can never complete a sign-in, and vice versa.
+ */
+authWebRoutes.post(
+  "/email/change/request",
+  webSessionMiddleware,
+  zValidator("json", emailSchema),
+  async (c) => {
+    if (!isAllowedOrigin(c.req.header("Origin"))) {
+      return c.json({ error: "Origin not allowed" }, 403);
+    }
+    const webUser = c.var.webUser;
+    if (!webUser) {
+      return c.json({ error: "Authentication required" }, 401);
+    }
+    const { email } = c.req.valid("json");
+    const db = c.env.DB;
+
+    try {
+      if (email === webUser.email.toLowerCase()) {
+        return c.json({ error: "same_email" }, 409);
+      }
+      const collision = await db
+        .prepare("SELECT id FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1")
+        .bind(email)
+        .first<{ id: number }>();
+      if (collision) {
+        return c.json({ error: "email_in_use" }, 409);
+      }
+
+      // #1008 analogue: the non-production D1 mirrors real production users,
+      // so a staging QA session must not be able to mail an arbitrary real
+      // address. Outside production, only send when the requester is an
+      // admin/owner (testing with an address they control) or the target is
+      // a synthetic test address. Same silent-ok shape as /code/request so
+      // the flow dead-ends quietly rather than leaking which gate fired.
+      const privilegedRequester = webUser.role === "admin" || webUser.role === "owner";
+      if (isDevOrTest(c.env) && !privilegedRequester && !nonProdCodeEchoAllowed(email)) {
+        return c.json({ ok: true, masked_email: maskEmail(email), dev_skip: "not_allowlisted" });
+      }
+
+      const code = generateAuthCode();
+      const codeHash = await hashAuthCode(code, c.env);
+      const expiresAt = new Date(Date.now() + CODE_TTL_MINUTES * 60 * 1000).toISOString();
+
+      // Atomic rate-limited INSERT, keyed by the TARGET address (same shape
+      // and limits as /code/request; see that route for the race reasoning).
+      const insertResult = await db
+        .prepare(
+          `INSERT INTO auth_codes (email, code_hash, expires_at)
+           SELECT ?, ?, ?
+           WHERE (SELECT COUNT(*) FROM auth_codes
+                   WHERE email = ?
+                     AND created_at > datetime('now','-1 minute')) < ?
+             AND (SELECT COUNT(*) FROM auth_codes
+                   WHERE email = ?
+                     AND created_at > datetime('now','-1 hour')) < ?`,
+        )
+        .bind(email, codeHash, expiresAt, email, PER_MINUTE_LIMIT, email, PER_HOUR_LIMIT)
+        .run();
+      if ((insertResult.meta?.changes ?? 0) === 0) {
+        return c.json({ error: "Too many requests. Try again later." }, 429);
+      }
+      const newCodeId = insertResult.meta?.last_row_id ?? 0;
+
+      await db
+        .prepare(
+          `UPDATE auth_codes SET used_at = datetime('now')
+            WHERE email = ? AND used_at IS NULL AND id != ?`,
+        )
+        .bind(email, newCodeId)
+        .run();
+
+      try {
+        const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
+        await sendEmailChangeCodeEmail(
+          email,
+          code,
+          c.env.RESEND_API_KEY,
+          fromEmail,
+          replyTo,
+          isDev,
+        );
+      } catch (emailError) {
+        console.error("[auth-web] failed to send email-change code email", emailError);
+        await db
+          .prepare("DELETE FROM auth_codes WHERE id = ?")
+          .bind(newCodeId)
+          .run()
+          .catch((cleanupErr) =>
+            console.error("[auth-web] failed to roll back auth_codes row", cleanupErr),
+          );
+        return c.json({ error: "Could not deliver the code; try again shortly." }, 503);
+      }
+
+      const body: Record<string, unknown> = { ok: true, masked_email: maskEmail(email) };
+      if (isDevOrTest(c.env) && nonProdCodeEchoAllowed(email)) body.dev_code = code;
+
+      // Same belt-and-braces as /code/request: never ship a code in a
+      // production response body.
+      if (c.env.ENVIRONMENT === "production" && "dev_code" in body) {
+        console.error(
+          "[auth-web] FATAL: dev_code present in production response — refusing to ship the response",
+        );
+        return c.json({ error: "Internal error" }, 500);
+      }
+
+      return c.json(body);
+    } catch (err) {
+      console.error("[auth-web] /email/change/request failed", err);
+      return c.json({ error: "Failed to send code" }, 500);
+    }
+  },
+);
+
+/**
+ * Self-service email change, step 2 (#911). Verifies the code sent to the
+ * new address (same compare/attempts/consume semantics as /code/verify),
+ * then moves users.email in the same D1 batch as the audit row. The session
+ * cookie is NOT rotated: web_sessions reference the user id, not the email,
+ * so every existing session stays valid across the change.
+ */
+authWebRoutes.post(
+  "/email/change/verify",
+  webSessionMiddleware,
+  zValidator("json", emailChangeVerifySchema),
+  async (c) => {
+    if (!isAllowedOrigin(c.req.header("Origin"))) {
+      return c.json({ error: "Origin not allowed" }, 403);
+    }
+    const webUser = c.var.webUser;
+    if (!webUser) {
+      return c.json({ error: "Authentication required" }, 401);
+    }
+    const { email, code } = c.req.valid("json");
+    const db = c.env.DB;
+
+    try {
+      if (email === webUser.email.toLowerCase()) {
+        return c.json({ error: "same_email" }, 409);
+      }
+      // Re-check the collision: an account for this address may have been
+      // created between request and verify. The users.email UNIQUE
+      // constraint below is the authoritative backstop for the write race.
+      const collision = await db
+        .prepare("SELECT id FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1")
+        .bind(email)
+        .first<{ id: number }>();
+      if (collision) {
+        return c.json({ error: "email_in_use" }, 409);
+      }
+
+      const row = await db
+        .prepare(
+          `SELECT id, code_hash, attempts FROM auth_codes
+            WHERE email = ? AND used_at IS NULL AND expires_at > datetime('now')
+            ORDER BY created_at DESC LIMIT 1`,
+        )
+        .bind(email)
+        .first<{ id: number; code_hash: string; attempts: number }>();
+      if (!row) {
+        return c.json({ error: "code_incorrect" }, 401);
+      }
+
+      const submittedHash = await hashAuthCode(code, c.env);
+      if (!constantTimeEqualHex(submittedHash, row.code_hash)) {
+        const newAttempts = row.attempts + 1;
+        if (newAttempts >= MAX_CODE_ATTEMPTS) {
+          await db
+            .prepare(`UPDATE auth_codes SET attempts = ?, used_at = datetime('now') WHERE id = ?`)
+            .bind(newAttempts, row.id)
+            .run();
+        } else {
+          await db
+            .prepare("UPDATE auth_codes SET attempts = ? WHERE id = ?")
+            .bind(newAttempts, row.id)
+            .run();
+        }
+        return c.json({ error: "code_incorrect" }, 401);
+      }
+
+      // Consume-once, same conditional UPDATE as /code/verify.
+      const consumeResult = await db
+        .prepare("UPDATE auth_codes SET used_at = datetime('now') WHERE id = ? AND used_at IS NULL")
+        .bind(row.id)
+        .run();
+      if ((consumeResult.meta?.changes ?? 0) === 0) {
+        return c.json({ error: "code_incorrect" }, 401);
+      }
+
+      // The change + its audit row in one batch. email_verified=1: the user
+      // just proved control of the new inbox. A concurrent claim of the
+      // address lands here as a UNIQUE violation -> 409, matching the
+      // pre-checks.
+      try {
+        await db.batch([
+          db
+            .prepare("UPDATE users SET email = ?, email_verified = 1 WHERE id = ?")
+            .bind(email, webUser.id),
+          auditLogStatement(db, {
+            userId: webUser.id,
+            action: "email_changed",
+            resourceType: "user",
+            resourceId: String(webUser.id),
+            details: JSON.stringify({ from: webUser.email, to: email }),
+          }),
+        ]);
+      } catch (writeErr) {
+        if (String(writeErr).includes("UNIQUE")) {
+          return c.json({ error: "email_in_use" }, 409);
+        }
+        throw writeErr;
+      }
+
+      const user = await fetchPublicUserById(db, webUser.id);
+      if (!user) {
+        return c.json({ error: "Account not found" }, 403);
+      }
+      return c.json({ ok: true, user });
+    } catch (err) {
+      console.error("[auth-web] /email/change/verify failed", err);
+      return c.json({ error: "Verification failed" }, 500);
     }
   },
 );
