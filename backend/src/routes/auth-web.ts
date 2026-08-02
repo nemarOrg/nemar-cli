@@ -6,10 +6,11 @@
  * password + API-token flow in `auth.ts` is untouched; these routes
  * exist alongside it under the same `/auth` mount.
  *
- *   POST /auth/code/request - mail a code
- *   POST /auth/code/verify  - check the code, set a session cookie
- *   POST /auth/logout       - clear the cookie + revoke the session row
- *   GET  /auth/me           - current user, or { user: null }
+ *   POST  /auth/code/request - mail a code
+ *   POST  /auth/code/verify  - check the code, set a session cookie
+ *   POST  /auth/logout       - clear the cookie + revoke the session row
+ *   GET   /auth/me           - current user, or { user: null }
+ *   PATCH /auth/profile      - self-service profile edit (#912)
  *
  * Notes for readers:
  *   - In development and test environments the `request` response
@@ -29,6 +30,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
+import { auditLogStatement } from "../db/audit-log";
 import { webSessionMiddleware } from "../middleware/webSession";
 import {
   constantTimeEqualHex,
@@ -39,6 +41,9 @@ import {
   nonProdCodeRequestAllowed,
 } from "../services/auth-code";
 import { resolveEmailConfig, sendPasswordlessCodeEmail } from "../services/email";
+import { validateGitHubUsername } from "../services/github";
+import { getDatasetsToken } from "../services/github-auth";
+import { githubHandleChanged, normalizeProfilePatch } from "../services/profile";
 import {
   buildClearedSessionCookie,
   buildSessionCookie,
@@ -476,3 +481,210 @@ authWebRoutes.get("/me", webSessionMiddleware, async (c) => {
 
   return c.json({ user: publicUser(webUser) });
 });
+
+// ---------------------------------------------------------------
+// PATCH /auth/profile
+// ---------------------------------------------------------------
+
+// Loose shape bounds only; the field semantics (trim, @-strip, non-empty
+// city/country, empty-string-clears) live in normalizeProfilePatch so they
+// are unit-testable. Bounds match finalizeSchema in auth-orcid.ts where the
+// same columns are first written (city/country 120, affiliation 200).
+const profilePatchSchema = z.object({
+  github_username: z.string().max(60).optional(),
+  city: z.string().max(120).optional(),
+  country: z.string().max(120).optional(),
+  affiliation: z.string().max(200).optional(),
+});
+
+/**
+ * Self-service profile edit (#912; nemarOrg/website#135). Accepts any subset
+ * of github_username / city / country / affiliation — see profile.ts for the
+ * per-field rules. Name is ORCID-canonical (#835) and not editable here.
+ *
+ * A changed GitHub handle gets the same three checks as CLI signup: direct
+ * dup (COLLATE NOCASE, 409 even when the handle no longer resolves), live
+ * existence against the GitHub API, and a canonical-login re-dedup when
+ * GitHub normalises what was typed. Re-saving the current handle skips all
+ * three so a routine "Save profile" never spends a GitHub call.
+ */
+authWebRoutes.patch(
+  "/profile",
+  webSessionMiddleware,
+  zValidator("json", profilePatchSchema),
+  async (c) => {
+    if (!isAllowedOrigin(c.req.header("Origin"))) {
+      return c.json({ error: "Origin not allowed" }, 403);
+    }
+    const webUser = c.var.webUser;
+    if (!webUser) {
+      return c.json({ error: "Authentication required" }, 401);
+    }
+
+    const normalized = normalizeProfilePatch(c.req.valid("json"));
+    if (!normalized.ok) {
+      return c.json({ error: normalized.error, message: normalized.message }, 400);
+    }
+    const patch = normalized.patch;
+    const db = c.env.DB;
+
+    try {
+      if (
+        typeof patch.github_username === "string" &&
+        githubHandleChanged(patch.github_username, webUser.github_username)
+      ) {
+        const dup = await db
+          .prepare(
+            `SELECT id FROM users
+              WHERE github_username = ? COLLATE NOCASE AND id != ? AND deleted_at IS NULL
+              LIMIT 1`,
+          )
+          .bind(patch.github_username, webUser.id)
+          .first<{ id: number }>();
+        if (dup) {
+          return c.json(
+            { error: "github_in_use", message: "GitHub account already linked to another user" },
+            409,
+          );
+        }
+
+        // Known limitation shared with CLI signup: validateGitHubUsername
+        // returns null for any non-OK GitHub response, so a GitHub-side
+        // outage reads as "does not exist" here rather than a 5xx.
+        const githubUser = await validateGitHubUsername(
+          patch.github_username,
+          await getDatasetsToken(c.env),
+        );
+        if (!githubUser) {
+          return c.json(
+            {
+              error: "invalid_github_username",
+              message: `The GitHub username '${patch.github_username}' does not exist`,
+            },
+            400,
+          );
+        }
+        // GitHub resolves renames/case variants to a canonical login; store
+        // that, and re-run the dup check when it differs from what was typed
+        // beyond case (the COLLATE NOCASE check above already covered case).
+        if (githubUser.login.toLowerCase() !== patch.github_username.toLowerCase()) {
+          const canonicalDup = await db
+            .prepare(
+              `SELECT id FROM users
+                WHERE github_username = ? COLLATE NOCASE AND id != ? AND deleted_at IS NULL
+                LIMIT 1`,
+            )
+            .bind(githubUser.login, webUser.id)
+            .first<{ id: number }>();
+          if (canonicalDup) {
+            return c.json(
+              { error: "github_in_use", message: "GitHub account already linked to another user" },
+              409,
+            );
+          }
+        }
+        patch.github_username = githubUser.login;
+      }
+
+      const sets: string[] = [];
+      const binds: (string | null)[] = [];
+      if (patch.github_username !== undefined) {
+        sets.push("github_username = ?");
+        binds.push(patch.github_username);
+      }
+      if (patch.city !== undefined) {
+        sets.push("city = ?");
+        binds.push(patch.city);
+      }
+      if (patch.country !== undefined) {
+        sets.push("country = ?");
+        binds.push(patch.country);
+      }
+      if (patch.affiliation !== undefined) {
+        sets.push("affiliation = ?");
+        binds.push(patch.affiliation);
+      }
+
+      // One D1 batch == one implicit transaction: the update and its audit
+      // row land together. Details carry the new values — profile fields,
+      // not secrets — so an admin can reconstruct what changed.
+      await db.batch([
+        db
+          .prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ? AND deleted_at IS NULL`)
+          .bind(...binds, webUser.id),
+        auditLogStatement(db, {
+          userId: webUser.id,
+          action: "profile_updated",
+          resourceType: "user",
+          resourceId: String(webUser.id),
+          details: JSON.stringify(patch),
+        }),
+      ]);
+
+      // Re-read so the response reflects what actually landed (the website
+      // also re-reads /auth/me on reload; this keeps both in agreement).
+      const row = await db
+        .prepare(
+          `SELECT id, email, role, status,
+                  given_name, family_name, orcid, orcid_verified,
+                  github_username, city, country, affiliation, service_access
+             FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+        )
+        .bind(webUser.id)
+        .first<{
+          id: number;
+          email: string;
+          role: string | null;
+          status: string;
+          given_name: string | null;
+          family_name: string | null;
+          orcid: string | null;
+          // NOT NULL DEFAULT 0 in D1 (0050), so plain number.
+          orcid_verified: number;
+          github_username: string | null;
+          city: string | null;
+          country: string | null;
+          affiliation: string | null;
+          // NOT NULL DEFAULT 0 in D1 (0062), so plain number.
+          service_access: number;
+        }>();
+      if (!row) {
+        // Session resolved but the row is gone (tombstoned mid-request).
+        return c.json({ error: "Account not found" }, 403);
+      }
+
+      return c.json({
+        ok: true,
+        user: publicUser({
+          id: row.id,
+          email: row.email,
+          role: parseRole(row.role, row.email),
+          status: row.status,
+          given_name: row.given_name,
+          family_name: row.family_name,
+          orcid: row.orcid,
+          orcid_verified: row.orcid_verified === 1,
+          github_username: row.github_username,
+          city: row.city,
+          country: row.country,
+          affiliation: row.affiliation,
+          service_access: row.service_access === 1,
+        }),
+      });
+    } catch (err) {
+      // Safety net for the TOCTOU window past the dedup SELECTs: two
+      // concurrent PATCHes claiming the same free handle both pass the
+      // pre-check, and the loser's UPDATE hits idx_users_github (0012,
+      // COLLATE NOCASE). Same net CLI signup carries in auth.ts.
+      const msg = String(err);
+      if (msg.includes("UNIQUE constraint failed") && msg.includes("users.github_username")) {
+        return c.json(
+          { error: "github_in_use", message: "GitHub account already linked to another user" },
+          409,
+        );
+      }
+      console.error("[auth-web] /profile PATCH failed", err);
+      return c.json({ error: "Failed to update profile" }, 500);
+    }
+  },
+);
