@@ -97,6 +97,13 @@ const AUTH_PATHS = [
   "/auth/code/request",
   "/auth/code/verify",
   "/auth/logout",
+  // Settings self-service (#912/#911): cookie-authenticated mutations.
+  // Without these entries they'd fall to the generic ip bucket (500/min);
+  // the email-change request in particular reveals address collisions to
+  // the (authenticated) caller, so the 10/min floor is load-bearing.
+  "/auth/profile",
+  "/auth/email/change/request",
+  "/auth/email/change/verify",
 ];
 
 type RateLimitContext = Context<{ Bindings: Bindings; Variables: Variables }>;

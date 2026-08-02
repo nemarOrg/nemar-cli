@@ -206,6 +206,13 @@ CLI keeps password + API-token. Dashboard (currently at `nemar.org`, moving to `
 - `POST /auth/code/request` — emails a 6-digit code. Per-email rate limit 1/min, 5/hour (counted from `auth_codes.created_at`). In `ENVIRONMENT=development|test` the response includes `dev_code` so tests can finish without an inbox; production must never see this field.
 - `POST /auth/code/verify` — Origin-allow-listed, returns `{ user }`, sets `nemar_session` HttpOnly + Secure + SameSite=Lax cookie.
 - `POST /auth/logout` / `GET /auth/me` — cookie-bearing.
+- Settings self-service (epic #1019), all cookie-bearing + Origin-allow-listed:
+  `PATCH /auth/profile` (#912, github/city/country/affiliation; name is
+  ORCID-canonical), `POST /auth/email/change/{request,verify}` (#911, codes
+  mailed to the NEW address, bound to the requesting session via
+  `auth_codes.user_id`, migration 0066), and ORCID re-link via
+  `POST /auth/orcid/start?mode=relink` (#913, ADR 0022 — relink intent is
+  never minted on a GET).
 
 Cookie domain is env-driven via `WEB_SESSION_COOKIE_DOMAIN` (prod: `app.nemar.org`, dev: host-only). Flip the prod value at the website#46 cutover; no code change.
 
