@@ -21,7 +21,43 @@ import { printStepFailure } from "../cli-output.js";
 import type { Config } from "../config.js";
 import { verifyGitHubAuth } from "../git-annex/github.js";
 import { checkPrerequisites } from "../git-annex/prereq.js";
+import { runCommand } from "../git-annex/run-command.js";
+import { formatBytes } from "../progress.js";
 import { FAIL, type Step, ok } from "./types.js";
+
+/**
+ * Warn below 16 GiB of virtual address space: git-annex's runtime failed to
+ * reserve its heap under an 8 GiB `ulimit -v` on an HPC login node (#884,
+ * "Failed to track data files: Out of memory"), and the same command ran
+ * fine unrestricted on a compute node.
+ */
+export const LOW_VMEM_WARN_BYTES = 16 * 1024 ** 3;
+
+/**
+ * Parse `ulimit -v` output. The shell reports 1024-byte blocks or the word
+ * "unlimited"; returns bytes, "unlimited", or null when unparseable.
+ */
+export function parseUlimitVirtualMemory(output: string): number | "unlimited" | null {
+  const trimmed = output.trim();
+  if (trimmed === "unlimited") return "unlimited";
+  if (!/^\d+$/.test(trimmed)) return null;
+  return Number(trimmed) * 1024;
+}
+
+/**
+ * Read the current process's virtual-memory (address space) limit via the
+ * shell builtin. Returns null when it cannot be determined (e.g. no `sh`);
+ * the caller treats that as "nothing to warn about".
+ */
+export async function detectVirtualMemoryLimit(): Promise<number | "unlimited" | null> {
+  try {
+    const { stdout, exitCode } = await runCommand(["sh", "-c", "ulimit -v"]);
+    if (exitCode !== 0) return null;
+    return parseUlimitVirtualMemory(stdout);
+  } catch {
+    return null;
+  }
+}
 
 /** Step 2: Check prerequisites (git-annex, GitHub SSH). */
 export async function checkUploadPrerequisites(): Promise<Step> {
@@ -41,6 +77,26 @@ export async function checkUploadPrerequisites(): Promise<Step> {
   console.log(chalk.dim(`  git-annex ${prereqs.gitAnnex.version}`));
   if (prereqs.githubSSH.username) {
     console.log(chalk.dim(`  GitHub: ${prereqs.githubSSH.username}`));
+  }
+
+  // Warn (never block) when the virtual-memory ulimit is low enough to
+  // OOM-kill git-annex while it tracks large datasets (#884). Common on
+  // HPC login nodes, which often cap address space per process.
+  const vmemLimit = await detectVirtualMemoryLimit();
+  if (typeof vmemLimit === "number" && vmemLimit < LOW_VMEM_WARN_BYTES) {
+    console.log(
+      chalk.yellow(`  Warning: virtual memory limit is ${formatBytes(vmemLimit)} (ulimit -v).`),
+    );
+    console.log(
+      chalk.yellow(
+        "  git-annex may be killed with out-of-memory errors while tracking data files.",
+      ),
+    );
+    console.log(
+      chalk.yellow(
+        "  On HPC systems, run the upload from a compute node or raise the limit (ulimit -v unlimited).",
+      ),
+    );
   }
   console.log();
   return ok();

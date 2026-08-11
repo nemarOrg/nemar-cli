@@ -32,6 +32,11 @@ import {
   reconcileProgressWithDataset,
   showUploadPlan,
 } from "../src/lib/upload/plan";
+import {
+  LOW_VMEM_WARN_BYTES,
+  detectVirtualMemoryLimit,
+  parseUlimitVirtualMemory,
+} from "../src/lib/upload/preflight";
 import { ensureGitignoreHasNemar, parseRepoFullName } from "../src/lib/upload/transfer";
 
 const scratchDirs: string[] = [];
@@ -166,6 +171,37 @@ describe("checkUploadPrerequisites", () => {
     expect(out).toContain("Prerequisites check failed");
     expect(out).toContain("STATUS:fail");
     expect(out).not.toContain("STATUS:ok");
+  });
+});
+
+describe("virtual-memory preflight (#884)", () => {
+  test("parses the shell's 1024-byte block count into bytes", () => {
+    // Real `ulimit -v` output for an 8 GiB cap (the SDSC Expanse login-node
+    // value that OOM-killed git-annex in the issue report).
+    expect(parseUlimitVirtualMemory("8388608\n")).toBe(8 * 1024 ** 3);
+  });
+
+  test("'unlimited' passes through as the sentinel string", () => {
+    expect(parseUlimitVirtualMemory("unlimited\n")).toBe("unlimited");
+  });
+
+  test("garbage, empty, and negative outputs return null (no warning)", () => {
+    expect(parseUlimitVirtualMemory("")).toBeNull();
+    expect(parseUlimitVirtualMemory("cannot set limit")).toBeNull();
+    expect(parseUlimitVirtualMemory("-1")).toBeNull();
+    expect(parseUlimitVirtualMemory("12 34")).toBeNull();
+  });
+
+  test("the 8 GiB failure case is below the warning threshold; 32 GiB is not", () => {
+    expect((parseUlimitVirtualMemory("8388608") as number) < LOW_VMEM_WARN_BYTES).toBe(true);
+    expect((parseUlimitVirtualMemory("33554432") as number) < LOW_VMEM_WARN_BYTES).toBe(false);
+  });
+
+  test("detectVirtualMemoryLimit returns a valid shape on this machine (real shell)", async () => {
+    const limit = await detectVirtualMemoryLimit();
+    expect(limit === "unlimited" || limit === null || (typeof limit === "number" && limit > 0)).toBe(
+      true,
+    );
   });
 });
 
