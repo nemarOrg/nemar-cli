@@ -342,25 +342,32 @@ adminCommand
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .action(async (username: string | undefined, options: ConfirmOptions & { id?: string }) => {
-    if (!requireAuth()) return;
-
     // Exactly one addressing key: username (CLI accounts) or --id
     // (web/ORCID accounts, whose username is NULL by design — #1012).
+    // Validated before the auth gate: argv errors should surface (exit 1)
+    // even when the caller is not logged in.
     const byId = options.id !== undefined;
-    if (byId === Boolean(username)) {
-      console.log(chalk.red("Provide a username or --id <id>, not both."));
-      console.log(chalk.dim("Web/ORCID accounts have no username; find their id with:"));
-      console.log(chalk.dim("  nemar admin users --pending"));
-      return;
+    if (!byId && !username) {
+      console.error(chalk.red("Error: provide a username or --id <id>"));
+      console.error(chalk.dim("Web/ORCID accounts have no username; find their id with:"));
+      console.error(chalk.dim("  nemar admin users --pending"));
+      process.exit(1);
+    }
+    if (byId && username) {
+      console.error(chalk.red("Error: username and --id are mutually exclusive; provide one"));
+      process.exit(1);
     }
     let userId = 0;
     if (byId) {
       userId = Number.parseInt(options.id ?? "", 10);
       if (!Number.isInteger(userId) || userId <= 0) {
-        console.log(chalk.red(`Invalid user id: ${options.id}`));
-        return;
+        console.error(chalk.red(`Error: invalid user id: ${options.id}`));
+        process.exit(1);
       }
     }
+
+    if (!requireAuth()) return;
+
     const label = username ?? `user id ${userId}`;
 
     // Confirmation
