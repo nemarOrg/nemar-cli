@@ -36,6 +36,8 @@ import {
 import { copyToAnnexRemote } from "../git-annex/transfer.js";
 import {
   type UploadProgress,
+  clearStepCompleted,
+  hasFileListChanged,
   initUploadProgress,
   isStepCompleted,
   markFileUploaded,
@@ -284,6 +286,12 @@ export async function configureRemotes(
  * initialized) progress so the finalize steps share one instance.
  * (`uploadProgress` is copied to a local `progress` binding — the one
  * mechanical rename in this move.)
+ *
+ * git-annex tracking (#884) is its own persisted "tracking" step, adds only
+ * `filesToUpload` (not the whole tree), and runs BEFORE the credential
+ * request so a multi-hour add on a multi-TB dataset cannot burn the 2h STS
+ * window. On resume with an unchanged file list the add is skipped
+ * entirely; a changed list clears the step (see the merge loop below).
  */
 export async function uploadDataToS3(
   absolutePath: string,
@@ -299,6 +307,12 @@ export async function uploadDataToS3(
   if (!progress) {
     progress = initUploadProgress(absolutePath, datasetInfo.dataset_id, dataFiles);
   } else {
+    // A completed git-annex tracking pass only covers the file list it saw;
+    // new or size-changed files invalidate it so the add re-runs (#884).
+    if (isStepCompleted(progress, "tracking") && hasFileListChanged(progress, dataFiles)) {
+      clearStepCompleted(progress, "tracking");
+      console.log(chalk.dim("  Data files changed since the last run; re-running git-annex add"));
+    }
     // Add any new files to progress tracking
     for (const file of dataFiles) {
       if (!progress.files[file.path]) {
@@ -314,6 +328,30 @@ export async function uploadDataToS3(
 
   if (!isStepCompleted(progress, "s3_upload")) {
     if (filesToUpload.length > 0) {
+      // Track data files with git-annex before anything else: the add can
+      // take hours on multi-TB datasets, so it must not eat into the 2h STS
+      // credential window, and its own persisted step lets a resume skip it.
+      // Only the files that still need uploading are added -- already-copied
+      // files are annexed already, and a whole-tree add re-reads every
+      // unlocked file's content (#884).
+      if (!isStepCompleted(progress, "tracking")) {
+        spinner = ora(`Tracking ${filesToUpload.length} data files with git-annex...`).start();
+        const addResult = await gitAnnexAdd(
+          absolutePath,
+          filesToUpload.map((f) => f.path),
+        );
+        if (!addResult.success) {
+          spinner.fail(`Failed to track data files: ${addResult.error}`);
+          console.log(chalk.yellow("Re-run the same command to resume tracking."));
+          return FAIL;
+        }
+        spinner.succeed("Data files tracked by git-annex");
+        markStepCompleted(progress, "tracking");
+        writeUploadProgress(absolutePath, progress);
+      } else {
+        console.log(chalk.dim("  Data files already tracked by git-annex (skipping)"));
+      }
+
       // Get STS credentials for S3 access
       spinner = ora("Requesting upload credentials...").start();
       let creds: Awaited<ReturnType<typeof requestUploadCredentials>>;
@@ -347,15 +385,6 @@ export async function uploadDataToS3(
         return FAIL;
       }
       spinner.succeed("S3 remote configured");
-
-      // Track data files with git-annex before uploading
-      spinner = ora("Tracking data files with git-annex...").start();
-      const addResult = await gitAnnexAdd(absolutePath);
-      if (!addResult.success) {
-        spinner.fail(`Failed to track data files: ${addResult.error}`);
-        return FAIL;
-      }
-      spinner.succeed("Data files tracked by git-annex");
 
       // Upload via git-annex S3 remote (handles key-based layout + tracking)
       spinner = ora(`Uploading ${filesToUpload.length} data files to S3...`).start();

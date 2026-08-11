@@ -13,6 +13,7 @@ export type FileStatus = "pending" | "uploaded" | "failed";
 const VALID_STATUSES = new Set<string>(["pending", "uploaded", "failed"]);
 
 export type UploadStep =
+  | "tracking"
   | "s3_upload"
   | "url_registration"
   | "metadata_write"
@@ -21,6 +22,7 @@ export type UploadStep =
   | "ci_deploy";
 
 const VALID_STEPS = new Set<string>([
+  "tracking",
   "s3_upload",
   "url_registration",
   "metadata_write",
@@ -166,6 +168,31 @@ export function markStepCompleted(progress: UploadProgress, step: UploadStep): v
 
 export function isStepCompleted(progress: UploadProgress, step: UploadStep): boolean {
   return progress.completed_steps.includes(step);
+}
+
+/**
+ * Un-complete a step so it re-runs on the next attempt. Used when a later
+ * discovery invalidates earlier work (e.g. the data-file list changed after
+ * git-annex tracking was marked complete, #884). No-op if not completed.
+ */
+export function clearStepCompleted(progress: UploadProgress, step: UploadStep): void {
+  progress.completed_steps = progress.completed_steps.filter((s) => s !== step);
+}
+
+/**
+ * Whether the current manifest carries data files the progress has not seen
+ * (new path) or that changed size since they were recorded. Drives the
+ * invalidation of the completed "tracking" step on resume (#884): unchanged
+ * lists skip the multi-hour git-annex re-add entirely.
+ */
+export function hasFileListChanged(
+  progress: UploadProgress,
+  currentManifest: Array<{ path: string; size: number }>,
+): boolean {
+  return currentManifest.some((file) => {
+    const existing = progress.files[file.path];
+    return !existing || existing.size !== file.size;
+  });
 }
 
 /**
