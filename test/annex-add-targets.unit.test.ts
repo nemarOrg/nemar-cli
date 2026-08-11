@@ -125,6 +125,18 @@ function chmodTreeWritable(dir: string): void {
   }
 }
 
+/**
+ * Pin a synthetic identity in the repo's local config (same pattern as
+ * git-annex-remote.test.ts). CI runners have no global git identity, and
+ * every commit-producing step needs one -- including git-annex branch
+ * writes from `git annex config`/`add`/`initremote`/`copy`, which run
+ * WITHOUT the author env that initDataset sets for its own commands.
+ */
+async function setRepoIdentity(dir: string): Promise<void> {
+  await runCmd(["git", "config", "user.email", "test@test.com"], dir);
+  await runCmd(["git", "config", "user.name", "Test"], dir);
+}
+
 /** Real dataset repo through the production init path (unlocked adjusted branch). */
 async function newDatasetRepo(name: string): Promise<string> {
   const dir = join(TMP_DIR, `${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
@@ -133,6 +145,7 @@ async function newDatasetRepo(name: string): Promise<string> {
   if (!init.success) {
     throw new Error(`initDataset failed: ${init.error}`);
   }
+  await setRepoIdentity(dir);
   const largefiles = await configureLargefiles(dir);
   if (!largefiles.success) {
     throw new Error(`configureLargefiles failed: ${largefiles.error}`);
@@ -325,7 +338,11 @@ describe("progress file outliving .git (#884 review blocker, real repos)", () =>
     // (rm -rf .git; same shape as a partial rsync to a compute node).
     chmodTreeWritable(join(dir, ".git"));
     rmSync(join(dir, ".git"), { recursive: true, force: true });
-    expect((await initDataset(dir, { author: { name: "Test", email: "test@test.com" } })).success).toBe(true);
+    expect(
+      (await initDataset(dir, { author: { name: "Test", email: "test@test.com" } })).success,
+    ).toBe(true);
+    // The local identity config died with .git; re-pin it for the re-init.
+    await setRepoIdentity(dir);
     expect((await configureLargefiles(dir)).success).toBe(true);
 
     // filesToUpload is empty (progress says everything uploaded), but the
