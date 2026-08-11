@@ -9,6 +9,7 @@
  */
 
 import { zValidator } from "@hono/zod-validator";
+import type { Context } from "hono";
 import { z } from "zod";
 import { ownerMiddleware } from "../../middleware/auth";
 
@@ -28,6 +29,7 @@ import {
   resolveEmailConfig,
   sendKeyReadyEmail,
   sendRevocationEmail,
+  sendWebApprovalEmail,
 } from "../../services/email";
 import { decrypt } from "../../services/encryption";
 import { isNonProductionEnv } from "../../services/environment";
@@ -35,8 +37,130 @@ import { removeCollaborator } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
 import { revokeUserIamAccess } from "../../services/iam";
 import { errorMessage } from "../../services/repo-metadata";
-import { isDemotion, parseRole } from "../../types/bindings";
+import { type Bindings, type Variables, isDemotion, parseRole } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
+
+/** Row shape shared by both approve routes (username-keyed and id-keyed). */
+interface ApprovableUserRow {
+  id: number;
+  username: string | null;
+  email: string;
+  status: string;
+  signup_source: string | null;
+  orcid_verified: number;
+}
+
+const APPROVABLE_USER_COLUMNS = "id, username, email, status, signup_source, orcid_verified";
+
+/**
+ * Approval eligibility (#1012). `verified` and `revoked` are approvable as
+ * before. `pending` is additionally approvable for ORCID-verified web
+ * signups: ORCID is the identity proof there (email is collected, not
+ * verified, by design) and admin review is the gate. CLI signups stay
+ * blocked at `pending` until they verify their email — there is no ORCID
+ * proof backing those rows.
+ */
+function isApprovable(user: ApprovableUserRow): boolean {
+  if (user.status === "verified" || user.status === "revoked") return true;
+  return user.status === "pending" && user.signup_source === "web" && user.orcid_verified === 1;
+}
+
+/** The 400 body both approve routes return for an ineligible status. */
+function ineligibilityMessage(user: ApprovableUserRow): string {
+  if (user.status !== "pending") return "User status is not eligible for approval";
+  return user.signup_source === "web"
+    ? "Web signup is not ORCID-verified; not eligible for approval"
+    : "User needs to verify their email first";
+}
+
+/**
+ * Shared approval finalizer for POST /admin/approve/:username and
+ * POST /admin/approve/by-id/:id (#1012): status flip, notification email,
+ * audit row, response. Callers have already 404'd on a missing row, 409'd
+ * on `approved`, and 400'd on ineligible statuses.
+ *
+ * Web/ORCID accounts have `username = NULL`, so anything username-shaped is
+ * conditional: they get a dashboard-flavored approval email instead of the
+ * CLI retrieve-key one, and the audit resource id falls back to the stable
+ * numeric id. Nothing GitHub- or IAM-side happens for either kind of
+ * account — approval has been a pure status transition since per-user IAM
+ * and auto-collaborator adds were removed.
+ */
+async function finalizeApproval(
+  c: Context<{ Bindings: Bindings; Variables: Variables }>,
+  user: ApprovableUserRow,
+): Promise<Response> {
+  const db = c.env.DB;
+  const adminUser = c.get("user");
+
+  await db
+    .prepare(
+      `
+    UPDATE users
+    SET status = 'approved',
+        approved_at = datetime('now'),
+        updated_at = datetime('now')
+    WHERE id = ?
+  `,
+    )
+    .bind(user.id)
+    .run();
+
+  // Note: API token is NOT created here. CLI users retrieve it via
+  // `nemar auth retrieve-key`, which generates the token on first call;
+  // web users sign in with an email code and never hold an API key.
+
+  // Send approval notification email. Skipped (not failed) when the email
+  // service is unconfigured, so approval still completes in dev/test.
+  let emailSent = false;
+  try {
+    if (c.env.RESEND_API_KEY) {
+      const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
+      if (user.username) {
+        await sendKeyReadyEmail(
+          user.email,
+          user.username,
+          c.env.RESEND_API_KEY,
+          fromEmail,
+          replyTo,
+          isDev,
+        );
+      } else {
+        await sendWebApprovalEmail(user.email, c.env.RESEND_API_KEY, fromEmail, replyTo, isDev);
+      }
+      emailSent = true;
+    } else {
+      console.error(`RESEND_API_KEY unset; approval email not sent for user id=${user.id}`);
+    }
+  } catch (error) {
+    console.error("Failed to send approval email:", error);
+  }
+
+  // Audit log. resource_id is the username where one exists (unchanged for
+  // CLI accounts) and the stable numeric id otherwise (web/ORCID accounts).
+  await auditLogStatement(db, {
+    userId: adminUser.id,
+    action: "user_approved",
+    resourceType: "user",
+    resourceId: user.username ?? String(user.id),
+    details: JSON.stringify({
+      approved_by: adminUser.username,
+      email_sent: emailSent,
+    }),
+  }).run();
+
+  const label = user.username ?? `id ${user.id}`;
+  return c.json({
+    message: `User ${label} has been approved`,
+    user: {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      status: "approved",
+    },
+    email_sent: emailSent,
+  });
+}
 
 /**
  * Resolve whose email preferences a request targets. With no `?user=`, it's the
@@ -275,25 +399,22 @@ export function registerUsersRoutes(admin: AdminRouter): void {
 
   /**
    * POST /admin/approve/:username - Approve a user (token created via retrieve-key)
+   *
+   * Only reaches accounts that have a username, i.e. CLI signups. Web/ORCID
+   * signups have username = NULL (migration 0026) and are approved via
+   * POST /admin/approve/by-id/:id below (#1012).
    */
   admin.post("/approve/:username", async (c) => {
     const username = c.req.param("username");
     const db = c.env.DB;
-    const adminUser = c.get("user");
 
     // Find user
     const user = await db
       .prepare(
-        "SELECT id, username, email, github_username, status FROM users WHERE username = ? AND deleted_at IS NULL",
+        `SELECT ${APPROVABLE_USER_COLUMNS} FROM users WHERE username = ? AND deleted_at IS NULL`,
       )
       .bind(username)
-      .first<{
-        id: number;
-        username: string;
-        email: string;
-        github_username: string;
-        status: string;
-      }>();
+      .first<ApprovableUserRow>();
 
     if (!user) {
       return c.json({ error: "User not found" }, 404);
@@ -303,16 +424,12 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       return c.json({ error: "User already approved" }, 409);
     }
 
-    // Allow approval of verified users OR re-approval of revoked users
-    if (user.status !== "verified" && user.status !== "revoked") {
+    if (!isApprovable(user)) {
       return c.json(
         {
           error: "User is not eligible for approval",
           status: user.status,
-          message:
-            user.status === "pending"
-              ? "User needs to verify their email first"
-              : "User status is not eligible for approval",
+          message: ineligibilityMessage(user),
         },
         400,
       );
@@ -322,65 +439,58 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     // managed through backend-scoped credentials (presigned URLs and STS tokens).
     // The D1 user_s3_permissions table is the sole authorization source.
 
-    // Update user status
-    await db
-      .prepare(
-        `
-    UPDATE users
-    SET status = 'approved',
-        approved_at = datetime('now'),
-        updated_at = datetime('now')
-    WHERE id = ?
-  `,
-      )
-      .bind(user.id)
-      .run();
+    return finalizeApproval(c, user);
+  });
 
-    // Note: API token is NOT created here. The user retrieves it via
-    // `nemar auth retrieve-key` which generates the token on first call.
-    // This ensures the user sees the plaintext key exactly once.
+  /**
+   * POST /admin/approve/by-id/:id - Approve a user by their stable numeric id.
+   *
+   * Exists because web/ORCID signups have username = NULL by design
+   * (migration 0026), so the username-keyed route above can never address
+   * them (#1012). Mirrors DELETE /admin/users/by-id/:id, which is id-keyed
+   * for the same reason. Works for any account kind — a CLI user can be
+   * approved by id too — with identical status gating: `verified` and
+   * `revoked` always, plus `pending` for ORCID-verified web signups (ORCID
+   * is the identity proof; the collected email is deliberately unverified).
+   *
+   * Most ORCID signups never need this: they auto-approve to base access on
+   * sign-up (migration 0062, epic #1013). This route covers the rows that
+   * don't — re-approving a revoked web account, and any web row that landed
+   * `pending` outside the auto-approve path.
+   */
+  admin.post("/approve/by-id/:id", async (c) => {
+    const db = c.env.DB;
 
-    // Note: We no longer auto-add users to all repos
-    // Users request access to specific datasets via `nemar dataset request-access`
-
-    // Send approval notification email
-    let emailSent = false;
-    try {
-      const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
-      await sendKeyReadyEmail(
-        user.email,
-        user.username,
-        c.env.RESEND_API_KEY,
-        fromEmail,
-        replyTo,
-        isDev,
-      );
-      emailSent = true;
-    } catch (error) {
-      console.error("Failed to send approval email:", error);
+    const id = Number.parseInt(c.req.param("id"), 10);
+    if (!Number.isInteger(id) || id <= 0 || id === SYSTEM_USER_ID) {
+      return c.json({ error: "Invalid user id" }, 400);
     }
 
-    // Audit log
-    await auditLogStatement(db, {
-      userId: adminUser.id,
-      action: "user_approved",
-      resourceType: "user",
-      resourceId: user.username,
-      details: JSON.stringify({
-        approved_by: adminUser.username,
-        email_sent: emailSent,
-      }),
-    }).run();
+    const user = await db
+      .prepare(`SELECT ${APPROVABLE_USER_COLUMNS} FROM users WHERE id = ? AND deleted_at IS NULL`)
+      .bind(id)
+      .first<ApprovableUserRow>();
 
-    return c.json({
-      message: `User ${username} has been approved`,
-      user: {
-        username: user.username,
-        email: user.email,
-        status: "approved",
-      },
-      email_sent: emailSent,
-    });
+    if (!user) {
+      return c.json({ error: "User not found" }, 404);
+    }
+
+    if (user.status === "approved") {
+      return c.json({ error: "User already approved" }, 409);
+    }
+
+    if (!isApprovable(user)) {
+      return c.json(
+        {
+          error: "User is not eligible for approval",
+          status: user.status,
+          message: ineligibilityMessage(user),
+        },
+        400,
+      );
+    }
+
+    return finalizeApproval(c, user);
   });
 
   /**
