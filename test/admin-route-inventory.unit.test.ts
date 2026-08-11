@@ -30,6 +30,8 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "GET /users/:username": 1,
   "POST /users/:username/role": 3,
   "POST /approve/:username": 1,
+  // #1012: id-keyed approve for web/ORCID accounts (username = NULL).
+  "POST /approve/by-id/:id": 1,
   "POST /revoke/:username": 1,
   "DELETE /users/by-id/:id": 2,
   "POST /regenerate-iam/:username": 1,
@@ -119,7 +121,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(91);
+    expect(adminRoutes.routes.length).toBe(92);
   });
 
   // The count pin above can't see a SWAP of the two router-level middleware

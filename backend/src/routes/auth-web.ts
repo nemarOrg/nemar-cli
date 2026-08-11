@@ -20,10 +20,14 @@
  *     without an email inbox. Production must never see this field;
  *     a defensive `if (env.ENVIRONMENT === 'production')` guard plus
  *     a corresponding test enforces the boundary.
- *   - First-time email-only signups land as `status='pending'`
- *     `signup_source='web'`. Admin approval (out of scope here) lifts
- *     them to `'approved'`. Until then the dashboard sees
- *     `status: 'pending'` and can render an onboarding screen.
+ *   - Web accounts are created by the ORCID flow (auth-orcid.ts) and
+ *     auto-approve to base access on sign-up (`status='approved'`,
+ *     `service_access=0`; migration 0062, epic #1013). Any web row that
+ *     is still `pending` (pre-0062 stragglers, seeded fixtures) or was
+ *     revoked has `username = NULL`, so admins approve it by id via
+ *     `POST /admin/approve/by-id/:id` (#1012) — the username-keyed
+ *     approve route cannot address it. The dashboard renders an
+ *     onboarding screen while `status` is `'pending'`.
  *   - Rate limits are enforced inline by counting `auth_codes` rows
  *     in the relevant window: per-email buckets on both request
  *     endpoints, plus a per-account bucket on /email/change/request

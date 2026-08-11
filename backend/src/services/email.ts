@@ -313,6 +313,62 @@ nemar auth login
 }
 
 /**
+ * Approval notification for web/ORCID accounts (#1012). These have no
+ * username, no password, and never hold an API key — the CLI retrieve-key
+ * instructions in sendKeyReadyEmail would be dead ends — so this variant
+ * points at the dashboard sign-in instead.
+ */
+export async function sendWebApprovalEmail(
+  to: string,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+): Promise<void> {
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #16a34a;">Congratulations!</h1>
+
+  <p>Your NEMAR account has been approved.</p>
+
+  <p>Sign in to your dashboard with your email address to get started:</p>
+
+  <p>
+    <a href="https://nemar.org/login" style="display: inline-block; background-color: #2563eb; color: #ffffff; padding: 10px 20px; border-radius: 8px; text-decoration: none;">Sign in to NEMAR</a>
+  </p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+
+  <p style="color: #666; font-size: 14px;">
+    <strong>Need help?</strong><br>
+    Check out the documentation at <a href="https://nemar-cli.pages.dev" style="color: #2563eb;">nemar-cli.pages.dev</a>
+  </p>
+
+  <p style="color: #999; font-size: 12px; margin-top: 30px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+
+  await sendEmail(
+    to,
+    "Your NEMAR account has been approved!",
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+  );
+}
+
+/**
  * Send key regeneration verification email
  */
 export async function sendKeyRegenerationVerificationEmail(
