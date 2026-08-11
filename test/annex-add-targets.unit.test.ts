@@ -12,11 +12,13 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "bun";
 import {
@@ -27,6 +29,12 @@ import {
   gitAnnexAdd,
   initDataset,
 } from "../src/lib/git-annex/init";
+import { copyToAnnexRemote } from "../src/lib/git-annex/transfer";
+import {
+  computeAddTargets,
+  listAnnexedPaths,
+  listTrackedPaths,
+} from "../src/lib/upload/transfer";
 
 describe("chunkAddTargets", () => {
   test("empty list produces no chunks", () => {
@@ -222,5 +230,123 @@ describe("gitAnnexAdd with a target list (real git-annex)", () => {
     const result = await gitAnnexAdd(dir, ["sub-99/eeg/nope.edf"]);
     expect(result.success).toBe(false);
     expect(result.error).toBeTruthy();
+  });
+});
+
+/** Register a directory special remote and return its name. */
+async function initDirectoryRemote(dir: string, name: string): Promise<string> {
+  const remoteDir = join(TMP_DIR, `${name}-store-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  mkdirSync(remoteDir, { recursive: true });
+  const init = await runCmd(
+    ["git", "annex", "initremote", name, "type=directory", `directory=${remoteDir}`, "encryption=none"],
+    dir,
+  );
+  expect(init.exitCode).toBe(0);
+  return name;
+}
+
+describe("computeAddTargets (#884 review: reconcile against actual git state)", () => {
+  const f = (path: string) => ({ path, size: 4096 });
+
+  test("unions filesToUpload with untracked data files, deduped, order preserved", () => {
+    const dataFiles = [f("sub-01/eeg/a.edf"), f("sub-01/eeg/b.edf"), f("sub-02/eeg/c.edf")];
+    const filesToUpload = [f("sub-01/eeg/b.edf")];
+    // a.edf tracked, b.edf tracked (but pending upload), c.edf missing from git
+    const tracked = new Set(["sub-01/eeg/a.edf", "sub-01/eeg/b.edf", "dataset_description.json"]);
+    const targets = computeAddTargets(filesToUpload, dataFiles, tracked);
+    expect(targets.map((t) => t.path)).toEqual(["sub-01/eeg/b.edf", "sub-02/eeg/c.edf"]);
+  });
+
+  test("everything tracked and nothing to upload: empty add set (legitimate skip)", () => {
+    const dataFiles = [f("sub-01/eeg/a.edf")];
+    expect(computeAddTargets([], dataFiles, new Set(["sub-01/eeg/a.edf"]))).toEqual([]);
+  });
+
+  test("a file both untracked and pending upload appears once", () => {
+    const dataFiles = [f("sub-01/eeg/a.edf")];
+    const targets = computeAddTargets([f("sub-01/eeg/a.edf")], dataFiles, new Set());
+    expect(targets.map((t) => t.path)).toEqual(["sub-01/eeg/a.edf"]);
+  });
+});
+
+describe("progress file outliving .git (#884 review blocker, real repos)", () => {
+  test("lost .git: uploaded-marked files are re-added and re-recorded at the remote", async () => {
+    const dir = await newDatasetRepo("lost-git");
+    const dataFiles = [
+      { path: "sub-01/eeg/a.edf", size: 4096 },
+      { path: "sub-01/eeg/b.edf", size: 4096 },
+    ];
+    for (const file of dataFiles) {
+      writeDataFile(dir, file.path, file.path.repeat(200));
+    }
+
+    // First run: targeted add + copy to a directory special remote; the
+    // location log records both files at the remote.
+    expect((await gitAnnexAdd(dir, dataFiles.map((f) => f.path))).success).toBe(true);
+    await initDirectoryRemote(dir, "test-dir");
+    expect((await copyToAnnexRemote(dir, "test-dir", 1)).success).toBe(true);
+    expect(await listAnnexedPaths(dir, "test-dir")).toEqual(new Set(dataFiles.map((f) => f.path)));
+
+    // Healthy resume: everything tracked, nothing to upload -> empty add set.
+    expect(computeAddTargets([], dataFiles, await listTrackedPaths(dir))).toEqual([]);
+
+    // Reviewer's reproduction: the progress file survives but .git does not
+    // (rm -rf .git; same shape as a partial rsync to a compute node).
+    chmodTreeWritable(join(dir, ".git"));
+    rmSync(join(dir, ".git"), { recursive: true, force: true });
+    expect((await initDataset(dir, { author: { name: "Test", email: "test@test.com" } })).success).toBe(true);
+    expect((await configureLargefiles(dir)).success).toBe(true);
+
+    // filesToUpload is empty (progress says everything uploaded), but the
+    // index reconcile puts both files back into the add set.
+    const addTargets = computeAddTargets([], dataFiles, await listTrackedPaths(dir));
+    expect(addTargets.map((f) => f.path)).toEqual(dataFiles.map((f) => f.path));
+
+    // Re-add + re-copy re-establishes the location log; the post-copy
+    // verification predicate finds nothing missing.
+    expect((await gitAnnexAdd(dir, addTargets.map((f) => f.path))).success).toBe(true);
+    await initDirectoryRemote(dir, "test-dir");
+    expect((await copyToAnnexRemote(dir, "test-dir", 1)).success).toBe(true);
+    const annexed = await listAnnexedPaths(dir);
+    const atRemote = await listAnnexedPaths(dir, "test-dir");
+    expect(annexed).toEqual(new Set(dataFiles.map((f) => f.path)));
+    const missing = addTargets.filter((f) => annexed.has(f.path) && !atRemote.has(f.path));
+    expect(missing).toEqual([]);
+  });
+
+  test("annexed file never copied is flagged by the location-log verification", async () => {
+    const dir = await newDatasetRepo("partial-copy");
+    const dataFiles = [
+      { path: "sub-01/eeg/a.edf", size: 4096 },
+      { path: "sub-02/eeg/c.edf", size: 4096 },
+    ];
+    for (const file of dataFiles) {
+      writeDataFile(dir, file.path, file.path.repeat(200));
+    }
+    expect((await gitAnnexAdd(dir, dataFiles.map((f) => f.path))).success).toBe(true);
+    await initDirectoryRemote(dir, "test-dir");
+
+    // Copy only a.edf; c.edf's content never reaches the remote.
+    const copyOne = await runCmd(
+      ["git", "annex", "copy", "--to", "test-dir", "sub-01/eeg/a.edf"],
+      dir,
+    );
+    expect(copyOne.exitCode).toBe(0);
+
+    const annexed = await listAnnexedPaths(dir);
+    const atRemote = await listAnnexedPaths(dir, "test-dir");
+    const missing = dataFiles.filter((f) => annexed.has(f.path) && !atRemote.has(f.path));
+    expect(missing.map((f) => f.path)).toEqual(["sub-02/eeg/c.edf"]);
+  });
+
+  test("listTrackedPaths surfaces git failure instead of returning an empty set", async () => {
+    // Must live outside ANY repo: git ls-files walks up from its cwd, so a
+    // scratch dir inside this project would silently use the project index.
+    const notARepo = mkdtempSync(join(tmpdir(), "nemar-not-a-repo-"));
+    try {
+      await expect(listTrackedPaths(notARepo)).rejects.toThrow();
+    } finally {
+      rmSync(notARepo, { recursive: true, force: true });
+    }
   });
 });
