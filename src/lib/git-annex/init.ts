@@ -259,12 +259,24 @@ export function chunkAddTargets(
  * completed chunk persists its annexed state (index + inode cache), so an
  * interrupted add resumes at O(remaining files) instead of restarting
  * (#884). An empty list is a successful no-op.
+ *
+ * `chunking` overrides the argv chunk bounds; production callers use the
+ * defaults. Exposed so tests can drive the multi-chunk loop through this
+ * entry point without thousands of fixture files.
  */
 export async function gitAnnexAdd(
   path: string,
   targets: string | string[] = ".",
+  chunking: { maxPaths?: number; maxBytes?: number } = {},
 ): Promise<{ success: boolean; error?: string }> {
-  const chunks = typeof targets === "string" ? [[targets]] : chunkAddTargets(targets);
+  const chunks =
+    typeof targets === "string"
+      ? [[targets]]
+      : chunkAddTargets(
+          targets,
+          chunking.maxPaths ?? ADD_CHUNK_MAX_PATHS,
+          chunking.maxBytes ?? ADD_CHUNK_MAX_BYTES,
+        );
   try {
     for (const chunk of chunks) {
       const { stderr, exitCode } = await runCommand(["git", "annex", "add", "--", ...chunk], {

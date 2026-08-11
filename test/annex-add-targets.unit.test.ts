@@ -198,7 +198,7 @@ describe("gitAnnexAdd with a target list (real git-annex)", () => {
     expect(await annexedFiles(dir)).toEqual(["sub-01/eeg/a.edf"]);
   });
 
-  test("chunked invocation adds every file across chunk boundaries", async () => {
+  test("multi-chunk single call: the internal loop adds every file", async () => {
     const dir = await newDatasetRepo("chunked");
     const paths: string[] = [];
     for (let i = 0; i < 7; i++) {
@@ -206,12 +206,43 @@ describe("gitAnnexAdd with a target list (real git-annex)", () => {
       writeDataFile(dir, p, `${i}`.repeat(2048));
       paths.push(p);
     }
-    // Force multiple subprocess invocations with a tiny byte budget.
-    const chunks = chunkAddTargets(paths, 3, ADD_CHUNK_MAX_BYTES);
-    expect(chunks.length).toBeGreaterThan(1);
-    for (const chunk of chunks) {
-      expect((await gitAnnexAdd(dir, chunk)).success).toBe(true);
+    // Drive the production entry point itself into multiple subprocess
+    // invocations (7 paths / 3 per chunk = 3 chunks), rather than
+    // pre-splitting with chunkAddTargets outside it.
+    expect(chunkAddTargets(paths, 3).length).toBe(3);
+    const result = await gitAnnexAdd(dir, paths, { maxPaths: 3 });
+    expect(result.success).toBe(true);
+    expect(await annexedFiles(dir)).toEqual([...paths].sort());
+  });
+
+  test("mid-chunk failure: earlier chunks persist, later chunks never run, remainder resumes", async () => {
+    const dir = await newDatasetRepo("chunk-fail");
+    const paths: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const p = `sub-0${i}/eeg/run-${i}.edf`;
+      writeDataFile(dir, p, `${i}`.repeat(2048));
+      paths.push(p);
     }
+    // Chunks of 2 with a missing path in the SECOND chunk:
+    //   [p0, p1] ok, [p2, MISSING] fails, [p3, p4] must never run.
+    const withMissing = [paths[0], paths[1], paths[2], "sub-99/eeg/nope.edf", paths[3], paths[4]];
+    const result = await gitAnnexAdd(dir, withMissing, { maxPaths: 2 });
+    expect(result.success).toBe(false);
+    expect(result.error).toBeTruthy();
+
+    const annexed = await annexedFiles(dir);
+    // The first chunk's adds persisted (index + inode cache checkpointed)...
+    expect(annexed).toContain(paths[0]);
+    expect(annexed).toContain(paths[1]);
+    // ...and chunks after the failing one were never attempted, so the
+    // caller (the tracking step) correctly stays incomplete.
+    expect(annexed).not.toContain(paths[3]);
+    expect(annexed).not.toContain(paths[4]);
+
+    // A subsequent full-list call completes the remainder: already-added
+    // files are cheap no-ops, missing ones get added.
+    const resume = await gitAnnexAdd(dir, paths, { maxPaths: 2 });
+    expect(resume.success).toBe(true);
     expect(await annexedFiles(dir)).toEqual([...paths].sort());
   });
 
