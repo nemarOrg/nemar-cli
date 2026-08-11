@@ -616,6 +616,8 @@ export interface DatasetFileInfo {
   path: string;
   size: number;
   type: "metadata" | "data";
+  /** Working-tree mtime; drives upload-progress change detection (#884). */
+  mtimeMs?: number;
 }
 
 /**
@@ -715,6 +717,7 @@ export async function collectFileManifest(datasetPath: string): Promise<{
         path: relativePath,
         size,
         type: fileType,
+        mtimeMs: stats.mtimeMs,
       });
     } catch {
       // Skip files we can't stat

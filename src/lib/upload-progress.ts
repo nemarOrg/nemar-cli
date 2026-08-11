@@ -34,6 +34,8 @@ const VALID_STEPS = new Set<string>([
 export interface FileProgress {
   status: FileStatus;
   size: number;
+  /** Working-tree mtime when recorded; absent in pre-#884 progress files. */
+  mtimeMs?: number;
   updated_at: string;
   error?: string;
 }
@@ -57,7 +59,7 @@ function getProgressPath(datasetPath: string): string {
 export function initUploadProgress(
   datasetPath: string,
   datasetId: string,
-  files: Array<{ path: string; size: number }>,
+  files: Array<{ path: string; size: number; mtimeMs?: number }>,
 ): UploadProgress {
   const now = new Date().toISOString();
   const progress: UploadProgress = {
@@ -72,6 +74,7 @@ export function initUploadProgress(
     progress.files[file.path] = {
       status: "pending",
       size: file.size,
+      mtimeMs: file.mtimeMs,
       updated_at: now,
     };
   }
@@ -137,13 +140,27 @@ export function writeUploadProgress(datasetPath: string, progress: UploadProgres
 /**
  * Mark a file as successfully uploaded.
  * No-ops silently if filePath is not tracked in progress.
+ *
+ * When `fileInfo` is given, the recorded size/mtime are refreshed to the
+ * just-uploaded working-tree state, so a file that was re-uploaded after a
+ * content change stops registering as changed on subsequent runs (#884).
  */
-export function markFileUploaded(progress: UploadProgress, filePath: string): void {
+export function markFileUploaded(
+  progress: UploadProgress,
+  filePath: string,
+  fileInfo?: { size: number; mtimeMs?: number },
+): void {
   const entry = progress.files[filePath];
   if (entry) {
     entry.status = "uploaded";
     entry.updated_at = new Date().toISOString();
     entry.error = undefined;
+    if (fileInfo) {
+      entry.size = fileInfo.size;
+      if (fileInfo.mtimeMs !== undefined) {
+        entry.mtimeMs = fileInfo.mtimeMs;
+      }
+    }
   }
 }
 
@@ -181,35 +198,53 @@ export function clearStepCompleted(progress: UploadProgress, step: UploadStep): 
 
 /**
  * Whether the current manifest carries data files the progress has not seen
- * (new path) or that changed size since they were recorded. Drives the
- * invalidation of the completed "tracking" step on resume (#884): unchanged
- * lists skip the multi-hour git-annex re-add entirely.
+ * (new path) or that changed size or mtime since they were recorded (see
+ * fileEntryChanged; removals never invalidate). Drives the invalidation of
+ * the completed "tracking" step on resume (#884): unchanged lists skip the
+ * multi-hour git-annex re-add entirely.
  */
 export function hasFileListChanged(
   progress: UploadProgress,
-  currentManifest: Array<{ path: string; size: number }>,
+  currentManifest: Array<{ path: string; size: number; mtimeMs?: number }>,
 ): boolean {
-  return currentManifest.some((file) => {
-    const existing = progress.files[file.path];
-    return !existing || existing.size !== file.size;
-  });
+  return currentManifest.some((file) => fileEntryChanged(progress.files[file.path], file));
 }
 
 /**
- * Get files that need uploading: pending, failed, new (not in progress), or size-changed.
+ * Whether a manifest file differs from its recorded progress entry: new
+ * path, size change, or mtime change. Same-size content rewrites (e.g.
+ * re-anonymization) move the mtime, so size alone misses them (#884
+ * review). A record without a stored mtime (pre-#884 progress file) is
+ * treated as changed when the manifest carries one -- failing toward a
+ * harmless content-addressed re-add. Manifests without mtimes fall back to
+ * size-only comparison.
+ */
+function fileEntryChanged(
+  existing: FileProgress | undefined,
+  file: { size: number; mtimeMs?: number },
+): boolean {
+  if (!existing) return true;
+  if (existing.size !== file.size) return true;
+  if (file.mtimeMs !== undefined && existing.mtimeMs !== file.mtimeMs) return true;
+  return false;
+}
+
+/**
+ * Get files that need uploading: pending, failed, new (not in progress),
+ * size-changed, or mtime-changed (see fileEntryChanged).
  *
  * @param progress - existing progress state
  * @param currentManifest - current data files from the upload manifest
  * @returns files that need to be uploaded
  */
-export function getFilesNeedingUpload(
+export function getFilesNeedingUpload<T extends { path: string; size: number; mtimeMs?: number }>(
   progress: UploadProgress,
-  currentManifest: Array<{ path: string; size: number }>,
-): Array<{ path: string; size: number }> {
+  currentManifest: T[],
+): T[] {
   return currentManifest.filter((file) => {
     const existing = progress.files[file.path];
-    // Skip only if previously uploaded and size unchanged
-    return !existing || existing.status !== "uploaded" || existing.size !== file.size;
+    // Skip only if previously uploaded and unchanged since
+    return !existing || existing.status !== "uploaded" || fileEntryChanged(existing, file);
   });
 }
 
@@ -291,6 +326,8 @@ function isValidProgress(data: unknown): data is UploadProgress {
     const e = entry as Record<string, unknown>;
     if (typeof e.status !== "string" || !VALID_STATUSES.has(e.status)) return false;
     if (typeof e.size !== "number" || e.size < 0) return false;
+    // mtimeMs is optional (absent in pre-#884 progress files)
+    if (e.mtimeMs !== undefined && (typeof e.mtimeMs !== "number" || e.mtimeMs < 0)) return false;
   }
 
   // Validate step values

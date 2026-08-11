@@ -87,10 +87,10 @@ export function showUploadPlan(
  * pre-reconcile progress silently skips files when stale progress for a
  * different dataset is discarded (#884).
  */
-export function computeFilesToUpload(
+export function computeFilesToUpload<T extends { path: string; size: number; mtimeMs?: number }>(
   uploadProgress: UploadProgress | null,
-  dataFiles: Array<{ path: string; size: number }>,
-): Array<{ path: string; size: number }> {
+  dataFiles: T[],
+): T[] {
   return uploadProgress ? getFilesNeedingUpload(uploadProgress, dataFiles) : dataFiles;
 }
 

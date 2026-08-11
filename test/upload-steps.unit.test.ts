@@ -62,6 +62,9 @@ describe("analyzeDataset", () => {
     expect(manifest.files.length).toBe(7);
     expect(manifest.dataFiles).toBe(1);
     expect(manifest.metadataFiles).toBe(6);
+    // Every manifest entry carries the working-tree mtime that drives
+    // upload-progress change detection (#884).
+    expect(manifest.files.every((f) => typeof f.mtimeMs === "number" && f.mtimeMs > 0)).toBe(true);
   });
 
   test("--name override wins over BIDS Name", async () => {

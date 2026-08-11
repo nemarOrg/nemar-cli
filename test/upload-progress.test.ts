@@ -296,6 +296,101 @@ describe("hasFileListChanged (#884 tracking invalidation)", () => {
   });
 });
 
+describe("mtime change detection (#884 review: same-size rewrites)", () => {
+  const timedFiles = [
+    { path: "sub-01/eeg/sub-01_eeg.edf", size: 1024000, mtimeMs: 1_700_000_000_000 },
+    { path: "sub-02/eeg/sub-02_eeg.edf", size: 2048000, mtimeMs: 1_700_000_100_000 },
+  ];
+
+  test("same-size different-mtime invalidates tracking", () => {
+    const progress = initUploadProgress(testDir, "nm000123", timedFiles);
+    const rewritten = timedFiles.map((f, i) =>
+      i === 0 ? { ...f, mtimeMs: f.mtimeMs + 5000 } : f,
+    );
+    expect(hasFileListChanged(progress, rewritten)).toBe(true);
+  });
+
+  test("same-size different-mtime file needs re-upload even when marked uploaded", () => {
+    const progress = initUploadProgress(testDir, "nm000123", timedFiles);
+    markFileUploaded(progress, timedFiles[0].path);
+    markFileUploaded(progress, timedFiles[1].path);
+    const rewritten = timedFiles.map((f, i) =>
+      i === 0 ? { ...f, mtimeMs: f.mtimeMs + 5000 } : f,
+    );
+    const needing = getFilesNeedingUpload(progress, rewritten);
+    expect(needing.map((f) => f.path)).toEqual([timedFiles[0].path]);
+  });
+
+  test("unchanged mtime and size: no invalidation, nothing to re-upload", () => {
+    const progress = initUploadProgress(testDir, "nm000123", timedFiles);
+    markFileUploaded(progress, timedFiles[0].path);
+    markFileUploaded(progress, timedFiles[1].path);
+    expect(hasFileListChanged(progress, timedFiles)).toBe(false);
+    expect(getFilesNeedingUpload(progress, timedFiles)).toEqual([]);
+  });
+
+  test("old-format progress without mtimes: manifest mtimes fail toward re-adding", () => {
+    // Pre-#884 progress files recorded size only. Simulate by initializing
+    // without mtimes, then presenting a manifest that carries them.
+    const progress = initUploadProgress(
+      testDir,
+      "nm000123",
+      timedFiles.map(({ path, size }) => ({ path, size })),
+    );
+    markFileUploaded(progress, timedFiles[0].path);
+    markFileUploaded(progress, timedFiles[1].path);
+    expect(hasFileListChanged(progress, timedFiles)).toBe(true);
+    expect(getFilesNeedingUpload(progress, timedFiles)).toHaveLength(2);
+  });
+
+  test("manifest without mtimes falls back to size-only comparison", () => {
+    const progress = initUploadProgress(testDir, "nm000123", timedFiles);
+    markFileUploaded(progress, timedFiles[0].path);
+    markFileUploaded(progress, timedFiles[1].path);
+    const sizeOnly = timedFiles.map(({ path, size }) => ({ path, size }));
+    expect(hasFileListChanged(progress, sizeOnly)).toBe(false);
+    expect(getFilesNeedingUpload(progress, sizeOnly)).toEqual([]);
+  });
+
+  test("markFileUploaded with fileInfo refreshes the recorded identity", () => {
+    const progress = initUploadProgress(testDir, "nm000123", timedFiles);
+    const rewritten = { ...timedFiles[0], mtimeMs: timedFiles[0].mtimeMs + 5000 };
+    // Re-upload of the rewritten file records its new mtime...
+    markFileUploaded(progress, rewritten.path, { size: rewritten.size, mtimeMs: rewritten.mtimeMs });
+    markFileUploaded(progress, timedFiles[1].path);
+    // ...so the next run sees a stable list again.
+    expect(hasFileListChanged(progress, [rewritten, timedFiles[1]])).toBe(false);
+    expect(getFilesNeedingUpload(progress, [rewritten, timedFiles[1]])).toEqual([]);
+  });
+
+  test("mtimeMs round-trips through disk and validates", () => {
+    const progress = initUploadProgress(testDir, "nm000123", timedFiles);
+    writeUploadProgress(testDir, progress);
+    const read = readUploadProgress(testDir);
+    expect(read).not.toBeNull();
+    if (!read) return; // narrowing guard
+    expect(read.files[timedFiles[0].path].mtimeMs).toBe(timedFiles[0].mtimeMs);
+  });
+
+  test("non-numeric mtimeMs in the file is rejected as corrupt", () => {
+    const dir = join(testDir, ".nemar");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "upload-progress.json"),
+      JSON.stringify({
+        dataset_id: "nm000123",
+        started_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+        files: {
+          "sub-01/eeg.edf": { status: "pending", size: 10, mtimeMs: "yesterday" },
+        },
+        completed_steps: [],
+      }),
+    );
+    expect(readUploadProgress(testDir)).toBeNull();
+  });
+});
+
 describe("getFilesNeedingUpload", () => {
   test("returns all files when none are uploaded", () => {
     const progress = initUploadProgress(testDir, "nm000123", testFiles);

@@ -51,6 +51,8 @@ export interface UploadFileEntry {
   path: string;
   size: number;
   type: "metadata" | "data";
+  /** Working-tree mtime; drives upload-progress change detection (#884). */
+  mtimeMs?: number;
 }
 
 /**
@@ -364,7 +366,7 @@ export async function uploadDataToS3(
   absolutePath: string,
   options: { jobs: string },
   dataFiles: UploadFileEntry[],
-  filesToUpload: Array<{ path: string; size: number }>,
+  filesToUpload: Array<{ path: string; size: number; mtimeMs?: number }>,
   uploadProgress: UploadProgress | null,
   datasetInfo: DatasetInfo,
 ): Promise<Step<UploadProgress>> {
@@ -386,6 +388,7 @@ export async function uploadDataToS3(
         progress.files[file.path] = {
           status: "pending",
           size: file.size,
+          mtimeMs: file.mtimeMs,
           updated_at: new Date().toISOString(),
         };
       }
@@ -530,7 +533,9 @@ export async function uploadDataToS3(
       }
 
       for (const file of addTargets) {
-        markFileUploaded(progress, file.path);
+        // Refresh the recorded size/mtime so a re-uploaded changed file
+        // stops registering as changed on the next run (#884).
+        markFileUploaded(progress, file.path, { size: file.size, mtimeMs: file.mtimeMs });
       }
       writeUploadProgress(absolutePath, progress);
       spinner.succeed(`Uploaded ${uploadResult.filesCopied} data files to S3`);
