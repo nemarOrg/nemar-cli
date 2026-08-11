@@ -170,6 +170,7 @@ import {
   writeNemarMetadata,
 } from "../lib/upload/finalize.js";
 import {
+  computeFilesToUpload,
   prepareUploadProgress,
   reconcileProgressWithDataset,
   showUploadPlan,
@@ -577,11 +578,11 @@ Examples:
 
     console.log();
 
-    const {
-      dataFiles,
-      uploadProgress: loadedProgress,
-      filesToUpload,
-    } = prepareUploadProgress(absolutePath, manifest, options);
+    const { dataFiles, uploadProgress: loadedProgress } = prepareUploadProgress(
+      absolutePath,
+      manifest,
+      options,
+    );
 
     // Step 6: Create new dataset or resume the existing one
     const created = await createOrResumeDataset(
@@ -599,6 +600,10 @@ Examples:
       loadedProgress,
       datasetInfo.dataset_id,
     );
+
+    // Compute the upload list AFTER reconcile: stale progress discarded above
+    // must not keep filtering the list (#884).
+    const filesToUpload = computeFilesToUpload(uploadProgress, dataFiles);
 
     // Step 6b: Accept GitHub invitation
     if ((await acceptRepoInvitation(datasetInfo)).status === "fail") process.exit(1);

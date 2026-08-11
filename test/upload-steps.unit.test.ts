@@ -27,10 +27,16 @@ import {
 import { analyzeDataset } from "../src/lib/upload/enrich";
 import { writeNemarMetadata } from "../src/lib/upload/finalize";
 import {
+  computeFilesToUpload,
   prepareUploadProgress,
   reconcileProgressWithDataset,
   showUploadPlan,
 } from "../src/lib/upload/plan";
+import {
+  LOW_VMEM_WARN_BYTES,
+  detectVirtualMemoryLimit,
+  parseUlimitVirtualMemory,
+} from "../src/lib/upload/preflight";
 import { ensureGitignoreHasNemar, parseRepoFullName } from "../src/lib/upload/transfer";
 
 const scratchDirs: string[] = [];
@@ -56,6 +62,9 @@ describe("analyzeDataset", () => {
     expect(manifest.files.length).toBe(7);
     expect(manifest.dataFiles).toBe(1);
     expect(manifest.metadataFiles).toBe(6);
+    // Every manifest entry carries the working-tree mtime that drives
+    // upload-progress change detection (#884).
+    expect(manifest.files.every((f) => typeof f.mtimeMs === "number" && f.mtimeMs > 0)).toBe(true);
   });
 
   test("--name override wins over BIDS Name", async () => {
@@ -88,10 +97,10 @@ describe("prepareUploadProgress", () => {
 
   test("fresh dataset: all data files need uploading, no progress", () => {
     const dir = scratchDir("nemar-prepare-fresh-");
-    const { dataFiles, uploadProgress, filesToUpload } = prepareUploadProgress(dir, manifest, {});
+    const { dataFiles, uploadProgress } = prepareUploadProgress(dir, manifest, {});
     expect(dataFiles.map((f) => f.path)).toEqual(["sub-01/eeg/a.edf", "sub-01/eeg/b.edf"]);
     expect(uploadProgress).toBeNull();
-    expect(filesToUpload).toEqual(dataFiles);
+    expect(computeFilesToUpload(uploadProgress, dataFiles)).toEqual(dataFiles);
   });
 
   test("persisted progress: already-uploaded files are excluded", () => {
@@ -102,7 +111,8 @@ describe("prepareUploadProgress", () => {
     ]);
     markFileUploaded(progress, "sub-01/eeg/a.edf");
     writeUploadProgress(dir, progress);
-    const { filesToUpload } = prepareUploadProgress(dir, manifest, {});
+    const { dataFiles, uploadProgress } = prepareUploadProgress(dir, manifest, {});
+    const filesToUpload = computeFilesToUpload(uploadProgress, dataFiles);
     expect(filesToUpload.map((f) => f.path)).toEqual(["sub-01/eeg/b.edf"]);
   });
 
@@ -111,30 +121,30 @@ describe("prepareUploadProgress", () => {
     const progress = initUploadProgress(dir, "nm000001", [{ path: "sub-01/eeg/a.edf", size: 100 }]);
     markFileUploaded(progress, "sub-01/eeg/a.edf");
     writeUploadProgress(dir, progress);
-    const { uploadProgress, filesToUpload } = prepareUploadProgress(dir, manifest, {
+    const { dataFiles, uploadProgress } = prepareUploadProgress(dir, manifest, {
       restart: true,
     });
     expect(uploadProgress).toBeNull();
-    expect(filesToUpload.length).toBe(2);
+    expect(computeFilesToUpload(uploadProgress, dataFiles).length).toBe(2);
     expect(readUploadProgress(dir)).toBeNull();
   });
 
-  test("QUIRK PIN: stale progress for a DIFFERENT dataset still filters filesToUpload", () => {
-    // Pre-existing behavior preserved by #907 and documented in plan.ts:
-    // filesToUpload is computed from the loaded progress BEFORE
-    // reconcileProgressWithDataset discards a dataset-id mismatch, and is
-    // not recomputed. Real fix tracked for phase 5b; this test pins the
-    // current behavior so the fix is an intentional, visible change.
+  test("stale progress for a DIFFERENT dataset no longer filters filesToUpload (#884)", () => {
+    // The quirk previously pinned here is fixed: the sequencer computes
+    // filesToUpload from the RECONCILED progress, so stale progress that
+    // reconcile discards cannot silently skip files.
     const dir = scratchDir("nemar-prepare-stale-");
     const stale = initUploadProgress(dir, "nm999999", [{ path: "sub-01/eeg/a.edf", size: 100 }]);
     markFileUploaded(stale, "sub-01/eeg/a.edf");
     writeUploadProgress(dir, stale);
-    const { uploadProgress, filesToUpload } = prepareUploadProgress(dir, manifest, {});
+    const { dataFiles, uploadProgress } = prepareUploadProgress(dir, manifest, {});
     expect(uploadProgress?.dataset_id).toBe("nm999999");
-    expect(filesToUpload.map((f) => f.path)).toEqual(["sub-01/eeg/b.edf"]);
-    // reconcile then discards the stale progress -- but filesToUpload above
-    // has already lost a.edf; that is the quirk.
-    expect(reconcileProgressWithDataset(dir, uploadProgress, "nm000001")).toBeNull();
+    // reconcile discards the stale progress...
+    const reconciled = reconcileProgressWithDataset(dir, uploadProgress, "nm000001");
+    expect(reconciled).toBeNull();
+    // ...and the post-reconcile list includes every data file again.
+    const filesToUpload = computeFilesToUpload(reconciled, dataFiles);
+    expect(filesToUpload.map((f) => f.path)).toEqual(["sub-01/eeg/a.edf", "sub-01/eeg/b.edf"]);
   });
 });
 
@@ -164,6 +174,37 @@ describe("checkUploadPrerequisites", () => {
     expect(out).toContain("Prerequisites check failed");
     expect(out).toContain("STATUS:fail");
     expect(out).not.toContain("STATUS:ok");
+  });
+});
+
+describe("virtual-memory preflight (#884)", () => {
+  test("parses the shell's 1024-byte block count into bytes", () => {
+    // Real `ulimit -v` output for an 8 GiB cap (the SDSC Expanse login-node
+    // value that OOM-killed git-annex in the issue report).
+    expect(parseUlimitVirtualMemory("8388608\n")).toBe(8 * 1024 ** 3);
+  });
+
+  test("'unlimited' passes through as the sentinel string", () => {
+    expect(parseUlimitVirtualMemory("unlimited\n")).toBe("unlimited");
+  });
+
+  test("garbage, empty, and negative outputs return null (no warning)", () => {
+    expect(parseUlimitVirtualMemory("")).toBeNull();
+    expect(parseUlimitVirtualMemory("cannot set limit")).toBeNull();
+    expect(parseUlimitVirtualMemory("-1")).toBeNull();
+    expect(parseUlimitVirtualMemory("12 34")).toBeNull();
+  });
+
+  test("the 8 GiB failure case is below the warning threshold; 32 GiB is not", () => {
+    expect((parseUlimitVirtualMemory("8388608") as number) < LOW_VMEM_WARN_BYTES).toBe(true);
+    expect((parseUlimitVirtualMemory("33554432") as number) < LOW_VMEM_WARN_BYTES).toBe(false);
+  });
+
+  test("detectVirtualMemoryLimit returns a valid shape on this machine (real shell)", async () => {
+    const limit = await detectVirtualMemoryLimit();
+    expect(limit === "unlimited" || limit === null || (typeof limit === "number" && limit > 0)).toBe(
+      true,
+    );
   });
 });
 

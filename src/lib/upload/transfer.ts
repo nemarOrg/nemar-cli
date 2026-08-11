@@ -28,6 +28,7 @@ import {
   isGitAnnexDataset,
 } from "../git-annex/init.js";
 import { ensureLocalMainBranch, getCurrentBranch } from "../git-annex/repo-state.js";
+import { runCommand } from "../git-annex/run-command.js";
 import {
   clearAnnexCredentials,
   configureS3Remote,
@@ -36,6 +37,8 @@ import {
 import { copyToAnnexRemote } from "../git-annex/transfer.js";
 import {
   type UploadProgress,
+  clearStepCompleted,
+  hasFileListChanged,
   initUploadProgress,
   isStepCompleted,
   markFileUploaded,
@@ -48,6 +51,8 @@ export interface UploadFileEntry {
   path: string;
   size: number;
   type: "metadata" | "data";
+  /** Working-tree mtime; drives upload-progress change detection (#884). */
+  mtimeMs?: number;
 }
 
 /**
@@ -279,17 +284,89 @@ export async function configureRemotes(
 }
 
 /**
+ * Paths currently tracked by git, read from the index (`git ls-files -z`).
+ * No content access, so this is cheap at any dataset size. Throws on git
+ * failure so callers fail loudly instead of deciding from an empty set.
+ */
+export async function listTrackedPaths(absolutePath: string): Promise<Set<string>> {
+  const { stdout, stderr, exitCode } = await runCommand(["git", "ls-files", "-z"], {
+    cwd: absolutePath,
+  });
+  if (exitCode !== 0) {
+    throw new Error(stderr.trim() || "git ls-files failed");
+  }
+  return new Set(stdout.split("\0").filter(Boolean));
+}
+
+/**
+ * Annexed working-tree files; with `remote`, only those whose content the
+ * location log records as present at that remote. Log/index reads only --
+ * no content access and no network.
+ */
+export async function listAnnexedPaths(
+  absolutePath: string,
+  remote?: string,
+): Promise<Set<string>> {
+  const args = remote
+    ? ["git", "annex", "find", "--in", remote]
+    : ["git", "annex", "find", "--include", "*"];
+  const { stdout, stderr, exitCode } = await runCommand(args, { cwd: absolutePath });
+  if (exitCode !== 0) {
+    throw new Error(stderr.trim() || "git annex find failed");
+  }
+  return new Set(stdout.split("\n").filter(Boolean));
+}
+
+/**
+ * The files the git-annex add must cover: everything still needing upload
+ * PLUS any data file git does not currently track, regardless of what the
+ * progress file claims (#884 review). A progress file can outlive the git
+ * state it describes (deleted .git, partial rsync of the dataset to another
+ * node); a file marked "uploaded" but untracked would otherwise be skipped
+ * by the targeted add AND silently omitted by `git annex copy` (which exits
+ * 0 for files it does not consider annexed), leaving content with no
+ * location-log record anywhere while the upload reports success.
+ * Re-adding such files is content-addressed, so a re-put is harmless; the
+ * point is re-establishing the location log.
+ */
+export function computeAddTargets<T extends { path: string }>(
+  filesToUpload: T[],
+  dataFiles: T[],
+  trackedPaths: Set<string>,
+): T[] {
+  const targets = [...filesToUpload];
+  const seen = new Set(filesToUpload.map((f) => f.path));
+  for (const file of dataFiles) {
+    if (!trackedPaths.has(file.path) && !seen.has(file.path)) {
+      targets.push(file);
+      seen.add(file.path);
+    }
+  }
+  return targets;
+}
+
+/**
  * Step 9: Upload data files to S3 via the git-annex S3 special remote,
  * gated by the persisted "s3_upload" step. Returns the (possibly newly
  * initialized) progress so the finalize steps share one instance.
  * (`uploadProgress` is copied to a local `progress` binding — the one
  * mechanical rename in this move.)
+ *
+ * git-annex tracking (#884) is its own persisted "tracking" step, adds only
+ * the files that need it (not the whole tree), and runs BEFORE the
+ * credential request so a multi-hour add on a multi-TB dataset cannot burn
+ * the 2h STS window. On resume with an unchanged file list the add is
+ * skipped entirely; a changed list clears the step (see the merge loop
+ * below). The skip decision never trusts the progress file alone: the git
+ * index is consulted first (computeAddTargets) and the post-copy location
+ * log is verified before anything is marked uploaded, so a progress file
+ * that outlived its .git state cannot fake availability.
  */
 export async function uploadDataToS3(
   absolutePath: string,
   options: { jobs: string },
   dataFiles: UploadFileEntry[],
-  filesToUpload: Array<{ path: string; size: number }>,
+  filesToUpload: Array<{ path: string; size: number; mtimeMs?: number }>,
   uploadProgress: UploadProgress | null,
   datasetInfo: DatasetInfo,
 ): Promise<Step<UploadProgress>> {
@@ -299,12 +376,19 @@ export async function uploadDataToS3(
   if (!progress) {
     progress = initUploadProgress(absolutePath, datasetInfo.dataset_id, dataFiles);
   } else {
+    // A completed git-annex tracking pass only covers the file list it saw;
+    // new or size-changed files invalidate it so the add re-runs (#884).
+    if (isStepCompleted(progress, "tracking") && hasFileListChanged(progress, dataFiles)) {
+      clearStepCompleted(progress, "tracking");
+      console.log(chalk.dim("  Data files changed since the last run; re-running git-annex add"));
+    }
     // Add any new files to progress tracking
     for (const file of dataFiles) {
       if (!progress.files[file.path]) {
         progress.files[file.path] = {
           status: "pending",
           size: file.size,
+          mtimeMs: file.mtimeMs,
           updated_at: new Date().toISOString(),
         };
       }
@@ -313,7 +397,54 @@ export async function uploadDataToS3(
   }
 
   if (!isStepCompleted(progress, "s3_upload")) {
-    if (filesToUpload.length > 0) {
+    // Reconcile against ACTUAL git state, not just the progress file: the
+    // progress file can survive while .git does not match it (#884 review).
+    // Cheap index read; no content access.
+    let trackedPaths: Set<string>;
+    try {
+      trackedPaths = await listTrackedPaths(absolutePath);
+    } catch (indexError) {
+      console.log(chalk.red(`Failed to read the git index: ${errorDetail(indexError)}`));
+      console.log(chalk.dim("  Re-run the command to retry."));
+      return FAIL;
+    }
+    const addTargets = computeAddTargets(filesToUpload, dataFiles, trackedPaths);
+    const untrackedCount = addTargets.length - filesToUpload.length;
+    if (untrackedCount > 0 && isStepCompleted(progress, "tracking")) {
+      clearStepCompleted(progress, "tracking");
+      writeUploadProgress(absolutePath, progress);
+      console.log(
+        chalk.yellow(
+          `  ${untrackedCount} data files are missing from git despite recorded progress; re-tracking them`,
+        ),
+      );
+    }
+
+    if (addTargets.length > 0) {
+      // Track data files with git-annex before anything else: the add can
+      // take hours on multi-TB datasets, so it must not eat into the 2h STS
+      // credential window, and its own persisted step lets a resume skip it.
+      // Only files still needing upload (plus any untracked stragglers found
+      // above) are added -- already-copied files are annexed already, and a
+      // whole-tree add re-reads every unlocked file's content (#884).
+      if (!isStepCompleted(progress, "tracking")) {
+        spinner = ora(`Tracking ${addTargets.length} data files with git-annex...`).start();
+        const addResult = await gitAnnexAdd(
+          absolutePath,
+          addTargets.map((f) => f.path),
+        );
+        if (!addResult.success) {
+          spinner.fail(`Failed to track data files: ${addResult.error}`);
+          console.log(chalk.yellow("Re-run the same command to resume tracking."));
+          return FAIL;
+        }
+        spinner.succeed("Data files tracked by git-annex");
+        markStepCompleted(progress, "tracking");
+        writeUploadProgress(absolutePath, progress);
+      } else {
+        console.log(chalk.dim("  Data files already tracked by git-annex (skipping)"));
+      }
+
       // Get STS credentials for S3 access
       spinner = ora("Requesting upload credentials...").start();
       let creds: Awaited<ReturnType<typeof requestUploadCredentials>>;
@@ -348,17 +479,8 @@ export async function uploadDataToS3(
       }
       spinner.succeed("S3 remote configured");
 
-      // Track data files with git-annex before uploading
-      spinner = ora("Tracking data files with git-annex...").start();
-      const addResult = await gitAnnexAdd(absolutePath);
-      if (!addResult.success) {
-        spinner.fail(`Failed to track data files: ${addResult.error}`);
-        return FAIL;
-      }
-      spinner.succeed("Data files tracked by git-annex");
-
       // Upload via git-annex S3 remote (handles key-based layout + tracking)
-      spinner = ora(`Uploading ${filesToUpload.length} data files to S3...`).start();
+      spinner = ora(`Uploading ${addTargets.length} data files to S3...`).start();
       const uploadResult = await copyToAnnexRemote(
         absolutePath,
         "nemar-s3",
@@ -375,8 +497,45 @@ export async function uploadDataToS3(
         return FAIL;
       }
 
-      for (const file of filesToUpload) {
-        markFileUploaded(progress, file.path);
+      // A zero exit from `git annex copy` is not proof of availability: it
+      // silently skips working-tree files it does not consider annexed and
+      // still exits 0 (#884 review). filesCopied also legitimately
+      // undercounts on resume (content already at the remote is skipped
+      // without a "copy ... ok" line), so instead of comparing counts,
+      // verify the location log records every expected file at the remote.
+      // Files the largefiles pattern routed into plain git (not the annex)
+      // travel with the metadata push and are excluded.
+      let annexedPaths: Set<string>;
+      let pathsAtRemote: Set<string>;
+      try {
+        annexedPaths = await listAnnexedPaths(absolutePath);
+        pathsAtRemote = await listAnnexedPaths(absolutePath, "nemar-s3");
+      } catch (verifyError) {
+        spinner.fail(`Could not verify the S3 upload: ${errorDetail(verifyError)}`);
+        console.log(chalk.yellow("Re-run the same command to retry."));
+        return FAIL;
+      }
+      const missingAtRemote = addTargets.filter(
+        (f) => annexedPaths.has(f.path) && !pathsAtRemote.has(f.path),
+      );
+      if (missingAtRemote.length > 0) {
+        spinner.fail(
+          `S3 upload incomplete: ${missingAtRemote.length} of ${addTargets.length} data files are not recorded at the S3 remote`,
+        );
+        for (const file of missingAtRemote.slice(0, 5)) {
+          console.log(chalk.red(`  - ${file.path}`));
+        }
+        if (missingAtRemote.length > 5) {
+          console.log(chalk.dim(`  ... and ${missingAtRemote.length - 5} more`));
+        }
+        console.log(chalk.yellow("Re-run the same command to resume uploading."));
+        return FAIL;
+      }
+
+      for (const file of addTargets) {
+        // Refresh the recorded size/mtime so a re-uploaded changed file
+        // stops registering as changed on the next run (#884).
+        markFileUploaded(progress, file.path, { size: file.size, mtimeMs: file.mtimeMs });
       }
       writeUploadProgress(absolutePath, progress);
       spinner.succeed(`Uploaded ${uploadResult.filesCopied} data files to S3`);

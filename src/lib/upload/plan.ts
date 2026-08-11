@@ -23,10 +23,10 @@ import { STOP, type StepOk, type StepStop, ok } from "./types.js";
 /**
  * Validate progress file matches current dataset (discard stale progress).
  *
- * NOTE (pre-existing behavior, preserved on purpose): the caller computes
- * `filesToUpload` from the loaded progress BEFORE this reconcile runs and
- * does not recompute it when stale progress is discarded here. Tracked for
- * a real fix (with a test) in the phase 5b follow-up issue.
+ * The caller must derive `filesToUpload` from the RETURN value of this
+ * function (via computeFilesToUpload), never from the progress loaded
+ * before it ran: stale progress discarded here would otherwise keep
+ * filtering the upload list (#884; previously pinned as a known quirk).
  */
 export function reconcileProgressWithDataset(
   absolutePath: string,
@@ -80,8 +80,24 @@ export function showUploadPlan(
 }
 
 /**
- * Step 5b: Filter data files, honor --restart, load persisted progress, and
- * compute which files still need uploading.
+ * Which data files still need uploading, given the (reconciled) progress.
+ * Null progress means a fresh upload: everything goes.
+ *
+ * Call this AFTER reconcileProgressWithDataset -- computing it from
+ * pre-reconcile progress silently skips files when stale progress for a
+ * different dataset is discarded (#884).
+ */
+export function computeFilesToUpload<T extends { path: string; size: number; mtimeMs?: number }>(
+  uploadProgress: UploadProgress | null,
+  dataFiles: T[],
+): T[] {
+  return uploadProgress ? getFilesNeedingUpload(uploadProgress, dataFiles) : dataFiles;
+}
+
+/**
+ * Step 5b: Filter data files, honor --restart, and load persisted progress.
+ * The files-to-upload list is computed later, after the progress has been
+ * reconciled against the backend dataset id (computeFilesToUpload).
  */
 export function prepareUploadProgress(
   absolutePath: string,
@@ -115,9 +131,5 @@ export function prepareUploadProgress(
     console.log();
   }
 
-  // Determine which files need uploading
-  const filesToUpload = uploadProgress
-    ? getFilesNeedingUpload(uploadProgress, dataFiles)
-    : dataFiles;
-  return { dataFiles, uploadProgress, filesToUpload };
+  return { dataFiles, uploadProgress };
 }

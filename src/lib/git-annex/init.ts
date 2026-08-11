@@ -212,18 +212,79 @@ export async function configureLargefiles(
   }
 }
 
+/** Default chunk bounds for targeted gitAnnexAdd (exported for unit tests). */
+export const ADD_CHUNK_MAX_PATHS = 500;
+export const ADD_CHUNK_MAX_BYTES = 128 * 1024;
+
+/**
+ * Split a path list into argv-safe chunks for `git annex add -- <paths...>`.
+ *
+ * Multi-TB BIDS datasets can carry thousands of data files; a single argv
+ * would blow past the OS argument-length limit (256 KB on macOS). Chunks are
+ * bounded both by path count and by total byte length (with a per-path +1
+ * for the argv NUL separator). A single path longer than maxBytes still
+ * forms its own chunk -- paths cannot be split.
+ */
+export function chunkAddTargets(
+  paths: string[],
+  maxPaths = ADD_CHUNK_MAX_PATHS,
+  maxBytes = ADD_CHUNK_MAX_BYTES,
+): string[][] {
+  const chunks: string[][] = [];
+  let current: string[] = [];
+  let currentBytes = 0;
+  for (const path of paths) {
+    const size = Buffer.byteLength(path, "utf8") + 1;
+    if (current.length > 0 && (current.length >= maxPaths || currentBytes + size > maxBytes)) {
+      chunks.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(path);
+    currentBytes += size;
+  }
+  if (current.length > 0) {
+    chunks.push(current);
+  }
+  return chunks;
+}
+
 /**
  * Stage files with git-annex. Data files matching the largefiles pattern
  * are added to the annex; other files are added to git normally.
+ *
+ * `targets` is either a single pathspec (default "." = whole tree) or a
+ * list of relative paths. A list is added in argv-safe chunks so multi-TB
+ * datasets with thousands of files never exceed the OS arg limit, and each
+ * completed chunk persists its annexed state (index + inode cache), so an
+ * interrupted add resumes at O(remaining files) instead of restarting
+ * (#884). An empty list is a successful no-op.
+ *
+ * `chunking` overrides the argv chunk bounds; production callers use the
+ * defaults. Exposed so tests can drive the multi-chunk loop through this
+ * entry point without thousands of fixture files.
  */
 export async function gitAnnexAdd(
   path: string,
-  target = ".",
+  targets: string | string[] = ".",
+  chunking: { maxPaths?: number; maxBytes?: number } = {},
 ): Promise<{ success: boolean; error?: string }> {
+  const chunks =
+    typeof targets === "string"
+      ? [[targets]]
+      : chunkAddTargets(
+          targets,
+          chunking.maxPaths ?? ADD_CHUNK_MAX_PATHS,
+          chunking.maxBytes ?? ADD_CHUNK_MAX_BYTES,
+        );
   try {
-    const { stderr, exitCode } = await runCommand(["git", "annex", "add", target], { cwd: path });
-    if (exitCode !== 0) {
-      return { success: false, error: stderr.trim() || "Failed to add files to git-annex" };
+    for (const chunk of chunks) {
+      const { stderr, exitCode } = await runCommand(["git", "annex", "add", "--", ...chunk], {
+        cwd: path,
+      });
+      if (exitCode !== 0) {
+        return { success: false, error: stderr.trim() || "Failed to add files to git-annex" };
+      }
     }
     return { success: true };
   } catch (e) {

@@ -41,6 +41,9 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "checkPrerequisites",
   ],
   init: [
+    "ADD_CHUNK_MAX_BYTES",
+    "ADD_CHUNK_MAX_PATHS",
+    "chunkAddTargets",
     "configureLargefiles",
     "ensureGitAnnexInitialized",
     "gitAnnexAdd",
@@ -125,6 +128,8 @@ const MODULE_EXPORTS: Record<string, string[]> = {
  *   #886 unit tests (partsize + copy-error surfacing); internal otherwise.
  * - classifyGetOutcome / MAX_UNAVAILABLE_SAMPLE: exported for #1038 unit tests
  *   (partial-retrieval classification); internal otherwise.
+ * - chunkAddTargets / ADD_CHUNK_MAX_PATHS / ADD_CHUNK_MAX_BYTES: exported for
+ *   #884 unit tests (argv chunking of targeted adds); internal otherwise.
  */
 const INTERNAL_WIRING = [
   "getGitHubToken",
@@ -133,6 +138,9 @@ const INTERNAL_WIRING = [
   "extractCopyError",
   "classifyGetOutcome",
   "MAX_UNAVAILABLE_SAMPLE",
+  "chunkAddTargets",
+  "ADD_CHUNK_MAX_PATHS",
+  "ADD_CHUNK_MAX_BYTES",
 ];
 
 /**
