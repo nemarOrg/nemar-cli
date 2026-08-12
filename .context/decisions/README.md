@@ -56,6 +56,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0020](0020-dataset-automation-runs-from-central-shared-workflows.md) - Dataset automation runs from central shared workflows
 - [ADR 0021](0021-the-api-token-is-the-master-credential.md) - The API token is the master credential; revocation cascades
 - [ADR 0022](0022-orcid-relink-requires-post-minted-intent.md) - ORCID relink intent is minted only by an authenticated same-origin POST
+- [ADR 0023](0023-clean-zarr-rebuilds-reconcile-instead-of-wiping.md) - A `--clean` Zarr rebuild reconciles the serving copy instead of erasing it first
 
 ## Backfill note (2026-07-31)
 
