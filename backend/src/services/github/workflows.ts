@@ -177,39 +177,58 @@ jobs:
             -f "client_payload[validator_version]=${VALIDATOR_VERSION}"
 `;
 
+  // Version Check shim — completes Phase 4 of epic #601 (sub-issue #610).
+  //
+  // Previously this shipped the whole version-comparison job to every dataset
+  // repo. `version-check` is a REQUIRED status check in the NEMAR branch
+  // protection ruleset, so on any repo where per-repo Actions do not run the
+  // check can never be produced and every PR stays BLOCKED forever — even when
+  // `Run BIDS Validation` already passes centrally.
+  //
+  // Same shape as the BIDS Validation shim above: fire
+  // `repository_dispatch[run-version-check]` at `nemarDatasets/.github`, where
+  // `run-version-check.yml` does the comparison and posts the `version-check`
+  // check-run back onto this repo's PR head SHA. The check NAME must stay
+  // `version-check` for the ruleset to accept it.
   const versionCheck = `name: Version Check
 
 on:
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
-  check-version:
-    name: version-check
+  dispatch:
+    name: Dispatch central version check
     runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
     steps:
-      - uses: actions/checkout@v4
+      - name: Mint App token scoped to .github
+        id: app-token
+        uses: actions/create-github-app-token@v1
         with:
-          fetch-depth: 0
+          app-id: \${{ secrets.NEMAR_APP_ID }}
+          private-key: \${{ secrets.NEMAR_APP_PRIVATE_KEY }}
+          owner: nemarDatasets
+          repositories: .github
 
-      - name: Check version bump
+      - name: Dispatch run-version-check
+        env:
+          GH_TOKEN: \${{ steps.app-token.outputs.token }}
         run: |
-          # PR-branch version
-          PR_VERSION=$(jq -r '.Version // "0.0.0"' dataset_description.json)
-
-          # main-branch version
-          git fetch origin main
-          git checkout origin/main -- dataset_description.json 2>/dev/null || echo '{}' > dataset_description.json
-          MAIN_VERSION=$(jq -r '.Version // "0.0.0"' dataset_description.json)
-          git checkout HEAD -- dataset_description.json
-
-          echo "Main version: $MAIN_VERSION"
-          echo "PR version: $PR_VERSION"
-
-          # Require valid semver X.Y.Z that strictly increments over main.
-${VERSION_COMPARE_SNIPPET.split("\n")
-  .map((l) => `          ${l}`)
-  .join("\n")}
+          set -euo pipefail
+          DATASET_ID="\${{ github.event.repository.name }}"
+          HEAD_SHA="\${{ github.event.pull_request.head.sha || github.sha }}"
+          REF="\${{ github.event.pull_request.head.ref || github.ref_name }}"
+          PR_NUMBER="\${{ github.event.pull_request.number || '' }}"
+          echo "Dispatching run-version-check for $DATASET_ID @ $HEAD_SHA (ref=$REF, PR=$PR_NUMBER)"
+          gh api "repos/nemarDatasets/.github/dispatches" \\
+            -f event_type=run-version-check \\
+            -f "client_payload[dataset_id]=$DATASET_ID" \\
+            -f "client_payload[ref]=$REF" \\
+            -f "client_payload[head_sha]=$HEAD_SHA" \\
+            -f "client_payload[pr_number]=$PR_NUMBER"
 `;
 
   // PR Merge Handler workflow
