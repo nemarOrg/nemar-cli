@@ -109,7 +109,7 @@ describe("CI workflow templates", () => {
     // Phases #602/#606/#608 already removed their per-repo templates;
     // Phase 4 (#610) replaces bids-validation.yml + pr-merge.yml with
     // shims that follow this contract.
-    const shimTemplates = ["pr-merge.yml", "bids-validation.yml"];
+    const shimTemplates = ["pr-merge.yml", "bids-validation.yml", "version-check.yml"];
     for (const name of shimTemplates) {
       const tpl = templates.find((t) => t.path.endsWith(name));
       expect(tpl, `${name} missing from templates`).toBeDefined();
@@ -164,6 +164,7 @@ describe("CI workflow templates", () => {
     const shimContracts: Array<{ name: string; eventType: string }> = [
       { name: "bids-validation.yml", eventType: "run-bids-validation" },
       { name: "pr-merge.yml", eventType: "run-pr-merge" },
+      { name: "version-check.yml", eventType: "run-version-check" },
     ];
     for (const { name, eventType } of shimContracts) {
       const tpl = templates.find((t) => t.path.endsWith(name));
@@ -207,22 +208,15 @@ describe("CI workflow templates", () => {
     expect(VALIDATOR_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
-  test("read-only / AWS-only templates stay on the auto-token (no App-token step)", () => {
-    // version-check does no writes and needs no App token. bids-validation
-    // (#610) and generate-archive (#608) WERE in this list pre-Phase 4
-    // but now require App-token steps — the bids-validation shim mints
-    // one to dispatch to .github; generate-archive moved off-repo
-    // entirely. pr-merge's `cleanup-staging` job uses AWS only too but
-    // lives in the same template as the dispatch shim and is excluded
-    // via the mintIdx < 0 short-circuit in the shim-templates test above.
-    const readOnlyTemplates = ["version-check.yml"];
-    for (const name of readOnlyTemplates) {
-      const tpl = templates.find((t) => t.path.endsWith(name));
-      expect(tpl, `${name} missing from templates`).toBeDefined();
-      if (!tpl) continue;
-      expect(tpl.content).not.toContain("create-github-app-token");
-    }
-  });
+  // The "read-only templates stay on the auto-token" test asserted that
+  // version-check.yml carries no App-token step. Phase 4 (#610) turns it
+  // into a dispatch shim, which must mint a token scoped to .github to
+  // reach repos/nemarDatasets/.github/dispatches -- so the property no
+  // longer holds, and version-check.yml was the list's only entry. Rather
+  // than keep a vacuous loop, its coverage moved into the two shim tests
+  // above, which are strictly stronger: they pin the token scoping, the
+  // mint-step ordering, and the dispatch event_type. Same treatment the
+  // bids-validation and generate-archive templates got in earlier phases.
 
   test("no literal newlines inside shell strings (escape regression)", () => {
     for (const { path, content } of templates) {
