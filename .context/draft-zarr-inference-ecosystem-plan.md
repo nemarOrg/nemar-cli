@@ -96,9 +96,13 @@ were drafted against current code).
 | E4 provenance on Zarr-backed datasets | **Post as-is** | The lossy-serving-copy honesty layer; aligned. Cross-ref E2. |
 
 All four survive the MCP re-scope untouched: they are the "pull and process on device" half,
-the MCP is the "understand what to pull" half. Mechanical edits before posting:
-replace `N2`/`N3` placeholders with real `nemarOrg/nemar-cli#1059` / `#1060` references,
-retarget `eegdash/EEGDash`, and map labels to the repo's existing set.
+the MCP is the "understand what to pull" half.
+
+**Posted 2026-08-16** to `eegdash/EEGDash` with the edits applied
+(E1 correction, `N2`/`N3` placeholders replaced with `nemarOrg/nemar-cli#1059` / `#1060`,
+labels mapped to the repo's existing set):
+E1 = eegdash/EEGDash#400, E2 = #401, E3 = #402, E4 = #403.
+The EEGDash team owns implementation; our side of the contract is N2/N3 landing as specified.
 
 ## 6. Gaps: issues to open in our ecosystem first
 
@@ -117,7 +121,7 @@ retarget `eegdash/EEGDash`, and map labels to the repo's existing set.
 ## 7. Sequencing
 
 1. Amend #1065 + write the ADR (in-ecosystem, settles the architecture).
-2. Post E1-E4 to `eegdash/EEGDash` with the mechanical edits (external, but now grounded in a settled plan).
+2. Post E1-E4 to `eegdash/EEGDash` with the mechanical edits — **done, #400-#403** (see section 5).
 3. Open the browser-compute and OSA issues (3, 4) once the ADR names the lanes.
 4. eegprep issue (5) when the E2 reader exists to feed it.
 
