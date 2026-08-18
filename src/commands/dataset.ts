@@ -56,6 +56,7 @@ import {
   requestPublication,
   resendPublishNotification,
 } from "../lib/api/publish.js";
+import { type DepositAttestation, resolveAttestation } from "../lib/attestation.js";
 import { isAwsCliAvailable } from "../lib/aws-cli.js";
 import { buildBidsFilterArgs, chooseGetFilter } from "../lib/bids-filter.js";
 import {
@@ -481,6 +482,16 @@ datasetCommand
   .option(YES_OPTION, YES_DESCRIPTION)
   .option("--restart", "Clear upload progress and re-upload all files")
   .option("--no", NO_DESCRIPTION) // Long form only; -n conflicts with --name
+  .option("--deposit-type <type>", "Attestation: 'owner' or 'redistribution' (non-interactive)")
+  .option("--key-status <status>", "Attestation: re-identification key 'destroyed' or 'retained'")
+  .option(
+    "--affirm-no-duplicate",
+    "Attestation (redistribution only): affirm the dataset is not already archived in BIDS format",
+  )
+  .option(
+    "--upstream-source <ref>",
+    "Attestation (redistribution only): upstream release URL or accession",
+  )
   .addHelpText(
     "after",
     `
@@ -565,6 +576,17 @@ Examples:
     if (planResult.status === "stop") return;
     const { existingConfig } = planResult.value;
 
+    // Step 4f: Deposit attestation (contributor terms, #1077). After the
+    // --dry-run exit so previews never prompt; before the final confirm so
+    // declining costs nothing. --yes does not satisfy it (see attestation.ts).
+    let attestation: DepositAttestation;
+    try {
+      attestation = await resolveAttestation(options);
+    } catch (attestErr) {
+      console.log(chalk.red(attestErr instanceof Error ? attestErr.message : String(attestErr)));
+      process.exit(1);
+    }
+
     // Step 5: Confirm with user
     const confirmResult = await confirm(
       "Proceed with upload?",
@@ -591,6 +613,7 @@ Examples:
       datasetName,
       dataFiles,
       existingConfig,
+      attestation,
     );
     if (created.status === "fail") process.exit(1);
     const datasetInfo = created.value;

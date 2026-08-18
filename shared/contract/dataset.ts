@@ -106,6 +106,13 @@ export const datasetDetailSchema = catalogItemSchema
     authors: z.string().nullable().optional(),
     license: z.string().nullable().optional(),
     owner_github: z.string().nullable().optional(),
+    // Deposit attestation (migration 0067). NULL on rows created before the
+    // policy, by server-side imports, or by pre-attestation CLIs.
+    attestation_deposit_type: z.enum(["owner", "redistribution"]).nullable().optional(),
+    attestation_key_status: z.enum(["destroyed", "retained"]).nullable().optional(),
+    attestation_no_duplicate: zeroOneNullable.optional(),
+    attestation_upstream_source: z.string().nullable().optional(),
+    attestation_accepted_at: z.string().nullable().optional(),
   })
   .passthrough();
 export type DatasetDetail = z.infer<typeof datasetDetailSchema>;
