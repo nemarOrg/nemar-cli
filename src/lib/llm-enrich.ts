@@ -1,8 +1,13 @@
 /**
- * LLM-based metadata enrichment using OpenRouter API (CLI-side)
+ * LLM-based metadata enrichment via Claude Platform on AWS (CLI-side)
  *
  * Extracts structured v2 metadata from README.md and BIDS dataset_description.json
  * for populating DataCite DOI records. Used by `nemar admin doi enrich`.
+ *
+ * Uses the Anthropic-operated Messages API billed through AWS Marketplace
+ * (NOT Bedrock). Requires ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, and
+ * ANTHROPIC_WORKSPACE_ID; requests without the anthropic-workspace-id
+ * header are rejected by the endpoint.
  */
 
 import {
@@ -49,7 +54,7 @@ Rules:
  *
  * @param readmeContent - Raw README.md content
  * @param bidsDescription - Parsed dataset_description.json
- * @param apiKey - OpenRouter API key (from env OPENROUTER_API_KEY or config)
+ * @param apiKey - Claude Platform on AWS key (from env ANTHROPIC_API_KEY or config)
  * @returns Extracted metadata in v2 format, or empty object if LLM is unavailable
  */
 export async function enrichFromReadme(
@@ -57,9 +62,13 @@ export async function enrichFromReadme(
   bidsDescription: Record<string, unknown>,
   apiKey?: string,
 ): Promise<LlmEnrichmentResult> {
-  const key = apiKey || process.env.OPENROUTER_API_KEY;
-  if (!key) {
-    console.warn("[llm-enrich] No OPENROUTER_API_KEY configured. Skipping LLM enrichment.");
+  const key = apiKey || process.env.ANTHROPIC_API_KEY;
+  const baseUrl = process.env.ANTHROPIC_BASE_URL;
+  const workspaceId = process.env.ANTHROPIC_WORKSPACE_ID;
+  if (!key || !baseUrl || !workspaceId) {
+    console.warn(
+      "[llm-enrich] ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / ANTHROPIC_WORKSPACE_ID not configured. Skipping LLM enrichment.",
+    );
     return {};
   }
 
@@ -75,33 +84,35 @@ ${JSON.stringify(bidsDescription, null, 2)}
 ## README.md
 ${truncatedReadme}`;
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  const response = await fetch(`${baseUrl}/v1/messages`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${key}`,
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+      "anthropic-workspace-id": workspaceId,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "anthropic/claude-haiku-4.5",
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userPrompt },
-      ],
-      temperature: 0.1,
-      max_tokens: 2000,
+      // Exact model ID; the API has no rolling "latest" alias. max_tokens
+      // leaves headroom for adaptive thinking, which counts toward the cap.
+      model: "claude-sonnet-5",
+      max_tokens: 4000,
+      system: SYSTEM_PROMPT,
+      output_config: { effort: "low" },
+      messages: [{ role: "user", content: userPrompt }],
     }),
   });
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`OpenRouter API error (${response.status}): ${errorText}`);
+    throw new Error(`Claude API error (${response.status}): ${errorText}`);
   }
 
   const data = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
+    content?: Array<{ type?: string; text?: string }>;
   };
 
-  const content = data.choices?.[0]?.message?.content;
+  const content = data.content?.find((block) => block.type === "text")?.text;
   if (!content) {
     throw new Error("No content in LLM response");
   }
