@@ -32,7 +32,7 @@ const PLACEHOLDER_AUTHOR =
  * to docs, false positives are caught by admin review.
  */
 const ETHICS_IN_README =
-  /\b(ethic(s|al)?\s+(approval|committee|board|review|statement)|IRB|institutional\s+review\s+board|informed\s+consent|research\s+ethics)\b/i;
+  /\b(ethic(s|al)?\s+(approval|committee|board|review|statement|clearance|exemption)|IRB|REB|HREC|institutional\s+review\s+board|informed\s+consent|research\s+ethics)\b/i;
 
 /** Reasons are user-facing: each states the failure AND the fix. */
 export function evaluateSubmissionMinimums(

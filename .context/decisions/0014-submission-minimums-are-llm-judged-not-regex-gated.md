@@ -2,11 +2,11 @@
 
 **Status:** superseded by ADR-0026
 **Date:** 2026-06-20
+**Owner:** Seyed Yahya Shirazi
 
 > Superseded 2026-08-18: mechanical minimums (name length floor, non-placeholder
 > authors, ethics statement) now hard-gate native publication requests per ADR
 > 0026. Adequacy-beyond-the-floor judgments remain LLM-advisory as decided here.
-**Owner:** Seyed Yahya Shirazi
 
 ## Context
 

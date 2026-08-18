@@ -7,6 +7,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { MIN_NAME_LENGTH, evaluateSubmissionMinimums } from "../src/services/submission-minimums";
+import { freshDb } from "./helpers/d1";
 
 const GOOD_NAME = "Auditory cortex EEG during natural speech comprehension";
 
@@ -82,6 +83,10 @@ describe("evaluateSubmissionMinimums", () => {
       "The local ethics committee approved the protocol.",
       "All participants gave informed consent.",
       "IRB protocol #99.",
+      "Ethical clearance was obtained from XYZ University.",
+      "This study was approved by the REB.",
+      "HREC approval number 2020/123.",
+      "The protocol received an ethics exemption.",
     ]) {
       expect(evaluateSubmissionMinimums(noEthics, readme)).toEqual([]);
     }
@@ -94,5 +99,16 @@ describe("evaluateSubmissionMinimums", () => {
       null,
     );
     expect(reasons).toHaveLength(3);
+  });
+});
+
+describe("migration 0068", () => {
+  test("publication_requests has the min_requirements_reasons column", () => {
+    const db = freshDb();
+    const cols = db
+      .query<{ name: string }, []>("PRAGMA table_info(publication_requests)")
+      .all()
+      .map((c) => c.name);
+    expect(cols).toContain("min_requirements_reasons");
   });
 });

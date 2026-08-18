@@ -3239,6 +3239,16 @@ Examples:
         } else if (result.block_reason) {
           console.log(`\n  ${chalk.red("Blocked:")} ${result.block_reason}`);
         }
+        // Itemized submission-minimums failures persisted at request time
+        // (#1087), so the status view stays as specific as the rejection.
+        if (result.reasons?.length) {
+          for (const reason of result.reasons) {
+            console.log(`    ${chalk.red("-")} ${reason}`);
+          }
+          if (result.policy_url) {
+            console.log(chalk.dim(`  Policy: ${result.policy_url}`));
+          }
+        }
         if (result.ci_url) {
           console.log(`  ${chalk.dim("CI:")} ${result.ci_url}`);
         }
