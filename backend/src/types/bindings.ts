@@ -252,8 +252,9 @@ export interface Variables {
   /** Set by `authMiddleware`: which credential resolved `user`.
    *  "token" = Authorization: Bearer (CLI path), "cookie" =
    *  `nemar_session` (web dashboard path). `cliVersionGuard` uses this
-   *  to exempt browser clients, which are served by the site itself and
-   *  cannot be version-stale the way an installed CLI can. */
+   *  to exempt browser clients, which fetch current site code on every
+   *  page load and so cannot be version-stale the way an installed CLI
+   *  binary can. */
   authMethod?: "token" | "cookie";
   /** Set by `webSessionMiddleware` (#569) when a valid `nemar_session`
    *  cookie resolves to an active row. Distinct from `user` (bearer
