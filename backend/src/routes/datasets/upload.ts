@@ -68,6 +68,9 @@ const attestationSchema = z
   .object({
     deposit_type: z.enum(["owner", "redistribution"]),
     key_status: z.enum(["destroyed", "retained"]),
+    // Literal true: an attestation that does not confirm de-identification is
+    // not an attestation; the CLI aborts the upload before ever sending false.
+    deidentified: z.literal(true),
     no_duplicate: z.boolean().optional(),
     upstream_source: z.string().max(500).optional(),
   })
@@ -78,6 +81,14 @@ const attestationSchema = z
         path: ["no_duplicate"],
         message:
           "Redistribution deposits must affirm the dataset is not already archived in BIDS format",
+      });
+    }
+    if (a.deposit_type === "owner" && a.no_duplicate !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["no_duplicate"],
+        message:
+          "no_duplicate only applies to redistribution deposits (owner deposits leave it unset)",
       });
     }
   });
@@ -274,6 +285,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
                 `UPDATE datasets SET
                    attestation_deposit_type = ?,
                    attestation_key_status = ?,
+                   attestation_deidentified = ?,
                    attestation_no_duplicate = ?,
                    attestation_upstream_source = ?,
                    attestation_accepted_at = datetime('now')
@@ -282,6 +294,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
               .bind(
                 attestation.deposit_type,
                 attestation.key_status,
+                attestation.deidentified ? 1 : 0,
                 attestation.no_duplicate === undefined ? null : attestation.no_duplicate ? 1 : 0,
                 attestation.upstream_source ?? null,
                 datasetId,
@@ -394,9 +407,9 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           await db
             .prepare(
               `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility,
-                attestation_deposit_type, attestation_key_status, attestation_no_duplicate,
-                attestation_upstream_source, attestation_accepted_at)
-             VALUES (?, ?, ?, ?, '', ?, 'private', ?, ?, ?, ?, ?)`,
+                attestation_deposit_type, attestation_key_status, attestation_deidentified,
+                attestation_no_duplicate, attestation_upstream_source, attestation_accepted_at)
+             VALUES (?, ?, ?, ?, '', ?, 'private', ?, ?, ?, ?, ?, ?)`,
             )
             .bind(
               datasetId,
@@ -406,6 +419,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
               sandbox ? 1 : 0,
               attestation?.deposit_type ?? null,
               attestation?.key_status ?? null,
+              attestation ? 1 : null,
               attestation
                 ? attestation.no_duplicate === undefined
                   ? null

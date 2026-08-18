@@ -485,6 +485,10 @@ datasetCommand
   .option("--deposit-type <type>", "Attestation: 'owner' or 'redistribution' (non-interactive)")
   .option("--key-status <status>", "Attestation: re-identification key 'destroyed' or 'retained'")
   .option(
+    "--confirm-deidentified",
+    "Attestation: confirm the dataset contains no identifiable personal information",
+  )
+  .option(
     "--affirm-no-duplicate",
     "Attestation (redistribution only): affirm the dataset is not already archived in BIDS format",
   )

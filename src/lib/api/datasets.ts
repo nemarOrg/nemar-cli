@@ -320,6 +320,7 @@ export interface CreateDatasetRequest {
   attestation?: {
     deposit_type: "owner" | "redistribution";
     key_status: "destroyed" | "retained";
+    deidentified: true;
     no_duplicate?: boolean;
     upstream_source?: string;
   };

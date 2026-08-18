@@ -20,6 +20,12 @@
 --                              anonymous under GDPR Recital 26) or 'retained'
 --                              (key stays with the depositing institution and
 --                              is never transmitted to NEMAR).
+--   attestation_deidentified   1 = depositor confirmed the dataset contains no
+--                              identifiable personal information (HIPAA Safe
+--                              Harbor identifiers removed, anatomicals defaced,
+--                              headers scrubbed). Always 1 on a valid
+--                              attestation; declining aborts the upload
+--                              client-side and the API rejects false.
 --   attestation_no_duplicate   1 = depositor affirmed the dataset is not
 --                              already on NEMAR or an upstream archive in
 --                              BIDS format. Only collected for
@@ -34,6 +40,8 @@ ALTER TABLE datasets ADD COLUMN attestation_deposit_type TEXT
   CHECK (attestation_deposit_type IN ('owner', 'redistribution'));
 ALTER TABLE datasets ADD COLUMN attestation_key_status TEXT
   CHECK (attestation_key_status IN ('destroyed', 'retained'));
+ALTER TABLE datasets ADD COLUMN attestation_deidentified INTEGER
+  CHECK (attestation_deidentified IN (0, 1));
 ALTER TABLE datasets ADD COLUMN attestation_no_duplicate INTEGER
   CHECK (attestation_no_duplicate IN (0, 1));
 ALTER TABLE datasets ADD COLUMN attestation_upstream_source TEXT;

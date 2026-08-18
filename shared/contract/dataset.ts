@@ -110,6 +110,7 @@ export const datasetDetailSchema = catalogItemSchema
     // policy, by server-side imports, or by pre-attestation CLIs.
     attestation_deposit_type: z.enum(["owner", "redistribution"]).nullable().optional(),
     attestation_key_status: z.enum(["destroyed", "retained"]).nullable().optional(),
+    attestation_deidentified: zeroOneNullable.optional(),
     attestation_no_duplicate: zeroOneNullable.optional(),
     attestation_upstream_source: z.string().nullable().optional(),
     attestation_accepted_at: z.string().nullable().optional(),

@@ -10,7 +10,11 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { attestationFromFlags, resolveAttestation } from "../src/lib/attestation";
+import {
+  SANDBOX_ATTESTATION,
+  attestationFromFlags,
+  resolveAttestation,
+} from "../src/lib/attestation";
 
 describe("attestationFromFlags", () => {
   test("returns null when no attestation flags are given", () => {
@@ -18,9 +22,16 @@ describe("attestationFromFlags", () => {
   });
 
   test("builds an owner attestation from complete flags", () => {
-    expect(attestationFromFlags({ depositType: "owner", keyStatus: "destroyed" })).toEqual({
+    expect(
+      attestationFromFlags({
+        depositType: "owner",
+        keyStatus: "destroyed",
+        confirmDeidentified: true,
+      }),
+    ).toEqual({
       deposit_type: "owner",
       key_status: "destroyed",
+      deidentified: true,
     });
   });
 
@@ -29,12 +40,14 @@ describe("attestationFromFlags", () => {
       attestationFromFlags({
         depositType: "redistribution",
         keyStatus: "retained",
+        confirmDeidentified: true,
         affirmNoDuplicate: true,
         upstreamSource: "https://openneuro.org/datasets/ds000000",
       }),
     ).toEqual({
       deposit_type: "redistribution",
       key_status: "retained",
+      deidentified: true,
       no_duplicate: true,
       upstream_source: "https://openneuro.org/datasets/ds000000",
     });
@@ -48,9 +61,19 @@ describe("attestationFromFlags", () => {
     );
   });
 
+  test("flags without --confirm-deidentified are an error", () => {
+    expect(() => attestationFromFlags({ depositType: "owner", keyStatus: "destroyed" })).toThrow(
+      /--confirm-deidentified/,
+    );
+  });
+
   test("redistribution without --affirm-no-duplicate is an error", () => {
     expect(() =>
-      attestationFromFlags({ depositType: "redistribution", keyStatus: "retained" }),
+      attestationFromFlags({
+        depositType: "redistribution",
+        keyStatus: "retained",
+        confirmDeidentified: true,
+      }),
     ).toThrow(/affirm-no-duplicate/);
   });
 
@@ -59,6 +82,7 @@ describe("attestationFromFlags", () => {
       attestationFromFlags({
         depositType: "owner",
         keyStatus: "destroyed",
+        confirmDeidentified: true,
         affirmNoDuplicate: true,
       }),
     ).toThrow(/redistribution/);
@@ -66,6 +90,7 @@ describe("attestationFromFlags", () => {
       attestationFromFlags({
         depositType: "owner",
         keyStatus: "destroyed",
+        confirmDeidentified: true,
         upstreamSource: "https://example.org",
       }),
     ).toThrow(/redistribution/);
@@ -74,13 +99,21 @@ describe("attestationFromFlags", () => {
 
 describe("resolveAttestation", () => {
   test("flags win regardless of TTY", async () => {
-    const a = await resolveAttestation({ depositType: "owner", keyStatus: "retained" }, false);
-    expect(a).toEqual({ deposit_type: "owner", key_status: "retained" });
+    const a = await resolveAttestation(
+      { depositType: "owner", keyStatus: "retained", confirmDeidentified: true },
+      false,
+    );
+    expect(a).toEqual({ deposit_type: "owner", key_status: "retained", deidentified: true });
   });
 
-  test("sandbox uploads auto-attest as owner fixtures", async () => {
-    const a = await resolveAttestation({ sandbox: true }, false);
-    expect(a).toEqual({ deposit_type: "owner", key_status: "destroyed" });
+  test("the sandbox fixture attestation is complete and owner-typed", () => {
+    // `nemar sandbox` sends this at its create call (src/commands/sandbox.ts);
+    // resolveAttestation itself has no sandbox branch.
+    expect(SANDBOX_ATTESTATION).toEqual({
+      deposit_type: "owner",
+      key_status: "destroyed",
+      deidentified: true,
+    });
   });
 
   test("non-interactive real upload without flags fails closed", async () => {

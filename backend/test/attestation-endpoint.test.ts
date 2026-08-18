@@ -78,14 +78,15 @@ function attestationRow(datasetId: string) {
       {
         attestation_deposit_type: string | null;
         attestation_key_status: string | null;
+        attestation_deidentified: number | null;
         attestation_no_duplicate: number | null;
         attestation_upstream_source: string | null;
         attestation_accepted_at: string | null;
       },
       [string]
     >(
-      `SELECT attestation_deposit_type, attestation_key_status, attestation_no_duplicate,
-              attestation_upstream_source, attestation_accepted_at
+      `SELECT attestation_deposit_type, attestation_key_status, attestation_deidentified,
+              attestation_no_duplicate, attestation_upstream_source, attestation_accepted_at
        FROM datasets WHERE dataset_id = ?`,
     )
     .get(datasetId);
@@ -107,6 +108,7 @@ describe("migration 0067", () => {
     for (const col of [
       "attestation_deposit_type",
       "attestation_key_status",
+      "attestation_deidentified",
       "attestation_no_duplicate",
       "attestation_upstream_source",
       "attestation_accepted_at",
@@ -132,7 +134,33 @@ describe("POST /datasets attestation validation", () => {
   test("rejects a redistribution attestation without the no-duplicate affirmation", async () => {
     const res = await post({
       name: DATASET_NAME,
-      attestation: { deposit_type: "redistribution", key_status: "retained" },
+      attestation: { deposit_type: "redistribution", key_status: "retained", deidentified: true },
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("rejects an attestation that does not confirm de-identification", async () => {
+    const res = await post({
+      name: DATASET_NAME,
+      attestation: { deposit_type: "owner", key_status: "destroyed", deidentified: false },
+    });
+    expect(res.status).toBe(400);
+    const missing = await post({
+      name: DATASET_NAME,
+      attestation: { deposit_type: "owner", key_status: "destroyed" },
+    });
+    expect(missing.status).toBe(400);
+  });
+
+  test("rejects no_duplicate on an owner deposit", async () => {
+    const res = await post({
+      name: DATASET_NAME,
+      attestation: {
+        deposit_type: "owner",
+        key_status: "destroyed",
+        deidentified: true,
+        no_duplicate: false,
+      },
     });
     expect(res.status).toBe(400);
   });
@@ -140,12 +168,12 @@ describe("POST /datasets attestation validation", () => {
   test("rejects out-of-vocabulary deposit_type and key_status", async () => {
     const bad1 = await post({
       name: DATASET_NAME,
-      attestation: { deposit_type: "friend", key_status: "destroyed" },
+      attestation: { deposit_type: "friend", key_status: "destroyed", deidentified: true },
     });
     expect(bad1.status).toBe(400);
     const bad2 = await post({
       name: DATASET_NAME,
-      attestation: { deposit_type: "owner", key_status: "lost" },
+      attestation: { deposit_type: "owner", key_status: "lost", deidentified: true },
     });
     expect(bad2.status).toBe(400);
   });
@@ -157,7 +185,7 @@ describe("POST /datasets resume branch persistence", () => {
     const res = await post({
       name: DATASET_NAME,
       sandbox: true,
-      attestation: { deposit_type: "owner", key_status: "destroyed" },
+      attestation: { deposit_type: "owner", key_status: "destroyed", deidentified: true },
     });
     // No S3 bindings: the resume branch fails closed AFTER the attestation
     // UPDATE (fail-closed carve-out, unchanged behavior).
@@ -165,6 +193,7 @@ describe("POST /datasets resume branch persistence", () => {
     const row = attestationRow("xx090002");
     expect(row?.attestation_deposit_type).toBe("owner");
     expect(row?.attestation_key_status).toBe("destroyed");
+    expect(row?.attestation_deidentified).toBe(1);
     expect(row?.attestation_no_duplicate).toBeNull();
     expect(row?.attestation_upstream_source).toBeNull();
     expect(row?.attestation_accepted_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
@@ -178,6 +207,7 @@ describe("POST /datasets resume branch persistence", () => {
       attestation: {
         deposit_type: "redistribution",
         key_status: "retained",
+        deidentified: true,
         no_duplicate: true,
         upstream_source: "https://openneuro.org/datasets/ds000000",
       },
@@ -185,6 +215,7 @@ describe("POST /datasets resume branch persistence", () => {
     const row = attestationRow("xx090003");
     expect(row?.attestation_deposit_type).toBe("redistribution");
     expect(row?.attestation_key_status).toBe("retained");
+    expect(row?.attestation_deidentified).toBe(1);
     expect(row?.attestation_no_duplicate).toBe(1);
     expect(row?.attestation_upstream_source).toBe("https://openneuro.org/datasets/ds000000");
   });
@@ -195,6 +226,7 @@ describe("POST /datasets resume branch persistence", () => {
     const row = attestationRow("xx090004");
     expect(row?.attestation_deposit_type).toBeNull();
     expect(row?.attestation_key_status).toBeNull();
+    expect(row?.attestation_deidentified).toBeNull();
     expect(row?.attestation_accepted_at).toBeNull();
   });
 });

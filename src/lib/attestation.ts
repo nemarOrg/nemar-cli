@@ -9,10 +9,11 @@
  * dataset row (migration 0067).
  *
  * Non-interactive rule: `--yes` does NOT satisfy the attestation. Without a
- * TTY the flags must spell it out (--deposit-type, --key-status, and
- * --affirm-no-duplicate for redistribution), so an automated pipeline cannot
- * silently affirm legal statements nobody read. Sandbox uploads are exempt:
- * they carry training fixtures, not participant data.
+ * TTY the flags must spell it out (--deposit-type, --key-status,
+ * --confirm-deidentified, and --affirm-no-duplicate for redistribution), so an
+ * automated pipeline cannot silently affirm legal statements nobody read.
+ * Sandbox training datasets attest as owner fixtures at the `nemar sandbox`
+ * create call (SANDBOX_ATTESTATION), not through this flow.
  */
 
 import chalk from "chalk";
@@ -21,6 +22,8 @@ import inquirer from "inquirer";
 export interface DepositAttestation {
   deposit_type: "owner" | "redistribution";
   key_status: "destroyed" | "retained";
+  /** Always true on a valid attestation; declining aborts the upload. */
+  deidentified: true;
   no_duplicate?: boolean;
   upstream_source?: string;
 }
@@ -28,6 +31,7 @@ export interface DepositAttestation {
 export interface AttestationFlagOptions {
   depositType?: string;
   keyStatus?: string;
+  confirmDeidentified?: boolean;
   affirmNoDuplicate?: boolean;
   upstreamSource?: string;
 }
@@ -35,15 +39,28 @@ export interface AttestationFlagOptions {
 export const CONTRIBUTOR_TERMS_URL = "https://docs.nemar.org/policies/contributor-terms/";
 
 /**
+ * The attestation recorded for sandbox training datasets, applied at the
+ * `nemar sandbox` create call: they hold generated fixtures, not participant
+ * data, so the fixture author (NEMAR) is the owner and there is no key.
+ */
+export const SANDBOX_ATTESTATION: DepositAttestation = {
+  deposit_type: "owner",
+  key_status: "destroyed",
+  deidentified: true,
+};
+
+/**
  * Build an attestation purely from flags. Returns null when no attestation
  * flags were given at all; throws on incomplete or inconsistent combinations
  * so automation fails loudly rather than half-attesting.
  */
 export function attestationFromFlags(options: AttestationFlagOptions): DepositAttestation | null {
-  const { depositType, keyStatus, affirmNoDuplicate, upstreamSource } = options;
+  const { depositType, keyStatus, confirmDeidentified, affirmNoDuplicate, upstreamSource } =
+    options;
   const anyGiven =
     depositType !== undefined ||
     keyStatus !== undefined ||
+    confirmDeidentified === true ||
     affirmNoDuplicate === true ||
     upstreamSource !== undefined;
   if (!anyGiven) return null;
@@ -58,6 +75,11 @@ export function attestationFromFlags(options: AttestationFlagOptions): DepositAt
       `--key-status must be "destroyed" or "retained" (got ${keyStatus ?? "nothing"}); it is required when attesting via flags.`,
     );
   }
+  if (confirmDeidentified !== true) {
+    throw new Error(
+      "--confirm-deidentified is required when attesting via flags: you must confirm the dataset contains no identifiable personal information.",
+    );
+  }
   if (depositType === "redistribution" && affirmNoDuplicate !== true) {
     throw new Error(
       "Redistribution deposits require --affirm-no-duplicate: you must affirm the dataset is not already on NEMAR or an upstream archive in BIDS format.",
@@ -67,7 +89,11 @@ export function attestationFromFlags(options: AttestationFlagOptions): DepositAt
     throw new Error("--affirm-no-duplicate only applies to --deposit-type redistribution.");
   }
 
-  const attestation: DepositAttestation = { deposit_type: depositType, key_status: keyStatus };
+  const attestation: DepositAttestation = {
+    deposit_type: depositType,
+    key_status: keyStatus,
+    deidentified: true,
+  };
   if (depositType === "redistribution") {
     attestation.no_duplicate = true;
     if (upstreamSource) attestation.upstream_source = upstreamSource;
@@ -118,7 +144,11 @@ export async function promptForAttestation(): Promise<DepositAttestation> {
     },
   ]);
 
-  const attestation: DepositAttestation = { deposit_type: depositType, key_status: keyStatus };
+  const attestation: DepositAttestation = {
+    deposit_type: depositType,
+    key_status: keyStatus,
+    deidentified: true,
+  };
 
   if (depositType === "redistribution") {
     const { noDuplicate } = await inquirer.prompt<{ noDuplicate: boolean }>([
@@ -168,23 +198,19 @@ export async function promptForAttestation(): Promise<DepositAttestation> {
 
 /**
  * Resolve the attestation for an upload: flags win; otherwise prompt on a
- * TTY; otherwise fail closed (except sandbox, which auto-attests as owner
- * fixtures). Exported as the single decision point so it is unit-testable.
+ * TTY; otherwise fail closed. (Sandbox training datasets never pass through
+ * here; `nemar sandbox` sends SANDBOX_ATTESTATION at its own create call.)
+ * Exported as the single decision point so it is unit-testable.
  */
 export async function resolveAttestation(
-  options: AttestationFlagOptions & { sandbox?: boolean },
+  options: AttestationFlagOptions,
   isTty: boolean = process.stdin.isTTY === true,
 ): Promise<DepositAttestation> {
   const fromFlags = attestationFromFlags(options);
   if (fromFlags) return fromFlags;
-  if (options.sandbox) {
-    // Sandbox datasets hold training fixtures; a human attestation would be
-    // meaningless and would break `nemar sandbox` automation.
-    return { deposit_type: "owner", key_status: "destroyed" };
-  }
   if (!isTty) {
     throw new Error(
-      `Deposit attestation required: run interactively, or pass --deposit-type and --key-status (plus --affirm-no-duplicate for redistribution). --yes does not substitute for attestation. Terms: ${CONTRIBUTOR_TERMS_URL}`,
+      `Deposit attestation required: run interactively, or pass --deposit-type, --key-status, and --confirm-deidentified (plus --affirm-no-duplicate for redistribution). --yes does not substitute for attestation. Terms: ${CONTRIBUTOR_TERMS_URL}`,
     );
   }
   return promptForAttestation();

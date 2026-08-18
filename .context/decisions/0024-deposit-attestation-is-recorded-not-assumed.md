@@ -21,10 +21,15 @@ which makes the per-dataset declaration itself the load-bearing record.
 
 The attestation is recorded as columns on `datasets` (migration 0067, per ADR 0003)
 at create time, sent by the CLI with the create-dataset request.
+All three warranties are persisted: deposit type, key status,
+and the de-identification confirmation (`attestation_deidentified`,
+rejected server-side unless literally true),
+plus the no-duplicate affirmation for redistribution deposits.
 `--yes` never satisfies it: interactive uploads prompt,
 non-interactive uploads must spell it out with dedicated flags
-(`--deposit-type`, `--key-status`, `--affirm-no-duplicate`),
-and only sandbox uploads auto-attest (training fixtures, not participant data).
+(`--deposit-type`, `--key-status`, `--confirm-deidentified`, `--affirm-no-duplicate`).
+Sandbox training datasets attest as owner fixtures at the `nemar sandbox`
+create call itself (`SANDBOX_ATTESTATION`), not through the upload prompts.
 The wire field is optional so pre-attestation CLIs keep working;
 NULL columns mean "no attestation on record"
 (legacy rows, server-side imports, old CLIs), never "attested by default".
