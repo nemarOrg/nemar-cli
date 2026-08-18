@@ -17,6 +17,7 @@ import ora, { type Ora } from "ora";
 import { requestUploadCredentials } from "../api/data.js";
 import { createDataset, getDataset } from "../api/datasets.js";
 import { ApiError, errorDetail } from "../api/errors.js";
+import type { DepositAttestation } from "../attestation.js";
 import { printStepFailure } from "../cli-output.js";
 import { type LocalDatasetConfig, writeLocalConfig } from "../dataset-config.js";
 import { acceptGitHubInvitation, configureGitHubRemote } from "../git-annex/github.js";
@@ -93,6 +94,7 @@ export async function createOrResumeDataset(
   datasetName: string,
   dataFiles: UploadFileEntry[],
   existingConfig: LocalDatasetConfig | null,
+  attestation?: DepositAttestation,
 ): Promise<Step<DatasetInfo>> {
   let datasetInfo: DatasetInfo;
 
@@ -139,6 +141,7 @@ export async function createOrResumeDataset(
         name: datasetName,
         description: options.description,
         files: dataFiles.map((f) => ({ path: f.path, size: f.size, type: f.type })),
+        attestation,
       });
 
       datasetInfo = {

@@ -315,6 +315,15 @@ export interface CreateDatasetRequest {
   description?: string;
   files?: FileInfo[];
   sandbox?: boolean; // If true, creates sandbox dataset with xx000xxx ID
+  // Deposit attestation (#1077): recorded on the dataset row (migration 0067).
+  // Optional at the wire level for older CLIs; collected for every new upload.
+  attestation?: {
+    deposit_type: "owner" | "redistribution";
+    key_status: "destroyed" | "retained";
+    deidentified: true;
+    no_duplicate?: boolean;
+    upstream_source?: string;
+  };
 }
 
 export interface CreateDatasetResponse {

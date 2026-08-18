@@ -59,12 +59,47 @@ const fileSchema = z.object({
   type: z.enum(["metadata", "data"]),
 });
 
+// Deposit attestation (#1077): the depositor's acceptance of the Data
+// Contributor Terms, recorded on the dataset row (migration 0067). Optional at
+// the wire level so pre-attestation CLIs keep working; the CLI collects it for
+// every new upload. A 'redistribution' deposit must affirm no_duplicate — the
+// dataset is not already on NEMAR or an upstream archive in BIDS form.
+const attestationSchema = z
+  .object({
+    deposit_type: z.enum(["owner", "redistribution"]),
+    key_status: z.enum(["destroyed", "retained"]),
+    // Literal true: an attestation that does not confirm de-identification is
+    // not an attestation; the CLI aborts the upload before ever sending false.
+    deidentified: z.literal(true),
+    no_duplicate: z.boolean().optional(),
+    upstream_source: z.string().max(500).optional(),
+  })
+  .superRefine((a, ctx) => {
+    if (a.deposit_type === "redistribution" && a.no_duplicate !== true) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["no_duplicate"],
+        message:
+          "Redistribution deposits must affirm the dataset is not already archived in BIDS format",
+      });
+    }
+    if (a.deposit_type === "owner" && a.no_duplicate !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["no_duplicate"],
+        message:
+          "no_duplicate only applies to redistribution deposits (owner deposits leave it unset)",
+      });
+    }
+  });
+
 // Create dataset schema
 const createDatasetSchema = z.object({
   name: z.string().min(1, "Name is required").max(200),
   description: z.string().optional(),
   files: z.array(fileSchema).optional(),
   sandbox: z.boolean().optional(), // If true, creates sandbox dataset (xx000XXX)
+  attestation: attestationSchema.optional(),
 });
 
 // Sandbox file size limit: 10MB total in production (sandbox is for exercising
@@ -141,7 +176,13 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
     cliVersionGuard,
     zValidator("json", createDatasetSchema),
     async (c) => {
-      const { name, description, files, sandbox: requestedSandbox } = c.req.valid("json");
+      const {
+        name,
+        description,
+        files,
+        sandbox: requestedSandbox,
+        attestation,
+      } = c.req.valid("json");
       const user = c.get("user");
       const db = c.env.DB;
 
@@ -231,6 +272,38 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
 
         const datasetId = existingIncomplete.dataset_id;
         const githubRepo = existingIncomplete.github_repo;
+
+        // A resumed create is the same depositor re-affirming: record the
+        // attestation they sent now (also backfills rows whose original
+        // create predated attestation collection). Failure here must not
+        // block the resume; the columns stay NULL and the next attempt
+        // records it.
+        if (attestation) {
+          try {
+            await db
+              .prepare(
+                `UPDATE datasets SET
+                   attestation_deposit_type = ?,
+                   attestation_key_status = ?,
+                   attestation_deidentified = ?,
+                   attestation_no_duplicate = ?,
+                   attestation_upstream_source = ?,
+                   attestation_accepted_at = datetime('now')
+                 WHERE dataset_id = ?`,
+              )
+              .bind(
+                attestation.deposit_type,
+                attestation.key_status,
+                attestation.deidentified ? 1 : 0,
+                attestation.no_duplicate === undefined ? null : attestation.no_duplicate ? 1 : 0,
+                attestation.upstream_source ?? null,
+                datasetId,
+              )
+              .run();
+          } catch (err) {
+            console.error(`Failed to record attestation on resumed ${datasetId}:`, err);
+          }
+        }
 
         // Ensure the resumed dataset is still carved out of public access before
         // re-issuing upload URLs (idempotent; covers rows created before this
@@ -328,12 +401,35 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           // 'unknown' (0034) until enrichment sets the real value via
           // writeDatasetCatalogFields. If `license` is ever added here, add
           // license_tier alongside it or the tier will stay stale (#653).
+          // Attestation columns (0067) ride the claim INSERT because they are
+          // known at create time; NULLs mean "no attestation on record"
+          // (pre-attestation CLIs, server-side imports).
           await db
             .prepare(
-              `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility)
-             VALUES (?, ?, ?, ?, '', ?, 'private')`,
+              `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility,
+                attestation_deposit_type, attestation_key_status, attestation_deidentified,
+                attestation_no_duplicate, attestation_upstream_source, attestation_accepted_at)
+             VALUES (?, ?, ?, ?, '', ?, 'private', ?, ?, ?, ?, ?, ?)`,
             )
-            .bind(datasetId, name, description || null, user.id, sandbox ? 1 : 0)
+            .bind(
+              datasetId,
+              name,
+              description || null,
+              user.id,
+              sandbox ? 1 : 0,
+              attestation?.deposit_type ?? null,
+              attestation?.key_status ?? null,
+              attestation ? 1 : null,
+              attestation
+                ? attestation.no_duplicate === undefined
+                  ? null
+                  : attestation.no_duplicate
+                    ? 1
+                    : 0
+                : null,
+              attestation?.upstream_source ?? null,
+              attestation ? new Date().toISOString().replace("T", " ").slice(0, 19) : null,
+            )
             .run();
           break; // ID claimed successfully
         } catch (err) {
