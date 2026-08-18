@@ -1,4 +1,4 @@
-# ADR 0024: Inference compute runs on the user's device; the MCP is a stateless broker
+# ADR 0025: Inference compute runs on the user's device; the MCP is a stateless broker
 
 **Status:** accepted
 **Date:** 2026-08-16

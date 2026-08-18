@@ -107,8 +107,8 @@ The EEGDash team owns implementation; our side of the contract is N2/N3 landing 
 ## 6. Gaps: issues to open in our ecosystem first
 
 1. **Amend #1065** with the recipe-first re-scope and the hosting decision (section 4).
-2. **ADR in nemar-cli:** compute-locality and hosting — **done, ADR 0024**
-   (`decisions/0024-inference-compute-runs-on-device-mcp-is-a-stateless-broker.md`).
+2. **ADR in nemar-cli:** compute-locality and hosting — **done, ADR 0025**
+   (`decisions/0025-inference-compute-runs-on-device-mcp-is-a-stateless-broker.md`).
 3. **Browser compute surface** (nemarOrg/website or new repo): JupyterLite + Pyodide kernel,
    zarrita chunk reads (already proven by the viewer), MNE-in-WASM feasibility spike,
    a small `nemar` py helper that opens a store from a recipe. Chatbot can hand sessions into it.
