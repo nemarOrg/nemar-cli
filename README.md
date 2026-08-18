@@ -564,6 +564,12 @@ bun run build
 - [DataLad](https://www.datalad.org) - Distributed data management
 - [BIDS Validator](https://github.com/bids-standard/bids-validator) - BIDS validation tool
 
+## Community and policies
+
+- [NEMAR policies](https://docs.nemar.org/policies/): privacy policy, data contributor terms, GDPR position statement, takedown procedure
+- [Code of Conduct](https://github.com/nemarOrg/.github/blob/main/CODE_OF_CONDUCT.md), [Contributing](https://github.com/nemarOrg/.github/blob/main/CONTRIBUTING.md), and [Security policy](https://github.com/nemarOrg/.github/blob/main/SECURITY.md) apply org-wide from [nemarOrg/.github](https://github.com/nemarOrg/.github).
+- Help using NEMAR: support@nemar.org. Bugs and feature requests: open an issue on this repository.
+
 ## License
 
 This project is licensed under the [Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License](https://creativecommons.org/licenses/by-nc-nd/4.0/).
