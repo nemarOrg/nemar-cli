@@ -40,13 +40,20 @@ function truncateReadme(content: string): string {
  *  version bumps are a deliberate one-line change here. */
 const CLAUDE_MODEL = "claude-sonnet-5";
 
-/** Accumulated token usage across the LLM calls of one enrichment run,
- *  from the Messages API `usage` field. Feeds the cost estimate surfaced
- *  in the enrichment response body. */
+/** Accumulated token usage across the LLM calls of one enrichment run.
+ *  `calls` counts ATTEMPTS (incremented on dispatch), so failed HTTP calls
+ *  are still visible in metering; tokens come from the Messages API `usage`
+ *  field of successful responses. */
 export interface LlmUsage {
   calls: number;
   input_tokens: number;
   output_tokens: number;
+}
+
+/** The usage shape surfaced in enrichment responses (webhook, admin reindex,
+ *  bulk reindex). Single source of truth — do not restate these fields. */
+export interface LlmUsageTotals extends LlmUsage {
+  est_cost_usd: number;
 }
 
 /** Estimated cost in USD for accumulated usage at claude-sonnet-5 standard
@@ -73,6 +80,7 @@ export interface LlmClientConfig {
 
 interface ClaudeMessagesResponse {
   content?: Array<{ type?: string; text?: string }>;
+  stop_reason?: string;
   usage?: { input_tokens?: number; output_tokens?: number };
 }
 
@@ -89,8 +97,11 @@ async function callClaude(
   systemPrompt: string,
   userPrompt: string,
   config: LlmClientConfig,
-  maxTokens = 4000,
+  maxTokens = 8000,
 ): Promise<Record<string, unknown>> {
+  // Count the attempt up front so metering still reflects calls that fail
+  // at the HTTP layer (an attempt count of zero reads as "never ran").
+  if (config.usage) config.usage.calls += 1;
   const response = await fetch(`${config.baseUrl}/v1/messages`, {
     method: "POST",
     headers: {
@@ -115,9 +126,17 @@ async function callClaude(
 
   const data = (await response.json()) as ClaudeMessagesResponse;
   if (config.usage && data.usage) {
-    config.usage.calls += 1;
     config.usage.input_tokens += data.usage.input_tokens ?? 0;
     config.usage.output_tokens += data.usage.output_tokens ?? 0;
+  }
+  // Distinguish cap truncation and refusals from formatting failures:
+  // adaptive thinking counts toward max_tokens, so a truncated response
+  // otherwise surfaces as a misleading JSON parse error.
+  if (data.stop_reason === "max_tokens") {
+    throw new Error(`LLM response truncated at max_tokens=${maxTokens}; raise the cap`);
+  }
+  if (data.stop_reason === "refusal") {
+    throw new Error("LLM refused the request (stop_reason: refusal)");
   }
   const content = data.content?.find((block) => block.type === "text")?.text;
   if (!content) {
@@ -452,6 +471,34 @@ export function seedFromBids(
   return seeded;
 }
 
+/** Relation types the enrichment LLM is allowed to write (its prompt
+ *  vocabulary). Only entries carrying one of these are subject to the
+ *  source-presence prune: relations written by other subsystems (e.g.
+ *  IsIdenticalTo from the OpenNeuro importer, curator-set IsCitedBy)
+ *  are never LLM output and must survive re-enrichment untouched. */
+const LLM_RELATION_TYPES: ReadonlySet<string> = new Set([
+  "IsDescribedBy",
+  "IsSupplementTo",
+  "References",
+  "IsDerivedFrom",
+]);
+
+/** Relation types the LLM may RECLASSIFY between on existing DOI entries —
+ *  the citation-classification triad of #826. Deliberately excludes
+ *  IsDerivedFrom (BIDS SourceDatasets provenance) and every non-LLM type,
+ *  so the model can never overwrite another subsystem's assertion. */
+const RECLASSIFIABLE_RELATION_TYPES: ReadonlySet<string> = new Set([
+  "IsDescribedBy",
+  "IsSupplementTo",
+  "References",
+]);
+
+export interface PruneOutcome<T> {
+  result: T;
+  /** Identifiers that were removed, for logging/response surfacing. */
+  pruned: RelatedIdentifierEntry[];
+}
+
 /**
  * Drop DOI related_identifiers that do not appear in the dataset's source
  * material (README + dataset_description.json).
@@ -459,35 +506,50 @@ export function seedFromBids(
  * LLMs sometimes fabricate plausible DOIs for papers the README cites only
  * as text (#826 diligence: on004100 got two invented 10.1093/brain/... DOIs,
  * one pointing at an unrelated glioblastoma paper). Every legitimate
- * related-identifier DOI in this pipeline originates from the README or the
- * BIDS description, so source presence is a safe, deterministic filter.
- * IsDerivedFrom entries (BIDS SourceDatasets, which may express the DOI as a
- * resolver URL) and URL entries are exempt. Applied to LLM output before
- * merging AND to carried-forward metadata, so past hallucinations self-heal
- * on re-enrichment.
+ * LLM-written DOI originates from the README or the BIDS description, so
+ * source presence is a safe, deterministic filter.
+ *
+ * Scope: only entries whose relation_type is in the LLM's own vocabulary
+ * (LLM_RELATION_TYPES) are prunable — that includes a hallucinated
+ * IsDerivedFrom (a legitimate one comes from BIDS SourceDatasets, whose DOI
+ * or resolver URL is in the serialized description and therefore matches).
+ * URL entries and non-LLM relation types (importer/curator assertions) are
+ * exempt. Applied to LLM output before merging AND to carried-forward
+ * metadata, so past hallucinations self-heal on re-enrichment. NOTE: a
+ * curator adding a DOI under an LLM-vocabulary relation must ensure the DOI
+ * appears in the README or dataset_description, or the next forced
+ * re-enrichment will prune it (visibly: callers log and surface `pruned`).
  */
-export function pruneUnsourcedDois<
-  T extends { related_identifiers?: RelatedIdentifierEntry[] },
->(target: T, readmeContent: string, bidsDescription: Record<string, unknown>): T {
-  if (!target.related_identifiers || target.related_identifiers.length === 0) return target;
+export function pruneUnsourcedDois<T extends { related_identifiers?: RelatedIdentifierEntry[] }>(
+  target: T,
+  readmeContent: string,
+  bidsDescription: Record<string, unknown>,
+): PruneOutcome<T> {
+  if (!target.related_identifiers || target.related_identifiers.length === 0) {
+    return { result: target, pruned: [] };
+  }
   const sourceText = `${readmeContent}\n${JSON.stringify(bidsDescription)}`.toLowerCase();
-  const kept = target.related_identifiers.filter(
-    (r) =>
+  const pruned: RelatedIdentifierEntry[] = [];
+  const kept = target.related_identifiers.filter((r) => {
+    const keep =
       r.identifier_type !== "DOI" ||
-      r.relation_type === "IsDerivedFrom" ||
-      sourceText.includes(r.identifier.toLowerCase()),
-  );
-  if (kept.length === target.related_identifiers.length) return target;
-  return { ...target, related_identifiers: kept };
+      !LLM_RELATION_TYPES.has(r.relation_type) ||
+      sourceText.includes(r.identifier.toLowerCase());
+    if (!keep) pruned.push(r);
+    return keep;
+  });
+  if (pruned.length === 0) return { result: target, pruned };
+  return { result: { ...target, related_identifiers: kept }, pruned };
 }
 
 /**
  * Merge LLM enrichment results into a seeded NemarMetadataV2 object.
  *
- * related_identifiers: BIDS-seeded IsDerivedFrom entries and URL entries are
- * locked; other DOI entries are reclassifiable by the LLM (#826); new entries
- * are added with duplicates removed. funding_references merge additively with
- * LLM-parsed entries replacing matching raw BIDS strings.
+ * related_identifiers: existing entries within the citation triad are
+ * reclassifiable by the LLM (#826); IsDerivedFrom, URL entries, and non-LLM
+ * relation types are locked; new entries are appended. funding_references
+ * merge additively with LLM-parsed entries replacing matching raw BIDS
+ * strings.
  *
  * LLM overwrites: description, methods_description, keywords (LLM's domain).
  * Authors are never touched by the LLM.
@@ -536,28 +598,32 @@ export function mergeWithExisting(
     merged.funding_references = allFunds;
   }
 
-  // Related identifiers merge. Two classes of existing entries are locked:
-  // - IsDerivedFrom (seeded from BIDS SourceDatasets; the LLM often
-  //   misclassifies these as "IsVersionOf")
-  // - URL entries (the GitHub repo / NEMAR landing links)
-  // Every other DOI entry is RECLASSIFIABLE: the LLM's relation_type replaces
-  // the existing one in place (#826). This lets re-enrichment both upgrade a
-  // data paper that ReferencesAndLinks seeded as mere "References" to
-  // IsDescribedBy, and downgrade a standard/resource paper a prior run wrongly
-  // tagged IsDescribedBy back to References.
+  // Related identifiers merge. Existing DOI entries are RECLASSIFIABLE only
+  // within the citation triad (IsDescribedBy/IsSupplementTo/References, #826):
+  // the LLM's relation_type replaces the existing one in place, letting
+  // re-enrichment upgrade a data paper that ReferencesAndLinks seeded as mere
+  // "References" and downgrade a standard/resource paper wrongly tagged
+  // IsDescribedBy. Everything else is locked: IsDerivedFrom (BIDS
+  // SourceDatasets), URL entries (GitHub/NEMAR links), and any relation type
+  // outside the triad (importer's IsIdenticalTo, curator-set types) — the LLM
+  // never overwrites another subsystem's assertion. All duplicate entries for
+  // an identifier are updated consistently.
   if (llmResult.related_identifiers) {
     const existingRels = existing?.related_identifiers || [];
     const allRels = existingRels.map((r) => ({ ...r }));
     for (const newRel of llmResult.related_identifiers) {
-      const current = allRels.find((r) => r.identifier === newRel.identifier);
-      if (current) {
-        const locked = current.relation_type === "IsDerivedFrom" || current.identifier_type === "URL";
-        if (!locked) current.relation_type = newRel.relation_type;
+      const matches = allRels.filter((r) => r.identifier === newRel.identifier);
+      if (matches.length > 0) {
+        for (const current of matches) {
+          const reclassifiable =
+            current.identifier_type !== "URL" &&
+            RECLASSIFIABLE_RELATION_TYPES.has(current.relation_type) &&
+            RECLASSIFIABLE_RELATION_TYPES.has(newRel.relation_type);
+          if (reclassifiable) current.relation_type = newRel.relation_type;
+        }
         continue;
       }
-      const key = `${newRel.identifier}|${newRel.relation_type}`;
-      const exists = allRels.some((r) => `${r.identifier}|${r.relation_type}` === key);
-      if (!exists) allRels.push(newRel);
+      allRels.push(newRel);
     }
     merged.related_identifiers = allRels;
   }

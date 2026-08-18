@@ -50,6 +50,7 @@ import {
   setRepoDescription,
 } from "./github.js";
 import {
+  type LlmUsageTotals,
   correctFromFeedback,
   enrichFromReadme,
   estimateUsageCostUsd,
@@ -128,12 +129,10 @@ export interface EnrichmentSuccessBody {
   doi_sync_error?: string;
   /** Token usage across this run's LLM calls, with an estimated USD cost
    *  at claude-sonnet-5 standard rates. */
-  llm_usage?: {
-    calls: number;
-    input_tokens: number;
-    output_tokens: number;
-    est_cost_usd: number;
-  };
+  llm_usage?: LlmUsageTotals;
+  /** DOIs removed by the unsourced-DOI guard this run (see
+   *  pruneUnsourcedDois). Surfaced so silent metadata loss is impossible. */
+  pruned_dois?: string[];
 }
 
 export interface EnrichmentSkippedBody {
@@ -538,11 +537,22 @@ export async function enrichDataset(
     // related-identifiers that no longer appear in the source material so
     // hallucinated DOIs from past runs self-heal on re-enrichment.
     const treePaths = tree.map((f) => f.path);
-    const seeded = pruneUnsourcedDois(
+    const prunedDois: string[] = [];
+    const logPrune = (stage: string, outcome: { pruned: { identifier: string }[] }) => {
+      if (outcome.pruned.length === 0) return;
+      const ids = outcome.pruned.map((p) => p.identifier);
+      prunedDois.push(...ids);
+      console.warn(
+        `[llm-enrich] Pruned ${ids.length} unsourced DOI(s) at ${stage} for ${datasetId}: ${ids.join(", ")}`,
+      );
+    };
+    const seedPrune = pruneUnsourcedDois(
       seedFromBids(bidsDescription, existingMetadata, datasetId, treePaths, landingBase),
       readmeContent,
       bidsDescription,
     );
+    logPrune("seed", seedPrune);
+    const seeded = seedPrune.result;
     console.log(
       `[llm-enrich] Stage 1 (seed): ${datasetId} - ${Object.keys(seeded.authors || {}).length} authors, ${(seeded.related_identifiers || []).length} related IDs`,
     );
@@ -648,11 +658,13 @@ export async function enrichDataset(
     }
 
     // Stage 2: LLM enrichment (adds description, keywords, methods, etc.)
-    const llmResult = pruneUnsourcedDois(
+    const llmPrune = pruneUnsourcedDois(
       await enrichFromReadme(readmeContent, bidsDescription, llmConfig),
       readmeContent,
       bidsDescription,
     );
+    logPrune("enrich", llmPrune);
+    const llmResult = llmPrune.result;
     const enriched = mergeWithExisting(seededWithOrcids, llmResult);
     const enrichedFields = Object.keys(llmResult).filter(
       (k) => llmResult[k as keyof typeof llmResult] !== undefined,
@@ -756,7 +768,7 @@ export async function enrichDataset(
           `[llm-enrich] Correction attempt ${correctionAttempts}/${MAX_CORRECTIONS} for ${datasetId}`,
         );
         try {
-          const corrections = pruneUnsourcedDois(
+          const correctionPrune = pruneUnsourcedDois(
             await correctFromFeedback(
               currentMetadata,
               validated.validation.blocking_issues,
@@ -768,7 +780,8 @@ export async function enrichDataset(
             readmeContent,
             bidsDescription,
           );
-          currentMetadata = mergeWithExisting(currentMetadata, corrections);
+          logPrune(`correction-${correctionAttempts}`, correctionPrune);
+          currentMetadata = mergeWithExisting(currentMetadata, correctionPrune.result);
         } catch (corrErr) {
           console.warn(
             `[llm-enrich] Correction attempt ${correctionAttempts} failed for ${datasetId}: ${errorMessage(corrErr)}`,
@@ -1065,8 +1078,9 @@ export async function enrichDataset(
       }
     }
 
+    const estCostUsd = estimateUsageCostUsd(llmUsage);
     console.log(
-      `[llm-enrich] LLM usage for ${datasetId}: ${llmUsage.calls} calls, ${llmUsage.input_tokens} in, ${llmUsage.output_tokens} out (~$${estimateUsageCostUsd(llmUsage)})`,
+      `[llm-enrich] LLM usage for ${datasetId}: ${llmUsage.calls} calls, ${llmUsage.input_tokens} in, ${llmUsage.output_tokens} out (~$${estCostUsd})`,
     );
     recordLlmUsage(env, {
       datasetId,
@@ -1074,7 +1088,7 @@ export async function enrichDataset(
       calls: llmUsage.calls,
       inputTokens: llmUsage.input_tokens,
       outputTokens: llmUsage.output_tokens,
-      estCostUsd: estimateUsageCostUsd(llmUsage),
+      estCostUsd,
     });
 
     return {
@@ -1084,7 +1098,8 @@ export async function enrichDataset(
         message: `Metadata pipeline completed (stage: ${finalMetadata.pipeline_stage})`,
         dataset_id: datasetId,
         pipeline_stage: finalMetadata.pipeline_stage,
-        llm_usage: { ...llmUsage, est_cost_usd: estimateUsageCostUsd(llmUsage) },
+        llm_usage: { ...llmUsage, est_cost_usd: estCostUsd },
+        ...(prunedDois.length > 0 && { pruned_dois: prunedDois }),
         seeded_fields: {
           authors: Object.keys(seeded.authors || {}).length,
           related_identifiers: (seeded.related_identifiers || []).length,
