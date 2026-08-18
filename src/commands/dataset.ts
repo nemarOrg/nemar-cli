@@ -3136,6 +3136,22 @@ Examples:
           console.log(chalk.dim("  Use 'nemar dataset publish resend' to remind admins."));
         } else if (error.statusCode === 403) {
           console.log(chalk.dim("  Only the dataset owner can request publication."));
+        } else if (error.statusCode === 422) {
+          // Submission-minimums rejection (#1087): print each stated reason
+          // and the policy it comes from, so the fix is actionable here.
+          const details = error.details as { reasons?: string[]; policy_url?: string } | undefined;
+          if (details?.reasons?.length) {
+            console.log(`\n  ${chalk.red("Not accepted for publication:")}`);
+            for (const reason of details.reasons) {
+              console.log(`    ${chalk.red("-")} ${reason}`);
+            }
+            if (details.policy_url) {
+              console.log(chalk.dim(`\n  Policy: ${details.policy_url}`));
+            }
+            console.log(
+              chalk.dim("  Fix the items above, then re-run 'nemar dataset publish request'."),
+            );
+          }
         }
       } else {
         spinner.fail("Failed to request publication");

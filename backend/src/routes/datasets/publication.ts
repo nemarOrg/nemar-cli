@@ -21,6 +21,7 @@ import {
   checkWorkflowExists,
   deployWorkflows,
   ensureRepoToSpec,
+  getFileContent,
   getWorkflowRuns,
   setRepoVisibility,
   signPrescreenCallbackToken,
@@ -29,6 +30,10 @@ import {
 import { getDatasetsToken } from "../../services/github-auth";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { markDatasetPrivate, markDatasetPublic } from "../../services/s3";
+import {
+  SUBMISSION_POLICY_URL,
+  evaluateSubmissionMinimums,
+} from "../../services/submission-minimums";
 import { hasRole } from "../../types/bindings";
 import { extractRepoName } from "./shared";
 import type { DatasetsRouter } from "./shared";
@@ -46,6 +51,7 @@ const BLOCK_MESSAGES: Record<string, string> = {
   // pre-deploy 'blocked' row still renders a sensible message until re-request.
   prescreen_failed:
     "The automated pre-screen flagged missing publication essentials (data, README, or dataset_description). Address the gaps and re-request publication; the pre-screen now runs as a non-blocking advisory.",
+  min_requirements_failed: `The dataset does not meet the minimum submission requirements. Fix the listed items and re-request publication. Policy: ${SUBMISSION_POLICY_URL}`,
 };
 
 export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
@@ -63,7 +69,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
 
     const dataset = await db
       .prepare(
-        "SELECT id, dataset_id, owner_user_id, is_sandbox, is_exemplar, github_repo, visibility FROM datasets WHERE dataset_id = ?",
+        "SELECT id, dataset_id, owner_user_id, is_sandbox, is_exemplar, github_repo, visibility, source FROM datasets WHERE dataset_id = ?",
       )
       .bind(datasetId)
       .first<{
@@ -74,6 +80,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         is_exemplar: number | null;
         github_repo: string | null;
         visibility: string | null;
+        source: string | null;
       }>();
 
     if (!dataset) {
@@ -176,6 +183,35 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       console.warn(`[publish-request] Skipping CI checks for ${datasetId}: no GitHub repo`);
     }
 
+    // Deterministic submission minimums for NATIVE submissions (#1087, ADR
+    // 0026): Name >= 25 chars, non-placeholder Authors, ethics statement.
+    // OpenNeuro imports and exemplars passed an upstream review and are
+    // exempt. Fail-open on a fetch error: the CI check above already proved
+    // GitHub reachable, so a later hiccup is logged and left to the admin
+    // review rather than adding a spurious block.
+    let minReasons: string[] | null = null;
+    if (!blocked && repoName && pat && dataset.source !== "openneuro" && !dataset.is_exemplar) {
+      try {
+        const descriptionJson = await getFileContent(repoName, "dataset_description.json", pat);
+        let readme: string | null = null;
+        for (const candidate of ["README.md", "README", "README.txt", "README.rst"]) {
+          readme = await getFileContent(repoName, candidate, pat);
+          if (readme !== null) break;
+        }
+        const reasons = evaluateSubmissionMinimums(descriptionJson, readme);
+        if (reasons.length > 0) {
+          blocked = true;
+          blockReason = "min_requirements_failed";
+          minReasons = reasons;
+        }
+      } catch (err) {
+        console.error(
+          `[publish-request] submission-minimums check failed for ${datasetId} (non-fatal):`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+
     let prId: number | null = requestId ?? null;
     if (requestId) {
       // Update existing blocked request
@@ -221,6 +257,15 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
           message: BLOCK_MESSAGES[blockReason || ""] || "Publication request blocked.",
           dataset_id: datasetId,
           ci_url: ciUrl,
+          // Specific, user-facing failures from the minimums check, mirrored
+          // under `details` because the CLI's ApiError only carries that field.
+          ...(minReasons
+            ? {
+                reasons: minReasons,
+                policy_url: SUBMISSION_POLICY_URL,
+                details: { reasons: minReasons, policy_url: SUBMISSION_POLICY_URL },
+              }
+            : {}),
         },
         422,
       );
