@@ -62,6 +62,12 @@ index_name = "nemar-dataset-index"
 binding = "ANALYTICS"
 dataset = "nemar_access_metrics"
 
+# LLM enrichment spend metering (one point per enrichment run; the website
+# observability dashboard aggregates per hour/day via the AE SQL API).
+[[analytics_engine_datasets]]
+binding = "ANALYTICS_LLM"
+dataset = "nemar_llm_metrics"
+
 # Workers Observability (Workers Paid plan).
 # Captures invocation logs (inbound request shape, response status, duration,
 # subrequest count) and console.log output for searchable runtime telemetry.
@@ -235,6 +241,10 @@ index_name = "nemar-dataset-index-dev"
 [[env.dev.analytics_engine_datasets]]
 binding = "ANALYTICS"
 dataset = "nemar_access_metrics_dev"
+
+[[env.dev.analytics_engine_datasets]]
+binding = "ANALYTICS_LLM"
+dataset = "nemar_llm_metrics_dev"
 
 # Observability for dev (not inherited from top-level)
 [env.dev.observability]
