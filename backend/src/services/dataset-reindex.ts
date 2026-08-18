@@ -362,18 +362,15 @@ export async function refreshMetadataAfterVersionDoi(
   }
 }
 
+import type { LlmUsageTotals } from "./llm-enrich.js";
+
 export interface EnrichmentRunResult {
   ok: boolean;
   error?: string;
   ref: string;
   /** Token usage + estimated USD cost of this run's LLM calls, when the
    *  pipeline completed and reported it. */
-  llm_usage?: {
-    calls: number;
-    input_tokens: number;
-    output_tokens: number;
-    est_cost_usd: number;
-  };
+  llm_usage?: LlmUsageTotals;
 }
 
 /**
