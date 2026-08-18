@@ -890,14 +890,15 @@ describe("relation type validation pipeline", () => {
 
 describe("enrichFromReadme", () => {
   test("returns empty object when no API key is provided", async () => {
-    // Ensure env var is not set
-    const oldKey = process.env.OPENROUTER_API_KEY;
-    process.env.OPENROUTER_API_KEY = undefined;
+    // Ensure env vars are not set
+    const oldKey = process.env.ANTHROPIC_API_KEY;
+    // Empty string is falsy for the config check without needing `delete`
+    process.env.ANTHROPIC_API_KEY = "";
     try {
       const result = await enrichFromReadme("# Test README", { Name: "Test" });
       expect(result).toEqual({});
     } finally {
-      if (oldKey) process.env.OPENROUTER_API_KEY = oldKey;
+      if (oldKey) process.env.ANTHROPIC_API_KEY = oldKey;
     }
   });
 });

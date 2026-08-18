@@ -239,10 +239,21 @@ export async function enrichDataset(
   env: Bindings,
   opts: EnrichmentOpts,
 ): Promise<EnrichmentOutcome> {
-  const apiKey = env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    return { ok: false, status: 500, body: { error: "OPENROUTER_API_KEY not configured" } };
+  if (!env.ANTHROPIC_API_KEY || !env.ANTHROPIC_BASE_URL || !env.ANTHROPIC_WORKSPACE_ID) {
+    return {
+      ok: false,
+      status: 500,
+      body: {
+        error:
+          "Claude API not configured (ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / ANTHROPIC_WORKSPACE_ID)",
+      },
+    };
   }
+  const llmConfig = {
+    apiKey: env.ANTHROPIC_API_KEY,
+    baseUrl: env.ANTHROPIC_BASE_URL,
+    workspaceId: env.ANTHROPIC_WORKSPACE_ID,
+  };
 
   const datasetId = opts.datasetId;
   const forceReenrich = opts.force === true;
@@ -624,7 +635,7 @@ export async function enrichDataset(
     }
 
     // Stage 2: LLM enrichment (adds description, keywords, methods, etc.)
-    const llmResult = await enrichFromReadme(readmeContent, bidsDescription, apiKey);
+    const llmResult = await enrichFromReadme(readmeContent, bidsDescription, llmConfig);
     const enriched = mergeWithExisting(seededWithOrcids, llmResult);
     const enrichedFields = Object.keys(llmResult).filter(
       (k) => llmResult[k as keyof typeof llmResult] !== undefined,
@@ -711,7 +722,7 @@ export async function enrichDataset(
           currentMetadata,
           readmeContent,
           bidsDescription,
-          apiKey,
+          llmConfig,
         );
         validationResult = validated.validation;
         finalMetadata = validated.metadata;
@@ -734,7 +745,7 @@ export async function enrichDataset(
             validated.validation.warnings,
             readmeContent,
             bidsDescription,
-            apiKey,
+            llmConfig,
           );
           currentMetadata = mergeWithExisting(currentMetadata, corrections);
         } catch (corrErr) {

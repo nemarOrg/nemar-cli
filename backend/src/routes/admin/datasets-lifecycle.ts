@@ -1656,7 +1656,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     const results: PerDataset[] = [];
 
     // Sequential to keep per-dataset failures isolated and respect upstream
-    // rate limits (OpenRouter, GitHub). The runtime budget for a
+    // rate limits (Claude API, GitHub). The runtime budget for a
     // Cloudflare Worker request is the limiting factor for very large batches;
     // operators should narrow the filter or split into multiple runs.
     for (const datasetId of datasetIds) {
