@@ -2,7 +2,9 @@
  * Backend LLM-based metadata enrichment service (Workers-compatible)
  *
  * Extracts structured v2 metadata from README.md and BIDS dataset_description.json
- * using OpenRouter API. Designed for server-side use in Cloudflare Workers webhooks.
+ * using Claude on the Claude Platform on AWS (Anthropic-operated Messages API,
+ * billed through the lab's AWS Marketplace allocation — NOT Amazon Bedrock).
+ * Designed for server-side use in Cloudflare Workers webhooks.
  */
 
 import {
@@ -34,46 +36,65 @@ function truncateReadme(content: string): string {
   return `${content.slice(0, README_MAX_LENGTH)}\n[truncated]`;
 }
 
-interface OpenRouterResponse {
-  choices?: Array<{ message?: { content?: string } }>;
+/** Exact model ID — the Anthropic API has no rolling "latest" alias, so
+ *  version bumps are a deliberate one-line change here. */
+const CLAUDE_MODEL = "claude-sonnet-5";
+
+/** Connection settings for the Claude Platform on AWS Messages endpoint.
+ *  All three are required: the endpoint rejects any request that lacks the
+ *  `anthropic-workspace-id` header. */
+export interface LlmClientConfig {
+  /** Long-lived API key from AWS Console -> Claude Platform on AWS -> API keys. */
+  apiKey: string;
+  /** e.g. https://aws-external-anthropic.us-east-2.api.aws */
+  baseUrl: string;
+  /** Workspace ID (wrkspc_...) the key is authorized on. */
+  workspaceId: string;
+}
+
+interface ClaudeMessagesResponse {
+  content?: Array<{ type?: string; text?: string }>;
 }
 
 /**
- * Call OpenRouter and extract a parsed JSON object from the response.
+ * Call the Claude Messages API and extract a parsed JSON object from the response.
  *
  * Handles markdown code block unwrapping and JSON parsing.
  * Throws on HTTP errors, missing content, or invalid JSON.
+ *
+ * maxTokens must leave headroom for adaptive thinking, which counts toward
+ * the cap; effort is pinned low since these are mechanical extraction tasks.
  */
-async function callOpenRouter(
+async function callClaude(
   systemPrompt: string,
   userPrompt: string,
-  apiKey: string,
-  maxTokens = 2000,
+  config: LlmClientConfig,
+  maxTokens = 4000,
 ): Promise<Record<string, unknown>> {
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  const response = await fetch(`${config.baseUrl}/v1/messages`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      "x-api-key": config.apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-workspace-id": config.workspaceId,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "anthropic/claude-haiku-4.5",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      temperature: 0.1,
+      model: CLAUDE_MODEL,
       max_tokens: maxTokens,
+      system: systemPrompt,
+      output_config: { effort: "low" },
+      messages: [{ role: "user", content: userPrompt }],
     }),
   });
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`OpenRouter API error (${response.status}): ${errorText}`);
+    throw new Error(`Claude API error (${response.status}): ${errorText}`);
   }
 
-  const data = (await response.json()) as OpenRouterResponse;
-  const content = data.choices?.[0]?.message?.content;
+  const data = (await response.json()) as ClaudeMessagesResponse;
+  const content = data.content?.find((block) => block.type === "text")?.text;
   if (!content) {
     throw new Error("No content in LLM response");
   }
@@ -119,13 +140,13 @@ Rules:
  *
  * @param readmeContent - Raw README.md content
  * @param bidsDescription - Parsed dataset_description.json
- * @param apiKey - OpenRouter API key
+ * @param config - Claude Platform on AWS connection settings
  * @returns Extracted metadata in v2 format
  */
 export async function enrichFromReadme(
   readmeContent: string,
   bidsDescription: Record<string, unknown>,
-  apiKey: string,
+  config: LlmClientConfig,
 ): Promise<LlmEnrichmentResultV2> {
   const userPrompt = `## BIDS dataset_description.json
 \`\`\`json
@@ -135,7 +156,7 @@ ${JSON.stringify(bidsDescription, null, 2)}
 ## README.md
 ${truncateReadme(readmeContent)}`;
 
-  const parsed = await callOpenRouter(SYSTEM_PROMPT, userPrompt, apiKey);
+  const parsed = await callClaude(SYSTEM_PROMPT, userPrompt, config);
   return validateLlmResultV2(parsed);
 }
 
@@ -706,14 +727,14 @@ Warnings: missing keywords, imprecise descriptions, unconfirmed funding details.
 /**
  * Stage 3: Validate enriched metadata using an LLM judge.
  *
- * Sends metadata + README + BIDS description to OpenRouter for review.
+ * Sends metadata + README + BIDS description to Claude for review.
  * If validation passes, pipeline_stage advances to "validated".
  */
 export async function validateMetadata(
   metadata: NemarMetadataV2,
   readmeContent: string,
   bidsDescription: Record<string, unknown>,
-  apiKey: string,
+  config: LlmClientConfig,
 ): Promise<{ metadata: NemarMetadataV2; validation: ValidationResult }> {
   const userPrompt = `## .nemar/metadata.json
 \`\`\`json
@@ -728,7 +749,7 @@ ${JSON.stringify(bidsDescription, null, 2)}
 ## README.md
 ${truncateReadme(readmeContent)}`;
 
-  const parsed = await callOpenRouter(VALIDATION_PROMPT, userPrompt, apiKey, 3000);
+  const parsed = await callClaude(VALIDATION_PROMPT, userPrompt, config, 6000);
   const validation = parseValidationResult(parsed);
   const updatedMetadata: NemarMetadataV2 = {
     ...metadata,
@@ -751,7 +772,7 @@ export async function correctFromFeedback(
   warnings: string[],
   readmeContent: string,
   bidsDescription: Record<string, unknown>,
-  apiKey: string,
+  config: LlmClientConfig,
 ): Promise<LlmEnrichmentResultV2> {
   const correctionPrompt = `You are a metadata correction assistant for neuroimaging datasets.
 A validation judge has reviewed the metadata and found issues that need to be fixed.
@@ -794,7 +815,7 @@ ${JSON.stringify(bidsDescription, null, 2)}
 ## README.md
 ${truncateReadme(readmeContent)}`;
 
-  const parsed = await callOpenRouter(correctionPrompt, userPrompt, apiKey, 3000);
+  const parsed = await callClaude(correctionPrompt, userPrompt, config, 6000);
   return validateLlmResultV2(parsed);
 }
 

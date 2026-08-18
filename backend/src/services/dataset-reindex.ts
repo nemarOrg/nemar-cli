@@ -374,7 +374,7 @@ export interface EnrichmentRunResult {
  * Kept in sync with the EnrichmentSuccessBody spread in enrich-dataset.ts.
  * (The workflow-template shell loop that also consumed these fields left this
  * repo when enrichment moved to the central nemarDatasets/.github workflow;
- * the old services/github.ts pointer was already stale.) The OpenRouter
+ * the old services/github.ts pointer was already stale.) The Claude API
  * call is intentionally not in this list: it's the load-bearing Stage 2,
  * and any failure there aborts the pipeline with a 500 rather than a
  * 200-with-warning.
@@ -435,8 +435,8 @@ export async function runEnrichmentForDataset(
   options?: { ref?: string; clientCommits?: boolean },
 ): Promise<EnrichmentRunResult> {
   const ref = options?.ref ?? "main";
-  if (!env.OPENROUTER_API_KEY) {
-    return { ok: false, error: "OPENROUTER_API_KEY not configured", ref };
+  if (!env.ANTHROPIC_API_KEY || !env.ANTHROPIC_BASE_URL || !env.ANTHROPIC_WORKSPACE_ID) {
+    return { ok: false, error: "Claude API not configured (ANTHROPIC_* bindings)", ref };
   }
 
   // Tag refs are immutable; force client_commits=true so the inner pipeline

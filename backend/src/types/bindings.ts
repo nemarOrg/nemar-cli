@@ -97,7 +97,12 @@ export interface Bindings {
   DEV_WEBHOOK_MIRROR_URL?: string;
   TEST_BYPASS_TOKEN?: string; // Optional - for CI/CD rate limit bypass
   ENCRYPTION_KEY?: string; // For encrypting stored credentials
-  OPENROUTER_API_KEY?: string; // For LLM-based metadata enrichment
+  // LLM enrichment via Claude Platform on AWS (Anthropic-operated, AWS-billed;
+  // NOT Bedrock). All three required; requests without the workspace header
+  // are rejected by the endpoint.
+  ANTHROPIC_API_KEY?: string; // Long-lived key (secret)
+  ANTHROPIC_BASE_URL?: string; // https://aws-external-anthropic.<region>.api.aws
+  ANTHROPIC_WORKSPACE_ID?: string; // wrkspc_... the key is authorized on
 
   // ORCID SSO (#832). Confidential OAuth client; login works on the free
   // Public API tier (no Member API needed). All optional: when CLIENT_ID /
