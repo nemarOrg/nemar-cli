@@ -14,6 +14,7 @@ import { completeSandbox, getSandboxStatus, resetSandbox } from "../lib/api/auth
 import { requestUploadCredentials } from "../lib/api/data.js";
 import { createDataset, finalizeDataset } from "../lib/api/datasets.js";
 import { ApiError } from "../lib/api/errors.js";
+import { SANDBOX_ATTESTATION } from "../lib/attestation.js";
 import { deleteConfig, getConfig, isAuthenticated, setConfig } from "../lib/config.js";
 import {
   type ConfirmOptions,
@@ -199,6 +200,9 @@ async function sandboxAction(options: { verbose?: boolean } = {}): Promise<void>
         { path: "sub-01/eeg/sub-01_task-rest_eeg.json", size: 300, type: "metadata" },
       ],
       sandbox: true,
+      // Training fixtures, not participant data: attested as owner fixtures
+      // so sandbox rows carry a real record instead of NULLs (ADR 0024).
+      attestation: SANDBOX_ATTESTATION,
     });
 
     datasetId = response.dataset.dataset_id;
