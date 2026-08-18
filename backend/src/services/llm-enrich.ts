@@ -40,6 +40,23 @@ function truncateReadme(content: string): string {
  *  version bumps are a deliberate one-line change here. */
 const CLAUDE_MODEL = "claude-sonnet-5";
 
+/** Accumulated token usage across the LLM calls of one enrichment run,
+ *  from the Messages API `usage` field. Feeds the cost estimate surfaced
+ *  in the enrichment response body. */
+export interface LlmUsage {
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+/** Estimated cost in USD for accumulated usage at claude-sonnet-5 standard
+ *  rates ($3 / $15 per MTok). Intro pricing through 2026-08-31 is lower, so
+ *  this reads slightly conservative until then. */
+export function estimateUsageCostUsd(usage: LlmUsage): number {
+  const usd = (usage.input_tokens * 3 + usage.output_tokens * 15) / 1_000_000;
+  return Math.round(usd * 10000) / 10000;
+}
+
 /** Connection settings for the Claude Platform on AWS Messages endpoint.
  *  All three are required: the endpoint rejects any request that lacks the
  *  `anthropic-workspace-id` header. */
@@ -50,10 +67,13 @@ export interface LlmClientConfig {
   baseUrl: string;
   /** Workspace ID (wrkspc_...) the key is authorized on. */
   workspaceId: string;
+  /** Optional accumulator; each callClaude adds its response usage to it. */
+  usage?: LlmUsage;
 }
 
 interface ClaudeMessagesResponse {
   content?: Array<{ type?: string; text?: string }>;
+  usage?: { input_tokens?: number; output_tokens?: number };
 }
 
 /**
@@ -94,6 +114,11 @@ async function callClaude(
   }
 
   const data = (await response.json()) as ClaudeMessagesResponse;
+  if (config.usage && data.usage) {
+    config.usage.calls += 1;
+    config.usage.input_tokens += data.usage.input_tokens ?? 0;
+    config.usage.output_tokens += data.usage.output_tokens ?? 0;
+  }
   const content = data.content?.find((block) => block.type === "text")?.text;
   if (!content) {
     throw new Error("No content in LLM response");
@@ -143,7 +168,9 @@ Rules:
   * IsDerivedFrom: a source dataset this dataset was created from.
   * When unsure whether a paper is THIS dataset's own data paper, use References.
 - Omit any field where you have no information. Return {} if nothing can be extracted.
-- Do NOT hallucinate DOIs or funding numbers.`;
+- Do NOT hallucinate DOIs or funding numbers. Include a DOI ONLY when it appears verbatim
+  in the README or dataset description. If a paper is cited without a DOI, OMIT it —
+  NEVER construct or recall a DOI for a textual citation.`;
 
 /**
  * Extract structured v2 metadata from README and BIDS description using an LLM.
@@ -423,6 +450,35 @@ export function seedFromBids(
   }
 
   return seeded;
+}
+
+/**
+ * Drop DOI related_identifiers that do not appear in the dataset's source
+ * material (README + dataset_description.json).
+ *
+ * LLMs sometimes fabricate plausible DOIs for papers the README cites only
+ * as text (#826 diligence: on004100 got two invented 10.1093/brain/... DOIs,
+ * one pointing at an unrelated glioblastoma paper). Every legitimate
+ * related-identifier DOI in this pipeline originates from the README or the
+ * BIDS description, so source presence is a safe, deterministic filter.
+ * IsDerivedFrom entries (BIDS SourceDatasets, which may express the DOI as a
+ * resolver URL) and URL entries are exempt. Applied to LLM output before
+ * merging AND to carried-forward metadata, so past hallucinations self-heal
+ * on re-enrichment.
+ */
+export function pruneUnsourcedDois<
+  T extends { related_identifiers?: RelatedIdentifierEntry[] },
+>(target: T, readmeContent: string, bidsDescription: Record<string, unknown>): T {
+  if (!target.related_identifiers || target.related_identifiers.length === 0) return target;
+  const sourceText = `${readmeContent}\n${JSON.stringify(bidsDescription)}`.toLowerCase();
+  const kept = target.related_identifiers.filter(
+    (r) =>
+      r.identifier_type !== "DOI" ||
+      r.relation_type === "IsDerivedFrom" ||
+      sourceText.includes(r.identifier.toLowerCase()),
+  );
+  if (kept.length === target.related_identifiers.length) return target;
+  return { ...target, related_identifiers: kept };
 }
 
 /**

@@ -366,6 +366,14 @@ export interface EnrichmentRunResult {
   ok: boolean;
   error?: string;
   ref: string;
+  /** Token usage + estimated USD cost of this run's LLM calls, when the
+   *  pipeline completed and reported it. */
+  llm_usage?: {
+    calls: number;
+    input_tokens: number;
+    output_tokens: number;
+    est_cost_usd: number;
+  };
 }
 
 /**
@@ -460,11 +468,12 @@ export async function runEnrichmentForDataset(
         ref,
       };
     }
+    const llmUsage = "llm_usage" in outcome.body ? outcome.body.llm_usage : undefined;
     const subErrors = extractEnrichmentSubErrors(outcome.body);
     if (subErrors.length > 0) {
-      return { ok: false, error: subErrors.join("; "), ref };
+      return { ok: false, error: subErrors.join("; "), ref, llm_usage: llmUsage };
     }
-    return { ok: true, ref };
+    return { ok: true, ref, llm_usage: llmUsage };
   } catch (err) {
     return { ok: false, error: errorMessage(err), ref };
   }

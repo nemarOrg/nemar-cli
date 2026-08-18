@@ -19,6 +19,11 @@ export interface Bindings {
   // no-ops when the binding is absent (dev/test, or before provisioning).
   ANALYTICS?: AnalyticsEngineDataset;
 
+  // LLM enrichment spend metering (nemar_llm_metrics). One data point per
+  // enrichment run; the observability dashboard reads it per hour/day via
+  // the AE SQL API. Optional: recordLlmUsage() no-ops when absent.
+  ANALYTICS_LLM?: AnalyticsEngineDataset;
+
   // Environment variables
   ENVIRONMENT: "production" | "development" | "staging" | "test";
   API_BASE_URL: string;

@@ -52,11 +52,14 @@ import {
 import {
   correctFromFeedback,
   enrichFromReadme,
+  estimateUsageCostUsd,
   mergeWithExisting,
+  pruneUnsourcedDois,
   seedFromBids,
   validateMeshTerms,
   validateMetadata,
 } from "./llm-enrich.js";
+import { recordLlmUsage } from "./llm-metrics.js";
 import { ensureParticipantsTsv } from "./participants-tsv.js";
 import { errorMessage, extractRepoName } from "./repo-metadata.js";
 import { extractExtensions, formatBytes, getDatasetS3Stats } from "./s3.js";
@@ -123,6 +126,14 @@ export interface EnrichmentSuccessBody {
   metadata_columns_error?: string;
   issue_creation_error?: string;
   doi_sync_error?: string;
+  /** Token usage across this run's LLM calls, with an estimated USD cost
+   *  at claude-sonnet-5 standard rates. */
+  llm_usage?: {
+    calls: number;
+    input_tokens: number;
+    output_tokens: number;
+    est_cost_usd: number;
+  };
 }
 
 export interface EnrichmentSkippedBody {
@@ -249,10 +260,12 @@ export async function enrichDataset(
       },
     };
   }
+  const llmUsage = { calls: 0, input_tokens: 0, output_tokens: 0 };
   const llmConfig = {
     apiKey: env.ANTHROPIC_API_KEY,
     baseUrl: env.ANTHROPIC_BASE_URL,
     workspaceId: env.ANTHROPIC_WORKSPACE_ID,
+    usage: llmUsage,
   };
 
   const datasetId = opts.datasetId;
@@ -521,14 +534,14 @@ export async function enrichDataset(
       console.log(`[llm-enrich] Re-enriching ${datasetId}: ${skipDecision.proceedReason}`);
     }
 
-    // Stage 1: Seed from BIDS (deterministic, no LLM call)
+    // Stage 1: Seed from BIDS (deterministic, no LLM call). Prune DOI
+    // related-identifiers that no longer appear in the source material so
+    // hallucinated DOIs from past runs self-heal on re-enrichment.
     const treePaths = tree.map((f) => f.path);
-    const seeded = seedFromBids(
+    const seeded = pruneUnsourcedDois(
+      seedFromBids(bidsDescription, existingMetadata, datasetId, treePaths, landingBase),
+      readmeContent,
       bidsDescription,
-      existingMetadata,
-      datasetId,
-      treePaths,
-      landingBase,
     );
     console.log(
       `[llm-enrich] Stage 1 (seed): ${datasetId} - ${Object.keys(seeded.authors || {}).length} authors, ${(seeded.related_identifiers || []).length} related IDs`,
@@ -635,7 +648,11 @@ export async function enrichDataset(
     }
 
     // Stage 2: LLM enrichment (adds description, keywords, methods, etc.)
-    const llmResult = await enrichFromReadme(readmeContent, bidsDescription, llmConfig);
+    const llmResult = pruneUnsourcedDois(
+      await enrichFromReadme(readmeContent, bidsDescription, llmConfig),
+      readmeContent,
+      bidsDescription,
+    );
     const enriched = mergeWithExisting(seededWithOrcids, llmResult);
     const enrichedFields = Object.keys(llmResult).filter(
       (k) => llmResult[k as keyof typeof llmResult] !== undefined,
@@ -739,13 +756,17 @@ export async function enrichDataset(
           `[llm-enrich] Correction attempt ${correctionAttempts}/${MAX_CORRECTIONS} for ${datasetId}`,
         );
         try {
-          const corrections = await correctFromFeedback(
-            currentMetadata,
-            validated.validation.blocking_issues,
-            validated.validation.warnings,
+          const corrections = pruneUnsourcedDois(
+            await correctFromFeedback(
+              currentMetadata,
+              validated.validation.blocking_issues,
+              validated.validation.warnings,
+              readmeContent,
+              bidsDescription,
+              llmConfig,
+            ),
             readmeContent,
             bidsDescription,
-            llmConfig,
           );
           currentMetadata = mergeWithExisting(currentMetadata, corrections);
         } catch (corrErr) {
@@ -1044,6 +1065,18 @@ export async function enrichDataset(
       }
     }
 
+    console.log(
+      `[llm-enrich] LLM usage for ${datasetId}: ${llmUsage.calls} calls, ${llmUsage.input_tokens} in, ${llmUsage.output_tokens} out (~$${estimateUsageCostUsd(llmUsage)})`,
+    );
+    recordLlmUsage(env, {
+      datasetId,
+      outcome: "ok",
+      calls: llmUsage.calls,
+      inputTokens: llmUsage.input_tokens,
+      outputTokens: llmUsage.output_tokens,
+      estCostUsd: estimateUsageCostUsd(llmUsage),
+    });
+
     return {
       ok: true,
       status: 200,
@@ -1051,6 +1084,7 @@ export async function enrichDataset(
         message: `Metadata pipeline completed (stage: ${finalMetadata.pipeline_stage})`,
         dataset_id: datasetId,
         pipeline_stage: finalMetadata.pipeline_stage,
+        llm_usage: { ...llmUsage, est_cost_usd: estimateUsageCostUsd(llmUsage) },
         seeded_fields: {
           authors: Object.keys(seeded.authors || {}).length,
           related_identifiers: (seeded.related_identifiers || []).length,
@@ -1081,6 +1115,15 @@ export async function enrichDataset(
     };
   } catch (error) {
     console.error(`[llm-enrich] Failed for ${datasetId}:`, error);
+    // Meter spend even on failure: the LLM calls that ran were still billed.
+    recordLlmUsage(env, {
+      datasetId,
+      outcome: "failed",
+      calls: llmUsage.calls,
+      inputTokens: llmUsage.input_tokens,
+      outputTokens: llmUsage.output_tokens,
+      estCostUsd: estimateUsageCostUsd(llmUsage),
+    });
     return {
       ok: false,
       status: 500,

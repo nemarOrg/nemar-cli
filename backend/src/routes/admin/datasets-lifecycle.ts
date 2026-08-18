@@ -1530,7 +1530,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     if (!skipEnrichment) {
       const enr = await runEnrichmentForDataset(c.env, datasetId, { ref: body.ref });
       result.enrichment = enr.ok
-        ? { status: "ok", ref: enr.ref }
+        ? { status: "ok", ref: enr.ref, ...(enr.llm_usage && { llm_usage: enr.llm_usage }) }
         : { status: "failed", ref: enr.ref, error: enr.error };
     }
 
