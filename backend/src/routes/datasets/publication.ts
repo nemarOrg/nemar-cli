@@ -21,6 +21,7 @@ import {
   checkWorkflowExists,
   deployWorkflows,
   ensureRepoToSpec,
+  getFileContent,
   getWorkflowRuns,
   setRepoVisibility,
   signPrescreenCallbackToken,
@@ -29,6 +30,10 @@ import {
 import { getDatasetsToken } from "../../services/github-auth";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { markDatasetPrivate, markDatasetPublic } from "../../services/s3";
+import {
+  SUBMISSION_POLICY_URL,
+  evaluateSubmissionMinimums,
+} from "../../services/submission-minimums";
 import { hasRole } from "../../types/bindings";
 import { extractRepoName } from "./shared";
 import type { DatasetsRouter } from "./shared";
@@ -46,6 +51,10 @@ const BLOCK_MESSAGES: Record<string, string> = {
   // pre-deploy 'blocked' row still renders a sensible message until re-request.
   prescreen_failed:
     "The automated pre-screen flagged missing publication essentials (data, README, or dataset_description). Address the gaps and re-request publication; the pre-screen now runs as a non-blocking advisory.",
+  // No policy URL in the message: the response carries policy_url separately
+  // and the CLI renders it once, alongside the itemized reasons.
+  min_requirements_failed:
+    "The dataset does not meet the minimum submission requirements. Fix the stated items and re-request publication.",
 };
 
 export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
@@ -63,7 +72,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
 
     const dataset = await db
       .prepare(
-        "SELECT id, dataset_id, owner_user_id, is_sandbox, is_exemplar, github_repo, visibility FROM datasets WHERE dataset_id = ?",
+        "SELECT id, dataset_id, owner_user_id, is_sandbox, is_exemplar, github_repo, visibility, source FROM datasets WHERE dataset_id = ?",
       )
       .bind(datasetId)
       .first<{
@@ -74,6 +83,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         is_exemplar: number | null;
         github_repo: string | null;
         visibility: string | null;
+        source: string | null;
       }>();
 
     if (!dataset) {
@@ -176,15 +186,48 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       console.warn(`[publish-request] Skipping CI checks for ${datasetId}: no GitHub repo`);
     }
 
+    // Deterministic submission minimums for NATIVE submissions (#1087, ADR
+    // 0026): Name >= 25 chars, non-placeholder Authors, ethics statement.
+    // OpenNeuro imports and exemplars passed an upstream review and are
+    // exempt. Fail-open on a fetch error: the CI check above already proved
+    // GitHub reachable, so a later hiccup is logged and left to the admin
+    // review rather than adding a spurious block.
+    let minReasons: string[] | null = null;
+    if (!blocked && repoName && pat && dataset.source !== "openneuro" && !dataset.is_exemplar) {
+      try {
+        const descriptionJson = await getFileContent(repoName, "dataset_description.json", pat);
+        let readme: string | null = null;
+        for (const candidate of ["README.md", "README", "README.txt", "README.rst"]) {
+          readme = await getFileContent(repoName, candidate, pat);
+          if (readme !== null) break;
+        }
+        const reasons = evaluateSubmissionMinimums(descriptionJson, readme);
+        if (reasons.length > 0) {
+          blocked = true;
+          blockReason = "min_requirements_failed";
+          minReasons = reasons;
+        }
+      } catch (err) {
+        console.error(
+          `[publish-request] submission-minimums check failed for ${datasetId} (non-fatal):`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+
     let prId: number | null = requestId ?? null;
     if (requestId) {
       // Update existing blocked request
       if (blocked) {
+        // Persist the itemized minimums reasons (migration 0068) so the later
+        // /publish/status view stays as specific as this rejection; NULL for
+        // CI blocks, and stale reasons from a prior minimums block are
+        // overwritten either way.
         await db
           .prepare(
-            "UPDATE publication_requests SET status = 'blocked', block_reason = ?, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE publication_requests SET status = 'blocked', block_reason = ?, min_requirements_reasons = ?, updated_at = datetime('now') WHERE id = ?",
           )
-          .bind(blockReason, requestId)
+          .bind(blockReason, minReasons ? JSON.stringify(minReasons) : null, requestId)
           .run();
       } else {
         // Unblock: transition to requested. Also clear any prior pre-screen
@@ -192,7 +235,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         // re-request doesn't leave a stale 'failed'/nonce on a 'requested' row).
         await db
           .prepare(
-            "UPDATE publication_requests SET status = 'requested', block_reason = NULL, prescreen_status = NULL, prescreen_nonce = NULL, prescreen_issue_url = NULL, prescreen_reasons = NULL, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE publication_requests SET status = 'requested', block_reason = NULL, min_requirements_reasons = NULL, prescreen_status = NULL, prescreen_nonce = NULL, prescreen_issue_url = NULL, prescreen_reasons = NULL, updated_at = datetime('now') WHERE id = ?",
           )
           .bind(requestId)
           .run();
@@ -201,9 +244,15 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       // Create new publication request
       const inserted = await db
         .prepare(
-          "INSERT INTO publication_requests (dataset_id, requested_by, status, block_reason) VALUES (?, ?, ?, ?) RETURNING id",
+          "INSERT INTO publication_requests (dataset_id, requested_by, status, block_reason, min_requirements_reasons) VALUES (?, ?, ?, ?, ?) RETURNING id",
         )
-        .bind(datasetId, currentUser.id, blocked ? "blocked" : "requested", blockReason)
+        .bind(
+          datasetId,
+          currentUser.id,
+          blocked ? "blocked" : "requested",
+          blockReason,
+          minReasons ? JSON.stringify(minReasons) : null,
+        )
         .first<{ id: number }>();
       prId = inserted?.id ?? null;
       if (prId === null) {
@@ -221,6 +270,15 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
           message: BLOCK_MESSAGES[blockReason || ""] || "Publication request blocked.",
           dataset_id: datasetId,
           ci_url: ciUrl,
+          // Specific, user-facing failures from the minimums check, mirrored
+          // under `details` because the CLI's ApiError only carries that field.
+          ...(minReasons
+            ? {
+                reasons: minReasons,
+                policy_url: SUBMISSION_POLICY_URL,
+                details: { reasons: minReasons, policy_url: SUBMISSION_POLICY_URL },
+              }
+            : {}),
         },
         422,
       );
@@ -344,6 +402,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         denied_at: string | null;
         denied_reason: string | null;
         block_reason: string | null;
+        min_requirements_reasons: string | null;
         prescreen_status: string | null;
         prescreen_reasons: string | null;
         prescreen_issue_url: string | null;
@@ -386,6 +445,20 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       };
     }
 
+    // Persisted submission-minimums reasons (#1087, migration 0068): keep the
+    // status view as specific as the original 422.
+    let minReasons: string[] | undefined;
+    if (request.block_reason === "min_requirements_failed" && request.min_requirements_reasons) {
+      try {
+        const parsed = JSON.parse(request.min_requirements_reasons);
+        if (Array.isArray(parsed)) {
+          minReasons = parsed.filter((r): r is string => typeof r === "string");
+        }
+      } catch (err) {
+        console.error(`[publish-status] malformed min_requirements_reasons for ${datasetId}:`, err);
+      }
+    }
+
     return c.json({
       dataset_id: datasetId,
       status: request.status,
@@ -401,6 +474,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
             ci_url: `https://github.com/nemarDatasets/${repoName}/actions`,
           }
         : {}),
+      ...(minReasons?.length ? { reasons: minReasons, policy_url: SUBMISSION_POLICY_URL } : {}),
       ...(prescreenAdvisory ? { advisory: prescreenAdvisory } : {}),
       steps_completed: JSON.parse(request.steps_completed || "[]"),
       current_step: request.current_step,

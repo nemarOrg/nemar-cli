@@ -31,6 +31,11 @@ export interface PublishStatusResponse {
   // Present when status='blocked': link to the dataset repo's Actions tab so the
   // user can see the BIDS validation run (#428).
   ci_url?: string;
+  // Present when block_reason='min_requirements_failed' (#1087): the itemized
+  // submission-minimums failures persisted at request time, plus the policy
+  // they come from.
+  reasons?: string[];
+  policy_url?: string;
   // Non-blocking pre-screen advisory (#756): present when the screen flagged a
   // concern. The request is NOT blocked by this.
   advisory?: { source: "prescreen"; reasons: string[]; issue_url?: string };
