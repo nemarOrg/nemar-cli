@@ -55,7 +55,11 @@ async function isDatasetCollaborator(
 // File schema for upload requests
 const fileSchema = z.object({
   path: z.string(),
-  size: z.number().int().positive(),
+  // Zero-byte files are legal: BIDS folders carry empty placeholder files,
+  // an empty-body presigned PUT is valid S3, and the web upload flow sends
+  // File.size verbatim — a single empty file must not block the whole
+  // create (#1084). Only negative sizes are rejected.
+  size: z.number().int().nonnegative(),
   type: z.enum(["metadata", "data"]),
 });
 
