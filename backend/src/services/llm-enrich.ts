@@ -129,9 +129,19 @@ Rules:
 - methods_description: Only include if methods/acquisition details are described.
 - keywords: 3-8 domain-specific terms. Include modality (EEG, MEG, etc.) if applicable. Use subject_scheme "MeSH" ONLY when you are confident the term is a real MeSH descriptor. Do NOT use "LCSH" or any other scheme. Terms that are not MeSH descriptors should have no subject_scheme.
 - funding_references: Parse funding strings into structured format. Common funders: NIH, NSF, ERC, DFG. Use funder_name (not funderName).
-- related_identifiers: Only include actual DOIs (10.XXXX/...) with identifier_type "DOI". Common relation_type values:
-  IsCitedBy, Cites, IsSupplementTo, IsSupplementedBy, References, IsReferencedBy,
-  IsDescribedBy, Describes, IsVersionOf, HasVersion, IsPartOf, HasPart
+- related_identifiers: Only include actual DOIs (10.XXXX/...) with identifier_type "DOI".
+  The relation_type is CRITICAL for downstream citation attribution. Assign it by what the
+  paper IS to THIS dataset, not by where the DOI appeared:
+  * IsDescribedBy or IsSupplementTo: ONLY for a paper that introduces or describes THIS
+    dataset's own data (its data paper / data descriptor). A dataset has at most one or two
+    such papers.
+  * References: everything this dataset merely uses or cites — shared paradigm/stimulus
+    resources (e.g. ERP CORE), other datasets it reuses (e.g. HBN-EEG), standards and
+    specification papers (e.g. BIDS, iEEG-BIDS), methods/analysis papers, and software
+    papers (e.g. EEGLAB, MNE-Python, fMRIPrep). A paper describing a STANDARD or RESOURCE
+    the dataset follows is NOT the dataset's data paper.
+  * IsDerivedFrom: a source dataset this dataset was created from.
+  * When unsure whether a paper is THIS dataset's own data paper, use References.
 - Omit any field where you have no information. Return {} if nothing can be extracted.
 - Do NOT hallucinate DOIs or funding numbers.`;
 
@@ -418,9 +428,10 @@ export function seedFromBids(
 /**
  * Merge LLM enrichment results into a seeded NemarMetadataV2 object.
  *
- * Additive merge for related_identifiers and funding_references:
- * - BIDS-seeded IsDerivedFrom entries are preserved
- * - LLM adds new entries; duplicates are removed
+ * related_identifiers: BIDS-seeded IsDerivedFrom entries and URL entries are
+ * locked; other DOI entries are reclassifiable by the LLM (#826); new entries
+ * are added with duplicates removed. funding_references merge additively with
+ * LLM-parsed entries replacing matching raw BIDS strings.
  *
  * LLM overwrites: description, methods_description, keywords (LLM's domain).
  * Authors are never touched by the LLM.
@@ -469,16 +480,25 @@ export function mergeWithExisting(
     merged.funding_references = allFunds;
   }
 
-  // Related identifiers merge: BIDS-seeded entries take priority for the same identifier.
-  // If BIDS seeds "IsDerivedFrom" for a DOI, drop any LLM entry for the same DOI
-  // (the LLM often misclassifies SourceDatasets as "IsVersionOf").
+  // Related identifiers merge. Two classes of existing entries are locked:
+  // - IsDerivedFrom (seeded from BIDS SourceDatasets; the LLM often
+  //   misclassifies these as "IsVersionOf")
+  // - URL entries (the GitHub repo / NEMAR landing links)
+  // Every other DOI entry is RECLASSIFIABLE: the LLM's relation_type replaces
+  // the existing one in place (#826). This lets re-enrichment both upgrade a
+  // data paper that ReferencesAndLinks seeded as mere "References" to
+  // IsDescribedBy, and downgrade a standard/resource paper a prior run wrongly
+  // tagged IsDescribedBy back to References.
   if (llmResult.related_identifiers) {
     const existingRels = existing?.related_identifiers || [];
-    const seededIdentifiers = new Set(existingRels.map((r) => r.identifier));
-    const allRels = [...existingRels];
+    const allRels = existingRels.map((r) => ({ ...r }));
     for (const newRel of llmResult.related_identifiers) {
-      // Skip LLM entries for identifiers already seeded from BIDS
-      if (seededIdentifiers.has(newRel.identifier)) continue;
+      const current = allRels.find((r) => r.identifier === newRel.identifier);
+      if (current) {
+        const locked = current.relation_type === "IsDerivedFrom" || current.identifier_type === "URL";
+        if (!locked) current.relation_type = newRel.relation_type;
+        continue;
+      }
       const key = `${newRel.identifier}|${newRel.relation_type}`;
       const exists = allRels.some((r) => `${r.identifier}|${r.relation_type}` === key);
       if (!exists) allRels.push(newRel);
@@ -672,9 +692,15 @@ Rate each criterion from 0-100 confidence that the metadata is CORRECT:
 - Is each relation type correct?
   - IsDerivedFrom: this dataset was created from that source
   - IsVersionOf: this is a newer version of the same dataset
-  - IsDescribedBy: a paper/page that describes this dataset (also valid for GitHub repo and NEMAR landing page URLs)
-  - IsSupplementTo: this dataset supplements a publication
-  - References: general citation
+  - IsDescribedBy: a paper that introduces/describes THIS dataset's own data — its data
+    paper (also valid for GitHub repo and NEMAR landing page URLs)
+  - IsSupplementTo: this dataset supplements that publication (also a data-paper relation)
+  - References: general citation — reused paradigm/stimulus resources (e.g. ERP CORE),
+    standards/specification papers (e.g. BIDS, iEEG-BIDS), methods and software papers
+    (e.g. EEGLAB, MNE-Python, fMRIPrep)
+- FLAG as a blocking issue any DOI tagged IsDescribedBy/IsSupplementTo whose paper is a
+  standard, shared resource, or method/software paper rather than this dataset's own data
+  paper — and the reverse: this dataset's own data paper tagged as mere References.
 - Are the DOIs valid identifiers?
 - Cross-check: does dataset_description.json have SourceDatasets that should be IsDerivedFrom?
 - NOTE: GitHub repo URLs (github.com/nemarDatasets/...) and NEMAR landing page URLs (nemar.org/dataset/...) with relation type IsDescribedBy are CORRECT and should NOT be flagged as issues.
@@ -781,7 +807,10 @@ Your job is to produce CORRECTED metadata fields that address the blocking issue
 IMPORTANT:
 - Only return fields that need correction. Do NOT return unchanged fields.
 - Do NOT modify authors (those are locked from BIDS).
-- Do NOT modify related_identifiers that were seeded from BIDS (IsDerivedFrom entries, GitHub/NEMAR URLs).
+- Do NOT modify IsDerivedFrom entries or GitHub/NEMAR URL entries in related_identifiers.
+  You MAY reclassify other DOI relation_types — e.g. correct THIS dataset's own data paper
+  to IsDescribedBy, or a standard/resource/software paper wrongly tagged IsDescribedBy
+  back to References.
 - Focus on fixing the blocking issues. Warnings are optional to address.
 
 Return ONLY valid JSON with the corrected fields (same schema as enrichment):
