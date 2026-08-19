@@ -19,10 +19,10 @@
  * that constraint errors are always surfaced.
  */
 
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -253,16 +253,12 @@ describe("migration 0021 — broadcast_emails user recipient", () => {
   // -------------------------------------------------------------------------
 
   test("all 10 fixture rows are preserved after table rebuild", () => {
-    const rows = db
-      .prepare("SELECT * FROM broadcast_emails ORDER BY id")
-      .all() as BroadcastRow[];
+    const rows = db.prepare("SELECT * FROM broadcast_emails ORDER BY id").all() as BroadcastRow[];
     expect(rows).toHaveLength(FIXTURE_ROWS.length);
   });
 
   test("row fields match fixture data verbatim", () => {
-    const rows = db
-      .prepare("SELECT * FROM broadcast_emails ORDER BY id")
-      .all() as BroadcastRow[];
+    const rows = db.prepare("SELECT * FROM broadcast_emails ORDER BY id").all() as BroadcastRow[];
 
     for (let i = 0; i < FIXTURE_ROWS.length; i++) {
       const expected = FIXTURE_ROWS[i];
@@ -279,9 +275,9 @@ describe("migration 0021 — broadcast_emails user recipient", () => {
   });
 
   test("row ids are sequential starting from 1", () => {
-    const rows = db
-      .prepare("SELECT id FROM broadcast_emails ORDER BY id")
-      .all() as { id: number }[];
+    const rows = db.prepare("SELECT id FROM broadcast_emails ORDER BY id").all() as {
+      id: number;
+    }[];
     for (let i = 0; i < rows.length; i++) {
       expect(rows[i].id).toBe(i + 1);
     }
@@ -413,9 +409,7 @@ describe("migration 0021 — broadcast_emails user recipient", () => {
 
   test("no stale broadcast_emails_new table remains after migration", () => {
     const tbl = db
-      .prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='broadcast_emails_new'",
-      )
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='broadcast_emails_new'")
       .get();
     expect(tbl).toBeNull();
   });
@@ -510,9 +504,7 @@ describe("migration 0022 — broadcast_emails GLOB user:*", () => {
 
   test("no stale broadcast_emails_new table remains after 0022", () => {
     const tbl = db
-      .prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='broadcast_emails_new'",
-      )
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='broadcast_emails_new'")
       .get();
     expect(tbl).toBeNull();
   });
@@ -558,13 +550,22 @@ describe("broadcast_emails AUTOINCREMENT across 0021 + 0022", () => {
        VALUES (1, 'all', $subject, 'Body.', 0, 0, '[]', $sent_at)`,
     );
     for (let i = 1; i <= 5; i++) {
-      insert.run({ $subject: `Pre-0021 row ${i}`, $sent_at: `2025-01-${String(i).padStart(2, "0")} 00:00:00` });
+      insert.run({
+        $subject: `Pre-0021 row ${i}`,
+        $sent_at: `2025-01-${String(i).padStart(2, "0")} 00:00:00`,
+      });
     }
     insert.finalize();
     // Apply both rebuilds in order — the scenario the chained-rebuild
     // concern was about.
-    execScript(db, readFileSync(join(MIGRATIONS_DIR, "0021_broadcast_user_recipient.sql"), "utf-8"));
-    execScript(db, readFileSync(join(MIGRATIONS_DIR, "0022_broadcast_user_glob_check.sql"), "utf-8"));
+    execScript(
+      db,
+      readFileSync(join(MIGRATIONS_DIR, "0021_broadcast_user_recipient.sql"), "utf-8"),
+    );
+    execScript(
+      db,
+      readFileSync(join(MIGRATIONS_DIR, "0022_broadcast_user_glob_check.sql"), "utf-8"),
+    );
   });
 
   afterAll(() => {
@@ -572,9 +573,10 @@ describe("broadcast_emails AUTOINCREMENT across 0021 + 0022", () => {
   });
 
   test("all 5 pre-0021 rows survive both rebuilds with original ids", () => {
-    const rows = db
-      .prepare("SELECT id, subject FROM broadcast_emails ORDER BY id")
-      .all() as { id: number; subject: string }[];
+    const rows = db.prepare("SELECT id, subject FROM broadcast_emails ORDER BY id").all() as {
+      id: number;
+      subject: string;
+    }[];
     expect(rows).toHaveLength(5);
     for (let i = 0; i < 5; i++) {
       expect(rows[i].id).toBe(i + 1);

@@ -199,7 +199,9 @@ dispatching against dev-created repos.
 - Ensure present: `GITHUB_ADMIN_PAT`/`GITHUB_APP_*`, `ENCRYPTION_KEY`, `RESEND_API_KEY`,
   `GITHUB_WEBHOOK_SECRET` (**must equal** the nemar-publish-bot App secret — Phase 5 re-posts the HMAC),
   `NEMAR_WEBHOOK_TOKEN`, `EZID_SANDBOX_USERNAME/PASSWORD`, `ZENODO_SANDBOX_API_KEY`,
-  `MANIFEST_CALLBACK_SECRET`, `PRESCREEN_CALLBACK_SECRET`, `OPENROUTER_API_KEY`.
+  `MANIFEST_CALLBACK_SECRET`, `PRESCREEN_CALLBACK_SECRET`, `ANTHROPIC_API_KEY`
+  (replaced `OPENROUTER_API_KEY` 2026-08-18; `ANTHROPIC_BASE_URL`/`ANTHROPIC_WORKSPACE_ID`
+  are committed `[env.dev.vars]`, only the key is a secret).
 - Ensure **absent** (defense-in-depth over the code gates): `EZID_USERNAME`, `EZID_PASSWORD`, `ZENODO_API_KEY`.
 
 **Code/config:** flip `[env.dev.vars]` `S3_BUCKET = "nemar-dev"` (the single most important line),

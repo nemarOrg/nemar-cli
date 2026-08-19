@@ -202,6 +202,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
     };
 
     c.set("user", user);
+    c.set("authMethod", "token");
 
     await next();
     return;
@@ -213,6 +214,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
   const cookieUser = await resolveCookieUser(c);
   if (cookieUser) {
     c.set("user", cookieUser);
+    c.set("authMethod", "cookie");
     await next();
     return;
   }

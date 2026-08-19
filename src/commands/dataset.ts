@@ -56,6 +56,7 @@ import {
   requestPublication,
   resendPublishNotification,
 } from "../lib/api/publish.js";
+import { type DepositAttestation, resolveAttestation } from "../lib/attestation.js";
 import { isAwsCliAvailable } from "../lib/aws-cli.js";
 import { buildBidsFilterArgs, chooseGetFilter } from "../lib/bids-filter.js";
 import {
@@ -170,6 +171,7 @@ import {
   writeNemarMetadata,
 } from "../lib/upload/finalize.js";
 import {
+  computeFilesToUpload,
   prepareUploadProgress,
   reconcileProgressWithDataset,
   showUploadPlan,
@@ -480,6 +482,20 @@ datasetCommand
   .option(YES_OPTION, YES_DESCRIPTION)
   .option("--restart", "Clear upload progress and re-upload all files")
   .option("--no", NO_DESCRIPTION) // Long form only; -n conflicts with --name
+  .option("--deposit-type <type>", "Attestation: 'owner' or 'redistribution' (non-interactive)")
+  .option("--key-status <status>", "Attestation: re-identification key 'destroyed' or 'retained'")
+  .option(
+    "--confirm-deidentified",
+    "Attestation: confirm the dataset contains no identifiable personal information",
+  )
+  .option(
+    "--affirm-no-duplicate",
+    "Attestation (redistribution only): affirm the dataset is not already archived in BIDS format",
+  )
+  .option(
+    "--upstream-source <ref>",
+    "Attestation (redistribution only): upstream release URL or accession",
+  )
   .addHelpText(
     "after",
     `
@@ -564,6 +580,17 @@ Examples:
     if (planResult.status === "stop") return;
     const { existingConfig } = planResult.value;
 
+    // Step 4f: Deposit attestation (contributor terms, #1077). After the
+    // --dry-run exit so previews never prompt; before the final confirm so
+    // declining costs nothing. --yes does not satisfy it (see attestation.ts).
+    let attestation: DepositAttestation;
+    try {
+      attestation = await resolveAttestation(options);
+    } catch (attestErr) {
+      console.log(chalk.red(attestErr instanceof Error ? attestErr.message : String(attestErr)));
+      process.exit(1);
+    }
+
     // Step 5: Confirm with user
     const confirmResult = await confirm(
       "Proceed with upload?",
@@ -577,11 +604,11 @@ Examples:
 
     console.log();
 
-    const {
-      dataFiles,
-      uploadProgress: loadedProgress,
-      filesToUpload,
-    } = prepareUploadProgress(absolutePath, manifest, options);
+    const { dataFiles, uploadProgress: loadedProgress } = prepareUploadProgress(
+      absolutePath,
+      manifest,
+      options,
+    );
 
     // Step 6: Create new dataset or resume the existing one
     const created = await createOrResumeDataset(
@@ -590,6 +617,7 @@ Examples:
       datasetName,
       dataFiles,
       existingConfig,
+      attestation,
     );
     if (created.status === "fail") process.exit(1);
     const datasetInfo = created.value;
@@ -599,6 +627,10 @@ Examples:
       loadedProgress,
       datasetInfo.dataset_id,
     );
+
+    // Compute the upload list AFTER reconcile: stale progress discarded above
+    // must not keep filtering the list (#884).
+    const filesToUpload = computeFilesToUpload(uploadProgress, dataFiles);
 
     // Step 6b: Accept GitHub invitation
     if ((await acceptRepoInvitation(datasetInfo)).status === "fail") process.exit(1);
@@ -3104,6 +3136,22 @@ Examples:
           console.log(chalk.dim("  Use 'nemar dataset publish resend' to remind admins."));
         } else if (error.statusCode === 403) {
           console.log(chalk.dim("  Only the dataset owner can request publication."));
+        } else if (error.statusCode === 422) {
+          // Submission-minimums rejection (#1087): print each stated reason
+          // and the policy it comes from, so the fix is actionable here.
+          const details = error.details as { reasons?: string[]; policy_url?: string } | undefined;
+          if (details?.reasons?.length) {
+            console.log(`\n  ${chalk.red("Not accepted for publication:")}`);
+            for (const reason of details.reasons) {
+              console.log(`    ${chalk.red("-")} ${reason}`);
+            }
+            if (details.policy_url) {
+              console.log(chalk.dim(`\n  Policy: ${details.policy_url}`));
+            }
+            console.log(
+              chalk.dim("  Fix the items above, then re-run 'nemar dataset publish request'."),
+            );
+          }
         }
       } else {
         spinner.fail("Failed to request publication");
@@ -3190,6 +3238,16 @@ Examples:
           console.log(`\n  ${chalk.red("Blocked:")} ${result.message}`);
         } else if (result.block_reason) {
           console.log(`\n  ${chalk.red("Blocked:")} ${result.block_reason}`);
+        }
+        // Itemized submission-minimums failures persisted at request time
+        // (#1087), so the status view stays as specific as the rejection.
+        if (result.reasons?.length) {
+          for (const reason of result.reasons) {
+            console.log(`    ${chalk.red("-")} ${reason}`);
+          }
+          if (result.policy_url) {
+            console.log(chalk.dim(`  Policy: ${result.policy_url}`));
+          }
         }
         if (result.ci_url) {
           console.log(`  ${chalk.dim("CI:")} ${result.ci_url}`);

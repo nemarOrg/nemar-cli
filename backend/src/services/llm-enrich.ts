@@ -2,7 +2,9 @@
  * Backend LLM-based metadata enrichment service (Workers-compatible)
  *
  * Extracts structured v2 metadata from README.md and BIDS dataset_description.json
- * using OpenRouter API. Designed for server-side use in Cloudflare Workers webhooks.
+ * using Claude on the Claude Platform on AWS (Anthropic-operated Messages API,
+ * billed through the lab's AWS Marketplace allocation — NOT Amazon Bedrock).
+ * Designed for server-side use in Cloudflare Workers webhooks.
  */
 
 import {
@@ -34,46 +36,109 @@ function truncateReadme(content: string): string {
   return `${content.slice(0, README_MAX_LENGTH)}\n[truncated]`;
 }
 
-interface OpenRouterResponse {
-  choices?: Array<{ message?: { content?: string } }>;
+/** Exact model ID — the Anthropic API has no rolling "latest" alias, so
+ *  version bumps are a deliberate one-line change here. */
+const CLAUDE_MODEL = "claude-sonnet-5";
+
+/** Accumulated token usage across the LLM calls of one enrichment run.
+ *  `calls` counts ATTEMPTS (incremented on dispatch), so failed HTTP calls
+ *  are still visible in metering; tokens come from the Messages API `usage`
+ *  field of successful responses. */
+export interface LlmUsage {
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+/** The usage shape surfaced in enrichment responses (webhook, admin reindex,
+ *  bulk reindex). Single source of truth — do not restate these fields. */
+export interface LlmUsageTotals extends LlmUsage {
+  est_cost_usd: number;
+}
+
+/** Estimated cost in USD for accumulated usage at claude-sonnet-5 standard
+ *  rates ($3 / $15 per MTok). Intro pricing through 2026-08-31 is lower, so
+ *  this reads slightly conservative until then. */
+export function estimateUsageCostUsd(usage: LlmUsage): number {
+  const usd = (usage.input_tokens * 3 + usage.output_tokens * 15) / 1_000_000;
+  return Math.round(usd * 10000) / 10000;
+}
+
+/** Connection settings for the Claude Platform on AWS Messages endpoint.
+ *  All three are required: the endpoint rejects any request that lacks the
+ *  `anthropic-workspace-id` header. */
+export interface LlmClientConfig {
+  /** Long-lived API key from AWS Console -> Claude Platform on AWS -> API keys. */
+  apiKey: string;
+  /** e.g. https://aws-external-anthropic.us-east-2.api.aws */
+  baseUrl: string;
+  /** Workspace ID (wrkspc_...) the key is authorized on. */
+  workspaceId: string;
+  /** Optional accumulator; each callClaude adds its response usage to it. */
+  usage?: LlmUsage;
+}
+
+interface ClaudeMessagesResponse {
+  content?: Array<{ type?: string; text?: string }>;
+  stop_reason?: string;
+  usage?: { input_tokens?: number; output_tokens?: number };
 }
 
 /**
- * Call OpenRouter and extract a parsed JSON object from the response.
+ * Call the Claude Messages API and extract a parsed JSON object from the response.
  *
  * Handles markdown code block unwrapping and JSON parsing.
  * Throws on HTTP errors, missing content, or invalid JSON.
+ *
+ * maxTokens must leave headroom for adaptive thinking, which counts toward
+ * the cap; effort is pinned low since these are mechanical extraction tasks.
  */
-async function callOpenRouter(
+async function callClaude(
   systemPrompt: string,
   userPrompt: string,
-  apiKey: string,
-  maxTokens = 2000,
+  config: LlmClientConfig,
+  maxTokens = 8000,
 ): Promise<Record<string, unknown>> {
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  // Count the attempt up front so metering still reflects calls that fail
+  // at the HTTP layer (an attempt count of zero reads as "never ran").
+  if (config.usage) config.usage.calls += 1;
+  const response = await fetch(`${config.baseUrl}/v1/messages`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      "x-api-key": config.apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-workspace-id": config.workspaceId,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "anthropic/claude-haiku-4.5",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      temperature: 0.1,
+      model: CLAUDE_MODEL,
       max_tokens: maxTokens,
+      system: systemPrompt,
+      output_config: { effort: "low" },
+      messages: [{ role: "user", content: userPrompt }],
     }),
   });
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`OpenRouter API error (${response.status}): ${errorText}`);
+    throw new Error(`Claude API error (${response.status}): ${errorText}`);
   }
 
-  const data = (await response.json()) as OpenRouterResponse;
-  const content = data.choices?.[0]?.message?.content;
+  const data = (await response.json()) as ClaudeMessagesResponse;
+  if (config.usage && data.usage) {
+    config.usage.input_tokens += data.usage.input_tokens ?? 0;
+    config.usage.output_tokens += data.usage.output_tokens ?? 0;
+  }
+  // Distinguish cap truncation and refusals from formatting failures:
+  // adaptive thinking counts toward max_tokens, so a truncated response
+  // otherwise surfaces as a misleading JSON parse error.
+  if (data.stop_reason === "max_tokens") {
+    throw new Error(`LLM response truncated at max_tokens=${maxTokens}; raise the cap`);
+  }
+  if (data.stop_reason === "refusal") {
+    throw new Error("LLM refused the request (stop_reason: refusal)");
+  }
+  const content = data.content?.find((block) => block.type === "text")?.text;
   if (!content) {
     throw new Error("No content in LLM response");
   }
@@ -108,24 +173,36 @@ Rules:
 - methods_description: Only include if methods/acquisition details are described.
 - keywords: 3-8 domain-specific terms. Include modality (EEG, MEG, etc.) if applicable. Use subject_scheme "MeSH" ONLY when you are confident the term is a real MeSH descriptor. Do NOT use "LCSH" or any other scheme. Terms that are not MeSH descriptors should have no subject_scheme.
 - funding_references: Parse funding strings into structured format. Common funders: NIH, NSF, ERC, DFG. Use funder_name (not funderName).
-- related_identifiers: Only include actual DOIs (10.XXXX/...) with identifier_type "DOI". Common relation_type values:
-  IsCitedBy, Cites, IsSupplementTo, IsSupplementedBy, References, IsReferencedBy,
-  IsDescribedBy, Describes, IsVersionOf, HasVersion, IsPartOf, HasPart
+- related_identifiers: Only include actual DOIs (10.XXXX/...) with identifier_type "DOI".
+  The relation_type is CRITICAL for downstream citation attribution. Assign it by what the
+  paper IS to THIS dataset, not by where the DOI appeared:
+  * IsDescribedBy or IsSupplementTo: ONLY for a paper that introduces or describes THIS
+    dataset's own data (its data paper / data descriptor). A dataset has at most one or two
+    such papers.
+  * References: everything this dataset merely uses or cites — shared paradigm/stimulus
+    resources (e.g. ERP CORE), other datasets it reuses (e.g. HBN-EEG), standards and
+    specification papers (e.g. BIDS, iEEG-BIDS), methods/analysis papers, and software
+    papers (e.g. EEGLAB, MNE-Python, fMRIPrep). A paper describing a STANDARD or RESOURCE
+    the dataset follows is NOT the dataset's data paper.
+  * IsDerivedFrom: a source dataset this dataset was created from.
+  * When unsure whether a paper is THIS dataset's own data paper, use References.
 - Omit any field where you have no information. Return {} if nothing can be extracted.
-- Do NOT hallucinate DOIs or funding numbers.`;
+- Do NOT hallucinate DOIs or funding numbers. Include a DOI ONLY when it appears verbatim
+  in the README or dataset description. If a paper is cited without a DOI, OMIT it —
+  NEVER construct or recall a DOI for a textual citation.`;
 
 /**
  * Extract structured v2 metadata from README and BIDS description using an LLM.
  *
  * @param readmeContent - Raw README.md content
  * @param bidsDescription - Parsed dataset_description.json
- * @param apiKey - OpenRouter API key
+ * @param config - Claude Platform on AWS connection settings
  * @returns Extracted metadata in v2 format
  */
 export async function enrichFromReadme(
   readmeContent: string,
   bidsDescription: Record<string, unknown>,
-  apiKey: string,
+  config: LlmClientConfig,
 ): Promise<LlmEnrichmentResultV2> {
   const userPrompt = `## BIDS dataset_description.json
 \`\`\`json
@@ -135,7 +212,7 @@ ${JSON.stringify(bidsDescription, null, 2)}
 ## README.md
 ${truncateReadme(readmeContent)}`;
 
-  const parsed = await callOpenRouter(SYSTEM_PROMPT, userPrompt, apiKey);
+  const parsed = await callClaude(SYSTEM_PROMPT, userPrompt, config);
   return validateLlmResultV2(parsed);
 }
 
@@ -394,12 +471,85 @@ export function seedFromBids(
   return seeded;
 }
 
+/** Relation types the enrichment LLM is allowed to write (its prompt
+ *  vocabulary). Only entries carrying one of these are subject to the
+ *  source-presence prune: relations written by other subsystems (e.g.
+ *  IsIdenticalTo from the OpenNeuro importer, curator-set IsCitedBy)
+ *  are never LLM output and must survive re-enrichment untouched. */
+const LLM_RELATION_TYPES: ReadonlySet<string> = new Set([
+  "IsDescribedBy",
+  "IsSupplementTo",
+  "References",
+  "IsDerivedFrom",
+]);
+
+/** Relation types the LLM may RECLASSIFY between on existing DOI entries —
+ *  the citation-classification triad of #826. Deliberately excludes
+ *  IsDerivedFrom (BIDS SourceDatasets provenance) and every non-LLM type,
+ *  so the model can never overwrite another subsystem's assertion. */
+const RECLASSIFIABLE_RELATION_TYPES: ReadonlySet<string> = new Set([
+  "IsDescribedBy",
+  "IsSupplementTo",
+  "References",
+]);
+
+export interface PruneOutcome<T> {
+  result: T;
+  /** Identifiers that were removed, for logging/response surfacing. */
+  pruned: RelatedIdentifierEntry[];
+}
+
+/**
+ * Drop DOI related_identifiers that do not appear in the dataset's source
+ * material (README + dataset_description.json).
+ *
+ * LLMs sometimes fabricate plausible DOIs for papers the README cites only
+ * as text (#826 diligence: on004100 got two invented 10.1093/brain/... DOIs,
+ * one pointing at an unrelated glioblastoma paper). Every legitimate
+ * LLM-written DOI originates from the README or the BIDS description, so
+ * source presence is a safe, deterministic filter.
+ *
+ * Scope: only entries whose relation_type is in the LLM's own vocabulary
+ * (LLM_RELATION_TYPES) are prunable — that includes a hallucinated
+ * IsDerivedFrom (a legitimate one comes from BIDS SourceDatasets, whose DOI
+ * or resolver URL is in the serialized description and therefore matches).
+ * URL entries and non-LLM relation types (importer/curator assertions) are
+ * exempt. Applied to LLM output before merging AND to carried-forward
+ * metadata, so past hallucinations self-heal on re-enrichment. NOTE: a
+ * curator adding a DOI under an LLM-vocabulary relation must ensure the DOI
+ * appears in the README or dataset_description, or the next forced
+ * re-enrichment will prune it (visibly: callers log and surface `pruned`).
+ */
+export function pruneUnsourcedDois<T extends { related_identifiers?: RelatedIdentifierEntry[] }>(
+  target: T,
+  readmeContent: string,
+  bidsDescription: Record<string, unknown>,
+): PruneOutcome<T> {
+  if (!target.related_identifiers || target.related_identifiers.length === 0) {
+    return { result: target, pruned: [] };
+  }
+  const sourceText = `${readmeContent}\n${JSON.stringify(bidsDescription)}`.toLowerCase();
+  const pruned: RelatedIdentifierEntry[] = [];
+  const kept = target.related_identifiers.filter((r) => {
+    const keep =
+      r.identifier_type !== "DOI" ||
+      !LLM_RELATION_TYPES.has(r.relation_type) ||
+      sourceText.includes(r.identifier.toLowerCase());
+    if (!keep) pruned.push(r);
+    return keep;
+  });
+  if (pruned.length === 0) return { result: target, pruned };
+  return { result: { ...target, related_identifiers: kept }, pruned };
+}
+
 /**
  * Merge LLM enrichment results into a seeded NemarMetadataV2 object.
  *
- * Additive merge for related_identifiers and funding_references:
- * - BIDS-seeded IsDerivedFrom entries are preserved
- * - LLM adds new entries; duplicates are removed
+ * related_identifiers: existing entries within the citation triad are
+ * reclassifiable by the LLM (#826); IsDerivedFrom, URL entries, and non-LLM
+ * relation types are locked; new entries are appended. funding_references
+ * merge additively with LLM-parsed entries replacing matching raw BIDS
+ * strings.
  *
  * LLM overwrites: description, methods_description, keywords (LLM's domain).
  * Authors are never touched by the LLM.
@@ -448,19 +598,32 @@ export function mergeWithExisting(
     merged.funding_references = allFunds;
   }
 
-  // Related identifiers merge: BIDS-seeded entries take priority for the same identifier.
-  // If BIDS seeds "IsDerivedFrom" for a DOI, drop any LLM entry for the same DOI
-  // (the LLM often misclassifies SourceDatasets as "IsVersionOf").
+  // Related identifiers merge. Existing DOI entries are RECLASSIFIABLE only
+  // within the citation triad (IsDescribedBy/IsSupplementTo/References, #826):
+  // the LLM's relation_type replaces the existing one in place, letting
+  // re-enrichment upgrade a data paper that ReferencesAndLinks seeded as mere
+  // "References" and downgrade a standard/resource paper wrongly tagged
+  // IsDescribedBy. Everything else is locked: IsDerivedFrom (BIDS
+  // SourceDatasets), URL entries (GitHub/NEMAR links), and any relation type
+  // outside the triad (importer's IsIdenticalTo, curator-set types) — the LLM
+  // never overwrites another subsystem's assertion. All duplicate entries for
+  // an identifier are updated consistently.
   if (llmResult.related_identifiers) {
     const existingRels = existing?.related_identifiers || [];
-    const seededIdentifiers = new Set(existingRels.map((r) => r.identifier));
-    const allRels = [...existingRels];
+    const allRels = existingRels.map((r) => ({ ...r }));
     for (const newRel of llmResult.related_identifiers) {
-      // Skip LLM entries for identifiers already seeded from BIDS
-      if (seededIdentifiers.has(newRel.identifier)) continue;
-      const key = `${newRel.identifier}|${newRel.relation_type}`;
-      const exists = allRels.some((r) => `${r.identifier}|${r.relation_type}` === key);
-      if (!exists) allRels.push(newRel);
+      const matches = allRels.filter((r) => r.identifier === newRel.identifier);
+      if (matches.length > 0) {
+        for (const current of matches) {
+          const reclassifiable =
+            current.identifier_type !== "URL" &&
+            RECLASSIFIABLE_RELATION_TYPES.has(current.relation_type) &&
+            RECLASSIFIABLE_RELATION_TYPES.has(newRel.relation_type);
+          if (reclassifiable) current.relation_type = newRel.relation_type;
+        }
+        continue;
+      }
+      allRels.push(newRel);
     }
     merged.related_identifiers = allRels;
   }
@@ -651,9 +814,15 @@ Rate each criterion from 0-100 confidence that the metadata is CORRECT:
 - Is each relation type correct?
   - IsDerivedFrom: this dataset was created from that source
   - IsVersionOf: this is a newer version of the same dataset
-  - IsDescribedBy: a paper/page that describes this dataset (also valid for GitHub repo and NEMAR landing page URLs)
-  - IsSupplementTo: this dataset supplements a publication
-  - References: general citation
+  - IsDescribedBy: a paper that introduces/describes THIS dataset's own data — its data
+    paper (also valid for GitHub repo and NEMAR landing page URLs)
+  - IsSupplementTo: this dataset supplements that publication (also a data-paper relation)
+  - References: general citation — reused paradigm/stimulus resources (e.g. ERP CORE),
+    standards/specification papers (e.g. BIDS, iEEG-BIDS), methods and software papers
+    (e.g. EEGLAB, MNE-Python, fMRIPrep)
+- FLAG as a blocking issue any DOI tagged IsDescribedBy/IsSupplementTo whose paper is a
+  standard, shared resource, or method/software paper rather than this dataset's own data
+  paper — and the reverse: this dataset's own data paper tagged as mere References.
 - Are the DOIs valid identifiers?
 - Cross-check: does dataset_description.json have SourceDatasets that should be IsDerivedFrom?
 - NOTE: GitHub repo URLs (github.com/nemarDatasets/...) and NEMAR landing page URLs (nemar.org/dataset/...) with relation type IsDescribedBy are CORRECT and should NOT be flagged as issues.
@@ -706,14 +875,14 @@ Warnings: missing keywords, imprecise descriptions, unconfirmed funding details.
 /**
  * Stage 3: Validate enriched metadata using an LLM judge.
  *
- * Sends metadata + README + BIDS description to OpenRouter for review.
+ * Sends metadata + README + BIDS description to Claude for review.
  * If validation passes, pipeline_stage advances to "validated".
  */
 export async function validateMetadata(
   metadata: NemarMetadataV2,
   readmeContent: string,
   bidsDescription: Record<string, unknown>,
-  apiKey: string,
+  config: LlmClientConfig,
 ): Promise<{ metadata: NemarMetadataV2; validation: ValidationResult }> {
   const userPrompt = `## .nemar/metadata.json
 \`\`\`json
@@ -728,7 +897,7 @@ ${JSON.stringify(bidsDescription, null, 2)}
 ## README.md
 ${truncateReadme(readmeContent)}`;
 
-  const parsed = await callOpenRouter(VALIDATION_PROMPT, userPrompt, apiKey, 3000);
+  const parsed = await callClaude(VALIDATION_PROMPT, userPrompt, config, 6000);
   const validation = parseValidationResult(parsed);
   const updatedMetadata: NemarMetadataV2 = {
     ...metadata,
@@ -751,7 +920,7 @@ export async function correctFromFeedback(
   warnings: string[],
   readmeContent: string,
   bidsDescription: Record<string, unknown>,
-  apiKey: string,
+  config: LlmClientConfig,
 ): Promise<LlmEnrichmentResultV2> {
   const correctionPrompt = `You are a metadata correction assistant for neuroimaging datasets.
 A validation judge has reviewed the metadata and found issues that need to be fixed.
@@ -760,7 +929,10 @@ Your job is to produce CORRECTED metadata fields that address the blocking issue
 IMPORTANT:
 - Only return fields that need correction. Do NOT return unchanged fields.
 - Do NOT modify authors (those are locked from BIDS).
-- Do NOT modify related_identifiers that were seeded from BIDS (IsDerivedFrom entries, GitHub/NEMAR URLs).
+- Do NOT modify IsDerivedFrom entries or GitHub/NEMAR URL entries in related_identifiers.
+  You MAY reclassify other DOI relation_types — e.g. correct THIS dataset's own data paper
+  to IsDescribedBy, or a standard/resource/software paper wrongly tagged IsDescribedBy
+  back to References.
 - Focus on fixing the blocking issues. Warnings are optional to address.
 
 Return ONLY valid JSON with the corrected fields (same schema as enrichment):
@@ -794,7 +966,7 @@ ${JSON.stringify(bidsDescription, null, 2)}
 ## README.md
 ${truncateReadme(readmeContent)}`;
 
-  const parsed = await callOpenRouter(correctionPrompt, userPrompt, apiKey, 3000);
+  const parsed = await callClaude(correctionPrompt, userPrompt, config, 6000);
   return validateLlmResultV2(parsed);
 }
 

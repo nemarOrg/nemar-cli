@@ -1,8 +1,12 @@
 # ADR 0014: Submission minimums are LLM-judged and advisory; regexes do not gate
 
-**Status:** accepted
+**Status:** superseded by ADR-0026
 **Date:** 2026-06-20
 **Owner:** Seyed Yahya Shirazi
+
+> Superseded 2026-08-18: mechanical minimums (name length floor, non-placeholder
+> authors, ethics statement) now hard-gate native publication requests per ADR
+> 0026. Adequacy-beyond-the-floor judgments remain LLM-advisory as decided here.
 
 ## Context
 

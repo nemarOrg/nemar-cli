@@ -21,7 +21,9 @@ import {
   createEzidVersionDoi,
   parseDoiProvider,
 } from "../backend/src/services/doi";
-import { enrichFromReadme, validateLlmResult } from "../src/lib/llm-enrich";
+// The CLI-side llm-enrich fork was deleted (dead code since enrichment moved
+// to the central workflow); these tests pin the backend implementation.
+import { validateLlmResultV2 as validateLlmResult } from "../backend/src/services/llm-enrich";
 
 describe("ORCID validation", () => {
   const orcidRegex = /^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/;
@@ -885,20 +887,6 @@ describe("relation type validation pipeline", () => {
     });
     expect(enrichment.relatedDois).toHaveLength(1);
     expect(enrichment.relatedDois?.[0].doi).toBe("10.1234/valid");
-  });
-});
-
-describe("enrichFromReadme", () => {
-  test("returns empty object when no API key is provided", async () => {
-    // Ensure env var is not set
-    const oldKey = process.env.OPENROUTER_API_KEY;
-    process.env.OPENROUTER_API_KEY = undefined;
-    try {
-      const result = await enrichFromReadme("# Test README", { Name: "Test" });
-      expect(result).toEqual({});
-    } finally {
-      if (oldKey) process.env.OPENROUTER_API_KEY = oldKey;
-    }
   });
 });
 

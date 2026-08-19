@@ -19,6 +19,11 @@ export interface Bindings {
   // no-ops when the binding is absent (dev/test, or before provisioning).
   ANALYTICS?: AnalyticsEngineDataset;
 
+  // LLM enrichment spend metering (nemar_llm_metrics). One data point per
+  // enrichment run; the observability dashboard reads it per hour/day via
+  // the AE SQL API. Optional: recordLlmUsage() no-ops when absent.
+  ANALYTICS_LLM?: AnalyticsEngineDataset;
+
   // Environment variables
   ENVIRONMENT: "production" | "development" | "staging" | "test";
   API_BASE_URL: string;
@@ -97,7 +102,12 @@ export interface Bindings {
   DEV_WEBHOOK_MIRROR_URL?: string;
   TEST_BYPASS_TOKEN?: string; // Optional - for CI/CD rate limit bypass
   ENCRYPTION_KEY?: string; // For encrypting stored credentials
-  OPENROUTER_API_KEY?: string; // For LLM-based metadata enrichment
+  // LLM enrichment via Claude Platform on AWS (Anthropic-operated, AWS-billed;
+  // NOT Bedrock). All three required; requests without the workspace header
+  // are rejected by the endpoint.
+  ANTHROPIC_API_KEY?: string; // Long-lived key (secret)
+  ANTHROPIC_BASE_URL?: string; // https://aws-external-anthropic.<region>.api.aws
+  ANTHROPIC_WORKSPACE_ID?: string; // wrkspc_... the key is authorized on
 
   // ORCID SSO (#832). Confidential OAuth client; login works on the free
   // Public API tier (no Member API needed). All optional: when CLIENT_ID /
@@ -249,6 +259,13 @@ export interface Variables {
   // tell "no header sent" from "header sent but token invalid/expired".
   // Optional: routes that don't use optionalAuthMiddleware never set this.
   authAttempted?: true;
+  /** Set by `authMiddleware`: which credential resolved `user`.
+   *  "token" = Authorization: Bearer (CLI path), "cookie" =
+   *  `nemar_session` (web dashboard path). `cliVersionGuard` uses this
+   *  to exempt browser clients, which fetch current site code on every
+   *  page load and so cannot be version-stale the way an installed CLI
+   *  binary can. */
+  authMethod?: "token" | "cookie";
   /** Set by `webSessionMiddleware` (#569) when a valid `nemar_session`
    *  cookie resolves to an active row. Distinct from `user` (bearer
    *  API token auth) — a single request can carry both in principle,

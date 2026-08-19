@@ -3,9 +3,11 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  clearStepCompleted,
   clearUploadProgress,
   getFilesNeedingUpload,
   getProgressSummary,
+  hasFileListChanged,
   initUploadProgress,
   isStepCompleted,
   markFileFailed,
@@ -214,6 +216,178 @@ describe("step completion", () => {
     expect(isStepCompleted(read, "s3_upload")).toBe(true);
     expect(isStepCompleted(read, "github_push")).toBe(true);
     expect(isStepCompleted(read, "dataset_save")).toBe(false);
+  });
+
+  test("tracking step (#884) persists and validates through disk", () => {
+    const progress = initUploadProgress(testDir, "nm000123", testFiles);
+    markStepCompleted(progress, "tracking");
+    writeUploadProgress(testDir, progress);
+
+    const read = readUploadProgress(testDir);
+    expect(read).not.toBeNull();
+    if (!read) return; // narrowing guard
+    expect(isStepCompleted(read, "tracking")).toBe(true);
+  });
+});
+
+describe("clearStepCompleted (#884)", () => {
+  test("removes a completed step so it re-runs", () => {
+    const progress = initUploadProgress(testDir, "nm000123", testFiles);
+    markStepCompleted(progress, "tracking");
+    markStepCompleted(progress, "s3_upload");
+
+    clearStepCompleted(progress, "tracking");
+    expect(isStepCompleted(progress, "tracking")).toBe(false);
+    // Other steps are untouched
+    expect(isStepCompleted(progress, "s3_upload")).toBe(true);
+  });
+
+  test("no-op when the step was never completed", () => {
+    const progress = initUploadProgress(testDir, "nm000123", testFiles);
+    clearStepCompleted(progress, "tracking");
+    expect(progress.completed_steps).toEqual([]);
+  });
+
+  test("cleared step survives a write/read cycle as not-completed", () => {
+    const progress = initUploadProgress(testDir, "nm000123", testFiles);
+    markStepCompleted(progress, "tracking");
+    clearStepCompleted(progress, "tracking");
+    writeUploadProgress(testDir, progress);
+
+    const read = readUploadProgress(testDir);
+    expect(read).not.toBeNull();
+    if (!read) return; // narrowing guard
+    expect(isStepCompleted(read, "tracking")).toBe(false);
+  });
+});
+
+describe("hasFileListChanged (#884 tracking invalidation)", () => {
+  test("false when the manifest matches the recorded files exactly", () => {
+    const progress = initUploadProgress(testDir, "nm000123", testFiles);
+    expect(hasFileListChanged(progress, testFiles)).toBe(false);
+  });
+
+  test("false regardless of upload status (status changes are not list changes)", () => {
+    const progress = initUploadProgress(testDir, "nm000123", testFiles);
+    markFileUploaded(progress, testFiles[0].path);
+    markFileFailed(progress, testFiles[1].path, "timeout");
+    expect(hasFileListChanged(progress, testFiles)).toBe(false);
+  });
+
+  test("true when a new file appears in the manifest", () => {
+    const progress = initUploadProgress(testDir, "nm000123", testFiles.slice(0, 2));
+    expect(hasFileListChanged(progress, testFiles)).toBe(true);
+  });
+
+  test("true when a recorded file changes size", () => {
+    const progress = initUploadProgress(testDir, "nm000123", testFiles);
+    const grown = testFiles.map((f, i) => (i === 0 ? { ...f, size: f.size + 1 } : f));
+    expect(hasFileListChanged(progress, grown)).toBe(true);
+  });
+
+  test("false when a recorded file disappears (removals need no re-add)", () => {
+    const progress = initUploadProgress(testDir, "nm000123", testFiles);
+    expect(hasFileListChanged(progress, testFiles.slice(0, 2))).toBe(false);
+  });
+
+  test("empty manifest never invalidates", () => {
+    const progress = initUploadProgress(testDir, "nm000123", testFiles);
+    expect(hasFileListChanged(progress, [])).toBe(false);
+  });
+});
+
+describe("mtime change detection (#884 review: same-size rewrites)", () => {
+  const timedFiles = [
+    { path: "sub-01/eeg/sub-01_eeg.edf", size: 1024000, mtimeMs: 1_700_000_000_000 },
+    { path: "sub-02/eeg/sub-02_eeg.edf", size: 2048000, mtimeMs: 1_700_000_100_000 },
+  ];
+
+  test("same-size different-mtime invalidates tracking", () => {
+    const progress = initUploadProgress(testDir, "nm000123", timedFiles);
+    const rewritten = timedFiles.map((f, i) =>
+      i === 0 ? { ...f, mtimeMs: f.mtimeMs + 5000 } : f,
+    );
+    expect(hasFileListChanged(progress, rewritten)).toBe(true);
+  });
+
+  test("same-size different-mtime file needs re-upload even when marked uploaded", () => {
+    const progress = initUploadProgress(testDir, "nm000123", timedFiles);
+    markFileUploaded(progress, timedFiles[0].path);
+    markFileUploaded(progress, timedFiles[1].path);
+    const rewritten = timedFiles.map((f, i) =>
+      i === 0 ? { ...f, mtimeMs: f.mtimeMs + 5000 } : f,
+    );
+    const needing = getFilesNeedingUpload(progress, rewritten);
+    expect(needing.map((f) => f.path)).toEqual([timedFiles[0].path]);
+  });
+
+  test("unchanged mtime and size: no invalidation, nothing to re-upload", () => {
+    const progress = initUploadProgress(testDir, "nm000123", timedFiles);
+    markFileUploaded(progress, timedFiles[0].path);
+    markFileUploaded(progress, timedFiles[1].path);
+    expect(hasFileListChanged(progress, timedFiles)).toBe(false);
+    expect(getFilesNeedingUpload(progress, timedFiles)).toEqual([]);
+  });
+
+  test("old-format progress without mtimes: manifest mtimes fail toward re-adding", () => {
+    // Pre-#884 progress files recorded size only. Simulate by initializing
+    // without mtimes, then presenting a manifest that carries them.
+    const progress = initUploadProgress(
+      testDir,
+      "nm000123",
+      timedFiles.map(({ path, size }) => ({ path, size })),
+    );
+    markFileUploaded(progress, timedFiles[0].path);
+    markFileUploaded(progress, timedFiles[1].path);
+    expect(hasFileListChanged(progress, timedFiles)).toBe(true);
+    expect(getFilesNeedingUpload(progress, timedFiles)).toHaveLength(2);
+  });
+
+  test("manifest without mtimes falls back to size-only comparison", () => {
+    const progress = initUploadProgress(testDir, "nm000123", timedFiles);
+    markFileUploaded(progress, timedFiles[0].path);
+    markFileUploaded(progress, timedFiles[1].path);
+    const sizeOnly = timedFiles.map(({ path, size }) => ({ path, size }));
+    expect(hasFileListChanged(progress, sizeOnly)).toBe(false);
+    expect(getFilesNeedingUpload(progress, sizeOnly)).toEqual([]);
+  });
+
+  test("markFileUploaded with fileInfo refreshes the recorded identity", () => {
+    const progress = initUploadProgress(testDir, "nm000123", timedFiles);
+    const rewritten = { ...timedFiles[0], mtimeMs: timedFiles[0].mtimeMs + 5000 };
+    // Re-upload of the rewritten file records its new mtime...
+    markFileUploaded(progress, rewritten.path, { size: rewritten.size, mtimeMs: rewritten.mtimeMs });
+    markFileUploaded(progress, timedFiles[1].path);
+    // ...so the next run sees a stable list again.
+    expect(hasFileListChanged(progress, [rewritten, timedFiles[1]])).toBe(false);
+    expect(getFilesNeedingUpload(progress, [rewritten, timedFiles[1]])).toEqual([]);
+  });
+
+  test("mtimeMs round-trips through disk and validates", () => {
+    const progress = initUploadProgress(testDir, "nm000123", timedFiles);
+    writeUploadProgress(testDir, progress);
+    const read = readUploadProgress(testDir);
+    expect(read).not.toBeNull();
+    if (!read) return; // narrowing guard
+    expect(read.files[timedFiles[0].path].mtimeMs).toBe(timedFiles[0].mtimeMs);
+  });
+
+  test("non-numeric mtimeMs in the file is rejected as corrupt", () => {
+    const dir = join(testDir, ".nemar");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "upload-progress.json"),
+      JSON.stringify({
+        dataset_id: "nm000123",
+        started_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+        files: {
+          "sub-01/eeg.edf": { status: "pending", size: 10, mtimeMs: "yesterday" },
+        },
+        completed_steps: [],
+      }),
+    );
+    expect(readUploadProgress(testDir)).toBeNull();
   });
 });
 

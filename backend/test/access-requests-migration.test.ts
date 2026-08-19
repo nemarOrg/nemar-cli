@@ -19,10 +19,10 @@
  *     and nulls decided_by.
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../src/db/migrations");
 const M0039 = readFileSync(join(MIGRATIONS_DIR, "0039_access_requests.sql"), "utf-8");

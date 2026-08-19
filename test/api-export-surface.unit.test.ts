@@ -89,6 +89,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   admin: [
     "addCi",
     "approveUser",
+    "approveUserById",
     "availabilityReport",
     "availabilityReportSweep",
     "availabilityReportSweepReset",
@@ -155,6 +156,7 @@ const INTERNAL_WIRING = ["request"];
  */
 const POST_SPLIT_ADDITIONS = [
   "NOTICE_LEVELS", // #1025, notice level vocabulary
+  "approveUserById", // #1012, id-keyed approve for web/ORCID accounts
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */

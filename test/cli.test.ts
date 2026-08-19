@@ -351,11 +351,22 @@ describe("CLI Error Handling", () => {
     expect(stderr).toContain("unknown command");
   });
 
-  test("missing required argument shows error", async () => {
+  // `admin approve` takes a username OR --id (web/ORCID accounts have no
+  // username, #1012), so the argument is optional to commander and the
+  // exactly-one-of rule is enforced by the action itself, before the auth
+  // gate. These pin that contract.
+  test("approve without username or --id shows error", async () => {
     const { stderr, exitCode } = await runCli(["admin", "approve"]);
 
     expect(exitCode).toBe(1);
-    expect(stderr).toContain("missing required argument");
+    expect(stderr).toContain("provide a username or --id");
+  });
+
+  test("approve with both username and --id shows error", async () => {
+    const { stderr, exitCode } = await runCli(["admin", "approve", "someone", "--id", "5"]);
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("mutually exclusive");
   });
 });
 

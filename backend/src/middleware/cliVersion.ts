@@ -40,6 +40,16 @@ export const cliVersionGuard = async (
   c: Context<{ Bindings: Bindings; Variables: Variables }>,
   next: Next,
 ) => {
+  // Web-session (cookie) requests come from the dashboard's upload flow.
+  // The browser fetches current site code on every page load, so it can
+  // never be version-stale the way an installed CLI binary can, and it
+  // sends no X-CLI-Version header. Only bearer-token (CLI) clients are
+  // subject to the minimum-version gate.
+  if (c.get("authMethod") === "cookie") {
+    await next();
+    return;
+  }
+
   const cliVersion = c.req.header("X-CLI-Version");
 
   if (!cliVersion) {

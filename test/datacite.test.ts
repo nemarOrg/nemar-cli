@@ -1280,6 +1280,95 @@ describe("mergeWithExisting", () => {
     expect(merged.pipeline_stage).toBe("enriched");
   });
 
+  test("LLM upgrades a seeded References entry to IsDescribedBy (#826)", () => {
+    // ReferencesAndLinks seeds every DOI as "References"; the LLM must be able
+    // to promote the dataset's own data paper to IsDescribedBy on re-enrichment.
+    const existing = {
+      version: "2.0" as const,
+      pipeline_stage: "seeded" as const,
+      related_identifiers: [
+        {
+          identifier: "10.1038/sdata.2015.1",
+          identifier_type: "DOI" as const,
+          relation_type: "References",
+        },
+      ],
+    };
+    const llmResult = {
+      related_identifiers: [
+        {
+          identifier: "10.1038/sdata.2015.1",
+          identifier_type: "DOI" as const,
+          relation_type: "IsDescribedBy",
+        },
+      ],
+    };
+
+    const merged = mergeWithExisting(existing, llmResult);
+
+    expect(merged.related_identifiers).toHaveLength(1);
+    expect(merged.related_identifiers?.[0].relation_type).toBe("IsDescribedBy");
+  });
+
+  test("LLM downgrades a wrongly-tagged IsDescribedBy DOI to References (#826)", () => {
+    // A prior run tagged a standards paper (e.g. iEEG-BIDS) as the data paper;
+    // re-enrichment must be able to correct it.
+    const existing = {
+      version: "2.0" as const,
+      pipeline_stage: "enriched" as const,
+      related_identifiers: [
+        {
+          identifier: "10.1038/s41597-019-0105-7",
+          identifier_type: "DOI" as const,
+          relation_type: "IsDescribedBy",
+        },
+      ],
+    };
+    const llmResult = {
+      related_identifiers: [
+        {
+          identifier: "10.1038/s41597-019-0105-7",
+          identifier_type: "DOI" as const,
+          relation_type: "References",
+        },
+      ],
+    };
+
+    const merged = mergeWithExisting(existing, llmResult);
+
+    expect(merged.related_identifiers).toHaveLength(1);
+    expect(merged.related_identifiers?.[0].relation_type).toBe("References");
+  });
+
+  test("URL related_identifiers are locked against LLM reclassification", () => {
+    const existing = {
+      version: "2.0" as const,
+      pipeline_stage: "seeded" as const,
+      related_identifiers: [
+        {
+          identifier: "https://github.com/nemarDatasets/nm000001",
+          identifier_type: "URL" as const,
+          relation_type: "IsDescribedBy",
+        },
+      ],
+    };
+    const llmResult = {
+      related_identifiers: [
+        {
+          identifier: "https://github.com/nemarDatasets/nm000001",
+          identifier_type: "DOI" as const,
+          relation_type: "References",
+        },
+      ],
+    };
+
+    const merged = mergeWithExisting(existing, llmResult);
+
+    expect(merged.related_identifiers).toHaveLength(1);
+    expect(merged.related_identifiers?.[0].relation_type).toBe("IsDescribedBy");
+    expect(merged.related_identifiers?.[0].identifier_type).toBe("URL");
+  });
+
   test("LLM-parsed funding replaces raw BIDS strings when award number matches", () => {
     const existing = {
       version: "2.0" as const,

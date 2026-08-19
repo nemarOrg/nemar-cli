@@ -43,6 +43,7 @@ import {
   type SummaryVersionCoverage,
   addCi,
   approveUser,
+  approveUserById,
   availabilityReport,
   availabilityReportSweep,
   availabilityReportSweepReset,
@@ -222,6 +223,7 @@ Examples:
   $ nemar admin users --verified           # List users awaiting approval
   $ nemar admin users --role admin         # List all admins
   $ nemar admin approve john_doe           # Approve a user
+  $ nemar admin approve --id 123           # Approve a web/ORCID user (no username)
   $ nemar admin role john_doe admin        # Promote user to admin (owner only)
   $ nemar admin repo public nm000104       # Make dataset repo public
   $ nemar admin ci check nm000104          # Check CI status
@@ -335,30 +337,61 @@ Examples:
 adminCommand
   .command("approve")
   .description("Approve a pending user")
-  .argument("<username>", "Username to approve")
+  .argument("[username]", "Username to approve (CLI accounts)")
+  .option("--id <id>", "Approve by numeric user id (web/ORCID accounts have no username)")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
-  .action(async (username, options: ConfirmOptions) => {
+  .action(async (username: string | undefined, options: ConfirmOptions & { id?: string }) => {
+    // Exactly one addressing key: username (CLI accounts) or --id
+    // (web/ORCID accounts, whose username is NULL by design — #1012).
+    // Validated before the auth gate: argv errors should surface (exit 1)
+    // even when the caller is not logged in.
+    const byId = options.id !== undefined;
+    if (!byId && !username) {
+      console.error(chalk.red("Error: provide a username or --id <id>"));
+      console.error(chalk.dim("Web/ORCID accounts have no username; find their id with:"));
+      console.error(chalk.dim("  nemar admin users --pending"));
+      process.exit(1);
+    }
+    if (byId && username) {
+      console.error(chalk.red("Error: username and --id are mutually exclusive; provide one"));
+      process.exit(1);
+    }
+    let userId = 0;
+    if (byId) {
+      userId = Number.parseInt(options.id ?? "", 10);
+      if (!Number.isInteger(userId) || userId <= 0) {
+        console.error(chalk.red(`Error: invalid user id: ${options.id}`));
+        process.exit(1);
+      }
+    }
+
     if (!requireAuth()) return;
 
+    const label = username ?? `user id ${userId}`;
+
     // Confirmation
-    console.log(chalk.cyan(`\nApproving user: ${username}\n`));
+    console.log(chalk.cyan(`\nApproving user: ${label}\n`));
     console.log("This will:");
-    console.log("  1. Set up S3 access for the user");
-    console.log("  2. Notify them to retrieve their API key via CLI");
+    console.log("  1. Mark the account approved");
+    if (username) {
+      console.log("  2. Notify them to retrieve their API key via CLI");
+    } else {
+      console.log("  2. Notify them to sign in to the dashboard");
+    }
     console.log();
 
-    const result = await confirm(`Approve ${username}?`, options, true);
+    const result = await confirm(`Approve ${label}?`, options, true);
     if (result !== "confirmed") {
       console.log(chalk.dim(result === "declined" ? "Skipped" : "Cancelled"));
       return;
     }
 
-    const spinner = ora(`Approving ${username}...`).start();
+    const spinner = ora(`Approving ${label}...`).start();
 
     try {
-      const result = await approveUser(username);
-      spinner.succeed(`Approved ${username}`);
+      const result = username ? await approveUser(username) : await approveUserById(userId);
+      spinner.succeed(`Approved ${result.user.username ?? label}`);
       console.log();
       console.log(`  Email: ${result.user.email}`);
       console.log(`  Status: ${chalk.green(result.user.status)}`);
@@ -366,17 +399,21 @@ adminCommand
       console.log();
       if (result.email_sent) {
         console.log(
-          chalk.green("User notified to retrieve their API key via 'nemar auth retrieve-key'"),
+          result.user.username
+            ? chalk.green("User notified to retrieve their API key via 'nemar auth retrieve-key'")
+            : chalk.green("User notified to sign in at https://nemar.org/login"),
         );
       } else {
         console.log(chalk.yellow("Warning: Notification email failed to send."));
         console.log(
-          chalk.yellow("Please notify the user manually to run 'nemar auth retrieve-key'"),
+          result.user.username
+            ? chalk.yellow("Please notify the user manually to run 'nemar auth retrieve-key'")
+            : chalk.yellow("Please notify the user manually that their account is approved"),
         );
       }
     } catch (error) {
       handleCommandError(error, spinner, "Failed to approve user", {
-        404: "User not found or not in 'verified' status",
+        404: "User not found or not eligible for approval",
       });
     }
   });

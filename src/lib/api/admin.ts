@@ -44,7 +44,9 @@ export async function listUsers(status?: string, role?: string): Promise<UsersLi
 export interface ApproveResponse {
   message: string;
   user: {
-    username: string;
+    id: number;
+    // NULL for web/ORCID accounts (they have no username by design).
+    username: string | null;
     email: string;
     status: string;
   };
@@ -57,6 +59,21 @@ export interface ApproveResponse {
 export async function approveUser(username: string): Promise<ApproveResponse> {
   return request<ApproveResponse>(
     `/admin/approve/${username}`,
+    {
+      method: "POST",
+    },
+    true,
+  );
+}
+
+/**
+ * Approve a user by their numeric id (admin only). Needed for web/ORCID
+ * accounts, which have username = NULL and so cannot be addressed by the
+ * username-keyed endpoint (#1012).
+ */
+export async function approveUserById(id: number): Promise<ApproveResponse> {
+  return request<ApproveResponse>(
+    `/admin/approve/by-id/${id}`,
     {
       method: "POST",
     },

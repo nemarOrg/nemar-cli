@@ -10,3 +10,12 @@ AWS_SECRET_ACCESS_KEY=your_secret_key
 
 # Resend API key for emails
 RESEND_API_KEY=re_your_key_here
+
+# LLM enrichment via Claude Platform on AWS (Anthropic-operated Messages API,
+# AWS Marketplace billing; NOT Bedrock). All three are required — the endpoint
+# rejects requests without the anthropic-workspace-id header.
+# Key: AWS Console -> Claude Platform on AWS -> API keys -> Generate a key
+# Workspace: AWS Console -> Claude Platform on AWS -> Workspaces (wrkspc_...)
+ANTHROPIC_API_KEY=your_long_lived_key_here
+ANTHROPIC_BASE_URL=https://aws-external-anthropic.us-east-2.api.aws
+ANTHROPIC_WORKSPACE_ID=wrkspc_your_workspace_id

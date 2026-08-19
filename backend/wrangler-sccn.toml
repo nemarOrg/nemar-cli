@@ -62,6 +62,12 @@ index_name = "nemar-dataset-index"
 binding = "ANALYTICS"
 dataset = "nemar_access_metrics"
 
+# LLM enrichment spend metering (one point per enrichment run; the website
+# observability dashboard aggregates per hour/day via the AE SQL API).
+[[analytics_engine_datasets]]
+binding = "ANALYTICS_LLM"
+dataset = "nemar_llm_metrics"
+
 # Workers Observability (Workers Paid plan).
 # Captures invocation logs (inbound request shape, response status, duration,
 # subrequest count) and console.log output for searchable runtime telemetry.
@@ -80,6 +86,12 @@ invocation_logs = true
 # Environment variables
 [vars]
 ENVIRONMENT = "production"
+# Claude Platform on AWS (Anthropic-operated Messages API, AWS Marketplace
+# billing; NOT Bedrock). Used by LLM enrichment. The paired ANTHROPIC_API_KEY
+# is a worker secret; both of these are required alongside it — requests
+# without the anthropic-workspace-id header are rejected.
+ANTHROPIC_BASE_URL = "https://aws-external-anthropic.us-east-2.api.aws"
+ANTHROPIC_WORKSPACE_ID = "wrkspc_01Rayuq1JvjaMYusRvUsn6vk"
 # Public base URL used to build absolute links in outbound email
 # (verification, key-regeneration confirmation, etc.). The reindex enrichment
 # path used to self-fetch this URL, which Cloudflare rejected at the edge
@@ -173,7 +185,10 @@ OPENNEURO_MAINTAINER_EMAIL_ENABLED = "false"
 # - EZID_PASSWORD
 # - EZID_SANDBOX_USERNAME
 # - EZID_SANDBOX_PASSWORD
-# - OPENROUTER_API_KEY
+# - ANTHROPIC_API_KEY      (Claude Platform on AWS long-lived key, from AWS Console ->
+#                            Claude Platform on AWS -> API keys. Replaced OPENROUTER_API_KEY
+#                            2026-08-18; the old OpenRouter key is disabled and its secret can
+#                            be deleted once the deploy is verified.)
 # - ZENODO_API_KEY
 # - ZENODO_SANDBOX_API_KEY
 # - MANIFEST_CALLBACK_SECRET    (HMAC key for /webhooks/manifest-ready; must
@@ -227,6 +242,10 @@ index_name = "nemar-dataset-index-dev"
 binding = "ANALYTICS"
 dataset = "nemar_access_metrics_dev"
 
+[[env.dev.analytics_engine_datasets]]
+binding = "ANALYTICS_LLM"
+dataset = "nemar_llm_metrics_dev"
+
 # Observability for dev (not inherited from top-level)
 [env.dev.observability]
 enabled = true
@@ -238,6 +257,11 @@ invocation_logs = true
 
 [env.dev.vars]
 ENVIRONMENT = "development"
+# Claude Platform on AWS (same values as prod [vars]; env vars do not inherit).
+# ANTHROPIC_API_KEY must be set as a dev-env secret separately:
+#   wrangler secret put ANTHROPIC_API_KEY --env dev -c backend/wrangler-sccn.toml
+ANTHROPIC_BASE_URL = "https://aws-external-anthropic.us-east-2.api.aws"
+ANTHROPIC_WORKSPACE_ID = "wrkspc_01Rayuq1JvjaMYusRvUsn6vk"
 # Staging API host (epic #923). Central-workflow callbacks are built from
 # API_BASE_URL, so they round-trip back to this worker via api-test.nemar.org.
 # (The nemar-api-dev.sccn-org.workers.dev fallback still resolves.)

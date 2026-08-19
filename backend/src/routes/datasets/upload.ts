@@ -10,6 +10,7 @@ import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { authMiddleware } from "../../middleware/auth";
 import { cliVersionGuard } from "../../middleware/cliVersion";
+import { formatFileSize } from "../../services/dataset-metadata-columns";
 import { generateDatasetId, isValidDatasetId } from "../../services/datasetId";
 import {
   type GitHubRepo,
@@ -52,12 +53,75 @@ async function isDatasetCollaborator(
   return row !== null;
 }
 
+/**
+ * Seed catalog stats from the declared file manifest (#1091). The web GUI
+ * runs no enrichment at upload, so without this a fresh draft's dashboard
+ * card shows nothing for subjects/size. Both numbers are already in the
+ * create request; enrichment later overwrites them with authoritative
+ * values, so these are first-paint seeds, not the record.
+ */
+export function manifestSeedStats(files: { path: string; size: number }[] | undefined): {
+  bytes: number | null;
+  subjects: number | null;
+} {
+  if (!files || files.length === 0) return { bytes: null, subjects: null };
+  let bytes = 0;
+  const subjects = new Set<string>();
+  for (const f of files) {
+    bytes += f.size;
+    // Paths are dataset-root-relative with no leading slash (both the CLI and
+    // the web uploader send them that way); a leading "/" would hide the
+    // subject from the count, not miscount it.
+    const top = f.path.split("/")[0];
+    if (/^sub-[^/]+$/.test(top)) subjects.add(top);
+  }
+  return { bytes, subjects: subjects.size > 0 ? subjects.size : null };
+}
+
 // File schema for upload requests
 const fileSchema = z.object({
   path: z.string(),
-  size: z.number().int().positive(),
+  // Zero-byte files are legal: BIDS folders carry empty placeholder files,
+  // an empty-body presigned PUT is valid S3, and the web upload flow sends
+  // File.size verbatim — a single empty file must not block the whole
+  // create (#1084). Only negative sizes are rejected.
+  size: z.number().int().nonnegative(),
   type: z.enum(["metadata", "data"]),
 });
+
+// Deposit attestation (#1077): the depositor's acceptance of the Data
+// Contributor Terms, recorded on the dataset row (migration 0067). Optional at
+// the wire level so pre-attestation CLIs keep working; the CLI collects it for
+// every new upload. A 'redistribution' deposit must affirm no_duplicate — the
+// dataset is not already on NEMAR or an upstream archive in BIDS form.
+const attestationSchema = z
+  .object({
+    deposit_type: z.enum(["owner", "redistribution"]),
+    key_status: z.enum(["destroyed", "retained"]),
+    // Literal true: an attestation that does not confirm de-identification is
+    // not an attestation; the CLI aborts the upload before ever sending false.
+    deidentified: z.literal(true),
+    no_duplicate: z.boolean().optional(),
+    upstream_source: z.string().max(500).optional(),
+  })
+  .superRefine((a, ctx) => {
+    if (a.deposit_type === "redistribution" && a.no_duplicate !== true) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["no_duplicate"],
+        message:
+          "Redistribution deposits must affirm the dataset is not already archived in BIDS format",
+      });
+    }
+    if (a.deposit_type === "owner" && a.no_duplicate !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["no_duplicate"],
+        message:
+          "no_duplicate only applies to redistribution deposits (owner deposits leave it unset)",
+      });
+    }
+  });
 
 // Create dataset schema
 const createDatasetSchema = z.object({
@@ -65,6 +129,7 @@ const createDatasetSchema = z.object({
   description: z.string().optional(),
   files: z.array(fileSchema).optional(),
   sandbox: z.boolean().optional(), // If true, creates sandbox dataset (xx000XXX)
+  attestation: attestationSchema.optional(),
 });
 
 // Sandbox file size limit: 10MB total in production (sandbox is for exercising
@@ -141,7 +206,13 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
     cliVersionGuard,
     zValidator("json", createDatasetSchema),
     async (c) => {
-      const { name, description, files, sandbox: requestedSandbox } = c.req.valid("json");
+      const {
+        name,
+        description,
+        files,
+        sandbox: requestedSandbox,
+        attestation,
+      } = c.req.valid("json");
       const user = c.get("user");
       const db = c.env.DB;
 
@@ -182,7 +253,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         ? SANDBOX_MAX_TOTAL_SIZE
         : SANDBOX_MAX_TOTAL_SIZE_NONPROD;
       if (sandbox && files && files.length > 0) {
-        const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+        const totalSize = manifestSeedStats(files).bytes ?? 0;
         if (totalSize > sandboxMaxTotalSize) {
           const sizeMB = (totalSize / (1024 * 1024)).toFixed(2);
           const limitMB = (sandboxMaxTotalSize / (1024 * 1024)).toFixed(0);
@@ -231,6 +302,63 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
 
         const datasetId = existingIncomplete.dataset_id;
         const githubRepo = existingIncomplete.github_repo;
+
+        // A resumed create is the same depositor re-affirming: record the
+        // attestation they sent now (also backfills rows whose original
+        // create predated attestation collection). Failure here must not
+        // block the resume; the columns stay NULL and the next attempt
+        // records it.
+        if (attestation) {
+          try {
+            await db
+              .prepare(
+                `UPDATE datasets SET
+                   attestation_deposit_type = ?,
+                   attestation_key_status = ?,
+                   attestation_deidentified = ?,
+                   attestation_no_duplicate = ?,
+                   attestation_upstream_source = ?,
+                   attestation_accepted_at = datetime('now')
+                 WHERE dataset_id = ?`,
+              )
+              .bind(
+                attestation.deposit_type,
+                attestation.key_status,
+                attestation.deidentified ? 1 : 0,
+                attestation.no_duplicate === undefined ? null : attestation.no_duplicate ? 1 : 0,
+                attestation.upstream_source ?? null,
+                datasetId,
+              )
+              .run();
+          } catch (err) {
+            console.error(`Failed to record attestation on resumed ${datasetId}:`, err);
+          }
+        }
+
+        // Re-seed subjects/size from the manifest sent with this resume
+        // (#1091): the row predates the seed columns or carries a stale
+        // selection. The dedup WHERE does NOT prove enrichment never ran (a
+        // pushed-then-lost-config dataset can be enriched while still
+        // "incomplete"), so the metadata_updated_at guard keeps this seed off
+        // any row writeDatasetMetadataColumns has already stamped. Non-fatal.
+        const resumeSeed = manifestSeedStats(files);
+        if (resumeSeed.bytes !== null) {
+          try {
+            await db
+              .prepare(
+                "UPDATE datasets SET subject_count = ?, file_size = ?, file_size_formatted = ? WHERE dataset_id = ? AND metadata_updated_at IS NULL",
+              )
+              .bind(
+                resumeSeed.subjects,
+                resumeSeed.bytes,
+                formatFileSize(resumeSeed.bytes),
+                datasetId,
+              )
+              .run();
+          } catch (err) {
+            console.error(`Failed to seed manifest stats on resumed ${datasetId}:`, err);
+          }
+        }
 
         // Ensure the resumed dataset is still carved out of public access before
         // re-issuing upload URLs (idempotent; covers rows created before this
@@ -328,12 +456,43 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           // 'unknown' (0034) until enrichment sets the real value via
           // writeDatasetCatalogFields. If `license` is ever added here, add
           // license_tier alongside it or the tier will stay stale (#653).
+          // Attestation columns (0067) ride the claim INSERT because they are
+          // known at create time; NULLs mean "no attestation on record"
+          // (pre-attestation CLIs, server-side imports).
+          // Manifest-derived seeds (#1091): subjects/size are known from the
+          // declared file list, so the dashboard card is populated from the
+          // first render; enrichment overwrites with authoritative values.
+          const seed = manifestSeedStats(files);
           await db
             .prepare(
-              `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility)
-             VALUES (?, ?, ?, ?, '', ?, 'private')`,
+              `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility,
+                subject_count, file_size, file_size_formatted,
+                attestation_deposit_type, attestation_key_status, attestation_deidentified,
+                attestation_no_duplicate, attestation_upstream_source, attestation_accepted_at)
+             VALUES (?, ?, ?, ?, '', ?, 'private', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
-            .bind(datasetId, name, description || null, user.id, sandbox ? 1 : 0)
+            .bind(
+              datasetId,
+              name,
+              description || null,
+              user.id,
+              sandbox ? 1 : 0,
+              seed.subjects,
+              seed.bytes,
+              formatFileSize(seed.bytes),
+              attestation?.deposit_type ?? null,
+              attestation?.key_status ?? null,
+              attestation ? 1 : null,
+              attestation
+                ? attestation.no_duplicate === undefined
+                  ? null
+                  : attestation.no_duplicate
+                    ? 1
+                    : 0
+                : null,
+              attestation?.upstream_source ?? null,
+              attestation ? new Date().toISOString().replace("T", " ").slice(0, 19) : null,
+            )
             .run();
           break; // ID claimed successfully
         } catch (err) {

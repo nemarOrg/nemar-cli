@@ -42,6 +42,7 @@ import {
 } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
 import { verifyDatasetVersionS3 } from "../../services/import-integrity";
+import type { LlmUsageTotals } from "../../services/llm-enrich";
 import { generateManifest } from "../../services/manifest";
 import { buildCoverageReport } from "../../services/manifest-coverage";
 import { errorMessage } from "../../services/repo-metadata";
@@ -1529,9 +1530,16 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
 
     if (!skipEnrichment) {
       const enr = await runEnrichmentForDataset(c.env, datasetId, { ref: body.ref });
+      // llm_usage rides along on BOTH branches: a run that fails after its
+      // LLM calls (e.g. commit error) still spent the tokens.
       result.enrichment = enr.ok
-        ? { status: "ok", ref: enr.ref }
-        : { status: "failed", ref: enr.ref, error: enr.error };
+        ? { status: "ok", ref: enr.ref, ...(enr.llm_usage && { llm_usage: enr.llm_usage }) }
+        : {
+            status: "failed",
+            ref: enr.ref,
+            error: enr.error,
+            ...(enr.llm_usage && { llm_usage: enr.llm_usage }),
+          };
     }
 
     if (!skipSync) {
@@ -1647,16 +1655,28 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
 
     type PerDataset = {
       dataset_id: string;
-      enrichment: { status: "ok" | "failed" | "skipped"; error?: string };
+      enrichment: {
+        status: "ok" | "failed" | "skipped";
+        error?: string;
+        llm_usage?: LlmUsageTotals;
+      };
       sync: {
         status: "ok" | "failed" | "skipped";
         metadata_columns_error?: string;
       };
     };
     const results: PerDataset[] = [];
+    // Aggregate spend across the batch — the bulk route is the
+    // highest-spend caller, so it must report what it cost.
+    const usageTotal: LlmUsageTotals = {
+      calls: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      est_cost_usd: 0,
+    };
 
     // Sequential to keep per-dataset failures isolated and respect upstream
-    // rate limits (OpenRouter, GitHub). The runtime budget for a
+    // rate limits (Claude API, GitHub). The runtime budget for a
     // Cloudflare Worker request is the limiting factor for very large batches;
     // operators should narrow the filter or split into multiple runs.
     for (const datasetId of datasetIds) {
@@ -1667,7 +1687,20 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       };
       if (!skipEnrichment) {
         const enr = await runEnrichmentForDataset(c.env, datasetId);
-        entry.enrichment = enr.ok ? { status: "ok" } : { status: "failed", error: enr.error };
+        entry.enrichment = enr.ok
+          ? { status: "ok", ...(enr.llm_usage && { llm_usage: enr.llm_usage }) }
+          : {
+              status: "failed",
+              error: enr.error,
+              ...(enr.llm_usage && { llm_usage: enr.llm_usage }),
+            };
+        if (enr.llm_usage) {
+          usageTotal.calls += enr.llm_usage.calls;
+          usageTotal.input_tokens += enr.llm_usage.input_tokens;
+          usageTotal.output_tokens += enr.llm_usage.output_tokens;
+          usageTotal.est_cost_usd =
+            Math.round((usageTotal.est_cost_usd + enr.llm_usage.est_cost_usd) * 10000) / 10000;
+        }
       }
       if (!skipSync) {
         try {
@@ -1698,6 +1731,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       filter,
       total: results.length,
       results,
+      llm_usage_total: usageTotal,
       elapsed_ms: Date.now() - startedAt,
     });
   });

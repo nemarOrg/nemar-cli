@@ -46,7 +46,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0011](0011-dataset-ids-are-backend-assigned-in-reserved-bands.md) - Dataset IDs are assigned by the backend, in reserved bands
 - [ADR 0012](0012-oversized-datasets-skip-the-zip-and-use-direct-download.md) - Oversized datasets skip the zip and steer users to direct download
 - [ADR 0013](0013-the-importer-stays-in-nemar-cli-with-registry-plus-family-adapters.md) - The multi-archive importer stays in nemar-cli (proposed)
-- [ADR 0014](0014-submission-minimums-are-llm-judged-not-regex-gated.md) - Submission minimums are LLM-judged and advisory; regexes do not gate
+- [ADR 0014](0014-submission-minimums-are-llm-judged-not-regex-gated.md) - Submission minimums are LLM-judged and advisory; regexes do not gate (**superseded**)
 - [ADR 0015](0015-git-annex-annexes-data-only-metadata-stays-in-git.md) - git-annex takes data files only; metadata stays in plain git
 - [ADR 0016](0016-release-versioning-is-owned-by-ci.md) - CI owns version bumping and tagging
 - [ADR 0017](0017-dataset-visibility-is-filtered-server-side.md) - Dataset visibility is enforced server-side
@@ -56,6 +56,10 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0020](0020-dataset-automation-runs-from-central-shared-workflows.md) - Dataset automation runs from central shared workflows
 - [ADR 0021](0021-the-api-token-is-the-master-credential.md) - The API token is the master credential; revocation cascades
 - [ADR 0022](0022-orcid-relink-requires-post-minted-intent.md) - ORCID relink intent is minted only by an authenticated same-origin POST
+- [ADR 0023](0023-clean-zarr-rebuilds-reconcile-instead-of-wiping.md) - A `--clean` Zarr rebuild reconciles the serving copy instead of erasing it first
+- [ADR 0024](0024-deposit-attestation-is-recorded-not-assumed.md) - Deposit attestation is recorded on the dataset row, never assumed from `--yes`
+- [ADR 0025](0025-inference-compute-runs-on-device-mcp-is-a-stateless-broker.md) - Inference compute runs on the user's device; the MCP is a stateless recipe-first broker
+- [ADR 0026](0026-mechanical-submission-minimums-hard-gate-native-publication.md) - Mechanical submission minimums hard-gate native publication; adequacy stays LLM-advisory
 
 ## Backfill note (2026-07-31)
 
