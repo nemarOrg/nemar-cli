@@ -20,7 +20,13 @@ import { beforeEach, describe, expect, mock, test } from "bun:test";
 // calls. Other tests in the suite transitively import the github service
 // (webhooks, datasets routes pull ensureMainBranch etc.), so we must not
 // replace the entire module export shape.
-const fakeTree: Array<{ path: string; mode: string; type: "blob" | "tree"; sha: string; size?: number }> = [];
+const fakeTree: Array<{
+  path: string;
+  mode: string;
+  type: "blob" | "tree";
+  sha: string;
+  size?: number;
+}> = [];
 const fakeBlobs: Record<string, string> = {};
 
 const realGithub = await import("../src/services/github");
@@ -67,7 +73,13 @@ describe("generateManifest — small root file handling (issue #509)", () => {
     );
 
     expect(Object.keys(m.files).sort()).toEqual(
-      [".gitattributes", "CHANGES", "README.md", "dataset_description.json", "sub-0/eeg/x.edf"].sort(),
+      [
+        ".gitattributes",
+        "CHANGES",
+        "README.md",
+        "dataset_description.json",
+        "sub-0/eeg/x.edf",
+      ].sort(),
     );
 
     // Regular files use git:<sha> keys
@@ -90,7 +102,9 @@ describe("generateManifest — small root file handling (issue #509)", () => {
     blob(".gitattributes", "sha-gitattrs", 100, "* text=auto");
     blob("README.md", "sha-readme", 50, "# hi");
 
-    const m = await generateManifest("test/repo", "v1.0.0", "fake-pat", "test", null, null, { skipGitBackedVerification: true });
+    const m = await generateManifest("test/repo", "v1.0.0", "fake-pat", "test", null, null, {
+      skipGitBackedVerification: true,
+    });
 
     expect(m.files[".gitattributes"]).toBeDefined();
     expect(m.files["README.md"]).toBeDefined();
@@ -104,7 +118,9 @@ describe("generateManifest — small root file handling (issue #509)", () => {
     blob("README.md", "sha-readme-big", 9763, "# Dataset\n\n...lots of text...");
     blob("participants.tsv", "sha-participants", 2291, "subject_id\tage\n");
 
-    const m = await generateManifest("test/repo", "v1.0.0", "fake-pat", "test", null, null, { skipGitBackedVerification: true });
+    const m = await generateManifest("test/repo", "v1.0.0", "fake-pat", "test", null, null, {
+      skipGitBackedVerification: true,
+    });
 
     expect(m.files["README.md"].key).toBe("git:sha-readme-big");
     expect(m.files["README.md"].size).toBe(9763);
@@ -116,7 +132,9 @@ describe("generateManifest — small root file handling (issue #509)", () => {
     // as an annex entry (with the parsed key), NOT as a git:<sha> entry.
     blob("sub-1/eeg/data.bdf", "sha-ptr", 200, "/annex/objects/MD5E-s987654--cafebabe.bdf");
 
-    const m = await generateManifest("test/repo", "v1.0.0", "fake-pat", "test", null, null, { skipGitBackedVerification: true });
+    const m = await generateManifest("test/repo", "v1.0.0", "fake-pat", "test", null, null, {
+      skipGitBackedVerification: true,
+    });
 
     expect(m.files["sub-1/eeg/data.bdf"]).toEqual({
       key: "MD5E-s987654--cafebabe.bdf",
