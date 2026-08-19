@@ -241,6 +241,7 @@ export async function writeDatasetMetadataColumns(
            age_min = COALESCE(?, age_min),
            age_max = COALESCE(?, age_max),
            file_size = COALESCE(?, file_size),
+           file_size_formatted = CASE WHEN ? IS NOT NULL THEN ? ELSE file_size_formatted END,
            total_files = COALESCE(?, total_files),
            tasks = COALESCE(?, tasks),
            n_channels = COALESCE(?, n_channels),
@@ -259,6 +260,11 @@ export async function writeDatasetMetadataColumns(
       cols.age_min,
       cols.age_max,
       cols.file_size,
+      // file_size_formatted moves in lockstep with file_size (#1092 review):
+      // rewritten whenever file_size is written (formatFileSize(0) is null,
+      // matching "nothing to display"), untouched when file_size is null.
+      cols.file_size,
+      formatFileSize(cols.file_size),
       cols.total_files,
       cols.tasks,
       cols.n_channels,

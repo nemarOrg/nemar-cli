@@ -69,6 +69,9 @@ export function manifestSeedStats(files: { path: string; size: number }[] | unde
   const subjects = new Set<string>();
   for (const f of files) {
     bytes += f.size;
+    // Paths are dataset-root-relative with no leading slash (both the CLI and
+    // the web uploader send them that way); a leading "/" would hide the
+    // subject from the count, not miscount it.
     const top = f.path.split("/")[0];
     if (/^sub-[^/]+$/.test(top)) subjects.add(top);
   }
@@ -250,7 +253,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         ? SANDBOX_MAX_TOTAL_SIZE
         : SANDBOX_MAX_TOTAL_SIZE_NONPROD;
       if (sandbox && files && files.length > 0) {
-        const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+        const totalSize = manifestSeedStats(files).bytes ?? 0;
         if (totalSize > sandboxMaxTotalSize) {
           const sizeMB = (totalSize / (1024 * 1024)).toFixed(2);
           const limitMB = (sandboxMaxTotalSize / (1024 * 1024)).toFixed(0);
@@ -334,14 +337,16 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
 
         // Re-seed subjects/size from the manifest sent with this resume
         // (#1091): the row predates the seed columns or carries a stale
-        // selection. Pre-enrichment rows only, by definition of the resume
-        // branch, so nothing authoritative is overwritten. Non-fatal.
+        // selection. The dedup WHERE does NOT prove enrichment never ran (a
+        // pushed-then-lost-config dataset can be enriched while still
+        // "incomplete"), so the metadata_updated_at guard keeps this seed off
+        // any row writeDatasetMetadataColumns has already stamped. Non-fatal.
         const resumeSeed = manifestSeedStats(files);
         if (resumeSeed.bytes !== null) {
           try {
             await db
               .prepare(
-                "UPDATE datasets SET subject_count = ?, file_size = ?, file_size_formatted = ? WHERE dataset_id = ?",
+                "UPDATE datasets SET subject_count = ?, file_size = ?, file_size_formatted = ? WHERE dataset_id = ? AND metadata_updated_at IS NULL",
               )
               .bind(
                 resumeSeed.subjects,

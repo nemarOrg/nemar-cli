@@ -120,4 +120,40 @@ describe("POST /datasets resume branch seeds catalog stats", () => {
     expect(row?.file_size).toBe(850_500);
     expect(row?.file_size_formatted).toMatch(/KB|MB/);
   });
+
+  test("never overwrites a row enrichment already stamped", async () => {
+    // A pushed-then-lost-config dataset can be enriched while still matching
+    // the dedup WHERE; the metadata_updated_at guard must keep the declared
+    // manifest from clobbering the authoritative values (#1092 review).
+    db.query(
+      `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility,
+                             subject_count, file_size, file_size_formatted, metadata_updated_at)
+       VALUES ('xx090011', 'Enriched Fixture Dataset', NULL, ?, 'nemarDatasets/fixture2', 1, 'private',
+               42, 999999, '976.56 KB', datetime('now'))`,
+    ).run(userId);
+    await app.request(
+      "/datasets",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${USER_KEY}`,
+          "Content-Type": "application/json",
+          "X-CLI-Version": "99.0.0",
+        },
+        body: JSON.stringify({
+          name: "Enriched Fixture Dataset",
+          sandbox: true,
+          files: [{ path: "sub-001/eeg/a.set", size: 5, type: "data" }],
+        }),
+      },
+      { DB: realD1(db), ENVIRONMENT: "test" } as Bindings,
+    );
+    const row = db
+      .query<{ subject_count: number | null; file_size: number | null }, [string]>(
+        "SELECT subject_count, file_size FROM datasets WHERE dataset_id = ?",
+      )
+      .get("xx090011");
+    expect(row?.subject_count).toBe(42);
+    expect(row?.file_size).toBe(999_999);
+  });
 });
