@@ -10,6 +10,7 @@ import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { authMiddleware } from "../../middleware/auth";
 import { cliVersionGuard } from "../../middleware/cliVersion";
+import { formatFileSize } from "../../services/dataset-metadata-columns";
 import { generateDatasetId, isValidDatasetId } from "../../services/datasetId";
 import {
   type GitHubRepo,
@@ -50,6 +51,28 @@ async function isDatasetCollaborator(
     .bind(datasetId, userId)
     .first();
   return row !== null;
+}
+
+/**
+ * Seed catalog stats from the declared file manifest (#1091). The web GUI
+ * runs no enrichment at upload, so without this a fresh draft's dashboard
+ * card shows nothing for subjects/size. Both numbers are already in the
+ * create request; enrichment later overwrites them with authoritative
+ * values, so these are first-paint seeds, not the record.
+ */
+export function manifestSeedStats(files: { path: string; size: number }[] | undefined): {
+  bytes: number | null;
+  subjects: number | null;
+} {
+  if (!files || files.length === 0) return { bytes: null, subjects: null };
+  let bytes = 0;
+  const subjects = new Set<string>();
+  for (const f of files) {
+    bytes += f.size;
+    const top = f.path.split("/")[0];
+    if (/^sub-[^/]+$/.test(top)) subjects.add(top);
+  }
+  return { bytes, subjects: subjects.size > 0 ? subjects.size : null };
 }
 
 // File schema for upload requests
@@ -309,6 +332,29 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           }
         }
 
+        // Re-seed subjects/size from the manifest sent with this resume
+        // (#1091): the row predates the seed columns or carries a stale
+        // selection. Pre-enrichment rows only, by definition of the resume
+        // branch, so nothing authoritative is overwritten. Non-fatal.
+        const resumeSeed = manifestSeedStats(files);
+        if (resumeSeed.bytes !== null) {
+          try {
+            await db
+              .prepare(
+                "UPDATE datasets SET subject_count = ?, file_size = ?, file_size_formatted = ? WHERE dataset_id = ?",
+              )
+              .bind(
+                resumeSeed.subjects,
+                resumeSeed.bytes,
+                formatFileSize(resumeSeed.bytes),
+                datasetId,
+              )
+              .run();
+          } catch (err) {
+            console.error(`Failed to seed manifest stats on resumed ${datasetId}:`, err);
+          }
+        }
+
         // Ensure the resumed dataset is still carved out of public access before
         // re-issuing upload URLs (idempotent; covers rows created before this
         // invariant existed or whose carve-out was lost). Fail closed.
@@ -408,12 +454,17 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           // Attestation columns (0067) ride the claim INSERT because they are
           // known at create time; NULLs mean "no attestation on record"
           // (pre-attestation CLIs, server-side imports).
+          // Manifest-derived seeds (#1091): subjects/size are known from the
+          // declared file list, so the dashboard card is populated from the
+          // first render; enrichment overwrites with authoritative values.
+          const seed = manifestSeedStats(files);
           await db
             .prepare(
               `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility,
+                subject_count, file_size, file_size_formatted,
                 attestation_deposit_type, attestation_key_status, attestation_deidentified,
                 attestation_no_duplicate, attestation_upstream_source, attestation_accepted_at)
-             VALUES (?, ?, ?, ?, '', ?, 'private', ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, '', ?, 'private', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .bind(
               datasetId,
@@ -421,6 +472,9 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
               description || null,
               user.id,
               sandbox ? 1 : 0,
+              seed.subjects,
+              seed.bytes,
+              formatFileSize(seed.bytes),
               attestation?.deposit_type ?? null,
               attestation?.key_status ?? null,
               attestation ? 1 : null,
