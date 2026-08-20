@@ -220,7 +220,16 @@ const ZARR_DATA_EXTENSIONS: ReadonlySet<string> = new Set([
 const ZARR_EXCLUDED_TREES: readonly string[] = ["derivatives", "sourcedata", "code"];
 
 function isInExcludedTree(p: string): boolean {
-  return ZARR_EXCLUDED_TREES.some((dir) => p.startsWith(`${dir}/`) || p.includes(`/${dir}/`));
+  // Matched on a path SEGMENT (`dir/` at the start, or `/dir/` within), never as
+  // a bare substring -- otherwise `mycode/`, `derivatives_old/`, or a task named
+  // `task-code` would all be silently dropped. Compared lowercase like
+  // ZARR_DATA_EXTENSIONS: BIDS mandates lowercase for these trees, so a
+  // capitalized one is already malformed, and a non-raw tree must not become
+  // servable just because it was misnamed.
+  const lower = p.toLowerCase();
+  return ZARR_EXCLUDED_TREES.some(
+    (dir) => lower.startsWith(`${dir}/`) || lower.includes(`/${dir}/`),
+  );
 }
 
 /** True if a BIDS path is a recording data file (or its companion) or a curated

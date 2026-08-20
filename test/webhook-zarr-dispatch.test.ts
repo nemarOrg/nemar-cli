@@ -146,6 +146,34 @@ describe("isZarrTriggerPath", () => {
     }
   });
 
+  test("excludes on a path SEGMENT, not a bare substring", () => {
+    // isInExcludedTree matches `${dir}/` at a segment boundary. Pin that, so
+    // collapsing it to a bare `p.includes(dir)` fails here instead of silently
+    // dropping every recording whose path merely CONTAINS an excluded word.
+    for (const p of [
+      "mycode/sub-01/eeg/sub-01_task-x_eeg.set",
+      "derivatives_old/sub-01/eeg/sub-01_task-x_eeg.set",
+      "sourcedatafoo/sub-01/eeg/sub-01_task-x_eeg.set",
+      "sub-01/sourcedata-backup/sub-01_task-x_eeg.set",
+      "sub-01/eeg/sub-01_task-code_eeg.set",
+    ]) {
+      expect(isZarrTriggerPath(p)).toBe(true);
+    }
+  });
+
+  test("excluded-tree match is case-insensitive", () => {
+    // BIDS mandates lowercase for these trees, so a capitalized one is already
+    // malformed -- but a non-raw tree must not become servable just because it
+    // was misnamed, and the extension match is case-insensitive too.
+    for (const p of [
+      "Derivatives/pipeline-x/sub-01/eeg/sub-01_task-x_eeg.set",
+      "SourceData/sub-01/eeg/sub-01_task-x_eeg.edf",
+      "sub-01/CODE/analyze.py",
+    ]) {
+      expect(isZarrTriggerPath(p)).toBe(false);
+    }
+  });
+
   test("does NOT match a derivatives _events.tsv (exclusion beats the early return)", () => {
     // The _events.tsv check used to short-circuit before every other check;
     // the raw-only exclusion must be applied first so this stays excluded.
