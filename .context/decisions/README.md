@@ -60,6 +60,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0024](0024-deposit-attestation-is-recorded-not-assumed.md) - Deposit attestation is recorded on the dataset row, never assumed from `--yes`
 - [ADR 0025](0025-inference-compute-runs-on-device-mcp-is-a-stateless-broker.md) - Inference compute runs on the user's device; the MCP is a stateless recipe-first broker
 - [ADR 0026](0026-mechanical-submission-minimums-hard-gate-native-publication.md) - Mechanical submission minimums hard-gate native publication; adequacy stays LLM-advisory
+- [ADR 0027](0027-zarr-dispatch-is-raw-only-derivatives-sourcedata-code-excluded.md) - The Zarr dispatch gate is raw-only; derivatives/sourcedata/code never trigger
 
 ## Backfill note (2026-07-31)
 
