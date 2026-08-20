@@ -14,8 +14,14 @@ deciding whether a push fans out to the conversion workflow.
 
 Measurement across all 200 datasets shows this is the dominant source of two separate problems.
 3,270 of 3,771 reported conversion failures (86.7%) come from `derivatives/`, `sourcedata/`, or
-`code/` paths: phantom failures for files that were never meant to be viewable recordings (ICA
-solutions, epoched/averaged `-epo.fif`/`-ave.fif` derivatives, raw `sourcedata`).
+`code/` paths, for files that were never meant to be viewable recordings (ICA solutions,
+epoched/averaged `-epo.fif`/`-ave.fif` derivatives, raw `sourcedata`).
+Sampling these showed misclassification rather than genuine defects: every `not_continuous` failure
+inspected was an epoched or trial-averaged derivative, which is a correct verdict on a file that
+should never have been offered to a time-series viewer in the first place.
+The count is characterized as *predominantly* misclassification on that basis rather than proven
+spurious file by file; a residue of these paths may well hold genuinely unreadable files, and
+excluding the trees means we stop asking rather than establishing that each one was fine.
 Separately, 4,721 live Zarr stores (12% of 39,433) were built from `derivatives/` and `sourcedata/`
 and are being served to the viewer, even though neither is a BIDS raw recording.
 
@@ -40,13 +46,29 @@ It does not change `generate_zarr.py` itself, which lives in a separate repo
 
 ## Consequences
 
-Eliminates the dominant source of phantom failures at the dispatch layer: a push confined to
-`derivatives/`, `sourcedata/`, or `code/` no longer fans out to the Zarr workflow at all, which
-removes 86.7% of the false-failure volume at the point where it is cheapest to stop, before a job is
-even queued.
+Makes the dispatch gate raw-only: a push confined to `derivatives/`, `sourcedata/`, or `code/` no
+longer fans out to the Zarr workflow at all.
 
-It does **not**, by itself, retroactively remove the 4,721 already-live `derivatives/`/`sourcedata/`
-stores, and it does not stop a *manually* triggered `--full` or `--clean` run from reconverting them.
+**This ADR deliberately does not claim that removes the measured 86.7% of phantom failures, because
+it cannot.** The webhook dispatch path this ADR governs is **off in production**: `ZARR_AUTODISPATCH`
+is set in no environment in `backend/wrangler-sccn.toml`, and the handler dispatches only when it is
+exactly `"true"`, so the event-driven path is skipped with a log line. The production conversion
+engine is the Hallu cron (`scripts/hallu-zarr.sh`, crontab `30 * * * *`), which is driven by
+`zarr_queue.py`'s `reconcile()` off a dataset's *version* changing, invokes `generate_zarr.py` with
+`--clean` **unconditionally**, and never consults `isZarrTriggerPath`. Both paths report through the
+same `/webhooks/zarr-ready` callback into the same `zarr_data_failures` column, so the measured
+failures almost certainly originate predominantly from the Hallu path, which this change does not
+touch.
+
+What this change is therefore worth: it fixes a real latent defect (the missing `.con`/`.sqd`/`.kdf`
+extensions meant KIT MEG pushes silently never re-dispatched), it makes the gate correct for the
+staging/dev path and for any future re-enabling of `ZARR_AUTODISPATCH`, and it establishes the
+raw-only scope as the settled contract that the converter-side change is then held to. The actual
+reduction in phantom failures lands with that converter change, not here. Claiming otherwise would
+credit this ADR with an effect the production topology does not permit.
+
+It also does **not** retroactively remove the 4,721 already-live `derivatives/`/`sourcedata/` stores,
+and it does not stop the hourly `--clean` cron from reconverting them on the next version bump.
 `generate_zarr.py`'s `is_primary()` and `compute_worklist()` were read at `nemarDatasets/.github` HEAD
 on 2026-08-20 to check this, and they still walk the entire tree with no directory filter: `is_primary`
 matches by extension alone, and a `--clean`/`--full` run's `all_primaries` is every such match anywhere
@@ -65,10 +87,12 @@ claim does not hold today**: a `--clean` run right now would still treat every `
 `sourcedata/` primary as present, reconvert it, and keep its store, because nothing removed it from
 `all_primaries`.
 The claim becomes true once the companion converter change lands.
-Until then, the existing stores are merely inert — nothing will trigger a fresh conversion job
-targeting them, since the dispatch path that would have done so is now excluded — but they are not
-removed, and a manual `--wipe` or a one-off bulk cleanup remains the only way to drop them in the
-interim.
+
+Until then the existing stores are **not** inert, and it would be wrong to describe them that way:
+the Hallu cron's unconditional `--clean` reconverts every `derivatives/`/`sourcedata/` primary each
+time a dataset's version changes, entirely independently of this dispatch gate. So they keep being
+rebuilt and kept, they keep being served, and they keep generating failure rows. A `--wipe` or a
+one-off bulk cleanup remains the only way to drop them in the interim.
 That is an operational follow-up, not something this ADR settles.
 
 ## Alternatives considered
