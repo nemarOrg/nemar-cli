@@ -86,7 +86,18 @@ As verified against the script above, the converter does **not** yet apply that 
 claim does not hold today**: a `--clean` run right now would still treat every `derivatives/`/
 `sourcedata/` primary as present, reconvert it, and keep its store, because nothing removed it from
 `all_primaries`.
-The claim becomes true once the companion converter change lands.
+The claim would become true once the companion converter change lands, but that change deliberately
+suppresses it, so **the automatic cleanup will not happen and must not be assumed**.
+
+This is worth spelling out, because the naive version of the converter change is actively dangerous.
+Excluding these trees from discovery also removes them from the set of stores a run produces, and
+`--clean` computes orphans as exactly `prior index stores - stores this run produced`, feeding the
+result straight into recursive deletion. So a raw-only converter with no further guard would read all
+4,721 already-published non-raw stores as "gone from HEAD" and delete them on the very next hourly
+cron tick, with no operator action and no authorization. The companion change therefore filters
+excluded-tree paths out of the orphan set on purpose, leaving those stores in place: not rebuilt, not
+removed, merely no longer listed in a fresh index.
+Deleting them stays a separate, explicitly authorized step.
 
 Until then the existing stores are **not** inert, and it would be wrong to describe them that way:
 the Hallu cron's unconditional `--clean` reconverts every `derivatives/`/`sourcedata/` primary each
