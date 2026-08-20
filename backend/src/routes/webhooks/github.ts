@@ -185,7 +185,14 @@ export function shouldDispatchVersionDoi(
  *  serving copy (epic #684). Primary recording containers plus the companion
  *  files that carry their samples/markers (EEGLAB `.fdt`; the BrainVision
  *  `.vhdr`/`.vmrk`/`.eeg` triplet), so a change confined to a companion still
- *  triggers a reconversion of its recording. Compared lowercase. */
+ *  triggers a reconversion of its recording. Compared lowercase.
+ *
+ *  Must stay a superset of `generate_zarr.py`'s `PRIMARY_EXTS` (the converter,
+ *  in `nemarDatasets/.github`) or a push changing one of those recordings
+ *  never re-dispatches conversion and the serving copy goes stale silently —
+ *  which is exactly what happened here: the KIT/Yokogawa/RICOH MEG formats
+ *  (`.con`/`.sqd`/`.kdf`) were missing (verified against `on007763`, which has
+ *  35 affected `.con` recordings). */
 const ZARR_DATA_EXTENSIONS: ReadonlySet<string> = new Set([
   "set",
   "fdt", // EEGLAB
@@ -195,15 +202,47 @@ const ZARR_DATA_EXTENSIONS: ReadonlySet<string> = new Set([
   "vmrk",
   "eeg", // BrainVision triplet
   "fif", // MEG / Elekta-Neuromag FIFF
+  "con", // KIT/Yokogawa MEG
+  "sqd", // KIT/Yokogawa MEG
+  "kdf", // RICOH MEG
 ]);
+
+/** BIDS trees that never hold a raw recording the Zarr viewer serves:
+ *  `derivatives/` (pipeline outputs — ICA solutions, epoched/averaged
+ *  `-epo.fif`/`-ave.fif`, etc.), `sourcedata/` (pre-conversion raw dumps),
+ *  and `code/` (analysis scripts). A push confined to these must never
+ *  dispatch a conversion (ADR 0027): a full repo walk otherwise treats any
+ *  matching file as a recording wherever it sits, and measurement showed
+ *  that is where most phantom "failures" and most wrongly-served stores
+ *  came from. Checked at both a top-level and a nested position, mirroring
+ *  `emit_records.py`'s existing `derivatives`/`sourcedata` exclusion in
+ *  `nemarDatasets/.github` (extended here to also cover `code/`). */
+const ZARR_EXCLUDED_TREES: readonly string[] = ["derivatives", "sourcedata", "code"];
+
+function isInExcludedTree(p: string): boolean {
+  return ZARR_EXCLUDED_TREES.some((dir) => p.startsWith(`${dir}/`) || p.includes(`/${dir}/`));
+}
 
 /** True if a BIDS path is a recording data file (or its companion) or a curated
  *  `_events.tsv` sidecar. A `_events.tsv` change must refresh the sibling
  *  recording's embedded events; a CTF `.ds` recording is a directory, so any
- *  file under `*.ds/` counts. Exported for unit testing. */
+ *  file under `*.ds/` counts, as is MEF3's `.mefd` (any file under `*.mefd/`
+ *  counts the same way). 4D/BTi is also a directory-based recording, but BIDS
+ *  gives it NO extension (`..._meg/` containing `c,rfDC`, `config`, `hs_file`),
+ *  so it is matched content-wise on the `c,rf*` basename instead — NOT on the
+ *  bare basename `config`, which would false-positive on `.datalad/config`
+ *  (present in essentially every dataset repo). The exclusion below is checked
+ *  first and unconditionally, so a `derivatives/`/`sourcedata/`/`code/` path
+ *  never triggers regardless of which rule below would otherwise have matched
+ *  it — including the `_events.tsv` early return, which used to short-circuit
+ *  before any other check. Exported for unit testing. */
 export function isZarrTriggerPath(p: string): boolean {
+  if (isInExcludedTree(p)) return false;
   if (p.endsWith("_events.tsv")) return true;
   if (p.includes(".ds/")) return true;
+  if (p.includes(".mefd/")) return true;
+  const base = p.slice(p.lastIndexOf("/") + 1);
+  if (base.startsWith("c,rf")) return true;
   const dot = p.lastIndexOf(".");
   if (dot === -1) return false;
   return ZARR_DATA_EXTENSIONS.has(p.slice(dot + 1).toLowerCase());
