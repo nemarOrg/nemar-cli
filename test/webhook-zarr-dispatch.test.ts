@@ -97,6 +97,21 @@ describe("isZarrTriggerPath", () => {
     // NO extension, so extension matching can't see it; match content-wise
     // on the conventional `c,rfDC` basename instead.
     expect(isZarrTriggerPath("sub-01/meg/sub-01_task-x_meg/c,rfDC")).toBe(true);
+    // Other real BTi PDF spellings share the `c,rf` prefix.
+    expect(isZarrTriggerPath("sub-01/meg/sub-01_task-x_run-01_meg/c,rfhp0.1Hz")).toBe(true);
+  });
+
+  test("c,rf* only counts inside a BIDS `_meg` recording directory", () => {
+    // The BTi recording directory is `..._meg/`. Requiring that segment keeps a
+    // stray comma-prefixed file elsewhere in a repo from triggering conversion.
+    for (const p of [
+      "c,rfDC", // top level, not inside any recording dir
+      "misc/c,rfDC",
+      "sub-01/meg/notes/c,rfDC",
+      "sub-01/meg/sub-01_task-x_eeg/c,rfDC", // sibling datatype, not _meg
+    ]) {
+      expect(isZarrTriggerPath(p)).toBe(false);
+    }
   });
 
   test("does NOT match the bare basename 'config' (the .datalad/config trap)", () => {

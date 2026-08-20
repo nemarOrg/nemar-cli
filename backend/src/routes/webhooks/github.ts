@@ -236,25 +236,41 @@ function isInExcludedTree(p: string): boolean {
  *  `_events.tsv` sidecar. A `_events.tsv` change must refresh the sibling
  *  recording's embedded events; a CTF `.ds` recording is a directory, so any
  *  file under `*.ds/` counts, as is MEF3's `.mefd` (any file under `*.mefd/`
- *  counts the same way). 4D/BTi is also a directory-based recording, but BIDS
- *  gives it NO extension (`..._meg/` containing `c,rfDC`, `config`, `hs_file`),
- *  so it is matched content-wise on the `c,rf*` basename instead — NOT on the
- *  bare basename `config`, which would false-positive on `.datalad/config`
- *  (present in essentially every dataset repo). The exclusion below is checked
+ *  counts the same way). 4D/BTi is directory-based too but carries no extension
+ *  at all, so it gets its own rule — see `isBtiMember`. The exclusion below is checked
  *  first and unconditionally, so a `derivatives/`/`sourcedata/`/`code/` path
  *  never triggers regardless of which rule below would otherwise have matched
  *  it — including the `_events.tsv` early return, which used to short-circuit
  *  before any other check. Exported for unit testing. */
 export function isZarrTriggerPath(p: string): boolean {
   if (isInExcludedTree(p)) return false;
-  if (p.endsWith("_events.tsv")) return true;
-  if (p.includes(".ds/")) return true;
-  if (p.includes(".mefd/")) return true;
-  const base = p.slice(p.lastIndexOf("/") + 1);
-  if (base.startsWith("c,rf")) return true;
-  const dot = p.lastIndexOf(".");
+  // Every rule below compares lowercase, so a recording can't slip the gate on
+  // capitalization alone. (`.ds/` was case-sensitive before this; BIDS mandates
+  // lowercase, so nothing real depended on that.)
+  const lower = p.toLowerCase();
+  if (lower.endsWith("_events.tsv")) return true;
+  if (lower.includes(".ds/") || lower.includes(".mefd/")) return true;
+  if (isBtiMember(lower)) return true;
+  const dot = lower.lastIndexOf(".");
   if (dot === -1) return false;
-  return ZARR_DATA_EXTENSIONS.has(p.slice(dot + 1).toLowerCase());
+  return ZARR_DATA_EXTENSIONS.has(lower.slice(dot + 1));
+}
+
+/** True if a lowercased path is a member of a 4D/BTi recording directory.
+ *
+ *  BIDS gives 4D/BTi NO extension -- the recording is a directory
+ *  `sub-<l>[_ses-<l>]_task-<l>[_run-<i>]_meg/` holding `c,rfDC`, `config`, and
+ *  `hs_file` -- so it is matched on the `c,rf*` data file. Two deliberate
+ *  narrowings: the containing segment must end in `_meg`, so a stray `c,rf*`
+ *  elsewhere in a repo cannot trigger a conversion; and the bare basenames
+ *  `config`/`hs_file` are NOT matched, because `config` would false-positive on
+ *  `.datalad/config`, which essentially every dataset repo carries. */
+function isBtiMember(lower: string): boolean {
+  const cut = lower.lastIndexOf("/");
+  if (cut === -1) return false; // a top-level file is never inside a `_meg/` dir
+  if (!lower.slice(cut + 1).startsWith("c,rf")) return false;
+  const parent = lower.slice(0, cut);
+  return parent.slice(parent.lastIndexOf("/") + 1).endsWith("_meg");
 }
 
 /** Decide whether a push event should fan out to the Zarr-generation workflow.
