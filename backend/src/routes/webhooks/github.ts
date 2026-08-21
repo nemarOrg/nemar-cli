@@ -279,7 +279,25 @@ export function isZarrTriggerPath(p: string): boolean {
 function isBtiMember(lower: string): boolean {
   const cut = lower.lastIndexOf("/");
   if (cut === -1) return false; // a top-level file is never inside a recording dir
-  return lower.slice(cut + 1).startsWith("c,rf");
+  const base = lower.slice(cut + 1);
+  if (base.startsWith("c,rf")) return true;
+  // The converter rebuilds a BTi recording on ANY touched file inside a
+  // qualifying directory, not just the `c,rf*` data file -- it has tests for a
+  // `config`-only edit and an `hs_file` deletion both rebuilding. Matching those
+  // basenames at any depth is not an option: `.datalad/config` exists in
+  // essentially every dataset repo, so it would fire on nearly every
+  // metadata-only push across ~785 repos. Requiring the BIDS `..._meg/` parent
+  // is the narrowest rule that covers them, and it is purely ADDITIVE to the
+  // name-independent `c,rf*` match above, so it cannot re-narrow the gate.
+  //
+  // Residual, accepted gap: a `config`/`hs_file`-only change inside a BTi
+  // directory NOT named `..._meg/` still will not re-dispatch. It self-heals on
+  // the next push that dispatches for any other reason, because the workflow
+  // diffs the last-converted commit against HEAD rather than trusting the event
+  // payload, so it is staleness until the next push, not permanent loss.
+  if (base !== "config" && base !== "hs_file") return false;
+  const parent = lower.slice(0, cut);
+  return parent.slice(parent.lastIndexOf("/") + 1).endsWith("_meg");
 }
 
 /** Decide whether a push event should fan out to the Zarr-generation workflow.

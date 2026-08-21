@@ -119,14 +119,36 @@ describe("isZarrTriggerPath", () => {
     expect(isZarrTriggerPath("c,rfDC")).toBe(false);
   });
 
-  test("does NOT match the bare basename 'config' (the .datalad/config trap)", () => {
-    // A 4D/BTi directory also contains `config` and `hs_file`, but matching
-    // the bare basename `config` would false-positive on `.datalad/config`,
-    // which is present in essentially every dataset repo (verified: 50 of 51
-    // datasets during analysis). Only `c,rf*` is matched.
-    expect(isZarrTriggerPath(".datalad/config")).toBe(false);
-    expect(isZarrTriggerPath("sub-01/meg/sub-01_task-x_meg/config")).toBe(false);
-    expect(isZarrTriggerPath("sub-01/meg/sub-01_task-x_meg/hs_file")).toBe(false);
+  test("never matches 'config'/'hs_file' outside a BIDS `_meg` directory", () => {
+    // Matching these basenames at any depth would false-positive on
+    // `.datalad/config`, present in essentially every dataset repo (verified:
+    // 50 of 51 datasets during analysis), firing on nearly every metadata-only
+    // push across ~785 repos.
+    for (const p of [
+      ".datalad/config",
+      "config", // top level
+      "code/config",
+      "sub-01/meg/notes/config",
+      "sub-01/meg/sub-01_task-x_eeg/hs_file", // wrong datatype segment
+    ]) {
+      expect(isZarrTriggerPath(p)).toBe(false);
+    }
+  });
+
+  test("DOES match 'config'/'hs_file' inside a BIDS `_meg` directory", () => {
+    // The converter rebuilds a BTi recording on any touched member, and has
+    // tests for a config-only edit and an hs_file deletion both rebuilding. So
+    // the gate must fire for them too or those pushes go stale. Requiring the
+    // `..._meg/` parent is the narrowest rule that covers them without the
+    // `.datalad/config` blast radius. Additive to the `c,rf*` match, so it
+    // cannot re-narrow the gate.
+    for (const p of [
+      "sub-01/meg/sub-01_task-x_meg/config",
+      "sub-01/meg/sub-01_task-x_meg/hs_file",
+      "sub-01/ses-01/meg/sub-01_ses-01_task-x_run-01_meg/config",
+    ]) {
+      expect(isZarrTriggerPath(p)).toBe(true);
+    }
   });
 
   test("does NOT match metadata / sidecar JSON / README / other tsv", () => {
