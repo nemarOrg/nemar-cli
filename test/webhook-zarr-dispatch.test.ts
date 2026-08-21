@@ -101,27 +101,54 @@ describe("isZarrTriggerPath", () => {
     expect(isZarrTriggerPath("sub-01/meg/sub-01_task-x_run-01_meg/c,rfhp0.1Hz")).toBe(true);
   });
 
-  test("c,rf* only counts inside a BIDS `_meg` recording directory", () => {
-    // The BTi recording directory is `..._meg/`. Requiring that segment keeps a
-    // stray comma-prefixed file elsewhere in a repo from triggering conversion.
+  test("c,rf* matches at any depth, NOT only under a `_meg` directory", () => {
+    // This gate must stay a SUPERSET of the converter, whose `bti_recordings`
+    // keys a BTi dir on `c,rf*` plus a sibling `config` with no constraint on
+    // the directory name. Requiring `_meg` here would make the gate narrower
+    // than the converter, so a BTi dir named anything else would convert but
+    // never re-dispatch, going stale silently -- the KIT failure mode again.
     for (const p of [
-      "c,rfDC", // top level, not inside any recording dir
+      "sub-01/meg/sub-01_task-x_meg/c,rfDC",
+      "sub-01/meg/sub-01_task-x_eeg/c,rfDC", // odd datatype name, still a recording
       "misc/c,rfDC",
       "sub-01/meg/notes/c,rfDC",
-      "sub-01/meg/sub-01_task-x_eeg/c,rfDC", // sibling datatype, not _meg
+    ]) {
+      expect(isZarrTriggerPath(p)).toBe(true);
+    }
+    // A top-level file sits inside no directory, so it cannot be a member.
+    expect(isZarrTriggerPath("c,rfDC")).toBe(false);
+  });
+
+  test("never matches 'config'/'hs_file' outside a BIDS `_meg` directory", () => {
+    // Matching these basenames at any depth would false-positive on
+    // `.datalad/config`, present in essentially every dataset repo (verified:
+    // 50 of 51 datasets during analysis), firing on nearly every metadata-only
+    // push across ~785 repos.
+    for (const p of [
+      ".datalad/config",
+      "config", // top level
+      "code/config",
+      "sub-01/meg/notes/config",
+      "sub-01/meg/sub-01_task-x_eeg/hs_file", // wrong datatype segment
     ]) {
       expect(isZarrTriggerPath(p)).toBe(false);
     }
   });
 
-  test("does NOT match the bare basename 'config' (the .datalad/config trap)", () => {
-    // A 4D/BTi directory also contains `config` and `hs_file`, but matching
-    // the bare basename `config` would false-positive on `.datalad/config`,
-    // which is present in essentially every dataset repo (verified: 50 of 51
-    // datasets during analysis). Only `c,rf*` is matched.
-    expect(isZarrTriggerPath(".datalad/config")).toBe(false);
-    expect(isZarrTriggerPath("sub-01/meg/sub-01_task-x_meg/config")).toBe(false);
-    expect(isZarrTriggerPath("sub-01/meg/sub-01_task-x_meg/hs_file")).toBe(false);
+  test("DOES match 'config'/'hs_file' inside a BIDS `_meg` directory", () => {
+    // The converter rebuilds a BTi recording on any touched member, and has
+    // tests for a config-only edit and an hs_file deletion both rebuilding. So
+    // the gate must fire for them too or those pushes go stale. Requiring the
+    // `..._meg/` parent is the narrowest rule that covers them without the
+    // `.datalad/config` blast radius. Additive to the `c,rf*` match, so it
+    // cannot re-narrow the gate.
+    for (const p of [
+      "sub-01/meg/sub-01_task-x_meg/config",
+      "sub-01/meg/sub-01_task-x_meg/hs_file",
+      "sub-01/ses-01/meg/sub-01_ses-01_task-x_run-01_meg/config",
+    ]) {
+      expect(isZarrTriggerPath(p)).toBe(true);
+    }
   });
 
   test("does NOT match metadata / sidecar JSON / README / other tsv", () => {
