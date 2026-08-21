@@ -101,17 +101,22 @@ describe("isZarrTriggerPath", () => {
     expect(isZarrTriggerPath("sub-01/meg/sub-01_task-x_run-01_meg/c,rfhp0.1Hz")).toBe(true);
   });
 
-  test("c,rf* only counts inside a BIDS `_meg` recording directory", () => {
-    // The BTi recording directory is `..._meg/`. Requiring that segment keeps a
-    // stray comma-prefixed file elsewhere in a repo from triggering conversion.
+  test("c,rf* matches at any depth, NOT only under a `_meg` directory", () => {
+    // This gate must stay a SUPERSET of the converter, whose `bti_recordings`
+    // keys a BTi dir on `c,rf*` plus a sibling `config` with no constraint on
+    // the directory name. Requiring `_meg` here would make the gate narrower
+    // than the converter, so a BTi dir named anything else would convert but
+    // never re-dispatch, going stale silently -- the KIT failure mode again.
     for (const p of [
-      "c,rfDC", // top level, not inside any recording dir
+      "sub-01/meg/sub-01_task-x_meg/c,rfDC",
+      "sub-01/meg/sub-01_task-x_eeg/c,rfDC", // odd datatype name, still a recording
       "misc/c,rfDC",
       "sub-01/meg/notes/c,rfDC",
-      "sub-01/meg/sub-01_task-x_eeg/c,rfDC", // sibling datatype, not _meg
     ]) {
-      expect(isZarrTriggerPath(p)).toBe(false);
+      expect(isZarrTriggerPath(p)).toBe(true);
     }
+    // A top-level file sits inside no directory, so it cannot be a member.
+    expect(isZarrTriggerPath("c,rfDC")).toBe(false);
   });
 
   test("does NOT match the bare basename 'config' (the .datalad/config trap)", () => {

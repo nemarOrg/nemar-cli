@@ -260,17 +260,26 @@ export function isZarrTriggerPath(p: string): boolean {
  *
  *  BIDS gives 4D/BTi NO extension -- the recording is a directory
  *  `sub-<l>[_ses-<l>]_task-<l>[_run-<i>]_meg/` holding `c,rfDC`, `config`, and
- *  `hs_file` -- so it is matched on the `c,rf*` data file. Two deliberate
- *  narrowings: the containing segment must end in `_meg`, so a stray `c,rf*`
- *  elsewhere in a repo cannot trigger a conversion; and the bare basenames
- *  `config`/`hs_file` are NOT matched, because `config` would false-positive on
- *  `.datalad/config`, which essentially every dataset repo carries. */
+ *  `hs_file` -- so it is matched on the `c,rf*` data file. The bare basenames
+ *  `config`/`hs_file` are deliberately NOT matched, because `config` would
+ *  false-positive on `.datalad/config`, which essentially every dataset repo
+ *  carries.
+ *
+ *  Matched at ANY depth, deliberately, even though BIDS names the directory
+ *  `..._meg/`. This gate must stay a SUPERSET of what the converter treats as a
+ *  recording, and the converter (`bti_recordings` in `generate_zarr.py`) keys a
+ *  BTi directory on `c,rf*` plus a sibling `config` with NO constraint on the
+ *  directory's name. The gate cannot evaluate that sibling rule, since it sees
+ *  one changed path at a time rather than the tree, so it takes the permissive
+ *  side. Requiring `_meg` here would make the gate NARROWER than the converter:
+ *  a BTi directory named anything else would be converted but would never
+ *  re-dispatch on a push, so its serving copy would go stale silently. That is
+ *  precisely the failure mode the missing KIT extensions caused. A false
+ *  positive costs one no-op workflow run; a false negative costs correctness. */
 function isBtiMember(lower: string): boolean {
   const cut = lower.lastIndexOf("/");
-  if (cut === -1) return false; // a top-level file is never inside a `_meg/` dir
-  if (!lower.slice(cut + 1).startsWith("c,rf")) return false;
-  const parent = lower.slice(0, cut);
-  return parent.slice(parent.lastIndexOf("/") + 1).endsWith("_meg");
+  if (cut === -1) return false; // a top-level file is never inside a recording dir
+  return lower.slice(cut + 1).startsWith("c,rf");
 }
 
 /** Decide whether a push event should fan out to the Zarr-generation workflow.
