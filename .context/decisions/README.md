@@ -61,6 +61,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0025](0025-inference-compute-runs-on-device-mcp-is-a-stateless-broker.md) - Inference compute runs on the user's device; the MCP is a stateless recipe-first broker
 - [ADR 0026](0026-mechanical-submission-minimums-hard-gate-native-publication.md) - Mechanical submission minimums hard-gate native publication; adequacy stays LLM-advisory
 - [ADR 0027](0027-zarr-dispatch-is-raw-only-derivatives-sourcedata-code-excluded.md) - The Zarr dispatch gate is raw-only; derivatives/sourcedata/code never trigger
+- [ADR 0028](0028-maxshield-meg-is-sss-filtered-before-serving-or-declined.md) - MaxShield MEG is Signal-Space Separation filtered before serving, or declined
 
 ## Backfill note (2026-07-31)
 
