@@ -117,7 +117,10 @@ Covers `dataqual.json`, histogram figures, and per-file QA.
 **This is the production Zarr conversion engine.** The webhook dispatch path exists
 but is off in production: `ZARR_AUTODISPATCH` is unset, so nothing converts on push.
 The cron is what builds every store, and it passes `--clean` unconditionally,
-which means a dataset it visits is rebuilt from scratch rather than updated in place.
+which means every recording in a dataset it visits is reconverted rather than diffed.
+**`--clean` does not wipe the prefix first** — it reconciles, removing only the stores
+the run did not produce, so a recording that fails to convert keeps its previous copy.
+See ADR 0023; the flag does not mean what its name suggests.
 
 All conversion state lives on local NVMe (`/mnt/local`, 954 G), never on NFS,
 because SQLite locking over NFS is fragile.
@@ -212,7 +215,7 @@ ssh mcm "zsh -i -c 'nemar admin users'"
 
 ---
 
-## 5. Disaster recovery
+## 5. Disaster recovery (#655, epic #794)
 
 D1 (`nemar-db`) is backed up hourly to the private repo `nemarOrg/nemar-db-backup`
 by a GitHub Actions cron, where git history serves as point-in-time recovery.

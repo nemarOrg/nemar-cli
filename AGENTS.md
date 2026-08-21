@@ -36,7 +36,8 @@ Load-bearing ones to know before touching the relevant area:
 0005 (partial data still serves), 0009 (dev D1 is not a prod mirror),
 0010 (never client-stream an import), 0012 (archive size policy),
 0016 (never hand-bump versions), 0020 (workflow edits hit ~785 repos at once),
-0027 (Zarr serves BIDS raw only), 0028 (MaxShield MEG is filtered or declined).
+0023 (`--clean` reconciles, it does not wipe), 0027 (Zarr discovery is raw-only),
+0028 (MaxShield MEG is filtered or declined).
 
 ---
 
@@ -49,7 +50,7 @@ or repo settings during development or testing.
 They are kept private during dev for maximum control but contain real data.
 
 For end-to-end testing use `nm099999`, created on demand via
-`POST /admin/datasets/nm099999/reset`:
+`POST /admin/datasets/nm099999/reset` (lazily created if missing):
 
 ```bash
 nemar admin e2e-test --verbose      # reset, upload, clone, download, update cycle
@@ -78,7 +79,8 @@ allowlist in `scheduled()`. Before adding a job to the non-prod set, confirm it 
 real user, dispatch GitHub work against `nemarDatasets`, or mutate a real DOI or prod-bucket object.
 
 Authentication against staging never uses production keys: use `TEST_ADMIN_API_KEY` from
-`test/.env.test` with an isolated `NEMAR_CONFIG_DIR`, so the real `~/.config/nemar` is untouched.
+`test/.env.test` — it matches the `test-admin` token seeded by `scripts/seed-dev-db.sql` —
+with an isolated `NEMAR_CONFIG_DIR`, so the real `~/.config/nemar` is untouched.
 
 ### Never hand-bump the version
 
@@ -152,6 +154,10 @@ target `nemarDatasets` because that is where dataset repos live. Do not change t
 target (`datasetLandingUrl` in `shared/datacite-constants.ts`).
 `ww2.nemar.org` is a legacy alias for the same site, not a deployment target.
 The legacy PHP `nemar.org/dataexplorer` site is gone and its URLs 301 to `nemar.org/dataset/<id>`.
+Epic #837 had already severed the data coupling before the hostname handover:
+the outgoing datapipeline push and the incoming 4-hour catalog pull were removed,
+our `nm`/`on` records were purged from its `dataexplorer_*` tables,
+and the legacy `ds######` shadow rows were dropped from our D1.
 "The website", "the browser", or "the UI" unqualified means `nemar.org`;
 a comment contrasting ww2 with nemar.org, or calling nemar.org legacy, predates the cutover
 and is wrong.
@@ -180,7 +186,12 @@ The CLI keeps password plus API token. The dashboard uses passwordless email cod
 `POST /auth/code/request` (rate limited 1/min, 5/hour; returns `dev_code` only when
 `ENVIRONMENT=development|test`, never in production), `POST /auth/code/verify`
 (Origin-allow-listed, sets the `nemar_session` HttpOnly cookie), plus `/auth/logout`,
-`/auth/me`, and the settings endpoints from epic #1019.
+`/auth/me`, and the settings endpoints from epic #1019 —
+`PATCH /auth/profile` (#912), `POST /auth/email/change/{request,verify}`
+(#911; codes go to the NEW address, bound to the requesting session via
+`auth_codes.user_id`, migration 0066), and ORCID re-link via
+`POST /auth/orcid/start?mode=relink` (#913, **ADR 0022** — relink intent is
+never minted on a GET).
 The cookie domain is env-driven via `WEB_SESSION_COOKIE_DOMAIN`, so the website#46 cutover
 is a config flip rather than a code change.
 Web-only signups land as `signup_source='web'`, `status='pending'`,
@@ -292,7 +303,12 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   EZID is the registrar (ADR 0007 — not Zenodo, whatever `.context/research.md` says).
   DOIs are permanent and require explicit confirmation.
 - **Zarr.** A derived, latest-only serving copy, not a source of truth.
-  BIDS raw only (ADR 0027), and never derivatives, sourcedata, or code.
+  Discovery and dispatch are raw-only (ADR 0027):
+  nothing under `derivatives/`, `sourcedata/`, or `code/` becomes a *new* store.
+  Stores published under those trees before that landed are a separate,
+  explicitly authorized purge — some are still served until it completes,
+  so do not read the rule as a description of what is currently in the bucket.
+  A `--clean` rebuild reconciles rather than wiping first (ADR 0023).
 
 ---
 
