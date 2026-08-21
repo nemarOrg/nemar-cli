@@ -133,3 +133,36 @@ That is an operational follow-up, not something this ADR settles.
   not yet raw-only filtered)
 - Measured 2026-08-20 across all 200 datasets: 3,270/3,771 (86.7%) conversion failures and
   4,721/39,433 (12%) live stores attributable to `derivatives/`/`sourcedata/`
+
+## Implementation status (added 2026-08-21)
+
+The decision stands unchanged. Two statements in **Consequences** were true when written
+and are no longer, so read them as dated rather than current.
+
+**The converter-side change landed.** `nemarDatasets/.github#98` made `generate_zarr.py`'s own
+discovery raw-only (`is_excluded_from_discovery`, `in_excluded_tree`), so the sentence
+"the converter itself does not yet know about this exclusion" no longer describes HEAD.
+It shipped with exactly the guard this ADR said it must:
+`compute_clean_orphans` filters excluded-tree paths out of the orphan set,
+so the raw-only scope change alone cannot mass-delete the already-published non-raw stores.
+The "actively dangerous naive version" warned about above was therefore never deployed.
+
+**The purge is real and separate, as this ADR required.**
+`nemarDatasets/.github#99` added `scripts/zarr/purge_non_raw_stores.py`,
+dry-run by default, deriving targets from the published `index.json`
+and confirming each against S3 before deleting.
+It is the "explicitly authorized step" this ADR deferred to, and it is now authorized and under way.
+
+**Both are live in production as of 2026-08-21.** That took an operator action the ADR did not
+anticipate: the Hallu cron's `setup()` refreshes the driver clone only at process start,
+and the drain loop holds the lock until its queue empties,
+so a single run that had been going since 2026-08-12 pinned production to the pre-#98 driver
+for nine days after the merge. Merging a converter change is not deploying it.
+See `.context/systems-inventory.md` §3.3.
+
+**The measurement in Receipts is an undercount.** `GET /datasets` caps `limit` at 200,
+so "all 200 datasets" was 200 of 754. Re-measured across the full catalog on 2026-08-20:
+**17,234** non-raw stores served (not 4,721) and **7,335** non-raw phantom failures (not 3,270),
+against 151,197 raw recordings and 91.81% raw coverage.
+The percentages held up better than the absolute counts, but neither figure should be quoted
+from Receipts above without this correction.
