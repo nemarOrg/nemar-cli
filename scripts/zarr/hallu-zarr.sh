@@ -132,7 +132,16 @@ while [[ $# -gt 0 ]]; do
     --dataset) ONLY_DATASET="$2"; shift 2 ;;
     --limit) LIMIT="$2"; shift 2 ;;
     --stats) STATS_ONLY=1; shift ;;
-    --requeue) REQUEUE="${2:-failed}"; shift 2 ;;
+    # `shift 2` would fail on a bare `--requeue` (one positional left), and since
+    # this script runs without `set -e` a failed shift leaves $# unchanged and the
+    # loop spins forever. Take a value only when one is actually there.
+    --requeue)
+      if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
+        REQUEUE="$2"; shift 2
+      else
+        REQUEUE="failed"; shift
+      fi
+      ;;
     --execute) REQUEUE_EXECUTE=1; shift ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -293,6 +302,26 @@ convert_dataset() {
 }
 
 # --- Single-instance lock -----------------------------------------------------
+# Requeue runs BEFORE the single-instance lock, deliberately. A drain can hold
+# that lock for hours (on007808 held it through two cron ticks), and needing to
+# revive stranded jobs while a long conversion is in flight is precisely when an
+# operator reaches for this -- behind the lock it would just exit 3 having done
+# nothing. It also skips setup(): that does `git reset --hard` on the driver
+# clone, which a running conversion is reading from. SQLite's own locking covers
+# the concurrent write, which is a single fast UPDATE.
+if [[ -n "$REQUEUE" ]]; then
+  if [[ ! -f "$QUEUE" ]]; then
+    err "queue script not found at $QUEUE; run once without --requeue to set up the clone"
+    exit 1
+  fi
+  if [[ -n "$REQUEUE_EXECUTE" ]]; then
+    qpy requeue --status "$REQUEUE" --execute
+  else
+    qpy requeue --status "$REQUEUE"
+  fi
+  exit $?
+fi
+
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
   log "another hallu-zarr instance holds the lock; exiting"
@@ -356,17 +385,6 @@ if [[ -n "$STATS_ONLY" ]]; then
   exit 0
 fi
 
-if [[ -n "$REQUEUE" ]]; then
-  # Dry-run by default; --execute applies. Runs where the queue lives, which is
-  # this box -- there is no backend surface for it because the SQLite queue is
-  # local state, not something the API knows about.
-  if [[ -n "$REQUEUE_EXECUTE" ]]; then
-    qpy requeue --status "$REQUEUE" --execute
-  else
-    qpy requeue --status "$REQUEUE"
-  fi
-  exit $?
-fi
 
 # Targeted single-dataset run bypasses the queue (manual rebuild / test).
 if [[ -n "$ONLY_DATASET" ]]; then
