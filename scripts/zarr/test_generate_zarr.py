@@ -49,6 +49,12 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     MEM_LIMIT_FLOOR_BYTES,
     MEM_LIMIT_SLACK,
     admission_reserve_bytes,
+    reset_peak_rss,
+    peak_rss_bytes,
+    inmem_factor_for,
+    calibration_summary,
+    INMEM_MEM_FACTOR,
+    usable_ram_bytes,
     memory_failure_result,
     count_infra_failures,
     RecordingMemoryExceeded,
@@ -2655,6 +2661,118 @@ class TestPoolBreakRecovery(unittest.TestCase):
         self.assertEqual(len(results), 5)
         self.assertTrue(all(r["ok"] for r in results))
         self.assertEqual(breaks, 0)
+
+
+class TestPeakRssMeasurement(unittest.TestCase):
+    """#1111: per-recording peak RAM, so the projection factors stop being guesses."""
+
+    def test_peak_rss_is_readable_and_plausible(self):
+        rss = peak_rss_bytes()
+        if rss is None:
+            self.skipTest("no readable peak-RSS source on this platform")
+        # A running CPython is comfortably over 1 MiB and nowhere near 1 TiB;
+        # this catches a units error (KiB read as bytes, or vice versa), which is
+        # the realistic failure mode here.
+        self.assertGreater(rss, 1024**2)
+        self.assertLess(rss, 1024**4)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "clear_refs is Linux-only")
+    def test_reset_actually_lowers_the_high_water_mark(self):
+        # The whole reason measurement is trustworthy with REUSED pool workers:
+        # without this a small recording inherits the peak of the largest one its
+        # worker handled earlier, and every number is an upper envelope.
+        blob = bytearray(256 * 1024**2)
+        blob[::4096] = b"\x01" * (len(blob) // 4096)  # touch it so it is resident
+        before = peak_rss_bytes()
+        del blob
+        self.assertTrue(reset_peak_rss())
+        after = peak_rss_bytes()
+        self.assertIsNotNone(before)
+        self.assertIsNotNone(after)
+        self.assertLess(after, before, "clear_refs did not reset the peak")
+
+    def test_reset_is_harmless_where_unsupported(self):
+        # Returns False rather than raising, so a platform without clear_refs
+        # simply reports coarser numbers instead of failing conversions.
+        self.assertIn(reset_peak_rss(), (True, False))
+
+
+class TestInMemoryFactors(unittest.TestCase):
+    """#1111: one blow-up multiplier for every format was the calibration error."""
+
+    def test_brainvision_is_higher_than_the_default(self):
+        # Its chain is MNE float64 preload + a per-channel DataFrame copy + the
+        # pandas consolidation transient + the resample copy -- roughly twice the
+        # generic assumption, which is what the admission controller mis-reserved
+        # when it packed seven of them onto a 62 GB node.
+        self.assertGreater(inmem_factor_for("sub-01_task-x_eeg.vhdr"), INMEM_MEM_FACTOR)
+
+    def test_unmeasured_formats_keep_the_default(self):
+        for name in ("sub-01_eeg.set", "sub-01_eeg.edf", "sub-01_meg.con"):
+            self.assertEqual(inmem_factor_for(name), INMEM_MEM_FACTOR)
+
+    def test_projection_uses_the_per_format_factor(self):
+        size = 1024**3
+        self.assertEqual(
+            projected_peak_bytes("sub-01_task-x_eeg.vhdr", size),
+            int(size * inmem_factor_for("x.vhdr")),
+        )
+
+
+class TestCalibrationSummary(unittest.TestCase):
+    """#1111: the feedback loop that turns the factor table into measurement."""
+
+    def test_reports_the_worst_ratio_per_format(self):
+        projections = {"a.set": 1000, "b.set": 1000, "c.vhdr": 1000}
+        measured = {"a.set": 500, "b.set": 3000, "c.vhdr": 1200}
+        rows = {r["ext"]: r for r in calibration_summary(measured, projections)}
+        self.assertEqual(rows[".set"]["n"], 2)
+        self.assertEqual(rows[".set"]["max_ratio"], 3.0)  # the worst, not the mean
+        self.assertEqual(rows[".vhdr"]["max_ratio"], 1.2)
+
+    def test_worst_format_sorts_first(self):
+        projections = {"a.set": 1000, "b.vhdr": 1000}
+        measured = {"a.set": 4000, "b.vhdr": 1100}
+        self.assertEqual(calibration_summary(measured, projections)[0]["ext"], ".set")
+
+    def test_suggested_factor_scales_the_current_one(self):
+        # Advisory only: it says what WOULD have covered the worst case, and is
+        # never applied automatically -- one pathological recording must not
+        # silently re-tune the archive.
+        rows = calibration_summary({"a.set": 2000}, {"a.set": 1000})
+        self.assertEqual(rows[0]["suggested_factor"], round(INMEM_MEM_FACTOR * 2, 1))
+
+    def test_recordings_without_a_projection_are_ignored(self):
+        self.assertEqual(calibration_summary({"ghost.set": 10}, {}), [])
+
+    def test_empty_input_is_empty_output(self):
+        self.assertEqual(calibration_summary({}, {}), [])
+
+
+class TestUsableRam(unittest.TestCase):
+    """#1111: the ceiling must describe RAM we can actually get."""
+
+    def test_is_positive_and_not_absurd(self):
+        os.environ.pop("ZARR_REC_MEM_BUDGET_BYTES", None)
+        usable = usable_ram_bytes()
+        self.assertGreater(usable, 0)
+        self.assertLess(usable, 1024**5)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "reads /proc/meminfo")
+    def test_never_exceeds_what_the_kernel_says_is_available(self):
+        # MemTotal describes a machine we do not have to ourselves: the conversion
+        # node is shared, and the page cache backing our own scratch lives in the
+        # same RAM. Using it consistently overstated the budget.
+        with open("/proc/meminfo") as fh:
+            info = {
+                line.split(":", 1)[0]: int(line.split()[1]) * 1024
+                for line in fh
+                if line.split(":", 1)[0] in ("MemTotal", "MemAvailable")
+            }
+        if "MemAvailable" not in info:
+            self.skipTest("kernel too old to publish MemAvailable")
+        self.assertLessEqual(usable_ram_bytes(), info["MemAvailable"])
+        self.assertLess(usable_ram_bytes(), info["MemTotal"])
 
 if __name__ == "__main__":
     unittest.main()
