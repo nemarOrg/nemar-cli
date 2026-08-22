@@ -53,7 +53,7 @@ longer fans out to the Zarr workflow at all.
 it cannot.** The webhook dispatch path this ADR governs is **off in production**: `ZARR_AUTODISPATCH`
 is set in no environment in `backend/wrangler-sccn.toml`, and the handler dispatches only when it is
 exactly `"true"`, so the event-driven path is skipped with a log line. The production conversion
-engine is the Hallu cron (`scripts/hallu-zarr.sh`, crontab `30 * * * *`), which is driven by
+engine is the Hallu cron (`scripts/zarr/hallu-zarr.sh`, crontab `30 * * * *`), which is driven by
 `zarr_queue.py`'s `reconcile()` off a dataset's *version* changing, invokes `generate_zarr.py` with
 `--clean` **unconditionally**, and never consults `isZarrTriggerPath`. Both paths report through the
 same `/webhooks/zarr-ready` callback into the same `zarr_data_failures` column, so the measured

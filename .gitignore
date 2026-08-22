@@ -58,3 +58,7 @@ wrangler.jsonc
 !.env.example
 .claude/*.local.md
 .claude/*.local.md.done
+
+# Python bytecode (scripts/zarr/)
+__pycache__/
+*.pyc

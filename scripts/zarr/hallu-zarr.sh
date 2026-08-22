@@ -33,11 +33,13 @@
 #   ./hallu-zarr.sh --dataset nm000132   # one dataset now (bypasses the queue)
 #   ./hallu-zarr.sh --stats              # print queue status and exit
 #
-# Every conversion wipes s3://<id>/zarr/ and rebuilds the whole dataset (the
-# driver's --clean), so the serving copy always mirrors the current dataset.
+# Every conversion rebuilds the whole dataset (the driver's --clean) so the
+# serving copy mirrors the current dataset. --clean RECONCILES rather than
+# erases: each store is synced with --delete and only stores that no longer
+# exist in HEAD are removed, after a successful conversion (ADR 0023).
 #
 # Crontab (sibling of hallu-sync, offset to :30):
-#   30 * * * * /path/to/nemar-cli/scripts/hallu-zarr.sh >> /mnt/local/zarr-state/.nm-zarr-cron.log 2>&1
+#   30 * * * * /path/to/hallu-zarr.sh >> /mnt/local/zarr-state/.nm-zarr-cron.log 2>&1
 #
 # Prereqs: curl, jq, git, git-annex, nemar CLI, aws, uv, python3 in PATH.
 ################################################################################
@@ -77,7 +79,15 @@ STATE_DIR="${ZARR_STATE_DIR:-${ZARR_BASE}/zarr-state}"
 JOBS="${ZARR_JOBS:-$(nproc 2>/dev/null || echo 8)}"
 DRIVER_REPO="${ZARR_DRIVER_REPO:-${STATE_DIR}/dotgithub}"   # clone of nemarDatasets/.github
 VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
-BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg]>=1.1.2}"
+# Fallback only (used when the clone predates scripts/zarr/requirements.txt, which
+# is the real pin). Floor is 1.2.4, not 1.2.3: 1.2.3 added MEF3 .mefd / 4D-BTi
+# import (so a run below that floor would discover a .mefd/BTi recording via
+# generate_zarr.py's dir_recording_of/bti_recordings and then fail to convert it),
+# and 1.2.4 additionally reads MATLAB v7.3 (HDF5) EEGLAB `.set` and recovers three
+# false EDF/BDF rejections. Extras are not optional here: [mef3] carries pymef and
+# [hdf5] carries h5py, and without either the matching recordings raise ImportError
+# at convert time even though discovery finds them.
+BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.4}"
 API_BASE="${API_BASE:-https://api.nemar.org}"
 CALLBACK_URL="${ZARR_CALLBACK_URL:-${API_BASE}/webhooks/zarr-ready}"
 S3_BUCKET="${S3_BUCKET:-nemar}"
@@ -133,14 +143,29 @@ setup() {
   fi
   # Install biosigIO from the driver repo's manifest so the pin is single-sourced
   # with the Actions workflow (scripts/zarr/requirements.txt). Fall back to the
-  # inline spec if an older clone predates the manifest. Idempotent: uv pip
-  # install is a no-op when already satisfied.
+  # inline spec if an older clone predates the manifest.
+  #
+  # --refresh-package/--upgrade-package biosigio are REQUIRED, not cosmetic: a
+  # plain `uv pip install` reuses uv's cached index, so right after a biosigIO
+  # release the cache still lists the old version and the pin bump silently no-ops
+  # (the venv keeps the stale wheel, and the `|| true` below hides the resolution
+  # miss). That shipped a run converting on the OLD library. Forcing a refresh +
+  # upgrade of just biosigIO makes a pin bump take effect on the very next run
+  # (deps are untouched). Verify afterward and fail loud if the pin is still unmet,
+  # rather than silently converting with the wrong version.
   local req="$DRIVER_REPO/scripts/zarr/requirements.txt"
   if [[ -f "$req" ]]; then
-    VIRTUAL_ENV="$VENV_DIR" uv pip install -q -r "$req" 2>&1 | tail -2 || true
+    VIRTUAL_ENV="$VENV_DIR" uv pip install -q --refresh-package biosigio --upgrade-package biosigio -r "$req" 2>&1 | tail -2 || true
   else
-    VIRTUAL_ENV="$VENV_DIR" uv pip install -q "$BIOSIGIO_SPEC" 2>&1 | tail -2 || true
+    VIRTUAL_ENV="$VENV_DIR" uv pip install -q --refresh-package biosigio --upgrade-package biosigio "$BIOSIGIO_SPEC" 2>&1 | tail -2 || true
   fi
+  # Guard: the pinned biosigIO must actually be importable, else abort setup so the
+  # cron does not convert a whole batch on a stale library.
+  if ! VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" -c "import biosigio" 2>/dev/null; then
+    echo "[setup] FATAL: biosigio not importable after install ($BIOSIGIO_SPEC)" >&2
+    exit 1
+  fi
+  VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" -c "import biosigio; print(f'[setup] biosigio {biosigio.__version__}')"
 }
 
 DRIVER="$DRIVER_REPO/scripts/zarr/generate_zarr.py"
@@ -222,9 +247,56 @@ if ! flock -n 9; then
   exit 3
 fi
 
+# --- Reclaim orphaned scratch -------------------------------------------------
+# The driver's per-recording `tempfile.TemporaryDirectory()` unwinds on a normal
+# exit, but a SIGKILL, an OOM, or an operator killing the drain's process group
+# leaves the whole tree behind. Those are invisible (random `tmp*` names, not
+# dataset-named) and they are BIG: 130 GB across 10 dirs by 2026-08-12, one of
+# them 117 GB on its own. nemarOrg/nemar-cli#1068.
+#
+# Sweeping is safe HERE and only here: we hold the single-instance lock and have
+# not started the driver, so nothing owns anything under WORK_DIR and every
+# `tmp*` entry is by definition from a dead run. Dataset-named scratch dirs are
+# left alone -- convert_dataset safe_rm's those itself before each clone.
+sweep_orphaned_scratch() {
+  local n=0 kb=0 sz
+  while IFS= read -r -d '' p; do
+    # `du -sk` (KiB) not `-sb`: -b is GNU-only. The regex guard keeps a failed or
+    # empty du from turning the arithmetic into a syntax error and aborting the
+    # sweep mid-loop -- reporting the size must never cost us the reclaim.
+    sz=$(du -sk "$p" 2>/dev/null | cut -f1)
+    [[ "$sz" =~ ^[0-9]+$ ]] || sz=0
+    kb=$((kb + sz))
+    safe_rm "$p"
+    n=$((n + 1))
+  done < <(find "$WORK_DIR" -maxdepth 1 -name 'tmp*' -print0 2>/dev/null)
+  if [[ "$n" -gt 0 ]]; then
+    log "swept $n orphaned scratch entries from a previous run (~$((kb / 1024)) MiB reclaimed)"
+  fi
+  return 0
+}
+sweep_orphaned_scratch
+
 setup
 if [[ ! -f "$DRIVER" || ! -f "$QUEUE" ]]; then
   err "driver/queue not found under $DRIVER_REPO after setup"; exit 1
+fi
+
+# Drift guard. setup() refreshes DRIVER_REPO from origin/main every run, so the
+# Python driver deploys itself -- but THIS script cannot: it has to exist before
+# the clone does, so it is a hand-placed copy that git never touches. That copy
+# silently fell ~5 weeks behind main once already (nemarDatasets/.github#92's
+# scratch sweep merged and did nothing here). Compare and warn; do NOT self-copy,
+# because bash reads a script incrementally and rewriting the running file mid-run
+# resumes execution at a garbage byte offset. Deploy with an atomic rename:
+#   scp hallu-zarr.sh hallu:/path/.hallu-zarr.sh.new && ssh hallu 'mv /path/.hallu-zarr.sh.new /path/hallu-zarr.sh'
+# dirname/basename rather than ${BASH_SOURCE%/*}: invoked by bare name off $PATH
+# there is no slash to strip, and the parameter expansion would yield the filename
+# as the directory, making every run report a bogus drift.
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/$(basename "${BASH_SOURCE[0]}")"
+REPO_SELF="$DRIVER_REPO/scripts/zarr/$(basename "${BASH_SOURCE[0]}")"
+if [[ -f "$REPO_SELF" && "$SELF" != "$REPO_SELF" ]] && ! cmp -s "$SELF" "$REPO_SELF"; then
+  err "DRIFT: $SELF differs from $REPO_SELF (origin/main). Changes merged to this script are NOT live; deploy it."
 fi
 
 if [[ -n "$STATS_ONLY" ]]; then
