@@ -457,6 +457,38 @@ INMEM_MEM_FACTOR_BY_EXT = {
     ".vhdr": float(os.environ.get("ZARR_INMEM_MEM_FACTOR_VHDR", "12")),
 }
 
+# Signal-Space Separation (ADR 0028) runs BEFORE conversion and costs its own peak:
+# it needs a fully preloaded float64 `Raw`, which is the anonymous memory RLIMIT_DATA
+# counts. The filtered copy then STREAMS, so conversion adds nothing to that peak.
+#
+# Measured through `apply_sss` itself on the conversion node, across both affected
+# datasets rather than at one point -- the BrainVision entry above is the cautionary
+# tale for a single-sample factor:
+#
+#     on006720 sub-197   160 MiB -> 0.78 GiB   5.0x
+#     on006720 sub-155   164 MiB -> 0.79 GiB   5.0x
+#     on006012 sub-01    438 MiB -> 1.87 GiB   4.4x
+#     on006720 sub-155   716 MiB -> 2.95 GiB   4.2x
+#
+# The ratio FALLS with size as fixed overhead amortises, so the worst ratio sits where
+# the absolute number is trivial and the largest recordings -- the ones that can
+# actually exhaust the node -- are the cheapest per byte. 6x clears every observed
+# point, and clears the largest by 43%.
+#
+# Note this deliberately does NOT get `MEM_LIMIT_SLACK`. Admission calls
+# `admission_reserve_bytes(..., streamed=True)` for these recordings, since the
+# CONVERSION streams, and that suppresses the 3x multiplier. That multiplier exists
+# for factors that are "a guessed multiple of on-disk bytes"; this one is measured
+# across the range it will be applied to, which is the condition the slack covers.
+# Applying both would reserve ~18x on-disk and gut concurrency for no evidence.
+#
+# Load-bearing rather than an efficiency nicety: `apply_worker_mem_limit` sizes
+# RLIMIT_DATA from this projection BEFORE the worker starts, so an under-projection
+# does not merely over-schedule the node, it kills the filter mid-run. The streaming
+# floor alone (4 GiB) happens to clear the largest recording by under 5%, which is
+# coincidence -- that floor was sized for conversion, not for this phase.
+MAXSHIELD_MEM_FACTOR = float(os.environ.get("ZARR_MAXSHIELD_MEM_FACTOR", "6"))
+
 
 def note_measurement(result: dict, projections: dict, measured: dict) -> str | None:
     """Fold one `convert_one` result into ``measured``; return a warning to print
@@ -564,8 +596,29 @@ class RecordingMemoryExceeded(Exception):
     code = "recording_memory_exceeded"
 
 
+class MaxShieldUncalibrated(Exception):
+    """A MEG recording carrying raw Internal Active Shielding (MaxShield) data for
+    which the site-specific calibration pair does not resolve.
+
+    MEGIN's position, which MNE enforces by refusing to read these files at all, is
+    that raw Internal Active Shielding data is not fit for analysis until the
+    shielding's effect has been modelled out. ADR 0028 decides we correct it with
+    Signal-Space Separation and serve the result -- but ONLY with the recording's own
+    fine-calibration and cross-talk files, because uncalibrated Signal-Space
+    Separation is a weaker correction whose quality varies by site and hardware, and
+    serving it under the same label would make the two indistinguishable.
+
+    So this is the honest decline: a permanent property of what the dataset ships,
+    NOT in `RETRYABLE_CODES`. It exists to replace the opaque `file_read_error` that
+    gave a user no way to tell an unreadable file from a policy decision."""
+
+    code = "maxshield_uncalibrated"
+
+
 # Coded failures that are nevertheless NOT a permanent property of the data, so a
 # run consisting entirely of them must stay retryable. See `deterministic` in main().
+# `maxshield_uncalibrated` is deliberately absent: the calibration pair is either
+# shipped with the dataset or it is not, and retrying cannot change that.
 RETRYABLE_CODES = frozenset({RecordingMemoryExceeded.code})
 
 
@@ -650,14 +703,28 @@ def streaming_peak_bytes(size_bytes: int, n_channels: int | None) -> int:
 
 
 def projected_peak_bytes(
-    primary_local: str, size_bytes: int, n_channels: int | None = None
+    primary_local: str,
+    size_bytes: int,
+    n_channels: int | None = None,
+    maxshield: bool = False,
 ) -> int:
     """Estimated peak RAM to convert this recording: the streaming path's
     channel-aware bound, or the float64 blow-up for the in-memory path. Drives the
-    skip guard (#909)."""
-    if should_stream(primary_local, size_bytes):
-        return streaming_peak_bytes(size_bytes, n_channels)
-    return int(size_bytes * inmem_factor_for(primary_local))
+    skip guard (#909).
+
+    `maxshield` adds the Signal-Space Separation phase (ADR 0028), which runs before
+    conversion and peaks independently of it. The two phases are sequential and the
+    `Raw` is released between them, so the recording's peak is the LARGER of the two
+    rather than their sum.
+    """
+    conversion = (
+        streaming_peak_bytes(size_bytes, n_channels)
+        if should_stream(primary_local, size_bytes)
+        else int(size_bytes * inmem_factor_for(primary_local))
+    )
+    if not maxshield:
+        return conversion
+    return max(conversion, int(size_bytes * MAXSHIELD_MEM_FACTOR))
 
 
 def usable_ram_bytes(meminfo_path: str = "/proc/meminfo") -> int:
@@ -786,6 +853,14 @@ _FALLBACK_REASONS = {
         "The converted viewer copy carried fewer channels than this recording's "
         "channels.tsv declares, so it was withheld pending a converter fix."
     ),
+    # NEMAR-side (not a biosigIO code): ADR 0028. Surfaces MEGIN's own position,
+    # which is why the file cannot simply be shown, rather than a bare read error.
+    "maxshield_uncalibrated": (
+        "This recording was acquired with internal active shielding, which distorts "
+        "the signal until it is corrected. Correcting it needs the site's "
+        "fine-calibration and cross-talk files, which this dataset does not provide "
+        "for this recording, so no viewer copy is offered."
+    ),
 }
 _GENERIC_REASON = _FALLBACK_REASONS["file_read_error"]
 
@@ -846,6 +921,156 @@ def is_bids_calibration_file(path: str) -> bool:
     """True for a BIDS-reserved MEG calibration filename (crosstalk or
     fine-calibration correction data), which is never a recording."""
     return path.endswith(_BIDS_CALIBRATION_SUFFIXES)
+
+
+def maxshield_calibration_for(
+    primary_path: str, head_files: set[str] | frozenset[str]
+) -> tuple[str, str] | None:
+    """The `(fine_calibration, cross_talk)` pair applying to `primary_path`, or None
+    when either is absent.
+
+    Resolved by BIDS inheritance: the nearest match in the recording's own directory
+    or any ancestor, most specific winning. Both must resolve -- ADR 0028 declines
+    rather than run Signal-Space Separation uncalibrated, because an uncalibrated
+    correction is weaker in a way a consumer could not distinguish from a good one.
+
+    These are exactly the files `is_bids_calibration_file` excludes from DISCOVERY.
+    That is not a contradiction and the two must not be conflated: they are never
+    recordings, and they are inputs to converting one. A future change that reads
+    "excluded from discovery" as "irrelevant to conversion" silently breaks MaxShield
+    support (ADR 0028's own warning).
+
+    The entity-subset rule the other sidecar resolvers use does NOT work here, which
+    is why this is its own function. `sub-01_acq-calibration_meg.dat` carries
+    `acq=calibration`, while the recording `sub-01_task-rest_meg.fif` has no `acq` at
+    all, so the subset test rejects the very file it should find. `acq` is the entity
+    that NAMES these sidecars rather than scoping them, so it is exempt here.
+    """
+    rec_dir = os.path.dirname(primary_path)
+    rec_ents = _bids_entities(filename_stem(primary_path))
+
+    def _nearest(suffix: str) -> str | None:
+        # Same two accepted spellings as the other sidecar resolvers: the
+        # entity-prefixed form beside the recording, or the bare form (no leading
+        # underscore) at a level that has no entities of its own.
+        bare = suffix.lstrip("_")
+        candidates: list[tuple[int, int, str]] = []
+        for f in head_files:
+            if not (f.endswith(suffix) or os.path.basename(f) == bare):
+                continue
+            cdir = os.path.dirname(f)
+            if cdir and rec_dir != cdir and not rec_dir.startswith(cdir + "/"):
+                continue
+            cents = _bids_entities(filename_stem(f))
+            cents.pop("acq", None)  # names the sidecar, does not scope it
+            if any(rec_ents.get(k) != v for k, v in cents.items()):
+                continue
+            candidates.append((cdir.count("/") + (1 if cdir else 0), len(cents), f))
+        if not candidates:
+            return None
+        candidates.sort()
+        return candidates[-1][2]
+
+    cal = _nearest("_acq-calibration_meg.dat")
+    ctc = _nearest("_acq-crosstalk_meg.fif")
+    return (cal, ctc) if cal and ctc else None
+
+
+def is_maxshield_fif(path: str) -> bool:
+    """True if `path` is a FIF carrying raw Internal Active Shielding data.
+
+    Reads the FIF header only (`preload=False`), which is cheap even on a large
+    recording -- measured at 1.6 s and 0.13 GiB of peak RSS against a 716 MiB file on
+    the conversion node -- so this is affordable as a preflight on every FIF.
+
+    `allow_maxshield="yes"` is the quiet form: it suppresses MNE's warning, which we
+    do not want in the log for a file we are about to correct properly. The flag we
+    read back, `info["maxshield"]`, is MNE's own; ADR 0028 established that it flips
+    True -> False once Signal-Space Separation has run, so the same field serves as
+    both the detector here and the verification afterwards.
+
+    Anything that is not a readable FIF is not our business: return False and let the
+    normal conversion path produce its own typed failure.
+    """
+    if lower_ext(path) != ".fif":
+        return False
+    try:
+        import mne  # type: ignore[import-not-found]  # lazy: runtime-only dep
+
+        info = mne.io.read_raw_fif(
+            path, allow_maxshield="yes", preload=False, verbose="ERROR"
+        ).info
+        return bool(info.get("maxshield"))
+    except Exception as exc:  # noqa: BLE001 - never fail a recording on the probe
+        # Returning False here routes the recording down the NORMAL path, which for
+        # a genuinely MaxShield file is the pre-ADR-0028 behaviour: MNE refuses it
+        # and the operator gets an opaque `file_read_error` with no hint that the
+        # correction was skipped because a header probe failed. That is a real
+        # regression risk (a truncated download, a missing split member -- MNE reads
+        # every split header even at preload=False), so it must not be silent.
+        print(
+            f"::warning::{path!r}: could not read the FIF header to test for "
+            f"Internal Active Shielding ({type(exc).__name__}: {exc}); converting it "
+            "as an ordinary recording. If it IS shielded, expect a file_read_error.",
+            flush=True,
+        )
+        return False
+
+
+def apply_sss(raw_path: str, calibration: str, cross_talk: str, out_path: str) -> dict:
+    """Signal-Space Separation filter a MaxShield recording, writing the corrected
+    recording to `out_path`. Returns the disclosure recorded in the store and index.
+
+    ADR 0028: raw Internal Active Shielding data is never served. It is corrected
+    with the recording's own site-specific fine-calibration and cross-talk files, or
+    it is declined. `mne.preprocessing.maxwell_filter` is an open-source
+    implementation of the same Signal-Space Separation family as MEGIN's proprietary
+    MaxFilter, which the conversion host cannot run.
+
+    The result is a PROCESSED DERIVATIVE, unlike every other store this converter
+    writes, which is why this returns a disclosure rather than filtering silently.
+    """
+    import mne  # type: ignore[import-not-found]  # lazy: runtime-only dep
+
+    raw = mne.io.read_raw_fif(
+        raw_path, allow_maxshield="yes", preload=True, verbose="ERROR"
+    )
+    try:
+        sss = mne.preprocessing.maxwell_filter(
+            raw, calibration=calibration, cross_talk=cross_talk, verbose="ERROR"
+        )
+    except MemoryError:
+        # Genuinely transient: the node was busy, not the data wrong. Let it reach
+        # the retryable `recording_memory_exceeded` verdict.
+        raise
+    except Exception as exc:  # noqa: BLE001 - see below
+        # A calibration pair that is PRESENT but does not fit this recording (wrong
+        # sensor set, wrong site, malformed file) is just as permanent a property of
+        # what the dataset ships as a missing pair, so it gets the same terminal
+        # verdict. Left uncoded it would fall through to the generic handler as an
+        # infra failure and re-run maxwell_filter on every future pass forever --
+        # the anti-pattern #1110 exists to prevent, at ~1 minute of compute a time.
+        raise MaxShieldUncalibrated(
+            f"Signal-Space Separation failed with this recording's calibration pair "
+            f"({os.path.basename(calibration)}, {os.path.basename(cross_talk)}): "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    # MNE's own guardrail, the check that refused to load the file, is satisfied by
+    # the output. If it is not, the correction did not happen and serving the result
+    # would be exactly the thing ADR 0028 forbids -- so fail rather than publish it.
+    if sss.info.get("maxshield"):
+        raise MaxShieldUncalibrated(
+            "Signal-Space Separation ran but the recording is still flagged as raw "
+            "Internal Active Shielding data; refusing to serve it"
+        )
+    sss.save(out_path, overwrite=True, verbose="ERROR")
+    return {
+        "applied": True,
+        "method": "maxwell_filter",
+        "calibration": os.path.basename(calibration),
+        "cross_talk": os.path.basename(cross_talk),
+        "mne_version": mne.__version__,
+    }
 
 
 def is_excluded_from_discovery(path: str) -> bool:
@@ -2743,6 +2968,54 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             primary_local, events_local, primary_key = materialize_recording(
                 c["repo"], c["bucket"], c["dataset_id"], primary, c["head_files"], c["head"], work
             )
+        # ADR 0028. Substituted HERE rather than inside convert_recording, which
+        # derives modality, size and the streaming decision from the path it is given
+        # (a late rebind would leave all three describing the unfiltered file). The
+        # filtered copy lands in `work`, which the `finally` below already removes,
+        # and fix_source_file_attr still rewrites source_file to the BIDS path, so the
+        # scratch name never reaches the store.
+        sss_meta = None
+        if is_maxshield_fif(primary_local):
+            pair = maxshield_calibration_for(primary, c["head_files"])
+            if pair is None:
+                raise MaxShieldUncalibrated(
+                    "recording carries raw Internal Active Shielding data and this "
+                    "dataset provides no fine-calibration / cross-talk pair for it"
+                )
+            cal_rel, ctc_rel = pair
+            cal_local = os.path.join(work, os.path.basename(cal_rel))
+            ctc_local = os.path.join(work, os.path.basename(ctc_rel))
+            if c["local"]:
+                cal_local = os.path.join(c["repo"], cal_rel)
+                ctc_local = os.path.join(c["repo"], ctc_rel)
+                # The remote branch below decides cleanly when a tracked file cannot
+                # be materialised; local mode has to check for itself. A working tree
+                # can hold a git-annex POINTER whose content was never fetched, and
+                # `os.path.exists` is False for a dangling symlink -- so this catches
+                # the realistic case rather than letting apply_sss fail uncoded and
+                # retry the filter on every future run.
+                missing = [r for r, p in ((cal_rel, cal_local), (ctc_rel, ctc_local))
+                           if not os.path.exists(p)]
+                if missing:
+                    raise MaxShieldUncalibrated(
+                        "calibration input(s) present in the tree but without local "
+                        f"content (run `git annex get`): {', '.join(missing)}"
+                    )
+            else:
+                for rel, dest in ((cal_rel, cal_local), (ctc_rel, ctc_local)):
+                    found, _ = _fetch_blob(
+                        c["repo"], c["bucket"], c["dataset_id"], rel, c["head"], dest
+                    )
+                    if not found:
+                        # Tracked at HEAD but unfetchable. Falling through to serve
+                        # the recording unfiltered is exactly what ADR 0028 forbids.
+                        raise MaxShieldUncalibrated(
+                            f"calibration input {rel!r} is tracked at "
+                            f"{c['head'][:8]} but could not be fetched"
+                        )
+            filtered = os.path.join(work, "sss_" + os.path.basename(primary_local))
+            sss_meta = apply_sss(primary_local, cal_local, ctc_local, filtered)
+            primary_local = filtered
         plf = power_line_frequency_for(c["repo"], primary, c["head_files"], c["head"])
         descs = event_descriptions_for(c["repo"], primary, c["head_files"], c["head"])
         elec = electrode_positions_for(c["repo"], primary, c["head_files"], c["head"])
@@ -2757,6 +3030,11 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # reproducible BIDS-repo-relative path before validating/uploading.
         # nemarOrg/nemar-cli#1102.
         fix_source_file_attr(store_local, primary)
+        if sss_meta:
+            # In the store as well as the index: a consumer reading the store
+            # directly (the ML streaming path) must not have to fetch index.json to
+            # learn that this signal is a processed derivative.
+            embed_root_attr(store_local, "sss", sss_meta)
         # Guard the --delete sync: an empty/partial store would otherwise wipe a
         # previously-valid one. zarr.json => v3 root.
         validate_store(store_local)
@@ -2816,6 +3094,15 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         members = split_members_for(primary, c["head_files"])
         if members:
             entry["split_members"] = members
+        # ADR 0028 requires this to be DISCLOSED, not merely auditable. Every other
+        # store is the source signal quantised and rate-capped and nothing more; this
+        # one has been processed. A model training across datasets would otherwise
+        # silently mix filtered and unfiltered MEG with no signal that it was doing
+        # so. MNE writes the parameters into the recording's own proc_history, but
+        # biosigIO's importer does not carry that into the store, so state it here
+        # (and in the store's root attributes) rather than assume it survives.
+        if sss_meta:
+            entry["sss"] = sss_meta
         return {
             "ok": True,
             "primary": primary,
@@ -3197,8 +3484,23 @@ def main() -> int:
             channel_counts[p] = expected_channel_count_for(repo, p, head_set, head)
         except Exception:  # noqa: BLE001 - a projection input must not fail a run
             channel_counts[p] = None
+    # Whether a recording will need the Signal-Space Separation phase cannot be known
+    # here: that is `info["maxshield"]` inside the FIF, and admission deliberately
+    # projects from git-annex pointers WITHOUT downloading. The BIDS sidecar carries
+    # no MaxShield marker either. So use the one signal that IS available from
+    # `head_files` alone -- a resolvable fine-calibration / cross-talk pair -- and let
+    # the worker do the real detection. A dataset that ships the pair for a FIF that
+    # turns out not to be MaxShield is merely over-reserved for, which costs
+    # concurrency; under-reserving costs the node.
+    maxshield_hint = {
+        p: lower_ext(p) == ".fif" and maxshield_calibration_for(p, head_set) is not None
+        for p in convert
+    }
     projections = {
-        p: projected_peak_bytes(p, sizes[p], channel_counts.get(p)) for p in convert
+        p: projected_peak_bytes(
+            p, sizes[p], channel_counts.get(p), maxshield=maxshield_hint[p]
+        )
+        for p in convert
     }
     peaks = {
         p: admission_reserve_bytes(
