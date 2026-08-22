@@ -292,6 +292,22 @@ class RequeueTest(unittest.TestCase):
         self.assertEqual(self._status("nm000001")["status"], "failed")
         self.assertEqual(self._status("nm000003")["status"], "failed")
 
+    def test_done_is_reachable_but_never_swept_up_by_all(self):
+        # A run where anything converted is marked `done`, so a recording that
+        # failed for a retryable reason is stranded in a `done` row (#1113).
+        # Requeue must be able to reach it -- but `all` must NOT include it, or a
+        # routine recovery would re-convert the entire archive.
+        mark_done(self.conn, "nm000003", "v1")
+        self.assertEqual(self._status("nm000003")["status"], "done")
+
+        requeue(self.conn, ("failed", "data_failed"), execute=True)
+        self.assertEqual(
+            self._status("nm000003")["status"], "done", "`all` must not touch done"
+        )
+
+        requeue(self.conn, ("done",), dataset_id="nm000003", execute=True)
+        self.assertEqual(self._status("nm000003")["status"], "pending")
+
     def test_healthy_jobs_are_never_touched(self):
         before = self._status("nm000003")["attempts"]
         requeue(self.conn, ("failed", "data_failed"), execute=True)

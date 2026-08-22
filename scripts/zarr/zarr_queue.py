@@ -359,7 +359,15 @@ def main() -> int:
         "requeue",
         help="reset terminal jobs (failed / data_failed) back to pending",
     )
-    p.add_argument("--status", choices=("failed", "data_failed", "all"), default="failed")
+    p.add_argument(
+        "--status",
+        choices=("failed", "data_failed", "done", "all"),
+        default="failed",
+        help="`done` reaches datasets that converted PARTIALLY: a run where "
+        "anything succeeded is marked done, so recordings that failed for a "
+        "retryable reason are stranded there. Scope it with --dataset -- "
+        "requeuing `done` re-converts the whole dataset.",
+    )
     p.add_argument("--dataset", default=None, help="just this dataset")
     p.add_argument(
         "--execute",
@@ -392,6 +400,8 @@ def main() -> int:
         return 0
 
     if args.cmd == "requeue":
+        # `all` deliberately does NOT include `done`: that would re-convert every
+        # dataset in the archive. Reaching `done` has to be asked for by name.
         statuses = ("failed", "data_failed") if args.status == "all" else (args.status,)
         rows = requeue(conn, statuses, args.dataset, args.execute)
         verb = "requeued" if args.execute else "would requeue"

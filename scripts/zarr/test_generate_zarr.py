@@ -78,6 +78,7 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     electrode_positions_for,
     expected_channel_count_for,
     store_total_channels,
+    store_metadata,
     embed_attr,
     embed_root_attr,
     event_descriptions_for,
@@ -1716,12 +1717,66 @@ class TestMemoryGuard(unittest.TestCase):
             with open(rec, "wb") as fh:
                 fh.write(b"e" * 100_000)
             with self.assertRaises(RecordingTooLarge) as cm:
+                # The genuinely terminal shape: free < node capacity < what this
+                # recording needs. The two ceilings must be DISTINGUISHABLE, or
+                # the verdict is deliberately the retryable one.
                 convert_recording(
                     rec, None, os.path.join(d, "store"),
-                    mem_budget_bytes=1, hard_ceiling_bytes=1,
+                    mem_budget_bytes=1, hard_ceiling_bytes=2,
                 )
             self.assertEqual(cm.exception.code, "recording_too_large")
             self.assertNotIn(cm.exception.code, RETRYABLE_CODES)
+
+    def test_preflight_uses_the_projection_admission_computed(self):
+        # Phase 4 made projected_peak_bytes channel-aware but only updated
+        # main()'s call site. Recomputing blind inside convert_recording always
+        # yielded the flat STREAM_PEAK_BYTES floor for a streaming recording --
+        # and since the ceiling is itself floored at 2x that value, the
+        # comparison could never fire, making the permanent RecordingTooLarge
+        # verdict dead code for the entire streaming path. The preflight must use
+        # the number admission already computed.
+        with tempfile.TemporaryDirectory() as d:
+            rec = os.path.join(d, "sub-01_task-x_eeg.edf")
+            with open(rec, "wb") as fh:
+                fh.write(b"e" * 100_000)
+            # A tiny file whose CHANNEL-AWARE projection is enormous: exactly the
+            # few-channel/long/high-rate shape the flat floor cannot represent.
+            with self.assertRaises(RecordingTooLarge) as cm:
+                convert_recording(
+                    rec, None, os.path.join(d, "store"),
+                    mem_budget_bytes=10, hard_ceiling_bytes=20,
+                    projected_peak=100 * 1024**3,
+                )
+            self.assertEqual(cm.exception.code, "recording_too_large")
+
+    def test_preflight_falls_back_to_computing_its_own_projection(self):
+        # Callers that do not supply one (tests, any future call site) must still
+        # get a preflight rather than silently none.
+        with tempfile.TemporaryDirectory() as d:
+            rec = os.path.join(d, "sub-01_task-x_eeg.edf")
+            with open(rec, "wb") as fh:
+                fh.write(b"e" * 100_000)
+            with self.assertRaises((RecordingTooLarge, RecordingMemoryExceeded)):
+                convert_recording(
+                    rec, None, os.path.join(d, "store"), mem_budget_bytes=1
+                )
+
+    def test_indistinguishable_ceilings_never_produce_a_permanent_verdict(self):
+        # When /proc/meminfo is unreadable both ceilings fall back to the same
+        # fixed figure. That makes `peak <= hard_ceiling` unsatisfiable whenever
+        # `peak > mem_budget`, so every over-budget recording would be marked
+        # permanently too-large -- silently undoing the #1111 split. Being wrong
+        # toward "retry" costs one attempt; being wrong the other way buries a
+        # dataset forever.
+        with tempfile.TemporaryDirectory() as d:
+            rec = os.path.join(d, "sub-01_task-x_eeg.edf")
+            with open(rec, "wb") as fh:
+                fh.write(b"e" * 100_000)
+            with self.assertRaises(RecordingMemoryExceeded):
+                convert_recording(
+                    rec, None, os.path.join(d, "store"),
+                    mem_budget_bytes=5, hard_ceiling_bytes=5,
+                )
 
     def test_reason_for_code_too_large_is_user_facing(self):
         self.assertIn("too large", reason_for_code("recording_too_large").lower())
@@ -2703,6 +2758,24 @@ class TestPoolBreakRecovery(unittest.TestCase):
         self.assertEqual(len(results), 5)
         self.assertTrue(all(r["ok"] for r in results))
         self.assertEqual(breaks, 0)
+
+
+class TestStoreMetadataDiagnostics(unittest.TestCase):
+    """#1119: a store-read failure must name its cause, and must not publish it."""
+
+    def test_unreadable_store_reports_the_cause_privately(self):
+        meta = store_metadata("/no/such/store.zarr")
+        self.assertFalse(meta.get("groups"))
+        self.assertIn("_error", meta)
+
+    def test_diagnostic_keys_are_underscore_prefixed(self):
+        # `meta` is spread into the published index entry, so anything diagnostic
+        # has to be filterable. The `_` prefix is that contract.
+        meta = store_metadata("/no/such/store.zarr")
+        for key in meta:
+            if key == "_error":
+                continue
+            self.assertFalse(key.startswith("_"), f"unexpected private key {key}")
 
 
 class TestPeakRssMeasurement(unittest.TestCase):

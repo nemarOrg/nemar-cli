@@ -286,6 +286,14 @@ convert_dataset() {
   # partial success returns rc=0 -> `done` regardless of this value (#774).
   if [[ -f "$cb" ]]; then
     LAST_DETERMINISTIC="$(jq -r '.deterministic // false' "$cb" 2>/dev/null || echo false)"
+    # A run where ANYTHING converted returns rc=0 and is marked `done` below, so
+    # recordings that failed for a retryable reason are not re-attempted by the
+    # queue on their own. That is a real gap (#1113); until the queue tracks
+    # per-recording state, make it loud and actionable instead of silent.
+    retryable="$(jq -r '.retryable_failures // 0' "$cb" 2>/dev/null || echo 0)"
+    if [[ "$retryable" =~ ^[0-9]+$ && "$retryable" -gt 0 ]]; then
+      err "[$id] $retryable recording(s) failed for a RETRYABLE reason but the dataset will be marked done; recover with: $0 --dataset $id --requeue done --execute"
+    fi
     # POST on every outcome (not just rc==0) so the backend records failures too.
     if [[ -n "$NEMAR_WEBHOOK_TOKEN" ]]; then
       curl -sS --connect-timeout 10 --max-time 30 -X POST "$CALLBACK_URL" \

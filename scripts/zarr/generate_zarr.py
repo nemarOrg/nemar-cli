@@ -307,6 +307,9 @@ _WARNED_NO_BACKSTOP = [False]
 # measuring would quietly end the #1111 feedback loop with nobody the wiser.
 _WARNED_NO_RSS = [False]
 _WARNED_NO_RESET = [False]
+# A meminfo fallback silently changes which VERDICT an over-budget recording
+# gets, so it cannot be quiet either.
+_WARNED_MEMINFO = [False]
 
 
 def admission_reserve_bytes(
@@ -696,6 +699,15 @@ def usable_ram_bytes(meminfo_path: str = "/proc/meminfo") -> int:
     except OSError:
         total = None
     if total is None:
+        if not _WARNED_MEMINFO[0]:
+            _WARNED_MEMINFO[0] = True
+            print(
+                f"::warning::could not read {meminfo_path}; falling back to a fixed "
+                "node-RAM figure. Admission is no longer sized to this machine, and "
+                "the temporary-vs-permanent verdict split degrades to always-temporary "
+                "(#1111)",
+                flush=True,
+            )
         total = int(os.environ.get("ZARR_NODE_RAM_BYTES", str(32 * 1024**3)))
     # Never fall below what one streaming recording needs, with room for a second.
     # Without a floor, a momentarily-loaded node yields a ceiling under
@@ -747,7 +759,7 @@ def per_recording_ceiling_bytes() -> int:
 _FALLBACK_REASONS = {
     "recording_memory_exceeded": (
         "This recording ran out of memory while its viewer copy was being "
-        "built. It will be retried automatically."
+        "built. It is not a defect in the data and can succeed on a later run."
     ),
     "not_continuous": (
         "This file is a trial-averaged or epoched derivative, not a continuous "
@@ -1254,6 +1266,16 @@ def expected_channel_count_for(
     best = candidates[-1][2]  # most specific
     text = _read_repo_text(repo_dir, head, best)
     if text is None:
+        # NOT the same as "no channels.tsv exists". Ground truth is present at
+        # HEAD and we failed to consult it, which turns off the very gate that
+        # exists to catch a repeat of biosigio#110 silently truncating a
+        # 74-channel recording to one (nemarDatasets/on002718#1) -- on precisely
+        # the recording most likely to be mid-incident. Fail open, but say so.
+        print(
+            f"::warning::could not read {best}; the channel-count fidelity gate "
+            "is OFF for this recording",
+            flush=True,
+        )
         return None
     rows = [line for line in text.splitlines()[1:] if line.strip()]
     return len(rows) or None
@@ -2133,6 +2155,11 @@ def store_metadata(store_path: str) -> dict:
         return result
     except Exception as exc:  # noqa: BLE001 - best-effort metadata, never fatal
         print(f"::warning::store_metadata failed for {store_path}: {exc}", flush=True)
+        # Carry the cause so the caller's error names it, instead of the two
+        # halves only being reconstructable by grepping the log for timestamps.
+        # Keyed `_error` and stripped before the entry is built: `meta` is spread
+        # into the PUBLISHED index, and diagnostic state must not ride along.
+        return {"_error": str(exc)}
         return {}
 
 
@@ -2491,6 +2518,7 @@ def convert_recording(
     electrode_positions: dict | None = None,
     mem_budget_bytes: int | None = None,
     hard_ceiling_bytes: int | None = None,
+    projected_peak: int | None = None,
 ) -> None:
     modality = bids_suffix_modality(primary_local)
     size_bytes = _recording_size_bytes(primary_local)
@@ -2500,13 +2528,35 @@ def convert_recording(
     # and BrokenProcessPool-cascade its siblings. Raised as a typed, coded failure
     # -> a DETERMINISTIC skip surfaced in the index, not an infra retry.
     if mem_budget_bytes is not None:
-        peak = projected_peak_bytes(primary_local, size_bytes)
+        # Use the projection ADMISSION computed, not a fresh blind one. Phase 4
+        # made `projected_peak_bytes` channel-aware but only updated main()'s call
+        # site; recomputing here without the channel count always yielded the flat
+        # STREAM_PEAK_BYTES floor for a streaming recording -- and since the
+        # ceiling is itself floored at 2x that value, `peak > mem_budget` was then
+        # unsatisfiable for EVERY streaming recording, making the permanent
+        # `RecordingTooLarge` verdict dead code on that whole path. One number,
+        # computed once, is also simply the right shape.
+        peak = (
+            projected_peak
+            if projected_peak is not None
+            else projected_peak_bytes(primary_local, size_bytes)
+        )
         # Injectable so the two verdicts can be tested without reloading the module
         # (a reload rebinds the exception classes and breaks assertRaises).
         hard_ceiling = (
             hardware_ceiling_bytes() if hard_ceiling_bytes is None else hard_ceiling_bytes
         )
-        if peak > mem_budget_bytes and peak <= hard_ceiling:
+        # The permanent verdict requires the two ceilings to be DISTINGUISHABLE.
+        # When /proc/meminfo is unreadable both fall back to the same fixed figure,
+        # which makes `peak <= hard_ceiling` unsatisfiable whenever
+        # `peak > mem_budget_bytes` -- so every over-budget recording would be
+        # marked permanently too-large, silently defeating the whole reason #1111
+        # split these verdicts apart. If we cannot tell the two apart, prefer the
+        # retryable verdict: being wrong that way costs one re-attempt, the other
+        # way buries a dataset forever.
+        if hard_ceiling <= mem_budget_bytes:
+            hard_ceiling = None
+        if peak > mem_budget_bytes and (hard_ceiling is None or peak <= hard_ceiling):
             # Fits the node, just not what is free right now. A TEMPORARY
             # condition on a shared box, so it must retry rather than mark the
             # dataset terminal -- otherwise one busy hour permanently buries a
@@ -2672,6 +2722,8 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         convert_recording(
             primary_local, events_local, store_local, plf, descs or None, elec,
             mem_budget_bytes=c.get("mem_budget"),
+            hard_ceiling_bytes=c.get("hard_ceiling"),
+            projected_peak=(c.get("projections") or {}).get(primary),
         )
         # biosigIO stamped recording_metadata.source_file with the scratch path
         # it was handed (this run's tmpdir); overwrite it with the stable,
@@ -2683,7 +2735,15 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         validate_store(store_local)
         meta = store_metadata(store_local)
         if not meta.get("groups"):
-            raise RuntimeError(f"store has no channel groups: {store_local}")
+            # store_metadata swallows its exception and returns {}, so without
+            # carrying the reason here the operator sees "no channel groups" (a
+            # data problem) while the real cause sits in an uncorrelated warning
+            # line somewhere in a multi-megabyte log.
+            why = meta.get("_error")
+            raise RuntimeError(
+                f"store has no channel groups: {store_local}"
+                + (f" (reading it failed: {why})" if why else "")
+            )
         # Fidelity gate: the BIDS channels.tsv is ground truth for how many
         # channels this recording has. A store that comes up short means the
         # importer silently dropped signals (biosigio#110 served 74-channel
@@ -2721,7 +2781,8 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             "zarr": rel_store,
             "source_key": primary_key,
             "updated_utc": c["updated"],
-            **meta,
+            # `_`-prefixed keys are diagnostics, never published.
+            **{k: v for k, v in meta.items() if not k.startswith("_")},
         }
         # For a split FIF, record all member source paths so the browser can map any
         # split file (e.g. a click on split-02) to this single head store.
@@ -3113,6 +3174,20 @@ def main() -> int:
     }
     # Measured peak RSS per recording, so the factors above stop being guesses.
     measured: dict[str, int] = {}
+    # Every tunable here is env-overridable, and ADR 0030 expects one such
+    # override (ZARR_STREAM_MIN_BYTES, applied to the crontab as an emergency
+    # mitigation) to be REMOVED once this ships. Nothing would otherwise tell
+    # anyone if a stale override diverged from the coded default later -- a future
+    # retune driven by calibration data would silently no-op on the node. Print
+    # what is actually in force.
+    overrides = sorted(k for k in os.environ if k.startswith("ZARR_"))
+    if overrides:
+        print(
+            "[zarr] active env overrides: "
+            + ", ".join(f"{k}={os.environ[k]}" for k in overrides),
+            flush=True,
+        )
+
     # Admission is RAM-only. Each streaming recording also writes a scratch memmap
     # of `n_channels * n_samples * 4` bytes, and raising concurrency raises the
     # CONCURRENT scratch peak proportionally -- the per-recording cleanup in
@@ -3141,6 +3216,10 @@ def main() -> int:
             "repo": repo, "bucket": bucket, "dataset_id": dataset_id, "head": head,
             "head_files": head_set, "local": args.local, "tmp": tmp, "updated": updated,
             "mem_budget": ram_ceiling,
+            # Computed once here rather than re-derived per worker from a second,
+            # independent /proc/meminfo read, which could disagree with this one.
+            "hard_ceiling": hardware_ceiling_bytes(),
+            "projections": projections,
         }
         pool_breaks = 0
         if cpu_cap == 1 or n <= 1:
@@ -3179,6 +3258,11 @@ def main() -> int:
     # (bounded retry) — and the backend records it for the failures dashboard.
     # See nemarOrg/nemar-cli#774.
     infra_failures = count_infra_failures(failures, failure_entries)
+    # Recordings that failed for a reason that is NOT a property of the data. On a
+    # run where anything converted, `main` returns 0 and the driver marks the
+    # dataset `done`, so these are not retried by the queue on their own -- say so
+    # loudly rather than let the index carry a failure nobody revisits. #1113
+    retryable_failures = infra_failures
     deterministic = bool(failures) and infra_failures == 0
 
     # Hard fail: every attempted conversion errored and nothing was removed. Do
@@ -3273,6 +3357,10 @@ def main() -> int:
         # Measured vs attempted, so an empty `calibration` can be told apart
         # from a run where measurement itself was unavailable.
         "measured_count": len(measured),
+        # Failures that could succeed on a later run. A partially successful
+        # run is still marked `done` by the queue, so these need an explicit
+        # requeue; they are reported here so that is visible. #1113
+        "retryable_failures": retryable_failures,
     }
     with open(args.callback_out, "w") as fh:
         json.dump(callback, fh)
