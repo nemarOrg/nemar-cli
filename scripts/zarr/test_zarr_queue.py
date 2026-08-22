@@ -276,6 +276,22 @@ class RequeueTest(unittest.TestCase):
         self.assertEqual(self._status("nm000001")["status"], "pending")
         self.assertEqual(self._status("nm000003")["status"], "failed")
 
+    def test_multiple_statuses_and_a_dataset_filter_together(self):
+        # The parameter shape most likely to hide a placeholder/order slip: two
+        # status placeholders AND an appended dataset_id, in both the SELECT and
+        # the UPDATE. Nothing else covers it, and this is the function where a
+        # wrong requeue resets the wrong production rows.
+        for _ in range(5):
+            mark_fail(self.conn, "nm000003", "worker crashed", max_attempts=5, backoff_base=1)
+        rows = requeue(
+            self.conn, ("failed", "data_failed"), dataset_id="nm000002", execute=True
+        )
+        self.assertEqual([r[0] for r in rows], ["nm000002"])
+        self.assertEqual(self._status("nm000002")["status"], "pending")
+        # The other terminal rows in BOTH statuses must be untouched.
+        self.assertEqual(self._status("nm000001")["status"], "failed")
+        self.assertEqual(self._status("nm000003")["status"], "failed")
+
     def test_healthy_jobs_are_never_touched(self):
         before = self._status("nm000003")["attempts"]
         requeue(self.conn, ("failed", "data_failed"), execute=True)

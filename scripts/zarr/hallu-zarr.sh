@@ -314,11 +314,14 @@ if [[ -n "$REQUEUE" ]]; then
     err "queue script not found at $QUEUE; run once without --requeue to set up the clone"
     exit 1
   fi
-  if [[ -n "$REQUEUE_EXECUTE" ]]; then
-    qpy requeue --status "$REQUEUE" --execute
-  else
-    qpy requeue --status "$REQUEUE"
-  fi
+  # --dataset MUST be forwarded. Accepting it and ignoring it would turn a
+  # deliberately narrow `--dataset X --requeue failed --execute` into a reset of
+  # EVERY failed row -- the operator asks for one dataset and silently gets all
+  # of them.
+  requeue_args=(requeue --status "$REQUEUE")
+  [[ -n "$ONLY_DATASET" ]] && requeue_args+=(--dataset "$ONLY_DATASET")
+  [[ -n "$REQUEUE_EXECUTE" ]] && requeue_args+=(--execute)
+  qpy "${requeue_args[@]}"
   exit $?
 fi
 
