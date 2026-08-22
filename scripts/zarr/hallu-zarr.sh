@@ -177,29 +177,46 @@ export TMPDIR="$WORK_DIR"
 # quietly stops updating -- a botched cutover would surface only as a dashboard
 # that stopped advancing. Warn instead. It stays non-fatal because the callback is
 # only D1 bookkeeping; the viewer reads index.json from S3, which is still written.
-if [[ -n "${ZARR_SECRETS_FILE:-}" ]]; then
-  # An explicit override is exclusive. Falling back after a typo'd path would
-  # source a DIFFERENT file than the operator named -- possibly a stale token --
-  # which is worse than stopping, and contradicts the fail-loud rule setup() uses
-  # for the driver checkout.
-  if [[ ! -f "$ZARR_SECRETS_FILE" ]]; then
-    err "FATAL: ZARR_SECRETS_FILE=$ZARR_SECRETS_FILE does not exist. Not falling back."
-    exit 1
+# Deliberately a function, called just before the conversion loop rather than at
+# top level. Only convert_dataset() reads the token, and --stats/--requeue exit
+# before that: an operator reaching for either during an incident must not be
+# blocked by a webhook-token misconfiguration they are not using. That is the same
+# reasoning that keeps --requeue ahead of the flock and out of setup().
+load_secrets() {
+  local sourced=""
+  if [[ -n "${ZARR_SECRETS_FILE:-}" ]]; then
+    # An explicit override is exclusive. Falling back after a typo'd path would
+    # source a DIFFERENT file than the operator named -- possibly a stale token --
+    # which is worse than stopping, and contradicts the fail-loud rule setup()
+    # uses for the driver checkout.
+    if [[ ! -f "$ZARR_SECRETS_FILE" ]]; then
+      err "FATAL: ZARR_SECRETS_FILE=$ZARR_SECRETS_FILE does not exist. Not falling back."
+      exit 1
+    fi
+    # shellcheck source=/dev/null  # deployment-local, chmod-600, never in the repo
+    source "$ZARR_SECRETS_FILE"
+    sourced="$ZARR_SECRETS_FILE"
+  elif [[ -f "${STATE_DIR}/.zarr-secrets.env" ]]; then
+    # shellcheck source=/dev/null
+    source "${STATE_DIR}/.zarr-secrets.env"
+    sourced="${STATE_DIR}/.zarr-secrets.env"
+  elif [[ -f "${BASH_SOURCE%/*}/.zarr-secrets.env" ]]; then
+    # shellcheck source=/dev/null
+    source "${BASH_SOURCE%/*}/.zarr-secrets.env"
+    sourced="${BASH_SOURCE%/*}/.zarr-secrets.env"
   fi
-  # shellcheck source=/dev/null  # deployment-local, chmod-600, never in the repo
-  source "$ZARR_SECRETS_FILE"
-elif [[ -f "${STATE_DIR}/.zarr-secrets.env" ]]; then
-  # shellcheck source=/dev/null
-  source "${STATE_DIR}/.zarr-secrets.env"
-elif [[ -f "${BASH_SOURCE%/*}/.zarr-secrets.env" ]]; then
-  # shellcheck source=/dev/null
-  source "${BASH_SOURCE%/*}/.zarr-secrets.env"
-fi
-NEMAR_WEBHOOK_TOKEN="${NEMAR_WEBHOOK_TOKEN:-}"
-if [[ -z "$NEMAR_WEBHOOK_TOKEN" ]]; then
-  err "no NEMAR_WEBHOOK_TOKEN (looked in ${STATE_DIR}/.zarr-secrets.env and ${BASH_SOURCE%/*}/.zarr-secrets.env)."
+  NEMAR_WEBHOOK_TOKEN="${NEMAR_WEBHOOK_TOKEN:-}"
+  [[ -n "$NEMAR_WEBHOOK_TOKEN" ]] && return 0
+  # Report what actually happened. Naming the search paths when a file WAS sourced
+  # would repeat the original mistake in this PR -- a message describing behaviour
+  # that did not occur -- and this is the message read during a live outage.
+  if [[ -n "$sourced" ]]; then
+    err "sourced $sourced but it did not set NEMAR_WEBHOOK_TOKEN."
+  else
+    err "no NEMAR_WEBHOOK_TOKEN: no secrets file at ${STATE_DIR}/.zarr-secrets.env or ${BASH_SOURCE%/*}/.zarr-secrets.env."
+  fi
   err "Conversion will run and upload normally, but every zarr-ready callback is SKIPPED, so D1 zarr_status will not advance."
-fi
+}
 
 # --- One-time setup: driver repo + biosigIO venv ------------------------------
 setup() {
@@ -437,6 +454,9 @@ if [[ -n "$STATS_ONLY" ]]; then
   qpy stats
   exit 0
 fi
+
+# Past every early exit; from here on convert_dataset() may run and needs the token.
+load_secrets
 
 
 # Targeted single-dataset run bypasses the queue (manual rebuild / test).
