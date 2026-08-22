@@ -92,6 +92,9 @@ jobs:
   # no workflow anywhere, so moving the engine here closes that gap.
   zarr-python-test:
     runs-on: ubuntu-latest
+    # The pool-recovery tests drive real subprocesses; if the executor ever
+    # wedges, fail in minutes rather than burning GitHub's 360-minute default.
+    timeout-minutes: 15
     needs: changes
     if: needs.changes.outputs.zarr == 'true'
     steps:
@@ -122,6 +125,9 @@ jobs:
   # without them -- so the install is what makes this job worth running.
   patch-duration-test:
     runs-on: ubuntu-latest
+    # The pool-recovery tests drive real subprocesses; if the executor ever
+    # wedges, fail in minutes rather than burning GitHub's 360-minute default.
+    timeout-minutes: 15
     needs: changes
     if: needs.changes.outputs.zarr == 'true'
     steps:
