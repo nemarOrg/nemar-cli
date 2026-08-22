@@ -50,6 +50,7 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     MEM_LIMIT_FLOOR_BYTES,
     MEM_LIMIT_SLACK,
     admission_reserve_bytes,
+    streaming_peak_bytes,
     reset_peak_rss,
     peak_rss_bytes,
     inmem_factor_for,
@@ -2988,7 +2989,7 @@ class TestStreamingAdmissionThroughput(unittest.TestCase):
         # a 4 GiB projection was charged 12 GiB against this node's measured
         # ~19 GiB ceiling, admitting exactly ONE recording at a time under
         # --jobs 24 -- serial conversion of a 1.5 TB dataset.
-        ceiling = int(19 * 1024**3)
+        ceiling = 19 * 1024**3
         size = int(1.3 * 1000**3)  # a real on004917 recording
         name = "sub-02/eeg/sub-02_task-pdm_eeg.vhdr"
         self.assertTrue(should_stream(name, size))
@@ -3074,7 +3075,7 @@ class TestOn004917BatchAdmission(unittest.TestCase):
             1.350, 1.326, 1.322, 1.318, 1.308, 1.304, 1.295, 1.280, 1.275, 1.261,
             1.254, 1.241, 1.237, 1.181,
         ]
-        ceiling = int(19 * 1024**3)
+        ceiling = 19 * 1024**3
         reserves = []
         for i, gb in enumerate(sizes):
             name = f"sub-{i:02d}/eeg/sub-{i:02d}_task-pdm_eeg.vhdr"
@@ -3116,6 +3117,54 @@ class TestMneEmbeddedSetCanary(unittest.TestCase):
             "preload=True",
             src,
             "MNE may have gained lazy reads for embedded .set -- re-evaluate ADR 0030",
+        )
+
+
+class TestStreamingPeakIsChannelAware(unittest.TestCase):
+    """#1112: STREAM_PEAK_BYTES is a FLOOR, not a bound.
+
+    Pass 2 of the streaming exporter materialises one whole channel at native
+    rate as anonymous float64 (`n_samples * 8`). That term scales with duration
+    and sample rate and is independent of channel count, so a few-channel, long,
+    high-rate recording can have a single channel that alone exceeds the flat
+    figure -- it would then be admitted as if it cost 4 GiB, trip the RLIMIT set
+    to exactly that, and fail.
+    """
+
+    SIZE = int(1.3 * 1000**3)
+
+    def test_many_channels_stay_at_the_floor(self):
+        # 66 short channels: no single one is anywhere near the floor.
+        self.assertEqual(streaming_peak_bytes(self.SIZE, 66), STREAM_PEAK_BYTES)
+
+    def test_a_single_channel_recording_projects_higher(self):
+        # All the bytes in one channel: the per-channel term dominates and the
+        # flat figure would have been a serious under-projection.
+        self.assertGreater(streaming_peak_bytes(self.SIZE, 1), STREAM_PEAK_BYTES)
+
+    def test_the_projection_falls_as_channels_rise(self):
+        peaks = [streaming_peak_bytes(self.SIZE, n) for n in (1, 2, 4, 8)]
+        self.assertEqual(peaks, sorted(peaks, reverse=True))
+
+    def test_unknown_channel_count_falls_back_to_the_floor(self):
+        # channels.tsv unreadable: no worse than before this change.
+        self.assertEqual(streaming_peak_bytes(self.SIZE, None), STREAM_PEAK_BYTES)
+        self.assertEqual(streaming_peak_bytes(self.SIZE, 0), STREAM_PEAK_BYTES)
+
+    def test_projected_peak_bytes_threads_the_channel_count(self):
+        name = "sub-01/emg/sub-01_task-x_emg.vhdr"
+        self.assertTrue(should_stream(name, self.SIZE))
+        self.assertGreater(
+            projected_peak_bytes(name, self.SIZE, 1),
+            projected_peak_bytes(name, self.SIZE, 66),
+        )
+
+    def test_the_in_memory_path_ignores_channel_count(self):
+        # .set never streams, so its projection is the on-disk factor regardless.
+        name = "sub-01/eeg/sub-01_task-x_eeg.set"
+        self.assertEqual(
+            projected_peak_bytes(name, 100 * 1024**2, 1),
+            projected_peak_bytes(name, 100 * 1024**2, 66),
         )
 
 if __name__ == "__main__":

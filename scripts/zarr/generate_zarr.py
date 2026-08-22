@@ -620,11 +620,40 @@ class ChannelCountMismatch(Exception):
     code = "channel_count_mismatch"
 
 
-def projected_peak_bytes(primary_local: str, size_bytes: int) -> int:
-    """Estimated peak RAM to convert this recording: bounded for the streaming
-    path, ~float64 blow-up for the in-memory path. Drives the skip guard (#909)."""
-    if should_stream(primary_local, size_bytes):
+# Pass 2 of the streaming exporter does, per channel,
+# `x = np.asarray(mm[i], dtype=np.float64)` -- it materialises ONE WHOLE CHANNEL
+# at native rate as anonymous float64. That term is `n_samples * 8` bytes: it
+# scales with duration and sample rate and is INDEPENDENT of channel count, so
+# STREAM_PEAK_BYTES is not the guaranteed bound it looks like. A many-channel
+# recording splits its bytes across many short channels and stays far under it; a
+# FEW-channel, long, high-rate recording (EMG, single-contact iEEG) can have one
+# channel that alone approaches or exceeds it.
+#
+# So project the per-channel term explicitly when the channel count is known.
+# `size_bytes / n_channels` is one channel's on-disk bytes; x4 takes int16 to
+# float64, and the multiplier below covers the resampled copy and resample_poly's
+# scratch alongside it.
+STREAM_CHANNEL_EXPANSION = float(os.environ.get("ZARR_STREAM_CHANNEL_EXPANSION", "12"))
+
+
+def streaming_peak_bytes(size_bytes: int, n_channels: int | None) -> int:
+    """Projected peak for the streaming path: the flat floor, raised when one
+    channel alone would exceed it. Falls back to the flat value when the channel
+    count is unknown."""
+    if not n_channels or n_channels <= 0:
         return STREAM_PEAK_BYTES
+    per_channel = int(size_bytes / n_channels * STREAM_CHANNEL_EXPANSION)
+    return max(STREAM_PEAK_BYTES, per_channel)
+
+
+def projected_peak_bytes(
+    primary_local: str, size_bytes: int, n_channels: int | None = None
+) -> int:
+    """Estimated peak RAM to convert this recording: the streaming path's
+    channel-aware bound, or the float64 blow-up for the in-memory path. Drives the
+    skip guard (#909)."""
+    if should_stream(primary_local, size_bytes):
+        return streaming_peak_bytes(size_bytes, n_channels)
     return int(size_bytes * inmem_factor_for(primary_local))
 
 
@@ -3063,7 +3092,19 @@ def main() -> int:
     # bare projection -- otherwise the in-flight sum is bounded while the memory
     # those workers may actually take is not. See `admission_reserve_bytes`.
     sizes = {p: recording_size_from_pointers(repo, p, head_set, head) for p in convert}
-    projections = {p: projected_peak_bytes(p, sizes[p]) for p in convert}
+    # channels.tsv is already the fidelity gate's ground truth; reuse it so the
+    # streaming projection can account for its per-channel term (see
+    # `streaming_peak_bytes`). Best-effort: an unreadable sidecar falls back to
+    # the flat bound rather than failing the run.
+    channel_counts: dict[str, int | None] = {}
+    for p in convert:
+        try:
+            channel_counts[p] = expected_channel_count_for(repo, p, head_set, head)
+        except Exception:  # noqa: BLE001 - a projection input must not fail a run
+            channel_counts[p] = None
+    projections = {
+        p: projected_peak_bytes(p, sizes[p], channel_counts.get(p)) for p in convert
+    }
     peaks = {
         p: admission_reserve_bytes(
             proj, ram_ceiling, streamed=should_stream(p, sizes[p])
@@ -3072,6 +3113,23 @@ def main() -> int:
     }
     # Measured peak RSS per recording, so the factors above stop being guesses.
     measured: dict[str, int] = {}
+    # Admission is RAM-only. Each streaming recording also writes a scratch memmap
+    # of `n_channels * n_samples * 4` bytes, and raising concurrency raises the
+    # CONCURRENT scratch peak proportionally -- the per-recording cleanup in
+    # convert_one's `finally` bounds accumulation over a run, not the peak at one
+    # instant. There is no disk admission control; report the headroom so a
+    # shortage is visible before it becomes a mid-run write failure. #1112
+    try:
+        scratch_root = tempfile.gettempdir()
+        scratch_free = shutil.disk_usage(scratch_root).free
+        print(
+            f"[zarr] scratch free: {scratch_free / 1024**3:.0f} GiB at {scratch_root} "
+            "(not admission-controlled; streaming writes a per-recording memmap)",
+            flush=True,
+        )
+    except OSError as exc:  # visibility only; never fail a run over a stat
+        print(f"::warning::could not stat scratch: {exc}", flush=True)
+
     print(
         f"[zarr] admission: up to {cpu_cap} worker(s), RAM ceiling "
         f"~{ram_ceiling // 1024**3} GiB; a recording projected above it alone is "
