@@ -77,7 +77,14 @@ STATE_DIR="${ZARR_STATE_DIR:-${ZARR_BASE}/zarr-state}"
 # per-recording budget (small EEG packs many-wide; large MEG self-limits). Override
 # with ZARR_JOBS.
 JOBS="${ZARR_JOBS:-$(nproc 2>/dev/null || echo 8)}"
-DRIVER_REPO="${ZARR_DRIVER_REPO:-${STATE_DIR}/dotgithub}"   # clone of nemarDatasets/.github
+# The driver source. Repatriated from nemarDatasets/.github to nemarOrg/nemar-cli
+# in #1109 (ADR 0029): this engine runs here on the cron, never in Actions, so it
+# belongs with the CLI where it can be developed and tested. Deployment is now a
+# `git pull` of this clone -- do NOT hand-copy the script onto the box again.
+# ZARR_DRIVER_REF pins which ref to track; `main` is the released CLI. Point it at
+# `dev` (or a feature branch) to run an unreleased driver.
+DRIVER_REPO="${ZARR_DRIVER_REPO:-${STATE_DIR}/nemar-cli}"   # clone of nemarOrg/nemar-cli
+DRIVER_REF="${ZARR_DRIVER_REF:-main}"
 VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 # Fallback only (used when the clone predates scripts/zarr/requirements.txt, which
 # is the real pin). Floor is 1.2.4, not 1.2.3: 1.2.3 added MEF3 .mefd / 4D-BTi
@@ -134,9 +141,10 @@ export TMPDIR="$WORK_DIR"
 # --- One-time setup: driver repo + biosigIO venv ------------------------------
 setup() {
   if [[ -d "$DRIVER_REPO/.git" ]]; then
-    git -C "$DRIVER_REPO" fetch -q origin && git -C "$DRIVER_REPO" reset -q --hard origin/main
+    git -C "$DRIVER_REPO" fetch -q origin \
+      && git -C "$DRIVER_REPO" reset -q --hard "origin/${DRIVER_REF}"
   else
-    git clone -q https://github.com/nemarDatasets/.github "$DRIVER_REPO"
+    git clone -q --branch "$DRIVER_REF" https://github.com/nemarOrg/nemar-cli "$DRIVER_REPO"
   fi
   if [[ ! -x "$VENV_DIR/bin/python" ]]; then
     uv venv -q "$VENV_DIR"

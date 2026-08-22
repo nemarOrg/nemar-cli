@@ -20,7 +20,9 @@ env:
 
 and replace every hardcoded `s3://nemar/...` / `--bucket nemar` with `s3://${S3_BUCKET}/...`. Affected
 workflows: `run-generate-manifest.yml` (required — without it, dev manifests land in the prod
-bucket), `run-generate-archive.yml`, `run-generate-zarr.yml`.
+bucket), `run-generate-archive.yml`. (`run-generate-zarr.yml` was retired in #1109 — the
+converter runs on the Hallu cron from `scripts/zarr/` in this repo, and takes `--bucket`
+as an argument already.)
 
 ## 2. Workflows read `callback_base_url` (staging callbacks hit the dev worker)
 
