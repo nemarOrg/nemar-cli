@@ -48,7 +48,11 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     apply_worker_mem_limit,
     MEM_LIMIT_FLOOR_BYTES,
     MEM_LIMIT_SLACK,
-    RecordingTooLarge,
+    admission_reserve_bytes,
+    memory_failure_result,
+    count_infra_failures,
+    RecordingMemoryExceeded,
+    reason_for_code,
     should_stream,
     STREAM_EDF_MIN_BYTES,
     compute_worklist,
@@ -79,7 +83,6 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     merge_index,
     parse_annex_key,
     power_line_frequency_for,
-    reason_for_code,
     safe_store_prefix,
     split_group_key,
     split_heads_and_members,
@@ -2466,33 +2469,94 @@ def _crashing_worker(primary, peak_bytes=None):
     return {"ok": True, "primary": primary, "entry": {"zarr": primary + ".zarr"}}
 
 
-def _memory_hog(primary, peak_bytes=None):
-    """Allocates far past any sane limit, to prove the RLIMIT backstop turns a
-    node-killing allocation into a catchable MemoryError."""
-    from generate_zarr import apply_worker_mem_limit  # noqa: PLC0415
+class TestMemoryFailureClassification(unittest.TestCase):
+    """#1110: a runtime OOM must be explainable to the viewer but still retryable."""
 
-    apply_worker_mem_limit(peak_bytes, None)
-    try:
-        chunks = []
-        for _ in range(64):
-            chunks.append(bytearray(1024**3))  # 1 GiB each, anonymous
-        return {"ok": True, "primary": primary, "entry": {"zarr": "unreachable"}}
-    except MemoryError:
-        return {"ok": False, "primary": primary, "error": "mem", "code": RecordingTooLarge.code}
+    def test_the_production_mapping_is_used(self):
+        # Asserts the SAME helper convert_one calls, so deleting or weakening the
+        # handler cannot leave this passing.
+        r = memory_failure_result("sub-01/eeg/x.set", MemoryError("nope"))
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["code"], RecordingMemoryExceeded.code)
+        self.assertIn("memory budget", r["error"])
 
+    def test_it_is_distinct_from_the_static_preflight_verdict(self):
+        # RecordingTooLarge is a judgment on the recording alone, made before any
+        # execution; a runtime OOM depends on what else was running. Conflating
+        # them is what let a busy hour bury a dataset permanently.
+        self.assertNotEqual(RecordingMemoryExceeded.code, RecordingTooLarge.code)
+
+    def test_it_has_a_user_facing_reason(self):
+        reason = reason_for_code(RecordingMemoryExceeded.code)
+        self.assertTrue(reason)
+        self.assertNotIn("recording_memory_exceeded", reason)  # not the raw code
+
+    def test_a_run_of_only_oom_failures_stays_retryable(self):
+        # The whole point. hallu-zarr.sh marks a dataset TERMINAL when every
+        # failure is deterministic; an all-OOM run must not qualify.
+        failures = ["a", "b"]
+        entries = [
+            {"path": "a", "code": RecordingMemoryExceeded.code},
+            {"path": "b", "code": RecordingMemoryExceeded.code},
+        ]
+        self.assertEqual(count_infra_failures(failures, entries), 2)
+
+    def test_real_data_failures_remain_deterministic(self):
+        failures = ["a", "b"]
+        entries = [
+            {"path": "a", "code": "not_continuous"},
+            {"path": "b", "code": "corrupt_or_truncated"},
+        ]
+        self.assertEqual(count_infra_failures(failures, entries), 0)
+
+    def test_a_mixed_run_is_infra(self):
+        failures = ["a", "b", "c"]
+        entries = [{"path": "a", "code": "not_continuous"}]  # b uncoded, c OOM
+        entries.append({"path": "c", "code": RecordingMemoryExceeded.code})
+        self.assertEqual(count_infra_failures(failures, entries), 2)
+
+    # NOT COVERED, deliberately: driving a real MemoryError through the whole of
+    # `convert_one` with a synthetic context is not achievable deterministically.
+    # Whichever allocation happens to fail first decides the exception type -- a
+    # tight RLIMIT makes numpy's own import fail (ImportError), a loose one lets
+    # the #909 preflight fire first (RecordingTooLarge), and neither exercises the
+    # runtime handler. Both were tried on the real Linux conversion node.
+    #
+    # What that leaves untested is one line: `except MemoryError` calling
+    # `memory_failure_result`. Everything it constructs is asserted above against
+    # the SAME production helper, so the mapping itself cannot silently rot -- but
+    # a change that deleted the handler, or folded it into the generic
+    # `except Exception` below it, would not be caught here. Reaching it honestly
+    # needs a real oversized recording, i.e. an integration test on the node.
 
 class TestWorkerMemLimit(unittest.TestCase):
     """#1110: the per-recording RLIMIT_DATA backstop."""
+
+    def setUp(self):
+        # These mutate the real process limit; restore it so test order cannot
+        # leave a later test running under a narrowed data segment.
+        try:
+            import resource
+
+            self._saved = resource.getrlimit(resource.RLIMIT_DATA)
+        except Exception:  # noqa: BLE001
+            self._saved = None
+
+    def tearDown(self):
+        if self._saved is not None:
+            import resource
+
+            resource.setrlimit(resource.RLIMIT_DATA, self._saved)
 
     def test_none_peak_leaves_limit_alone(self):
         self.assertIsNone(worker_mem_limit_bytes(None, 100))
         self.assertIsNone(worker_mem_limit_bytes(0, 100))
 
     def test_small_recording_gets_the_floor_not_a_tiny_limit(self):
-        # A 10 MB recording projects to 60 MB; capping a worker there would kill
-        # it on interpreter + numpy/MNE startup alone, long before any signal.
+        # A 10 MB recording reserves little; capping its worker there would kill
+        # it on interpreter + numpy/MNE startup, long before any signal.
         self.assertEqual(
-            worker_mem_limit_bytes(60 * 1024**2, 999 * 1024**3), MEM_LIMIT_FLOOR_BYTES
+            worker_mem_limit_bytes(10 * 1024**2, 999 * 1024**3), MEM_LIMIT_FLOOR_BYTES
         )
 
     def test_large_recording_scales_with_its_reservation(self):
@@ -2502,24 +2566,28 @@ class TestWorkerMemLimit(unittest.TestCase):
         )
 
     def test_never_exceeds_the_node_ceiling(self):
-        # #909 already forbids a recording larger than the node; the backstop
-        # must not hand one MORE than that via the slack multiplier.
         ceiling = 8 * 1024**3
         self.assertEqual(worker_mem_limit_bytes(20 * 1024**3, ceiling), ceiling)
 
+    def test_admission_charges_what_the_worker_is_permitted(self):
+        # The invariant that makes the backstop a real containment rather than a
+        # per-process curiosity: if admission charged the bare projection while
+        # each worker was allowed `projection * SLACK`, N concurrent workers
+        # could be permitted N*SLACK times the ceiling and the kernel OOM reaper
+        # would still win. Reserving what we permit bounds the aggregate.
+        ceiling = 48 * 1024**3
+        projection = 4 * 1024**3
+        reserve = admission_reserve_bytes(projection, ceiling)
+        admitted, running = 0, 0
+        while running + reserve <= ceiling:
+            running += reserve
+            admitted += 1
+        self.assertGreaterEqual(admitted, 1)
+        self.assertLessEqual(admitted * reserve, ceiling)
+
     def test_setting_the_limit_never_raises(self):
-        # Best-effort by contract: an unsupported platform must run unlimited,
-        # not fail the conversion.
         apply_worker_mem_limit(4 * 1024**3, 8 * 1024**3)
         apply_worker_mem_limit(None, None)
-
-    @unittest.skipUnless(sys.platform.startswith("linux"), "RLIMIT_DATA semantics are Linux-specific")
-    def test_backstop_turns_a_runaway_into_a_catchable_memoryerror(self):
-        # The whole point: an over-budget allocation must raise IN the worker
-        # rather than be OOM-killed by the kernel (which takes the pool with it).
-        r = _memory_hog("sub-01/eeg/sub-01_task-rest_eeg.set", 1024**3)
-        self.assertFalse(r["ok"])
-        self.assertEqual(r["code"], RecordingTooLarge.code)
 
 
 class TestPoolBreakRecovery(unittest.TestCase):
@@ -2528,52 +2596,65 @@ class TestPoolBreakRecovery(unittest.TestCase):
     def _run(self, primaries, cpu_cap=2):
         peaks = {p: 1024 for p in primaries}
         results = []
-        _drain_with_admission(
-            primaries, peaks, cpu_cap, 10**9, {}, lambda r, i: results.append(r),
-            worker=_crashing_worker,
+        breaks = _drain_with_admission(
+            list(primaries), peaks, cpu_cap, 10**9, {},
+            lambda r, i: results.append(r), worker=_crashing_worker,
         )
-        return results
+        return results, breaks
 
     def test_a_dying_worker_does_not_abandon_the_queue(self):
         # Before #1110 this aborted the run: on004998 converted 74 of 115 and
         # lost the remaining 41 to one kill.
         primaries = [f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.set" for i in range(1, 9)]
         primaries.insert(2, "sub-boom/eeg/sub-boom_task-rest_eeg.set")
-        results = self._run(primaries)
+        results, breaks = self._run(primaries)
 
         self.assertEqual(len(results), len(primaries), "every recording must be accounted for")
         ok = {r["primary"] for r in results if r["ok"]}
         self.assertEqual(ok, set(primaries) - {"sub-boom/eeg/sub-boom_task-rest_eeg.set"})
+        self.assertGreaterEqual(breaks, 1)
 
     def test_the_culprit_is_named_after_running_alone(self):
-        results = self._run(["sub-boom/eeg/sub-boom_task-rest_eeg.set"], cpu_cap=1)
+        results, _ = self._run(["sub-boom/eeg/sub-boom_task-rest_eeg.set"], cpu_cap=1)
         self.assertEqual(len(results), 1)
         self.assertFalse(results[0]["ok"])
-        # Infra-shaped (no `code`) so it retries on a later run rather than being
-        # recorded as a permanent property of the data.
+        self.assertIn("killed its worker process", results[0]["error"])
+        # Uncoded => infra => retried on a later run, rather than recorded as a
+        # permanent property of the data.
         self.assertIsNone(results[0].get("code"))
 
     def test_innocent_siblings_are_never_blamed(self):
         # The reason recovery re-runs suspects SERIALLY. Retrying them in
-        # parallel lets the culprit break the pool again, and a sibling in
-        # flight for both breaks gets blamed for a crash it did not cause --
-        # which is exactly what an earlier parallel-retry implementation did.
+        # parallel lets the culprit break the pool again, and a sibling in flight
+        # for both breaks gets blamed for a crash it did not cause -- which is
+        # exactly what an earlier parallel-retry implementation did.
         primaries = [f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.set" for i in range(1, 13)]
         primaries.insert(1, "sub-boom/eeg/sub-boom_task-rest_eeg.set")
+        boom = "sub-boom/eeg/sub-boom_task-rest_eeg.set"
+        saw_crossfire = False
         for _ in range(5):  # the race is timing-dependent; repeat it
-            results = self._run(primaries, cpu_cap=4)
+            results, breaks = self._run(primaries, cpu_cap=4)
             failed = {r["primary"] for r in results if not r["ok"]}
             self.assertEqual(
-                failed, {"sub-boom/eeg/sub-boom_task-rest_eeg.set"},
-                "only the recording that dies alone may be reported failed",
+                failed, {boom}, "only the recording that dies alone may be reported failed"
             )
             self.assertEqual(len(results), len(primaries))
+            if breaks > 1:
+                saw_crossfire = True
+        # Without this the loop could pass 5/5 having never once put an innocent
+        # sibling in flight during a break -- i.e. never exercising the path it
+        # exists to protect -- and nothing would say so.
+        self.assertTrue(
+            saw_crossfire,
+            "never observed a sibling caught in the crossfire; the guarded path went untested",
+        )
 
     def test_a_clean_run_is_unaffected(self):
         primaries = [f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.set" for i in range(1, 6)]
-        results = self._run(primaries)
+        results, breaks = self._run(primaries)
         self.assertEqual(len(results), 5)
         self.assertTrue(all(r["ok"] for r in results))
+        self.assertEqual(breaks, 0)
 
 if __name__ == "__main__":
     unittest.main()

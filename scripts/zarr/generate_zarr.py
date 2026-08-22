@@ -259,39 +259,84 @@ STREAM_PEAK_BYTES = int(os.environ.get("ZARR_STREAM_PEAK_BYTES", str(4 * 1024**3
 # measurement-based and can then tighten SLACK.
 MEM_LIMIT_SLACK = float(os.environ.get("ZARR_MEM_LIMIT_SLACK", "3.0"))
 MEM_LIMIT_FLOOR_BYTES = int(os.environ.get("ZARR_MEM_LIMIT_FLOOR_BYTES", str(4 * 1024**3)))
+# One-shot latch: a box where setrlimit is refused (a seccomp profile, an odd
+# container runtime) would otherwise run with NO containment and say nothing,
+# leaving everyone believing #1110 shipped when it silently did not.
+_WARNED_NO_BACKSTOP = [False]
+
+
+def admission_reserve_bytes(peak_bytes: int, ceiling_bytes: int | None) -> int:
+    """What admission must CHARGE for a recording: the slack-inflated projection,
+    i.e. what its worker is actually permitted to allocate.
+
+    Charging the bare projection instead was the flaw that made the backstop only
+    half a containment. Admission bounded the SUM of nominal projections to the
+    node ceiling, while each worker was separately allowed `projection * SLACK` --
+    so ~12 concurrent streaming recordings on a 62 GB box were collectively
+    permitted ~144 GiB before any single soft limit could fire, and the kernel
+    OOM reaper still won. Reserving what we permit makes the aggregate bound hold
+    by construction, at the cost of proportionally less concurrency for large
+    recordings -- which is the point: the previous concurrency was overcommitted.
+    """
+    reserve = int(peak_bytes * MEM_LIMIT_SLACK)
+    return min(reserve, ceiling_bytes) if ceiling_bytes else reserve
 
 
 def worker_mem_limit_bytes(peak_bytes: int | None, ceiling_bytes: int | None) -> int | None:
-    """Soft RLIMIT_DATA for one recording, or None to leave the limit alone."""
+    """Soft RLIMIT_DATA for one recording, or None to leave the limit alone.
+
+    The floor is deliberately NOT charged to admission. It exists so a small
+    recording's worker still has room for the interpreter plus numpy/MNE, which is
+    per-process baseline rather than signal data, and charging it would stop small
+    EEG recordings packing many-wide for no real benefit. The residual overcommit
+    is therefore bounded by `jobs * MEM_LIMIT_FLOOR_BYTES` of baseline, not by
+    anything that scales with recording size.
+    """
     if not peak_bytes:
         return None
-    limit = max(int(peak_bytes * MEM_LIMIT_SLACK), MEM_LIMIT_FLOOR_BYTES)
+    limit = max(admission_reserve_bytes(peak_bytes, ceiling_bytes), MEM_LIMIT_FLOOR_BYTES)
     if ceiling_bytes:
         limit = min(limit, ceiling_bytes)
     return limit
 
 
-def apply_worker_mem_limit(peak_bytes: int | None, ceiling_bytes: int | None) -> None:
+def apply_worker_mem_limit(
+    peak_bytes: int | None, ceiling_bytes: int | None, *, reserved: bool = False
+) -> None:
     """Cap this process's anonymous memory for the recording it is about to
     convert. Best-effort: a platform without a usable RLIMIT_DATA (macOS counts
     it differently, and it is absent on Windows) simply runs unlimited, exactly
     as before. Never raises -- failing to set a backstop must not fail a
     conversion."""
-    limit = worker_mem_limit_bytes(peak_bytes, ceiling_bytes)
+    # `reserved=True` means the caller already passed a slack-inflated reserve
+    # (what admission charged), so only the floor and ceiling still apply --
+    # multiplying by slack again would permit 3x what was reserved.
+    if reserved and peak_bytes:
+        limit = max(peak_bytes, MEM_LIMIT_FLOOR_BYTES)
+        if ceiling_bytes:
+            limit = min(limit, ceiling_bytes)
+    else:
+        limit = worker_mem_limit_bytes(peak_bytes, ceiling_bytes)
     if limit is None or not sys.platform.startswith("linux"):
         return
     try:
         import resource
 
-        soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
+        _soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
         # Keep the hard limit where it is so the next task can raise the soft
         # one back up; a task needing MORE than the previous one must not be
         # capped by it.
         if hard != resource.RLIM_INFINITY and limit > hard:
             limit = hard
         resource.setrlimit(resource.RLIMIT_DATA, (limit, hard))
-    except Exception:  # noqa: BLE001 - a missing backstop is not a conversion failure
-        pass
+    except Exception as exc:  # noqa: BLE001 - a missing backstop must not fail a conversion
+        if not _WARNED_NO_BACKSTOP[0]:
+            _WARNED_NO_BACKSTOP[0] = True
+            print(
+                f"::warning::RLIMIT_DATA backstop unavailable ({exc}); this run has "
+                "NO per-recording out-of-memory containment (#1110)",
+                flush=True,
+            )
 
 # float64 blow-up + resample copy for the in-memory path (int16 -> float64 = 4x).
 INMEM_MEM_FACTOR = float(os.environ.get("ZARR_INMEM_MEM_FACTOR", "6"))
@@ -304,6 +349,58 @@ class RecordingTooLarge(Exception):
     failure -- instead of OOM-crashing the worker. #909"""
 
     code = "recording_too_large"
+
+
+class RecordingMemoryExceeded(Exception):
+    """A recording hit its RLIMIT_DATA backstop (or the allocator failed) WHILE
+    converting. Deliberately distinct from `RecordingTooLarge`, which is a static
+    preflight verdict on the recording alone and is therefore a permanent property
+    of the data.
+
+    A runtime out-of-memory is NOT: the same recording can OOM today under sibling
+    contention and convert fine tomorrow running alone. So this code is surfaced in
+    the index (the viewer can say why there is no store) but is listed in
+    `RETRYABLE_CODES`, which keeps it OUT of the `deterministic` verdict -- otherwise
+    a dataset whose recordings all OOM during one busy hour would be marked
+    terminal by hallu-zarr.sh and never retried. #1110."""
+
+    code = "recording_memory_exceeded"
+
+
+# Coded failures that are nevertheless NOT a permanent property of the data, so a
+# run consisting entirely of them must stay retryable. See `deterministic` in main().
+RETRYABLE_CODES = frozenset({RecordingMemoryExceeded.code})
+
+
+def memory_failure_result(primary: str, exc: BaseException) -> dict:
+    """The `convert_one` result for a recording that ran out of memory mid-convert.
+
+    A function rather than an inline dict so tests exercise the SAME construction
+    production uses. Inlined, the obvious test reimplements the mapping and passes
+    even if the handler is deleted or folded into the generic `except Exception`
+    below it -- which would silently downgrade this to an uncoded infra failure
+    that retries forever.
+    """
+    return {
+        "ok": False,
+        "primary": primary,
+        "error": f"exceeded its memory budget while converting: {exc}",
+        "code": RecordingMemoryExceeded.code,
+    }
+
+
+def count_infra_failures(failures: list, failure_entries: list) -> int:
+    """How many of ``failures`` are infrastructure rather than a property of the
+    data. Drives ``deterministic``, which the shell driver turns into a TERMINAL,
+    never-retried verdict for the whole dataset when every failure is data-shaped.
+
+    An uncoded failure (crashed worker, transient S3) is infra. A coded one
+    normally is not -- except the codes in ``RETRYABLE_CODES``, which are surfaced
+    to the viewer but still depend on conditions rather than on the recording, so
+    they must not let one bad hour bury a dataset permanently. #1110.
+    """
+    retryable_coded = sum(1 for e in failure_entries if e.get("code") in RETRYABLE_CODES)
+    return len(failures) - len(failure_entries) + retryable_coded
 
 
 class ChannelCountMismatch(Exception):
@@ -370,6 +467,10 @@ def per_recording_ceiling_bytes() -> int:
 # that at runtime and use this only if the import is unavailable. Keep the codes
 # in sync with biosigio's hierarchy.
 _FALLBACK_REASONS = {
+    "recording_memory_exceeded": (
+        "This recording ran out of memory while its viewer copy was being "
+        "built. It will be retried automatically."
+    ),
     "not_continuous": (
         "This file is a trial-averaged or epoched derivative, not a continuous "
         "recording, so the time-series viewer is not available."
@@ -2224,15 +2325,20 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
     {"ok": True, "primary", "entry"} or {"ok": False, "primary", "error"}.
     Self-contained and picklable; reads shared inputs from the worker `_CTX`."""
     c = _CTX
-    # Backstop this recording BEFORE any allocation: exceeding the reservation
-    # admission made for it must raise in-process, not take the node down (#1110).
-    apply_worker_mem_limit(peak_bytes, c.get("mem_budget"))
-    rel_store = store_rel_for(primary)
-    work = os.path.join(c["tmp"], "work", primary.replace("/", "_"))
-    store_local = os.path.join(c["tmp"], "stores", rel_store)
-    os.makedirs(work, exist_ok=True)
-    os.makedirs(os.path.dirname(store_local), exist_ok=True)
+    # `work`/`store_local` are bound before the try so the `finally` can always
+    # reference them, even when setup itself is what failed.
+    work = store_local = None
     try:
+        # Backstop this recording before any allocation: exceeding the reservation
+        # admission made for it must raise in-process, not take the node down.
+        # Inside the try, so a MemoryError during SETUP is typed like any other
+        # rather than escaping convert_one uncoded and retrying forever (#1110).
+        apply_worker_mem_limit(peak_bytes, c.get("mem_budget"), reserved=True)
+        rel_store = store_rel_for(primary)
+        work = os.path.join(c["tmp"], "work", primary.replace("/", "_"))
+        store_local = os.path.join(c["tmp"], "stores", rel_store)
+        os.makedirs(work, exist_ok=True)
+        os.makedirs(os.path.dirname(store_local), exist_ok=True)
         if c["local"]:
             primary_local, events_local, primary_key = materialize_local(
                 c["repo"], primary, c["head_files"]
@@ -2311,12 +2417,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # rather than as a nameless infra failure that retries forever. Reporting
         # it typed also means a dataset made ENTIRELY of such recordings is marked
         # terminal instead of burning its five attempts.
-        return {
-            "ok": False,
-            "primary": primary,
-            "error": f"exceeded its memory budget while converting: {exc}",
-            "code": RecordingTooLarge.code,
-        }
+        return memory_failure_result(primary, exc)
     except Exception as exc:  # noqa: BLE001 - isolate one bad recording
         # biosigIO read failures carry a stable `.code` (not_continuous,
         # corrupt_or_truncated, ...) so the index can tell the viewer WHY a
@@ -2332,7 +2433,8 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # Parallel workers share the NVMe scratch; reclaim each recording's copy
         # right after upload so N concurrent stores don't accumulate on disk.
         for d in (store_local, work):
-            shutil.rmtree(d, ignore_errors=True)
+            if d:
+                shutil.rmtree(d, ignore_errors=True)
 
 
 def _next_admission(
@@ -2356,7 +2458,7 @@ def _next_admission(
 
 def _drain_with_admission(
     convert, peaks, cpu_cap, ram_ceiling, ctx, record, worker=None
-) -> None:
+) -> int:
     """Run ``convert_one`` over ``convert`` in a pool of up to ``cpu_cap`` workers,
     dispatching a recording only while the SUM of in-flight projected peaks stays
     within ``ram_ceiling`` (see ``_next_admission``). Results are reported via
@@ -2398,6 +2500,11 @@ def _drain_with_admission(
         nonlocal pool_breaks
         in_flight: dict = {}
         running_peak = 0
+        # One pass observes at most one pool death, but it can surface twice (a
+        # future resolving with BrokenProcessPool, and again from `submit`). Latch
+        # it so the count is events, not observations -- `max(pool_breaks, 1)`
+        # previously absorbed a genuine SECOND break in a later pass.
+        broke = False
         # Recordings whose future resolved with the pool's death rather than a
         # fault of their own. They are suspects, not failures: when a pool dies
         # EVERY outstanding future raises BrokenProcessPool, so reporting them
@@ -2443,9 +2550,9 @@ def _drain_with_admission(
                         report(r)
                     admit()
         except BrokenProcessPool:
+            broke = True
+        if broke or broken:
             pool_breaks += 1
-        if broken:
-            pool_breaks = max(pool_breaks, 1)
         return broken + [p for p, _peak in in_flight.values()]
 
     pending = list(convert)
@@ -2471,11 +2578,16 @@ def _drain_with_admission(
             })
 
     if pool_breaks:
+        # ::warning:: not [zarr]: on the cron this lands in a multi-megabyte plain
+        # log with no annotation parsing, so chronic node pressure needs to look
+        # different from routine progress. It is also reported in the callback.
         print(
-            f"[zarr] recovered from {pool_breaks} worker-pool break(s); the run "
-            "continued instead of abandoning its queue (#1110)",
+            f"::warning::recovered from {pool_breaks} worker-pool break(s); the run "
+            "continued instead of abandoning its queue, but a worker being killed "
+            "means the node is under memory pressure (#1110)",
             flush=True,
         )
+    return pool_breaks
 
 
 def main() -> int:
@@ -2633,8 +2745,14 @@ def main() -> int:
     # #909-skipped only when it can't fit the node even alone (independent of jobs).
     # Peaks are projected from git-annex pointers (no download) so the estimate is
     # cheap and matches the worker's preflight.
+    # Charge admission what each worker is PERMITTED (projection * slack), not the
+    # bare projection -- otherwise the in-flight sum is bounded while the memory
+    # those workers may actually take is not. See `admission_reserve_bytes`.
     peaks = {
-        p: projected_peak_bytes(p, recording_size_from_pointers(repo, p, head_set, head))
+        p: admission_reserve_bytes(
+            projected_peak_bytes(p, recording_size_from_pointers(repo, p, head_set, head)),
+            ram_ceiling,
+        )
         for p in convert
     }
     print(
@@ -2649,12 +2767,15 @@ def main() -> int:
             "head_files": head_set, "local": args.local, "tmp": tmp, "updated": updated,
             "mem_budget": ram_ceiling,
         }
+        pool_breaks = 0
         if cpu_cap == 1 or n <= 1:
             _init_worker(ctx)
             for i, p in enumerate(convert, 1):
                 record(convert_one(p, peaks[p]), i)
         else:
-            _drain_with_admission(convert, peaks, cpu_cap, ram_ceiling, ctx, record)
+            pool_breaks = _drain_with_admission(
+                convert, peaks, cpu_cap, ram_ceiling, ctx, record
+            )
 
     for rel_store in remove:
         _rm_recursive(safe_store_prefix(bucket, dataset_id, rel_store))
@@ -2665,7 +2786,7 @@ def main() -> int:
     # this to mark a total failure terminal (`data_failed`, no retry) vs infra
     # (bounded retry) — and the backend records it for the failures dashboard.
     # See nemarOrg/nemar-cli#774.
-    infra_failures = len(failures) - len(failure_entries)
+    infra_failures = count_infra_failures(failures, failure_entries)
     deterministic = bool(failures) and infra_failures == 0
 
     # Hard fail: every attempted conversion errored and nothing was removed. Do
@@ -2690,6 +2811,7 @@ def main() -> int:
                     "failure_count": len(failure_entries),
                     "data_failures": failure_entries,
                     "deterministic": deterministic,
+                    "pool_breaks": pool_breaks,
                 },
                 fh,
             )
@@ -2749,6 +2871,10 @@ def main() -> int:
         # converted); `deterministic` only tells the backend whether the skipped
         # recordings are data (won't retry) vs infra. See #774.
         "deterministic": deterministic,
+        # Worker-pool breaks recovered during this run. Zero is the healthy
+        # value; a non-zero trend means the node is under memory pressure and
+        # is only visible here -- the log is far too large to watch. #1110.
+        "pool_breaks": pool_breaks,
     }
     with open(args.callback_out, "w") as fh:
         json.dump(callback, fh)
