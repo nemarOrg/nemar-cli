@@ -243,6 +243,59 @@ def mark_fail(
     return status
 
 
+def requeue(
+    conn: sqlite3.Connection,
+    statuses: tuple[str, ...],
+    dataset_id: str | None = None,
+    execute: bool = False,
+) -> list[tuple[str, str, int]]:
+    """Reset terminal jobs to `pending` so the drain loop picks them up again.
+
+    Returns the rows it would touch (or did) as (dataset_id, status, attempts).
+    Read-only unless ``execute`` is set, because this un-does a deliberate
+    give-up decision and a dry run should be the default way to see its scope.
+
+    Distinct from ``reconcile``, which already revives a terminal job when a
+    genuinely NEW version appears. This is for the same version: the give-up was
+    wrong on its own terms, not superseded.
+
+    Two reasons a terminal job deserves another chance:
+
+    `failed` means the retry budget ran out on INFRA errors. Most of that budget
+    was spent on OOM-killed workers taking whole datasets down with them
+    (nemarOrg/nemar-cli#1110), so the attempts were consumed by a defect that no
+    longer exists rather than by anything about the dataset.
+
+    `data_failed` is terminal-by-design for typed DATA failures, but the
+    classifier itself was wrong: a runtime out-of-memory used to be recorded as
+    `recording_too_large`, a permanent property of the recording, when it is
+    really a property of what else was running (#1111). Datasets buried by that
+    misclassification are indistinguishable here from genuine ones, so requeue
+    them and let the corrected classifier re-decide -- a genuine data failure
+    simply returns to `data_failed` on the next run, at the cost of one
+    conversion attempt.
+    """
+    placeholders = ",".join("?" for _ in statuses)
+    params: list = list(statuses)
+    sql = f"SELECT dataset_id, status, attempts FROM jobs WHERE status IN ({placeholders})"
+    if dataset_id:
+        sql += " AND dataset_id=?"
+        params.append(dataset_id)
+    rows = [
+        (r["dataset_id"], r["status"], r["attempts"])
+        for r in conn.execute(sql + " ORDER BY dataset_id", params)
+    ]
+    if execute and rows:
+        conn.execute(
+            f"UPDATE jobs SET status='pending', attempts=0, next_retry_at=0,"
+            f" last_error='', updated_at=? WHERE status IN ({placeholders})"
+            + (" AND dataset_id=?" if dataset_id else ""),
+            [_now(), *params],
+        )
+        conn.commit()
+    return rows
+
+
 # --- I/O: fetch the dataset list ----------------------------------------------
 
 
@@ -302,6 +355,18 @@ def main() -> int:
         help="typed DATA failure: terminal `data_failed` now, no retry/requeue (#774)",
     )
 
+    p = sub.add_parser(
+        "requeue",
+        help="reset terminal jobs (failed / data_failed) back to pending",
+    )
+    p.add_argument("--status", choices=("failed", "data_failed", "all"), default="failed")
+    p.add_argument("--dataset", default=None, help="just this dataset")
+    p.add_argument(
+        "--execute",
+        action="store_true",
+        help="actually requeue; without it the command only reports what it would do",
+    )
+
     sub.add_parser("stats")
 
     args = ap.parse_args()
@@ -324,6 +389,17 @@ def main() -> int:
 
     if args.cmd == "done":
         mark_done(conn, args.dataset, args.version)
+        return 0
+
+    if args.cmd == "requeue":
+        statuses = ("failed", "data_failed") if args.status == "all" else (args.status,)
+        rows = requeue(conn, statuses, args.dataset, args.execute)
+        verb = "requeued" if args.execute else "would requeue"
+        for dataset_id, status, attempts in rows:
+            print(f"{verb} {dataset_id} ({status}, attempts={attempts})")
+        print(f"{verb} {len(rows)} job(s) from {'/'.join(statuses)}")
+        if rows and not args.execute:
+            print("re-run with --execute to apply")
         return 0
 
     if args.cmd == "fail":

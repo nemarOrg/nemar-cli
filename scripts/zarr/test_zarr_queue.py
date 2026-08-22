@@ -27,6 +27,7 @@ from zarr_queue import (  # type: ignore[import-not-found]  # noqa: E402
     mark_done,
     mark_fail,
     reconcile,
+    requeue,
 )
 
 
@@ -213,6 +214,101 @@ class QueueTest(unittest.TestCase):
         self.assertEqual(res["enqueued"], 0)
         self.assertEqual(self.status("nm000001"), "done")
 
+
+
+class RequeueTest(unittest.TestCase):
+    """#1113: recovering datasets the OOM defect and its misclassification buried."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.conn = connect(os.path.join(self._tmp.name, "q.db"))
+        reconcile(self.conn, [("nm000001", "v1"), ("nm000002", "v1"), ("nm000003", "v1")], 3600)
+        # nm1: retry budget exhausted on infra errors.
+        for _ in range(5):
+            mark_fail(self.conn, "nm000001", "worker crashed", max_attempts=5, backoff_base=1)
+        # nm2: terminal by the (previously wrong) deterministic classifier.
+        mark_fail(self.conn, "nm000002", "all data failures", 5, 1, deterministic=True)
+        # nm3 stays pending and must not be touched.
+
+    def tearDown(self):
+        self.conn.close()
+        self._tmp.cleanup()
+
+    def _status(self, dataset_id):
+        return self.conn.execute(
+            "SELECT status, attempts FROM jobs WHERE dataset_id=?", (dataset_id,)
+        ).fetchone()
+
+    def test_setup_is_what_we_think(self):
+        self.assertEqual(self._status("nm000001")["status"], "failed")
+        self.assertEqual(self._status("nm000001")["attempts"], 5)
+        self.assertEqual(self._status("nm000002")["status"], "data_failed")
+        self.assertEqual(self._status("nm000003")["status"], "pending")
+
+    def test_dry_run_reports_without_changing_anything(self):
+        # Requeue un-does a deliberate give-up, so seeing the scope first is the
+        # default rather than an option.
+        rows = requeue(self.conn, ("failed",))
+        self.assertEqual([r[0] for r in rows], ["nm000001"])
+        self.assertEqual(self._status("nm000001")["status"], "failed")
+
+    def test_execute_resets_status_and_the_retry_budget(self):
+        # attempts must reset too: the budget was spent on a defect that no
+        # longer exists, so leaving it at 5 would give the dataset one attempt.
+        requeue(self.conn, ("failed",), execute=True)
+        row = self._status("nm000001")
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(row["attempts"], 0)
+
+    def test_failed_only_leaves_data_failed_alone(self):
+        requeue(self.conn, ("failed",), execute=True)
+        self.assertEqual(self._status("nm000002")["status"], "data_failed")
+
+    def test_all_covers_both_terminal_states(self):
+        requeue(self.conn, ("failed", "data_failed"), execute=True)
+        self.assertEqual(self._status("nm000001")["status"], "pending")
+        self.assertEqual(self._status("nm000002")["status"], "pending")
+
+    def test_a_single_dataset_can_be_targeted(self):
+        for _ in range(5):
+            mark_fail(self.conn, "nm000003", "worker crashed", max_attempts=5, backoff_base=1)
+        requeue(self.conn, ("failed",), dataset_id="nm000001", execute=True)
+        self.assertEqual(self._status("nm000001")["status"], "pending")
+        self.assertEqual(self._status("nm000003")["status"], "failed")
+
+    def test_multiple_statuses_and_a_dataset_filter_together(self):
+        # The parameter shape most likely to hide a placeholder/order slip: two
+        # status placeholders AND an appended dataset_id, in both the SELECT and
+        # the UPDATE. Nothing else covers it, and this is the function where a
+        # wrong requeue resets the wrong production rows.
+        for _ in range(5):
+            mark_fail(self.conn, "nm000003", "worker crashed", max_attempts=5, backoff_base=1)
+        rows = requeue(
+            self.conn, ("failed", "data_failed"), dataset_id="nm000002", execute=True
+        )
+        self.assertEqual([r[0] for r in rows], ["nm000002"])
+        self.assertEqual(self._status("nm000002")["status"], "pending")
+        # The other terminal rows in BOTH statuses must be untouched.
+        self.assertEqual(self._status("nm000001")["status"], "failed")
+        self.assertEqual(self._status("nm000003")["status"], "failed")
+
+    def test_healthy_jobs_are_never_touched(self):
+        before = self._status("nm000003")["attempts"]
+        requeue(self.conn, ("failed", "data_failed"), execute=True)
+        self.assertEqual(self._status("nm000003")["status"], "pending")
+        self.assertEqual(self._status("nm000003")["attempts"], before)
+
+    def test_requeued_jobs_are_immediately_claimable(self):
+        # next_retry_at must clear, or a requeued job sits behind a backoff that
+        # was set when it last failed.
+        requeue(self.conn, ("failed",), execute=True)
+        claimed = set()
+        while (row := claim_next(self.conn)) is not None:
+            claimed.add(row["dataset_id"])
+        self.assertIn("nm000001", claimed)
+
+    def test_requeueing_nothing_is_not_an_error(self):
+        self.assertEqual(requeue(self.conn, ("failed",), dataset_id="nope"), [])
 
 if __name__ == "__main__":
     unittest.main()

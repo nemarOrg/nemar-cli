@@ -32,6 +32,14 @@
 #   ./hallu-zarr.sh --limit 20           # cap datasets per run (paced)
 #   ./hallu-zarr.sh --dataset nm000132   # one dataset now (bypasses the queue)
 #   ./hallu-zarr.sh --stats              # print queue status and exit
+#   ./hallu-zarr.sh --requeue failed     # dry-run: what a requeue would revive
+#   ./hallu-zarr.sh --requeue all --execute   # revive failed + data_failed
+#
+# --requeue exists because the retry budget for `failed` was spent on OOM-killed
+# workers taking whole datasets down (#1110), and `data_failed` was reachable by
+# a classifier that recorded a runtime out-of-memory as a permanent property of
+# the data (#1111). Both give-ups predate the fixes, so they deserve one more
+# attempt; a genuine data failure simply returns to data_failed next run.
 #
 # Every conversion rebuilds the whole dataset (the driver's --clean) so the
 # serving copy mirrors the current dataset. --clean RECONCILES rather than
@@ -117,11 +125,24 @@ NEMAR_WEBHOOK_TOKEN="${NEMAR_WEBHOOK_TOKEN:-}"
 ONLY_DATASET=""
 LIMIT="${ZARR_LIMIT:-0}"
 STATS_ONLY=""
+REQUEUE=""
+REQUEUE_EXECUTE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dataset) ONLY_DATASET="$2"; shift 2 ;;
     --limit) LIMIT="$2"; shift 2 ;;
     --stats) STATS_ONLY=1; shift ;;
+    # `shift 2` would fail on a bare `--requeue` (one positional left), and since
+    # this script runs without `set -e` a failed shift leaves $# unchanged and the
+    # loop spins forever. Take a value only when one is actually there.
+    --requeue)
+      if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
+        REQUEUE="$2"; shift 2
+      else
+        REQUEUE="failed"; shift
+      fi
+      ;;
+    --execute) REQUEUE_EXECUTE=1; shift ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -281,6 +302,29 @@ convert_dataset() {
 }
 
 # --- Single-instance lock -----------------------------------------------------
+# Requeue runs BEFORE the single-instance lock, deliberately. A drain can hold
+# that lock for hours (on007808 held it through two cron ticks), and needing to
+# revive stranded jobs while a long conversion is in flight is precisely when an
+# operator reaches for this -- behind the lock it would just exit 3 having done
+# nothing. It also skips setup(): that does `git reset --hard` on the driver
+# clone, which a running conversion is reading from. SQLite's own locking covers
+# the concurrent write, which is a single fast UPDATE.
+if [[ -n "$REQUEUE" ]]; then
+  if [[ ! -f "$QUEUE" ]]; then
+    err "queue script not found at $QUEUE; run once without --requeue to set up the clone"
+    exit 1
+  fi
+  # --dataset MUST be forwarded. Accepting it and ignoring it would turn a
+  # deliberately narrow `--dataset X --requeue failed --execute` into a reset of
+  # EVERY failed row -- the operator asks for one dataset and silently gets all
+  # of them.
+  requeue_args=(requeue --status "$REQUEUE")
+  [[ -n "$ONLY_DATASET" ]] && requeue_args+=(--dataset "$ONLY_DATASET")
+  [[ -n "$REQUEUE_EXECUTE" ]] && requeue_args+=(--execute)
+  qpy "${requeue_args[@]}"
+  exit $?
+fi
+
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
   log "another hallu-zarr instance holds the lock; exiting"
@@ -343,6 +387,7 @@ if [[ -n "$STATS_ONLY" ]]; then
   qpy stats
   exit 0
 fi
+
 
 # Targeted single-dataset run bypasses the queue (manual rebuild / test).
 if [[ -n "$ONLY_DATASET" ]]; then
