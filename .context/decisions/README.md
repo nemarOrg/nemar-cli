@@ -62,6 +62,8 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0026](0026-mechanical-submission-minimums-hard-gate-native-publication.md) - Mechanical submission minimums hard-gate native publication; adequacy stays LLM-advisory
 - [ADR 0027](0027-zarr-dispatch-is-raw-only-derivatives-sourcedata-code-excluded.md) - The Zarr dispatch gate is raw-only; derivatives/sourcedata/code never trigger
 - [ADR 0028](0028-maxshield-meg-is-sss-filtered-before-serving-or-declined.md) - MaxShield MEG is Signal-Space Separation filtered before serving, or declined
+- [ADR 0029](0029-the-zarr-conversion-engine-lives-with-the-cli.md) - The Zarr conversion engine lives in nemar-cli, not the Actions repo
+- [ADR 0030](0030-bounded-streaming-is-the-default-conversion-path.md) - Bounded streaming is the default conversion path; in-memory is the exception
 
 ## Backfill note (2026-07-31)
 

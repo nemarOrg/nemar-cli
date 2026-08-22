@@ -1,11 +1,16 @@
 /**
  * Tests for the Zarr-generation dispatch filter (epic #684 / Stream C #685).
  *
- * `POST /webhooks/github` fans a `push` delivery out to the Zarr workflow via
- * the pure decision function `shouldDispatchZarr` (and its path matcher
- * `isZarrTriggerPath`). Keeping both pure lets the filter table be asserted
- * without a Hono app / fake GitHub / env mocks, mirroring
- * webhook-github-push.test.ts.
+ * `POST /webhooks/github` USED TO fan a `push` delivery out to the Zarr Actions
+ * workflow via the pure decision function `shouldDispatchZarr` (and its path
+ * matcher `isZarrTriggerPath`). #1109 retired that dispatch path -- conversion
+ * runs on the SDSC Hallu cron -- so these functions now have no production
+ * caller and this file tests their standalone contract: the raw-only path rules
+ * recorded in ADR 0027, which `zarr-gate-superset.unit.test.ts` then asserts
+ * against the converter's own constants (#1103).
+ *
+ * Keeping both pure lets the filter table be asserted without a Hono app / fake
+ * GitHub / env mocks, mirroring webhook-github-push.test.ts.
  */
 
 import { describe, expect, test } from "bun:test";

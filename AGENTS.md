@@ -37,7 +37,9 @@ Load-bearing ones to know before touching the relevant area:
 0010 (never client-stream an import), 0012 (archive size policy),
 0016 (never hand-bump versions), 0020 (workflow edits hit ~785 repos at once),
 0023 (`--clean` reconciles, it does not wipe), 0027 (Zarr discovery is raw-only),
-0028 (MaxShield MEG is filtered or declined).
+0028 (MaxShield MEG is filtered or declined),
+0029 (the Zarr conversion engine lives here, not in the Actions repo),
+0030 (bounded streaming is the default; `.set` is the exception).
 
 ---
 
@@ -138,7 +140,8 @@ Tooling is fixed: **Bun** for JavaScript and TypeScript (never npm or npx),
 | Backend (`backend/`) | Cloudflare Worker + D1; the API at `api.nemar.org` | [systems inventory](.context/systems-inventory.md) §1 |
 | Website | `nemar.org`, Astro SSR, in `nemarOrg/website` | [systems inventory](.context/systems-inventory.md) §1 |
 | Docs site | `docs.nemar.org`, in `nemarOrg/docs` | — |
-| Central workflows | `nemarDatasets/.github` — dataset CI, archive, manifest, **Zarr converter** | [systems inventory](.context/systems-inventory.md) §3.3 |
+| Central workflows | `nemarDatasets/.github` — dataset CI, archive, manifest | [systems inventory](.context/systems-inventory.md) §3.3 |
+| Zarr converter | `scripts/zarr/` **in this repo**; runs on the Hallu cron, not Actions (ADR 0029) | [systems inventory](.context/systems-inventory.md) §3 |
 | Signal readers | `neuromechanist/biosigio` on PyPI — importers plus the Zarr exporter | [systems inventory](.context/systems-inventory.md) §2 |
 | Processing host | SDSC Hallu — dataset sync, QA sync, Zarr conversion | [systems inventory](.context/systems-inventory.md) §3 |
 | Test machines | `ssh mcm` (admin), `ssh mba` (regular user) | [systems inventory](.context/systems-inventory.md) §4 |
@@ -303,6 +306,19 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   EZID is the registrar (ADR 0007 — not Zenodo, whatever `.context/research.md` says).
   DOIs are permanent and require explicit confirmation.
 - **Zarr.** A derived, latest-only serving copy, not a source of truth.
+  The converter is `scripts/zarr/` **in this repo** and runs on the SDSC Hallu
+  cron (`scripts/zarr/hallu-zarr.sh`, hourly at `:30`), never in GitHub Actions —
+  Actions cannot finish a large dataset inside the 120-minute cap (ADR 0029).
+  Deployment has two halves and they differ: the **Python driver deploys itself**
+  (`setup()` resets the Hallu clone to the tracked ref every run), but
+  **`hallu-zarr.sh` cannot** -- it has to exist before the clone does, so it is a
+  hand-placed copy git never touches. Ship it with `scp` + atomic `mv`; the script
+  logs `DRIFT:` when the deployed copy differs from the repo copy. Manual recovery
+  for one dataset is `hallu-zarr.sh --dataset <id>`.
+  Conversion streams by default above 256 MiB, so peak RAM is a read window
+  plus one channel rather than the whole recording (ADR 0030). EEGLAB `.set`
+  is the one format that cannot: MNE refuses v7.3 files that biosigIO reads,
+  and an embedded classic `.set` loads fully even with `preload=False`.
   Discovery and dispatch are raw-only (ADR 0027):
   nothing under `derivatives/`, `sourcedata/`, or `code/` becomes a *new* store.
   Stores published under those trees before that landed are a separate,

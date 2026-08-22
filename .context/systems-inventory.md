@@ -61,7 +61,9 @@ before adding one to the non-prod set.
 | `nemarOrg` | tooling and infra: `nemar-cli`, `nemar-tools`, `nemar-metadata`, `neuroschema`, `website`, `docs`, `nemar-db-backup` (private) | |
 | `nemarDatasets` | dataset repos only (`nm000103`, `on004942`, `xx0999NN`, ...) plus `.github`, the central-workflow repo | **Shared between production and staging.** The org name is hardcoded, not environment-scoped. |
 
-`nemarDatasets/.github` is where the Zarr converter and the reusable dataset workflows live.
+`nemarDatasets/.github` is where the reusable dataset workflows live.
+The Zarr converter used to live there too; it moved to `scripts/zarr/` in this repo
+because it runs on the Hallu cron, not in Actions (ADR 0029).
 It is a separate repository from `nemar-cli` with its own PR cycle,
 and a change there reaches roughly 785 dataset repos at once — see ADR 0020.
 
@@ -114,8 +116,10 @@ Covers `dataqual.json`, histogram figures, and per-file QA.
 
 ### 3.3 Zarr conversion (`hallu-zarr.sh`)
 
-**This is the production Zarr conversion engine.** The webhook dispatch path exists
-but is off in production: `ZARR_AUTODISPATCH` is unset, so nothing converts on push.
+**This is the production Zarr conversion engine, and now the only one.** The Actions
+path (`run-generate-zarr.yml`, `triggerZarrGeneration`, `ZARR_AUTODISPATCH`) was
+retired in #1109; it had been off by default and could not finish a large dataset
+inside the 120-minute cap. The converter source is `scripts/zarr/` in this repo.
 The cron is what builds every store, and it passes `--clean` unconditionally,
 which means every recording in a dataset it visits is reconverted rather than diffed.
 **`--clean` does not wipe the prefix first** — it reconciles, removing only the stores
@@ -128,7 +132,7 @@ because SQLite locking over NFS is fragile.
 | Path | What it is |
 |---|---|
 | `/mnt/local/zarr-state/zarr-queue.db` | the work queue (SQLite) |
-| `/mnt/local/zarr-state/dotgithub/` | clone of `nemarDatasets/.github`; supplies the driver |
+| `/mnt/local/zarr-state/nemar-cli/` | clone of `nemarOrg/nemar-cli`; supplies the driver (`git pull` is the deploy path) |
 | `/mnt/local/zarr-state/.zarr-venv/` | the Python environment biosigio installs into |
 | `/mnt/local/zarr-state/.nm-zarr.lock` | single-instance lock |
 | `/mnt/local/zarr-state/.nm-zarr.log` | detailed per-recording log (tens of MB; `grep -a`) |
@@ -142,7 +146,7 @@ Everything except the secrets is rebuildable, so the whole state directory is di
 
 ```bash
 ssh hallu '/mnt/local/zarr-state/.zarr-venv/bin/python \
-  /mnt/local/zarr-state/dotgithub/scripts/zarr/zarr_queue.py \
+  /mnt/local/zarr-state/nemar-cli/scripts/zarr/zarr_queue.py \
   --db /mnt/local/zarr-state/zarr-queue.db stats'
 ```
 
@@ -151,7 +155,7 @@ ssh hallu '/mnt/local/zarr-state/.zarr-venv/bin/python \
 Two halves deploy differently, and the difference has bitten twice.
 
 **The Python driver deploys itself.** `setup()` runs
-`git fetch && git reset --hard origin/main` on the `dotgithub` clone,
+`git fetch && git reset --hard origin/$ZARR_DRIVER_REF` (default `main`) on the `nemar-cli` clone,
 then installs from that clone's `scripts/zarr/requirements.txt`
 with `--refresh-package biosigio --upgrade-package biosigio`
 so a version bump takes effect rather than resolving against a stale index cache.
@@ -187,7 +191,7 @@ Confirm what the running process actually loaded:
 
 ```bash
 ssh hallu 'ps -eo pid,lstart,etime,cmd | grep -E "hallu-zarr|generate_zarr" | grep -v grep
-           git -C /mnt/local/zarr-state/dotgithub log --oneline -1
+           git -C /mnt/local/zarr-state/nemar-cli log --oneline -1
            /mnt/local/zarr-state/.zarr-venv/bin/python -c "import biosigio; print(biosigio.__version__)"'
 ```
 
