@@ -2,8 +2,9 @@
 """Unit tests for the pure helpers in scripts/zarr/generate_zarr.py.
 
 No mocks: these exercise the path-classification, worklist, index-merge, and
-annex-key parsing logic directly (the git/S3/biosigIO I/O is validated E2E by a
-`workflow_dispatch` run of run-generate-zarr.yml on nm099999, not here).
+annex-key parsing logic directly (the git/S3/biosigIO I/O is validated E2E by
+`hallu-zarr.sh --dataset nm099999` on Hallu, not here; the old
+run-generate-zarr.yml workflow_dispatch path was retired in nemar-cli#1109).
 
 Run with:
     python3 scripts/zarr/test_generate_zarr.py

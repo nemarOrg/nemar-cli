@@ -13,7 +13,7 @@ import { type WebhookRouter, timingSafeEqual } from "../webhooks/shared.js";
 
 /**
  * POST /webhooks/zarr-ready — callback from nemarDatasets/.github
- * `run-generate-zarr.yml` once a dataset's Zarr serving copy has been
+ * `scripts/zarr/hallu-zarr.sh` on the SDSC Hallu cron once a dataset's Zarr serving copy has been
  * (re)built and synced to `s3://nemar/<id>/zarr/...` (epic #684 / Stream C).
  *
  * Authenticated with the shared `X-Webhook-Token` (NEMAR_WEBHOOK_TOKEN), same

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """NEMAR Zarr serving-copy generator (epic nemarOrg/nemar-cli#684, Stream B).
 
-Runs in nemarDatasets/.github :: run-generate-zarr.yml. Converts the BIDS
-recordings that changed since the last conversion into per-recording biosigIO
-Zarr v3 serving stores, uploads them to ``s3://<bucket>/<id>/zarr/...``
-(LATEST-ONLY: overwrite in place, delete on source removal), maintains
-``s3://<bucket>/<id>/zarr/index.json``, and writes a callback body the workflow
-POSTs to ``/webhooks/zarr-ready``.
+Runs on the SDSC Hallu cron, driven by ``scripts/zarr/hallu-zarr.sh`` (ADR 0029).
+It previously lived in nemarDatasets/.github and ran as run-generate-zarr.yml;
+that workflow is retired -- Actions cannot finish a large dataset inside the
+120-minute cap. Converts the BIDS recordings that changed since the last
+conversion into per-recording biosigIO Zarr v3 serving stores, uploads them to
+``s3://<bucket>/<id>/zarr/...`` (LATEST-ONLY: overwrite in place, delete on
+source removal), maintains ``s3://<bucket>/<id>/zarr/index.json``, and writes a
+callback body the driver script POSTs to ``/webhooks/zarr-ready``.
 
 The conversion itself is biosigIO (``Recording.from_file -> bids.apply_events_tsv
 -> rec.to_zarr``); this driver owns the BIDS-tree orchestration: change

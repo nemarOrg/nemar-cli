@@ -308,9 +308,12 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   The converter is `scripts/zarr/` **in this repo** and runs on the SDSC Hallu
   cron (`scripts/zarr/hallu-zarr.sh`, hourly at `:30`), never in GitHub Actions —
   Actions cannot finish a large dataset inside the 120-minute cap (ADR 0029).
-  Hallu tracks a checkout of this repo, so `git pull` is the deployment path;
-  never hand-copy the script to the box. Manual recovery for one dataset is
-  `hallu-zarr.sh --dataset <id>`.
+  Deployment has two halves and they differ: the **Python driver deploys itself**
+  (`setup()` resets the Hallu clone to the tracked ref every run), but
+  **`hallu-zarr.sh` cannot** -- it has to exist before the clone does, so it is a
+  hand-placed copy git never touches. Ship it with `scp` + atomic `mv`; the script
+  logs `DRIFT:` when the deployed copy differs from the repo copy. Manual recovery
+  for one dataset is `hallu-zarr.sh --dataset <id>`.
   Discovery and dispatch are raw-only (ADR 0027):
   nothing under `derivatives/`, `sourcedata/`, or `code/` becomes a *new* store.
   Stores published under those trees before that landed are a separate,

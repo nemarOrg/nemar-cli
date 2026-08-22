@@ -146,7 +146,7 @@ Everything except the secrets is rebuildable, so the whole state directory is di
 
 ```bash
 ssh hallu '/mnt/local/zarr-state/.zarr-venv/bin/python \
-  /mnt/local/zarr-state/dotgithub/scripts/zarr/zarr_queue.py \
+  /mnt/local/zarr-state/nemar-cli/scripts/zarr/zarr_queue.py \
   --db /mnt/local/zarr-state/zarr-queue.db stats'
 ```
 
@@ -155,7 +155,7 @@ ssh hallu '/mnt/local/zarr-state/.zarr-venv/bin/python \
 Two halves deploy differently, and the difference has bitten twice.
 
 **The Python driver deploys itself.** `setup()` runs
-`git fetch && git reset --hard origin/main` on the `dotgithub` clone,
+`git fetch && git reset --hard origin/$ZARR_DRIVER_REF` (default `main`) on the `nemar-cli` clone,
 then installs from that clone's `scripts/zarr/requirements.txt`
 with `--refresh-package biosigio --upgrade-package biosigio`
 so a version bump takes effect rather than resolving against a stale index cache.
@@ -191,7 +191,7 @@ Confirm what the running process actually loaded:
 
 ```bash
 ssh hallu 'ps -eo pid,lstart,etime,cmd | grep -E "hallu-zarr|generate_zarr" | grep -v grep
-           git -C /mnt/local/zarr-state/dotgithub log --oneline -1
+           git -C /mnt/local/zarr-state/nemar-cli log --oneline -1
            /mnt/local/zarr-state/.zarr-venv/bin/python -c "import biosigio; print(biosigio.__version__)"'
 ```
 

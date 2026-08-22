@@ -140,11 +140,41 @@ export TMPDIR="$WORK_DIR"
 
 # --- One-time setup: driver repo + biosigIO venv ------------------------------
 setup() {
+  # This script runs `set -uo pipefail` WITHOUT -e, so every git step below is
+  # checked explicitly. An unchecked failure here is the worst kind: `git reset
+  # --hard` validates the revspec BEFORE touching the tree, so a bad DRIVER_REF
+  # exits 128 and leaves the previous run's checkout intact -- the file-existence
+  # check below then passes on STALE code and the cron converts an entire batch
+  # against it, the only trace being a bare `fatal:` line in a multi-megabyte log.
+  # Same "fail loud rather than silently convert on the wrong thing" rule as the
+  # biosigio import guard further down.
   if [[ -d "$DRIVER_REPO/.git" ]]; then
-    git -C "$DRIVER_REPO" fetch -q origin \
-      && git -C "$DRIVER_REPO" reset -q --hard "origin/${DRIVER_REF}"
+    # Verify the clone is the repo we think it is before fetching into it. The
+    # driver moved from nemarDatasets/.github to nemarOrg/nemar-cli (#1109), and
+    # a leftover clone of the OLD repo still has scripts/zarr/generate_zarr.py --
+    # so neither the existence check nor the drift guard would notice, and we
+    # would convert against the wrong tree.
+    actual_url="$(git -C "$DRIVER_REPO" remote get-url origin 2>/dev/null || echo "<unreadable>")"
+    if [[ "$actual_url" != *"nemarOrg/nemar-cli"* ]]; then
+      err "FATAL: $DRIVER_REPO points at '$actual_url', expected nemarOrg/nemar-cli."
+      err "Refusing to run. Remove that directory, or fix ZARR_DRIVER_REPO."
+      exit 1
+    fi
+    if ! git -C "$DRIVER_REPO" fetch -q origin; then
+      err "FATAL: fetch failed for $DRIVER_REPO (currently at $(git -C "$DRIVER_REPO" rev-parse --short HEAD 2>/dev/null || echo unknown))."
+      err "Refusing to convert a batch against a possibly-stale driver."
+      exit 1
+    fi
+    if ! git -C "$DRIVER_REPO" reset -q --hard "origin/${DRIVER_REF}"; then
+      err "FATAL: origin/${DRIVER_REF} does not resolve in $DRIVER_REPO."
+      err "Check ZARR_DRIVER_REF (branch deleted after merge?). Not running a stale driver."
+      exit 1
+    fi
   else
-    git clone -q --branch "$DRIVER_REF" https://github.com/nemarOrg/nemar-cli "$DRIVER_REPO"
+    if ! git clone -q --branch "$DRIVER_REF" https://github.com/nemarOrg/nemar-cli "$DRIVER_REPO"; then
+      err "FATAL: clone of nemarOrg/nemar-cli@${DRIVER_REF} into $DRIVER_REPO failed."
+      exit 1
+    fi
   fi
   if [[ ! -x "$VENV_DIR/bin/python" ]]; then
     uv venv -q "$VENV_DIR"
@@ -217,8 +247,10 @@ convert_dataset() {
   fi
 
   local rc=0
-  # --clean: wipe s3://<id>/zarr/ then full-rebuild, so the serving copy mirrors
-  # the current dataset exactly (no orphaned stores / stale groups). With
+  # --clean: full-rebuild every recording so the serving copy mirrors the current
+  # dataset. It RECONCILES rather than wiping -- each store is synced with
+  # --delete and only stores absent from HEAD are removed, after a successful
+  # conversion (ADR 0023); the flag does not mean what its name suggests. With
   # streaming + JOBS-way parallelism a whole-dataset rebuild is cheap enough that
   # we always remake rather than reason about incremental diffs.
   VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" "$DRIVER" \
@@ -290,7 +322,7 @@ if [[ ! -f "$DRIVER" || ! -f "$QUEUE" ]]; then
   err "driver/queue not found under $DRIVER_REPO after setup"; exit 1
 fi
 
-# Drift guard. setup() refreshes DRIVER_REPO from origin/main every run, so the
+# Drift guard. setup() refreshes DRIVER_REPO from origin/$DRIVER_REF every run, so the
 # Python driver deploys itself -- but THIS script cannot: it has to exist before
 # the clone does, so it is a hand-placed copy that git never touches. That copy
 # silently fell ~5 weeks behind main once already (nemarDatasets/.github#92's
@@ -304,7 +336,7 @@ fi
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/$(basename "${BASH_SOURCE[0]}")"
 REPO_SELF="$DRIVER_REPO/scripts/zarr/$(basename "${BASH_SOURCE[0]}")"
 if [[ -f "$REPO_SELF" && "$SELF" != "$REPO_SELF" ]] && ! cmp -s "$SELF" "$REPO_SELF"; then
-  err "DRIFT: $SELF differs from $REPO_SELF (origin/main). Changes merged to this script are NOT live; deploy it."
+  err "DRIFT: $SELF differs from $REPO_SELF (origin/${DRIVER_REF}). Changes merged to this script are NOT live; deploy it."
 fi
 
 if [[ -n "$STATS_ONLY" ]]; then

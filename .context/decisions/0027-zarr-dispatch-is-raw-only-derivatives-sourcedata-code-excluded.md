@@ -166,3 +166,23 @@ so "all 200 datasets" was 200 of 754. Re-measured across the full catalog on 202
 against 151,197 raw recordings and 91.81% raw coverage.
 The percentages held up better than the absolute counts, but neither figure should be quoted
 from Receipts above without this correction.
+
+## Location and dispatch update (added 2026-08-22)
+
+Two classes of statement above were true when written and are no longer. Read them as dated
+rather than current, in the same spirit as the correction block above.
+
+**`generate_zarr.py` no longer lives in `nemarDatasets/.github`.** The Context section and the
+closing scope note both describe it as living in a separate repository, which was the whole
+reason this ADR's change was confined to the dispatch gate. Epic #1108 Phase 1 (#1109) moved
+`scripts/zarr/` into `nemarOrg/nemar-cli`; see ADR 0029. The practical consequence is that the
+converter-side half of this work is no longer cross-repo, and #1103's "the gate must stay a
+superset of `PRIMARY_EXTS`" is now enforced by a same-repo unit test
+(`test/zarr-gate-superset.unit.test.ts`) instead of a doc comment.
+
+**The dispatch path this ADR gates was retired, not merely disabled.** Statements here about
+`ZARR_AUTODISPATCH` being "off in production" and about any future re-enabling no longer apply:
+#1109 deleted `triggerZarrGeneration`, the `ZARR_AUTODISPATCH` binding, and the push-handler
+branch outright. `isZarrTriggerPath` and `shouldDispatchZarr` survive with no production caller,
+precisely so the raw-only contract decided here stays executable and asserted. The decision
+itself stands; only its enforcement point moved.

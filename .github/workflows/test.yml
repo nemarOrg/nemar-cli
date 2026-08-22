@@ -75,6 +75,10 @@ jobs:
               # materialize_recording), so it moved here with it (#1109).
               - 'scripts/patch_duration.py'
               - 'scripts/test_patch_duration.py'
+              # Self-reference, mirroring the `email` filter above: without it,
+              # editing only these jobs (a python bump, a new step, a typo in the
+              # install line) leaves zarr == 'false' and skips them silently.
+              - '.github/workflows/test.yml'
 
   # Zarr conversion engine tests (epic #1108 Phase 1 / #1109).
   # Pure no-mock unit assertions over generate_zarr.py's helpers (path
@@ -134,6 +138,20 @@ jobs:
 
       - name: Install biosigIO + pyedflib
         run: uv pip install --system -r scripts/zarr/requirements.txt pyedflib
+
+      # test_patch_duration.py wraps every case in
+      # `unittest.skipUnless(HAVE_PYEDFLIB and HAVE_BIOSIGIO)`, and unittest exits
+      # 0 whether the cases ran or all skipped. So if `uv pip install --system`
+      # ever resolves to a different interpreter than the one below (uv/setup-python
+      # skew, PATH ordering), the job goes green having asserted nothing. Fail here
+      # instead, where the cause is obvious.
+      - name: Verify the deps reached this interpreter
+        run: |
+          python -c 'import biosigio, pyedflib' || {
+            echo '::error::biosigio/pyedflib not importable by this python;'\
+                 'patch-duration-test would skip every assertion and still pass'
+            exit 1
+          }
 
       - name: Tier-2 duration tests
         run: python scripts/test_patch_duration.py
