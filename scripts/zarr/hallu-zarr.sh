@@ -117,24 +117,8 @@ LOCK_FILE="${ZARR_LOCK_FILE:-${STATE_DIR}/.nm-zarr.lock}"
 # NEMAR_WEBHOOK_TOKEN may be exported by the environment; the callback is skipped
 # when it is empty (the viewer reads index.json, not D1, so the callback is only
 # D1 bookkeeping).
-# Load secrets (e.g. NEMAR_WEBHOOK_TOKEN) from a chmod-600 file, so the token
-# lives neither in crontab nor in any repo. That second half stopped holding when
-# #1109 moved this script INTO the nemar-cli checkout: "beside this script" is now
-# a git working tree, where the file is one `git add -A` away from being committed.
-# So the default moved to STATE_DIR, which sits outside the clone alongside the
-# queue DB and the venv -- machine-local state that git never touches.
-#
-# The beside-the-script path stays as a fallback purely so an existing deployment
-# keeps converting across the cutover rather than silently losing its token and
-# skipping every callback. Prefer STATE_DIR; ZARR_SECRETS_FILE overrides both.
-SECRETS_FILE="${ZARR_SECRETS_FILE:-${STATE_DIR}/.zarr-secrets.env}"
-if [[ -f "$SECRETS_FILE" ]]; then
-  # shellcheck source=/dev/null  # deployment-local, chmod-600, never in the repo
-  source "$SECRETS_FILE"
-elif [[ -f "${BASH_SOURCE%/*}/.zarr-secrets.env" ]]; then
-  source "${BASH_SOURCE%/*}/.zarr-secrets.env"
-fi
-NEMAR_WEBHOOK_TOKEN="${NEMAR_WEBHOOK_TOKEN:-}"
+# NEMAR_WEBHOOK_TOKEN is loaded further down, once log()/err() exist -- a missing
+# token has to be able to announce itself.
 
 ONLY_DATASET=""
 LIMIT="${ZARR_LIMIT:-0}"
@@ -172,6 +156,50 @@ mkdir -p "$WORK_DIR" "$STATE_DIR"
 # The driver's tempfile.TemporaryDirectory() (per-recording materialize + store)
 # follows TMPDIR; pin it to the NVMe scratch, not the system default.
 export TMPDIR="$WORK_DIR"
+
+# --- Secrets (NEMAR_WEBHOOK_TOKEN) -------------------------------------------
+# Loaded from a chmod-600 file so the token lives neither in crontab nor in any
+# repo. That second half stopped holding when #1109 moved this script INTO the
+# nemar-cli checkout: "beside this script" is now a git working tree, where the
+# file is one `git add -A` away from being committed. Hence the STATE_DIR default,
+# which sits outside the clone alongside the queue DB and the venv.
+#
+# The beside-the-script fallback does NOT carry a token through that move, and it
+# would be dangerous to believe it does. It resolves against wherever the script
+# currently IS, so post-cutover it points inside the clone -- never at the old
+# hand-copy directory the token actually sat in. Relocating the token to STATE_DIR
+# is a required manual step of the cutover, not something this fallback does for
+# you. The fallback covers only the other deployment shape: script and secrets
+# kept together somewhere outside a checkout.
+#
+# An absent token is otherwise SILENT: both callback POSTs below skip when it is
+# empty, so conversion keeps succeeding and uploading while D1's zarr_status
+# quietly stops updating -- a botched cutover would surface only as a dashboard
+# that stopped advancing. Warn instead. It stays non-fatal because the callback is
+# only D1 bookkeeping; the viewer reads index.json from S3, which is still written.
+if [[ -n "${ZARR_SECRETS_FILE:-}" ]]; then
+  # An explicit override is exclusive. Falling back after a typo'd path would
+  # source a DIFFERENT file than the operator named -- possibly a stale token --
+  # which is worse than stopping, and contradicts the fail-loud rule setup() uses
+  # for the driver checkout.
+  if [[ ! -f "$ZARR_SECRETS_FILE" ]]; then
+    err "FATAL: ZARR_SECRETS_FILE=$ZARR_SECRETS_FILE does not exist. Not falling back."
+    exit 1
+  fi
+  # shellcheck source=/dev/null  # deployment-local, chmod-600, never in the repo
+  source "$ZARR_SECRETS_FILE"
+elif [[ -f "${STATE_DIR}/.zarr-secrets.env" ]]; then
+  # shellcheck source=/dev/null
+  source "${STATE_DIR}/.zarr-secrets.env"
+elif [[ -f "${BASH_SOURCE%/*}/.zarr-secrets.env" ]]; then
+  # shellcheck source=/dev/null
+  source "${BASH_SOURCE%/*}/.zarr-secrets.env"
+fi
+NEMAR_WEBHOOK_TOKEN="${NEMAR_WEBHOOK_TOKEN:-}"
+if [[ -z "$NEMAR_WEBHOOK_TOKEN" ]]; then
+  err "no NEMAR_WEBHOOK_TOKEN (looked in ${STATE_DIR}/.zarr-secrets.env and ${BASH_SOURCE%/*}/.zarr-secrets.env)."
+  err "Conversion will run and upload normally, but every zarr-ready callback is SKIPPED, so D1 zarr_status will not advance."
+fi
 
 # --- One-time setup: driver repo + biosigIO venv ------------------------------
 setup() {
