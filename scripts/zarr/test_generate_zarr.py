@@ -394,6 +394,119 @@ class TestComputeWorklist(unittest.TestCase):
         self.assertEqual(remove, [])
 
 
+class TestSidecarRebuildsDirectoryRecordings(unittest.TestCase):
+    """#1106: an events/companion edit beside a DIRECTORY recording must rebuild it.
+
+    `by_dir` was keyed on file heads only, so `affected_primaries` got an empty
+    bucket for a CTF `.ds` / MEF3 `.mefd` / 4D-BTi directory and an events edit
+    queued nothing at all. The `--clean` cron papered over it on the next full
+    rebuild, which is why it stayed invisible.
+    """
+
+    CTF = [
+        "dataset_description.json",
+        "sub-01/meg/sub-01_task-x_meg.ds/res4",
+        "sub-01/meg/sub-01_task-x_meg.ds/meg4",
+        "sub-01/meg/sub-01_task-x_events.tsv",
+    ]
+    MEFD = [
+        "sub-01/ieeg/sub-01_task-x_ieeg.mefd/segment.1/x.rdat",
+        "sub-01/ieeg/sub-01_task-x_ieeg.mefd/segment.1/x.ridx",
+        "sub-01/ieeg/sub-01_task-x_events.tsv",
+    ]
+    BTI = [
+        "sub-01/meg/sub-01_task-x_meg/c,rfDC",
+        "sub-01/meg/sub-01_task-x_meg/config",
+        "sub-01/meg/sub-01_task-x_meg/hs_file",
+        "sub-01/meg/sub-01_task-x_events.tsv",
+    ]
+
+    def test_events_edit_rebuilds_ctf_ds(self):
+        convert, remove = compute_worklist(
+            self.CTF, [("M", "sub-01/meg/sub-01_task-x_events.tsv")], full=False
+        )
+        self.assertEqual(convert, ["sub-01/meg/sub-01_task-x_meg.ds"])
+        self.assertEqual(remove, [])
+
+    def test_events_edit_rebuilds_mefd(self):
+        convert, _ = compute_worklist(
+            self.MEFD, [("M", "sub-01/ieeg/sub-01_task-x_events.tsv")], full=False
+        )
+        self.assertEqual(convert, ["sub-01/ieeg/sub-01_task-x_ieeg.mefd"])
+
+    def test_events_edit_rebuilds_bti(self):
+        convert, _ = compute_worklist(
+            self.BTI, [("M", "sub-01/meg/sub-01_task-x_events.tsv")], full=False
+        )
+        self.assertEqual(convert, ["sub-01/meg/sub-01_task-x_meg"])
+
+    def test_events_added_rebuilds(self):
+        convert, _ = compute_worklist(
+            self.CTF, [("A", "sub-01/meg/sub-01_task-x_events.tsv")], full=False
+        )
+        self.assertEqual(convert, ["sub-01/meg/sub-01_task-x_meg.ds"])
+
+    def test_events_deleted_still_rebuilds_without_events(self):
+        # The recording survives, so it must be regenerated WITHOUT the events
+        # block rather than left carrying stale annotations.
+        head = [p for p in self.CTF if not p.endswith("_events.tsv")]
+        convert, remove = compute_worklist(
+            head, [("D", "sub-01/meg/sub-01_task-x_events.tsv")], full=False
+        )
+        self.assertEqual(convert, ["sub-01/meg/sub-01_task-x_meg.ds"])
+        self.assertEqual(remove, [])
+
+    def test_events_for_a_different_task_does_not_rebuild(self):
+        # Guards against the fix over-matching: same directory, different entities.
+        head = [*self.CTF, "sub-01/meg/sub-01_task-y_events.tsv"]
+        convert, _ = compute_worklist(
+            head, [("M", "sub-01/meg/sub-01_task-y_events.tsv")], full=False
+        )
+        self.assertEqual(convert, [])
+
+    def test_only_the_matching_recording_rebuilds_among_siblings(self):
+        head = [
+            "sub-01/meg/sub-01_task-x_meg.ds/res4",
+            "sub-01/meg/sub-01_task-y_meg.ds/res4",
+            "sub-01/meg/sub-01_task-x_events.tsv",
+        ]
+        convert, _ = compute_worklist(
+            head, [("M", "sub-01/meg/sub-01_task-x_events.tsv")], full=False
+        )
+        self.assertEqual(convert, ["sub-01/meg/sub-01_task-x_meg.ds"])
+
+    def test_file_and_directory_recordings_coexist_in_one_directory(self):
+        # A directory recording must not displace a file primary sharing the dir.
+        head = [
+            "sub-01/meg/sub-01_task-x_meg.ds/res4",
+            "sub-01/meg/sub-01_task-x_meg.fif",
+            "sub-01/meg/sub-01_task-x_events.tsv",
+        ]
+        convert, _ = compute_worklist(
+            head, [("M", "sub-01/meg/sub-01_task-x_events.tsv")], full=False
+        )
+        self.assertEqual(
+            convert,
+            ["sub-01/meg/sub-01_task-x_meg.ds", "sub-01/meg/sub-01_task-x_meg.fif"],
+        )
+
+    def test_change_inside_the_recording_directory_still_rebuilds(self):
+        # Regression guard: this path is resolved by `dir_recording_of` BEFORE
+        # `by_dir` is consulted, and must stay that way.
+        convert, remove = compute_worklist(
+            self.CTF, [("M", "sub-01/meg/sub-01_task-x_meg.ds/meg4")], full=False
+        )
+        self.assertEqual(convert, ["sub-01/meg/sub-01_task-x_meg.ds"])
+        self.assertEqual(remove, [])
+
+    def test_unrelated_sidecar_in_another_directory_does_not_rebuild(self):
+        head = [*self.CTF, "sub-02/meg/sub-02_task-x_events.tsv"]
+        convert, _ = compute_worklist(
+            head, [("M", "sub-02/meg/sub-02_task-x_events.tsv")], full=False
+        )
+        self.assertEqual(convert, [])
+
+
 class TestMergeIndex(unittest.TestCase):
     def test_upsert_remove_and_carry_over(self):
         prior = {

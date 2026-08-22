@@ -1339,10 +1339,18 @@ def compute_worklist(
     # Collapse FIF split groups to their chain head: only the head builds a store,
     # and a change to any split routes to that head (member_to_head).
     heads, member_to_head = split_heads_and_members(primaries)
-    by_dir: dict[str, list[str]] = {}
-    for p in heads:
-        by_dir.setdefault(os.path.dirname(p), []).append(p)
     all_primaries = sorted([*heads, *dirrec_dirs, *bti_dirs])
+    # Keyed on ALL buildable primaries, not just the file heads. A directory
+    # recording sits in the same parent directory as its sidecars -- CTF
+    # `sub-01/meg/..._meg.ds` next to `sub-01/meg/..._events.tsv` -- so omitting
+    # the directory forms here left `affected_primaries` with an empty bucket and
+    # an events or companion edit rebuilt NOTHING for CTF/MEF3/BTi (#1106).
+    # Changes INSIDE a recording directory never reach this map; they are resolved
+    # earlier by `dir_recording_of`/`bti_dirs`. This map is only consulted for
+    # siblings alongside the recording, which is exactly the sidecar case.
+    by_dir: dict[str, list[str]] = {}
+    for p in all_primaries:
+        by_dir.setdefault(os.path.dirname(p), []).append(p)
 
     if full:
         return all_primaries, []
