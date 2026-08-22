@@ -136,21 +136,35 @@ MODALITY_RATES = {"EEG": 250, "MEG": 250, "IEEG": 1000, "EMG": 1000}
 # -- worth it, since a MEF3 iEEG session can be multi-gigabyte. 4D/BTi streams too
 # (`mne.io.read_raw_bti(preload=False)`, same `_MneSource` lazy path) but is NOT
 # extension-keyed, so it cannot join this tuple; `should_stream` below gives it its
-# own extension-less branch at this SAME multi-GB threshold, deliberately not the
+# own extension-less branch at this SAME common threshold, deliberately not the
 # lower KIT one (see the KIT comment below for why KIT differs).
-STREAM_MIN_BYTES = int(os.environ.get("ZARR_STREAM_MIN_BYTES", str(2 * 1024**3)))
+# 256 MiB, matching KIT and EDF. It was 2 GiB, and that gap is what sank
+# on004917: its 24 BrainVision recordings are 1.18-2.25 GB, so all but one sat
+# just UNDER the threshold, took the unbounded in-memory path, and were admitted
+# seven at a time against a projection running half their real cost.
+#
+# There was never a principled reason for BrainVision to need a threshold eight
+# times higher than EDF's -- the driver's own note says BrainVision goes through
+# MNE on both paths, so parity holds either way. The in-memory path survives only
+# as a fast path for genuinely small recordings, where process startup and the
+# scratch memmap would cost more than the load itself.
+#
+# This supersedes the ZARR_STREAM_MIN_BYTES=268435456 crontab override added as a
+# mitigation on 2026-08-22; remove that override when this reaches the node
+# (ADR 0030).
+STREAM_MIN_BYTES = int(os.environ.get("ZARR_STREAM_MIN_BYTES", str(256 * 1024**2)))
 STREAM_EXTS = (".vhdr", ".fif", ".ds", MEFD_EXT)
 # KIT/Yokogawa .con/.sqd/.kdf load FULLY in memory (read_raw_kit has no lazy
 # path), and a many-channel MEG file expands to ~5x its bytes as float64 + the
 # biosigIO DataFrame + the resample copy -- so even a ~600 MB .con OOM-kills a
 # pool worker at JOBS-way concurrency (which then breaks the whole pool). Route
-# them through the streaming converter above a much lower threshold than the
-# multi-GB one: streaming peaks ~3 GB regardless of file size, and small KIT
+# them through the streaming converter from the common threshold (since #1112
+# common one: streaming peaks ~3 GB regardless of file size, and small KIT
 # files stay on the faster in-memory path. 4D/BTi does NOT belong in this group
 # even though it is also MEG and also directory-based: `read_raw_bti` DOES support
 # `preload=False` (confirmed via biosigio's streaming exporter, which opens it lazily
 # exactly like CTF/FIF/`.mefd`), so it has none of KIT's "no lazy path" problem and
-# stays on the multi-GB `STREAM_EXTS`-equivalent threshold instead (see
+# stays on the `STREAM_EXTS` threshold instead (see
 # `should_stream`).
 STREAM_KIT_EXTS = (".con", ".sqd", ".kdf")
 STREAM_KIT_MIN_BYTES = int(os.environ.get("ZARR_STREAM_KIT_MIN_BYTES", str(256 * 1024**2)))
@@ -185,11 +199,32 @@ _EDF_STREAMABLE = _biosigio_streams_edf()
 def should_stream(primary_local: str, size_bytes: int) -> bool:
     """Whether a recording converts via the bounded-memory streaming path.
 
-    Large MNE-native recordings (multi-GB iEEG/MEG BrainVision/FIF, CTF `.ds`,
-    MEF3 `.mefd`) stream above ``STREAM_MIN_BYTES``; KIT `.con`/`.sqd`/`.kdf` and
+    EEGLAB `.set` is deliberately absent from every streaming tuple, and stays on
+    the in-memory path at any size. Two independent blockers, both verified
+    against the installed MNE and biosigIO:
+
+    1. A MATLAB v7.3 `.set` is an HDF5 container. MNE refuses it outright, and
+       only biosigIO's own h5py importer reads it (the `[hdf5]` extra, added in
+       1.2.4 for 544 such recordings across the archive). Streaming routes through
+       MNE, so routing `.set` there would turn those 544 back into failures.
+    2. For a classic `.set` whose samples are embedded in the MAT struct rather
+       than a sibling `.fdt`, `preload=False` is a fiction: MNE's
+       `_read_segment_file` detects `is_embedded` and calls `_readmat(preload=True)`,
+       materialising the whole recording and caching it. Streaming such a file
+       would load everything anyway AND add the scratch memmap on top -- strictly
+       worse than the in-memory path it replaced.
+
+    Only a classic `.set` with a sibling `.fdt` could genuinely stream, which is a
+    subset, and biosigIO importer parity for units and channel handling would
+    still need proving before relying on it. Large `.set` recordings are instead
+    protected by the RLIMIT_DATA backstop (#1110) and by the temporary-vs-permanent
+    verdict split (#1111), so one cannot take down a node or be buried forever.
+
+    Large MNE-native recordings (BrainVision/FIF, CTF `.ds`, MEF3 `.mefd`) stream
+    above ``STREAM_MIN_BYTES``; KIT `.con`/`.sqd`/`.kdf` and
     -- when biosigIO >= 1.2.0 -- EDF/BDF stream above the much lower KIT/EDF
     thresholds because their in-memory float64 blow-up OOMs a worker well below
-    the multi-GB mark. Everything else (and small KIT/EDF) uses the faster
+    the common threshold. Everything else uses the faster
     in-memory path.
 
     Called both pre-materialization (``primary_local`` is still the git-relative
@@ -211,7 +246,7 @@ def should_stream(primary_local: str, size_bytes: int) -> bool:
     # primary this converter discovers carries a real extension (PRIMARY_EXTS, or
     # `.ds`/`.mefd` via DIR_RECORDING_EXTS), so an empty extension reaching here is
     # a BTi recording by construction, not an unrelated ext-less path. It streams
-    # above the SAME multi-GB threshold as STREAM_EXTS -- deliberately not the
+    # above the SAME threshold as STREAM_EXTS -- deliberately not the
     # lower KIT one -- because `read_raw_bti` genuinely supports `preload=False`
     # (biosigIO's streaming exporter opens it lazily via the same `_MneSource`
     # path as CTF/FIF/`.mefd`); it doesn't have KIT's "no lazy reader" problem.
@@ -274,9 +309,23 @@ _WARNED_NO_RSS = [False]
 _WARNED_NO_RESET = [False]
 
 
-def admission_reserve_bytes(peak_bytes: int, ceiling_bytes: int | None) -> int:
-    """What admission must CHARGE for a recording: the slack-inflated projection,
-    i.e. what its worker is actually permitted to allocate.
+def admission_reserve_bytes(
+    peak_bytes: int, ceiling_bytes: int | None, *, streamed: bool = False
+) -> int:
+    """What admission must CHARGE for a recording: what its worker is permitted to
+    allocate.
+
+    Slack applies to the IN-MEMORY path only. It exists to cover that path's
+    projection being a guessed multiple of on-disk bytes that runs about 2x low.
+    The streaming path's projection is not a guess of that kind -- it is the flat
+    bound the two-pass design gives (one read window plus one channel), already
+    generous. Tripling it charged 12 GiB for a recording whose real peak is in the
+    hundreds of megabytes, and against this node's ~19 GiB ceiling that admitted
+    exactly ONE recording at a time with --jobs 24, i.e. serial conversion of a
+    1.5 TB dataset. #1112
+
+    Once #1111's measurements land, STREAM_PEAK_BYTES itself should come down from
+    4 GiB, which is where the rest of the concurrency comes back.
 
     Charging the bare projection instead was the flaw that made the backstop only
     half a containment. Admission bounded the SUM of nominal projections to the
@@ -287,7 +336,7 @@ def admission_reserve_bytes(peak_bytes: int, ceiling_bytes: int | None) -> int:
     by construction, at the cost of proportionally less concurrency for large
     recordings -- which is the point: the previous concurrency was overcommitted.
     """
-    reserve = int(peak_bytes * MEM_LIMIT_SLACK)
+    reserve = peak_bytes if streamed else int(peak_bytes * MEM_LIMIT_SLACK)
     return min(reserve, ceiling_bytes) if ceiling_bytes else reserve
 
 
@@ -571,11 +620,40 @@ class ChannelCountMismatch(Exception):
     code = "channel_count_mismatch"
 
 
-def projected_peak_bytes(primary_local: str, size_bytes: int) -> int:
-    """Estimated peak RAM to convert this recording: bounded for the streaming
-    path, ~float64 blow-up for the in-memory path. Drives the skip guard (#909)."""
-    if should_stream(primary_local, size_bytes):
+# Pass 2 of the streaming exporter does, per channel,
+# `x = np.asarray(mm[i], dtype=np.float64)` -- it materialises ONE WHOLE CHANNEL
+# at native rate as anonymous float64. That term is `n_samples * 8` bytes: it
+# scales with duration and sample rate and is INDEPENDENT of channel count, so
+# STREAM_PEAK_BYTES is not the guaranteed bound it looks like. A many-channel
+# recording splits its bytes across many short channels and stays far under it; a
+# FEW-channel, long, high-rate recording (EMG, single-contact iEEG) can have one
+# channel that alone approaches or exceeds it.
+#
+# So project the per-channel term explicitly when the channel count is known.
+# `size_bytes / n_channels` is one channel's on-disk bytes; x4 takes int16 to
+# float64, and the multiplier below covers the resampled copy and resample_poly's
+# scratch alongside it.
+STREAM_CHANNEL_EXPANSION = float(os.environ.get("ZARR_STREAM_CHANNEL_EXPANSION", "12"))
+
+
+def streaming_peak_bytes(size_bytes: int, n_channels: int | None) -> int:
+    """Projected peak for the streaming path: the flat floor, raised when one
+    channel alone would exceed it. Falls back to the flat value when the channel
+    count is unknown."""
+    if not n_channels or n_channels <= 0:
         return STREAM_PEAK_BYTES
+    per_channel = int(size_bytes / n_channels * STREAM_CHANNEL_EXPANSION)
+    return max(STREAM_PEAK_BYTES, per_channel)
+
+
+def projected_peak_bytes(
+    primary_local: str, size_bytes: int, n_channels: int | None = None
+) -> int:
+    """Estimated peak RAM to convert this recording: the streaming path's
+    channel-aware bound, or the float64 blow-up for the in-memory path. Drives the
+    skip guard (#909)."""
+    if should_stream(primary_local, size_bytes):
+        return streaming_peak_bytes(size_bytes, n_channels)
     return int(size_bytes * inmem_factor_for(primary_local))
 
 
@@ -2468,7 +2546,7 @@ def convert_recording(
 
     # Large recordings use the streaming converter so peak RAM stays bounded; the
     # in-memory path would load them at float64 2-3x and OOM. (multi-GB BrainVision/
-    # FIF/CTF/MEF3/4D-BTi, KIT above its much lower threshold, and EDF/BDF via
+    # FIF/CTF/MEF3/4D-BTi, KIT, and EDF/BDF via
     # pyedflib on biosigio>=1.2.0 -- see should_stream.)
     if streaming:
         from biosigio import stream_to_zarr  # type: ignore[import-not-found]  # lazy
@@ -3013,13 +3091,45 @@ def main() -> int:
     # Charge admission what each worker is PERMITTED (projection * slack), not the
     # bare projection -- otherwise the in-flight sum is bounded while the memory
     # those workers may actually take is not. See `admission_reserve_bytes`.
+    sizes = {p: recording_size_from_pointers(repo, p, head_set, head) for p in convert}
+    # channels.tsv is already the fidelity gate's ground truth; reuse it so the
+    # streaming projection can account for its per-channel term (see
+    # `streaming_peak_bytes`). Best-effort: an unreadable sidecar falls back to
+    # the flat bound rather than failing the run.
+    channel_counts: dict[str, int | None] = {}
+    for p in convert:
+        try:
+            channel_counts[p] = expected_channel_count_for(repo, p, head_set, head)
+        except Exception:  # noqa: BLE001 - a projection input must not fail a run
+            channel_counts[p] = None
     projections = {
-        p: projected_peak_bytes(p, recording_size_from_pointers(repo, p, head_set, head))
-        for p in convert
+        p: projected_peak_bytes(p, sizes[p], channel_counts.get(p)) for p in convert
     }
-    peaks = {p: admission_reserve_bytes(proj, ram_ceiling) for p, proj in projections.items()}
+    peaks = {
+        p: admission_reserve_bytes(
+            proj, ram_ceiling, streamed=should_stream(p, sizes[p])
+        )
+        for p, proj in projections.items()
+    }
     # Measured peak RSS per recording, so the factors above stop being guesses.
     measured: dict[str, int] = {}
+    # Admission is RAM-only. Each streaming recording also writes a scratch memmap
+    # of `n_channels * n_samples * 4` bytes, and raising concurrency raises the
+    # CONCURRENT scratch peak proportionally -- the per-recording cleanup in
+    # convert_one's `finally` bounds accumulation over a run, not the peak at one
+    # instant. There is no disk admission control; report the headroom so a
+    # shortage is visible before it becomes a mid-run write failure. #1112
+    try:
+        scratch_root = tempfile.gettempdir()
+        scratch_free = shutil.disk_usage(scratch_root).free
+        print(
+            f"[zarr] scratch free: {scratch_free / 1024**3:.0f} GiB at {scratch_root} "
+            "(not admission-controlled; streaming writes a per-recording memmap)",
+            flush=True,
+        )
+    except OSError as exc:  # visibility only; never fail a run over a stat
+        print(f"::warning::could not stat scratch: {exc}", flush=True)
+
     print(
         f"[zarr] admission: up to {cpu_cap} worker(s), RAM ceiling "
         f"~{ram_ceiling // 1024**3} GiB; a recording projected above it alone is "

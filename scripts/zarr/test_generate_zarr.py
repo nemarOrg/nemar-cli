@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import generate_zarr
 from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (sibling module via sys.path)
     _AWS_OP_TIMEOUT,
     _AWS_RM_TIMEOUT,
@@ -49,6 +50,7 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     MEM_LIMIT_FLOOR_BYTES,
     MEM_LIMIT_SLACK,
     admission_reserve_bytes,
+    streaming_peak_bytes,
     reset_peak_rss,
     peak_rss_bytes,
     inmem_factor_for,
@@ -1407,13 +1409,12 @@ class TestMefdRecordings(unittest.TestCase):
                         fh.write(b"m" * size)
             self.assertEqual(_recording_size_bytes(mefd), sum(sizes.values()) * 3)
 
-    def test_mefd_joins_stream_exts_at_the_multigb_threshold(self):
+    def test_mefd_streams_on_the_common_threshold(self):
         # .mefd streams like CTF/FIF/BrainVision (biosigio>=1.2.3, read_raw_mef
-        # supports preload=False) -- the SAME multi-GB threshold, not the lower
-        # KIT one (MEF3 has a genuine lazy reader, unlike read_raw_kit).
+        # supports preload=False), now on the single common threshold (#1112).
         self.assertTrue(self.MEFD.endswith(MEFD_EXT))
-        self.assertFalse(should_stream(self.MEFD, 500 * 1024**2))
-        self.assertTrue(should_stream(self.MEFD, 3 * 1024**3))
+        self.assertFalse(should_stream(self.MEFD, 100 * 1024**2))
+        self.assertTrue(should_stream(self.MEFD, 500 * 1024**2))
 
 
 class TestBtiRecordings(unittest.TestCase):
@@ -1569,13 +1570,13 @@ class TestBtiRecordings(unittest.TestCase):
                 fh.write(b"h" * 100)
             self.assertEqual(_recording_size_bytes(bti), 9400)
 
-    def test_bti_streams_at_the_multigb_threshold_not_the_kit_one(self):
-        # BTi genuinely supports preload=False (biosigIO's streaming exporter
-        # opens it lazily via the same _MneSource path as CTF/FIF/.mefd), so it
-        # must NOT join KIT's much-lower threshold: a size that would stream as
-        # KIT must stay in-memory here.
-        kit_streaming_size = 300 * 1024**2  # above STREAM_KIT_MIN_BYTES (256 MB)
-        self.assertFalse(should_stream(self.BTI, kit_streaming_size))
+    def test_bti_streams_on_the_same_threshold_as_everything_else(self):
+        # #1112 collapsed the two-tier threshold: BTi used to stay in-memory until
+        # multi-GB because it genuinely supports preload=False, but "has a lazy
+        # reader" is a reason streaming WORKS, not a reason to postpone it. Only
+        # genuinely small recordings keep the in-memory fast path now.
+        self.assertFalse(should_stream(self.BTI, 100 * 1024**2))
+        self.assertTrue(should_stream(self.BTI, 300 * 1024**2))
         self.assertTrue(should_stream(self.BTI, 3 * 1024**3))
 
     def test_all_directory_recording_kinds_coexist_in_one_worklist(self):
@@ -2088,12 +2089,27 @@ class TestShouldStream(unittest.TestCase):
         # A small (~190 MB task-0) .con is cheap in memory -> faster path.
         self.assertFalse(should_stream("sub-01/meg/sub-01_task-x_meg.con", 190 * self.MB))
 
-    def test_brainvision_fif_keep_multigb_threshold(self):
-        # MNE-native formats only stream when genuinely large (the in-memory path
-        # is fine for moderate sizes).
-        self.assertFalse(should_stream("sub-01/ieeg/sub-01_task-x_ieeg.vhdr", 500 * self.MB))
-        self.assertTrue(should_stream("sub-01/ieeg/sub-01_task-x_ieeg.vhdr", 3 * self.GB))
+    def test_brainvision_fif_stream_from_the_common_threshold(self):
+        # The 2 GiB threshold is what sank on004917: its BrainVision recordings
+        # were 1.18-2.25 GB, so all but one sat just UNDER it, took the unbounded
+        # in-memory path, and were admitted seven at a time. 500 MB must stream.
+        self.assertTrue(should_stream("sub-01/ieeg/sub-01_task-x_ieeg.vhdr", 500 * self.MB))
+        self.assertTrue(should_stream("sub-01/ieeg/sub-01_task-x_ieeg.vhdr", 2 * self.GB))
         self.assertTrue(should_stream("sub-01/meg/sub-01_task-x_meg.fif", 3 * self.GB))
+
+    def test_the_on004917_band_now_streams(self):
+        # Regression pin for the exact sizes that OOMed the node.
+        for gb in (1.18, 1.5, 2.09, 2.25):
+            self.assertTrue(
+                should_stream("sub-02/eeg/sub-02_task-pdm_eeg.vhdr", int(gb * 1000**3)),
+                f"{gb} GB BrainVision must take the bounded path",
+            )
+
+    def test_small_recordings_keep_the_in_memory_fast_path(self):
+        # Streaming is not free: a scratch memmap plus a second pass costs more
+        # than simply loading a small recording.
+        self.assertFalse(should_stream("sub-01/ieeg/sub-01_task-x_ieeg.vhdr", 10 * self.MB))
+        self.assertFalse(should_stream("sub-01/meg/sub-01_task-x_meg.fif", 10 * self.MB))
 
     def test_eeglab_set_never_streams(self):
         # EEGLAB .set has no streaming reader -> always in-memory.
@@ -2738,7 +2754,8 @@ class TestInMemoryFactors(unittest.TestCase):
             self.assertEqual(inmem_factor_for(name), INMEM_MEM_FACTOR)
 
     def test_projection_uses_the_per_format_factor(self):
-        size = 1024**3
+        # Below the streaming threshold, so the in-memory factor is what applies.
+        size = 100 * 1024**2
         self.assertEqual(
             projected_peak_bytes("sub-01_task-x_eeg.vhdr", size),
             int(size * inmem_factor_for("x.vhdr")),
@@ -2933,7 +2950,9 @@ class TestFactorAffectsAdmission(unittest.TestCase):
     not merely what `projected_peak_bytes` returns."""
 
     def test_a_heavier_format_admits_fewer_at_once(self):
-        size = 1024**3  # same on-disk size, different readers
+        # Below the streaming threshold on purpose: above it both formats get the
+        # same flat STREAM_PEAK_BYTES and the factor is not what is being tested.
+        size = 100 * 1024**2
         ceiling = 200 * 1024**3
 
         def admitted(name):
@@ -2948,6 +2967,205 @@ class TestFactorAffectsAdmission(unittest.TestCase):
         light = admitted("sub-01_task-x_eeg.set")    # factor 6 (default)
         self.assertLess(heavy, light, "the heavier format must self-limit concurrency")
         self.assertGreater(light, 0)
+
+
+class TestStreamingAdmissionThroughput(unittest.TestCase):
+    """#1112: making streaming the default must not make conversion serial."""
+
+    def test_streaming_is_not_charged_in_memory_slack(self):
+        # Slack covers the in-memory factor being a guess that runs ~2x low. The
+        # streaming projection is the flat bound the two-pass design gives, not a
+        # guess of that kind, so tripling it is charging for nothing.
+        ceiling = 200 * 1024**3
+        proj = STREAM_PEAK_BYTES
+        self.assertEqual(admission_reserve_bytes(proj, ceiling, streamed=True), proj)
+        self.assertEqual(
+            admission_reserve_bytes(proj, ceiling, streamed=False),
+            int(proj * MEM_LIMIT_SLACK),
+        )
+
+    def test_more_than_one_recording_is_admitted_on_a_realistic_ceiling(self):
+        # The regression this guards: with slack applied to the streaming bound,
+        # a 4 GiB projection was charged 12 GiB against this node's measured
+        # ~19 GiB ceiling, admitting exactly ONE recording at a time under
+        # --jobs 24 -- serial conversion of a 1.5 TB dataset.
+        ceiling = 19 * 1024**3
+        size = int(1.3 * 1000**3)  # a real on004917 recording
+        name = "sub-02/eeg/sub-02_task-pdm_eeg.vhdr"
+        self.assertTrue(should_stream(name, size))
+        reserve = admission_reserve_bytes(
+            projected_peak_bytes(name, size), ceiling, streamed=True
+        )
+        self.assertGreater(
+            ceiling // reserve, 1, "streaming the default must not serialise the queue"
+        )
+
+    def test_in_memory_recordings_still_carry_slack(self):
+        # .set has no streaming route, so its projection is still the guessed
+        # multiple and must keep its safety margin.
+        ceiling = 200 * 1024**3
+        size = 100 * 1024**2
+        name = "sub-01/eeg/sub-01_task-x_eeg.set"
+        self.assertFalse(should_stream(name, size))
+        proj = projected_peak_bytes(name, size)
+        self.assertEqual(
+            admission_reserve_bytes(proj, ceiling, streamed=False),
+            int(proj * MEM_LIMIT_SLACK),
+        )
+
+    def test_set_never_streams_at_any_size(self):
+        # ADR 0030: two independent blockers (MNE refuses v7.3; an embedded
+        # classic .set loads fully even with preload=False). Pinned at sizes well
+        # past every threshold so a future tuple edit cannot quietly include it.
+        for size in (10 * 1024**2, 512 * 1024**2, 5 * 1024**3, 50 * 1024**3):
+            self.assertFalse(
+                should_stream("sub-01/eeg/sub-01_task-x_eeg.set", size),
+                f".set must not stream at {size} bytes",
+            )
+
+
+class TestThresholdIndependence(unittest.TestCase):
+    """#1112 collapsed STREAM_MIN_BYTES and STREAM_KIT_MIN_BYTES to the same
+    value. They remain separate, separately-overridable constants feeding separate
+    branches, so no black-box probe can tell any more whether BTi reads the right
+    one -- a refactor wiring it to KIT's would pass every other test. These pin
+    each branch to its own constant by giving them different values."""
+
+    def setUp(self):
+        self._saved = (
+            generate_zarr.STREAM_MIN_BYTES,
+            generate_zarr.STREAM_KIT_MIN_BYTES,
+        )
+        generate_zarr.STREAM_MIN_BYTES = 100
+        generate_zarr.STREAM_KIT_MIN_BYTES = 10_000
+
+    def tearDown(self):
+        generate_zarr.STREAM_MIN_BYTES, generate_zarr.STREAM_KIT_MIN_BYTES = self._saved
+
+    def test_bti_tracks_stream_min_not_the_kit_constant(self):
+        bti = "sub-01/meg/sub-01_task-x_meg"  # extension-less: the BTi branch
+        self.assertTrue(generate_zarr.should_stream(bti, 200))     # > STREAM_MIN
+        self.assertFalse(generate_zarr.should_stream(bti, 50))
+
+    def test_brainvision_tracks_stream_min_not_the_kit_constant(self):
+        vhdr = "sub-01/eeg/sub-01_task-x_eeg.vhdr"
+        self.assertTrue(generate_zarr.should_stream(vhdr, 200))
+        self.assertFalse(generate_zarr.should_stream(vhdr, 50))
+
+    def test_kit_tracks_its_own_constant(self):
+        con = "sub-01/meg/sub-01_task-x_meg.con"
+        self.assertFalse(generate_zarr.should_stream(con, 200))    # < STREAM_KIT_MIN
+        self.assertTrue(generate_zarr.should_stream(con, 20_000))
+
+    def test_exact_boundary_is_strictly_greater_than(self):
+        vhdr = "sub-01/eeg/sub-01_task-x_eeg.vhdr"
+        self.assertFalse(generate_zarr.should_stream(vhdr, 100))   # equal, not >
+        self.assertTrue(generate_zarr.should_stream(vhdr, 101))
+
+
+class TestOn004917BatchAdmission(unittest.TestCase):
+    """#1112: the end-to-end concurrency the fix restores, on the real batch."""
+
+    def test_the_real_batch_admits_several_at_once(self):
+        # The 24 BrainVision recordings that OOMed the node, at their real sizes,
+        # against the ceiling Phase 3 measured there. Before the streamed-slack
+        # fix this admitted exactly one at a time.
+        sizes = [
+            2.246, 1.728, 1.681, 1.577, 1.452, 1.433, 1.407, 1.386, 1.369, 1.361,
+            1.350, 1.326, 1.322, 1.318, 1.308, 1.304, 1.295, 1.280, 1.275, 1.261,
+            1.254, 1.241, 1.237, 1.181,
+        ]
+        ceiling = 19 * 1024**3
+        reserves = []
+        for i, gb in enumerate(sizes):
+            name = f"sub-{i:02d}/eeg/sub-{i:02d}_task-pdm_eeg.vhdr"
+            size = int(gb * 1000**3)
+            self.assertTrue(should_stream(name, size), f"{gb} GB must stream now")
+            reserves.append(
+                admission_reserve_bytes(
+                    projected_peak_bytes(name, size), ceiling, streamed=True
+                )
+            )
+
+        # Walk the real admission rule over the batch.
+        running, admitted = 0, 0
+        for r in reserves:
+            if running + r > ceiling:
+                break
+            running += r
+            admitted += 1
+        self.assertGreater(admitted, 1, "the batch must not convert one at a time")
+        self.assertLessEqual(running, ceiling, "and must still respect the ceiling")
+
+
+class TestMneEmbeddedSetCanary(unittest.TestCase):
+    """ADR 0030 rests on MNE eagerly materialising an EEGLAB `.set` whose samples
+    are embedded in the MAT struct rather than a sibling `.fdt`. That is a claim
+    about a third-party library, verified once by hand; if a future MNE gains real
+    lazy support the `.set` exclusion goes stale silently. This is the canary."""
+
+    def test_mne_still_eagerly_loads_embedded_set(self):
+        try:
+            import inspect
+
+            from mne.io.eeglab.eeglab import RawEEGLAB
+        except Exception:  # noqa: BLE001
+            self.skipTest("mne not installed (it is lazily imported in production)")
+        src = inspect.getsource(RawEEGLAB._read_segment_file)
+        self.assertIn("is_embedded", src, "MNE no longer flags embedded .set")
+        self.assertIn(
+            "preload=True",
+            src,
+            "MNE may have gained lazy reads for embedded .set -- re-evaluate ADR 0030",
+        )
+
+
+class TestStreamingPeakIsChannelAware(unittest.TestCase):
+    """#1112: STREAM_PEAK_BYTES is a FLOOR, not a bound.
+
+    Pass 2 of the streaming exporter materialises one whole channel at native
+    rate as anonymous float64 (`n_samples * 8`). That term scales with duration
+    and sample rate and is independent of channel count, so a few-channel, long,
+    high-rate recording can have a single channel that alone exceeds the flat
+    figure -- it would then be admitted as if it cost 4 GiB, trip the RLIMIT set
+    to exactly that, and fail.
+    """
+
+    SIZE = int(1.3 * 1000**3)
+
+    def test_many_channels_stay_at_the_floor(self):
+        # 66 short channels: no single one is anywhere near the floor.
+        self.assertEqual(streaming_peak_bytes(self.SIZE, 66), STREAM_PEAK_BYTES)
+
+    def test_a_single_channel_recording_projects_higher(self):
+        # All the bytes in one channel: the per-channel term dominates and the
+        # flat figure would have been a serious under-projection.
+        self.assertGreater(streaming_peak_bytes(self.SIZE, 1), STREAM_PEAK_BYTES)
+
+    def test_the_projection_falls_as_channels_rise(self):
+        peaks = [streaming_peak_bytes(self.SIZE, n) for n in (1, 2, 4, 8)]
+        self.assertEqual(peaks, sorted(peaks, reverse=True))
+
+    def test_unknown_channel_count_falls_back_to_the_floor(self):
+        # channels.tsv unreadable: no worse than before this change.
+        self.assertEqual(streaming_peak_bytes(self.SIZE, None), STREAM_PEAK_BYTES)
+        self.assertEqual(streaming_peak_bytes(self.SIZE, 0), STREAM_PEAK_BYTES)
+
+    def test_projected_peak_bytes_threads_the_channel_count(self):
+        name = "sub-01/emg/sub-01_task-x_emg.vhdr"
+        self.assertTrue(should_stream(name, self.SIZE))
+        self.assertGreater(
+            projected_peak_bytes(name, self.SIZE, 1),
+            projected_peak_bytes(name, self.SIZE, 66),
+        )
+
+    def test_the_in_memory_path_ignores_channel_count(self):
+        # .set never streams, so its projection is the on-disk factor regardless.
+        name = "sub-01/eeg/sub-01_task-x_eeg.set"
+        self.assertEqual(
+            projected_peak_bytes(name, 100 * 1024**2, 1),
+            projected_peak_bytes(name, 100 * 1024**2, 66),
+        )
 
 if __name__ == "__main__":
     unittest.main()
