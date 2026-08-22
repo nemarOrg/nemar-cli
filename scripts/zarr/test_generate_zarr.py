@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import generate_zarr
 from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (sibling module via sys.path)
     _AWS_OP_TIMEOUT,
     _AWS_RM_TIMEOUT,
@@ -3020,6 +3021,102 @@ class TestStreamingAdmissionThroughput(unittest.TestCase):
                 should_stream("sub-01/eeg/sub-01_task-x_eeg.set", size),
                 f".set must not stream at {size} bytes",
             )
+
+
+class TestThresholdIndependence(unittest.TestCase):
+    """#1112 collapsed STREAM_MIN_BYTES and STREAM_KIT_MIN_BYTES to the same
+    value. They remain separate, separately-overridable constants feeding separate
+    branches, so no black-box probe can tell any more whether BTi reads the right
+    one -- a refactor wiring it to KIT's would pass every other test. These pin
+    each branch to its own constant by giving them different values."""
+
+    def setUp(self):
+        self._saved = (
+            generate_zarr.STREAM_MIN_BYTES,
+            generate_zarr.STREAM_KIT_MIN_BYTES,
+        )
+        generate_zarr.STREAM_MIN_BYTES = 100
+        generate_zarr.STREAM_KIT_MIN_BYTES = 10_000
+
+    def tearDown(self):
+        generate_zarr.STREAM_MIN_BYTES, generate_zarr.STREAM_KIT_MIN_BYTES = self._saved
+
+    def test_bti_tracks_stream_min_not_the_kit_constant(self):
+        bti = "sub-01/meg/sub-01_task-x_meg"  # extension-less: the BTi branch
+        self.assertTrue(generate_zarr.should_stream(bti, 200))     # > STREAM_MIN
+        self.assertFalse(generate_zarr.should_stream(bti, 50))
+
+    def test_brainvision_tracks_stream_min_not_the_kit_constant(self):
+        vhdr = "sub-01/eeg/sub-01_task-x_eeg.vhdr"
+        self.assertTrue(generate_zarr.should_stream(vhdr, 200))
+        self.assertFalse(generate_zarr.should_stream(vhdr, 50))
+
+    def test_kit_tracks_its_own_constant(self):
+        con = "sub-01/meg/sub-01_task-x_meg.con"
+        self.assertFalse(generate_zarr.should_stream(con, 200))    # < STREAM_KIT_MIN
+        self.assertTrue(generate_zarr.should_stream(con, 20_000))
+
+    def test_exact_boundary_is_strictly_greater_than(self):
+        vhdr = "sub-01/eeg/sub-01_task-x_eeg.vhdr"
+        self.assertFalse(generate_zarr.should_stream(vhdr, 100))   # equal, not >
+        self.assertTrue(generate_zarr.should_stream(vhdr, 101))
+
+
+class TestOn004917BatchAdmission(unittest.TestCase):
+    """#1112: the end-to-end concurrency the fix restores, on the real batch."""
+
+    def test_the_real_batch_admits_several_at_once(self):
+        # The 24 BrainVision recordings that OOMed the node, at their real sizes,
+        # against the ceiling Phase 3 measured there. Before the streamed-slack
+        # fix this admitted exactly one at a time.
+        sizes = [
+            2.246, 1.728, 1.681, 1.577, 1.452, 1.433, 1.407, 1.386, 1.369, 1.361,
+            1.350, 1.326, 1.322, 1.318, 1.308, 1.304, 1.295, 1.280, 1.275, 1.261,
+            1.254, 1.241, 1.237, 1.181,
+        ]
+        ceiling = int(19 * 1024**3)
+        reserves = []
+        for i, gb in enumerate(sizes):
+            name = f"sub-{i:02d}/eeg/sub-{i:02d}_task-pdm_eeg.vhdr"
+            size = int(gb * 1000**3)
+            self.assertTrue(should_stream(name, size), f"{gb} GB must stream now")
+            reserves.append(
+                admission_reserve_bytes(
+                    projected_peak_bytes(name, size), ceiling, streamed=True
+                )
+            )
+
+        # Walk the real admission rule over the batch.
+        running, admitted = 0, 0
+        for r in reserves:
+            if running + r > ceiling:
+                break
+            running += r
+            admitted += 1
+        self.assertGreater(admitted, 1, "the batch must not convert one at a time")
+        self.assertLessEqual(running, ceiling, "and must still respect the ceiling")
+
+
+class TestMneEmbeddedSetCanary(unittest.TestCase):
+    """ADR 0030 rests on MNE eagerly materialising an EEGLAB `.set` whose samples
+    are embedded in the MAT struct rather than a sibling `.fdt`. That is a claim
+    about a third-party library, verified once by hand; if a future MNE gains real
+    lazy support the `.set` exclusion goes stale silently. This is the canary."""
+
+    def test_mne_still_eagerly_loads_embedded_set(self):
+        try:
+            import inspect
+
+            from mne.io.eeglab.eeglab import RawEEGLAB
+        except Exception:  # noqa: BLE001
+            self.skipTest("mne not installed (it is lazily imported in production)")
+        src = inspect.getsource(RawEEGLAB._read_segment_file)
+        self.assertIn("is_embedded", src, "MNE no longer flags embedded .set")
+        self.assertIn(
+            "preload=True",
+            src,
+            "MNE may have gained lazy reads for embedded .set -- re-evaluate ADR 0030",
+        )
 
 if __name__ == "__main__":
     unittest.main()

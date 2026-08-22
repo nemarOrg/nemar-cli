@@ -136,7 +136,7 @@ MODALITY_RATES = {"EEG": 250, "MEG": 250, "IEEG": 1000, "EMG": 1000}
 # -- worth it, since a MEF3 iEEG session can be multi-gigabyte. 4D/BTi streams too
 # (`mne.io.read_raw_bti(preload=False)`, same `_MneSource` lazy path) but is NOT
 # extension-keyed, so it cannot join this tuple; `should_stream` below gives it its
-# own extension-less branch at this SAME multi-GB threshold, deliberately not the
+# own extension-less branch at this SAME common threshold, deliberately not the
 # lower KIT one (see the KIT comment below for why KIT differs).
 # 256 MiB, matching KIT and EDF. It was 2 GiB, and that gap is what sank
 # on004917: its 24 BrainVision recordings are 1.18-2.25 GB, so all but one sat
@@ -158,13 +158,13 @@ STREAM_EXTS = (".vhdr", ".fif", ".ds", MEFD_EXT)
 # path), and a many-channel MEG file expands to ~5x its bytes as float64 + the
 # biosigIO DataFrame + the resample copy -- so even a ~600 MB .con OOM-kills a
 # pool worker at JOBS-way concurrency (which then breaks the whole pool). Route
-# them through the streaming converter above a much lower threshold than the
-# multi-GB one: streaming peaks ~3 GB regardless of file size, and small KIT
+# them through the streaming converter from the common threshold (since #1112
+# common one: streaming peaks ~3 GB regardless of file size, and small KIT
 # files stay on the faster in-memory path. 4D/BTi does NOT belong in this group
 # even though it is also MEG and also directory-based: `read_raw_bti` DOES support
 # `preload=False` (confirmed via biosigio's streaming exporter, which opens it lazily
 # exactly like CTF/FIF/`.mefd`), so it has none of KIT's "no lazy path" problem and
-# stays on the multi-GB `STREAM_EXTS`-equivalent threshold instead (see
+# stays on the `STREAM_EXTS` threshold instead (see
 # `should_stream`).
 STREAM_KIT_EXTS = (".con", ".sqd", ".kdf")
 STREAM_KIT_MIN_BYTES = int(os.environ.get("ZARR_STREAM_KIT_MIN_BYTES", str(256 * 1024**2)))
@@ -224,7 +224,7 @@ def should_stream(primary_local: str, size_bytes: int) -> bool:
     above ``STREAM_MIN_BYTES``; KIT `.con`/`.sqd`/`.kdf` and
     -- when biosigIO >= 1.2.0 -- EDF/BDF stream above the much lower KIT/EDF
     thresholds because their in-memory float64 blow-up OOMs a worker well below
-    the multi-GB mark. Everything else (and small KIT/EDF) uses the faster
+    the common threshold. Everything else uses the faster
     in-memory path.
 
     Called both pre-materialization (``primary_local`` is still the git-relative
@@ -246,7 +246,7 @@ def should_stream(primary_local: str, size_bytes: int) -> bool:
     # primary this converter discovers carries a real extension (PRIMARY_EXTS, or
     # `.ds`/`.mefd` via DIR_RECORDING_EXTS), so an empty extension reaching here is
     # a BTi recording by construction, not an unrelated ext-less path. It streams
-    # above the SAME multi-GB threshold as STREAM_EXTS -- deliberately not the
+    # above the SAME threshold as STREAM_EXTS -- deliberately not the
     # lower KIT one -- because `read_raw_bti` genuinely supports `preload=False`
     # (biosigIO's streaming exporter opens it lazily via the same `_MneSource`
     # path as CTF/FIF/`.mefd`); it doesn't have KIT's "no lazy reader" problem.
@@ -2517,7 +2517,7 @@ def convert_recording(
 
     # Large recordings use the streaming converter so peak RAM stays bounded; the
     # in-memory path would load them at float64 2-3x and OOM. (multi-GB BrainVision/
-    # FIF/CTF/MEF3/4D-BTi, KIT above its much lower threshold, and EDF/BDF via
+    # FIF/CTF/MEF3/4D-BTi, KIT, and EDF/BDF via
     # pyedflib on biosigio>=1.2.0 -- see should_stream.)
     if streaming:
         from biosigio import stream_to_zarr  # type: ignore[import-not-found]  # lazy
