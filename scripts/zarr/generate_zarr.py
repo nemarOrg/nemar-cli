@@ -1293,8 +1293,15 @@ def affected_primaries(
     (`.fdt`/`.eeg`/`.vmrk`) maps to the same-stem primary in its directory; a
     `*_events.tsv` maps to every primary in its directory sharing the events
     entities-base (the `split-NN` entity is ignored on both sides, since a split
-    recording's events file carries no split). `primaries_by_dir` holds only
-    buildable heads, so a non-head split is not in `here`.
+    recording's events file carries no split).
+
+    `primaries_by_dir` holds every buildable primary in a directory: the file
+    heads AND the directory recordings (CTF `.ds`, MEF3 `.mefd`, 4D/BTi), which
+    sit in the same parent directory as their sidecars. A non-head split is still
+    absent from `here`, since only chain heads are buildable. Directory recordings
+    reach only the companion and events branches: they are never `is_primary`
+    (their extensions are not in `PRIMARY_EXTS`, and a BTi directory is not a
+    tracked path at all), and never split FIFs.
     """
     d = os.path.dirname(changed_path)
     here = primaries_by_dir.get(d, [])
@@ -1344,7 +1351,10 @@ def compute_worklist(
     # recording sits in the same parent directory as its sidecars -- CTF
     # `sub-01/meg/..._meg.ds` next to `sub-01/meg/..._events.tsv` -- so omitting
     # the directory forms here left `affected_primaries` with an empty bucket and
-    # an events or companion edit rebuilt NOTHING for CTF/MEF3/BTi (#1106).
+    # an events edit rebuilt NOTHING for CTF/MEF3/BTi (#1106). Events only: the
+    # companion extensions are EEGLAB/BrainVision-specific, so reaching a
+    # directory recording through that branch would need a same-stem `.fdt`/
+    # `.eeg`/`.vmrk` beside it, which is not a valid BIDS layout.
     # Changes INSIDE a recording directory never reach this map; they are resolved
     # earlier by `dir_recording_of`/`bti_dirs`. This map is only consulted for
     # siblings alongside the recording, which is exactly the sidecar case.

@@ -506,6 +506,37 @@ class TestSidecarRebuildsDirectoryRecordings(unittest.TestCase):
         )
         self.assertEqual(convert, [])
 
+    def test_session_run_and_acq_entities_route_to_the_right_run(self):
+        # The flat sub-01 fixtures above are not how CTF/MEF3 data actually
+        # arrives: these are precisely the multi-session, multi-run formats. The
+        # entities-base matching is shared with file primaries, but it had never
+        # been exercised on a directory recording, so pin it.
+        head = [
+            "sub-01/ses-01/meg/sub-01_ses-01_task-x_acq-hi_run-1_meg.ds/res4",
+            "sub-01/ses-01/meg/sub-01_ses-01_task-x_acq-hi_run-2_meg.ds/res4",
+            "sub-01/ses-01/meg/sub-01_ses-01_task-x_acq-hi_run-1_events.tsv",
+            "sub-01/ses-01/meg/sub-01_ses-01_task-x_acq-hi_run-2_events.tsv",
+            "sub-01/ses-02/meg/sub-01_ses-02_task-x_acq-hi_run-1_meg.ds/res4",
+            "sub-01/ses-02/meg/sub-01_ses-02_task-x_acq-hi_run-1_events.tsv",
+        ]
+        convert, _ = compute_worklist(
+            head,
+            [("M", "sub-01/ses-01/meg/sub-01_ses-01_task-x_acq-hi_run-2_events.tsv")],
+            full=False,
+        )
+        self.assertEqual(
+            convert, ["sub-01/ses-01/meg/sub-01_ses-01_task-x_acq-hi_run-2_meg.ds"]
+        )
+        # And the same-numbered run in the OTHER session is untouched.
+        convert, _ = compute_worklist(
+            head,
+            [("M", "sub-01/ses-02/meg/sub-01_ses-02_task-x_acq-hi_run-1_events.tsv")],
+            full=False,
+        )
+        self.assertEqual(
+            convert, ["sub-01/ses-02/meg/sub-01_ses-02_task-x_acq-hi_run-1_meg.ds"]
+        )
+
 
 class TestMergeIndex(unittest.TestCase):
     def test_upsert_remove_and_carry_over(self):
