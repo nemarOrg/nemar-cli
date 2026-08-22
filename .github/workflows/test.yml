@@ -29,6 +29,7 @@ jobs:
       backend: ${{ steps.filter.outputs.backend }}
       tests: ${{ steps.filter.outputs.tests }}
       email: ${{ steps.filter.outputs.email }}
+      zarr: ${{ steps.filter.outputs.zarr }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -65,6 +66,46 @@ jobs:
               - 'backend/src/db/migrations/0017_broadcast_emails.sql'
               - 'test/auth-passwordless.test.ts'
               - '.github/workflows/test.yml'
+            # Zarr conversion engine (epic #1108 Phase 1 / #1109). Repatriated
+            # from nemarDatasets/.github, where test-generate-zarr.yml used to
+            # run these; that workflow is retired and this filter replaces it.
+            zarr:
+              - 'scripts/zarr/**'
+
+  # Zarr conversion engine tests (epic #1108 Phase 1 / #1109).
+  # Pure no-mock unit assertions over generate_zarr.py's helpers (path
+  # classification, incremental worklist, index merge, annex-key parsing), the
+  # SQLite queue, the non-raw store purge, and the power-line-frequency patch.
+  # biosigIO and zarr are lazy-imported inside the I/O functions, so these need
+  # no dependency install at all.
+  #
+  # This replaces nemarDatasets/.github's test-generate-zarr.yml, which ran only
+  # three of the four files -- test_patch_power_line_frequency.py was covered by
+  # no workflow anywhere, so moving the engine here closes that gap.
+  zarr-python-test:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.zarr == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Converter helper tests
+        run: python scripts/zarr/test_generate_zarr.py
+
+      - name: Queue tests
+        run: python scripts/zarr/test_zarr_queue.py
+
+      - name: Non-raw store purge tests
+        run: python scripts/zarr/test_purge_non_raw_stores.py
+
+      - name: Power-line-frequency patch tests
+        run: python scripts/zarr/test_patch_power_line_frequency.py
 
   # Type check and lint - always runs on code changes
   lint:
