@@ -2848,7 +2848,7 @@ def _next_admission(
 
 def _drain_with_admission(
     convert, peaks, cpu_cap, ram_ceiling, ctx, record, worker=None
-) -> int:
+) -> tuple[int, int]:
     """Run ``convert_one`` over ``convert`` in a pool of up to ``cpu_cap`` workers,
     dispatching a recording only while the SUM of in-flight projected peaks stays
     within ``ram_ceiling`` (see ``_next_admission``). Results are reported via
@@ -2947,8 +2947,15 @@ def _drain_with_admission(
 
     pending = list(convert)
     suspects: list = []
+    # How many recordings the parallel pass ever had to set aside at once. Tests
+    # need this to tell "a sibling really was caught in the crossfire" from "only
+    # the culprit was in flight" -- `pool_breaks` cannot, because the serial
+    # confirmation pass always breaks too, pinning it at 2 either way.
+    max_suspects_at_once = 0
     while pending:
-        suspects.extend(drain_once(pending, cpu_cap))
+        batch = drain_once(pending, cpu_cap)
+        max_suspects_at_once = max(max_suspects_at_once, len(batch))
+        suspects.extend(batch)
 
     if suspects:
         print(
@@ -2977,7 +2984,7 @@ def _drain_with_admission(
             "means the node is under memory pressure (#1110)",
             flush=True,
         )
-    return pool_breaks
+    return pool_breaks, max_suspects_at_once
 
 
 def main() -> int:
@@ -3227,7 +3234,7 @@ def main() -> int:
             for i, p in enumerate(convert, 1):
                 record(convert_one(p, peaks[p]), i)
         else:
-            pool_breaks = _drain_with_admission(
+            pool_breaks, _max_suspects = _drain_with_admission(
                 convert, peaks, cpu_cap, ram_ceiling, ctx, record
             )
 

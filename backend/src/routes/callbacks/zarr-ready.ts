@@ -53,6 +53,12 @@ interface ZarrReadyBody {
   failure_count?: number; // subset that are TYPED data failures
   data_failures?: ZarrDataFailure[]; // typed failures [{path, code, reason}]
   deterministic?: boolean; // all failures are typed data failures (won't retry)
+  // Memory-robustness telemetry (epic #1108). Declared here because an
+  // undeclared field is silently dropped by this handler's typed read -- the
+  // converter was reporting these and nothing was listening.
+  pool_breaks?: number; // worker-pool breaks RECOVERED this run; 0 is healthy
+  measured_count?: number; // recordings whose peak RAM was actually measured
+  calibration?: unknown[]; // per-format measured-vs-projected peak RAM
 }
 
 /**
@@ -177,6 +183,7 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
                zarr_failure_count = ?,
                zarr_deterministic = ?,
                zarr_data_failures = ?,
+               zarr_pool_breaks = ?,
                zarr_failed_at = CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END
            WHERE dataset_id = ?`,
         )
@@ -188,6 +195,7 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
             f.failureCount,
             f.deterministic,
             f.dataFailuresJson,
+            typeof body.pool_breaks === "number" ? body.pool_breaks : null,
             f.hadErrors ? 1 : 0,
             body.dataset_id,
           )
@@ -260,8 +268,18 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
     }
 
     console.log(
-      `[zarr-ready] dataset=${body.dataset_id} status=${status} stores=${body.store_count ?? "?"} converted=${body.converted?.length ?? 0} removed=${body.removed?.length ?? 0} purged=${purge?.submitted ?? 0}`,
+      `[zarr-ready] dataset=${body.dataset_id} status=${status} stores=${body.store_count ?? "?"} converted=${body.converted?.length ?? 0} removed=${body.removed?.length ?? 0} purged=${purge?.submitted ?? 0} pool_breaks=${body.pool_breaks ?? "?"}`,
     );
+
+    // Peak-RAM calibration (#1111) is diagnostic rather than dashboard material,
+    // so it is logged rather than given a column -- but it is logged HERE, on the
+    // Worker, instead of only in a cron log on one box nobody tails. Only when
+    // there is something to say.
+    if (body.pool_breaks || (body.calibration?.length ?? 0) > 0) {
+      console.log(
+        `[zarr-ready] dataset=${body.dataset_id} memory: pool_breaks=${body.pool_breaks ?? 0} measured=${body.measured_count ?? 0} calibration=${JSON.stringify(body.calibration ?? [])}`,
+      );
+    }
 
     return c.json({
       ok: true,

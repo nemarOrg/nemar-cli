@@ -106,6 +106,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      # hallu-zarr.sh matches this job's paths filter but nothing checked it.
+      # Its argument parser shipped an infinite loop and a silent scope-widening
+      # bug during this epic, both found by hand-testing on the production node.
+      - name: Shellcheck the driver script
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck --severity=warning scripts/zarr/hallu-zarr.sh
+
       - name: Converter helper tests
         run: python scripts/zarr/test_generate_zarr.py
 

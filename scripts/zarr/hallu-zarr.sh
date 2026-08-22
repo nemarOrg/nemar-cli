@@ -413,6 +413,7 @@ while :; do
   [[ -z "$line" ]] && break
   id="${line%%$'\t'*}"; version="${line#*$'\t'}"
   if convert_dataset "$id" "$version"; then
+    # shellcheck disable=SC1010  # `done` is the queue subcommand, not the keyword
     qpy done "$id" "$version"
   elif [[ "$LAST_DETERMINISTIC" == "true" ]]; then
     # Every recording is an unreadable DATA failure -- terminal, no retry (#774).

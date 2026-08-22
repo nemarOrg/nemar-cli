@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -2566,9 +2567,21 @@ def _crashing_worker(primary, peak_bytes=None):
     """Fault-injection worker body. Module-level so it survives pickling to a
     spawned child. A recording whose path contains `boom` kills its own process
     the way the kernel OOM reaper does, which is what poisons a
-    ProcessPoolExecutor; everything else converts normally."""
+    ProcessPoolExecutor; everything else converts normally.
+
+    The sleeps make the crossfire DETERMINISTIC rather than hoped-for. The
+    culprit dies while its siblings are provably still running, so a pool break
+    always catches innocent recordings in flight -- which is the scenario the
+    serial-isolation design exists for. Without them the timing is the
+    scheduler's to decide: on macOS (spawn, slow worker startup) the crossfire
+    happened readily, while on Linux (fork) the culprit died before any sibling
+    was in flight, so the guarded path was never exercised on the platform
+    production actually runs.
+    """
     if "boom" in primary:
+        time.sleep(0.15)
         os._exit(1)
+    time.sleep(0.45)
     return {"ok": True, "primary": primary, "entry": {"zarr": primary + ".zarr"}}
 
 
@@ -2699,18 +2712,18 @@ class TestPoolBreakRecovery(unittest.TestCase):
     def _run(self, primaries, cpu_cap=2):
         peaks = {p: 1024 for p in primaries}
         results = []
-        breaks = _drain_with_admission(
+        breaks, max_suspects = _drain_with_admission(
             list(primaries), peaks, cpu_cap, 10**9, {},
             lambda r, i: results.append(r), worker=_crashing_worker,
         )
-        return results, breaks
+        return results, breaks, max_suspects
 
     def test_a_dying_worker_does_not_abandon_the_queue(self):
         # Before #1110 this aborted the run: on004998 converted 74 of 115 and
         # lost the remaining 41 to one kill.
         primaries = [f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.set" for i in range(1, 9)]
         primaries.insert(2, "sub-boom/eeg/sub-boom_task-rest_eeg.set")
-        results, breaks = self._run(primaries)
+        results, breaks, _ = self._run(primaries)
 
         self.assertEqual(len(results), len(primaries), "every recording must be accounted for")
         ok = {r["primary"] for r in results if r["ok"]}
@@ -2718,7 +2731,7 @@ class TestPoolBreakRecovery(unittest.TestCase):
         self.assertGreaterEqual(breaks, 1)
 
     def test_the_culprit_is_named_after_running_alone(self):
-        results, _ = self._run(["sub-boom/eeg/sub-boom_task-rest_eeg.set"], cpu_cap=1)
+        results, _, _ = self._run(["sub-boom/eeg/sub-boom_task-rest_eeg.set"], cpu_cap=1)
         self.assertEqual(len(results), 1)
         self.assertFalse(results[0]["ok"])
         self.assertIn("killed its worker process", results[0]["error"])
@@ -2736,17 +2749,20 @@ class TestPoolBreakRecovery(unittest.TestCase):
         boom = "sub-boom/eeg/sub-boom_task-rest_eeg.set"
         saw_crossfire = False
         for _ in range(5):  # the race is timing-dependent; repeat it
-            results, breaks = self._run(primaries, cpu_cap=4)
+            results, _breaks, max_suspects = self._run(primaries, cpu_cap=4)
             failed = {r["primary"] for r in results if not r["ok"]}
             self.assertEqual(
                 failed, {boom}, "only the recording that dies alone may be reported failed"
             )
             self.assertEqual(len(results), len(primaries))
-            if breaks > 1:
+            # More than one suspect set aside at once means an INNOCENT recording
+            # was in flight when the pool died -- the actual guarded path.
+            # `pool_breaks` cannot express this: with one faulty recording it is
+            # pinned at 2 (parallel pass, then the serial confirmation that always
+            # breaks too) whether or not a sibling was ever caught, which made the
+            # previous version of this assertion pass vacuously.
+            if max_suspects > 1:
                 saw_crossfire = True
-        # Without this the loop could pass 5/5 having never once put an innocent
-        # sibling in flight during a break -- i.e. never exercising the path it
-        # exists to protect -- and nothing would say so.
         self.assertTrue(
             saw_crossfire,
             "never observed a sibling caught in the crossfire; the guarded path went untested",
@@ -2754,7 +2770,7 @@ class TestPoolBreakRecovery(unittest.TestCase):
 
     def test_a_clean_run_is_unaffected(self):
         primaries = [f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.set" for i in range(1, 6)]
-        results, breaks = self._run(primaries)
+        results, breaks, _ = self._run(primaries)
         self.assertEqual(len(results), 5)
         self.assertTrue(all(r["ok"] for r in results))
         self.assertEqual(breaks, 0)
@@ -3108,12 +3124,18 @@ class TestThresholdIndependence(unittest.TestCase):
         self._saved = (
             generate_zarr.STREAM_MIN_BYTES,
             generate_zarr.STREAM_KIT_MIN_BYTES,
+            generate_zarr.STREAM_EDF_MIN_BYTES,
         )
         generate_zarr.STREAM_MIN_BYTES = 100
         generate_zarr.STREAM_KIT_MIN_BYTES = 10_000
+        generate_zarr.STREAM_EDF_MIN_BYTES = 1_000_000
 
     def tearDown(self):
-        generate_zarr.STREAM_MIN_BYTES, generate_zarr.STREAM_KIT_MIN_BYTES = self._saved
+        (
+            generate_zarr.STREAM_MIN_BYTES,
+            generate_zarr.STREAM_KIT_MIN_BYTES,
+            generate_zarr.STREAM_EDF_MIN_BYTES,
+        ) = self._saved
 
     def test_bti_tracks_stream_min_not_the_kit_constant(self):
         bti = "sub-01/meg/sub-01_task-x_meg"  # extension-less: the BTi branch
@@ -3129,6 +3151,18 @@ class TestThresholdIndependence(unittest.TestCase):
         con = "sub-01/meg/sub-01_task-x_meg.con"
         self.assertFalse(generate_zarr.should_stream(con, 200))    # < STREAM_KIT_MIN
         self.assertTrue(generate_zarr.should_stream(con, 20_000))
+
+    def test_edf_tracks_its_own_constant(self):
+        # The third constant, and the one this class originally missed: all three
+        # default to 256 MiB, so a refactor wiring the EDF branch to
+        # STREAM_MIN_BYTES or STREAM_KIT_MIN_BYTES would have passed every test
+        # in the file -- exactly the bug shape this class exists to prevent.
+        edf = "sub-01/eeg/sub-01_task-x_eeg.edf"
+        if not generate_zarr._EDF_STREAMABLE:
+            self.skipTest("installed biosigio does not stream EDF")
+        self.assertFalse(generate_zarr.should_stream(edf, 200))        # > STREAM_MIN
+        self.assertFalse(generate_zarr.should_stream(edf, 20_000))     # > STREAM_KIT_MIN
+        self.assertTrue(generate_zarr.should_stream(edf, 2_000_000))   # > STREAM_EDF_MIN
 
     def test_exact_boundary_is_strictly_greater_than(self):
         vhdr = "sub-01/eeg/sub-01_task-x_eeg.vhdr"
