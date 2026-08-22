@@ -38,7 +38,8 @@ Load-bearing ones to know before touching the relevant area:
 0016 (never hand-bump versions), 0020 (workflow edits hit ~785 repos at once),
 0023 (`--clean` reconciles, it does not wipe), 0027 (Zarr discovery is raw-only),
 0028 (MaxShield MEG is filtered or declined),
-0029 (the Zarr conversion engine lives here, not in the Actions repo).
+0029 (the Zarr conversion engine lives here, not in the Actions repo),
+0030 (bounded streaming is the default; `.set` is the exception).
 
 ---
 
@@ -314,6 +315,10 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   hand-placed copy git never touches. Ship it with `scp` + atomic `mv`; the script
   logs `DRIFT:` when the deployed copy differs from the repo copy. Manual recovery
   for one dataset is `hallu-zarr.sh --dataset <id>`.
+  Conversion streams by default above 256 MiB, so peak RAM is a read window
+  plus one channel rather than the whole recording (ADR 0030). EEGLAB `.set`
+  is the one format that cannot: MNE refuses v7.3 files that biosigIO reads,
+  and an embedded classic `.set` loads fully even with `preload=False`.
   Discovery and dispatch are raw-only (ADR 0027):
   nothing under `derivatives/`, `sourcedata/`, or `code/` becomes a *new* store.
   Stores published under those trees before that landed are a separate,

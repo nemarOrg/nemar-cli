@@ -138,7 +138,21 @@ MODALITY_RATES = {"EEG": 250, "MEG": 250, "IEEG": 1000, "EMG": 1000}
 # extension-keyed, so it cannot join this tuple; `should_stream` below gives it its
 # own extension-less branch at this SAME multi-GB threshold, deliberately not the
 # lower KIT one (see the KIT comment below for why KIT differs).
-STREAM_MIN_BYTES = int(os.environ.get("ZARR_STREAM_MIN_BYTES", str(2 * 1024**3)))
+# 256 MiB, matching KIT and EDF. It was 2 GiB, and that gap is what sank
+# on004917: its 24 BrainVision recordings are 1.18-2.25 GB, so all but one sat
+# just UNDER the threshold, took the unbounded in-memory path, and were admitted
+# seven at a time against a projection running half their real cost.
+#
+# There was never a principled reason for BrainVision to need a threshold eight
+# times higher than EDF's -- the driver's own note says BrainVision goes through
+# MNE on both paths, so parity holds either way. The in-memory path survives only
+# as a fast path for genuinely small recordings, where process startup and the
+# scratch memmap would cost more than the load itself.
+#
+# This supersedes the ZARR_STREAM_MIN_BYTES=268435456 crontab override added as a
+# mitigation on 2026-08-22; remove that override when this reaches the node
+# (ADR 0030).
+STREAM_MIN_BYTES = int(os.environ.get("ZARR_STREAM_MIN_BYTES", str(256 * 1024**2)))
 STREAM_EXTS = (".vhdr", ".fif", ".ds", MEFD_EXT)
 # KIT/Yokogawa .con/.sqd/.kdf load FULLY in memory (read_raw_kit has no lazy
 # path), and a many-channel MEG file expands to ~5x its bytes as float64 + the
@@ -185,8 +199,29 @@ _EDF_STREAMABLE = _biosigio_streams_edf()
 def should_stream(primary_local: str, size_bytes: int) -> bool:
     """Whether a recording converts via the bounded-memory streaming path.
 
-    Large MNE-native recordings (multi-GB iEEG/MEG BrainVision/FIF, CTF `.ds`,
-    MEF3 `.mefd`) stream above ``STREAM_MIN_BYTES``; KIT `.con`/`.sqd`/`.kdf` and
+    EEGLAB `.set` is deliberately absent from every streaming tuple, and stays on
+    the in-memory path at any size. Two independent blockers, both verified
+    against the installed MNE and biosigIO:
+
+    1. A MATLAB v7.3 `.set` is an HDF5 container. MNE refuses it outright, and
+       only biosigIO's own h5py importer reads it (the `[hdf5]` extra, added in
+       1.2.4 for 544 such recordings across the archive). Streaming routes through
+       MNE, so routing `.set` there would turn those 544 back into failures.
+    2. For a classic `.set` whose samples are embedded in the MAT struct rather
+       than a sibling `.fdt`, `preload=False` is a fiction: MNE's
+       `_read_segment_file` detects `is_embedded` and calls `_readmat(preload=True)`,
+       materialising the whole recording and caching it. Streaming such a file
+       would load everything anyway AND add the scratch memmap on top -- strictly
+       worse than the in-memory path it replaced.
+
+    Only a classic `.set` with a sibling `.fdt` could genuinely stream, which is a
+    subset, and biosigIO importer parity for units and channel handling would
+    still need proving before relying on it. Large `.set` recordings are instead
+    protected by the RLIMIT_DATA backstop (#1110) and by the temporary-vs-permanent
+    verdict split (#1111), so one cannot take down a node or be buried forever.
+
+    Large MNE-native recordings (BrainVision/FIF, CTF `.ds`, MEF3 `.mefd`) stream
+    above ``STREAM_MIN_BYTES``; KIT `.con`/`.sqd`/`.kdf` and
     -- when biosigIO >= 1.2.0 -- EDF/BDF stream above the much lower KIT/EDF
     thresholds because their in-memory float64 blow-up OOMs a worker well below
     the multi-GB mark. Everything else (and small KIT/EDF) uses the faster

@@ -1407,13 +1407,12 @@ class TestMefdRecordings(unittest.TestCase):
                         fh.write(b"m" * size)
             self.assertEqual(_recording_size_bytes(mefd), sum(sizes.values()) * 3)
 
-    def test_mefd_joins_stream_exts_at_the_multigb_threshold(self):
+    def test_mefd_streams_on_the_common_threshold(self):
         # .mefd streams like CTF/FIF/BrainVision (biosigio>=1.2.3, read_raw_mef
-        # supports preload=False) -- the SAME multi-GB threshold, not the lower
-        # KIT one (MEF3 has a genuine lazy reader, unlike read_raw_kit).
+        # supports preload=False), now on the single common threshold (#1112).
         self.assertTrue(self.MEFD.endswith(MEFD_EXT))
-        self.assertFalse(should_stream(self.MEFD, 500 * 1024**2))
-        self.assertTrue(should_stream(self.MEFD, 3 * 1024**3))
+        self.assertFalse(should_stream(self.MEFD, 100 * 1024**2))
+        self.assertTrue(should_stream(self.MEFD, 500 * 1024**2))
 
 
 class TestBtiRecordings(unittest.TestCase):
@@ -1569,13 +1568,13 @@ class TestBtiRecordings(unittest.TestCase):
                 fh.write(b"h" * 100)
             self.assertEqual(_recording_size_bytes(bti), 9400)
 
-    def test_bti_streams_at_the_multigb_threshold_not_the_kit_one(self):
-        # BTi genuinely supports preload=False (biosigIO's streaming exporter
-        # opens it lazily via the same _MneSource path as CTF/FIF/.mefd), so it
-        # must NOT join KIT's much-lower threshold: a size that would stream as
-        # KIT must stay in-memory here.
-        kit_streaming_size = 300 * 1024**2  # above STREAM_KIT_MIN_BYTES (256 MB)
-        self.assertFalse(should_stream(self.BTI, kit_streaming_size))
+    def test_bti_streams_on_the_same_threshold_as_everything_else(self):
+        # #1112 collapsed the two-tier threshold: BTi used to stay in-memory until
+        # multi-GB because it genuinely supports preload=False, but "has a lazy
+        # reader" is a reason streaming WORKS, not a reason to postpone it. Only
+        # genuinely small recordings keep the in-memory fast path now.
+        self.assertFalse(should_stream(self.BTI, 100 * 1024**2))
+        self.assertTrue(should_stream(self.BTI, 300 * 1024**2))
         self.assertTrue(should_stream(self.BTI, 3 * 1024**3))
 
     def test_all_directory_recording_kinds_coexist_in_one_worklist(self):
@@ -2088,12 +2087,27 @@ class TestShouldStream(unittest.TestCase):
         # A small (~190 MB task-0) .con is cheap in memory -> faster path.
         self.assertFalse(should_stream("sub-01/meg/sub-01_task-x_meg.con", 190 * self.MB))
 
-    def test_brainvision_fif_keep_multigb_threshold(self):
-        # MNE-native formats only stream when genuinely large (the in-memory path
-        # is fine for moderate sizes).
-        self.assertFalse(should_stream("sub-01/ieeg/sub-01_task-x_ieeg.vhdr", 500 * self.MB))
-        self.assertTrue(should_stream("sub-01/ieeg/sub-01_task-x_ieeg.vhdr", 3 * self.GB))
+    def test_brainvision_fif_stream_from_the_common_threshold(self):
+        # The 2 GiB threshold is what sank on004917: its BrainVision recordings
+        # were 1.18-2.25 GB, so all but one sat just UNDER it, took the unbounded
+        # in-memory path, and were admitted seven at a time. 500 MB must stream.
+        self.assertTrue(should_stream("sub-01/ieeg/sub-01_task-x_ieeg.vhdr", 500 * self.MB))
+        self.assertTrue(should_stream("sub-01/ieeg/sub-01_task-x_ieeg.vhdr", 2 * self.GB))
         self.assertTrue(should_stream("sub-01/meg/sub-01_task-x_meg.fif", 3 * self.GB))
+
+    def test_the_on004917_band_now_streams(self):
+        # Regression pin for the exact sizes that OOMed the node.
+        for gb in (1.18, 1.5, 2.09, 2.25):
+            self.assertTrue(
+                should_stream("sub-02/eeg/sub-02_task-pdm_eeg.vhdr", int(gb * 1000**3)),
+                f"{gb} GB BrainVision must take the bounded path",
+            )
+
+    def test_small_recordings_keep_the_in_memory_fast_path(self):
+        # Streaming is not free: a scratch memmap plus a second pass costs more
+        # than simply loading a small recording.
+        self.assertFalse(should_stream("sub-01/ieeg/sub-01_task-x_ieeg.vhdr", 10 * self.MB))
+        self.assertFalse(should_stream("sub-01/meg/sub-01_task-x_meg.fif", 10 * self.MB))
 
     def test_eeglab_set_never_streams(self):
         # EEGLAB .set has no streaming reader -> always in-memory.
@@ -2738,7 +2752,8 @@ class TestInMemoryFactors(unittest.TestCase):
             self.assertEqual(inmem_factor_for(name), INMEM_MEM_FACTOR)
 
     def test_projection_uses_the_per_format_factor(self):
-        size = 1024**3
+        # Below the streaming threshold, so the in-memory factor is what applies.
+        size = 100 * 1024**2
         self.assertEqual(
             projected_peak_bytes("sub-01_task-x_eeg.vhdr", size),
             int(size * inmem_factor_for("x.vhdr")),
@@ -2933,7 +2948,9 @@ class TestFactorAffectsAdmission(unittest.TestCase):
     not merely what `projected_peak_bytes` returns."""
 
     def test_a_heavier_format_admits_fewer_at_once(self):
-        size = 1024**3  # same on-disk size, different readers
+        # Below the streaming threshold on purpose: above it both formats get the
+        # same flat STREAM_PEAK_BYTES and the factor is not what is being tested.
+        size = 100 * 1024**2
         ceiling = 200 * 1024**3
 
         def admitted(name):
