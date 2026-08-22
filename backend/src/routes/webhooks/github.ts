@@ -11,11 +11,7 @@
 import { isDevRangeDatasetId, isValidDatasetId } from "../../services/datasetId.js";
 import { isNonProductionEnv } from "../../services/environment.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
-import {
-  triggerEnrichmentRun,
-  triggerVersionDoiRun,
-  triggerZarrGeneration,
-} from "../../services/github.js";
+import { triggerEnrichmentRun, triggerVersionDoiRun } from "../../services/github.js";
 import { verifyGitHubWebhookSignature } from "../../services/webhook-signature.js";
 import type { WebhookRouter } from "./shared.js";
 
@@ -241,7 +237,14 @@ function isInExcludedTree(p: string): boolean {
  *  first and unconditionally, so a `derivatives/`/`sourcedata/`/`code/` path
  *  never triggers regardless of which rule below would otherwise have matched
  *  it — including the `_events.tsv` early return, which used to short-circuit
- *  before any other check. Exported for unit testing. */
+ *  before any other check. Exported for unit testing.
+ *
+ *  NOT CALLED IN PRODUCTION, deliberately. The Actions dispatcher this gated was
+ *  retired in #1109; conversion now runs on the SDSC Hallu cron
+ *  (`scripts/zarr/hallu-zarr.sh`). It is kept because it is the executable
+ *  statement of ADR 0027's raw-only contract, and `zarr-gate-superset.unit.test.ts`
+ *  asserts it against the converter's `PRIMARY_EXTS` (#1103) — a same-repo check
+ *  now that the converter lives here. Do not delete as dead code. */
 export function isZarrTriggerPath(p: string): boolean {
   if (isInExcludedTree(p)) return false;
   // Every rule below compares lowercase, so a recording can't slip the gate on
@@ -300,7 +303,10 @@ function isBtiMember(lower: string): boolean {
   return parent.slice(parent.lastIndexOf("/") + 1).endsWith("_meg");
 }
 
-/** Decide whether a push event should fan out to the Zarr-generation workflow.
+/** Decide whether a push event should fan out to Zarr conversion.
+ *
+ *  Like `isZarrTriggerPath`, retained but NOT called in production since #1109
+ *  retired the Actions dispatch path; see that function's note.
  *
  *  Parallels `shouldDispatchEnrichment` (same owner/dataset gate, same
  *  touched-path union over `commits[]` + `head_commit`), but:
@@ -411,7 +417,7 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
 
     // Dev/test staging repos (xx09NNNN, epic #923) live in the shared
     // nemarDatasets org but belong to the dev worker, not prod. The production
-    // worker must never dispatch enrichment/zarr/version-DOI runs against them:
+    // worker must never dispatch enrichment/version-DOI runs against them:
     // there is no prod D1 row, and the central workflows' callbacks would 404.
     // Short-circuit here on prod. (Phase 5 adds a forward of the raw, still
     // HMAC-signed delivery to the dev worker's DEV_WEBHOOK_MIRROR_URL; the dev
@@ -479,17 +485,14 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
     // tooling.
     const enrichmentDecision = shouldDispatchEnrichment(payload);
     const versionDoiDecision = shouldDispatchVersionDoi(payload);
-    const zarrDecision = shouldDispatchZarr(payload);
 
-    if (!enrichmentDecision.dispatch && !versionDoiDecision.dispatch && !zarrDecision.dispatch) {
+    if (!enrichmentDecision.dispatch && !versionDoiDecision.dispatch) {
       // Surface whichever reason is more specific. The enrichment path's
       // reasons are richer (no_enrichment_paths_touched, wrong_owner, …)
       // but it bails at `ref_not_main_or_release` for any tag-shaped ref,
       // hiding the more useful `ref_not_version_tag` from version-doi.
       // When enrichment's reason is the generic ref-category bail, prefer
       // version-doi's reason; otherwise keep enrichment's. Code-review #607.
-      // (zarr matches a strict subset of enrichment's main-ref pushes, so its
-      // reason is never the more-specific one here.)
       const reason =
         enrichmentDecision.reason === "ref_not_main_or_release"
           ? versionDoiDecision.reason
@@ -542,37 +545,6 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
           `[github-webhook] version-doi dispatch failed for ${versionDoiDecision.datasetId}@${versionDoiDecision.tag} delivery=${deliveryId}: ${msg}`,
         );
         errors.version_doi = msg;
-      }
-    }
-
-    if (zarrDecision.dispatch) {
-      // The Hallu cron is the Zarr conversion engine (the GitHub Actions path
-      // can't sustain bulk/backfill -- a large dataset stalls past the 120-min
-      // cap; epic #684). Auto-dispatch is therefore OFF by default; set
-      // ZARR_AUTODISPATCH="true" to re-enable the event-driven Actions path. The
-      // run-generate-zarr.yml workflow stays available for manual
-      // workflow_dispatch recovery regardless.
-      if (c.env.ZARR_AUTODISPATCH !== "true") {
-        console.log(
-          `[github-webhook] zarr autodispatch off (Hallu cron owns conversion); skipping ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}`,
-        );
-      } else {
-        try {
-          await triggerZarrGeneration(zarrDecision.datasetId, zarrDecision.ref, pat, {
-            s3Bucket: c.env.S3_BUCKET,
-            callbackBaseUrl: c.env.API_BASE_URL,
-          });
-          console.log(
-            `[github-webhook] dispatched run-generate-zarr for ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}`,
-          );
-          dispatched.zarr = { dataset_id: zarrDecision.datasetId, ref: zarrDecision.ref };
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error(
-            `[github-webhook] zarr dispatch failed for ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}: ${msg}`,
-          );
-          errors.zarr = msg;
-        }
       }
     }
 
