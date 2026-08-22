@@ -32,6 +32,14 @@
 #   ./hallu-zarr.sh --limit 20           # cap datasets per run (paced)
 #   ./hallu-zarr.sh --dataset nm000132   # one dataset now (bypasses the queue)
 #   ./hallu-zarr.sh --stats              # print queue status and exit
+#   ./hallu-zarr.sh --requeue failed     # dry-run: what a requeue would revive
+#   ./hallu-zarr.sh --requeue all --execute   # revive failed + data_failed
+#
+# --requeue exists because the retry budget for `failed` was spent on OOM-killed
+# workers taking whole datasets down (#1110), and `data_failed` was reachable by
+# a classifier that recorded a runtime out-of-memory as a permanent property of
+# the data (#1111). Both give-ups predate the fixes, so they deserve one more
+# attempt; a genuine data failure simply returns to data_failed next run.
 #
 # Every conversion rebuilds the whole dataset (the driver's --clean) so the
 # serving copy mirrors the current dataset. --clean RECONCILES rather than
@@ -117,11 +125,15 @@ NEMAR_WEBHOOK_TOKEN="${NEMAR_WEBHOOK_TOKEN:-}"
 ONLY_DATASET=""
 LIMIT="${ZARR_LIMIT:-0}"
 STATS_ONLY=""
+REQUEUE=""
+REQUEUE_EXECUTE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dataset) ONLY_DATASET="$2"; shift 2 ;;
     --limit) LIMIT="$2"; shift 2 ;;
     --stats) STATS_ONLY=1; shift ;;
+    --requeue) REQUEUE="${2:-failed}"; shift 2 ;;
+    --execute) REQUEUE_EXECUTE=1; shift ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -342,6 +354,18 @@ fi
 if [[ -n "$STATS_ONLY" ]]; then
   qpy stats
   exit 0
+fi
+
+if [[ -n "$REQUEUE" ]]; then
+  # Dry-run by default; --execute applies. Runs where the queue lives, which is
+  # this box -- there is no backend surface for it because the SQLite queue is
+  # local state, not something the API knows about.
+  if [[ -n "$REQUEUE_EXECUTE" ]]; then
+    qpy requeue --status "$REQUEUE" --execute
+  else
+    qpy requeue --status "$REQUEUE"
+  fi
+  exit $?
 fi
 
 # Targeted single-dataset run bypasses the queue (manual rebuild / test).
