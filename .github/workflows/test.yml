@@ -71,6 +71,10 @@ jobs:
             # run these; that workflow is retired and this filter replaces it.
             zarr:
               - 'scripts/zarr/**'
+              # patch_duration.py imports generate_zarr (_run,
+              # materialize_recording), so it moved here with it (#1109).
+              - 'scripts/patch_duration.py'
+              - 'scripts/test_patch_duration.py'
 
   # Zarr conversion engine tests (epic #1108 Phase 1 / #1109).
   # Pure no-mock unit assertions over generate_zarr.py's helpers (path
@@ -106,6 +110,33 @@ jobs:
 
       - name: Power-line-frequency patch tests
         run: python scripts/zarr/test_patch_power_line_frequency.py
+
+  # Tier-2 duration backfill (scripts/patch_duration.py), moved here from
+  # nemarDatasets/.github with the converter it imports (#1109). Unlike the
+  # zarr helper tests above this one needs REAL dependencies: it generates an
+  # EDF with pyedflib and reads it back through biosigIO, and self-skips
+  # without them -- so the install is what makes this job worth running.
+  patch-duration-test:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.zarr == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install biosigIO + pyedflib
+        run: uv pip install --system -r scripts/zarr/requirements.txt pyedflib
+
+      - name: Tier-2 duration tests
+        run: python scripts/test_patch_duration.py
 
   # Type check and lint - always runs on code changes
   lint:
