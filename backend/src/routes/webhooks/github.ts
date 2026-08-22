@@ -11,11 +11,7 @@
 import { isDevRangeDatasetId, isValidDatasetId } from "../../services/datasetId.js";
 import { isNonProductionEnv } from "../../services/environment.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
-import {
-  triggerEnrichmentRun,
-  triggerVersionDoiRun,
-  triggerZarrGeneration,
-} from "../../services/github.js";
+import { triggerEnrichmentRun, triggerVersionDoiRun } from "../../services/github.js";
 import { verifyGitHubWebhookSignature } from "../../services/webhook-signature.js";
 import type { WebhookRouter } from "./shared.js";
 
@@ -242,6 +238,13 @@ function isInExcludedTree(p: string): boolean {
  *  never triggers regardless of which rule below would otherwise have matched
  *  it — including the `_events.tsv` early return, which used to short-circuit
  *  before any other check. Exported for unit testing. */
+// NOTE: `isZarrTriggerPath` / `shouldDispatchZarr` are deliberately kept after the
+// Actions dispatcher they used to gate was retired (#1109). They are no longer
+// called by the push handler -- conversion runs on the SDSC Hallu cron
+// (scripts/zarr/hallu-zarr.sh) -- but they remain the executable statement of the
+// raw-only path contract recorded in ADR 0027, and #1103 asserts them against the
+// converter's PRIMARY_EXTS, which is now a same-repo check. Do not delete as dead
+// code without reading both.
 export function isZarrTriggerPath(p: string): boolean {
   if (isInExcludedTree(p)) return false;
   // Every rule below compares lowercase, so a recording can't slip the gate on
@@ -479,17 +482,14 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
     // tooling.
     const enrichmentDecision = shouldDispatchEnrichment(payload);
     const versionDoiDecision = shouldDispatchVersionDoi(payload);
-    const zarrDecision = shouldDispatchZarr(payload);
 
-    if (!enrichmentDecision.dispatch && !versionDoiDecision.dispatch && !zarrDecision.dispatch) {
+    if (!enrichmentDecision.dispatch && !versionDoiDecision.dispatch) {
       // Surface whichever reason is more specific. The enrichment path's
       // reasons are richer (no_enrichment_paths_touched, wrong_owner, …)
       // but it bails at `ref_not_main_or_release` for any tag-shaped ref,
       // hiding the more useful `ref_not_version_tag` from version-doi.
       // When enrichment's reason is the generic ref-category bail, prefer
       // version-doi's reason; otherwise keep enrichment's. Code-review #607.
-      // (zarr matches a strict subset of enrichment's main-ref pushes, so its
-      // reason is never the more-specific one here.)
       const reason =
         enrichmentDecision.reason === "ref_not_main_or_release"
           ? versionDoiDecision.reason
@@ -542,37 +542,6 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
           `[github-webhook] version-doi dispatch failed for ${versionDoiDecision.datasetId}@${versionDoiDecision.tag} delivery=${deliveryId}: ${msg}`,
         );
         errors.version_doi = msg;
-      }
-    }
-
-    if (zarrDecision.dispatch) {
-      // The Hallu cron is the Zarr conversion engine (the GitHub Actions path
-      // can't sustain bulk/backfill -- a large dataset stalls past the 120-min
-      // cap; epic #684). Auto-dispatch is therefore OFF by default; set
-      // ZARR_AUTODISPATCH="true" to re-enable the event-driven Actions path. The
-      // run-generate-zarr.yml workflow stays available for manual
-      // workflow_dispatch recovery regardless.
-      if (c.env.ZARR_AUTODISPATCH !== "true") {
-        console.log(
-          `[github-webhook] zarr autodispatch off (Hallu cron owns conversion); skipping ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}`,
-        );
-      } else {
-        try {
-          await triggerZarrGeneration(zarrDecision.datasetId, zarrDecision.ref, pat, {
-            s3Bucket: c.env.S3_BUCKET,
-            callbackBaseUrl: c.env.API_BASE_URL,
-          });
-          console.log(
-            `[github-webhook] dispatched run-generate-zarr for ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}`,
-          );
-          dispatched.zarr = { dataset_id: zarrDecision.datasetId, ref: zarrDecision.ref };
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error(
-            `[github-webhook] zarr dispatch failed for ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}: ${msg}`,
-          );
-          errors.zarr = msg;
-        }
       }
     }
 
