@@ -2697,8 +2697,17 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
     Self-contained and picklable; reads shared inputs from the worker `_CTX`."""
     c = _CTX
     # `work`/`store_local` are bound before the try so the `finally` can always
-    # reference them, even when setup itself is what failed.
+    # reference them, even when setup itself is what failed. `rss_trusted` needs
+    # the same treatment for the `except MemoryError` handler: it is assigned
+    # AFTER apply_worker_mem_limit tightens RLIMIT_DATA, so on a reused worker
+    # still holding the previous recording's memory the very next allocation --
+    # inside reset_peak_rss's own open() -- can raise MemoryError before the name
+    # exists. The handler reads it, so that path raised UnboundLocalError and
+    # escaped convert_one uncoded, retrying forever: exactly the failure the
+    # limit call sits inside the try to prevent (#1110). Default to untrusted,
+    # which is correct anyway when the reset never ran.
     work = store_local = None
+    rss_trusted = False
     try:
         # Backstop this recording before any allocation: exceeding the reservation
         # admission made for it must raise in-process, not take the node down.
