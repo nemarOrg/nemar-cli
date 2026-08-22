@@ -2659,6 +2659,22 @@ class TestMemoryErrorBeforePeakResetIsTyped(unittest.TestCase):
     inside the try to prevent (#1110).
     """
 
+    def setUp(self):
+        # convert_one calls apply_worker_mem_limit for real before it reaches the
+        # injected reset, so on Linux these tests genuinely narrow this PROCESS's
+        # RLIMIT_DATA and never put it back. That leaks: this class sorts before
+        # TestWorkerMemLimit, whose setUp would then capture the already-narrowed
+        # value as its "pristine" baseline and restore the wrong limit -- silently
+        # defeating the isolation that class exists to provide. Same save/restore
+        # it uses, for the same reason.
+        try:
+            import resource
+
+            saved = resource.getrlimit(resource.RLIMIT_DATA)
+            self.addCleanup(resource.setrlimit, resource.RLIMIT_DATA, saved)
+        except Exception:  # noqa: BLE001 - no usable RLIMIT_DATA (macOS/Windows)
+            pass
+
     def _inject(self, exc: BaseException):
         import generate_zarr as gz
 
