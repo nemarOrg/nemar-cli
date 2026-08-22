@@ -117,9 +117,23 @@ LOCK_FILE="${ZARR_LOCK_FILE:-${STATE_DIR}/.nm-zarr.lock}"
 # NEMAR_WEBHOOK_TOKEN may be exported by the environment; the callback is skipped
 # when it is empty (the viewer reads index.json, not D1, so the callback is only
 # D1 bookkeeping).
-# Load secrets (e.g. NEMAR_WEBHOOK_TOKEN) from a chmod-600 file beside this
-# script, so the token lives neither in crontab nor in any repo.
-[[ -f "${BASH_SOURCE%/*}/.zarr-secrets.env" ]] && source "${BASH_SOURCE%/*}/.zarr-secrets.env"
+# Load secrets (e.g. NEMAR_WEBHOOK_TOKEN) from a chmod-600 file, so the token
+# lives neither in crontab nor in any repo. That second half stopped holding when
+# #1109 moved this script INTO the nemar-cli checkout: "beside this script" is now
+# a git working tree, where the file is one `git add -A` away from being committed.
+# So the default moved to STATE_DIR, which sits outside the clone alongside the
+# queue DB and the venv -- machine-local state that git never touches.
+#
+# The beside-the-script path stays as a fallback purely so an existing deployment
+# keeps converting across the cutover rather than silently losing its token and
+# skipping every callback. Prefer STATE_DIR; ZARR_SECRETS_FILE overrides both.
+SECRETS_FILE="${ZARR_SECRETS_FILE:-${STATE_DIR}/.zarr-secrets.env}"
+if [[ -f "$SECRETS_FILE" ]]; then
+  # shellcheck source=/dev/null  # deployment-local, chmod-600, never in the repo
+  source "$SECRETS_FILE"
+elif [[ -f "${BASH_SOURCE%/*}/.zarr-secrets.env" ]]; then
+  source "${BASH_SOURCE%/*}/.zarr-secrets.env"
+fi
 NEMAR_WEBHOOK_TOKEN="${NEMAR_WEBHOOK_TOKEN:-}"
 
 ONLY_DATASET=""
