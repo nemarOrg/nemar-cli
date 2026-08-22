@@ -2218,6 +2218,26 @@ class TestMaxShieldVerdictAndProjection(unittest.TestCase):
         self.assertGreater(shielded, plain)
         self.assertGreaterEqual(shielded, int(size * MAXSHIELD_MEM_FACTOR))
 
+    def test_factor_clears_every_measured_ratio(self):
+        """Pin the factor against the measurements it was derived from, so a future
+        edit cannot quietly drop it below an observed peak. Sizes in MiB, peaks in
+        GiB, measured through apply_sss on the conversion node."""
+        for mib, gib in ((160, 0.78), (164, 0.79), (438, 1.87), (716, 2.95)):
+            with self.subTest(mib=mib):
+                self.assertGreater(mib * 1024**2 * MAXSHIELD_MEM_FACTOR, gib * 1024**3)
+
+    def test_reserve_keeps_headroom_over_the_measured_peak(self):
+        """The projection is not the limit. What the worker actually gets is
+        admission_reserve_bytes, which for these recordings suppresses the usual 3x
+        slack because the CONVERSION streams -- so assert the end of that chain, not
+        just the projection. 716 MiB measured at 2.95 GiB."""
+        size = 716 * 1024**2
+        p = "sub-01/meg/sub-01_task-rest_meg.fif"
+        ceiling = 24 * 1024**3
+        proj = projected_peak_bytes(p, size, 336, maxshield=True)
+        reserve = admission_reserve_bytes(proj, ceiling, streamed=should_stream(p, size))
+        self.assertGreater(reserve, int(2.95 * 1024**3))
+
     def test_projection_takes_the_larger_phase_not_the_sum(self):
         # The two phases are sequential and the Raw is released between them.
         size = 8 * 1024**2  # small enough that conversion dominates

@@ -459,17 +459,34 @@ INMEM_MEM_FACTOR_BY_EXT = {
 
 # Signal-Space Separation (ADR 0028) runs BEFORE conversion and costs its own peak:
 # it needs a fully preloaded float64 `Raw`, which is the anonymous memory RLIMIT_DATA
-# counts. Measured end to end on the conversion node against on006720's `sub-155`,
-# through these same functions: a 716 MiB recording peaked at 2.95 GiB, i.e. 4.2x its
-# on-disk size, and the filtered copy then STREAMS, so conversion adds nothing to that
-# peak. 6x is the measurement with headroom.
+# counts. The filtered copy then STREAMS, so conversion adds nothing to that peak.
 #
-# This is load-bearing rather than an efficiency nicety. `apply_worker_mem_limit`
-# sizes RLIMIT_DATA from the projection BEFORE the worker starts, so an
-# under-projection does not merely over-schedule the node, it kills the filter
-# mid-run. The streaming floor alone (4 GiB) happens to clear this dataset's largest
-# recording by under 5%, which is coincidence rather than headroom -- and it is the
-# filter phase, not the conversion, that the floor was never sized for.
+# Measured through `apply_sss` itself on the conversion node, across both affected
+# datasets rather than at one point -- the BrainVision entry above is the cautionary
+# tale for a single-sample factor:
+#
+#     on006720 sub-197   160 MiB -> 0.78 GiB   5.0x
+#     on006720 sub-155   164 MiB -> 0.79 GiB   5.0x
+#     on006012 sub-01    438 MiB -> 1.87 GiB   4.4x
+#     on006720 sub-155   716 MiB -> 2.95 GiB   4.2x
+#
+# The ratio FALLS with size as fixed overhead amortises, so the worst ratio sits where
+# the absolute number is trivial and the largest recordings -- the ones that can
+# actually exhaust the node -- are the cheapest per byte. 6x clears every observed
+# point, and clears the largest by 43%.
+#
+# Note this deliberately does NOT get `MEM_LIMIT_SLACK`. Admission calls
+# `admission_reserve_bytes(..., streamed=True)` for these recordings, since the
+# CONVERSION streams, and that suppresses the 3x multiplier. That multiplier exists
+# for factors that are "a guessed multiple of on-disk bytes"; this one is measured
+# across the range it will be applied to, which is the condition the slack covers.
+# Applying both would reserve ~18x on-disk and gut concurrency for no evidence.
+#
+# Load-bearing rather than an efficiency nicety: `apply_worker_mem_limit` sizes
+# RLIMIT_DATA from this projection BEFORE the worker starts, so an under-projection
+# does not merely over-schedule the node, it kills the filter mid-run. The streaming
+# floor alone (4 GiB) happens to clear the largest recording by under 5%, which is
+# coincidence -- that floor was sized for conversion, not for this phase.
 MAXSHIELD_MEM_FACTOR = float(os.environ.get("ZARR_MAXSHIELD_MEM_FACTOR", "6"))
 
 
@@ -984,7 +1001,19 @@ def is_maxshield_fif(path: str) -> bool:
             path, allow_maxshield="yes", preload=False, verbose="ERROR"
         ).info
         return bool(info.get("maxshield"))
-    except Exception:  # noqa: BLE001 - unreadable here means "not the MaxShield path"
+    except Exception as exc:  # noqa: BLE001 - never fail a recording on the probe
+        # Returning False here routes the recording down the NORMAL path, which for
+        # a genuinely MaxShield file is the pre-ADR-0028 behaviour: MNE refuses it
+        # and the operator gets an opaque `file_read_error` with no hint that the
+        # correction was skipped because a header probe failed. That is a real
+        # regression risk (a truncated download, a missing split member -- MNE reads
+        # every split header even at preload=False), so it must not be silent.
+        print(
+            f"::warning::{path!r}: could not read the FIF header to test for "
+            f"Internal Active Shielding ({type(exc).__name__}: {exc}); converting it "
+            "as an ordinary recording. If it IS shielded, expect a file_read_error.",
+            flush=True,
+        )
         return False
 
 
@@ -1006,9 +1035,26 @@ def apply_sss(raw_path: str, calibration: str, cross_talk: str, out_path: str) -
     raw = mne.io.read_raw_fif(
         raw_path, allow_maxshield="yes", preload=True, verbose="ERROR"
     )
-    sss = mne.preprocessing.maxwell_filter(
-        raw, calibration=calibration, cross_talk=cross_talk, verbose="ERROR"
-    )
+    try:
+        sss = mne.preprocessing.maxwell_filter(
+            raw, calibration=calibration, cross_talk=cross_talk, verbose="ERROR"
+        )
+    except MemoryError:
+        # Genuinely transient: the node was busy, not the data wrong. Let it reach
+        # the retryable `recording_memory_exceeded` verdict.
+        raise
+    except Exception as exc:  # noqa: BLE001 - see below
+        # A calibration pair that is PRESENT but does not fit this recording (wrong
+        # sensor set, wrong site, malformed file) is just as permanent a property of
+        # what the dataset ships as a missing pair, so it gets the same terminal
+        # verdict. Left uncoded it would fall through to the generic handler as an
+        # infra failure and re-run maxwell_filter on every future pass forever --
+        # the anti-pattern #1110 exists to prevent, at ~1 minute of compute a time.
+        raise MaxShieldUncalibrated(
+            f"Signal-Space Separation failed with this recording's calibration pair "
+            f"({os.path.basename(calibration)}, {os.path.basename(cross_talk)}): "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     # MNE's own guardrail, the check that refused to load the file, is satisfied by
     # the output. If it is not, the correction did not happen and serving the result
     # would be exactly the thing ADR 0028 forbids -- so fail rather than publish it.
@@ -2942,6 +2988,19 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             if c["local"]:
                 cal_local = os.path.join(c["repo"], cal_rel)
                 ctc_local = os.path.join(c["repo"], ctc_rel)
+                # The remote branch below decides cleanly when a tracked file cannot
+                # be materialised; local mode has to check for itself. A working tree
+                # can hold a git-annex POINTER whose content was never fetched, and
+                # `os.path.exists` is False for a dangling symlink -- so this catches
+                # the realistic case rather than letting apply_sss fail uncoded and
+                # retry the filter on every future run.
+                missing = [r for r, p in ((cal_rel, cal_local), (ctc_rel, ctc_local))
+                           if not os.path.exists(p)]
+                if missing:
+                    raise MaxShieldUncalibrated(
+                        "calibration input(s) present in the tree but without local "
+                        f"content (run `git annex get`): {', '.join(missing)}"
+                    )
             else:
                 for rel, dest in ((cal_rel, cal_local), (ctc_rel, ctc_local)):
                     found, _ = _fetch_blob(
