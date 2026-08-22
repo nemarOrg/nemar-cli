@@ -309,9 +309,23 @@ _WARNED_NO_RSS = [False]
 _WARNED_NO_RESET = [False]
 
 
-def admission_reserve_bytes(peak_bytes: int, ceiling_bytes: int | None) -> int:
-    """What admission must CHARGE for a recording: the slack-inflated projection,
-    i.e. what its worker is actually permitted to allocate.
+def admission_reserve_bytes(
+    peak_bytes: int, ceiling_bytes: int | None, *, streamed: bool = False
+) -> int:
+    """What admission must CHARGE for a recording: what its worker is permitted to
+    allocate.
+
+    Slack applies to the IN-MEMORY path only. It exists to cover that path's
+    projection being a guessed multiple of on-disk bytes that runs about 2x low.
+    The streaming path's projection is not a guess of that kind -- it is the flat
+    bound the two-pass design gives (one read window plus one channel), already
+    generous. Tripling it charged 12 GiB for a recording whose real peak is in the
+    hundreds of megabytes, and against this node's ~19 GiB ceiling that admitted
+    exactly ONE recording at a time with --jobs 24, i.e. serial conversion of a
+    1.5 TB dataset. #1112
+
+    Once #1111's measurements land, STREAM_PEAK_BYTES itself should come down from
+    4 GiB, which is where the rest of the concurrency comes back.
 
     Charging the bare projection instead was the flaw that made the backstop only
     half a containment. Admission bounded the SUM of nominal projections to the
@@ -322,7 +336,7 @@ def admission_reserve_bytes(peak_bytes: int, ceiling_bytes: int | None) -> int:
     by construction, at the cost of proportionally less concurrency for large
     recordings -- which is the point: the previous concurrency was overcommitted.
     """
-    reserve = int(peak_bytes * MEM_LIMIT_SLACK)
+    reserve = peak_bytes if streamed else int(peak_bytes * MEM_LIMIT_SLACK)
     return min(reserve, ceiling_bytes) if ceiling_bytes else reserve
 
 
@@ -3048,11 +3062,14 @@ def main() -> int:
     # Charge admission what each worker is PERMITTED (projection * slack), not the
     # bare projection -- otherwise the in-flight sum is bounded while the memory
     # those workers may actually take is not. See `admission_reserve_bytes`.
-    projections = {
-        p: projected_peak_bytes(p, recording_size_from_pointers(repo, p, head_set, head))
-        for p in convert
+    sizes = {p: recording_size_from_pointers(repo, p, head_set, head) for p in convert}
+    projections = {p: projected_peak_bytes(p, sizes[p]) for p in convert}
+    peaks = {
+        p: admission_reserve_bytes(
+            proj, ram_ceiling, streamed=should_stream(p, sizes[p])
+        )
+        for p, proj in projections.items()
     }
-    peaks = {p: admission_reserve_bytes(proj, ram_ceiling) for p, proj in projections.items()}
     # Measured peak RSS per recording, so the factors above stop being guesses.
     measured: dict[str, int] = {}
     print(

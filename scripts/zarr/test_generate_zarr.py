@@ -2966,5 +2966,60 @@ class TestFactorAffectsAdmission(unittest.TestCase):
         self.assertLess(heavy, light, "the heavier format must self-limit concurrency")
         self.assertGreater(light, 0)
 
+
+class TestStreamingAdmissionThroughput(unittest.TestCase):
+    """#1112: making streaming the default must not make conversion serial."""
+
+    def test_streaming_is_not_charged_in_memory_slack(self):
+        # Slack covers the in-memory factor being a guess that runs ~2x low. The
+        # streaming projection is the flat bound the two-pass design gives, not a
+        # guess of that kind, so tripling it is charging for nothing.
+        ceiling = 200 * 1024**3
+        proj = STREAM_PEAK_BYTES
+        self.assertEqual(admission_reserve_bytes(proj, ceiling, streamed=True), proj)
+        self.assertEqual(
+            admission_reserve_bytes(proj, ceiling, streamed=False),
+            int(proj * MEM_LIMIT_SLACK),
+        )
+
+    def test_more_than_one_recording_is_admitted_on_a_realistic_ceiling(self):
+        # The regression this guards: with slack applied to the streaming bound,
+        # a 4 GiB projection was charged 12 GiB against this node's measured
+        # ~19 GiB ceiling, admitting exactly ONE recording at a time under
+        # --jobs 24 -- serial conversion of a 1.5 TB dataset.
+        ceiling = int(19 * 1024**3)
+        size = int(1.3 * 1000**3)  # a real on004917 recording
+        name = "sub-02/eeg/sub-02_task-pdm_eeg.vhdr"
+        self.assertTrue(should_stream(name, size))
+        reserve = admission_reserve_bytes(
+            projected_peak_bytes(name, size), ceiling, streamed=True
+        )
+        self.assertGreater(
+            ceiling // reserve, 1, "streaming the default must not serialise the queue"
+        )
+
+    def test_in_memory_recordings_still_carry_slack(self):
+        # .set has no streaming route, so its projection is still the guessed
+        # multiple and must keep its safety margin.
+        ceiling = 200 * 1024**3
+        size = 100 * 1024**2
+        name = "sub-01/eeg/sub-01_task-x_eeg.set"
+        self.assertFalse(should_stream(name, size))
+        proj = projected_peak_bytes(name, size)
+        self.assertEqual(
+            admission_reserve_bytes(proj, ceiling, streamed=False),
+            int(proj * MEM_LIMIT_SLACK),
+        )
+
+    def test_set_never_streams_at_any_size(self):
+        # ADR 0030: two independent blockers (MNE refuses v7.3; an embedded
+        # classic .set loads fully even with preload=False). Pinned at sizes well
+        # past every threshold so a future tuple edit cannot quietly include it.
+        for size in (10 * 1024**2, 512 * 1024**2, 5 * 1024**3, 50 * 1024**3):
+            self.assertFalse(
+                should_stream("sub-01/eeg/sub-01_task-x_eeg.set", size),
+                f".set must not stream at {size} bytes",
+            )
+
 if __name__ == "__main__":
     unittest.main()
