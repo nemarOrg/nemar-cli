@@ -113,7 +113,7 @@ jobs:
     needs: changes
     # Matches unit-pure's trigger so that, as a required check, lint never
     # "skips" on a backend-only PR (a skipped required check blocks merges).
-    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true'
+    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -141,7 +141,7 @@ jobs:
   unit-pure:
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true'
+    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
