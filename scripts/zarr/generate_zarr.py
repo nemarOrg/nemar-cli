@@ -233,6 +233,11 @@ def should_stream(primary_local: str, size_bytes: int) -> bool:
 # of in-flight peaks stays within it, so raising --jobs adds concurrency without
 # shrinking the budget or skipping more recordings.
 STREAM_PEAK_BYTES = int(os.environ.get("ZARR_STREAM_PEAK_BYTES", str(4 * 1024**3)))
+# Hard floor for the admission ceiling: two streaming recordings. See
+# `usable_ram_bytes`.
+CEILING_FLOOR_BYTES = int(
+    os.environ.get("ZARR_CEILING_FLOOR_BYTES", str(2 * STREAM_PEAK_BYTES))
+)
 
 # --- Per-worker memory ceiling (#1110) ---------------------------------------
 # Admission reserves a projected peak for each recording. Nothing enforced that
@@ -263,6 +268,10 @@ MEM_LIMIT_FLOOR_BYTES = int(os.environ.get("ZARR_MEM_LIMIT_FLOOR_BYTES", str(4 *
 # container runtime) would otherwise run with NO containment and say nothing,
 # leaving everyone believing #1110 shipped when it silently did not.
 _WARNED_NO_BACKSTOP = [False]
+# Same latch shape for the measurement side-channel: a run that silently stops
+# measuring would quietly end the #1111 feedback loop with nobody the wiser.
+_WARNED_NO_RSS = [False]
+_WARNED_NO_RESET = [False]
 
 
 def admission_reserve_bytes(peak_bytes: int, ceiling_bytes: int | None) -> int:
@@ -280,6 +289,45 @@ def admission_reserve_bytes(peak_bytes: int, ceiling_bytes: int | None) -> int:
     """
     reserve = int(peak_bytes * MEM_LIMIT_SLACK)
     return min(reserve, ceiling_bytes) if ceiling_bytes else reserve
+
+
+def reset_peak_rss() -> bool:
+    """Reset this process's peak-RSS high-water mark so the NEXT measurement is
+    attributable to one recording.
+
+    Pool workers are reused, and both `VmHWM` and `ru_maxrss` are per-PROCESS
+    high-water marks, so without this a small recording inherits whatever the
+    biggest recording that worker previously handled peaked at -- which would make
+    every calibration number an upper envelope rather than a measurement. Writing
+    `5` to /proc/self/clear_refs resets it (Linux >= 4.0). Verified on the
+    conversion node: 611 MiB -> reset -> 12 MiB.
+    """
+    try:
+        with open("/proc/self/clear_refs", "w") as fh:
+            fh.write("5")
+        return True
+    except OSError:
+        return False
+
+
+def peak_rss_bytes() -> int | None:
+    """This process's peak RSS since the last `reset_peak_rss`, or None where that
+    cannot be read. Prefers /proc (bytes we can trust the units of); falls back to
+    `ru_maxrss`, whose units differ by platform -- KiB on Linux, bytes on macOS."""
+    try:
+        with open("/proc/self/status") as fh:
+            for line in fh:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    try:
+        import resource
+
+        maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return maxrss if sys.platform == "darwin" else maxrss * 1024
+    except Exception:  # noqa: BLE001 - measurement is never worth failing a run over
+        return None
 
 
 def worker_mem_limit_bytes(peak_bytes: int | None, ceiling_bytes: int | None) -> int | None:
@@ -338,8 +386,105 @@ def apply_worker_mem_limit(
                 flush=True,
             )
 
-# float64 blow-up + resample copy for the in-memory path (int16 -> float64 = 4x).
+# Multiplier from on-disk bytes to peak RAM on the in-memory path. ONE constant
+# for every format was the calibration error behind the 2026-08-22 OOMs: the
+# admission controller packed seven BrainVision recordings whose real cost was
+# roughly twice what it had reserved, and the node died. The cost genuinely
+# differs by reader, so the factor does too.
+#
+# The default stays 6 for formats nothing has measured yet. BrainVision is 12,
+# from its actual chain: MNE preloads at float64 (4x int16 on disk), biosigIO
+# copies each channel into a DataFrame (another 4x), pandas periodically
+# consolidates that fragmented frame (transiently another 4x -- this is the
+# `PerformanceWarning` the log is full of), plus the resample copy. Measured
+# peaks are now logged against these projections on every run
+# (`::warning::under-projected`), so the next revision of this table is data
+# rather than arithmetic. #1111
 INMEM_MEM_FACTOR = float(os.environ.get("ZARR_INMEM_MEM_FACTOR", "6"))
+INMEM_MEM_FACTOR_BY_EXT = {
+    ".vhdr": float(os.environ.get("ZARR_INMEM_MEM_FACTOR_VHDR", "12")),
+}
+
+
+def note_measurement(result: dict, projections: dict, measured: dict) -> str | None:
+    """Fold one `convert_one` result into ``measured``; return a warning to print
+    when the recording cost more than was reserved for it, else None.
+
+    Extracted from ``main``'s reporting closure so the bookkeeping that feeds
+    calibration is testable without a live conversion. `rss is None` is checked
+    explicitly rather than by truthiness: None means "not measured" (or measured
+    untrustworthily) and must be dropped, while a genuine 0 would be a real
+    reading and must not be silently conflated with it.
+    """
+    rss = result.get("peak_rss")
+    primary = result.get("primary")
+    proj = projections.get(primary)
+    if rss is None or not proj:
+        return None
+    measured[primary] = rss
+    # Warn at the CONTAINMENT boundary, not the bare projection. Admission charges
+    # `projection * MEM_LIMIT_SLACK`, so a recording over its bare projection is
+    # still comfortably inside what was reserved for it and endangered nothing --
+    # warning there would put a scary line against a large share of every run's
+    # recordings, in a log already too big to read, and drown the real cases.
+    # "reserved" means the slack-inflated charge, matching admission's vocabulary.
+    reserved = proj * MEM_LIMIT_SLACK
+    if rss > reserved:
+        return (
+            f"::warning::under-reserved {primary}: needed {rss / 1024**3:.1f} GiB, "
+            f"reserved {reserved / 1024**3:.1f} GiB ({rss / proj:.1f}x its "
+            f"projection) -- see INMEM_MEM_FACTOR_BY_EXT (#1111)"
+        )
+    return None
+
+
+def calibration_summary(measured: dict, projections: dict) -> list[dict]:
+    """Per-extension measured-vs-projected peak RAM, worst case first.
+
+    This is the feedback loop that stops `INMEM_MEM_FACTOR_BY_EXT` being folklore:
+    every run reports what each format actually cost against what was reserved for
+    it, so the next revision of that table is measurement. `suggested_factor` is
+    the multiplier that would have covered the worst recording seen here; it is
+    advisory output, never applied automatically -- one pathological recording
+    should not silently re-tune the whole archive.
+    """
+    # Bucket by (extension, which path it took). A streamed recording's projection
+    # is the flat STREAM_PEAK_BYTES, unrelated to its on-disk size, so mixing it in
+    # with in-memory recordings of the same extension yields a "suggested factor"
+    # that looks like a blow-up multiplier but is not one. Only the in-memory path
+    # has a factor to suggest.
+    buckets: dict[tuple[str, str], list[tuple[int, int]]] = {}
+    for path, rss in measured.items():
+        proj = projections.get(path)
+        if proj:
+            kind = "stream" if proj == STREAM_PEAK_BYTES else "inmem"
+            buckets.setdefault((lower_ext(path) or "(dir)", kind), []).append((rss, proj))
+    rows = []
+    for (ext, kind), pairs in buckets.items():
+        # max_peak_bytes must come from the SAME recording as max_ratio, or the
+        # log reads "worst .set at 4.0x its projection (peak 105 KB)" while the 4x
+        # recording actually peaked at 400 bytes -- misleading exactly the person
+        # trying to retune the table.
+        worst_rss, worst_proj = max(pairs, key=lambda x: x[0] / x[1])
+        row = {
+            "ext": ext,
+            "path": kind,
+            "n": len(pairs),
+            "max_ratio": round(worst_rss / worst_proj, 2),
+            "max_peak_bytes": worst_rss,
+            "max_peak_projection_bytes": worst_proj,
+        }
+        if kind == "inmem":
+            row["suggested_factor"] = round(
+                inmem_factor_for(f"x{ext}") * worst_rss / worst_proj, 1
+            )
+        rows.append(row)
+    return sorted(rows, key=lambda r: r["max_ratio"], reverse=True)
+
+
+def inmem_factor_for(primary_local: str) -> float:
+    """In-memory blow-up multiplier for this recording's format."""
+    return INMEM_MEM_FACTOR_BY_EXT.get(lower_ext(primary_local), INMEM_MEM_FACTOR)
 
 
 class RecordingTooLarge(Exception):
@@ -372,7 +517,9 @@ class RecordingMemoryExceeded(Exception):
 RETRYABLE_CODES = frozenset({RecordingMemoryExceeded.code})
 
 
-def memory_failure_result(primary: str, exc: BaseException) -> dict:
+def memory_failure_result(
+    primary: str, exc: BaseException, peak_rss: int | None = None
+) -> dict:
     """The `convert_one` result for a recording that ran out of memory mid-convert.
 
     A function rather than an inline dict so tests exercise the SAME construction
@@ -386,6 +533,7 @@ def memory_failure_result(primary: str, exc: BaseException) -> dict:
         "primary": primary,
         "error": f"exceeded its memory budget while converting: {exc}",
         "code": RecordingMemoryExceeded.code,
+        "peak_rss": peak_rss,
     }
 
 
@@ -428,25 +576,77 @@ def projected_peak_bytes(primary_local: str, size_bytes: int) -> int:
     path, ~float64 blow-up for the in-memory path. Drives the skip guard (#909)."""
     if should_stream(primary_local, size_bytes):
         return STREAM_PEAK_BYTES
-    return int(size_bytes * INMEM_MEM_FACTOR)
+    return int(size_bytes * inmem_factor_for(primary_local))
 
 
-def usable_ram_bytes() -> int:
+def usable_ram_bytes(meminfo_path: str = "/proc/meminfo") -> int:
     """Convertible RAM: MemTotal (Linux /proc/meminfo) minus a headroom fraction.
     A conservative fallback keeps the guard active off-Linux / in tests."""
     frac = float(os.environ.get("ZARR_MEM_HEADROOM_FRAC", "0.8"))
     total: int | None = None
-    try:
-        with open("/proc/meminfo") as fh:
+    # MemAvailable, not MemTotal. The conversion node is SHARED -- other tenants,
+    # other jobs, and the page cache backing this run's own scratch all live in the
+    # same RAM -- so MemTotal describes a machine we do not have to ourselves and
+    # consistently overstates what we may allocate. MemAvailable is the kernel's own
+    # estimate of what is obtainable without swapping, which is the number admission
+    # actually needs. Falls back to MemTotal on a kernel too old to publish it
+    # (< 3.14), and to the env/default below off-Linux. #1111
+    def _meminfo() -> dict:
+        fields = {}
+        with open(meminfo_path) as fh:
             for line in fh:
-                if line.startswith("MemTotal:"):
-                    total = int(line.split()[1]) * 1024  # kB -> bytes
-                    break
+                key = line.split(":", 1)[0]
+                if key in ("MemAvailable", "MemTotal"):
+                    fields[key] = int(line.split()[1]) * 1024  # kB -> bytes
+        return fields
+
+    try:
+        # Median of three samples. MemAvailable is a live number on a shared box,
+        # and this is read ONCE for a run that lasts hours -- so a single unlucky
+        # instant (a neighbouring job's page-cache spike) would otherwise set an
+        # absurdly low ceiling for everything that follows. `is not None` rather
+        # than `or`: a genuine 0 must not silently fall through to MemTotal.
+        samples = []
+        for i in range(3):
+            fields = _meminfo()
+            avail = fields.get("MemAvailable")
+            samples.append(avail if avail is not None else fields.get("MemTotal"))
+            if i < 2:
+                time.sleep(0.05)
+        samples = [x for x in samples if x is not None]
+        total = sorted(samples)[len(samples) // 2] if samples else None
     except OSError:
         total = None
     if total is None:
         total = int(os.environ.get("ZARR_NODE_RAM_BYTES", str(32 * 1024**3)))
-    return int(total * frac)
+    # Never fall below what one streaming recording needs, with room for a second.
+    # Without a floor, a momentarily-loaded node yields a ceiling under
+    # STREAM_PEAK_BYTES, at which point NOTHING is admissible and every recording
+    # is skipped as "too large" -- a node-load artifact recorded as a property of
+    # the data. #1111
+    return max(int(total * frac), CEILING_FLOOR_BYTES)
+
+
+def hardware_ceiling_bytes(meminfo_path: str = "/proc/meminfo") -> int:
+    """The most memory this NODE could ever offer one recording: MemTotal, not
+    MemAvailable.
+
+    This is what separates a permanent verdict from a temporary one. Since the
+    admission ceiling became MemAvailable (#1111) it is a live sample on a shared
+    box, so "exceeds the budget" stopped meaning "too big to ever convert" and
+    started meaning "too big right now" -- and the two must not share a verdict,
+    because one is terminal and the other must retry.
+    """
+    frac = float(os.environ.get("ZARR_MEM_HEADROOM_FRAC", "0.8"))
+    try:
+        with open(meminfo_path) as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return max(int(int(line.split()[1]) * 1024 * frac), CEILING_FLOOR_BYTES)
+    except OSError:
+        pass
+    return max(int(int(os.environ.get("ZARR_NODE_RAM_BYTES", str(32 * 1024**3))) * frac),
+               CEILING_FLOOR_BYTES)
 
 
 def per_recording_ceiling_bytes() -> int:
@@ -2212,6 +2412,7 @@ def convert_recording(
     value_descriptions: dict[str, str] | None = None,
     electrode_positions: dict | None = None,
     mem_budget_bytes: int | None = None,
+    hard_ceiling_bytes: int | None = None,
 ) -> None:
     modality = bids_suffix_modality(primary_local)
     size_bytes = _recording_size_bytes(primary_local)
@@ -2222,13 +2423,28 @@ def convert_recording(
     # -> a DETERMINISTIC skip surfaced in the index, not an infra retry.
     if mem_budget_bytes is not None:
         peak = projected_peak_bytes(primary_local, size_bytes)
+        # Injectable so the two verdicts can be tested without reloading the module
+        # (a reload rebinds the exception classes and breaks assertRaises).
+        hard_ceiling = (
+            hardware_ceiling_bytes() if hard_ceiling_bytes is None else hard_ceiling_bytes
+        )
+        if peak > mem_budget_bytes and peak <= hard_ceiling:
+            # Fits the node, just not what is free right now. A TEMPORARY
+            # condition on a shared box, so it must retry rather than mark the
+            # dataset terminal -- otherwise one busy hour permanently buries a
+            # dataset that converts fine an hour later. #1111
+            raise RecordingMemoryExceeded(
+                f"projected peak ~{peak // 1024**3} GiB exceeds the "
+                f"~{mem_budget_bytes // 1024**3} GiB free on the node right now "
+                f"(the node itself could hold it); will retry"
+            )
         if peak > mem_budget_bytes:
             raise RecordingTooLarge(
                 f"projected peak ~{peak // 1024**3} GiB exceeds the "
                 f"~{mem_budget_bytes // 1024**3} GiB per-recording budget for this run "
                 f"(on-disk {size_bytes // 1024**3} GiB via the "
                 f"{'streaming' if streaming else 'in-memory'} path; "
-                "re-run with fewer --jobs to raise the budget)"
+                "the budget is the node's usable RAM and does NOT change with --jobs)"
             )
     def _convert_in_memory() -> None:
         from biosigio import Recording, bids  # type: ignore[import-not-found]  # lazy: runtime-only dep
@@ -2282,12 +2498,21 @@ def convert_recording(
             # (larger) in-memory budget before the full-load fallback so a big
             # mixed-rate EDF is #909-skipped rather than OOMing.
             if mem_budget_bytes is not None:
-                inmem_peak = int(size_bytes * INMEM_MEM_FACTOR)
+                inmem_peak = int(size_bytes * inmem_factor_for(primary_local))
+                if inmem_peak > mem_budget_bytes and inmem_peak <= (
+                    hardware_ceiling_bytes() if hard_ceiling_bytes is None
+                    else hard_ceiling_bytes
+                ):
+                    raise RecordingMemoryExceeded(
+                        f"mixed-rate EDF needs the in-memory resample path "
+                        f"(projected ~{inmem_peak // 1024**3} GiB > "
+                        f"~{mem_budget_bytes // 1024**3} GiB free right now); will retry"
+                    )
                 if inmem_peak > mem_budget_bytes:
                     raise RecordingTooLarge(
                         f"mixed-rate EDF needs the in-memory resample path "
                         f"(projected ~{inmem_peak // 1024**3} GiB > "
-                        f"~{mem_budget_bytes // 1024**3} GiB budget); re-run with fewer --jobs"
+                        f"~{mem_budget_bytes // 1024**3} GiB budget); the budget is the node's usable RAM and does NOT change with --jobs"
                     ) from None
             _convert_in_memory()
     else:
@@ -2334,6 +2559,22 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # Inside the try, so a MemoryError during SETUP is typed like any other
         # rather than escaping convert_one uncoded and retrying forever (#1110).
         apply_worker_mem_limit(peak_bytes, c.get("mem_budget"), reserved=True)
+        # Reset the high-water mark so what we read at the end belongs to THIS
+        # recording and not to whatever this reused worker converted before it.
+        # A failed reset means the next reading is this WORKER's lifetime peak
+        # across every recording it has handled, not this recording's -- an
+        # inflated number that would drive false "under-projected" warnings and,
+        # if believed, a pointless factor increase. Mark the sample untrusted
+        # rather than blend it into calibration.
+        rss_trusted = reset_peak_rss()
+        if not rss_trusted and not _WARNED_NO_RESET[0]:
+            _WARNED_NO_RESET[0] = True
+            print(
+                "::warning::cannot reset the peak-RSS mark (/proc/self/clear_refs); "
+                "peak-RAM measurements are unattributable this run and are being "
+                "discarded rather than reported wrong (#1111)",
+                flush=True,
+            )
         rel_store = store_rel_for(primary)
         work = os.path.join(c["tmp"], "work", primary.replace("/", "_"))
         store_local = os.path.join(c["tmp"], "stores", rel_store)
@@ -2409,7 +2650,12 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         members = split_members_for(primary, c["head_files"])
         if members:
             entry["split_members"] = members
-        return {"ok": True, "primary": primary, "entry": entry}
+        return {
+            "ok": True,
+            "primary": primary,
+            "entry": entry,
+            "peak_rss": peak_rss_bytes() if rss_trusted else None,
+        }
     except MemoryError as exc:
         # The RLIMIT_DATA backstop fired (or the allocator genuinely ran out).
         # This is the same verdict #909's preflight reaches -- this recording does
@@ -2417,7 +2663,12 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # rather than as a nameless infra failure that retries forever. Reporting
         # it typed also means a dataset made ENTIRELY of such recordings is marked
         # terminal instead of burning its five attempts.
-        return memory_failure_result(primary, exc)
+        # Measure here as well: a recording that hit the backstop is the strongest
+        # evidence its format is under-projected, and excluding it made the
+        # calibration summary look cleanest exactly where it was most wrong.
+        return memory_failure_result(
+            primary, exc, peak_rss_bytes() if rss_trusted else None
+        )
     except Exception as exc:  # noqa: BLE001 - isolate one bad recording
         # biosigIO read failures carry a stable `.code` (not_continuous,
         # corrupt_or_truncated, ...) so the index can tell the viewer WHY a
@@ -2717,6 +2968,20 @@ def main() -> int:
     def record(r: dict, i: int) -> None:
         # Log each recording as it finishes (live progress over a long backfill),
         # not all at once at the end.
+        # Under-projection is the defect that caused the 2026-08-22 OOMs, and it is
+        # invisible until the node dies. Say so per recording, while the path that
+        # caused it is still on screen.
+        warning = note_measurement(r, projections, measured)
+        if warning:
+            print(warning, flush=True)
+        elif r["ok"] and r.get("peak_rss") is None and not _WARNED_NO_RSS[0]:
+            _WARNED_NO_RSS[0] = True
+            print(
+                "::warning::peak RAM could not be measured; this run contributes "
+                "nothing to calibration and `calibration` will be empty for reasons "
+                "unrelated to what converted (#1111)",
+                flush=True,
+            )
         if r["ok"]:
             converted_entries.append(r["entry"])
             print(f"[zarr] [{i}/{n}] converted {r['primary']} -> {r['entry']['zarr']}", flush=True)
@@ -2748,13 +3013,13 @@ def main() -> int:
     # Charge admission what each worker is PERMITTED (projection * slack), not the
     # bare projection -- otherwise the in-flight sum is bounded while the memory
     # those workers may actually take is not. See `admission_reserve_bytes`.
-    peaks = {
-        p: admission_reserve_bytes(
-            projected_peak_bytes(p, recording_size_from_pointers(repo, p, head_set, head)),
-            ram_ceiling,
-        )
+    projections = {
+        p: projected_peak_bytes(p, recording_size_from_pointers(repo, p, head_set, head))
         for p in convert
     }
+    peaks = {p: admission_reserve_bytes(proj, ram_ceiling) for p, proj in projections.items()}
+    # Measured peak RSS per recording, so the factors above stop being guesses.
+    measured: dict[str, int] = {}
     print(
         f"[zarr] admission: up to {cpu_cap} worker(s), RAM ceiling "
         f"~{ram_ceiling // 1024**3} GiB; a recording projected above it alone is "
@@ -2776,6 +3041,23 @@ def main() -> int:
             pool_breaks = _drain_with_admission(
                 convert, peaks, cpu_cap, ram_ceiling, ctx, record
             )
+
+    calibration = calibration_summary(measured, projections)
+    if calibration:
+        worst = calibration[0]
+        print(
+            f"[zarr] peak RAM measured for {len(measured)}/{len(convert)} recording(s); "
+            f"worst {worst['ext']} at {worst['max_ratio']}x its projection "
+            f"(peak {worst['max_peak_bytes'] / 1024**3:.1f} GiB)",
+            flush=True,
+        )
+    elif convert:
+        print(
+            f"[zarr] peak RAM measured for 0/{len(convert)} recording(s); "
+            "calibration is empty because nothing could be measured, not because "
+            "nothing converted (#1111)",
+            flush=True,
+        )
 
     for rel_store in remove:
         _rm_recursive(safe_store_prefix(bucket, dataset_id, rel_store))
@@ -2875,6 +3157,12 @@ def main() -> int:
         # value; a non-zero trend means the node is under memory pressure and
         # is only visible here -- the log is far too large to watch. #1110.
         "pool_breaks": pool_breaks,
+        # Measured peak RAM vs what was reserved, per format. The only way the
+        # projection factors stop being guesses. #1111
+        "calibration": calibration,
+        # Measured vs attempted, so an empty `calibration` can be told apart
+        # from a run where measurement itself was unavailable.
+        "measured_count": len(measured),
     }
     with open(args.callback_out, "w") as fh:
         json.dump(callback, fh)
