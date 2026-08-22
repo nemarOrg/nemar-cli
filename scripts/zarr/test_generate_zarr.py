@@ -2645,6 +2645,54 @@ class TestMemoryFailureClassification(unittest.TestCase):
     # `except Exception` below it, would not be caught here. Reaching it honestly
     # needs a real oversized recording, i.e. an integration test on the node.
 
+class TestMemoryErrorBeforePeakResetIsTyped(unittest.TestCase):
+    """A MemoryError raised BEFORE `rss_trusted` is assigned must still produce a
+    typed memory failure.
+
+    `apply_worker_mem_limit` tightens RLIMIT_DATA at the top of `convert_one`'s
+    try, and `rss_trusted = reset_peak_rss()` comes after it. On a reused worker
+    still holding the previous recording's memory, the next allocation -- inside
+    reset_peak_rss's own `open()`, which catches only OSError -- can raise
+    MemoryError while the name does not yet exist. The handler reads
+    `rss_trusted`, so this raised UnboundLocalError and escaped `convert_one`
+    uncoded, retrying forever. That is the precise failure the limit call sits
+    inside the try to prevent (#1110).
+    """
+
+    def _inject(self, exc: BaseException):
+        import generate_zarr as gz
+
+        def boom() -> bool:
+            raise exc
+
+        self._orig_reset, self._orig_ctx = gz.reset_peak_rss, gz._CTX
+        gz.reset_peak_rss = boom
+        gz._CTX = {"mem_budget": None}
+        self.addCleanup(setattr, gz, "reset_peak_rss", self._orig_reset)
+        self.addCleanup(setattr, gz, "_CTX", self._orig_ctx)
+        return gz
+
+    def test_memory_error_before_reset_returns_typed_failure(self):
+        gz = self._inject(MemoryError("cannot allocate"))
+        res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        self.assertFalse(res["ok"])
+        # The whole point: coded, so the queue can mark it terminal instead of
+        # burning five attempts on a recording that will never fit.
+        self.assertEqual(res["code"], gz.RecordingMemoryExceeded.code)
+        self.assertEqual(res["primary"], "sub-01/eeg/sub-01_task-x_eeg.set")
+        # Unmeasurable, not zero: the reset never completed, so any reading would
+        # be the worker's lifetime peak rather than this recording's.
+        self.assertIsNone(res["peak_rss"])
+
+    def test_non_memory_error_before_reset_is_still_uncoded_infra(self):
+        # The generic handler never touched rss_trusted, so it was already fine;
+        # assert it stays that way rather than being swept into the typed branch.
+        gz = self._inject(RuntimeError("something else"))
+        res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        self.assertFalse(res["ok"])
+        self.assertIsNone(res["code"])
+
+
 class TestWorkerMemLimit(unittest.TestCase):
     """#1110: the per-recording RLIMIT_DATA backstop."""
 
