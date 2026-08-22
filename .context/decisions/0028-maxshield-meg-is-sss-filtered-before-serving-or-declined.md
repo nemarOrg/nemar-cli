@@ -132,6 +132,37 @@ It came from the `zarr_errors` column
 and included the 43 calibration and cross-talk files themselves,
 which were being attempted as recordings before ADR 0027 excluded them.
 
+## Implementation receipt (2026-08-22)
+
+This decision is **implemented** as of #1126; the status line stays `accepted` because
+that field records the decision's standing, and the index test constrains it to
+`proposed | accepted | superseded by ADR-NNNN`. The decision's own receipts verified that the correction is real;
+what they did not carry is what it costs, which admission control needs.
+
+Measured on the conversion node against `on006720`'s `sub-155`, through the shipped
+functions rather than a stand-in:
+
+- Detection (`is_maxshield_fif`, FIF header only, no preload): 1.5 s, 0.14 GiB peak.
+  Cheap enough to run on every FIF.
+- `apply_sss` on a 716 MiB recording: 57.5 s, peak 2.95 GiB, i.e. **4.2x its on-disk size**.
+- The filtered copy then takes the STREAMING conversion path, so `convert_recording` adds
+  nothing to that peak: end-to-end peak stayed 2.95 GiB.
+- `info["maxshield"]` is clear on the output, as this decision's receipts predicted.
+
+Hence `MAXSHIELD_MEM_FACTOR = 6`. The pre-existing streaming floor of 4 GiB would have
+cleared the largest recording in these datasets by under 5%, which is coincidence rather
+than headroom: the floor was sized for conversion, and the filter phase is a separate cost
+that peaks before conversion starts. Since `apply_worker_mem_limit` sizes `RLIMIT_DATA`
+from the projection, an under-projection would not merely over-schedule the node, it would
+kill the filter mid-run.
+
+Resolution coverage was re-derived from the current repository trees and reproduces this
+decision's projection exactly: `on006720` 207 of 223, `on006012` 158 of 173, every declined
+recording under `sub-emptyroom`.
+
+Conversion cost is real: roughly 5 minutes per recording (57 s filtering, ~260 s streaming
+conversion), so the 365-recording backfill is on the order of 30 hours of node time.
+
 Related: ADR 0027 (raw-only discovery, which excludes the calibration files as recordings).
 
 ## Note on eventual placement

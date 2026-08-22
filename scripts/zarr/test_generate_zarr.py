@@ -61,6 +61,10 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     memory_failure_result,
     count_infra_failures,
     RecordingMemoryExceeded,
+    MaxShieldUncalibrated,
+    maxshield_calibration_for,
+    MAXSHIELD_MEM_FACTOR,
+    projected_peak_bytes,
     RETRYABLE_CODES,
     reason_for_code,
     should_stream,
@@ -87,6 +91,7 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     fix_source_file_attr,
     in_excluded_tree,
     is_bids_calibration_file,
+    _bids_entities,
     is_excluded_from_discovery,
     is_primary,
     is_split_fif,
@@ -2101,6 +2106,126 @@ class TestAnnexKeySize(unittest.TestCase):
         self.assertIsNone(annex_key_size("WORM--whatever"))
         self.assertIsNone(annex_key_size(None))
         self.assertIsNone(annex_key_size(""))
+
+
+class TestMaxShieldCalibrationResolution(unittest.TestCase):
+    """ADR 0028: Signal-Space Separation runs only with the recording's OWN
+    fine-calibration and cross-talk pair. Resolution is BIDS inheritance, and the
+    pair is all-or-nothing -- uncalibrated filtering is a weaker correction a
+    consumer could not distinguish from a good one, so it is declined instead."""
+
+    REC = "sub-01/meg/sub-01_task-rest_meg.fif"
+    CAL = "sub-01/meg/sub-01_acq-calibration_meg.dat"
+    CTC = "sub-01/meg/sub-01_acq-crosstalk_meg.fif"
+
+    def test_pair_beside_the_recording(self):
+        self.assertEqual(
+            maxshield_calibration_for(self.REC, {self.REC, self.CAL, self.CTC}),
+            (self.CAL, self.CTC),
+        )
+
+    def test_the_entity_subset_rule_would_reject_these(self):
+        """The regression this resolver exists for.
+
+        Every other sidecar resolver requires the candidate's entities to be a
+        SUBSET of the recording's. `sub-01_acq-calibration_meg.dat` carries
+        `acq=calibration` while the recording has no `acq` at all, so that rule
+        rejects the very file it should find. Pin the exemption.
+        """
+        self.assertEqual(_bids_entities("sub-01_acq-calibration_meg")["acq"], "calibration")
+        self.assertNotIn("acq", _bids_entities("sub-01_task-rest_meg"))
+        self.assertIsNotNone(
+            maxshield_calibration_for(self.REC, {self.REC, self.CAL, self.CTC})
+        )
+
+    def test_half_a_pair_is_no_pair(self):
+        for present in (self.CAL, self.CTC):
+            with self.subTest(present=present):
+                self.assertIsNone(
+                    maxshield_calibration_for(self.REC, {self.REC, present})
+                )
+
+    def test_neither_present(self):
+        self.assertIsNone(maxshield_calibration_for(self.REC, {self.REC}))
+
+    def test_inherited_from_an_ancestor(self):
+        rec = "sub-06/ses-1/meg/sub-06_ses-1_task-rest_meg.fif"
+        head = {rec, "sub-06/sub-06_acq-calibration_meg.dat",
+                "sub-06/sub-06_acq-crosstalk_meg.fif"}
+        self.assertIsNotNone(maxshield_calibration_for(rec, head))
+
+    def test_bare_form_at_the_dataset_root(self):
+        head = {self.REC, "acq-calibration_meg.dat", "acq-crosstalk_meg.fif"}
+        self.assertIsNotNone(maxshield_calibration_for(self.REC, head))
+
+    def test_nearest_wins(self):
+        rec = "sub-06/ses-1/meg/sub-06_ses-1_task-rest_meg.fif"
+        near = "sub-06/ses-1/meg/sub-06_ses-1_acq-calibration_meg.dat"
+        head = {rec, near, "sub-06/ses-1/meg/sub-06_ses-1_acq-crosstalk_meg.fif",
+                "sub-06/sub-06_acq-calibration_meg.dat",
+                "sub-06/sub-06_acq-crosstalk_meg.fif"}
+        pair = maxshield_calibration_for(rec, head)
+        self.assertIsNotNone(pair)
+        self.assertEqual(pair[0], near)
+
+    def test_another_subject_pair_does_not_apply(self):
+        head = {self.REC, "sub-02/meg/sub-02_acq-calibration_meg.dat",
+                "sub-02/meg/sub-02_acq-crosstalk_meg.fif"}
+        self.assertIsNone(maxshield_calibration_for(self.REC, head))
+
+    def test_a_sibling_session_does_not_apply(self):
+        # `sub-06/ses-2/` is not an ancestor of `sub-06/ses-1/`, so inheritance
+        # must not reach across it.
+        rec = "sub-06/ses-1/meg/sub-06_ses-1_task-rest_meg.fif"
+        head = {rec, "sub-06/ses-2/meg/sub-06_ses-2_acq-calibration_meg.dat",
+                "sub-06/ses-2/meg/sub-06_ses-2_acq-crosstalk_meg.fif"}
+        self.assertIsNone(maxshield_calibration_for(rec, head))
+
+    def test_calibration_files_stay_excluded_from_discovery(self):
+        """ADR 0028's own trap: these are inputs to conversion AND never
+        recordings. Both must remain true; conflating them breaks MaxShield."""
+        for p in (self.CAL, self.CTC):
+            with self.subTest(p=p):
+                self.assertTrue(is_bids_calibration_file(p))
+                self.assertFalse(is_primary(p))
+        self.assertIsNotNone(
+            maxshield_calibration_for(self.REC, {self.REC, self.CAL, self.CTC})
+        )
+
+
+class TestMaxShieldVerdictAndProjection(unittest.TestCase):
+    def test_decline_is_deterministic_not_retryable(self):
+        """The calibration pair is either shipped or it is not; retrying cannot
+        change that, so a dataset made entirely of these must be marked terminal
+        rather than burning five attempts."""
+        self.assertNotIn(MaxShieldUncalibrated.code, RETRYABLE_CODES)
+        failures = [{"code": MaxShieldUncalibrated.code}]
+        self.assertEqual(count_infra_failures(failures, failures), 0)
+
+    def test_decline_has_its_own_user_facing_reason(self):
+        reason = reason_for_code(MaxShieldUncalibrated.code)
+        self.assertNotEqual(reason, reason_for_code("file_read_error"))
+        self.assertIn("shielding", reason.lower())
+
+    def test_projection_covers_the_filter_phase(self):
+        """A streaming FIF is projected on the streaming bound, which for this
+        dataset's largest recording exceeds the measured filter peak by under 5%.
+        That is coincidence, not headroom, so the MaxShield term must raise it."""
+        size = 927 * 1024**2
+        p = "sub-01/meg/sub-01_task-rest_meg.fif"
+        plain = projected_peak_bytes(p, size, 328)
+        shielded = projected_peak_bytes(p, size, 328, maxshield=True)
+        self.assertGreater(shielded, plain)
+        self.assertGreaterEqual(shielded, int(size * MAXSHIELD_MEM_FACTOR))
+
+    def test_projection_takes_the_larger_phase_not_the_sum(self):
+        # The two phases are sequential and the Raw is released between them.
+        size = 8 * 1024**2  # small enough that conversion dominates
+        p = "sub-01/meg/sub-01_task-rest_meg.fif"
+        plain = projected_peak_bytes(p, size)
+        shielded = projected_peak_bytes(p, size, maxshield=True)
+        self.assertEqual(shielded, max(plain, int(size * MAXSHIELD_MEM_FACTOR)))
+        self.assertLess(shielded, plain + int(size * MAXSHIELD_MEM_FACTOR))
 
 
 class TestFailureReasons(unittest.TestCase):
