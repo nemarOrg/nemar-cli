@@ -27,8 +27,6 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     _AWS_OP_TIMEOUT,
     _AWS_RM_TIMEOUT,
     _AWS_TIMEOUTS,
-    INMEM_MEM_FACTOR,
-    STREAM_PEAK_BYTES,
     RecordingTooLarge,
     _aws,
     _s3_prefix_empty,
@@ -41,7 +39,9 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     projected_peak_bytes,
     per_recording_ceiling_bytes,
     recording_size_from_pointers,
-    usable_ram_bytes,
+    note_measurement,
+    CEILING_FLOOR_BYTES,
+    STREAM_PEAK_BYTES,
     _next_admission,
     _drain_with_admission,
     worker_mem_limit_bytes,
@@ -58,6 +58,7 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     memory_failure_result,
     count_infra_failures,
     RecordingMemoryExceeded,
+    RETRYABLE_CODES,
     reason_for_code,
     should_stream,
     STREAM_EDF_MIN_BYTES,
@@ -1676,7 +1677,13 @@ class TestMemoryGuard(unittest.TestCase):
         # usable node, so raising concurrency never skips a recording it otherwise
         # would convert (admission control bounds the SUM, not each recording).
         os.environ.pop("ZARR_REC_MEM_BUDGET_BYTES", None)
-        self.assertEqual(per_recording_ceiling_bytes(), usable_ram_bytes())
+        # Sampled, not exact: since #1111 the ceiling comes from MemAvailable,
+        # which moves between two reads on a shared box. The property under test
+        # is that the ceiling IS the usable node and does not shrink with --jobs,
+        # not that two live samples are bit-identical.
+        self.assertAlmostEqual(
+            per_recording_ceiling_bytes() / 1024**3, usable_ram_bytes() / 1024**3, places=0
+        )
 
     def test_ceiling_explicit_override_wins(self):
         os.environ["ZARR_REC_MEM_BUDGET_BYTES"] = str(123 * 1024**2)
@@ -1685,16 +1692,35 @@ class TestMemoryGuard(unittest.TestCase):
         finally:
             os.environ.pop("ZARR_REC_MEM_BUDGET_BYTES", None)
 
-    def test_preflight_skips_oversized_with_deterministic_code(self):
-        # A tiny budget forces a skip BEFORE any load (no biosigIO import, no OOM);
-        # the exception carries the code so it surfaces as a deterministic skip.
+    def test_preflight_skips_before_any_load(self):
+        # A tiny budget forces a skip BEFORE any load (no biosigIO import, no OOM).
+        # The recording easily fits the NODE, so the verdict is the temporary one:
+        # "not enough free right now", which retries. Since #1111 the ceiling is
+        # MemAvailable, a live sample on a shared box, so "over budget" no longer
+        # implies "too big to ever convert" -- and only the latter may be terminal.
+        with tempfile.TemporaryDirectory() as d:
+            rec = os.path.join(d, "sub-01_task-x_eeg.edf")
+            with open(rec, "wb") as fh:
+                fh.write(b"e" * 100_000)
+            with self.assertRaises(RecordingMemoryExceeded) as cm:
+                convert_recording(rec, None, os.path.join(d, "store"), mem_budget_bytes=1)
+            self.assertEqual(cm.exception.code, "recording_memory_exceeded")
+            self.assertIn(cm.exception.code, RETRYABLE_CODES)
+
+    def test_a_recording_too_big_for_the_node_is_still_terminal(self):
+        # The other branch: beyond what the hardware could EVER offer, so no amount
+        # of waiting helps and the deterministic, no-retry verdict is correct.
         with tempfile.TemporaryDirectory() as d:
             rec = os.path.join(d, "sub-01_task-x_eeg.edf")
             with open(rec, "wb") as fh:
                 fh.write(b"e" * 100_000)
             with self.assertRaises(RecordingTooLarge) as cm:
-                convert_recording(rec, None, os.path.join(d, "store"), mem_budget_bytes=1)
+                convert_recording(
+                    rec, None, os.path.join(d, "store"),
+                    mem_budget_bytes=1, hard_ceiling_bytes=1,
+                )
             self.assertEqual(cm.exception.code, "recording_too_large")
+            self.assertNotIn(cm.exception.code, RETRYABLE_CODES)
 
     def test_reason_for_code_too_large_is_user_facing(self):
         self.assertIn("too large", reason_for_code("recording_too_large").lower())
@@ -2729,6 +2755,9 @@ class TestCalibrationSummary(unittest.TestCase):
         self.assertEqual(rows[".set"]["n"], 2)
         self.assertEqual(rows[".set"]["max_ratio"], 3.0)  # the worst, not the mean
         self.assertEqual(rows[".vhdr"]["max_ratio"], 1.2)
+        # The peak reported must belong to the SAME recording as the ratio, or the
+        # summary attributes one recording's size to another's overrun.
+        self.assertEqual(rows[".set"]["max_peak_bytes"], 3000)
 
     def test_worst_format_sorts_first(self):
         projections = {"a.set": 1000, "b.vhdr": 1000}
@@ -2741,6 +2770,23 @@ class TestCalibrationSummary(unittest.TestCase):
         # silently re-tune the archive.
         rows = calibration_summary({"a.set": 2000}, {"a.set": 1000})
         self.assertEqual(rows[0]["suggested_factor"], round(INMEM_MEM_FACTOR * 2, 1))
+
+    def test_streamed_recordings_get_no_factor_suggestion(self):
+        # A streamed recording's projection is the flat STREAM_PEAK_BYTES,
+        # unrelated to on-disk size, so multiplying a blow-up factor by its
+        # overrun ratio yields a number that looks like a factor but is not one.
+        rows = calibration_summary(
+            {"a.edf": STREAM_PEAK_BYTES * 2}, {"a.edf": STREAM_PEAK_BYTES}
+        )
+        self.assertEqual(rows[0]["path"], "stream")
+        self.assertNotIn("suggested_factor", rows[0])
+
+    def test_the_same_format_is_split_by_which_path_it_took(self):
+        rows = calibration_summary(
+            {"a.edf": 100, "b.edf": STREAM_PEAK_BYTES * 2},
+            {"a.edf": 50, "b.edf": STREAM_PEAK_BYTES},
+        )
+        self.assertEqual({r["path"] for r in rows}, {"inmem", "stream"})
 
     def test_recordings_without_a_projection_are_ignored(self):
         self.assertEqual(calibration_summary({"ghost.set": 10}, {}), [])
@@ -2773,6 +2819,135 @@ class TestUsableRam(unittest.TestCase):
             self.skipTest("kernel too old to publish MemAvailable")
         self.assertLessEqual(usable_ram_bytes(), info["MemAvailable"])
         self.assertLess(usable_ram_bytes(), info["MemTotal"])
+
+
+class TestUsableRamFromSyntheticMeminfo(unittest.TestCase):
+    """#1111: prove the ceiling takes MemAvailable, without depending on whatever
+    the host's ambient memory happens to be. On a near-idle CI runner MemAvailable
+    is most of MemTotal, so a live-/proc assertion barely discriminates."""
+
+    def _meminfo(self, total_gib, avail_gib=None):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "meminfo")
+        lines = [f"MemTotal:       {total_gib * 1024 * 1024} kB\n"]
+        if avail_gib is not None:
+            lines.append(f"MemAvailable:   {avail_gib * 1024 * 1024} kB\n")
+        lines.append("SwapTotal:      0 kB\n")
+        with open(path, "w") as fh:
+            fh.writelines(lines)
+        return path
+
+    def test_prefers_memavailable_over_memtotal(self):
+        # Far apart on purpose: the old code took 0.8 * 64 = 51.2 GiB while only
+        # 20 GiB was obtainable. That gap is the whole bug.
+        path = self._meminfo(total_gib=64, avail_gib=20)
+        os.environ["ZARR_MEM_HEADROOM_FRAC"] = "0.8"
+        try:
+            self.assertAlmostEqual(
+                usable_ram_bytes(path) / 1024**3, 16.0, places=1  # 0.8 * 20
+            )
+        finally:
+            os.environ.pop("ZARR_MEM_HEADROOM_FRAC", None)
+
+    def test_falls_back_to_memtotal_on_an_old_kernel(self):
+        # MemAvailable landed in 3.14; without it MemTotal is all there is.
+        path = self._meminfo(total_gib=64)
+        os.environ["ZARR_MEM_HEADROOM_FRAC"] = "0.5"
+        try:
+            self.assertAlmostEqual(usable_ram_bytes(path) / 1024**3, 32.0, places=1)
+        finally:
+            os.environ.pop("ZARR_MEM_HEADROOM_FRAC", None)
+
+    def test_a_momentarily_loaded_node_cannot_starve_admission(self):
+        # Without a floor, a transient dip yields a ceiling below one streaming
+        # recording -- at which point EVERY recording is skipped as "too large"
+        # and a node-load artifact is recorded as a property of the data.
+        path = self._meminfo(total_gib=64, avail_gib=1)
+        self.assertEqual(usable_ram_bytes(path), CEILING_FLOOR_BYTES)
+        self.assertGreaterEqual(CEILING_FLOOR_BYTES, STREAM_PEAK_BYTES)
+
+
+class TestNoteMeasurement(unittest.TestCase):
+    """#1111: the bookkeeping that feeds calibration."""
+
+    def test_records_a_measurement_and_stays_quiet_when_within_budget(self):
+        measured = {}
+        warning = note_measurement(
+            {"primary": "a.set", "peak_rss": 500, "ok": True}, {"a.set": 1000}, measured
+        )
+        self.assertIsNone(warning)
+        self.assertEqual(measured, {"a.set": 500})
+
+    def test_warns_when_a_recording_cost_more_than_reserved(self):
+        measured = {}
+        # Over the containment boundary (projection * slack), not merely over the
+        # bare projection.
+        warning = note_measurement(
+            {"primary": "a.vhdr", "peak_rss": 9000, "ok": True}, {"a.vhdr": 1000}, measured
+        )
+        self.assertIsNotNone(warning)
+        self.assertIn("under-reserved", warning)
+        self.assertIn("9.0x", warning)
+
+    def test_stays_quiet_within_the_slack_that_was_actually_reserved(self):
+        # A recording over its bare projection but inside its reservation
+        # endangered nothing; warning here would put a line against a large share
+        # of every run, in a log already too big to read.
+        measured = {}
+        self.assertIsNone(
+            note_measurement(
+                {"primary": "a.set", "peak_rss": 2000, "ok": True}, {"a.set": 1000}, measured
+            )
+        )
+        self.assertEqual(measured, {"a.set": 2000})
+
+    def test_an_unmeasured_recording_is_dropped_not_recorded_as_zero(self):
+        # None means "not measured" or "measured untrustworthily". Blending it in
+        # would silently corrupt the calibration sample.
+        measured = {}
+        self.assertIsNone(
+            note_measurement({"primary": "a.set", "peak_rss": None}, {"a.set": 1000}, measured)
+        )
+        self.assertEqual(measured, {})
+
+    def test_a_recording_with_no_projection_is_ignored(self):
+        measured = {}
+        self.assertIsNone(
+            note_measurement({"primary": "ghost.set", "peak_rss": 10}, {}, measured)
+        )
+        self.assertEqual(measured, {})
+
+    def test_a_backstop_trip_still_contributes_a_measurement(self):
+        # The recordings that PROVE a format is under-projected are the ones that
+        # hit the backstop; excluding them made calibration look cleanest exactly
+        # where it was most wrong.
+        r = memory_failure_result("a.set", MemoryError("x"), peak_rss=5000)
+        measured = {}
+        warning = note_measurement(r, {"a.set": 1000}, measured)
+        self.assertEqual(measured, {"a.set": 5000})
+        self.assertIn("under-reserved", warning)
+
+
+class TestFactorAffectsAdmission(unittest.TestCase):
+    """#1111: the per-format factor must actually change what runs concurrently --
+    not merely what `projected_peak_bytes` returns."""
+
+    def test_a_heavier_format_admits_fewer_at_once(self):
+        size = 1024**3  # same on-disk size, different readers
+        ceiling = 200 * 1024**3
+
+        def admitted(name):
+            reserve = admission_reserve_bytes(projected_peak_bytes(name, size), ceiling)
+            n, running = 0, 0
+            while running + reserve <= ceiling:
+                running += reserve
+                n += 1
+            return n
+
+        heavy = admitted("sub-01_task-x_eeg.vhdr")   # factor 12
+        light = admitted("sub-01_task-x_eeg.set")    # factor 6 (default)
+        self.assertLess(heavy, light, "the heavier format must self-limit concurrency")
+        self.assertGreater(light, 0)
 
 if __name__ == "__main__":
     unittest.main()
