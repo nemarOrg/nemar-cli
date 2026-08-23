@@ -326,5 +326,89 @@ class RequeueTest(unittest.TestCase):
     def test_requeueing_nothing_is_not_an_error(self):
         self.assertEqual(requeue(self.conn, ("failed",), dataset_id="nope"), [])
 
+
+class UnlistedSweepTest(unittest.TestCase):
+    """Datasets the catalog stops listing must stop being converted (#1048).
+
+    Withdrawn datasets sat `pending` forever: every run cloned them, failed on
+    content that is 0-byte by design, and wrote failure lines. They vanish from
+    `GET /datasets` on withdrawal, so reconcile never sees them again and its
+    add-and-update-only logic left the rows untouched.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.conn = connect(os.path.join(self._tmp.name, "q.db"))
+        reconcile(self.conn, [("nm000001", "1.0.0"), ("on000002", "1.0.0")], 3600)
+
+    def tearDown(self):
+        self.conn.close()
+        self._tmp.cleanup()
+
+    def status(self, dataset_id):
+        r = self.conn.execute(
+            "SELECT status FROM jobs WHERE dataset_id=?", (dataset_id,)
+        ).fetchone()
+        return r["status"] if r else None
+
+    def test_absent_dataset_is_parked(self):
+        res = reconcile(self.conn, [("nm000001", "1.0.0")], 3600, listing_complete=True)
+        self.assertEqual(res["unlisted"], 1)
+        self.assertEqual(self.status("on000002"), "unlisted")
+        self.assertEqual(self.status("nm000001"), "pending")
+
+    def test_parked_dataset_is_never_claimed(self):
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600, listing_complete=True)
+        claimed = set()
+        while (row := claim_next(self.conn)) is not None:
+            claimed.add(row["dataset_id"])
+        self.assertEqual(claimed, {"nm000001"})
+
+    def test_partial_catalog_read_parks_nothing(self):
+        """The guard that stops a truncated fetch from emptying the queue."""
+        res = reconcile(self.conn, [("nm000001", "1.0.0")], 3600, listing_complete=False)
+        self.assertEqual(res["unlisted"], 0)
+        self.assertEqual(self.status("on000002"), "pending")
+
+    def test_relisted_dataset_returns_to_pending(self):
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600, listing_complete=True)
+        self.assertEqual(self.status("on000002"), "unlisted")
+        res = reconcile(
+            self.conn,
+            [("nm000001", "1.0.0"), ("on000002", "1.0.0")],
+            3600,
+            listing_complete=True,
+        )
+        self.assertEqual(res["unlisted"], 0)
+        self.assertEqual(self.status("on000002"), "pending")
+
+    def test_parking_preserves_converted_version(self):
+        """Parked, not deleted: a dataset that comes back must not reconvert
+        work we already have."""
+        mark_done(self.conn, "on000002", "1.0.0")
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600, listing_complete=True)
+        row = self.conn.execute(
+            "SELECT converted_version FROM jobs WHERE dataset_id=?", ("on000002",)
+        ).fetchone()
+        self.assertEqual(row["converted_version"], "v1.0.0")
+
+    def test_inprogress_row_is_left_to_its_converter(self):
+        """A worker holds that row right now; its own completion decides."""
+        claim_next(self.conn)  # nm000001, the older row
+        claimed = claim_next(self.conn)
+        self.assertEqual(claimed["dataset_id"], "on000002")
+        res = reconcile(self.conn, [("nm000001", "1.0.0")], 3600, listing_complete=True)
+        self.assertEqual(res["unlisted"], 0)
+        self.assertEqual(self.status("on000002"), "inprogress")
+
+    def test_terminal_rows_are_parked_too(self):
+        """A withdrawn dataset that already burned its retries still stops
+        showing up in the failure listing."""
+        mark_fail(self.conn, "on000002", "boom", max_attempts=1, backoff_base=1)
+        self.assertEqual(self.status("on000002"), "failed")
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600, listing_complete=True)
+        self.assertEqual(self.status("on000002"), "unlisted")
+
+
 if __name__ == "__main__":
     unittest.main()
