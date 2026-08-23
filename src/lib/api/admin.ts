@@ -1180,3 +1180,81 @@ export async function dispatchManifest(
     true,
   );
 }
+
+// ============================================================================
+// Doctor (diagnostic checks + remediation, #1130)
+// ============================================================================
+
+/** One dataset/version exhibiting a check's problem. */
+export interface DoctorFinding {
+  dataset_id: string;
+  version?: string;
+  details?: Record<string, unknown>;
+}
+
+/** Response of `POST /admin/doctor/scan` (read-only). */
+export interface DoctorScanResponse {
+  scanned: string[];
+  results: Record<string, { description: string; count: number; findings: DoctorFinding[] }>;
+}
+
+/** Per-finding outcome of a fix run. */
+export interface DoctorFixResult {
+  dataset_id: string;
+  version?: string;
+  status: "fixed" | "skipped" | "failed";
+  message?: string;
+  details?: Record<string, unknown>;
+}
+
+/** Response of `POST /admin/doctor/fix`. `dry_run: true` returns the
+ *  would-fix shape instead of writing. */
+export interface DoctorFixResponse {
+  check: string;
+  dry_run?: boolean;
+  would_fix?: number;
+  findings?: DoctorFinding[];
+  total?: number;
+  fixed?: number;
+  skipped?: number;
+  failed?: number;
+  results?: DoctorFixResult[];
+}
+
+/** Run doctor diagnostic checks (read-only). Omit `check` to run them all. */
+export async function doctorScan(options?: {
+  check?: string;
+  datasetId?: string;
+}): Promise<DoctorScanResponse> {
+  return request<DoctorScanResponse>(
+    "/admin/doctor/scan",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        ...(options?.check && { check: options.check }),
+        ...(options?.datasetId && { dataset_id: options.datasetId }),
+      }),
+    },
+    true,
+  );
+}
+
+/** Apply a doctor check's remediation. `dryRun` lists findings without writing. */
+export async function doctorFix(options: {
+  check: string;
+  datasetId?: string;
+  dryRun?: boolean;
+}): Promise<DoctorFixResponse> {
+  return request<DoctorFixResponse>(
+    "/admin/doctor/fix",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        check: options.check,
+        ...(options.datasetId && { dataset_id: options.datasetId }),
+        ...(options.dryRun && { dry_run: true }),
+      }),
+    },
+    true,
+  );
+}
