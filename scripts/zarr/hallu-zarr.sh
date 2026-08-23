@@ -436,11 +436,15 @@ if [[ ! -f "$DRIVER" || ! -f "$QUEUE" ]]; then
   err "driver/queue not found under $DRIVER_REPO after setup"; exit 1
 fi
 
-# Drift guard. setup() refreshes DRIVER_REPO from origin/$DRIVER_REF every run, so the
-# Python driver deploys itself -- but THIS script cannot: it has to exist before
-# the clone does, so it is a hand-placed copy that git never touches. That copy
-# silently fell ~5 weeks behind main once already (nemarDatasets/.github#92's
-# scratch sweep merged and did nothing here). Compare and warn; do NOT self-copy,
+# Drift guard, for the bootstrap deployment shape only. setup() refreshes
+# DRIVER_REPO from origin/$DRIVER_REF every run, and since #1109 moved this script
+# INTO the checkout, cron invokes the clone's copy -- so in the normal deployment
+# this script deploys itself along with the driver and the check below is a no-op
+# (SELF == REPO_SELF). It still matters for a node bootstrapped from an
+# out-of-clone copy, which has to exist before the clone does and which git never
+# touches: such a copy silently fell ~5 weeks behind main once already
+# (nemarDatasets/.github#92's scratch sweep merged and did nothing here).
+# Compare and warn; do NOT self-copy,
 # because bash reads a script incrementally and rewriting the running file mid-run
 # resumes execution at a garbage byte offset. Deploy with an atomic rename:
 #   scp hallu-zarr.sh hallu:/path/.hallu-zarr.sh.new && ssh hallu 'mv /path/.hallu-zarr.sh.new /path/hallu-zarr.sh'

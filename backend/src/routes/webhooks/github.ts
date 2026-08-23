@@ -184,7 +184,8 @@ export function shouldDispatchVersionDoi(
  *  triggers a reconversion of its recording. Compared lowercase.
  *
  *  Must stay a superset of `generate_zarr.py`'s `PRIMARY_EXTS` (the converter,
- *  in `nemarDatasets/.github`) or a push changing one of those recordings
+ *  now at `scripts/zarr/` in this repo — ADR 0029) or a push changing one of
+ *  those recordings
  *  never re-dispatches conversion and the serving copy goes stale silently —
  *  which is exactly what happened here: the KIT/Yokogawa/RICOH MEG formats
  *  (`.con`/`.sqd`/`.kdf`) were missing (verified against `on007763`, which has

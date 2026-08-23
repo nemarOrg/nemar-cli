@@ -140,7 +140,7 @@ Tooling is fixed: **Bun** for JavaScript and TypeScript (never npm or npx),
 | Backend (`backend/`) | Cloudflare Worker + D1; the API at `api.nemar.org` | [systems inventory](.context/systems-inventory.md) §1 |
 | Website | `nemar.org`, Astro SSR, in `nemarOrg/website` | [systems inventory](.context/systems-inventory.md) §1 |
 | Docs site | `docs.nemar.org`, in `nemarOrg/docs` | — |
-| Central workflows | `nemarDatasets/.github` — dataset CI, archive, manifest | [systems inventory](.context/systems-inventory.md) §3.3 |
+| Central workflows | `nemarDatasets/.github` — dataset CI, archive, manifest | [systems inventory](.context/systems-inventory.md) §2 |
 | Zarr converter | `scripts/zarr/` **in this repo**; runs on the Hallu cron, not Actions (ADR 0029) | [systems inventory](.context/systems-inventory.md) §3 |
 | Signal readers | `neuromechanist/biosigio` on PyPI — importers plus the Zarr exporter | [systems inventory](.context/systems-inventory.md) §2 |
 | Processing host | SDSC Hallu — dataset sync, QA sync, Zarr conversion | [systems inventory](.context/systems-inventory.md) §3 |
@@ -309,12 +309,17 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   The converter is `scripts/zarr/` **in this repo** and runs on the SDSC Hallu
   cron (`scripts/zarr/hallu-zarr.sh`, hourly at `:30`), never in GitHub Actions —
   Actions cannot finish a large dataset inside the 120-minute cap (ADR 0029).
-  Deployment has two halves and they differ: the **Python driver deploys itself**
-  (`setup()` resets the Hallu clone to the tracked ref every run), but
-  **`hallu-zarr.sh` cannot** -- it has to exist before the clone does, so it is a
-  hand-placed copy git never touches. Ship it with `scp` + atomic `mv`; the script
-  logs `DRIFT:` when the deployed copy differs from the repo copy. Manual recovery
-  for one dataset is `hallu-zarr.sh --dataset <id>`.
+  **Both halves deploy themselves now**, driver and shell script alike:
+  `setup()` resets the Hallu clone to the tracked ref every run, and since #1109
+  moved `hallu-zarr.sh` into the checkout, cron invokes the clone's copy
+  (`/mnt/local/zarr-state/nemar-cli/scripts/zarr/hallu-zarr.sh`), so that reset
+  updates the script too. Hand-placement with `scp` + atomic `mv` is now only for
+  bootstrapping a node that has no clone yet — the script has to exist before the
+  clone does. The `DRIFT:` warning covers that shape: it fires when the running
+  copy is NOT the clone's copy and the two differ, and is a no-op in the normal
+  deployment where they are the same file. A stale out-of-clone copy left at the
+  old path is inert, not a fallback. Manual recovery for one dataset is
+  `hallu-zarr.sh --dataset <id>`.
   "Every run" is load-bearing and used to be a lie during a backfill: a run holds
   the lock until the queue empties, so `setup()` never re-ran and the node sat two
   deploys behind for two days (#1129). The drain now re-checks `origin/$DRIVER_REF`
