@@ -630,6 +630,13 @@ export interface ImportStatusResponse {
   imports: ImportJobRow[];
   total: number;
   by_status: Record<string, number>;
+  /**
+   * Imported datasets that have since been withdrawn. NOT a value of
+   * `by_status` -- withdrawal is orthogonal to the import lifecycle, and these
+   * rows are counted inside `by_status.complete` because their import did
+   * succeed. Optional: older backends omit it (#1048).
+   */
+  withdrawn?: number;
 }
 
 export async function getImportStatus(

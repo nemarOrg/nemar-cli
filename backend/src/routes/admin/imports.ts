@@ -319,7 +319,23 @@ export function registerImportRoutes(admin: AdminRouter): void {
     const by_status: Record<string, number> = {};
     for (const s of IMPORT_STATUSES) by_status[s] = 0;
     for (const row of counts.results ?? []) by_status[row.status] = row.n;
-    return c.json({ imports: results, total: results.length, by_status });
+    // Withdrawal is orthogonal to import status, not another value of it: a
+    // withdrawn dataset imported fine and stays `complete` here. Reported as its
+    // own number so the summary stops implying that every `complete` import is
+    // a dataset you can still fetch (#1048).
+    const withdrawn = await db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM import_jobs j
+         JOIN datasets d ON d.dataset_id = j.dataset_id
+         WHERE d.withdrawn_at IS NOT NULL`,
+      )
+      .first<{ n: number }>();
+    return c.json({
+      imports: results,
+      total: results.length,
+      by_status,
+      withdrawn: withdrawn?.n ?? 0,
+    });
   });
 
   /**

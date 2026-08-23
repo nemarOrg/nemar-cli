@@ -3450,6 +3450,14 @@ importCommand
         console.log(
           `  ${chalk.yellow(`in-flight ${(counts.preparing ?? 0) + (counts.copying ?? 0) + (counts.finalizing ?? 0)}`)}  ${chalk.green(`complete ${counts.complete ?? 0}`)}  ${chalk.magenta(`incomplete ${counts.incomplete ?? 0}`)}  ${chalk.red(`failed ${counts.failed ?? 0}`)}  ${chalk.red(`quarantined ${counts.quarantined ?? 0}`)}  ${chalk.dim(`rolled_back ${counts.rolled_back ?? 0}`)}\n`,
         );
+        // Withdrawn datasets are counted inside `complete` -- their import did
+        // succeed -- so say so rather than letting the total read as datasets
+        // that are still fetchable (#1048).
+        if (result.withdrawn) {
+          console.log(
+            `  ${chalk.red(`withdrawn ${result.withdrawn}`)} ${chalk.dim("(included in complete; content removed and DOI tombstoned)")}\n`,
+          );
+        }
 
         if (rows.length === 0) {
           console.log(chalk.dim("  No import jobs match."));
