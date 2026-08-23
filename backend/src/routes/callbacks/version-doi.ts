@@ -673,7 +673,7 @@ async function handleEzidVersionDoiLegacy(
       } catch (dispatchErr) {
         manifestErrorMsg = errorMessage(dispatchErr);
         console.error(
-          `[webhook] Central manifest dispatch failed for ${dataset.dataset_id}@${version}:`,
+          `[webhook][manifest-missing] Central manifest dispatch failed for ${dataset.dataset_id}@${version} (daily manifest-sweep retries, #1130):`,
           dispatchErr,
         );
       }
@@ -703,7 +703,7 @@ async function handleEzidVersionDoiLegacy(
       } catch (manifestErr) {
         manifestErrorMsg = errorMessage(manifestErr);
         console.error(
-          `[webhook] Manifest generation failed for ${dataset.dataset_id}@${version}:`,
+          `[webhook][manifest-missing] Manifest generation failed for ${dataset.dataset_id}@${version} (daily manifest-sweep retries, #1130):`,
           manifestErr,
         );
       }
@@ -930,7 +930,7 @@ async function handleZenodoVersionDoi(
       } catch (dispatchErr) {
         manifestErrorMsg = errorMessage(dispatchErr);
         console.error(
-          `[webhook] Central manifest dispatch failed for ${dataset.dataset_id}@${version}:`,
+          `[webhook][manifest-missing] Central manifest dispatch failed for ${dataset.dataset_id}@${version} (daily manifest-sweep retries, #1130):`,
           dispatchErr,
         );
       }
@@ -960,7 +960,7 @@ async function handleZenodoVersionDoi(
       } catch (manifestErr) {
         manifestErrorMsg = errorMessage(manifestErr);
         console.error(
-          `[webhook] Manifest generation failed for ${dataset.dataset_id}@${version}:`,
+          `[webhook][manifest-missing] Manifest generation failed for ${dataset.dataset_id}@${version} (daily manifest-sweep retries, #1130):`,
           manifestErr,
         );
       }
