@@ -1,14 +1,22 @@
 /**
  * Daily backstop for published versions whose S3 manifest never landed (#1130).
  *
- * The version-DOI callback generates and uploads `<id>/version/v<X>.json` after
- * the DOI is minted, but a failure there is caught and the webhook still
- * returns 200 (deliberately: the DOI is already registered, failing the run
- * would not un-mint it). Until now nothing retried, so one GitHub App
- * rate-limit burst on 2026-06-03 left 10 published versions serving
- * "Version not published" on data.nemar.org for 2.5 months.
+ * The "row exists, manifest missing" state this heals arises on the LEGACY
+ * inline path (MANIFEST_VIA_CENTRAL_WORKFLOW=false): the version-DOI callback
+ * inserts the `dataset_versions` row, then generates and uploads
+ * `<id>/version/v<X>.json`, and a failure in between is caught while the
+ * webhook still returns 200 (deliberately: the DOI is already registered,
+ * failing the run would not un-mint it). One GitHub App rate-limit burst on
+ * 2026-06-03 left 10 published versions in that state, serving "Version not
+ * published" on data.nemar.org for 2.5 months. Under the central-workflow
+ * flow the row is only written by /manifest-ready AFTER the manifest is
+ * confirmed on S3, so this sweep additionally covers a flag rollback, an
+ * S3 object lost after publication, and any future path that leaves a row
+ * without its manifest. A dispatch failure under central flow leaves NO
+ * `dataset_versions` row (only a failed/stuck manifest_jobs row), which is
+ * structurally outside this query — tracked separately as #1136.
  *
- * This sweep re-checks recent `dataset_versions` rows against S3 and heals
+ * The sweep re-checks recent `dataset_versions` rows against S3 and heals
  * missing manifests through the existing `missing-manifest` doctor fix
  * (regenerate from the GitHub tag, re-upload). It is bounded to a recency
  * window + LIMIT because a full-catalog pass costs one S3 GET per published
@@ -22,6 +30,7 @@ import { missingManifestCheck } from "./doctor/checks/missing-manifest.js";
 import type { CheckContext, Finding } from "./doctor/types.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
+import { errorMessage } from "./repo-metadata.js";
 import { getManifest } from "./s3.js";
 
 /**
@@ -56,10 +65,6 @@ interface SweepRow {
   concept_doi: string | null;
 }
 
-function errText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
 /**
  * Daily cron job: detect and heal missing version manifests for recent
  * publications. Loud on any finding: a missing manifest means a published,
@@ -84,7 +89,7 @@ export async function manifestIntegritySweep(env: Bindings): Promise<void> {
       .all<SweepRow>();
     rows = res.results ?? [];
   } catch (err) {
-    console.error("[manifest-sweep] candidate query failed:", errText(err));
+    console.error("[manifest-sweep] candidate query failed:", errorMessage(err));
     return;
   }
   if (rows.length === 0) {
@@ -108,7 +113,7 @@ export async function manifestIntegritySweep(env: Bindings): Promise<void> {
       // rather than regenerate over an object we could not read.
       console.error(
         `[manifest-sweep] presence check failed dataset=${row.dataset_id} version=${row.version}:`,
-        errText(err),
+        errorMessage(err),
       );
       continue;
     }
@@ -127,7 +132,7 @@ export async function manifestIntegritySweep(env: Bindings): Promise<void> {
   try {
     ctx = { db: env.DB, s3, githubPat: await getDatasetsToken(env) };
   } catch (err) {
-    console.error("[manifest-sweep] could not mint datasets token:", errText(err));
+    console.error("[manifest-sweep] could not mint datasets token:", errorMessage(err));
     return;
   }
 
@@ -135,7 +140,16 @@ export async function manifestIntegritySweep(env: Bindings): Promise<void> {
   let skipped = 0;
   let failed = 0;
   for (const finding of missing) {
-    const result = await missingManifestCheck.fix(ctx, finding);
+    // Per-finding guard, matching archiveRetrySweep's per-row style: fix()'s
+    // own pre-write getManifest re-check can throw on a transient S3 5xx,
+    // and one bad finding must not abort the rest of the day's run (or
+    // swallow the summary line below).
+    let result: Awaited<ReturnType<typeof missingManifestCheck.fix>>;
+    try {
+      result = await missingManifestCheck.fix(ctx, finding);
+    } catch (err) {
+      result = { status: "failed", message: errorMessage(err) };
+    }
     if (result.status === "fixed") {
       fixed++;
       console.error(

@@ -33,6 +33,7 @@ import {
   type AvailabilityReportSweepBatchResponse,
   type DataIntegritySweepBatchResponse,
   type DatasetTransitionResponse,
+  type DoctorFixLiveResponse,
   type DoctorFixResult,
   type DoctorScanResponse,
   type EmailPreferences,
@@ -5293,8 +5294,8 @@ doctorCommand
             console.log(JSON.stringify(res, null, 2));
             return;
           }
-          console.log(`Would fix ${res.would_fix ?? 0} finding(s) for ${chalk.bold(check)}:`);
-          for (const f of res.findings ?? []) {
+          console.log(`Would fix ${res.would_fix} finding(s) for ${chalk.bold(check)}:`);
+          for (const f of res.findings) {
             console.log(`  ${f.dataset_id}${f.version ? `@v${f.version}` : ""}`);
           }
         } catch (err) {
@@ -5308,8 +5309,9 @@ doctorCommand
       // Enumerate first, then fix one dataset per request, so the spinner can
       // show which dataset is in flight and a partial failure is visible the
       // moment it happens rather than after one long opaque request. The
-      // narrowed fix re-scans its dataset server-side, so a finding healed
-      // between the scan and its fix turn simply reports as skipped.
+      // narrowed fix re-scans its dataset server-side; a finding healed
+      // between the scan and its fix turn comes back with zero results and
+      // is counted as `resolved` by runDoctorFixLoop, never silently dropped.
       const spinner = ora(`Scanning for ${check} findings...`).start();
       let findings: DoctorScanResponse["results"][string]["findings"];
       try {
@@ -5330,54 +5332,45 @@ doctorCommand
       console.log(`${chalk.bold(check)}: ${findings.length} finding(s) to fix`);
 
       const datasetIds = [...new Set(findings.map((f) => f.dataset_id))];
-      const totals = { fixed: 0, skipped: 0, failed: 0 };
-      const allResults: DoctorFixResult[] = [];
       spinner.start();
-      for (const [i, id] of datasetIds.entries()) {
-        const versions = findings
-          .filter((f) => f.dataset_id === id && f.version)
-          .map((f) => `v${f.version}`)
-          .join(", ");
-        spinner.text = `Fixing ${id}${versions ? ` (${versions})` : ""} [${i + 1}/${datasetIds.length}]...`;
-        try {
-          const res = await doctorFix({ check, datasetId: id });
-          totals.fixed += res.fixed ?? 0;
-          totals.skipped += res.skipped ?? 0;
-          totals.failed += res.failed ?? 0;
-          allResults.push(...(res.results ?? []));
-          spinner.stop();
-          for (const r of res.results ?? []) {
-            const label = `${r.dataset_id}${r.version ? `@v${r.version}` : ""}`;
-            if (r.status === "fixed") {
-              console.log(`  ${chalk.green("fixed")}   ${label}`);
-            } else if (r.status === "skipped") {
-              console.log(`  skipped ${label}: ${r.message ?? "already healthy"}`);
-            } else {
-              console.log(`  ${chalk.red("FAILED")}  ${label}: ${r.message ?? "unknown error"}`);
+      const { totals, results } = await runDoctorFixLoop(
+        datasetIds,
+        (id, index) => {
+          const versions = findings
+            .filter((f) => f.dataset_id === id && f.version)
+            .map((f) => `v${f.version}`)
+            .join(", ");
+          spinner.text = `Fixing ${id}${versions ? ` (${versions})` : ""} [${index + 1}/${datasetIds.length}]...`;
+          return doctorFix({ check, datasetId: id });
+        },
+        {
+          onDataset: (id, perDataset) => {
+            spinner.stop();
+            if (perDataset.length === 0) {
+              console.log(`  resolved ${id}: healed between the scan and its fix turn`);
             }
-          }
-          spinner.start();
-        } catch (err) {
-          totals.failed++;
-          allResults.push({ dataset_id: id, status: "failed", message: errorDetail(err) });
-          spinner.stop();
-          console.log(`  ${chalk.red("FAILED")}  ${id}: ${errorDetail(err)}`);
-          spinner.start();
-        }
-      }
+            for (const r of perDataset) {
+              const label = `${r.dataset_id}${r.version ? `@v${r.version}` : ""}`;
+              if (r.status === "fixed") {
+                console.log(`  ${chalk.green("fixed")}   ${label}`);
+              } else if (r.status === "skipped") {
+                console.log(`  skipped ${label}: ${r.message ?? "already healthy"}`);
+              } else {
+                console.log(`  ${chalk.red("FAILED")}  ${label}: ${r.message ?? "unknown error"}`);
+              }
+            }
+            spinner.start();
+          },
+        },
+      );
       spinner.stop();
 
       if (options.json) {
-        console.log(
-          JSON.stringify(
-            { check, total: findings.length, ...totals, results: allResults },
-            null,
-            2,
-          ),
-        );
+        console.log(JSON.stringify({ check, total: findings.length, ...totals, results }, null, 2));
       } else {
+        const resolvedNote = totals.resolved > 0 ? `, ${totals.resolved} already resolved` : "";
         console.log(
-          `\n${chalk.bold(check)}: ${chalk.green(`${totals.fixed} fixed`)}, ${totals.skipped} skipped, ${totals.failed > 0 ? chalk.red(`${totals.failed} failed`) : "0 failed"}`,
+          `\n${chalk.bold(check)}: ${chalk.green(`${totals.fixed} fixed`)}, ${totals.skipped} skipped, ${totals.failed > 0 ? chalk.red(`${totals.failed} failed`) : "0 failed"}${resolvedNote}`,
         );
       }
       // Non-zero exit when any fix failed, so a caller never reads a
@@ -5385,6 +5378,54 @@ doctorCommand
       if (totals.failed > 0) process.exit(1);
     },
   );
+
+/** Aggregated outcome of {@link runDoctorFixLoop}. `resolved` counts datasets
+ *  whose findings were healed between enumeration and their fix turn (the
+ *  narrowed server-side re-scan returned zero results). */
+export interface DoctorFixLoopOutcome {
+  totals: { fixed: number; skipped: number; failed: number; resolved: number };
+  results: DoctorFixResult[];
+}
+
+/**
+ * Per-dataset driver for `nemar admin doctor fix` (#1133 review fix). Pure
+ * aggregation over a dependency-injected `fixOne`, mirroring runReauditLoop's
+ * extraction convention, so two properties are unit-testable without a server:
+ * a dataset healed in the interim is counted as `resolved` (never silently
+ * dropped from the tally), and a thrown `fixOne` records a failed result and
+ * continues with the remaining datasets instead of aborting the run.
+ */
+export async function runDoctorFixLoop(
+  datasetIds: string[],
+  fixOne: (datasetId: string, index: number) => Promise<DoctorFixLiveResponse>,
+  hooks?: {
+    /** Called after each dataset with its per-dataset results (empty = resolved). */
+    onDataset?: (datasetId: string, results: DoctorFixResult[]) => void;
+  },
+): Promise<DoctorFixLoopOutcome> {
+  const totals = { fixed: 0, skipped: 0, failed: 0, resolved: 0 };
+  const results: DoctorFixResult[] = [];
+  for (const [index, id] of datasetIds.entries()) {
+    let perDataset: DoctorFixResult[];
+    try {
+      const res = await fixOne(id, index);
+      perDataset = res.results;
+      if (perDataset.length === 0) {
+        totals.resolved++;
+      } else {
+        totals.fixed += res.fixed;
+        totals.skipped += res.skipped;
+        totals.failed += res.failed;
+      }
+    } catch (err) {
+      totals.failed++;
+      perDataset = [{ dataset_id: id, status: "failed", message: errorDetail(err) }];
+    }
+    results.push(...perDataset);
+    hooks?.onDataset?.(id, perDataset);
+  }
+  return { totals, results };
+}
 
 adminCommand.addCommand(doctorCommand);
 

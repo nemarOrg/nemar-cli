@@ -673,7 +673,7 @@ async function handleEzidVersionDoiLegacy(
       } catch (dispatchErr) {
         manifestErrorMsg = errorMessage(dispatchErr);
         console.error(
-          `[webhook][manifest-missing] Central manifest dispatch failed for ${dataset.dataset_id}@${version} (daily manifest-sweep retries, #1130):`,
+          `[webhook][manifest-missing] Central manifest dispatch failed for ${dataset.dataset_id}@${version} (manifest_jobs row marked failed; no dataset_versions row yet, so the daily manifest-sweep cannot see this — re-drive backstop tracked as #1136):`,
           dispatchErr,
         );
       }
@@ -703,7 +703,7 @@ async function handleEzidVersionDoiLegacy(
       } catch (manifestErr) {
         manifestErrorMsg = errorMessage(manifestErr);
         console.error(
-          `[webhook][manifest-missing] Manifest generation failed for ${dataset.dataset_id}@${version} (daily manifest-sweep retries, #1130):`,
+          `[webhook][manifest-missing] Manifest generation failed for ${dataset.dataset_id}@${version} (legacy inline path: dataset_versions row exists, daily manifest-sweep retries, #1130):`,
           manifestErr,
         );
       }
@@ -930,7 +930,7 @@ async function handleZenodoVersionDoi(
       } catch (dispatchErr) {
         manifestErrorMsg = errorMessage(dispatchErr);
         console.error(
-          `[webhook][manifest-missing] Central manifest dispatch failed for ${dataset.dataset_id}@${version} (daily manifest-sweep retries, #1130):`,
+          `[webhook][manifest-missing] Central manifest dispatch failed for ${dataset.dataset_id}@${version} (manifest_jobs row marked failed; no dataset_versions row yet, so the daily manifest-sweep cannot see this — re-drive backstop tracked as #1136):`,
           dispatchErr,
         );
       }
@@ -960,7 +960,7 @@ async function handleZenodoVersionDoi(
       } catch (manifestErr) {
         manifestErrorMsg = errorMessage(manifestErr);
         console.error(
-          `[webhook][manifest-missing] Manifest generation failed for ${dataset.dataset_id}@${version} (daily manifest-sweep retries, #1130):`,
+          `[webhook][manifest-missing] Manifest generation failed for ${dataset.dataset_id}@${version} (legacy inline path: dataset_versions row exists, daily manifest-sweep retries, #1130):`,
           manifestErr,
         );
       }

@@ -1207,19 +1207,28 @@ export interface DoctorFixResult {
   details?: Record<string, unknown>;
 }
 
-/** Response of `POST /admin/doctor/fix`. `dry_run: true` returns the
- *  would-fix shape instead of writing. */
-export interface DoctorFixResponse {
+/** `POST /admin/doctor/fix` with `dry_run: true`: lists findings, writes nothing. */
+export interface DoctorFixDryRunResponse {
   check: string;
-  dry_run?: boolean;
-  would_fix?: number;
-  findings?: DoctorFinding[];
-  total?: number;
-  fixed?: number;
-  skipped?: number;
-  failed?: number;
-  results?: DoctorFixResult[];
+  dry_run: true;
+  would_fix: number;
+  findings: DoctorFinding[];
 }
+
+/** `POST /admin/doctor/fix` live run: per-finding outcomes and counts. */
+export interface DoctorFixLiveResponse {
+  check: string;
+  total: number;
+  fixed: number;
+  skipped: number;
+  failed: number;
+  results: DoctorFixResult[];
+}
+
+/** Discriminated on `dry_run` so a caller cannot read live-run counts off a
+ *  dry-run response (or vice versa); the overloads on {@link doctorFix} pick
+ *  the arm at the call site. */
+export type DoctorFixResponse = DoctorFixDryRunResponse | DoctorFixLiveResponse;
 
 /** Run doctor diagnostic checks (read-only). Omit `check` to run them all. */
 export async function doctorScan(options?: {
@@ -1240,6 +1249,16 @@ export async function doctorScan(options?: {
 }
 
 /** Apply a doctor check's remediation. `dryRun` lists findings without writing. */
+export async function doctorFix(options: {
+  check: string;
+  datasetId?: string;
+  dryRun: true;
+}): Promise<DoctorFixDryRunResponse>;
+export async function doctorFix(options: {
+  check: string;
+  datasetId?: string;
+  dryRun?: false;
+}): Promise<DoctorFixLiveResponse>;
 export async function doctorFix(options: {
   check: string;
   datasetId?: string;
