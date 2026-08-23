@@ -13,6 +13,8 @@ Run with:
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -55,6 +57,7 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     reset_peak_rss,
     peak_rss_bytes,
     inmem_factor_for,
+    is_maxshield_fif,
     calibration_summary,
     INMEM_MEM_FACTOR,
     usable_ram_bytes,
@@ -2996,6 +2999,142 @@ class TestMemoryErrorBeforePeakResetIsTyped(unittest.TestCase):
         res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
         self.assertFalse(res["ok"])
         self.assertIsNone(res["code"])
+
+
+class TestMaxShieldWiringInConvertOne(unittest.TestCase):
+    """ADR 0028's decision, as `convert_one` actually wires it (#1126).
+
+    The pieces were covered in isolation -- `maxshield_calibration_for`'s
+    resolution, and that `maxshield_uncalibrated` is classified deterministic --
+    but nothing exercised the code that CONNECTS them. A regression that let any
+    of these branches fall through would serve raw Internal Active Shielding
+    data, which is the one outcome ADR 0028 exists to prevent, and every
+    isolated test would still have passed.
+
+    `is_maxshield_fif` is substituted here, and only it. Real detection needs
+    both MNE (absent from the pure-python CI job) and a genuine IAS recording,
+    and it is an environmental PROBE, not the decision under test: what runs for
+    real below is the pair resolution, all three decline branches, and the
+    verdict `convert_one` returns. Same injection the module already uses for
+    `reset_peak_rss` in TestMemoryErrorBeforePeakReset.
+    """
+
+    REC = "sub-01/meg/sub-01_task-rest_meg.fif"
+    CAL = "sub-01/meg/sub-01_acq-calibration_meg.dat"
+    CTC = "sub-01/meg/sub-01_acq-crosstalk_meg.fif"
+
+    def setUp(self):
+        import generate_zarr as gz
+
+        self.gz = gz
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = os.path.join(self._tmp.name, "repo")
+        os.makedirs(os.path.join(self.repo, "sub-01", "meg"), exist_ok=True)
+        self._write(self.REC)
+
+        try:
+            import resource
+
+            saved = resource.getrlimit(resource.RLIMIT_DATA)
+            self.addCleanup(resource.setrlimit, resource.RLIMIT_DATA, saved)
+        except Exception:  # noqa: BLE001 - no usable RLIMIT_DATA (macOS/Windows)
+            pass
+
+        self._orig_probe, self._orig_ctx = gz.is_maxshield_fif, gz._CTX
+        self.addCleanup(setattr, gz, "is_maxshield_fif", self._orig_probe)
+        self.addCleanup(setattr, gz, "_CTX", self._orig_ctx)
+
+    def _write(self, rel: str) -> None:
+        path = os.path.join(self.repo, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(b"\0")
+
+    def _run(self, head_files, *, shielded=True):
+        self.gz.is_maxshield_fif = lambda _p: shielded
+        self.gz._CTX = {
+            "mem_budget": None,
+            "tmp": self._tmp.name,
+            "local": True,
+            "repo": self.repo,
+            "head_files": set(head_files),
+            "bucket": "b",
+            "dataset_id": "on000001",
+            "head": "0" * 40,
+        }
+        return self.gz.convert_one(self.REC, 4 * 1024**3)
+
+    def test_no_calibration_pair_declines_with_the_typed_code(self):
+        res = self._run([self.REC])
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["code"], self.gz.MaxShieldUncalibrated.code)
+        # Assert the REASON, not just the code. Every decline branch here raises
+        # the same code, so a code-only assertion still passes when this branch
+        # falls through and a later one happens to catch the mess -- which is
+        # exactly what a fallthrough regression looks like.
+        self.assertIn("no fine-calibration", res["error"])
+
+    def test_calibration_alone_is_not_enough(self):
+        # ADR 0028 rejects uncalibrated SSS: half a pair must decline, not filter.
+        self._write(self.CAL)
+        res = self._run([self.REC, self.CAL])
+        self.assertEqual(res["code"], self.gz.MaxShieldUncalibrated.code)
+        self.assertIn("no fine-calibration", res["error"])
+
+    def test_cross_talk_alone_is_not_enough(self):
+        self._write(self.CTC)
+        res = self._run([self.REC, self.CTC])
+        self.assertEqual(res["code"], self.gz.MaxShieldUncalibrated.code)
+        self.assertIn("no fine-calibration", res["error"])
+
+    def test_tracked_pair_without_local_content_declines(self):
+        # A git-annex pointer whose content was never fetched. Left uncoded this
+        # became an infra failure that re-ran the filter on every future pass.
+        res = self._run([self.REC, self.CAL, self.CTC])  # in head_files, not on disk
+        self.assertEqual(res["code"], self.gz.MaxShieldUncalibrated.code)
+        self.assertIn("git annex get", res["error"])
+
+    def test_a_resolvable_pair_gets_past_the_gate(self):
+        # The other direction: with both inputs really present, the decline must
+        # NOT fire -- otherwise the 365 recoverable recordings ADR 0028 counted
+        # would all be declined and the filtering would never run at all.
+        self._write(self.CAL)
+        self._write(self.CTC)
+        res = self._run([self.REC, self.CAL, self.CTC])
+        self.assertNotEqual(res.get("code"), self.gz.MaxShieldUncalibrated.code)
+
+    def test_a_recording_that_is_not_shielded_never_declines(self):
+        # The gate is conditioned on detection: an ordinary FIF in a dataset that
+        # ships no calibration pair must convert normally, not be declined.
+        res = self._run([self.REC], shielded=False)
+        self.assertNotEqual(res.get("code"), self.gz.MaxShieldUncalibrated.code)
+
+
+class TestIsMaxShieldFif(unittest.TestCase):
+    """The MaxShield probe's own edges (#1126)."""
+
+    def test_a_non_fif_is_not_probed(self):
+        # Short-circuits on extension, so it costs nothing on the EEG datasets
+        # that make up most of the archive and never needs MNE.
+        self.assertFalse(is_maxshield_fif("sub-01/eeg/sub-01_task-x_eeg.set"))
+
+    def test_an_unreadable_fif_warns_instead_of_failing_silently(self):
+        # A header probe that fails routes the recording down the normal path,
+        # where a genuinely shielded file yields an opaque file_read_error. That
+        # is a real regression risk (truncated download, missing split member),
+        # so it must leave a warning rather than pass silently.
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = os.path.join(tmp, "sub-01_task-x_meg.fif")
+            with open(bad, "wb") as fh:
+                fh.write(b"not a fif")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                result = is_maxshield_fif(bad)
+        self.assertFalse(result)
+        out = buf.getvalue()
+        self.assertIn("::warning::", out)
+        self.assertIn("Internal Active Shielding", out)
 
 
 class TestWorkerMemLimit(unittest.TestCase):

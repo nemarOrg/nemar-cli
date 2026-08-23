@@ -409,6 +409,40 @@ class UnlistedSweepTest(unittest.TestCase):
         reconcile(self.conn, [("nm000001", "1.0.0")], 3600, listing_complete=True)
         self.assertEqual(self.status("on000002"), "unlisted")
 
+    def test_relisting_an_exhausted_row_restores_its_full_retry_budget(self):
+        """A row that failed its way to terminal, was parked, and later came back
+        must convert again -- not arrive one failure from terminal.
+
+        The relist branch resets attempts/last_error/next_retry_at precisely so
+        the row is not judged on failures that happened while the dataset was in
+        a different state. Without that reset the dataset would go straight back
+        to terminal on its next hiccup and silently stay unconverted.
+        """
+        mark_fail(self.conn, "on000002", "boom", max_attempts=1, backoff_base=1)
+        self.assertEqual(self.status("on000002"), "failed")
+        row = self.conn.execute(
+            "SELECT attempts, last_error FROM jobs WHERE dataset_id='on000002'"
+        ).fetchone()
+        self.assertGreater(row["attempts"], 0)  # guard: the case is real
+        self.assertIsNotNone(row["last_error"])
+
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600, listing_complete=True)
+        self.assertEqual(self.status("on000002"), "unlisted")
+
+        reconcile(
+            self.conn,
+            [("nm000001", "1.0.0"), ("on000002", "1.0.0")],
+            3600,
+            listing_complete=True,
+        )
+        self.assertEqual(self.status("on000002"), "pending")
+        back = self.conn.execute(
+            "SELECT attempts, last_error, next_retry_at FROM jobs WHERE dataset_id='on000002'"
+        ).fetchone()
+        self.assertEqual(back["attempts"], 0)
+        self.assertIsNone(back["last_error"])
+        self.assertEqual(back["next_retry_at"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
