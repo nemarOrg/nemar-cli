@@ -25,8 +25,9 @@ scratch, which wedged the queue on a single unconvertible dataset).
 Subcommands (all take --db):
     reconcile --api-base URL [--stale-seconds N]
         Pull GET /datasets, enqueue (status=pending) every public nm/on dataset
-        whose latest_version != converted_version, and reset stale `inprogress`
-        rows to `pending`. Idempotent.
+        whose latest_version != converted_version, reset stale `inprogress` rows
+        to `pending`, and park rows the catalog no longer lists as `unlisted`
+        (withdrawn or returned to private -- see `reconcile`). Idempotent.
     next [--max-attempts N]
         Atomically claim the oldest eligible job -> `inprogress`; print
         "<dataset_id>\t<latest_version>" (nothing if the queue is drained).
@@ -107,7 +108,12 @@ def backoff_seconds(attempts: int, base: int, cap: int = 6 * 3600) -> int:
 # --- transition helpers (exercised by the unit tests) -------------------------
 
 
-def reconcile(conn: sqlite3.Connection, datasets: list[tuple[str, str]], stale_seconds: int) -> dict:
+def reconcile(
+    conn: sqlite3.Connection,
+    datasets: list[tuple[str, str]],
+    stale_seconds: int,
+    listing_complete: bool = False,
+) -> dict:
     """Enqueue datasets needing (re)conversion + recover stale inprogress rows.
 
     `datasets` is a list of (dataset_id, latest_version). A dataset is enqueued
@@ -116,6 +122,22 @@ def reconcile(conn: sqlite3.Connection, datasets: list[tuple[str, str]], stale_s
     left alone (a new version flips it back to pending). `inprogress` rows whose
     `updated_at` is older than `stale_seconds` are assumed crashed and reset to
     `pending` so they run again.
+
+    `listing_complete` enables the `unlisted` sweep: a row for a dataset the
+    catalog no longer lists is parked as `unlisted` so `claim_next` stops handing
+    it out. Withdrawal is the case that motivated this (#1048) -- ten withdrawn
+    datasets sat `pending` forever, each run cloning them, failing on content
+    that is 0-byte by design, and writing failure lines that made the conversion
+    log look worse than it was. A dataset merely returned to private looks
+    identical from here, which is why the status says `unlisted` rather than
+    `withdrawn`: absence from the public catalog is all this process can observe.
+
+    The sweep is gated because it is the one destructive thing reconcile does.
+    A short read from a paginated catalog fetch would otherwise unlist the whole
+    queue, so the caller must have verified it saw every page (see
+    :func:`fetch_public_datasets`). Parking rather than deleting keeps
+    `converted_version` intact, and a dataset that reappears in the catalog goes
+    straight back to `pending` below.
     """
     now_iso, now = _now_iso(), _now()
     enq = 0
@@ -158,6 +180,15 @@ def reconcile(conn: sqlite3.Connection, datasets: list[tuple[str, str]], stale_s
                     (latest, now, dataset_id),
                 )
                 enq += 1
+        elif status == "unlisted":
+            # Back in the catalog, so it is convertible again. Reset attempts:
+            # whatever failed before was about a dataset in a different state.
+            conn.execute(
+                "UPDATE jobs SET latest_version=?, status='pending', attempts=0,"
+                " next_retry_at=0, last_error=NULL, updated_at=? WHERE dataset_id=?",
+                (latest or row["latest_version"], now, dataset_id),
+            )
+            enq += 1
         else:
             # pending / inprogress -- refresh the target version only. Do NOT
             # touch updated_at: it is the inprogress heartbeat the stale-recovery
@@ -168,13 +199,33 @@ def reconcile(conn: sqlite3.Connection, datasets: list[tuple[str, str]], stale_s
                     (latest, dataset_id),
                 )
 
+    unlisted = 0
+    if listing_complete:
+        # Compare against a temp table rather than an inlined `NOT IN (?, ?, ...)`:
+        # the catalog is already ~800 rows and SQLite caps host parameters.
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS listed(dataset_id TEXT PRIMARY KEY)")
+        conn.execute("DELETE FROM listed")
+        conn.executemany(
+            "INSERT OR IGNORE INTO listed(dataset_id) VALUES(?)",
+            [(dataset_id,) for dataset_id, _ in datasets],
+        )
+        # `inprogress` is excluded on purpose: a converter is holding that row
+        # right now, and its own completion decides the outcome. If the dataset
+        # really is gone the run fails and the next reconcile parks it.
+        unlisted = conn.execute(
+            "UPDATE jobs SET status='unlisted', next_retry_at=0, updated_at=?"
+            " WHERE status NOT IN ('unlisted', 'inprogress')"
+            " AND dataset_id NOT IN (SELECT dataset_id FROM listed)",
+            (now,),
+        ).rowcount
+
     recovered = conn.execute(
         "UPDATE jobs SET status='pending', next_retry_at=0, updated_at=?"
         " WHERE status='inprogress' AND updated_at < ?",
         (now, now - stale_seconds),
     ).rowcount
     conn.commit()
-    return {"enqueued": enq, "recovered_stale": recovered}
+    return {"enqueued": enq, "recovered_stale": recovered, "unlisted": unlisted}
 
 
 def claim_next(conn: sqlite3.Connection) -> sqlite3.Row | None:
@@ -299,31 +350,39 @@ def requeue(
 # --- I/O: fetch the dataset list ----------------------------------------------
 
 
-def fetch_public_datasets(api_base: str) -> list[tuple[str, str]]:
-    """Every public dataset as (dataset_id, latest_version).
+def fetch_public_datasets(api_base: str) -> tuple[list[tuple[str, str]], bool]:
+    """Every public dataset as (dataset_id, latest_version), plus completeness.
 
     Paginates: `GET /datasets` caps a page at 200 regardless of `limit`, so we
     walk `offset` until `total_count`. A non-default User-Agent is required --
     api.nemar.org sits behind Cloudflare, which 403s the default Python-urllib UA
     as a bot.
+
+    The second return value says whether every page was actually seen. A short
+    read is benign for enqueueing (the missing datasets are simply picked up next
+    run) but NOT for reconcile's `unlisted` sweep, which would read a truncated
+    catalog as "these datasets are gone" and park the queue. So the walk stops
+    on an empty page rather than looping forever, and reports the shortfall
+    instead of hiding it (#1048).
     """
     base = api_base.rstrip("/")
     out: list[tuple[str, str]] = []
-    offset, page = 0, 200
+    offset, page, total = 0, 200, 0
     while True:
         url = f"{base}/datasets?limit={page}&offset={offset}"
         req = urllib.request.Request(url, headers={"User-Agent": "nemar-zarr-cron/1.0"})
         with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310 - trusted NEMAR API
             payload = json.loads(resp.read().decode("utf-8"))
         rows = payload.get("datasets", []) or []
+        total = int(payload.get("total_count", 0) or 0)
         for d in rows:
             if d.get("visibility") != "public":
                 continue
             out.append((str(d.get("dataset_id", "")), str(d.get("latest_version") or "")))
         offset += len(rows)
-        if not rows or offset >= int(payload.get("total_count", 0) or 0):
+        if not rows or offset >= total:
             break
-    return out
+    return out, bool(total) and offset >= total
 
 
 # --- CLI ----------------------------------------------------------------------
@@ -381,11 +440,12 @@ def main() -> int:
     conn = connect(args.db)
 
     if args.cmd == "reconcile":
-        datasets = fetch_public_datasets(args.api_base)
-        res = reconcile(conn, datasets, args.stale_seconds)
+        datasets, complete = fetch_public_datasets(args.api_base)
+        res = reconcile(conn, datasets, args.stale_seconds, listing_complete=complete)
         print(
             f"reconcile: seen={len(datasets)} enqueued={res['enqueued']} "
-            f"recovered_stale={res['recovered_stale']}"
+            f"recovered_stale={res['recovered_stale']} unlisted={res['unlisted']}"
+            + ("" if complete else " (PARTIAL catalog read; unlisted sweep skipped)")
         )
         return 0
 
