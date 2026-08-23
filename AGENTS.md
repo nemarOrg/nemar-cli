@@ -315,6 +315,10 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   hand-placed copy git never touches. Ship it with `scp` + atomic `mv`; the script
   logs `DRIFT:` when the deployed copy differs from the repo copy. Manual recovery
   for one dataset is `hallu-zarr.sh --dataset <id>`.
+  "Every run" is load-bearing and used to be a lie during a backfill: a run holds
+  the lock until the queue empties, so `setup()` never re-ran and the node sat two
+  deploys behind for two days (#1129). The drain now re-checks `origin/$DRIVER_REF`
+  between datasets and stops when it moves, so the next tick redeploys.
   Conversion streams by default above 256 MiB, so peak RAM is a read window
   plus one channel rather than the whole recording (ADR 0030). EEGLAB `.set`
   is the one format that cannot: MNE refuses v7.3 files that biosigIO reads,

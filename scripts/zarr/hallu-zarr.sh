@@ -25,7 +25,10 @@
 #              resample/compress.
 #         flock keeps a single long backfill draining across hourly cron ticks
 #         (a later tick finds the lock held and exits). As long as the box is on,
-#         the cron fires and the queue resumes exactly where it left off.
+#         the cron fires and the queue resumes exactly where it left off. The
+#         drain also stops itself at a dataset boundary when origin/$DRIVER_REF
+#         moves, so a merged driver change reaches the node on the next tick
+#         instead of waiting out the backfill (#1129).
 #
 # Usage:
 #   ./hallu-zarr.sh                      # reconcile + drain the queue
@@ -450,6 +453,32 @@ if [[ -f "$REPO_SELF" && "$SELF" != "$REPO_SELF" ]] && ! cmp -s "$SELF" "$REPO_S
   err "DRIFT: $SELF differs from $REPO_SELF (origin/${DRIVER_REF}). Changes merged to this script are NOT live; deploy it."
 fi
 
+# The drift guard above answers "is this script stale relative to the repo it was
+# launched from". It CANNOT answer "has that repo moved since this run started",
+# and during a backfill that is the question that matters: a run does not end
+# until the queue is empty, so setup() never re-runs and the deployed driver is
+# frozen for the whole drain. Measured once, and it is not a small window --
+# Hallu ran a driver two deploys behind for two days, missing the entire epic
+# #1108 memory work, because the run holding the lock had started before the
+# cutover (#1129).
+#
+# So re-check the tracked ref BETWEEN datasets and stop cleanly when it moves.
+# One ls-remote per dataset is noise against per-dataset conversion times
+# measured in minutes, and the queue persists across runs, so stopping costs
+# nothing but the next cron tick.
+#
+# A failed ls-remote must NEVER stop a backfill: a network blip is not a reason
+# to halt hours of work, and the worst case of ignoring it is that the redeploy
+# waits for the next dataset boundary.
+ref_moved() {
+  local remote_head local_head
+  remote_head="$(git -C "$DRIVER_REPO" ls-remote origin "$DRIVER_REF" 2>/dev/null | cut -f1)"
+  [[ -z "$remote_head" ]] && return 1
+  local_head="$(git -C "$DRIVER_REPO" rev-parse HEAD 2>/dev/null)"
+  [[ -z "$local_head" ]] && return 1
+  [[ "$remote_head" != "$local_head" ]]
+}
+
 if [[ -n "$STATS_ONLY" ]]; then
   qpy stats
   exit 0
@@ -486,6 +515,10 @@ while :; do
   n=$((n + 1))
   if [[ "$LIMIT" -gt 0 && "$n" -ge "$LIMIT" ]]; then
     log "reached --limit $LIMIT; stopping (queue persists; next run continues)"
+    break
+  fi
+  if ref_moved; then
+    log "origin/${DRIVER_REF} moved; stopping so the next run redeploys (queue persists)"
     break
   fi
 done
