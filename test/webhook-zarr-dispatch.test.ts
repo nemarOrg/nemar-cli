@@ -1,11 +1,16 @@
 /**
  * Tests for the Zarr-generation dispatch filter (epic #684 / Stream C #685).
  *
- * `POST /webhooks/github` fans a `push` delivery out to the Zarr workflow via
- * the pure decision function `shouldDispatchZarr` (and its path matcher
- * `isZarrTriggerPath`). Keeping both pure lets the filter table be asserted
- * without a Hono app / fake GitHub / env mocks, mirroring
- * webhook-github-push.test.ts.
+ * `POST /webhooks/github` USED TO fan a `push` delivery out to the Zarr Actions
+ * workflow via the pure decision function `shouldDispatchZarr` (and its path
+ * matcher `isZarrTriggerPath`). #1109 retired that dispatch path -- conversion
+ * runs on the SDSC Hallu cron -- so these functions now have no production
+ * caller and this file tests their standalone contract: the raw-only path rules
+ * recorded in ADR 0027, which `zarr-gate-superset.unit.test.ts` then asserts
+ * against the converter's own constants (#1103).
+ *
+ * Keeping both pure lets the filter table be asserted without a Hono app / fake
+ * GitHub / env mocks, mirroring webhook-github-push.test.ts.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -41,6 +46,20 @@ describe("isZarrTriggerPath", () => {
     }
   });
 
+  test("matches the KIT/Yokogawa/RICOH MEG extensions (bug fix, on007763)", () => {
+    // generate_zarr.py's PRIMARY_EXTS has always included these three; the
+    // gate was missing them, so a push touching a KIT/Yokogawa/RICOH MEG
+    // recording never re-dispatched conversion. on007763 has 35 affected
+    // `.con` recordings.
+    for (const p of [
+      "sub-01/meg/sub-01_task-x_meg.con", // KIT/Yokogawa
+      "sub-01/meg/sub-01_task-x_meg.sqd", // KIT/Yokogawa
+      "sub-01/meg/sub-01_task-x_meg.kdf", // RICOH
+    ]) {
+      expect(isZarrTriggerPath(p)).toBe(true);
+    }
+  });
+
   test("matches companion files (a change confined to them still reconverts)", () => {
     for (const p of [
       "sub-01/eeg/sub-01_task-x_eeg.fdt", // EEGLAB samples
@@ -67,6 +86,76 @@ describe("isZarrTriggerPath", () => {
     expect(isZarrTriggerPath("sub-01/meg/sub-01_task-x_meg.ds")).toBe(false);
   });
 
+  test("matches any file inside a MEF3 .mefd recording directory", () => {
+    // MEF3 mirrors CTF .ds: <name>.mefd/<CH>.timd/<CH>-000000.segd/*.tdat etc.
+    for (const p of [
+      "sub-01/ieeg/sub-01_task-x_ieeg.mefd/Ch1.timd/Ch1-000000.segd/Ch1-000000.tdat",
+      "sub-01/ieeg/sub-01_task-x_ieeg.mefd/Ch1.timd/Ch1-000000.segd/Ch1-000000.tidx",
+      "sub-01/ieeg/sub-01_task-x_ieeg.mefd/Ch1.timd/Ch1-000000.segd/Ch1-000000.tmet",
+    ]) {
+      expect(isZarrTriggerPath(p)).toBe(true);
+    }
+  });
+
+  test("matches a 4D/BTi directory member via the c,rf* basename", () => {
+    // 4D/BTi is directory-based like .ds/.mefd, but BIDS gives the directory
+    // NO extension, so extension matching can't see it; match content-wise
+    // on the conventional `c,rfDC` basename instead.
+    expect(isZarrTriggerPath("sub-01/meg/sub-01_task-x_meg/c,rfDC")).toBe(true);
+    // Other real BTi PDF spellings share the `c,rf` prefix.
+    expect(isZarrTriggerPath("sub-01/meg/sub-01_task-x_run-01_meg/c,rfhp0.1Hz")).toBe(true);
+  });
+
+  test("c,rf* matches at any depth, NOT only under a `_meg` directory", () => {
+    // This gate must stay a SUPERSET of the converter, whose `bti_recordings`
+    // keys a BTi dir on `c,rf*` plus a sibling `config` with no constraint on
+    // the directory name. Requiring `_meg` here would make the gate narrower
+    // than the converter, so a BTi dir named anything else would convert but
+    // never re-dispatch, going stale silently -- the KIT failure mode again.
+    for (const p of [
+      "sub-01/meg/sub-01_task-x_meg/c,rfDC",
+      "sub-01/meg/sub-01_task-x_eeg/c,rfDC", // odd datatype name, still a recording
+      "misc/c,rfDC",
+      "sub-01/meg/notes/c,rfDC",
+    ]) {
+      expect(isZarrTriggerPath(p)).toBe(true);
+    }
+    // A top-level file sits inside no directory, so it cannot be a member.
+    expect(isZarrTriggerPath("c,rfDC")).toBe(false);
+  });
+
+  test("never matches 'config'/'hs_file' outside a BIDS `_meg` directory", () => {
+    // Matching these basenames at any depth would false-positive on
+    // `.datalad/config`, present in essentially every dataset repo (verified:
+    // 50 of 51 datasets during analysis), firing on nearly every metadata-only
+    // push across ~785 repos.
+    for (const p of [
+      ".datalad/config",
+      "config", // top level
+      "code/config",
+      "sub-01/meg/notes/config",
+      "sub-01/meg/sub-01_task-x_eeg/hs_file", // wrong datatype segment
+    ]) {
+      expect(isZarrTriggerPath(p)).toBe(false);
+    }
+  });
+
+  test("DOES match 'config'/'hs_file' inside a BIDS `_meg` directory", () => {
+    // The converter rebuilds a BTi recording on any touched member, and has
+    // tests for a config-only edit and an hs_file deletion both rebuilding. So
+    // the gate must fire for them too or those pushes go stale. Requiring the
+    // `..._meg/` parent is the narrowest rule that covers them without the
+    // `.datalad/config` blast radius. Additive to the `c,rf*` match, so it
+    // cannot re-narrow the gate.
+    for (const p of [
+      "sub-01/meg/sub-01_task-x_meg/config",
+      "sub-01/meg/sub-01_task-x_meg/hs_file",
+      "sub-01/ses-01/meg/sub-01_ses-01_task-x_run-01_meg/config",
+    ]) {
+      expect(isZarrTriggerPath(p)).toBe(true);
+    }
+  });
+
   test("does NOT match metadata / sidecar JSON / README / other tsv", () => {
     for (const p of [
       "dataset_description.json",
@@ -78,6 +167,64 @@ describe("isZarrTriggerPath", () => {
     ]) {
       expect(isZarrTriggerPath(p)).toBe(false);
     }
+  });
+
+  test("does NOT match derivatives/, sourcedata/, or code/ at top level", () => {
+    for (const p of [
+      "derivatives/pipeline-x/sub-01/eeg/sub-01_task-x_eeg.set",
+      "sourcedata/sub-01/eeg/sub-01_task-x_eeg.edf",
+      "code/preprocess.py",
+      // Directory-based formats are excluded the same way.
+      "derivatives/pipeline-x/sub-01/meg/sub-01_task-x_meg.ds/sub-01_task-x_meg.meg4",
+      "sourcedata/sub-01/ieeg/sub-01_task-x_ieeg.mefd/Ch1.timd/Ch1-000000.segd/x.tdat",
+      "derivatives/pipeline-x/sub-01/meg/sub-01_task-x_meg/c,rfDC",
+    ]) {
+      expect(isZarrTriggerPath(p)).toBe(false);
+    }
+  });
+
+  test("does NOT match derivatives/, sourcedata/, or code/ nested under another path", () => {
+    for (const p of [
+      "sub-01/derivatives/pipeline-x/sub-01_task-x_eeg.set",
+      "sub-01/sourcedata/sub-01_task-x_eeg.edf",
+      "sub-01/code/analyze.py",
+    ]) {
+      expect(isZarrTriggerPath(p)).toBe(false);
+    }
+  });
+
+  test("excludes on a path SEGMENT, not a bare substring", () => {
+    // isInExcludedTree matches `${dir}/` at a segment boundary. Pin that, so
+    // collapsing it to a bare `p.includes(dir)` fails here instead of silently
+    // dropping every recording whose path merely CONTAINS an excluded word.
+    for (const p of [
+      "mycode/sub-01/eeg/sub-01_task-x_eeg.set",
+      "derivatives_old/sub-01/eeg/sub-01_task-x_eeg.set",
+      "sourcedatafoo/sub-01/eeg/sub-01_task-x_eeg.set",
+      "sub-01/sourcedata-backup/sub-01_task-x_eeg.set",
+      "sub-01/eeg/sub-01_task-code_eeg.set",
+    ]) {
+      expect(isZarrTriggerPath(p)).toBe(true);
+    }
+  });
+
+  test("excluded-tree match is case-insensitive", () => {
+    // BIDS mandates lowercase for these trees, so a capitalized one is already
+    // malformed -- but a non-raw tree must not become servable just because it
+    // was misnamed, and the extension match is case-insensitive too.
+    for (const p of [
+      "Derivatives/pipeline-x/sub-01/eeg/sub-01_task-x_eeg.set",
+      "SourceData/sub-01/eeg/sub-01_task-x_eeg.edf",
+      "sub-01/CODE/analyze.py",
+    ]) {
+      expect(isZarrTriggerPath(p)).toBe(false);
+    }
+  });
+
+  test("does NOT match a derivatives _events.tsv (exclusion beats the early return)", () => {
+    // The _events.tsv check used to short-circuit before every other check;
+    // the raw-only exclusion must be applied first so this stays excluded.
+    expect(isZarrTriggerPath("derivatives/pipeline-x/sub-01/sub-01_task-x_events.tsv")).toBe(false);
   });
 
   test("extension match is case-insensitive", () => {

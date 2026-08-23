@@ -103,6 +103,8 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "deleteDataset",
     "dispatchCooldown",
     "dispatchManifest",
+    "doctorFix",
+    "doctorScan",
     "enforceBulk",
     "enforceDataset",
     "getCiStatus",
@@ -157,6 +159,8 @@ const INTERNAL_WIRING = ["request"];
 const POST_SPLIT_ADDITIONS = [
   "NOTICE_LEVELS", // #1025, notice level vocabulary
   "approveUserById", // #1012, id-keyed approve for web/ORCID accounts
+  "doctorFix", // #1130, CLI wrapper for POST /admin/doctor/fix
+  "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */

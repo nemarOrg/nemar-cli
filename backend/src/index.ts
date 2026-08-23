@@ -51,6 +51,7 @@ import { isNonProductionEnv } from "./services/environment";
 import { resolveHostRoute } from "./services/host-routing";
 import { OPENNEURO_UPSTREAM_MARKER, runImportRecovery } from "./services/import-recovery";
 import { sweepImportRetries } from "./services/import-retry";
+import { manifestIntegritySweep } from "./services/manifest-sweep";
 import { getActiveNotices } from "./services/notices";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
 import {
@@ -752,6 +753,21 @@ export default {
       // mirror D1 it would repository_dispatch real Actions runs against the
       // shared nemarDatasets org for real datasets.
       ctx.waitUntil(archiveRetrySweep(env));
+      // #1130: heal published versions whose S3 manifest never landed (the
+      // version-DOI callback swallows manifest failures by design, so without
+      // this sweep a rate-limit burst leaves "Version not published" pages
+      // behind indefinitely — the nm000225 incident). Bounded to a recency
+      // window; full-catalog detection lives in nemar-observability.
+      // PROD-ONLY: the fix reads real nemarDatasets repos via the shared App
+      // and uploads to the prod bucket; the guard is also repeated inside.
+      ctx.waitUntil(
+        manifestIntegritySweep(env).catch((err) =>
+          console.error(
+            "[manifest-sweep] sweep failed:",
+            err instanceof Error ? (err.stack ?? err.message) : err,
+          ),
+        ),
+      );
       // #900: backstop for a version-DOI mint that crashed after createIdentifier
       // (reserved) but before makePublic, leaving a permanent non-resolving DOI.
       // PROD-ONLY: sandbox-vs-prod EZID auth is chosen from the DOI string, not

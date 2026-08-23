@@ -101,7 +101,6 @@ export {
   triggerOpenNeuroOnboard,
   triggerPrescreenRun,
   triggerVersionDoiRun,
-  triggerZarrGeneration,
 } from "./github/dispatch";
 export {
   createRepository,

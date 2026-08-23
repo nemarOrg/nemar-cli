@@ -1,0 +1,563 @@
+#!/usr/bin/env bash
+################################################################################
+# NEMAR SDSC Hallu Zarr conversion (queue-driven)
+#
+# Purpose: Build the derived, latest-only Zarr serving copies for NEMAR public
+#          datasets ON Hallu (ample compute + a 1 Gbps link, no GitHub Actions
+#          120-min cap) and push them to s3://nemar/<id>/zarr/. Epic
+#          nemarOrg/nemar-cli#684; the conversion engine replaces the
+#          run-generate-zarr.yml Actions path for bulk/backfill.
+#
+# Design: self-contained, EPHEMERAL, and crash-safe via a persistent SQLite
+#         queue (scripts/zarr/zarr_queue.py). Each run:
+#           1. reconcile -- enqueue every public dataset whose latest version
+#              isn't converted yet, and reset any `inprogress` job left by a
+#              crashed/rebooted run back to `pending`.
+#           2. drain     -- claim the oldest job, clone the dataset's metadata
+#              only (`nemar dataset download --no-data`, seconds), then the
+#              biosigIO driver STREAMs each recording's annex blob from
+#              s3://nemar/<id>/objects/<key> just-in-time -> convert -> push,
+#              JOBS recordings in PARALLEL (ProcessPoolExecutor), onto NVMe
+#              scratch; `rm -rf` the scratch copy and mark the job done (or fail
+#              w/ backoff). Repeat until the queue is empty (or --limit).
+#              Streaming + parallelism start converting immediately, never hold
+#              the whole dataset, and saturate Hallu's cores on the CPU-bound
+#              resample/compress.
+#         flock keeps a single long backfill draining across hourly cron ticks
+#         (a later tick finds the lock held and exits). As long as the box is on,
+#         the cron fires and the queue resumes exactly where it left off. The
+#         drain also stops itself at a dataset boundary when origin/$DRIVER_REF
+#         moves, so a merged driver change reaches the node on the next tick
+#         instead of waiting out the backfill (#1129).
+#
+# Usage:
+#   ./hallu-zarr.sh                      # reconcile + drain the queue
+#   ./hallu-zarr.sh --limit 20           # cap datasets per run (paced)
+#   ./hallu-zarr.sh --dataset nm000132   # one dataset now (bypasses the queue)
+#   ./hallu-zarr.sh --stats              # print queue status and exit
+#   ./hallu-zarr.sh --requeue failed     # dry-run: what a requeue would revive
+#   ./hallu-zarr.sh --requeue all --execute   # revive failed + data_failed
+#
+# --requeue exists because the retry budget for `failed` was spent on OOM-killed
+# workers taking whole datasets down (#1110), and `data_failed` was reachable by
+# a classifier that recorded a runtime out-of-memory as a permanent property of
+# the data (#1111). Both give-ups predate the fixes, so they deserve one more
+# attempt; a genuine data failure simply returns to data_failed next run.
+#
+# Every conversion rebuilds the whole dataset (the driver's --clean) so the
+# serving copy mirrors the current dataset. --clean RECONCILES rather than
+# erases: each store is synced with --delete and only stores that no longer
+# exist in HEAD are removed, after a successful conversion (ADR 0023).
+#
+# Crontab (sibling of hallu-sync, offset to :30):
+#   30 * * * * /path/to/hallu-zarr.sh >> /mnt/local/zarr-state/.nm-zarr-cron.log 2>&1
+#
+# Prereqs: curl, jq, git, git-annex, nemar CLI, aws, uv, python3 in PATH.
+################################################################################
+
+set -uo pipefail
+
+# --- PATH bootstrap (Homebrew/Bun/uv installed under $HOME) -------------------
+for p in "$HOME/.local/homebrew/bin" "$HOME/.bun/bin" "$HOME/.local/bin"; do
+  [[ -d "$p" ]] && PATH="$p:$PATH"
+done
+export PATH
+
+# --- Config (environment-overridable) ----------------------------------------
+# ZARR_BASE is the SINGLE local drive this pipeline lives on. Both the hot
+# per-recording scratch AND the persistent state (queue db, venv, driver clone,
+# logs) hang off it, so the whole pipeline touches exactly one filesystem and has
+# NO network (NFS) dependency: NFS made every Python import, SQLite lock, and stat
+# a network round-trip -- too much tension/traffic on the hot path, and
+# SQLite-over-NFS locking is fragile. All state here is rebuildable (venv/clone
+# via setup(); the queue via `reconcile`) and the real outputs live in S3, so
+# single-drive-local is the right durability trade. Moving to another machine is
+# a one-line change here (or set ZARR_BASE in the environment / crontab).
+#
+# WORK_DIR is the EPHEMERAL per-recording scratch: the driver streams each annex
+# blob here and N parallel workers build temp Zarr stores before upload, so it
+# MUST be fast local disk. Only this subtree is wiped between recordings; the
+# sibling STATE_DIR is never touched by the cleanup.
+ZARR_BASE="${ZARR_BASE:-/mnt/local}"
+WORK_DIR="${ZARR_WORK_DIR:-${ZARR_BASE}/zarr-scratch}"
+STATE_DIR="${ZARR_STATE_DIR:-${ZARR_BASE}/zarr-state}"
+# Max parallel workers = the driver's ProcessPoolExecutor CPU cap. Default to all
+# cores: the driver's RAM-admission control (nemarDatasets/.github#67) dispatches a
+# recording only while the SUM of in-flight projected peaks fits usable RAM, so a
+# high worker count adds CPU parallelism WITHOUT OOM risk or shrinking the
+# per-recording budget (small EEG packs many-wide; large MEG self-limits). Override
+# with ZARR_JOBS.
+JOBS="${ZARR_JOBS:-$(nproc 2>/dev/null || echo 8)}"
+# The driver source. Repatriated from nemarDatasets/.github to nemarOrg/nemar-cli
+# in #1109 (ADR 0029): this engine runs here on the cron, never in Actions, so it
+# belongs with the CLI where it can be developed and tested. Deployment is now a
+# `git pull` of this clone -- do NOT hand-copy the script onto the box again.
+# ZARR_DRIVER_REF pins which ref to track; `main` is the released CLI. Point it at
+# `dev` (or a feature branch) to run an unreleased driver.
+DRIVER_REPO="${ZARR_DRIVER_REPO:-${STATE_DIR}/nemar-cli}"   # clone of nemarOrg/nemar-cli
+DRIVER_REF="${ZARR_DRIVER_REF:-main}"
+VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
+# Fallback only (used when the clone predates scripts/zarr/requirements.txt, which
+# is the real pin). Floor is 1.2.4, not 1.2.3: 1.2.3 added MEF3 .mefd / 4D-BTi
+# import (so a run below that floor would discover a .mefd/BTi recording via
+# generate_zarr.py's dir_recording_of/bti_recordings and then fail to convert it),
+# and 1.2.4 additionally reads MATLAB v7.3 (HDF5) EEGLAB `.set` and recovers three
+# false EDF/BDF rejections. Extras are not optional here: [mef3] carries pymef and
+# [hdf5] carries h5py, and without either the matching recordings raise ImportError
+# at convert time even though discovery finds them.
+BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.4}"
+API_BASE="${API_BASE:-https://api.nemar.org}"
+CALLBACK_URL="${ZARR_CALLBACK_URL:-${API_BASE}/webhooks/zarr-ready}"
+S3_BUCKET="${S3_BUCKET:-nemar}"
+AWS_REGION="${AWS_DEFAULT_REGION:-us-east-2}"
+# Scoped service profile (IAM user nemar-hallu-zarr; s3:Get/Put/Delete on
+# nemar/*/zarr/* + ListBucket). The driver's `aws s3 ...` calls inherit it.
+export AWS_PROFILE="${ZARR_AWS_PROFILE:-nemar-zarr}"
+export AWS_DEFAULT_REGION="$AWS_REGION"
+QUEUE_DB="${ZARR_QUEUE_DB:-${STATE_DIR}/zarr-queue.db}"
+LOG_FILE="${ZARR_LOG_FILE:-${STATE_DIR}/.nm-zarr.log}"
+LOCK_FILE="${ZARR_LOCK_FILE:-${STATE_DIR}/.nm-zarr.lock}"
+# NEMAR_WEBHOOK_TOKEN may be exported by the environment; the callback is skipped
+# when it is empty (the viewer reads index.json, not D1, so the callback is only
+# D1 bookkeeping).
+# NEMAR_WEBHOOK_TOKEN is loaded further down, once log()/err() exist -- a missing
+# token has to be able to announce itself.
+
+ONLY_DATASET=""
+LIMIT="${ZARR_LIMIT:-0}"
+STATS_ONLY=""
+REQUEUE=""
+REQUEUE_EXECUTE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dataset) ONLY_DATASET="$2"; shift 2 ;;
+    --limit) LIMIT="$2"; shift 2 ;;
+    --stats) STATS_ONLY=1; shift ;;
+    # `shift 2` would fail on a bare `--requeue` (one positional left), and since
+    # this script runs without `set -e` a failed shift leaves $# unchanged and the
+    # loop spins forever. Take a value only when one is actually there.
+    --requeue)
+      if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
+        REQUEUE="$2"; shift 2
+      else
+        REQUEUE="failed"; shift
+      fi
+      ;;
+    --execute) REQUEUE_EXECUTE=1; shift ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" | tee -a "$LOG_FILE"; }
+err() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] ERROR: $*" | tee -a "$LOG_FILE" >&2; }
+
+# git-annex marks object files (and their dirs) read-only, so a plain `rm -rf`
+# fails with EPERM. Make the tree writable first, then remove.
+safe_rm() { [[ -n "${1:-}" && -e "$1" ]] || return 0; chmod -R u+w "$1" 2>/dev/null; rm -rf "$1"; }
+
+mkdir -p "$WORK_DIR" "$STATE_DIR"
+# The driver's tempfile.TemporaryDirectory() (per-recording materialize + store)
+# follows TMPDIR; pin it to the NVMe scratch, not the system default.
+export TMPDIR="$WORK_DIR"
+
+# --- Secrets (NEMAR_WEBHOOK_TOKEN) -------------------------------------------
+# Loaded from a chmod-600 file so the token lives neither in crontab nor in any
+# repo. That second half stopped holding when #1109 moved this script INTO the
+# nemar-cli checkout: "beside this script" is now a git working tree, where the
+# file is one `git add -A` away from being committed. Hence the STATE_DIR default,
+# which sits outside the clone alongside the queue DB and the venv.
+#
+# The beside-the-script fallback does NOT carry a token through that move, and it
+# would be dangerous to believe it does. It resolves against wherever the script
+# currently IS, so post-cutover it points inside the clone -- never at the old
+# hand-copy directory the token actually sat in. Relocating the token to STATE_DIR
+# is a required manual step of the cutover, not something this fallback does for
+# you. The fallback covers only the other deployment shape: script and secrets
+# kept together somewhere outside a checkout.
+#
+# An absent token is otherwise SILENT: both callback POSTs below skip when it is
+# empty, so conversion keeps succeeding and uploading while D1's zarr_status
+# quietly stops updating -- a botched cutover would surface only as a dashboard
+# that stopped advancing. Warn instead. It stays non-fatal because the callback is
+# only D1 bookkeeping; the viewer reads index.json from S3, which is still written.
+# Deliberately a function, called just before the conversion loop rather than at
+# top level. Only convert_dataset() reads the token, and --stats/--requeue exit
+# before that: an operator reaching for either during an incident must not be
+# blocked by a webhook-token misconfiguration they are not using. That is the same
+# reasoning that keeps --requeue ahead of the flock and out of setup().
+load_secrets() {
+  local sourced=""
+  if [[ -n "${ZARR_SECRETS_FILE:-}" ]]; then
+    # An explicit override is exclusive. Falling back after a typo'd path would
+    # source a DIFFERENT file than the operator named -- possibly a stale token --
+    # which is worse than stopping, and contradicts the fail-loud rule setup()
+    # uses for the driver checkout.
+    if [[ ! -f "$ZARR_SECRETS_FILE" ]]; then
+      err "FATAL: ZARR_SECRETS_FILE=$ZARR_SECRETS_FILE does not exist. Not falling back."
+      exit 1
+    fi
+    # shellcheck source=/dev/null  # deployment-local, chmod-600, never in the repo
+    source "$ZARR_SECRETS_FILE"
+    sourced="$ZARR_SECRETS_FILE"
+  elif [[ -f "${STATE_DIR}/.zarr-secrets.env" ]]; then
+    # shellcheck source=/dev/null
+    source "${STATE_DIR}/.zarr-secrets.env"
+    sourced="${STATE_DIR}/.zarr-secrets.env"
+  elif [[ -f "${BASH_SOURCE%/*}/.zarr-secrets.env" ]]; then
+    # shellcheck source=/dev/null
+    source "${BASH_SOURCE%/*}/.zarr-secrets.env"
+    sourced="${BASH_SOURCE%/*}/.zarr-secrets.env"
+  fi
+  NEMAR_WEBHOOK_TOKEN="${NEMAR_WEBHOOK_TOKEN:-}"
+  [[ -n "$NEMAR_WEBHOOK_TOKEN" ]] && return 0
+  # Report what actually happened. Naming the search paths when a file WAS sourced
+  # would repeat the original mistake in this PR -- a message describing behaviour
+  # that did not occur -- and this is the message read during a live outage.
+  if [[ -n "$sourced" ]]; then
+    err "sourced $sourced but it did not set NEMAR_WEBHOOK_TOKEN."
+  else
+    err "no NEMAR_WEBHOOK_TOKEN: no secrets file at ${STATE_DIR}/.zarr-secrets.env or ${BASH_SOURCE%/*}/.zarr-secrets.env."
+  fi
+  err "Conversion will run and upload normally, but every zarr-ready callback is SKIPPED, so D1 zarr_status will not advance."
+}
+
+# --- One-time setup: driver repo + biosigIO venv ------------------------------
+setup() {
+  # This script runs `set -uo pipefail` WITHOUT -e, so every git step below is
+  # checked explicitly. An unchecked failure here is the worst kind: `git reset
+  # --hard` validates the revspec BEFORE touching the tree, so a bad DRIVER_REF
+  # exits 128 and leaves the previous run's checkout intact -- the file-existence
+  # check below then passes on STALE code and the cron converts an entire batch
+  # against it, the only trace being a bare `fatal:` line in a multi-megabyte log.
+  # Same "fail loud rather than silently convert on the wrong thing" rule as the
+  # biosigio import guard further down.
+  if [[ -d "$DRIVER_REPO/.git" ]]; then
+    # Verify the clone is the repo we think it is before fetching into it. The
+    # driver moved from nemarDatasets/.github to nemarOrg/nemar-cli (#1109), and
+    # a leftover clone of the OLD repo still has scripts/zarr/generate_zarr.py --
+    # so neither the existence check nor the drift guard would notice, and we
+    # would convert against the wrong tree.
+    actual_url="$(git -C "$DRIVER_REPO" remote get-url origin 2>/dev/null || echo "<unreadable>")"
+    if [[ "$actual_url" != *"nemarOrg/nemar-cli"* ]]; then
+      err "FATAL: $DRIVER_REPO points at '$actual_url', expected nemarOrg/nemar-cli."
+      err "Refusing to run. Remove that directory, or fix ZARR_DRIVER_REPO."
+      exit 1
+    fi
+    if ! git -C "$DRIVER_REPO" fetch -q origin; then
+      err "FATAL: fetch failed for $DRIVER_REPO (currently at $(git -C "$DRIVER_REPO" rev-parse --short HEAD 2>/dev/null || echo unknown))."
+      err "Refusing to convert a batch against a possibly-stale driver."
+      exit 1
+    fi
+    if ! git -C "$DRIVER_REPO" reset -q --hard "origin/${DRIVER_REF}"; then
+      err "FATAL: origin/${DRIVER_REF} does not resolve in $DRIVER_REPO."
+      err "Check ZARR_DRIVER_REF (branch deleted after merge?). Not running a stale driver."
+      exit 1
+    fi
+  else
+    if ! git clone -q --branch "$DRIVER_REF" https://github.com/nemarOrg/nemar-cli "$DRIVER_REPO"; then
+      err "FATAL: clone of nemarOrg/nemar-cli@${DRIVER_REF} into $DRIVER_REPO failed."
+      exit 1
+    fi
+  fi
+  if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+    uv venv -q "$VENV_DIR"
+  fi
+  # Install biosigIO from the driver repo's manifest so the pin is single-sourced
+  # with the Actions workflow (scripts/zarr/requirements.txt). Fall back to the
+  # inline spec if an older clone predates the manifest.
+  #
+  # --refresh-package/--upgrade-package biosigio are REQUIRED, not cosmetic: a
+  # plain `uv pip install` reuses uv's cached index, so right after a biosigIO
+  # release the cache still lists the old version and the pin bump silently no-ops
+  # (the venv keeps the stale wheel, and the `|| true` below hides the resolution
+  # miss). That shipped a run converting on the OLD library. Forcing a refresh +
+  # upgrade of just biosigIO makes a pin bump take effect on the very next run
+  # (deps are untouched). Verify afterward and fail loud if the pin is still unmet,
+  # rather than silently converting with the wrong version.
+  local req="$DRIVER_REPO/scripts/zarr/requirements.txt"
+  if [[ -f "$req" ]]; then
+    VIRTUAL_ENV="$VENV_DIR" uv pip install -q --refresh-package biosigio --upgrade-package biosigio -r "$req" 2>&1 | tail -2 || true
+  else
+    VIRTUAL_ENV="$VENV_DIR" uv pip install -q --refresh-package biosigio --upgrade-package biosigio "$BIOSIGIO_SPEC" 2>&1 | tail -2 || true
+  fi
+  # Guard: the pinned biosigIO must actually be importable, else abort setup so the
+  # cron does not convert a whole batch on a stale library.
+  if ! VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" -c "import biosigio" 2>/dev/null; then
+    echo "[setup] FATAL: biosigio not importable after install ($BIOSIGIO_SPEC)" >&2
+    exit 1
+  fi
+  VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" -c "import biosigio; print(f'[setup] biosigio {biosigio.__version__}')"
+}
+
+DRIVER="$DRIVER_REPO/scripts/zarr/generate_zarr.py"
+QUEUE="$DRIVER_REPO/scripts/zarr/zarr_queue.py"
+qpy() { VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" "$QUEUE" --db "$QUEUE_DB" "$@"; }
+
+# --- Per-dataset: download -> convert -> push -> CLEANUP -----------------------
+# Returns 0 on success. The store is on S3; the scratch copy is always deleted.
+convert_dataset() {
+  local id="$1" version="${2:-}"
+  local dir="$WORK_DIR/$id"
+  local cb="$WORK_DIR/$id.callback.json"
+  # Reset BEFORE any early return so the drain loop never reads an unbound (set -u
+  # aborts) or stale value: a clone-failure early-return below must NOT inherit
+  # the previous dataset's `deterministic` and get mis-marked terminal. Set from
+  # the callback further down on a real conversion run.
+  LAST_DETERMINISTIC=false
+  log "[$id] start (version=${version:-?})"
+
+  # In-progress signal so the observability dashboard's "Processing" tile reflects
+  # live conversions (the cron has no Actions dispatch to set zarr_status=pending;
+  # #774). Best-effort: a failed/skipped POST never blocks the conversion -- the
+  # terminal ready/failed callback below is the authoritative state.
+  if [[ -n "$NEMAR_WEBHOOK_TOKEN" ]]; then
+    curl -sS --connect-timeout 10 --max-time 30 -X POST "$CALLBACK_URL" \
+      -H "Content-Type: application/json" \
+      -H "X-Webhook-Token: ${NEMAR_WEBHOOK_TOKEN}" \
+      --data "{\"dataset_id\":\"$id\",\"status\":\"converting\"}" >>"$LOG_FILE" 2>&1 \
+      || err "[$id] converting callback failed (non-fatal)"
+  fi
+
+  # Metadata-only clone (git history + annex pointers, no content -- seconds, not
+  # the whole 18 GB). The driver then STREAMS each recording's annex blob from
+  # s3://nemar/<id>/objects/<key> just-in-time, converts, pushes, and moves on,
+  # so we start converting immediately and never hold the whole dataset on disk.
+  safe_rm "$dir"
+  if ! nemar dataset download "$id" --no-data -o "$dir" >>"$LOG_FILE" 2>&1; then
+    err "[$id] metadata clone failed"
+    safe_rm "$dir"
+    return 1
+  fi
+
+  local rc=0
+  # --clean: full-rebuild every recording so the serving copy mirrors the current
+  # dataset. It RECONCILES rather than wiping -- each store is synced with
+  # --delete and only stores absent from HEAD are removed, after a successful
+  # conversion (ADR 0023); the flag does not mean what its name suggests. With
+  # streaming + JOBS-way parallelism a whole-dataset rebuild is cheap enough that
+  # we always remake rather than reason about incremental diffs.
+  VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" "$DRIVER" \
+    --dataset-id "$id" --repo-dir "$dir" \
+    --bucket "$S3_BUCKET" --region "$AWS_REGION" --clean \
+    --jobs "$JOBS" --callback-out "$cb" >>"$LOG_FILE" 2>&1 || rc=$?
+
+  # Read the driver's classification BEFORE the scratch is reclaimed. The
+  # converter now writes the callback on EVERY outcome (incl. a total failure),
+  # carrying `deterministic` = all failures are typed DATA failures. The drain
+  # loop only consults LAST_DETERMINISTIC in the failure (rc!=0) branch: a
+  # partial success returns rc=0 -> `done` regardless of this value (#774).
+  if [[ -f "$cb" ]]; then
+    LAST_DETERMINISTIC="$(jq -r '.deterministic // false' "$cb" 2>/dev/null || echo false)"
+    # A run where ANYTHING converted returns rc=0 and is marked `done` below, so
+    # recordings that failed for a retryable reason are not re-attempted by the
+    # queue on their own. That is a real gap (#1113); until the queue tracks
+    # per-recording state, make it loud and actionable instead of silent.
+    retryable="$(jq -r '.retryable_failures // 0' "$cb" 2>/dev/null || echo 0)"
+    if [[ "$retryable" =~ ^[0-9]+$ && "$retryable" -gt 0 ]]; then
+      err "[$id] $retryable recording(s) failed for a RETRYABLE reason but the dataset will be marked done; recover with: $0 --dataset $id --requeue done --execute"
+    fi
+    # POST on every outcome (not just rc==0) so the backend records failures too.
+    if [[ -n "$NEMAR_WEBHOOK_TOKEN" ]]; then
+      curl -sS --connect-timeout 10 --max-time 30 -X POST "$CALLBACK_URL" \
+        -H "Content-Type: application/json" \
+        -H "X-Webhook-Token: ${NEMAR_WEBHOOK_TOKEN}" \
+        --data @"$cb" >>"$LOG_FILE" 2>&1 || err "[$id] callback failed (non-fatal)"
+    fi
+  fi
+
+  # EPHEMERAL: always reclaim the scratch copy, success or failure.
+  safe_rm "$dir"; rm -f "$cb"
+  if [[ "$rc" -eq 0 ]]; then log "[$id] done"; else err "[$id] driver rc=$rc"; fi
+  return "$rc"
+}
+
+# --- Single-instance lock -----------------------------------------------------
+# Requeue runs BEFORE the single-instance lock, deliberately. A drain can hold
+# that lock for hours (on007808 held it through two cron ticks), and needing to
+# revive stranded jobs while a long conversion is in flight is precisely when an
+# operator reaches for this -- behind the lock it would just exit 3 having done
+# nothing. It also skips setup(): that does `git reset --hard` on the driver
+# clone, which a running conversion is reading from. SQLite's own locking covers
+# the concurrent write, which is a single fast UPDATE.
+if [[ -n "$REQUEUE" ]]; then
+  if [[ ! -f "$QUEUE" ]]; then
+    err "queue script not found at $QUEUE; run once without --requeue to set up the clone"
+    exit 1
+  fi
+  # --dataset MUST be forwarded. Accepting it and ignoring it would turn a
+  # deliberately narrow `--dataset X --requeue failed --execute` into a reset of
+  # EVERY failed row -- the operator asks for one dataset and silently gets all
+  # of them.
+  requeue_args=(requeue --status "$REQUEUE")
+  [[ -n "$ONLY_DATASET" ]] && requeue_args+=(--dataset "$ONLY_DATASET")
+  [[ -n "$REQUEUE_EXECUTE" ]] && requeue_args+=(--execute)
+  qpy "${requeue_args[@]}"
+  exit $?
+fi
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  log "another hallu-zarr instance holds the lock; exiting"
+  exit 3
+fi
+
+# --- Reclaim orphaned scratch -------------------------------------------------
+# The driver's per-recording `tempfile.TemporaryDirectory()` unwinds on a normal
+# exit, but a SIGKILL, an OOM, or an operator killing the drain's process group
+# leaves the whole tree behind. Those are invisible (random `tmp*` names, not
+# dataset-named) and they are BIG: 130 GB across 10 dirs by 2026-08-12, one of
+# them 117 GB on its own. nemarOrg/nemar-cli#1068.
+#
+# Sweeping is safe HERE and only here: we hold the single-instance lock and have
+# not started the driver, so nothing owns anything under WORK_DIR and every
+# `tmp*` entry is by definition from a dead run. Dataset-named scratch dirs are
+# left alone -- convert_dataset safe_rm's those itself before each clone.
+sweep_orphaned_scratch() {
+  local n=0 kb=0 sz
+  while IFS= read -r -d '' p; do
+    # `du -sk` (KiB) not `-sb`: -b is GNU-only. The regex guard keeps a failed or
+    # empty du from turning the arithmetic into a syntax error and aborting the
+    # sweep mid-loop -- reporting the size must never cost us the reclaim.
+    sz=$(du -sk "$p" 2>/dev/null | cut -f1)
+    [[ "$sz" =~ ^[0-9]+$ ]] || sz=0
+    kb=$((kb + sz))
+    safe_rm "$p"
+    n=$((n + 1))
+  done < <(find "$WORK_DIR" -maxdepth 1 -name 'tmp*' -print0 2>/dev/null)
+  if [[ "$n" -gt 0 ]]; then
+    log "swept $n orphaned scratch entries from a previous run (~$((kb / 1024)) MiB reclaimed)"
+  fi
+  return 0
+}
+sweep_orphaned_scratch
+
+setup
+if [[ ! -f "$DRIVER" || ! -f "$QUEUE" ]]; then
+  err "driver/queue not found under $DRIVER_REPO after setup"; exit 1
+fi
+
+# Drift guard, for the bootstrap deployment shape only. setup() refreshes
+# DRIVER_REPO from origin/$DRIVER_REF every run, and since #1109 moved this script
+# INTO the checkout, cron invokes the clone's copy -- so in the normal deployment
+# this script deploys itself along with the driver and the check below is a no-op
+# (SELF == REPO_SELF). It still matters for a node bootstrapped from an
+# out-of-clone copy, which has to exist before the clone does and which git never
+# touches: such a copy silently fell ~5 weeks behind main once already
+# (nemarDatasets/.github#92's scratch sweep merged and did nothing here).
+# Compare and warn; do NOT self-copy,
+# because bash reads a script incrementally and rewriting the running file mid-run
+# resumes execution at a garbage byte offset. Deploy with an atomic rename:
+#   scp hallu-zarr.sh hallu:/path/.hallu-zarr.sh.new && ssh hallu 'mv /path/.hallu-zarr.sh.new /path/hallu-zarr.sh'
+# dirname/basename rather than ${BASH_SOURCE%/*}: invoked by bare name off $PATH
+# there is no slash to strip, and the parameter expansion would yield the filename
+# as the directory, making every run report a bogus drift.
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/$(basename "${BASH_SOURCE[0]}")"
+REPO_SELF="$DRIVER_REPO/scripts/zarr/$(basename "${BASH_SOURCE[0]}")"
+if [[ -f "$REPO_SELF" && "$SELF" != "$REPO_SELF" ]] && ! cmp -s "$SELF" "$REPO_SELF"; then
+  err "DRIFT: $SELF differs from $REPO_SELF (origin/${DRIVER_REF}). Changes merged to this script are NOT live; deploy it."
+fi
+
+# The drift guard above answers "is this script stale relative to the repo it was
+# launched from". It CANNOT answer "has that repo moved since this run started",
+# and during a backfill that is the question that matters: a run does not end
+# until the queue is empty, so setup() never re-runs and the deployed driver is
+# frozen for the whole drain. Measured once, and it is not a small window --
+# Hallu ran a driver two deploys behind for two days, missing the entire epic
+# #1108 memory work, because the run holding the lock had started before the
+# cutover (#1129).
+#
+# So re-check the tracked ref BETWEEN datasets and stop cleanly when it moves.
+# One ls-remote per dataset is noise against per-dataset conversion times
+# measured in minutes, and the queue persists across runs, so stopping costs
+# nothing but the next cron tick.
+#
+# A failed ls-remote must NEVER stop a backfill: a network blip is not a reason
+# to halt hours of work, and the worst case of ignoring it is that the redeploy
+# waits for the next dataset boundary.
+ref_moved() {
+  local remote_head local_head
+  remote_head="$(git -C "$DRIVER_REPO" ls-remote origin "$DRIVER_REF" 2>/dev/null | cut -f1)"
+  [[ -z "$remote_head" ]] && return 1
+  local_head="$(git -C "$DRIVER_REPO" rev-parse HEAD 2>/dev/null)"
+  [[ -z "$local_head" ]] && return 1
+  [[ "$remote_head" != "$local_head" ]]
+}
+
+if [[ -n "$STATS_ONLY" ]]; then
+  # Propagate qpy's status rather than hard-coding success. `--stats` is what an
+  # operator reaches for when the queue looks wrong, so a crash here (a corrupt
+  # DB, say) IS the answer to their question -- reporting 0 would hide it from
+  # anything checking the exit code.
+  qpy stats
+  exit $?
+fi
+
+# Past every early exit; from here on convert_dataset() may run and needs the token.
+load_secrets
+
+
+# Targeted single-dataset run bypasses the queue (manual rebuild / test).
+if [[ -n "$ONLY_DATASET" ]]; then
+  v="$(curl -sS --max-time 30 "${API_BASE}/datasets/${ONLY_DATASET}" 2>/dev/null \
+        | jq -r '.dataset.latest_version // ""' 2>/dev/null)"
+  convert_dataset "$ONLY_DATASET" "$v"
+  exit $?
+fi
+
+# Reconcile (enqueue pending + recover stale inprogress), then drain the queue.
+#
+# Both queue calls below are exit-code checked, and that is load-bearing under
+# `set -uo pipefail` (no -e). `log "reconcile: $(qpy reconcile)"` used to discard
+# the status entirely: fetch_public_datasets' urlopen has no retry, so one API
+# blip crashed qpy, the traceback went to stderr while the substitution captured
+# only stdout, and the run logged a content-free "reconcile: " line. The drain
+# then read an empty queue, broke immediately, and reported
+# "run complete: processed 0 dataset(s)" with exit 0 -- a green cron tick that
+# enqueued nothing, repeatable every hour for as long as the API stayed sick.
+# Fail loud instead, the same way setup() treats every git step.
+if ! reconcile_out="$(qpy reconcile --api-base "$API_BASE")"; then
+  err "FATAL: reconcile failed (catalog unreachable, or queue error); nothing was"
+  err "enqueued this run. Not draining -- an empty queue here would be a lie."
+  exit 1
+fi
+log "reconcile: $reconcile_out"
+n=0
+while :; do
+  # An empty line means "queue drained"; a NON-ZERO exit means the queue could
+  # not be read. Conflating them would turn a broken DB into a silent clean exit.
+  if ! line="$(qpy next)"; then
+    err "FATAL: could not read the next queue entry; refusing to treat that as an"
+    err "empty queue. ${n} dataset(s) processed before this."
+    exit 1
+  fi
+  [[ -z "$line" ]] && break
+  id="${line%%$'\t'*}"; version="${line#*$'\t'}"
+  # These three are warn-not-exit, unlike the two above. A queue write that fails
+  # right after a real conversion leaves the row `inprogress`, which the 6h
+  # stale-recovery sweep reclaims on its own -- it costs one re-conversion, it
+  # does not lose data or stall the drain. Worth a loud line so the wasted work
+  # is attributable, not worth abandoning a backfill mid-queue.
+  if convert_dataset "$id" "$version"; then
+    # shellcheck disable=SC1010  # `done` is the queue subcommand, not the keyword
+    qpy done "$id" "$version" ||
+      err "[$id] converted, but marking it done FAILED; the row stays inprogress until the stale sweep reclaims it (~6h) and it will be converted again"
+  elif [[ "$LAST_DETERMINISTIC" == "true" ]]; then
+    # Every recording is an unreadable DATA failure -- terminal, no retry (#774).
+    qpy fail "$id" "all recordings failed to convert (typed data failures; see ${LOG_FILE})" --deterministic ||
+      err "[$id] marking the deterministic failure FAILED; the row stays inprogress and will be retried despite being terminal"
+  else
+    qpy fail "$id" "conversion failed (see ${LOG_FILE})" ||
+      err "[$id] marking the failure FAILED; the row stays inprogress until the stale sweep reclaims it"
+  fi
+  n=$((n + 1))
+  if [[ "$LIMIT" -gt 0 && "$n" -ge "$LIMIT" ]]; then
+    log "reached --limit $LIMIT; stopping (queue persists; next run continues)"
+    break
+  fi
+  if ref_moved; then
+    log "origin/${DRIVER_REF} moved; stopping so the next run redeploys (queue persists)"
+    break
+  fi
+done
+
+log "run complete: processed $n dataset(s); $(qpy stats | head -1)"

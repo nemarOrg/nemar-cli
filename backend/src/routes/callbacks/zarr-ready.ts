@@ -12,8 +12,9 @@ import { isValidDatasetId } from "../../services/datasetId.js";
 import { type WebhookRouter, timingSafeEqual } from "../webhooks/shared.js";
 
 /**
- * POST /webhooks/zarr-ready — callback from nemarDatasets/.github
- * `run-generate-zarr.yml` once a dataset's Zarr serving copy has been
+ * POST /webhooks/zarr-ready — callback from `scripts/zarr/hallu-zarr.sh`, which
+ * lives in THIS repo and runs on the SDSC Hallu cron (ADR 0029 repatriated it
+ * from nemarDatasets/.github), once a dataset's Zarr serving copy has been
  * (re)built and synced to `s3://nemar/<id>/zarr/...` (epic #684 / Stream C).
  *
  * Authenticated with the shared `X-Webhook-Token` (NEMAR_WEBHOOK_TOKEN), same
@@ -53,6 +54,12 @@ interface ZarrReadyBody {
   failure_count?: number; // subset that are TYPED data failures
   data_failures?: ZarrDataFailure[]; // typed failures [{path, code, reason}]
   deterministic?: boolean; // all failures are typed data failures (won't retry)
+  // Memory-robustness telemetry (epic #1108). Declared here because an
+  // undeclared field is silently dropped by this handler's typed read -- the
+  // converter was reporting these and nothing was listening.
+  pool_breaks?: number; // worker-pool breaks RECOVERED this run; 0 is healthy
+  measured_count?: number; // recordings whose peak RAM was actually measured
+  calibration?: unknown[]; // per-format measured-vs-projected peak RAM
 }
 
 /**
@@ -177,6 +184,7 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
                zarr_failure_count = ?,
                zarr_deterministic = ?,
                zarr_data_failures = ?,
+               zarr_pool_breaks = ?,
                zarr_failed_at = CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END
            WHERE dataset_id = ?`,
         )
@@ -188,6 +196,7 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
             f.failureCount,
             f.deterministic,
             f.dataFailuresJson,
+            typeof body.pool_breaks === "number" ? body.pool_breaks : null,
             f.hadErrors ? 1 : 0,
             body.dataset_id,
           )
@@ -202,6 +211,12 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
         // with the archive-ready auto-retry (epic #736, Phase 3 decision). Keep
         // the prior store_count/etag/commit (a failed rebuild shouldn't erase the
         // last good copy's bookkeeping) and only flip status + the failure detail.
+        // zarr_pool_breaks is recorded here too, not just on the ready path. The
+        // driver sends it with either status, and a run that failed outright is
+        // the STRONGEST node-pressure signal there is -- dropping it would leave
+        // the column stale at the last successful run's value and defeat the
+        // point of migration 0069 ("a node under sustained memory pressure looks
+        // healthy until it isn't") in exactly the case it was added for.
         const result = await c.env.DB.prepare(
           `UPDATE datasets
            SET zarr_status = 'failed',
@@ -209,10 +224,18 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
                zarr_failure_count = ?,
                zarr_deterministic = ?,
                zarr_data_failures = ?,
+               zarr_pool_breaks = ?,
                zarr_failed_at = datetime('now')
            WHERE dataset_id = ?`,
         )
-          .bind(f.errors, f.failureCount, f.deterministic, f.dataFailuresJson, body.dataset_id)
+          .bind(
+            f.errors,
+            f.failureCount,
+            f.deterministic,
+            f.dataFailuresJson,
+            typeof body.pool_breaks === "number" ? body.pool_breaks : null,
+            body.dataset_id,
+          )
           .run();
         changed = result.meta.changes ?? 0;
       }
@@ -260,8 +283,18 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
     }
 
     console.log(
-      `[zarr-ready] dataset=${body.dataset_id} status=${status} stores=${body.store_count ?? "?"} converted=${body.converted?.length ?? 0} removed=${body.removed?.length ?? 0} purged=${purge?.submitted ?? 0}`,
+      `[zarr-ready] dataset=${body.dataset_id} status=${status} stores=${body.store_count ?? "?"} converted=${body.converted?.length ?? 0} removed=${body.removed?.length ?? 0} purged=${purge?.submitted ?? 0} pool_breaks=${body.pool_breaks ?? "?"}`,
     );
+
+    // Peak-RAM calibration (#1111) is diagnostic rather than dashboard material,
+    // so it is logged rather than given a column -- but it is logged HERE, on the
+    // Worker, instead of only in a cron log on one box nobody tails. Only when
+    // there is something to say.
+    if (body.pool_breaks || (body.calibration?.length ?? 0) > 0) {
+      console.log(
+        `[zarr-ready] dataset=${body.dataset_id} memory: pool_breaks=${body.pool_breaks ?? 0} measured=${body.measured_count ?? 0} calibration=${JSON.stringify(body.calibration ?? [])}`,
+      );
+    }
 
     return c.json({
       ok: true,

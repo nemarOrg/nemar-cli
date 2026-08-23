@@ -33,6 +33,9 @@ import {
   type AvailabilityReportSweepBatchResponse,
   type DataIntegritySweepBatchResponse,
   type DatasetTransitionResponse,
+  type DoctorFixLiveResponse,
+  type DoctorFixResult,
+  type DoctorScanResponse,
   type EmailPreferences,
   type HedSweepBatchResponse,
   type ReindexBulkOptions,
@@ -57,6 +60,8 @@ import {
   deleteDataset,
   dispatchCooldown,
   dispatchManifest,
+  doctorFix,
+  doctorScan,
   enforceBulk,
   enforceDataset,
   getCiStatus,
@@ -3450,6 +3455,14 @@ importCommand
         console.log(
           `  ${chalk.yellow(`in-flight ${(counts.preparing ?? 0) + (counts.copying ?? 0) + (counts.finalizing ?? 0)}`)}  ${chalk.green(`complete ${counts.complete ?? 0}`)}  ${chalk.magenta(`incomplete ${counts.incomplete ?? 0}`)}  ${chalk.red(`failed ${counts.failed ?? 0}`)}  ${chalk.red(`quarantined ${counts.quarantined ?? 0}`)}  ${chalk.dim(`rolled_back ${counts.rolled_back ?? 0}`)}\n`,
         );
+        // Withdrawn datasets are counted inside `complete` -- their import did
+        // succeed -- so say so rather than letting the total read as datasets
+        // that are still fetchable (#1048).
+        if (result.withdrawn) {
+          console.log(
+            `  ${chalk.red(`withdrawn ${result.withdrawn}`)} ${chalk.dim("(included in complete; content removed and DOI tombstoned)")}\n`,
+          );
+        }
 
         if (rows.length === 0) {
           console.log(chalk.dim("  No import jobs match."));
@@ -5210,6 +5223,219 @@ dataIntegritySweepCommand
   );
 
 adminCommand.addCommand(dataIntegritySweepCommand);
+
+// ============================================================================
+// Doctor: diagnostic checks + remediation (#1130)
+// ============================================================================
+
+const doctorCommand = new Command("doctor").description(
+  "Diagnose and heal stuck-dataset patterns (e.g. missing S3 version manifests)",
+);
+
+function printScanResults(res: DoctorScanResponse): number {
+  let total = 0;
+  for (const [name, r] of Object.entries(res.results)) {
+    total += r.count;
+    const status = r.count > 0 ? chalk.red(`${r.count} finding(s)`) : chalk.green("clean");
+    console.log(`${chalk.bold(name)}: ${status} — ${r.description}`);
+    for (const f of r.findings) {
+      console.log(`  ${f.dataset_id}${f.version ? `@v${f.version}` : ""}`);
+    }
+  }
+  return total;
+}
+
+doctorCommand
+  .command("scan")
+  .description("Run diagnostic checks (read-only)")
+  .argument("[dataset-id]", "Narrow the scan to one dataset")
+  .option("--check <name>", "Run a single check (default: all checks)")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (datasetId: string | undefined, options: { check?: string; json?: boolean }) => {
+    if (!requireAuth()) return;
+    const spinner = ora(
+      "Running doctor checks (read-only; a full-catalog scan can take ~1 minute)...",
+    ).start();
+    try {
+      const res = await doctorScan({ check: options.check, datasetId });
+      spinner.stop();
+      if (options.json) {
+        console.log(JSON.stringify(res, null, 2));
+        return;
+      }
+      const total = printScanResults(res);
+      if (total > 0) {
+        console.log(
+          chalk.yellow(
+            `\n${total} finding(s). Preview the remediation with: nemar admin doctor fix <check> --dry-run`,
+          ),
+        );
+      }
+    } catch (err) {
+      spinner.fail("Doctor scan failed");
+      console.error(chalk.red(errorDetail(err)));
+      process.exit(1);
+    }
+  });
+
+doctorCommand
+  .command("fix")
+  .description("Apply a check's remediation (writes; use --dry-run first)")
+  .argument("<check>", "Check name (see: nemar admin doctor scan)")
+  .argument("[dataset-id]", "Narrow to one dataset")
+  .option("--dry-run", "List what would be fixed without writing")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(
+    async (
+      check: string,
+      datasetId: string | undefined,
+      options: { dryRun?: boolean; json?: boolean },
+    ) => {
+      if (!requireAuth()) return;
+
+      if (options.dryRun) {
+        const spinner = ora(`Listing ${check} findings (dry run)...`).start();
+        try {
+          const res = await doctorFix({ check, datasetId, dryRun: true });
+          spinner.stop();
+          if (options.json) {
+            console.log(JSON.stringify(res, null, 2));
+            return;
+          }
+          console.log(`Would fix ${res.would_fix} finding(s) for ${chalk.bold(check)}:`);
+          for (const f of res.findings) {
+            console.log(`  ${f.dataset_id}${f.version ? `@v${f.version}` : ""}`);
+          }
+        } catch (err) {
+          spinner.fail("Dry run failed");
+          console.error(chalk.red(errorDetail(err)));
+          process.exit(1);
+        }
+        return;
+      }
+
+      // Enumerate first, then fix one dataset per request, so the spinner can
+      // show which dataset is in flight and a partial failure is visible the
+      // moment it happens rather than after one long opaque request. The
+      // narrowed fix re-scans its dataset server-side; a finding healed
+      // between the scan and its fix turn comes back with zero results and
+      // is counted as `resolved` by runDoctorFixLoop, never silently dropped.
+      const spinner = ora(`Scanning for ${check} findings...`).start();
+      let findings: DoctorScanResponse["results"][string]["findings"];
+      try {
+        const scan = await doctorScan({ check, datasetId });
+        findings = scan.results[check]?.findings ?? [];
+      } catch (err) {
+        spinner.fail("Doctor scan failed");
+        console.error(chalk.red(errorDetail(err)));
+        process.exit(1);
+        return;
+      }
+      if (findings.length === 0) {
+        spinner.succeed(`${check}: nothing to fix`);
+        if (options.json) console.log(JSON.stringify({ check, total: 0, results: [] }, null, 2));
+        return;
+      }
+      spinner.stop();
+      console.log(`${chalk.bold(check)}: ${findings.length} finding(s) to fix`);
+
+      const datasetIds = [...new Set(findings.map((f) => f.dataset_id))];
+      spinner.start();
+      const { totals, results } = await runDoctorFixLoop(
+        datasetIds,
+        (id, index) => {
+          const versions = findings
+            .filter((f) => f.dataset_id === id && f.version)
+            .map((f) => `v${f.version}`)
+            .join(", ");
+          spinner.text = `Fixing ${id}${versions ? ` (${versions})` : ""} [${index + 1}/${datasetIds.length}]...`;
+          return doctorFix({ check, datasetId: id });
+        },
+        {
+          onDataset: (id, perDataset) => {
+            spinner.stop();
+            if (perDataset.length === 0) {
+              console.log(`  resolved ${id}: healed between the scan and its fix turn`);
+            }
+            for (const r of perDataset) {
+              const label = `${r.dataset_id}${r.version ? `@v${r.version}` : ""}`;
+              if (r.status === "fixed") {
+                console.log(`  ${chalk.green("fixed")}   ${label}`);
+              } else if (r.status === "skipped") {
+                console.log(`  skipped ${label}: ${r.message ?? "already healthy"}`);
+              } else {
+                console.log(`  ${chalk.red("FAILED")}  ${label}: ${r.message ?? "unknown error"}`);
+              }
+            }
+            spinner.start();
+          },
+        },
+      );
+      spinner.stop();
+
+      if (options.json) {
+        console.log(JSON.stringify({ check, total: findings.length, ...totals, results }, null, 2));
+      } else {
+        const resolvedNote = totals.resolved > 0 ? `, ${totals.resolved} already resolved` : "";
+        console.log(
+          `\n${chalk.bold(check)}: ${chalk.green(`${totals.fixed} fixed`)}, ${totals.skipped} skipped, ${totals.failed > 0 ? chalk.red(`${totals.failed} failed`) : "0 failed"}${resolvedNote}`,
+        );
+      }
+      // Non-zero exit when any fix failed, so a caller never reads a
+      // partial remediation as success.
+      if (totals.failed > 0) process.exit(1);
+    },
+  );
+
+/** Aggregated outcome of {@link runDoctorFixLoop}. `resolved` counts datasets
+ *  whose findings were healed between enumeration and their fix turn (the
+ *  narrowed server-side re-scan returned zero results). */
+export interface DoctorFixLoopOutcome {
+  totals: { fixed: number; skipped: number; failed: number; resolved: number };
+  results: DoctorFixResult[];
+}
+
+/**
+ * Per-dataset driver for `nemar admin doctor fix` (#1133 review fix). Pure
+ * aggregation over a dependency-injected `fixOne`, mirroring runReauditLoop's
+ * extraction convention, so two properties are unit-testable without a server:
+ * a dataset healed in the interim is counted as `resolved` (never silently
+ * dropped from the tally), and a thrown `fixOne` records a failed result and
+ * continues with the remaining datasets instead of aborting the run.
+ */
+export async function runDoctorFixLoop(
+  datasetIds: string[],
+  fixOne: (datasetId: string, index: number) => Promise<DoctorFixLiveResponse>,
+  hooks?: {
+    /** Called after each dataset with its per-dataset results (empty = resolved). */
+    onDataset?: (datasetId: string, results: DoctorFixResult[]) => void;
+  },
+): Promise<DoctorFixLoopOutcome> {
+  const totals = { fixed: 0, skipped: 0, failed: 0, resolved: 0 };
+  const results: DoctorFixResult[] = [];
+  for (const [index, id] of datasetIds.entries()) {
+    let perDataset: DoctorFixResult[];
+    try {
+      const res = await fixOne(id, index);
+      perDataset = res.results;
+      if (perDataset.length === 0) {
+        totals.resolved++;
+      } else {
+        totals.fixed += res.fixed;
+        totals.skipped += res.skipped;
+        totals.failed += res.failed;
+      }
+    } catch (err) {
+      totals.failed++;
+      perDataset = [{ dataset_id: id, status: "failed", message: errorDetail(err) }];
+    }
+    results.push(...perDataset);
+    hooks?.onDataset?.(id, perDataset);
+  }
+  return { totals, results };
+}
+
+adminCommand.addCommand(doctorCommand);
 
 // ============================================================================
 // Email Notification Preferences

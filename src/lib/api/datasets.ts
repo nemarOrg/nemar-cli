@@ -91,6 +91,18 @@ export interface Dataset {
   github_repo: string | null;
   concept_doi: string | null;
   created_at: string;
+  /**
+   * Withdrawal state (migration 0060). A withdrawn dataset had its concept DOI
+   * tombstoned at the registrar and its repo made private; its S3 content is
+   * gone by design. NULL/absent means not withdrawn.
+   *
+   * `status` stays "active" for a withdrawn dataset -- withdrawal is a separate
+   * axis from the lifecycle column, not a value of it -- so anything reporting
+   * on a dataset has to read this field to avoid presenting a tombstoned
+   * dataset as live (#1048).
+   */
+  withdrawn_at?: string | null;
+  withdrawn_reason?: string | null;
   // Catalog-enriched fields (from nemar_catalog JOIN or catalog-only)
   modalities?: string;
   participants?: number;

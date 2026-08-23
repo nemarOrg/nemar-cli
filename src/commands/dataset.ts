@@ -1422,6 +1422,17 @@ Examples:
     console.log(`  Name:        ${datasetInfo.name}`);
     console.log(`  Owner:       ${datasetInfo.owner_username}`);
     console.log(`  Status:      ${colorizeStatus(datasetInfo.status)}`);
+    // Withdrawal is a separate axis from `status`, which stays "active", so it
+    // has to be printed or the dataset reads as live. Directly under Status,
+    // because that is the line a reader takes their answer from (#1048).
+    if (datasetInfo.withdrawn_at) {
+      const reason = datasetInfo.withdrawn_reason
+        ? ` ${chalk.dim(`- ${datasetInfo.withdrawn_reason}`)}`
+        : "";
+      console.log(
+        `  Withdrawn:   ${chalk.red(new Date(datasetInfo.withdrawn_at).toLocaleDateString())}${reason}`,
+      );
+    }
     console.log(`  Created:     ${new Date(datasetInfo.created_at).toLocaleDateString()}`);
 
     if (datasetInfo.description) {
@@ -1433,20 +1444,40 @@ Examples:
     }
 
     if (datasetInfo.concept_doi) {
-      console.log(`  DOI:         https://doi.org/${datasetInfo.concept_doi}`);
+      // A withdrawn dataset's DOI resolves to a registrar tombstone, not the
+      // dataset. Printing it as a bare link invites the reader to follow it and
+      // conclude the dataset is fine.
+      const doiUrl = `https://doi.org/${datasetInfo.concept_doi}`;
+      console.log(
+        datasetInfo.withdrawn_at
+          ? `  DOI:         ${chalk.dim(doiUrl)} ${chalk.red("(tombstoned)")}`
+          : `  DOI:         ${doiUrl}`,
+      );
     }
 
     // #970: surface-but-visible -- only shout when data is verified incomplete;
     // complete/not-yet-audited stay silent (mirrors the list table's Data column).
     if (datasetInfo.data_complete === 0) {
+      // A withdrawn dataset's content is 0-byte BY DESIGN, so the integrity
+      // sweep has nothing to find. Pointing an operator at it here is the exact
+      // false lead #1048 opened with: a withdrawal cohort read as a data loss
+      // incident because every surface described it as broken rather than gone.
       console.log(
-        `  Data:        ${chalk.red("incomplete")} ${chalk.dim("(some files failed to upload; see `nemar admin data-integrity-sweep`)")}`,
+        datasetInfo.withdrawn_at
+          ? `  Data:        ${chalk.dim("removed as part of the withdrawal")}`
+          : `  Data:        ${chalk.red("incomplete")} ${chalk.dim("(some files failed to upload; see `nemar admin data-integrity-sweep`)")}`,
       );
     }
 
     console.log();
-    console.log(chalk.dim("To download this dataset:"));
-    console.log(chalk.dim(`  nemar dataset download ${datasetId}`));
+    if (datasetInfo.withdrawn_at) {
+      // Offering the download hint here would send the reader after content
+      // that was deliberately removed.
+      console.log(chalk.dim("This dataset was withdrawn; its content is no longer available."));
+    } else {
+      console.log(chalk.dim("To download this dataset:"));
+      console.log(chalk.dim(`  nemar dataset download ${datasetId}`));
+    }
   });
 
 /**

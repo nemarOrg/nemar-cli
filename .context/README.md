@@ -1,6 +1,6 @@
 # `.context/` — map
 
-Twenty-eight documents accumulated here over the project's life, mixing binding decisions,
+Documents accumulated here over the project's life, mixing binding decisions,
 live runbooks, point-in-time research, and completed plans. Nothing distinguished them, so a
 reader could not tell a current rule from a superseded one. This index does that.
 
@@ -14,7 +14,7 @@ Documents that record completed work carry a `STATUS: HISTORICAL` banner. They a
 
 ## Decisions
 
-- [`decisions/`](decisions/README.md) — 21 Architecture Decision Records, index enforced by
+- [`decisions/`](decisions/README.md) — the Architecture Decision Records, index enforced by
   `test/adr-index.unit.test.ts`. Read before designing, and before "fixing" something that looks
   odd — several oddities here are deliberate.
 
@@ -24,6 +24,7 @@ Trust these for how things work today.
 
 | Document | What it is |
 |---|---|
+| [systems-inventory.md](systems-inventory.md) | Every host and service, with paths, cron schedules, and deploy procedures. Expands the map in `AGENTS.md`. |
 | [validated_workflows.md](validated_workflows.md) | Workflows proven by prototype, with the gotchas. The git-annex and staging-to-final recipes live here. |
 | [release-safety-playbook.md](release-safety-playbook.md) | Environments, promotion path, pre-release checks. |
 | [recover-runbook.md](recover-runbook.md) | Recovering 0-byte imports (epic #967 Phase 5). |

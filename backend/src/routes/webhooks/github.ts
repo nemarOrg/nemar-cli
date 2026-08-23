@@ -11,11 +11,7 @@
 import { isDevRangeDatasetId, isValidDatasetId } from "../../services/datasetId.js";
 import { isNonProductionEnv } from "../../services/environment.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
-import {
-  triggerEnrichmentRun,
-  triggerVersionDoiRun,
-  triggerZarrGeneration,
-} from "../../services/github.js";
+import { triggerEnrichmentRun, triggerVersionDoiRun } from "../../services/github.js";
 import { verifyGitHubWebhookSignature } from "../../services/webhook-signature.js";
 import type { WebhookRouter } from "./shared.js";
 
@@ -185,7 +181,15 @@ export function shouldDispatchVersionDoi(
  *  serving copy (epic #684). Primary recording containers plus the companion
  *  files that carry their samples/markers (EEGLAB `.fdt`; the BrainVision
  *  `.vhdr`/`.vmrk`/`.eeg` triplet), so a change confined to a companion still
- *  triggers a reconversion of its recording. Compared lowercase. */
+ *  triggers a reconversion of its recording. Compared lowercase.
+ *
+ *  Must stay a superset of `generate_zarr.py`'s `PRIMARY_EXTS` (the converter,
+ *  now at `scripts/zarr/` in this repo — ADR 0029) or a push changing one of
+ *  those recordings
+ *  never re-dispatches conversion and the serving copy goes stale silently —
+ *  which is exactly what happened here: the KIT/Yokogawa/RICOH MEG formats
+ *  (`.con`/`.sqd`/`.kdf`) were missing (verified against `on007763`, which has
+ *  35 affected `.con` recordings). */
 const ZARR_DATA_EXTENSIONS: ReadonlySet<string> = new Set([
   "set",
   "fdt", // EEGLAB
@@ -195,21 +199,115 @@ const ZARR_DATA_EXTENSIONS: ReadonlySet<string> = new Set([
   "vmrk",
   "eeg", // BrainVision triplet
   "fif", // MEG / Elekta-Neuromag FIFF
+  "con", // KIT/Yokogawa MEG
+  "sqd", // KIT/Yokogawa MEG
+  "kdf", // RICOH MEG
 ]);
+
+/** BIDS trees that never hold a raw recording the Zarr viewer serves:
+ *  `derivatives/` (pipeline outputs — ICA solutions, epoched/averaged
+ *  `-epo.fif`/`-ave.fif`, etc.), `sourcedata/` (pre-conversion raw dumps),
+ *  and `code/` (analysis scripts). A push confined to these must never
+ *  dispatch a conversion (ADR 0027): a full repo walk otherwise treats any
+ *  matching file as a recording wherever it sits, and measurement showed
+ *  that is where most phantom "failures" and most wrongly-served stores
+ *  came from. Checked at both a top-level and a nested position, mirroring
+ *  `emit_records.py`'s existing `derivatives`/`sourcedata` exclusion in
+ *  `nemarDatasets/.github` (extended here to also cover `code/`). */
+const ZARR_EXCLUDED_TREES: readonly string[] = ["derivatives", "sourcedata", "code"];
+
+function isInExcludedTree(p: string): boolean {
+  // Matched on a path SEGMENT (`dir/` at the start, or `/dir/` within), never as
+  // a bare substring -- otherwise `mycode/`, `derivatives_old/`, or a task named
+  // `task-code` would all be silently dropped. Compared lowercase like
+  // ZARR_DATA_EXTENSIONS: BIDS mandates lowercase for these trees, so a
+  // capitalized one is already malformed, and a non-raw tree must not become
+  // servable just because it was misnamed.
+  const lower = p.toLowerCase();
+  return ZARR_EXCLUDED_TREES.some(
+    (dir) => lower.startsWith(`${dir}/`) || lower.includes(`/${dir}/`),
+  );
+}
 
 /** True if a BIDS path is a recording data file (or its companion) or a curated
  *  `_events.tsv` sidecar. A `_events.tsv` change must refresh the sibling
  *  recording's embedded events; a CTF `.ds` recording is a directory, so any
- *  file under `*.ds/` counts. Exported for unit testing. */
+ *  file under `*.ds/` counts, as is MEF3's `.mefd` (any file under `*.mefd/`
+ *  counts the same way). 4D/BTi is directory-based too but carries no extension
+ *  at all, so it gets its own rule — see `isBtiMember`. The exclusion below is checked
+ *  first and unconditionally, so a `derivatives/`/`sourcedata/`/`code/` path
+ *  never triggers regardless of which rule below would otherwise have matched
+ *  it — including the `_events.tsv` early return, which used to short-circuit
+ *  before any other check. Exported for unit testing.
+ *
+ *  NOT CALLED IN PRODUCTION, deliberately. The Actions dispatcher this gated was
+ *  retired in #1109; conversion now runs on the SDSC Hallu cron
+ *  (`scripts/zarr/hallu-zarr.sh`). It is kept because it is the executable
+ *  statement of ADR 0027's raw-only contract, and `zarr-gate-superset.unit.test.ts`
+ *  asserts it against the converter's `PRIMARY_EXTS` (#1103) — a same-repo check
+ *  now that the converter lives here. Do not delete as dead code. */
 export function isZarrTriggerPath(p: string): boolean {
-  if (p.endsWith("_events.tsv")) return true;
-  if (p.includes(".ds/")) return true;
-  const dot = p.lastIndexOf(".");
+  if (isInExcludedTree(p)) return false;
+  // Every rule below compares lowercase, so a recording can't slip the gate on
+  // capitalization alone. (`.ds/` was case-sensitive before this; BIDS mandates
+  // lowercase, so nothing real depended on that.)
+  const lower = p.toLowerCase();
+  if (lower.endsWith("_events.tsv")) return true;
+  if (lower.includes(".ds/") || lower.includes(".mefd/")) return true;
+  if (isBtiMember(lower)) return true;
+  const dot = lower.lastIndexOf(".");
   if (dot === -1) return false;
-  return ZARR_DATA_EXTENSIONS.has(p.slice(dot + 1).toLowerCase());
+  return ZARR_DATA_EXTENSIONS.has(lower.slice(dot + 1));
 }
 
-/** Decide whether a push event should fan out to the Zarr-generation workflow.
+/** True if a lowercased path is a member of a 4D/BTi recording directory.
+ *
+ *  BIDS gives 4D/BTi NO extension -- the recording is a directory
+ *  `sub-<l>[_ses-<l>]_task-<l>[_run-<i>]_meg/` holding `c,rfDC`, `config`, and
+ *  `hs_file` -- so it is matched on the `c,rf*` data file. The bare basenames
+ *  `config`/`hs_file` are deliberately NOT matched, because `config` would
+ *  false-positive on `.datalad/config`, which essentially every dataset repo
+ *  carries.
+ *
+ *  Matched at ANY depth, deliberately, even though BIDS names the directory
+ *  `..._meg/`. This gate must stay a SUPERSET of what the converter treats as a
+ *  recording, and the converter (`bti_recordings` in `generate_zarr.py`) keys a
+ *  BTi directory on `c,rf*` plus a sibling `config` with NO constraint on the
+ *  directory's name. The gate cannot evaluate that sibling rule, since it sees
+ *  one changed path at a time rather than the tree, so it takes the permissive
+ *  side. Requiring `_meg` here would make the gate NARROWER than the converter:
+ *  a BTi directory named anything else would be converted but would never
+ *  re-dispatch on a push, so its serving copy would go stale silently. That is
+ *  precisely the failure mode the missing KIT extensions caused. A false
+ *  positive costs one no-op workflow run; a false negative costs correctness. */
+function isBtiMember(lower: string): boolean {
+  const cut = lower.lastIndexOf("/");
+  if (cut === -1) return false; // a top-level file is never inside a recording dir
+  const base = lower.slice(cut + 1);
+  if (base.startsWith("c,rf")) return true;
+  // The converter rebuilds a BTi recording on ANY touched file inside a
+  // qualifying directory, not just the `c,rf*` data file -- it has tests for a
+  // `config`-only edit and an `hs_file` deletion both rebuilding. Matching those
+  // basenames at any depth is not an option: `.datalad/config` exists in
+  // essentially every dataset repo, so it would fire on nearly every
+  // metadata-only push across ~785 repos. Requiring the BIDS `..._meg/` parent
+  // is the narrowest rule that covers them, and it is purely ADDITIVE to the
+  // name-independent `c,rf*` match above, so it cannot re-narrow the gate.
+  //
+  // Residual, accepted gap: a `config`/`hs_file`-only change inside a BTi
+  // directory NOT named `..._meg/` still will not re-dispatch. It self-heals on
+  // the next push that dispatches for any other reason, because the workflow
+  // diffs the last-converted commit against HEAD rather than trusting the event
+  // payload, so it is staleness until the next push, not permanent loss.
+  if (base !== "config" && base !== "hs_file") return false;
+  const parent = lower.slice(0, cut);
+  return parent.slice(parent.lastIndexOf("/") + 1).endsWith("_meg");
+}
+
+/** Decide whether a push event should fan out to Zarr conversion.
+ *
+ *  Like `isZarrTriggerPath`, retained but NOT called in production since #1109
+ *  retired the Actions dispatch path; see that function's note.
  *
  *  Parallels `shouldDispatchEnrichment` (same owner/dataset gate, same
  *  touched-path union over `commits[]` + `head_commit`), but:
@@ -320,7 +418,7 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
 
     // Dev/test staging repos (xx09NNNN, epic #923) live in the shared
     // nemarDatasets org but belong to the dev worker, not prod. The production
-    // worker must never dispatch enrichment/zarr/version-DOI runs against them:
+    // worker must never dispatch enrichment/version-DOI runs against them:
     // there is no prod D1 row, and the central workflows' callbacks would 404.
     // Short-circuit here on prod. (Phase 5 adds a forward of the raw, still
     // HMAC-signed delivery to the dev worker's DEV_WEBHOOK_MIRROR_URL; the dev
@@ -388,17 +486,14 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
     // tooling.
     const enrichmentDecision = shouldDispatchEnrichment(payload);
     const versionDoiDecision = shouldDispatchVersionDoi(payload);
-    const zarrDecision = shouldDispatchZarr(payload);
 
-    if (!enrichmentDecision.dispatch && !versionDoiDecision.dispatch && !zarrDecision.dispatch) {
+    if (!enrichmentDecision.dispatch && !versionDoiDecision.dispatch) {
       // Surface whichever reason is more specific. The enrichment path's
       // reasons are richer (no_enrichment_paths_touched, wrong_owner, …)
       // but it bails at `ref_not_main_or_release` for any tag-shaped ref,
       // hiding the more useful `ref_not_version_tag` from version-doi.
       // When enrichment's reason is the generic ref-category bail, prefer
       // version-doi's reason; otherwise keep enrichment's. Code-review #607.
-      // (zarr matches a strict subset of enrichment's main-ref pushes, so its
-      // reason is never the more-specific one here.)
       const reason =
         enrichmentDecision.reason === "ref_not_main_or_release"
           ? versionDoiDecision.reason
@@ -451,37 +546,6 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
           `[github-webhook] version-doi dispatch failed for ${versionDoiDecision.datasetId}@${versionDoiDecision.tag} delivery=${deliveryId}: ${msg}`,
         );
         errors.version_doi = msg;
-      }
-    }
-
-    if (zarrDecision.dispatch) {
-      // The Hallu cron is the Zarr conversion engine (the GitHub Actions path
-      // can't sustain bulk/backfill -- a large dataset stalls past the 120-min
-      // cap; epic #684). Auto-dispatch is therefore OFF by default; set
-      // ZARR_AUTODISPATCH="true" to re-enable the event-driven Actions path. The
-      // run-generate-zarr.yml workflow stays available for manual
-      // workflow_dispatch recovery regardless.
-      if (c.env.ZARR_AUTODISPATCH !== "true") {
-        console.log(
-          `[github-webhook] zarr autodispatch off (Hallu cron owns conversion); skipping ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}`,
-        );
-      } else {
-        try {
-          await triggerZarrGeneration(zarrDecision.datasetId, zarrDecision.ref, pat, {
-            s3Bucket: c.env.S3_BUCKET,
-            callbackBaseUrl: c.env.API_BASE_URL,
-          });
-          console.log(
-            `[github-webhook] dispatched run-generate-zarr for ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}`,
-          );
-          dispatched.zarr = { dataset_id: zarrDecision.datasetId, ref: zarrDecision.ref };
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error(
-            `[github-webhook] zarr dispatch failed for ${zarrDecision.datasetId}@${zarrDecision.ref} delivery=${deliveryId}: ${msg}`,
-          );
-          errors.zarr = msg;
-        }
       }
     }
 

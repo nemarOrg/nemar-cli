@@ -1,0 +1,18 @@
+-- Chronic worker-pool pressure on the Zarr conversion node (epic #1108 / #1110).
+--
+-- A worker killed by the kernel OOM reaper poisons the whole ProcessPoolExecutor.
+-- Before #1110 that aborted the dataset outright; it is now recovered from, which
+-- is strictly better but also means the symptom stops being visible: the run
+-- succeeds, the dataset is marked ready, and the only trace is a line in a cron
+-- log measured in tens of megabytes.
+--
+-- Recovering silently is how a node under sustained memory pressure looks healthy
+-- until it isn't. This column carries the per-run count so the trend is queryable
+-- instead of requiring someone to grep the box.
+--
+--   zarr_pool_breaks  number of worker-pool breaks RECOVERED during the last
+--                     conversion. 0 is the healthy value; NULL means the dataset
+--                     has not converted since this shipped. A non-zero trend
+--                     across datasets means the node is over-committed, not that
+--                     any one dataset is bad.
+ALTER TABLE datasets ADD COLUMN zarr_pool_breaks INTEGER;

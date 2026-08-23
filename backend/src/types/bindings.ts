@@ -176,8 +176,8 @@ export interface Bindings {
   OPENNEURO_SUPPORT_EMAIL?: string;
   OPENNEURO_MAINTAINER_EMAIL_ENABLED?: string;
 
-  // Zarr serving copy (epic #684). The conversion runs in
-  // nemarDatasets/.github run-generate-zarr.yml and POSTs back to
+  // Zarr serving copy (epic #684). The conversion runs on the SDSC Hallu cron
+  // (scripts/zarr/hallu-zarr.sh in this repo) and POSTs back to
   // /webhooks/zarr-ready (authenticated with NEMAR_WEBHOOK_TOKEN). The browser
   // viewer reads the per-recording Zarr stores through a Cloudflare-cached host
   // fronting the public S3 zarr prefix; the callback purges the small shared
@@ -186,11 +186,6 @@ export interface Bindings {
   ZARR_CACHE_BASE_URL?: string; // e.g. "https://zarr.nemar.org" (cache host, no trailing slash needed)
   CLOUDFLARE_API_TOKEN?: string; // Workers secret; scoped token with Zone.Cache Purge on the SCCN zone
   CLOUDFLARE_ZONE_ID?: string; // SCCN zone id for the cache host
-  // "true" re-enables the event-driven Actions auto-dispatch on a data/events
-  // push. Default (unset) keeps it OFF: the SDSC Hallu cron is the conversion
-  // engine (Actions can't sustain bulk/backfill). run-generate-zarr.yml stays
-  // available for manual workflow_dispatch recovery either way.
-  ZARR_AUTODISPATCH?: string;
 }
 
 /** User roles in hierarchical order: owner > admin > member */
