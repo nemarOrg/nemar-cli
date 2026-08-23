@@ -126,10 +126,17 @@ MODALITY_RATES = {"EEG": 250, "MEG": 250, "IEEG": 1000, "EMG": 1000}
 # Large recordings are converted with biosigIO's STREAMING path (bounded RAM)
 # instead of the in-memory `Recording.from_file -> to_zarr`, which loads the whole
 # recording at float64 2-3x and OOMs on multi-GB iEEG/MEG (e.g. nm000253's 18 GB
-# BrainVision recordings). Gated on (a) size and (b) an MNE-native format, so the
-# streamed read matches the in-memory reader for that format exactly (BrainVision/
-# FIF both go through MNE either way); EDF/EEGLAB stay on the in-memory path.
-# Requires biosigio>=1.1.5. Threshold is env-overridable for the Hallu cron.
+# BrainVision recordings). Gated on (a) size and (b) the format having a streaming
+# reader that agrees with its in-memory reader exactly. That condition started out
+# as "MNE-native" (BrainVision/FIF go through MNE either way) and is no longer a
+# synonym for it: KIT and EDF/BDF stream too, each on its own lower threshold,
+# which is why they get their own tuples below. EEGLAB `.set` is now the only
+# format that never streams at any size (ADR 0030) -- `should_stream` is the
+# authority, not this paragraph.
+# No single version floor: EDF streaming needs biosigio>=1.2.0, MEF3/BTi discovery
+# >=1.2.3, HDF5 `.set` >=1.2.4, CTF coil naming >=1.2.5. `requirements.txt` carries
+# the pin and the reason for each bump; read it there rather than tracking a number
+# here. Threshold is env-overridable for the Hallu cron.
 # CTF `.ds` is MNE-native too (large MEG), so it streams as well. So is MEF3
 # `.mefd`: `mne.io.read_raw_mef` supports `preload=False`, and biosigio's streaming
 # exporter opens it lazily the same way as CTF/FIF (`_MneSource`, biosigio>=1.2.3)
@@ -522,7 +529,9 @@ def note_measurement(result: dict, projections: dict, measured: dict) -> str | N
     return None
 
 
-def calibration_summary(measured: dict, projections: dict) -> list[dict]:
+def calibration_summary(
+    measured: dict, projections: dict, streamed: set[str]
+) -> list[dict]:
     """Per-extension measured-vs-projected peak RAM, worst case first.
 
     This is the feedback loop that stops `INMEM_MEM_FACTOR_BY_EXT` being folklore:
@@ -533,15 +542,21 @@ def calibration_summary(measured: dict, projections: dict) -> list[dict]:
     should not silently re-tune the whole archive.
     """
     # Bucket by (extension, which path it took). A streamed recording's projection
-    # is the flat STREAM_PEAK_BYTES, unrelated to its on-disk size, so mixing it in
-    # with in-memory recordings of the same extension yields a "suggested factor"
-    # that looks like a blow-up multiplier but is not one. Only the in-memory path
-    # has a factor to suggest.
+    # is unrelated to its on-disk size, so mixing it in with in-memory recordings
+    # of the same extension yields a "suggested factor" that looks like a blow-up
+    # multiplier but is not one. Only the in-memory path has a factor to suggest.
+    #
+    # `streamed` is passed in rather than re-derived from `proj == STREAM_PEAK_BYTES`.
+    # That test held only while a streamed projection was always the flat constant;
+    # `streaming_peak_bytes` now raises it to the per-channel floor for a few-channel,
+    # long, high-rate recording (ADR 0030's EMG / single-contact iEEG case), and such
+    # a recording would fall through to "inmem" and be handed a bogus suggested_factor
+    # -- corrupting the very feedback loop this function exists to provide.
     buckets: dict[tuple[str, str], list[tuple[int, int]]] = {}
     for path, rss in measured.items():
         proj = projections.get(path)
         if proj:
-            kind = "stream" if proj == STREAM_PEAK_BYTES else "inmem"
+            kind = "stream" if path in streamed else "inmem"
             buckets.setdefault((lower_ext(path) or "(dir)", kind), []).append((rss, proj))
     rows = []
     for (ext, kind), pairs in buckets.items():
@@ -2331,6 +2346,7 @@ def materialize_recording(
         wanted.append(events_path)
 
     primary_key: str | None = None
+    events_fetched = False
     for path in wanted:
         local = os.path.join(work_dir, os.path.basename(path))
         found, key = _fetch_blob(repo_dir, bucket, dataset_id, path, head, local)
@@ -2340,15 +2356,36 @@ def materialize_recording(
                     f"primary {path!r} in the worklist but absent from ls-tree {head[:8]} "
                     "(possible pack corruption or path-encoding issue)"
                 )
-            print(f"::warning::companion {path!r} absent from ls-tree {head[:8]}; skipping", flush=True)
+            if path == events_path:
+                # events_path only reaches `wanted` when it IS in head_files, so
+                # "not found" here is a tree/pack desync rather than the ordinary
+                # "this recording has no events.tsv". Say so distinctly: the
+                # generic companion line below reads identically to the benign
+                # case and would hide a real repository problem.
+                print(
+                    f"::warning::events sidecar {path!r} is tracked at {head[:8]} but "
+                    "could not be fetched; converting WITHOUT behavioral annotations",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"::warning::companion {path!r} absent from ls-tree {head[:8]}; skipping",
+                    flush=True,
+                )
             continue
         if path == primary_path:
             primary_key = key
+        if path == events_path:
+            events_fetched = True
     return (
         os.path.join(work_dir, os.path.basename(primary_path)),
-        os.path.join(work_dir, os.path.basename(events_path))
-        if events_path in head_files
-        else None,
+        # Derived from the fetch actually succeeding, not from tree membership.
+        # `_materialize_dir_members` already does it this way; this returned a
+        # path to a file it had not written whenever the events fetch failed.
+        # Every caller happens to guard with os.path.exists, so nothing is
+        # mis-served today -- but the value was a claim this function could not
+        # back, and one unguarded caller away from being a real bug.
+        os.path.join(work_dir, os.path.basename(events_path)) if events_fetched else None,
         primary_key,
     )
 
@@ -2403,7 +2440,6 @@ def store_metadata(store_path: str) -> dict:
         # Keyed `_error` and stripped before the entry is built: `meta` is spread
         # into the PUBLISHED index, and diagnostic state must not ride along.
         return {"_error": str(exc)}
-        return {}
 
 
 def materialize_local(
@@ -3127,6 +3163,23 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # corrupt_or_truncated, ...) so the index can tell the viewer WHY a
         # recording has no store. Infra failures (a plain RuntimeError, a crashed
         # worker) have no code -> not surfaced, they retry on the next run.
+        #
+        # Print the traceback for the uncoded ones before it is lost. This runs in
+        # a ProcessPoolExecutor worker, so once the exception is reduced to
+        # `str(exc)` for the return value the stack is gone for good, and a NOVEL
+        # bug surfaces on an unattended cron as a bare "list index out of range"
+        # with no file or line. That is the same undiagnosable shape that left the
+        # MaxShield cause unexplained across 396 recordings. Coded failures are
+        # already self-explaining and stay quiet, or every derivative in the
+        # archive would print a stack.
+        if getattr(exc, "code", None) is None:
+            import traceback
+
+            print(
+                f"::warning::{primary!r} failed with an uncoded error; traceback follows "
+                f"so the cause is not reduced to one line:\n{traceback.format_exc()}",
+                flush=True,
+            )
         return {
             "ok": False,
             "primary": primary,
@@ -3502,10 +3555,12 @@ def main() -> int:
         )
         for p in convert
     }
+    # Which path each recording will take. Computed once and reused: admission
+    # needs it to skip MEM_LIMIT_SLACK for streamed recordings, and the calibration
+    # summary needs it to bucket them apart from in-memory ones.
+    streamed_paths = {p for p in convert if should_stream(p, sizes[p])}
     peaks = {
-        p: admission_reserve_bytes(
-            proj, ram_ceiling, streamed=should_stream(p, sizes[p])
-        )
+        p: admission_reserve_bytes(proj, ram_ceiling, streamed=p in streamed_paths)
         for p, proj in projections.items()
     }
     # Measured peak RSS per recording, so the factors above stop being guesses.
@@ -3567,7 +3622,7 @@ def main() -> int:
                 convert, peaks, cpu_cap, ram_ceiling, ctx, record
             )
 
-    calibration = calibration_summary(measured, projections)
+    calibration = calibration_summary(measured, projections, streamed_paths)
     if calibration:
         worst = calibration[0]
         print(

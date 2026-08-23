@@ -436,11 +436,15 @@ if [[ ! -f "$DRIVER" || ! -f "$QUEUE" ]]; then
   err "driver/queue not found under $DRIVER_REPO after setup"; exit 1
 fi
 
-# Drift guard. setup() refreshes DRIVER_REPO from origin/$DRIVER_REF every run, so the
-# Python driver deploys itself -- but THIS script cannot: it has to exist before
-# the clone does, so it is a hand-placed copy that git never touches. That copy
-# silently fell ~5 weeks behind main once already (nemarDatasets/.github#92's
-# scratch sweep merged and did nothing here). Compare and warn; do NOT self-copy,
+# Drift guard, for the bootstrap deployment shape only. setup() refreshes
+# DRIVER_REPO from origin/$DRIVER_REF every run, and since #1109 moved this script
+# INTO the checkout, cron invokes the clone's copy -- so in the normal deployment
+# this script deploys itself along with the driver and the check below is a no-op
+# (SELF == REPO_SELF). It still matters for a node bootstrapped from an
+# out-of-clone copy, which has to exist before the clone does and which git never
+# touches: such a copy silently fell ~5 weeks behind main once already
+# (nemarDatasets/.github#92's scratch sweep merged and did nothing here).
+# Compare and warn; do NOT self-copy,
 # because bash reads a script incrementally and rewriting the running file mid-run
 # resumes execution at a garbage byte offset. Deploy with an atomic rename:
 #   scp hallu-zarr.sh hallu:/path/.hallu-zarr.sh.new && ssh hallu 'mv /path/.hallu-zarr.sh.new /path/hallu-zarr.sh'
@@ -480,8 +484,12 @@ ref_moved() {
 }
 
 if [[ -n "$STATS_ONLY" ]]; then
+  # Propagate qpy's status rather than hard-coding success. `--stats` is what an
+  # operator reaches for when the queue looks wrong, so a crash here (a corrupt
+  # DB, say) IS the answer to their question -- reporting 0 would hide it from
+  # anything checking the exit code.
   qpy stats
-  exit 0
+  exit $?
 fi
 
 # Past every early exit; from here on convert_dataset() may run and needs the token.
@@ -497,20 +505,49 @@ if [[ -n "$ONLY_DATASET" ]]; then
 fi
 
 # Reconcile (enqueue pending + recover stale inprogress), then drain the queue.
-log "reconcile: $(qpy reconcile --api-base "$API_BASE")"
+#
+# Both queue calls below are exit-code checked, and that is load-bearing under
+# `set -uo pipefail` (no -e). `log "reconcile: $(qpy reconcile)"` used to discard
+# the status entirely: fetch_public_datasets' urlopen has no retry, so one API
+# blip crashed qpy, the traceback went to stderr while the substitution captured
+# only stdout, and the run logged a content-free "reconcile: " line. The drain
+# then read an empty queue, broke immediately, and reported
+# "run complete: processed 0 dataset(s)" with exit 0 -- a green cron tick that
+# enqueued nothing, repeatable every hour for as long as the API stayed sick.
+# Fail loud instead, the same way setup() treats every git step.
+if ! reconcile_out="$(qpy reconcile --api-base "$API_BASE")"; then
+  err "FATAL: reconcile failed (catalog unreachable, or queue error); nothing was"
+  err "enqueued this run. Not draining -- an empty queue here would be a lie."
+  exit 1
+fi
+log "reconcile: $reconcile_out"
 n=0
 while :; do
-  line="$(qpy next)"
+  # An empty line means "queue drained"; a NON-ZERO exit means the queue could
+  # not be read. Conflating them would turn a broken DB into a silent clean exit.
+  if ! line="$(qpy next)"; then
+    err "FATAL: could not read the next queue entry; refusing to treat that as an"
+    err "empty queue. ${n} dataset(s) processed before this."
+    exit 1
+  fi
   [[ -z "$line" ]] && break
   id="${line%%$'\t'*}"; version="${line#*$'\t'}"
+  # These three are warn-not-exit, unlike the two above. A queue write that fails
+  # right after a real conversion leaves the row `inprogress`, which the 6h
+  # stale-recovery sweep reclaims on its own -- it costs one re-conversion, it
+  # does not lose data or stall the drain. Worth a loud line so the wasted work
+  # is attributable, not worth abandoning a backfill mid-queue.
   if convert_dataset "$id" "$version"; then
     # shellcheck disable=SC1010  # `done` is the queue subcommand, not the keyword
-    qpy done "$id" "$version"
+    qpy done "$id" "$version" ||
+      err "[$id] converted, but marking it done FAILED; the row stays inprogress until the stale sweep reclaims it (~6h) and it will be converted again"
   elif [[ "$LAST_DETERMINISTIC" == "true" ]]; then
     # Every recording is an unreadable DATA failure -- terminal, no retry (#774).
-    qpy fail "$id" "all recordings failed to convert (typed data failures; see ${LOG_FILE})" --deterministic
+    qpy fail "$id" "all recordings failed to convert (typed data failures; see ${LOG_FILE})" --deterministic ||
+      err "[$id] marking the deterministic failure FAILED; the row stays inprogress and will be retried despite being terminal"
   else
-    qpy fail "$id" "conversion failed (see ${LOG_FILE})"
+    qpy fail "$id" "conversion failed (see ${LOG_FILE})" ||
+      err "[$id] marking the failure FAILED; the row stays inprogress until the stale sweep reclaims it"
   fi
   n=$((n + 1))
   if [[ "$LIMIT" -gt 0 && "$n" -ge "$LIMIT" ]]; then

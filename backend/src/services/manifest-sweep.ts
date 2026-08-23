@@ -44,9 +44,11 @@ export const MANIFEST_SWEEP_WINDOW = "-30 days";
  * Candidate query, exported so the test pins the WHERE logic against a real
  * SQLite db. The predicates mirror the missing-manifest doctor check's
  * candidate query (active + public + has a repo to regenerate from), narrowed
- * to recently created versions. LIMIT 50 bounds the per-run subrequest cost:
+ * to recently created versions. The LIMIT bounds the per-run subrequest cost:
  * one unsigned S3 GET per row, plus a signed retry on 403.
  */
+export const MANIFEST_SWEEP_LIMIT = 50;
+
 export const MANIFEST_SWEEP_QUERY = `SELECT d.dataset_id, dv.version, dv.doi, d.github_repo, d.concept_doi
    FROM datasets d
    JOIN dataset_versions dv ON dv.dataset_id = d.dataset_id
@@ -55,7 +57,7 @@ export const MANIFEST_SWEEP_QUERY = `SELECT d.dataset_id, dv.version, dv.doi, d.
     AND d.github_repo IS NOT NULL
     AND dv.created_at >= datetime('now', ?)
   ORDER BY dv.created_at DESC
-  LIMIT 50`;
+  LIMIT ${MANIFEST_SWEEP_LIMIT}`;
 
 interface SweepRow {
   dataset_id: string;
@@ -96,6 +98,15 @@ export async function manifestIntegritySweep(env: Bindings): Promise<void> {
     console.log("[manifest-sweep] no versions inside the window");
     return;
   }
+  if (rows.length >= MANIFEST_SWEEP_LIMIT) {
+    // The slice is `ORDER BY created_at DESC LIMIT n`, so hitting the cap means
+    // older-but-still-in-window versions were not looked at THIS run and will
+    // keep being crowded out while the burst stays inside the window. Silent
+    // truncation would read as "everything in the window is fine".
+    console.error(
+      `[manifest-sweep] candidate slice hit the ${MANIFEST_SWEEP_LIMIT}-row cap; older versions inside the window were not checked this run`,
+    );
+  }
 
   const s3 = {
     bucket: env.S3_BUCKET,
@@ -105,12 +116,20 @@ export async function manifestIntegritySweep(env: Bindings): Promise<void> {
   };
 
   const missing: Finding[] = [];
+  // Counted separately from `missing`. Both branches below `continue`, so the
+  // summary could not tell "checked all N, every manifest present" apart from
+  // "N threw and were skipped" -- and an S3 outage during the tick would print a
+  // reassuring `missing=0` having verified nothing. That is the same shape as the
+  // incident this backstop exists for: a real problem behind a healthy-looking
+  // signal.
+  let checkFailures = 0;
   for (const row of rows) {
     try {
       if ((await getManifest(s3, row.dataset_id, row.version)) !== null) continue;
     } catch (err) {
       // Transient S3/network error, not proof of a missing manifest. Skip
       // rather than regenerate over an object we could not read.
+      checkFailures++;
       console.error(
         `[manifest-sweep] presence check failed dataset=${row.dataset_id} version=${row.version}:`,
         errorMessage(err),
@@ -124,7 +143,16 @@ export async function manifestIntegritySweep(env: Bindings): Promise<void> {
     });
   }
   if (missing.length === 0) {
-    console.log(`[manifest-sweep] candidates=${rows.length} missing=0`);
+    // Loud when a check failed, even though nothing was found missing: "missing=0
+    // after 40 of 50 checks errored" is not a clean bill of health, and reporting
+    // it as one is how a silent regression survives a daily backstop.
+    if (checkFailures > 0) {
+      console.error(
+        `[manifest-sweep] candidates=${rows.length} missing=0 check_failures=${checkFailures} -- this run did NOT verify every candidate; treat missing=0 as inconclusive`,
+      );
+      return;
+    }
+    console.log(`[manifest-sweep] candidates=${rows.length} missing=0 check_failures=0`);
     return;
   }
 
@@ -165,6 +193,6 @@ export async function manifestIntegritySweep(env: Bindings): Promise<void> {
     }
   }
   console.error(
-    `[manifest-sweep] candidates=${rows.length} missing=${missing.length} fixed=${fixed} skipped=${skipped} failed=${failed}`,
+    `[manifest-sweep] candidates=${rows.length} missing=${missing.length} fixed=${fixed} skipped=${skipped} failed=${failed} check_failures=${checkFailures}`,
   );
 }

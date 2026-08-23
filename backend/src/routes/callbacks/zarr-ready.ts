@@ -12,8 +12,9 @@ import { isValidDatasetId } from "../../services/datasetId.js";
 import { type WebhookRouter, timingSafeEqual } from "../webhooks/shared.js";
 
 /**
- * POST /webhooks/zarr-ready — callback from nemarDatasets/.github
- * `scripts/zarr/hallu-zarr.sh` on the SDSC Hallu cron once a dataset's Zarr serving copy has been
+ * POST /webhooks/zarr-ready — callback from `scripts/zarr/hallu-zarr.sh`, which
+ * lives in THIS repo and runs on the SDSC Hallu cron (ADR 0029 repatriated it
+ * from nemarDatasets/.github), once a dataset's Zarr serving copy has been
  * (re)built and synced to `s3://nemar/<id>/zarr/...` (epic #684 / Stream C).
  *
  * Authenticated with the shared `X-Webhook-Token` (NEMAR_WEBHOOK_TOKEN), same
@@ -210,6 +211,12 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
         // with the archive-ready auto-retry (epic #736, Phase 3 decision). Keep
         // the prior store_count/etag/commit (a failed rebuild shouldn't erase the
         // last good copy's bookkeeping) and only flip status + the failure detail.
+        // zarr_pool_breaks is recorded here too, not just on the ready path. The
+        // driver sends it with either status, and a run that failed outright is
+        // the STRONGEST node-pressure signal there is -- dropping it would leave
+        // the column stale at the last successful run's value and defeat the
+        // point of migration 0069 ("a node under sustained memory pressure looks
+        // healthy until it isn't") in exactly the case it was added for.
         const result = await c.env.DB.prepare(
           `UPDATE datasets
            SET zarr_status = 'failed',
@@ -217,10 +224,18 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
                zarr_failure_count = ?,
                zarr_deterministic = ?,
                zarr_data_failures = ?,
+               zarr_pool_breaks = ?,
                zarr_failed_at = datetime('now')
            WHERE dataset_id = ?`,
         )
-          .bind(f.errors, f.failureCount, f.deterministic, f.dataFailuresJson, body.dataset_id)
+          .bind(
+            f.errors,
+            f.failureCount,
+            f.deterministic,
+            f.dataFailuresJson,
+            typeof body.pool_breaks === "number" ? body.pool_breaks : null,
+            body.dataset_id,
+          )
           .run();
         changed = result.meta.changes ?? 0;
       }

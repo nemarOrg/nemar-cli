@@ -13,6 +13,8 @@ Run with:
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -55,6 +57,7 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     reset_peak_rss,
     peak_rss_bytes,
     inmem_factor_for,
+    is_maxshield_fif,
     calibration_summary,
     INMEM_MEM_FACTOR,
     usable_ram_bytes,
@@ -2998,6 +3001,142 @@ class TestMemoryErrorBeforePeakResetIsTyped(unittest.TestCase):
         self.assertIsNone(res["code"])
 
 
+class TestMaxShieldWiringInConvertOne(unittest.TestCase):
+    """ADR 0028's decision, as `convert_one` actually wires it (#1126).
+
+    The pieces were covered in isolation -- `maxshield_calibration_for`'s
+    resolution, and that `maxshield_uncalibrated` is classified deterministic --
+    but nothing exercised the code that CONNECTS them. A regression that let any
+    of these branches fall through would serve raw Internal Active Shielding
+    data, which is the one outcome ADR 0028 exists to prevent, and every
+    isolated test would still have passed.
+
+    `is_maxshield_fif` is substituted here, and only it. Real detection needs
+    both MNE (absent from the pure-python CI job) and a genuine IAS recording,
+    and it is an environmental PROBE, not the decision under test: what runs for
+    real below is the pair resolution, all three decline branches, and the
+    verdict `convert_one` returns. Same injection the module already uses for
+    `reset_peak_rss` in TestMemoryErrorBeforePeakReset.
+    """
+
+    REC = "sub-01/meg/sub-01_task-rest_meg.fif"
+    CAL = "sub-01/meg/sub-01_acq-calibration_meg.dat"
+    CTC = "sub-01/meg/sub-01_acq-crosstalk_meg.fif"
+
+    def setUp(self):
+        import generate_zarr as gz
+
+        self.gz = gz
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = os.path.join(self._tmp.name, "repo")
+        os.makedirs(os.path.join(self.repo, "sub-01", "meg"), exist_ok=True)
+        self._write(self.REC)
+
+        try:
+            import resource
+
+            saved = resource.getrlimit(resource.RLIMIT_DATA)
+            self.addCleanup(resource.setrlimit, resource.RLIMIT_DATA, saved)
+        except Exception:  # noqa: BLE001 - no usable RLIMIT_DATA (macOS/Windows)
+            pass
+
+        self._orig_probe, self._orig_ctx = gz.is_maxshield_fif, gz._CTX
+        self.addCleanup(setattr, gz, "is_maxshield_fif", self._orig_probe)
+        self.addCleanup(setattr, gz, "_CTX", self._orig_ctx)
+
+    def _write(self, rel: str) -> None:
+        path = os.path.join(self.repo, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(b"\0")
+
+    def _run(self, head_files, *, shielded=True):
+        self.gz.is_maxshield_fif = lambda _p: shielded
+        self.gz._CTX = {
+            "mem_budget": None,
+            "tmp": self._tmp.name,
+            "local": True,
+            "repo": self.repo,
+            "head_files": set(head_files),
+            "bucket": "b",
+            "dataset_id": "on000001",
+            "head": "0" * 40,
+        }
+        return self.gz.convert_one(self.REC, 4 * 1024**3)
+
+    def test_no_calibration_pair_declines_with_the_typed_code(self):
+        res = self._run([self.REC])
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["code"], self.gz.MaxShieldUncalibrated.code)
+        # Assert the REASON, not just the code. Every decline branch here raises
+        # the same code, so a code-only assertion still passes when this branch
+        # falls through and a later one happens to catch the mess -- which is
+        # exactly what a fallthrough regression looks like.
+        self.assertIn("no fine-calibration", res["error"])
+
+    def test_calibration_alone_is_not_enough(self):
+        # ADR 0028 rejects uncalibrated SSS: half a pair must decline, not filter.
+        self._write(self.CAL)
+        res = self._run([self.REC, self.CAL])
+        self.assertEqual(res["code"], self.gz.MaxShieldUncalibrated.code)
+        self.assertIn("no fine-calibration", res["error"])
+
+    def test_cross_talk_alone_is_not_enough(self):
+        self._write(self.CTC)
+        res = self._run([self.REC, self.CTC])
+        self.assertEqual(res["code"], self.gz.MaxShieldUncalibrated.code)
+        self.assertIn("no fine-calibration", res["error"])
+
+    def test_tracked_pair_without_local_content_declines(self):
+        # A git-annex pointer whose content was never fetched. Left uncoded this
+        # became an infra failure that re-ran the filter on every future pass.
+        res = self._run([self.REC, self.CAL, self.CTC])  # in head_files, not on disk
+        self.assertEqual(res["code"], self.gz.MaxShieldUncalibrated.code)
+        self.assertIn("git annex get", res["error"])
+
+    def test_a_resolvable_pair_gets_past_the_gate(self):
+        # The other direction: with both inputs really present, the decline must
+        # NOT fire -- otherwise the 365 recoverable recordings ADR 0028 counted
+        # would all be declined and the filtering would never run at all.
+        self._write(self.CAL)
+        self._write(self.CTC)
+        res = self._run([self.REC, self.CAL, self.CTC])
+        self.assertNotEqual(res.get("code"), self.gz.MaxShieldUncalibrated.code)
+
+    def test_a_recording_that_is_not_shielded_never_declines(self):
+        # The gate is conditioned on detection: an ordinary FIF in a dataset that
+        # ships no calibration pair must convert normally, not be declined.
+        res = self._run([self.REC], shielded=False)
+        self.assertNotEqual(res.get("code"), self.gz.MaxShieldUncalibrated.code)
+
+
+class TestIsMaxShieldFif(unittest.TestCase):
+    """The MaxShield probe's own edges (#1126)."""
+
+    def test_a_non_fif_is_not_probed(self):
+        # Short-circuits on extension, so it costs nothing on the EEG datasets
+        # that make up most of the archive and never needs MNE.
+        self.assertFalse(is_maxshield_fif("sub-01/eeg/sub-01_task-x_eeg.set"))
+
+    def test_an_unreadable_fif_warns_instead_of_failing_silently(self):
+        # A header probe that fails routes the recording down the normal path,
+        # where a genuinely shielded file yields an opaque file_read_error. That
+        # is a real regression risk (truncated download, missing split member),
+        # so it must leave a warning rather than pass silently.
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = os.path.join(tmp, "sub-01_task-x_meg.fif")
+            with open(bad, "wb") as fh:
+                fh.write(b"not a fif")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                result = is_maxshield_fif(bad)
+        self.assertFalse(result)
+        out = buf.getvalue()
+        self.assertIn("::warning::", out)
+        self.assertIn("Internal Active Shielding", out)
+
+
 class TestWorkerMemLimit(unittest.TestCase):
     """#1110: the per-recording RLIMIT_DATA backstop."""
 
@@ -3210,7 +3349,7 @@ class TestCalibrationSummary(unittest.TestCase):
     def test_reports_the_worst_ratio_per_format(self):
         projections = {"a.set": 1000, "b.set": 1000, "c.vhdr": 1000}
         measured = {"a.set": 500, "b.set": 3000, "c.vhdr": 1200}
-        rows = {r["ext"]: r for r in calibration_summary(measured, projections)}
+        rows = {r["ext"]: r for r in calibration_summary(measured, projections, set())}
         self.assertEqual(rows[".set"]["n"], 2)
         self.assertEqual(rows[".set"]["max_ratio"], 3.0)  # the worst, not the mean
         self.assertEqual(rows[".vhdr"]["max_ratio"], 1.2)
@@ -3221,13 +3360,13 @@ class TestCalibrationSummary(unittest.TestCase):
     def test_worst_format_sorts_first(self):
         projections = {"a.set": 1000, "b.vhdr": 1000}
         measured = {"a.set": 4000, "b.vhdr": 1100}
-        self.assertEqual(calibration_summary(measured, projections)[0]["ext"], ".set")
+        self.assertEqual(calibration_summary(measured, projections, set())[0]["ext"], ".set")
 
     def test_suggested_factor_scales_the_current_one(self):
         # Advisory only: it says what WOULD have covered the worst case, and is
         # never applied automatically -- one pathological recording must not
         # silently re-tune the archive.
-        rows = calibration_summary({"a.set": 2000}, {"a.set": 1000})
+        rows = calibration_summary({"a.set": 2000}, {"a.set": 1000}, set())
         self.assertEqual(rows[0]["suggested_factor"], round(INMEM_MEM_FACTOR * 2, 1))
 
     def test_streamed_recordings_get_no_factor_suggestion(self):
@@ -3235,7 +3374,7 @@ class TestCalibrationSummary(unittest.TestCase):
         # unrelated to on-disk size, so multiplying a blow-up factor by its
         # overrun ratio yields a number that looks like a factor but is not one.
         rows = calibration_summary(
-            {"a.edf": STREAM_PEAK_BYTES * 2}, {"a.edf": STREAM_PEAK_BYTES}
+            {"a.edf": STREAM_PEAK_BYTES * 2}, {"a.edf": STREAM_PEAK_BYTES}, {"a.edf"}
         )
         self.assertEqual(rows[0]["path"], "stream")
         self.assertNotIn("suggested_factor", rows[0])
@@ -3244,14 +3383,29 @@ class TestCalibrationSummary(unittest.TestCase):
         rows = calibration_summary(
             {"a.edf": 100, "b.edf": STREAM_PEAK_BYTES * 2},
             {"a.edf": 50, "b.edf": STREAM_PEAK_BYTES},
+            {"b.edf"},
         )
         self.assertEqual({r["path"] for r in rows}, {"inmem", "stream"})
 
+    def test_channel_raised_streaming_projection_still_buckets_as_stream(self):
+        # Regression: the bucket used to be derived from `proj == STREAM_PEAK_BYTES`,
+        # which silently stopped being equivalent to "streamed" once
+        # `streaming_peak_bytes` began raising the projection to the per-channel
+        # floor for a few-channel, long, high-rate recording (ADR 0030). Such a
+        # recording streamed, but was bucketed "inmem" and handed a suggested_factor
+        # computed from a streaming projection -- a number that reads like a blow-up
+        # multiplier and is not one.
+        raised = streaming_peak_bytes(8 * 1024**3, 2)
+        self.assertGreater(raised, STREAM_PEAK_BYTES)  # guard: the case is real
+        rows = calibration_summary({"a.edf": raised * 2}, {"a.edf": raised}, {"a.edf"})
+        self.assertEqual(rows[0]["path"], "stream")
+        self.assertNotIn("suggested_factor", rows[0])
+
     def test_recordings_without_a_projection_are_ignored(self):
-        self.assertEqual(calibration_summary({"ghost.set": 10}, {}), [])
+        self.assertEqual(calibration_summary({"ghost.set": 10}, {}, set()), [])
 
     def test_empty_input_is_empty_output(self):
-        self.assertEqual(calibration_summary({}, {}), [])
+        self.assertEqual(calibration_summary({}, {}, set()), [])
 
 
 class TestUsableRam(unittest.TestCase):
