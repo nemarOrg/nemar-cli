@@ -2346,6 +2346,7 @@ def materialize_recording(
         wanted.append(events_path)
 
     primary_key: str | None = None
+    events_fetched = False
     for path in wanted:
         local = os.path.join(work_dir, os.path.basename(path))
         found, key = _fetch_blob(repo_dir, bucket, dataset_id, path, head, local)
@@ -2355,15 +2356,36 @@ def materialize_recording(
                     f"primary {path!r} in the worklist but absent from ls-tree {head[:8]} "
                     "(possible pack corruption or path-encoding issue)"
                 )
-            print(f"::warning::companion {path!r} absent from ls-tree {head[:8]}; skipping", flush=True)
+            if path == events_path:
+                # events_path only reaches `wanted` when it IS in head_files, so
+                # "not found" here is a tree/pack desync rather than the ordinary
+                # "this recording has no events.tsv". Say so distinctly: the
+                # generic companion line below reads identically to the benign
+                # case and would hide a real repository problem.
+                print(
+                    f"::warning::events sidecar {path!r} is tracked at {head[:8]} but "
+                    "could not be fetched; converting WITHOUT behavioral annotations",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"::warning::companion {path!r} absent from ls-tree {head[:8]}; skipping",
+                    flush=True,
+                )
             continue
         if path == primary_path:
             primary_key = key
+        if path == events_path:
+            events_fetched = True
     return (
         os.path.join(work_dir, os.path.basename(primary_path)),
-        os.path.join(work_dir, os.path.basename(events_path))
-        if events_path in head_files
-        else None,
+        # Derived from the fetch actually succeeding, not from tree membership.
+        # `_materialize_dir_members` already does it this way; this returned a
+        # path to a file it had not written whenever the events fetch failed.
+        # Every caller happens to guard with os.path.exists, so nothing is
+        # mis-served today -- but the value was a claim this function could not
+        # back, and one unguarded caller away from being a real bug.
+        os.path.join(work_dir, os.path.basename(events_path)) if events_fetched else None,
         primary_key,
     )
 
@@ -3142,6 +3164,23 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # corrupt_or_truncated, ...) so the index can tell the viewer WHY a
         # recording has no store. Infra failures (a plain RuntimeError, a crashed
         # worker) have no code -> not surfaced, they retry on the next run.
+        #
+        # Print the traceback for the uncoded ones before it is lost. This runs in
+        # a ProcessPoolExecutor worker, so once the exception is reduced to
+        # `str(exc)` for the return value the stack is gone for good, and a NOVEL
+        # bug surfaces on an unattended cron as a bare "list index out of range"
+        # with no file or line. That is the same undiagnosable shape that left the
+        # MaxShield cause unexplained across 396 recordings. Coded failures are
+        # already self-explaining and stay quiet, or every derivative in the
+        # archive would print a stack.
+        if getattr(exc, "code", None) is None:
+            import traceback
+
+            print(
+                f"::warning::{primary!r} failed with an uncoded error; traceback follows "
+                f"so the cause is not reduced to one line:\n{traceback.format_exc()}",
+                flush=True,
+            )
         return {
             "ok": False,
             "primary": primary,

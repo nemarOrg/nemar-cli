@@ -141,8 +141,20 @@ def reconcile(
     """
     now_iso, now = _now_iso(), _now()
     enq = 0
+    # IDs the queue refuses, kept as a COUNT rather than dropped on the floor.
+    # `seen` counts every row the catalog returned and nothing else did, so a
+    # dataset rejected here simply never appeared -- indistinguishable in the log
+    # from a healthy steady state where most rows are already `done`. A catalog
+    # that starts emitting an unexpected ID shape would go unconverted forever
+    # with no line saying so.
+    rejected = 0
     for dataset_id, latest in datasets:
-        if not DATASET_ID_RE.match(dataset_id) or dataset_id == "nm099999":
+        # nm099999 is the private E2E fixture, deliberately never converted; it is
+        # an expected skip, not an anomaly, so it is not counted as rejected.
+        if dataset_id == "nm099999":
+            continue
+        if not DATASET_ID_RE.match(dataset_id):
+            rejected += 1
             continue
         row = conn.execute(
             "SELECT status, converted_version, latest_version FROM jobs WHERE dataset_id=?",
@@ -225,7 +237,12 @@ def reconcile(
         (now, now - stale_seconds),
     ).rowcount
     conn.commit()
-    return {"enqueued": enq, "recovered_stale": recovered, "unlisted": unlisted}
+    return {
+        "enqueued": enq,
+        "recovered_stale": recovered,
+        "unlisted": unlisted,
+        "rejected": rejected,
+    }
 
 
 def claim_next(conn: sqlite3.Connection) -> sqlite3.Row | None:
@@ -444,7 +461,8 @@ def main() -> int:
         res = reconcile(conn, datasets, args.stale_seconds, listing_complete=complete)
         print(
             f"reconcile: seen={len(datasets)} enqueued={res['enqueued']} "
-            f"recovered_stale={res['recovered_stale']} unlisted={res['unlisted']}"
+            f"recovered_stale={res['recovered_stale']} unlisted={res['unlisted']} "
+            f"rejected={res['rejected']}"
             + ("" if complete else " (PARTIAL catalog read; unlisted sweep skipped)")
         )
         return 0

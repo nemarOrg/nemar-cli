@@ -105,12 +105,20 @@ export async function manifestIntegritySweep(env: Bindings): Promise<void> {
   };
 
   const missing: Finding[] = [];
+  // Counted separately from `missing`. Both branches below `continue`, so the
+  // summary could not tell "checked all N, every manifest present" apart from
+  // "N threw and were skipped" -- and an S3 outage during the tick would print a
+  // reassuring `missing=0` having verified nothing. That is the same shape as the
+  // incident this backstop exists for: a real problem behind a healthy-looking
+  // signal.
+  let checkFailures = 0;
   for (const row of rows) {
     try {
       if ((await getManifest(s3, row.dataset_id, row.version)) !== null) continue;
     } catch (err) {
       // Transient S3/network error, not proof of a missing manifest. Skip
       // rather than regenerate over an object we could not read.
+      checkFailures++;
       console.error(
         `[manifest-sweep] presence check failed dataset=${row.dataset_id} version=${row.version}:`,
         errorMessage(err),
@@ -124,7 +132,16 @@ export async function manifestIntegritySweep(env: Bindings): Promise<void> {
     });
   }
   if (missing.length === 0) {
-    console.log(`[manifest-sweep] candidates=${rows.length} missing=0`);
+    // Loud when a check failed, even though nothing was found missing: "missing=0
+    // after 40 of 50 checks errored" is not a clean bill of health, and reporting
+    // it as one is how a silent regression survives a daily backstop.
+    if (checkFailures > 0) {
+      console.error(
+        `[manifest-sweep] candidates=${rows.length} missing=0 check_failures=${checkFailures} -- this run did NOT verify every candidate; treat missing=0 as inconclusive`,
+      );
+      return;
+    }
+    console.log(`[manifest-sweep] candidates=${rows.length} missing=0 check_failures=0`);
     return;
   }
 
@@ -165,6 +182,6 @@ export async function manifestIntegritySweep(env: Bindings): Promise<void> {
     }
   }
   console.error(
-    `[manifest-sweep] candidates=${rows.length} missing=${missing.length} fixed=${fixed} skipped=${skipped} failed=${failed}`,
+    `[manifest-sweep] candidates=${rows.length} missing=${missing.length} fixed=${fixed} skipped=${skipped} failed=${failed} check_failures=${checkFailures}`,
   );
 }
