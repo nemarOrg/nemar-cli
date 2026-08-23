@@ -3210,7 +3210,7 @@ class TestCalibrationSummary(unittest.TestCase):
     def test_reports_the_worst_ratio_per_format(self):
         projections = {"a.set": 1000, "b.set": 1000, "c.vhdr": 1000}
         measured = {"a.set": 500, "b.set": 3000, "c.vhdr": 1200}
-        rows = {r["ext"]: r for r in calibration_summary(measured, projections)}
+        rows = {r["ext"]: r for r in calibration_summary(measured, projections, set())}
         self.assertEqual(rows[".set"]["n"], 2)
         self.assertEqual(rows[".set"]["max_ratio"], 3.0)  # the worst, not the mean
         self.assertEqual(rows[".vhdr"]["max_ratio"], 1.2)
@@ -3221,13 +3221,13 @@ class TestCalibrationSummary(unittest.TestCase):
     def test_worst_format_sorts_first(self):
         projections = {"a.set": 1000, "b.vhdr": 1000}
         measured = {"a.set": 4000, "b.vhdr": 1100}
-        self.assertEqual(calibration_summary(measured, projections)[0]["ext"], ".set")
+        self.assertEqual(calibration_summary(measured, projections, set())[0]["ext"], ".set")
 
     def test_suggested_factor_scales_the_current_one(self):
         # Advisory only: it says what WOULD have covered the worst case, and is
         # never applied automatically -- one pathological recording must not
         # silently re-tune the archive.
-        rows = calibration_summary({"a.set": 2000}, {"a.set": 1000})
+        rows = calibration_summary({"a.set": 2000}, {"a.set": 1000}, set())
         self.assertEqual(rows[0]["suggested_factor"], round(INMEM_MEM_FACTOR * 2, 1))
 
     def test_streamed_recordings_get_no_factor_suggestion(self):
@@ -3235,7 +3235,7 @@ class TestCalibrationSummary(unittest.TestCase):
         # unrelated to on-disk size, so multiplying a blow-up factor by its
         # overrun ratio yields a number that looks like a factor but is not one.
         rows = calibration_summary(
-            {"a.edf": STREAM_PEAK_BYTES * 2}, {"a.edf": STREAM_PEAK_BYTES}
+            {"a.edf": STREAM_PEAK_BYTES * 2}, {"a.edf": STREAM_PEAK_BYTES}, {"a.edf"}
         )
         self.assertEqual(rows[0]["path"], "stream")
         self.assertNotIn("suggested_factor", rows[0])
@@ -3244,14 +3244,29 @@ class TestCalibrationSummary(unittest.TestCase):
         rows = calibration_summary(
             {"a.edf": 100, "b.edf": STREAM_PEAK_BYTES * 2},
             {"a.edf": 50, "b.edf": STREAM_PEAK_BYTES},
+            {"b.edf"},
         )
         self.assertEqual({r["path"] for r in rows}, {"inmem", "stream"})
 
+    def test_channel_raised_streaming_projection_still_buckets_as_stream(self):
+        # Regression: the bucket used to be derived from `proj == STREAM_PEAK_BYTES`,
+        # which silently stopped being equivalent to "streamed" once
+        # `streaming_peak_bytes` began raising the projection to the per-channel
+        # floor for a few-channel, long, high-rate recording (ADR 0030). Such a
+        # recording streamed, but was bucketed "inmem" and handed a suggested_factor
+        # computed from a streaming projection -- a number that reads like a blow-up
+        # multiplier and is not one.
+        raised = streaming_peak_bytes(8 * 1024**3, 2)
+        self.assertGreater(raised, STREAM_PEAK_BYTES)  # guard: the case is real
+        rows = calibration_summary({"a.edf": raised * 2}, {"a.edf": raised}, {"a.edf"})
+        self.assertEqual(rows[0]["path"], "stream")
+        self.assertNotIn("suggested_factor", rows[0])
+
     def test_recordings_without_a_projection_are_ignored(self):
-        self.assertEqual(calibration_summary({"ghost.set": 10}, {}), [])
+        self.assertEqual(calibration_summary({"ghost.set": 10}, {}, set()), [])
 
     def test_empty_input_is_empty_output(self):
-        self.assertEqual(calibration_summary({}, {}), [])
+        self.assertEqual(calibration_summary({}, {}, set()), [])
 
 
 class TestUsableRam(unittest.TestCase):

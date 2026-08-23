@@ -126,10 +126,17 @@ MODALITY_RATES = {"EEG": 250, "MEG": 250, "IEEG": 1000, "EMG": 1000}
 # Large recordings are converted with biosigIO's STREAMING path (bounded RAM)
 # instead of the in-memory `Recording.from_file -> to_zarr`, which loads the whole
 # recording at float64 2-3x and OOMs on multi-GB iEEG/MEG (e.g. nm000253's 18 GB
-# BrainVision recordings). Gated on (a) size and (b) an MNE-native format, so the
-# streamed read matches the in-memory reader for that format exactly (BrainVision/
-# FIF both go through MNE either way); EDF/EEGLAB stay on the in-memory path.
-# Requires biosigio>=1.1.5. Threshold is env-overridable for the Hallu cron.
+# BrainVision recordings). Gated on (a) size and (b) the format having a streaming
+# reader that agrees with its in-memory reader exactly. That condition started out
+# as "MNE-native" (BrainVision/FIF go through MNE either way) and is no longer a
+# synonym for it: KIT and EDF/BDF stream too, each on its own lower threshold,
+# which is why they get their own tuples below. EEGLAB `.set` is now the only
+# format that never streams at any size (ADR 0030) -- `should_stream` is the
+# authority, not this paragraph.
+# No single version floor: EDF streaming needs biosigio>=1.2.0, MEF3/BTi discovery
+# >=1.2.3, HDF5 `.set` >=1.2.4, CTF coil naming >=1.2.5. `requirements.txt` carries
+# the pin and the reason for each bump; read it there rather than tracking a number
+# here. Threshold is env-overridable for the Hallu cron.
 # CTF `.ds` is MNE-native too (large MEG), so it streams as well. So is MEF3
 # `.mefd`: `mne.io.read_raw_mef` supports `preload=False`, and biosigio's streaming
 # exporter opens it lazily the same way as CTF/FIF (`_MneSource`, biosigio>=1.2.3)
@@ -522,7 +529,9 @@ def note_measurement(result: dict, projections: dict, measured: dict) -> str | N
     return None
 
 
-def calibration_summary(measured: dict, projections: dict) -> list[dict]:
+def calibration_summary(
+    measured: dict, projections: dict, streamed: set[str]
+) -> list[dict]:
     """Per-extension measured-vs-projected peak RAM, worst case first.
 
     This is the feedback loop that stops `INMEM_MEM_FACTOR_BY_EXT` being folklore:
@@ -533,15 +542,21 @@ def calibration_summary(measured: dict, projections: dict) -> list[dict]:
     should not silently re-tune the whole archive.
     """
     # Bucket by (extension, which path it took). A streamed recording's projection
-    # is the flat STREAM_PEAK_BYTES, unrelated to its on-disk size, so mixing it in
-    # with in-memory recordings of the same extension yields a "suggested factor"
-    # that looks like a blow-up multiplier but is not one. Only the in-memory path
-    # has a factor to suggest.
+    # is unrelated to its on-disk size, so mixing it in with in-memory recordings
+    # of the same extension yields a "suggested factor" that looks like a blow-up
+    # multiplier but is not one. Only the in-memory path has a factor to suggest.
+    #
+    # `streamed` is passed in rather than re-derived from `proj == STREAM_PEAK_BYTES`.
+    # That test held only while a streamed projection was always the flat constant;
+    # `streaming_peak_bytes` now raises it to the per-channel floor for a few-channel,
+    # long, high-rate recording (ADR 0030's EMG / single-contact iEEG case), and such
+    # a recording would fall through to "inmem" and be handed a bogus suggested_factor
+    # -- corrupting the very feedback loop this function exists to provide.
     buckets: dict[tuple[str, str], list[tuple[int, int]]] = {}
     for path, rss in measured.items():
         proj = projections.get(path)
         if proj:
-            kind = "stream" if proj == STREAM_PEAK_BYTES else "inmem"
+            kind = "stream" if path in streamed else "inmem"
             buckets.setdefault((lower_ext(path) or "(dir)", kind), []).append((rss, proj))
     rows = []
     for (ext, kind), pairs in buckets.items():
@@ -3502,10 +3517,12 @@ def main() -> int:
         )
         for p in convert
     }
+    # Which path each recording will take. Computed once and reused: admission
+    # needs it to skip MEM_LIMIT_SLACK for streamed recordings, and the calibration
+    # summary needs it to bucket them apart from in-memory ones.
+    streamed_paths = {p for p in convert if should_stream(p, sizes[p])}
     peaks = {
-        p: admission_reserve_bytes(
-            proj, ram_ceiling, streamed=should_stream(p, sizes[p])
-        )
+        p: admission_reserve_bytes(proj, ram_ceiling, streamed=p in streamed_paths)
         for p, proj in projections.items()
     }
     # Measured peak RSS per recording, so the factors above stop being guesses.
@@ -3567,7 +3584,7 @@ def main() -> int:
                 convert, peaks, cpu_cap, ram_ceiling, ctx, record
             )
 
-    calibration = calibration_summary(measured, projections)
+    calibration = calibration_summary(measured, projections, streamed_paths)
     if calibration:
         worst = calibration[0]
         print(
