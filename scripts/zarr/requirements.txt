@@ -44,4 +44,13 @@
 #     real recordings, all channels) and are flagged via `edf_tolerant_read`.
 #     Genuine truncation is still reported as corruption. ~4,332 recordings across
 #     23 datasets, the largest single cluster.
-biosigio[zarr,meg,mef3,hdf5]>=1.2.4
+# >=1.2.5: reads CTF `.ds` recordings whose `.hc` names the head coils
+#   `Nasion`/`LPA`/`RPA` (biosigio#117). MNE substring-matches that descriptor
+#   against a case-sensitive `nasion`/`left ear`/`right ear` table, so every coil
+#   parsed as unknown and the whole recording failed with "Some of the mandatory
+#   HPI device-coordinate info was not there" -- the coil coordinates were
+#   present and correct the entire time. 380 recordings in on006502, which is
+#   every recording it has (nemarOrg/nemar-cli#1125). Fixed upstream too
+#   (mne-tools/mne-python#14191, merged), but no MNE release carries it yet;
+#   biosigIO's shim is gated on that and no-ops once one does.
+biosigio[zarr,meg,mef3,hdf5]>=1.2.5
