@@ -2440,7 +2440,6 @@ def store_metadata(store_path: str) -> dict:
         # Keyed `_error` and stripped before the entry is built: `meta` is spread
         # into the PUBLISHED index, and diagnostic state must not ride along.
         return {"_error": str(exc)}
-        return {}
 
 
 def materialize_local(

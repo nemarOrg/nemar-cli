@@ -44,9 +44,11 @@ export const MANIFEST_SWEEP_WINDOW = "-30 days";
  * Candidate query, exported so the test pins the WHERE logic against a real
  * SQLite db. The predicates mirror the missing-manifest doctor check's
  * candidate query (active + public + has a repo to regenerate from), narrowed
- * to recently created versions. LIMIT 50 bounds the per-run subrequest cost:
+ * to recently created versions. The LIMIT bounds the per-run subrequest cost:
  * one unsigned S3 GET per row, plus a signed retry on 403.
  */
+export const MANIFEST_SWEEP_LIMIT = 50;
+
 export const MANIFEST_SWEEP_QUERY = `SELECT d.dataset_id, dv.version, dv.doi, d.github_repo, d.concept_doi
    FROM datasets d
    JOIN dataset_versions dv ON dv.dataset_id = d.dataset_id
@@ -55,7 +57,7 @@ export const MANIFEST_SWEEP_QUERY = `SELECT d.dataset_id, dv.version, dv.doi, d.
     AND d.github_repo IS NOT NULL
     AND dv.created_at >= datetime('now', ?)
   ORDER BY dv.created_at DESC
-  LIMIT 50`;
+  LIMIT ${MANIFEST_SWEEP_LIMIT}`;
 
 interface SweepRow {
   dataset_id: string;
@@ -95,6 +97,15 @@ export async function manifestIntegritySweep(env: Bindings): Promise<void> {
   if (rows.length === 0) {
     console.log("[manifest-sweep] no versions inside the window");
     return;
+  }
+  if (rows.length >= MANIFEST_SWEEP_LIMIT) {
+    // The slice is `ORDER BY created_at DESC LIMIT n`, so hitting the cap means
+    // older-but-still-in-window versions were not looked at THIS run and will
+    // keep being crowded out while the burst stays inside the window. Silent
+    // truncation would read as "everything in the window is fine".
+    console.error(
+      `[manifest-sweep] candidate slice hit the ${MANIFEST_SWEEP_LIMIT}-row cap; older versions inside the window were not checked this run`,
+    );
   }
 
   const s3 = {
