@@ -12,10 +12,30 @@
  * existing test files that import them from there
  * (`datasets-search.unit.test.ts`, `data-complete-filter.test.ts`,
  * `has-hed-filter.test.ts`, `license-tier.test.ts`) keep passing unchanged.
+ *
+ * This file has NO imports from `dataset-search.ts` (review round 3 caught an
+ * earlier version that imported `buildFtsMatch` back from there, recreating a
+ * two-file cycle one layer down -- harmless at runtime since both are hoisted
+ * function declarations, but it contradicted this docstring, so `buildFtsMatch`
+ * lives here now instead). `dataset-search.ts` imports FROM this file only.
  */
 
 import type { LicenseTier } from "../lib/license";
-import { buildFtsMatch } from "./dataset-search";
+
+/** Build an injection-safe FTS5 MATCH expression: tokenize to alphanumerics
+ *  (dropping all FTS5 operator chars), quote each token and prefix-match it,
+ *  OR them for recall. Returns null when there is nothing to match. Lives
+ *  here (not dataset-search.ts) so this file has no outgoing imports from
+ *  dataset-search.ts -- the whole point of the #1145 move was to let
+ *  dataset-search.ts depend on this file, not the other way around. */
+export function buildFtsMatch(query: string): string | null {
+  const tokens = query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/i)
+    .filter((t) => t.length >= 2);
+  if (tokens.length === 0) return null;
+  return tokens.map((t) => `"${t}"*`).join(" OR ");
+}
 
 // Escape SQLite LIKE wildcards in user input so a literal '%' or '_' in the
 // search term means itself rather than "match everything" / "match any
@@ -43,7 +63,9 @@ export interface DatasetFilterOptions {
 }
 
 /**
- * #646 filter clauses for the single-table `datasets` list.
+ * #646 filter clauses for the single-table `datasets` list -- and, since
+ * #1145 (epic #1144 phase 1), for every GET /datasets/search tier too
+ * (exact-id, FTS, semantic-hydration all call this via dataset-search.ts).
  * Reads d.* only (no nemar_catalog), and routes free-text `search` through the
  * FTS5 index (`d.id IN (SELECT rowid FROM datasets_fts WHERE … MATCH …)`) plus
  * dataset_id/source_id LIKE, replacing the old `c.search_text` LIKE.
@@ -108,10 +130,13 @@ export function buildDatasetFilterClauses(
     // idx_datasets_data_complete.
     clauses += " AND d.data_complete = 1";
   }
-  if (opts.recent) {
+  if (opts.recent && opts.recent > 0) {
     // #646: folded catalog rows carry publish_date (from nemar.org); managed
     // rows leave it NULL so this falls through to created_at. Preserves the old
     // UNION's per-branch recency (catalog = publish_date, managed = created_at).
+    // Guarded to > 0 (#1145 review S4): a negative value would build
+    // `datetime('now', '--5 days')`, a malformed SQLite modifier that
+    // silently matches nothing rather than erroring loudly.
     clauses += " AND COALESCE(d.publish_date, d.created_at) > datetime('now', ?)";
     params.push(`-${opts.recent} days`);
   }

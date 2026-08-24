@@ -7,7 +7,11 @@
  * Vectors carry zero facts; every display field is hydrated from `datasets`.
  */
 
-import { type DatasetFilterOptions, buildDatasetFilterClauses } from "./dataset-filters";
+import {
+  type DatasetFilterOptions,
+  buildDatasetFilterClauses,
+  buildFtsMatch,
+} from "./dataset-filters";
 
 const EMBEDDING_MODEL = "@cf/baai/bge-small-en-v1.5";
 
@@ -225,18 +229,6 @@ export function buildInPlaceholders(n: number): string {
   return new Array(n).fill("?").join(",");
 }
 
-/** Build an injection-safe FTS5 MATCH expression: tokenize to alphanumerics
- *  (dropping all FTS5 operator chars), quote each token and prefix-match it,
- *  OR them for recall. Returns null when there is nothing to match. */
-export function buildFtsMatch(query: string): string | null {
-  const tokens = query
-    .toLowerCase()
-    .split(/[^a-z0-9]+/i)
-    .filter((t) => t.length >= 2);
-  if (tokens.length === 0) return null;
-  return tokens.map((t) => `"${t}"*`).join(" OR ");
-}
-
 interface HydrateRow {
   id: string;
   name: string | null;
@@ -305,10 +297,16 @@ export async function lookupDatasetById(
   // ds shadow row was deleted at import. Prefer a managed row (owner != -1) over
   // a legacy catalog shadow if both somehow match.
   const params: (string | number)[] = [datasetId, datasetId];
-  // #1145: the exact-id tier used to ignore filters entirely (`search
-  // nm000111 --modality meg` returned the hit regardless of modality). Apply
-  // the same clauses as the other tiers so an id hit that fails the filter is
-  // not returned.
+  // #1145 review C4 correction: the exact-id tier did NOT previously ignore
+  // filters entirely. The pre-#1145 handler ran `applyHasHed(applyModality(rows))`
+  // over the exact-id hit too, so a filtered-out hit already came back as
+  // `results: [], count: 0, method: "exact_id"` -- it never returned the hit
+  // regardless of the filter. What actually changed: the filter clauses now
+  // run inside THIS query (SQL, not a JS array filter), and -- at the
+  // executeDatasetSearch call site -- a filtered-out hit falls through to
+  // try the FTS/semantic tiers instead of short-circuiting with an empty
+  // `exact_id` envelope. That fallthrough, not filter enforcement itself, is
+  // the behaviour change.
   const filterClauses = buildDatasetFilterClauses(params, filters);
   const row = await db
     .prepare(
@@ -397,14 +395,21 @@ export async function ftsSearch(
 
 /**
  * Exact total for GET /datasets/search (#1145, epic #1144 phase 1): one
- * `COUNT(*)` over the union predicate the two retrieval legs draw from, so
- * `count` describes the same population `results` is sliced from instead of
- * drifting with page size (the bug this phase fixes). Each disjunct is
- * omitted when its input is empty -- a punctuation-only query has no FTS
- * match expression, a failed/empty semantic tier has no ids -- and both empty
- * yields `count = 0` without a query. `semanticIds` is expected to already be
- * capped at `SEMANTIC_TOPK` (100), which is also `buildInPlaceholders`' hard
- * ceiling.
+ * `COUNT(*)` over the union predicate, independent of any candidate window --
+ * the FTS disjunct is an UNBOUNDED subquery over `datasets_fts` (no `LIMIT`),
+ * unlike `ftsSearch`, which is capped at `SEARCH_CANDIDATE_CEILING`. That is
+ * deliberate (#1145 review C3 correction): it is what lets `count` reach the
+ * true total (the issue's 189) even though `results` can only ever be drawn
+ * from the smaller, fixed candidate windows (`SEARCH_CANDIDATE_CEILING`,
+ * `SEMANTIC_TOPK`). Past those windows, `count` can legitimately exceed the
+ * pageable pool -- `count` does NOT describe "the same population `results`
+ * is sliced from".
+ *
+ * Each disjunct is omitted when its input is empty -- a punctuation-only
+ * query has no FTS match expression, a failed/empty semantic tier has no ids
+ * -- and both empty yields `count = 0` without a query. `semanticIds` is
+ * expected to already be capped at `SEMANTIC_TOPK` (100), which is also
+ * `buildInPlaceholders`' hard ceiling.
  */
 export async function countSearchMatches(
   db: D1Database,
