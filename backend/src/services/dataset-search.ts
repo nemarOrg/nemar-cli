@@ -323,6 +323,45 @@ export async function lookupDatasetById(
   return row ? toResult(row, 1.0) : null;
 }
 
+/** Embed the query and run the Vectorize similarity search, ranked and
+ *  rounded. Split out of {@link semanticSearchHydrated} (#1145 review I3) so
+ *  the caller can wrap ONLY this step in a try/catch -- the D1 hydration step
+ *  that follows is a separate failure domain and must not be caught by the
+ *  same handler that means "Vectorize is unavailable, fall back to text". */
+async function embedAndQuery(
+  ai: Ai,
+  vectorize: VectorizeIndex,
+  query: string,
+  topK: number,
+): Promise<{ id: string; score: number }[]> {
+  const embedding = await ai.run(EMBEDDING_MODEL, { text: [query] });
+  const embeddingData = "data" in embedding ? embedding.data : undefined;
+  if (!embeddingData?.[0]) {
+    throw new Error("Failed to generate query embedding");
+  }
+  const results = await vectorize.query(embeddingData[0], { topK, returnMetadata: "none" });
+  return results.matches.map((m) => ({ id: m.id, score: Math.round(m.score * 100) / 100 }));
+}
+
+/** Whether any filter in `filters` would actually narrow a query. Used only
+ *  to qualify the stale-vector-drift warning in {@link semanticSearchHydrated}
+ *  (#1145 review I2): an id dropped by hydrateDatasetsByIds might be a
+ *  genuinely stale/deleted vector, or might simply have failed an active
+ *  filter -- the two are indistinguishable from the count alone. */
+function hasActiveFilters(filters: DatasetFilterOptions): boolean {
+  return Boolean(
+    filters.search ||
+      filters.modality ||
+      filters.author ||
+      filters.task ||
+      filters.hasDoi ||
+      filters.hasHed ||
+      filters.dataComplete ||
+      (filters.recent && filters.recent > 0) ||
+      (filters.licenseTiers && filters.licenseTiers.length > 0),
+  );
+}
+
 /** Semantic search, id-only: query Vectorize with `returnMetadata:'none'`
  *  (lifts the topK ceiling to 100), then hydrate from `datasets` by id and
  *  re-attach the vector scores in rank order. */
@@ -335,18 +374,25 @@ export async function semanticSearchHydrated(
   filters: DatasetFilterOptions = {},
 ): Promise<SearchResult[]> {
   const k = Math.min(Math.max(topK, 1), 100);
-  const embedding = await ai.run(EMBEDDING_MODEL, { text: [query] });
-  const embeddingData = "data" in embedding ? embedding.data : undefined;
-  if (!embeddingData?.[0]) {
-    throw new Error("Failed to generate query embedding");
+  let ranked: { id: string; score: number }[];
+  try {
+    ranked = await embedAndQuery(ai, vectorize, query, k);
+  } catch (err) {
+    // #1145 review I3: tag so executeDatasetSearch's catch can tell "Vectorize
+    // itself is unavailable" (safe to fall back to text-only) apart from a
+    // hydration/filter-SQL bug below, which must not be silently swallowed
+    // as "semantic tier unavailable".
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`[embedding] ${msg}`);
   }
-  const results = await vectorize.query(embeddingData[0], { topK: k, returnMetadata: "none" });
-  const ranked = results.matches.map((m) => ({ id: m.id, score: Math.round(m.score * 100) / 100 }));
   if (ranked.length === 0) return [];
   const scoreById = new Map(ranked.map((r) => [r.id, r.score]));
   // The index is id-only (ADR 0003), so a modality/hasHed filter can't be
   // applied inside Vectorize; it lands here, in the D1 hydration, which
-  // already carries the public/active/non-sandbox predicate.
+  // already carries the public/active/non-sandbox predicate. Deliberately
+  // NOT wrapped in the try/catch above (#1145 review I3): an error here is a
+  // D1/filter-SQL bug, not "Vectorize is unavailable", and must propagate as
+  // such rather than being mislabeled.
   const hydrated = await hydrateDatasetsByIds(
     db,
     ranked.map((r) => r.id),
@@ -355,9 +401,15 @@ export async function semanticSearchHydrated(
   // Vector ids with no live `datasets` row are dropped (correct: a vector for a
   // deleted dataset must not surface). Log when it happens so index drift /
   // stale vectors are observable rather than silently shrinking results.
+  // #1145 review I2: when a filter is active, a dropped id might just have
+  // failed that filter rather than being genuinely stale -- qualify the
+  // warning rather than asserting a cause it can't establish.
   if (hydrated.length < ranked.length) {
+    const reason = hasActiveFilters(filters)
+      ? "stale vectors, recent deletes, or the active filter excluding some ids -- indistinguishable here"
+      : "stale vectors or recent deletes";
     console.warn(
-      `[search] ${ranked.length - hydrated.length}/${ranked.length} vector ids had no datasets row (stale vectors or recent deletes)`,
+      `[search] ${ranked.length - hydrated.length}/${ranked.length} vector ids had no datasets row (${reason})`,
     );
   }
   return hydrated.map((r) => ({ ...r, score: scoreById.get(r.id) ?? 0 }));
@@ -441,6 +493,39 @@ export async function countSearchMatches(
   return row?.total ?? 0;
 }
 
+/**
+ * `countSearchMatches` wrapped so a count failure degrades the response
+ * instead of 500ing it (#1145 review I1): `count` is a cosmetic reporting
+ * query (ADR 0005 -- partial data still serves), not a precondition for
+ * returning results already fetched. On failure, falls back to
+ * `pageLowerBound` (the honest "at least this many exist" bound implied by
+ * how far paging already reached: `offset + <rows actually returned>`) and
+ * sets `warning`, mirroring `executeAndReturn`'s (catalog.ts) count-failure
+ * fallback and its established `warning` vocabulary (the CLI already
+ * surfaces `response.warning`).
+ */
+async function countSearchMatchesSafely(
+  db: D1Database,
+  ftsMatch: string | null,
+  semanticIds: string[],
+  filters: DatasetFilterOptions,
+  pageLowerBound: number,
+): Promise<{ count: number; warning?: string }> {
+  try {
+    return { count: await countSearchMatches(db, ftsMatch, semanticIds, filters) };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[search] countSearchMatches failed, reporting a page-derived lower bound: ${msg}`,
+    );
+    return {
+      count: pageLowerBound,
+      warning:
+        "Result count is temporarily unavailable; showing a lower bound based on the returned page.",
+    };
+  }
+}
+
 /** Reciprocal-rank fusion of semantic + lexical result lists (k=60). Dedups by
  *  id, keeps the FTS snippet, and sorts by fused score. */
 export function rrfFuse(semantic: SearchResult[], lexical: SearchResult[], k = 60): SearchResult[] {
@@ -472,7 +557,8 @@ export interface ExecuteDatasetSearchOptions {
 
 /** Return shape of {@link executeDatasetSearch} -- the full GET
  *  /datasets/search envelope, built the same way regardless of which tier
- *  answered. */
+ *  answered. `warning` is present only when a sub-query degraded (currently:
+ *  `countSearchMatches` failing, #1145 review I1). */
 export interface DatasetSearchEnvelope {
   results: SearchResult[];
   count: number;
@@ -482,6 +568,7 @@ export interface DatasetSearchEnvelope {
   candidate_ceiling: number;
   method: string;
   min_score: number;
+  warning?: string;
 }
 
 /**
@@ -508,16 +595,19 @@ export interface DatasetSearchEnvelope {
  * `modality`/`has_hed` filter in SQL, pushed into every tier (including the
  * exact-id lookup) via `filters`, rather than being re-applied in JS on the
  * response. `count` is an exact `COUNT(*)` over the same union predicate
- * (`countSearchMatches`), independent of `limit`/`offset`; the candidate
- * windows the two legs fetch are fixed (`SEARCH_CANDIDATE_CEILING`,
- * `SEMANTIC_TOPK`) so `count` no longer drifts with page size. `results` is
- * the fused list sliced to `[offset, offset + limit)`.
+ * (`countSearchMatches`), independent of `limit`/`offset` -- and independent
+ * of the candidate windows too (#1145 review C3 correction): it can
+ * legitimately exceed what `results` was drawn from. A `countSearchMatches`
+ * failure degrades to a page-derived lower bound plus `warning` rather than
+ * 500ing (#1145 review I1). `results` is the fused list sliced to
+ * `[offset, offset + limit)`.
  *
  * Preserved unchanged: exact-id tier ordering, RRF fusion, the
  * `text`/`text_fallback`/`semantic`/`exact_id`/`unavailable` method values and
  * the conditions that select them. Only the expected missing-FTS-table error
  * degrades (to `"unavailable"`, `count: 0`); any other error is re-thrown for
- * the caller to translate into a 500 -- it is not masked here.
+ * the caller to log once and translate into a 500 -- it is not masked, and
+ * not double-logged, here (#1145 review S5).
  */
 export async function executeDatasetSearch(
   db: D1Database,
@@ -547,6 +637,7 @@ export async function executeDatasetSearch(
     rows: SearchResult[],
     method: string,
     count: number,
+    warning?: string,
   ): DatasetSearchEnvelope => {
     const page = rows.slice(offset, offset + limit);
     return {
@@ -558,6 +649,7 @@ export async function executeDatasetSearch(
       candidate_ceiling: SEARCH_CANDIDATE_CEILING,
       method,
       min_score: minScore,
+      ...(warning !== undefined ? { warning } : {}),
     };
   };
 
@@ -565,7 +657,9 @@ export async function executeDatasetSearch(
     if (exactIdMatch) {
       // The exact-id tier respects filters too (#1145): an id hit failing the
       // modality/hasHed filter falls through to the fused tiers below instead
-      // of always being returned.
+      // of short-circuiting with an empty `exact_id` envelope (see the C4
+      // correction on lookupDatasetById for what the prior behaviour
+      // actually was).
       const idHit = await lookupDatasetById(db, trimmed.toLowerCase(), filters);
       if (idHit) return buildEnvelope([idHit], "exact_id", 1);
     }
@@ -584,8 +678,15 @@ export async function executeDatasetSearch(
       },
     );
     if (!ai || !vectorize) {
-      const count = await countSearchMatches(db, ftsMatch, [], filters);
-      return buildEnvelope(lexical, "text", count);
+      const page = lexical.slice(offset, offset + limit);
+      const { count, warning } = await countSearchMatchesSafely(
+        db,
+        ftsMatch,
+        [],
+        filters,
+        offset + page.length,
+      );
+      return buildEnvelope(lexical, "text", count, warning);
     }
     let semantic: SearchResult[] = [];
     try {
@@ -593,31 +694,57 @@ export async function executeDatasetSearch(
       // ceiling), not `limit * 2`.
       semantic = await semanticSearchHydrated(ai, vectorize, db, trimmed, SEMANTIC_TOPK, filters);
     } catch (embErr) {
+      const embMsg = embErr instanceof Error ? embErr.message : String(embErr);
+      if (!embMsg.startsWith("[embedding]")) {
+        // Not a Vectorize/embedding failure (e.g. a hydration/filter-SQL bug
+        // inside semanticSearchHydrated) -- don't mask it as "semantic tier
+        // unavailable, fall back to text" (#1145 review I3). Propagate it
+        // the way the FTS tier's own `.catch()` does.
+        throw embErr;
+      }
       console.error("[search] semantic tier failed, using FTS only:", embErr);
-      const count = await countSearchMatches(db, ftsMatch, [], filters);
-      return buildEnvelope(lexical, "text_fallback", count);
+      const page = lexical.slice(offset, offset + limit);
+      const { count, warning } = await countSearchMatchesSafely(
+        db,
+        ftsMatch,
+        [],
+        filters,
+        offset + page.length,
+      );
+      return buildEnvelope(lexical, "text_fallback", count, warning);
     }
     const semanticFiltered = applyMinScore(semantic);
     if (semanticFiltered.length === 0) {
-      const count = await countSearchMatches(db, ftsMatch, [], filters);
-      return buildEnvelope(lexical, "text_fallback", count);
+      const page = lexical.slice(offset, offset + limit);
+      const { count, warning } = await countSearchMatchesSafely(
+        db,
+        ftsMatch,
+        [],
+        filters,
+        offset + page.length,
+      );
+      return buildEnvelope(lexical, "text_fallback", count, warning);
     }
     // The union `count` describes is exactly what the fused results are
     // drawn from: the FTS match plus the (min-score-filtered) semantic ids.
-    const count = await countSearchMatches(
+    const fused = rrfFuse(semanticFiltered, lexical);
+    const page = fused.slice(offset, offset + limit);
+    const { count, warning } = await countSearchMatchesSafely(
       db,
       ftsMatch,
       semanticFiltered.map((r) => r.id),
       filters,
+      offset + page.length,
     );
-    return buildEnvelope(rrfFuse(semanticFiltered, lexical), "semantic", count);
+    return buildEnvelope(fused, "semantic", count, warning);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error("Dataset search failed:", msg);
-    // Only the expected missing-FTS-table case degrades to "unavailable";
-    // any other structural error is re-thrown (the caller turns it into a
-    // 500 -- it must not be masked here).
+    // Only the expected missing-FTS-table case degrades to "unavailable"
+    // (and is logged, here, once); any other structural error is re-thrown
+    // -- logging it here too would double-log the same failure once the
+    // caller logs it again while translating it to a 500 (#1145 review S5).
     if (msg.includes("no such table: datasets_fts")) {
+      console.warn(`[search] datasets_fts missing, degrading to unavailable: ${msg}`);
       return buildEnvelope([], "unavailable", 0);
     }
     throw err;
