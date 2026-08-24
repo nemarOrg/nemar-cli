@@ -9,8 +9,9 @@
 
 import { toVersionTag } from "../../../../shared/contract/index.js";
 import { SYSTEM_USER_ID } from "../../lib/constants";
-import { type LicenseTier, parseLicenseTierFilter } from "../../lib/license";
+import { parseLicenseTierFilter } from "../../lib/license";
 import { optionalAuthMiddleware } from "../../middleware/auth";
+import { buildDatasetFilterClauses, escapeLikePattern } from "../../services/dataset-filters";
 import {
   type SearchResult,
   buildFtsMatch,
@@ -22,6 +23,13 @@ import {
 import { isValidDatasetId } from "../../services/datasetId";
 import { hasRole } from "../../types/bindings";
 import type { DatasetsRouter } from "./shared";
+
+// Moved to services/dataset-filters.ts (#1145, epic #1144 phase 1): a service
+// (dataset-search.ts) needs these too, and importing them from this route
+// module would be both a circular import and a layering inversion. Re-exported
+// here so the existing test files that import them from this module keep
+// passing unchanged.
+export { buildDatasetFilterClauses, escapeLikePattern };
 
 /**
  * Emit `latest_version` in the canonical `vX.Y.Z` tag form (epic #896 #899).
@@ -36,101 +44,6 @@ import type { DatasetsRouter } from "./shared";
 export function withCanonicalLatestVersion<T extends Record<string, unknown>>(row: T): T {
   const v = row.latest_version;
   return typeof v === "string" && v ? { ...row, latest_version: toVersionTag(v) } : row;
-}
-
-// Escape SQLite LIKE wildcards in user input so a literal '%' or '_' in the
-// search term means itself rather than "match everything" / "match any
-// character". Paired with `ESCAPE '\\'` on every LIKE predicate that uses
-// these patterns. Exported for unit testing.
-export function escapeLikePattern(raw: string): string {
-  return raw.replace(/[\\%_]/g, "\\$&");
-}
-
-/**
- * #646 filter clauses for the single-table `datasets` list.
- * Reads d.* only (no nemar_catalog), and routes free-text `search` through the
- * FTS5 index (`d.id IN (SELECT rowid FROM datasets_fts WHERE … MATCH …)`) plus
- * dataset_id/source_id LIKE, replacing the old `c.search_text` LIKE.
- */
-export function buildDatasetFilterClauses(
-  params: (string | number)[],
-  opts: {
-    search?: string;
-    modality?: string;
-    author?: string;
-    task?: string;
-    hasDoi?: boolean;
-    hasHed?: boolean;
-    dataComplete?: boolean;
-    recent?: number;
-    licenseTiers?: LicenseTier[];
-  },
-): string {
-  let clauses = "";
-
-  if (opts.search) {
-    const pattern = `%${escapeLikePattern(opts.search.toLowerCase())}%`;
-    const match = buildFtsMatch(opts.search);
-    if (match) {
-      clauses +=
-        " AND (LOWER(d.dataset_id) LIKE ? ESCAPE '\\'" +
-        " OR LOWER(COALESCE(d.source_id, '')) LIKE ? ESCAPE '\\'" +
-        " OR d.id IN (SELECT rowid FROM datasets_fts WHERE datasets_fts MATCH ?))";
-      params.push(pattern, pattern, match);
-    } else {
-      // No FTS-usable tokens (e.g. all punctuation): fall back to id/name LIKE.
-      clauses +=
-        " AND (LOWER(d.dataset_id) LIKE ? ESCAPE '\\'" +
-        " OR LOWER(COALESCE(d.source_id, '')) LIKE ? ESCAPE '\\'" +
-        " OR LOWER(d.name) LIKE ? ESCAPE '\\'" +
-        " OR LOWER(COALESCE(d.description, '')) LIKE ? ESCAPE '\\')";
-      params.push(pattern, pattern, pattern, pattern);
-    }
-  }
-
-  if (opts.modality) {
-    clauses += " AND LOWER(COALESCE(d.modalities, '')) LIKE ?";
-    params.push(`%${opts.modality.toLowerCase()}%`);
-  }
-  if (opts.author) {
-    clauses += " AND LOWER(COALESCE(d.authors, '')) LIKE ?";
-    params.push(`%${opts.author.toLowerCase()}%`);
-  }
-  if (opts.task) {
-    clauses += " AND LOWER(COALESCE(d.tasks, '')) LIKE ?";
-    params.push(`%${opts.task.toLowerCase()}%`);
-  }
-  if (opts.licenseTiers && opts.licenseTiers.length > 0) {
-    // OR across tiers = IN (...). Tiers are pre-validated against LICENSE_TIERS
-    // by parseLicenseTierFilter, so they're a safe, bounded placeholder list.
-    // license_tier is NOT NULL (migration 0034), so no NULL branch is needed.
-    const placeholders = opts.licenseTiers.map(() => "?").join(", ");
-    clauses += ` AND d.license_tier IN (${placeholders})`;
-    params.push(...opts.licenseTiers);
-  }
-  if (opts.hasDoi) {
-    clauses += " AND (d.concept_doi IS NOT NULL AND d.concept_doi != '')";
-  }
-  if (opts.hasHed) {
-    // #869: has_hed is nullable (NULL = not classified yet), so `= 1` cleanly
-    // excludes both 0 (checked, no HED) and NULL. Backed by idx_datasets_has_hed.
-    clauses += " AND d.has_hed = 1";
-  }
-  if (opts.dataComplete) {
-    // #970: same nullable-safe idiom as has_hed -- `= 1` excludes both 0
-    // (checked, incomplete) and NULL (not audited yet). Backed by
-    // idx_datasets_data_complete.
-    clauses += " AND d.data_complete = 1";
-  }
-  if (opts.recent) {
-    // #646: folded catalog rows carry publish_date (from nemar.org); managed
-    // rows leave it NULL so this falls through to created_at. Preserves the old
-    // UNION's per-branch recency (catalog = publish_date, managed = created_at).
-    clauses += " AND COALESCE(d.publish_date, d.created_at) > datetime('now', ?)";
-    params.push(`-${opts.recent} days`);
-  }
-
-  return clauses;
 }
 
 function buildSortClause(sort: string): string {
