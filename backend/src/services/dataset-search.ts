@@ -7,7 +7,23 @@
  * Vectors carry zero facts; every display field is hydrated from `datasets`.
  */
 
+import { type DatasetFilterOptions, buildDatasetFilterClauses } from "./dataset-filters";
+
 const EMBEDDING_MODEL = "@cf/baai/bge-small-en-v1.5";
+
+/**
+ * Fixed candidate-window ceilings for GET /datasets/search (#1145, epic #1144
+ * phase 1). Both legs used to fetch `limit * 2` candidates, which made the
+ * reported `count` a function of the caller's page size rather than a
+ * property of the query -- the more selective the filter, the worse the
+ * drift. Pinning both windows to constants (independent of `limit`) is what
+ * makes `count` -- now computed once by `countSearchMatches` -- stable across
+ * every page size.
+ */
+// Also the ceiling `buildInPlaceholders` hard-throws past -- do not raise this
+// without raising that too.
+export const SEMANTIC_TOPK = 100;
+export const SEARCH_CANDIDATE_CEILING = 300;
 
 export interface SearchResult {
   id: string;
@@ -250,8 +266,14 @@ const toResult = (row: HydrateRow, score: number, snippet?: string): SearchResul
  *  display fields come from the row, not stale Vectorize metadata. Filters to
  *  public/active/non-sandbox so a stale or mistakenly-embedded vector for a
  *  private/archived row can never surface in the (anonymous) search. */
-export async function hydrateDatasetsByIds(db: D1Database, ids: string[]): Promise<SearchResult[]> {
+export async function hydrateDatasetsByIds(
+  db: D1Database,
+  ids: string[],
+  filters: DatasetFilterOptions = {},
+): Promise<SearchResult[]> {
   if (ids.length === 0) return [];
+  const params: (string | number)[] = [...ids];
+  const filterClauses = buildDatasetFilterClauses(params, filters);
   const results = await db
     .prepare(
       `SELECT d.dataset_id AS id, d.name, d.modalities, d.subject_count AS participants,
@@ -259,9 +281,9 @@ export async function hydrateDatasetsByIds(db: D1Database, ids: string[]): Promi
        FROM datasets d
        WHERE d.dataset_id IN (${buildInPlaceholders(ids.length)})
          AND d.status = 'active' AND d.visibility = 'public'
-         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)`,
+         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)${filterClauses}`,
     )
-    .bind(...ids)
+    .bind(...params)
     .all<HydrateRow>();
   const byId = new Map((results.results || []).map((r) => [r.id, r]));
   return ids
@@ -276,22 +298,29 @@ export async function hydrateDatasetsByIds(db: D1Database, ids: string[]): Promi
 export async function lookupDatasetById(
   db: D1Database,
   datasetId: string,
+  filters: DatasetFilterOptions = {},
 ): Promise<SearchResult | null> {
   // Match the dataset_id OR the source_id: an OpenNeuro source id (e.g.
   // ds005342) resolves to its managed mirror (on005342) even though the legacy
   // ds shadow row was deleted at import. Prefer a managed row (owner != -1) over
   // a legacy catalog shadow if both somehow match.
+  const params: (string | number)[] = [datasetId, datasetId];
+  // #1145: the exact-id tier used to ignore filters entirely (`search
+  // nm000111 --modality meg` returned the hit regardless of modality). Apply
+  // the same clauses as the other tiers so an id hit that fails the filter is
+  // not returned.
+  const filterClauses = buildDatasetFilterClauses(params, filters);
   const row = await db
     .prepare(
       `SELECT d.dataset_id AS id, d.name, d.modalities, d.subject_count AS participants,
               d.concept_doi AS doi, d.tasks, d.authors, d.has_hed
        FROM datasets d
        WHERE (d.dataset_id = ? OR d.source_id = ?) AND d.status = 'active'
-         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1) AND d.visibility = 'public'
+         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1) AND d.visibility = 'public'${filterClauses}
        ORDER BY (d.owner_user_id != -1) DESC
        LIMIT 1`,
     )
-    .bind(datasetId, datasetId)
+    .bind(...params)
     .first<HydrateRow>();
   return row ? toResult(row, 1.0) : null;
 }
@@ -305,6 +334,7 @@ export async function semanticSearchHydrated(
   db: D1Database,
   query: string,
   topK = 20,
+  filters: DatasetFilterOptions = {},
 ): Promise<SearchResult[]> {
   const k = Math.min(Math.max(topK, 1), 100);
   const embedding = await ai.run(EMBEDDING_MODEL, { text: [query] });
@@ -316,9 +346,13 @@ export async function semanticSearchHydrated(
   const ranked = results.matches.map((m) => ({ id: m.id, score: Math.round(m.score * 100) / 100 }));
   if (ranked.length === 0) return [];
   const scoreById = new Map(ranked.map((r) => [r.id, r.score]));
+  // The index is id-only (ADR 0003), so a modality/hasHed filter can't be
+  // applied inside Vectorize; it lands here, in the D1 hydration, which
+  // already carries the public/active/non-sandbox predicate.
   const hydrated = await hydrateDatasetsByIds(
     db,
     ranked.map((r) => r.id),
+    filters,
   );
   // Vector ids with no live `datasets` row are dropped (correct: a vector for a
   // deleted dataset must not surface). Log when it happens so index drift /
@@ -337,9 +371,12 @@ export async function ftsSearch(
   db: D1Database,
   query: string,
   limit = 20,
+  filters: DatasetFilterOptions = {},
 ): Promise<SearchResult[]> {
   const match = buildFtsMatch(query);
   if (!match) return [];
+  const params: (string | number)[] = [match];
+  const filterClauses = buildDatasetFilterClauses(params, filters);
   const results = await db
     .prepare(
       `SELECT d.dataset_id AS id, d.name, d.modalities, d.subject_count AS participants,
@@ -349,13 +386,54 @@ export async function ftsSearch(
        JOIN datasets d ON d.id = datasets_fts.rowid
        WHERE datasets_fts MATCH ?
          AND d.status = 'active' AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)
-         AND d.visibility = 'public'
+         AND d.visibility = 'public'${filterClauses}
        ORDER BY bm25(datasets_fts)
        LIMIT ?`,
     )
-    .bind(match, limit)
+    .bind(...params, limit)
     .all<HydrateRow & { snippet: string | null }>();
   return (results.results || []).map((row) => toResult(row, 1.0, row.snippet || undefined));
+}
+
+/**
+ * Exact total for GET /datasets/search (#1145, epic #1144 phase 1): one
+ * `COUNT(*)` over the union predicate the two retrieval legs draw from, so
+ * `count` describes the same population `results` is sliced from instead of
+ * drifting with page size (the bug this phase fixes). Each disjunct is
+ * omitted when its input is empty -- a punctuation-only query has no FTS
+ * match expression, a failed/empty semantic tier has no ids -- and both empty
+ * yields `count = 0` without a query. `semanticIds` is expected to already be
+ * capped at `SEMANTIC_TOPK` (100), which is also `buildInPlaceholders`' hard
+ * ceiling.
+ */
+export async function countSearchMatches(
+  db: D1Database,
+  ftsMatch: string | null,
+  semanticIds: string[],
+  filters: DatasetFilterOptions = {},
+): Promise<number> {
+  const disjuncts: string[] = [];
+  const params: (string | number)[] = [];
+  if (ftsMatch) {
+    disjuncts.push("d.id IN (SELECT rowid FROM datasets_fts WHERE datasets_fts MATCH ?)");
+    params.push(ftsMatch);
+  }
+  if (semanticIds.length > 0) {
+    disjuncts.push(`d.dataset_id IN (${buildInPlaceholders(semanticIds.length)})`);
+    params.push(...semanticIds);
+  }
+  if (disjuncts.length === 0) return 0;
+  const filterClauses = buildDatasetFilterClauses(params, filters);
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS total FROM datasets d
+       WHERE d.status = 'active' AND d.visibility = 'public'
+         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)
+         AND (${disjuncts.join(" OR ")})${filterClauses}`,
+    )
+    .bind(...params)
+    .first<{ total: number }>();
+  return row?.total ?? 0;
 }
 
 /** Reciprocal-rank fusion of semantic + lexical result lists (k=60). Dedups by
