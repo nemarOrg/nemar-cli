@@ -146,9 +146,18 @@ describe("search hit schema", () => {
   });
 
   test("search envelope validates a non-empty results array", () => {
+    // "fts" was never a real `method` value the backend emits; #1145 review
+    // I6/I7 tightened the schema's `method` to the real 5-member enum, so
+    // this now has to use a literal the backend actually returns.
+    expect(() =>
+      datasetSearchEnvelopeSchema.parse({ results: [hit], count: 1, method: "text", min_score: 0 }),
+    ).not.toThrow();
+  });
+
+  test("search envelope rejects a method value the backend never emits", () => {
     expect(() =>
       datasetSearchEnvelopeSchema.parse({ results: [hit], count: 1, method: "fts", min_score: 0 }),
-    ).not.toThrow();
+    ).toThrow();
   });
 });
 
