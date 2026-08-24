@@ -24,8 +24,11 @@ const EMBEDDING_MODEL = "@cf/baai/bge-small-en-v1.5";
  * makes `count` -- now computed once by `countSearchMatches` -- stable across
  * every page size.
  */
-// Also the ceiling `buildInPlaceholders` hard-throws past -- do not raise this
-// without raising that too.
+// SEMANTIC_TOPK is also `buildInPlaceholders`' hard ceiling (that function
+// reads this constant directly, not a separate literal) -- raising one
+// raises both. SEARCH_CANDIDATE_CEILING is unrelated: a plain SQL `LIMIT`
+// with no `IN (...)` placeholder list behind it, so it is NOT bounded by
+// buildInPlaceholders and does not need to move in lockstep (#1145 review S2).
 export const SEMANTIC_TOPK = 100;
 export const SEARCH_CANDIDATE_CEILING = 300;
 
@@ -220,11 +223,14 @@ async function writeEmbedDrainAudit(
 // truth (the single source after the nemar_catalog drop).
 // ---------------------------------------------------------------------------
 
-/** Build a comma-joined `?` placeholder list for a SQL `IN (...)`. Bounded to
- *  D1's safe range (and the topK ceiling); throws outside 1..100. */
+/** Build a comma-joined `?` placeholder list for a SQL `IN (...)`. The only
+ *  lists this ever builds are semantic-id lists (hydrateDatasetsByIds'
+ *  `ids`, countSearchMatches' `semanticIds`), both bounded by `SEMANTIC_TOPK`
+ *  -- so the throw bound reads that constant directly rather than a
+ *  duplicated literal (#1145 review S2). */
 export function buildInPlaceholders(n: number): string {
-  if (!Number.isInteger(n) || n < 1 || n > 100) {
-    throw new Error(`buildInPlaceholders: n must be an integer in 1..100, got ${n}`);
+  if (!Number.isInteger(n) || n < 1 || n > SEMANTIC_TOPK) {
+    throw new Error(`buildInPlaceholders: n must be an integer in 1..${SEMANTIC_TOPK}, got ${n}`);
   }
   return new Array(n).fill("?").join(",");
 }
@@ -545,8 +551,10 @@ export function rrfFuse(semantic: SearchResult[], lexical: SearchResult[], k = 6
 }
 
 /** Options for {@link executeDatasetSearch}. HTTP-layer concerns (parsing
- *  query-string values, defaulting) are the caller's job; everything here is
- *  already a validated, typed value. */
+ *  query-string values, defaulting) are the caller's job; `limit`/`offset`/
+ *  `minScore` are expected to already be validated (e.g. via
+ *  `parseSearchPagination`) -- this function still clamps them defensively
+ *  (#1145 review S3) since it is designed for direct reuse. */
 export interface ExecuteDatasetSearchOptions {
   query: string;
   filters: DatasetFilterOptions;
@@ -558,7 +566,10 @@ export interface ExecuteDatasetSearchOptions {
 /** Return shape of {@link executeDatasetSearch} -- the full GET
  *  /datasets/search envelope, built the same way regardless of which tier
  *  answered. `warning` is present only when a sub-query degraded (currently:
- *  `countSearchMatches` failing, #1145 review I1). */
+ *  `countSearchMatches` failing). `truncated` is true when `count` exceeds
+ *  `candidate_ceiling` -- more rows match than this response's candidate
+ *  window could ever supply, so paging past `candidate_ceiling` returns an
+ *  empty page even though `count` is truthful. */
 export interface DatasetSearchEnvelope {
   results: SearchResult[];
   count: number;
@@ -566,6 +577,7 @@ export interface DatasetSearchEnvelope {
   offset: number;
   limit: number;
   candidate_ceiling: number;
+  truncated: boolean;
   method: string;
   min_score: number;
   warning?: string;
@@ -615,7 +627,15 @@ export async function executeDatasetSearch(
   vectorize: VectorizeIndex | undefined,
   opts: ExecuteDatasetSearchOptions,
 ): Promise<DatasetSearchEnvelope> {
-  const { filters, limit, offset, minScore } = opts;
+  const { filters } = opts;
+  // #1145 review S3: a cheap defensive clamp, not a substitute for real
+  // validation upstream (parseSearchPagination already does that for the
+  // HTTP path) -- this function is meant to be safely reusable directly.
+  const limit = Number.isFinite(opts.limit)
+    ? Math.min(Math.max(Math.trunc(opts.limit), 1), 100)
+    : 20;
+  const offset = Number.isFinite(opts.offset) ? Math.max(Math.trunc(opts.offset), 0) : 0;
+  const minScore = Number.isFinite(opts.minScore) ? Math.max(0, Math.min(opts.minScore, 1)) : 0.65;
   const trimmed = opts.query.trim();
   // Match every NEMAR id shape: nm (native), on (OpenNeuro mirror), and ds
   // (legacy catalog OR an OpenNeuro source id whose mirror is on######). `on`
@@ -632,7 +652,13 @@ export async function executeDatasetSearch(
 
   // Every return path builds the envelope through this one helper so the
   // shape is uniform (the pre-#1145 `unavailable` branch omitted `min_score`
-  // entirely).
+  // entirely). `candidate_ceiling` (#1145 review S6) is the ACTUAL number of
+  // candidates this response's tier gathered (`rows.length`) -- not always
+  // the `SEARCH_CANDIDATE_CEILING` constant -- so it stays honest for the
+  // semantic tier's larger (up to `SEARCH_CANDIDATE_CEILING + SEMANTIC_TOPK`,
+  // deduped) pool, and for a query with fewer true matches than any ceiling.
+  // `truncated` (#1145 review S1) is the derived signal a caller would
+  // otherwise have to reconstruct by hand from `count`/`candidate_ceiling`.
   const buildEnvelope = (
     rows: SearchResult[],
     method: string,
@@ -646,7 +672,8 @@ export async function executeDatasetSearch(
       returned: page.length,
       offset,
       limit,
-      candidate_ceiling: SEARCH_CANDIDATE_CEILING,
+      candidate_ceiling: rows.length,
+      truncated: count > rows.length,
       method,
       min_score: minScore,
       ...(warning !== undefined ? { warning } : {}),
