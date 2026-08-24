@@ -338,6 +338,102 @@ describe("paging: page1 + page2 equals one double-width page", () => {
     expect(page).toEqual([]);
     db.close();
   });
+
+  // The window-derived-from-limit regression only bites when offset > limit:
+  // under the old `limit * 2` window, limit=5/offset=15 needs candidate
+  // index 15..19, but the window is only 10 rows wide, so `slice(15, 20)`
+  // silently returns an empty page while `count` still reports the true
+  // total. limit=10/offset=10 (the test above) can't catch this: its windows
+  // (20, 40 under the old bug) always cover the requested slice.
+  test("deep page (offset > limit) returns the correct rows, not an empty page", async () => {
+    const db = freshDb();
+    seedEegFixture(db);
+    const d1 = realD1(db);
+
+    const full = await fetchPage(d1, "eeg", String(EEG_ROW_COUNT), "0");
+    const deep = await fetchPage(d1, "eeg", "5", "15");
+
+    expect(deep.length).toBe(5);
+    expect(deep).toEqual(full.slice(15, 20));
+    db.close();
+  });
+
+  // The invariant, stated directly: for any offset strictly less than
+  // `count`, and within `candidate_ceiling`, the page must not be empty.
+  // That asymmetry -- a truthful, non-zero `count` alongside an empty page
+  // well inside it -- is the user-visible symptom of a limit-derived window.
+  test("no empty page for any offset strictly less than count, within candidate_ceiling", async () => {
+    const db = freshDb();
+    seedEegFixture(db);
+    const d1 = realD1(db);
+    const limit = 5;
+
+    for (const offset of [0, 5, 10, 15, 20, 25, EEG_ROW_COUNT - 1]) {
+      const envelope = await executeDatasetSearch(d1, undefined, undefined, {
+        query: "eeg",
+        filters: {},
+        limit,
+        offset,
+        minScore: 0.65,
+      });
+      expect(envelope.count).toBe(EEG_ROW_COUNT);
+      expect(offset).toBeLessThan(envelope.count);
+      expect(envelope.results.length).toBeGreaterThan(0);
+    }
+    db.close();
+  });
+});
+
+describe("candidate_ceiling boundary", () => {
+  // A dedicated fixture bigger than SEARCH_CANDIDATE_CEILING so the true
+  // total (`count`) genuinely exceeds the candidate window -- otherwise
+  // "offset at the ceiling" is indistinguishable from ordinary
+  // past-the-true-total paging, and the ceiling-specific behaviour (count
+  // stays truthful; the page goes empty anyway because nothing past the
+  // window was ever fetched) is not actually pinned.
+  const BIG_ROW_COUNT = SEARCH_CANDIDATE_CEILING + 5;
+
+  function seedBigEegFixture(db: Database): void {
+    for (let i = 1; i <= BIG_ROW_COUNT; i++) {
+      insertRow(db, {
+        dataset_id: `nm${String(900000 + i).padStart(6, "0")}`,
+        name: `EEG bulk ${i}`,
+        description: "eeg",
+        modalities: "eeg",
+      });
+    }
+  }
+
+  test("offset at and just past the ceiling: empty page, count still truthful", async () => {
+    const db = freshDb();
+    seedBigEegFixture(db);
+    const d1 = realD1(db);
+    const run = (offset: number) =>
+      executeDatasetSearch(d1, undefined, undefined, {
+        query: "eeg",
+        filters: {},
+        limit: 5,
+        offset,
+        minScore: 0.65,
+      });
+
+    const justInside = await run(SEARCH_CANDIDATE_CEILING - 5);
+    expect(justInside.results.length).toBeGreaterThan(0);
+
+    const atCeiling = await run(SEARCH_CANDIDATE_CEILING);
+    expect(atCeiling.results).toEqual([]);
+    expect(atCeiling.returned).toBe(0);
+    // count is exact (countSearchMatches has no window), so it stays
+    // truthful -- and bigger than candidate_ceiling -- even though the page
+    // fetched from the (capped) candidate window is empty.
+    expect(atCeiling.count).toBe(BIG_ROW_COUNT);
+    expect(atCeiling.count).toBeGreaterThan(SEARCH_CANDIDATE_CEILING);
+
+    const pastCeiling = await run(SEARCH_CANDIDATE_CEILING + 10);
+    expect(pastCeiling.results).toEqual([]);
+    expect(pastCeiling.count).toBe(BIG_ROW_COUNT);
+    db.close();
+  });
 });
 
 describe("parseSearchPagination clamping", () => {
