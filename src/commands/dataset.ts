@@ -1871,6 +1871,13 @@ Examples:
         return;
       }
 
+      // Surface backend degradation (#1145 review I1: a count-query failure
+      // falls back to a page-derived lower bound rather than 500ing), same
+      // vocabulary and treatment as the list command's `response.warning`.
+      if (response.warning) {
+        console.log(chalk.yellow(`\n⚠ ${response.warning}`));
+      }
+
       if (response.results.length === 0) {
         console.log();
         console.log(chalk.yellow("No datasets match your search."));

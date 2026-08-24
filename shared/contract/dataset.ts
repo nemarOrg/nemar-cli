@@ -153,13 +153,33 @@ export const datasetListEnvelopeSchema = z
   .passthrough();
 export type DatasetListEnvelope = z.infer<typeof datasetListEnvelopeSchema>;
 
-/** Envelope for GET /datasets/search. */
+/**
+ * Envelope for GET /datasets/search. `count` (#1145, epic #1144 phase 1) is
+ * the true total matching the query + filters, independent of page size --
+ * and independent of the candidate windows `results` is drawn from, so it
+ * can legitimately exceed `candidate_ceiling` (review round 3 C3: `count` is
+ * NOT "the same population `results` is sliced from"). `truncated` is a
+ * derived convenience: `count > candidate_ceiling`. `warning` is set only
+ * when the exact count query itself failed and `count` fell back to a
+ * page-derived lower bound (review round 3 I1) -- mirrors
+ * datasetListEnvelopeSchema's established `warning` vocabulary.
+ * `returned`/`offset`/`limit`/`candidate_ceiling` are additive, mirroring the
+ * naming precedent of datasetListEnvelopeSchema above. `method` is one of the
+ * five values the backend actually emits (review round 3 I6/I7); still
+ * optional since not every historical/degraded response is guaranteed to set it.
+ */
 export const datasetSearchEnvelopeSchema = z
   .object({
     results: z.array(searchHitSchema),
     count: z.number().int().nonnegative(),
-    method: z.string().optional(),
+    returned: z.number().int().nonnegative().optional(),
+    offset: z.number().int().nonnegative().optional(),
+    limit: z.number().int().optional(),
+    candidate_ceiling: z.number().int().optional(),
+    truncated: z.boolean().optional(),
+    method: z.enum(["exact_id", "text", "text_fallback", "semantic", "unavailable"]).optional(),
     min_score: z.number().optional(),
+    warning: z.string().optional(),
   })
   .passthrough();
 

@@ -9,19 +9,24 @@
 
 import { toVersionTag } from "../../../../shared/contract/index.js";
 import { SYSTEM_USER_ID } from "../../lib/constants";
-import { type LicenseTier, parseLicenseTierFilter } from "../../lib/license";
+import { parseLicenseTierFilter } from "../../lib/license";
 import { optionalAuthMiddleware } from "../../middleware/auth";
 import {
-  type SearchResult,
-  buildFtsMatch,
-  ftsSearch,
-  lookupDatasetById,
-  rrfFuse,
-  semanticSearchHydrated,
-} from "../../services/dataset-search";
+  type DatasetFilterOptions,
+  buildDatasetFilterClauses,
+  escapeLikePattern,
+} from "../../services/dataset-filters";
+import { executeDatasetSearch } from "../../services/dataset-search";
 import { isValidDatasetId } from "../../services/datasetId";
 import { hasRole } from "../../types/bindings";
 import type { DatasetsRouter } from "./shared";
+
+// Moved to services/dataset-filters.ts (#1145, epic #1144 phase 1): a service
+// (dataset-search.ts) needs these too, and importing them from this route
+// module would be both a circular import and a layering inversion. Re-exported
+// here so the existing test files that import them from this module keep
+// passing unchanged.
+export { buildDatasetFilterClauses, escapeLikePattern };
 
 /**
  * Emit `latest_version` in the canonical `vX.Y.Z` tag form (epic #896 #899).
@@ -38,99 +43,27 @@ export function withCanonicalLatestVersion<T extends Record<string, unknown>>(ro
   return typeof v === "string" && v ? { ...row, latest_version: toVersionTag(v) } : row;
 }
 
-// Escape SQLite LIKE wildcards in user input so a literal '%' or '_' in the
-// search term means itself rather than "match everything" / "match any
-// character". Paired with `ESCAPE '\\'` on every LIKE predicate that uses
-// these patterns. Exported for unit testing.
-export function escapeLikePattern(raw: string): string {
-  return raw.replace(/[\\%_]/g, "\\$&");
-}
-
 /**
- * #646 filter clauses for the single-table `datasets` list.
- * Reads d.* only (no nemar_catalog), and routes free-text `search` through the
- * FTS5 index (`d.id IN (SELECT rowid FROM datasets_fts WHERE … MATCH …)`) plus
- * dataset_id/source_id LIKE, replacing the old `c.search_text` LIKE.
+ * Clamp raw `limit`/`offset` query values for GET /datasets/search (#1145),
+ * mirroring the list endpoint's clamping idiom (see the `GET /` handler
+ * below) but with search's own historical default/ceiling: `limit` defaults
+ * to 20 and is capped at 100 (the Vectorize / `buildInPlaceholders` ceiling),
+ * and -- new in #1145 -- `offset` is now accepted and clamped; there was no
+ * offset support before, so nothing past the first 100 results was reachable.
+ * Fixes two adjacent bugs: `limit=-5` used to fall through to
+ * `results.slice(0, -5)` (silently dropping the last five rows) and
+ * `limit=abc` produced `slice(0, NaN)` (an empty list). Exported for unit
+ * testing.
  */
-export function buildDatasetFilterClauses(
-  params: (string | number)[],
-  opts: {
-    search?: string;
-    modality?: string;
-    author?: string;
-    task?: string;
-    hasDoi?: boolean;
-    hasHed?: boolean;
-    dataComplete?: boolean;
-    recent?: number;
-    licenseTiers?: LicenseTier[];
-  },
-): string {
-  let clauses = "";
-
-  if (opts.search) {
-    const pattern = `%${escapeLikePattern(opts.search.toLowerCase())}%`;
-    const match = buildFtsMatch(opts.search);
-    if (match) {
-      clauses +=
-        " AND (LOWER(d.dataset_id) LIKE ? ESCAPE '\\'" +
-        " OR LOWER(COALESCE(d.source_id, '')) LIKE ? ESCAPE '\\'" +
-        " OR d.id IN (SELECT rowid FROM datasets_fts WHERE datasets_fts MATCH ?))";
-      params.push(pattern, pattern, match);
-    } else {
-      // No FTS-usable tokens (e.g. all punctuation): fall back to id/name LIKE.
-      clauses +=
-        " AND (LOWER(d.dataset_id) LIKE ? ESCAPE '\\'" +
-        " OR LOWER(COALESCE(d.source_id, '')) LIKE ? ESCAPE '\\'" +
-        " OR LOWER(d.name) LIKE ? ESCAPE '\\'" +
-        " OR LOWER(COALESCE(d.description, '')) LIKE ? ESCAPE '\\')";
-      params.push(pattern, pattern, pattern, pattern);
-    }
-  }
-
-  if (opts.modality) {
-    clauses += " AND LOWER(COALESCE(d.modalities, '')) LIKE ?";
-    params.push(`%${opts.modality.toLowerCase()}%`);
-  }
-  if (opts.author) {
-    clauses += " AND LOWER(COALESCE(d.authors, '')) LIKE ?";
-    params.push(`%${opts.author.toLowerCase()}%`);
-  }
-  if (opts.task) {
-    clauses += " AND LOWER(COALESCE(d.tasks, '')) LIKE ?";
-    params.push(`%${opts.task.toLowerCase()}%`);
-  }
-  if (opts.licenseTiers && opts.licenseTiers.length > 0) {
-    // OR across tiers = IN (...). Tiers are pre-validated against LICENSE_TIERS
-    // by parseLicenseTierFilter, so they're a safe, bounded placeholder list.
-    // license_tier is NOT NULL (migration 0034), so no NULL branch is needed.
-    const placeholders = opts.licenseTiers.map(() => "?").join(", ");
-    clauses += ` AND d.license_tier IN (${placeholders})`;
-    params.push(...opts.licenseTiers);
-  }
-  if (opts.hasDoi) {
-    clauses += " AND (d.concept_doi IS NOT NULL AND d.concept_doi != '')";
-  }
-  if (opts.hasHed) {
-    // #869: has_hed is nullable (NULL = not classified yet), so `= 1` cleanly
-    // excludes both 0 (checked, no HED) and NULL. Backed by idx_datasets_has_hed.
-    clauses += " AND d.has_hed = 1";
-  }
-  if (opts.dataComplete) {
-    // #970: same nullable-safe idiom as has_hed -- `= 1` excludes both 0
-    // (checked, incomplete) and NULL (not audited yet). Backed by
-    // idx_datasets_data_complete.
-    clauses += " AND d.data_complete = 1";
-  }
-  if (opts.recent) {
-    // #646: folded catalog rows carry publish_date (from nemar.org); managed
-    // rows leave it NULL so this falls through to created_at. Preserves the old
-    // UNION's per-branch recency (catalog = publish_date, managed = created_at).
-    clauses += " AND COALESCE(d.publish_date, d.created_at) > datetime('now', ?)";
-    params.push(`-${opts.recent} days`);
-  }
-
-  return clauses;
+export function parseSearchPagination(
+  limitRaw: string | undefined,
+  offsetRaw: string | undefined,
+): { limit: number; offset: number } {
+  const rawLimit = Number.parseInt(limitRaw ?? "", 10);
+  const limit = Math.min(Math.max(Number.isNaN(rawLimit) ? 20 : rawLimit, 1), 100);
+  const rawOffset = Number.parseInt(offsetRaw ?? "", 10);
+  const offset = Math.max(Number.isNaN(rawOffset) ? 0 : rawOffset, 0);
+  return { limit, offset };
 }
 
 function buildSortClause(sort: string): string {
@@ -506,18 +439,14 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
   /**
    * GET /datasets/search - Semantic dataset search
    *
-   * Combines three strategies:
-   *  - Exact dataset-ID lookup (nm###### / on###### managed mirrors / ds######
-   *    legacy or OpenNeuro source) via D1, since embeddings and the FTS index
-   *    (name/description/authors/tasks/modalities/readme) do not cover the id, so
-   *    a literal id query would otherwise miss -- notably every `on######` mirror,
-   *    whose NEMAR-assigned id appears in none of its OpenNeuro-sourced text.
-   *  - Vectorize semantic similarity (when bindings are configured).
-   *  - D1 LIKE text search as a fallback, also used to backfill semantic
-   *    results when Vectorize returns no hits.
-   *
-   * Semantic and text hits are merged on `id`; semantic ranking is preserved
-   * and text-only hits are appended.
+   * Combines exact dataset-ID lookup, Vectorize semantic similarity (when
+   * bindings are configured), and D1 FTS5 text search -- see
+   * `executeDatasetSearch` in dataset-search.ts for the tier logic, `count`
+   * semantics, and pagination. This handler only parses query-string params
+   * and translates a thrown error into a 500 (extracted in #1145, epic #1144
+   * phase 1, so the orchestration -- the thing the count-drifts-with-page-
+   * size bug actually lived in -- is directly unit-testable without the
+   * Worker runtime).
    */
   datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
     const query = c.req.query("q");
@@ -525,18 +454,11 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       return c.json({ error: "Search query parameter 'q' is required" }, 400);
     }
 
-    const limit = Math.min(Number.parseInt(c.req.query("limit") || "20", 10), 100);
+    const { limit, offset } = parseSearchPagination(c.req.query("limit"), c.req.query("offset"));
     const modality = c.req.query("modality");
     // #869: same `has_hed=1`/`true` convention as the browse list filter.
     const hasHed = c.req.query("has_hed") === "1" || c.req.query("has_hed") === "true";
-    const db = c.env.DB;
-    const trimmed = query.trim();
-    // Match every NEMAR id shape: nm (native), on (OpenNeuro mirror), and ds
-    // (legacy catalog OR an OpenNeuro source id whose mirror is on######). `on`
-    // was missing here, so `on######` ids fell through to FTS/semantic, which
-    // don't index the id -> zero results (#808). lookupDatasetById resolves both
-    // dataset_id and source_id, so `ds######` finds the on mirror too.
-    const exactIdMatch = /^(nm|on|ds)\d{6}$/i.test(trimmed);
+    const filters: DatasetFilterOptions = { modality, hasHed };
 
     // Relevance floor for semantic results. bge-small cosine scores under
     // ~0.65 against this catalog tend to be topic-adjacent noise rather
@@ -550,69 +472,18 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       ? Math.max(0, Math.min(parsedMinScore, 1))
       : DEFAULT_MIN_SCORE;
 
-    const applyModality = (rows: SearchResult[]): SearchResult[] => {
-      if (!modality) return rows;
-      const mod = modality.toLowerCase();
-      return rows.filter((r) => r.modalities.toLowerCase().includes(mod));
-    };
-
-    // #869: client-side HED filter (the search projection can't use the SQL clause);
-    // mirrors applyModality. `has_hed === 1` only -> excludes 0 and NULL/undefined.
-    const applyHasHed = (rows: SearchResult[]): SearchResult[] =>
-      hasHed ? rows.filter((r) => r.has_hed === 1) : rows;
-
-    // FTS5/exact hits carry score=1.0, so this cosine floor only filters the
-    // semantic component. Applied BEFORE RRF fusion; finalize() does not re-floor
-    // the fused scores.
-    const applyMinScore = (rows: SearchResult[]): SearchResult[] =>
-      minScore <= 0 ? rows : rows.filter((r) => r.score >= minScore);
-
-    // #646 hybrid path: exact-id -> (semantic id-only ∪ FTS5) fused by RRF.
-    const finalize = (rows: SearchResult[], method: string) => {
-      const filtered = applyHasHed(applyModality(rows));
-      return c.json({
-        results: filtered.slice(0, limit),
-        count: filtered.length,
-        method,
-        min_score: minScore,
-      });
-    };
     try {
-      if (exactIdMatch) {
-        const idHit = await lookupDatasetById(db, trimmed.toLowerCase());
-        if (idHit) return finalize([idHit], "exact_id");
-      }
-      // Tier-specific log so a failure here is distinguishable from the
-      // semantic/hydration tiers; re-throw so the outer catch still degrades.
-      const lexical = await ftsSearch(db, trimmed, limit * 2).catch((ftsErr) => {
-        console.error(
-          `[search] FTS tier failed: ${ftsErr instanceof Error ? ftsErr.message : String(ftsErr)}`,
-        );
-        throw ftsErr;
+      const envelope = await executeDatasetSearch(c.env.DB, c.env.AI, c.env.VECTORIZE, {
+        query,
+        filters,
+        limit,
+        offset,
+        minScore,
       });
-      if (!c.env.AI || !c.env.VECTORIZE) {
-        return finalize(lexical, "text");
-      }
-      let semantic: SearchResult[] = [];
-      try {
-        semantic = await semanticSearchHydrated(c.env.AI, c.env.VECTORIZE, db, trimmed, limit * 2);
-      } catch (embErr) {
-        console.error("[search] semantic tier failed, using FTS only:", embErr);
-        return finalize(lexical, "text_fallback");
-      }
-      const semanticFiltered = applyMinScore(semantic);
-      if (semanticFiltered.length === 0) {
-        return finalize(lexical, "text_fallback");
-      }
-      return finalize(rrfFuse(semanticFiltered, lexical), "semantic");
+      return c.json(envelope);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("Dataset search failed:", msg);
-      // Only the expected missing-FTS-table case degrades to "unavailable";
-      // any other structural error is a real 500 (don't mask it).
-      if (msg.includes("no such table: datasets_fts")) {
-        return c.json({ results: [], count: 0, method: "unavailable" });
-      }
       return c.json({ error: "Search failed", details: msg }, 500);
     }
   });
