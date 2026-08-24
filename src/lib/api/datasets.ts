@@ -192,6 +192,13 @@ export interface DatasetSearchResult {
 export interface DatasetSearchResponse {
   results: DatasetSearchResult[];
   count: number;
+  // Additive envelope fields (#1145, epic #1144 phase 1): `count` is now the
+  // true total for the query + filters, decoupled from page size. Types only
+  // this phase -- the CLI renders nothing new (see src/commands/dataset.ts).
+  returned?: number;
+  offset?: number;
+  limit?: number;
+  candidate_ceiling?: number;
   method: "semantic" | "text" | "text_fallback" | "exact_id" | "unavailable";
   min_score?: number;
 }

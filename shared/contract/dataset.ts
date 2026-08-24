@@ -153,11 +153,20 @@ export const datasetListEnvelopeSchema = z
   .passthrough();
 export type DatasetListEnvelope = z.infer<typeof datasetListEnvelopeSchema>;
 
-/** Envelope for GET /datasets/search. */
+/**
+ * Envelope for GET /datasets/search. `count` (#1145, epic #1144 phase 1) is
+ * the true total matching the query + filters, independent of page size;
+ * `returned`/`offset`/`limit`/`candidate_ceiling` are additive, mirroring the
+ * naming precedent of datasetListEnvelopeSchema above.
+ */
 export const datasetSearchEnvelopeSchema = z
   .object({
     results: z.array(searchHitSchema),
     count: z.number().int().nonnegative(),
+    returned: z.number().int().nonnegative().optional(),
+    offset: z.number().int().nonnegative().optional(),
+    limit: z.number().int().optional(),
+    candidate_ceiling: z.number().int().optional(),
     method: z.string().optional(),
     min_score: z.number().optional(),
   })
