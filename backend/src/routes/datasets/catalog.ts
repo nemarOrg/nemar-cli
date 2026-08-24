@@ -16,17 +16,7 @@ import {
   buildDatasetFilterClauses,
   escapeLikePattern,
 } from "../../services/dataset-filters";
-import {
-  SEARCH_CANDIDATE_CEILING,
-  SEMANTIC_TOPK,
-  type SearchResult,
-  buildFtsMatch,
-  countSearchMatches,
-  ftsSearch,
-  lookupDatasetById,
-  rrfFuse,
-  semanticSearchHydrated,
-} from "../../services/dataset-search";
+import { executeDatasetSearch } from "../../services/dataset-search";
 import { isValidDatasetId } from "../../services/datasetId";
 import { hasRole } from "../../types/bindings";
 import type { DatasetsRouter } from "./shared";
@@ -449,28 +439,14 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
   /**
    * GET /datasets/search - Semantic dataset search
    *
-   * Combines three strategies:
-   *  - Exact dataset-ID lookup (nm###### / on###### managed mirrors / ds######
-   *    legacy or OpenNeuro source) via D1, since embeddings and the FTS index
-   *    (name/description/authors/tasks/modalities/readme) do not cover the id, so
-   *    a literal id query would otherwise miss -- notably every `on######` mirror,
-   *    whose NEMAR-assigned id appears in none of its OpenNeuro-sourced text.
-   *  - Vectorize semantic similarity (when bindings are configured).
-   *  - D1 LIKE text search as a fallback, also used to backfill semantic
-   *    results when Vectorize returns no hits.
-   *
-   * Semantic and text hits are merged on `id`; semantic ranking is preserved
-   * and text-only hits are appended.
-   *
-   * `modality`/`has_hed` filter in SQL (#1145, epic #1144 phase 1) -- pushed
-   * into every tier via buildDatasetFilterClauses, including the exact-id
-   * lookup -- rather than being re-applied in JS on the response. `count` is
-   * an exact `COUNT(*)` over the same union predicate (countSearchMatches),
-   * independent of `limit`/`offset`; the candidate windows the two legs fetch
-   * are fixed (SEARCH_CANDIDATE_CEILING, SEMANTIC_TOPK) so `count` no longer
-   * drifts with page size. `limit`/`offset` are parsed by
-   * parseSearchPagination; `results` is the fused list sliced to
-   * `[offset, offset + limit)`.
+   * Combines exact dataset-ID lookup, Vectorize semantic similarity (when
+   * bindings are configured), and D1 FTS5 text search -- see
+   * `executeDatasetSearch` in dataset-search.ts for the tier logic, `count`
+   * semantics, and pagination. This handler only parses query-string params
+   * and translates a thrown error into a 500 (extracted in #1145, epic #1144
+   * phase 1, so the orchestration -- the thing the count-drifts-with-page-
+   * size bug actually lived in -- is directly unit-testable without the
+   * Worker runtime).
    */
   datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
     const query = c.req.query("q");
@@ -482,18 +458,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     const modality = c.req.query("modality");
     // #869: same `has_hed=1`/`true` convention as the browse list filter.
     const hasHed = c.req.query("has_hed") === "1" || c.req.query("has_hed") === "true";
-    // #1145: filters now travel into the SQL of every tier (exact-id, FTS,
-    // semantic-hydration) via buildDatasetFilterClauses, instead of being
-    // re-applied here in JS after the fact -- see dataset-search.ts.
     const filters: DatasetFilterOptions = { modality, hasHed };
-    const db = c.env.DB;
-    const trimmed = query.trim();
-    // Match every NEMAR id shape: nm (native), on (OpenNeuro mirror), and ds
-    // (legacy catalog OR an OpenNeuro source id whose mirror is on######). `on`
-    // was missing here, so `on######` ids fell through to FTS/semantic, which
-    // don't index the id -> zero results (#808). lookupDatasetById resolves both
-    // dataset_id and source_id, so `ds######` finds the on mirror too.
-    const exactIdMatch = /^(nm|on|ds)\d{6}$/i.test(trimmed);
 
     // Relevance floor for semantic results. bge-small cosine scores under
     // ~0.65 against this catalog tend to be topic-adjacent noise rather
@@ -507,97 +472,18 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       ? Math.max(0, Math.min(parsedMinScore, 1))
       : DEFAULT_MIN_SCORE;
 
-    // FTS5/exact hits carry score=1.0, so this cosine floor only filters the
-    // semantic component. Applied BEFORE RRF fusion; the envelope builder does
-    // not re-floor the fused scores.
-    const applyMinScore = (rows: SearchResult[]): SearchResult[] =>
-      minScore <= 0 ? rows : rows.filter((r) => r.score >= minScore);
-
-    // #646 hybrid path: exact-id -> (semantic id-only ∪ FTS5) fused by RRF.
-    // #1145: every return path builds the envelope through this one helper so
-    // the shape is uniform (the old `unavailable` branch omitted `min_score`
-    // entirely). `count` is the true total from countSearchMatches -- decoupled
-    // from `results.length`/`limit`, which is the fix for the count-drifts-
-    // with-page-size bug.
-    const buildEnvelope = (rows: SearchResult[], method: string, count: number) => {
-      const page = rows.slice(offset, offset + limit);
-      return c.json({
-        results: page,
-        count,
-        returned: page.length,
-        offset,
-        limit,
-        candidate_ceiling: SEARCH_CANDIDATE_CEILING,
-        method,
-        min_score: minScore,
-      });
-    };
-
     try {
-      if (exactIdMatch) {
-        // #1145: the exact-id tier now respects filters too -- an id hit
-        // failing the modality/hasHed filter falls through to the fused tiers
-        // below instead of always being returned.
-        const idHit = await lookupDatasetById(db, trimmed.toLowerCase(), filters);
-        if (idHit) return buildEnvelope([idHit], "exact_id", 1);
-      }
-      const ftsMatch = buildFtsMatch(trimmed);
-      // Tier-specific log so a failure here is distinguishable from the
-      // semantic/hydration tiers; re-throw so the outer catch still degrades.
-      // #1145: fetches a fixed SEARCH_CANDIDATE_CEILING candidates regardless
-      // of `limit`, so the population `count` describes doesn't shrink at
-      // small page sizes.
-      const lexical = await ftsSearch(db, trimmed, SEARCH_CANDIDATE_CEILING, filters).catch(
-        (ftsErr) => {
-          console.error(
-            `[search] FTS tier failed: ${ftsErr instanceof Error ? ftsErr.message : String(ftsErr)}`,
-          );
-          throw ftsErr;
-        },
-      );
-      if (!c.env.AI || !c.env.VECTORIZE) {
-        const count = await countSearchMatches(db, ftsMatch, [], filters);
-        return buildEnvelope(lexical, "text", count);
-      }
-      let semantic: SearchResult[] = [];
-      try {
-        // #1145: fixed SEMANTIC_TOPK (also Vectorize's returnMetadata:'none'
-        // topK ceiling), not `limit * 2`.
-        semantic = await semanticSearchHydrated(
-          c.env.AI,
-          c.env.VECTORIZE,
-          db,
-          trimmed,
-          SEMANTIC_TOPK,
-          filters,
-        );
-      } catch (embErr) {
-        console.error("[search] semantic tier failed, using FTS only:", embErr);
-        const count = await countSearchMatches(db, ftsMatch, [], filters);
-        return buildEnvelope(lexical, "text_fallback", count);
-      }
-      const semanticFiltered = applyMinScore(semantic);
-      if (semanticFiltered.length === 0) {
-        const count = await countSearchMatches(db, ftsMatch, [], filters);
-        return buildEnvelope(lexical, "text_fallback", count);
-      }
-      // The union `count` describes is exactly what the fused results are
-      // drawn from: the FTS match plus the (min-score-filtered) semantic ids.
-      const count = await countSearchMatches(
-        db,
-        ftsMatch,
-        semanticFiltered.map((r) => r.id),
+      const envelope = await executeDatasetSearch(c.env.DB, c.env.AI, c.env.VECTORIZE, {
+        query,
         filters,
-      );
-      return buildEnvelope(rrfFuse(semanticFiltered, lexical), "semantic", count);
+        limit,
+        offset,
+        minScore,
+      });
+      return c.json(envelope);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("Dataset search failed:", msg);
-      // Only the expected missing-FTS-table case degrades to "unavailable";
-      // any other structural error is a real 500 (don't mask it).
-      if (msg.includes("no such table: datasets_fts")) {
-        return buildEnvelope([], "unavailable", 0);
-      }
       return c.json({ error: "Search failed", details: msg }, 500);
     }
   });
