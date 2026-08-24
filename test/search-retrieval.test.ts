@@ -41,10 +41,10 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseSearchPagination } from "../backend/src/routes/datasets/catalog";
+import { buildFtsMatch } from "../backend/src/services/dataset-filters";
 import {
   SEARCH_CANDIDATE_CEILING,
   SEMANTIC_TOPK,
-  buildFtsMatch,
   countSearchMatches,
   executeDatasetSearch,
   ftsSearch,
@@ -191,6 +191,47 @@ describe("setup sanity: datasets_fts is actually populated", () => {
   });
 });
 
+describe("unavailable branch: missing datasets_fts (#1145 review C2)", () => {
+  // Deliberately skips migration 0031 (no datasets_fts table at all), so
+  // ftsSearch's query against it throws "no such table: datasets_fts" and
+  // executeDatasetSearch's outer catch degrades to `method: "unavailable"`.
+  // A reviewer replaced buildEnvelope's unavailable branch with the literal
+  // pre-#1145 shape ({results: [], count: 0, method: "unavailable"} --
+  // dropping min_score/offset/limit/candidate_ceiling/returned/truncated)
+  // and every existing test still passed, because none of them actually
+  // exercised this branch.
+  function dbWithoutFtsIndex(): Database {
+    const db = new Database(":memory:");
+    db.exec(BASE_SCHEMA);
+    db.exec(sql("0056_hed_columns.sql"));
+    return db;
+  }
+
+  test("executeDatasetSearch degrades to the FULL envelope shape, not the old bare literal", async () => {
+    const db = dbWithoutFtsIndex();
+    insertRow(db, { dataset_id: "nm000201", name: "Some dataset", modalities: "eeg" });
+    const d1 = realD1(db);
+    const envelope = await executeDatasetSearch(d1, undefined, undefined, {
+      query: "eeg",
+      filters: {},
+      limit: 20,
+      offset: 0,
+      minScore: 0.42,
+    });
+    expect(envelope.method).toBe("unavailable");
+    expect(envelope.results).toEqual([]);
+    expect(envelope.count).toBe(0);
+    // The fields the pre-#1145 literal silently dropped.
+    expect(envelope.returned).toBe(0);
+    expect(envelope.offset).toBe(0);
+    expect(envelope.limit).toBe(20);
+    expect(envelope.candidate_ceiling).toBe(0);
+    expect(envelope.truncated).toBe(false);
+    expect(envelope.min_score).toBe(0.42);
+    db.close();
+  });
+});
+
 describe("count is stable across limit (the regression this epic fixes)", () => {
   // ai/vectorize are `undefined` throughout this describe block, which forces
   // executeDatasetSearch down the "text" (FTS-only) leg -- the same
@@ -286,6 +327,95 @@ describe("count is exact", () => {
     expect(buildFtsMatch("!!")).toBeNull();
     const count = await countSearchMatches(d1, null, [], {});
     expect(count).toBe(0);
+    db.close();
+  });
+});
+
+describe("countSearchMatches' semantic-id disjunct (#1145 review I8)", () => {
+  // Every existing call site (in executeDatasetSearch) either passes `[]`
+  // for semanticIds (text/text_fallback) or passes real ids assembled by
+  // production code the tests never inspected directly. Disabling the
+  // semantic-id disjunct entirely (`if (false && semanticIds.length > 0)`)
+  // passed every existing test, because none of them called
+  // countSearchMatches with a non-empty semanticIds array and checked a
+  // hand-computed expectation.
+  function seedCountFixture(db: Database): void {
+    // "eeg" (as an indexed word/token) appears only in 300001/300002/300005.
+    insertRow(db, {
+      dataset_id: "nm300001",
+      name: "EEG alpha",
+      description: "eeg waves",
+      modalities: "eeg",
+    });
+    insertRow(db, {
+      dataset_id: "nm300002",
+      name: "EEG beta",
+      description: "eeg waves",
+      modalities: "eeg",
+    });
+    insertRow(db, {
+      dataset_id: "nm300003",
+      name: "fMRI gamma",
+      description: "functional imaging data",
+      modalities: "func",
+    });
+    insertRow(db, {
+      dataset_id: "nm300004",
+      name: "MEG delta",
+      description: "magnetic recordings",
+      modalities: "meg",
+    });
+    insertRow(db, {
+      dataset_id: "nm300005",
+      name: "EEG epsilon",
+      description: "eeg recording",
+      modalities: "eeg",
+    });
+  }
+
+  test("semantic-only ids (no FTS match): count equals the size of the (filtered) semantic id set", async () => {
+    const db = freshDb();
+    seedCountFixture(db);
+    const d1 = realD1(db);
+    // A punctuation-only query has no FTS match expression (ftsMatch=null),
+    // isolating the semantic-id disjunct entirely.
+    const count = await countSearchMatches(d1, null, ["nm300003", "nm300004"], {});
+    expect(count).toBe(2);
+    db.close();
+  });
+
+  test("FTS + semantic ids, overlapping: count is the union, not the sum", async () => {
+    const db = freshDb();
+    seedCountFixture(db);
+    const d1 = realD1(db);
+    const match = buildFtsMatch("eeg"); // matches nm300001, nm300002, nm300005
+    // Semantic ids overlap one of those three (nm300001) and add one FTS
+    // doesn't match (nm300003).
+    const count = await countSearchMatches(d1, match, ["nm300001", "nm300003"], {});
+    // Union: {nm300001, nm300002, nm300005} ∪ {nm300001, nm300003} = 4 rows,
+    // NOT 3 + 2 = 5 -- proving this is OR/union semantics, not double-counting.
+    expect(count).toBe(4);
+    // Hand-computed ground truth via a direct SQL union count.
+    const direct = db
+      .query(
+        `SELECT COUNT(*) AS total FROM datasets d
+         WHERE d.status = 'active' AND d.visibility = 'public'
+           AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)
+           AND (d.id IN (SELECT rowid FROM datasets_fts WHERE datasets_fts MATCH ?)
+                OR d.dataset_id IN (?, ?))`,
+      )
+      .get(match as string, "nm300001", "nm300003") as { total: number };
+    expect(count).toBe(direct.total);
+    db.close();
+  });
+
+  test("FTS + semantic ids, fully disjoint: count is the sum", async () => {
+    const db = freshDb();
+    seedCountFixture(db);
+    const d1 = realD1(db);
+    const match = buildFtsMatch("eeg"); // matches nm300001, nm300002, nm300005 (3 rows)
+    const count = await countSearchMatches(d1, match, ["nm300003", "nm300004"], {});
+    expect(count).toBe(5); // 3 FTS-matched + 2 disjoint semantic ids, no overlap
     db.close();
   });
 });
@@ -419,6 +549,10 @@ describe("candidate_ceiling boundary", () => {
 
     const justInside = await run(SEARCH_CANDIDATE_CEILING - 5);
     expect(justInside.results.length).toBeGreaterThan(0);
+    // Even "just inside" the pageable window, the true population (305) still
+    // exceeds it (300) -- `truncated` reflects the population, not the
+    // current page.
+    expect(justInside.truncated).toBe(true);
 
     const atCeiling = await run(SEARCH_CANDIDATE_CEILING);
     expect(atCeiling.results).toEqual([]);
@@ -428,10 +562,51 @@ describe("candidate_ceiling boundary", () => {
     // fetched from the (capped) candidate window is empty.
     expect(atCeiling.count).toBe(BIG_ROW_COUNT);
     expect(atCeiling.count).toBeGreaterThan(SEARCH_CANDIDATE_CEILING);
+    // candidate_ceiling (#1145 review S6) is the ACTUAL candidate pool this
+    // response drew from (lexical.length), capped at the SQL LIMIT -- here
+    // that's exactly SEARCH_CANDIDATE_CEILING, since the true match count
+    // (305) exceeds it.
+    expect(atCeiling.candidate_ceiling).toBe(SEARCH_CANDIDATE_CEILING);
+    expect(atCeiling.truncated).toBe(true);
 
     const pastCeiling = await run(SEARCH_CANDIDATE_CEILING + 10);
     expect(pastCeiling.results).toEqual([]);
     expect(pastCeiling.count).toBe(BIG_ROW_COUNT);
+    expect(pastCeiling.truncated).toBe(true);
+    db.close();
+  });
+});
+
+describe("envelope fields reflect the actual call (#1145 review I9)", () => {
+  // Existing assertions elsewhere in this file read `results`/`returned`/
+  // `count`, which are derived from the closure's `offset`/`limit` variables
+  // during slicing -- they would still be numerically correct even if the
+  // literal `offset`/`limit`/`candidate_ceiling`/`min_score` FIELDS on the
+  // returned envelope were hardcoded to something else entirely. Nothing
+  // else in this file reads those fields directly, so this is the one place
+  // that would catch that.
+  test("offset/limit/min_score/candidate_ceiling/truncated on the envelope match the call, not a hardcoded literal", async () => {
+    const db = freshDb();
+    seedEegFixture(db); // 30 real matches, well under any ceiling
+    const d1 = realD1(db);
+    const envelope = await executeDatasetSearch(d1, undefined, undefined, {
+      query: "eeg",
+      filters: {},
+      limit: 7,
+      offset: 3,
+      minScore: 0.42,
+    });
+
+    expect(envelope.offset).toBe(3);
+    expect(envelope.limit).toBe(7);
+    expect(envelope.min_score).toBe(0.42);
+    // candidate_ceiling is the actual pool size (S6): with only 30 true
+    // matches (well under SEARCH_CANDIDATE_CEILING), it is 30, not 300.
+    expect(envelope.candidate_ceiling).toBe(EEG_ROW_COUNT);
+    expect(envelope.count).toBe(EEG_ROW_COUNT);
+    expect(envelope.truncated).toBe(false);
+    expect(envelope.returned).toBe(7);
+    expect(envelope.results).toHaveLength(7);
     db.close();
   });
 });
@@ -573,7 +748,7 @@ describe("exact-id tier respects filters (#1145 behaviour change)", () => {
     db.close();
   });
 
-  test("lookupDatasetById returns null when the hit fails the filter (old behaviour: returned regardless)", async () => {
+  test("lookupDatasetById returns null when the hit fails the filter", async () => {
     const db = freshDb();
     seedExactIdFixture(db);
     const d1 = realD1(db);
@@ -599,6 +774,60 @@ describe("exact-id tier respects filters (#1145 behaviour change)", () => {
     const d1 = realD1(db);
     expect((await lookupDatasetById(d1, "nm000112", { hasHed: true }))?.id).toBe("nm000112");
     expect(await lookupDatasetById(d1, "nm000112", { hasHed: false })).not.toBeNull();
+    db.close();
+  });
+});
+
+describe("exact-id tier through executeDatasetSearch (#1145 review C1)", () => {
+  // The block above drives lookupDatasetById directly, which only proves the
+  // SQL clause is correct in isolation. A reviewer dropped `filters` from the
+  // executeDatasetSearch call site -- reintroducing the real pre-#1145 bug --
+  // and every test in this file still passed (34/0), because none of them
+  // drove the exact-id tier through the actual orchestration. This is the
+  // third instance of the same root cause (count, paging, now exact-id):
+  // testing the callee instead of the caller that derives its inputs.
+  function seedExactIdFixture(db: Database): void {
+    insertRow(db, { dataset_id: "nm000111", name: "MEG study", modalities: "meg" });
+  }
+
+  test("exact id hit matching the filter: method exact_id, count 1", async () => {
+    const db = freshDb();
+    seedExactIdFixture(db);
+    const d1 = realD1(db);
+    const envelope = await executeDatasetSearch(d1, undefined, undefined, {
+      query: "nm000111",
+      filters: { modality: "meg" },
+      limit: 20,
+      offset: 0,
+      minScore: 0.65,
+    });
+    expect(envelope.method).toBe("exact_id");
+    expect(envelope.count).toBe(1);
+    expect(envelope.results).toHaveLength(1);
+    expect(envelope.results[0]?.id).toBe("nm000111");
+    db.close();
+  });
+
+  test("exact id hit failing the filter falls through to the text tier, not an empty exact_id envelope", async () => {
+    const db = freshDb();
+    seedExactIdFixture(db);
+    const d1 = realD1(db);
+    const envelope = await executeDatasetSearch(d1, undefined, undefined, {
+      query: "nm000111",
+      filters: { modality: "eeg" },
+      limit: 20,
+      offset: 0,
+      minScore: 0.65,
+    });
+    // The id hit fails the modality filter, so it falls through instead of
+    // short-circuiting under `exact_id`. "nm000111" isn't indexed text (no
+    // seeded row's name/description/etc. contains that literal token), so the
+    // FTS tier this falls through to genuinely finds nothing -- a real,
+    // empty text search, not a leftover exact_id envelope wearing a different
+    // method label.
+    expect(envelope.method).toBe("text");
+    expect(envelope.count).toBe(0);
+    expect(envelope.results).toEqual([]);
     db.close();
   });
 });
