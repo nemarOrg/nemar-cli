@@ -6,18 +6,26 @@
  * harness style of test/data-complete-filter.test.ts and
  * test/has-hed-filter.test.ts.
  *
- * Scope note: this exercises the SQL-layer retrieval functions
- * (ftsSearch, hydrateDatasetsByIds, lookupDatasetById, countSearchMatches,
- * parseSearchPagination) directly rather than the GET /datasets/search HTTP
- * handler. The handler also depends on the AI/Vectorize Worker bindings for
- * its semantic tier, which this repo has no Miniflare/Worker-runtime harness
- * for and which cannot be exercised without faking business logic (the NO
- * MOCKS policy) -- has-hed-filter.test.ts and data-complete-filter.test.ts
- * note the same boundary for the HTTP-layer query-string parse. Every
- * function tested here is real production code the handler calls unmodified;
- * the "text"/"exact_id" methods it exercises are two of the five preserved
- * `method` values (the other three -- "semantic", "text_fallback",
- * "unavailable" -- need the AI/Vectorize bindings or a dropped FTS table).
+ * Scope note: `executeDatasetSearch` is the extracted GET /datasets/search
+ * orchestration (dataset-search.ts) -- the actual handler is a thin wrapper
+ * that parses query-string params and calls it, so calling it directly here
+ * exercises the real tier-selection/count/pagination logic, not a bypass of
+ * it. This repo has no Miniflare/Worker-runtime harness, so the thin
+ * query-string-parsing wrapper itself stays untested here (has-hed-filter.test.ts
+ * and data-complete-filter.test.ts note the same boundary); passing `ai`/
+ * `vectorize` as `undefined` drives the "text" (FTS-only) leg, one of the
+ * five preserved `method` values reachable without those bindings (the other
+ * four -- "exact_id", "semantic", "text_fallback", "unavailable" -- are
+ * covered by the lower-level function tests below and, for "unavailable",
+ * would need a dropped FTS table).
+ *
+ * IMPORTANT: a test that calls a pure function (e.g. `countSearchMatches`) in
+ * a loop over a parameter that function does not accept cannot detect a
+ * regression in how the CALLER derives its inputs from that parameter. The
+ * count-drifts-with-page-size bug lived in `executeDatasetSearch`'s
+ * orchestration (deriving the candidate window from `limit`), so the
+ * regression test below drives `executeDatasetSearch` itself across `limit`,
+ * not `countSearchMatches` in isolation.
  *
  * Harness gotcha (0031 is FTS5 external-content, content='datasets',
  * content_rowid='id'): the base schema must declare `datasets` with an
@@ -38,6 +46,7 @@ import {
   SEMANTIC_TOPK,
   buildFtsMatch,
   countSearchMatches,
+  executeDatasetSearch,
   ftsSearch,
   hydrateDatasetsByIds,
   lookupDatasetById,
@@ -183,32 +192,64 @@ describe("setup sanity: datasets_fts is actually populated", () => {
 });
 
 describe("count is stable across limit (the regression this epic fixes)", () => {
-  test("countSearchMatches for q=eeg&has_hed=1 is identical at limit 5/10/20/50/100", async () => {
+  // ai/vectorize are `undefined` throughout this describe block, which forces
+  // executeDatasetSearch down the "text" (FTS-only) leg -- the same
+  // orchestration path, with the same SEARCH_CANDIDATE_CEILING window and
+  // countSearchMatches call, that the real handler hits whenever the Worker
+  // has no AI/VECTORIZE bindings configured.
+  const MIN_SCORE = 0.65;
+
+  test("executeDatasetSearch for q=eeg&has_hed=1 reports the same count at limit 5/10/20/50/100", async () => {
     const db = freshDb();
     seedEegFixture(db);
     const d1 = realD1(db);
-    const match = buildFtsMatch("eeg");
-
-    // Fetch the candidate window ONCE, exactly like the handler does -- the
-    // window is fixed (SEARCH_CANDIDATE_CEILING), not derived from `limit`.
-    const lexical = await ftsSearch(d1, "eeg", SEARCH_CANDIDATE_CEILING, { hasHed: true });
-    // Sanity: the candidate window actually contains every matching row, so
-    // it's the fixed ceiling -- not a lucky limit -- making the rest hold.
-    expect(lexical.length).toBe(HAS_HED_MATCH_COUNT);
 
     for (const limitRaw of ["5", "10", "20", "50", "100"]) {
       const { limit, offset } = parseSearchPagination(limitRaw, undefined);
-      const count = await countSearchMatches(d1, match, [], { hasHed: true });
-      const returned = lexical.slice(offset, offset + limit).length;
+      // This drives the actual orchestration function, not countSearchMatches
+      // in isolation -- countSearchMatches has no `limit` parameter, so
+      // calling it in a loop over `limit` is a tautology that cannot fail
+      // against the old, broken code (see the file header comment).
+      const envelope = await executeDatasetSearch(d1, undefined, undefined, {
+        query: "eeg",
+        filters: { hasHed: true },
+        limit,
+        offset,
+        minScore: MIN_SCORE,
+      });
 
-      // The fix: `count` (the true total) never moves...
-      expect(count).toBe(HAS_HED_MATCH_COUNT);
+      expect(envelope.method).toBe("text");
+      // The fix: `count` (the true total) never moves with `limit`...
+      expect(envelope.count).toBe(HAS_HED_MATCH_COUNT);
       // ...while `returned` (the page) tracks `limit`, exactly as the old,
       // buggy code conflated the two (`count: filtered.length` WAS the page
       // size). At limit=5/10 the page is smaller than the true total; from
       // limit=20 on the whole match set fits on one page.
-      expect(returned).toBe(Math.min(limit, HAS_HED_MATCH_COUNT));
+      expect(envelope.returned).toBe(Math.min(limit, HAS_HED_MATCH_COUNT));
+      expect(envelope.results.length).toBe(envelope.returned);
     }
+    db.close();
+  });
+
+  // The invariant, stated directly rather than as a table of specific
+  // limits, so a future filter (Phase 3/4 adds roughly a dozen more through
+  // this same handler) that reintroduces a limit-derived candidate window
+  // trips this immediately: count must not depend on limit at all, for a
+  // query whose match set (12 rows) is bigger than the smallest page (5).
+  test("count is independent of limit whenever the match set exceeds the smallest page", async () => {
+    const db = freshDb();
+    seedEegFixture(db);
+    const d1 = realD1(db);
+    const base = { query: "eeg", filters: { hasHed: true }, offset: 0, minScore: MIN_SCORE };
+
+    const smallPage = await executeDatasetSearch(d1, undefined, undefined, { ...base, limit: 5 });
+    const largePage = await executeDatasetSearch(d1, undefined, undefined, { ...base, limit: 100 });
+
+    expect(smallPage.count).toBe(largePage.count);
+    expect(smallPage.count).toBe(HAS_HED_MATCH_COUNT);
+    // Sanity that the two calls actually exercised different page sizes
+    // (otherwise the count-equality assertion above would be vacuous).
+    expect(smallPage.returned).toBeLessThan(largePage.returned);
     db.close();
   });
 });
@@ -250,15 +291,25 @@ describe("count is exact", () => {
 });
 
 describe("paging: page1 + page2 equals one double-width page", () => {
+  // Drives executeDatasetSearch itself (ai/vectorize undefined -> "text"
+  // leg), not a hand-rolled reimplementation of its fetch-then-slice logic --
+  // a helper that called ftsSearch + sliced locally would test the test's own
+  // arithmetic, not the production windowing/slicing it's supposed to guard.
   async function fetchPage(
     db: D1Database,
     query: string,
     limitRaw: string | undefined,
     offsetRaw: string | undefined,
-  ) {
+  ): Promise<string[]> {
     const { limit, offset } = parseSearchPagination(limitRaw, offsetRaw);
-    const candidates = await ftsSearch(db, query, SEARCH_CANDIDATE_CEILING, {});
-    return candidates.slice(offset, offset + limit).map((r) => r.id);
+    const envelope = await executeDatasetSearch(db, undefined, undefined, {
+      query,
+      filters: {},
+      limit,
+      offset,
+      minScore: 0.65,
+    });
+    return envelope.results.map((r) => r.id);
   }
 
   test("no duplicates, no gaps, across two half-width pages vs one double-width page", async () => {
