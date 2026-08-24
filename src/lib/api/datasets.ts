@@ -6,6 +6,7 @@
  * verbatim.
  */
 
+import { datasetSearchEnvelopeSchema } from "../../../shared/contract/index.js";
 import { request } from "./client.js";
 
 /** ORCID identifier format: XXXX-XXXX-XXXX-XXXX (last char may be X) */
@@ -193,14 +194,22 @@ export interface DatasetSearchResponse {
   results: DatasetSearchResult[];
   count: number;
   // Additive envelope fields (#1145, epic #1144 phase 1): `count` is now the
-  // true total for the query + filters, decoupled from page size. Types only
-  // this phase -- the CLI renders nothing new (see src/commands/dataset.ts).
+  // true total for the query + filters, decoupled from page size (and can
+  // legitimately exceed `candidate_ceiling` -- see `truncated`). Types only
+  // this phase -- the CLI renders nothing new beyond surfacing `warning`
+  // (see src/commands/dataset.ts), same as the list endpoint already does.
   returned?: number;
   offset?: number;
   limit?: number;
   candidate_ceiling?: number;
+  /** True when `count` exceeds `candidate_ceiling`: more rows match than
+   *  this response's candidate window could ever supply (review round 3 S1). */
+  truncated?: boolean;
   method: "semantic" | "text" | "text_fallback" | "exact_id" | "unavailable";
   min_score?: number;
+  /** Set only when the backend's exact-count query failed and `count` fell
+   *  back to a page-derived lower bound (review round 3 I1). */
+  warning?: string;
 }
 
 /**
@@ -275,6 +284,15 @@ export async function resolveSourceId(sourceId: string): Promise<ResolveSourceRe
 
 /**
  * Semantic dataset search
+ *
+ * Validated against the shared contract (#1145 review I5) -- previously the
+ * only endpoints doing this were the ones burned by a real drift bug
+ * (getCurrentUser's #895 nested-envelope regression); search had none, so a
+ * backend shape drift here would have silently cast to a malformed
+ * `DatasetSearchResponse` instead of failing loudly. The schema's field
+ * shapes don't line up 1:1 with this legacy interface (nullable columns,
+ * etc.), so the validated value is cast rather than returned as-is -- the
+ * validation itself, not the cast, is what the drift guard actually buys.
  */
 export async function searchDatasets(
   query: string,
@@ -284,7 +302,13 @@ export async function searchDatasets(
   if (filters.modality) params.set("modality", filters.modality);
   if (filters.limit) params.set("limit", String(filters.limit));
   if (filters.hasHed) params.set("has_hed", "1");
-  return request<DatasetSearchResponse>(`/datasets/search?${params.toString()}`, {}, "optional");
+  const response = await request(
+    `/datasets/search?${params.toString()}`,
+    {},
+    "optional",
+    datasetSearchEnvelopeSchema,
+  );
+  return response as unknown as DatasetSearchResponse;
 }
 
 interface GetDatasetResponse {
