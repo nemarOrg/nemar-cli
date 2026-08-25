@@ -146,7 +146,10 @@ async function loadEnrichedMetadata(
     `SELECT dataset_id, name, description, github_repo, concept_doi,
             modalities, subject_count, age_min, age_max,
             file_size, total_files, tasks, enrichment_json,
-            data_complete, bytes_present
+            data_complete, bytes_present,
+            total_recording_duration, recording_duration_min, recording_duration_max,
+            recording_count, recordings_unavailable, recordings_measured,
+            channel_count_min, channel_count_max
        FROM datasets
        WHERE dataset_id = ?`,
   )
@@ -167,6 +170,14 @@ async function loadEnrichedMetadata(
       enrichment_json: string | null;
       data_complete: number | null;
       bytes_present: number | null;
+      total_recording_duration: number | null;
+      recording_duration_min: number | null;
+      recording_duration_max: number | null;
+      recording_count: number | null;
+      recordings_unavailable: number | null;
+      recordings_measured: number | null;
+      channel_count_min: number | null;
+      channel_count_max: number | null;
     }>();
 
   if (!row) {
@@ -221,6 +232,14 @@ async function loadEnrichedMetadata(
       tasks: row.tasks,
       data_complete: row.data_complete,
       bytes_present: row.bytes_present,
+      total_recording_duration: row.total_recording_duration,
+      recording_duration_min: row.recording_duration_min,
+      recording_duration_max: row.recording_duration_max,
+      recording_count: row.recording_count,
+      recordings_unavailable: row.recordings_unavailable,
+      recordings_measured: row.recordings_measured,
+      channel_count_min: row.channel_count_min,
+      channel_count_max: row.channel_count_max,
     },
     parsedEnrichment,
     versions: versionRows,

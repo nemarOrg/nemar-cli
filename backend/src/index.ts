@@ -54,6 +54,7 @@ import { sweepImportRetries } from "./services/import-retry";
 import { manifestIntegritySweep } from "./services/manifest-sweep";
 import { getActiveNotices } from "./services/notices";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
+import { runRecordingStatsSweep } from "./services/recording-stats-sweep";
 import {
   FIRST_WARNING_DAYS,
   STALENESS_LIMIT_DAYS,
@@ -818,6 +819,33 @@ export default {
           .catch((err) =>
             console.error(
               "[availability-report-sweep] sweep failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
+      );
+      // Epic #1144 Phase 2 (#1146): backfill dataset-level recording
+      // duration/count/channel-range stats from each dataset's zarr index.
+      // PROD-ONLY BY DEFAULT per AGENTS.md, though this job's own writes are
+      // narrower than most of the block above: it only reads the prod S3
+      // bucket and writes D1 columns, with no email, no GitHub dispatch, and
+      // no DOI/bucket mutation. Kept in the prod-only block anyway --
+      // AGENTS.md's default stands absent a specific reason to carve out an
+      // exception, and there is none here.
+      ctx.waitUntil(
+        runRecordingStatsSweep(env)
+          .then((r) => {
+            if (r.processed > 0 || (r.remaining ?? 0) > 0) {
+              console.log(
+                `[recording-stats-sweep] processed=${r.processed} measured=${r.measured} unmeasured=${r.unmeasured} errors=${r.errors.length} remaining=${r.remaining ?? "?"}`,
+              );
+            }
+            for (const e of r.errors) {
+              console.error(`[recording-stats-sweep] ${e.dataset_id}: ${e.error}`);
+            }
+          })
+          .catch((err) =>
+            console.error(
+              "[recording-stats-sweep] sweep failed:",
               err instanceof Error ? (err.stack ?? err.message) : err,
             ),
           ),

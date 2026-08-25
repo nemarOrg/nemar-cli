@@ -540,10 +540,36 @@ export interface DatasetDemographics {
   age_max?: number | null;
 }
 
+/** A `{min, max}` range object, per neuroschema's channel_count_range /
+ *  recording_duration_range shape (`additionalProperties: false` -- no other
+ *  keys). Omitted entirely from DatasetDataSummary when both bounds are
+ *  null, rather than emitted as `{min: null, max: null}`. */
+export interface DatasetStatRange {
+  min: number | null;
+  max: number | null;
+}
+
 export interface DatasetDataSummary {
   total_files: number | null;
   size_bytes: number | null;
   size_human: string | null;
+  /** store_count + failure_count from the zarr index -- every raw recording
+   *  discovery found, converted or not (epic #1144 Phase 2). */
+  recording_count: number | null;
+  /** failure_count from the zarr index: recordings that could not be
+   *  summarised (truncated, corrupt, unsupported). */
+  recordings_unavailable: number | null;
+  /** Sum of per-store duration (seconds); a store's duration is the max
+   *  across its channel groups, never their sum. NULL (not 0) whenever
+   *  nothing has been measured yet -- see migration 0070. A lower bound on
+   *  the dataset's true total whenever recordings_unavailable is non-zero. */
+  total_recording_duration: number | null;
+  /** Present only when at least one bound is known. */
+  recording_duration_range?: DatasetStatRange;
+  /** Present only when at least one bound is known. The existing scalar
+   *  `n_channels` elsewhere in the row is a single sampled value, not this
+   *  range -- see the Phase 2 plan for why the scalar alone is misleading. */
+  channel_count_range?: DatasetStatRange;
 }
 
 export interface DatasetProvenance {
@@ -608,6 +634,19 @@ export interface NemarExtensionBlock {
    *  (the honest declared total) when data_complete=0. Same namespace rationale
    *  as data_complete. */
   bytes_present: number | null;
+  /**
+   * Recording-stats measurement completeness (epic #1144 Phase 2): how many
+   * of `data_summary.recording_count` actually yielded a duration. Lives
+   * here rather than in `data_summary` because it is a NEMAR-specific
+   * measurement-progress fact, not part of neuroschema's FAIR core --
+   * `recording_count` and `recordings_unavailable` already say how many
+   * recordings exist and how many failed; this says how many of the
+   * remainder have been measured so far (recording_stats_at IS NULL means
+   * "not yet swept" rather than "zero recordings measured", and this field
+   * distinguishes that from a genuinely all-unmeasured dataset). null before
+   * the sweep first runs a dataset.
+   */
+  recordings_measured: number | null;
 }
 
 export interface NeuroschemaDataset {
@@ -665,6 +704,18 @@ export interface DatasetRowForMetadata {
   data_complete: number | null;
   /** Actual bytes present in S3 for the latest version (#970), or null. */
   bytes_present: number | null;
+  /** Recording-stats columns from migration 0070 (epic #1144 Phase 2), all
+   *  null until the recording-stats-sweep first computes them for this
+   *  dataset. See DatasetDataSummary / NemarExtensionBlock for what each
+   *  serves. */
+  total_recording_duration: number | null;
+  recording_duration_min: number | null;
+  recording_duration_max: number | null;
+  recording_count: number | null;
+  recordings_unavailable: number | null;
+  recordings_measured: number | null;
+  channel_count_min: number | null;
+  channel_count_max: number | null;
 }
 
 /**
@@ -931,6 +982,19 @@ export function buildDatasetMetadata(input: {
 
   const latestVersionRow = versions[0] ?? null;
 
+  // Range objects (epic #1144 Phase 2): present only when at least one bound
+  // is known, per neuroschema convention -- {min: null, max: null} would be
+  // indistinguishable from "not yet computed" on the wire, so the key is
+  // omitted entirely rather than emitted with both bounds null.
+  const recordingDurationRange: DatasetStatRange | undefined =
+    row.recording_duration_min !== null || row.recording_duration_max !== null
+      ? { min: row.recording_duration_min, max: row.recording_duration_max }
+      : undefined;
+  const channelCountRange: DatasetStatRange | undefined =
+    row.channel_count_min !== null || row.channel_count_max !== null
+      ? { min: row.channel_count_min, max: row.channel_count_max }
+      : undefined;
+
   return {
     schema_version: NEUROSCHEMA_VERSION,
     doc_type: "dataset",
@@ -971,11 +1035,19 @@ export function buildDatasetMetadata(input: {
           }
         : null,
     data_summary:
-      totalFiles !== null || sizeBytes !== null
+      totalFiles !== null ||
+      sizeBytes !== null ||
+      row.recording_count !== null ||
+      row.total_recording_duration !== null
         ? {
             total_files: totalFiles,
             size_bytes: sizeBytes,
             size_human: formatBytes(sizeBytes),
+            recording_count: row.recording_count,
+            recordings_unavailable: row.recordings_unavailable,
+            total_recording_duration: row.total_recording_duration,
+            ...(recordingDurationRange ? { recording_duration_range: recordingDurationRange } : {}),
+            ...(channelCountRange ? { channel_count_range: channelCountRange } : {}),
           }
         : null,
     provenance: {
@@ -1009,6 +1081,7 @@ export function buildDatasetMetadata(input: {
         pipeline_stage: v2?.pipeline_stage ?? null,
         data_complete: row.data_complete,
         bytes_present: row.bytes_present,
+        recordings_measured: row.recordings_measured,
       },
     },
   };
