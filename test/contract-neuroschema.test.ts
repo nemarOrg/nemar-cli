@@ -122,3 +122,75 @@ describe("data_summary recording-duration fields (v0.4.0)", () => {
     expect(validate(ds)).toBe(false);
   });
 });
+
+// Epic #1144 Phase 2b (#1153): signal_defaults (definitions/inheritable.schema.json).
+// The power_line_frequency enum is THE trap this phase's plan calls out --
+// these tests assert the REAL vendored schema enforces it, not a
+// hand-written expectation of what the enum should be.
+describe("signal_defaults field (v0.4.0, epic #1144 Phase 2b #1153)", () => {
+  test("accepts every field populated with a valid value", () => {
+    const ds = {
+      ...goodDataset,
+      signal_defaults: {
+        sampling_frequency: 500,
+        power_line_frequency: 60,
+        reference: "average",
+        recording_type: null,
+        channel_system: "10-20",
+        placement_scheme: "extended 10-10% system",
+      },
+    };
+    const ok = validate(ds);
+    if (!ok) throw new Error(`expected valid, got: ${formatAjvErrors(validate)}`);
+    expect(ok).toBe(true);
+  });
+
+  test("accepts every field null (nothing probed yet)", () => {
+    const ds = {
+      ...goodDataset,
+      signal_defaults: {
+        sampling_frequency: null,
+        power_line_frequency: null,
+        reference: null,
+        recording_type: null,
+        channel_system: null,
+        placement_scheme: null,
+      },
+    };
+    expect(validate(ds)).toBe(true);
+  });
+
+  test("accepts power_line_frequency: 50 (the other enum member)", () => {
+    const ds = { ...goodDataset, signal_defaults: { power_line_frequency: 50 } };
+    expect(validate(ds)).toBe(true);
+  });
+
+  test("REJECTS power_line_frequency out of the {50, 60, null} enum -- enforced by the real vendored schema, not a hand-written check", () => {
+    // A measured value close to 60 -- the exact "don't round" trap.
+    expect(validate({ ...goodDataset, signal_defaults: { power_line_frequency: 59.94 } })).toBe(
+      false,
+    );
+    // BIDS "not applicable" numeric convention -- distinct from JSON null.
+    expect(validate({ ...goodDataset, signal_defaults: { power_line_frequency: 0 } })).toBe(false);
+    // Same class as Phase 2's negative-number gap.
+    expect(validate({ ...goodDataset, signal_defaults: { power_line_frequency: -60 } })).toBe(
+      false,
+    );
+    // Stringly-typed, as some hand-authored sidecars carry it.
+    expect(validate({ ...goodDataset, signal_defaults: { power_line_frequency: "60" } })).toBe(
+      false,
+    );
+  });
+
+  test("rejects sampling_frequency below the schema's minimum:0", () => {
+    expect(validate({ ...goodDataset, signal_defaults: { sampling_frequency: -1 } })).toBe(false);
+  });
+
+  test("rejects an unknown key inside signal_defaults -- additionalProperties:false is doing real work", () => {
+    const ds = {
+      ...goodDataset,
+      signal_defaults: { sampling_frequency: 500, extra_field: true },
+    };
+    expect(validate(ds)).toBe(false);
+  });
+});

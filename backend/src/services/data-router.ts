@@ -575,6 +575,25 @@ export interface DatasetDataSummary {
   channel_count_range?: DatasetStatRange;
 }
 
+/**
+ * neuroschema `signal_defaults` block (dataset.schema.json:133, backed by
+ * definitions/inheritable.schema.json) -- epic #1144 Phase 2b, issue #1153.
+ * Every field is independently nullable per the vendored schema; the whole
+ * block is omitted (set to null) by the builder when every field is null,
+ * matching `data_summary`'s gating. Every field below is one exemplar
+ * sidecar's declared value, not a verified per-dataset aggregate -- see
+ * migration 0071's caveat.
+ */
+export interface DatasetSignalDefaults {
+  sampling_frequency: number | null;
+  power_line_frequency: number | null;
+  reference: string | null;
+  /** Not derivable from anything NEMAR probes today; always null. */
+  recording_type: string | null;
+  channel_system: string | null;
+  placement_scheme: string | null;
+}
+
 export interface DatasetProvenance {
   latest_snapshot: string | null;
   publish_date: string | null;
@@ -681,6 +700,7 @@ export interface NeuroschemaDataset {
   sessions_count: number | null;
   demographics: DatasetDemographics | null;
   data_summary: DatasetDataSummary | null;
+  signal_defaults: DatasetSignalDefaults | null;
   provenance: DatasetProvenance;
   external_links: DatasetExternalLinks;
   extensions: { nemar: NemarExtensionBlock };
@@ -719,6 +739,17 @@ export interface DatasetRowForMetadata {
   recordings_measured: number | null;
   channel_count_min: number | null;
   channel_count_max: number | null;
+  /** signal_defaults columns from migration 0071 (epic #1144 Phase 2b,
+   *  #1153), all null until the signal-defaults-sweep or a live reindex
+   *  first computes them for this dataset. See DatasetSignalDefaults for
+   *  what each serves. `electrode_system` predates this phase (migration
+   *  0054) but is selected here for the first time -- it was never served
+   *  on this endpoint until signal_defaults.channel_system needed it. */
+  sampling_frequency: number | null;
+  power_line_frequency: number | null;
+  eeg_reference: string | null;
+  placement_scheme: string | null;
+  electrode_system: string | null;
 }
 
 /**
@@ -1015,6 +1046,18 @@ export function buildDatasetMetadata(input: {
     row.channel_count_min !== null ||
     row.channel_count_max !== null;
 
+  // signal_defaults (epic #1144 Phase 2b, #1153): omitted (null) unless at
+  // least one of the five source columns is populated -- recording_type has
+  // no source column and is never part of this gate (it would otherwise
+  // never contribute a true condition, which is fine, but it also must
+  // never be read as "populated" on its own since it's always null).
+  const hasSignalDefaults =
+    row.sampling_frequency !== null ||
+    row.power_line_frequency !== null ||
+    row.eeg_reference !== null ||
+    row.placement_scheme !== null ||
+    row.electrode_system !== null;
+
   return {
     schema_version: NEUROSCHEMA_VERSION,
     doc_type: "dataset",
@@ -1067,6 +1110,16 @@ export function buildDatasetMetadata(input: {
             ...(channelCountRange ? { channel_count_range: channelCountRange } : {}),
           }
         : null,
+    signal_defaults: hasSignalDefaults
+      ? {
+          sampling_frequency: row.sampling_frequency,
+          power_line_frequency: row.power_line_frequency,
+          reference: row.eeg_reference,
+          recording_type: null,
+          channel_system: row.electrode_system,
+          placement_scheme: row.placement_scheme,
+        }
+      : null,
     provenance: {
       // Coerce to tag form to match every other version field on the
       // wire (`extensions.nemar.versions[].version`,

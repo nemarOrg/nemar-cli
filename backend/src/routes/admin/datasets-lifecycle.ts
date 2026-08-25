@@ -57,6 +57,10 @@ import {
   getZarrIndex,
   uploadManifest,
 } from "../../services/s3";
+import {
+  SIGNAL_DEFAULTS_SWEEP_RESET_SQL,
+  runSignalDefaultsSweep,
+} from "../../services/signal-defaults-sweep";
 import { hasRole } from "../../types/bindings";
 import { getS3Config } from "./shared";
 import type { AdminRouter } from "./shared";
@@ -512,6 +516,56 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       console.error("[recording-stats-sweep] candidate query failed:", err);
       return c.json(
         { error: "Failed to query sweep candidates (is migration 0070 applied?)" },
+        500,
+      );
+    }
+  });
+
+  /**
+   * POST /admin/datasets/signal-defaults-sweep?limit=N — backfill that seeds
+   * BIDS signal defaults (migration 0071: sampling_frequency,
+   * power_line_frequency, eeg_reference, placement_scheme) from each
+   * dataset's exemplar `*_eeg.json` sidecar (epic #1144 Phase 2b, issue
+   * #1153). Modelled on recording-stats-sweep above: one implementation
+   * (services/signal-defaults-sweep.ts) so this route cannot drift from any
+   * future caller. `?reset=1` clears the stamp + the four value columns via
+   * the same file's exported SIGNAL_DEFAULTS_SWEEP_RESET_SQL.
+   *
+   * Bound tighter than recording-stats-sweep (default 15, max 30, not 200):
+   * this hits the GitHub API (getBidsTreeStats: root tree + up to 25 subject
+   * subtrees + up to 2 sidecar blobs per dataset), not S3 -- same cap as
+   * channel-montage-sweep / hed-sweep.
+   *
+   * The catch below is now ACCURATE about what it catches (#1162 review,
+   * I5): `runSignalDefaultsSweep` itself absorbs a GitHub-auth failure
+   * (missing/invalid App credentials) into a normal 200 response with a
+   * batch-level `errors` entry, rather than letting it propagate here to be
+   * misreported as a missing migration -- so a throw reaching this catch
+   * really does mean the candidate query failed.
+   */
+  admin.post("/datasets/signal-defaults-sweep", async (c) => {
+    const db = c.env.DB;
+
+    if (c.req.query("reset") === "1") {
+      try {
+        const res = await db.prepare(SIGNAL_DEFAULTS_SWEEP_RESET_SQL).run();
+        return c.json({ reset: res.meta?.changes ?? 0 });
+      } catch (err) {
+        console.error("[signal-defaults-sweep] reset failed:", err);
+        return c.json({ error: "Failed to reset signal defaults" }, 500);
+      }
+    }
+
+    const limitRaw = Number.parseInt(c.req.query("limit") || "15", 10);
+    const limit = Number.isFinite(limitRaw) ? limitRaw : 15;
+
+    try {
+      const result = await runSignalDefaultsSweep(c.env, { limit });
+      return c.json(result);
+    } catch (err) {
+      console.error("[signal-defaults-sweep] candidate query failed:", err);
+      return c.json(
+        { error: "Failed to query sweep candidates (is migration 0071 applied?)" },
         500,
       );
     }

@@ -717,7 +717,9 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
             data_complete, bytes_present,
             total_recording_duration, recording_duration_min, recording_duration_max,
             recording_count, recordings_unavailable, recordings_measured,
-            channel_count_min, channel_count_max
+            channel_count_min, channel_count_max,
+            sampling_frequency, power_line_frequency, eeg_reference,
+            placement_scheme, electrode_system
      FROM datasets
      WHERE dataset_id = ?`,
   )
@@ -792,6 +794,11 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
       recordings_measured: row.recordings_measured,
       channel_count_min: row.channel_count_min,
       channel_count_max: row.channel_count_max,
+      sampling_frequency: row.sampling_frequency,
+      power_line_frequency: row.power_line_frequency,
+      eeg_reference: row.eeg_reference,
+      placement_scheme: row.placement_scheme,
+      electrode_system: row.electrode_system,
     },
     parsedEnrichment,
     versions,
