@@ -633,7 +633,7 @@ dataRoutes.get("/:datasetId/:version/summary.json", (c) => {
  *
  * Sibling to summary.json. Emitted by the central generate-records workflow
  * on `nemarDatasets/.github` at S3 key `<id>/version/v<X.Y.Z>-records.json`
- * (an array of neuroschema v0.3.0 `record` docs, one per primary signal
+ * (an array of neuroschema v0.4.0 `record` docs, one per primary signal
  * file). The emitter owns the shape contract; this handler serves the bytes
  * verbatim. Same cache policy as summary.json: immutable per (id, version),
  * so a long s-maxage; a missing artifact is `no-store` 404 (no negative
@@ -695,7 +695,7 @@ dataRoutes.get("/:datasetId/:version/records.json", (c) => {
 });
 
 /**
- * GET /<id>/metadata.json -> dataset-level neuroschema v0.3.0 document.
+ * GET /<id>/metadata.json -> dataset-level neuroschema v0.4.0 document.
  *
  * Combines the D1 catalog row, the parsed nemar_metadata.json enrichment
  * payload, and (when at least one version exists) a derived BIDS index from
@@ -714,7 +714,10 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
     `SELECT dataset_id, name, description, github_repo, concept_doi,
             modalities, subject_count, age_min, age_max,
             file_size, total_files, tasks, enrichment_json,
-            data_complete, bytes_present
+            data_complete, bytes_present,
+            total_recording_duration, recording_duration_min, recording_duration_max,
+            recording_count, recordings_unavailable, recordings_measured,
+            channel_count_min, channel_count_max
      FROM datasets
      WHERE dataset_id = ?`,
   )
@@ -781,6 +784,14 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
       tasks: row.tasks,
       data_complete: row.data_complete,
       bytes_present: row.bytes_present,
+      total_recording_duration: row.total_recording_duration,
+      recording_duration_min: row.recording_duration_min,
+      recording_duration_max: row.recording_duration_max,
+      recording_count: row.recording_count,
+      recordings_unavailable: row.recordings_unavailable,
+      recordings_measured: row.recordings_measured,
+      channel_count_min: row.channel_count_min,
+      channel_count_max: row.channel_count_max,
     },
     parsedEnrichment,
     versions,

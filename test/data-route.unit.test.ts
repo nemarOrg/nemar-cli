@@ -625,6 +625,14 @@ function emptyRow(): DatasetRowForMetadata {
     tasks: null,
     data_complete: null,
     bytes_present: null,
+    total_recording_duration: null,
+    recording_duration_min: null,
+    recording_duration_max: null,
+    recording_count: null,
+    recordings_unavailable: null,
+    recordings_measured: null,
+    channel_count_min: null,
+    channel_count_max: null,
   };
 }
 
@@ -827,7 +835,7 @@ describe("buildDatasetMetadata", () => {
       latestManifest: null,
       githubOrg: "nemarDatasets",
     });
-    expect(out.schema_version).toBe("0.3.0");
+    expect(out.schema_version).toBe("0.4.0");
     expect(out.doc_type).toBe("dataset");
     expect(out.dataset_id).toBe("nm099999");
     expect(out.source).toBe("nemar");
@@ -864,6 +872,99 @@ describe("buildDatasetMetadata", () => {
     expect(out.data_summary?.size_bytes).toBe(500);
     expect(out.data_summary?.total_files).toBe(3);
     expect(out.data_summary?.size_human).toBe("500 B");
+  });
+
+  // Epic #1144 Phase 2 (#1146): recording-stats columns surfaced on
+  // data_summary / extensions.nemar.
+  describe("recording-stats serving", () => {
+    test("data_summary carries recording_count/unavailable/duration even with no files/size", () => {
+      // Gate extension: the block must appear even when totalFiles/sizeBytes
+      // are both null, as long as a recording-stats column is populated.
+      const out = buildDatasetMetadata({
+        row: {
+          ...emptyRow(),
+          recording_count: 126,
+          recordings_unavailable: 2,
+          total_recording_duration: 3343170,
+        },
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out.data_summary).not.toBeNull();
+      expect(out.data_summary?.total_files).toBeNull();
+      expect(out.data_summary?.size_bytes).toBeNull();
+      expect(out.data_summary?.recording_count).toBe(126);
+      expect(out.data_summary?.recordings_unavailable).toBe(2);
+      expect(out.data_summary?.total_recording_duration).toBe(3343170);
+    });
+
+    test("range objects are present when at least one bound is known", () => {
+      const out = buildDatasetMetadata({
+        row: {
+          ...emptyRow(),
+          recording_count: 124,
+          recording_duration_min: 22410,
+          recording_duration_max: 31860,
+          channel_count_min: 19,
+          channel_count_max: 24,
+        },
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out.data_summary?.recording_duration_range).toEqual({ min: 22410, max: 31860 });
+      expect(out.data_summary?.channel_count_range).toEqual({ min: 19, max: 24 });
+    });
+
+    test("data_summary is non-null and channel_count_range survives when ONLY the channel columns are set (I2)", () => {
+      // Not reachable through today's sweep (all 8 stat columns always write
+      // together), but the gate must not assume that invariant: a future
+      // asymmetric write, a partial reset bug, or manual DB surgery must
+      // never cause a real, non-null range value to be silently dropped
+      // because recording_count/total_recording_duration happen to be null.
+      const out = buildDatasetMetadata({
+        row: { ...emptyRow(), channel_count_min: 19, channel_count_max: 24 },
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out.data_summary).not.toBeNull();
+      expect(out.data_summary?.recording_count).toBeNull();
+      expect(out.data_summary?.total_recording_duration).toBeNull();
+      expect(out.data_summary?.channel_count_range).toEqual({ min: 19, max: 24 });
+    });
+
+    test("range objects are omitted entirely (not {min:null,max:null}) when both bounds are null", () => {
+      const out = buildDatasetMetadata({
+        row: { ...emptyRow(), total_recording_duration: null, recording_count: 0 },
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out.data_summary).not.toBeNull(); // recording_count:0 is non-null
+      expect(out.data_summary && "recording_duration_range" in out.data_summary).toBe(false);
+      expect(out.data_summary && "channel_count_range" in out.data_summary).toBe(false);
+    });
+
+    test("recordings_measured is served from extensions.nemar, not data_summary", () => {
+      const out = buildDatasetMetadata({
+        row: { ...emptyRow(), recording_count: 124, recordings_measured: 6 },
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out.extensions.nemar.recordings_measured).toBe(6);
+      // Not part of the FAIR-core data_summary block (neuroschema does not
+      // define it there).
+      expect(out.data_summary).not.toBeNull();
+      expect(out.data_summary && "recordings_measured" in out.data_summary).toBe(false);
+    });
   });
 
   test("full v2 enrichment + versions + manifest -> populated payload", () => {

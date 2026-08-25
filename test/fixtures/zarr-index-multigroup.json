@@ -1,0 +1,57 @@
+{
+  "_comment": "SYNTHETIC fixture, not real data (test/recording-stats.test.ts). As of 2026-08-24, a sample of 34 live zarr indexes -- every MEG/NIRS/motion/EMG dataset reachable plus a broad EEG/iEEG sample -- contained ZERO multi-group stores, so max-within-store and sum-within-store agree on every real index today. This fixture is the only thing that exercises the transposed-rule failure mode: a recording whose file mixes sampling rates (biosigIO names the resulting groups '{modality}_{rate}hz') produces a store with more than one channel group, which are concurrent streams of the SAME recording, not separate recordings. Store duration must be max(group durations), never their sum.",
+  "dataset_id": "xx099999",
+  "format": "nemar-zarr-index",
+  "format_version": 1,
+  "source_commit": "synthetic0000000000000000000000000000000",
+  "updated_utc": "2026-08-24T00:00:00Z",
+  "store_count": 2,
+  "stores": [
+    {
+      "path": "sub-01/eeg/sub-01_task-rest_eeg.edf",
+      "zarr": "sub-01/eeg/sub-01_task-rest_eeg.zarr",
+      "source_key": "SHA256E-s1--0000000000000000000000000000000000000000000000000000000000000000.edf",
+      "updated_utc": "2026-08-24T00:00:00Z",
+      "modalities": ["eeg"],
+      "groups": [
+        {
+          "name": "eeg_250hz",
+          "modality": "EEG",
+          "rate": 250.0,
+          "n_channels": 32,
+          "n_samples": 750000,
+          "duration_s": 3000.0
+        },
+        {
+          "name": "eeg_1000hz",
+          "modality": "EEG",
+          "rate": 1000.0,
+          "n_channels": 4,
+          "n_samples": 1000000,
+          "duration_s": 1000.0
+        }
+      ],
+      "power_line_frequency": null
+    },
+    {
+      "path": "sub-02/eeg/sub-02_task-rest_eeg.edf",
+      "zarr": "sub-02/eeg/sub-02_task-rest_eeg.zarr",
+      "source_key": "SHA256E-s2--1111111111111111111111111111111111111111111111111111111111111111.edf",
+      "updated_utc": "2026-08-24T00:00:00Z",
+      "modalities": ["eeg"],
+      "groups": [
+        {
+          "name": "eeg_250hz",
+          "modality": "EEG",
+          "rate": 250.0,
+          "n_channels": 32,
+          "n_samples": 500000,
+          "duration_s": 2000.0
+        }
+      ],
+      "power_line_frequency": null
+    }
+  ],
+  "failure_count": 0,
+  "failures": []
+}

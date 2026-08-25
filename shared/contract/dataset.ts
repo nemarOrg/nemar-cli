@@ -6,7 +6,7 @@
  *  - catalogItemSchema  : api.nemar.org GET /datasets list/search rows
  *  - datasetDetailSchema: api.nemar.org GET /datasets/:id (superset of the item)
  *  - neuroschemaDatasetSchema: data.nemar.org landing payload, which conforms to
- *    the neuroschema v0.3.0 `core/dataset.schema.json` (the canonical, language-
+ *    the neuroschema v0.4.0 `core/dataset.schema.json` (the canonical, language-
  *    agnostic dataset-metadata schema; enforced against the vendored JSON Schema
  *    in test/contract/neuroschema-conformance.test.ts).
  *
@@ -25,7 +25,7 @@ import { versionTagSchema } from "./version.js";
  * neuroschema version this contract's dataset shape conforms to. Single source;
  * backend services/data-router.ts imports this instead of a hardcoded literal.
  */
-export const NEUROSCHEMA_VERSION = "0.3.0";
+export const NEUROSCHEMA_VERSION = "0.4.0";
 
 /** neuroschema `source` enum. */
 export const datasetSourceSchema = z.enum(["openneuro", "nemar", "gin", "other"]);
@@ -187,7 +187,7 @@ export const datasetSearchEnvelopeSchema = z
 export const datasetDetailEnvelopeSchema = z.object({ dataset: datasetDetailSchema }).passthrough();
 
 /**
- * data.nemar.org landing payload — conforms to neuroschema v0.3.0
+ * data.nemar.org landing payload — conforms to neuroschema v0.4.0
  * core/dataset.schema.json. Passthrough + optional on the deep nested blocks
  * (demographics/data_summary/provenance/extensions) which neuroschema fully
  * specifies and the JSON-Schema conformance test enforces; here we pin the

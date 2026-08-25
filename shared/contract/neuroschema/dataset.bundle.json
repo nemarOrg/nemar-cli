@@ -2,7 +2,9 @@
   "_provenance": {
     "source": "https://github.com/nemarOrg/neuroschema",
     "generated_by": "shared/contract/neuroschema/build-vendor.mjs",
-    "note": "Do not hand-edit; regenerate from the neuroschema repo."
+    "note": "Do not hand-edit; regenerate from the neuroschema repo.",
+    "neuroschema_version": "0.4.0",
+    "source_commit": "d920ad01f01220ae1edbc6a5000f1ac4504198ae"
   },
   "root": "nsc:/core/dataset.schema.json",
   "schemas": [
@@ -453,6 +455,22 @@
           "description": "Total number of recordings (data files) in the dataset.",
           "minimum": 0
         },
+        "recordings_unavailable": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Number of recordings in the dataset that could not be summarised (truncated, corrupt, in an unsupported format, or otherwise unreadable). recording_count counts all recordings in the dataset, so recording_count minus recordings_unavailable gives the number of recordings with usable summaries.",
+          "minimum": 0
+        },
+        "total_recording_duration": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Total recording duration in seconds, summed across recordings. Concurrent channel groups within a single recording are not additive: a recording with EEG and EOG streams running simultaneously contributes its longest stream to the sum, not the sum of both streams. The sum covers only recordings that could be summarised, so when recordings_unavailable is non-zero this value is a lower bound on the dataset's true total.",
+          "minimum": 0
+        },
         "channel_count_range": {
           "type": [
             "object",
@@ -487,6 +505,24 @@
             "null"
           ],
           "description": "Range of sampling frequencies across recordings (if they vary).",
+          "properties": {
+            "min": {
+              "type": "number",
+              "minimum": 0
+            },
+            "max": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "recording_duration_range": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Range of per-recording durations across the dataset, in seconds.",
           "properties": {
             "min": {
               "type": "number",

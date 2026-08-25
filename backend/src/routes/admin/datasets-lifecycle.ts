@@ -45,6 +45,10 @@ import { verifyDatasetVersionS3 } from "../../services/import-integrity";
 import type { LlmUsageTotals } from "../../services/llm-enrich";
 import { generateManifest } from "../../services/manifest";
 import { buildCoverageReport } from "../../services/manifest-coverage";
+import {
+  RECORDING_STATS_SWEEP_RESET_SQL,
+  runRecordingStatsSweep,
+} from "../../services/recording-stats-sweep";
 import { errorMessage } from "../../services/repo-metadata";
 import {
   deleteDatasetObjects,
@@ -467,6 +471,50 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       errors,
       remaining: remainingRow?.n ?? null,
     });
+  });
+
+  /**
+   * POST /admin/datasets/recording-stats-sweep?limit=N — backfill that seeds
+   * dataset-level recording duration / count / channel-range stats (migration
+   * 0070) from each dataset's zarr index (epic #1144 Phase 2, issue #1146).
+   * Modelled directly on channel-montage-sweep above.
+   *
+   * One implementation, shared with the daily cron (backend/src/index.ts) --
+   * the candidate query, the cap, the two write paths (success vs.
+   * stamp-only) and the error collection all live in runRecordingStatsSweep
+   * (services/recording-stats-sweep.ts) so the two callers cannot drift.
+   * `?reset=1` clears the stamp + every stat column via the same file's
+   * exported RECORDING_STATS_SWEEP_RESET_SQL, so a corrected aggregator can
+   * re-sweep from scratch; the branch stays inline here (only the admin
+   * route ever needs it) but the SQL text itself is imported, not
+   * hand-copied.
+   */
+  admin.post("/datasets/recording-stats-sweep", async (c) => {
+    const db = c.env.DB;
+
+    if (c.req.query("reset") === "1") {
+      try {
+        const res = await db.prepare(RECORDING_STATS_SWEEP_RESET_SQL).run();
+        return c.json({ reset: res.meta?.changes ?? 0 });
+      } catch (err) {
+        console.error("[recording-stats-sweep] reset failed:", err);
+        return c.json({ error: "Failed to reset recording stats" }, 500);
+      }
+    }
+
+    const limitRaw = Number.parseInt(c.req.query("limit") || "50", 10);
+    const limit = Number.isFinite(limitRaw) ? limitRaw : 50;
+
+    try {
+      const result = await runRecordingStatsSweep(c.env, { limit });
+      return c.json(result);
+    } catch (err) {
+      console.error("[recording-stats-sweep] candidate query failed:", err);
+      return c.json(
+        { error: "Failed to query sweep candidates (is migration 0070 applied?)" },
+        500,
+      );
+    }
   });
 
   /**
