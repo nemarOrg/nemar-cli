@@ -7,11 +7,27 @@
 --
 -- index.stores lists only recordings that CONVERTED; recordings that failed
 -- conversion live in a sibling `failures` array and appear in neither. ADR
--- 0027 makes zarr discovery raw-only, so stores + failures is the complete
--- raw-recording set -- recording_count is therefore store_count +
--- failure_count, never stores.length alone (that would silently undercount
--- by exactly the failure count). See services/s3.ts's aggregateRecordingStats
--- for the full rationale.
+-- 0027 made zarr discovery raw-only, so stores + failures is the complete
+-- raw-recording set for a dataset converted since that landed -- this does
+-- NOT describe every dataset in the bucket today. AGENTS.md's Zarr section
+-- is explicit that stores published under derivatives/sourcedata/code before
+-- the raw-only cutover are a separate, still-in-progress purge, and some are
+-- still served; an unpurged legacy dataset's stores can include a non-raw
+-- entry. recording_count is nonetheless store_count + failure_count, never
+-- stores.length alone (that would silently undercount by exactly the
+-- failure count, regardless of the legacy caveat). Confirmed live on
+-- nm000111: 124 stores + 2 truncated EDFs (sub-I001/sub-I002,
+-- corrupt_or_truncated) = 126 actual recordings; stores.length alone
+-- reports 124 and looks perfectly plausible. See services/s3.ts's
+-- aggregateRecordingStats for the full rationale.
+--
+-- recording_stats_at, and only recording_stats_at, is written on EVERY sweep
+-- attempt (see services/recording-stats-sweep.ts); the 8 stat columns below
+-- are written together, atomically, ONLY on a successful read of the zarr
+-- index. A transient S3 error or a briefly-absent index (e.g. a reconversion
+-- in flight) therefore stamps recording_stats_at without touching the stat
+-- columns at all, leaving prior values -- NULL for a never-swept dataset,
+-- real numbers for a reconverted one -- exactly as they were.
 --
 --   total_recording_duration   sum of per-STORE duration across the dataset,
 --                              in seconds. A store's duration is the MAX
@@ -24,26 +40,46 @@
 --   recording_duration_max     when recordings_measured is 0.
 --   recording_count            store_count + failure_count: every raw
 --                              recording discovery found, converted or not.
+--                              Always a number (0 is valid, for a genuinely
+--                              empty dataset) once a sweep has successfully
+--                              read the index; NULL means no sweep has yet
+--                              succeeded -- either never attempted, or every
+--                              attempt so far hit a transient failure (see
+--                              above), never "measured zero".
 --   recordings_unavailable     failure_count -- recordings that could not be
 --                              summarised (truncated, corrupt, unsupported).
+--                              Same NULL-means-no-successful-sweep-yet rule
+--                              as recording_count (0 is a valid clean-run
+--                              value, not evidence of "unswept").
 --   recordings_measured        Stores that yielded a duration. A store whose
 --                              groups all lack duration_s (or has no groups)
 --                              is unmeasured, not zero-length, and is
---                              excluded from this count. NULL until the
---                              sweep first runs a dataset.
+--                              excluded from this count. Same
+--                              NULL-means-no-successful-sweep-yet rule.
 --   channel_count_min          Channel-count range across stores. A group
 --   channel_count_max          contributes here even when it has no
 --                              duration (rate/channel-count can be known
---                              before a full read is measured), so this
---                              range can be populated while duration is
---                              still NULL.
---   recording_stats_at         Bookkeeping stamp; NULL means needs
---                              (re)computing. Nulled by the zarr-ready
---                              callback's 'ready' branch only, so a
---                              reconverted dataset is re-picked by the next
---                              sweep; the 'failed' branch leaves it (and
---                              every other stat column) untouched -- a bad
---                              rebuild must never erase good numbers.
+--                              before a full read is measured), so this pair
+--                              can be NULL while recordings_measured is
+--                              non-zero (every measured group happened to
+--                              omit n_channels) -- and the inverse also
+--                              holds, populated while recordings_measured is
+--                              0 (every group has n_channels but none has a
+--                              duration). The two are independent facts, not
+--                              a pair that moves together.
+--   recording_stats_at         Bookkeeping stamp; NULL means never swept.
+--                              Nulled by the zarr-ready callback's 'ready'
+--                              branch only, so a reconverted dataset is
+--                              re-picked by the next sweep; the 'failed'
+--                              branch leaves it (and every stat column)
+--                              untouched -- a bad rebuild must never erase
+--                              good numbers. A dataset whose index kept
+--                              404ing across every sweep attempt ends up
+--                              stamped (so the sweep converges) with the 8
+--                              stat columns still NULL; it is not retried
+--                              again until its NEXT zarr rebuild renulls the
+--                              stamp via the callback, or an operator runs
+--                              `?reset=1`.
 --
 -- Deliberately absent: sampling_frequency_min/max. The zarr index's `rate`
 -- field is generate_zarr.py's per-modality serving cap (MODALITY_RATES),

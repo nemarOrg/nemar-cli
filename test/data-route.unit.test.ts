@@ -919,6 +919,25 @@ describe("buildDatasetMetadata", () => {
       expect(out.data_summary?.channel_count_range).toEqual({ min: 19, max: 24 });
     });
 
+    test("data_summary is non-null and channel_count_range survives when ONLY the channel columns are set (I2)", () => {
+      // Not reachable through today's sweep (all 8 stat columns always write
+      // together), but the gate must not assume that invariant: a future
+      // asymmetric write, a partial reset bug, or manual DB surgery must
+      // never cause a real, non-null range value to be silently dropped
+      // because recording_count/total_recording_duration happen to be null.
+      const out = buildDatasetMetadata({
+        row: { ...emptyRow(), channel_count_min: 19, channel_count_max: 24 },
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out.data_summary).not.toBeNull();
+      expect(out.data_summary?.recording_count).toBeNull();
+      expect(out.data_summary?.total_recording_duration).toBeNull();
+      expect(out.data_summary?.channel_count_range).toEqual({ min: 19, max: 24 });
+    });
+
     test("range objects are omitted entirely (not {min:null,max:null}) when both bounds are null", () => {
       const out = buildDatasetMetadata({
         row: { ...emptyRow(), total_recording_duration: null, recording_count: 0 },

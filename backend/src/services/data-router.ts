@@ -554,7 +554,10 @@ export interface DatasetDataSummary {
   size_bytes: number | null;
   size_human: string | null;
   /** store_count + failure_count from the zarr index -- every raw recording
-   *  discovery found, converted or not (epic #1144 Phase 2). */
+   *  discovery found for a dataset converted since ADR 0027's raw-only
+   *  cutover; a legacy dataset with unpurged derivative/sourcedata stores
+   *  (AGENTS.md's Zarr section) can still include a non-raw entry (epic
+   *  #1144 Phase 2). */
   recording_count: number | null;
   /** failure_count from the zarr index: recordings that could not be
    *  summarised (truncated, corrupt, unsupported). */
@@ -994,6 +997,23 @@ export function buildDatasetMetadata(input: {
     row.channel_count_min !== null || row.channel_count_max !== null
       ? { min: row.channel_count_min, max: row.channel_count_max }
       : undefined;
+  // Gate on ALL 8 recording-stat columns, not just two of them: migration
+  // 0070 documents that channel_count_min/max can be populated independently
+  // of recording_count/total_recording_duration (they move together under
+  // today's sweep, which always writes all 8 in one UPDATE, but nothing
+  // enforces that at the type level -- a future asymmetric write, a partial
+  // reset bug, or manual DB surgery must not cause a real, non-null range
+  // value to be silently dropped from the response because the other two
+  // columns happened to be null).
+  const hasRecordingStats =
+    row.recording_count !== null ||
+    row.recordings_unavailable !== null ||
+    row.total_recording_duration !== null ||
+    row.recording_duration_min !== null ||
+    row.recording_duration_max !== null ||
+    row.recordings_measured !== null ||
+    row.channel_count_min !== null ||
+    row.channel_count_max !== null;
 
   return {
     schema_version: NEUROSCHEMA_VERSION,
@@ -1035,10 +1055,7 @@ export function buildDatasetMetadata(input: {
           }
         : null,
     data_summary:
-      totalFiles !== null ||
-      sizeBytes !== null ||
-      row.recording_count !== null ||
-      row.total_recording_duration !== null
+      totalFiles !== null || sizeBytes !== null || hasRecordingStats
         ? {
             total_files: totalFiles,
             size_bytes: sizeBytes,

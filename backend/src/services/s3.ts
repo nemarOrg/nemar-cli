@@ -740,8 +740,19 @@ export interface RecordingStats {
   channelCountMax: number | null;
 }
 
-function toFiniteNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+/**
+ * Parse a JSON value as a non-negative finite number, REJECTING (not
+ * clamping) anything else: NaN, +/-Infinity, non-numbers, and negatives all
+ * become null. Every field this reads (n_channels, duration_s, store_count,
+ * failure_count) is `minimum: 0` in the vendored neuroschema bundle, so a
+ * negative input is malformed data, not a valid-but-inconvenient value.
+ * Rejecting rather than clamping to 0 matters: a clamped negative duration
+ * would be indistinguishable from a genuinely measured zero-length
+ * recording, which is exactly the ambiguity `measuredCount` below exists to
+ * avoid for the "nothing measured" case.
+ */
+function toFiniteNonNegativeNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 /**
@@ -763,31 +774,40 @@ function toFiniteNumber(value: unknown): number | null {
  *    the synthetic multi-group fixture in the test suite is the only thing
  *    that exercises the transposed-rule failure mode.
  *
- * 2. `index.stores` lists only recordings that CONVERTED (ADR 0027: zarr
- *    discovery is raw-only, so `stores` + `failures` is the complete raw
- *    set). Recordings that failed conversion live in a sibling `failures`
- *    array and appear in neither -- so `recordingCount` is
+ * 2. `index.stores` lists only recordings that CONVERTED. ADR 0027 made zarr
+ *    discovery raw-only, so `stores` + `failures` is the complete raw set
+ *    for a dataset converted since that landed. This does NOT describe
+ *    every dataset in the bucket today: AGENTS.md's Zarr section is explicit
+ *    that stores published under `derivatives/`/`sourcedata/`/`code/` before
+ *    the raw-only cutover are a separate, still-in-progress purge, and some
+ *    are still served -- an unpurged legacy dataset's `stores` can include a
+ *    non-raw entry. Recordings that failed conversion live in a sibling
+ *    `failures` array and appear in neither -- so `recordingCount` is
  *    `store_count + failure_count`, never `stores.length` alone, or a
  *    corrupt/truncated upstream file silently vanishes from the count
- *    instead of showing up as "unavailable". `store_count` (the converter's
- *    own authoritative field) is preferred over `stores.length`; the two
- *    should always agree, but the field is the source of truth, matching
- *    `storeCount` below.
+ *    instead of showing up as "unavailable" (true regardless of the legacy
+ *    caveat above). `store_count` (the converter's own authoritative field)
+ *    is preferred over `stores.length`; the two should always agree, but
+ *    the field is the source of truth, matching `storeCount` below.
  *
  * A store whose groups all lack `duration_s` (or that has no groups at all)
  * is UNMEASURED: it contributes nothing to the duration sum/range and is
  * excluded from `recordingsMeasured`, but a group's `n_channels` still
  * counts toward the channel-count range even when that same group has no
  * duration (a channel count can be known before a full read is measured).
- * When nothing measured, `totalRecordingDuration`/min/max are NULL, not 0 --
- * a zero would read as "zero-length dataset" instead of "not measured yet"
- * (ADR 0005: availability is reported, never faked).
+ * The inverse also holds -- a group with `duration_s` but no `n_channels`
+ * (an old/degraded converter run) contributes to the duration sum and
+ * `recordingsMeasured` while leaving the channel range untouched, so
+ * `channelCountMin`/`Max` can be NULL independently of whether anything was
+ * measured. When nothing measured, `totalRecordingDuration`/min/max are
+ * NULL, not 0 -- a zero would read as "zero-length dataset" instead of "not
+ * measured yet" (ADR 0005: availability is reported, never faked).
  */
 export function aggregateRecordingStats(index: ZarrIndexJson): RecordingStats {
   const stores: ZarrIndexStoreJson[] = Array.isArray(index.stores) ? index.stores : [];
   const failures: unknown[] = Array.isArray(index.failures) ? index.failures : [];
-  const failureCount = toFiniteNumber(index.failure_count) ?? failures.length;
-  const storeCount = toFiniteNumber(index.store_count) ?? stores.length;
+  const failureCount = toFiniteNonNegativeNumber(index.failure_count) ?? failures.length;
+  const storeCount = toFiniteNonNegativeNumber(index.store_count) ?? stores.length;
 
   let measuredCount = 0;
   let totalDuration = 0;
@@ -804,13 +824,13 @@ export function aggregateRecordingStats(index: ZarrIndexJson): RecordingStats {
       if (!rawGroup || typeof rawGroup !== "object") continue;
       const group = rawGroup as ZarrIndexGroupJson;
 
-      const nChannels = toFiniteNumber(group.n_channels);
+      const nChannels = toFiniteNonNegativeNumber(group.n_channels);
       if (nChannels !== null) {
         channelMin = channelMin === null ? nChannels : Math.min(channelMin, nChannels);
         channelMax = channelMax === null ? nChannels : Math.max(channelMax, nChannels);
       }
 
-      const duration = toFiniteNumber(group.duration_s);
+      const duration = toFiniteNonNegativeNumber(group.duration_s);
       if (duration !== null) {
         storeDuration = storeDuration === null ? duration : Math.max(storeDuration, duration);
       }

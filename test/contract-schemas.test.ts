@@ -179,7 +179,7 @@ describe("user /me envelope schema", () => {
 });
 
 describe("neuroschema dataset schema", () => {
-  test("pins the v0.3.0 envelope + required identity fields", () => {
+  test("pins the v0.4.0 envelope + required identity fields", () => {
     expect(NEUROSCHEMA_VERSION).toBe("0.4.0");
     const ds = {
       schema_version: "0.4.0",

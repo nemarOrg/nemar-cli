@@ -91,6 +91,19 @@ describe("data_summary recording-duration fields (v0.4.0)", () => {
     expect(validate(ds)).toBe(false);
   });
 
+  test("rejects a negative recording_count (S2)", () => {
+    // The bundle gives recording_count the same minimum:0 as
+    // total_recording_duration -- confirm it's actually enforced, not just
+    // declared.
+    const ds = { ...goodDataset, data_summary: { recording_count: -1 } };
+    expect(validate(ds)).toBe(false);
+  });
+
+  test("rejects a negative recordings_unavailable (S2)", () => {
+    const ds = { ...goodDataset, data_summary: { recordings_unavailable: -1 } };
+    expect(validate(ds)).toBe(false);
+  });
+
   test("rejects recording_duration_range carrying an unknown key -- additionalProperties:false is doing real work", () => {
     const ds = {
       ...goodDataset,

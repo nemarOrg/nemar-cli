@@ -1,17 +1,25 @@
 /**
- * Real behavioral tests for dataset-level recording statistics (epic #1144
- * Phase 2, issue #1146): the pure `aggregateRecordingStats` aggregator and the
- * `POST /admin/datasets/recording-stats-sweep` backfill (modelled on
- * channel-montage-sweep, routes/admin/datasets-lifecycle.ts). No mocks: real
+ * Real behavioral tests for the pure `aggregateRecordingStats` aggregator
+ * and migration 0070 (epic #1144 Phase 2, issue #1146). No mocks: real
  * bun:sqlite + the ACTUAL migration SQL read off disk.
  *
+ * The recording-stats SWEEP (`runRecordingStatsSweep`,
+ * POST /admin/datasets/recording-stats-sweep, and the daily cron) is covered
+ * separately in backend/test/, where a real D1 (bun:sqlite behind realD1)
+ * and, for the route, a real Hono dispatch are available:
+ *  - backend/test/recording-stats-sweep.test.ts drives the real
+ *    runRecordingStatsSweep function -- the entry point both real callers
+ *    use -- with only the network boundary (getZarrIndex) substituted.
+ *  - backend/test/recording-stats-sweep-route.test.ts drives the real HTTP
+ *    route, including the real `?reset=1` SQL.
+ * Neither hand-copies the sweep's SQL or re-implements its control flow, so
+ * a future edit to the real sweep cannot silently drift out of test reach --
+ * see those files' header comments for the incident (PR #1157 review) that
+ * made this the required standard here.
+ *
  * The `/webhooks/zarr-ready` callback's `recording_stats_at` invalidation is
- * covered separately in
- * backend/test/recording-stats-callback.test.ts, which drives the real
- * handler through Hono (backend/test/helpers/d1.ts's realD1) rather than
- * hand-copying its UPDATE SQL -- a hand-copy could never catch a future edit
- * to the handler that accidentally clears (or forgets to clear)
- * recording_stats_at, which is exactly the property this invalidation needs.
+ * covered in backend/test/recording-stats-callback.test.ts, which drives the
+ * real handler through Hono for the same reason.
  *
  * Fixtures:
  *  - test/fixtures/zarr-index-nm000111-slice.json: the first 6 stores + both
@@ -21,27 +29,21 @@
  *    kept verbatim. Anchors the sum-across-stores half of the aggregation
  *    rule against real data; independently hand-computed oracle: 165450 s.
  *  - test/fixtures/zarr-index-multigroup.json: SYNTHETIC. As of 2026-08-24 a
- *    sample of 34 live indexes (every MEG/NIRS/motion/EMG dataset reachable)
- *    contains zero multi-group stores, so real data cannot falsify the
- *    max-within-store half of the rule -- this fixture is the only thing
- *    that can.
+ *    sample of 34 live indexes -- every MEG/NIRS/motion/EMG dataset
+ *    reachable plus a broad EEG/iEEG sample -- contains zero multi-group
+ *    stores, so real data cannot falsify the max-within-store half of the
+ *    rule -- this fixture is the only thing that can.
  */
 
 import { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   RECORDING_STATS_SWEEP_CANDIDATE_SQL,
   RECORDING_STATS_SWEEP_REMAINING_SQL,
-  RECORDING_STATS_SWEEP_WRITE_SQL,
-  recordingStatsWriteBindings,
 } from "../backend/src/services/recording-stats-sweep";
-import {
-  type RecordingStats,
-  type ZarrIndexJson,
-  aggregateRecordingStats,
-} from "../backend/src/services/s3";
+import { type ZarrIndexJson, aggregateRecordingStats } from "../backend/src/services/s3";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "..", "backend/src/db/migrations");
 const FIXTURES_DIR = join(import.meta.dir, "fixtures");
@@ -130,6 +132,20 @@ describe("aggregateRecordingStats", () => {
     expect(stats.channelCountMax).toBe(8);
   });
 
+  test("a store with duration_s but no n_channels is measured with a NULL channel range (I3 inverse case)", () => {
+    const index: ZarrIndexJson = {
+      store_count: 1,
+      stores: [{ groups: [{ duration_s: 1200 }] }],
+      failure_count: 0,
+      failures: [],
+    };
+    const stats = aggregateRecordingStats(index);
+    expect(stats.recordingsMeasured).toBe(1);
+    expect(stats.totalRecordingDuration).toBe(1200);
+    expect(stats.channelCountMin).toBeNull();
+    expect(stats.channelCountMax).toBeNull();
+  });
+
   test("a store with an empty groups array is unmeasured and contributes no channel data", () => {
     const index: ZarrIndexJson = {
       store_count: 1,
@@ -163,6 +179,53 @@ describe("aggregateRecordingStats", () => {
     expect(stats.recordingsUnavailable).toBe(3);
     expect(stats.channelCountMin).toBeNull();
     expect(stats.channelCountMax).toBeNull();
+  });
+
+  test("duration_s: 0 counts as MEASURED, not unmeasured (S1)", () => {
+    // A genuinely zero-length recording is a measured fact, not an absence
+    // of measurement -- `if (duration)` (a truthy check) would misclassify
+    // 0 as unmeasured, since `!== null` is the correct test.
+    const index: ZarrIndexJson = {
+      store_count: 1,
+      stores: [{ groups: [{ n_channels: 4, duration_s: 0 }] }],
+      failure_count: 0,
+      failures: [],
+    };
+    const stats = aggregateRecordingStats(index);
+    expect(stats.recordingsMeasured).toBe(1);
+    expect(stats.totalRecordingDuration).toBe(0);
+    expect(stats.recordingDurationMin).toBe(0);
+    expect(stats.recordingDurationMax).toBe(0);
+  });
+
+  test("a negative duration_s is rejected, not summed (I1)", () => {
+    // Malformed data (the bundle declares duration_s minimum:0), not a
+    // valid-but-unusual value. Rejecting (not clamping to 0) matters: a
+    // clamped negative would be indistinguishable from a real zero-length
+    // recording (see the "duration_s: 0" test above).
+    const index: ZarrIndexJson = {
+      store_count: 1,
+      stores: [{ groups: [{ n_channels: 4, duration_s: -500 }] }],
+      failure_count: 0,
+      failures: [],
+    };
+    const stats = aggregateRecordingStats(index);
+    expect(stats.recordingsMeasured).toBe(0);
+    expect(stats.totalRecordingDuration).toBeNull();
+  });
+
+  test("a negative n_channels is rejected, not published as a range bound (I1)", () => {
+    const index: ZarrIndexJson = {
+      store_count: 1,
+      stores: [{ groups: [{ n_channels: -1, duration_s: 100 }] }],
+      failure_count: 0,
+      failures: [],
+    };
+    const stats = aggregateRecordingStats(index);
+    expect(stats.channelCountMin).toBeNull();
+    expect(stats.channelCountMax).toBeNull();
+    // The duration itself is unaffected by the sibling field's rejection.
+    expect(stats.totalRecordingDuration).toBe(100);
   });
 });
 
@@ -199,165 +262,68 @@ describe("migration 0070", () => {
 });
 
 // ===========================================================================
-// POST /admin/datasets/recording-stats-sweep (routes/admin/datasets-lifecycle.ts)
+// Candidate/remaining SQL (pinned, read-only, no route/function dispatch)
+//
+// RECORDING_STATS_SWEEP_CANDIDATE_SQL / _REMAINING_SQL are the SAME strings
+// runRecordingStatsSweep itself queries (services/recording-stats-sweep.ts)
+// -- imported directly, not hand-copied, so there is nothing here that can
+// silently drift. Exercised as plain read-only SELECTs so this stays
+// network-free; the full sweep (including the write paths) is covered
+// end-to-end in backend/test/recording-stats-sweep.test.ts.
 // ===========================================================================
 
-// The candidate/remaining queries are imported directly from
-// services/recording-stats-sweep.ts (the SAME source runRecordingStatsSweep
-// itself queries), so there is nothing here that can silently drift --
-// unlike channel-montage-sweep.unit.test.ts / zarr-sweep.unit.test.ts, which
-// predate that shared-query pattern and hand-duplicate their SQL instead.
-const RESET_SQL = `UPDATE datasets
-   SET recording_stats_at = NULL,
-       total_recording_duration = NULL,
-       recording_duration_min = NULL,
-       recording_duration_max = NULL,
-       recording_count = NULL,
-       recordings_unavailable = NULL,
-       recordings_measured = NULL,
-       channel_count_min = NULL,
-       channel_count_max = NULL
-   WHERE recording_stats_at IS NOT NULL`;
-
-const BASE_SCHEMA = `
+const CANDIDATE_SCHEMA = `
 CREATE TABLE datasets (
   dataset_id TEXT PRIMARY KEY,
   status TEXT NOT NULL DEFAULT 'active',
   zarr_status TEXT,
-  updated_at TEXT
+  recording_stats_at TEXT
 );
 `;
 
-function seedSweepFixture(db: Database) {
-  const ins = db.query(
-    "INSERT INTO datasets (dataset_id, status, zarr_status, updated_at) VALUES (?, ?, ?, ?)",
-  );
-  ins.run("nm000400", "active", "ready", "2020-01-01 00:00:00"); // candidate
-  ins.run("nm000401", "active", "ready", "2020-01-01 00:00:00"); // candidate
+function seedCandidateFixture(db: Database) {
+  const ins = db.query("INSERT INTO datasets (dataset_id, status, zarr_status) VALUES (?, ?, ?)");
+  ins.run("nm000400", "active", "ready"); // candidate
+  ins.run("nm000401", "active", "ready"); // candidate
   // Sandbox-prefixed IDs are NOT excluded by this sweep's predicate (unlike
-  // channel-montage-sweep / zarr-sweep, which both filter is_sandbox) --
-  // the plan specifies exactly the three ANDed conditions above and nothing
+  // channel-montage-sweep / zarr-sweep, which both filter is_sandbox) -- the
+  // plan specifies exactly the three ANDed conditions below and nothing
   // more, since the exemplar fleet's published xx0999NN copies are
   // legitimate catalog entries that should carry duration too.
-  ins.run("xx000090", "active", "ready", "2020-01-01 00:00:00"); // candidate
-  ins.run("nm000402", "active", null, "2020-01-01 00:00:00"); // excluded: not zarr-ready
-  ins.run("nm000403", "withdrawn", "ready", "2020-01-01 00:00:00"); // excluded: not active
-  ins.run("nm000404", "active", "ready", "2020-01-01 00:00:00"); // excluded: already stamped below
+  ins.run("xx000090", "active", "ready"); // candidate
+  ins.run("nm000402", "active", null); // excluded: not zarr-ready
+  ins.run("nm000403", "withdrawn", "ready"); // excluded: not active
+  ins.run("nm000404", "active", "ready"); // excluded: already stamped below
   db.run("UPDATE datasets SET recording_stats_at = datetime('now') WHERE dataset_id = 'nm000404'");
 }
 
+const GENEROUS_LIMIT = 100;
 const candidates = (db: Database) =>
-  (db.query(RECORDING_STATS_SWEEP_CANDIDATE_SQL).all(100) as { dataset_id: string }[]).map(
-    (r) => r.dataset_id,
-  );
+  (
+    db.query(RECORDING_STATS_SWEEP_CANDIDATE_SQL).all(GENEROUS_LIMIT) as { dataset_id: string }[]
+  ).map((r) => r.dataset_id);
+const remaining = (db: Database) =>
+  (db.query(RECORDING_STATS_SWEEP_REMAINING_SQL).get() as { n: number }).n;
 
-/**
- * Apply the endpoint's per-dataset write using the REAL exported SQL +
- * binding builder from services/recording-stats-sweep.ts, not a hand-copy --
- * so a future edit to the write (e.g. an accidental updated_at bump) cannot
- * silently drift out of this test's reach.
- */
-function applyStats(db: Database, id: string, stats: RecordingStats | null) {
-  db.query(RECORDING_STATS_SWEEP_WRITE_SQL).run(...recordingStatsWriteBindings(stats, id));
-}
-
-describe("recording-stats-sweep", () => {
-  let db: Database;
-  beforeEach(() => {
-    db = new Database(":memory:");
-    db.exec(BASE_SCHEMA);
-    db.exec(M0070);
-    seedSweepFixture(db);
-  });
-
+describe("recording-stats-sweep candidate/remaining SQL (pinned)", () => {
   test("candidate query scopes to active, zarr-ready, unstamped rows (sandbox included)", () => {
+    const db = new Database(":memory:");
+    db.exec(CANDIDATE_SCHEMA);
+    seedCandidateFixture(db);
     expect(candidates(db)).toEqual(["nm000400", "nm000401", "xx000090"]);
+    db.close();
   });
 
-  test("a computed stats bag is written verbatim, stamping recording_stats_at, leaving updated_at untouched", () => {
-    const stats: RecordingStats = {
-      totalRecordingDuration: 165450,
-      recordingDurationMin: 26250,
-      recordingDurationMax: 28890,
-      recordingCount: 8,
-      recordingsUnavailable: 2,
-      recordingsMeasured: 6,
-      channelCountMin: 19,
-      channelCountMax: 21,
-    };
-    applyStats(db, "nm000400", stats);
-    const row = db
-      .query(
-        `SELECT total_recording_duration, recording_duration_min, recording_duration_max,
-                recording_count, recordings_unavailable, recordings_measured,
-                channel_count_min, channel_count_max, recording_stats_at, updated_at
-           FROM datasets WHERE dataset_id = 'nm000400'`,
-      )
-      .get() as Record<string, unknown>;
-    expect(row.total_recording_duration).toBe(165450);
-    expect(row.recording_duration_min).toBe(26250);
-    expect(row.recording_duration_max).toBe(28890);
-    expect(row.recording_count).toBe(8);
-    expect(row.recordings_unavailable).toBe(2);
-    expect(row.recordings_measured).toBe(6);
-    expect(row.channel_count_min).toBe(19);
-    expect(row.channel_count_max).toBe(21);
-    expect(row.recording_stats_at).not.toBeNull();
-    // Verification #7: a ~660-dataset backfill must not bump updated_at
-    // catalog-wide (would re-sort every dataset to "newest").
-    expect(row.updated_at).toBe("2020-01-01 00:00:00");
-    // Idempotent convergence: no longer a candidate.
-    expect(candidates(db)).not.toContain("nm000400");
-  });
-
-  test("a failed probe (null stats) still stamps recording_stats_at so it converges", () => {
-    applyStats(db, "nm000401", null);
-    const row = db
-      .query(
-        "SELECT total_recording_duration, recording_count, recording_stats_at FROM datasets WHERE dataset_id = 'nm000401'",
-      )
-      .get() as Record<string, unknown>;
-    expect(row.total_recording_duration).toBeNull();
-    expect(row.recording_count).toBeNull();
-    expect(row.recording_stats_at).not.toBeNull();
-    expect(candidates(db)).not.toContain("nm000401");
-  });
-
-  test("?reset=1 clears every stamped row's stats and stamp, making it a candidate again", () => {
-    const stats: RecordingStats = {
-      totalRecordingDuration: 100,
-      recordingDurationMin: 100,
-      recordingDurationMax: 100,
-      recordingCount: 1,
-      recordingsUnavailable: 0,
-      recordingsMeasured: 1,
-      channelCountMin: 19,
-      channelCountMax: 19,
-    };
-    applyStats(db, "nm000400", stats);
-    expect(candidates(db)).not.toContain("nm000400");
-
-    const result = db.run(RESET_SQL);
-    // nm000400 (just stamped) + nm000404 (pre-stamped by the fixture) = 2.
-    expect(result.changes).toBe(2);
-    expect(candidates(db).sort()).toEqual(["nm000400", "nm000401", "nm000404", "xx000090"]);
-    const row = db
-      .query(
-        "SELECT total_recording_duration, recording_count FROM datasets WHERE dataset_id = 'nm000400'",
-      )
-      .get() as Record<string, unknown>;
-    expect(row.total_recording_duration).toBeNull();
-    expect(row.recording_count).toBeNull();
-  });
-
-  test("remaining count reflects only unstamped candidates", () => {
-    const remaining = () =>
-      (db.query(RECORDING_STATS_SWEEP_REMAINING_SQL).get() as { n: number }).n;
-    expect(remaining()).toBe(3); // nm000400, nm000401, xx000090
-    applyStats(db, "nm000400", null);
-    expect(remaining()).toBe(2);
-    applyStats(db, "nm000401", null);
-    applyStats(db, "xx000090", null);
-    expect(remaining()).toBe(0);
+  test("remaining count matches the candidate set and decreases as rows are stamped", () => {
+    const db = new Database(":memory:");
+    db.exec(CANDIDATE_SCHEMA);
+    seedCandidateFixture(db);
+    expect(remaining(db)).toBe(3);
+    db.run(
+      "UPDATE datasets SET recording_stats_at = datetime('now') WHERE dataset_id = 'nm000400'",
+    );
+    expect(remaining(db)).toBe(2);
+    expect(candidates(db)).toEqual(["nm000401", "xx000090"]);
+    db.close();
   });
 });
