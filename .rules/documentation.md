@@ -2,6 +2,32 @@
 
 > NEMAR's user-facing docs now live in their own repo, [nemarOrg/docs](https://github.com/nemarOrg/docs) (Astro Starlight), published at https://docs.nemar.org. This repo no longer hosts a docs site. The tool-specific setup below is retained only as general doc-writing guidance; do not reintroduce a MkDocs/Python pipeline here.
 
+## [STRICT] A copied comment is a claim, not decoration
+
+**Why:** the most severe defect found in this codebase's recent review history was
+not in code. It was a justification comment copied from a module where it was
+true into one where it was false, which turned a mild convergence bug into silent
+data loss. Three code-focused reviewers read the same lines and missed it.
+
+**The rule:** when you copy a comment along with a pattern, re-derive whether it
+still holds. State the reason, not just the behaviour, so the next person can
+check it against their context.
+
+**Where this bites:**
+- A safety claim citing a branch that is not the branch that runs
+  ("re-probing is idempotent because the no-sidecar branch preserves prior
+  values" -- when a populated row takes the *success* branch, which did not).
+- A justification true for a one-time backfill, reused in a sweep whose
+  candidate set recurs ("a brand-new row has no prior good values to protect").
+- An error message inherited from a caller with different failure modes
+  ("is migration NNNN applied?" reported for a credential failure).
+- A rule quoted as a description of current state when the codebase says
+  otherwise -- ADR 0027 is raw-only *going forward*, not a claim about what is
+  in the bucket today.
+
+**Never write "guarantees" for something the code defensively handles.** If there
+is a fallback for the violation six lines below, it is not a guarantee.
+
 ## Core Philosophy: Write for Your Future Self
 **Good docs** answer questions before they're asked.
 **Think:** What would confuse me in 6 months?
