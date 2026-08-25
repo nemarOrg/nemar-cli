@@ -1,0 +1,70 @@
+-- BIDS signal defaults from the exemplar EEG sidecar (epic #1144 Phase 2b,
+-- issue #1153). Fills neuroschema's already-declared `signal_defaults` block
+-- (dataset.schema.json:133, backed by definitions/inheritable.schema.json),
+-- which NEMAR has served with zero fields until now -- see the "Deliberately
+-- absent" note on migration 0070, which ruled out the zarr index's `rate` as
+-- a source (it's NEMAR's per-modality serving cap, not the acquisition
+-- rate). The real values live in the BIDS `*_eeg.json` sidecar, which
+-- probeChannelMontage (services/github/bids-tree.ts) already fetches for
+-- EEGChannelCount; this widens that same probe to four more keys.
+--
+-- ROOT-LEVEL PREFERENCE: under BIDS inheritance, a dataset-wide default
+-- sidecar sits at the repo root (or `task-<x>_eeg.json` at root); a
+-- subject-level `*_eeg.json` is an OVERRIDE of that default, not the
+-- default itself. The probe prefers a root-level sidecar when one exists
+-- and only falls back to a subject-level exemplar when it doesn't --
+-- publishing the override as the dataset default would invert the
+-- inheritance direction. See getBidsTreeStats's rootEegJson handling.
+--
+-- Even the root-level value is still ONE recording's declaration, not a
+-- verified per-dataset aggregate: a mixed-parameter dataset reports
+-- whichever exemplar was sampled. This is the same class of limitation
+-- n_channels/electrode_system already carry (migration 0054) -- confirmed
+-- non-hypothetical there: nm000111's n_channels reads 19 from the exemplar
+-- while 70 of its 124 recordings are actually 20. signal_defaults' own
+-- contract ("the dataset provides defaults and individual records can
+-- override them") is the right claim to be making for sampling_frequency in
+-- particular, which is far more stable across a dataset than channel count
+-- -- but a mixed-rate dataset will still report only one of its rates.
+--
+--   sampling_frequency    Hz, from *_eeg.json SamplingFrequency. NULL means
+--                         not yet probed, or the key was absent/invalid
+--                         (non-numeric, non-finite, or <= 0).
+--   power_line_frequency  50 or 60 ONLY -- inheritable.schema.json declares
+--                         this an ENUM ([50, 60, null]), not a free number.
+--                         A sidecar value of 0, 59.94, or "60" (string) is
+--                         DROPPED to NULL, never clamped or rounded. Same
+--                         class of bug as Phase 2's negative-number gap on a
+--                         `minimum:0` field: nothing runs AJV on the live
+--                         serving path, so an out-of-enum value would ship
+--                         as a silently schema-violating payload.
+--   eeg_reference          Serves neuroschema's `reference` field; named
+--                         `eeg_reference` here because `reference` is a SQL
+--                         keyword. From *_eeg.json EEGReference. Only a
+--                         string value is accepted (not an array) -- the
+--                         inheritable schema types this field as string|null.
+--   placement_scheme      From *_eeg.json EEGPlacementScheme.
+--   signal_defaults_at    Bookkeeping stamp for the backfill sweep (see
+--                         services/signal-defaults-sweep.ts); NULL means the
+--                         sweep has not (re)computed this row yet. Written
+--                         ONLY by that sweep, mirroring
+--                         channel_montage_checked_at (migration 0055) --
+--                         NOT touched by writeDatasetMetadataColumns, so a
+--                         live reindex can populate the four value columns
+--                         above without making this row look "swept" (it is
+--                         simply reswept later at no cost: the sweep's
+--                         no-sidecar branch stamps without touching prior
+--                         good values, so re-probing an already-correct row
+--                         is idempotent, not destructive).
+--
+-- Deliberately absent: a channel_system column. inheritable.schema.json's
+-- `channel_system` is served from the EXISTING `electrode_system` column
+-- (migration 0054) under its schema name -- a second copy of the same fact
+-- would be redundant and could drift. `recording_type` is not derivable
+-- from anything probed here and is served as null, not backed by a column.
+
+ALTER TABLE datasets ADD COLUMN sampling_frequency REAL;
+ALTER TABLE datasets ADD COLUMN power_line_frequency REAL;
+ALTER TABLE datasets ADD COLUMN eeg_reference TEXT;
+ALTER TABLE datasets ADD COLUMN placement_scheme TEXT;
+ALTER TABLE datasets ADD COLUMN signal_defaults_at TEXT;
