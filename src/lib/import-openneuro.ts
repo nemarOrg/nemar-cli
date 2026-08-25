@@ -16,6 +16,7 @@ import {
   readlinkSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,6 +28,7 @@ import { getDataset, getUserCiStatus } from "./api/datasets.js";
 import { approvePublication, requestPublication } from "./api/publish.js";
 import { cloneDataset, pushToGitHub } from "./git-annex/clone-push.js";
 import { configureGitHubRemote } from "./git-annex/github.js";
+import { isNeverAnnexedMetadata, shouldAnnex } from "./git-annex/policy.js";
 import { ensureLocalMainBranch } from "./git-annex/repo-state.js";
 import { runCommand } from "./git-annex/run-command.js";
 import {
@@ -50,6 +52,7 @@ import {
   readManifestFromS3,
   writeManifestToS3,
 } from "./s3-server-copy.js";
+import { listAnnexedPaths, listTrackedPaths } from "./upload/transfer.js";
 
 const OPENNEURO_ORG = "OpenNeuroDatasets";
 const S3_BUCKET = "nemar";
@@ -263,19 +266,59 @@ function mapDatasetId(openneuroId: string): string {
 }
 
 /**
- * True for dataset-level metadata files that NEMAR policy keeps in git and
- * never annexes. Mirrors the `annex.largefiles` exclusion in the validated
- * upload workflow (`*.tsv|*.json|*.md|*.txt|*.yml|*.yaml`, `README*`,
- * `LICENSE*`, `CHANGES*`, `.bidsignore`, `.gitignore`). Case-insensitive on the
- * name prefixes to match `ensureReadmeMd`'s tolerance.
+ * True for dataset-level metadata files that NEMAR policy keeps in git and never
+ * annexes. Re-exported from the shared annex policy rather than restated here:
+ * this used to be an independent regex of the exclusion list, which is exactly
+ * how it drifted from `annex.largefiles` (#1158).
  */
-export function isNeverAnnexedMetadata(filename: string): boolean {
-  const lower = filename.toLowerCase();
-  if (lower.startsWith("readme") || lower.startsWith("license") || lower.startsWith("changes")) {
-    return true;
+export { isNeverAnnexedMetadata };
+
+/** A git-tracked file that NEMAR policy says belongs in the annex. */
+export interface UnannexedDataFile {
+  path: string;
+  size: number;
+}
+
+/**
+ * Files this clone carries as plain git blobs that NEMAR policy would annex.
+ *
+ * The import deliberately inherits upstream's annex layout -- that is what makes
+ * the S3 copy a server-side copy by key -- so it also inherits upstream's idea of
+ * what counts as data. OpenNeuro decides by size alone (~1 MB), which is why
+ * `ds007788` splits its `_motion.tsv` recordings across both planes: 690 annexed,
+ * 893 left as git blobs totalling 675 MB. Under NEMAR policy every one of those
+ * is data.
+ *
+ * This only reports. Actually annexing them needs their content uploaded to S3
+ * on our side, and the import manifest has no way to express a key sourced from
+ * the clone rather than from an upstream server-side copy -- annexing without
+ * that would publish an unresolvable pointer, which is worse than the bloat.
+ * See the follow-up issue referenced at the call site.
+ */
+export async function findUnannexedData(datasetPath: string): Promise<UnannexedDataFile[]> {
+  // Ask git-annex which files it holds rather than inferring it from the index
+  // mode. A plain clone shows annexed files as symlinks, but an adjusted-unlock
+  // branch (what `initDataset` leaves behind, and what some clones arrive on)
+  // shows them as ordinary-looking files carrying a pointer -- so a mode check
+  // silently reports every already-annexed file as un-annexed.
+  const [tracked, annexed] = await Promise.all([
+    listTrackedPaths(datasetPath),
+    listAnnexedPaths(datasetPath),
+  ]);
+
+  const found: UnannexedDataFile[] = [];
+  for (const path of tracked) {
+    if (annexed.has(path)) continue;
+    let size: number;
+    try {
+      size = statSync(join(datasetPath, path)).size;
+    } catch {
+      // Vanished or unreadable between listing and stat -- not our call to make.
+      continue;
+    }
+    if (shouldAnnex(path, size)) found.push({ path, size });
   }
-  if (lower === ".bidsignore" || lower === ".gitignore") return true;
-  return /\.(tsv|json|md|txt|yml|yaml)$/.test(lower);
+  return found;
 }
 
 /**
@@ -806,6 +849,39 @@ export async function prepareImport(
       `Failed to normalize annexed metadata: ${err instanceof Error ? err.message : String(err)}`,
     );
     process.exit(1);
+  }
+
+  // Step 1b: report data files upstream left in git that NEMAR policy would
+  // annex. Reporting only -- see findUnannexedData for why annexing them here
+  // would publish unresolvable pointers, and issue #1159 for the real fix.
+  // Loud on purpose: this is how ds007788 put 675 MB of motion recordings into a
+  // public git repo without anyone noticing (#1158).
+  try {
+    const unannexed = await findUnannexedData(datasetPath);
+    if (unannexed.length > 0) {
+      const bytes = unannexed.reduce((sum, f) => sum + f.size, 0);
+      console.log(
+        chalk.yellow(
+          `  Warning: ${unannexed.length} file(s) (${(bytes / 1e6).toFixed(1)} MB) will stay in the git repo though NEMAR policy treats them as data.`,
+        ),
+      );
+      for (const f of unannexed.slice(0, 5)) {
+        console.log(chalk.dim(`    - ${f.path} (${(f.size / 1e6).toFixed(1)} MB)`));
+      }
+      if (unannexed.length > 5) {
+        console.log(chalk.dim(`    ... and ${unannexed.length - 5} more`));
+      }
+      console.log(
+        chalk.dim("    They stay readable and downloadable; see issue #1159 to migrate them."),
+      );
+    }
+  } catch (err) {
+    // Never block an import on a diagnostic.
+    console.log(
+      chalk.dim(
+        `  Could not check for un-annexed data: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    );
   }
 
   // Read BIDS metadata and extract OpenNeuro DOI once for reuse
