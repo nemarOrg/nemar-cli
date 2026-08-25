@@ -11,6 +11,10 @@ import {
   classifyElectrodeSystem,
   parseChannelsTsv,
   parseEegChannelCount,
+  parseEegReference,
+  parsePlacementScheme,
+  parsePowerLineFrequency,
+  parseSamplingFrequency,
   resolveNChannels,
 } from "../channel-montage";
 import { BIDS_DATATYPES } from "../datacite";
@@ -83,6 +87,21 @@ export interface BidsTreeStats {
   nChannels?: number;
   /** Scalp montage class from the exemplar's channel labels (#858). */
   electrodeSystem?: string;
+  /** `SamplingFrequency` (Hz) from the preferred `*_eeg.json` sidecar (epic
+   *  #1144 Phase 2b, #1153) -- see `probeChannelMontage` for the
+   *  root-vs-subject sidecar preference. Undefined when no sidecar was
+   *  sampled or the key was absent/invalid. */
+  samplingFrequency?: number;
+  /** `PowerLineFrequency` (Hz), coerced to exactly 50 or 60 -- see
+   *  `parsePowerLineFrequency` for why anything else is dropped rather than
+   *  clamped. Undefined (not 0) when absent/out-of-enum. */
+  powerLineFrequency?: number;
+  /** `EEGReference` from the preferred sidecar. Undefined when absent, an
+   *  array, or the BIDS "n/a" placeholder. */
+  eegReference?: string;
+  /** `EEGPlacementScheme` from the preferred sidecar. Undefined when absent
+   *  or the "n/a" placeholder. */
+  placementScheme?: string;
   /** Whether this ref carries HED annotations: HEDVersion declared AND >=1 real
    *  HED key in an events sidecar (#869). Undefined when the probe couldn't run
    *  (no dataset_description.json) OR any fetch/parse failure inside probeHed ->
@@ -167,6 +186,14 @@ export async function getBidsTreeStats(
   const rootEventsJson = root.tree.find(
     (e) => e.type === "blob" && /^[^/]*_events\.json$/.test(e.path),
   );
+  // signal_defaults input (epic #1144 Phase 2b, #1153): a root-level
+  // `*_eeg.json` (bare or `task-<label>_eeg.json`) IS the BIDS dataset-wide
+  // default. A subject-level `*_eeg.json` is an override of it, not the
+  // default -- preferring the override here would invert BIDS inheritance
+  // and publish per-subject deviations as if they were the dataset norm.
+  // Same root-scan cost as rootEventsJson just above: this tree fetch
+  // already happened for subjectDirs, so finding this entry is free.
+  const rootEegJson = root.tree.find((e) => e.type === "blob" && /^[^/]*_eeg\.json$/.test(e.path));
   const subjectDirs = root.tree.filter((e) => e.type === "tree" && e.path.startsWith("sub-"));
   if (subjectDirs.length === 0) return { modalities: [], subjectCount: 0, tasks: [] };
 
@@ -175,6 +202,8 @@ export async function getBidsTreeStats(
   // First EEG sidecars seen across the sampled subjects -> one exemplar probe for
   // channel count + montage (#858). Captured as blob entries; fetched after the
   // loop so the probe never adds latency to the modality/task walk.
+  // exemplarEegJson is the signal_defaults FALLBACK when no rootEegJson exists
+  // (#1153) -- see rootEegJson above for why root wins when both are present.
   let exemplarChannelsTsv: TreeEntry | undefined;
   let exemplarEegJson: TreeEntry | undefined;
   // Subject-level events sidecars for HED detection (#869). Not eeg-scoped: HED
@@ -216,10 +245,20 @@ export async function getBidsTreeStats(
     }
   }
 
-  const { nChannels, electrodeSystem } = await probeChannelMontage(
+  const {
+    nChannels,
+    electrodeSystem,
+    samplingFrequency,
+    powerLineFrequency,
+    eegReference,
+    placementScheme,
+  } = await probeChannelMontage(
     repo,
     exemplarChannelsTsv,
-    exemplarEegJson,
+    // Root-level sidecar wins when present (#1153); the subject exemplar is
+    // only the fallback. ONE blob is fetched either way -- see the
+    // function's doc comment -- so this never adds a network call.
+    rootEegJson ?? exemplarEegJson,
     pat,
     refreshTokenOn401,
   );
@@ -238,17 +277,28 @@ export async function getBidsTreeStats(
     tasks: [...tasks].sort(),
     nChannels,
     electrodeSystem,
+    samplingFrequency,
+    powerLineFrequency,
+    eegReference,
+    placementScheme,
     hasHed,
     hedVersion,
   };
 }
 
 /**
- * Best-effort channel-count + montage probe for getBidsTreeStats (#858). Fetches
- * the exemplar EEG `*_channels.tsv` (+ `*_eeg.json` sidecar) blobs and runs the
- * pure classifiers. Channel data is secondary to the modality/subject walk, so
- * any failure (annex pointer, fetch error, parse miss) returns empty rather than
- * throwing -- the caller leaves the columns NULL.
+ * Best-effort channel-count + montage + signal-defaults probe for
+ * getBidsTreeStats (#858; widened #1153). Fetches the exemplar EEG
+ * `*_channels.tsv` and ONE `*_eeg.json` sidecar blob and runs the pure
+ * parsers/classifiers over them. This data is secondary to the
+ * modality/subject walk, so any failure (annex pointer, fetch error, parse
+ * miss) returns empty rather than throwing -- the caller leaves every
+ * column NULL.
+ *
+ * `eegJson` is the CALLER's already-resolved choice of root-level-or-subject
+ * -exemplar sidecar (see getBidsTreeStats's rootEegJson) -- this function
+ * fetches at most one `*_eeg.json` blob, exactly as it did before #1153, so
+ * widening the set of keys parsed from that one blob adds no network call.
  */
 async function probeChannelMontage(
   repo: string,
@@ -256,22 +306,43 @@ async function probeChannelMontage(
   eegJson: TreeEntry | undefined,
   pat: string,
   refreshTokenOn401?: () => Promise<string>,
-): Promise<{ nChannels?: number; electrodeSystem?: string }> {
+): Promise<{
+  nChannels?: number;
+  electrodeSystem?: string;
+  samplingFrequency?: number;
+  powerLineFrequency?: number;
+  eegReference?: string;
+  placementScheme?: string;
+}> {
   if (!channelsTsv && !eegJson) return {};
   try {
     let tsv: ReturnType<typeof parseChannelsTsv> = null;
     let sidecar: number | null = null;
+    let samplingFrequency: number | null = null;
+    let powerLineFrequency: number | null = null;
+    let eegReference: string | null = null;
+    let placementScheme: string | null = null;
     if (channelsTsv) {
       tsv = parseChannelsTsv(await getBlobContent(repo, channelsTsv.sha, pat, refreshTokenOn401));
     }
     if (eegJson) {
-      sidecar = parseEegChannelCount(
-        await getBlobContent(repo, eegJson.sha, pat, refreshTokenOn401),
-      );
+      const eegJsonContent = await getBlobContent(repo, eegJson.sha, pat, refreshTokenOn401);
+      sidecar = parseEegChannelCount(eegJsonContent);
+      samplingFrequency = parseSamplingFrequency(eegJsonContent);
+      powerLineFrequency = parsePowerLineFrequency(eegJsonContent);
+      eegReference = parseEegReference(eegJsonContent);
+      placementScheme = parsePlacementScheme(eegJsonContent);
     }
     const n = resolveNChannels(sidecar, tsv);
     const sys = tsv ? classifyElectrodeSystem(tsv.labels) : null;
-    return { nChannels: n ?? undefined, electrodeSystem: sys ?? undefined };
+    return {
+      nChannels: n ?? undefined,
+      electrodeSystem: sys ?? undefined,
+      samplingFrequency: samplingFrequency ?? undefined,
+      powerLineFrequency: powerLineFrequency ?? undefined,
+      eegReference: eegReference ?? undefined,
+      placementScheme: placementScheme ?? undefined,
+    };
   } catch (err) {
     console.warn(
       `[getBidsTreeStats] channel/montage probe failed for ${repo}: ${err instanceof Error ? err.message : String(err)}`,
