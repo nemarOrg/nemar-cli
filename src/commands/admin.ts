@@ -1253,9 +1253,6 @@ doiCommand
               ),
             );
           }
-          console.log(
-            chalk.dim("  Manual setup: Go to GitHub repo Settings > Branches > Add rule"),
-          );
         }
 
         console.log();

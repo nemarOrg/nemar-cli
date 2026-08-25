@@ -114,6 +114,14 @@ describe("POST /datasets/:id/publish admin gate", () => {
     expect(res.status).toBe(403);
   });
 
+  test("unknown dataset -> 404 (checked before the admin gate)", async () => {
+    // No seedDataset: the dataset lookup runs before the role check, so an
+    // unrelated member probing a bogus ID gets 404, not a 403 that would leak
+    // whether the ID exists.
+    const res = await publish(OTHER_KEY);
+    expect(res.status).toBe(404);
+  });
+
   test("admin on a sandbox dataset -> 400 (gate passed, sandbox check reached)", async () => {
     seedDataset({ is_sandbox: 1 });
     const res = await publish(ADMIN_KEY);

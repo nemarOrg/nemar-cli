@@ -94,6 +94,14 @@ describe("POST /datasets/:id/finalize lifecycle guard", () => {
     expect(res.status).toBe(403);
   });
 
+  test("non-owner member on a public dataset -> 403 (auth wins over lifecycle guard)", async () => {
+    // The ownership check runs before the visibility check, so a stranger must
+    // get a flat 403 and never learn the dataset is public (409 would disclose it).
+    seedDataset("public");
+    const res = await finalize(OTHER_KEY);
+    expect(res.status).toBe(403);
+  });
+
   test("unknown dataset -> 404", async () => {
     const res = await finalize(OWNER_KEY);
     expect(res.status).toBe(404);

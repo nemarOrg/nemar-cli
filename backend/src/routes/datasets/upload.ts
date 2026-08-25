@@ -952,10 +952,13 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
   );
 
   /**
-   * POST /datasets/:id/finalize - Finalize dataset after upload
+   * POST /datasets/:id/finalize - Finalize dataset repo setup after upload
    *
-   * Applies branch protection and marks dataset as published.
-   * Should be called after initial upload is complete.
+   * Pre-publish setup on a still-private repo: ensures the default branch is
+   * "main", deploys the CI workflow shims, enables auto-merge, and applies the
+   * private-repo collaborator spec. Branch protection is NOT applied here; it is
+   * applied at make-public and removed at make-private (epic #713). Refuses on an
+   * already-public dataset, whose repo spec is owned by the publication flow.
    */
   datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
     const datasetId = c.req.param("id");
@@ -989,6 +992,8 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       // it on an already-published dataset would push through the published-repo
       // ruleset and re-apply the private spec to a public repo. Publication and its
       // spec enforcement own the published repo instead.
+      // `visibility` is NOT NULL CHECK ('private','public') (migration 0006), so
+      // `=== "public"` is exhaustive today; revisit if a third state is ever added.
       if (dataset.visibility === "public") {
         return c.json(
           {
