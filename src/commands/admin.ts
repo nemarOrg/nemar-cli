@@ -1225,20 +1225,22 @@ doiCommand
 
         createSpinner.succeed("Concept DOI created successfully");
 
-        // Apply branch protection now that dataset has a DOI (permanent record)
-        const protectionSpinner = ora("Applying branch protection...").start();
+        // Finalize repo setup now that the dataset has a DOI: default branch,
+        // CI workflow shims, auto-merge, owner maintain. Branch protection is
+        // applied at make-public, not here (epic #713).
+        const protectionSpinner = ora("Finalizing repository setup...").start();
         try {
           const finalizeResult = await finalizeDataset(datasetId);
           if (finalizeResult.warnings && finalizeResult.warnings.length > 0) {
-            protectionSpinner.warn("Branch protection applied with warnings");
+            protectionSpinner.warn("Repository setup finalized with warnings");
             for (const warning of finalizeResult.warnings) {
               console.log(chalk.yellow(`  Warning: ${warning}`));
             }
           } else {
-            protectionSpinner.succeed("Branch protection applied");
+            protectionSpinner.succeed("Repository setup finalized");
           }
         } catch (protectionError) {
-          protectionSpinner.warn("Could not apply branch protection");
+          protectionSpinner.warn("Could not finalize repository setup");
           if (protectionError instanceof ApiError) {
             console.log(chalk.dim(`  ${protectionError.message}`));
             if (protectionError.statusCode === 403) {
