@@ -83,14 +83,23 @@ export interface BidsTreeStats {
   /** Sorted task labels. Sampled across subjects (union with tree paths upstream). */
   tasks: string[];
   /** Representative EEG channel count from an exemplar recording (#858).
-   *  Undefined when no EEG `*_channels.tsv` / `*_eeg.json` was sampled. */
+   *  Sourced from the SAMPLED SUBJECT's own `*_channels.tsv` /
+   *  `*_eeg.json` ONLY -- deliberately independent of the root-vs-subject
+   *  preference below (#1153 review, I4): this is a single sampled
+   *  recording's value (migration 0054's "exemplar" caveat -- see
+   *  migration 0071 for the sibling caveat on the four signal_defaults
+   *  fields), not a dataset default, so it must not inherit from a
+   *  root-level sidecar the way signal_defaults correctly does. Undefined
+   *  when no EEG `*_channels.tsv` / `*_eeg.json` was sampled. */
   nChannels?: number;
   /** Scalp montage class from the exemplar's channel labels (#858). */
   electrodeSystem?: string;
   /** `SamplingFrequency` (Hz) from the preferred `*_eeg.json` sidecar (epic
    *  #1144 Phase 2b, #1153) -- see `probeChannelMontage` for the
-   *  root-vs-subject sidecar preference. Undefined when no sidecar was
-   *  sampled or the key was absent/invalid. */
+   *  root-vs-subject sidecar preference. Still one exemplar sidecar's
+   *  declared value, not a verified per-dataset aggregate -- see migration
+   *  0071's caveat. Undefined when no sidecar was sampled or the key was
+   *  absent/invalid. */
   samplingFrequency?: number;
   /** `PowerLineFrequency` (Hz), coerced to exactly 50 or 60 -- see
    *  `parsePowerLineFrequency` for why anything else is dropped rather than
@@ -109,6 +118,17 @@ export interface BidsTreeStats {
   hasHed?: boolean;
   /** The `HEDVersion` string (array form comma-joined), or undefined (#869). */
   hedVersion?: string;
+  /** A TRANSPORT failure (network error, non-2xx blob fetch) that
+   *  `probeChannelMontage` caught and swallowed internally so it doesn't
+   *  abort the rest of this (more expensive, already-succeeded) walk --
+   *  see that function's doc comment and ADR 0005. Present ONLY on a
+   *  genuine fetch/parse-plumbing failure, never on authoritative absence
+   *  (no matching file, or a key missing/invalid within one that WAS
+   *  read) -- those simply leave the fields above undefined with no
+   *  error. A caller that attaches permanent-convergence semantics to
+   *  "fields undefined" (the signal-defaults sweep) MUST check this first
+   *  and treat it like a throw, not like absence (#1162 review, C2). */
+  channelMontageProbeError?: string;
 }
 
 /**
@@ -191,8 +211,9 @@ export async function getBidsTreeStats(
   // default. A subject-level `*_eeg.json` is an override of it, not the
   // default -- preferring the override here would invert BIDS inheritance
   // and publish per-subject deviations as if they were the dataset norm.
-  // Same root-scan cost as rootEventsJson just above: this tree fetch
-  // already happened for subjectDirs, so finding this entry is free.
+  // Same shared `root.tree` fetch as rootEventsJson just above and
+  // subjectDirs just below (one non-recursive GET, already paid for), so
+  // finding this entry costs nothing extra.
   const rootEegJson = root.tree.find((e) => e.type === "blob" && /^[^/]*_eeg\.json$/.test(e.path));
   const subjectDirs = root.tree.filter((e) => e.type === "tree" && e.path.startsWith("sub-"));
   if (subjectDirs.length === 0) return { modalities: [], subjectCount: 0, tasks: [] };
@@ -202,8 +223,11 @@ export async function getBidsTreeStats(
   // First EEG sidecars seen across the sampled subjects -> one exemplar probe for
   // channel count + montage (#858). Captured as blob entries; fetched after the
   // loop so the probe never adds latency to the modality/task walk.
-  // exemplarEegJson is the signal_defaults FALLBACK when no rootEegJson exists
-  // (#1153) -- see rootEegJson above for why root wins when both are present.
+  // exemplarEegJson serves TWO roles below, kept deliberately separate
+  // (#1153 review, I4): it is ALWAYS the source for EEGChannelCount (a
+  // single sampled recording's value must come from that recording, not a
+  // dataset-wide root default), and it is ALSO the signal_defaults FALLBACK
+  // when no rootEegJson exists.
   let exemplarChannelsTsv: TreeEntry | undefined;
   let exemplarEegJson: TreeEntry | undefined;
   // Subject-level events sidecars for HED detection (#869). Not eeg-scoped: HED
@@ -252,12 +276,19 @@ export async function getBidsTreeStats(
     powerLineFrequency,
     eegReference,
     placementScheme,
+    probeError: channelMontageProbeError,
   } = await probeChannelMontage(
     repo,
     exemplarChannelsTsv,
-    // Root-level sidecar wins when present (#1153); the subject exemplar is
-    // only the fallback. ONE blob is fetched either way -- see the
-    // function's doc comment -- so this never adds a network call.
+    // EEGChannelCount source: the SAMPLED SUBJECT's own sidecar, ALWAYS --
+    // never the root default (#1153 review, I4). See nChannels's doc.
+    exemplarEegJson,
+    // signal_defaults source: root-level sidecar wins when present (#1153);
+    // the subject exemplar is only the fallback. The two purposes above and
+    // here are independent on purpose -- probeChannelMontage dedupes the
+    // fetch when they resolve to the same blob (the common no-root-file
+    // case), and only fetches twice when a genuine, distinct root default
+    // exists alongside the subject's own override.
     rootEegJson ?? exemplarEegJson,
     pat,
     refreshTokenOn401,
@@ -281,6 +312,7 @@ export async function getBidsTreeStats(
     powerLineFrequency,
     eegReference,
     placementScheme,
+    channelMontageProbeError,
     hasHed,
     hedVersion,
   };
@@ -289,21 +321,32 @@ export async function getBidsTreeStats(
 /**
  * Best-effort channel-count + montage + signal-defaults probe for
  * getBidsTreeStats (#858; widened #1153). Fetches the exemplar EEG
- * `*_channels.tsv` and ONE `*_eeg.json` sidecar blob and runs the pure
- * parsers/classifiers over them. This data is secondary to the
- * modality/subject walk, so any failure (annex pointer, fetch error, parse
- * miss) returns empty rather than throwing -- the caller leaves every
- * column NULL.
+ * `*_channels.tsv` and up to two `*_eeg.json` sidecar blobs and runs the
+ * pure parsers/classifiers over them. This data is secondary to the
+ * modality/subject walk, so a swallowed failure never aborts the rest of
+ * that (more expensive, already-succeeded) walk -- but "swallowed" no
+ * longer means "silent": a genuine transport failure is reported back via
+ * `probeError` rather than collapsed into the same empty result as
+ * authoritative absence (#1162 review, C2; ADR 0005 -- transport failures
+ * stay fatal, only real absence is permanent). A caller that attaches
+ * permanent-convergence semantics to an empty result (the signal-defaults
+ * sweep) MUST check `probeError` first.
  *
- * `eegJson` is the CALLER's already-resolved choice of root-level-or-subject
- * -exemplar sidecar (see getBidsTreeStats's rootEegJson) -- this function
- * fetches at most one `*_eeg.json` blob, exactly as it did before #1153, so
- * widening the set of keys parsed from that one blob adds no network call.
+ * `channelCountEegJson` and `signalDefaultsEegJson` are deliberately TWO
+ * separate parameters, not one (#1153 review, I4): `EEGChannelCount` is a
+ * single sampled recording's value and must come from the SUBJECT's own
+ * sidecar; the four signal_defaults keys are a dataset default and must
+ * prefer the ROOT sidecar. When the caller's two choices resolve to the
+ * SAME blob (the common case -- no distinct root default exists) this
+ * fetches it once and reuses the content for both purposes; it fetches
+ * twice only when a genuine, distinct root default coexists with the
+ * subject's own override.
  */
 async function probeChannelMontage(
   repo: string,
   channelsTsv: TreeEntry | undefined,
-  eegJson: TreeEntry | undefined,
+  channelCountEegJson: TreeEntry | undefined,
+  signalDefaultsEegJson: TreeEntry | undefined,
   pat: string,
   refreshTokenOn401?: () => Promise<string>,
 ): Promise<{
@@ -313,8 +356,9 @@ async function probeChannelMontage(
   powerLineFrequency?: number;
   eegReference?: string;
   placementScheme?: string;
+  probeError?: string;
 }> {
-  if (!channelsTsv && !eegJson) return {};
+  if (!channelsTsv && !channelCountEegJson && !signalDefaultsEegJson) return {};
   try {
     let tsv: ReturnType<typeof parseChannelsTsv> = null;
     let sidecar: number | null = null;
@@ -322,17 +366,40 @@ async function probeChannelMontage(
     let powerLineFrequency: number | null = null;
     let eegReference: string | null = null;
     let placementScheme: string | null = null;
+
     if (channelsTsv) {
       tsv = parseChannelsTsv(await getBlobContent(repo, channelsTsv.sha, pat, refreshTokenOn401));
     }
-    if (eegJson) {
-      const eegJsonContent = await getBlobContent(repo, eegJson.sha, pat, refreshTokenOn401);
-      sidecar = parseEegChannelCount(eegJsonContent);
-      samplingFrequency = parseSamplingFrequency(eegJsonContent);
-      powerLineFrequency = parsePowerLineFrequency(eegJsonContent);
-      eegReference = parseEegReference(eegJsonContent);
-      placementScheme = parsePlacementScheme(eegJsonContent);
+
+    // EEGChannelCount: SUBJECT-scoped only, independent of the root
+    // preference below -- see this function's doc comment (I4).
+    let channelCountJsonContent: string | null = null;
+    if (channelCountEegJson) {
+      channelCountJsonContent = await getBlobContent(
+        repo,
+        channelCountEegJson.sha,
+        pat,
+        refreshTokenOn401,
+      );
+      sidecar = parseEegChannelCount(channelCountJsonContent);
     }
+
+    // signal_defaults: root-preferred. Reuse the content already fetched
+    // above when it is the SAME blob (no distinct root default exists);
+    // fetch separately only when the two genuinely differ.
+    if (signalDefaultsEegJson) {
+      const signalDefaultsJsonContent =
+        signalDefaultsEegJson.sha === channelCountEegJson?.sha
+          ? channelCountJsonContent
+          : await getBlobContent(repo, signalDefaultsEegJson.sha, pat, refreshTokenOn401);
+      if (signalDefaultsJsonContent != null) {
+        samplingFrequency = parseSamplingFrequency(signalDefaultsJsonContent);
+        powerLineFrequency = parsePowerLineFrequency(signalDefaultsJsonContent);
+        eegReference = parseEegReference(signalDefaultsJsonContent);
+        placementScheme = parsePlacementScheme(signalDefaultsJsonContent);
+      }
+    }
+
     const n = resolveNChannels(sidecar, tsv);
     const sys = tsv ? classifyElectrodeSystem(tsv.labels) : null;
     return {
@@ -344,10 +411,9 @@ async function probeChannelMontage(
       placementScheme: placementScheme ?? undefined,
     };
   } catch (err) {
-    console.warn(
-      `[getBidsTreeStats] channel/montage probe failed for ${repo}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return {};
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[getBidsTreeStats] channel/montage probe failed for ${repo}: ${message}`);
+    return { probeError: message };
   }
 }
 
