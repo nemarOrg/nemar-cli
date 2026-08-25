@@ -1053,6 +1053,70 @@ describe("buildDatasetMetadata", () => {
       expect(out.signal_defaults?.recording_type).toBeNull();
     });
 
+    // #1162 review, I2: hasSignalDefaults is a 5-term OR (the four sidecar
+    // columns + electrode_system). Deleting any ONE term left 154 tests
+    // passing before this block existed -- "populated when all four columns
+    // + electrode_system are set" above cannot catch that (every term is
+    // simultaneously true there), and only the electrode_system-only case
+    // had a dedicated single-term test. Each of the five columns gets its
+    // own test here so a deleted OR term fails exactly one of them.
+    describe("hasSignalDefaults gate: each of the five source columns independently produces a non-null block", () => {
+      test("sampling_frequency alone", () => {
+        const out = buildDatasetMetadata({
+          row: { ...emptyRow(), sampling_frequency: 500 },
+          parsedEnrichment: null,
+          versions: [],
+          latestManifest: null,
+          githubOrg: "nemarDatasets",
+        });
+        expect(out.signal_defaults).not.toBeNull();
+      });
+
+      test("power_line_frequency alone", () => {
+        const out = buildDatasetMetadata({
+          row: { ...emptyRow(), power_line_frequency: 60 },
+          parsedEnrichment: null,
+          versions: [],
+          latestManifest: null,
+          githubOrg: "nemarDatasets",
+        });
+        expect(out.signal_defaults).not.toBeNull();
+      });
+
+      test("eeg_reference alone", () => {
+        const out = buildDatasetMetadata({
+          row: { ...emptyRow(), eeg_reference: "average" },
+          parsedEnrichment: null,
+          versions: [],
+          latestManifest: null,
+          githubOrg: "nemarDatasets",
+        });
+        expect(out.signal_defaults).not.toBeNull();
+      });
+
+      test("placement_scheme alone", () => {
+        const out = buildDatasetMetadata({
+          row: { ...emptyRow(), placement_scheme: "10-20" },
+          parsedEnrichment: null,
+          versions: [],
+          latestManifest: null,
+          githubOrg: "nemarDatasets",
+        });
+        expect(out.signal_defaults).not.toBeNull();
+      });
+
+      test("electrode_system alone", () => {
+        const out = buildDatasetMetadata({
+          row: { ...emptyRow(), electrode_system: "10-20" },
+          parsedEnrichment: null,
+          versions: [],
+          latestManifest: null,
+          githubOrg: "nemarDatasets",
+        });
+        expect(out.signal_defaults).not.toBeNull();
+      });
+    });
+
     // Mutation-check target for the power-line enum trap: a sidecar value
     // out of {50, 60, null} must never reach the wire. The parser-level
     // coercion is tested in channel-montage.unit.test.ts; this proves the
