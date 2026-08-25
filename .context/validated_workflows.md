@@ -480,7 +480,7 @@ For the full workflow (combining Prototypes 1 and 3):
 1. **Git-annex largefiles configuration is critical**
    - By default, git-annex tracks ALL files including workflow YAML
    - GitHub can't read workflow files stored as git-annex symlinks
-   - Must configure with explicit metadata exclusions (see `src/lib/git-annex.ts` DATA_EXTENSIONS and METADATA_EXCLUSIONS)
+   - Must configure with explicit metadata exclusions (see `src/lib/git-annex/policy.ts`)
 
 2. **GitHub Actions S3 copy doesn't update git-annex**
    - `aws s3 cp` moves the file but git-annex doesn't know
@@ -500,8 +500,9 @@ For the full workflow (combining Prototypes 1 and 3):
 datalad create my-dataset
 cd my-dataset
 
-# 2. Configure git-annex: annex data files, never metadata (see src/lib/git-annex.ts for canonical pattern)
-git annex config --set annex.largefiles '(include=*.edf or include=*.bdf or include=*.set or include=*.fif or include=*.vhdr or include=*.eeg or include=*.cnt or include=*.fdt or largerthan=100kb) and exclude=*.tsv and exclude=*.json and exclude=*.md and exclude=*.txt and exclude=*.yml and exclude=*.yaml and exclude=README* and exclude=LICENSE* and exclude=CHANGES* and exclude=.bidsignore and exclude=.gitignore'
+# 2. Configure git-annex: annex data files, never metadata.
+# The expression is generated, never hand-typed -- src/lib/git-annex/policy.ts owns it (ADR 0031).
+git annex config --set annex.largefiles "$(bun -e 'import {buildLargefilesExpression} from "./src/lib/git-annex/policy.ts"; console.log(buildLargefilesExpression())')"
 
 # 3. Add workflow files (will be in git, not git-annex)
 mkdir -p .github/workflows
@@ -625,16 +626,23 @@ datalad get sub-XXX/eeg/
 
 ### Recommended Largefiles Configuration
 
-See `src/lib/git-annex.ts` (DATA_EXTENSIONS + METADATA_EXCLUSIONS) for the canonical pattern.
+`src/lib/git-annex/policy.ts` is the single source of truth (ADR 0031). Generate the
+expression rather than copying it -- the two literal copies that used to live in this
+file are exactly how the policy drifted (#1158):
 
 ```bash
-git annex config --set annex.largefiles '(include=*.edf or include=*.bdf or include=*.set or include=*.fif or include=*.vhdr or include=*.eeg or include=*.cnt or include=*.fdt or largerthan=100kb) and exclude=*.tsv and exclude=*.json and exclude=*.md and exclude=*.txt and exclude=*.yml and exclude=*.yaml and exclude=README* and exclude=LICENSE* and exclude=CHANGES* and exclude=.bidsignore and exclude=.gitignore'
+git annex config --set annex.largefiles "$(bun -e 'import {buildLargefilesExpression} from "./src/lib/git-annex/policy.ts"; console.log(buildLargefilesExpression())')"
 ```
 
 This ensures:
 - EEG/MEG data files -> git-annex (S3)
 - Metadata (TSV, JSON, MD, txt, yml) -> always git (GitHub), regardless of size
-- tsv.gz -> annexed (compressed data; `exclude=*.tsv` doesn't match `*.tsv.gz`)
+- `*_motion.tsv` -> annexed at any size. Motion-BIDS stores the recording itself in a
+  `.tsv`, so the extension lies; its `_channels.tsv`/`_motion.json` sidecars stay in git
+  (ADR 0031)
+- tsv.gz -> escapes the `*.tsv` exclusion (the globs are exact), then annexes if it is
+  over the 100 kB threshold. A small `.tsv.gz` still stays in git -- this used to be
+  written as the flat claim "tsv.gz IS annexed"
 
 ---
 
