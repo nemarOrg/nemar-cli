@@ -31,6 +31,19 @@ export interface DatasetMetadataColumns {
   n_channels: number | null;
   /** Scalp montage class: 10-20|10-10|10-05|biosemi|egi-geodesic|other (#854/#858). */
   electrode_system: string | null;
+  /** `SamplingFrequency` (Hz) from the preferred `*_eeg.json` sidecar (epic
+   *  #1144 Phase 2b, #1153). Serves `signal_defaults.sampling_frequency`. */
+  sampling_frequency: number | null;
+  /** `PowerLineFrequency` (Hz), coerced to exactly 50 or 60 (#1153). Serves
+   *  `signal_defaults.power_line_frequency`. */
+  power_line_frequency: number | null;
+  /** `EEGReference` from the preferred sidecar (#1153). Serves
+   *  `signal_defaults.reference`; named `eeg_reference` to avoid the SQL
+   *  keyword. */
+  eeg_reference: string | null;
+  /** `EEGPlacementScheme` from the preferred sidecar (#1153). Serves
+   *  `signal_defaults.placement_scheme`. */
+  placement_scheme: string | null;
   /** HED presence as 0/1, or null when not classified yet (#869). */
   has_hed: number | null;
   /** Declared `HEDVersion` (array form comma-joined), or null (#869). */
@@ -79,6 +92,27 @@ export interface MetadataColumnInputs {
    * Scalp montage class from `getBidsTreeStats` (#858). Omit when undetermined.
    */
   electrodeSystem?: string;
+  /**
+   * `SamplingFrequency` (Hz) from `getBidsTreeStats`'s root-preferred `*_eeg.json`
+   * sidecar (#1153). Omit when no sidecar was sampled or the key was
+   * absent/invalid.
+   */
+  samplingFrequency?: number;
+  /**
+   * `PowerLineFrequency` (Hz) from `getBidsTreeStats`, already coerced to
+   * exactly 50 or 60 (#1153). Omit when absent or out-of-enum.
+   */
+  powerLineFrequency?: number;
+  /**
+   * `EEGReference` from `getBidsTreeStats`'s preferred sidecar (#1153). Omit
+   * when absent, non-string, or the BIDS "n/a" placeholder.
+   */
+  eegReference?: string;
+  /**
+   * `EEGPlacementScheme` from `getBidsTreeStats`'s preferred sidecar (#1153).
+   * Omit when absent or the "n/a" placeholder.
+   */
+  placementScheme?: string;
   /**
    * HED presence from `getBidsTreeStats` probeHed (#869): true/false when the ref
    * was probed, omit when the probe couldn't run (-> column stays NULL).
@@ -201,6 +235,10 @@ export function computeDatasetMetadataColumns(input: MetadataColumnInputs): Data
     tasks: tasksArr.length ? tasksArr.join(",") : null,
     n_channels: input.nChannels ?? null,
     electrode_system: input.electrodeSystem ?? null,
+    sampling_frequency: input.samplingFrequency ?? null,
+    power_line_frequency: input.powerLineFrequency ?? null,
+    eeg_reference: input.eegReference ?? null,
+    placement_scheme: input.placementScheme ?? null,
     // Tri-state via `== null` (intentionally catches undefined AND null): probe
     // didn't run -> null = not classified yet; false -> 0 = checked, no HED;
     // true -> 1 = checked, has HED.
@@ -246,6 +284,10 @@ export async function writeDatasetMetadataColumns(
            tasks = COALESCE(?, tasks),
            n_channels = COALESCE(?, n_channels),
            electrode_system = COALESCE(?, electrode_system),
+           sampling_frequency = COALESCE(?, sampling_frequency),
+           power_line_frequency = COALESCE(?, power_line_frequency),
+           eeg_reference = COALESCE(?, eeg_reference),
+           placement_scheme = COALESCE(?, placement_scheme),
            has_hed = COALESCE(?, has_hed),
            hed_version = COALESCE(?, hed_version),
            bytes_present = COALESCE(?, bytes_present),
@@ -269,6 +311,10 @@ export async function writeDatasetMetadataColumns(
       cols.tasks,
       cols.n_channels,
       cols.electrode_system,
+      cols.sampling_frequency,
+      cols.power_line_frequency,
+      cols.eeg_reference,
+      cols.placement_scheme,
       cols.has_hed,
       cols.hed_version,
       cols.bytes_present,
