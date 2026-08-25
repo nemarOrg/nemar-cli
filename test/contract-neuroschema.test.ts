@@ -1,6 +1,6 @@
 /**
  * neuroschema conformance — the vendored bundle compiles and enforces the
- * v0.3.0 dataset schema (epic #896, #898). Pure: validates fixtures, no backend.
+ * v0.4.0 dataset schema (epic #896, #898). Pure: validates fixtures, no backend.
  * The live-response conformance check is in test/contract-live.test.ts.
  */
 

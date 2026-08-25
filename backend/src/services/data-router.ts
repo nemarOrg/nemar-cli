@@ -505,13 +505,13 @@ export function toHttpDate(value: string): string {
 // ===========================================================================
 // metadata.json builders
 //
-// Composes a neuroschema v0.3.0 `dataset` document from the catalog row in
+// Composes a neuroschema v0.4.0 `dataset` document from the catalog row in
 // D1, the parsed nemar_metadata.json enrichment payload, the dataset_versions
 // list, and (optionally) the latest version's S3 manifest. All pure: no D1,
 // S3, or network access happens here; callers in routes/data.ts wire the I/O.
 //
 // The wire format mirrors `~/Documents/git/nemar/neuroschema/schema/core/dataset.schema.json`
-// (v0.3.0). NEMAR-specific aggregates that aren't part of the FAIR core
+// (v0.4.0). NEMAR-specific aggregates that aren't part of the FAIR core
 // (version DOI list, derived BIDS subjects/sessions/tasks/runs tree) sit in
 // `extensions.nemar` per `schema/extensions/nemar.schema.json` which already
 // declares `additionalProperties: true`.

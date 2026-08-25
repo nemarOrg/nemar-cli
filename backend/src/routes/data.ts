@@ -633,7 +633,7 @@ dataRoutes.get("/:datasetId/:version/summary.json", (c) => {
  *
  * Sibling to summary.json. Emitted by the central generate-records workflow
  * on `nemarDatasets/.github` at S3 key `<id>/version/v<X.Y.Z>-records.json`
- * (an array of neuroschema v0.3.0 `record` docs, one per primary signal
+ * (an array of neuroschema v0.4.0 `record` docs, one per primary signal
  * file). The emitter owns the shape contract; this handler serves the bytes
  * verbatim. Same cache policy as summary.json: immutable per (id, version),
  * so a long s-maxage; a missing artifact is `no-store` 404 (no negative
@@ -695,7 +695,7 @@ dataRoutes.get("/:datasetId/:version/records.json", (c) => {
 });
 
 /**
- * GET /<id>/metadata.json -> dataset-level neuroschema v0.3.0 document.
+ * GET /<id>/metadata.json -> dataset-level neuroschema v0.4.0 document.
  *
  * Combines the D1 catalog row, the parsed nemar_metadata.json enrichment
  * payload, and (when at least one version exists) a derived BIDS index from
