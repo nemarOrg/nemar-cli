@@ -38,7 +38,7 @@
 --                         `minimum:0` field: nothing runs AJV on the live
 --                         serving path, so an out-of-enum value would ship
 --                         as a silently schema-violating payload.
---   eeg_reference          Serves neuroschema's `reference` field; named
+--   eeg_reference         Serves neuroschema's `reference` field; named
 --                         `eeg_reference` here because `reference` is a SQL
 --                         keyword. From *_eeg.json EEGReference. Only a
 --                         string value is accepted (not an array) -- the
@@ -51,11 +51,23 @@
 --                         channel_montage_checked_at (migration 0055) --
 --                         NOT touched by writeDatasetMetadataColumns, so a
 --                         live reindex can populate the four value columns
---                         above without making this row look "swept" (it is
---                         simply reswept later at no cost: the sweep's
---                         no-sidecar branch stamps without touching prior
---                         good values, so re-probing an already-correct row
---                         is idempotent, not destructive).
+--                         above without making this row look "swept". That
+--                         row then STAYS a sweep candidate across every
+--                         later reindex (nothing here re-arms the stamp),
+--                         so it will eventually be re-probed for real --
+--                         and a re-probed row with real prior values will
+--                         almost always take the SUCCESS branch, not the
+--                         no-sidecar one, because a sidecar that already
+--                         yielded a value once will usually yield at least
+--                         one again. What makes THAT safe is that
+--                         SIGNAL_DEFAULTS_SWEEP_WRITE_SQL COALESCEs each of
+--                         the four columns rather than overwriting them
+--                         outright (services/signal-defaults-sweep.ts's own
+--                         doc comment has the full history: an earlier,
+--                         non-COALESCE version of this write destroyed
+--                         reindex-populated values the first time the
+--                         sweep re-probed a sparser sidecar -- #1162 review,
+--                         C1).
 --
 -- Deliberately absent: a channel_system column. inheritable.schema.json's
 -- `channel_system` is served from the EXISTING `electrode_system` column
