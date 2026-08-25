@@ -580,7 +580,9 @@ export interface DatasetDataSummary {
  * definitions/inheritable.schema.json) -- epic #1144 Phase 2b, issue #1153.
  * Every field is independently nullable per the vendored schema; the whole
  * block is omitted (set to null) by the builder when every field is null,
- * matching `data_summary`'s gating.
+ * matching `data_summary`'s gating. Every field below is one exemplar
+ * sidecar's declared value, not a verified per-dataset aggregate -- see
+ * migration 0071's caveat.
  */
 export interface DatasetSignalDefaults {
   sampling_frequency: number | null;
