@@ -9,6 +9,7 @@
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { shouldAnnex } from "./policy.js";
 import { runCommand } from "./run-command.js";
 import { type S3Credentials, awsCredentialEnv } from "./s3-remote.js";
 
@@ -621,33 +622,12 @@ export interface DatasetFileInfo {
 }
 
 /**
- * Threshold for classifying files as data (100KB)
- */
-const DATA_FILE_THRESHOLD = 100 * 1024;
-
-/**
- * File extensions that are always classified as data files
- */
-const DATA_FILE_EXTENSIONS = new Set([
-  ".edf",
-  ".bdf",
-  ".eeg",
-  ".vhdr",
-  ".vmrk",
-  ".set",
-  ".fdt",
-  ".cnt",
-  ".mff",
-  ".fif",
-  ".nii",
-  ".nii.gz",
-  ".mat",
-  ".bin",
-]);
-
-/**
- * Collect file manifest for a dataset
- * Classifies files as "data" (large binary files) or "metadata" (JSON, TSV, small files)
+ * Collect file manifest for a dataset.
+ *
+ * "data" means git-annex will take it (S3); "metadata" means it stays in plain
+ * git (GitHub). The split is decided by the shared policy in `policy.ts` -- the
+ * same rule that renders `annex.largefiles` -- so the plan shown to the user and
+ * the files actually uploaded cannot disagree.
  */
 export async function collectFileManifest(datasetPath: string): Promise<{
   files: DatasetFileInfo[];
@@ -702,9 +682,16 @@ export async function collectFileManifest(datasetPath: string): Promise<{
       const size = stats.size;
       totalSize += size;
 
-      // Classify file type
-      const ext = relativePath.toLowerCase().match(/\.[^.]+$/)?.[0] || "";
-      const isDataFile = DATA_FILE_EXTENSIONS.has(ext) || size > DATA_FILE_THRESHOLD;
+      // "data" means exactly "git-annex will take this", so the caller's
+      // addTargets are the files that genuinely end up in S3. This used to be a
+      // second, looser rule (any extension in a local list, or >100 kB), and the
+      // disagreement was the #1158 bug: a `_motion.tsv` counted as data here,
+      // was handed to `git annex add`, and annex then routed it into plain git
+      // because the largefiles expression excluded every `*.tsv`. Worse, a file
+      // this rule calls metadata never reaches `git annex add` at all -- the
+      // later `git add -A` in commitChanges does NOT honour annex.largefiles --
+      // so the two rules have to be the same rule.
+      const isDataFile = shouldAnnex(relativePath, size);
       const fileType: "metadata" | "data" = isDataFile ? "data" : "metadata";
 
       if (isDataFile) {
