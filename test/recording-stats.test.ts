@@ -34,6 +34,8 @@ import { join } from "node:path";
 import {
   RECORDING_STATS_SWEEP_CANDIDATE_SQL,
   RECORDING_STATS_SWEEP_REMAINING_SQL,
+  RECORDING_STATS_SWEEP_WRITE_SQL,
+  recordingStatsWriteBindings,
 } from "../backend/src/services/recording-stats-sweep";
 import {
   type RecordingStats,
@@ -249,31 +251,14 @@ const candidates = (db: Database) =>
     (r) => r.dataset_id,
   );
 
-/** Mirror the endpoint's per-dataset write: eight stat columns + the stamp, no updated_at. */
+/**
+ * Apply the endpoint's per-dataset write using the REAL exported SQL +
+ * binding builder from services/recording-stats-sweep.ts, not a hand-copy --
+ * so a future edit to the write (e.g. an accidental updated_at bump) cannot
+ * silently drift out of this test's reach.
+ */
 function applyStats(db: Database, id: string, stats: RecordingStats | null) {
-  db.query(
-    `UPDATE datasets
-       SET total_recording_duration = ?,
-           recording_duration_min = ?,
-           recording_duration_max = ?,
-           recording_count = ?,
-           recordings_unavailable = ?,
-           recordings_measured = ?,
-           channel_count_min = ?,
-           channel_count_max = ?,
-           recording_stats_at = datetime('now')
-     WHERE dataset_id = ?`,
-  ).run(
-    stats?.totalRecordingDuration ?? null,
-    stats?.recordingDurationMin ?? null,
-    stats?.recordingDurationMax ?? null,
-    stats?.recordingCount ?? null,
-    stats?.recordingsUnavailable ?? null,
-    stats?.recordingsMeasured ?? null,
-    stats?.channelCountMin ?? null,
-    stats?.channelCountMax ?? null,
-    id,
-  );
+  db.query(RECORDING_STATS_SWEEP_WRITE_SQL).run(...recordingStatsWriteBindings(stats, id));
 }
 
 describe("recording-stats-sweep", () => {

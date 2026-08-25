@@ -36,6 +36,59 @@ export const RECORDING_STATS_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n FROM da
      AND zarr_status = 'ready'
      AND recording_stats_at IS NULL`;
 
+/**
+ * The per-candidate write, exported so a test can exercise the exact SQL
+ * text (bind order: the 8 stat columns in RecordingStats field order, then
+ * dataset_id) instead of a hand-copy that could silently drift. Writes
+ * DIRECTLY (no updated_at bump) so a ~660-dataset backfill does not bump
+ * updated_at/metadata_updated_at catalog-wide -- same reasoning as
+ * channel-montage-sweep at datasets-lifecycle.ts:351.
+ */
+export const RECORDING_STATS_SWEEP_WRITE_SQL = `UPDATE datasets
+   SET total_recording_duration = ?,
+       recording_duration_min = ?,
+       recording_duration_max = ?,
+       recording_count = ?,
+       recordings_unavailable = ?,
+       recordings_measured = ?,
+       channel_count_min = ?,
+       channel_count_max = ?,
+       recording_stats_at = datetime('now')
+   WHERE dataset_id = ?`;
+
+/** Positional bind values for RECORDING_STATS_SWEEP_WRITE_SQL's 8 stat
+ *  placeholders + trailing dataset_id. */
+export type RecordingStatsWriteBindings = [
+  totalRecordingDuration: number | null,
+  recordingDurationMin: number | null,
+  recordingDurationMax: number | null,
+  recordingCount: number | null,
+  recordingsUnavailable: number | null,
+  recordingsMeasured: number | null,
+  channelCountMin: number | null,
+  channelCountMax: number | null,
+  datasetId: string,
+];
+
+/** Bind values for RECORDING_STATS_SWEEP_WRITE_SQL from a (possibly null,
+ *  on a failed probe) stats bag. */
+export function recordingStatsWriteBindings(
+  stats: RecordingStats | null,
+  datasetId: string,
+): RecordingStatsWriteBindings {
+  return [
+    stats?.totalRecordingDuration ?? null,
+    stats?.recordingDurationMin ?? null,
+    stats?.recordingDurationMax ?? null,
+    stats?.recordingCount ?? null,
+    stats?.recordingsUnavailable ?? null,
+    stats?.recordingsMeasured ?? null,
+    stats?.channelCountMin ?? null,
+    stats?.channelCountMax ?? null,
+    datasetId,
+  ];
+}
+
 /** Hard ceiling on candidates per invocation. One signed GET each
  *  (getZarrIndex) -- looser than the montage sweep's 15/30 since there is no
  *  GitHub call in the loop. */
@@ -102,30 +155,8 @@ export async function runRecordingStatsSweep(
     }
 
     try {
-      await env.DB.prepare(
-        `UPDATE datasets
-           SET total_recording_duration = ?,
-               recording_duration_min = ?,
-               recording_duration_max = ?,
-               recording_count = ?,
-               recordings_unavailable = ?,
-               recordings_measured = ?,
-               channel_count_min = ?,
-               channel_count_max = ?,
-               recording_stats_at = datetime('now')
-         WHERE dataset_id = ?`,
-      )
-        .bind(
-          stats?.totalRecordingDuration ?? null,
-          stats?.recordingDurationMin ?? null,
-          stats?.recordingDurationMax ?? null,
-          stats?.recordingCount ?? null,
-          stats?.recordingsUnavailable ?? null,
-          stats?.recordingsMeasured ?? null,
-          stats?.channelCountMin ?? null,
-          stats?.channelCountMax ?? null,
-          dataset_id,
-        )
+      await env.DB.prepare(RECORDING_STATS_SWEEP_WRITE_SQL)
+        .bind(...recordingStatsWriteBindings(stats, dataset_id))
         .run();
     } catch (err) {
       errors.push({
