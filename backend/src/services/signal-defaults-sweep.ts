@@ -1,0 +1,241 @@
+/**
+ * Dataset-level BIDS signal-defaults backfill sweep (epic #1144 Phase 2b,
+ * issue #1153). Shared by `POST /admin/datasets/signal-defaults-sweep` (and
+ * any future caller) so the candidate query and the outcome handling can
+ * never drift -- mirrors services/recording-stats-sweep.ts's
+ * runRecordingStatsSweep, which this sweep's three-way branch is modelled on
+ * directly (read that file's module doc for the full rationale; summarized
+ * here for this sweep's specifics).
+ *
+ * THROW (GitHub/infra error from getBidsTreeStats): record the error, write
+ * NOTHING, `continue`. The row stays a candidate for the next run.
+ *
+ * NO SIDECAR (the probe ran to completion but found no usable `*_eeg.json`
+ * key -- a non-BIDS repo, a repo with no EEG sidecar, or a sidecar that
+ * parsed to nothing): SIGNAL_DEFAULTS_SWEEP_STAMP_ONLY_SQL stamps
+ * `signal_defaults_at` only, so the sweep converges, but the four value
+ * columns are left exactly as they were (NULL for a never-swept row, real
+ * values for one a prior reindex already populated -- see
+ * dataset-reindex.ts's note on why reindex writes the value columns without
+ * touching this stamp).
+ *
+ * SUCCESS (at least one of the four keys parsed): SIGNAL_DEFAULTS_SWEEP_WRITE_SQL
+ * writes all four columns + the stamp together.
+ *
+ * Collapsing throw and no-sidecar into one unconditional write was exactly
+ * the C1 bug the sibling recording-stats sweep fixed (destroyed prior good
+ * values on a transient failure); this sweep starts from that fixed shape
+ * rather than re-deriving it.
+ */
+
+import type { Bindings } from "../types/bindings";
+import { getBidsTreeStats } from "./github";
+import { getDatasetsToken } from "./github-auth";
+
+/**
+ * Candidates: active datasets with a GitHub repo whose signal defaults have
+ * never been computed. No modality filter (unlike channel-montage-sweep,
+ * which restricts to `modalities LIKE '%eeg%'`): getBidsTreeStats's
+ * `*_eeg.json` probe is itself the modality gate -- a non-EEG dataset simply
+ * yields no sidecar and is stamped via the no-sidecar branch, exactly like
+ * hed-sweep's no-modality-filter reasoning.
+ */
+export const SIGNAL_DEFAULTS_SWEEP_CANDIDATE_SQL = `SELECT dataset_id, github_repo FROM datasets
+   WHERE status = 'active'
+     AND github_repo IS NOT NULL
+     AND signal_defaults_at IS NULL
+   ORDER BY dataset_id
+   LIMIT ?`;
+
+export const SIGNAL_DEFAULTS_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n FROM datasets
+   WHERE status = 'active'
+     AND github_repo IS NOT NULL
+     AND signal_defaults_at IS NULL`;
+
+/**
+ * The per-candidate write on a probe that found at least one usable key.
+ * Exported so a test can drive the exact SQL text instead of a hand-copy
+ * that could silently drift (`.rules/testing.md`'s "never hand-copy a SQL
+ * statement" rule). Bind order: the 4 value columns, then dataset_id.
+ */
+export const SIGNAL_DEFAULTS_SWEEP_WRITE_SQL = `UPDATE datasets
+   SET sampling_frequency = ?,
+       power_line_frequency = ?,
+       eeg_reference = ?,
+       placement_scheme = ?,
+       signal_defaults_at = datetime('now')
+   WHERE dataset_id = ?`;
+
+/**
+ * Stamp `signal_defaults_at` ONLY -- every value column is left exactly as
+ * it was. Used when the probe ran to completion but found no usable sidecar
+ * key.
+ */
+export const SIGNAL_DEFAULTS_SWEEP_STAMP_ONLY_SQL = `UPDATE datasets
+   SET signal_defaults_at = datetime('now')
+   WHERE dataset_id = ?`;
+
+/**
+ * `?reset=1`: clear the stamp + every value column so a corrected parser can
+ * re-sweep from scratch. Exported for the same hand-copy reason as the other
+ * sweep SQL above.
+ */
+export const SIGNAL_DEFAULTS_SWEEP_RESET_SQL = `UPDATE datasets
+   SET signal_defaults_at = NULL,
+       sampling_frequency = NULL,
+       power_line_frequency = NULL,
+       eeg_reference = NULL,
+       placement_scheme = NULL
+   WHERE signal_defaults_at IS NOT NULL`;
+
+/** Positional bind values for SIGNAL_DEFAULTS_SWEEP_WRITE_SQL's 4 value
+ *  placeholders + trailing dataset_id. */
+export type SignalDefaultsWriteBindings = [
+  samplingFrequency: number | null,
+  powerLineFrequency: number | null,
+  eegReference: string | null,
+  placementScheme: string | null,
+  datasetId: string,
+];
+
+/** Bind values for SIGNAL_DEFAULTS_SWEEP_WRITE_SQL from a real probe result.
+ *  `stats` is intentionally the same shape getBidsTreeStats returns -- no
+ *  intermediate "found" bag -- so there is nothing here to transpose. */
+export function signalDefaultsWriteBindings(
+  stats: {
+    samplingFrequency?: number;
+    powerLineFrequency?: number;
+    eegReference?: string;
+    placementScheme?: string;
+  },
+  datasetId: string,
+): SignalDefaultsWriteBindings {
+  return [
+    stats.samplingFrequency ?? null,
+    stats.powerLineFrequency ?? null,
+    stats.eegReference ?? null,
+    stats.placementScheme ?? null,
+    datasetId,
+  ];
+}
+
+/** Default candidates per invocation. Tighter than recording-stats-sweep's
+ *  200: this hits the GitHub API (getBidsTreeStats: root tree + up to 25
+ *  subject subtrees + up to 2 sidecar blobs per dataset) rather than one
+ *  signed S3 GET -- same cap as channel-montage-sweep / hed-sweep. */
+export const SIGNAL_DEFAULTS_SWEEP_DEFAULT = 15;
+/** Hard ceiling on candidates per invocation, regardless of a larger
+ *  requested `?limit=`. */
+export const SIGNAL_DEFAULTS_SWEEP_MAX = 30;
+
+export interface SignalDefaultsSweepResult {
+  processed: number;
+  /** Candidates whose probe found at least one usable sidecar key and
+   *  wrote the value columns. */
+  populated: number;
+  /** Candidates whose probe ran to completion but found nothing to write
+   *  (stamped only; prior values, if any, are untouched). */
+  noData: number;
+  errors: { dataset_id: string; error: string }[];
+  /** Candidates still unstamped after this run; null if the count query failed. */
+  remaining: number | null;
+}
+
+/**
+ * Run one bounded pass of the signal-defaults sweep: take up to `limit`
+ * unstamped candidates and, for each, probe its GitHub repo's BIDS tree and
+ * react per-outcome (see the module doc for the three-way split).
+ *
+ * `fetchStats` defaults to the real `getBidsTreeStats` and exists so a test
+ * can drive this exact function -- the entry point the real route uses --
+ * against a real D1 with the one true network boundary substituted, instead
+ * of re-implementing this loop's control flow at the test level.
+ *
+ * `pat` lets a test skip the real GitHub App token mint entirely; real
+ * callers never pass it, so `getDatasetsToken` resolves a real token --
+ * lazily, and only when there is at least one real candidate, mirroring
+ * recording-stats-sweep's no-wasted-network-call reasoning (there: no
+ * wasted S3 GETs on an empty batch; here: no wasted token mint).
+ *
+ * Throws only if the candidate query itself fails (e.g. migration 0071 not
+ * applied). Per-dataset failures are collected into `errors`, never thrown.
+ */
+export async function runSignalDefaultsSweep(
+  env: Bindings,
+  opts?: {
+    limit?: number;
+    fetchStats?: typeof getBidsTreeStats;
+    pat?: string;
+  },
+): Promise<SignalDefaultsSweepResult> {
+  const requested = opts?.limit ?? SIGNAL_DEFAULTS_SWEEP_DEFAULT;
+  const limit = Math.min(Math.max(requested, 1), SIGNAL_DEFAULTS_SWEEP_MAX);
+  const fetchStats = opts?.fetchStats ?? getBidsTreeStats;
+
+  const rows = await env.DB.prepare(SIGNAL_DEFAULTS_SWEEP_CANDIDATE_SQL)
+    .bind(limit)
+    .all<{ dataset_id: string; github_repo: string }>();
+  const candidates = rows.results ?? [];
+
+  let pat = opts?.pat ?? null;
+  if (candidates.length > 0 && pat === null) {
+    pat = await getDatasetsToken(env);
+  }
+
+  let populated = 0;
+  let noData = 0;
+  const errors: { dataset_id: string; error: string }[] = [];
+
+  for (const { dataset_id, github_repo } of candidates) {
+    const repoName = github_repo.split("/")[1] ?? github_repo;
+
+    // ONE getBidsTreeStats call. A throw keeps the row a candidate for the
+    // next run (no write at all) -- see the module doc for why this must
+    // not fall through to a write.
+    let stats: Awaited<ReturnType<typeof getBidsTreeStats>>;
+    try {
+      stats = await fetchStats(repoName, "main", pat as string);
+    } catch (err) {
+      errors.push({
+        dataset_id,
+        error: `github: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      continue;
+    }
+
+    const found =
+      stats.samplingFrequency != null ||
+      stats.powerLineFrequency != null ||
+      stats.eegReference != null ||
+      stats.placementScheme != null;
+
+    try {
+      if (found) {
+        await env.DB.prepare(SIGNAL_DEFAULTS_SWEEP_WRITE_SQL)
+          .bind(...signalDefaultsWriteBindings(stats, dataset_id))
+          .run();
+        populated++;
+      } else {
+        await env.DB.prepare(SIGNAL_DEFAULTS_SWEEP_STAMP_ONLY_SQL).bind(dataset_id).run();
+        noData++;
+      }
+    } catch (err) {
+      errors.push({
+        dataset_id,
+        error: `d1 write: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
+  const remainingRow = await env.DB.prepare(SIGNAL_DEFAULTS_SWEEP_REMAINING_SQL)
+    .first<{ n: number }>()
+    .catch(() => null);
+
+  return {
+    processed: candidates.length,
+    populated,
+    noData,
+    errors,
+    remaining: remainingRow?.n ?? null,
+  };
+}
