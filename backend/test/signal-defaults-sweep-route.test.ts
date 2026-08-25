@@ -104,6 +104,7 @@ function seedDataset(
     status?: string;
     githubRepo?: string | null;
     stamped?: boolean;
+    isSandbox?: boolean;
   } = {},
 ): void {
   db.prepare(
@@ -119,6 +120,9 @@ function seedDataset(
     db.prepare(
       "UPDATE datasets SET signal_defaults_at = '2026-08-01 00:00:00' WHERE dataset_id = ?",
     ).run(id);
+  }
+  if (opts.isSandbox) {
+    db.prepare("UPDATE datasets SET is_sandbox = 1 WHERE dataset_id = ?").run(id);
   }
 }
 
@@ -156,6 +160,19 @@ describe("POST /admin/datasets/signal-defaults-sweep (real route, zero real cand
 
   test("an already-stamped row is excluded", async () => {
     seedDataset("nm000902", { stamped: true });
+    const res = await post("/admin/datasets/signal-defaults-sweep");
+    const body = await res.json();
+    expect(body.processed).toBe(0);
+    expect(body.remaining).toBe(0);
+  });
+
+  // #1162 review, I3: matches channel-montage-sweep / hed-sweep (both cited
+  // as this sweep's model), which exclude is_sandbox for the same reason --
+  // prod sandbox (xx*) datasets churn continuously (AGENTS.md's 14-day
+  // cron), and unlike recording-stats-sweep's one cheap S3 GET, a candidate
+  // here costs a full GitHub tree walk against a tight 15/30 budget.
+  test("a sandbox (is_sandbox=1) row is excluded", async () => {
+    seedDataset("xx090903", { isSandbox: true });
     const res = await post("/admin/datasets/signal-defaults-sweep");
     const body = await res.json();
     expect(body.processed).toBe(0);

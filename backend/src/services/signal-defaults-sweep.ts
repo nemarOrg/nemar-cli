@@ -7,25 +7,37 @@
  * directly (read that file's module doc for the full rationale; summarized
  * here for this sweep's specifics).
  *
- * THROW (GitHub/infra error from getBidsTreeStats): record the error, write
- * NOTHING, `continue`. The row stays a candidate for the next run.
+ * THROW (GitHub/infra error from getBidsTreeStats itself, e.g. a failed
+ * subject-subtree fetch): record the error, write NOTHING, `continue`. The
+ * row stays a candidate for the next run.
  *
- * NO SIDECAR (the probe ran to completion but found no usable `*_eeg.json`
- * key -- a non-BIDS repo, a repo with no EEG sidecar, or a sidecar that
- * parsed to nothing): SIGNAL_DEFAULTS_SWEEP_STAMP_ONLY_SQL stamps
- * `signal_defaults_at` only, so the sweep converges, but the four value
- * columns are left exactly as they were (NULL for a never-swept row, real
- * values for one a prior reindex already populated -- see
+ * PROBE ERROR (getBidsTreeStats returned SUCCESSFULLY, but its secondary
+ * channel/signal-defaults probe swallowed a transport failure internally --
+ * see bids-tree.ts's `probeChannelMontage`, ADR 0005: transport failures
+ * must stay fatal, only authoritative absence is permanent). Surfaced via
+ * `stats.channelMontageProbeError` and handled IDENTICALLY to THROW: no
+ * write, `continue`, row stays a candidate. Without this check a network
+ * blip reads as "no sidecar" and gets permanently stamped -- the exact
+ * disguised-absence bug PR review caught (#1162 review, C2).
+ *
+ * NO SIDECAR (the probe ran to completion, no transport error, but found no
+ * usable `*_eeg.json` key -- a non-BIDS repo, a repo with no EEG sidecar, or
+ * a sidecar that parsed to nothing): SIGNAL_DEFAULTS_SWEEP_STAMP_ONLY_SQL
+ * stamps `signal_defaults_at` only, so the sweep converges, but the four
+ * value columns are left exactly as they were (NULL for a never-swept row,
+ * real values for one a prior reindex already populated -- see
  * dataset-reindex.ts's note on why reindex writes the value columns without
  * touching this stamp).
  *
  * SUCCESS (at least one of the four keys parsed): SIGNAL_DEFAULTS_SWEEP_WRITE_SQL
- * writes all four columns + the stamp together.
+ * COALESCE-writes all four columns (see the SQL's own doc comment for why
+ * this must be COALESCE, not a direct SET) + the stamp together.
  *
- * Collapsing throw and no-sidecar into one unconditional write was exactly
- * the C1 bug the sibling recording-stats sweep fixed (destroyed prior good
- * values on a transient failure); this sweep starts from that fixed shape
- * rather than re-deriving it.
+ * Collapsing throw/probe-error and no-sidecar into one unconditional
+ * non-COALESCE write was exactly the C1 bug class the sibling
+ * recording-stats sweep fixed (destroyed prior good values on a transient
+ * failure); this sweep starts from that fixed shape rather than
+ * re-deriving it.
  */
 
 import type { Bindings } from "../types/bindings";
@@ -34,15 +46,24 @@ import { getDatasetsToken } from "./github-auth";
 
 /**
  * Candidates: active datasets with a GitHub repo whose signal defaults have
- * never been computed. No modality filter (unlike channel-montage-sweep,
- * which restricts to `modalities LIKE '%eeg%'`): getBidsTreeStats's
- * `*_eeg.json` probe is itself the modality gate -- a non-EEG dataset simply
- * yields no sidecar and is stamped via the no-sidecar branch, exactly like
- * hed-sweep's no-modality-filter reasoning.
+ * never been computed. `is_sandbox` excluded (matches channel-montage-sweep
+ * / hed-sweep, both cited as this sweep's model): prod sandbox (`xx*`)
+ * datasets churn continuously (14-day cron cleanup, AGENTS.md's dataset ID
+ * bands), and unlike recording-stats-sweep's one cheap signed S3 GET, a
+ * candidate here costs a full GitHub tree walk (root tree + up to 25
+ * subject subtrees + up to 2 blobs) against a tight 15/30 budget --
+ * burning that budget on rows that will be deleted before anyone reads
+ * their signal_defaults is wasted work recording-stats-sweep's own
+ * documented exception doesn't have to worry about. No modality filter
+ * (unlike channel-montage-sweep, which restricts to `modalities LIKE
+ * '%eeg%'`): getBidsTreeStats's `*_eeg.json` probe is itself the modality
+ * gate -- a non-EEG dataset simply yields no sidecar and is stamped via the
+ * no-sidecar branch, exactly like hed-sweep's no-modality-filter reasoning.
  */
 export const SIGNAL_DEFAULTS_SWEEP_CANDIDATE_SQL = `SELECT dataset_id, github_repo FROM datasets
    WHERE status = 'active'
      AND github_repo IS NOT NULL
+     AND (is_sandbox = 0 OR is_sandbox IS NULL)
      AND signal_defaults_at IS NULL
    ORDER BY dataset_id
    LIMIT ?`;
@@ -50,6 +71,7 @@ export const SIGNAL_DEFAULTS_SWEEP_CANDIDATE_SQL = `SELECT dataset_id, github_re
 export const SIGNAL_DEFAULTS_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n FROM datasets
    WHERE status = 'active'
      AND github_repo IS NOT NULL
+     AND (is_sandbox = 0 OR is_sandbox IS NULL)
      AND signal_defaults_at IS NULL`;
 
 /**
@@ -57,19 +79,35 @@ export const SIGNAL_DEFAULTS_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n FROM da
  * Exported so a test can drive the exact SQL text instead of a hand-copy
  * that could silently drift (`.rules/testing.md`'s "never hand-copy a SQL
  * statement" rule). Bind order: the 4 value columns, then dataset_id.
+ *
+ * COALESCE, not a direct SET (#1162 review, C1): `found` is an OR across
+ * four independent keys, so a probe that reads only `SamplingFrequency`
+ * still takes this branch -- a direct SET would null the other three even
+ * when a PRIOR reindex (which does NOT stamp signal_defaults_at, so the row
+ * stays a sweep candidate across many reindex cycles) already wrote real
+ * values for them. Once nulled here, nothing re-arms the stamp -- the row
+ * is written once, permanently, since `?reset=1` is catalog-wide, not
+ * per-row. A direct SET is only actually safe if a "successful" probe is
+ * guaranteed to mean "this sidecar authoritatively declares (or omits)
+ * every key" -- and it is not: `probeChannelMontage` can swallow a
+ * transport failure on ONE of its two blob fetches and still return
+ * partial data for the other (see the module doc's PROBE ERROR case,
+ * though that case is now caught before reaching this write at all). Two
+ * writers disagreeing on the same four columns (this one direct-SET,
+ * writeDatasetMetadataColumns COALESCE) was also its own smell.
  */
 export const SIGNAL_DEFAULTS_SWEEP_WRITE_SQL = `UPDATE datasets
-   SET sampling_frequency = ?,
-       power_line_frequency = ?,
-       eeg_reference = ?,
-       placement_scheme = ?,
+   SET sampling_frequency = COALESCE(?, sampling_frequency),
+       power_line_frequency = COALESCE(?, power_line_frequency),
+       eeg_reference = COALESCE(?, eeg_reference),
+       placement_scheme = COALESCE(?, placement_scheme),
        signal_defaults_at = datetime('now')
    WHERE dataset_id = ?`;
 
 /**
  * Stamp `signal_defaults_at` ONLY -- every value column is left exactly as
- * it was. Used when the probe ran to completion but found no usable sidecar
- * key.
+ * it was. Used when the probe ran to completion, with no transport error,
+ * but found no usable sidecar key.
  */
 export const SIGNAL_DEFAULTS_SWEEP_STAMP_ONLY_SQL = `UPDATE datasets
    SET signal_defaults_at = datetime('now')
@@ -133,8 +171,9 @@ export interface SignalDefaultsSweepResult {
   /** Candidates whose probe found at least one usable sidecar key and
    *  wrote the value columns. */
   populated: number;
-  /** Candidates whose probe ran to completion but found nothing to write
-   *  (stamped only; prior values, if any, are untouched). */
+  /** Candidates whose probe ran to completion (no transport error) but
+   *  found nothing to write (stamped only; prior values, if any, are
+   *  untouched). */
   noData: number;
   errors: { dataset_id: string; error: string }[];
   /** Candidates still unstamped after this run; null if the count query failed. */
@@ -144,7 +183,7 @@ export interface SignalDefaultsSweepResult {
 /**
  * Run one bounded pass of the signal-defaults sweep: take up to `limit`
  * unstamped candidates and, for each, probe its GitHub repo's BIDS tree and
- * react per-outcome (see the module doc for the three-way split).
+ * react per-outcome (see the module doc for the full branch split).
  *
  * `fetchStats` defaults to the real `getBidsTreeStats` and exists so a test
  * can drive this exact function -- the entry point the real route uses --
@@ -156,6 +195,16 @@ export interface SignalDefaultsSweepResult {
  * lazily, and only when there is at least one real candidate, mirroring
  * recording-stats-sweep's no-wasted-network-call reasoning (there: no
  * wasted S3 GETs on an empty batch; here: no wasted token mint).
+ *
+ * A GitHub-auth failure (missing/invalid App credentials) is caught here,
+ * NOT allowed to propagate to the caller (#1162 review, I5): the ROUTE's
+ * own catch assumes any throw out of this function means the candidate
+ * query failed (its 500 hint literally says "is migration 0071 applied?"),
+ * which was already false for an auth failure before this fix -- a
+ * transient credential issue would have been misdiagnosed as a missing
+ * migration. Instead this returns normally with a single batch-level entry
+ * in `errors` (dataset_id: "*") and every candidate left untouched
+ * (`processed: 0`), so the caller gets an honest, recoverable signal.
  *
  * Throws only if the candidate query itself fails (e.g. migration 0071 not
  * applied). Per-dataset failures are collected into `errors`, never thrown.
@@ -179,7 +228,28 @@ export async function runSignalDefaultsSweep(
 
   let pat = opts?.pat ?? null;
   if (candidates.length > 0 && pat === null) {
-    pat = await getDatasetsToken(env);
+    try {
+      pat = await getDatasetsToken(env);
+    } catch (err) {
+      // See the function doc: an auth failure is NOT a candidate-query
+      // failure, so it must not be allowed to propagate to the route's
+      // migration-hinting catch. Every candidate stays untouched.
+      const remainingOnAuthFailure = await env.DB.prepare(SIGNAL_DEFAULTS_SWEEP_REMAINING_SQL)
+        .first<{ n: number }>()
+        .catch(() => null);
+      return {
+        processed: 0,
+        populated: 0,
+        noData: 0,
+        errors: [
+          {
+            dataset_id: "*",
+            error: `github-auth: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        remaining: remainingOnAuthFailure?.n ?? null,
+      };
+    }
   }
 
   let populated = 0;
@@ -200,6 +270,18 @@ export async function runSignalDefaultsSweep(
         dataset_id,
         error: `github: ${err instanceof Error ? err.message : String(err)}`,
       });
+      continue;
+    }
+
+    // A transport failure the secondary channel/signal-defaults probe
+    // swallowed internally (bids-tree.ts's probeChannelMontage) surfaces
+    // HERE, not as a throw -- getBidsTreeStats itself succeeded (modalities
+    // etc. are trustworthy). Treat it exactly like THROW: no write, stays a
+    // candidate. Without this, a network blip during the probe reads as
+    // "no sidecar" and gets permanently stamped by the branch below (#1162
+    // review, C2; see ADR 0005: transport failures stay fatal).
+    if (stats.channelMontageProbeError) {
+      errors.push({ dataset_id, error: `probe: ${stats.channelMontageProbeError}` });
       continue;
     }
 

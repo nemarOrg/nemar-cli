@@ -25,6 +25,46 @@ import {
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
+/** Real-engine D1 shim (like realD1) that throws on `.run()` for any
+ *  statement whose SQL contains `sampling_frequency = COALESCE` -- i.e.
+ *  the sweep's per-candidate write -- so the `d1 write:` catch branch,
+ *  otherwise never exercised, can be driven for real. Every other
+ *  statement (the candidate SELECT, the remaining COUNT, the stamp-only
+ *  UPDATE) still executes against the real SQLite `db`.
+ *
+ * realD1's own `prepare()` returns a SELF-REFERENCING `api` object: its
+ * `bind()` mutates closure state and returns `api` itself, so callers
+ * chain `.prepare(sql).bind(...).run()` and land back on that same `api`.
+ * This wrapper's `bind` must do the same -- call `stmt.bind()` to set up
+ * the closure state, then return ITS OWN self-reference (`wrapper`), not
+ * `stmt`. An earlier draft returned `stmt.bind(...)` directly, which
+ * resolves to `stmt` itself and silently bypasses this wrapper's
+ * overridden `run` entirely -- `.run()` in the chain would call the REAL
+ * `run`, and this mutation-proof test would have reported `populated: 1`
+ * instead of catching the simulated failure. */
+function writeFailingD1(target: Database): D1Database {
+  const base = realD1(target);
+  return {
+    prepare(sql: string) {
+      const stmt = base.prepare(sql);
+      const shouldFail = sql.includes("sampling_frequency = COALESCE");
+      const wrapper = {
+        bind: (...args: unknown[]) => {
+          stmt.bind(...args);
+          return wrapper;
+        },
+        run: () => {
+          if (shouldFail) throw new Error("simulated D1 write failure");
+          return stmt.run();
+        },
+        first: <T>() => stmt.first<T>(),
+        all: <T>() => stmt.all<T>(),
+      };
+      return wrapper;
+    },
+  } as unknown as D1Database;
+}
+
 let db: Database;
 
 function env(): Bindings {
@@ -155,6 +195,167 @@ describe("runSignalDefaultsSweep: three-way outcome handling", () => {
     expect(r.power_line_frequency).toBeNull();
     expect(r.eeg_reference).toBeNull();
     expect(r.placement_scheme).toBeNull();
+  });
+
+  // #1162 review, C1: SIGNAL_DEFAULTS_SWEEP_WRITE_SQL must COALESCE, not
+  // directly SET. Unlike the "SUCCESS with only ONE key" test above (which
+  // seeds a FRESH all-NULL row and so cannot distinguish a direct SET from
+  // a COALESCE -- both produce the same result there), this seeds REAL
+  // prior values in the three fields the sparse probe does NOT return,
+  // exactly the "reindex already populated these, sweep re-probes with a
+  // sparser sidecar later" scenario the review flagged. A direct SET
+  // regresses this to NULL; COALESCE preserves it.
+  test("SUCCESS with only ONE key populated does NOT null the other three when they already hold real prior values", async () => {
+    seedDataset("nm000804");
+    db.prepare(
+      `UPDATE datasets
+         SET power_line_frequency = 60, eeg_reference = 'average',
+             placement_scheme = '10-20'
+       WHERE dataset_id = 'nm000804'`,
+    ).run();
+    // This probe result is what a SPARSER re-probe would return -- only
+    // sampling_frequency, as if the sidecar changed or a different
+    // exemplar was sampled this time.
+    const sparseFetch: typeof getBidsTreeStats = async () => emptyStats({ samplingFrequency: 999 });
+    const result = await runSignalDefaultsSweep(env(), {
+      pat: "fake-pat",
+      fetchStats: sparseFetch,
+    });
+    expect(result.populated).toBe(1);
+    const r = row("nm000804");
+    expect(r.sampling_frequency).toBe(999);
+    // The C1 assertions: these three must survive untouched.
+    expect(r.power_line_frequency).toBe(60);
+    expect(r.eeg_reference).toBe("average");
+    expect(r.placement_scheme).toBe("10-20");
+  });
+
+  // #1162 review, I1: each of the four OR terms in the `found` gate must
+  // independently route to SUCCESS. Only samplingFrequency was previously
+  // exercised in isolation; deleting any ONE of the other three terms from
+  // the `||` chain left every existing test green.
+  test("powerLineFrequency alone routes to SUCCESS, not no-data", async () => {
+    seedDataset("nm000805");
+    const result = await runSignalDefaultsSweep(env(), {
+      pat: "fake-pat",
+      fetchStats: async () => emptyStats({ powerLineFrequency: 60 }),
+    });
+    expect(result.populated).toBe(1);
+    expect(result.noData).toBe(0);
+    const r = row("nm000805");
+    expect(r.power_line_frequency).toBe(60);
+  });
+
+  test("eegReference alone routes to SUCCESS, not no-data", async () => {
+    seedDataset("nm000806");
+    const result = await runSignalDefaultsSweep(env(), {
+      pat: "fake-pat",
+      fetchStats: async () => emptyStats({ eegReference: "average" }),
+    });
+    expect(result.populated).toBe(1);
+    expect(result.noData).toBe(0);
+    const r = row("nm000806");
+    expect(r.eeg_reference).toBe("average");
+  });
+
+  test("placementScheme alone routes to SUCCESS, not no-data", async () => {
+    seedDataset("nm000807");
+    const result = await runSignalDefaultsSweep(env(), {
+      pat: "fake-pat",
+      fetchStats: async () => emptyStats({ placementScheme: "10-20" }),
+    });
+    expect(result.populated).toBe(1);
+    expect(result.noData).toBe(0);
+    const r = row("nm000807");
+    expect(r.placement_scheme).toBe("10-20");
+  });
+});
+
+// #1162 review, C2: a swallowed transport failure inside the secondary
+// probe must be treated identically to THROW (no write, row stays a
+// candidate), never like genuine absence (which would stamp it away
+// permanently).
+describe("runSignalDefaultsSweep: channelMontageProbeError is treated like THROW, not NO SIDECAR", () => {
+  test("a probe error leaves the row unstamped, prior values untouched, and is recorded in errors", async () => {
+    seedDataset("nm000808");
+    db.prepare(
+      `UPDATE datasets
+         SET sampling_frequency = 512, signal_defaults_at = NULL
+       WHERE dataset_id = 'nm000808'`,
+    ).run();
+    const probeErrorFetch: typeof getBidsTreeStats = async () =>
+      emptyStats({ channelMontageProbeError: "Failed to get blob abc123: HTTP 500" });
+    const result = await runSignalDefaultsSweep(env(), {
+      pat: "fake-pat",
+      fetchStats: probeErrorFetch,
+    });
+
+    expect(result.populated).toBe(0);
+    expect(result.noData).toBe(0);
+    expect(result.errors).toEqual([
+      { dataset_id: "nm000808", error: "probe: Failed to get blob abc123: HTTP 500" },
+    ]);
+    const r = row("nm000808");
+    // Stays a candidate for the next run, exactly like THROW.
+    expect(r.signal_defaults_at).toBeNull();
+    // Prior good value is untouched (would survive the C1 COALESCE fix
+    // anyway if this fell through to a write, but this outcome must not
+    // write at all).
+    expect(r.sampling_frequency).toBe(512);
+  });
+});
+
+// #1162 review, I5: a GitHub-auth failure (missing/invalid App
+// credentials) must be absorbed into a normal 200-shaped result, not
+// propagate as a throw the route would misreport as "is migration 0071
+// applied?".
+describe("runSignalDefaultsSweep: GitHub-auth failure handling", () => {
+  test("with a real candidate and no `pat` override, a missing-auth-config throw is caught and reported gracefully", async () => {
+    seedDataset("nm000809");
+    // No `pat` passed -- forces the real getDatasetsToken(env) path, which
+    // throws synchronously ("No GitHub auth configured...") because this
+    // test's env() has no GITHUB_APP_* / GITHUB_ADMIN_PAT bindings at all.
+    const result = await runSignalDefaultsSweep(env());
+
+    expect(result.processed).toBe(0);
+    expect(result.populated).toBe(0);
+    expect(result.noData).toBe(0);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]?.dataset_id).toBe("*");
+    expect(result.errors[0]?.error).toContain("github-auth:");
+    expect(result.errors[0]?.error).toContain("No GitHub auth configured");
+    // The candidate is untouched -- still a candidate for the next run.
+    const r = row("nm000809");
+    expect(r.signal_defaults_at).toBeNull();
+  });
+
+  test("with zero candidates, no auth attempt is made -- the function returns cleanly even with no auth config", async () => {
+    const result = await runSignalDefaultsSweep(env());
+    expect(result).toEqual({
+      processed: 0,
+      populated: 0,
+      noData: 0,
+      errors: [],
+      remaining: 0,
+    });
+  });
+});
+
+describe("runSignalDefaultsSweep: d1 write failure (suggestion from #1162 review)", () => {
+  test("a D1 write failure after a SUCCESSFUL probe is recorded in errors, not thrown", async () => {
+    seedDataset("nm000804a");
+    const result = await runSignalDefaultsSweep(
+      { DB: writeFailingD1(db), ENVIRONMENT: "test" } as Bindings,
+      { pat: "fake-pat", fetchStats: async () => emptyStats({ samplingFrequency: 250 }) },
+    );
+    expect(result.populated).toBe(0);
+    expect(result.errors).toEqual([
+      { dataset_id: "nm000804a", error: "d1 write: simulated D1 write failure" },
+    ]);
+    // The probe succeeded but the write failed -- the row is left exactly
+    // as it was (still unstamped), same recoverable shape as THROW.
+    const r = row("nm000804a");
+    expect(r.signal_defaults_at).toBeNull();
   });
 });
 

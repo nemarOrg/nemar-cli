@@ -535,6 +535,13 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
    * this hits the GitHub API (getBidsTreeStats: root tree + up to 25 subject
    * subtrees + up to 2 sidecar blobs per dataset), not S3 -- same cap as
    * channel-montage-sweep / hed-sweep.
+   *
+   * The catch below is now ACCURATE about what it catches (#1162 review,
+   * I5): `runSignalDefaultsSweep` itself absorbs a GitHub-auth failure
+   * (missing/invalid App credentials) into a normal 200 response with a
+   * batch-level `errors` entry, rather than letting it propagate here to be
+   * misreported as a missing migration -- so a throw reaching this catch
+   * really does mean the candidate query failed.
    */
   admin.post("/datasets/signal-defaults-sweep", async (c) => {
     const db = c.env.DB;
