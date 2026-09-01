@@ -13,6 +13,7 @@ import { RangeParseError } from "../../../../shared/range.js";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import { parseLicenseTierFilter } from "../../lib/license";
 import { optionalAuthMiddleware } from "../../middleware/auth";
+import { getFacetVocabulary } from "../../services/dataset-facet-vocabulary";
 import {
   FacetEnumParseError,
   buildExcludedUnknownBreakdownSql,
@@ -22,6 +23,7 @@ import {
 import {
   type DatasetFilterOptions,
   buildDatasetFilterClauses,
+  buildPublicCatalogBase,
   escapeLikePattern,
 } from "../../services/dataset-filters";
 import { executeDatasetSearch } from "../../services/dataset-search";
@@ -587,23 +589,14 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     // excluded_unknown_by_facet breakdown runs its own SUM(...) query
     // directly against the base, and its nullTest expressions need the raw
     // `d` columns the projection's COALESCE/aliasing would otherwise hide.
-    const buildPublicBase = (): { from: string; params: (string | number)[] } => {
-      const prefixParams: (string | number)[] = [status];
-      let from = `
-      FROM datasets d
-      LEFT JOIN users u ON d.owner_user_id = u.id
-      WHERE d.status = ?
-        AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)
-    `;
-      if (!user || !hasRole(user.role, "admin")) {
-        from += " AND d.visibility = 'public'";
-      }
-      if (owner) {
-        from += " AND COALESCE(d.uploader, u.username) = ?";
-        prefixParams.push(owner);
-      }
-      return { from, params: prefixParams };
-    };
+    // Epic #1144 phase 5a (#1170), D4: this exact FROM/JOIN/WHERE base is
+    // also what GET /datasets/facets must count over (the population an
+    // anonymous caller can already list), so it now lives in
+    // dataset-filters.ts and both call sites share it -- see that function's
+    // doc comment. This closure just supplies the handler's own
+    // request-scoped `status`/`user`/`owner`.
+    const buildPublicBase = (): { from: string; params: (string | number)[] } =>
+      buildPublicCatalogBase(status, user, owner);
 
     const buildPublicPrefix = (): { sql: string; params: (string | number)[] } => {
       const { from, params: prefixParams } = buildPublicBase();
@@ -767,6 +760,54 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       console.error("Dataset search failed:", msg);
       return c.json({ error: "Search failed", details: msg }, 500);
     }
+  });
+
+  /**
+   * GET /datasets/facets - Facet vocabulary with counts (epic #1144 phase 5a,
+   * #1170, D1). Lets the CLI validate/autocomplete values like `--task`
+   * (1040 distinct labels) or `--electrode-system` (six values nobody has
+   * written down outside the source) against what the catalog actually
+   * contains, instead of accepting free text blind.
+   *
+   * MUST be registered before `GET /:id` below: this file already carries
+   * one warning about that trap (`GET /search` above), and a literal path
+   * segment registered AFTER a `:id` param route is shadowed by it -- every
+   * request to `/facets` would instead hit the `:id` handler, fail
+   * `isValidDatasetId("facets")`, and 404/400 as an unrecognised dataset id.
+   * This is the SECOND instance of the same trap in this file.
+   *
+   * Response shape (D2): most keys are a `{ value, count }[]` vocabulary;
+   * `task` alone carries `{ values, distinct_total, truncated }` since a
+   * truncated list that looks complete is the exact failure mode this
+   * endpoint exists to prevent for its 1040 real values. A key is ABSENT
+   * (not `[]`) when its underlying query failed (D5/ADR 0005) -- `warning`
+   * is set only then; see dataset-facet-vocabulary.ts for the full policy.
+   */
+  datasetRoutes.get("/facets", async (c) => {
+    // Safe default, matching every other handler in this file: an error
+    // path (there is none today, since getFacetVocabulary never throws --
+    // see its own doc comment) would inherit no-store rather than being
+    // cached at the edge by accident.
+    c.header("Cache-Control", "no-store");
+    const db = c.env.DB;
+    const { vocabulary, warning } = await getFacetVocabulary(db);
+
+    if (!warning) {
+      // D4: this response is identical for every caller -- no user-scoped
+      // branching, no query params, nothing auth-dependent changes the
+      // answer -- so it takes the same edge-cache header the resolve and
+      // detail endpoints use. Unlike those two (and the list endpoint),
+      // there is no `Vary: Authorization` here: this handler never reads
+      // `c.get("user")` and the SQL never branches on auth, so there is no
+      // auth-dependent cache key to separate in the first place -- not
+      // "the same reasoning as the list endpoint", a different one. A
+      // degraded (warning-carrying) response is left at the no-store
+      // default above rather than cached for the full 5-minute s-maxage
+      // window, so a transient query failure doesn't get pinned at the edge.
+      c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
+    }
+
+    return c.json({ ...vocabulary, ...(warning ? { warning } : {}) });
   });
 
   /**
