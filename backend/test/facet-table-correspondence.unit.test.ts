@@ -212,7 +212,15 @@ describe("D7: every facet's column is projected on both GET /datasets branches",
     const row = body.datasets[0];
     const missing: string[] = [];
     for (const facet of FACETS) {
-      for (const col of expectedColumns[facet.key]) {
+      // Fail cleanly rather than crashing with a TypeError when a facet has no
+      // fixture entry (#1177 review): `for (const c of undefined)` throws and
+      // the reader gets a stack trace instead of the facet's name.
+      const cols = expectedColumns[facet.key];
+      if (!cols) {
+        missing.push(`${facet.key} -> NO EXPECTED-COLUMN ENTRY IN THIS TEST`);
+        continue;
+      }
+      for (const col of cols) {
         if (!(col in row)) missing.push(`${facet.key} -> ${col}`);
       }
     }
@@ -241,7 +249,15 @@ describe("D7: every facet's column is projected on both GET /datasets branches",
     const row = body.datasets[0];
     const missing: string[] = [];
     for (const facet of FACETS) {
-      for (const col of expectedColumns[facet.key]) {
+      // Fail cleanly rather than crashing with a TypeError when a facet has no
+      // fixture entry (#1177 review): `for (const c of undefined)` throws and
+      // the reader gets a stack trace instead of the facet's name.
+      const cols = expectedColumns[facet.key];
+      if (!cols) {
+        missing.push(`${facet.key} -> NO EXPECTED-COLUMN ENTRY IN THIS TEST`);
+        continue;
+      }
+      for (const col of cols) {
         if (!(col in row)) missing.push(`${facet.key} -> ${col}`);
       }
     }

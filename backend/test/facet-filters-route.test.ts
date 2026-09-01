@@ -1110,6 +1110,19 @@ describe("GET /datasets visibility: anonymous, member and admin", () => {
     app = newApp();
     insertDataset(db, "nm400001", { name: "Public Fixture" });
     insertDataset(db, "nm400002", { name: "Private Fixture", visibility: "private" });
+    // #1177 cross-phase review: buildPublicCatalogBase's sandbox/exemplar
+    // clause was pinned ONLY by the facets endpoint's tests. This file --
+    // the list endpoint's own suite, covering phases 3, 4 and 5a -- hardcoded
+    // is_sandbox: 0 in every fixture and never inserted a sandbox or exemplar
+    // row, so `GET /datasets` had no coverage at all for excluding throwaway
+    // sandboxes from an anonymous listing. Two halves of one shared function,
+    // each defended by a different single endpoint.
+    insertDataset(db, "xx090001", { name: "Throwaway Sandbox", is_sandbox: 1 });
+    insertDataset(db, "xx099901", {
+      name: "Curated Exemplar",
+      is_sandbox: 1,
+      is_exemplar: 1,
+    });
     db.run(
       "INSERT INTO users (id, username, email, password_hash, status, role, email_verified) VALUES (11, 'member11', 'm11@example.org', 'x', 'approved', 'member', 1)",
     );
@@ -1131,14 +1144,27 @@ describe("GET /datasets visibility: anonymous, member and admin", () => {
   }
 
   test("an anonymous caller sees only the public dataset", async () => {
-    expect(await listIds()).toEqual(["nm400001"]);
+    // The exemplar is public+active and carries is_exemplar=1, so the
+    // carve-out admits it; the plain sandbox must stay out.
+    expect(await listIds()).toEqual(["nm400001", "xx099901"]);
+  });
+
+  test("a throwaway sandbox is excluded, a curated exemplar is not", async () => {
+    // Stated separately from the assertion above so a failure names WHICH
+    // half of the sandbox/exemplar clause broke.
+    const ids = await listIds();
+    expect(ids).not.toContain("xx090001");
+    expect(ids).toContain("xx099901");
   });
 
   test("an authenticated NON-admin sees only the public dataset", async () => {
     // The branch an inverted gate would flip open. Distinct from the
     // anonymous case: here `user` is set but `hasRole(user.role, "admin")`
     // is false, so only the second half of the condition is doing the work.
-    expect(await listIds({ Authorization: `Bearer ${MEMBER_KEY}` })).toEqual(["nm400001"]);
+    expect(await listIds({ Authorization: `Bearer ${MEMBER_KEY}` })).toEqual([
+      "nm400001",
+      "xx099901",
+    ]);
   });
 
   test("an authenticated admin sees the private dataset too", async () => {
@@ -1148,6 +1174,7 @@ describe("GET /datasets visibility: anonymous, member and admin", () => {
     expect(await listIds({ Authorization: `Bearer ${ADMIN_KEY}` })).toEqual([
       "nm400001",
       "nm400002",
+      "xx099901",
     ]);
   });
 });

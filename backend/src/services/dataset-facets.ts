@@ -277,6 +277,32 @@ export const FACET_DEFINITIONS: readonly FacetSqlSpec[] = [
   },
 ];
 
+/**
+ * Every facet declared in `shared/facets.ts` MUST have an SQL binding here.
+ *
+ * ADR 0031 says a half-added facet "fails CI instead of a flag silently doing
+ * nothing". That was true of CI and only CI: the correspondence test was the
+ * single thing standing between a declared-but-unbound facet and production,
+ * with no defence behind it (#1177 cross-phase review). Verified: a facet in
+ * `FACETS` with no entry below makes `GET /datasets?<its param>=1..5` return
+ * 200 with EVERY row, filter silently ignored -- a plausible, wrong answer,
+ * which is the worst shape of failure this epic has.
+ *
+ * Throwing at module scope is deliberate. This is a programming error, not a
+ * data condition: the two tables are both source, edited together, and an
+ * inconsistency means the filter engine cannot be trusted at all. Failing the
+ * import fails the deploy loudly, which is strictly better than serving
+ * unfiltered results that look filtered. Same posture as
+ * `buildInPlaceholders`, which throws rather than emit wrong SQL.
+ */
+const UNBOUND_FACETS = FACETS.filter((f) => !FACET_DEFINITIONS.some((d) => d.key === f.key));
+if (UNBOUND_FACETS.length > 0) {
+  const keys = UNBOUND_FACETS.map((f) => f.key).join(", ");
+  throw new Error(
+    `dataset-facets: ${UNBOUND_FACETS.length} facet(s) declared in shared/facets.ts have no SQL binding, so their filters would silently return unfiltered results: ${keys}`,
+  );
+}
+
 const FACET_DEFINITIONS_BY_KEY = new Map(FACET_DEFINITIONS.map((s) => [s.key, s]));
 
 // --- Parsed filter values -----------------------------------------------

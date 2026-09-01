@@ -92,11 +92,17 @@ describe("search result table: Score column (#1150 D1)", () => {
   });
 
   test("--json still carries the real score field", async () => {
-    const { stdout, exitCode } = await runSearch(["--limit", "3", "--json"]);
+    // No --limit here (#1177 review): the stub returns a fixed two-row body
+    // and ignores the query string, so passing --limit 3 read as coverage of
+    // limit handling that this test cannot provide. Asserting on the field is
+    // the point; the flag was decoration.
+    const { stdout, exitCode } = await runSearch(["--json"]);
     expect(exitCode).toBe(0);
     const parsed = JSON.parse(stdout);
     expect(Array.isArray(parsed.results)).toBe(true);
-    expect(parsed.results.length).toBeGreaterThan(0);
+    // The stub's fixed body, so this is an exact expectation rather than a
+    // toBeGreaterThan(0) that any non-empty response would satisfy.
+    expect(parsed.results.length).toBe(2);
     for (const result of parsed.results) {
       expect(typeof result.score).toBe("number");
     }
