@@ -22,14 +22,17 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "bun";
 import chalk from "chalk";
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
+import { LICENSE_TIERS } from "../../shared/license-tiers.js";
+import { RangeParseError } from "../../shared/range.js";
 import { addCi } from "../lib/api/admin.js";
 import { getCurrentUser } from "../lib/api/auth.js";
 import { requestDownloadCredentials, requestUploadCredentials } from "../lib/api/data.js";
 import {
   type Dataset,
+  type DatasetSearchResult,
   type DatasetsListResponse,
   type NemarMetadataPayload,
   ORCID_REGEX,
@@ -70,6 +73,7 @@ import {
   validateBidsDataset,
 } from "../lib/bids-validator.js";
 import { printPartialRetrieval, requireAuth } from "../lib/cli-output.js";
+import { triggerOpportunisticRefresh } from "../lib/completion/refresh.js";
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
 import { NO_DESCRIPTION, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
 import {
@@ -78,6 +82,13 @@ import {
   updateLastUpload,
   writeLocalConfig,
 } from "../lib/dataset-config.js";
+import {
+  FacetEnumCliError,
+  RANGE_FORMS_HELP,
+  addFacetOptions,
+  buildFacetParams,
+  formatExcludedUnknownNote,
+} from "../lib/facet-options.js";
 import {
   cloneDataset,
   pushBranch,
@@ -144,7 +155,9 @@ import {
 import { checkPrerequisitesForCommand } from "../lib/prerequisites.js";
 import { DownloadProgressTracker, formatBytes } from "../lib/progress.js";
 import { promptForProvenance } from "../lib/provenance.js";
+import { renderSnippetLine, truncateTokenList } from "../lib/render/snippet.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
+import { theme } from "../lib/theme.js";
 import type { UploadProgress } from "../lib/upload-progress.js";
 import {
   clearUploadProgress,
@@ -1639,8 +1652,219 @@ function renderDatasetTable(
   console.log(chalk.dim("Search: nemar dataset search <query>"));
 }
 
+/**
+ * Column layout for `nemar dataset search`'s result table (epic #1144 phase
+ * 6, issue #1150, D4). Derives widths from the terminal width, shrinking the
+ * name column first and then dropping the least load-bearing columns (HED,
+ * then Subj, then Modality) in that order before the row would otherwise
+ * overflow -- but never touching `idWidth`: the id is what the user copies
+ * into their next command, so it is never truncated at any width, even if
+ * every other column has already been dropped and the row still overflows.
+ */
+export interface SearchColumnPlan {
+  idWidth: number;
+  nameWidth: number;
+  modWidth: number;
+  subjWidth: number;
+  showModality: boolean;
+  showSubj: boolean;
+  showHed: boolean;
+}
+
+const SEARCH_MAX_NAME_WIDTH = 35;
+const SEARCH_MIN_NAME_WIDTH = 8;
+const SEARCH_FLOOR_NAME_WIDTH = 4;
+const SEARCH_MOD_WIDTH = 10;
+const SEARCH_SUBJ_WIDTH = 6;
+const SEARCH_HED_WIDTH = 3;
+const SEARCH_COLUMN_GAP = 2;
+/** Fallback terminal width (#1150 D4): `process.stdout.columns` is
+ *  `undefined` for piped/non-TTY output, which is the common case for a
+ *  scripted or redirected invocation. */
+export const SEARCH_DEFAULT_COLUMNS = 80;
+
+/**
+ * Plan the search table's column widths for a given terminal width. Never
+ * throws (#1150 D7): a non-finite or non-positive `columns` (a terminal
+ * capability probe gone wrong) falls back to {@link SEARCH_DEFAULT_COLUMNS}
+ * rather than producing a degenerate or negative-width layout.
+ */
+export function planSearchColumns(
+  results: Pick<DatasetSearchResult, "id" | "name">[],
+  columns: number,
+): SearchColumnPlan {
+  const safeColumns =
+    Number.isFinite(columns) && columns > 0 ? Math.floor(columns) : SEARCH_DEFAULT_COLUMNS;
+  const idWidth = Math.max(10, ...results.map((r) => r.id.length));
+  let nameWidth = Math.min(
+    SEARCH_MAX_NAME_WIDTH,
+    Math.max(10, ...results.map((r) => r.name.length)),
+  );
+  let showModality = true;
+  let showSubj = true;
+  let showHed = true;
+
+  const totalWidth = (): number => {
+    let width = idWidth + SEARCH_COLUMN_GAP + nameWidth;
+    if (showModality) width += SEARCH_COLUMN_GAP + SEARCH_MOD_WIDTH;
+    if (showSubj) width += SEARCH_COLUMN_GAP + SEARCH_SUBJ_WIDTH;
+    if (showHed) width += SEARCH_COLUMN_GAP + SEARCH_HED_WIDTH;
+    return width;
+  };
+
+  while (totalWidth() > safeColumns && nameWidth > SEARCH_MIN_NAME_WIDTH) nameWidth--;
+  if (totalWidth() > safeColumns && showHed) showHed = false;
+  if (totalWidth() > safeColumns && showSubj) showSubj = false;
+  if (totalWidth() > safeColumns && showModality) showModality = false;
+  // Extremely narrow terminals: shrink further rather than drop the name
+  // column entirely -- id + name is the minimum a search result is legible
+  // by.
+  while (totalWidth() > safeColumns && nameWidth > SEARCH_FLOOR_NAME_WIDTH) nameWidth--;
+
+  return {
+    idWidth,
+    nameWidth,
+    modWidth: SEARCH_MOD_WIDTH,
+    subjWidth: SEARCH_SUBJ_WIDTH,
+    showModality,
+    showSubj,
+    showHed,
+  };
+}
+
+/**
+ * Render `nemar dataset search`'s human-readable result table as an array
+ * of lines (epic #1144 phase 6, issue #1150). No `Score` column (D1: RRF
+ * score is a ranking artefact on a scale the CLI's old 0.8/0.5 thresholds
+ * never matched -- row order already encodes relevance, and the freed width
+ * goes to the snippet). A snippet line follows its row only when one comes
+ * back from the API (D2); a row without one leaves no blank line behind.
+ *
+ * Row CONTENT rendering is fault-isolated (#1150 D7): a malformed
+ * `modalities` or `snippet` on one result degrades that row to its plainest
+ * safe form rather than aborting the whole table -- the dataset list the
+ * user asked for is the deliverable, the decoration is not allowed to take
+ * it down.
+ *
+ * The scope is narrower than "per-row" first reads, and the difference is
+ * worth knowing (#1174 review): `planSearchColumns` runs ONCE over the whole
+ * result set before the per-row try/catch, so a malformed `id` or `name`
+ * throws out of this function entirely. That is caught one level up by the
+ * command's own fallback to a plain id/name listing. The command still never
+ * fails, which is D7's actual guarantee -- but in that case every row loses
+ * its full rendering, not just the offending one.
+ */
+export function renderSearchResultLines(results: DatasetSearchResult[], columns: number): string[] {
+  const plan = planSearchColumns(results, columns);
+  const lines: string[] = [];
+
+  const headerParts = ["ID".padEnd(plan.idWidth), "Name".padEnd(plan.nameWidth)];
+  if (plan.showModality) headerParts.push("Modality".padEnd(plan.modWidth));
+  if (plan.showSubj) headerParts.push("Subj".padEnd(plan.subjWidth));
+  if (plan.showHed) headerParts.push("HED".padEnd(SEARCH_HED_WIDTH));
+  const header = headerParts.join("  ");
+  lines.push(theme.muted(header));
+  lines.push(theme.muted("-".repeat(header.length)));
+
+  for (const result of results) {
+    try {
+      const name =
+        result.name.length > plan.nameWidth
+          ? `${result.name.substring(0, plan.nameWidth - 3)}...`
+          : result.name;
+
+      const rowParts = [theme.id(result.id.padEnd(plan.idWidth)), name.padEnd(plan.nameWidth)];
+      if (plan.showModality) {
+        rowParts.push(
+          truncateTokenList(result.modalities || "-", plan.modWidth).padEnd(plan.modWidth),
+        );
+      }
+      if (plan.showSubj) {
+        rowParts.push(
+          (result.participants ? String(result.participants) : "-").padEnd(plan.subjWidth),
+        );
+      }
+      if (plan.showHed) {
+        rowParts.push(result.has_hed === 1 ? theme.metric("HED") : theme.muted("-"));
+      }
+      lines.push(rowParts.join("  "));
+
+      // Defence-in-depth beyond renderSnippetLine's own guard (#1150 D7):
+      // a snippet that fails to render costs this row its garnish, never
+      // the row itself, never the rest of the table.
+      //
+      // This layer is DOUBLY masked and no test can see it (#1174 review):
+      // renderSnippetLine already cannot throw for any input reachable here,
+      // and if it somehow did, the per-row catch below would handle it with
+      // the same visible outcome. Kept because the cost is a try/catch and
+      // the failure it guards against is a search silently losing rows, but
+      // do not mistake the passing suite for proof that it does anything.
+      let snippetLine: string | null = null;
+      try {
+        snippetLine = renderSnippetLine(result.snippet);
+      } catch {
+        snippetLine = null;
+      }
+      if (snippetLine) lines.push(`    ${snippetLine}`);
+    } catch {
+      // A single malformed row must not take down the rest of the table
+      // (#1150 D7) -- fall back to the two fields that matter most: the id
+      // the user copies onward, and the name that tells them what it is.
+      lines.push(`${result.id ?? "?"}  ${result.name ?? "?"}`);
+    }
+  }
+
+  return lines;
+}
+
+/**
+ * Validate `--license` tiers up front, shared by `list` and `search` (epic
+ * #1144 phase 4, #1148, D4/D6). The API tolerantly drops unknown tokens (so
+ * the website degrades gracefully), which would silently return an
+ * unfiltered list on a CLI typo -- so fail fast here instead, against the
+ * SAME `LICENSE_TIERS` the backend classifies with (shared/license-tiers.ts,
+ * #653) rather than a second hand-maintained copy.
+ */
+function validateLicenseTiersOrExit(license: string | undefined): void {
+  if (!license) return;
+  const bad = license
+    .split(",")
+    .map((t: string) => t.trim().toLowerCase())
+    .filter((t: string) => t && !(LICENSE_TIERS as readonly string[]).includes(t));
+  if (bad.length > 0) {
+    console.log(chalk.red(`Error: invalid license tier(s): ${bad.join(", ")}`));
+    console.log(`Valid tiers: ${LICENSE_TIERS.join(", ")}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * Build the wire-ready facet query params from a command's parsed options,
+ * or print an error and exit 1 -- before any network call (epic #1144 phase
+ * 4, #1148, D3). Shared by `list` and `search` so a bad `--subjects 100xyz`
+ * behaves identically on both. `buildFacetParams`/`FacetEnumCliError` live in
+ * lib/facet-options.ts, which never calls `process.exit` itself (see that
+ * file's header and lib/cli-output.ts's) -- owning the exit is this command
+ * module's job, same as the license-tier check above.
+ */
+function parseFacetOptionsOrExit(options: Record<string, unknown>): Record<string, string> {
+  try {
+    return buildFacetParams(options);
+  } catch (err) {
+    if (err instanceof RangeParseError) {
+      console.log(chalk.red(`Error: ${err.message}`));
+      console.log(chalk.dim(RANGE_FORMS_HELP));
+    } else if (err instanceof FacetEnumCliError) {
+      console.log(chalk.red(`Error: ${err.message}`));
+    } else {
+      throw err;
+    }
+    process.exit(1);
+  }
+}
+
 // List command
-datasetCommand
+const listCommand = datasetCommand
   .command("list")
   .description("List datasets on NEMAR (full catalog)")
   .option("--mine", "List only your datasets (both private and public)")
@@ -1657,18 +1881,32 @@ datasetCommand
   .option("--hed", "Show only datasets with HED annotations")
   .option("--complete", "Show only datasets verified data-complete (#970)")
   .option("--recent [days]", "Show recently published datasets")
-  .option("--sort <order>", "Sort: newest, oldest, name, participants, size", "newest")
+  .addOption(
+    new Option("--sort <order>", "Sort order")
+      .choices(["newest", "oldest", "name", "participants", "size", "citations"])
+      .default("newest"),
+  )
+  .option(
+    "--include-unknown",
+    "Include datasets with an unknown value for the active facet filter(s)",
+  )
   .option("--json", "Output as JSON for scripting")
   .option("-n, --limit <n>", "Results per page (default: 20, max: 200)", "20")
   .option("--page <n>", "Page number (starts at 1)")
   .option("--offset <n>", "Skip this many results (alternative to --page)")
-  .option("--all", "Show all results (up to 200)")
+  .option("--all", "Show all results (up to 200)");
+// Epic #1144 phase 4 (#1148), D1: one registered flag per declared facet
+// (shared/facets.ts), generated rather than 20 hand-written .option() calls.
+addFacetOptions(listCommand);
+listCommand
   .addHelpText(
     "after",
     `
 Description:
   Lists the full NEMAR catalog, including legacy datasets from nemar.org
   and datasets managed via nemar-cli. Shows 20 results per page by default.
+  Run 'nemar dataset list --help' for the full list of facet filters
+  (--subjects, --channels, --age, --source, ...).
 
   With --mine: shows only YOUR datasets (requires authentication).
   With --owner <username>: shows datasets owned by a specific user.
@@ -1696,6 +1934,7 @@ Examples:
   $ nemar dataset list --license public,attribution  # Permissive licenses
   $ nemar dataset list --search "motor"        # Search by keyword
   $ nemar dataset list --doi --sort size       # Published, by size
+  $ nemar dataset list --subjects 20..50 --age 18..  # Facet filters
   $ nemar dataset search "resting state EEG"   # Semantic search`,
   )
   .action(async (options) => {
@@ -1711,29 +1950,11 @@ Examples:
       process.exit(1);
     }
 
-    // Validate --license tiers up front. The API tolerantly drops unknown
-    // tokens (so the website degrades gracefully), which would silently return
-    // an unfiltered list on a CLI typo -- so fail fast here instead. Mirror of
-    // backend/src/lib/license.ts LICENSE_TIERS (#653).
-    if (options.license) {
-      const VALID_LICENSE_TIERS = [
-        "public",
-        "attribution",
-        "sharealike",
-        "noncommercial",
-        "noderiv",
-        "unknown",
-      ];
-      const bad = options.license
-        .split(",")
-        .map((t: string) => t.trim().toLowerCase())
-        .filter((t: string) => t && !VALID_LICENSE_TIERS.includes(t));
-      if (bad.length > 0) {
-        console.log(chalk.red(`Error: invalid license tier(s): ${bad.join(", ")}`));
-        console.log(`Valid tiers: ${VALID_LICENSE_TIERS.join(", ")}`);
-        process.exit(1);
-      }
-    }
+    validateLicenseTiersOrExit(options.license);
+    // Epic #1144 phase 4 (#1148), D3: every facet range/enum is parsed and
+    // validated here, client-side, before the spinner (and therefore before
+    // any network call) starts below.
+    const facets = parseFacetOptionsOrExit(options);
 
     // Parse pagination
     const limit = options.all ? 200 : Math.min(Number.parseInt(options.limit, 10) || 20, 200);
@@ -1764,6 +1985,8 @@ Examples:
         limit,
         offset,
         owner: options.owner,
+        facets,
+        includeUnknown: !!options.includeUnknown,
       });
       spinner.stop();
     } catch (error) {
@@ -1789,11 +2012,18 @@ Examples:
             offset,
             fallback: response.fallback,
             warning: response.warning,
+            excluded_unknown: response.excluded_unknown,
+            excluded_unknown_by_facet: response.excluded_unknown_by_facet,
           },
           null,
           2,
         ),
       );
+      // Epic #1144 phase 5b (#1149), D3: fire-and-forget, after output is
+      // rendered, never awaited -- this list call just proved the API is
+      // reachable, so refreshing the completion cache costs one extra
+      // request on a path that already made one.
+      triggerOpportunisticRefresh();
       return;
     }
 
@@ -1802,6 +2032,21 @@ Examples:
     // not what was asked for. Make it loud rather than a silent unfiltered list (#646).
     if (response.warning) {
       console.log(chalk.yellow(`\n⚠ ${response.warning}`));
+    }
+
+    // Epic #1144 phase 4 (#1148), D5: reported on stderr (not part of the
+    // rendered table/JSON on stdout) and only when at least one facet
+    // actually excluded something. Always attributed per facet -- the
+    // backend computes excluded_unknown_by_facet in the same query.
+    if (response.excluded_unknown !== undefined && response.excluded_unknown > 0) {
+      console.error(
+        chalk.dim(
+          formatExcludedUnknownNote(
+            response.excluded_unknown,
+            response.excluded_unknown_by_facet ?? {},
+          ),
+        ),
+      );
     }
 
     if (datasets.length === 0) {
@@ -1825,27 +2070,51 @@ Examples:
       } else {
         console.log(chalk.yellow("No datasets found."));
       }
+      triggerOpportunisticRefresh();
       return;
     }
 
     renderDatasetTable(datasets, { limit, offset, totalCount });
+    triggerOpportunisticRefresh();
   });
 
 // Search command (semantic search via Vectorize)
-datasetCommand
+const searchCommand = datasetCommand
   .command("search <query>")
   .description("Search datasets using semantic matching")
   .option("--modality <type>", "Filter by modality (eeg, emg, meg, etc.)")
+  .option("--author <name>", "Filter by author name")
+  .option("--task <name>", "Filter by task name")
+  .option(
+    "--license <tiers>",
+    "Filter by license tier(s), comma-separated: public, attribution, sharealike, noncommercial, noderiv, unknown",
+  )
+  .option("--doi", "Show only datasets with DOIs")
   .option("--hed", "Show only datasets with HED annotations")
+  .option("--complete", "Show only datasets verified data-complete (#970)")
+  .option("--recent [days]", "Show recently published datasets")
+  .option(
+    "--include-unknown",
+    "Include datasets with an unknown value for the active facet filter(s)",
+  )
   .option("--json", "Output as JSON for scripting")
-  .option("--limit <n>", "Limit results (default: 20)", "20")
+  .option("--limit <n>", "Limit results (default: 20)", "20");
+// Epic #1144 phase 4 (#1148), D1/D6: same declared facet table `list` uses,
+// so a facet or legacy filter fixed on the backend is reachable from search
+// too instead of drifting behind list's flag set.
+addFacetOptions(searchCommand);
+searchCommand
   .addHelpText(
     "after",
     `
 Description:
   Performs semantic search across the NEMAR dataset catalog. Unlike
   --search on the list command (which uses exact text matching), this
-  uses AI embeddings to find conceptually similar datasets.
+  uses AI embeddings to find conceptually similar datasets. The free-text
+  query is always the <query> argument -- this command has no --search flag.
+
+  Accepts the same license/author/task/doi/complete/recent filters and facet
+  flags (--subjects, --age, --source, ...) as 'nemar dataset list --help'.
 
   For example, "brain signals during sleep" will match datasets about
   "EEG recordings in sleep studies" even if those exact words don't appear.
@@ -1853,9 +2122,15 @@ Description:
 Examples:
   $ nemar dataset search "motor imagery EEG"
   $ nemar dataset search "resting state" --modality eeg
-  $ nemar dataset search "sleep spindles" --json`,
+  $ nemar dataset search "sleep spindles" --json
+  $ nemar dataset search "motor imagery" --license public --subjects 10..`,
   )
   .action(async (query: string, options) => {
+    validateLicenseTiersOrExit(options.license);
+    // Epic #1144 phase 4 (#1148), D3: parsed and validated before the
+    // spinner (and therefore before any network call) starts below.
+    const facets = parseFacetOptionsOrExit(options);
+
     const spinner = ora("Searching datasets...").start();
 
     try {
@@ -1863,68 +2138,101 @@ Examples:
         modality: options.modality,
         hasHed: !!options.hed,
         limit: Number.parseInt(options.limit, 10),
+        author: options.author,
+        task: options.task,
+        license: options.license,
+        hasDoi: !!options.doi,
+        dataComplete: !!options.complete,
+        recent: options.recent ? Number.parseInt(options.recent, 10) || 30 : undefined,
+        facets,
+        includeUnknown: !!options.includeUnknown,
       });
       spinner.stop();
 
       if (options.json) {
         console.log(JSON.stringify(response, null, 2));
+        triggerOpportunisticRefresh();
         return;
+      }
+
+      // Surface backend degradation (#1145 review I1: a count-query failure
+      // falls back to a page-derived lower bound rather than 500ing), same
+      // vocabulary and treatment as the list command's `response.warning`.
+      if (response.warning) {
+        console.log(theme.warn(`\n⚠ ${response.warning}`));
+      }
+
+      // Epic #1144 phase 4 (#1148), D5: same stderr-only, count-gated,
+      // always-attributed note as the list command.
+      if (response.excluded_unknown !== undefined && response.excluded_unknown > 0) {
+        console.error(
+          theme.muted(
+            formatExcludedUnknownNote(
+              response.excluded_unknown,
+              response.excluded_unknown_by_facet ?? {},
+            ),
+          ),
+        );
       }
 
       if (response.results.length === 0) {
         console.log();
-        console.log(chalk.yellow("No datasets match your search."));
+        console.log(theme.warn("No datasets match your search."));
         console.log(
-          chalk.dim("Try different search terms or use 'nemar dataset list' for browsing."),
+          theme.muted("Try different search terms or use 'nemar dataset list' for browsing."),
         );
+        triggerOpportunisticRefresh();
         return;
       }
 
       console.log();
       console.log(
-        chalk.bold(
+        theme.label(
           `Search results for "${query}" (${response.results.length} found, ${response.method}):`,
         ),
       );
       console.log();
 
-      const idWidth = Math.max(10, ...response.results.map((r) => r.id.length));
-      const nameWidth = Math.min(35, Math.max(10, ...response.results.map((r) => r.name.length)));
-      const modWidth = 10;
-      const subjWidth = 6;
+      // Terminal-capability probe: never throws, never yields a degenerate
+      // width (#1150 D4/D7). `process.stdout.columns` is `undefined` for
+      // piped/non-TTY stdout -- the common case for a scripted invocation --
+      // in which case the table lays out for SEARCH_DEFAULT_COLUMNS (80).
+      let columns = SEARCH_DEFAULT_COLUMNS;
+      try {
+        const raw = process.stdout.columns;
+        if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
+          columns = Math.floor(raw);
+        }
+      } catch {
+        columns = SEARCH_DEFAULT_COLUMNS;
+      }
 
-      const header = [
-        "Score".padEnd(5),
-        "ID".padEnd(idWidth),
-        "Name".padEnd(nameWidth),
-        "Modality".padEnd(modWidth),
-        "Subj".padEnd(subjWidth),
-        "HED".padEnd(3),
-      ].join("  ");
-      console.log(chalk.dim(header));
-      console.log(chalk.dim("-".repeat(header.length)));
-
-      for (const result of response.results) {
-        const name =
-          result.name.length > nameWidth
-            ? `${result.name.substring(0, nameWidth - 3)}...`
-            : result.name;
-        const scoreColor =
-          result.score >= 0.8 ? chalk.green : result.score >= 0.5 ? chalk.yellow : chalk.dim;
-
-        const row = [
-          scoreColor(String(result.score).padEnd(5)),
-          chalk.cyan(result.id.padEnd(idWidth)),
-          name.padEnd(nameWidth),
-          (result.modalities || "-").substring(0, modWidth).padEnd(modWidth),
-          (result.participants ? String(result.participants) : "-").padEnd(subjWidth),
-          result.has_hed === 1 ? chalk.magenta("HED") : chalk.dim("-"),
-        ].join("  ");
-        console.log(row);
+      try {
+        for (const line of renderSearchResultLines(response.results, columns)) {
+          console.log(line);
+        }
+      } catch (renderErr) {
+        // Presentation must never fail a command that already has its data
+        // (#1150 D7): the search succeeded and `response.results` is real:
+        // a bug in the table renderer degrades to the simplest possible
+        // listing, not to "Search failed".
+        if (process.env.VERBOSE) {
+          console.error(
+            theme.muted(
+              `[search] table rendering failed, falling back to a plain list: ${
+                renderErr instanceof Error ? renderErr.message : String(renderErr)
+              }`,
+            ),
+          );
+        }
+        for (const result of response.results) {
+          console.log(`${result.id}  ${result.name}`);
+        }
       }
 
       console.log();
-      console.log(chalk.dim("For details: nemar dataset status <dataset-id>"));
+      console.log(theme.muted("For details: nemar dataset status <dataset-id>"));
+      triggerOpportunisticRefresh();
     } catch (error) {
       spinner.fail("Search failed");
       if (error instanceof ApiError) {

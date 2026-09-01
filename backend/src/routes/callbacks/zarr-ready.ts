@@ -173,6 +173,13 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
           .run();
         changed = result.meta.changes ?? 0;
       } else if (status === "ready") {
+        // recording_stats_at -> NULL (epic #1144 Phase 2, issue #1146): a
+        // reconverted index may carry different duration/count/channel
+        // facts, so this dataset must be re-picked by the next
+        // recording-stats-sweep. Nulled on THIS branch only -- the 'failed'
+        // branch below leaves it (and every stat column) untouched, because
+        // a bad rebuild must never erase good numbers already computed from
+        // the last good index.
         const result = await c.env.DB.prepare(
           `UPDATE datasets
            SET zarr_status = 'ready',
@@ -185,7 +192,8 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
                zarr_deterministic = ?,
                zarr_data_failures = ?,
                zarr_pool_breaks = ?,
-               zarr_failed_at = CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END
+               zarr_failed_at = CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END,
+               recording_stats_at = NULL
            WHERE dataset_id = ?`,
         )
           .bind(

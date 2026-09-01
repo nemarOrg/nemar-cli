@@ -20,6 +20,7 @@
  * Commit the regenerated dataset.bundle.json + bump the provenance below.
  */
 
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 
@@ -28,6 +29,21 @@ if (!nscRepo) {
   console.error("usage: bun build-vendor.mjs <path-to-neuroschema-repo>");
   process.exit(1);
 }
+
+// Read the neuroschema version straight from its pyproject.toml (single
+// source of truth over there) so this script's own provenance stamp can't
+// drift from what NEUROSCHEMA_VERSION gets hand-set to in dataset.ts. A
+// minimal regex, not a TOML parser, because we only need the one line.
+const pyproject = readFileSync(join(nscRepo, "pyproject.toml"), "utf8");
+const versionMatch = pyproject.match(/^version\s*=\s*"([^"]+)"/m);
+const nscVersion = versionMatch ? versionMatch[1] : null;
+if (!nscVersion) {
+  console.error(`could not find version = "..." in ${join(nscRepo, "pyproject.toml")}`);
+  process.exit(1);
+}
+const nscCommit = execFileSync("git", ["-C", nscRepo, "rev-parse", "HEAD"], {
+  encoding: "utf8",
+}).trim();
 const schemaRoot = resolve(nscRepo, "schema");
 const ROOT_REL = "core/dataset.schema.json";
 const idFor = (relPath) => `nsc:/${relPath}`;
@@ -74,6 +90,8 @@ const out = {
     source: "https://github.com/nemarOrg/neuroschema",
     generated_by: "shared/contract/neuroschema/build-vendor.mjs",
     note: "Do not hand-edit; regenerate from the neuroschema repo.",
+    neuroschema_version: nscVersion,
+    source_commit: nscCommit,
   },
   root: idFor(ROOT_REL),
   schemas: [...bundle.values()],

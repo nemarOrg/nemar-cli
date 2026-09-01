@@ -146,9 +146,18 @@ describe("search hit schema", () => {
   });
 
   test("search envelope validates a non-empty results array", () => {
+    // "fts" was never a real `method` value the backend emits; #1145 review
+    // I6/I7 tightened the schema's `method` to the real 5-member enum, so
+    // this now has to use a literal the backend actually returns.
+    expect(() =>
+      datasetSearchEnvelopeSchema.parse({ results: [hit], count: 1, method: "text", min_score: 0 }),
+    ).not.toThrow();
+  });
+
+  test("search envelope rejects a method value the backend never emits", () => {
     expect(() =>
       datasetSearchEnvelopeSchema.parse({ results: [hit], count: 1, method: "fts", min_score: 0 }),
-    ).not.toThrow();
+    ).toThrow();
   });
 });
 
@@ -170,10 +179,10 @@ describe("user /me envelope schema", () => {
 });
 
 describe("neuroschema dataset schema", () => {
-  test("pins the v0.3.0 envelope + required identity fields", () => {
-    expect(NEUROSCHEMA_VERSION).toBe("0.3.0");
+  test("pins the v0.4.0 envelope + required identity fields", () => {
+    expect(NEUROSCHEMA_VERSION).toBe("0.4.0");
     const ds = {
-      schema_version: "0.3.0",
+      schema_version: "0.4.0",
       doc_type: "dataset",
       dataset_id: "nm000108",
       name: "Test",
@@ -185,7 +194,7 @@ describe("neuroschema dataset schema", () => {
 
   test("rejects a wrong schema_version or empty modality", () => {
     const base = {
-      schema_version: "0.3.0",
+      schema_version: "0.4.0",
       doc_type: "dataset",
       dataset_id: "nm000108",
       name: "T",

@@ -34,8 +34,9 @@ import webhooks from "./routes/webhooks";
 import { zarrDataRoutes } from "./routes/zarr-data";
 import { archiveRetrySweep } from "./services/archive-retry";
 import { AUTO_IMPORT_CRON, autoImportTick } from "./services/auto-import";
-import { runAvailabilityReportSweep } from "./services/availability-report";
+import { runAvailabilityReportSweepCron } from "./services/availability-report";
 import { fetchAndSyncCitationCounts } from "./services/citation-counts-sync";
+import { sweepLogLines } from "./services/cron-sweep-log";
 import { drainEmbeddingDirty } from "./services/dataset-search";
 import { DEV_EPHEMERAL_BAND_END, DEV_EPHEMERAL_BAND_START } from "./services/datasetId";
 import { deleteDatasetCascade } from "./services/deletion";
@@ -54,6 +55,8 @@ import { sweepImportRetries } from "./services/import-retry";
 import { manifestIntegritySweep } from "./services/manifest-sweep";
 import { getActiveNotices } from "./services/notices";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
+import { runRecordingStatsSweepCron } from "./services/recording-stats-sweep";
+import { runSignalDefaultsSweepCron } from "./services/signal-defaults-sweep";
 import {
   FIRST_WARNING_DAYS,
   STALENESS_LIMIT_DAYS,
@@ -797,6 +800,12 @@ export default {
       // a mirror D1 this would write to production dataset repos. It also has no
       // dataset-id prefix filter, exactly like archiveRetrySweep above.
       //
+      // Called via the Cron wrapper (#1166): the exported sweep itself is left
+      // unguarded because the admin backfill route calls it directly and needs
+      // it to keep working on staging, so the fence lives in
+      // runAvailabilityReportSweepCron instead. Kept inside this block too,
+      // belt and braces, exactly like archiveRetrySweep's own internal guard.
+      //
       // Self-limiting rather than exhaustive: capped at 10 GitHub commits per
       // run (AVAILABILITY_REPORT_SWEEP_MAX) because a burst of writes trips
       // GitHub's secondary rate limit on the shared PAT. It drains ~10/day and
@@ -804,20 +813,119 @@ export default {
       // large backlog is meant to be cleared with `nemar admin
       // availability-report --all`, not by waiting on this.
       ctx.waitUntil(
-        runAvailabilityReportSweep(env)
+        runAvailabilityReportSweepCron(env)
           .then((r) => {
-            if (r.processed > 0 || (r.remaining ?? 0) > 0) {
-              console.log(
+            // A null result means the wrapper's guard skipped the run and
+            // already logged it; sweepLogLines owns that decision so it can be
+            // tested without invoking scheduled(). See #1167 review.
+            const lines = sweepLogLines(
+              "availability-report-sweep",
+              r,
+              (r) =>
                 `[availability-report-sweep] processed=${r.processed} written=${r.written} errors=${r.errors.length} remaining=${r.remaining ?? "?"}`,
-              );
-            }
-            for (const e of r.errors) {
-              console.error(`[availability-report-sweep] ${e.dataset_id}: ${e.error}`);
-            }
+            );
+            if (lines.info) console.log(lines.info);
+            for (const e of lines.errors) console.error(e);
           })
           .catch((err) =>
             console.error(
               "[availability-report-sweep] sweep failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
+      );
+      // Epic #1144 Phase 2 (#1146): backfill dataset-level recording
+      // duration/count/channel-range stats from each dataset's zarr index.
+      // PROD-ONLY BY DEFAULT per AGENTS.md, though this job's own writes are
+      // narrower than most of the block above: it only reads the prod S3
+      // bucket and writes D1 columns, with no email, no GitHub dispatch, and
+      // no DOI/bucket mutation. Kept in the prod-only block anyway --
+      // AGENTS.md's default stands absent a specific reason to carve out an
+      // exception, and there is none here.
+      //
+      // Called via the Cron wrapper (#1166): the exported sweep itself is left
+      // unguarded because the admin backfill route calls it directly and needs
+      // it to keep working on staging, so the fence lives in
+      // runRecordingStatsSweepCron instead. Kept inside this block too, belt
+      // and braces, exactly like archiveRetrySweep's own internal guard.
+      ctx.waitUntil(
+        runRecordingStatsSweepCron(env)
+          .then((r) => {
+            // A null result means the wrapper's guard skipped the run and
+            // already logged it; sweepLogLines owns that decision so it can be
+            // tested without invoking scheduled(). See #1167 review.
+            const lines = sweepLogLines(
+              "recording-stats-sweep",
+              r,
+              (r) =>
+                `[recording-stats-sweep] processed=${r.processed} measured=${r.measured} unmeasured=${r.unmeasured} errors=${r.errors.length} remaining=${r.remaining ?? "?"}`,
+            );
+            if (lines.info) console.log(lines.info);
+            for (const e of lines.errors) console.error(e);
+          })
+          .catch((err) =>
+            console.error(
+              "[recording-stats-sweep] sweep failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
+      );
+      // Epic #1144 Phase 2b (#1153): backfill the BIDS signal defaults
+      // (sampling/power-line frequency, reference, placement scheme) that
+      // getBidsTreeStats reads from a dataset's ROOT-level *_eeg.json, falling
+      // back to a subject-level exemplar only when no root sidecar exists --
+      // the subject file is an inheritance override, not the dataset default,
+      // and getting that direction right is what Phase 2b was built around.
+      //
+      // Added in #1164, and the gap it closes is narrower than "nothing
+      // populated these columns". Phase 2b also threaded them through
+      // refreshDatasetMetadata (dataset-reindex.ts), which runs automatically
+      // on every version-DOI mint and manifest-ready callback, so the VALUES
+      // already had a producer. What had none was signal_defaults_at: the
+      // reindex path deliberately leaves that stamp alone so a live reindex
+      // does not make a row look already-swept, which means the sweep's own
+      // candidate set never converged and any dataset that never publishes a
+      // version was never probed at all. This block is what drains it.
+      //
+      // PROD-ONLY. The AGENTS.md default would be reason enough, but there is
+      // a specific one: getBidsTreeStats calls ORG_NAME (github/shared.ts),
+      // hardcoded to "nemarDatasets" and NOT environment-scoped, so a dev-side
+      // run reads production dataset repos. That holds whichever credential
+      // getDatasetsToken resolves -- do not restate it as "the shared GitHub
+      // App", which the code treats as conditional (App when configured,
+      // GITHUB_ADMIN_PAT otherwise) and wrangler-sccn.toml still lists as in
+      // soak. The shared org is the load-bearing fact; the credential is not.
+      //
+      // The recording-stats block above has no equivalent exposure: it touches
+      // only S3 and D1, both environment-scoped.
+      //
+      // Bounded tighter than that sibling (15 per run, hard max 30, against
+      // its 200) because each candidate costs a root tree, up to 25 subject
+      // subtrees and a few blob fetches rather than one signed S3 GET.
+      //
+      // Called via the Cron wrapper (#1166): the exported sweep itself is left
+      // unguarded because the admin backfill route calls it directly and needs
+      // it to keep working on staging, so the fence lives in
+      // runSignalDefaultsSweepCron instead. Kept inside this block too, belt
+      // and braces, exactly like archiveRetrySweep's own internal guard.
+      ctx.waitUntil(
+        runSignalDefaultsSweepCron(env)
+          .then((r) => {
+            // A null result means the wrapper's guard skipped the run and
+            // already logged it; sweepLogLines owns that decision so it can be
+            // tested without invoking scheduled(). See #1167 review.
+            const lines = sweepLogLines(
+              "signal-defaults-sweep",
+              r,
+              (r) =>
+                `[signal-defaults-sweep] processed=${r.processed} populated=${r.populated} noData=${r.noData} errors=${r.errors.length} remaining=${r.remaining ?? "?"}`,
+            );
+            if (lines.info) console.log(lines.info);
+            for (const e of lines.errors) console.error(e);
+          })
+          .catch((err) =>
+            console.error(
+              "[signal-defaults-sweep] sweep failed:",
               err instanceof Error ? (err.stack ?? err.message) : err,
             ),
           ),

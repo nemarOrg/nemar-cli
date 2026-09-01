@@ -8,6 +8,10 @@ import {
   classifyElectrodeSystem,
   parseChannelsTsv,
   parseEegChannelCount,
+  parseEegReference,
+  parsePlacementScheme,
+  parsePowerLineFrequency,
+  parseSamplingFrequency,
   resolveNChannels,
 } from "../backend/src/services/channel-montage";
 
@@ -83,6 +87,73 @@ describe("parseEegChannelCount", () => {
   });
 });
 
+// Epic #1144 Phase 2b (#1153): the four new signal_defaults sidecar parsers.
+describe("parseSamplingFrequency", () => {
+  test("reads a real-shape SamplingFrequency", () => {
+    expect(parseSamplingFrequency('{"SamplingFrequency": 500}')).toBe(500);
+    expect(parseSamplingFrequency('{"SamplingFrequency": 250.5}')).toBe(250.5);
+  });
+  test("null on missing key, non-JSON, zero, negative, or non-finite", () => {
+    expect(parseSamplingFrequency('{"PowerLineFrequency": 60}')).toBeNull();
+    expect(parseSamplingFrequency("not json")).toBeNull();
+    expect(parseSamplingFrequency('{"SamplingFrequency": 0}')).toBeNull();
+    expect(parseSamplingFrequency('{"SamplingFrequency": -256}')).toBeNull();
+    expect(parseSamplingFrequency('{"SamplingFrequency": "500"}')).toBeNull();
+    expect(parseSamplingFrequency('{"SamplingFrequency": null}')).toBeNull();
+  });
+});
+
+describe("parsePowerLineFrequency (enum coercion -- the phase's main trap)", () => {
+  test("50 and 60 pass through unchanged", () => {
+    expect(parsePowerLineFrequency('{"PowerLineFrequency": 50}')).toBe(50);
+    expect(parsePowerLineFrequency('{"PowerLineFrequency": 60}')).toBe(60);
+  });
+  test("anything out of the {50, 60, null} enum is DROPPED to null, never clamped/rounded", () => {
+    // A measured value close to 60 -- must not round up.
+    expect(parsePowerLineFrequency('{"PowerLineFrequency": 59.94}')).toBeNull();
+    // BIDS "not applicable" numeric convention.
+    expect(parsePowerLineFrequency('{"PowerLineFrequency": 0}')).toBeNull();
+    // Same class of bug as Phase 2's negative-number gap.
+    expect(parsePowerLineFrequency('{"PowerLineFrequency": -50}')).toBeNull();
+    // A stringly-typed value some sidecars carry.
+    expect(parsePowerLineFrequency('{"PowerLineFrequency": "60"}')).toBeNull();
+    expect(parsePowerLineFrequency('{"PowerLineFrequency": "n/a"}')).toBeNull();
+    expect(parsePowerLineFrequency('{"PowerLineFrequency": null}')).toBeNull();
+    expect(parsePowerLineFrequency('{"SamplingFrequency": 500}')).toBeNull();
+    expect(parsePowerLineFrequency("not json")).toBeNull();
+  });
+});
+
+describe("parseEegReference", () => {
+  test("reads a real-shape EEGReference", () => {
+    expect(parseEegReference('{"EEGReference": "average"}')).toBe("average");
+    expect(parseEegReference('{"EEGReference": "Cz"}')).toBe("Cz");
+  });
+  test("null on missing key, the n/a placeholder, empty string, an array, or non-JSON", () => {
+    expect(parseEegReference('{"SamplingFrequency": 500}')).toBeNull();
+    expect(parseEegReference('{"EEGReference": "n/a"}')).toBeNull();
+    expect(parseEegReference('{"EEGReference": "N/A"}')).toBeNull();
+    expect(parseEegReference('{"EEGReference": "  "}')).toBeNull();
+    // Some BIDS sidecars carry an array of channel names -- out of the
+    // schema's string|null contract, so dropped rather than joined.
+    expect(parseEegReference('{"EEGReference": ["Cz", "Fz"]}')).toBeNull();
+    expect(parseEegReference("not json")).toBeNull();
+  });
+});
+
+describe("parsePlacementScheme", () => {
+  test("reads a real-shape EEGPlacementScheme", () => {
+    expect(parsePlacementScheme('{"EEGPlacementScheme": "extended 10-10% system"}')).toBe(
+      "extended 10-10% system",
+    );
+  });
+  test("null on missing key, the n/a placeholder, or non-JSON", () => {
+    expect(parsePlacementScheme('{"SamplingFrequency": 500}')).toBeNull();
+    expect(parsePlacementScheme('{"EEGPlacementScheme": "n/a"}')).toBeNull();
+    expect(parsePlacementScheme("not json")).toBeNull();
+  });
+});
+
 describe("resolveNChannels", () => {
   test("measured channels.tsv EEG count wins over a disagreeing sidecar", () => {
     const tsv = { count: 130, eegCount: 129, labels: [] };
@@ -112,8 +183,7 @@ describe("classifyElectrodeSystem", () => {
   test("a 10-20 cap with an A2 ear ref is 10-20, NOT biosemi (nm000109)", () => {
     // Real nm000109 labels: A2 matches the A-bank probe and F3/F4/C3/C4 match
     // [A-H]\d, but the bank labels are a minority, so it must not read as BioSemi.
-    const labels =
-      "Fp1 Fp2 F3 F4 F7 F8 T3 T4 C3 C4 T5 T6 P3 P4 O1 O2 Fz Cz Pz A2".split(" ");
+    const labels = "Fp1 Fp2 F3 F4 F7 F8 T3 T4 C3 C4 T5 T6 P3 P4 O1 O2 Fz Cz Pz A2".split(" ");
     expect(classifyElectrodeSystem(labels)).toBe("10-20");
   });
 

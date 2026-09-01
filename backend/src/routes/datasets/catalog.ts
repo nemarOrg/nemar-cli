@@ -8,20 +8,79 @@
  */
 
 import { toVersionTag } from "../../../../shared/contract/index.js";
+import type { FacetKey } from "../../../../shared/facets.js";
+import { RangeParseError } from "../../../../shared/range.js";
 import { SYSTEM_USER_ID } from "../../lib/constants";
-import { type LicenseTier, parseLicenseTierFilter } from "../../lib/license";
+import { parseLicenseTierFilter } from "../../lib/license";
 import { optionalAuthMiddleware } from "../../middleware/auth";
+import { getFacetVocabulary } from "../../services/dataset-facet-vocabulary";
 import {
-  type SearchResult,
-  buildFtsMatch,
-  ftsSearch,
-  lookupDatasetById,
-  rrfFuse,
-  semanticSearchHydrated,
-} from "../../services/dataset-search";
+  FacetEnumParseError,
+  buildExcludedUnknownBreakdownSql,
+  isAnyFacetActive,
+  parseFacetFilters,
+} from "../../services/dataset-facets";
+import {
+  type DatasetFilterOptions,
+  buildDatasetFilterClauses,
+  buildPublicCatalogBase,
+  escapeLikePattern,
+} from "../../services/dataset-filters";
+import { DEFAULT_MIN_SCORE, executeDatasetSearch } from "../../services/dataset-search";
 import { isValidDatasetId } from "../../services/datasetId";
 import { hasRole } from "../../types/bindings";
 import type { DatasetsRouter } from "./shared";
+
+/**
+ * Epic #1144 phase 3 (#1147), D7: every column the facet filter table binds
+ * to must also be projected -- raw, un-COALESCEd so NULL stays NULL -- or a
+ * user could filter on a fact they can never see the value of (the D7
+ * describe block in backend/test/facet-table-correspondence.unit.test.ts
+ * enforces this). One shared fragment so
+ * both `GET /datasets` branches (the `?mine` shape, formerly 28 columns, and
+ * the public shape, formerly 33) stay in lockstep rather than drifting apart
+ * as two hand-copied column lists.
+ *
+ * `subject_count` and `file_size` are here for a reason worth stating,
+ * because they look redundant (#1177 integration review). Both are ALSO
+ * projected as `COALESCE(..., 0) AS participants` / `AS file_size`, a display
+ * convention that predates this epic and that the website depends on. Phase 3
+ * then made both filterable facets whose nullTest treats NULL as "unknown",
+ * so `include_unknown=1` deliberately returns rows whose value was never
+ * measured -- and the COALESCE rendered every one of them as a confident `0`,
+ * indistinguishable from a measured zero. That is the exact "unknown reported
+ * as a value" failure ADR 0005 and ADR 0032 exist to prevent, arrived at by
+ * composing a pre-existing display convention with a new filter contract.
+ *
+ * The raw columns are additive, so the COALESCEd aliases keep working for
+ * existing consumers. Do not "simplify" by dropping either half: the aliases
+ * are the wire contract, these are the honest values.
+ */
+const FACET_PROJECTION_COLUMNS = `d.subject_count,
+               d.file_size AS file_size_bytes,
+               d.sessions_count,
+               d.age_min,
+               d.age_max,
+               d.bids_version,
+               d.zarr_status,
+               d.total_recording_duration,
+               d.recording_duration_min,
+               d.recording_duration_max,
+               d.recording_count,
+               d.recordings_unavailable,
+               d.channel_count_min,
+               d.channel_count_max,
+               d.sampling_frequency,
+               d.power_line_frequency,
+               d.eeg_reference,
+               d.placement_scheme`;
+
+// Moved to services/dataset-filters.ts (#1145, epic #1144 phase 1): a service
+// (dataset-search.ts) needs these too, and importing them from this route
+// module would be both a circular import and a layering inversion. Re-exported
+// here so the existing test files that import them from this module keep
+// passing unchanged.
+export { buildDatasetFilterClauses, escapeLikePattern };
 
 /**
  * Emit `latest_version` in the canonical `vX.Y.Z` tag form (epic #896 #899).
@@ -38,99 +97,110 @@ export function withCanonicalLatestVersion<T extends Record<string, unknown>>(ro
   return typeof v === "string" && v ? { ...row, latest_version: toVersionTag(v) } : row;
 }
 
-// Escape SQLite LIKE wildcards in user input so a literal '%' or '_' in the
-// search term means itself rather than "match everything" / "match any
-// character". Paired with `ESCAPE '\\'` on every LIKE predicate that uses
-// these patterns. Exported for unit testing.
-export function escapeLikePattern(raw: string): string {
-  return raw.replace(/[\\%_]/g, "\\$&");
+// Re-exported so existing importers keep their path; the constant itself
+// now lives with executeDatasetSearch, the other consumer (#1174 review).
+export { DEFAULT_MIN_SCORE };
+
+/**
+ * Clamp raw `limit`/`offset` query values for GET /datasets/search (#1145),
+ * mirroring the list endpoint's clamping idiom (see the `GET /` handler
+ * below) but with search's own historical default/ceiling: `limit` defaults
+ * to 20 and is capped at 100 (the Vectorize / `buildInPlaceholders` ceiling),
+ * and -- new in #1145 -- `offset` is now accepted and clamped; there was no
+ * offset support before, so nothing past the first 100 results was reachable.
+ * Fixes two adjacent bugs: `limit=-5` used to fall through to
+ * `results.slice(0, -5)` (silently dropping the last five rows) and
+ * `limit=abc` produced `slice(0, NaN)` (an empty list). Exported for unit
+ * testing.
+ */
+export function parseSearchPagination(
+  limitRaw: string | undefined,
+  offsetRaw: string | undefined,
+): { limit: number; offset: number } {
+  const rawLimit = Number.parseInt(limitRaw ?? "", 10);
+  const limit = Math.min(Math.max(Number.isNaN(rawLimit) ? 20 : rawLimit, 1), 100);
+  const rawOffset = Number.parseInt(offsetRaw ?? "", 10);
+  const offset = Math.max(Number.isNaN(rawOffset) ? 0 : rawOffset, 0);
+  return { limit, offset };
+}
+
+/** Minimal shape both `GET /datasets` and `GET /datasets/search` share --
+ *  just enough of Hono's Context to read query params, so this stays
+ *  testable without constructing a real Context. */
+interface FilterQueryContext {
+  req: { query: (name: string) => string | undefined };
 }
 
 /**
- * #646 filter clauses for the single-table `datasets` list.
- * Reads d.* only (no nemar_catalog), and routes free-text `search` through the
- * FTS5 index (`d.id IN (SELECT rowid FROM datasets_fts WHERE … MATCH …)`) plus
- * dataset_id/source_id LIKE, replacing the old `c.search_text` LIKE.
+ * Parse and clamp the `min_score` query param, defaulting to
+ * {@link DEFAULT_MIN_SCORE}. Exported for unit testing (#1150 D6): a test
+ * pins this function's no-param result to `DEFAULT_MIN_SCORE` so a silent
+ * revert to the old 0.65 fails.
  */
-export function buildDatasetFilterClauses(
-  params: (string | number)[],
-  opts: {
-    search?: string;
-    modality?: string;
-    author?: string;
-    task?: string;
-    hasDoi?: boolean;
-    hasHed?: boolean;
-    dataComplete?: boolean;
-    recent?: number;
-    licenseTiers?: LicenseTier[];
-  },
-): string {
-  let clauses = "";
+export function parseMinScore(c: FilterQueryContext): number {
+  const minScoreParam = c.req.query("min_score");
+  const parsed = minScoreParam === undefined ? Number.NaN : Number.parseFloat(minScoreParam);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(parsed, 1)) : DEFAULT_MIN_SCORE;
+}
 
-  if (opts.search) {
-    const pattern = `%${escapeLikePattern(opts.search.toLowerCase())}%`;
-    const match = buildFtsMatch(opts.search);
-    if (match) {
-      clauses +=
-        " AND (LOWER(d.dataset_id) LIKE ? ESCAPE '\\'" +
-        " OR LOWER(COALESCE(d.source_id, '')) LIKE ? ESCAPE '\\'" +
-        " OR d.id IN (SELECT rowid FROM datasets_fts WHERE datasets_fts MATCH ?))";
-      params.push(pattern, pattern, match);
-    } else {
-      // No FTS-usable tokens (e.g. all punctuation): fall back to id/name LIKE.
-      clauses +=
-        " AND (LOWER(d.dataset_id) LIKE ? ESCAPE '\\'" +
-        " OR LOWER(COALESCE(d.source_id, '')) LIKE ? ESCAPE '\\'" +
-        " OR LOWER(d.name) LIKE ? ESCAPE '\\'" +
-        " OR LOWER(COALESCE(d.description, '')) LIKE ? ESCAPE '\\')";
-      params.push(pattern, pattern, pattern, pattern);
-    }
-  }
+/**
+ * Parse every filter query param -- the nine legacy bespoke filters plus the
+ * full facet table (epic #1144 phase 3, #1147, D6) -- into one
+ * `DatasetFilterOptions`, shared by both catalog endpoints so they can no
+ * longer drift apart on which filters they honour. Before this, `GET
+ * /datasets/search` built only `{ modality, hasHed }` and silently ignored
+ * `license`, `author`, `task`, `has_doi`, `recent` and `data_complete`, which
+ * the list endpoint has honoured since #646/#653/#970.
+ *
+ * `includeSearch: false` (the search handler's case) omits `filters.search`:
+ * that handler's free text is already the `q` parameter driving FTS/semantic
+ * matching, and setting both would AND the query against itself through two
+ * different matchers.
+ *
+ * Throws {@link RangeParseError} on an invalid facet range (`shared/range.ts`)
+ * or `FacetEnumParseError` on an unrecognised enum token (#1165 review P1,
+ * ADR 0032); the caller is expected to translate either into a 400. The
+ * pre-existing `license` param keeps its original drop-unrecognised
+ * behaviour (`parseLicenseTierFilter`) -- a deliberate asymmetry, not an
+ * oversight, since it predates this table and the website already depends
+ * on its current semantics.
+ */
+export function parseFilterQuery(
+  c: FilterQueryContext,
+  { includeSearch = true }: { includeSearch?: boolean } = {},
+): DatasetFilterOptions {
+  const hasDoi = c.req.query("has_doi") === "true";
+  // #869: accept the website FilterSidebar's `has_hed=1` and a `true` for parity.
+  const hasHed = c.req.query("has_hed") === "1" || c.req.query("has_hed") === "true";
+  // #970: same `1`/`true` convention.
+  const dataComplete =
+    c.req.query("data_complete") === "1" || c.req.query("data_complete") === "true";
+  const recentParam = c.req.query("recent");
+  const recent = recentParam ? Number.parseInt(recentParam, 10) : undefined;
+  // #653: comma-separated license tiers, OR semantics. Invalid tokens are
+  // dropped; an empty result means "no license filter".
+  const licenseTiers = parseLicenseTierFilter(c.req.query("license"));
+  // D4/ADR 0005: same `1`/`true` convention as has_hed/data_complete.
+  const includeUnknownRaw = c.req.query("include_unknown");
+  const includeUnknown = includeUnknownRaw === "1" || includeUnknownRaw === "true";
+  const facets = parseFacetFilters((key) => c.req.query(key));
 
-  if (opts.modality) {
-    clauses += " AND LOWER(COALESCE(d.modalities, '')) LIKE ?";
-    params.push(`%${opts.modality.toLowerCase()}%`);
+  const filters: DatasetFilterOptions = {
+    modality: c.req.query("modality"),
+    author: c.req.query("author"),
+    task: c.req.query("task"),
+    hasDoi,
+    hasHed,
+    dataComplete,
+    recent,
+    licenseTiers,
+    facets,
+    includeUnknown,
+  };
+  if (includeSearch) {
+    filters.search = c.req.query("search");
   }
-  if (opts.author) {
-    clauses += " AND LOWER(COALESCE(d.authors, '')) LIKE ?";
-    params.push(`%${opts.author.toLowerCase()}%`);
-  }
-  if (opts.task) {
-    clauses += " AND LOWER(COALESCE(d.tasks, '')) LIKE ?";
-    params.push(`%${opts.task.toLowerCase()}%`);
-  }
-  if (opts.licenseTiers && opts.licenseTiers.length > 0) {
-    // OR across tiers = IN (...). Tiers are pre-validated against LICENSE_TIERS
-    // by parseLicenseTierFilter, so they're a safe, bounded placeholder list.
-    // license_tier is NOT NULL (migration 0034), so no NULL branch is needed.
-    const placeholders = opts.licenseTiers.map(() => "?").join(", ");
-    clauses += ` AND d.license_tier IN (${placeholders})`;
-    params.push(...opts.licenseTiers);
-  }
-  if (opts.hasDoi) {
-    clauses += " AND (d.concept_doi IS NOT NULL AND d.concept_doi != '')";
-  }
-  if (opts.hasHed) {
-    // #869: has_hed is nullable (NULL = not classified yet), so `= 1` cleanly
-    // excludes both 0 (checked, no HED) and NULL. Backed by idx_datasets_has_hed.
-    clauses += " AND d.has_hed = 1";
-  }
-  if (opts.dataComplete) {
-    // #970: same nullable-safe idiom as has_hed -- `= 1` excludes both 0
-    // (checked, incomplete) and NULL (not audited yet). Backed by
-    // idx_datasets_data_complete.
-    clauses += " AND d.data_complete = 1";
-  }
-  if (opts.recent) {
-    // #646: folded catalog rows carry publish_date (from nemar.org); managed
-    // rows leave it NULL so this falls through to created_at. Preserves the old
-    // UNION's per-branch recency (catalog = publish_date, managed = created_at).
-    clauses += " AND COALESCE(d.publish_date, d.created_at) > datetime('now', ?)";
-    params.push(`-${opts.recent} days`);
-  }
-
-  return clauses;
+  return filters;
 }
 
 function buildSortClause(sort: string): string {
@@ -157,23 +227,71 @@ async function executeAndReturn(
   baseQuery: string,
   baseParams: (string | number)[],
   pagination: { limit: number; offset: number },
+  // Epic #1144 phase 3/4 (#1147/#1148), D4/D5/ADR 0005: when provided (only
+  // when a facet is active), a single query over the SAME base FROM/WHERE
+  // (not the row projection -- see the call sites' `*Base` helpers) that
+  // computes both the widened COUNT(*) (excluded_unknown = this minus the
+  // real count) and, in the same scan, a conditional-aggregation SUM per
+  // active facet (excluded_unknown_by_facet). `keysInOrder[i]` names the
+  // FacetKey whose count lives in the result row's `unk_<i>` column. Joins
+  // the existing Promise.allSettled so a failure here can never turn a good
+  // response into a 500; it just omits both fields.
+  excludedUnknownQuery?: { query: string; params: (string | number)[]; keysInOrder: FacetKey[] },
 ) {
   const { limit, offset } = pagination;
   try {
     const paginatedQuery = `${baseQuery} LIMIT ? OFFSET ?`;
     const countQuery = `SELECT COUNT(*) AS total FROM (${baseQuery})`;
 
-    // Run main query and count in parallel; use allSettled so a count
-    // failure does not prevent returning the main results.
-    const [mainSettled, countSettled] = await Promise.allSettled([
+    // Run main query, count, and (when applicable) the widened
+    // excluded_unknown count in parallel; allSettled so neither the count
+    // nor the excluded_unknown query can prevent returning the main results.
+    //
+    // The count query is wrapped in an async IIFE (not called inline) for
+    // the exact reason the excluded-unknown branch below already is: a
+    // SYNCHRONOUS throw from prepare()/bind()/first() would otherwise abort
+    // the array literal itself -- before Promise.allSettled even runs --
+    // taking the main list query's own (unrelated, unfailed) result down
+    // with it. This gap had no test until epic #1144 phase 4 (#1148) added
+    // one exercising a synchronously-throwing count query for GET /datasets;
+    // GET /datasets/search never had the analogous bug because its count
+    // query already runs inside its own try/catch (countSearchMatchesSafely),
+    // not inline in an array literal. The main query is deliberately left
+    // unwrapped: an unrecoverable failure there should propagate to this
+    // function's outer try/catch and its own fallback/500 handling, not be
+    // isolated away.
+    const [mainSettled, countSettled, excludedSettled] = await Promise.allSettled([
       db
         .prepare(paginatedQuery)
         .bind(...baseParams, limit, offset)
         .all(),
-      db
-        .prepare(countQuery)
-        .bind(...baseParams)
-        .first<{ total: number }>(),
+      (async () =>
+        db
+          .prepare(countQuery)
+          .bind(...baseParams)
+          .first<{ total: number }>())(),
+      // Wrapped in an async IIFE (not called inline) so a SYNCHRONOUS throw
+      // from prepare()/bind()/first() -- e.g. a driver that validates bound
+      // parameter counts immediately -- becomes a genuine promise rejection
+      // Promise.allSettled can isolate, rather than throwing while this
+      // array literal is still being constructed and aborting the WHOLE
+      // Promise.allSettled call (which would 500 the main list too). ADR
+      // 0005: excluded_unknown's own query must never be able to take the
+      // primary response down with it.
+      //
+      // `excludedUnknownQuery.query` is already the complete, ready-to-run
+      // statement (`SELECT COUNT(*) AS total, SUM(...) AS unk_0, ... FROM
+      // datasets d WHERE ...`) built against the base FROM/WHERE directly --
+      // D5's fix for the trap where wrapping it as `SELECT COUNT(*) FROM
+      // (<projected query>)` put the SUM's nullTest expressions out of scope
+      // of the raw `d.*` columns they read.
+      excludedUnknownQuery
+        ? (async () =>
+            db
+              .prepare(excludedUnknownQuery.query)
+              .bind(...excludedUnknownQuery.params)
+              .first<Record<string, number>>())()
+        : Promise.resolve(undefined),
     ]);
 
     if (mainSettled.status === "rejected") {
@@ -186,8 +304,10 @@ async function executeAndReturn(
     }
 
     let totalCount = result.results.length;
+    let countSucceeded = false;
     if (countSettled.status === "fulfilled" && countSettled.value?.total != null) {
       totalCount = countSettled.value.total;
+      countSucceeded = true;
     } else if (countSettled.status === "rejected") {
       console.warn(
         "[datasets] COUNT query failed, using result length:",
@@ -197,12 +317,44 @@ async function executeAndReturn(
       );
     }
 
+    // Only meaningful relative to a real (non-fallback) total: if the main
+    // count itself degraded to a page-derived length, diffing against the
+    // widened count would report a bogus/negative-clamped number rather
+    // than omitting the field (ADR 0005 -- reporting must never masquerade
+    // as more certain than it is). Both fields are gated together: a
+    // breakdown without a trustworthy total (or vice versa) is worse than
+    // neither.
+    let excludedUnknown: number | undefined;
+    let excludedUnknownByFacet: Record<string, number> | undefined;
+    if (excludedUnknownQuery && countSucceeded) {
+      if (excludedSettled.status === "fulfilled" && excludedSettled.value?.total != null) {
+        const row = excludedSettled.value;
+        excludedUnknown = Math.max(0, row.total - totalCount);
+        const byFacet: Record<string, number> = {};
+        excludedUnknownQuery.keysInOrder.forEach((key, i) => {
+          byFacet[key] = Number(row[`unk_${i}`] ?? 0);
+        });
+        excludedUnknownByFacet = byFacet;
+      } else if (excludedSettled.status === "rejected") {
+        console.warn(
+          "[datasets] excluded_unknown COUNT query failed, omitting field:",
+          excludedSettled.reason instanceof Error
+            ? excludedSettled.reason.message
+            : String(excludedSettled.reason),
+        );
+      }
+    }
+
     return c.json({
       datasets: result.results.map(withCanonicalLatestVersion),
       count: result.results.length,
       total_count: totalCount,
       limit,
       offset,
+      ...(excludedUnknown !== undefined ? { excluded_unknown: excludedUnknown } : {}),
+      ...(excludedUnknownByFacet !== undefined
+        ? { excluded_unknown_by_facet: excludedUnknownByFacet }
+        : {}),
     });
   } catch (dbError) {
     const msg = dbError instanceof Error ? dbError.message : String(dbError);
@@ -284,7 +436,14 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
    *   - Authenticated non-admin: public datasets only
    *   - Admin: all datasets (including private managed datasets)
    *
-   * Filter params: modality, author, task, has_doi, recent, sort, search, owner
+   * Filter params: modality, author, task, has_doi, recent, sort, search, owner,
+   * license, data_complete, has_hed, include_unknown, and the facet table
+   * (epic #1144 phase 3, #1147) -- see shared/facets.ts for the full list of
+   * facet query params (subjects, channels, sessions, size, files, citations,
+   * duration, recording_length, recordings, unavailable, age, rate,
+   * powerline, reference, placement, electrode_system, source, zarr,
+   * bids_version, hed_version -- snake_case on the wire per #1165 review I3,
+   * even though the four multi-word ones stay hyphenated as CLI flags).
    * Pagination: limit (1-200, default 50), offset (>= 0, default 0)
    * Response includes total_count, limit, offset for client-side pagination
    */
@@ -305,24 +464,20 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     const user = c.get("user");
     const db = c.env.DB;
 
-    // Filter params
-    const search = c.req.query("search");
-    const modality = c.req.query("modality");
-    const author = c.req.query("author");
-    const task = c.req.query("task");
-    const hasDoi = c.req.query("has_doi") === "true";
-    // #869: accept the website FilterSidebar's `has_hed=1` and a `true` for parity.
-    const hasHed = c.req.query("has_hed") === "1" || c.req.query("has_hed") === "true";
-    // #970: same `1`/`true` convention.
-    const dataComplete =
-      c.req.query("data_complete") === "1" || c.req.query("data_complete") === "true";
-    const recentParam = c.req.query("recent");
-    const recent = recentParam ? Number.parseInt(recentParam, 10) : undefined;
-    // #653: comma-separated license tiers, OR semantics. Invalid tokens are
-    // dropped; an empty result means "no license filter". Filters on the derived
-    // datasets.license_tier column so it covers the whole catalog, not just the
-    // page the website already fetched.
-    const licenseTiers = parseLicenseTierFilter(c.req.query("license"));
+    // Epic #1144 phase 3 (#1147): every filter (the nine legacy bespoke ones
+    // plus the full facet table) parsed in one place, shared with GET
+    // /datasets/search below. Filters on `datasets.license_tier` etc. so
+    // they cover the whole catalog, not just the page the website already
+    // fetched.
+    let filters: DatasetFilterOptions;
+    try {
+      filters = parseFilterQuery(c);
+    } catch (err) {
+      if (err instanceof RangeParseError || err instanceof FacetEnumParseError) {
+        return c.json({ error: err.message }, 400);
+      }
+      throw err;
+    }
     const sort = c.req.query("sort") || "newest";
 
     if (mine) {
@@ -348,14 +503,25 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
         return c.json({ error: "Authentication required to view your datasets" }, 401);
       }
 
-      const params: (string | number)[] = [status, user.id];
-      // Read managed facts from the `datasets` source of truth (#646). 28-column
+      // Read managed facts from the `datasets` source of truth (#646). 45-column
       // ?mine wire shape (+ #869 HED has_hed/hed_version + #970 total_files/
-      // data_complete/bytes_present). latest_version is the most recently minted
-      // DOI version (null when none); scripts/hallu-sync.sh reads it to skip the
-      // per-dataset /manifest call, so keep the ordering in sync with
+      // data_complete/bytes_present + #1147 citations/facet columns).
+      // latest_version is the most recently minted DOI version (null when
+      // none); scripts/hallu-sync.sh reads it to skip the per-dataset
+      // /manifest call, so keep the ordering in sync with
       // /datasets/:id/manifest.
-      let query = `
+      //
+      // The FROM/JOIN/WHERE base is kept separate from the SELECT column
+      // list (epic #1144 phase 4, #1148, D5): the excluded_unknown_by_facet
+      // breakdown below runs its own SUM(...) query directly against this
+      // base, and its nullTest expressions (e.g. `d.subject_count IS NULL`)
+      // must see the raw `d` columns, not the COALESCEd/aliased projection.
+      const mineBase = `
+        FROM datasets d
+        JOIN users u ON d.owner_user_id = u.id
+        WHERE d.status = ? AND d.owner_user_id = ?
+      `;
+      const minePrefix = `
         SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
                d.github_repo, d.concept_doi, d.created_at, d.updated_at,
                u.username AS owner_username,
@@ -367,6 +533,10 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
                COALESCE(d.license, '') AS license,
                COALESCE(d.file_size, 0) AS file_size,
                COALESCE(d.file_size_formatted, '') AS file_size_formatted,
+               -- #804: added here in #1147 -- the citations facet's column
+               -- must be visible on this branch too (it was previously
+               -- projected only on the public branch below).
+               COALESCE(d.num_citations, 0) AS num_citations,
                -- #854: NULL until phase 2/3 populate them; the website's channel +
                -- montage filter reads NULL as "not classified yet".
                d.n_channels,
@@ -380,6 +550,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
                d.total_files,
                d.data_complete,
                d.bytes_present,
+               ${FACET_PROJECTION_COLUMNS},
                'managed' AS source_type,
                (
                  SELECT version FROM dataset_versions dv
@@ -387,39 +558,82 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
                  ORDER BY created_at DESC
                  LIMIT 1
                ) AS latest_version
-        FROM datasets d
-        JOIN users u ON d.owner_user_id = u.id
-        WHERE d.status = ? AND d.owner_user_id = ?
+        ${mineBase}
       `;
-      query += buildDatasetFilterClauses(params, {
-        search,
-        modality,
-        author,
-        task,
-        hasDoi,
-        hasHed,
-        dataComplete,
-        recent,
-        licenseTiers,
-      });
+      const params: (string | number)[] = [status, user.id];
+      let query = minePrefix;
+      query += buildDatasetFilterClauses(params, filters);
       query += buildSortClause(sort);
+
+      // D4/D5/ADR 0005: only pay for the widened breakdown query when a
+      // facet is actually active -- an unfiltered ?mine list costs nothing
+      // extra. #1165 review M5: wrapped in its own try/catch -- this is a
+      // reporting-only extra (excluded_unknown/excluded_unknown_by_facet),
+      // so a throw building it must omit both fields, not 500 the whole
+      // (otherwise-good) list response the way an uncaught throw here
+      // would. Dormant today (buildFacetClauses has no path that throws for
+      // validated `filters`), but the primary query build above stays
+      // unwrapped on purpose: without it there is no valid response to
+      // return anyway.
+      let excludedUnknownQuery:
+        | { query: string; params: (string | number)[]; keysInOrder: FacetKey[] }
+        | undefined;
+      if (isAnyFacetActive(filters.facets)) {
+        try {
+          const widenedParams: (string | number)[] = [status, user.id];
+          const widenedWhere =
+            mineBase +
+            buildDatasetFilterClauses(widenedParams, { ...filters, includeUnknown: true });
+          const breakdown = buildExcludedUnknownBreakdownSql(filters.facets);
+          excludedUnknownQuery = {
+            query: `SELECT COUNT(*) AS total${breakdown.selectFragment} ${widenedWhere}`,
+            params: widenedParams,
+            keysInOrder: breakdown.keysInOrder,
+          };
+        } catch (err) {
+          console.warn(
+            "[datasets] failed to build excluded_unknown widened query, omitting field:",
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      }
 
       // --mine path is always authed and per-user; the no-store default
       // set at the top of the handler is the right header here. See #639
       // + the union-path Vary block below for the anonymous-shareable case.
-      return executeAndReturn(c, db, query, params, { limit, offset });
+      return executeAndReturn(c, db, query, params, { limit, offset }, excludedUnknownQuery);
     }
 
     // Single-table read from the `datasets` source of truth (#646). Folded legacy
     // catalog rows are first-class here, discriminated by the sentinel owner
     // (source_type='catalog'); managed datasets are source_type='managed'.
-    // 33-column wire shape: the pre-consolidation UNION path + #653 `license` +
+    // 49-column wire shape: the pre-consolidation UNION path + #653 `license` +
     // the #804 citation counts (num_citations / num_dataset_citations /
     // num_datapaper_citations) + #854 channel/montage (n_channels,
     // electrode_system) + #869 HED (has_hed, hed_version) + #970 honest size
-    // (total_files, data_complete, bytes_present).
-    const params: (string | number)[] = [status];
-    let query = `
+    // (total_files, data_complete, bytes_present) + #1147 facet columns.
+    //
+    // The visibility/owner predicate is a function (not inlined once) because
+    // #1147's excluded_unknown computation needs a SECOND, independently
+    // parameterized copy of this exact base -- widened with
+    // includeUnknown:true -- and a hand-duplicated copy would drift the two
+    // out of sync with `user`/`owner` silently. Split into a FROM/JOIN/WHERE
+    // base and the SELECT column list (epic #1144 phase 4, #1148, D5): the
+    // excluded_unknown_by_facet breakdown runs its own SUM(...) query
+    // directly against the base, and its nullTest expressions need the raw
+    // `d` columns the projection's COALESCE/aliasing would otherwise hide.
+    // Epic #1144 phase 5a (#1170), D4: this exact FROM/JOIN/WHERE base is
+    // also what GET /datasets/facets must count over (the population an
+    // anonymous caller can already list), so it now lives in
+    // dataset-filters.ts and both call sites share it -- see that function's
+    // doc comment. This closure just supplies the handler's own
+    // request-scoped `status`/`user`/`owner`.
+    const buildPublicBase = (): { from: string; params: (string | number)[] } =>
+      buildPublicCatalogBase(status, user, owner);
+
+    const buildPublicPrefix = (): { sql: string; params: (string | number)[] } => {
+      const { from, params: prefixParams } = buildPublicBase();
+      const sql = `
       SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
              d.github_repo, d.concept_doi, d.concept_doi AS doi, d.created_at, d.updated_at,
              COALESCE(d.uploader, u.username) AS owner_username,
@@ -447,6 +661,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
              d.total_files,
              d.data_complete,
              d.bytes_present,
+             ${FACET_PROJECTION_COLUMNS},
              CASE WHEN d.owner_user_id = ${SYSTEM_USER_ID} THEN 'catalog' ELSE 'managed' END AS source_type,
              (
                SELECT version FROM dataset_versions dv
@@ -454,30 +669,41 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
                ORDER BY created_at DESC
                LIMIT 1
              ) AS latest_version
-      FROM datasets d
-      LEFT JOIN users u ON d.owner_user_id = u.id
-      WHERE d.status = ?
-        AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)
+      ${from}
     `;
-    if (!user || !hasRole(user.role, "admin")) {
-      query += " AND d.visibility = 'public'";
-    }
-    if (owner) {
-      query += " AND COALESCE(d.uploader, u.username) = ?";
-      params.push(owner);
-    }
-    query += buildDatasetFilterClauses(params, {
-      search,
-      modality,
-      author,
-      task,
-      hasDoi,
-      hasHed,
-      dataComplete,
-      recent,
-      licenseTiers,
-    });
+      return { sql, params: prefixParams };
+    };
+
+    const { sql: publicPrefix, params } = buildPublicPrefix();
+    let query = publicPrefix;
+    query += buildDatasetFilterClauses(params, filters);
     query += buildSortClause(sort);
+
+    // #1165 review M5: same try/catch as the ?mine branch above -- a
+    // reporting-only field must degrade on its own failure, not 500 the
+    // whole list. See that branch's comment for the full rationale.
+    let excludedUnknownQuery:
+      | { query: string; params: (string | number)[]; keysInOrder: FacetKey[] }
+      | undefined;
+    if (isAnyFacetActive(filters.facets)) {
+      try {
+        const { from: widenedFrom, params: widenedParams } = buildPublicBase();
+        const widenedWhere =
+          widenedFrom +
+          buildDatasetFilterClauses(widenedParams, { ...filters, includeUnknown: true });
+        const breakdown = buildExcludedUnknownBreakdownSql(filters.facets);
+        excludedUnknownQuery = {
+          query: `SELECT COUNT(*) AS total${breakdown.selectFragment} ${widenedWhere}`,
+          params: widenedParams,
+          keysInOrder: breakdown.keysInOrder,
+        };
+      } catch (err) {
+        console.warn(
+          "[datasets] failed to build excluded_unknown widened query, omitting field:",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
 
     // CF edge cache: anonymous list responses are identical for all callers
     // (no private rows leak — the SQL already filters visibility), so share
@@ -500,24 +726,29 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
       c.header("Vary", "Authorization");
     }
-    return executeAndReturn(c, db, query, params, { limit, offset });
+    return executeAndReturn(c, db, query, params, { limit, offset }, excludedUnknownQuery);
   });
 
   /**
    * GET /datasets/search - Semantic dataset search
    *
-   * Combines three strategies:
-   *  - Exact dataset-ID lookup (nm###### / on###### managed mirrors / ds######
-   *    legacy or OpenNeuro source) via D1, since embeddings and the FTS index
-   *    (name/description/authors/tasks/modalities/readme) do not cover the id, so
-   *    a literal id query would otherwise miss -- notably every `on######` mirror,
-   *    whose NEMAR-assigned id appears in none of its OpenNeuro-sourced text.
-   *  - Vectorize semantic similarity (when bindings are configured).
-   *  - D1 LIKE text search as a fallback, also used to backfill semantic
-   *    results when Vectorize returns no hits.
+   * Combines exact dataset-ID lookup, Vectorize semantic similarity (when
+   * bindings are configured), and D1 FTS5 text search -- see
+   * `executeDatasetSearch` in dataset-search.ts for the tier logic, `count`
+   * semantics, and pagination. This handler only parses query-string params
+   * and translates a thrown error into a 500 (extracted in #1145, epic #1144
+   * phase 1, so the orchestration -- the thing the count-drifts-with-page-
+   * size bug actually lived in -- is directly unit-testable without the
+   * Worker runtime).
    *
-   * Semantic and text hits are merged on `id`; semantic ranking is preserved
-   * and text-only hits are appended.
+   * Epic #1144 phase 3 (#1147), D6: filters now come from the SAME
+   * `parseFilterQuery` the list endpoint uses, closing a gap where this
+   * handler built only `{ modality, hasHed }` and silently ignored
+   * `license`, `author`, `task`, `has_doi`, `recent`, `data_complete`, and
+   * every facet -- filters the list endpoint has honoured since
+   * #646/#653/#970. `includeSearch: false` because this handler's free text
+   * is already `q`, driving FTS/semantic matching; setting `filters.search`
+   * too would AND the query against itself through a second matcher.
    */
   datasetRoutes.get("/search", optionalAuthMiddleware, async (c) => {
     const query = c.req.query("q");
@@ -525,96 +756,82 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       return c.json({ error: "Search query parameter 'q' is required" }, 400);
     }
 
-    const limit = Math.min(Number.parseInt(c.req.query("limit") || "20", 10), 100);
-    const modality = c.req.query("modality");
-    // #869: same `has_hed=1`/`true` convention as the browse list filter.
-    const hasHed = c.req.query("has_hed") === "1" || c.req.query("has_hed") === "true";
-    const db = c.env.DB;
-    const trimmed = query.trim();
-    // Match every NEMAR id shape: nm (native), on (OpenNeuro mirror), and ds
-    // (legacy catalog OR an OpenNeuro source id whose mirror is on######). `on`
-    // was missing here, so `on######` ids fell through to FTS/semantic, which
-    // don't index the id -> zero results (#808). lookupDatasetById resolves both
-    // dataset_id and source_id, so `ds######` finds the on mirror too.
-    const exactIdMatch = /^(nm|on|ds)\d{6}$/i.test(trimmed);
-
-    // Relevance floor for semantic results. bge-small cosine scores under
-    // ~0.65 against this catalog tend to be topic-adjacent noise rather
-    // than real matches (e.g. any EEG dataset coming back for "sleep eeg").
-    // Override per-request with ?min_score=0 to inspect the long tail.
-    const DEFAULT_MIN_SCORE = 0.65;
-    const minScoreParam = c.req.query("min_score");
-    const parsedMinScore =
-      minScoreParam === undefined ? Number.NaN : Number.parseFloat(minScoreParam);
-    const minScore = Number.isFinite(parsedMinScore)
-      ? Math.max(0, Math.min(parsedMinScore, 1))
-      : DEFAULT_MIN_SCORE;
-
-    const applyModality = (rows: SearchResult[]): SearchResult[] => {
-      if (!modality) return rows;
-      const mod = modality.toLowerCase();
-      return rows.filter((r) => r.modalities.toLowerCase().includes(mod));
-    };
-
-    // #869: client-side HED filter (the search projection can't use the SQL clause);
-    // mirrors applyModality. `has_hed === 1` only -> excludes 0 and NULL/undefined.
-    const applyHasHed = (rows: SearchResult[]): SearchResult[] =>
-      hasHed ? rows.filter((r) => r.has_hed === 1) : rows;
-
-    // FTS5/exact hits carry score=1.0, so this cosine floor only filters the
-    // semantic component. Applied BEFORE RRF fusion; finalize() does not re-floor
-    // the fused scores.
-    const applyMinScore = (rows: SearchResult[]): SearchResult[] =>
-      minScore <= 0 ? rows : rows.filter((r) => r.score >= minScore);
-
-    // #646 hybrid path: exact-id -> (semantic id-only ∪ FTS5) fused by RRF.
-    const finalize = (rows: SearchResult[], method: string) => {
-      const filtered = applyHasHed(applyModality(rows));
-      return c.json({
-        results: filtered.slice(0, limit),
-        count: filtered.length,
-        method,
-        min_score: minScore,
-      });
-    };
+    const { limit, offset } = parseSearchPagination(c.req.query("limit"), c.req.query("offset"));
+    let filters: DatasetFilterOptions;
     try {
-      if (exactIdMatch) {
-        const idHit = await lookupDatasetById(db, trimmed.toLowerCase());
-        if (idHit) return finalize([idHit], "exact_id");
+      filters = parseFilterQuery(c, { includeSearch: false });
+    } catch (err) {
+      if (err instanceof RangeParseError || err instanceof FacetEnumParseError) {
+        return c.json({ error: err.message }, 400);
       }
-      // Tier-specific log so a failure here is distinguishable from the
-      // semantic/hydration tiers; re-throw so the outer catch still degrades.
-      const lexical = await ftsSearch(db, trimmed, limit * 2).catch((ftsErr) => {
-        console.error(
-          `[search] FTS tier failed: ${ftsErr instanceof Error ? ftsErr.message : String(ftsErr)}`,
-        );
-        throw ftsErr;
+      throw err;
+    }
+
+    const minScore = parseMinScore(c);
+
+    try {
+      const envelope = await executeDatasetSearch(c.env.DB, c.env.AI, c.env.VECTORIZE, {
+        query,
+        filters,
+        limit,
+        offset,
+        minScore,
       });
-      if (!c.env.AI || !c.env.VECTORIZE) {
-        return finalize(lexical, "text");
-      }
-      let semantic: SearchResult[] = [];
-      try {
-        semantic = await semanticSearchHydrated(c.env.AI, c.env.VECTORIZE, db, trimmed, limit * 2);
-      } catch (embErr) {
-        console.error("[search] semantic tier failed, using FTS only:", embErr);
-        return finalize(lexical, "text_fallback");
-      }
-      const semanticFiltered = applyMinScore(semantic);
-      if (semanticFiltered.length === 0) {
-        return finalize(lexical, "text_fallback");
-      }
-      return finalize(rrfFuse(semanticFiltered, lexical), "semantic");
+      return c.json(envelope);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("Dataset search failed:", msg);
-      // Only the expected missing-FTS-table case degrades to "unavailable";
-      // any other structural error is a real 500 (don't mask it).
-      if (msg.includes("no such table: datasets_fts")) {
-        return c.json({ results: [], count: 0, method: "unavailable" });
-      }
       return c.json({ error: "Search failed", details: msg }, 500);
     }
+  });
+
+  /**
+   * GET /datasets/facets - Facet vocabulary with counts (epic #1144 phase 5a,
+   * #1170, D1). Lets the CLI validate/autocomplete values like `--task`
+   * (1040 distinct labels) or `--electrode-system` (six values nobody has
+   * written down outside the source) against what the catalog actually
+   * contains, instead of accepting free text blind.
+   *
+   * MUST be registered before `GET /:id` below: this file already carries
+   * one warning about that trap (`GET /search` above), and a literal path
+   * segment registered AFTER a `:id` param route is shadowed by it -- every
+   * request to `/facets` would instead hit the `:id` handler, fail
+   * `isValidDatasetId("facets")` -- a synchronous regex check, so it returns
+   * 400 there and never reaches that handler's later not-found branch.
+   * This is the SECOND instance of the same trap in this file.
+   *
+   * Response shape (D2): most keys are a `{ value, count }[]` vocabulary;
+   * `task` alone carries `{ values, distinct_total, truncated }` since a
+   * truncated list that looks complete is the exact failure mode this
+   * endpoint exists to prevent for its 1040 real values. A key is ABSENT
+   * (not `[]`) when its underlying query failed (D5/ADR 0005) -- `warning`
+   * is set only then; see dataset-facet-vocabulary.ts for the full policy.
+   */
+  datasetRoutes.get("/facets", async (c) => {
+    // Safe default, matching every other handler in this file: an error
+    // path (there is none today, since getFacetVocabulary never throws --
+    // see its own doc comment) would inherit no-store rather than being
+    // cached at the edge by accident.
+    c.header("Cache-Control", "no-store");
+    const db = c.env.DB;
+    const { vocabulary, warning } = await getFacetVocabulary(db);
+
+    if (!warning) {
+      // D4: this response is identical for every caller -- no user-scoped
+      // branching, no query params, nothing auth-dependent changes the
+      // answer -- so it takes the same edge-cache header the resolve and
+      // detail endpoints use. Unlike those two (and the list endpoint),
+      // there is no `Vary: Authorization` here: this handler never reads
+      // `c.get("user")` and the SQL never branches on auth, so there is no
+      // auth-dependent cache key to separate in the first place -- not
+      // "the same reasoning as the list endpoint", a different one. A
+      // degraded (warning-carrying) response is left at the no-store
+      // default above rather than cached for the full 5-minute s-maxage
+      // window, so a transient query failure doesn't get pinned at the edge.
+      c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
+    }
+
+    return c.json({ ...vocabulary, ...(warning ? { warning } : {}) });
   });
 
   /**
