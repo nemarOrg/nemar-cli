@@ -169,3 +169,50 @@ describe("truncateTokenList (#1150 D3)", () => {
     expect(truncateTokenList("anat,eeg,fmap", -5)).toBe("anat,eeg,fmap");
   });
 });
+
+// #1174 comment review, Critical. The ANSI pattern recognises TWO escape
+// introducers: ESC (0x1B) and the single-byte C1 CSI (0x9B). The fallback
+// control-character pass covered C0 (0x00-0x1F) and DEL only, and a comment
+// claimed it caught "any escape byte this misses, since the escape byte is
+// itself a C0 control character". True of 0x1B, FALSE of 0x9B, which is C1.
+// A lone 0x9B therefore reached the terminal verbatim -- in untrusted,
+// dataset-supplied prose, which is the exact threat this module exists for.
+describe("sanitizeSnippetText: C1 control bytes, not just C0 (#1174 review)", () => {
+  const ESC = String.fromCharCode(0x1b);
+  const C1_CSI = String.fromCharCode(0x9b);
+
+  test("a lone C1 CSI introducer never survives", () => {
+    const out = sanitizeSnippetText(`before${C1_CSI} after`);
+    expect(out.includes(C1_CSI)).toBe(false);
+    expect(out).toBe("before after");
+  });
+
+  test("a lone ESC introducer never survives either (the case that always worked)", () => {
+    // Kept alongside the C1 case so the pair documents WHY the range had to
+    // widen: these two bytes are handled by the same ANSI pattern but live in
+    // different control blocks.
+    const out = sanitizeSnippetText(`before${ESC} after`);
+    expect(out.includes(ESC)).toBe(false);
+    expect(out).toBe("before after");
+  });
+
+  test("a C1-introduced colour sequence is consumed whole", () => {
+    expect(sanitizeSnippetText(`plain${C1_CSI}31m red`)).toBe("plain red");
+  });
+
+  test("every byte in the C1 block is removed, not only the CSI introducer", () => {
+    // 0x85 (NEL) is the one most likely to appear by accident in imported
+    // prose, and it moves the cursor in terminals that honour 8-bit controls.
+    for (const code of [0x80, 0x85, 0x8f, 0x9b, 0x9f]) {
+      const byte = String.fromCharCode(code);
+      const out = sanitizeSnippetText(`a${byte}b`);
+      expect(out.includes(byte)).toBe(false);
+    }
+  });
+
+  test("printable characters just above the C1 block are untouched", () => {
+    // 0xA0 is the first byte past C1. Widening the range one byte too far
+    // would start eating non-breaking spaces and accented text.
+    expect(sanitizeSnippetText("café naïve  end")).toBe("café naïve  end");
+  });
+});

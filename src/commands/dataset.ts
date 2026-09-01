@@ -1740,11 +1740,19 @@ export function planSearchColumns(
  * goes to the snippet). A snippet line follows its row only when one comes
  * back from the API (D2); a row without one leaves no blank line behind.
  *
- * Per-row rendering is individually fault-isolated (#1150 D7): a single
- * malformed result (an unexpected `modalities`/`snippet` shape) degrades
- * that one row to its plainest safe form rather than aborting the whole
- * table -- the dataset list the user asked for is the deliverable, the
- * decoration is not allowed to take it down.
+ * Row CONTENT rendering is fault-isolated (#1150 D7): a malformed
+ * `modalities` or `snippet` on one result degrades that row to its plainest
+ * safe form rather than aborting the whole table -- the dataset list the
+ * user asked for is the deliverable, the decoration is not allowed to take
+ * it down.
+ *
+ * The scope is narrower than "per-row" first reads, and the difference is
+ * worth knowing (#1174 review): `planSearchColumns` runs ONCE over the whole
+ * result set before the per-row try/catch, so a malformed `id` or `name`
+ * throws out of this function entirely. That is caught one level up by the
+ * command's own fallback to a plain id/name listing. The command still never
+ * fails, which is D7's actual guarantee -- but in that case every row loses
+ * its full rendering, not just the offending one.
  */
 export function renderSearchResultLines(results: DatasetSearchResult[], columns: number): string[] {
   const plan = planSearchColumns(results, columns);

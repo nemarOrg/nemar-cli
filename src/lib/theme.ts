@@ -50,7 +50,9 @@ export const theme = {
   id: safe(chalk.cyan),
   /** A dataset attribute worth calling out (e.g. the HED annotation badge). */
   metric: safe(chalk.magenta),
-  /** Section titles and column headers. */
+  /** Section titles. NOT the table header row, which renders with
+   * {@link muted} -- verified at the call site (#1174 review); an earlier
+   * version of this line claimed both. */
   label: safe(chalk.bold),
   /** Non-fatal warnings and "nothing found" messages. */
   warn: safe(chalk.yellow),

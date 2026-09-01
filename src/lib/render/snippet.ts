@@ -12,7 +12,7 @@
  *   character-by-character (sanitised), not dropped whole: it is a display
  *   extra, and losing one bad byte should not blank out an otherwise
  *   readable line.
- * - D3: the comma-joined token lists (`modalities`, `tasks`) that a
+ * - D3: the comma-joined token list (`modalities`) that a
  *   fixed-width column used to cut mid-token (`.substring(0, modWidth)`
  *   rendered `anat,eeg,fmap` as `anat,eeg,f`).
  *
@@ -33,9 +33,18 @@ import { theme } from "../theme.js";
  * 0x40-0x7E range. This does not attempt to recognise every ECMA-48 escape
  * shape (OSC hyperlinks, DCS, ...), only the CSI form that a terminal
  * actually acts on for colour and cursor control -- which is the threat
- * this function defends against. Any escape byte this misses is still
- * removed by the control-character pass below, since the escape byte is
- * itself a C0 control character.
+ * this function defends against. An escape byte this misses is still removed
+ * by {@link OTHER_CONTROL_CHAR_PATTERN} below, which covers C0, DEL AND C1 --
+ * the last of those specifically so the 0x9B introducer this pattern accepts
+ * cannot survive as a lone byte. Do not narrow that range to C0 on the
+ * reasoning that "an escape byte is a C0 control character": it is true of
+ * 0x1B and false of 0x9B (#1174 review).
+ *
+ * Note the final-byte class below is deliberately WIDER than 0x40-0x7E in one
+ * direction and narrower in another: it accepts digits and `=`/`>` so a
+ * truncated colour sequence is still consumed whole, at the cost of eating a
+ * digit that directly follows a stray introducer. That trade favours never
+ * leaking a live escape over preserving one character of prose.
  */
 const ANSI_ESCAPE_PATTERN =
   // biome-ignore lint/suspicious/noControlCharactersInRegex: matching the escape byte is the point
@@ -51,14 +60,24 @@ const ANSI_ESCAPE_PATTERN =
 const LINE_BREAK_PATTERN = /[\n\r\t]+/g;
 
 /**
- * Every other C0 control character and DEL, including a lone/malformed
- * escape byte that {@link ANSI_ESCAPE_PATTERN} did not recognise as a full
- * sequence. Removed outright (not collapsed to a space): these have no
- * legitimate appearance in display prose.
+ * Every other control character: C0 (0x00-0x1F), DEL (0x7F), and C1
+ * (0x80-0x9F). This is the fallback for a lone or malformed escape byte that
+ * {@link ANSI_ESCAPE_PATTERN} did not recognise as a complete sequence.
+ * Removed outright rather than collapsed to a space: these have no legitimate
+ * appearance in display prose.
+ *
+ * The C1 range is load-bearing, not defensive breadth (#1174 review). The
+ * ANSI pattern above recognises TWO introducers, ESC (0x1B) and the
+ * single-byte C1 CSI (0x9B). ESC is C0 so a lone one was always caught here;
+ * 0x9B is NOT, and an earlier version of this range stopped at 0x7F while a
+ * comment claimed the fallback caught "any escape byte this misses, since the
+ * escape byte is itself a C0 control character". That was false for exactly
+ * the second introducer the pattern above goes out of its way to handle, and
+ * a lone 0x9B reached the terminal verbatim.
  */
 const OTHER_CONTROL_CHAR_PATTERN =
   // biome-ignore lint/suspicious/noControlCharactersInRegex: detecting control chars is the point
-  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
 
 /**
  * Strip ANSI escape sequences and control characters from untrusted display
@@ -129,7 +148,7 @@ export function renderSnippetLine(rawSnippet: string | undefined | null): string
 }
 
 /**
- * Truncate a comma-joined token list (`modalities`, `tasks`) to fit
+ * Truncate a comma-joined token list to fit
  * `maxWidth` without ever cutting a token in half (#1150 D3). Keeps as many
  * complete leading tokens as fit, then reports how many were dropped
  * (`" +N"`) instead of the previous `.substring(0, maxWidth)` behaviour,

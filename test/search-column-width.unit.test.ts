@@ -8,7 +8,11 @@
  * `planSearchColumns`/`renderSearchResultLines` ARE `nemar dataset
  * search`'s real column-layout logic (exported directly from
  * `src/commands/dataset.ts`, not a re-implementation of it): the command's
- * action calls exactly these with `process.stdout.columns ?? 80`. Real
+ * action calls exactly these. Note the real call site is NOT a `??`
+ * fallback (#1174 review): it reads `process.stdout.columns`, accepts it
+ * only when it is a finite number greater than zero, floors it, and wraps
+ * the whole probe in try/catch. `??` would substitute on null/undefined
+ * alone and let NaN, a negative, or a non-number through. Real
  * `process.stdout.columns` being undefined for piped output is exercised
  * end-to-end over a real subprocess in test/search-color.unit.test.ts and
  * test/search-score-column.unit.test.ts (every one of those spawns pipes
