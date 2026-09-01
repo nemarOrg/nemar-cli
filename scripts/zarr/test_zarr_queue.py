@@ -32,12 +32,14 @@ from zarr_queue import (  # type: ignore[import-not-found]  # noqa: E402
     classify_backfill,
     connect,
     dir_format_recordings,
+    index_failure_keys,
     index_store_keys,
     mark_done,
     mark_fail,
     may_carry_dir_formats,
     migrate_schema,
     missing_dir_format_stores,
+    partition_dir_format_recordings,
     reconcile,
     requeue,
 )
@@ -755,7 +757,9 @@ class DirFormatDetectionTest(unittest.TestCase):
         # `.datalad/config` exists in virtually every dataset here; treating
         # `config` alone as the marker would report every repo as a stranded
         # BTi recording and requeue the archive.
-        self.assertEqual(dir_format_recordings({".datalad/config", "dataset_description.json"}), set())
+        self.assertEqual(
+            dir_format_recordings({".datalad/config", "dataset_description.json"}), set()
+        )
 
     def test_excluded_trees_are_not_counted_as_missing(self):
         # The converter would not build these either (ADR 0027), so a dataset is
@@ -778,6 +782,8 @@ class BackfillClassificationTest(unittest.TestCase):
         "participants.tsv",
     }
 
+    ZARR = "sub-01/ieeg/sub-01_task-x_ieeg.zarr"
+
     def index(self, stores, failures=None):
         failures = failures or []
         return {
@@ -788,6 +794,71 @@ class BackfillClassificationTest(unittest.TestCase):
             "failure_count": len(failures),
             "failures": failures,
         }
+
+    def test_a_recorded_failure_is_not_a_discovery_miss(self):
+        """The precision rule, found by running the sweep against production.
+
+        A directory recording listed in `failures` was SEEN by the converter: the
+        pre-#1095 engine could not have put it there, since it did not recognise
+        the directory as a recording at all. Counting it as missing re-queues
+        datasets whose `.ds` recordings a current engine has already tried and
+        rejected -- on005752 alone would have re-queued 471 CTF MEG recordings.
+        """
+        doc = self.index(
+            [{"path": "sub-01/eeg/x.set", "zarr": "sub-01/eeg/x.zarr"}],
+            failures=[{"path": self.MEFD, "zarr": self.ZARR, "code": "unreadable"}],
+        )
+        got = classify_backfill("on004696", doc, self.PATHS)
+        self.assertFalse(got["affected"], "a known failure is #1113's problem, not this one")
+        self.assertEqual(got["reason"], "served")
+        self.assertEqual(got["missing"], [])
+        self.assertEqual(got["known_failed"], [self.MEFD])
+
+    def test_the_two_buckets_are_reported_separately(self):
+        # A dataset can have both, and the report must not merge them: one is
+        # this sweep's business and the other is not.
+        other = "sub-02/meg/sub-02_task-y_meg.ds"
+        paths = set(self.PATHS) | {f"{other}/sub-02_task-y_meg.meg4"}
+        doc = self.index(
+            [{"path": "sub-01/eeg/x.set", "zarr": "sub-01/eeg/x.zarr"}],
+            failures=[{"path": other, "zarr": "sub-02/meg/sub-02_task-y_meg.zarr"}],
+        )
+        unseen, failed = partition_dir_format_recordings(paths, doc)
+        self.assertEqual(unseen, [self.MEFD])
+        self.assertEqual(failed, [other])
+        got = classify_backfill("on004696", doc, paths)
+        self.assertTrue(got["affected"])
+        self.assertEqual(got["reason"], "dir_stores_missing")
+
+    def test_a_served_recording_is_in_neither_bucket(self):
+        doc = self.index([{"path": self.MEFD, "zarr": self.ZARR}])
+        self.assertEqual(partition_dir_format_recordings(self.PATHS, doc), ([], []))
+
+    def test_a_failure_matched_by_its_zarr_rel_path_alone_still_counts(self):
+        doc = self.index(
+            [{"path": "sub-01/eeg/x.set", "zarr": "sub-01/eeg/x.zarr"}],
+            failures=[{"zarr": self.ZARR}],
+        )
+        self.assertEqual(partition_dir_format_recordings(self.PATHS, doc), ([], [self.MEFD]))
+
+    def test_index_failure_keys_reads_the_failures_list(self):
+        paths, rels = index_failure_keys(
+            {"failures": [{"path": "a.ds", "zarr": "a.zarr"}, "junk", {}]}
+        )
+        self.assertEqual(paths, {"a.ds"})
+        self.assertEqual(rels, {"a.zarr"})
+        self.assertEqual(index_failure_keys(None), (set(), set()))
+        self.assertEqual(index_failure_keys({"stores": [{"path": "a.ds"}]}), (set(), set()))
+
+    def test_an_empty_index_stays_affected_even_with_recorded_failures(self):
+        # store_count 0 is decisive on its own; the failure list only refines
+        # which recordings are named as unseen.
+        doc = self.index([], failures=[{"path": self.MEFD, "zarr": self.ZARR}])
+        got = classify_backfill("on004696", doc, self.PATHS)
+        self.assertTrue(got["affected"])
+        self.assertEqual(got["reason"], "empty_index")
+        self.assertEqual(got["missing"], [])
+        self.assertEqual(got["known_failed"], [self.MEFD])
 
     def test_no_published_index_at_all(self):
         got = classify_backfill("on004696", None)

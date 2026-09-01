@@ -581,11 +581,12 @@ def fetch_public_datasets(api_base: str) -> tuple[list[tuple[str, str]], bool]:
 #   (a) the published index (`zarr.nemar.org/<id>/zarr/index.json`) -- missing
 #       entirely, or listing no stores at all; and
 #   (b) the dataset's own file list (`data.nemar.org/<id>/<v>/manifest.json`) --
-#       a directory-format recording present in the tree with no store for it in
-#       the index.
+#       a directory-format recording present in the tree that the index neither
+#       serves as a store NOR blames as a failure.
 #
 # Rule (b) is what catches a PARTIAL miss (a dataset with EEG stores whose one
-# `.ds` MEG session never converted), which rule (a) alone cannot see.
+# `.ds` MEG session never converted), which rule (a) alone cannot see. The
+# "nor blames" half is what keeps it precise -- see `index_failure_keys`.
 #
 # The detection rules are IMPORTED from `generate_zarr`, never restated: if this
 # sweep and the converter disagreed about what a directory recording is, the
@@ -626,8 +627,8 @@ def may_carry_dir_formats(modalities: str | None) -> bool:
     """True when a catalog row's modalities could involve a directory format.
 
     MEG (CTF `.ds`, 4D/BTi) and iEEG (MEF3 `.mefd`) are the only carriers, so
-    the sweep probes those and skips the rest -- ~131 of 755 datasets at the time
-    of writing, which is what keeps a full sweep to a few minutes.
+    the sweep probes those and skips the rest -- 131 of 755 datasets when this
+    was written, which is most of what bounds a full run.
 
     An EMPTY modality string is treated as "could be", not "is not". A catalog
     row with no modalities is exactly what an OpenNeuro import that never got
@@ -642,16 +643,16 @@ def may_carry_dir_formats(modalities: str | None) -> bool:
     return bool(tokens & set(DIR_FORMAT_MODALITIES))
 
 
-def index_store_keys(index_doc: dict | None) -> tuple[set[str], set[str]]:
-    """(recording paths, `.zarr` rel-paths) the published index lists as stores.
+def _entry_keys(entries) -> tuple[set[str], set[str]]:
+    """(recording paths, `.zarr` rel-paths) named by a list of index entries.
 
-    Both keys are collected because either identifies a store and a hand-edited
-    or half-written index may carry only one of them; a recording is considered
-    served if EITHER matches.
+    Both keys are collected because either identifies a recording and a
+    hand-edited or half-written index may carry only one of them; a match on
+    EITHER counts.
     """
     paths: set[str] = set()
     rels: set[str] = set()
-    for entry in (index_doc or {}).get("stores") or []:
+    for entry in entries or []:
         if not isinstance(entry, dict):
             continue
         if isinstance(entry.get("path"), str):
@@ -659,6 +660,31 @@ def index_store_keys(index_doc: dict | None) -> tuple[set[str], set[str]]:
         if isinstance(entry.get("zarr"), str):
             rels.add(entry["zarr"])
     return paths, rels
+
+
+def index_store_keys(index_doc: dict | None) -> tuple[set[str], set[str]]:
+    """The recordings the published index lists as SERVED stores."""
+    return _entry_keys((index_doc or {}).get("stores"))
+
+
+def index_failure_keys(index_doc: dict | None) -> tuple[set[str], set[str]]:
+    """The recordings the published index lists as typed conversion FAILURES.
+
+    A recording here was **seen** by the converter and could not be converted,
+    which is a different problem from the one this sweep exists to find -- and
+    the distinction is what keeps the sweep precise. The pre-#1095 engine did not
+    recognise `.mefd`/`.ds`/BTi directories as recordings at all, so a
+    directory-format recording it processed landed in NEITHER list; one sitting
+    in `failures` therefore proves a POST-#1095 engine already looked at it and
+    failed on the data.
+
+    Measured against the live archive before this distinction existed: of 41
+    datasets the sweep flagged, ten were flagged only because their `.ds`
+    recordings were recorded failures -- on005752 alone would have re-queued 471
+    CTF MEG recordings a current engine has already tried. Retrying those is the
+    `--requeue` decision (#1113), not this one.
+    """
+    return _entry_keys((index_doc or {}).get("failures"))
 
 
 def dir_format_recordings(paths) -> set[str]:
@@ -675,20 +701,42 @@ def dir_format_recordings(paths) -> set[str]:
     return dir_recordings(paths) | bti_recordings(paths)
 
 
-def missing_dir_format_stores(manifest_paths, index_doc: dict | None) -> list[str]:
-    """Directory-format recordings present in the tree with no store in the index.
+def partition_dir_format_recordings(
+    manifest_paths, index_doc: dict | None
+) -> tuple[list[str], list[str]]:
+    """Split the tree's directory recordings into (never seen, seen and failed).
 
     `manifest_paths` is the dataset's full file list (every path, not just
     recordings) -- the same input shape `generate_zarr`'s detectors take, which
-    is why they can be applied to it unmodified. Sorted for a stable report.
+    is why they can be applied to it unmodified. Both lists are sorted, and a
+    recording that has a store appears in neither.
+
+    The first list is the #1172 cohort: a recording in the tree that the index
+    neither serves nor blames. The second is a recording the converter tried and
+    failed on, which is a real problem but a different one -- see
+    `index_failure_keys` for why conflating them re-converts hundreds of
+    recordings that a current engine has already rejected.
     """
     _, _, store_rel_for = _detection_rules()
     served_paths, served_rels = index_store_keys(index_doc)
-    return sorted(
-        rec
-        for rec in dir_format_recordings(manifest_paths)
-        if rec not in served_paths and store_rel_for(rec) not in served_rels
-    )
+    failed_paths, failed_rels = index_failure_keys(index_doc)
+    unseen: list[str] = []
+    failed: list[str] = []
+    for rec in dir_format_recordings(manifest_paths):
+        rel = store_rel_for(rec)
+        if rec in served_paths or rel in served_rels:
+            continue
+        if rec in failed_paths or rel in failed_rels:
+            failed.append(rec)
+        else:
+            unseen.append(rec)
+    return sorted(unseen), sorted(failed)
+
+
+def missing_dir_format_stores(manifest_paths, index_doc: dict | None) -> list[str]:
+    """The directory recordings the index neither serves nor blames."""
+    unseen, _ = partition_dir_format_recordings(manifest_paths, index_doc)
+    return unseen
 
 
 def classify_backfill(
@@ -705,13 +753,18 @@ def classify_backfill(
     Reasons, in the order they are checked:
       `index_missing`     -- no published index at all.
       `empty_index`       -- an index that lists zero stores.
-      `dir_stores_missing`-- a directory-format recording in the tree with no
-                             store in the index (the partial case).
-      `served`            -- nothing missing.
+      `dir_stores_missing`-- a directory-format recording in the tree that the
+                             index neither serves nor blames (the partial case).
+      `served`            -- nothing unaccounted for.
       `not_probed`        -- stores exist and no manifest was read, so the
                              partial case could not be ruled out. NOT affected:
                              requeuing on an unfinished check would re-convert
                              datasets on no evidence.
+
+    `known_failed` carries the directory recordings the index records as typed
+    conversion failures. They are reported and never counted as missing --
+    the converter has already seen them, so they are #1113's problem, not this
+    sweep's.
     """
     if index_doc is None:
         return {
@@ -721,12 +774,15 @@ def classify_backfill(
             "store_count": 0,
             "failure_count": 0,
             "missing": [],
+            "known_failed": [],
         }
     # Count the entries rather than trusting `store_count`: the entries are what
     # the viewer reads, so a document where the two disagree should be judged by
     # what it actually serves.
     stores = index_doc.get("stores")
-    store_count = len(stores) if isinstance(stores, list) else int(index_doc.get("store_count") or 0)
+    store_count = (
+        len(stores) if isinstance(stores, list) else int(index_doc.get("store_count") or 0)
+    )
     failures = index_doc.get("failures")
     failure_count = (
         len(failures) if isinstance(failures, list) else int(index_doc.get("failure_count") or 0)
@@ -738,21 +794,22 @@ def classify_backfill(
         "store_count": store_count,
         "failure_count": failure_count,
         "missing": [],
+        "known_failed": [],
     }
+    if manifest_paths is not None:
+        result["missing"], result["known_failed"] = partition_dir_format_recordings(
+            manifest_paths, index_doc
+        )
     if store_count == 0:
         result["affected"] = True
         result["reason"] = "empty_index"
-        if manifest_paths is not None:
-            result["missing"] = missing_dir_format_stores(manifest_paths, index_doc)
         return result
     if manifest_paths is None:
         result["reason"] = "not_probed"
         return result
-    missing = missing_dir_format_stores(manifest_paths, index_doc)
-    if missing:
+    if result["missing"]:
         result["affected"] = True
         result["reason"] = "dir_stores_missing"
-        result["missing"] = missing
     return result
 
 
@@ -800,15 +857,26 @@ def fetch_zarr_index(zarr_base: str, dataset_id: str) -> dict | None:
         raise
 
 
-def fetch_manifest_paths(data_base: str, dataset_id: str, version: str) -> set[str]:
+def fetch_manifest_paths(data_base: str, dataset_id: str, version: str) -> set[str] | None:
     """Every file path in the dataset at `version`, from one manifest.json read.
 
     The literal alias `latest` is used when the catalog has no version for the
     row; the data plane resolves it to the newest published version.
+
+    None when there is no manifest to read (404). That is not an error: a
+    published dataset can have no `dataset_versions` row at all (on005691 does),
+    so the tree cannot be listed and the probe simply did not happen -- which is
+    exactly what `not_probed` says. Raising instead would file a permanent
+    property of the dataset as a transient failure, on every run forever.
     """
     tag = _vtag(version) or "latest"
     url = f"{data_base.rstrip('/')}/{dataset_id}/{tag}/manifest.json"
-    rows = _get_json_retrying(url, timeout=120)
+    try:
+        rows = _get_json_retrying(url, timeout=120)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
     if not isinstance(rows, list):
         raise ValueError(f"manifest.json for {dataset_id} is not a list")
     return {r["path"] for r in rows if isinstance(r, dict) and isinstance(r.get("path"), str)}
@@ -872,6 +940,15 @@ def sweep_dir_format_backfill(
                 manifest_paths = fetch_manifest_paths(
                     data_base, dataset_id, str(row.get("latest_version") or "")
                 )
+                if manifest_paths is None:
+                    # Not affected and not an error, but not checked either --
+                    # and a dataset that quietly falls out of both buckets is the
+                    # kind of gap this sweep is supposed to close, not create.
+                    print(
+                        f"note {dataset_id}: no manifest to read (no published version),"
+                        " so the partial case could not be checked",
+                        flush=True,
+                    )
             finding = classify_backfill(dataset_id, index_doc, manifest_paths)
         except Exception as exc:  # noqa: BLE001 - one dataset must not end the sweep
             errors.append((dataset_id, f"{type(exc).__name__}: {exc}"))
@@ -893,7 +970,8 @@ def sweep_dir_format_backfill(
         print(
             f"affected {dataset_id}: {finding['reason']}"
             f" (stores={finding['store_count']}, failures={finding['failure_count']},"
-            f" missing_dir_recordings={len(finding['missing'])},"
+            f" unseen_dir_recordings={len(finding['missing'])},"
+            f" already_failed={len(finding['known_failed'])},"
             f" queue={finding['queue_status']}"
             f"{'@' + finding['converted_version'] if finding['converted_version'] else ''},"
             f" engine={finding['engine_version']})",
@@ -903,6 +981,14 @@ def sweep_dir_format_backfill(
             print(f"    no store for {rec}")
         if len(finding["missing"]) > 5:
             print(f"    ... and {len(finding['missing']) - 5} more")
+        if finding["known_failed"]:
+            # Named, not hidden: these are real gaps in the serving copy, they
+            # just are not THIS gap, and an operator reading the report should
+            # not have to rediscover that they exist.
+            print(
+                f"    ({len(finding['known_failed'])} more directory recording(s) are"
+                " recorded conversion FAILURES, not discovery misses; see --requeue)"
+            )
         if not execute:
             continue
         # `requeue` filters on status itself, so a dataset that is not `done`
