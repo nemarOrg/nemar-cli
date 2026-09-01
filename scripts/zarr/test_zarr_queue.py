@@ -2,32 +2,55 @@
 """Unit tests for the SQLite conversion queue (scripts/zarr/zarr_queue.py).
 
 Real SQLite (a temp db per test), no mocks: exercises the enqueue / claim /
-done / fail transitions, retry-backoff, version-bump requeue, and the crash
-recovery (stale `inprogress` -> `pending`). The HTTP fetch is not tested here
-(it hits the live API, validated by the cron run).
+done / fail transitions, retry-backoff, version-bump requeue, the crash
+recovery (stale `inprogress` -> `pending`), the engine-version stamp and its
+migration (#1172), and the pure decision logic of the directory-format backfill
+sweep. The HTTP fetches are not tested here (they hit the live API/data plane,
+validated by the cron run and by a dry-run sweep).
 
 Run: python3 scripts/zarr/test_zarr_queue.py
 """
 
 from __future__ import annotations
 
+import contextlib
+import http.server
+import io
+import json
 import os
+import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import unittest
+import urllib.error
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from zarr_queue import (  # type: ignore[import-not-found]  # noqa: E402
+    ZARR_ENGINE_VERSION,
+    _get_json_retrying,
     backoff_seconds,
     claim_next,
+    classify_backfill,
     connect,
+    dir_format_recordings,
+    fetch_manifest_paths,
+    fetch_zarr_index,
+    index_failure_keys,
+    index_store_keys,
+    main,
     mark_done,
     mark_fail,
+    may_carry_dir_formats,
+    migrate_schema,
+    missing_dir_format_stores,
+    partition_dir_format_recordings,
     reconcile,
     requeue,
+    sweep_dir_format_backfill,
 )
 
 
@@ -459,6 +482,1138 @@ class UnlistedSweepTest(unittest.TestCase):
         self.assertEqual(back["attempts"], 0)
         self.assertIsNone(back["last_error"])
         self.assertEqual(back["next_retry_at"], 0)
+
+
+class EngineStampMigrationTest(unittest.TestCase):
+    """#1172: the migration that must NOT requeue the archive.
+
+    The production queue predates the `engine_version` column, so every one of
+    its ~667 `done` rows arrives NULL. Reading NULL as "old engine" would put the
+    whole archive back through conversion on the next cron tick; the migration
+    therefore seeds them to the CURRENT version and leaves the genuinely stranded
+    cohort to the targeted `backfill-dir-formats` sweep.
+    """
+
+    # The jobs table exactly as it stood before this change: a real pre-migration
+    # database, not a stand-in for one.
+    PRE_MIGRATION_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS jobs (
+      dataset_id        TEXT PRIMARY KEY,
+      latest_version    TEXT,
+      converted_version TEXT,
+      status            TEXT NOT NULL DEFAULT 'pending',
+      attempts          INTEGER NOT NULL DEFAULT 0,
+      last_error        TEXT,
+      next_retry_at     INTEGER NOT NULL DEFAULT 0,
+      enqueued_at       TEXT,
+      updated_at        INTEGER NOT NULL DEFAULT 0
+    );
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db = os.path.join(self._tmp.name, "old.db")
+        old = sqlite3.connect(self.db)
+        # WAL, like the live queue: `connect` sets it on every open, and
+        # SWITCHING journal mode needs an exclusive lock that an already-WAL
+        # database never asks for. Without this the fixture would make two
+        # concurrent opens collide on the pragma rather than on the migration.
+        old.execute("PRAGMA journal_mode=WAL")
+        old.executescript(self.PRE_MIGRATION_SCHEMA)
+        old.executemany(
+            "INSERT INTO jobs(dataset_id, latest_version, converted_version, status,"
+            " enqueued_at, updated_at) VALUES(?,?,?,?,?,?)",
+            [
+                ("nm000001", "v1.0.0", "v1.0.0", "done", "2026-01-01T00:00:00Z", 0),
+                ("on000002", "v2.0.0", "v2.0.0", "done", "2026-01-01T00:00:01Z", 0),
+                ("nm000003", "v1.0.0", None, "pending", "2026-01-01T00:00:02Z", 0),
+            ],
+        )
+        old.commit()
+        old.close()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _open(self):
+        """connect() with its one-time migration notice captured, not printed."""
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            conn = connect(self.db)
+        return conn, buf.getvalue()
+
+    def stamps(self, conn):
+        return {
+            r["dataset_id"]: r["engine_version"]
+            for r in conn.execute("SELECT dataset_id, engine_version FROM jobs")
+        }
+
+    def test_the_pre_migration_db_really_lacks_the_column(self):
+        # Guard on the fixture itself: if this ever passes trivially, every other
+        # assertion in this class is testing nothing.
+        raw = sqlite3.connect(self.db)
+        cols = {r[1] for r in raw.execute("PRAGMA table_info(jobs)")}
+        raw.close()
+        self.assertNotIn("engine_version", cols)
+
+    def test_connect_adds_the_column_and_seeds_the_done_rows_to_current(self):
+        conn, _ = self._open()
+        self.addCleanup(conn.close)
+        self.assertEqual(
+            self.stamps(conn),
+            {
+                "nm000001": ZARR_ENGINE_VERSION,
+                "on000002": ZARR_ENGINE_VERSION,
+                # Pending: nothing has converted it, so it has nothing to
+                # declare. `mark_done` stamps it when it actually converts.
+                "nm000003": None,
+            },
+        )
+
+    def test_a_pending_row_is_not_seeded(self):
+        """The seed runs on every connect, so it must match only what it means.
+
+        Seeding every NULL row would re-fire forever: `reconcile` INSERTs new
+        rows with no stamp, so the next process would "seed" them, print a
+        migration notice on a routine tick, and take a write lock inside the
+        drain's `next` loop.
+        """
+        conn, _ = self._open()
+        self.addCleanup(conn.close)
+        reconcile(conn, [("nm000009", "v1.0.0")], 3600)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self.assertEqual(migrate_schema(conn), 0)
+        self.assertEqual(buf.getvalue(), "")
+        row = conn.execute(
+            "SELECT engine_version FROM jobs WHERE dataset_id='nm000009'"
+        ).fetchone()
+        self.assertIsNone(row["engine_version"])
+
+    def test_the_migration_announces_itself(self):
+        # The single most consequential thing this file does to a live queue is
+        # declare rows current instead of requeuing them. It must leave a trace
+        # in the cron log.
+        _, notice = self._open()
+        self.assertIn("2 pre-existing row(s)", notice)
+        self.assertIn("engine_version", notice)
+
+    def test_migrated_rows_are_not_requeued_by_the_next_reconcile(self):
+        """The whole point: no mass reconversion on the first post-upgrade run."""
+        conn, _ = self._open()
+        self.addCleanup(conn.close)
+        res = reconcile(conn, [("nm000001", "v1.0.0"), ("on000002", "v2.0.0")], 3600)
+        self.assertEqual(res["enqueued"], 0)
+        self.assertEqual(res["engine_stale"], 0)
+        self.assertEqual(res["engine_requeued"], 0)
+        statuses = {
+            r["dataset_id"]: r["status"]
+            for r in conn.execute("SELECT dataset_id, status FROM jobs")
+        }
+        self.assertEqual(statuses["nm000001"], "done")
+        self.assertEqual(statuses["on000002"], "done")
+
+    def test_a_crash_between_the_alter_and_the_seed_is_recovered(self):
+        """The window that made the seed unconditional.
+
+        SQLite makes `ALTER TABLE ... ADD COLUMN` durable the moment it runs,
+        before the seeding UPDATE that follows commits. An OOM kill in between --
+        this box's documented history (#1110) -- leaves the column present and
+        every row NULL. A `column exists -> return 0` guard would then see a
+        migrated schema forever, never seed, and leave those rows permanently
+        invisible to every future engine bump, with nothing in any log saying so.
+
+        This constructs exactly that state and asserts the next connect repairs
+        it.
+        """
+        crashed = sqlite3.connect(self.db)
+        crashed.execute("ALTER TABLE jobs ADD COLUMN engine_version TEXT")
+        crashed.commit()  # the ALTER lands; the seed never ran
+        crashed.close()
+
+        raw = sqlite3.connect(self.db)
+        raw.row_factory = sqlite3.Row
+        self.assertIn("engine_version", {r["name"] for r in raw.execute("PRAGMA table_info(jobs)")})
+        self.assertEqual(
+            [r["engine_version"] for r in raw.execute("SELECT engine_version FROM jobs")],
+            [None, None, None],
+            "guard: the crashed state must really be column-present/all-NULL",
+        )
+        raw.close()
+
+        conn, notice = self._open()
+        self.addCleanup(conn.close)
+        self.assertEqual(
+            self.stamps(conn),
+            {
+                "nm000001": ZARR_ENGINE_VERSION,
+                "on000002": ZARR_ENGINE_VERSION,
+                "nm000003": None,
+            },
+        )
+        self.assertIn("2 pre-existing row(s)", notice)
+
+    def test_a_lost_alter_race_does_not_raise(self):
+        """Two processes may legitimately hold this DB at once.
+
+        `--requeue` and `--backfill-dir-formats` are documented as safe to run
+        while a drain holds the flock, so two processes can both read "no
+        column" and both attempt the ALTER. The loser used to take an uncaught
+        OperationalError -- and if the loser is the cron's `reconcile`, the whole
+        tick aborts and nothing is enqueued.
+        """
+        winner, _ = self._open()  # adds the column and seeds
+        self.addCleanup(winner.close)
+        # A connection that read the schema BEFORE the winner ran: its PRAGMA
+        # said "no column", so it will attempt the ALTER and lose.
+        loser = sqlite3.connect(self.db)
+        loser.row_factory = sqlite3.Row
+        self.addCleanup(loser.close)
+        with self.assertRaises(sqlite3.OperationalError) as raised:
+            loser.execute("ALTER TABLE jobs ADD COLUMN engine_version TEXT")
+        self.assertIn("duplicate column", str(raised.exception).lower())
+        # migrate_schema swallows exactly that error and proceeds to the seed.
+        self.assertEqual(migrate_schema(loser), 0)
+
+    def test_a_real_schema_error_still_raises(self):
+        # The duplicate-column tolerance must not become a blanket
+        # "ignore OperationalError", or a genuinely broken schema converts
+        # silently against the wrong table.
+        broken = sqlite3.connect(os.path.join(self._tmp.name, "broken.db"))
+        broken.row_factory = sqlite3.Row
+        self.addCleanup(broken.close)
+        with self.assertRaises(sqlite3.OperationalError) as raised:
+            migrate_schema(broken)  # no `jobs` table at all
+        self.assertIn("no such table", str(raised.exception).lower())
+
+    def test_two_racing_connects_both_succeed(self):
+        """The race, driven for real through two threads on one file."""
+        errors: list[BaseException] = []
+        started = threading.Barrier(2)
+
+        def open_and_migrate():
+            try:
+                started.wait(timeout=5)
+                buf = io.StringIO()
+                with contextlib.redirect_stderr(buf):
+                    conn = connect(self.db)
+                conn.close()
+            except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+                errors.append(exc)
+
+        threads = [threading.Thread(target=open_and_migrate) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        self.assertEqual([f"{type(e).__name__}: {e}" for e in errors], [])
+        raw = sqlite3.connect(self.db)
+        raw.row_factory = sqlite3.Row
+        self.addCleanup(raw.close)
+        done = [
+            r["engine_version"]
+            for r in raw.execute("SELECT engine_version FROM jobs WHERE status='done'")
+        ]
+        self.assertEqual(done, [ZARR_ENGINE_VERSION, ZARR_ENGINE_VERSION])
+
+    def test_migration_is_idempotent(self):
+        conn, _ = self._open()
+        self.addCleanup(conn.close)
+        self.assertEqual(migrate_schema(conn), 0)
+        conn2, notice = self._open()
+        self.addCleanup(conn2.close)
+        self.assertEqual(notice, "")
+
+    def test_a_fresh_db_has_the_column_and_seeds_nothing(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            conn = connect(os.path.join(tmp.name, "new.db"))
+        self.addCleanup(conn.close)
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+        self.assertIn("engine_version", cols)
+        self.assertEqual(buf.getvalue(), "")
+
+
+class EngineStampRequeueTest(unittest.TestCase):
+    """#1172: a widened engine reaches the back catalog through the stamp.
+
+    An engine upgrade bumps no dataset version, so before this the version
+    comparison in `reconcile` was the only requeue trigger and every
+    already-converted dataset stayed on the rules it was converted under.
+    """
+
+    OLD_ENGINE = "1"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.conn = connect(os.path.join(self._tmp.name, "q.db"))
+        reconcile(self.conn, [("nm000001", "v1.0.0")], 3600)
+        claim_next(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+        self._tmp.cleanup()
+
+    def row(self, dataset_id="nm000001"):
+        return self.conn.execute(
+            "SELECT status, latest_version, converted_version, engine_version, attempts"
+            " FROM jobs WHERE dataset_id=?",
+            (dataset_id,),
+        ).fetchone()
+
+    def test_done_stamps_the_current_engine(self):
+        mark_done(self.conn, "nm000001", "v1.0.0")
+        self.assertEqual(self.row()["engine_version"], ZARR_ENGINE_VERSION)
+
+    def test_a_stale_stamp_requeues_at_the_same_version(self):
+        mark_done(self.conn, "nm000001", "v1.0.0", engine_version=self.OLD_ENGINE)
+        res = reconcile(self.conn, [("nm000001", "v1.0.0")], 3600)
+        self.assertEqual(res["enqueued"], 1)
+        self.assertEqual(res["engine_stale"], 1)
+        self.assertEqual(res["engine_requeued"], 1)
+        self.assertEqual(self.row()["status"], "pending")
+
+    def test_a_current_stamp_is_left_alone(self):
+        mark_done(self.conn, "nm000001", "v1.0.0")
+        res = reconcile(self.conn, [("nm000001", "v1.0.0")], 3600)
+        self.assertEqual((res["enqueued"], res["engine_stale"]), (0, 0))
+        self.assertEqual(self.row()["status"], "done")
+
+    def test_the_guard_flag_suppresses_the_requeue_but_still_counts_it(self):
+        # `--no-engine-requeue` exists so the cost of a bump can be read off a
+        # run before it is paid; a suppressed requeue that also reported zero
+        # would make the flag useless.
+        mark_done(self.conn, "nm000001", "v1.0.0", engine_version=self.OLD_ENGINE)
+        res = reconcile(self.conn, [("nm000001", "v1.0.0")], 3600, engine_requeue=False)
+        self.assertEqual(res["engine_stale"], 1)
+        self.assertEqual(res["engine_requeued"], 0)
+        self.assertEqual(res["enqueued"], 0)
+        self.assertEqual(self.row()["status"], "done")
+
+    def test_a_null_stamp_is_never_stale(self):
+        """Fail-safe: a NULL that escaped the migration must not requeue.
+
+        `migrate_schema` seeds every pre-existing row, so this should be
+        unreachable -- which is exactly why the behaviour needs pinning. If a
+        NULL ever does appear (an older driver writing into a migrated DB, a
+        hand-edited row), the wrong reading of it re-converts the entire archive.
+        """
+        mark_done(self.conn, "nm000001", "v1.0.0")
+        self.conn.execute("UPDATE jobs SET engine_version=NULL WHERE dataset_id='nm000001'")
+        self.conn.commit()
+        res = reconcile(self.conn, [("nm000001", "v1.0.0")], 3600)
+        self.assertEqual((res["enqueued"], res["engine_stale"]), (0, 0))
+        self.assertEqual(self.row()["status"], "done")
+
+    def test_a_version_change_still_requeues_and_is_not_double_counted(self):
+        # A row with both a new version and a stale stamp would re-convert
+        # anyway, so it is attributed to the version -- `engine_requeued` reports
+        # the MARGINAL cost of a bump, not the overlap.
+        mark_done(self.conn, "nm000001", "v1.0.0", engine_version=self.OLD_ENGINE)
+        res = reconcile(self.conn, [("nm000001", "v2.0.0")], 3600)
+        self.assertEqual(res["enqueued"], 1)
+        self.assertEqual(res["engine_stale"], 1)
+        self.assertEqual(res["engine_requeued"], 0)
+        row = self.row()
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(row["latest_version"], "v2.0.0")
+
+    def test_a_stamp_only_requeue_keeps_the_version_to_convert(self):
+        # The drain reads `latest_version` off the claimed row; blanking it would
+        # hand the converter an empty target.
+        mark_done(self.conn, "nm000001", "v1.0.0", engine_version=self.OLD_ENGINE)
+        reconcile(self.conn, [("nm000001", "")], 3600)
+        row = self.row()
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(row["latest_version"], "v1.0.0")
+
+    def test_the_requeued_row_converts_and_restamps_to_current(self):
+        mark_done(self.conn, "nm000001", "v1.0.0", engine_version=self.OLD_ENGINE)
+        reconcile(self.conn, [("nm000001", "v1.0.0")], 3600)
+        claimed = claim_next(self.conn)
+        self.assertEqual(claimed["dataset_id"], "nm000001")
+        mark_done(self.conn, "nm000001", claimed["latest_version"])
+        self.assertEqual(self.row()["engine_version"], ZARR_ENGINE_VERSION)
+        # ... and the next reconcile is quiet again, so a bump requeues once.
+        res = reconcile(self.conn, [("nm000001", "v1.0.0")], 3600)
+        self.assertEqual((res["enqueued"], res["engine_stale"]), (0, 0))
+
+    def test_the_stamp_governs_done_rows_only(self):
+        # A terminal row is terminal for reasons the stamp knows nothing about
+        # (#774). Widening discovery does not make an unreadable recording
+        # readable, so an engine bump must not revive `failed`/`data_failed`.
+        mark_fail(self.conn, "nm000001", "unreadable", 5, 1800, deterministic=True)
+        self.conn.execute("UPDATE jobs SET engine_version=? WHERE dataset_id='nm000001'", ("1",))
+        self.conn.commit()
+        res = reconcile(self.conn, [("nm000001", "v1.0.0")], 3600)
+        self.assertEqual((res["enqueued"], res["engine_stale"]), (0, 0))
+        self.assertEqual(self.row()["status"], "data_failed")
+
+
+class EngineBumpGuardTest(unittest.TestCase):
+    """#1172: a merged engine bump must not land unattended.
+
+    The Hallu cron self-deploys the driver every run (`setup()` resets the clone
+    to origin/$DRIVER_REF), so merging a bump IS deploying it: the next hourly
+    tick would reconcile with the new constant and re-queue the back catalog with
+    nobody watching. The guard turns that into a deliberate second step.
+    """
+
+    OLD_ENGINE = "1"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.conn = connect(os.path.join(self._tmp.name, "q.db"))
+        self.ids = [f"nm{n:06d}" for n in range(1, 11)]
+        reconcile(self.conn, [(i, "v1.0.0") for i in self.ids], 3600)
+        for dataset_id in self.ids:
+            claim_next(self.conn)
+            mark_done(self.conn, dataset_id, "v1.0.0", engine_version=self.OLD_ENGINE)
+
+    def tearDown(self):
+        self.conn.close()
+        self._tmp.cleanup()
+
+    def catalog(self):
+        return [(i, "v1.0.0") for i in self.ids]
+
+    def statuses(self):
+        return [
+            r["status"] for r in self.conn.execute("SELECT status FROM jobs ORDER BY dataset_id")
+        ]
+
+    def test_a_bump_over_the_limit_requeues_nothing_at_all(self):
+        # All-or-nothing: a partial requeue would split the archive across two
+        # engines with no record of where the line fell, and the next run would
+        # carry on regardless -- the very thing the guard prevents.
+        res = reconcile(self.conn, self.catalog(), 3600, engine_requeue_limit=5)
+        self.assertTrue(res["engine_requeue_blocked"])
+        self.assertEqual(res["engine_requeued"], 0)
+        self.assertEqual(res["engine_pending"], 10)
+        self.assertEqual(res["enqueued"], 0)
+        self.assertEqual(self.statuses(), ["done"] * 10)
+
+    def test_the_block_still_reports_the_full_stale_count(self):
+        res = reconcile(self.conn, self.catalog(), 3600, engine_requeue_limit=5)
+        self.assertEqual(res["engine_stale"], 10)
+
+    def test_an_ack_applies_the_whole_bump(self):
+        res = reconcile(
+            self.conn, self.catalog(), 3600, engine_requeue_limit=5, engine_requeue_ack=True
+        )
+        self.assertFalse(res["engine_requeue_blocked"])
+        self.assertEqual(res["engine_requeued"], 10)
+        self.assertEqual(res["enqueued"], 10)
+        self.assertEqual(self.statuses(), ["pending"] * 10)
+
+    def test_a_bump_at_or_under_the_limit_needs_no_ack(self):
+        # The guard is for bumps, not for the handful of rows a hand-fixed stamp
+        # or a rolled-back driver leaves behind.
+        res = reconcile(self.conn, self.catalog(), 3600, engine_requeue_limit=10)
+        self.assertFalse(res["engine_requeue_blocked"])
+        self.assertEqual(res["engine_requeued"], 10)
+
+    def test_no_limit_is_the_pure_default(self):
+        res = reconcile(self.conn, self.catalog(), 3600)
+        self.assertFalse(res["engine_requeue_blocked"])
+        self.assertEqual(res["engine_requeued"], 10)
+
+    def test_a_blocked_bump_does_not_stop_ordinary_work(self):
+        """The guard is scoped to the stamp-only requeues, deliberately.
+
+        A guard that stopped genuinely new datasets converting would be a worse
+        failure than the unattended requeue it prevents.
+        """
+        catalog = self.catalog() + [("nm000042", "v1.0.0")]  # brand new
+        catalog[0] = (self.ids[0], "v2.0.0")  # and one real version bump
+        res = reconcile(self.conn, catalog, 3600, engine_requeue_limit=5)
+        self.assertTrue(res["engine_requeue_blocked"])
+        self.assertEqual(res["enqueued"], 2)  # the new row + the version bump
+        self.assertEqual(res["engine_requeued"], 0)
+        row = self.conn.execute(
+            "SELECT status FROM jobs WHERE dataset_id=?", (self.ids[0],)
+        ).fetchone()
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(
+            self.conn.execute("SELECT status FROM jobs WHERE dataset_id='nm000042'").fetchone()[
+                "status"
+            ],
+            "pending",
+        )
+        # ... and every other stamp-stale row is untouched.
+        self.assertEqual(
+            [
+                r["status"]
+                for r in self.conn.execute(
+                    "SELECT status FROM jobs WHERE dataset_id IN"
+                    " ('nm000002','nm000003','nm000004')"
+                )
+            ],
+            ["done", "done", "done"],
+        )
+
+    def test_a_blocked_run_leaves_the_next_run_free_to_apply(self):
+        # Blocking must be a pause, not a state change: the same bump has to be
+        # applyable by the acknowledged run that follows.
+        reconcile(self.conn, self.catalog(), 3600, engine_requeue_limit=5)
+        res = reconcile(
+            self.conn, self.catalog(), 3600, engine_requeue_limit=5, engine_requeue_ack=True
+        )
+        self.assertEqual(res["engine_requeued"], 10)
+        self.assertEqual(self.statuses(), ["pending"] * 10)
+
+    def test_the_suppression_flag_reports_nothing_pending(self):
+        # --no-engine-requeue is a deliberate "don't", not a blocked "can't", so
+        # it must not read as a bump awaiting acknowledgement.
+        res = reconcile(
+            self.conn, self.catalog(), 3600, engine_requeue=False, engine_requeue_limit=5
+        )
+        self.assertFalse(res["engine_requeue_blocked"])
+        self.assertEqual(res["engine_pending"], 0)
+        self.assertEqual(res["engine_stale"], 10)
+        self.assertEqual(self.statuses(), ["done"] * 10)
+
+
+class DirFormatDetectionTest(unittest.TestCase):
+    """#1172: which datasets the one-off sweep considers, and what it looks for.
+
+    The detectors themselves are imported from `generate_zarr` rather than
+    restated, so these assert the wiring and the exclusions that matter here --
+    not a second copy of the format rules.
+    """
+
+    def test_meg_and_ieeg_are_the_carriers(self):
+        for modalities in ("meg", "ieeg", "anat,meg", "beh,ieeg", "eeg,meg", "MEG"):
+            self.assertTrue(may_carry_dir_formats(modalities), modalities)
+        for modalities in ("eeg", "emg", "beh,eeg", "anat,eeg,func"):
+            self.assertFalse(may_carry_dir_formats(modalities), modalities)
+
+    def test_an_unknown_modality_is_probed_not_skipped(self):
+        # A catalog row with no modalities is what an un-backfilled OpenNeuro
+        # import looks like (nemar-cli#512) -- exactly the under-described shape
+        # this sweep exists to find, so it must not be filtered out.
+        self.assertTrue(may_carry_dir_formats(""))
+        self.assertTrue(may_carry_dir_formats(None))
+        self.assertTrue(may_carry_dir_formats("  ,  "))
+
+    def test_directory_recordings_are_found_from_their_member_files(self):
+        paths = {
+            "sub-01/ieeg/sub-01_task-x_ieeg.mefd/c1.timd/c1-000000.segd/c1.tdat",
+            "sub-02/meg/sub-02_task-y_meg.ds/sub-02_task-y_meg.meg4",
+            "sub-03/meg/sub-03_task-z_meg/c,rfDC",
+            "sub-03/meg/sub-03_task-z_meg/config",
+            "sub-04/eeg/sub-04_task-w_eeg.set",
+            "participants.tsv",
+        }
+        self.assertEqual(
+            dir_format_recordings(paths),
+            {
+                "sub-01/ieeg/sub-01_task-x_ieeg.mefd",
+                "sub-02/meg/sub-02_task-y_meg.ds",
+                "sub-03/meg/sub-03_task-z_meg",
+            },
+        )
+
+    def test_a_bare_config_file_is_not_a_bti_recording(self):
+        # `.datalad/config` exists in virtually every dataset here; treating
+        # `config` alone as the marker would report every repo as a stranded
+        # BTi recording and requeue the archive.
+        self.assertEqual(
+            dir_format_recordings({".datalad/config", "dataset_description.json"}), set()
+        )
+
+    def test_excluded_trees_are_not_counted_as_missing(self):
+        # The converter would not build these either (ADR 0027), so a dataset is
+        # not stranded for lacking them.
+        paths = {
+            "derivatives/pipe/sub-01/meg/sub-01_task-x_meg.ds/x.meg4",
+            "sourcedata/sub-01/ieeg/sub-01_task-x_ieeg.mefd/c1.timd/c1.tdat",
+            "code/demo_meg.ds/x.meg4",
+        }
+        self.assertEqual(dir_format_recordings(paths), set())
+
+
+class BackfillClassificationTest(unittest.TestCase):
+    """#1172: is this dataset stranded, and on what evidence."""
+
+    MEFD = "sub-01/ieeg/sub-01_task-x_ieeg.mefd"
+    PATHS = {
+        f"{MEFD}/c1.timd/c1-000000.segd/c1.tdat",
+        "sub-01/eeg/sub-01_task-x_eeg.set",
+        "participants.tsv",
+    }
+
+    ZARR = "sub-01/ieeg/sub-01_task-x_ieeg.zarr"
+
+    def index(self, stores, failures=None):
+        failures = failures or []
+        return {
+            "dataset_id": "on004696",
+            "format": "nemar-zarr-index",
+            "store_count": len(stores),
+            "stores": stores,
+            "failure_count": len(failures),
+            "failures": failures,
+        }
+
+    def test_a_recorded_failure_is_not_a_discovery_miss(self):
+        """The precision rule, found by running the sweep against production.
+
+        A directory recording listed in `failures` was SEEN by the converter: the
+        pre-#1095 engine could not have put it there, since it did not recognise
+        the directory as a recording at all. Counting it as missing re-queues
+        datasets whose `.ds` recordings a current engine has already tried and
+        rejected -- on005752 alone would have re-queued 471 CTF MEG recordings.
+        """
+        doc = self.index(
+            [{"path": "sub-01/eeg/x.set", "zarr": "sub-01/eeg/x.zarr"}],
+            failures=[{"path": self.MEFD, "zarr": self.ZARR, "code": "unreadable"}],
+        )
+        got = classify_backfill("on004696", doc, self.PATHS)
+        self.assertFalse(got["affected"], "a known failure is #1113's problem, not this one")
+        self.assertEqual(got["reason"], "served")
+        self.assertEqual(got["missing"], [])
+        self.assertEqual(got["known_failed"], [self.MEFD])
+
+    def test_the_two_buckets_are_reported_separately(self):
+        # A dataset can have both, and the report must not merge them: one is
+        # this sweep's business and the other is not.
+        other = "sub-02/meg/sub-02_task-y_meg.ds"
+        paths = set(self.PATHS) | {f"{other}/sub-02_task-y_meg.meg4"}
+        doc = self.index(
+            [{"path": "sub-01/eeg/x.set", "zarr": "sub-01/eeg/x.zarr"}],
+            failures=[{"path": other, "zarr": "sub-02/meg/sub-02_task-y_meg.zarr"}],
+        )
+        unseen, failed = partition_dir_format_recordings(paths, doc)
+        self.assertEqual(unseen, [self.MEFD])
+        self.assertEqual(failed, [other])
+        got = classify_backfill("on004696", doc, paths)
+        self.assertTrue(got["affected"])
+        self.assertEqual(got["reason"], "dir_stores_missing")
+
+    def test_a_served_recording_is_in_neither_bucket(self):
+        doc = self.index([{"path": self.MEFD, "zarr": self.ZARR}])
+        self.assertEqual(partition_dir_format_recordings(self.PATHS, doc), ([], []))
+
+    def test_a_failure_matched_by_its_zarr_rel_path_alone_still_counts(self):
+        doc = self.index(
+            [{"path": "sub-01/eeg/x.set", "zarr": "sub-01/eeg/x.zarr"}],
+            failures=[{"zarr": self.ZARR}],
+        )
+        self.assertEqual(partition_dir_format_recordings(self.PATHS, doc), ([], [self.MEFD]))
+
+    def test_index_failure_keys_reads_the_failures_list(self):
+        paths, rels = index_failure_keys(
+            {"failures": [{"path": "a.ds", "zarr": "a.zarr"}, "junk", {}]}
+        )
+        self.assertEqual(paths, {"a.ds"})
+        self.assertEqual(rels, {"a.zarr"})
+        self.assertEqual(index_failure_keys(None), (set(), set()))
+        self.assertEqual(index_failure_keys({"stores": [{"path": "a.ds"}]}), (set(), set()))
+
+    def test_an_empty_index_stays_affected_even_with_recorded_failures(self):
+        # store_count 0 is decisive on its own; the failure list only refines
+        # which recordings are named as unseen.
+        doc = self.index([], failures=[{"path": self.MEFD, "zarr": self.ZARR}])
+        got = classify_backfill("on004696", doc, self.PATHS)
+        self.assertTrue(got["affected"])
+        self.assertEqual(got["reason"], "empty_index")
+        self.assertEqual(got["missing"], [])
+        self.assertEqual(got["known_failed"], [self.MEFD])
+
+    def test_no_published_index_at_all(self):
+        got = classify_backfill("on004696", None)
+        self.assertTrue(got["affected"])
+        self.assertEqual(got["reason"], "index_missing")
+
+    def test_the_reference_case_empty_index(self):
+        # on004696 as observed: store_count 0, failure_count 0 -- the pre-#1095
+        # engine saw the `.mefd` directories as nothing at all, so they landed in
+        # neither list and the run was marked done.
+        got = classify_backfill("on004696", self.index([]), self.PATHS)
+        self.assertTrue(got["affected"])
+        self.assertEqual(got["reason"], "empty_index")
+        self.assertEqual(got["store_count"], 0)
+        self.assertEqual(got["missing"], [self.MEFD])
+
+    def test_an_empty_index_is_affected_even_without_a_probe(self):
+        got = classify_backfill("on004696", self.index([]))
+        self.assertTrue(got["affected"])
+        self.assertEqual(got["reason"], "empty_index")
+        self.assertEqual(got["missing"], [])
+
+    def test_the_partial_case_some_stores_but_no_directory_store(self):
+        # What rule (a) alone cannot see: an EEG store exists, so the index is
+        # not empty, but the dataset's one `.mefd` recording was never converted.
+        got = classify_backfill(
+            "on004696",
+            self.index(
+                [
+                    {
+                        "path": "sub-01/eeg/sub-01_task-x_eeg.set",
+                        "zarr": "sub-01/eeg/sub-01_task-x_eeg.zarr",
+                    }
+                ]
+            ),
+            self.PATHS,
+        )
+        self.assertTrue(got["affected"])
+        self.assertEqual(got["reason"], "dir_stores_missing")
+        self.assertEqual(got["missing"], [self.MEFD])
+
+    def test_a_served_directory_recording_is_not_affected(self):
+        got = classify_backfill(
+            "on004696",
+            self.index(
+                [
+                    {"path": self.MEFD, "zarr": "sub-01/ieeg/sub-01_task-x_ieeg.zarr"},
+                    {
+                        "path": "sub-01/eeg/sub-01_task-x_eeg.set",
+                        "zarr": "sub-01/eeg/sub-01_task-x_eeg.zarr",
+                    },
+                ]
+            ),
+            self.PATHS,
+        )
+        self.assertFalse(got["affected"])
+        self.assertEqual(got["reason"], "served")
+
+    def test_a_store_matched_by_its_zarr_rel_path_alone_still_counts_as_served(self):
+        # Either key identifies a store; a half-written entry must not be read
+        # as a missing conversion and re-converted.
+        got = classify_backfill(
+            "on004696",
+            self.index([{"zarr": "sub-01/ieeg/sub-01_task-x_ieeg.zarr"}]),
+            self.PATHS,
+        )
+        self.assertFalse(got["affected"])
+
+    def test_unprobed_is_reported_but_never_requeued(self):
+        # `--no-probe` cannot rule out the partial case, and requeuing on an
+        # unfinished check would re-convert datasets on no evidence.
+        got = classify_backfill(
+            "on004696",
+            self.index([{"path": "sub-01/eeg/x.set", "zarr": "sub-01/eeg/x.zarr"}]),
+        )
+        self.assertFalse(got["affected"])
+        self.assertEqual(got["reason"], "not_probed")
+
+    def test_the_entries_outrank_a_disagreeing_store_count(self):
+        # The viewer reads the entries, so judge the document by what it serves.
+        doc = self.index([])
+        doc["store_count"] = 7
+        self.assertEqual(classify_backfill("on004696", doc)["store_count"], 0)
+
+    def test_index_store_keys_tolerates_a_malformed_document(self):
+        paths, rels = index_store_keys(
+            {"stores": ["not-a-dict", {"path": "a.set"}, {"zarr": "b.zarr"}, {}]}
+        )
+        self.assertEqual(paths, {"a.set"})
+        self.assertEqual(rels, {"b.zarr"})
+        self.assertEqual(index_store_keys(None), (set(), set()))
+        self.assertEqual(index_store_keys({}), (set(), set()))
+
+    def test_missing_is_sorted_for_a_stable_report(self):
+        paths = {
+            "sub-02/meg/sub-02_meg.ds/x.meg4",
+            "sub-01/ieeg/sub-01_ieeg.mefd/c1.timd/c1.tdat",
+        }
+        self.assertEqual(
+            missing_dir_format_stores(paths, {"stores": []}),
+            ["sub-01/ieeg/sub-01_ieeg.mefd", "sub-02/meg/sub-02_meg.ds"],
+        )
+
+
+class _CannedHTTPServer:
+    """A real HTTP server on 127.0.0.1 serving scripted responses.
+
+    Not a mock: the code under test makes genuine `urllib` calls over a genuine
+    socket, and this decides only what comes BACK -- the same role a `respx`
+    fixture plays for an HTTP client. It is the only way to exercise the retry
+    classifier and the sweep's per-dataset error isolation without depending on
+    api.nemar.org being sick in a particular way at test time.
+
+    `routes` maps a path to either a list of (status, body) responses consumed
+    one per request (so a flaky endpoint can be scripted), or a single one
+    repeated. Requests are recorded so a test can assert how many attempts the
+    retry actually made.
+    """
+
+    def __init__(self, routes: dict):
+        self.routes = {p: (r if isinstance(r, list) else [r]) for p, r in routes.items()}
+        self.requests: list[str] = []
+        server = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's API
+                server.requests.append(self.path)
+                scripted = server.routes.get(self.path.split("?")[0])
+                if not scripted:
+                    self.send_error(404, "no route")
+                    return
+                status, body = scripted[0] if len(scripted) == 1 else scripted.pop(0)
+                if status >= 400:
+                    self.send_error(status, "scripted")
+                    return
+                payload = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):  # keep the test output clean
+                pass
+
+        self._httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        # An explicit poll_interval, not the 0.5s default: `shutdown()` waits out
+        # one interval, which would otherwise add half a second to every test here.
+        self._thread = threading.Thread(
+            target=lambda: self._httpd.serve_forever(poll_interval=0.01), daemon=True
+        )
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._httpd.shutdown()
+        self._httpd.server_close()
+        self._thread.join(timeout=5)
+
+    @property
+    def base(self) -> str:
+        host, port = self._httpd.server_address[:2]
+        return f"http://{host}:{port}"
+
+    def count(self, path: str) -> int:
+        return sum(1 for p in self.requests if p.split("?")[0] == path)
+
+
+class RetryClassificationTest(unittest.TestCase):
+    """#1172: which failures are worth another attempt, and which are answers."""
+
+    def test_a_transient_5xx_is_retried_until_it_succeeds(self):
+        routes = {"/x.json": [(503, None), (503, None), (200, {"ok": True})]}
+        with _CannedHTTPServer(routes) as srv:
+            got = _get_json_retrying(f"{srv.base}/x.json", timeout=5, backoff=0)
+            self.assertEqual(got, {"ok": True})
+            self.assertEqual(srv.count("/x.json"), 3)
+
+    def test_a_5xx_that_never_clears_raises_after_the_budget(self):
+        with _CannedHTTPServer({"/x.json": (500, None)}) as srv:
+            with self.assertRaises(urllib.error.HTTPError):
+                _get_json_retrying(f"{srv.base}/x.json", timeout=5, attempts=3, backoff=0)
+            self.assertEqual(srv.count("/x.json"), 3)
+
+    def test_a_404_is_an_answer_and_is_never_retried(self):
+        # A 404 is a finding ("nothing was ever published here"), so spending
+        # the retry budget on it would only slow the sweep down.
+        with _CannedHTTPServer({"/x.json": (404, None)}) as srv:
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                _get_json_retrying(f"{srv.base}/x.json", timeout=5, backoff=0)
+            self.assertEqual(raised.exception.code, 404)
+            self.assertEqual(srv.count("/x.json"), 1)
+
+    def test_a_403_is_not_retried_either(self):
+        with _CannedHTTPServer({"/x.json": (403, None)}) as srv:
+            with self.assertRaises(urllib.error.HTTPError):
+                _get_json_retrying(f"{srv.base}/x.json", timeout=5, backoff=0)
+            self.assertEqual(srv.count("/x.json"), 1)
+
+    def test_the_index_fetch_reads_404_as_none_but_raises_on_500(self):
+        routes = {"/on000001/zarr/index.json": (404, None), "/on000002/zarr/index.json": (500, None)}
+        with _CannedHTTPServer(routes) as srv:
+            self.assertIsNone(fetch_zarr_index(srv.base, "on000001", backoff=0))
+            with self.assertRaises(urllib.error.HTTPError):
+                fetch_zarr_index(srv.base, "on000002", backoff=0)
+
+    def test_the_manifest_fetch_reads_404_as_none_but_raises_on_500(self):
+        # None means "no published version to list", which is `not_probed` --
+        # a permanent property of the dataset, not a transient failure to
+        # re-examine on every future run.
+        routes = {
+            "/on000001/v1.0.0/manifest.json": (404, None),
+            "/on000002/v1.0.0/manifest.json": (500, None),
+            "/on000003/v1.0.0/manifest.json": (200, [{"path": "a.set"}, {"nope": 1}, "junk"]),
+        }
+        with _CannedHTTPServer(routes) as srv:
+            self.assertIsNone(fetch_manifest_paths(srv.base, "on000001", "1.0.0", backoff=0))
+            with self.assertRaises(urllib.error.HTTPError):
+                fetch_manifest_paths(srv.base, "on000002", "1.0.0", backoff=0)
+            self.assertEqual(
+                fetch_manifest_paths(srv.base, "on000003", "v1.0.0", backoff=0), {"a.set"}
+            )
+
+    def test_a_bare_version_is_tagged_for_the_data_plane(self):
+        routes = {"/on000001/v1.0.0/manifest.json": (200, [{"path": "a.set"}])}
+        with _CannedHTTPServer(routes) as srv:
+            fetch_manifest_paths(srv.base, "on000001", "1.0.0", backoff=0)
+            self.assertEqual(srv.count("/on000001/v1.0.0/manifest.json"), 1)
+
+    def test_no_version_falls_back_to_the_latest_alias(self):
+        routes = {"/on000001/latest/manifest.json": (200, [{"path": "a.set"}])}
+        with _CannedHTTPServer(routes) as srv:
+            fetch_manifest_paths(srv.base, "on000001", "", backoff=0)
+            self.assertEqual(srv.count("/on000001/latest/manifest.json"), 1)
+
+
+class SweepOrchestrationTest(unittest.TestCase):
+    """#1172: one sick dataset must not cost the sweep its other answers."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.conn = connect(os.path.join(self._tmp.name, "q.db"))
+
+    def tearDown(self):
+        self.conn.close()
+        self._tmp.cleanup()
+
+    def catalog(self, *ids):
+        return {
+            "/datasets": (
+                200,
+                {
+                    "datasets": [
+                        {
+                            "dataset_id": i,
+                            "visibility": "public",
+                            "modalities": "ieeg",
+                            "latest_version": "v1.0.0",
+                        }
+                        for i in ids
+                    ],
+                    "total_count": len(ids),
+                },
+            )
+        }
+
+    def status(self, dataset_id):
+        r = self.conn.execute(
+            "SELECT status FROM jobs WHERE dataset_id=?", (dataset_id,)
+        ).fetchone()
+        return r["status"] if r else None
+
+    def _seed_done(self, *ids):
+        reconcile(self.conn, [(i, "v1.0.0") for i in ids], 3600)
+        for dataset_id in ids:
+            claim_next(self.conn)
+            mark_done(self.conn, dataset_id, "v1.0.0")
+
+    def test_a_failing_dataset_is_recorded_and_the_sweep_continues(self):
+        # on000001's index 404s (affected: nothing was ever published);
+        # on000002's index 403s, which reaches the handler without spending the
+        # retry budget, so this asserts orchestration rather than timing.
+        self._seed_done("on000001", "on000002")
+        routes = {
+            **self.catalog("on000001", "on000002"),
+            "/on000001/zarr/index.json": (404, None),
+            "/on000002/zarr/index.json": (403, None),
+        }
+        with _CannedHTTPServer(routes) as srv, contextlib.redirect_stdout(io.StringIO()):
+            res = sweep_dir_format_backfill(
+                self.conn, srv.base, srv.base, srv.base, sleep_seconds=0, execute=True
+            )
+        self.assertEqual([f["dataset_id"] for f in res["affected"]], ["on000001"])
+        self.assertEqual([e[0] for e in res["errors"]], ["on000002"])
+        self.assertEqual(res["examined"], 2)
+        # Only the answered dataset is touched; the one we could not read is
+        # left exactly as it was.
+        self.assertEqual(self.status("on000001"), "pending")
+        self.assertEqual(self.status("on000002"), "done")
+        self.assertEqual(res["requeued"], ["on000001"])
+
+    def test_the_cli_exits_non_zero_when_a_dataset_could_not_be_examined(self):
+        """A sweep that could not read some datasets did not answer for them.
+
+        Reporting "nothing affected" with exit 0 would let a scripted run record
+        a clean bill of health for datasets it never saw.
+        """
+        self._seed_done("on000001")
+        routes = {**self.catalog("on000001"), "/on000001/zarr/index.json": (403, None)}
+        with _CannedHTTPServer(routes) as srv:
+            argv = [
+                "zarr_queue.py",
+                "--db",
+                os.path.join(self._tmp.name, "q.db"),
+                "backfill-dir-formats",
+                "--api-base",
+                srv.base,
+                "--data-base",
+                srv.base,
+                "--zarr-base",
+                srv.base,
+                "--sleep",
+                "0",
+            ]
+            saved, sys.argv = sys.argv, argv
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(main(), 1)
+            finally:
+                sys.argv = saved
+
+    def test_execute_never_touches_a_row_that_is_not_done(self):
+        """The "no-op by construction" claim, asserted rather than assumed.
+
+        `requeue` filters on status itself, so an affected dataset that is
+        mid-flight or terminal must come back reported and untouched.
+        """
+        reconcile(self.conn, [("on000001", "v1.0.0"), ("on000002", "v1.0.0")], 3600)
+        claim_next(self.conn)  # on000001 -> inprogress
+        claim_next(self.conn)
+        mark_fail(self.conn, "on000002", "unreadable", 5, 1800, deterministic=True)
+        self.assertEqual((self.status("on000001"), self.status("on000002")),
+                         ("inprogress", "data_failed"))
+        routes = {
+            **self.catalog("on000001", "on000002"),
+            "/on000001/zarr/index.json": (404, None),
+            "/on000002/zarr/index.json": (404, None),
+        }
+        with _CannedHTTPServer(routes) as srv, contextlib.redirect_stdout(io.StringIO()):
+            res = sweep_dir_format_backfill(
+                self.conn, srv.base, srv.base, srv.base, sleep_seconds=0, execute=True
+            )
+        self.assertEqual(len(res["affected"]), 2)
+        self.assertEqual(res["requeued"], [])
+        self.assertEqual(
+            sorted(res["not_requeued"]), [("on000001", "inprogress"), ("on000002", "data_failed")]
+        )
+        self.assertEqual(self.status("on000001"), "inprogress")
+        self.assertEqual(self.status("on000002"), "data_failed")
+
+    def test_an_unprobed_dataset_is_counted_in_the_summary(self):
+        # A dataset that serves stores but cannot be probed is neither affected
+        # nor an error; without the not_probed count a --no-probe run would read
+        # as a clean bill of health.
+        self._seed_done("on000001")
+        routes = {
+            **self.catalog("on000001"),
+            "/on000001/zarr/index.json": (
+                200,
+                {"store_count": 1, "stores": [{"path": "a.set", "zarr": "a.zarr"}], "failures": []},
+            ),
+            "/on000001/v1.0.0/manifest.json": (404, None),
+        }
+        with _CannedHTTPServer(routes) as srv, contextlib.redirect_stdout(io.StringIO()):
+            res = sweep_dir_format_backfill(
+                self.conn, srv.base, srv.base, srv.base, sleep_seconds=0
+            )
+        self.assertEqual(res["affected"], [])
+        self.assertEqual([f["dataset_id"] for f in res["not_probed"]], ["on000001"])
+
+    def test_a_non_meg_ieeg_dataset_is_never_examined(self):
+        routes = {
+            "/datasets": (
+                200,
+                {
+                    "datasets": [
+                        {
+                            "dataset_id": "nm000001",
+                            "visibility": "public",
+                            "modalities": "eeg",
+                            "latest_version": "v1.0.0",
+                        }
+                    ],
+                    "total_count": 1,
+                },
+            )
+        }
+        with _CannedHTTPServer(routes) as srv, contextlib.redirect_stdout(io.StringIO()):
+            res = sweep_dir_format_backfill(
+                self.conn, srv.base, srv.base, srv.base, sleep_seconds=0
+            )
+            self.assertEqual(srv.count("/nm000001/zarr/index.json"), 0)
+        self.assertEqual((res["candidates"], res["examined"]), (0, 0))
+
+
+class EngineBumpCliTest(unittest.TestCase):
+    """The operator-visible half of the guard: what the cron actually sees.
+
+    hallu-zarr.sh captures reconcile's stdout into one log line and lets stderr
+    through separately, then greps the former to re-raise the notice as its own
+    ERROR line. Both streams are asserted here because the shell needs both.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db = os.path.join(self._tmp.name, "q.db")
+        conn = connect(self.db)
+        self.ids = [f"nm{n:06d}" for n in range(1, 11)]
+        reconcile(conn, [(i, "v1.0.0") for i in self.ids], 3600)
+        for dataset_id in self.ids:
+            claim_next(conn)
+            mark_done(conn, dataset_id, "v1.0.0", engine_version="1")
+        conn.close()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, *extra):
+        routes = {
+            "/datasets": (
+                200,
+                {
+                    "datasets": [
+                        {
+                            "dataset_id": i,
+                            "visibility": "public",
+                            "modalities": "ieeg",
+                            "latest_version": "v1.0.0",
+                        }
+                        for i in self.ids
+                    ],
+                    "total_count": len(self.ids),
+                },
+            )
+        }
+        out, errbuf = io.StringIO(), io.StringIO()
+        with _CannedHTTPServer(routes) as srv:
+            argv = ["zarr_queue.py", "--db", self.db, "reconcile", "--api-base", srv.base, *extra]
+            saved, sys.argv = sys.argv, argv
+            try:
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(errbuf):
+                    code = main()
+            finally:
+                sys.argv = saved
+        return code, out.getvalue(), errbuf.getvalue()
+
+    def statuses(self):
+        conn = connect(self.db)
+        self.addCleanup(conn.close)
+        return [r["status"] for r in conn.execute("SELECT status FROM jobs ORDER BY dataset_id")]
+
+    def test_a_blocked_bump_is_announced_on_both_streams(self):
+        code, out, err = self._run("--engine-requeue-limit", "5")
+        self.assertEqual(code, 0)  # not an error: the queue is fine, it just waited
+        self.assertIn("ENGINE BUMP PENDING ACK", out)
+        self.assertIn("ENGINE BUMP PENDING ACK", err)
+        self.assertIn("engine_requeued=0", out)
+        self.assertEqual(self.statuses(), ["done"] * 10)
+
+    def test_the_ack_flag_applies_it(self):
+        code, out, _ = self._run("--engine-requeue-limit", "5", "--engine-requeue-ack")
+        self.assertEqual(code, 0)
+        self.assertNotIn("ENGINE BUMP PENDING ACK", out)
+        self.assertIn("engine_requeued=10", out)
+        self.assertEqual(self.statuses(), ["pending"] * 10)
+
+    def test_a_zero_limit_disables_the_guard(self):
+        # 0 spells "no guard" on a CLI where None cannot be typed.
+        code, out, _ = self._run("--engine-requeue-limit", "0")
+        self.assertEqual(code, 0)
+        self.assertIn("engine_requeued=10", out)
+
+    def test_the_routine_line_reports_the_stamp_even_when_nothing_is_stale(self):
+        # A steady `engine_stale=0` in the cron log is what makes the run that
+        # says otherwise legible.
+        self._run("--engine-requeue-limit", "5", "--engine-requeue-ack")
+        code, out, _ = self._run("--engine-requeue-limit", "5")
+        self.assertEqual(code, 0)
+        self.assertIn(f"engine={ZARR_ENGINE_VERSION}", out)
+        self.assertIn("engine_stale=0", out)
 
 
 if __name__ == "__main__":
