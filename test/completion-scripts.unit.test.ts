@@ -13,6 +13,14 @@
  * machine running this suite is skipped, not failed -- reported separately
  * rather than asserted on, since which shells exist here says nothing about
  * whether the generated script is correct.
+ *
+ * These checks are purely syntactic and cannot catch a script that parses
+ * fine but behaves wrongly at runtime (a call wrapped in dead code, or --
+ * #1173 -- an array slice quoted without zsh's `(@)` flag, which glues
+ * multiple words/candidates into one string). See
+ * test/completion-shell-functional.unit.test.ts for the runtime coverage:
+ * each emitted script sourced into a real shell with a stub `nemar`,
+ * driving actual candidate resolution end to end.
  */
 
 import { describe, expect, test } from "bun:test";
