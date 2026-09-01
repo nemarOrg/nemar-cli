@@ -11,6 +11,7 @@ fires and the queue picks up exactly where it left off.
 One row per dataset:
     jobs(dataset_id PK, latest_version, converted_version,
          status,            -- pending | inprogress | done | failed | data_failed
+                            --   | unlisted (dropped from the public catalog)
          attempts, last_error, next_retry_at (epoch),
          enqueued_at (ISO), updated_at (epoch),
          engine_version)    -- the discovery generation it was converted under
@@ -25,21 +26,32 @@ scratch, which wedged the queue on a single unconvertible dataset).
 
 Subcommands (all take --db):
     reconcile --api-base URL [--stale-seconds N] [--no-engine-requeue]
+              [--engine-requeue-limit N] [--engine-requeue-ack]
         Pull GET /datasets, enqueue (status=pending) every public nm/on dataset
         whose latest_version != converted_version OR whose `done` row was
         converted by an older engine (see ZARR_ENGINE_VERSION), reset stale
         `inprogress` rows to `pending`, and park rows the catalog no longer lists
         as `unlisted` (withdrawn or returned to private -- see `reconcile`).
-        Idempotent.
-    next [--max-attempts N]
+        Idempotent. A bump above the limit requeues NOTHING until acknowledged.
+    next
         Atomically claim the oldest eligible job -> `inprogress`; print
         "<dataset_id>\t<latest_version>" (nothing if the queue is drained).
     done DATASET VERSION         mark converted at VERSION (stamps the engine).
-    fail DATASET "ERROR" [--max-attempts N] [--backoff-base S]
+    fail DATASET "ERROR" [--max-attempts N] [--backoff-base S] [--deterministic]
         attempts++; reschedule (pending + next_retry_at) until max-attempts, then
-        terminal `failed`.
-    stats                        counts by status (+ a few recent failures).
-    backfill-dir-formats [--execute]
+        terminal `failed`. `--deterministic` is terminal at once as `data_failed`.
+    requeue [--status failed|data_failed|done|all] [--dataset ID] [--execute]
+        Reset terminal jobs to `pending` (dry run without --execute). `done`
+        reaches a dataset that converted PARTIALLY and must be scoped with
+        --dataset; `all` deliberately excludes it.
+    stats                        counts by status (+ a few recent failures,
+                                 + the engine stamps of the `done` rows).
+    engine-preview               read-only: how many `done` rows the current
+                                 ZARR_ENGINE_VERSION would requeue. No network,
+                                 no writes.
+    backfill-dir-formats [--api-base URL] [--data-base URL] [--zarr-base URL]
+                         [--dataset ID] [--limit N] [--sleep S] [--no-probe]
+                         [--execute]
         One-off sweep for the cohort stranded BEFORE the engine stamp existed:
         MEG/iEEG datasets marked `done` whose published index has no store for a
         directory-format recording (`.mefd`/`.ds`/4D-BTi). Dry run by default.
@@ -48,6 +60,7 @@ Subcommands (all take --db):
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -97,6 +110,14 @@ DATASET_ID_RE = re.compile(r"^(nm|on)[0-9]{6}$")
 # see before", and for nothing else.
 ZARR_ENGINE_VERSION = "2"
 
+# How many stamp-stale rows a routine `reconcile` will requeue without an
+# explicit acknowledgement. Above this, it requeues none and says so (see
+# `reconcile`). The number is a judgement, not a measurement: small enough that
+# the guard fires on any real bump (the whole point is that a bump is never
+# routine), large enough that it never fires on the handful of rows a hand-fixed
+# stamp or a rolled-back driver could leave behind.
+DEFAULT_ENGINE_REQUEUE_LIMIT = 25
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -126,9 +147,29 @@ def migrate_schema(conn: sqlite3.Connection, engine_version: str = ZARR_ENGINE_V
     """Add `engine_version` to a pre-existing `jobs` table and seed it.
 
     Returns how many rows were seeded (0 on a brand-new or already-migrated DB).
-    Additive and guarded by `pragma_table_info`, so it is a no-op on every run
-    after the first -- `CREATE TABLE IF NOT EXISTS` cannot add a column to a
-    table that already exists, which is why this is here at all.
+    Additive: `CREATE TABLE IF NOT EXISTS` cannot add a column to a table that
+    already exists, which is why this is here at all.
+
+    **The ALTER and the seeding are deliberately decoupled, and the seed runs on
+    EVERY connect.** SQLite makes an `ALTER TABLE ... ADD COLUMN` durable the
+    moment it executes, before any commit of the statement that follows it. So a
+    crash in between -- and an OOM kill mid-run is this box's documented history
+    (nemarOrg/nemar-cli#1110) -- would leave the column present and every row
+    NULL. A `if column exists: return 0` guard would then see a migrated schema
+    forever, never seed, and leave those rows permanently invisible to every
+    future engine bump, with no log line anywhere saying so (the notice in
+    `connect` fires only when rows were seeded). Re-running the seed
+    unconditionally costs one indexed no-op UPDATE per process and closes that
+    window: the state is defined by the DATA, not by whether a previous process
+    survived long enough to finish.
+
+    The ALTER itself tolerates losing a race. Two processes may legitimately hold
+    this database at once -- `--requeue` and `--backfill-dir-formats` are
+    documented as safe to run while a drain holds the flock -- so both can
+    observe "no column" and both attempt the ALTER. The loser would otherwise
+    take an uncaught `OperationalError`, and if the loser is the cron's
+    `reconcile`, the whole tick aborts and nothing is enqueued. Only the
+    duplicate-column error is swallowed; anything else still raises.
 
     **A NULL stamp must NEVER mean "requeue me", and this is where that is
     decided.** On the first run against the production queue every one of the
@@ -149,11 +190,24 @@ def migrate_schema(conn: sqlite3.Connection, engine_version: str = ZARR_ENGINE_V
     requeues exactly the rows that predate the bump, automatically.
     """
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
-    if "engine_version" in cols:
-        return 0
-    conn.execute("ALTER TABLE jobs ADD COLUMN engine_version TEXT")
+    if "engine_version" not in cols:
+        try:
+            conn.execute("ALTER TABLE jobs ADD COLUMN engine_version TEXT")
+        except sqlite3.OperationalError as exc:
+            # Another process added it between our PRAGMA and this statement.
+            # That is a benign race, not a failure -- but only for this exact
+            # error; a genuine schema problem must still stop the run.
+            if "duplicate column name" not in str(exc).lower():
+                raise
+    # Scoped to `done`, which is the only status the stamp governs. Seeding
+    # every NULL row instead would re-fire on ordinary traffic forever:
+    # `reconcile` INSERTs new rows with no stamp (they have not been converted
+    # yet), so the next process would "seed" them, print a migration notice on a
+    # perfectly routine tick, and take a write lock inside the drain's `next`
+    # loop. A pending row has nothing to declare; `mark_done` stamps it when it
+    # actually converts.
     seeded = conn.execute(
-        "UPDATE jobs SET engine_version=? WHERE engine_version IS NULL",
+        "UPDATE jobs SET engine_version=? WHERE engine_version IS NULL AND status='done'",
         (engine_version,),
     ).rowcount
     conn.commit()
@@ -213,6 +267,8 @@ def reconcile(
     listing_complete: bool = False,
     engine_requeue: bool = True,
     engine_version: str = ZARR_ENGINE_VERSION,
+    engine_requeue_limit: int | None = None,
+    engine_requeue_ack: bool = False,
 ) -> dict:
     """Enqueue datasets needing (re)conversion + recover stale inprogress rows.
 
@@ -236,6 +292,23 @@ def reconcile(
     reason ALONE (a row whose version also changed is counted as an ordinary
     version requeue, since it would have re-converted regardless -- what an
     operator wants from this number is the MARGINAL cost of the bump).
+
+    **`engine_requeue_limit` is the guard that keeps a bump from landing
+    unattended.** The Hallu cron self-deploys the driver every run (`setup()`
+    resets the clone to `origin/$DRIVER_REF`), so merging a bump of
+    `ZARR_ENGINE_VERSION` is deploying it: the next hourly tick would reconcile
+    with the new constant and re-queue the back catalog with nobody watching. So
+    when more than `engine_requeue_limit` rows are stamp-stale and
+    `engine_requeue_ack` is not set, this run requeues NONE of them, reports
+    `engine_requeue_blocked`, and leaves the queue exactly as it found it. The
+    conversion of genuinely new datasets is unaffected -- the block is scoped to
+    the stamp-only requeues, because a guard that stopped ordinary work would be
+    a worse failure than the one it prevents. `None` means no limit (the pure
+    default; the CLI supplies one).
+
+    The stamp-only requeues are therefore COLLECTED during the walk and applied
+    after it, once the total is known. Version-change requeues are applied
+    inline as before: they are not what the guard is about.
 
     `listing_complete` enables the `unlisted` sweep: a row for a dataset the
     catalog no longer lists is parked as `unlisted` so `claim_next` stops handing
@@ -263,7 +336,10 @@ def reconcile(
     # with no line saying so.
     rejected = 0
     engine_stale = 0
-    engine_requeued = 0
+    # (dataset_id, version to convert) for rows the STAMP alone would requeue.
+    # Held until the walk finishes so the guard below can judge the whole bump
+    # rather than the first N rows of it.
+    stamp_only: list[tuple[str, str]] = []
     for dataset_id, latest in datasets:
         # nm099999 is the private E2E fixture, deliberately never converted; it is
         # an expected skip, not an anomaly, so it is not counted as rejected.
@@ -295,19 +371,19 @@ def reconcile(
             stale_engine = _engine_is_stale(row["engine_version"], engine_version)
             if stale_engine:
                 engine_stale += 1
-            if version_changed or (stale_engine and engine_requeue):
+            if version_changed:
                 conn.execute(
                     "UPDATE jobs SET latest_version=?, status='pending', attempts=0,"
                     " next_retry_at=0, updated_at=? WHERE dataset_id=?",
-                    # `version_changed` guarantees a non-empty `latest`; a
-                    # stamp-only requeue may not have one (a catalog row with no
-                    # latest_version), so fall back to the version already on the
-                    # row rather than blanking the drain's conversion target.
-                    (latest or row["latest_version"], now, dataset_id),
+                    (latest, now, dataset_id),
                 )
                 enq += 1
-                if stale_engine and not version_changed:
-                    engine_requeued += 1
+            elif stale_engine and engine_requeue:
+                # Deferred, not applied: see the guard after the walk. A
+                # stamp-only requeue may have no `latest` (a catalog row with no
+                # latest_version), so carry the version already on the row rather
+                # than blanking the drain's conversion target.
+                stamp_only.append((dataset_id, latest or row["latest_version"]))
         elif status in ("failed", "data_failed"):
             # Terminal for THIS version (#774). Only a genuinely NEW snapshot
             # (latest != the version we already gave up on) retries -- compare
@@ -339,6 +415,29 @@ def reconcile(
                     "UPDATE jobs SET latest_version=? WHERE dataset_id=?",
                     (latest, dataset_id),
                 )
+
+    # --- the engine-bump guard ------------------------------------------------
+    # Applied after the walk, so the decision is made on the size of the WHOLE
+    # bump. Blocking is all-or-nothing on purpose: a partial requeue would leave
+    # the archive split across two engines with no record of where the line fell,
+    # and the next run would simply carry on, which is the unattended mass
+    # requeue this guard exists to prevent.
+    engine_requeued = 0
+    engine_requeue_blocked = (
+        bool(stamp_only)
+        and engine_requeue_limit is not None
+        and len(stamp_only) > engine_requeue_limit
+        and not engine_requeue_ack
+    )
+    if stamp_only and not engine_requeue_blocked:
+        for dataset_id, target in stamp_only:
+            conn.execute(
+                "UPDATE jobs SET latest_version=?, status='pending', attempts=0,"
+                " next_retry_at=0, updated_at=? WHERE dataset_id=?",
+                (target, now, dataset_id),
+            )
+        engine_requeued = len(stamp_only)
+        enq += engine_requeued
 
     unlisted = 0
     if listing_complete:
@@ -373,6 +472,8 @@ def reconcile(
         "rejected": rejected,
         "engine_stale": engine_stale,
         "engine_requeued": engine_requeued,
+        "engine_pending": len(stamp_only) if engine_requeue_blocked else 0,
+        "engine_requeue_blocked": engine_requeue_blocked,
     }
 
 
@@ -512,6 +613,10 @@ def requeue(
 # api.nemar.org and data.nemar.org sit behind Cloudflare, which 403s the default
 # Python-urllib User-Agent as a bot. Every request in this file must set one.
 USER_AGENT = "nemar-zarr-cron/1.0"
+
+# Base pause between retries of a transient fetch (multiplied by the attempt
+# number). Only the one-off sweep retries at all; see `_get_json_retrying`.
+RETRY_BACKOFF_SECONDS = 2.0
 
 
 def _get_json(url: str, timeout: int = 60):
@@ -816,7 +921,9 @@ def classify_backfill(
 # --- I/O for the sweep ---------------------------------------------------------
 
 
-def _get_json_retrying(url: str, timeout: int, attempts: int = 3, backoff: float = 2.0):
+def _get_json_retrying(
+    url: str, timeout: int, attempts: int = 3, backoff: float = RETRY_BACKOFF_SECONDS
+):
     """`_get_json` with a small bounded retry on transient server/network errors.
 
     The sweep touches ~131 live endpoints in one pass, and a single 503 (observed
@@ -824,24 +931,39 @@ def _get_json_retrying(url: str, timeout: int, attempts: int = 3, backoff: float
     4xx is NEVER retried -- a 404 is a finding, not a hiccup -- and the backoff
     keeps this well short of hammering.
 
+    `http.client.HTTPException` is in the retry set alongside `URLError`:
+    urllib does NOT wrap the httplib-level failures, so `RemoteDisconnected`
+    (a keep-alive connection closed under us) and `BadStatusLine` propagate
+    unwrapped. They are exactly as transient as a 503, and without this they
+    would skip the retry entirely and land in the sweep's per-dataset error
+    bucket instead.
+
     Deliberately not applied to `fetch_public_catalog_rows`: `reconcile` relies
     on that call failing loudly and immediately, so the cron aborts rather than
     draining an under-populated queue (see hallu-zarr.sh's reconcile guard).
+
+    `attempts`/`backoff` are parameters rather than constants so the tests can
+    exercise the real classification against a real HTTP server without waiting
+    out the production backoff.
     """
     for attempt in range(1, attempts + 1):
         try:
             return _get_json(url, timeout=timeout)
         except urllib.error.HTTPError as exc:
+            # HTTPError subclasses URLError, so it must be caught FIRST or every
+            # 404 would be retried by the clause below.
             if exc.code < 500 or attempt == attempts:
                 raise
-        except (urllib.error.URLError, TimeoutError):
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError):
             if attempt == attempts:
                 raise
         time.sleep(backoff * attempt)
     raise RuntimeError("unreachable")  # pragma: no cover - loop always returns or raises
 
 
-def fetch_zarr_index(zarr_base: str, dataset_id: str) -> dict | None:
+def fetch_zarr_index(
+    zarr_base: str, dataset_id: str, backoff: float = RETRY_BACKOFF_SECONDS
+) -> dict | None:
     """The published `index.json`, or None when there is none (404).
 
     Only a 404 becomes None -- "nothing was ever published here" is a finding.
@@ -850,14 +972,16 @@ def fetch_zarr_index(zarr_base: str, dataset_id: str) -> dict | None:
     """
     url = f"{zarr_base.rstrip('/')}/{dataset_id}/zarr/index.json"
     try:
-        return _get_json_retrying(url, timeout=30)
+        return _get_json_retrying(url, timeout=30, backoff=backoff)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return None
         raise
 
 
-def fetch_manifest_paths(data_base: str, dataset_id: str, version: str) -> set[str] | None:
+def fetch_manifest_paths(
+    data_base: str, dataset_id: str, version: str, backoff: float = RETRY_BACKOFF_SECONDS
+) -> set[str] | None:
     """Every file path in the dataset at `version`, from one manifest.json read.
 
     The literal alias `latest` is used when the catalog has no version for the
@@ -872,7 +996,7 @@ def fetch_manifest_paths(data_base: str, dataset_id: str, version: str) -> set[s
     tag = _vtag(version) or "latest"
     url = f"{data_base.rstrip('/')}/{dataset_id}/{tag}/manifest.json"
     try:
-        rows = _get_json_retrying(url, timeout=120)
+        rows = _get_json_retrying(url, timeout=120, backoff=backoff)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return None
@@ -940,15 +1064,6 @@ def sweep_dir_format_backfill(
                 manifest_paths = fetch_manifest_paths(
                     data_base, dataset_id, str(row.get("latest_version") or "")
                 )
-                if manifest_paths is None:
-                    # Not affected and not an error, but not checked either --
-                    # and a dataset that quietly falls out of both buckets is the
-                    # kind of gap this sweep is supposed to close, not create.
-                    print(
-                        f"note {dataset_id}: no manifest to read (no published version),"
-                        " so the partial case could not be checked",
-                        flush=True,
-                    )
             finding = classify_backfill(dataset_id, index_doc, manifest_paths)
         except Exception as exc:  # noqa: BLE001 - one dataset must not end the sweep
             errors.append((dataset_id, f"{type(exc).__name__}: {exc}"))
@@ -965,6 +1080,19 @@ def sweep_dir_format_backfill(
         finding["converted_version"] = (job["converted_version"] if job else None) or ""
         finding["engine_version"] = (job["engine_version"] if job else None) or "(unset)"
         findings.append(finding)
+        if finding["reason"] == "not_probed":
+            # Printed for EVERY not_probed finding, not just the missing-manifest
+            # one, and outside the probe branch that produces the commonest
+            # cause. A dataset that is neither affected nor an error is otherwise
+            # invisible in this report, and "not checked" reading as "checked and
+            # fine" is the exact failure this sweep exists to end. The other way
+            # in is an index carrying a store_count with no `stores` array --
+            # rare, and previously silent in every stream.
+            print(
+                f"not probed {dataset_id}: the partial case could not be checked"
+                " (no manifest to read, or probing was disabled)",
+                flush=True,
+            )
         if not finding["affected"]:
             continue
         print(
@@ -1005,9 +1133,14 @@ def sweep_dir_format_backfill(
                 f" {finding['queue_status']}, not done"
             )
     affected = [f for f in findings if f["affected"]]
+    # `not_probed` belongs in the summary line for the same reason `errors` does:
+    # a `--no-probe` run reports affected=0 for every dataset that serves any
+    # store, and without this number that reads as a clean bill of health rather
+    # than as a check that was never made.
+    not_probed = [f for f in findings if f["reason"] == "not_probed"]
     print(
         f"backfill-dir-formats: candidates={len(candidates)} examined={examined}"
-        f" affected={len(affected)} errors={len(errors)}"
+        f" affected={len(affected)} not_probed={len(not_probed)} errors={len(errors)}"
         f" requeued={len(requeued)} not_requeued={len(skipped)}"
         + ("" if complete else " (PARTIAL catalog read; some datasets were not examined)")
     )
@@ -1018,6 +1151,7 @@ def sweep_dir_format_backfill(
         "examined": examined,
         "findings": findings,
         "affected": affected,
+        "not_probed": not_probed,
         "errors": errors,
         "requeued": requeued,
         "not_requeued": skipped,
@@ -1042,6 +1176,20 @@ def main() -> int:
         help="do NOT requeue `done` rows converted by an older engine; the run still"
         " reports how many rows the current ZARR_ENGINE_VERSION would requeue, so the"
         " cost of a bump can be read off a dry run before it is paid",
+    )
+    p.add_argument(
+        "--engine-requeue-limit",
+        type=int,
+        default=DEFAULT_ENGINE_REQUEUE_LIMIT,
+        help="requeue no stamp-stale rows at all when more than N of them are found,"
+        f" unless --engine-requeue-ack is given (default {DEFAULT_ENGINE_REQUEUE_LIMIT};"
+        " 0 disables the guard). Stops a merged engine bump from re-queueing the back"
+        " catalog unattended on the cron's next self-deploying tick",
+    )
+    p.add_argument(
+        "--engine-requeue-ack",
+        action="store_true",
+        help="acknowledge a bump above --engine-requeue-limit and apply it",
     )
 
     sub.add_parser("next")
@@ -1082,6 +1230,13 @@ def main() -> int:
     )
 
     sub.add_parser("stats")
+
+    sub.add_parser(
+        "engine-preview",
+        help="read-only: how many `done` rows the current ZARR_ENGINE_VERSION would"
+        " requeue. Touches neither the network nor the queue, so it is safe to run"
+        " while a drain holds the lock",
+    )
 
     p = sub.add_parser(
         "backfill-dir-formats",
@@ -1124,6 +1279,9 @@ def main() -> int:
             args.stale_seconds,
             listing_complete=complete,
             engine_requeue=not args.no_engine_requeue,
+            # 0 spells "no guard" on a CLI where None cannot be typed.
+            engine_requeue_limit=args.engine_requeue_limit or None,
+            engine_requeue_ack=args.engine_requeue_ack,
         )
         # `engine_stale` is printed on every run, not only when it is non-zero:
         # an engine bump is the one reconcile outcome that can requeue hundreds
@@ -1140,6 +1298,46 @@ def main() -> int:
                 else ""
             )
             + ("" if complete else " (PARTIAL catalog read; unlisted sweep skipped)")
+        )
+        if res["engine_requeue_blocked"]:
+            # On BOTH streams. The cron captures stdout into its log line and
+            # lets stderr through separately, and this is the one reconcile
+            # outcome where the queue quietly did less than the code says it
+            # does -- it must not be readable as an ordinary tick in either.
+            message = (
+                f"ENGINE BUMP PENDING ACK: {res['engine_pending']} done row(s) carry an"
+                f" engine stamp other than {ZARR_ENGINE_VERSION}, which is more than the"
+                f" limit of {args.engine_requeue_limit}. NOTHING was requeued for the"
+                " stamp this run. Preview it with `engine-preview`, then apply with"
+                " --engine-requeue-ack."
+            )
+            print(message)
+            print(message, file=sys.stderr)
+        return 0
+
+    if args.cmd == "engine-preview":
+        rows = conn.execute(
+            "SELECT COALESCE(engine_version, '(unset)') e, COUNT(*) n FROM jobs"
+            " WHERE status='done' GROUP BY e ORDER BY e"
+        ).fetchall()
+        stale = sum(r["n"] for r in rows if _engine_is_stale(r["e"], ZARR_ENGINE_VERSION))
+        # '(unset)' is a display value standing in for NULL, and NULL is never
+        # stale (see `_engine_is_stale`), so it cannot land in `stale` above --
+        # but it is worth showing, because a non-zero count there means the
+        # seeding in `migrate_schema` did not reach some rows.
+        print(
+            f"engine-preview: current={ZARR_ENGINE_VERSION}"
+            f" done_rows={sum(r['n'] for r in rows)} stale={stale}"
+            f" by stamp: " + (", ".join(f"{r['e']}={r['n']}" for r in rows) or "(none)")
+        )
+        print(
+            f"a reconcile would requeue {stale} dataset(s) for the stamp"
+            + (
+                f"; that is above the default limit of {DEFAULT_ENGINE_REQUEUE_LIMIT},"
+                " so it needs --engine-requeue-ack"
+                if stale > DEFAULT_ENGINE_REQUEUE_LIMIT
+                else ""
+            )
         )
         return 0
 
