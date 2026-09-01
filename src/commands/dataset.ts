@@ -72,6 +72,7 @@ import {
   validateBidsDataset,
 } from "../lib/bids-validator.js";
 import { printPartialRetrieval, requireAuth } from "../lib/cli-output.js";
+import { triggerOpportunisticRefresh } from "../lib/completion/refresh.js";
 import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
 import { NO_DESCRIPTION, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
 import {
@@ -1850,6 +1851,11 @@ Examples:
           2,
         ),
       );
+      // Epic #1144 phase 5b (#1149), D3: fire-and-forget, after output is
+      // rendered, never awaited -- this list call just proved the API is
+      // reachable, so refreshing the completion cache costs one extra
+      // request on a path that already made one.
+      triggerOpportunisticRefresh();
       return;
     }
 
@@ -1896,10 +1902,12 @@ Examples:
       } else {
         console.log(chalk.yellow("No datasets found."));
       }
+      triggerOpportunisticRefresh();
       return;
     }
 
     renderDatasetTable(datasets, { limit, offset, totalCount });
+    triggerOpportunisticRefresh();
   });
 
 // Search command (semantic search via Vectorize)
@@ -1975,6 +1983,7 @@ Examples:
 
       if (options.json) {
         console.log(JSON.stringify(response, null, 2));
+        triggerOpportunisticRefresh();
         return;
       }
 
@@ -2004,6 +2013,7 @@ Examples:
         console.log(
           chalk.dim("Try different search terms or use 'nemar dataset list' for browsing."),
         );
+        triggerOpportunisticRefresh();
         return;
       }
 
@@ -2052,6 +2062,7 @@ Examples:
 
       console.log();
       console.log(chalk.dim("For details: nemar dataset status <dataset-id>"));
+      triggerOpportunisticRefresh();
     } catch (error) {
       spinner.fail("Search failed");
       if (error instanceof ApiError) {
