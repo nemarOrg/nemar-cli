@@ -17,6 +17,7 @@ import { describe, expect, test } from "bun:test";
 import { Command, Option } from "commander";
 import { datasetSourceSchema } from "../shared/contract/dataset";
 import { FACETS } from "../shared/facets";
+import { adminCommand } from "../src/commands/admin";
 import { getCandidates } from "../src/lib/completion/candidates";
 
 function buildTree(): Command {
@@ -133,5 +134,95 @@ describe("verification case 4: .choices() and facet enums complete for their fla
 
     const result = getCandidates(program, ["list", "--so"]);
     expect(result.sort()).toEqual(["--sort", "--source"]);
+  });
+});
+
+// Regression (test-review follow-up on #1173): Commander accepts the
+// `--flag=value` combined form for any option (`_combineFlagAndOptionalValue`
+// in commander/lib/option.js), but getCandidates had no notion of it at all,
+// so the CLI accepts a syntax completion can never offer. The two describe
+// blocks below cover the two DIFFERENT shapes it arrives in, because they
+// need opposite replacement text (full "flag=value" vs. a bare value) --
+// see candidates.ts's own comments on each branch for why.
+describe("regression: --flag=value single-token form (zsh/fish tokenize this way)", () => {
+  function buildSourceProgram(): Command {
+    const program = new Command("nemar");
+    const list = program.command("list");
+    list.addOption(new Option("--source <values>"));
+    return program;
+  }
+
+  test("a partial value after '=' completes, replacement includes 'flag='", () => {
+    const result = getCandidates(buildSourceProgram(), ["list", "--source=op"]);
+    expect(result).toEqual(["--source=openneuro"]);
+  });
+
+  test("an empty value after '=' offers every value for that flag, still prefixed", () => {
+    const result = getCandidates(buildSourceProgram(), ["list", "--source="]);
+    expect(result.sort()).toEqual(
+      ["--source=openneuro", "--source=nemar", "--source=gin", "--source=other"].sort(),
+    );
+  });
+
+  test("a boolean flag before '=' offers nothing (it takes no value to complete)", () => {
+    const program = new Command("nemar");
+    const list = program.command("list");
+    list.addOption(new Option("--doi"));
+    expect(getCandidates(program, ["list", "--doi=x"])).toEqual([]);
+  });
+
+  test("an undeclared flag before '=' offers nothing, not an error", () => {
+    const result = getCandidates(buildSourceProgram(), ["list", "--nope=x"]);
+    expect(result).toEqual([]);
+  });
+});
+
+describe("regression: --flag = value split-token form (bash's default COMP_WORDBREAKS)", () => {
+  test("bash splits '--source=op' into ('--source', '=', 'op') -- value completes bare", () => {
+    const program = new Command("nemar");
+    const list = program.command("list");
+    list.addOption(new Option("--source <values>"));
+
+    const result = getCandidates(program, ["list", "--source", "=", "op"]);
+    // No "--source=" prefix here: bash's own idea of "the current word" is
+    // only the "op" fragment, so the replacement must be bare "openneuro"
+    // or bash would duplicate the flag already on the line.
+    expect(result).toEqual(["openneuro"]);
+  });
+
+  test("an empty value after the split '=' offers every bare value", () => {
+    const program = new Command("nemar");
+    const list = program.command("list");
+    list.addOption(new Option("--source <values>"));
+
+    const result = getCandidates(program, ["list", "--source", "=", ""]);
+    expect(result.sort()).toEqual(["gin", "nemar", "openneuro", "other"]);
+  });
+});
+
+// #1173 review: subcommandNames() walked cmd.commands with no hidden check,
+// so `admin regenerate-iam` (registered `{ hidden: true }` in
+// src/commands/admin.ts specifically to stay out of --help) leaked into
+// `nemar __complete -- admin ""`. A synthetic tree built fresh in each test
+// above could not have caught this even in principle -- none of those trees
+// ever registered a hidden command, so the gap was never exercised, hidden
+// or not. This runs getCandidates against the ACTUAL adminCommand object
+// src/index.ts registers, not a stand-in shaped like it, so a future
+// `{ hidden: true }` command in the real tree is covered the same way.
+//
+// adminCommand is a module-level singleton also imported by other test
+// files; addCommand()-ing it under a throwaway root would mutate its shared
+// `.parent` and risk cross-file interference, so it's passed directly as
+// getCandidates' root instead -- equivalent to completing "admin"'s own
+// subcommands (words = [""]) without ever attaching it anywhere.
+describe("regression: hidden commands do not leak into completion (#1173)", () => {
+  test("admin regenerate-iam (hidden: true) is excluded from the real tree", () => {
+    const result = getCandidates(adminCommand, [""]);
+    expect(result).not.toContain("regenerate-iam");
+  });
+
+  test("a visible sibling (admin s3) still completes from the same real tree", () => {
+    const result = getCandidates(adminCommand, [""]);
+    expect(result).toContain("s3");
   });
 });
