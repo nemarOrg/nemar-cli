@@ -26,11 +26,13 @@ import {
   statusAction,
   switchAction,
 } from "./commands/auth.js";
+import { completionCommand } from "./commands/completion.js";
 import { datasetCommand } from "./commands/dataset.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { sandboxCommand } from "./commands/sandbox.js";
 import { IS_DEV_BUILD } from "./lib/api/client.js";
 import { MaintenanceError, errorDetail } from "./lib/api/errors.js";
+import { runComplete } from "./lib/completion/run.js";
 import { NO_DESCRIPTION, NO_OPTION, YES_DESCRIPTION, YES_OPTION } from "./lib/confirm.js";
 import { printMaintenanceBanner } from "./lib/maintenance-banner.js";
 import { fetchAndDisplayNotices } from "./lib/notices.js";
@@ -73,6 +75,7 @@ program.addCommand(datasetCommand);
 program.addCommand(sandboxCommand);
 program.addCommand(adminCommand);
 program.addCommand(doctorCommand);
+program.addCommand(completionCommand);
 
 // ============================================================================
 // Root-level shortcuts (convenience aliases)
@@ -133,8 +136,62 @@ if (IS_DEV_BUILD) {
   );
 }
 
+/**
+ * Index into `argv` (already `process.argv.slice(2)`) of the `__complete`
+ * token, or null if this is not a completion invocation. `argv[2]` alone is
+ * not reliable: a global flag typed before the subcommand (`nemar --verbose
+ * __complete -- ...`) shifts `__complete` to a later position, and checking
+ * position 2 positionally missed it entirely (#1173 review) -- the guard
+ * below never fired, so the request fell through to `initUpdateCheck()` and
+ * paid a real blocking fetch before Commander finally rejected it as an
+ * unknown command.
+ *
+ * Every global option this program declares (`--no-color`, `--verbose`,
+ * `--help-all`, `-v`/`--version`) is boolean, so "the first token that is
+ * not itself a flag" is unambiguous here: it is either `__complete` or the
+ * name of a subcommand. `nemar dataset get __complete` must NOT dispatch --
+ * `dataset` is that first non-flag token, and `__complete` there is just an
+ * (unusual) positional argument to `dataset get`.
+ */
+function findCompletionArgsStart(argv: string[]): number | null {
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i].startsWith("-")) continue;
+    return argv[i] === "__complete" ? i : null;
+  }
+  return null;
+}
+
 // Initialize update check before parsing (may block up to 5s on first run)
 async function main() {
+  // Shell completion (epic #1144 phase 5b, #1149, D1). This guard does two
+  // separable things; an earlier version of this comment conflated them and
+  // asserted something false (#1173 review).
+  //
+  // 1. It DISPATCHES `__complete`, which is deliberately not a registered
+  //    Commander command. Falling through to parseAsync() would not run it
+  //    slowly -- it would not run it at all: Commander's _findCommand finds
+  //    no match, takes the unknownCommand() branch, and exits 1 with
+  //    "error: unknown command '__complete'" BEFORE any preAction hook can
+  //    fire. Verified by disabling this guard and running it.
+  // 2. Sitting ABOVE initUpdateCheck() is what avoids the one network cost
+  //    that is real on this path today: on a cold cache initUpdateCheck()
+  //    does a blocking fetch (see update-check.ts), and it runs before
+  //    parseAsync() regardless of which command was typed.
+  //
+  // The preAction hook's unconditional GET /notices is a hazard of the
+  // ALTERNATIVE design, not of this one: it is why `__complete` is not
+  // registered as a normal command (see commands/completion.ts), not
+  // something this early return is currently skipping.
+  //
+  // The budget is ~100ms and __complete must touch the network zero times --
+  // not even with a timeout, since a timeout still pays DNS and connect on
+  // exactly the networks where someone is offline pressing TAB.
+  const completionArgsStart = findCompletionArgsStart(process.argv.slice(2));
+  if (completionArgsStart !== null) {
+    await runComplete(program, process.argv.slice(2 + completionArgsStart + 1));
+    return;
+  }
+
   const pendingUpdate = await initUpdateCheck();
 
   if (pendingUpdate) {

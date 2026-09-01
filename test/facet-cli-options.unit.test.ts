@@ -52,6 +52,20 @@ function startCaptureServer(body: unknown, status = 200): CaptureServer {
           headers: { "content-type": "application/json" },
         });
       }
+      // Phase 5b (#1149, D3): a successful list/search also fires a
+      // fire-and-forget `GET /datasets/facets` AFTER its own output is
+      // rendered, to opportunistically refresh the shell-completion cache
+      // (src/lib/completion/refresh.ts). Genuine traffic this capture
+      // server has to answer, same reasoning as /notices above, but not
+      // part of what these tests are checking -- excluded from the
+      // recorded requests so "exactly one request" below still means the
+      // list/search call itself.
+      if (url.pathname === "/datasets/facets") {
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       requests.push(url);
       return new Response(JSON.stringify(body), {
         status,
