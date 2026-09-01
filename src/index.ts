@@ -136,6 +136,31 @@ if (IS_DEV_BUILD) {
   );
 }
 
+/**
+ * Index into `argv` (already `process.argv.slice(2)`) of the `__complete`
+ * token, or null if this is not a completion invocation. `argv[2]` alone is
+ * not reliable: a global flag typed before the subcommand (`nemar --verbose
+ * __complete -- ...`) shifts `__complete` to a later position, and checking
+ * position 2 positionally missed it entirely (#1173 review) -- the guard
+ * below never fired, so the request fell through to `initUpdateCheck()` and
+ * paid a real blocking fetch before Commander finally rejected it as an
+ * unknown command.
+ *
+ * Every global option this program declares (`--no-color`, `--verbose`,
+ * `--help-all`, `-v`/`--version`) is boolean, so "the first token that is
+ * not itself a flag" is unambiguous here: it is either `__complete` or the
+ * name of a subcommand. `nemar dataset get __complete` must NOT dispatch --
+ * `dataset` is that first non-flag token, and `__complete` there is just an
+ * (unusual) positional argument to `dataset get`.
+ */
+function findCompletionArgsStart(argv: string[]): number | null {
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i].startsWith("-")) continue;
+    return argv[i] === "__complete" ? i : null;
+  }
+  return null;
+}
+
 // Initialize update check before parsing (may block up to 5s on first run)
 async function main() {
   // Shell completion (epic #1144 phase 5b, #1149, D1). This guard does two
@@ -161,8 +186,9 @@ async function main() {
   // The budget is ~100ms and __complete must touch the network zero times --
   // not even with a timeout, since a timeout still pays DNS and connect on
   // exactly the networks where someone is offline pressing TAB.
-  if (process.argv[2] === "__complete") {
-    await runComplete(program, process.argv.slice(3));
+  const completionArgsStart = findCompletionArgsStart(process.argv.slice(2));
+  if (completionArgsStart !== null) {
+    await runComplete(program, process.argv.slice(2 + completionArgsStart + 1));
     return;
   }
 
