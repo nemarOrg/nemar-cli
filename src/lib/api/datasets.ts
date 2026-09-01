@@ -154,6 +154,15 @@ export interface DatasetsListResponse {
   // filters were NOT applied and catalog datasets are NOT included (#646).
   fallback?: boolean;
   warning?: string;
+  // Epic #1144 phase 3/4 (#1147/#1148): rows hidden by the default
+  // unknown-excluded facet policy -- present only when at least one facet
+  // filter (shared/facets.ts) is active. See dataset-facets.ts#buildFacetClauses.
+  excluded_unknown?: number;
+  // Epic #1144 phase 4 (#1148), D5: per-facet breakdown of excluded_unknown,
+  // keyed by FacetKey. Does NOT sum to excluded_unknown -- a dataset unknown
+  // in two active facets counts once in the total but once in EACH bucket.
+  // Always present together with excluded_unknown, never on its own.
+  excluded_unknown_by_facet?: Record<string, number>;
 }
 
 export interface DatasetListFilters {
@@ -171,10 +180,17 @@ export interface DatasetListFilters {
   /** Comma-separated license tiers (public, attribution, sharealike,
       noncommercial, noderiv, unknown), OR semantics. #653. */
   license?: string;
-  sort?: "newest" | "oldest" | "name" | "participants" | "size";
+  sort?: "newest" | "oldest" | "name" | "participants" | "size" | "citations";
   limit?: number;
   offset?: number;
   owner?: string;
+  /** Wire-ready facet query params (queryParam -> canonical value), built by
+   *  `lib/facet-options.ts#buildFacetParams` from the declared table in
+   *  `shared/facets.ts`. Epic #1144 phase 4 (#1148). */
+  facets?: Record<string, string>;
+  /** Widen every active facet's predicate to also match rows where that
+   *  field is unknown (NULL). Serialized as include_unknown=1. */
+  includeUnknown?: boolean;
 }
 
 export interface DatasetSearchResult {
@@ -210,6 +226,42 @@ export interface DatasetSearchResponse {
   /** Set only when the backend's exact-count query failed and `count` fell
    *  back to a page-derived lower bound (review round 3 I1). */
   warning?: string;
+  /** Epic #1144 phase 3/4 (#1147/#1148): identical semantics to
+   *  `DatasetsListResponse#excluded_unknown` -- present only when at least
+   *  one facet filter is active. */
+  excluded_unknown?: number;
+  /** Epic #1144 phase 4 (#1148), D5: identical semantics to
+   *  `DatasetsListResponse#excluded_unknown_by_facet` -- per-facet breakdown,
+   *  does not sum to `excluded_unknown`, always present alongside it. */
+  excluded_unknown_by_facet?: Record<string, number>;
+}
+
+/**
+ * Filters `nemar dataset search` accepts (epic #1144 phase 4, #1148, D6).
+ * Phase 3 already made `GET /datasets/search` honour `license`, `author`,
+ * `task`, `has_doi`, `recent`, `data_complete` and the full facet table via
+ * the same `parseFilterQuery` the list endpoint uses -- this type is what
+ * makes those reachable from the CLI. Deliberately no `search`: this
+ * endpoint's free text is the `q` argument, not a `search` query param (D6).
+ */
+export interface DatasetSearchFilters {
+  modality?: string;
+  /** Only datasets with HED annotations (#869). Serialized as has_hed=1. */
+  hasHed?: boolean;
+  limit?: number;
+  author?: string;
+  task?: string;
+  /** Comma-separated license tiers, OR semantics. #653. */
+  license?: string;
+  hasDoi?: boolean;
+  /** Only datasets verified data-complete (#970). Serialized as data_complete=1. */
+  dataComplete?: boolean;
+  recent?: number;
+  /** Wire-ready facet query params, built by
+   *  `lib/facet-options.ts#buildFacetParams`. */
+  facets?: Record<string, string>;
+  /** Widen every active facet's predicate to also match unknown (NULL) rows. */
+  includeUnknown?: boolean;
 }
 
 /**
@@ -257,6 +309,12 @@ export async function listDatasets(
   if (filters.limit != null) params.set("limit", String(filters.limit));
   if (filters.offset != null) params.set("offset", String(filters.offset));
   if (filters.owner) params.set("owner", filters.owner);
+  if (filters.facets) {
+    for (const [key, value] of Object.entries(filters.facets)) {
+      params.set(key, value);
+    }
+  }
+  if (filters.includeUnknown) params.set("include_unknown", "1");
   const query = params.toString() ? `?${params.toString()}` : "";
   const response = await request<DatasetsListResponse>(
     `/datasets${query}`,
@@ -296,12 +354,24 @@ export async function resolveSourceId(sourceId: string): Promise<ResolveSourceRe
  */
 export async function searchDatasets(
   query: string,
-  filters: { modality?: string; limit?: number; hasHed?: boolean } = {},
+  filters: DatasetSearchFilters = {},
 ): Promise<DatasetSearchResponse> {
   const params = new URLSearchParams({ q: query });
   if (filters.modality) params.set("modality", filters.modality);
   if (filters.limit) params.set("limit", String(filters.limit));
   if (filters.hasHed) params.set("has_hed", "1");
+  if (filters.author) params.set("author", filters.author);
+  if (filters.task) params.set("task", filters.task);
+  if (filters.license) params.set("license", filters.license);
+  if (filters.hasDoi) params.set("has_doi", "true");
+  if (filters.dataComplete) params.set("data_complete", "1");
+  if (filters.recent) params.set("recent", String(filters.recent));
+  if (filters.facets) {
+    for (const [key, value] of Object.entries(filters.facets)) {
+      params.set(key, value);
+    }
+  }
+  if (filters.includeUnknown) params.set("include_unknown", "1");
   const response = await request(
     `/datasets/search?${params.toString()}`,
     {},
