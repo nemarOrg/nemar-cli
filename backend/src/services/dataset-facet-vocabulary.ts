@@ -92,9 +92,9 @@ const GROUPED_VOCAB_COLUMNS: Record<GroupedVocabKey, string> = {
   license: "d.license_tier",
 };
 
-/** Every key this endpoint can return, exported for the route handler and
- *  for tests that need to assert on response shape without hand-listing
- *  strings twice. */
+/** Every key this endpoint can return. Exported so a test can assert the
+ *  response shape against this list instead of hand-listing the strings a
+ *  second time and letting the two drift. */
 export const FACET_VOCABULARY_KEYS = [...GROUPED_VOCAB_KEYS, "modality", "task"] as const;
 export type FacetVocabularyKey = (typeof FACET_VOCABULARY_KEYS)[number];
 
@@ -103,10 +103,18 @@ const TASK_TOP_N = 50;
 /** Response shape: every key is OPTIONAL and ABSENT (not `[]`, not `null`)
  *  when its underlying query failed (D5) -- `[]` means the query succeeded
  *  and genuinely found no values. `hed-version`/`powerline` may legitimately
- *  be `[]` today; several write paths populate those columns (the phase 2/2b
- *  sweeps, but also ordinary reindex traffic via refreshDatasetMetadata for
- *  power_line_frequency), so an empty vocabulary here is a population fact,
- *  not evidence any one of them hasn't run. */
+ *  be `[]` today, and an empty vocabulary is a population fact rather than
+ *  evidence that any particular job has not run.
+ *
+ *  The general rule, stated as a rule because enumerating the columns is how
+ *  this keeps being got wrong (#1171 review, and twice before it): EVERY
+ *  column `computeDatasetMetadataColumns` writes is reachable from ordinary
+ *  reindex traffic via `refreshDatasetMetadata`, not from a sweep alone.
+ *  That includes `hed_version` and `power_line_frequency`, which land in the
+ *  same `writeDatasetMetadataColumns` UPDATE. A column is sweep-only when
+ *  NOTHING in that write path sets it -- `total_recording_duration` and
+ *  `recording_count` (migration 0070) are the real examples. Check the write
+ *  path before attributing an empty vocabulary to a pending sweep. */
 export type FacetVocabulary = Partial<Record<GroupedVocabKey, FacetVocabularyEntry[]>> & {
   modality?: FacetVocabularyEntry[];
   task?: FacetTaskVocabulary;

@@ -773,7 +773,8 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
    * one warning about that trap (`GET /search` above), and a literal path
    * segment registered AFTER a `:id` param route is shadowed by it -- every
    * request to `/facets` would instead hit the `:id` handler, fail
-   * `isValidDatasetId("facets")`, and 404/400 as an unrecognised dataset id.
+   * `isValidDatasetId("facets")` -- a synchronous regex check, so it returns
+   * 400 there and never reaches that handler's later not-found branch.
    * This is the SECOND instance of the same trap in this file.
    *
    * Response shape (D2): most keys are a `{ value, count }[]` vocabulary;

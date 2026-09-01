@@ -17,6 +17,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { FACETS } from "../../shared/facets";
 import { registerCatalogRoutes } from "../src/routes/datasets/catalog";
+import { FACET_VOCABULARY_KEYS } from "../src/services/dataset-facet-vocabulary";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
@@ -55,6 +56,12 @@ function insertDataset(
   ).run(datasetId, ...(keys.map((k) => merged[k]) as never[]));
 }
 
+// The hand-written shape below is a TYPE convenience for reading fields off
+// the parsed body. It is NOT the source of truth for which keys exist -- the
+// test immediately after this block asserts the real response against the
+// exported FACET_VOCABULARY_KEYS, so a key added to the service without being
+// added here (or vice versa) fails rather than drifting silently. #1171
+// review flagged that the export claimed a consumer it did not have.
 interface FacetsBody {
   "electrode-system"?: { value: string; count: number }[];
   source?: { value: string; count: number }[];
@@ -74,6 +81,43 @@ async function getFacets(app: App, db: Database): Promise<{ status: number; body
   const body = (await res.json()) as FacetsBody;
   return { status: res.status, body };
 }
+
+describe("the response shape is the exported key list, not a second hand-written one", () => {
+  let db: Database;
+  let app: App;
+  beforeEach(() => {
+    db = freshDb();
+    app = newApp();
+    insertDataset(db, "nm900001", {
+      modalities: "eeg",
+      tasks: "rest",
+      license_tier: "public",
+      electrode_system: "10-10",
+      source: "openneuro",
+      zarr_status: "ready",
+      bids_version: "1.9.0",
+    });
+  });
+
+  test("a fully-successful response carries exactly FACET_VOCABULARY_KEYS", async () => {
+    // #1171 review: FACET_VOCABULARY_KEYS documented itself as existing so a
+    // test would not hand-list the keys twice, and then no test imported it.
+    // This is that consumer.
+    //
+    // What it catches, verified by mutation: the RESPONSE drifting from the
+    // declaration -- a declared key the assembly fails to set, or a key set
+    // that was never declared. What it does NOT catch, also verified: a key
+    // deleted from GROUPED_VOCAB_KEYS, because FACET_VOCABULARY_KEYS is
+    // derived from that same list, so both sides move together and still
+    // match. The enum-facet correspondence test below is what covers that
+    // direction, by checking against shared/facets.ts instead.
+    const { status, body } = await getFacets(app, db);
+    expect(status).toBe(200);
+    expect(body.warning).toBeUndefined();
+    const returned = Object.keys(body as Record<string, unknown>).sort();
+    expect(returned).toEqual([...FACET_VOCABULARY_KEYS].sort());
+  });
+});
 
 describe("D1: route order -- /facets must not be shadowed by /:id", () => {
   let db: Database;
