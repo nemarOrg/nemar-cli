@@ -55,6 +55,7 @@ import { manifestIntegritySweep } from "./services/manifest-sweep";
 import { getActiveNotices } from "./services/notices";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
 import { runRecordingStatsSweep } from "./services/recording-stats-sweep";
+import { runSignalDefaultsSweep } from "./services/signal-defaults-sweep";
 import {
   FIRST_WARNING_DAYS,
   STALENESS_LIMIT_DAYS,
@@ -846,6 +847,40 @@ export default {
           .catch((err) =>
             console.error(
               "[recording-stats-sweep] sweep failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
+      );
+      // Epic #1144 Phase 2b (#1153): backfill the BIDS signal defaults
+      // (sampling/power-line frequency, reference, placement scheme) that
+      // probeChannelMontage reads from each dataset's exemplar *_eeg.json.
+      // Added in #1164: Phase 2b shipped the service, the admin endpoint and
+      // its tests but never this block, so the columns drained only on a
+      // manual admin call and signal_defaults stayed empty for the catalog.
+      //
+      // PROD-ONLY, and here the AGENTS.md default is not the only argument:
+      // getBidsTreeStats reads repos through the shared GitHub App against the
+      // shared nemarDatasets org, which is precisely the cross-environment
+      // reach the default exists to prevent. That is a stronger reason than
+      // the recording-stats block above has, which touches only S3 and D1.
+      //
+      // Bounded tighter than its sibling (15 per run, hard max 30) because it
+      // spends GitHub API calls per dataset rather than one signed S3 GET.
+      ctx.waitUntil(
+        runSignalDefaultsSweep(env)
+          .then((r) => {
+            if (r.processed > 0 || (r.remaining ?? 0) > 0) {
+              console.log(
+                `[signal-defaults-sweep] processed=${r.processed} populated=${r.populated} noData=${r.noData} errors=${r.errors.length} remaining=${r.remaining ?? "?"}`,
+              );
+            }
+            for (const e of r.errors) {
+              console.error(`[signal-defaults-sweep] ${e.dataset_id}: ${e.error}`);
+            }
+          })
+          .catch((err) =>
+            console.error(
+              "[signal-defaults-sweep] sweep failed:",
               err instanceof Error ? (err.stack ?? err.message) : err,
             ),
           ),
