@@ -85,6 +85,27 @@ export const catalogItemSchema = z
     // Canonical output is the vX.Y.Z tag; coercing schema keeps today's bare
     // rows valid. null when the dataset has no published version yet.
     latest_version: versionTagSchema.nullable().optional(),
+    // Epic #1144 phase 3 (#1147), D7: every column the facet filter table
+    // (shared/facets.ts + backend/src/services/dataset-facets.ts) can filter
+    // on is also projected here, raw and nullable -- a facet a caller can
+    // filter by but never see the value of is a result set with no way to
+    // check. Absent on older backends (additive, passthrough).
+    sessions_count: z.number().int().nullable().optional(),
+    age_min: z.number().nullable().optional(),
+    age_max: z.number().nullable().optional(),
+    bids_version: z.string().nullable().optional(),
+    zarr_status: z.enum(["pending", "ready", "failed"]).nullable().optional(),
+    total_recording_duration: z.number().nullable().optional(),
+    recording_duration_min: z.number().nullable().optional(),
+    recording_duration_max: z.number().nullable().optional(),
+    recording_count: z.number().int().nullable().optional(),
+    recordings_unavailable: z.number().int().nullable().optional(),
+    channel_count_min: z.number().int().nullable().optional(),
+    channel_count_max: z.number().int().nullable().optional(),
+    sampling_frequency: z.number().nullable().optional(),
+    power_line_frequency: z.number().nullable().optional(),
+    eeg_reference: z.string().nullable().optional(),
+    placement_scheme: z.string().nullable().optional(),
   })
   .passthrough();
 export type CatalogItem = z.infer<typeof catalogItemSchema>;
@@ -149,6 +170,13 @@ export const datasetListEnvelopeSchema = z
     total_count: z.number().int().nonnegative().optional(),
     limit: z.number().int().optional(),
     offset: z.number().int().optional(),
+    // Epic #1144 phase 3 (#1147), D4/ADR 0005: rows hidden by the default
+    // unknown-excluded facet policy -- the count that would have matched
+    // with `include_unknown=1`, minus the count that did. Present only when
+    // a facet is active; absent (never 0-as-a-substitute) when the widened
+    // count itself failed, so its absence never masquerades as "nothing was
+    // excluded".
+    excluded_unknown: z.number().int().nonnegative().optional(),
   })
   .passthrough();
 export type DatasetListEnvelope = z.infer<typeof datasetListEnvelopeSchema>;
@@ -180,6 +208,10 @@ export const datasetSearchEnvelopeSchema = z
     method: z.enum(["exact_id", "text", "text_fallback", "semantic", "unavailable"]).optional(),
     min_score: z.number().optional(),
     warning: z.string().optional(),
+    // Epic #1144 phase 3 (#1147), D4/ADR 0005: see datasetListEnvelopeSchema's
+    // `excluded_unknown` for the exact semantics -- identical field, mirrored
+    // here since /datasets/search now shares the same facet engine.
+    excluded_unknown: z.number().int().nonnegative().optional(),
   })
   .passthrough();
 
