@@ -931,9 +931,14 @@ describe("shared/facets.ts + dataset-facets.ts: every facet, both endpoints", ()
       file_size: 500 * 1024 * 1024,
       total_files: 120,
       // The citations facet filters the derived sum of these two addends
-      // (#1182); there is no stored num_citations column to seed.
-      num_dataset_citations: 3,
-      num_datapaper_citations: 1,
+      // (#1182); there is no stored num_citations column to seed. The first
+      // addend is deliberately 0 so a facet reading num_dataset_citations
+      // alone (instead of the sum) falls outside the matching 1..10 range
+      // and fails the test; no non-negative pair can also catch the mirror
+      // regression (reading num_datapaper_citations alone), which is why the
+      // sum itself is value-pinned in dataset-detail-contract.test.ts.
+      num_dataset_citations: 0,
+      num_datapaper_citations: 4,
       total_recording_duration: 3600,
       recording_duration_min: 100,
       recording_duration_max: 200,
