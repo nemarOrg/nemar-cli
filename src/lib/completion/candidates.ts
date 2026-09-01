@@ -115,9 +115,25 @@ function findOption(cmd: Command, token: string): Option | undefined {
   return cmd.options.find((opt) => opt.short === token || opt.long === token);
 }
 
+/**
+ * `Command` has no public accessor for hidden state -- `Option.hidden` is
+ * public in Commander 12.1.0's own typings, but the `Command` class only
+ * carries it as the private `_hidden` field (verified against
+ * node_modules/commander/lib/command.js and typings/index.d.ts). Commander's
+ * own help renderer reads the exact same private field to filter hidden
+ * commands out of `--help` (lib/help.js: `cmd.commands.filter((cmd) =>
+ * !cmd._hidden)`), so this isn't reaching past the API for something
+ * Commander itself treats as internal-only; there is simply no public
+ * equivalent to reach for.
+ */
+function isHidden(cmd: Command): boolean {
+  return Boolean((cmd as unknown as { _hidden?: boolean })._hidden);
+}
+
 function subcommandNames(cmd: Command): string[] {
   const names: string[] = [];
   for (const sub of cmd.commands) {
+    if (isHidden(sub)) continue;
     names.push(sub.name(), ...sub.aliases());
   }
   return names;
