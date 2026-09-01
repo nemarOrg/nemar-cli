@@ -41,6 +41,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { startSearchStub } from "./helpers/search-stub";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -51,7 +52,8 @@ const ESC = String.fromCharCode(27);
 // something to colour (id, HED badge, matched snippet term) -- otherwise an
 // empty or trivial result set would make the "no escape codes" assertions
 // pass for the wrong reason (nothing was ever going to print colour).
-const LIVE_QUERY = "P300";
+// Was a live query. Now a local stub -- see helpers/search-stub.ts.
+const QUERY = "P300";
 
 interface RunResult {
   stdout: string;
@@ -64,6 +66,7 @@ async function runSearch(
   extraArgs: string[] = [],
 ): Promise<RunResult> {
   const configDir = mkdtempSync(join(tmpdir(), "nemar-search-color-"));
+  const stub = startSearchStub();
   const env: Record<string, string | undefined> = {
     ...process.env,
     NEMAR_CONFIG_DIR: configDir,
@@ -72,12 +75,13 @@ async function runSearch(
     NO_COLOR: undefined,
     // See the file-level comment: neutralises a pre-existing cross-file
     // test-isolation bug rather than depending on it not having run yet.
-    TEST_API_URL: undefined,
+    TEST_API_URL: stub.url,
+    NEMAR_NO_UPDATE_CHECK: "1",
     ...envOverrides,
   };
   try {
     const proc = spawn({
-      cmd: ["bun", "run", CLI_ENTRY, "dataset", "search", LIVE_QUERY, "--limit", "5", ...extraArgs],
+      cmd: ["bun", "run", CLI_ENTRY, "dataset", "search", QUERY, "--limit", "5", ...extraArgs],
       cwd: REPO_ROOT,
       env,
       stdin: "ignore",
@@ -89,6 +93,7 @@ async function runSearch(
     const exitCode = await proc.exited;
     return { stdout, stderr, exitCode };
   } finally {
+    stub.stop();
     rmSync(configDir, { recursive: true, force: true });
   }
 }

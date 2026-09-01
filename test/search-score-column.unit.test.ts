@@ -19,19 +19,30 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { startSearchStub } from "./helpers/search-stub";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
-const LIVE_QUERY = "P300";
+// Was a live query against api.nemar.org. Now a local stub: see
+// helpers/search-stub.ts for why (rate limiting under a full suite run,
+// plus non-deterministic fixtures for a renderer assertion).
+const QUERY = "P300";
 
 async function runSearch(args: string[]): Promise<{ stdout: string; exitCode: number }> {
   const configDir = mkdtempSync(join(tmpdir(), "nemar-search-score-"));
-  const env = { ...process.env, NEMAR_CONFIG_DIR: configDir, NO_COLOR: "1" };
+  const stub = startSearchStub();
+  const env = {
+    ...process.env,
+    NEMAR_CONFIG_DIR: configDir,
+    NO_COLOR: "1",
+    TEST_API_URL: stub.url,
+    NEMAR_NO_UPDATE_CHECK: "1",
+  };
   env.FORCE_COLOR = undefined;
   env.CLICOLOR_FORCE = undefined;
   try {
     const proc = spawn({
-      cmd: ["bun", "run", CLI_ENTRY, "dataset", "search", LIVE_QUERY, ...args],
+      cmd: ["bun", "run", CLI_ENTRY, "dataset", "search", QUERY, ...args],
       cwd: REPO_ROOT,
       env,
       stdin: "ignore",
@@ -42,6 +53,7 @@ async function runSearch(args: string[]): Promise<{ stdout: string; exitCode: nu
     const exitCode = await proc.exited;
     return { stdout, exitCode };
   } finally {
+    stub.stop();
     rmSync(configDir, { recursive: true, force: true });
   }
 }
