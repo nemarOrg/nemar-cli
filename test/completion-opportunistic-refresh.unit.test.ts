@@ -180,6 +180,24 @@ describe("verification case 7: opportunistic refresh never blocks or breaks a co
     }
   });
 
+  // Test-review follow-up on #1173: this was the one call site (dataset.ts's
+  // search --json branch) with no cacheWritten() assertion of its own. Its
+  // absence went undetected because the only other test covering that exact
+  // path (verification case 7 above) only asserts stdout/exit-code parity
+  // between a healthy and a failing facets server -- a call site deleted
+  // outright satisfies that comparison just as well as one that is present
+  // and working, since both sides of the comparison would still match.
+  test("a healthy facets response after search --json is written to the completion cache", async () => {
+    const server = startServer(EMPTY_SEARCH_ENVELOPE, "healthy");
+    try {
+      const result = await runCli(["dataset", "search", "eeg", "--json"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(cacheWritten()).toBe(true);
+    } finally {
+      server.stop();
+    }
+  });
+
   // The plan's D3 fires this on EVERY successful list/search render, not
   // just the --json branch -- each of the six call sites in
   // src/commands/dataset.ts (json / empty-results / rendered-table, times
