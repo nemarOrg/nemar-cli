@@ -162,6 +162,12 @@ function filterPrefix(candidates: string[], prefix: string): string[] {
   return candidates.filter((c) => c.startsWith(prefix));
 }
 
+/** Matches a long-flag `=`-value token, e.g. `--source=op`, group 1 the flag
+ *  and group 2 the (possibly empty) value typed so far. Commander itself
+ *  accepts this form for any option (`_combineFlagAndOptionalValue`), so
+ *  completion has to as well -- #1173 review follow-up. */
+const EQUALS_VALUE_PATTERN = /^(--[A-Za-z0-9][A-Za-z0-9-]*)=(.*)$/;
+
 /**
  * Resolve completion candidates for one `__complete` request. `words` is
  * every word the user has typed after `nemar`, in order, with the
@@ -189,6 +195,20 @@ export function getCandidates(program: Command, words: string[]): string[] {
     resolved++;
   }
 
+  // `--flag=partial` arrives as ONE token from zsh and fish, whose tokenizers
+  // don't break words on `=` the way bash's default COMP_WORDBREAKS does.
+  // Checked before the plain-flag branches below, or `--source=op` would
+  // fall into "complete a flag NAME" and match nothing (no flag is spelled
+  // "--source=op"). The replacement here has to be the FULL `flag=value`
+  // text, because zsh/fish treat the whole token as what gets replaced.
+  const eqMatch = toComplete.match(EQUALS_VALUE_PATTERN);
+  if (eqMatch) {
+    const [, flag, valuePrefix] = eqMatch;
+    const opt = findOption(current, flag);
+    if (!opt || !optionTakesValue(opt)) return [];
+    return filterPrefix(valueCandidatesFor(opt), valuePrefix).map((value) => `${flag}=${value}`);
+  }
+
   // The word immediately before toComplete, if any words were left over
   // after the subcommand walk above -- i.e. we're already inside `current`'s
   // own flags. If it names a value-taking option, toComplete is completing
@@ -198,6 +218,20 @@ export function getCandidates(program: Command, words: string[]): string[] {
     const opt = findOption(current, lastPrior);
     if (opt && optionTakesValue(opt)) {
       return filterPrefix(valueCandidatesFor(opt), toComplete);
+    }
+    // bash's default COMP_WORDBREAKS includes "=", so `--source=op` reaches
+    // here as THREE separate words (..., "--source", "=", "op") instead of
+    // one -- the immediately preceding word is a bare "=", and the flag name
+    // is one word further back. Unlike the single-token case above, the
+    // replacement here has to be the BARE value: bash's own idea of "the
+    // current word" is only the "op" fragment after the break character, so
+    // prefixing it with "--source=" again would duplicate the flag bash
+    // already has on the line.
+    if (lastPrior === "=" && priorWords.length >= 2) {
+      const eqOpt = findOption(current, priorWords[priorWords.length - 2]);
+      if (eqOpt && optionTakesValue(eqOpt)) {
+        return filterPrefix(valueCandidatesFor(eqOpt), toComplete);
+      }
     }
   }
 
