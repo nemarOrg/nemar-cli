@@ -28,6 +28,42 @@ check it against their context.
 **Never write "guarantees" for something the code defensively handles.** If there
 is a fallback for the violation six lines below, it is not a guarantee.
 
+## [STRICT] A claim in a plan is a claim in the code
+
+**Why:** the rule above kept being violated by people who had read it. The reason
+is that the false claim did not originate in the comment. It originated one step
+upstream, in an approved plan or an implementer brief, and was copied down
+verbatim because **nobody re-derives a confident line in an approved plan.**
+Approval reads as verification. It is not: a plan is approved for its *approach*,
+not fact-checked line by line.
+
+Four instances in epic #1144 alone, each true where it was written and false where
+it landed:
+
+| Claim | True of | Landed in |
+|---|---|---|
+| `count` describes the population `results` is sliced from | nothing; the subquery is unbounded | code comments + a `.context` doc |
+| `--rate` filters a column that is 0% until the sweeps run | `--duration`, `--recordings` | **ADR 0031**, which is binding |
+| pair null test is AND because the pair is "written atomically" | `recording_duration`, `channel_count` | `age_min/max`, which predates that sweep |
+| the null guard prevents "a fabricated processed=0 line" | nothing; the summary is already gated | six places, from one brief sentence |
+
+**The rule, for whoever writes the plan:** a statement about how existing code
+behaves is a claim you own. Verify it against the code before it goes in, or mark
+it explicitly as unverified so it gets checked instead of copied. "Verify claims
+about EXISTING behaviour against the base code before writing them into a plan"
+was already recorded as a lesson after phase 1 of that epic, and was then violated
+three more times by the same author.
+
+**The rule, for whoever implements it:** a plan is not a source. When it states a
+fact about the codebase and you are about to repeat that fact in a comment, an
+ADR, or a commit message, re-derive it first. Disagreeing with an approved plan on
+a point of fact is the cheapest correction available; the expensive one is a
+binding ADR that is wrong.
+
+**Watch the repetitive shapes.** All four instances were bulk edits: one sentence
+applied to N sibling facets, N wrappers, N call sites. Structural repetition is
+where a justification stops being re-read, so verify per instance, not per pattern.
+
 ## Core Philosophy: Write for Your Future Self
 **Good docs** answer questions before they're asked.
 **Think:** What would confuse me in 6 months?
