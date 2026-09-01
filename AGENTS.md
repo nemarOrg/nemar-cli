@@ -39,7 +39,8 @@ Load-bearing ones to know before touching the relevant area:
 0023 (`--clean` reconciles, it does not wipe), 0027 (Zarr discovery is raw-only),
 0028 (MaxShield MEG is filtered or declined),
 0029 (the Zarr conversion engine lives here, not in the Actions repo),
-0030 (bounded streaming is the default; `.set` is the exception).
+0030 (bounded streaming is the default; `.set` is the exception),
+0031 (one annex policy module; `_motion.tsv` is data despite the extension).
 
 ---
 

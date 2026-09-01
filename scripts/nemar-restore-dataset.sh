@@ -70,10 +70,17 @@ S3_BUCKET="nemar"
 S3_REGION="us-east-2"
 S3_BASE_URL="https://nemar.s3.${S3_REGION}.amazonaws.com"
 
-# Git-annex largefiles configuration
+# Git-annex largefiles configuration.
 # Annex data files by extension or size, but NEVER annex metadata (TSV, JSON,
-# MD, txt, etc.) - they must stay in git for BIDS validation. tsv.gz IS annexed.
-ANNEX_LARGEFILES="(include=*.edf or include=*.bdf or include=*.set or include=*.fif or include=*.vhdr or include=*.eeg or include=*.cnt or include=*.fdt or largerthan=100kb) and exclude=*.tsv and exclude=*.json and exclude=*.md and exclude=*.txt and exclude=*.yml and exclude=*.yaml and exclude=README* and exclude=LICENSE* and exclude=CHANGES* and exclude=.bidsignore and exclude=.gitignore"
+# MD, txt, etc.) - they must stay in git for BIDS validation. tsv.gz IS annexed,
+# and so is *_motion.tsv, which is a recording despite the .tsv extension.
+#
+# MUST match buildLargefilesExpression() in src/lib/git-annex/policy.ts, which is
+# the single source of truth. test/annex-policy.test.ts parses this exact line
+# and fails if the two drift apart -- shell cannot import the TS, so the test is
+# the only thing holding them together. Regenerate with:
+#   bun -e 'import {buildLargefilesExpression} from "./src/lib/git-annex/policy.ts"; console.log(buildLargefilesExpression())'
+ANNEX_LARGEFILES="(include=*.edf or include=*.bdf or include=*.set or include=*.fif or include=*.vhdr or include=*.eeg or include=*.cnt or include=*.fdt or include=*_motion.tsv or largerthan=100kb) and (exclude=*.tsv or include=*_motion.tsv) and exclude=*.json and exclude=*.md and exclude=*.txt and exclude=*.yml and exclude=*.yaml and exclude=README* and exclude=LICENSE* and exclude=CHANGES* and exclude=.bidsignore and exclude=.gitignore"
 
 # Colors for output
 RED='\033[0;31m'
