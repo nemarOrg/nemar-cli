@@ -122,40 +122,57 @@ function runBash(compWords: string[], compCword: number, stub: string): string[]
   });
 }
 
-describe("functional: bash completion script drives real candidate resolution", () => {
-  test("subcommand position: nemar dataset <TAB>", () => {
-    const stub = shWordCheckStub(["dataset", ""], ["list", "search"]);
-    const items = runBash(["nemar", "dataset", ""], 2, stub);
-    expect(items).toEqual(["list", "search"]);
-  });
+// CI runs ubuntu-latest, which ships bash but NOT zsh or fish. The fish block
+// was guarded from the start; bash and zsh were not, so the five zsh tests
+// failed the `unit-pure` job while passing on a developer machine that has zsh
+// (#1177 CI). Guard all three from one place rather than leaving the guard to
+// whoever remembers.
+//
+// A skipped shell is a real coverage gap, not a pass: on a machine without
+// zsh these tests prove nothing, and the (@) bug they exist to catch would
+// ship. That is why the syntax-check tests are additionally kept -- they are
+// weaker, but they at least run where the shell exists.
+const bashInstalled = which("bash") !== null;
+const zshInstalled = which("zsh") !== null;
+const fishInstalled = which("fish") !== null;
 
-  test("flag-name position past the first word: nemar dataset list --sou<TAB>", () => {
-    const stub = shWordCheckStub(["dataset", "list", "--sou"], ["--source"]);
-    const items = runBash(["nemar", "dataset", "list", "--sou"], 3, stub);
-    expect(items).toEqual(["--source"]);
-  });
+describe.skipIf(!bashInstalled)(
+  "functional: bash completion script drives real candidate resolution",
+  () => {
+    test("subcommand position: nemar dataset <TAB>", () => {
+      const stub = shWordCheckStub(["dataset", ""], ["list", "search"]);
+      const items = runBash(["nemar", "dataset", ""], 2, stub);
+      expect(items).toEqual(["list", "search"]);
+    });
 
-  test("flag VALUE position: nemar dataset list --source <TAB>", () => {
-    const stub = shWordCheckStub(["dataset", "list", "--source", ""], ["openneuro"]);
-    const items = runBash(["nemar", "dataset", "list", "--source", ""], 4, stub);
-    expect(items).toEqual(["openneuro"]);
-  });
+    test("flag-name position past the first word: nemar dataset list --sou<TAB>", () => {
+      const stub = shWordCheckStub(["dataset", "list", "--sou"], ["--source"]);
+      const items = runBash(["nemar", "dataset", "list", "--sou"], 3, stub);
+      expect(items).toEqual(["--source"]);
+    });
 
-  test("--flag=value: bash's COMP_WORDBREAKS splits it into 3 words, bare value comes back", () => {
-    // bash's own tokenizer (not this test) is what splits "--source=op" into
-    // ("--source", "=", "op") -- COMP_WORDS is built the same way here.
-    const stub = shWordCheckStub(["dataset", "list", "--source", "=", "op"], ["openneuro"]);
-    const items = runBash(["nemar", "dataset", "list", "--source", "=", "op"], 5, stub);
-    expect(items).toEqual(["openneuro"]);
-  });
+    test("flag VALUE position: nemar dataset list --source <TAB>", () => {
+      const stub = shWordCheckStub(["dataset", "list", "--source", ""], ["openneuro"]);
+      const items = runBash(["nemar", "dataset", "list", "--source", ""], 4, stub);
+      expect(items).toEqual(["openneuro"]);
+    });
 
-  test("the trailing :4 directive never appears as a candidate", () => {
-    const stub = shWordCheckStub(["dataset", ""], ["alpha", "beta", "gamma"]);
-    const items = runBash(["nemar", "dataset", ""], 2, stub);
-    expect(items).toEqual(["alpha", "beta", "gamma"]);
-    expect(items).not.toContain(":4");
-  });
-});
+    test("--flag=value: bash's COMP_WORDBREAKS splits it into 3 words, bare value comes back", () => {
+      // bash's own tokenizer (not this test) is what splits "--source=op" into
+      // ("--source", "=", "op") -- COMP_WORDS is built the same way here.
+      const stub = shWordCheckStub(["dataset", "list", "--source", "=", "op"], ["openneuro"]);
+      const items = runBash(["nemar", "dataset", "list", "--source", "=", "op"], 5, stub);
+      expect(items).toEqual(["openneuro"]);
+    });
+
+    test("the trailing :4 directive never appears as a candidate", () => {
+      const stub = shWordCheckStub(["dataset", ""], ["alpha", "beta", "gamma"]);
+      const items = runBash(["nemar", "dataset", ""], 2, stub);
+      expect(items).toEqual(["alpha", "beta", "gamma"]);
+      expect(items).not.toContain(":4");
+    });
+  },
+);
 
 // ---------------------------------------------------------------------------
 // zsh
@@ -196,51 +213,52 @@ function runZsh(words: string[], current: number, stub: string): string[] {
   });
 }
 
-describe("functional: zsh completion script drives real candidate resolution (#1173)", () => {
-  test("subcommand position: nemar dataset <TAB>", () => {
-    const stub = shWordCheckStub(["dataset", ""], ["list", "search"]);
-    const items = runZsh(["nemar", "dataset", ""], 3, stub);
-    expect(items).toEqual(["list", "search"]);
-  });
+describe.skipIf(!zshInstalled)(
+  "functional: zsh completion script drives real candidate resolution (#1173)",
+  () => {
+    test("subcommand position: nemar dataset <TAB>", () => {
+      const stub = shWordCheckStub(["dataset", ""], ["list", "search"]);
+      const items = runZsh(["nemar", "dataset", ""], 3, stub);
+      expect(items).toEqual(["list", "search"]);
+    });
 
-  test("flag-name position past the first word: nemar dataset list --sou<TAB> (#1173's exact bug site)", () => {
-    // This is the scenario that was silently broken before the (@) fix:
-    // words[2,CURRENT] without (@) glued ("dataset","list","--sou") into one
-    // string, so the stub below would have seen 1 argument, not 3, and this
-    // test would have failed on UNEXPECTED_ARGS.
-    const stub = shWordCheckStub(["dataset", "list", "--sou"], ["--source"]);
-    const items = runZsh(["nemar", "dataset", "list", "--sou"], 4, stub);
-    expect(items).toEqual(["--source"]);
-  });
+    test("flag-name position past the first word: nemar dataset list --sou<TAB> (#1173's exact bug site)", () => {
+      // This is the scenario that was silently broken before the (@) fix:
+      // words[2,CURRENT] without (@) glued ("dataset","list","--sou") into one
+      // string, so the stub below would have seen 1 argument, not 3, and this
+      // test would have failed on UNEXPECTED_ARGS.
+      const stub = shWordCheckStub(["dataset", "list", "--sou"], ["--source"]);
+      const items = runZsh(["nemar", "dataset", "list", "--sou"], 4, stub);
+      expect(items).toEqual(["--source"]);
+    });
 
-  test("flag VALUE position: nemar dataset list --source <TAB>", () => {
-    const stub = shWordCheckStub(["dataset", "list", "--source", ""], ["openneuro"]);
-    const items = runZsh(["nemar", "dataset", "list", "--source", ""], 5, stub);
-    expect(items).toEqual(["openneuro"]);
-  });
+    test("flag VALUE position: nemar dataset list --source <TAB>", () => {
+      const stub = shWordCheckStub(["dataset", "list", "--source", ""], ["openneuro"]);
+      const items = runZsh(["nemar", "dataset", "list", "--source", ""], 5, stub);
+      expect(items).toEqual(["openneuro"]);
+    });
 
-  test("--flag=value: zsh sends ONE token, full 'flag=value' comes back", () => {
-    const stub = shWordCheckStub(["dataset", "list", "--source=op"], ["--source=openneuro"]);
-    const items = runZsh(["nemar", "dataset", "list", "--source=op"], 4, stub);
-    expect(items).toEqual(["--source=openneuro"]);
-  });
+    test("--flag=value: zsh sends ONE token, full 'flag=value' comes back", () => {
+      const stub = shWordCheckStub(["dataset", "list", "--source=op"], ["--source=openneuro"]);
+      const items = runZsh(["nemar", "dataset", "list", "--source=op"], 4, stub);
+      expect(items).toEqual(["--source=openneuro"]);
+    });
 
-  test("the trailing :4 directive never appears as a candidate, even with 3+ real candidates (line 55's bug site)", () => {
-    // This is scripts.ts's OTHER (@)-less slice: candidates=("${lines[1,-2]}")
-    // used to glue "alpha beta gamma" into one CAPTURED element. With the
-    // fix, three distinct candidates come back and ":4" is excluded.
-    const stub = shWordCheckStub(["dataset", ""], ["alpha", "beta", "gamma"]);
-    const items = runZsh(["nemar", "dataset", ""], 3, stub);
-    expect(items).toEqual(["alpha", "beta", "gamma"]);
-    expect(items).not.toContain(":4");
-  });
-});
+    test("the trailing :4 directive never appears as a candidate, even with 3+ real candidates (line 55's bug site)", () => {
+      // This is scripts.ts's OTHER (@)-less slice: candidates=("${lines[1,-2]}")
+      // used to glue "alpha beta gamma" into one CAPTURED element. With the
+      // fix, three distinct candidates come back and ":4" is excluded.
+      const stub = shWordCheckStub(["dataset", ""], ["alpha", "beta", "gamma"]);
+      const items = runZsh(["nemar", "dataset", ""], 3, stub);
+      expect(items).toEqual(["alpha", "beta", "gamma"]);
+      expect(items).not.toContain(":4");
+    });
+  },
+);
 
 // ---------------------------------------------------------------------------
 // fish
 // ---------------------------------------------------------------------------
-
-const fishInstalled = which("fish") !== null;
 
 /** Fish has no bash-style COMPREPLY/zsh-style compadd to intercept --
  *  `complete -C '<partial line>'` is fish's own supported mechanism for

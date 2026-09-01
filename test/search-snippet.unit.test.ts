@@ -14,6 +14,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import chalk from "chalk";
 import {
   renderSnippetLine,
   sanitizeSnippetText,
@@ -232,27 +233,32 @@ describe("renderSnippetLine: emphasis lands on the matched term (#1174 review)",
   const MATCH_OFF = "\u001b[39m";
   const MUTED_ON = "\u001b[2m";
   const MUTED_OFF = "\u001b[22m";
-  const originalForceColor = process.env.FORCE_COLOR;
+  // Drive chalk's level DIRECTLY rather than setting FORCE_COLOR and
+  // re-importing (#1177 CI). chalk is a module singleton evaluated once at
+  // first import: setting the env var afterwards does nothing, and
+  // re-importing this module does not re-import chalk. These tests passed on
+  // a developer machine only because its shell already exported
+  // FORCE_COLOR=1, so chalk happened to be in colour mode; in CI, with no TTY
+  // and no FORCE_COLOR, chalk was level 0 and all three failed. Passing for an
+  // ambient reason is not passing.
+  //
+  // Mutating `chalk.level` is the supported way to force it, and it reaches
+  // theme.ts because both import the same instance.
+  const originalLevel = chalk.level;
 
   beforeEach(() => {
-    process.env.FORCE_COLOR = "1";
+    chalk.level = 3;
   });
   afterEach(() => {
-    // Restore by DELETING when it was unset. Assigning undefined coerces to
-    // the string "undefined", which is truthy and leaks into every later test
-    // in the same process -- the exact bug filed as #1175.
-    if (originalForceColor === undefined) delete process.env.FORCE_COLOR;
-    else process.env.FORCE_COLOR = originalForceColor;
+    chalk.level = originalLevel;
   });
 
-  async function renderColoured(input: string): Promise<string> {
-    // Fresh import so chalk re-evaluates FORCE_COLOR for this block.
-    const mod = await import(`../src/lib/render/snippet.js?colour=${Date.now()}`);
-    return mod.renderSnippetLine(input, 80) ?? "";
+  function renderColoured(input: string): string {
+    return renderSnippetLine(input, 80) ?? "";
   }
 
-  test("the marked term carries the match role, the prose carries muted", async () => {
-    const out = await renderColoured("before <mark>TERM</mark> after");
+  test("the marked term carries the match role, the prose carries muted", () => {
+    const out = renderColoured("before <mark>TERM</mark> after");
     expect(out).toContain(`${MATCH_ON}TERM${MATCH_OFF}`);
     expect(out).toContain(`${MUTED_ON}before ${MUTED_OFF}`);
     expect(out).toContain(`${MUTED_ON} after${MUTED_OFF}`);
@@ -261,14 +267,14 @@ describe("renderSnippetLine: emphasis lands on the matched term (#1174 review)",
     expect(out).not.toContain(`${MATCH_ON}before `);
   });
 
-  test("every marked term is emphasised, not just the first", async () => {
-    const out = await renderColoured("a <mark>ONE</mark> b <mark>TWO</mark> c");
+  test("every marked term is emphasised, not just the first", () => {
+    const out = renderColoured("a <mark>ONE</mark> b <mark>TWO</mark> c");
     expect(out).toContain(`${MATCH_ON}ONE${MATCH_OFF}`);
     expect(out).toContain(`${MATCH_ON}TWO${MATCH_OFF}`);
   });
 
-  test("a snippet with no marks is entirely muted, with no match colour", async () => {
-    const out = await renderColoured("nothing highlighted here");
+  test("a snippet with no marks is entirely muted, with no match colour", () => {
+    const out = renderColoured("nothing highlighted here");
     expect(out).toContain(MUTED_ON);
     expect(out).not.toContain(MATCH_ON);
   });
