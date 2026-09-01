@@ -2,16 +2,20 @@
 """Unit tests for the SQLite conversion queue (scripts/zarr/zarr_queue.py).
 
 Real SQLite (a temp db per test), no mocks: exercises the enqueue / claim /
-done / fail transitions, retry-backoff, version-bump requeue, and the crash
-recovery (stale `inprogress` -> `pending`). The HTTP fetch is not tested here
-(it hits the live API, validated by the cron run).
+done / fail transitions, retry-backoff, version-bump requeue, the crash
+recovery (stale `inprogress` -> `pending`), and the engine-version stamp with
+its migration (#1172). The HTTP fetch is not tested here (it hits the live API,
+validated by the cron run).
 
 Run: python3 scripts/zarr/test_zarr_queue.py
 """
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -21,11 +25,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from zarr_queue import (  # type: ignore[import-not-found]  # noqa: E402
+    ZARR_ENGINE_VERSION,
     backoff_seconds,
     claim_next,
     connect,
     mark_done,
     mark_fail,
+    migrate_schema,
     reconcile,
     requeue,
 )
@@ -459,6 +465,244 @@ class UnlistedSweepTest(unittest.TestCase):
         self.assertEqual(back["attempts"], 0)
         self.assertIsNone(back["last_error"])
         self.assertEqual(back["next_retry_at"], 0)
+
+
+class EngineStampMigrationTest(unittest.TestCase):
+    """#1172: the migration that must NOT requeue the archive.
+
+    The production queue predates the `engine_version` column, so every one of
+    its ~667 `done` rows arrives NULL. Reading NULL as "old engine" would put the
+    whole archive back through conversion on the next cron tick; the migration
+    therefore seeds them to the CURRENT version and leaves the genuinely stranded
+    cohort to the targeted `backfill-dir-formats` sweep.
+    """
+
+    # The jobs table exactly as it stood before this change: a real pre-migration
+    # database, not a stand-in for one.
+    PRE_MIGRATION_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS jobs (
+      dataset_id        TEXT PRIMARY KEY,
+      latest_version    TEXT,
+      converted_version TEXT,
+      status            TEXT NOT NULL DEFAULT 'pending',
+      attempts          INTEGER NOT NULL DEFAULT 0,
+      last_error        TEXT,
+      next_retry_at     INTEGER NOT NULL DEFAULT 0,
+      enqueued_at       TEXT,
+      updated_at        INTEGER NOT NULL DEFAULT 0
+    );
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db = os.path.join(self._tmp.name, "old.db")
+        old = sqlite3.connect(self.db)
+        old.executescript(self.PRE_MIGRATION_SCHEMA)
+        old.executemany(
+            "INSERT INTO jobs(dataset_id, latest_version, converted_version, status,"
+            " enqueued_at, updated_at) VALUES(?,?,?,?,?,?)",
+            [
+                ("nm000001", "v1.0.0", "v1.0.0", "done", "2026-01-01T00:00:00Z", 0),
+                ("on000002", "v2.0.0", "v2.0.0", "done", "2026-01-01T00:00:01Z", 0),
+                ("nm000003", "v1.0.0", None, "pending", "2026-01-01T00:00:02Z", 0),
+            ],
+        )
+        old.commit()
+        old.close()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _open(self):
+        """connect() with its one-time migration notice captured, not printed."""
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            conn = connect(self.db)
+        return conn, buf.getvalue()
+
+    def stamps(self, conn):
+        return {
+            r["dataset_id"]: r["engine_version"]
+            for r in conn.execute("SELECT dataset_id, engine_version FROM jobs")
+        }
+
+    def test_the_pre_migration_db_really_lacks_the_column(self):
+        # Guard on the fixture itself: if this ever passes trivially, every other
+        # assertion in this class is testing nothing.
+        raw = sqlite3.connect(self.db)
+        cols = {r[1] for r in raw.execute("PRAGMA table_info(jobs)")}
+        raw.close()
+        self.assertNotIn("engine_version", cols)
+
+    def test_connect_adds_the_column_and_seeds_every_null_to_current(self):
+        conn, _ = self._open()
+        self.addCleanup(conn.close)
+        self.assertEqual(
+            self.stamps(conn),
+            {
+                "nm000001": ZARR_ENGINE_VERSION,
+                "on000002": ZARR_ENGINE_VERSION,
+                "nm000003": ZARR_ENGINE_VERSION,
+            },
+        )
+
+    def test_the_migration_announces_itself(self):
+        # The single most consequential thing this file does to a live queue is
+        # declare hundreds of rows current instead of requeuing them. It must
+        # leave a trace in the cron log.
+        _, notice = self._open()
+        self.assertIn("3", notice)
+        self.assertIn("engine_version", notice)
+
+    def test_migrated_rows_are_not_requeued_by_the_next_reconcile(self):
+        """The whole point: no mass reconversion on the first post-upgrade run."""
+        conn, _ = self._open()
+        self.addCleanup(conn.close)
+        res = reconcile(conn, [("nm000001", "v1.0.0"), ("on000002", "v2.0.0")], 3600)
+        self.assertEqual(res["enqueued"], 0)
+        self.assertEqual(res["engine_stale"], 0)
+        self.assertEqual(res["engine_requeued"], 0)
+        statuses = {
+            r["dataset_id"]: r["status"]
+            for r in conn.execute("SELECT dataset_id, status FROM jobs")
+        }
+        self.assertEqual(statuses["nm000001"], "done")
+        self.assertEqual(statuses["on000002"], "done")
+
+    def test_migration_is_idempotent(self):
+        conn, _ = self._open()
+        self.addCleanup(conn.close)
+        self.assertEqual(migrate_schema(conn), 0)
+        conn2, notice = self._open()
+        self.addCleanup(conn2.close)
+        self.assertEqual(notice, "")
+
+    def test_a_fresh_db_has_the_column_and_seeds_nothing(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            conn = connect(os.path.join(tmp.name, "new.db"))
+        self.addCleanup(conn.close)
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+        self.assertIn("engine_version", cols)
+        self.assertEqual(buf.getvalue(), "")
+
+
+class EngineStampRequeueTest(unittest.TestCase):
+    """#1172: a widened engine reaches the back catalog through the stamp.
+
+    An engine upgrade bumps no dataset version, so before this the version
+    comparison in `reconcile` was the only requeue trigger and every
+    already-converted dataset stayed on the rules it was converted under.
+    """
+
+    OLD_ENGINE = "1"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.conn = connect(os.path.join(self._tmp.name, "q.db"))
+        reconcile(self.conn, [("nm000001", "v1.0.0")], 3600)
+        claim_next(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+        self._tmp.cleanup()
+
+    def row(self, dataset_id="nm000001"):
+        return self.conn.execute(
+            "SELECT status, latest_version, converted_version, engine_version, attempts"
+            " FROM jobs WHERE dataset_id=?",
+            (dataset_id,),
+        ).fetchone()
+
+    def test_done_stamps_the_current_engine(self):
+        mark_done(self.conn, "nm000001", "v1.0.0")
+        self.assertEqual(self.row()["engine_version"], ZARR_ENGINE_VERSION)
+
+    def test_a_stale_stamp_requeues_at_the_same_version(self):
+        mark_done(self.conn, "nm000001", "v1.0.0", engine_version=self.OLD_ENGINE)
+        res = reconcile(self.conn, [("nm000001", "v1.0.0")], 3600)
+        self.assertEqual(res["enqueued"], 1)
+        self.assertEqual(res["engine_stale"], 1)
+        self.assertEqual(res["engine_requeued"], 1)
+        self.assertEqual(self.row()["status"], "pending")
+
+    def test_a_current_stamp_is_left_alone(self):
+        mark_done(self.conn, "nm000001", "v1.0.0")
+        res = reconcile(self.conn, [("nm000001", "v1.0.0")], 3600)
+        self.assertEqual((res["enqueued"], res["engine_stale"]), (0, 0))
+        self.assertEqual(self.row()["status"], "done")
+
+    def test_the_guard_flag_suppresses_the_requeue_but_still_counts_it(self):
+        # `--no-engine-requeue` exists so the cost of a bump can be read off a
+        # run before it is paid; a suppressed requeue that also reported zero
+        # would make the flag useless.
+        mark_done(self.conn, "nm000001", "v1.0.0", engine_version=self.OLD_ENGINE)
+        res = reconcile(self.conn, [("nm000001", "v1.0.0")], 3600, engine_requeue=False)
+        self.assertEqual(res["engine_stale"], 1)
+        self.assertEqual(res["engine_requeued"], 0)
+        self.assertEqual(res["enqueued"], 0)
+        self.assertEqual(self.row()["status"], "done")
+
+    def test_a_null_stamp_is_never_stale(self):
+        """Fail-safe: a NULL that escaped the migration must not requeue.
+
+        `migrate_schema` seeds every pre-existing row, so this should be
+        unreachable -- which is exactly why the behaviour needs pinning. If a
+        NULL ever does appear (an older driver writing into a migrated DB, a
+        hand-edited row), the wrong reading of it re-converts the entire archive.
+        """
+        mark_done(self.conn, "nm000001", "v1.0.0")
+        self.conn.execute("UPDATE jobs SET engine_version=NULL WHERE dataset_id='nm000001'")
+        self.conn.commit()
+        res = reconcile(self.conn, [("nm000001", "v1.0.0")], 3600)
+        self.assertEqual((res["enqueued"], res["engine_stale"]), (0, 0))
+        self.assertEqual(self.row()["status"], "done")
+
+    def test_a_version_change_still_requeues_and_is_not_double_counted(self):
+        # A row with both a new version and a stale stamp would re-convert
+        # anyway, so it is attributed to the version -- `engine_requeued` reports
+        # the MARGINAL cost of a bump, not the overlap.
+        mark_done(self.conn, "nm000001", "v1.0.0", engine_version=self.OLD_ENGINE)
+        res = reconcile(self.conn, [("nm000001", "v2.0.0")], 3600)
+        self.assertEqual(res["enqueued"], 1)
+        self.assertEqual(res["engine_stale"], 1)
+        self.assertEqual(res["engine_requeued"], 0)
+        row = self.row()
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(row["latest_version"], "v2.0.0")
+
+    def test_a_stamp_only_requeue_keeps_the_version_to_convert(self):
+        # The drain reads `latest_version` off the claimed row; blanking it would
+        # hand the converter an empty target.
+        mark_done(self.conn, "nm000001", "v1.0.0", engine_version=self.OLD_ENGINE)
+        reconcile(self.conn, [("nm000001", "")], 3600)
+        row = self.row()
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(row["latest_version"], "v1.0.0")
+
+    def test_the_requeued_row_converts_and_restamps_to_current(self):
+        mark_done(self.conn, "nm000001", "v1.0.0", engine_version=self.OLD_ENGINE)
+        reconcile(self.conn, [("nm000001", "v1.0.0")], 3600)
+        claimed = claim_next(self.conn)
+        self.assertEqual(claimed["dataset_id"], "nm000001")
+        mark_done(self.conn, "nm000001", claimed["latest_version"])
+        self.assertEqual(self.row()["engine_version"], ZARR_ENGINE_VERSION)
+        # ... and the next reconcile is quiet again, so a bump requeues once.
+        res = reconcile(self.conn, [("nm000001", "v1.0.0")], 3600)
+        self.assertEqual((res["enqueued"], res["engine_stale"]), (0, 0))
+
+    def test_the_stamp_governs_done_rows_only(self):
+        # A terminal row is terminal for reasons the stamp knows nothing about
+        # (#774). Widening discovery does not make an unreadable recording
+        # readable, so an engine bump must not revive `failed`/`data_failed`.
+        mark_fail(self.conn, "nm000001", "unreadable", 5, 1800, deterministic=True)
+        self.conn.execute("UPDATE jobs SET engine_version=? WHERE dataset_id='nm000001'", ("1",))
+        self.conn.commit()
+        res = reconcile(self.conn, [("nm000001", "v1.0.0")], 3600)
+        self.assertEqual((res["enqueued"], res["engine_stale"]), (0, 0))
+        self.assertEqual(self.row()["status"], "data_failed")
 
 
 if __name__ == "__main__":

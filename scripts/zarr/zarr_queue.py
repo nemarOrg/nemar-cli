@@ -12,7 +12,8 @@ One row per dataset:
     jobs(dataset_id PK, latest_version, converted_version,
          status,            -- pending | inprogress | done | failed | data_failed
          attempts, last_error, next_retry_at (epoch),
-         enqueued_at (ISO), updated_at (epoch))
+         enqueued_at (ISO), updated_at (epoch),
+         engine_version)    -- the discovery generation it was converted under
 
 `failed` is an INFRA failure that exhausted its bounded retries (transient: a
 crashed worker / S3 blip — could be re-tried manually). `data_failed` is a
@@ -23,15 +24,17 @@ is NOT re-queued by reconcile until a genuinely new dataset version appears
 scratch, which wedged the queue on a single unconvertible dataset).
 
 Subcommands (all take --db):
-    reconcile --api-base URL [--stale-seconds N]
+    reconcile --api-base URL [--stale-seconds N] [--no-engine-requeue]
         Pull GET /datasets, enqueue (status=pending) every public nm/on dataset
-        whose latest_version != converted_version, reset stale `inprogress` rows
-        to `pending`, and park rows the catalog no longer lists as `unlisted`
-        (withdrawn or returned to private -- see `reconcile`). Idempotent.
+        whose latest_version != converted_version OR whose `done` row was
+        converted by an older engine (see ZARR_ENGINE_VERSION), reset stale
+        `inprogress` rows to `pending`, and park rows the catalog no longer lists
+        as `unlisted` (withdrawn or returned to private -- see `reconcile`).
+        Idempotent.
     next [--max-attempts N]
         Atomically claim the oldest eligible job -> `inprogress`; print
         "<dataset_id>\t<latest_version>" (nothing if the queue is drained).
-    done DATASET VERSION         mark converted at VERSION.
+    done DATASET VERSION         mark converted at VERSION (stamps the engine).
     fail DATASET "ERROR" [--max-attempts N] [--backoff-base S]
         attempts++; reschedule (pending + next_retry_at) until max-attempts, then
         terminal `failed`.
@@ -59,12 +62,34 @@ CREATE TABLE IF NOT EXISTS jobs (
   last_error        TEXT,
   next_retry_at     INTEGER NOT NULL DEFAULT 0,
   enqueued_at       TEXT,
-  updated_at        INTEGER NOT NULL DEFAULT 0
+  updated_at        INTEGER NOT NULL DEFAULT 0,
+  engine_version    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 """
 
 DATASET_ID_RE = re.compile(r"^(nm|on)[0-9]{6}$")
+
+# The generation of DISCOVERY/DISPATCH rules a `done` row was converted under.
+#
+# **Bump this whenever discovery or dispatch WIDENS** -- that is the whole point
+# of the column, and it is what triggers the automatic backfill: `reconcile`
+# resets every `done` row carrying an older stamp back to `pending`, so the back
+# catalog is reconverted under the wider rules instead of sitting invisibly
+# stranded at store_count 0 (nemarOrg/nemar-cli#1172).
+#
+# "1" retroactively denotes the pre-directory-format engine: everything before
+# epic #1095 (merged 2026-08-22) taught discovery to see MEF3 `.mefd`, CTF `.ds`,
+# and 4D/BTi recording DIRECTORIES as recordings. It is a documented zero point
+# for the numbering, not a value any row actually wears -- rows that predate this
+# column are seeded to the CURRENT version by `migrate_schema`, deliberately;
+# read the note there before changing that.
+#
+# A NARROWING must not bump this. Raw-only discovery (ADR 0027) removes stores
+# rather than adding them, so a mass requeue would buy nothing and cost a full
+# archive reconversion. Bump for "the engine can now see something it could not
+# see before", and for nothing else.
+ZARR_ENGINE_VERSION = "2"
 
 
 def _now_iso() -> str:
@@ -91,12 +116,61 @@ def _vtag(v: str | None) -> str:
     return v if v.startswith("v") else f"v{v}"
 
 
+def migrate_schema(conn: sqlite3.Connection, engine_version: str = ZARR_ENGINE_VERSION) -> int:
+    """Add `engine_version` to a pre-existing `jobs` table and seed it.
+
+    Returns how many rows were seeded (0 on a brand-new or already-migrated DB).
+    Additive and guarded by `pragma_table_info`, so it is a no-op on every run
+    after the first -- `CREATE TABLE IF NOT EXISTS` cannot add a column to a
+    table that already exists, which is why this is here at all.
+
+    **A NULL stamp must NEVER mean "requeue me", and this is where that is
+    decided.** On the first run against the production queue every one of the
+    ~667 `done` rows has a NULL `engine_version`, because it was written before
+    the column existed. Reading NULL as "converted by an unknown, therefore old,
+    engine" would hand `reconcile` the entire archive to re-convert on the very
+    next cron tick -- days of Hallu compute, an S3 rewrite of every store, and a
+    `--clean` pass over datasets that are perfectly fine. So the migration seeds
+    them to the CURRENT version instead: they are declared up-to-date.
+
+    That is deliberately a lie about the stranded cohort, and it is the right
+    one. The datasets #1172 is about -- MEG/iEEG datasets whose `.mefd`/`.ds`/BTi
+    directories the pre-#1095 engine could not see -- are recovered by the
+    TARGETED `backfill-dir-formats` sweep below, which finds them by evidence
+    (an empty or dir-format-missing published index) rather than by re-converting
+    667 datasets on the chance that a few dozen need it. Seeding buys the precise
+    thing the column is for: from here on, a bump of `ZARR_ENGINE_VERSION`
+    requeues exactly the rows that predate the bump, automatically.
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+    if "engine_version" in cols:
+        return 0
+    conn.execute("ALTER TABLE jobs ADD COLUMN engine_version TEXT")
+    seeded = conn.execute(
+        "UPDATE jobs SET engine_version=? WHERE engine_version IS NULL",
+        (engine_version,),
+    ).rowcount
+    conn.commit()
+    return seeded
+
+
 def connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, timeout=60)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=60000")
     conn.executescript(SCHEMA)
+    seeded = migrate_schema(conn)
+    if seeded:
+        # One line, once, on the run that migrates. The alternative -- a silent
+        # migration -- would leave no evidence anywhere that ~667 rows were
+        # declared current rather than requeued, which is the single most
+        # consequential thing this file does to a live queue.
+        print(
+            f"migrated: seeded engine_version={ZARR_ENGINE_VERSION} on {seeded} pre-existing"
+            " row(s) (NOT requeued; see backfill-dir-formats for the stranded cohort)",
+            file=sys.stderr,
+        )
     return conn
 
 
@@ -108,11 +182,31 @@ def backoff_seconds(attempts: int, base: int, cap: int = 6 * 3600) -> int:
 # --- transition helpers (exercised by the unit tests) -------------------------
 
 
+def _engine_is_stale(stamp: str | None, current: str) -> bool:
+    """True when a `done` row was converted by a DIFFERENT engine generation.
+
+    A NULL stamp is deliberately not stale. `migrate_schema` seeds every
+    pre-existing row to the current version precisely so NULL never reaches
+    here, and the explicit `is not None` is the second half of that guarantee:
+    if a NULL ever does appear (a row written by a driver older than this file,
+    a hand-edited DB), it must fail SAFE -- leave the row alone -- rather than
+    trigger the archive-wide reconversion the seeding exists to prevent.
+
+    Any difference counts, not just a lower value: the stamp is an identity, not
+    an ordering. A deliberate roll-back of `ZARR_ENGINE_VERSION` is then a
+    requeue too, which is the honest reading -- the rows were converted by an
+    engine that is no longer the one in force.
+    """
+    return stamp is not None and stamp != current
+
+
 def reconcile(
     conn: sqlite3.Connection,
     datasets: list[tuple[str, str]],
     stale_seconds: int,
     listing_complete: bool = False,
+    engine_requeue: bool = True,
+    engine_version: str = ZARR_ENGINE_VERSION,
 ) -> dict:
     """Enqueue datasets needing (re)conversion + recover stale inprogress rows.
 
@@ -122,6 +216,20 @@ def reconcile(
     left alone (a new version flips it back to pending). `inprogress` rows whose
     `updated_at` is older than `stale_seconds` are assumed crashed and reset to
     `pending` so they run again.
+
+    A `done` row is ALSO requeued when its `engine_version` is not the current
+    one (`ZARR_ENGINE_VERSION`), which is how a widening of the discovery rules
+    reaches the back catalog: an engine upgrade bumps no dataset version, so
+    before this the version comparison above was the only trigger and every
+    already-converted dataset stayed stranded under the old rules
+    (nemarOrg/nemar-cli#1172). `engine_requeue=False` (CLI:
+    `--no-engine-requeue`) suppresses the requeue while still COUNTING it, so an
+    operator can see what a bump would cost before paying for it. Either way the
+    returned `engine_stale` says how many `done` rows the current stamp
+    disagrees with; `engine_requeued` says how many were requeued for that
+    reason ALONE (a row whose version also changed is counted as an ordinary
+    version requeue, since it would have re-converted regardless -- what an
+    operator wants from this number is the MARGINAL cost of the bump).
 
     `listing_complete` enables the `unlisted` sweep: a row for a dataset the
     catalog no longer lists is parked as `unlisted` so `claim_next` stops handing
@@ -148,6 +256,8 @@ def reconcile(
     # that starts emitting an unexpected ID shape would go unconverted forever
     # with no line saying so.
     rejected = 0
+    engine_stale = 0
+    engine_requeued = 0
     for dataset_id, latest in datasets:
         # nm099999 is the private E2E fixture, deliberately never converted; it is
         # an expected skip, not an anomaly, so it is not counted as rejected.
@@ -157,7 +267,8 @@ def reconcile(
             rejected += 1
             continue
         row = conn.execute(
-            "SELECT status, converted_version, latest_version FROM jobs WHERE dataset_id=?",
+            "SELECT status, converted_version, latest_version, engine_version FROM jobs"
+            " WHERE dataset_id=?",
             (dataset_id,),
         ).fetchone()
         if row is None:
@@ -170,15 +281,27 @@ def reconcile(
             continue
         status = row["status"]
         if status == "done":
-            # Re-convert only when a version newer than the one we converted
-            # appears.
-            if latest and _vtag(latest) != _vtag(row["converted_version"]):
+            # Re-convert when a version newer than the one we converted appears,
+            # OR when the engine that converted it is no longer the current one
+            # (#1172 -- an engine upgrade bumps no dataset version, so without
+            # this the row would never be looked at again).
+            version_changed = bool(latest) and _vtag(latest) != _vtag(row["converted_version"])
+            stale_engine = _engine_is_stale(row["engine_version"], engine_version)
+            if stale_engine:
+                engine_stale += 1
+            if version_changed or (stale_engine and engine_requeue):
                 conn.execute(
                     "UPDATE jobs SET latest_version=?, status='pending', attempts=0,"
                     " next_retry_at=0, updated_at=? WHERE dataset_id=?",
-                    (latest, now, dataset_id),
+                    # `version_changed` guarantees a non-empty `latest`; a
+                    # stamp-only requeue may not have one (a catalog row with no
+                    # latest_version), so fall back to the version already on the
+                    # row rather than blanking the drain's conversion target.
+                    (latest or row["latest_version"], now, dataset_id),
                 )
                 enq += 1
+                if stale_engine and not version_changed:
+                    engine_requeued += 1
         elif status in ("failed", "data_failed"):
             # Terminal for THIS version (#774). Only a genuinely NEW snapshot
             # (latest != the version we already gave up on) retries -- compare
@@ -242,6 +365,8 @@ def reconcile(
         "recovered_stale": recovered,
         "unlisted": unlisted,
         "rejected": rejected,
+        "engine_stale": engine_stale,
+        "engine_requeued": engine_requeued,
     }
 
 
@@ -264,16 +389,27 @@ def claim_next(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return row
 
 
-def mark_done(conn: sqlite3.Connection, dataset_id: str, version: str) -> None:
+def mark_done(
+    conn: sqlite3.Connection,
+    dataset_id: str,
+    version: str,
+    engine_version: str = ZARR_ENGINE_VERSION,
+) -> None:
     # Store the canonical tag, not whatever the caller happened to hold. `_vtag`
     # already makes reconcile's comparisons prefix-agnostic, so a bare value is
     # harmless TODAY -- but it left 222 rows carrying "1.0.0" against a
     # "v1.0.0" latest_version, which is a trap for the next comparison written
     # without _vtag. Normalize on write so the column is uniform.
+    #
+    # `engine_version` records WHICH discovery generation produced this
+    # conversion, so a later widening can find the row again (#1172). It is a
+    # parameter rather than a bare constant read so a test can express "this row
+    # was converted by the old engine" through the real code path instead of
+    # writing the column by hand.
     conn.execute(
         "UPDATE jobs SET status='done', converted_version=?, last_error=NULL,"
-        " next_retry_at=0, updated_at=? WHERE dataset_id=?",
-        (_vtag(version), _now(), dataset_id),
+        " next_retry_at=0, engine_version=?, updated_at=? WHERE dataset_id=?",
+        (_vtag(version), engine_version, _now(), dataset_id),
     )
     conn.commit()
 
@@ -413,6 +549,13 @@ def main() -> int:
     p = sub.add_parser("reconcile")
     p.add_argument("--api-base", default="https://api.nemar.org")
     p.add_argument("--stale-seconds", type=int, default=6 * 3600)
+    p.add_argument(
+        "--no-engine-requeue",
+        action="store_true",
+        help="do NOT requeue `done` rows converted by an older engine; the run still"
+        " reports how many rows the current ZARR_ENGINE_VERSION would requeue, so the"
+        " cost of a bump can be read off a dry run before it is paid",
+    )
 
     sub.add_parser("next")
 
@@ -458,11 +601,27 @@ def main() -> int:
 
     if args.cmd == "reconcile":
         datasets, complete = fetch_public_datasets(args.api_base)
-        res = reconcile(conn, datasets, args.stale_seconds, listing_complete=complete)
+        res = reconcile(
+            conn,
+            datasets,
+            args.stale_seconds,
+            listing_complete=complete,
+            engine_requeue=not args.no_engine_requeue,
+        )
+        # `engine_stale` is printed on every run, not only when it is non-zero:
+        # an engine bump is the one reconcile outcome that can requeue hundreds
+        # of datasets at once, and a steady `engine_stale=0` in the cron log is
+        # what makes the run that says otherwise legible.
         print(
             f"reconcile: seen={len(datasets)} enqueued={res['enqueued']} "
             f"recovered_stale={res['recovered_stale']} unlisted={res['unlisted']} "
-            f"rejected={res['rejected']}"
+            f"rejected={res['rejected']} engine={ZARR_ENGINE_VERSION} "
+            f"engine_stale={res['engine_stale']} engine_requeued={res['engine_requeued']}"
+            + (
+                " (engine requeue SUPPRESSED by --no-engine-requeue)"
+                if args.no_engine_requeue and res["engine_stale"]
+                else ""
+            )
             + ("" if complete else " (PARTIAL catalog read; unlisted sweep skipped)")
         )
         return 0
@@ -505,6 +664,17 @@ def main() -> int:
     if args.cmd == "stats":
         rows = conn.execute("SELECT status, COUNT(*) n FROM jobs GROUP BY status").fetchall()
         print("status: " + (", ".join(f"{r['status']}={r['n']}" for r in rows) or "(empty)"))
+        # Engine stamps of the `done` rows only: those are the rows the stamp
+        # governs, and the one number an operator needs after a bump is "how
+        # much of the archive is still on the old engine".
+        engines = conn.execute(
+            "SELECT COALESCE(engine_version, '(unset)') e, COUNT(*) n FROM jobs"
+            " WHERE status='done' GROUP BY e ORDER BY e"
+        ).fetchall()
+        print(
+            f"engine (current={ZARR_ENGINE_VERSION}), done rows by stamp: "
+            + (", ".join(f"{r['e']}={r['n']}" for r in engines) or "(none)")
+        )
         fails = conn.execute(
             "SELECT dataset_id, status, attempts, last_error FROM jobs"
             " WHERE status IN ('failed', 'data_failed')"
