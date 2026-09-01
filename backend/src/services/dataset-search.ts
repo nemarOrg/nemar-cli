@@ -7,7 +7,7 @@
  * Vectors carry zero facts; every display field is hydrated from `datasets`.
  */
 
-import { isAnyFacetActive } from "./dataset-facets";
+import { buildExcludedUnknownBreakdownSql, isAnyFacetActive } from "./dataset-facets";
 import {
   type DatasetFilterOptions,
   buildDatasetFilterClauses,
@@ -545,13 +545,73 @@ async function countSearchMatchesSafely(
 }
 
 /**
- * Epic #1144 phase 3 (#1147), D4: the count of rows that would have matched
- * if every active facet's NULL rows had been included, minus the count that
- * actually did -- i.e. how many rows the default unknown-excluded policy is
- * hiding right now. Skipped (returns `undefined`, not `0`) when no facet is
- * active, so an unfiltered search pays nothing for it. On failure, omits the
- * field rather than degrading `count`/`results` or 500ing the response --
- * ADR 0005: this is reporting, never a precondition for serving.
+ * Epic #1144 phase 3/4 (#1147/#1148), D4/D5: the widened COUNT(*) plus, in
+ * the SAME scan, a conditional-aggregation SUM per active facet -- no extra
+ * query beyond what Phase 3 already ran for the plain widened count. Unlike
+ * `catalog.ts`'s `executeAndReturn`, this never needed a wrap-the-projection
+ * fix (D5's "one structural change"): `countSearchMatches` already queried
+ * `FROM datasets d ...` directly with no row projection to get in the way,
+ * so `buildExcludedUnknownBreakdownSql`'s nullTest expressions (`d.<column>
+ * IS NULL`) slot straight into the same SELECT list the COUNT(*) already
+ * used.
+ *
+ * Returns `null` (not thrown) when the query yields no row at all, so the
+ * caller can omit both fields the same way a thrown error would make it do.
+ */
+async function countWidenedWithBreakdown(
+  db: D1Database,
+  ftsMatch: string | null,
+  semanticIds: string[],
+  filters: DatasetFilterOptions,
+): Promise<{ total: number; byFacet: Record<string, number> } | null> {
+  const disjuncts: string[] = [];
+  const params: (string | number)[] = [];
+  if (ftsMatch) {
+    disjuncts.push("d.id IN (SELECT rowid FROM datasets_fts WHERE datasets_fts MATCH ?)");
+    params.push(ftsMatch);
+  }
+  if (semanticIds.length > 0) {
+    disjuncts.push(`d.dataset_id IN (${buildInPlaceholders(semanticIds.length)})`);
+    params.push(...semanticIds);
+  }
+  if (disjuncts.length === 0) return { total: 0, byFacet: {} };
+  const widenedFilters: DatasetFilterOptions = { ...filters, includeUnknown: true };
+  const filterClauses = buildDatasetFilterClauses(params, widenedFilters);
+  const breakdown = buildExcludedUnknownBreakdownSql(widenedFilters.facets);
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS total${breakdown.selectFragment} FROM datasets d
+       WHERE d.status = 'active' AND d.visibility = 'public'
+         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)
+         AND (${disjuncts.join(" OR ")})${filterClauses}`,
+    )
+    .bind(...params)
+    .first<Record<string, number>>();
+  if (!row || row.total == null) return null;
+  const byFacet: Record<string, number> = {};
+  breakdown.keysInOrder.forEach((key, i) => {
+    byFacet[key] = Number(row[`unk_${i}`] ?? 0);
+  });
+  return { total: row.total, byFacet };
+}
+
+/** The two `excluded_unknown*` fields together -- see
+ *  {@link DatasetSearchEnvelope} for what each means and why they do not sum. */
+export interface ExcludedUnknownResult {
+  excludedUnknown: number;
+  excludedUnknownByFacet: Record<string, number>;
+}
+
+/**
+ * Epic #1144 phase 3/4 (#1147/#1148), D4/D5: the count of rows that would
+ * have matched if every active facet's NULL rows had been included, minus
+ * the count that actually did -- i.e. how many rows the default
+ * unknown-excluded policy is hiding right now -- plus, per D5, a breakdown
+ * of how many of those widened-population rows are unknown in EACH active
+ * facet individually. Skipped (returns `undefined`, not `0`) when no facet
+ * is active, so an unfiltered search pays nothing for it. On failure, omits
+ * both fields rather than degrading `count`/`results` or 500ing the
+ * response -- ADR 0005: this is reporting, never a precondition for serving.
  *
  * `countSucceeded` (#1165 review C1) gates this the same way `catalog.ts`'s
  * `executeAndReturn` gates its own `excludedUnknown` diff on `countSucceeded`:
@@ -570,15 +630,16 @@ async function computeExcludedUnknownCount(
   filters: DatasetFilterOptions,
   actualCount: number,
   countSucceeded: boolean,
-): Promise<number | undefined> {
+): Promise<ExcludedUnknownResult | undefined> {
   if (!isAnyFacetActive(filters.facets)) return undefined;
   if (!countSucceeded) return undefined;
   try {
-    const widenedCount = await countSearchMatches(db, ftsMatch, semanticIds, {
-      ...filters,
-      includeUnknown: true,
-    });
-    return Math.max(0, widenedCount - actualCount);
+    const widened = await countWidenedWithBreakdown(db, ftsMatch, semanticIds, filters);
+    if (!widened) return undefined;
+    return {
+      excludedUnknown: Math.max(0, widened.total - actualCount),
+      excludedUnknownByFacet: widened.byFacet,
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[search] excluded_unknown count failed, omitting field: ${msg}`);
@@ -639,6 +700,15 @@ export interface DatasetSearchEnvelope {
    *  (see {@link computeExcludedUnknownCount}). Absent when no facet is
    *  active, or when the widened count itself failed. */
   excluded_unknown?: number;
+  /** D5: per-facet breakdown of `excluded_unknown` -- how many rows in the
+   *  widened population are unknown for EACH active facet individually.
+   *  Buckets do NOT sum to `excluded_unknown`: a row unknown in two active
+   *  facets counts once toward the total but once in EACH bucket, so
+   *  `sum(values) >= excluded_unknown`, with equality only when no row is
+   *  unknown in more than one active facet. Always present together with
+   *  `excluded_unknown` (same success/failure gate); never presented as a
+   *  partition of it. */
+  excluded_unknown_by_facet?: Record<string, number>;
 }
 
 /**
@@ -722,7 +792,7 @@ export async function executeDatasetSearch(
     method: string,
     count: number,
     warning?: string,
-    excludedUnknown?: number,
+    excludedUnknown?: ExcludedUnknownResult,
   ): DatasetSearchEnvelope => {
     const page = rows.slice(offset, offset + limit);
     return {
@@ -736,7 +806,12 @@ export async function executeDatasetSearch(
       method,
       min_score: minScore,
       ...(warning !== undefined ? { warning } : {}),
-      ...(excludedUnknown !== undefined ? { excluded_unknown: excludedUnknown } : {}),
+      ...(excludedUnknown !== undefined
+        ? {
+            excluded_unknown: excludedUnknown.excludedUnknown,
+            excluded_unknown_by_facet: excludedUnknown.excludedUnknownByFacet,
+          }
+        : {}),
     };
   };
 
