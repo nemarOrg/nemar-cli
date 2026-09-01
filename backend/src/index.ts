@@ -853,19 +853,36 @@ export default {
       );
       // Epic #1144 Phase 2b (#1153): backfill the BIDS signal defaults
       // (sampling/power-line frequency, reference, placement scheme) that
-      // probeChannelMontage reads from each dataset's exemplar *_eeg.json.
-      // Added in #1164: Phase 2b shipped the service, the admin endpoint and
-      // its tests but never this block, so the columns drained only on a
-      // manual admin call and signal_defaults stayed empty for the catalog.
+      // getBidsTreeStats reads from a dataset's ROOT-level *_eeg.json, falling
+      // back to a subject-level exemplar only when no root sidecar exists --
+      // the subject file is an inheritance override, not the dataset default,
+      // and getting that direction right is what Phase 2b was built around.
       //
-      // PROD-ONLY, and here the AGENTS.md default is not the only argument:
-      // getBidsTreeStats reads repos through the shared GitHub App against the
-      // shared nemarDatasets org, which is precisely the cross-environment
-      // reach the default exists to prevent. That is a stronger reason than
-      // the recording-stats block above has, which touches only S3 and D1.
+      // Added in #1164, and the gap it closes is narrower than "nothing
+      // populated these columns". Phase 2b also threaded them through
+      // refreshDatasetMetadata (dataset-reindex.ts), which runs automatically
+      // on every version-DOI mint and manifest-ready callback, so the VALUES
+      // already had a producer. What had none was signal_defaults_at: the
+      // reindex path deliberately leaves that stamp alone so a live reindex
+      // does not make a row look already-swept, which means the sweep's own
+      // candidate set never converged and any dataset that never publishes a
+      // version was never probed at all. This block is what drains it.
       //
-      // Bounded tighter than its sibling (15 per run, hard max 30) because it
-      // spends GitHub API calls per dataset rather than one signed S3 GET.
+      // PROD-ONLY. The AGENTS.md default would be reason enough, but there is
+      // a specific one: getBidsTreeStats calls ORG_NAME (github/shared.ts),
+      // hardcoded to "nemarDatasets" and NOT environment-scoped, so a dev-side
+      // run reads production dataset repos. That holds whichever credential
+      // getDatasetsToken resolves -- do not restate it as "the shared GitHub
+      // App", which the code treats as conditional (App when configured,
+      // GITHUB_ADMIN_PAT otherwise) and wrangler-sccn.toml still lists as in
+      // soak. The shared org is the load-bearing fact; the credential is not.
+      //
+      // The recording-stats block above has no equivalent exposure: it touches
+      // only S3 and D1, both environment-scoped.
+      //
+      // Bounded tighter than that sibling (15 per run, hard max 30, against
+      // its 200) because each candidate costs a root tree, up to 25 subject
+      // subtrees and a few blob fetches rather than one signed S3 GET.
       ctx.waitUntil(
         runSignalDefaultsSweep(env)
           .then((r) => {
