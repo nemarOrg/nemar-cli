@@ -22,9 +22,11 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "bun";
 import chalk from "chalk";
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
+import { LICENSE_TIERS } from "../../shared/license-tiers.js";
+import { RangeParseError } from "../../shared/range.js";
 import { addCi } from "../lib/api/admin.js";
 import { getCurrentUser } from "../lib/api/auth.js";
 import { requestDownloadCredentials, requestUploadCredentials } from "../lib/api/data.js";
@@ -78,6 +80,13 @@ import {
   updateLastUpload,
   writeLocalConfig,
 } from "../lib/dataset-config.js";
+import {
+  FacetEnumCliError,
+  RANGE_FORMS_HELP,
+  addFacetOptions,
+  buildFacetParams,
+  formatExcludedUnknownNote,
+} from "../lib/facet-options.js";
 import {
   cloneDataset,
   pushBranch,
@@ -1639,8 +1648,54 @@ function renderDatasetTable(
   console.log(chalk.dim("Search: nemar dataset search <query>"));
 }
 
+/**
+ * Validate `--license` tiers up front, shared by `list` and `search` (epic
+ * #1144 phase 4, #1148, D4/D6). The API tolerantly drops unknown tokens (so
+ * the website degrades gracefully), which would silently return an
+ * unfiltered list on a CLI typo -- so fail fast here instead, against the
+ * SAME `LICENSE_TIERS` the backend classifies with (shared/license-tiers.ts,
+ * #653) rather than a second hand-maintained copy.
+ */
+function validateLicenseTiersOrExit(license: string | undefined): void {
+  if (!license) return;
+  const bad = license
+    .split(",")
+    .map((t: string) => t.trim().toLowerCase())
+    .filter((t: string) => t && !(LICENSE_TIERS as readonly string[]).includes(t));
+  if (bad.length > 0) {
+    console.log(chalk.red(`Error: invalid license tier(s): ${bad.join(", ")}`));
+    console.log(`Valid tiers: ${LICENSE_TIERS.join(", ")}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * Build the wire-ready facet query params from a command's parsed options,
+ * or print an error and exit 1 -- before any network call (epic #1144 phase
+ * 4, #1148, D3). Shared by `list` and `search` so a bad `--subjects 100xyz`
+ * behaves identically on both. `buildFacetParams`/`FacetEnumCliError` live in
+ * lib/facet-options.ts, which never calls `process.exit` itself (see that
+ * file's header and lib/cli-output.ts's) -- owning the exit is this command
+ * module's job, same as the license-tier check above.
+ */
+function parseFacetOptionsOrExit(options: Record<string, unknown>): Record<string, string> {
+  try {
+    return buildFacetParams(options);
+  } catch (err) {
+    if (err instanceof RangeParseError) {
+      console.log(chalk.red(`Error: ${err.message}`));
+      console.log(chalk.dim(RANGE_FORMS_HELP));
+    } else if (err instanceof FacetEnumCliError) {
+      console.log(chalk.red(`Error: ${err.message}`));
+    } else {
+      throw err;
+    }
+    process.exit(1);
+  }
+}
+
 // List command
-datasetCommand
+const listCommand = datasetCommand
   .command("list")
   .description("List datasets on NEMAR (full catalog)")
   .option("--mine", "List only your datasets (both private and public)")
@@ -1657,18 +1712,32 @@ datasetCommand
   .option("--hed", "Show only datasets with HED annotations")
   .option("--complete", "Show only datasets verified data-complete (#970)")
   .option("--recent [days]", "Show recently published datasets")
-  .option("--sort <order>", "Sort: newest, oldest, name, participants, size", "newest")
+  .addOption(
+    new Option("--sort <order>", "Sort order")
+      .choices(["newest", "oldest", "name", "participants", "size", "citations"])
+      .default("newest"),
+  )
+  .option(
+    "--include-unknown",
+    "Include datasets with an unknown value for the active facet filter(s)",
+  )
   .option("--json", "Output as JSON for scripting")
   .option("-n, --limit <n>", "Results per page (default: 20, max: 200)", "20")
   .option("--page <n>", "Page number (starts at 1)")
   .option("--offset <n>", "Skip this many results (alternative to --page)")
-  .option("--all", "Show all results (up to 200)")
+  .option("--all", "Show all results (up to 200)");
+// Epic #1144 phase 4 (#1148), D1: one registered flag per declared facet
+// (shared/facets.ts), generated rather than 20 hand-written .option() calls.
+addFacetOptions(listCommand);
+listCommand
   .addHelpText(
     "after",
     `
 Description:
   Lists the full NEMAR catalog, including legacy datasets from nemar.org
   and datasets managed via nemar-cli. Shows 20 results per page by default.
+  Run 'nemar dataset list --help' for the full list of facet filters
+  (--subjects, --channels, --age, --source, ...).
 
   With --mine: shows only YOUR datasets (requires authentication).
   With --owner <username>: shows datasets owned by a specific user.
@@ -1696,6 +1765,7 @@ Examples:
   $ nemar dataset list --license public,attribution  # Permissive licenses
   $ nemar dataset list --search "motor"        # Search by keyword
   $ nemar dataset list --doi --sort size       # Published, by size
+  $ nemar dataset list --subjects 20..50 --age 18..  # Facet filters
   $ nemar dataset search "resting state EEG"   # Semantic search`,
   )
   .action(async (options) => {
@@ -1711,29 +1781,11 @@ Examples:
       process.exit(1);
     }
 
-    // Validate --license tiers up front. The API tolerantly drops unknown
-    // tokens (so the website degrades gracefully), which would silently return
-    // an unfiltered list on a CLI typo -- so fail fast here instead. Mirror of
-    // backend/src/lib/license.ts LICENSE_TIERS (#653).
-    if (options.license) {
-      const VALID_LICENSE_TIERS = [
-        "public",
-        "attribution",
-        "sharealike",
-        "noncommercial",
-        "noderiv",
-        "unknown",
-      ];
-      const bad = options.license
-        .split(",")
-        .map((t: string) => t.trim().toLowerCase())
-        .filter((t: string) => t && !VALID_LICENSE_TIERS.includes(t));
-      if (bad.length > 0) {
-        console.log(chalk.red(`Error: invalid license tier(s): ${bad.join(", ")}`));
-        console.log(`Valid tiers: ${VALID_LICENSE_TIERS.join(", ")}`);
-        process.exit(1);
-      }
-    }
+    validateLicenseTiersOrExit(options.license);
+    // Epic #1144 phase 4 (#1148), D3: every facet range/enum is parsed and
+    // validated here, client-side, before the spinner (and therefore before
+    // any network call) starts below.
+    const facets = parseFacetOptionsOrExit(options);
 
     // Parse pagination
     const limit = options.all ? 200 : Math.min(Number.parseInt(options.limit, 10) || 20, 200);
@@ -1764,6 +1816,8 @@ Examples:
         limit,
         offset,
         owner: options.owner,
+        facets,
+        includeUnknown: !!options.includeUnknown,
       });
       spinner.stop();
     } catch (error) {
@@ -1789,6 +1843,8 @@ Examples:
             offset,
             fallback: response.fallback,
             warning: response.warning,
+            excluded_unknown: response.excluded_unknown,
+            excluded_unknown_by_facet: response.excluded_unknown_by_facet,
           },
           null,
           2,
@@ -1802,6 +1858,21 @@ Examples:
     // not what was asked for. Make it loud rather than a silent unfiltered list (#646).
     if (response.warning) {
       console.log(chalk.yellow(`\n⚠ ${response.warning}`));
+    }
+
+    // Epic #1144 phase 4 (#1148), D5: reported on stderr (not part of the
+    // rendered table/JSON on stdout) and only when at least one facet
+    // actually excluded something. Always attributed per facet -- the
+    // backend computes excluded_unknown_by_facet in the same query.
+    if (response.excluded_unknown !== undefined && response.excluded_unknown > 0) {
+      console.error(
+        chalk.dim(
+          formatExcludedUnknownNote(
+            response.excluded_unknown,
+            response.excluded_unknown_by_facet ?? {},
+          ),
+        ),
+      );
     }
 
     if (datasets.length === 0) {
@@ -1832,20 +1903,42 @@ Examples:
   });
 
 // Search command (semantic search via Vectorize)
-datasetCommand
+const searchCommand = datasetCommand
   .command("search <query>")
   .description("Search datasets using semantic matching")
   .option("--modality <type>", "Filter by modality (eeg, emg, meg, etc.)")
+  .option("--author <name>", "Filter by author name")
+  .option("--task <name>", "Filter by task name")
+  .option(
+    "--license <tiers>",
+    "Filter by license tier(s), comma-separated: public, attribution, sharealike, noncommercial, noderiv, unknown",
+  )
+  .option("--doi", "Show only datasets with DOIs")
   .option("--hed", "Show only datasets with HED annotations")
+  .option("--complete", "Show only datasets verified data-complete (#970)")
+  .option("--recent [days]", "Show recently published datasets")
+  .option(
+    "--include-unknown",
+    "Include datasets with an unknown value for the active facet filter(s)",
+  )
   .option("--json", "Output as JSON for scripting")
-  .option("--limit <n>", "Limit results (default: 20)", "20")
+  .option("--limit <n>", "Limit results (default: 20)", "20");
+// Epic #1144 phase 4 (#1148), D1/D6: same declared facet table `list` uses,
+// so a facet or legacy filter fixed on the backend is reachable from search
+// too instead of drifting behind list's flag set.
+addFacetOptions(searchCommand);
+searchCommand
   .addHelpText(
     "after",
     `
 Description:
   Performs semantic search across the NEMAR dataset catalog. Unlike
   --search on the list command (which uses exact text matching), this
-  uses AI embeddings to find conceptually similar datasets.
+  uses AI embeddings to find conceptually similar datasets. The free-text
+  query is always the <query> argument -- this command has no --search flag.
+
+  Accepts the same license/author/task/doi/complete/recent filters and facet
+  flags (--subjects, --age, --source, ...) as 'nemar dataset list --help'.
 
   For example, "brain signals during sleep" will match datasets about
   "EEG recordings in sleep studies" even if those exact words don't appear.
@@ -1853,9 +1946,15 @@ Description:
 Examples:
   $ nemar dataset search "motor imagery EEG"
   $ nemar dataset search "resting state" --modality eeg
-  $ nemar dataset search "sleep spindles" --json`,
+  $ nemar dataset search "sleep spindles" --json
+  $ nemar dataset search "motor imagery" --license public --subjects 10..`,
   )
   .action(async (query: string, options) => {
+    validateLicenseTiersOrExit(options.license);
+    // Epic #1144 phase 4 (#1148), D3: parsed and validated before the
+    // spinner (and therefore before any network call) starts below.
+    const facets = parseFacetOptionsOrExit(options);
+
     const spinner = ora("Searching datasets...").start();
 
     try {
@@ -1863,6 +1962,14 @@ Examples:
         modality: options.modality,
         hasHed: !!options.hed,
         limit: Number.parseInt(options.limit, 10),
+        author: options.author,
+        task: options.task,
+        license: options.license,
+        hasDoi: !!options.doi,
+        dataComplete: !!options.complete,
+        recent: options.recent ? Number.parseInt(options.recent, 10) || 30 : undefined,
+        facets,
+        includeUnknown: !!options.includeUnknown,
       });
       spinner.stop();
 
@@ -1876,6 +1983,19 @@ Examples:
       // vocabulary and treatment as the list command's `response.warning`.
       if (response.warning) {
         console.log(chalk.yellow(`\n⚠ ${response.warning}`));
+      }
+
+      // Epic #1144 phase 4 (#1148), D5: same stderr-only, count-gated,
+      // always-attributed note as the list command.
+      if (response.excluded_unknown !== undefined && response.excluded_unknown > 0) {
+        console.error(
+          chalk.dim(
+            formatExcludedUnknownNote(
+              response.excluded_unknown,
+              response.excluded_unknown_by_facet ?? {},
+            ),
+          ),
+        );
       }
 
       if (response.results.length === 0) {
