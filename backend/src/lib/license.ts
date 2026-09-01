@@ -7,19 +7,16 @@
 // derived tier in `datasets.license_tier` (migration 0034) so `?license=<tier>`
 // can filter the FULL catalog server-side rather than only the current page.
 //
-// Keep this file dependency-free and in sync with the website. The parity is
-// asserted by test/license-tier.test.ts against the real catalog values.
+// The parity with the website is asserted by test/license-tier.test.ts against
+// the real catalog values. `LICENSE_TIERS`/`LicenseTier` themselves moved to
+// shared/license-tiers.ts in epic #1144 phase 4 (#1148, D4) so the CLI
+// (src/commands/dataset.ts) can validate `--license` against the SAME list
+// instead of hand-rolling a second copy; re-exported here verbatim so this
+// file's own import path, and every existing importer, does not change.
 
-export const LICENSE_TIERS = [
-  "public",
-  "attribution",
-  "sharealike",
-  "noncommercial",
-  "noderiv",
-  "unknown",
-] as const;
+import { LICENSE_TIERS, type LicenseTier } from "../../../shared/license-tiers.js";
 
-export type LicenseTier = (typeof LICENSE_TIERS)[number];
+export { LICENSE_TIERS, type LicenseTier };
 
 /**
  * Classify a free-text license string into a permissiveness tier. Tolerant of
