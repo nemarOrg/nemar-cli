@@ -39,16 +39,22 @@ Subcommands (all take --db):
         attempts++; reschedule (pending + next_retry_at) until max-attempts, then
         terminal `failed`.
     stats                        counts by status (+ a few recent failures).
+    backfill-dir-formats [--execute]
+        One-off sweep for the cohort stranded BEFORE the engine stamp existed:
+        MEG/iEEG datasets marked `done` whose published index has no store for a
+        directory-format recording (`.mefd`/`.ds`/4D-BTi). Dry run by default.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
@@ -503,13 +509,22 @@ def requeue(
 # --- I/O: fetch the dataset list ----------------------------------------------
 
 
-def fetch_public_datasets(api_base: str) -> tuple[list[tuple[str, str]], bool]:
-    """Every public dataset as (dataset_id, latest_version), plus completeness.
+# api.nemar.org and data.nemar.org sit behind Cloudflare, which 403s the default
+# Python-urllib User-Agent as a bot. Every request in this file must set one.
+USER_AGENT = "nemar-zarr-cron/1.0"
+
+
+def _get_json(url: str, timeout: int = 60):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - trusted NEMAR host
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def fetch_public_catalog_rows(api_base: str) -> tuple[list[dict], bool]:
+    """Every public catalog row (the full JSON object), plus completeness.
 
     Paginates: `GET /datasets` caps a page at 200 regardless of `limit`, so we
-    walk `offset` until `total_count`. A non-default User-Agent is required --
-    api.nemar.org sits behind Cloudflare, which 403s the default Python-urllib UA
-    as a bot.
+    walk `offset` until `total_count`.
 
     The second return value says whether every page was actually seen. A short
     read is benign for enqueueing (the missing datasets are simply picked up next
@@ -517,25 +532,411 @@ def fetch_public_datasets(api_base: str) -> tuple[list[tuple[str, str]], bool]:
     catalog as "these datasets are gone" and park the queue. So the walk stops
     on an empty page rather than looping forever, and reports the shortfall
     instead of hiding it (#1048).
+
+    `offset` advances by the number of rows the page RETURNED, not the number
+    kept: filtering to public here must not desynchronise the paging arithmetic.
     """
     base = api_base.rstrip("/")
-    out: list[tuple[str, str]] = []
+    out: list[dict] = []
     offset, page, total = 0, 200, 0
     while True:
-        url = f"{base}/datasets?limit={page}&offset={offset}"
-        req = urllib.request.Request(url, headers={"User-Agent": "nemar-zarr-cron/1.0"})
-        with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310 - trusted NEMAR API
-            payload = json.loads(resp.read().decode("utf-8"))
+        payload = _get_json(f"{base}/datasets?limit={page}&offset={offset}")
         rows = payload.get("datasets", []) or []
         total = int(payload.get("total_count", 0) or 0)
-        for d in rows:
-            if d.get("visibility") != "public":
-                continue
-            out.append((str(d.get("dataset_id", "")), str(d.get("latest_version") or "")))
+        out.extend(d for d in rows if d.get("visibility") == "public")
         offset += len(rows)
         if not rows or offset >= total:
             break
     return out, bool(total) and offset >= total
+
+
+def fetch_public_datasets(api_base: str) -> tuple[list[tuple[str, str]], bool]:
+    """Every public dataset as (dataset_id, latest_version), plus completeness.
+
+    The shape `reconcile` consumes; `fetch_public_catalog_rows` owns the paging
+    and the public filter so the backfill sweep below cannot drift from it.
+    """
+    rows, complete = fetch_public_catalog_rows(api_base)
+    return (
+        [(str(d.get("dataset_id", "")), str(d.get("latest_version") or "")) for d in rows],
+        complete,
+    )
+
+
+# --- One-off: the pre-stamp directory-format backfill (#1172) ------------------
+#
+# `migrate_schema` declares every pre-existing `done` row current, which is right
+# for the ~667 datasets that genuinely are, and wrong for the handful that are
+# not: MEG/iEEG datasets converted BEFORE epic #1095 (2026-08-22), whose MEF3
+# `.mefd`, CTF `.ds` and 4D/BTi recording DIRECTORIES the engine of the day could
+# not see at all. Those landed in neither `stores` nor `failures` -- the run
+# found nothing, succeeded, and was marked `done`. on004696 is the reference
+# case: `store_count: 0`, `failure_count: 0`, invisible in the viewer ever since.
+#
+# The engine stamp cannot recover them (it did not exist when they converted) and
+# a blanket requeue of every `done` row would re-convert the whole archive to
+# find a few dozen. So this sweep identifies them by EVIDENCE instead, from the
+# two documents that already say what happened:
+#
+#   (a) the published index (`zarr.nemar.org/<id>/zarr/index.json`) -- missing
+#       entirely, or listing no stores at all; and
+#   (b) the dataset's own file list (`data.nemar.org/<id>/<v>/manifest.json`) --
+#       a directory-format recording present in the tree with no store for it in
+#       the index.
+#
+# Rule (b) is what catches a PARTIAL miss (a dataset with EEG stores whose one
+# `.ds` MEG session never converted), which rule (a) alone cannot see.
+#
+# The detection rules are IMPORTED from `generate_zarr`, never restated: if this
+# sweep and the converter disagreed about what a directory recording is, the
+# sweep would requeue datasets the converter will not fix, or miss ones it would.
+#
+# `manifest.json` is the probe rather than the `?format=json` directory listings
+# because it returns the entire file tree in ONE request. Walking listings costs
+# one request per directory -- hundreds per dataset, tens of thousands across the
+# sweep -- to compute the same set. One request per dataset is both gentler on
+# the data plane and the only version of this that is reasonable to re-run.
+
+DIR_FORMAT_MODALITIES = ("meg", "ieeg")
+
+
+def _detection_rules():
+    """`generate_zarr`'s own directory-recording detectors, imported not copied.
+
+    Lazy on purpose. This module is the crash-safe core of the cron -- `next`,
+    `done` and `fail` run for every dataset of every drain -- and it must not
+    acquire a hard import dependency on the 3,700-line converter sitting beside
+    it. Only the backfill sweep needs these, so only the backfill sweep pays for
+    them, and a converter that failed to import breaks the sweep rather than the
+    queue.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from generate_zarr import (  # type: ignore[import-not-found]  (sibling module)
+        bti_recordings,
+        dir_recordings,
+        store_rel_for,
+    )
+
+    return dir_recordings, bti_recordings, store_rel_for
+
+
+def may_carry_dir_formats(modalities: str | None) -> bool:
+    """True when a catalog row's modalities could involve a directory format.
+
+    MEG (CTF `.ds`, 4D/BTi) and iEEG (MEF3 `.mefd`) are the only carriers, so
+    the sweep probes those and skips the rest -- ~131 of 755 datasets at the time
+    of writing, which is what keeps a full sweep to a few minutes.
+
+    An EMPTY modality string is treated as "could be", not "is not". A catalog
+    row with no modalities is exactly what an OpenNeuro import that never got
+    backfilled looks like (nemarOrg/nemar-cli#512), and skipping those would
+    silently exclude precisely the under-described datasets this sweep exists to
+    find. There happen to be none today; the cost of the guard is zero and the
+    cost of being wrong about it is a cohort that stays stranded.
+    """
+    tokens = {t.strip().lower() for t in (modalities or "").split(",") if t.strip()}
+    if not tokens:
+        return True
+    return bool(tokens & set(DIR_FORMAT_MODALITIES))
+
+
+def index_store_keys(index_doc: dict | None) -> tuple[set[str], set[str]]:
+    """(recording paths, `.zarr` rel-paths) the published index lists as stores.
+
+    Both keys are collected because either identifies a store and a hand-edited
+    or half-written index may carry only one of them; a recording is considered
+    served if EITHER matches.
+    """
+    paths: set[str] = set()
+    rels: set[str] = set()
+    for entry in (index_doc or {}).get("stores") or []:
+        if not isinstance(entry, dict):
+            continue
+        if isinstance(entry.get("path"), str):
+            paths.add(entry["path"])
+        if isinstance(entry.get("zarr"), str):
+            rels.add(entry["zarr"])
+    return paths, rels
+
+
+def dir_format_recordings(paths) -> set[str]:
+    """Every directory-format recording among `paths`, by `generate_zarr`'s rules.
+
+    Extension-keyed (`.mefd`, `.ds`) via `dir_recordings`, plus content-keyed
+    4D/BTi via `bti_recordings` (a directory holding both a `c,rf*` file and a
+    sibling `config`). Both already exclude `derivatives/`, `sourcedata/` and
+    `code/` (ADR 0027), so a recording under one of those is not counted as
+    missing -- the converter would not build it either.
+    """
+    dir_recordings, bti_recordings, _ = _detection_rules()
+    paths = set(paths)
+    return dir_recordings(paths) | bti_recordings(paths)
+
+
+def missing_dir_format_stores(manifest_paths, index_doc: dict | None) -> list[str]:
+    """Directory-format recordings present in the tree with no store in the index.
+
+    `manifest_paths` is the dataset's full file list (every path, not just
+    recordings) -- the same input shape `generate_zarr`'s detectors take, which
+    is why they can be applied to it unmodified. Sorted for a stable report.
+    """
+    _, _, store_rel_for = _detection_rules()
+    served_paths, served_rels = index_store_keys(index_doc)
+    return sorted(
+        rec
+        for rec in dir_format_recordings(manifest_paths)
+        if rec not in served_paths and store_rel_for(rec) not in served_rels
+    )
+
+
+def classify_backfill(
+    dataset_id: str,
+    index_doc: dict | None,
+    manifest_paths=None,
+) -> dict:
+    """Decide whether one dataset is stranded, and say why. Pure.
+
+    `index_doc` is the parsed `index.json` (None when it 404s -- nothing was ever
+    published). `manifest_paths` is the dataset's file list, or None when the
+    probe was skipped or unavailable.
+
+    Reasons, in the order they are checked:
+      `index_missing`     -- no published index at all.
+      `empty_index`       -- an index that lists zero stores.
+      `dir_stores_missing`-- a directory-format recording in the tree with no
+                             store in the index (the partial case).
+      `served`            -- nothing missing.
+      `not_probed`        -- stores exist and no manifest was read, so the
+                             partial case could not be ruled out. NOT affected:
+                             requeuing on an unfinished check would re-convert
+                             datasets on no evidence.
+    """
+    if index_doc is None:
+        return {
+            "dataset_id": dataset_id,
+            "affected": True,
+            "reason": "index_missing",
+            "store_count": 0,
+            "failure_count": 0,
+            "missing": [],
+        }
+    # Count the entries rather than trusting `store_count`: the entries are what
+    # the viewer reads, so a document where the two disagree should be judged by
+    # what it actually serves.
+    stores = index_doc.get("stores")
+    store_count = len(stores) if isinstance(stores, list) else int(index_doc.get("store_count") or 0)
+    failures = index_doc.get("failures")
+    failure_count = (
+        len(failures) if isinstance(failures, list) else int(index_doc.get("failure_count") or 0)
+    )
+    result = {
+        "dataset_id": dataset_id,
+        "affected": False,
+        "reason": "served",
+        "store_count": store_count,
+        "failure_count": failure_count,
+        "missing": [],
+    }
+    if store_count == 0:
+        result["affected"] = True
+        result["reason"] = "empty_index"
+        if manifest_paths is not None:
+            result["missing"] = missing_dir_format_stores(manifest_paths, index_doc)
+        return result
+    if manifest_paths is None:
+        result["reason"] = "not_probed"
+        return result
+    missing = missing_dir_format_stores(manifest_paths, index_doc)
+    if missing:
+        result["affected"] = True
+        result["reason"] = "dir_stores_missing"
+        result["missing"] = missing
+    return result
+
+
+# --- I/O for the sweep ---------------------------------------------------------
+
+
+def _get_json_retrying(url: str, timeout: int, attempts: int = 3, backoff: float = 2.0):
+    """`_get_json` with a small bounded retry on transient server/network errors.
+
+    The sweep touches ~131 live endpoints in one pass, and a single 503 (observed
+    on the very first trial run) otherwise costs a whole dataset its answer. A
+    4xx is NEVER retried -- a 404 is a finding, not a hiccup -- and the backoff
+    keeps this well short of hammering.
+
+    Deliberately not applied to `fetch_public_catalog_rows`: `reconcile` relies
+    on that call failing loudly and immediately, so the cron aborts rather than
+    draining an under-populated queue (see hallu-zarr.sh's reconcile guard).
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return _get_json(url, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code < 500 or attempt == attempts:
+                raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == attempts:
+                raise
+        time.sleep(backoff * attempt)
+    raise RuntimeError("unreachable")  # pragma: no cover - loop always returns or raises
+
+
+def fetch_zarr_index(zarr_base: str, dataset_id: str) -> dict | None:
+    """The published `index.json`, or None when there is none (404).
+
+    Only a 404 becomes None -- "nothing was ever published here" is a finding.
+    Every other failure raises, so a 500 or a timeout is reported as an error
+    against that dataset instead of being read as an empty index and requeued.
+    """
+    url = f"{zarr_base.rstrip('/')}/{dataset_id}/zarr/index.json"
+    try:
+        return _get_json_retrying(url, timeout=30)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+
+
+def fetch_manifest_paths(data_base: str, dataset_id: str, version: str) -> set[str]:
+    """Every file path in the dataset at `version`, from one manifest.json read.
+
+    The literal alias `latest` is used when the catalog has no version for the
+    row; the data plane resolves it to the newest published version.
+    """
+    tag = _vtag(version) or "latest"
+    url = f"{data_base.rstrip('/')}/{dataset_id}/{tag}/manifest.json"
+    rows = _get_json_retrying(url, timeout=120)
+    if not isinstance(rows, list):
+        raise ValueError(f"manifest.json for {dataset_id} is not a list")
+    return {r["path"] for r in rows if isinstance(r, dict) and isinstance(r.get("path"), str)}
+
+
+def sweep_dir_format_backfill(
+    conn: sqlite3.Connection,
+    api_base: str,
+    data_base: str,
+    zarr_base: str,
+    dataset: str | None = None,
+    limit: int = 0,
+    sleep_seconds: float = 0.5,
+    probe: bool = True,
+    execute: bool = False,
+) -> dict:
+    """Enumerate (and optionally requeue) the stranded directory-format cohort.
+
+    Sequential with a pause between datasets: this is a one-off recovery, not a
+    hot path, and the archive it reads is the one serving live traffic.
+
+    A per-dataset failure is recorded and the sweep continues. Aborting would
+    make the whole run's usefulness hostage to one flaky read, and the run is
+    idempotent -- re-running it re-examines the datasets that errored.
+    """
+    rows, complete = fetch_public_catalog_rows(api_base)
+    candidates = [
+        r
+        for r in rows
+        if DATASET_ID_RE.match(str(r.get("dataset_id", "")))
+        and may_carry_dir_formats(r.get("modalities"))
+        and (dataset is None or r.get("dataset_id") == dataset)
+    ]
+    if dataset and not candidates:
+        # Silence here would read as "checked, nothing wrong". Say which of the
+        # two filters rejected it instead.
+        print(
+            f"{dataset} is not a candidate: it is not a public nm/on dataset, or its"
+            " modalities carry no directory format (MEG/iEEG)"
+        )
+    findings: list[dict] = []
+    errors: list[tuple[str, str]] = []
+    requeued: list[str] = []
+    skipped: list[tuple[str, str]] = []
+    examined = 0
+    for row in candidates:
+        if limit and examined >= limit:
+            break
+        dataset_id = str(row["dataset_id"])
+        examined += 1
+        if examined > 1 and sleep_seconds:
+            time.sleep(sleep_seconds)
+        try:
+            index_doc = fetch_zarr_index(zarr_base, dataset_id)
+            manifest_paths = None
+            # An index that is missing or empty is already decisive, so the
+            # multi-megabyte manifest read is skipped for it. That is not just
+            # speed: it is most of what makes this sweep gentle, because the
+            # stranded datasets are exactly the ones that would need it.
+            if probe and index_doc is not None and (index_doc.get("stores") or []):
+                manifest_paths = fetch_manifest_paths(
+                    data_base, dataset_id, str(row.get("latest_version") or "")
+                )
+            finding = classify_backfill(dataset_id, index_doc, manifest_paths)
+        except Exception as exc:  # noqa: BLE001 - one dataset must not end the sweep
+            errors.append((dataset_id, f"{type(exc).__name__}: {exc}"))
+            # Reported where it happens, not batched to the end: this sweep runs
+            # for minutes against live hosts, usually into a log an operator is
+            # tailing, and `flush` is what makes that tail move.
+            print(f"error {dataset_id}: {type(exc).__name__}: {exc}", flush=True)
+            continue
+        job = conn.execute(
+            "SELECT status, converted_version, engine_version FROM jobs WHERE dataset_id=?",
+            (dataset_id,),
+        ).fetchone()
+        finding["queue_status"] = job["status"] if job else "(no row)"
+        finding["converted_version"] = (job["converted_version"] if job else None) or ""
+        finding["engine_version"] = (job["engine_version"] if job else None) or "(unset)"
+        findings.append(finding)
+        if not finding["affected"]:
+            continue
+        print(
+            f"affected {dataset_id}: {finding['reason']}"
+            f" (stores={finding['store_count']}, failures={finding['failure_count']},"
+            f" missing_dir_recordings={len(finding['missing'])},"
+            f" queue={finding['queue_status']}"
+            f"{'@' + finding['converted_version'] if finding['converted_version'] else ''},"
+            f" engine={finding['engine_version']})",
+            flush=True,
+        )
+        for rec in finding["missing"][:5]:
+            print(f"    no store for {rec}")
+        if len(finding["missing"]) > 5:
+            print(f"    ... and {len(finding['missing']) - 5} more")
+        if not execute:
+            continue
+        # `requeue` filters on status itself, so a dataset that is not `done`
+        # (already pending, in flight, or terminal) is a no-op here BY
+        # CONSTRUCTION rather than by a check that could drift from it.
+        touched = requeue(conn, ("done",), dataset_id=dataset_id, execute=True)
+        if touched:
+            requeued.append(dataset_id)
+            print(f"  requeued {dataset_id} (done -> pending)")
+        else:
+            skipped.append((dataset_id, finding["queue_status"]))
+            print(
+                f"  not requeued {dataset_id}: queue status is"
+                f" {finding['queue_status']}, not done"
+            )
+    affected = [f for f in findings if f["affected"]]
+    print(
+        f"backfill-dir-formats: candidates={len(candidates)} examined={examined}"
+        f" affected={len(affected)} errors={len(errors)}"
+        f" requeued={len(requeued)} not_requeued={len(skipped)}"
+        + ("" if complete else " (PARTIAL catalog read; some datasets were not examined)")
+    )
+    if affected and not execute:
+        print("re-run with --execute to requeue the affected datasets")
+    return {
+        "candidates": len(candidates),
+        "examined": examined,
+        "findings": findings,
+        "affected": affected,
+        "errors": errors,
+        "requeued": requeued,
+        "not_requeued": skipped,
+        "catalog_complete": complete,
+    }
 
 
 # --- CLI ----------------------------------------------------------------------
@@ -596,6 +997,36 @@ def main() -> int:
 
     sub.add_parser("stats")
 
+    p = sub.add_parser(
+        "backfill-dir-formats",
+        help="one-off (#1172): find MEG/iEEG datasets marked `done` whose published"
+        " index has no store for a directory-format recording (.mefd/.ds/4D-BTi),"
+        " and requeue them",
+    )
+    p.add_argument("--api-base", default="https://api.nemar.org")
+    p.add_argument("--data-base", default="https://data.nemar.org")
+    p.add_argument("--zarr-base", default="https://zarr.nemar.org")
+    p.add_argument("--dataset", default=None, help="examine just this dataset")
+    p.add_argument("--limit", type=int, default=0, help="stop after N candidates (0 = all)")
+    p.add_argument(
+        "--sleep",
+        type=float,
+        default=0.5,
+        help="seconds between datasets; this reads the live serving archive",
+    )
+    p.add_argument(
+        "--no-probe",
+        action="store_true",
+        help="index-only: skip the manifest read, so a dataset that serves SOME stores"
+        " is reported `not_probed` instead of being checked for a partial miss",
+    )
+    p.add_argument(
+        "--execute",
+        action="store_true",
+        help="actually requeue the affected datasets (`done` -> `pending`);"
+        " without it the sweep only reports",
+    )
+
     args = ap.parse_args()
     conn = connect(args.db)
 
@@ -648,6 +1079,23 @@ def main() -> int:
         if rows and not args.execute:
             print("re-run with --execute to apply")
         return 0
+
+    if args.cmd == "backfill-dir-formats":
+        res = sweep_dir_format_backfill(
+            conn,
+            api_base=args.api_base,
+            data_base=args.data_base,
+            zarr_base=args.zarr_base,
+            dataset=args.dataset,
+            limit=args.limit,
+            sleep_seconds=args.sleep,
+            probe=not args.no_probe,
+            execute=args.execute,
+        )
+        # A sweep that could not read some datasets did not answer the question
+        # for them. Exit non-zero so a scripted run cannot record "no datasets
+        # affected" when the truth is "some were never examined".
+        return 1 if res["errors"] or not res["catalog_complete"] else 0
 
     if args.cmd == "fail":
         status = mark_fail(

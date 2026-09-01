@@ -3,9 +3,10 @@
 
 Real SQLite (a temp db per test), no mocks: exercises the enqueue / claim /
 done / fail transitions, retry-backoff, version-bump requeue, the crash
-recovery (stale `inprogress` -> `pending`), and the engine-version stamp with
-its migration (#1172). The HTTP fetch is not tested here (it hits the live API,
-validated by the cron run).
+recovery (stale `inprogress` -> `pending`), the engine-version stamp and its
+migration (#1172), and the pure decision logic of the directory-format backfill
+sweep. The HTTP fetches are not tested here (they hit the live API/data plane,
+validated by the cron run and by a dry-run sweep).
 
 Run: python3 scripts/zarr/test_zarr_queue.py
 """
@@ -28,10 +29,15 @@ from zarr_queue import (  # type: ignore[import-not-found]  # noqa: E402
     ZARR_ENGINE_VERSION,
     backoff_seconds,
     claim_next,
+    classify_backfill,
     connect,
+    dir_format_recordings,
+    index_store_keys,
     mark_done,
     mark_fail,
+    may_carry_dir_formats,
     migrate_schema,
+    missing_dir_format_stores,
     reconcile,
     requeue,
 )
@@ -703,6 +709,187 @@ class EngineStampRequeueTest(unittest.TestCase):
         res = reconcile(self.conn, [("nm000001", "v1.0.0")], 3600)
         self.assertEqual((res["enqueued"], res["engine_stale"]), (0, 0))
         self.assertEqual(self.row()["status"], "data_failed")
+
+
+class DirFormatDetectionTest(unittest.TestCase):
+    """#1172: which datasets the one-off sweep considers, and what it looks for.
+
+    The detectors themselves are imported from `generate_zarr` rather than
+    restated, so these assert the wiring and the exclusions that matter here --
+    not a second copy of the format rules.
+    """
+
+    def test_meg_and_ieeg_are_the_carriers(self):
+        for modalities in ("meg", "ieeg", "anat,meg", "beh,ieeg", "eeg,meg", "MEG"):
+            self.assertTrue(may_carry_dir_formats(modalities), modalities)
+        for modalities in ("eeg", "emg", "beh,eeg", "anat,eeg,func"):
+            self.assertFalse(may_carry_dir_formats(modalities), modalities)
+
+    def test_an_unknown_modality_is_probed_not_skipped(self):
+        # A catalog row with no modalities is what an un-backfilled OpenNeuro
+        # import looks like (nemar-cli#512) -- exactly the under-described shape
+        # this sweep exists to find, so it must not be filtered out.
+        self.assertTrue(may_carry_dir_formats(""))
+        self.assertTrue(may_carry_dir_formats(None))
+        self.assertTrue(may_carry_dir_formats("  ,  "))
+
+    def test_directory_recordings_are_found_from_their_member_files(self):
+        paths = {
+            "sub-01/ieeg/sub-01_task-x_ieeg.mefd/c1.timd/c1-000000.segd/c1.tdat",
+            "sub-02/meg/sub-02_task-y_meg.ds/sub-02_task-y_meg.meg4",
+            "sub-03/meg/sub-03_task-z_meg/c,rfDC",
+            "sub-03/meg/sub-03_task-z_meg/config",
+            "sub-04/eeg/sub-04_task-w_eeg.set",
+            "participants.tsv",
+        }
+        self.assertEqual(
+            dir_format_recordings(paths),
+            {
+                "sub-01/ieeg/sub-01_task-x_ieeg.mefd",
+                "sub-02/meg/sub-02_task-y_meg.ds",
+                "sub-03/meg/sub-03_task-z_meg",
+            },
+        )
+
+    def test_a_bare_config_file_is_not_a_bti_recording(self):
+        # `.datalad/config` exists in virtually every dataset here; treating
+        # `config` alone as the marker would report every repo as a stranded
+        # BTi recording and requeue the archive.
+        self.assertEqual(dir_format_recordings({".datalad/config", "dataset_description.json"}), set())
+
+    def test_excluded_trees_are_not_counted_as_missing(self):
+        # The converter would not build these either (ADR 0027), so a dataset is
+        # not stranded for lacking them.
+        paths = {
+            "derivatives/pipe/sub-01/meg/sub-01_task-x_meg.ds/x.meg4",
+            "sourcedata/sub-01/ieeg/sub-01_task-x_ieeg.mefd/c1.timd/c1.tdat",
+            "code/demo_meg.ds/x.meg4",
+        }
+        self.assertEqual(dir_format_recordings(paths), set())
+
+
+class BackfillClassificationTest(unittest.TestCase):
+    """#1172: is this dataset stranded, and on what evidence."""
+
+    MEFD = "sub-01/ieeg/sub-01_task-x_ieeg.mefd"
+    PATHS = {
+        f"{MEFD}/c1.timd/c1-000000.segd/c1.tdat",
+        "sub-01/eeg/sub-01_task-x_eeg.set",
+        "participants.tsv",
+    }
+
+    def index(self, stores, failures=None):
+        failures = failures or []
+        return {
+            "dataset_id": "on004696",
+            "format": "nemar-zarr-index",
+            "store_count": len(stores),
+            "stores": stores,
+            "failure_count": len(failures),
+            "failures": failures,
+        }
+
+    def test_no_published_index_at_all(self):
+        got = classify_backfill("on004696", None)
+        self.assertTrue(got["affected"])
+        self.assertEqual(got["reason"], "index_missing")
+
+    def test_the_reference_case_empty_index(self):
+        # on004696 as observed: store_count 0, failure_count 0 -- the pre-#1095
+        # engine saw the `.mefd` directories as nothing at all, so they landed in
+        # neither list and the run was marked done.
+        got = classify_backfill("on004696", self.index([]), self.PATHS)
+        self.assertTrue(got["affected"])
+        self.assertEqual(got["reason"], "empty_index")
+        self.assertEqual(got["store_count"], 0)
+        self.assertEqual(got["missing"], [self.MEFD])
+
+    def test_an_empty_index_is_affected_even_without_a_probe(self):
+        got = classify_backfill("on004696", self.index([]))
+        self.assertTrue(got["affected"])
+        self.assertEqual(got["reason"], "empty_index")
+        self.assertEqual(got["missing"], [])
+
+    def test_the_partial_case_some_stores_but_no_directory_store(self):
+        # What rule (a) alone cannot see: an EEG store exists, so the index is
+        # not empty, but the dataset's one `.mefd` recording was never converted.
+        got = classify_backfill(
+            "on004696",
+            self.index(
+                [
+                    {
+                        "path": "sub-01/eeg/sub-01_task-x_eeg.set",
+                        "zarr": "sub-01/eeg/sub-01_task-x_eeg.zarr",
+                    }
+                ]
+            ),
+            self.PATHS,
+        )
+        self.assertTrue(got["affected"])
+        self.assertEqual(got["reason"], "dir_stores_missing")
+        self.assertEqual(got["missing"], [self.MEFD])
+
+    def test_a_served_directory_recording_is_not_affected(self):
+        got = classify_backfill(
+            "on004696",
+            self.index(
+                [
+                    {"path": self.MEFD, "zarr": "sub-01/ieeg/sub-01_task-x_ieeg.zarr"},
+                    {
+                        "path": "sub-01/eeg/sub-01_task-x_eeg.set",
+                        "zarr": "sub-01/eeg/sub-01_task-x_eeg.zarr",
+                    },
+                ]
+            ),
+            self.PATHS,
+        )
+        self.assertFalse(got["affected"])
+        self.assertEqual(got["reason"], "served")
+
+    def test_a_store_matched_by_its_zarr_rel_path_alone_still_counts_as_served(self):
+        # Either key identifies a store; a half-written entry must not be read
+        # as a missing conversion and re-converted.
+        got = classify_backfill(
+            "on004696",
+            self.index([{"zarr": "sub-01/ieeg/sub-01_task-x_ieeg.zarr"}]),
+            self.PATHS,
+        )
+        self.assertFalse(got["affected"])
+
+    def test_unprobed_is_reported_but_never_requeued(self):
+        # `--no-probe` cannot rule out the partial case, and requeuing on an
+        # unfinished check would re-convert datasets on no evidence.
+        got = classify_backfill(
+            "on004696",
+            self.index([{"path": "sub-01/eeg/x.set", "zarr": "sub-01/eeg/x.zarr"}]),
+        )
+        self.assertFalse(got["affected"])
+        self.assertEqual(got["reason"], "not_probed")
+
+    def test_the_entries_outrank_a_disagreeing_store_count(self):
+        # The viewer reads the entries, so judge the document by what it serves.
+        doc = self.index([])
+        doc["store_count"] = 7
+        self.assertEqual(classify_backfill("on004696", doc)["store_count"], 0)
+
+    def test_index_store_keys_tolerates_a_malformed_document(self):
+        paths, rels = index_store_keys(
+            {"stores": ["not-a-dict", {"path": "a.set"}, {"zarr": "b.zarr"}, {}]}
+        )
+        self.assertEqual(paths, {"a.set"})
+        self.assertEqual(rels, {"b.zarr"})
+        self.assertEqual(index_store_keys(None), (set(), set()))
+        self.assertEqual(index_store_keys({}), (set(), set()))
+
+    def test_missing_is_sorted_for_a_stable_report(self):
+        paths = {
+            "sub-02/meg/sub-02_meg.ds/x.meg4",
+            "sub-01/ieeg/sub-01_ieeg.mefd/c1.timd/c1.tdat",
+        }
+        self.assertEqual(
+            missing_dir_format_stores(paths, {"stores": []}),
+            ["sub-01/ieeg/sub-01_ieeg.mefd", "sub-02/meg/sub-02_meg.ds"],
+        )
 
 
 if __name__ == "__main__":
