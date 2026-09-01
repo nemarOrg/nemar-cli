@@ -208,6 +208,13 @@ export interface DatasetSearchResult {
   /** HED presence (#869): 1 = has HED, 0 = checked/none, null = not classified. */
   has_hed?: number | null;
   score: number;
+  /** FTS5 highlight (#646, epic #1144 phase 6/#1150 D2): `<mark>`-wrapped
+   *  matched terms around a README excerpt. Absent on the exact-id tier and
+   *  on semantic rows with no FTS match -- render nothing for those, not a
+   *  blank line. Untrusted dataset-supplied prose; sanitise before printing
+   *  (`src/lib/render/snippet.ts`), same class as Phase 5b's completion
+   *  candidate sanitisation. */
+  snippet?: string;
 }
 
 export interface DatasetSearchResponse {
