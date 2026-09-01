@@ -42,7 +42,8 @@ Load-bearing ones to know before touching the relevant area:
 0030 (bounded streaming is the default; `.set` is the exception),
 0031 (one annex policy module; `_motion.tsv` is data despite the extension),
 0032 (facet filters are declared once and report what they exclude),
-0033 (the queue stamps which engine converted each dataset; pre-stamp rows are declared current).
+0033 (the queue stamps which engine converted each dataset; pre-stamp rows are declared current),
+0034 (`datasets` stays one table under an enforced column budget; derive, don't store).
 
 ---
 
