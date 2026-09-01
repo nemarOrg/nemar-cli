@@ -8,12 +8,14 @@
  */
 
 import { toVersionTag } from "../../../../shared/contract/index.js";
+import type { FacetKey } from "../../../../shared/facets.js";
 import { RangeParseError } from "../../../../shared/range.js";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import { parseLicenseTierFilter } from "../../lib/license";
 import { optionalAuthMiddleware } from "../../middleware/auth";
 import {
   FacetEnumParseError,
+  buildExcludedUnknownBreakdownSql,
   isAnyFacetActive,
   parseFacetFilters,
 } from "../../services/dataset-facets";
@@ -190,13 +192,16 @@ async function executeAndReturn(
   baseQuery: string,
   baseParams: (string | number)[],
   pagination: { limit: number; offset: number },
-  // Epic #1144 phase 3 (#1147), D4/ADR 0005: when provided (only when a
-  // facet is active), a second COUNT(*) over the SAME base query but with
-  // every active facet widened by includeUnknown -- the difference from the
-  // real count is `excluded_unknown`. Joins the existing Promise.allSettled
-  // so a failure here can never turn a good response into a 500; it just
-  // omits the field.
-  excludedUnknownQuery?: { query: string; params: (string | number)[] },
+  // Epic #1144 phase 3/4 (#1147/#1148), D4/D5/ADR 0005: when provided (only
+  // when a facet is active), a single query over the SAME base FROM/WHERE
+  // (not the row projection -- see the call sites' `*Base` helpers) that
+  // computes both the widened COUNT(*) (excluded_unknown = this minus the
+  // real count) and, in the same scan, a conditional-aggregation SUM per
+  // active facet (excluded_unknown_by_facet). `keysInOrder[i]` names the
+  // FacetKey whose count lives in the result row's `unk_<i>` column. Joins
+  // the existing Promise.allSettled so a failure here can never turn a good
+  // response into a 500; it just omits both fields.
+  excludedUnknownQuery?: { query: string; params: (string | number)[]; keysInOrder: FacetKey[] },
 ) {
   const { limit, offset } = pagination;
   try {
@@ -206,15 +211,30 @@ async function executeAndReturn(
     // Run main query, count, and (when applicable) the widened
     // excluded_unknown count in parallel; allSettled so neither the count
     // nor the excluded_unknown query can prevent returning the main results.
+    //
+    // The count query is wrapped in an async IIFE (not called inline) for
+    // the exact reason the excluded-unknown branch below already is: a
+    // SYNCHRONOUS throw from prepare()/bind()/first() would otherwise abort
+    // the array literal itself -- before Promise.allSettled even runs --
+    // taking the main list query's own (unrelated, unfailed) result down
+    // with it. This gap had no test until epic #1144 phase 4 (#1148) added
+    // one exercising a synchronously-throwing count query for GET /datasets;
+    // GET /datasets/search never had the analogous bug because its count
+    // query already runs inside its own try/catch (countSearchMatchesSafely),
+    // not inline in an array literal. The main query is deliberately left
+    // unwrapped: an unrecoverable failure there should propagate to this
+    // function's outer try/catch and its own fallback/500 handling, not be
+    // isolated away.
     const [mainSettled, countSettled, excludedSettled] = await Promise.allSettled([
       db
         .prepare(paginatedQuery)
         .bind(...baseParams, limit, offset)
         .all(),
-      db
-        .prepare(countQuery)
-        .bind(...baseParams)
-        .first<{ total: number }>(),
+      (async () =>
+        db
+          .prepare(countQuery)
+          .bind(...baseParams)
+          .first<{ total: number }>())(),
       // Wrapped in an async IIFE (not called inline) so a SYNCHRONOUS throw
       // from prepare()/bind()/first() -- e.g. a driver that validates bound
       // parameter counts immediately -- becomes a genuine promise rejection
@@ -223,12 +243,19 @@ async function executeAndReturn(
       // Promise.allSettled call (which would 500 the main list too). ADR
       // 0005: excluded_unknown's own query must never be able to take the
       // primary response down with it.
+      //
+      // `excludedUnknownQuery.query` is already the complete, ready-to-run
+      // statement (`SELECT COUNT(*) AS total, SUM(...) AS unk_0, ... FROM
+      // datasets d WHERE ...`) built against the base FROM/WHERE directly --
+      // D5's fix for the trap where wrapping it as `SELECT COUNT(*) FROM
+      // (<projected query>)` put the SUM's nullTest expressions out of scope
+      // of the raw `d.*` columns they read.
       excludedUnknownQuery
         ? (async () =>
             db
-              .prepare(`SELECT COUNT(*) AS total FROM (${excludedUnknownQuery.query})`)
+              .prepare(excludedUnknownQuery.query)
               .bind(...excludedUnknownQuery.params)
-              .first<{ total: number }>())()
+              .first<Record<string, number>>())()
         : Promise.resolve(undefined),
     ]);
 
@@ -259,11 +286,20 @@ async function executeAndReturn(
     // count itself degraded to a page-derived length, diffing against the
     // widened count would report a bogus/negative-clamped number rather
     // than omitting the field (ADR 0005 -- reporting must never masquerade
-    // as more certain than it is).
+    // as more certain than it is). Both fields are gated together: a
+    // breakdown without a trustworthy total (or vice versa) is worse than
+    // neither.
     let excludedUnknown: number | undefined;
+    let excludedUnknownByFacet: Record<string, number> | undefined;
     if (excludedUnknownQuery && countSucceeded) {
       if (excludedSettled.status === "fulfilled" && excludedSettled.value?.total != null) {
-        excludedUnknown = Math.max(0, excludedSettled.value.total - totalCount);
+        const row = excludedSettled.value;
+        excludedUnknown = Math.max(0, row.total - totalCount);
+        const byFacet: Record<string, number> = {};
+        excludedUnknownQuery.keysInOrder.forEach((key, i) => {
+          byFacet[key] = Number(row[`unk_${i}`] ?? 0);
+        });
+        excludedUnknownByFacet = byFacet;
       } else if (excludedSettled.status === "rejected") {
         console.warn(
           "[datasets] excluded_unknown COUNT query failed, omitting field:",
@@ -281,6 +317,9 @@ async function executeAndReturn(
       limit,
       offset,
       ...(excludedUnknown !== undefined ? { excluded_unknown: excludedUnknown } : {}),
+      ...(excludedUnknownByFacet !== undefined
+        ? { excluded_unknown_by_facet: excludedUnknownByFacet }
+        : {}),
     });
   } catch (dbError) {
     const msg = dbError instanceof Error ? dbError.message : String(dbError);
@@ -436,6 +475,17 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       // none); scripts/hallu-sync.sh reads it to skip the per-dataset
       // /manifest call, so keep the ordering in sync with
       // /datasets/:id/manifest.
+      //
+      // The FROM/JOIN/WHERE base is kept separate from the SELECT column
+      // list (epic #1144 phase 4, #1148, D5): the excluded_unknown_by_facet
+      // breakdown below runs its own SUM(...) query directly against this
+      // base, and its nullTest expressions (e.g. `d.subject_count IS NULL`)
+      // must see the raw `d` columns, not the COALESCEd/aliased projection.
+      const mineBase = `
+        FROM datasets d
+        JOIN users u ON d.owner_user_id = u.id
+        WHERE d.status = ? AND d.owner_user_id = ?
+      `;
       const minePrefix = `
         SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
                d.github_repo, d.concept_doi, d.created_at, d.updated_at,
@@ -473,32 +523,38 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
                  ORDER BY created_at DESC
                  LIMIT 1
                ) AS latest_version
-        FROM datasets d
-        JOIN users u ON d.owner_user_id = u.id
-        WHERE d.status = ? AND d.owner_user_id = ?
+        ${mineBase}
       `;
       const params: (string | number)[] = [status, user.id];
       let query = minePrefix;
       query += buildDatasetFilterClauses(params, filters);
       query += buildSortClause(sort);
 
-      // D4/ADR 0005: only pay for the widened-count query when a facet is
-      // actually active -- an unfiltered ?mine list costs nothing extra.
-      // #1165 review M5: wrapped in its own try/catch -- this is a
-      // reporting-only extra (excluded_unknown), so a throw building it must
-      // omit the field, not 500 the whole (otherwise-good) list response the
-      // way an uncaught throw here would. Dormant today (buildFacetClauses
-      // has no path that throws for validated `filters`), but the primary
-      // query build above stays unwrapped on purpose: without it there is no
-      // valid response to return anyway.
-      let excludedUnknownQuery: { query: string; params: (string | number)[] } | undefined;
+      // D4/D5/ADR 0005: only pay for the widened breakdown query when a
+      // facet is actually active -- an unfiltered ?mine list costs nothing
+      // extra. #1165 review M5: wrapped in its own try/catch -- this is a
+      // reporting-only extra (excluded_unknown/excluded_unknown_by_facet),
+      // so a throw building it must omit both fields, not 500 the whole
+      // (otherwise-good) list response the way an uncaught throw here
+      // would. Dormant today (buildFacetClauses has no path that throws for
+      // validated `filters`), but the primary query build above stays
+      // unwrapped on purpose: without it there is no valid response to
+      // return anyway.
+      let excludedUnknownQuery:
+        | { query: string; params: (string | number)[]; keysInOrder: FacetKey[] }
+        | undefined;
       if (isAnyFacetActive(filters.facets)) {
         try {
           const widenedParams: (string | number)[] = [status, user.id];
-          const widenedQuery =
-            minePrefix +
+          const widenedWhere =
+            mineBase +
             buildDatasetFilterClauses(widenedParams, { ...filters, includeUnknown: true });
-          excludedUnknownQuery = { query: widenedQuery, params: widenedParams };
+          const breakdown = buildExcludedUnknownBreakdownSql(filters.facets);
+          excludedUnknownQuery = {
+            query: `SELECT COUNT(*) AS total${breakdown.selectFragment} ${widenedWhere}`,
+            params: widenedParams,
+            keysInOrder: breakdown.keysInOrder,
+          };
         } catch (err) {
           console.warn(
             "[datasets] failed to build excluded_unknown widened query, omitting field:",
@@ -524,12 +580,34 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     //
     // The visibility/owner predicate is a function (not inlined once) because
     // #1147's excluded_unknown computation needs a SECOND, independently
-    // parameterized copy of this exact prefix -- widened with
+    // parameterized copy of this exact base -- widened with
     // includeUnknown:true -- and a hand-duplicated copy would drift the two
-    // out of sync with `user`/`owner` silently.
-    const buildPublicPrefix = (): { sql: string; params: (string | number)[] } => {
+    // out of sync with `user`/`owner` silently. Split into a FROM/JOIN/WHERE
+    // base and the SELECT column list (epic #1144 phase 4, #1148, D5): the
+    // excluded_unknown_by_facet breakdown runs its own SUM(...) query
+    // directly against the base, and its nullTest expressions need the raw
+    // `d` columns the projection's COALESCE/aliasing would otherwise hide.
+    const buildPublicBase = (): { from: string; params: (string | number)[] } => {
       const prefixParams: (string | number)[] = [status];
-      let sql = `
+      let from = `
+      FROM datasets d
+      LEFT JOIN users u ON d.owner_user_id = u.id
+      WHERE d.status = ?
+        AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)
+    `;
+      if (!user || !hasRole(user.role, "admin")) {
+        from += " AND d.visibility = 'public'";
+      }
+      if (owner) {
+        from += " AND COALESCE(d.uploader, u.username) = ?";
+        prefixParams.push(owner);
+      }
+      return { from, params: prefixParams };
+    };
+
+    const buildPublicPrefix = (): { sql: string; params: (string | number)[] } => {
+      const { from, params: prefixParams } = buildPublicBase();
+      const sql = `
       SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
              d.github_repo, d.concept_doi, d.concept_doi AS doi, d.created_at, d.updated_at,
              COALESCE(d.uploader, u.username) AS owner_username,
@@ -565,18 +643,8 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
                ORDER BY created_at DESC
                LIMIT 1
              ) AS latest_version
-      FROM datasets d
-      LEFT JOIN users u ON d.owner_user_id = u.id
-      WHERE d.status = ?
-        AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)
+      ${from}
     `;
-      if (!user || !hasRole(user.role, "admin")) {
-        sql += " AND d.visibility = 'public'";
-      }
-      if (owner) {
-        sql += " AND COALESCE(d.uploader, u.username) = ?";
-        prefixParams.push(owner);
-      }
       return { sql, params: prefixParams };
     };
 
@@ -588,14 +656,21 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     // #1165 review M5: same try/catch as the ?mine branch above -- a
     // reporting-only field must degrade on its own failure, not 500 the
     // whole list. See that branch's comment for the full rationale.
-    let excludedUnknownQuery: { query: string; params: (string | number)[] } | undefined;
+    let excludedUnknownQuery:
+      | { query: string; params: (string | number)[]; keysInOrder: FacetKey[] }
+      | undefined;
     if (isAnyFacetActive(filters.facets)) {
       try {
-        const { sql: widenedPrefix, params: widenedParams } = buildPublicPrefix();
-        const widenedQuery =
-          widenedPrefix +
+        const { from: widenedFrom, params: widenedParams } = buildPublicBase();
+        const widenedWhere =
+          widenedFrom +
           buildDatasetFilterClauses(widenedParams, { ...filters, includeUnknown: true });
-        excludedUnknownQuery = { query: widenedQuery, params: widenedParams };
+        const breakdown = buildExcludedUnknownBreakdownSql(filters.facets);
+        excludedUnknownQuery = {
+          query: `SELECT COUNT(*) AS total${breakdown.selectFragment} ${widenedWhere}`,
+          params: widenedParams,
+          keysInOrder: breakdown.keysInOrder,
+        };
       } catch (err) {
         console.warn(
           "[datasets] failed to build excluded_unknown widened query, omitting field:",
