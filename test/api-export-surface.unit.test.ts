@@ -54,6 +54,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "denyAccessRequest",
     "finalizeDataset",
     "getDataset",
+    "getFacets",
     "getManifest",
     "getUserCiStatus",
     "getVersionHistory",
@@ -161,6 +162,7 @@ const POST_SPLIT_ADDITIONS = [
   "approveUserById", // #1012, id-keyed approve for web/ORCID accounts
   "doctorFix", // #1130, CLI wrapper for POST /admin/doctor/fix
   "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
+  "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */

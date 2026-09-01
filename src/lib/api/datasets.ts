@@ -6,7 +6,11 @@
  * verbatim.
  */
 
-import { datasetSearchEnvelopeSchema } from "../../../shared/contract/index.js";
+import {
+  type DatasetFacetsEnvelope,
+  datasetFacetsEnvelopeSchema,
+  datasetSearchEnvelopeSchema,
+} from "../../../shared/contract/index.js";
 import { request } from "./client.js";
 
 /** ORCID identifier format: XXXX-XXXX-XXXX-XXXX (last char may be X) */
@@ -338,6 +342,26 @@ interface ResolveSourceResult {
  */
 export async function resolveSourceId(sourceId: string): Promise<ResolveSourceResult> {
   return request<ResolveSourceResult>(`/datasets/resolve/${sourceId}`, {}, "optional");
+}
+
+/**
+ * Facet vocabulary with counts (epic #1144 phase 5a's `GET /datasets/facets`,
+ * consumed by phase 5b's shell completion, #1149). Optional-auth like the
+ * other catalog reads above -- the response is identical for every caller.
+ *
+ * Bounded like update-check.ts's own npm-registry fetch (same 5s budget):
+ * one caller is the opportunistic, fire-and-forget refresh after a
+ * successful `dataset list`/`dataset search` (src/lib/completion/refresh.ts)
+ * -- without a timeout, a hung connection there would hold the CLI process
+ * open well after its output has already been rendered.
+ */
+export async function getFacets(): Promise<DatasetFacetsEnvelope> {
+  return request<DatasetFacetsEnvelope>(
+    "/datasets/facets",
+    { signal: AbortSignal.timeout(5000) },
+    "optional",
+    datasetFacetsEnvelopeSchema,
+  );
 }
 
 /**
