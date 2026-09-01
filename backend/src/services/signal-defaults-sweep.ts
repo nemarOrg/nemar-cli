@@ -41,6 +41,7 @@
  */
 
 import type { Bindings } from "../types/bindings";
+import { isNonProductionEnv } from "./environment";
 import { getBidsTreeStats } from "./github";
 import { getDatasetsToken } from "./github-auth";
 
@@ -320,4 +321,27 @@ export async function runSignalDefaultsSweep(
     errors,
     remaining: remainingRow?.n ?? null,
   };
+}
+
+/**
+ * Cron-only wrapper (issue #1166, Option 2). `runSignalDefaultsSweep` itself
+ * stays UNGUARDED on purpose: `POST /admin/datasets/signal-defaults-sweep`
+ * calls it directly, and staging needs that admin backfill against the
+ * exemplar fleet to keep working. Only the recurring daily-cron caller needs
+ * the production fence, so the guard lives here instead of inside the sweep
+ * -- guarding the sweep itself would quietly take the admin route down
+ * outside production too.
+ *
+ * Returns `null` when skipped so the `scheduled()` call site can tell "ran
+ * with nothing to do" (a real result with `processed: 0`) apart from "did not
+ * run at all", instead of logging a fabricated all-zero summary line.
+ */
+export async function runSignalDefaultsSweepCron(
+  env: Bindings,
+): Promise<SignalDefaultsSweepResult | null> {
+  if (isNonProductionEnv(env)) {
+    console.log("[signal-defaults-sweep] skipped (non-production)");
+    return null;
+  }
+  return runSignalDefaultsSweep(env);
 }

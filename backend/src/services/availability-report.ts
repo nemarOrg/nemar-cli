@@ -11,6 +11,7 @@
  */
 
 import type { Bindings } from "../types/bindings.js";
+import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { createOrUpdateFile } from "./github/contents.js";
 import {
@@ -375,4 +376,27 @@ export async function runAvailabilityReportSweep(
     .catch(() => null);
 
   return { processed: candidates.length, written, errors, remaining: remainingRow?.n ?? null };
+}
+
+/**
+ * Cron-only wrapper (issue #1166, Option 2). `runAvailabilityReportSweep`
+ * itself stays UNGUARDED on purpose: `POST
+ * /admin/datasets/availability-report-sweep` calls it directly, and staging
+ * needs that admin backfill against the exemplar fleet to keep working. Only
+ * the recurring daily-cron caller needs the production fence, so the guard
+ * lives here instead of inside the sweep -- guarding the sweep itself would
+ * quietly take the admin route down outside production too.
+ *
+ * Returns `null` when skipped so the `scheduled()` call site can tell "ran
+ * with nothing to do" (a real result with `processed: 0`) apart from "did not
+ * run at all", instead of logging a fabricated all-zero summary line.
+ */
+export async function runAvailabilityReportSweepCron(
+  env: Bindings,
+): Promise<AvailabilityReportSweepResult | null> {
+  if (isNonProductionEnv(env)) {
+    console.log("[availability-report-sweep] skipped (non-production)");
+    return null;
+  }
+  return runAvailabilityReportSweep(env);
 }

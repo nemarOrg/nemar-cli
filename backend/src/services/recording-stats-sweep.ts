@@ -21,6 +21,7 @@
 
 import { getS3Config } from "../routes/admin/shared.js";
 import type { Bindings } from "../types/bindings.js";
+import { isNonProductionEnv } from "./environment.js";
 import { type RecordingStats, getZarrIndex } from "./s3.js";
 
 /**
@@ -265,4 +266,27 @@ export async function runRecordingStatsSweep(
     errors,
     remaining: remainingRow?.n ?? null,
   };
+}
+
+/**
+ * Cron-only wrapper (issue #1166, Option 2). `runRecordingStatsSweep` itself
+ * stays UNGUARDED on purpose: `POST /admin/datasets/recording-stats-sweep`
+ * calls it directly, and staging needs that admin backfill against the
+ * exemplar fleet to keep working. Only the recurring daily-cron caller needs
+ * the production fence, so the guard lives here instead of inside the sweep
+ * -- guarding the sweep itself would quietly take the admin route down
+ * outside production too.
+ *
+ * Returns `null` when skipped so the `scheduled()` call site can tell "ran
+ * with nothing to do" (a real result with `processed: 0`) apart from "did not
+ * run at all", instead of logging a fabricated all-zero summary line.
+ */
+export async function runRecordingStatsSweepCron(
+  env: Bindings,
+): Promise<RecordingStatsSweepResult | null> {
+  if (isNonProductionEnv(env)) {
+    console.log("[recording-stats-sweep] skipped (non-production)");
+    return null;
+  }
+  return runRecordingStatsSweep(env);
 }
