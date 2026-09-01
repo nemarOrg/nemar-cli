@@ -122,6 +122,42 @@ one-time sweep completing. `excluded_unknown` is what tells a caller which
 of "no matches" and "matches excluded because unknown" they are looking at,
 for whichever reason a column is still sparse.
 
+**Amended in epic #1144 phase 4 (#1148): `excluded_unknown` is now attributed
+per facet, in the SAME query, at no extra cost.** This decision originally
+deferred per-facet attribution (see "Alternatives considered" below) on the
+premise that it needed one query per active facet; that premise was wrong.
+The widened count is already a single `SELECT COUNT(*) ... FROM datasets d
+WHERE <base> AND <every active facet, widened>` -- turning it into a
+conditional aggregation (`SELECT COUNT(*) AS total, SUM(CASE WHEN <nullTest
+of facet i> THEN 1 ELSE 0 END) AS unk_i, ...`) computes the full per-facet
+breakdown in the same scan, no additional round trip on either endpoint.
+Both envelopes now also carry `excluded_unknown_by_facet` (`FacetKey ->
+count`), gated together with `excluded_unknown` on the same
+`countSucceeded` check and the same failure-omits-both posture. The two
+numbers do NOT sum: a row unknown in two active facets counts once toward
+`excluded_unknown` but once in EACH bucket, so
+`sum(excluded_unknown_by_facet values) >= excluded_unknown`, with equality
+only when no row is unknown in more than one active facet -- a consumer
+must never present the buckets as a partition of the total. This closed a
+real gap: the vague "a filtered field is unknown for them" message the
+deferred design forced for two-or-more active facets told a user their
+result set shrank and refused to say which flag did it, at exactly the
+moment they had several flags to choose between.
+
+The one structural fix this needed: `executeAndReturn`'s widened-count
+query used to wrap a COMPLETE row-projection query (`SELECT COUNT(*) FROM
+(<projected query>)`), which works for a plain count but cannot host the
+breakdown's `SUM(CASE WHEN d.subject_count IS NULL ...)` clauses -- the
+projection already COALESCEs several of those columns to a default before
+the outer query ever sees them, and the `d` alias used by every `nullTest`
+is out of scope there entirely. `catalog.ts`'s two prefix-builders
+(`buildPublicPrefix`/the `?mine` branch) were split into a FROM/JOIN/WHERE
+base and a separate SELECT column list, so the breakdown query can run
+directly against `FROM datasets d ...` the way `dataset-search.ts`'s count
+query already did (it never had this trap -- its `countSearchMatches` was
+already a bare `SELECT COUNT(*) FROM datasets d ...`, not a wrapped
+projection).
+
 ## Consequences
 
 - Adding the twenty-first facet is one row in each of two tables, not a new
@@ -149,7 +185,9 @@ for whichever reason a column is still sparse.
   runs it as a genuine extra sequential round trip after
   `countSearchMatchesSafely` returns (see the M1 correction above) -- a
   facet-filtered search request is one full round trip slower than a
-  facet-filtered list request for the same reason.
+  facet-filtered list request for the same reason. Phase 4 (#1148) added the
+  per-facet `excluded_unknown_by_facet` breakdown to this SAME query (extra
+  SELECT columns, not an extra query), so this cost accounting is unchanged.
 - `bids_version`/`hed_version` stay prefix/exact only in this phase (a
   lexicographic `>=` is already wrong on production data: `'1.9.0' >
   '1.10.0'` as strings). A true semver range needs either a derived sortable
@@ -180,17 +218,21 @@ for whichever reason a column is still sparse.
   caller asked for -- worse than low recall, because it looks like a match.
   Rejected; the explicit escape hatch plus the reported count is the honest
   version of the same convenience.
-- **Compute `excluded_unknown` per-facet.** More informative, but needs one
-  query per active facet rather than one aggregate query, and the CLI
-  message this feeds ("N datasets excluded because a filtered field is
-  unknown for them") doesn't need the breakdown. Deferred; the aggregate
-  form is the one built here.
+- **Compute `excluded_unknown` per-facet.** Originally deferred here on the
+  premise that it needed one query per active facet rather than one
+  aggregate query. That premise was wrong -- a conditional aggregation
+  (`SUM(CASE WHEN ... THEN 1 ELSE 0 END)` per active facet) computes the
+  full breakdown in the SAME aggregate query, no extra round trip. Built in
+  epic #1144 phase 4 (#1148); see the amendment above. No longer deferred.
 
 ## Receipts
 
 - Epic #1144, issue #1147 (this phase); #1145 (Phase 1, the deferred
   restructure), #1146 / #1153 (Phase 2 / 2b, the columns this phase makes
   filterable).
+- Issue #1148 (Phase 4): the per-facet-attribution amendment above --
+  `buildExcludedUnknownBreakdownSql` (`dataset-facets.ts`), and the
+  FROM/WHERE-vs-SELECT-column split in `catalog.ts`'s prefix builders.
 - ADR 0005 (availability is reported, never a precondition for serving) --
   the precedent `excluded_unknown` follows.
 - Migration 0070 (`recording_stats`) and 0071 (`signal_defaults`) column
