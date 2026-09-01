@@ -358,3 +358,159 @@ describe("verification case 6: legacy filters reach search (D6)", () => {
     });
   }
 });
+
+// #1169 review, test-analyzer findings. Each block below was added because a
+// mutation to the production line it targets produced ZERO failures against
+// the original suite -- the implementer's own 18-mutation pass did not reach
+// them. They are ordered by the severity the reviewer assigned.
+describe("verification case 8: gaps found by mutation after the first review round", () => {
+  // Rating 7/10. Both commands register --include-unknown and both API-client
+  // functions serialize it, but nothing confirmed it survives the trip. A
+  // hardcoded `includeUnknown: false` in the two actions broke nothing.
+  for (const cmd of ["list", "search"] as const) {
+    test(`${cmd}: --include-unknown reaches the wire as include_unknown=1`, async () => {
+      const server = startCaptureServer(
+        cmd === "list" ? EMPTY_LIST_ENVELOPE : EMPTY_SEARCH_ENVELOPE,
+      );
+      try {
+        const args =
+          cmd === "list"
+            ? ["dataset", "list", "--channels", "10..50", "--include-unknown"]
+            : ["dataset", "search", "sleep", "--channels", "10..50", "--include-unknown"];
+        const result = await runCli(args, server.url);
+        expect(result.exitCode).toBe(0);
+        expect(server.requests.length).toBe(1);
+        expect(server.requests[0].searchParams.get("include_unknown")).toBe("1");
+      } finally {
+        server.stop();
+      }
+    });
+
+    test(`${cmd}: include_unknown is absent when the flag is not passed`, async () => {
+      const server = startCaptureServer(
+        cmd === "list" ? EMPTY_LIST_ENVELOPE : EMPTY_SEARCH_ENVELOPE,
+      );
+      try {
+        const args =
+          cmd === "list"
+            ? ["dataset", "list", "--channels", "10..50"]
+            : ["dataset", "search", "sleep", "--channels", "10..50"];
+        await runCli(args, server.url);
+        expect(server.requests[0].searchParams.has("include_unknown")).toBe(false);
+      } finally {
+        server.stop();
+      }
+    });
+  }
+
+  // Rating 6/10. D4 deleted the duplicated tier array, and case 7 pins that
+  // the literal cannot come back -- but nothing ran the validator. Neutering
+  // it entirely failed no test anywhere in the repo, including before this
+  // phase, so this covers behaviour the CLI has had since #653.
+  for (const cmd of ["list", "search"] as const) {
+    test(`${cmd}: an invalid --license tier exits 1 before any network call`, async () => {
+      const server = startCaptureServer(
+        cmd === "list" ? EMPTY_LIST_ENVELOPE : EMPTY_SEARCH_ENVELOPE,
+      );
+      try {
+        const args =
+          cmd === "list"
+            ? ["dataset", "list", "--license", "public,bogus"]
+            : ["dataset", "search", "sleep", "--license", "public,bogus"];
+        const result = await runCli(args, server.url);
+        expect(result.exitCode).toBe(1);
+        expect(result.stdout).toContain("invalid license tier(s): bogus");
+        // The valid set is echoed so the fix does not need the docs.
+        expect(result.stdout).toContain("attribution");
+        // The point of validating client-side: nothing was sent.
+        expect(server.requests.length).toBe(0);
+      } finally {
+        server.stop();
+      }
+    });
+  }
+
+  test("a valid comma-separated --license list passes through untouched", async () => {
+    const server = startCaptureServer(EMPTY_LIST_ENVELOPE);
+    try {
+      const result = await runCli(
+        ["dataset", "list", "--license", "public,attribution"],
+        server.url,
+      );
+      expect(result.exitCode).toBe(0);
+      expect(server.requests[0].searchParams.get("license")).toBe("public,attribution");
+    } finally {
+      server.stop();
+    }
+  });
+
+  // Rating 5/10. Cosmetic but on every filtered call: dropping the `> 0`
+  // gate makes the CLI print "note: 0 datasets excluded ..." whenever a facet
+  // is merely active. Only the field-ABSENT case was covered.
+  test("excluded_unknown present but ZERO prints no note", async () => {
+    const server = startCaptureServer({
+      ...EMPTY_LIST_ENVELOPE,
+      excluded_unknown: 0,
+      excluded_unknown_by_facet: { channels: 0 },
+    });
+    try {
+      const result = await runCli(["dataset", "list", "--channels", "10..50"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).not.toContain("note:");
+      expect(result.stdout).not.toContain("note:");
+    } finally {
+      server.stop();
+    }
+  });
+
+  // Rating 4/10. sampleFor() only ever builds two-sided ranges, so the
+  // min===max collapse in serializeBounds was never exercised end to end. A
+  // bare `42` must stay `42` on the wire, not become `42..42`.
+  test("a bare exact value serializes as itself, not as a degenerate range", async () => {
+    const server = startCaptureServer(EMPTY_LIST_ENVELOPE);
+    try {
+      const result = await runCli(["dataset", "list", "--subjects", "42"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(server.requests[0].searchParams.get("subjects")).toBe("42");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a range rejection echoes the accepted forms, not just the error", async () => {
+    const server = startCaptureServer(EMPTY_LIST_ENVELOPE);
+    try {
+      const result = await runCli(["dataset", "list", "--subjects", "100xyz"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toContain("Accepted forms:");
+      expect(result.stdout).toContain("a bare number (exact)");
+      expect(server.requests.length).toBe(0);
+    } finally {
+      server.stop();
+    }
+  });
+
+  // --sort gained `citations` in this phase (the backend has supported it
+  // since #804; only the help text and the choices list lagged).
+  test("--sort citations is accepted and reaches the wire", async () => {
+    const server = startCaptureServer(EMPTY_LIST_ENVELOPE);
+    try {
+      const result = await runCli(["dataset", "list", "--sort", "citations"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(server.requests[0].searchParams.get("sort")).toBe("citations");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("--sort rejects a value outside its choices, before any network call", async () => {
+    const server = startCaptureServer(EMPTY_LIST_ENVELOPE);
+    try {
+      const result = await runCli(["dataset", "list", "--sort", "bogus"], server.url);
+      expect(result.exitCode).not.toBe(0);
+      expect(server.requests.length).toBe(0);
+    } finally {
+      server.stop();
+    }
+  });
+});

@@ -75,9 +75,16 @@ function describeFacet(facet: FacetDefinition): string {
     case "enum":
       return `${facet.label} -- comma-separated, one or more of: ${(facet.enumValues ?? []).join(", ")}`;
     case "number":
-    case "bytes":
-    case "duration":
       return `${facet.label}${unit} -- range (e.g. 10..50, 10.., ..50, or 10)`;
+    // Byte and duration facets accept unit suffixes (shared/range.ts), and the
+    // bare form means the base unit -- bytes and seconds. Showing only
+    // `10..50` here nudged users toward typing raw byte and second counts for
+    // --size and --duration, which is the difference between `--duration 100h`
+    // and `--duration 360000` (#1169 review).
+    case "bytes":
+      return `${facet.label}${unit} -- range with optional units (e.g. 10gb..2tb, 500mb.., ..1gb; bare = bytes)`;
+    case "duration":
+      return `${facet.label}${unit} -- range with optional units (e.g. 30m..2h, 100h.., ..90s; bare = seconds)`;
     case "text":
       return `${facet.label} -- substring match`;
     case "version":

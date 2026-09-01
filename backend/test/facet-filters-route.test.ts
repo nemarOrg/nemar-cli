@@ -29,6 +29,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { FACETS, type FacetKey } from "../../shared/facets";
 import { registerCatalogRoutes } from "../src/routes/datasets/catalog";
+import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
@@ -335,6 +336,40 @@ describe("D4/ADR 0005: unknown is excluded by default, and reported", () => {
     // The main list and its real count are unaffected by the injected fault.
     expect(body.datasets.map((d) => d.dataset_id)).toEqual(["nm220001"]);
     expect("excluded_unknown" in body).toBe(false);
+  });
+
+  // #1169 review: the ?mine=true branch shares executeAndReturn with the public
+  // branch, so its degradation logic is the same code -- but nothing exercised
+  // it there, and ?mine is the branch a signed-in user actually hits. Reading
+  // "it is the same function" is how the Phase 2b sweep gap survived review, so
+  // this drives the authenticated path for real rather than arguing from
+  // shared structure.
+  test("GET /datasets?mine=true: a failed excluded_unknown query omits BOTH fields, never 500s", async () => {
+    const API_KEY = "mine-degradation-key-0123456789abcdef01234567";
+    db.run(
+      "INSERT INTO users (id, username, email, password_hash, status, role, email_verified) VALUES (9, 'mineuser', 'mine@example.org', 'x', 'approved', 'member', 1)",
+    );
+    db.run("UPDATE datasets SET owner_user_id = 9 WHERE dataset_id = 'nm220001'");
+    db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (9, ?, ?)").run(
+      await hashApiKey(API_KEY),
+      API_KEY.slice(0, 8),
+    );
+
+    const res = await app.request(
+      "/?mine=true&duration=50..150",
+      { headers: { Authorization: `Bearer ${API_KEY}` } },
+      excludedUnknownFailingD1(db),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      datasets: { dataset_id: string }[];
+      excluded_unknown?: number;
+      excluded_unknown_by_facet?: Record<string, number>;
+    };
+    // The owned list and its real count survive the injected fault.
+    expect(body.datasets.map((d) => d.dataset_id)).toEqual(["nm220001"]);
+    expect("excluded_unknown" in body).toBe(false);
+    expect("excluded_unknown_by_facet" in body).toBe(false);
   });
 
   test("GET /datasets/search: a failed excluded_unknown query omits the field, never 500s", async () => {

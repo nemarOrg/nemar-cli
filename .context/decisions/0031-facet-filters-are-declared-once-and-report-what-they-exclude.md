@@ -123,9 +123,12 @@ of "no matches" and "matches excluded because unknown" they are looking at,
 for whichever reason a column is still sparse.
 
 **Amended in epic #1144 phase 4 (#1148): `excluded_unknown` is now attributed
-per facet, in the SAME query, at no extra cost.** This decision originally
-deferred per-facet attribution (see "Alternatives considered" below) on the
-premise that it needed one query per active facet; that premise was wrong.
+per facet, in the SAME query, with no extra round trip.** This decision
+originally deferred per-facet attribution (see "Alternatives considered"
+below) on the premise that it needed one query per active facet; that premise
+was wrong, and no extra ROUND TRIP is the precise claim. The per-facet SUMs
+are real added computation within that one scan; what costs nothing extra is
+queries, which is exactly what the deferral mispriced.
 The widened count is already a single `SELECT COUNT(*) ... FROM datasets d
 WHERE <base> AND <every active facet, widened>` -- turning it into a
 conditional aggregation (`SELECT COUNT(*) AS total, SUM(CASE WHEN <nullTest
