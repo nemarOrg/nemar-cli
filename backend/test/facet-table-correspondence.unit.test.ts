@@ -1,6 +1,6 @@
 /**
  * Cross-checks between the two halves of the declared facet table (epic
- * #1144 phase 3, #1147, D2/ADR 0031): `shared/facets.ts` (the CLI/wire
+ * #1144 phase 3, #1147, D2/ADR 0032): `shared/facets.ts` (the CLI/wire
  * vocabulary) and `backend/src/services/dataset-facets.ts` (the SQL
  * binding). These are the three properties that make twenty facets
  * maintainable instead of twenty chances to half-wire one (plan

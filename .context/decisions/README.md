@@ -64,7 +64,8 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0028](0028-maxshield-meg-is-sss-filtered-before-serving-or-declined.md) - MaxShield MEG is Signal-Space Separation filtered before serving, or declined
 - [ADR 0029](0029-the-zarr-conversion-engine-lives-with-the-cli.md) - The Zarr conversion engine lives in nemar-cli, not the Actions repo
 - [ADR 0030](0030-bounded-streaming-is-the-default-conversion-path.md) - Bounded streaming is the default conversion path; in-memory is the exception
-- [ADR 0031](0031-facet-filters-are-declared-once-and-report-what-they-exclude.md) - Facet filters are declared once in a shared table, and report what they exclude
+- [ADR 0031](0031-the-annex-policy-has-one-source-and-data-may-wear-a-metadata-extension.md) - The annex policy has one source, and data may wear a metadata extension
+- [ADR 0032](0032-facet-filters-are-declared-once-and-report-what-they-exclude.md) - Facet filters are declared once in a shared table, and report what they exclude
 
 ## Backfill note (2026-07-31)
 

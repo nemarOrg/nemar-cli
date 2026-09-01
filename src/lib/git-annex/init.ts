@@ -7,6 +7,7 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { buildLargefilesExpression } from "./policy.js";
 import { runCommand } from "./run-command.js";
 
 /**
@@ -170,31 +171,12 @@ export async function configureLargefiles(
   path: string,
   pattern?: string,
 ): Promise<{ success: boolean; error?: string }> {
-  // Annex large data files, but NEVER annex metadata files regardless of size.
-  // Metadata must stay in git for BIDS validation and GitHub readability.
-  // Note: exclude=*.tsv does not match *.tsv.gz (glob is exact), so compressed
-  // data is correctly annexed.
+  // The policy itself lives in policy.ts -- one spelling, shared with the upload
+  // manifest classifier and enforced against real git-annex by
+  // test/annex-policy.test.ts.
   // Keep in sync with: scripts/nemar-restore-dataset.sh ANNEX_LARGEFILES
-  const DATA_EXTENSIONS = ["*.edf", "*.bdf", "*.set", "*.fif", "*.vhdr", "*.eeg", "*.cnt", "*.fdt"];
-  const METADATA_EXCLUSIONS = [
-    "*.tsv",
-    "*.json",
-    "*.md",
-    "*.txt",
-    "*.yml",
-    "*.yaml",
-    "README*",
-    "LICENSE*",
-    "CHANGES*",
-    ".bidsignore",
-    ".gitignore",
-  ];
-
-  const includes = DATA_EXTENSIONS.map((ext) => `include=${ext}`).join(" or ");
-  const excludes = METADATA_EXCLUSIONS.map((pat) => `exclude=${pat}`).join(" and ");
-  const defaultPattern = `(${includes} or largerthan=100kb) and ${excludes}`;
-
-  const largefilesPattern = pattern || defaultPattern;
+  // (test/annex-policy.test.ts asserts the shell copy matches this one).
+  const largefilesPattern = pattern || buildLargefilesExpression();
 
   try {
     const { stderr, exitCode } = await runCommand(

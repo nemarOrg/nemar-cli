@@ -3,7 +3,7 @@
  * phase 3, issue #1147). Every column Phases 2 and 2b added to `datasets` is
  * filterable -- a column that is populated but unfilterable is a column only
  * a future phase can use, which is the gap this epic exists to close. See
- * `.context/decisions/0031-facet-filters-are-declared-once-and-report-what-they-exclude.md`.
+ * `.context/decisions/0032-facet-filters-are-declared-once-and-report-what-they-exclude.md`.
  *
  * This file is the CLI/wire-facing half of the split: facet key, CLI flag,
  * value kind, enum members, unit, label. NO SQL, no D1 types -- those live in

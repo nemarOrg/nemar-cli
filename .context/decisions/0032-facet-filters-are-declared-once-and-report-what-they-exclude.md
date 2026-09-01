@@ -1,4 +1,4 @@
-# ADR 0031: Facet filters are declared once, and report what they exclude
+# ADR 0032: Facet filters are declared once, and report what they exclude
 
 **Status:** accepted
 **Date:** 2026-09-01

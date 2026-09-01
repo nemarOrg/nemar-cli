@@ -49,7 +49,7 @@ import type { DatasetsRouter } from "./shared";
  * so `include_unknown=1` deliberately returns rows whose value was never
  * measured -- and the COALESCE rendered every one of them as a confident `0`,
  * indistinguishable from a measured zero. That is the exact "unknown reported
- * as a value" failure ADR 0005 and ADR 0031 exist to prevent, arrived at by
+ * as a value" failure ADR 0005 and ADR 0032 exist to prevent, arrived at by
  * composing a pre-existing display convention with a new filter contract.
  *
  * The raw columns are additive, so the COALESCEd aliases keep working for
@@ -159,7 +159,7 @@ export function parseMinScore(c: FilterQueryContext): number {
  *
  * Throws {@link RangeParseError} on an invalid facet range (`shared/range.ts`)
  * or `FacetEnumParseError` on an unrecognised enum token (#1165 review P1,
- * ADR 0031); the caller is expected to translate either into a 400. The
+ * ADR 0032); the caller is expected to translate either into a 400. The
  * pre-existing `license` param keeps its original drop-unrecognised
  * behaviour (`parseLicenseTierFilter`) -- a deliberate asymmetry, not an
  * oversight, since it predates this table and the website already depends

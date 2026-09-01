@@ -69,7 +69,7 @@ export interface DatasetFilterOptions {
    * legacy fields above rather than folded in: those nine fields have
    * irregular, bespoke semantics (FTS routing, LIKE-joined comma lists) that
    * don't fit a declared table, while every facet here shares one of five
-   * regular shapes. See ADR 0031.
+   * regular shapes. See ADR 0032.
    */
   facets?: FacetFilterValues;
   /** Widens every ACTIVE facet's predicate with its declared NULL test
@@ -161,7 +161,7 @@ export function buildDatasetFilterClauses(
 
   // Epic #1144 phase 3 (#1147): the declared facet table's generic walk,
   // appended after the bespoke clauses above rather than merged into them --
-  // see the `facets` field doc comment on DatasetFilterOptions and ADR 0031.
+  // see the `facets` field doc comment on DatasetFilterOptions and ADR 0032.
   clauses += buildFacetClauses(params, opts.facets, opts.includeUnknown ?? false);
 
   return clauses;

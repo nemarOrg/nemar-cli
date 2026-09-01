@@ -642,7 +642,10 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
   /**
    * POST /datasets/:id/publish - Publish a dataset (make public)
    *
-   * Authorization: Owner or admin only
+   * Authorization: Admin only. Predates the orchestrated publication flow
+   * (publish/request -> admin approval -> orchestrator); as a direct flip of
+   * GitHub/S3/D1 visibility it skips DOI minting, manifest generation, and the
+   * submission-minimums gate, so owners must go through publish/request instead.
    * One-way operation: Cannot unpublish
    *
    * Effects:
@@ -683,9 +686,16 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       return c.json({ error: "Dataset not found" }, 404);
     }
 
-    // Authorization: owner or admin
-    if (dataset.owner_user_id !== user.id && !hasRole(user.role, "admin")) {
-      return c.json({ error: "Forbidden: Only dataset owner or admin can publish" }, 403);
+    // Authorization: admin only. Owners must use the publication request flow
+    // (POST /datasets/:id/publish/request), which routes through the orchestrator.
+    if (!hasRole(user.role, "admin")) {
+      return c.json(
+        {
+          error:
+            "Forbidden: Only admins can publish directly. Use 'nemar dataset publish request' to request publication.",
+        },
+        403,
+      );
     }
 
     // Prevent publishing sandbox datasets

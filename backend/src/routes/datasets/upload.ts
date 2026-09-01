@@ -952,10 +952,13 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
   );
 
   /**
-   * POST /datasets/:id/finalize - Finalize dataset after upload
+   * POST /datasets/:id/finalize - Finalize dataset repo setup after upload
    *
-   * Applies branch protection and marks dataset as published.
-   * Should be called after initial upload is complete.
+   * Pre-publish setup on a still-private repo: ensures the default branch is
+   * "main", deploys the CI workflow shims, enables auto-merge, and applies the
+   * private-repo collaborator spec. Branch protection is NOT applied here; it is
+   * applied at make-public and removed at make-private (epic #713). Refuses on an
+   * already-public dataset, whose repo spec is owned by the publication flow.
    */
   datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
     const datasetId = c.req.param("id");
@@ -965,9 +968,16 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
     try {
       // Verify dataset exists and user is owner
       const dataset = await db
-        .prepare("SELECT owner_user_id, github_repo, status FROM datasets WHERE dataset_id = ?")
+        .prepare(
+          "SELECT owner_user_id, github_repo, status, visibility FROM datasets WHERE dataset_id = ?",
+        )
         .bind(datasetId)
-        .first<{ owner_user_id: number; github_repo: string; status: string }>();
+        .first<{
+          owner_user_id: number;
+          github_repo: string;
+          status: string;
+          visibility: string;
+        }>();
 
       if (!dataset) {
         return c.json({ error: "Dataset not found" }, 404);
@@ -975,6 +985,24 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
 
       if (dataset.owner_user_id !== user.id && !hasRole(user.role, "admin")) {
         return c.json({ error: "Only dataset owner can finalize upload" }, 403);
+      }
+
+      // Finalize is a pre-publish step: it renames the default branch, re-commits
+      // workflow templates, and applies the PRIVATE-repo collaborator spec. Running
+      // it on an already-published dataset would push through the published-repo
+      // ruleset and re-apply the private spec to a public repo. Publication and its
+      // spec enforcement own the published repo instead.
+      // `visibility` is NOT NULL CHECK ('private','public') (migration 0006), so
+      // `=== "public"` is exhaustive today; revisit if a third state is ever added.
+      if (dataset.visibility === "public") {
+        return c.json(
+          {
+            error: "Cannot finalize a published dataset",
+            message:
+              "This dataset is already public; its repository spec is managed by the publication flow.",
+          },
+          409,
+        );
       }
 
       // Note: We could track finalization state separately if needed

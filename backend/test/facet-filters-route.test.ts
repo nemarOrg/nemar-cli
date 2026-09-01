@@ -504,7 +504,7 @@ describe("I2: excluded_unknown widens EACH active facet by its OWN nullTest", ()
 // Epic #1144 phase 4 (#1148), D5: per-facet attribution, computed in the
 // SAME widened-count query via conditional aggregation
 // (buildExcludedUnknownBreakdownSql), not a deferred second round trip.
-// Phase 3's "aggregate only" design is superseded; ADR 0031 is amended.
+// Phase 3's "aggregate only" design is superseded; ADR 0032 is amended.
 describe("Phase 4 D5: excluded_unknown_by_facet, a row unknown in TWO active facets", () => {
   let db: Database;
   let app: App;

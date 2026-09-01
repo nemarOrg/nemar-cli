@@ -50,6 +50,15 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "initDataset",
     "isGitAnnexDataset",
   ],
+  policy: [
+    "ANNEX_DATA_EXTENSIONS",
+    "ANNEX_DATA_GLOBS",
+    "ANNEX_SIZE_THRESHOLD_BYTES",
+    "NEVER_ANNEX_GLOBS",
+    "buildLargefilesExpression",
+    "isNeverAnnexedMetadata",
+    "shouldAnnex",
+  ],
   "s3-remote": [
     "ANNEX_REMOTE_EXISTS_RE",
     "DEFAULT_S3_PARTSIZE",
@@ -141,6 +150,16 @@ const INTERNAL_WIRING = [
   "chunkAddTargets",
   "ADD_CHUNK_MAX_PATHS",
   "ADD_CHUNK_MAX_BYTES",
+  // policy.ts postdates the split (#1158). Its surface is consumed by sibling
+  // git-annex modules and by import-openneuro, never by the CLI directly, so
+  // none of it belongs to the pre-split monolith surface below.
+  "ANNEX_DATA_EXTENSIONS",
+  "ANNEX_DATA_GLOBS",
+  "ANNEX_SIZE_THRESHOLD_BYTES",
+  "NEVER_ANNEX_GLOBS",
+  "buildLargefilesExpression",
+  "isNeverAnnexedMetadata",
+  "shouldAnnex",
 ];
 
 /**

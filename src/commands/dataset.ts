@@ -3107,11 +3107,13 @@ datasetCommand
     "after",
     `
 Description:
-  Request access to a NEMAR dataset to push data via git-annex.
-  Access is automatically granted for public repositories.
+  Request collaborator access to a private NEMAR dataset. The owner is
+  notified and can approve or deny; once approved you can push data via
+  git-annex.
 
-  For metadata-only changes, you can fork and submit a PR without
-  requesting access.
+  Public datasets grant no access here, because the repository is already
+  open. Fork it and submit a pull request, or ask the owner for an invite
+  if you need merge rights.
 
 Requirements:
   - NEMAR account (nemar auth login)

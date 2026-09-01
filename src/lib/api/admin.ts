@@ -153,7 +153,7 @@ export interface PublishDatasetResponse {
 }
 
 /**
- * Publish a dataset (make public) - owner or admin
+ * Publish a dataset (make public) - admin only
  * This is a one-way operation that cannot be undone
  */
 export async function publishDataset(datasetId: string): Promise<PublishDatasetResponse> {

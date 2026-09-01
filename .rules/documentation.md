@@ -43,7 +43,7 @@ it landed:
 | Claim | True of | Landed in |
 |---|---|---|
 | `count` describes the population `results` is sliced from | nothing; the subquery is unbounded | code comments + a `.context` doc |
-| `--rate` filters a column that is 0% until the sweeps run | `--duration`, `--recordings` | **ADR 0031**, which is binding |
+| `--rate` filters a column that is 0% until the sweeps run | `--duration`, `--recordings` | **ADR 0032**, which is binding |
 | pair null test is AND because the pair is "written atomically" | `recording_duration`, `channel_count` | `age_min/max`, which predates that sweep |
 | the null guard prevents "a fabricated processed=0 line" | nothing; the summary is already gated | six places, from one brief sentence |
 

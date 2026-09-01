@@ -5,7 +5,7 @@
  * the SQL kind (`scalar` | `pair` | `pair-with-fallback` | `enum` | `text` |
  * `version-prefix`), the column(s), and the NULL test `include_unknown`
  * widens with. See
- * `.context/decisions/0031-facet-filters-are-declared-once-and-report-what-they-exclude.md`.
+ * `.context/decisions/0032-facet-filters-are-declared-once-and-report-what-they-exclude.md`.
  *
  * `backend/test/facet-table-correspondence.unit.test.ts` asserts this file and
  * `shared/facets.ts` declare the exact same set of keys in both directions.
@@ -280,7 +280,7 @@ export const FACET_DEFINITIONS: readonly FacetSqlSpec[] = [
 /**
  * Every facet declared in `shared/facets.ts` MUST have an SQL binding here.
  *
- * ADR 0031 says a half-added facet "fails CI instead of a flag silently doing
+ * ADR 0032 says a half-added facet "fails CI instead of a flag silently doing
  * nothing". That was true of CI and only CI: the correspondence test was the
  * single thing standing between a declared-but-unbound facet and production,
  * with no defence behind it (#1177 cross-phase review). Verified: a facet in
@@ -345,7 +345,7 @@ export function isAnyFacetActive(facets: FacetFilterValues | undefined): boolean
  * outside its declared vocabulary (#1165 review P1). Mirrors
  * {@link RangeParseError}'s role: a rejection the route handler is expected
  * to translate into a 400, naming the bad token and listing the valid
- * values rather than silently ignoring it. See ADR 0031 for why this is
+ * values rather than silently ignoring it. See ADR 0032 for why this is
  * deliberately NOT the same policy `parseLicenseTierFilter` uses for the
  * pre-existing `license` param.
  */
@@ -374,7 +374,7 @@ export class FacetEnumParseError extends Error {
  * (#1165 review P1); the caller (the route handler) is expected to
  * translate either into a 400. This is a deliberate asymmetry with the
  * pre-existing `license` param (`parseLicenseTierFilter`), which still
- * drops unrecognised tokens silently -- see ADR 0031.
+ * drops unrecognised tokens silently -- see ADR 0032.
  */
 export function parseFacetFilters(
   getParam: (key: string) => string | undefined,
