@@ -23,6 +23,24 @@
 import type { Command } from "commander";
 import { CompletionDirective, getCandidates } from "./candidates.js";
 
+/**
+ * Matches a newline, carriage return, or any other C0/DEL control character
+ * (#1173 review). The wire format every shell script here parses is one
+ * candidate per line, terminated by a final `:<directive>` line -- a
+ * candidate that itself contains "\n" splits into an extra line that every
+ * consumer (bash's `mapfile`, zsh's `${(@f)...}`, fish's newline-split
+ * `$lines`) reads as its own, unrelated candidate. Worse, a value shaped
+ * like `"rest\n:4"` produces a line that is indistinguishable from the real
+ * trailing directive.
+ *
+ * `facetVocabularyEntrySchema.value` (shared/contract/dataset.ts) is an
+ * unconstrained `z.string()` sourced from live dataset metadata, so this is
+ * attacker-influenceable in the weak sense: whatever ends up in a dataset's
+ * metadata reaches every user's shell through this path.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: detecting control chars is the point
+const UNSAFE_CANDIDATE_PATTERN = /[\u0000-\u001f\u007f]/;
+
 export async function runComplete(program: Command, argv: string[]): Promise<void> {
   // The shell scripts (D4) always invoke `nemar __complete -- <words...>`;
   // drop the literal `--` separator if the caller passed it through.
@@ -41,6 +59,10 @@ export async function runComplete(program: Command, argv: string[]): Promise<voi
   }
 
   for (const candidate of candidates) {
+    // Drop rather than mangle: a dropped candidate is merely invisible at
+    // the prompt, while rewriting/escaping it risks silently offering some
+    // OTHER real value instead of the one the user typed toward.
+    if (UNSAFE_CANDIDATE_PATTERN.test(candidate)) continue;
     process.stdout.write(`${candidate}\n`);
   }
   process.stdout.write(`:${CompletionDirective.NoFileComp}\n`);
