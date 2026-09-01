@@ -26,11 +26,13 @@ import {
   statusAction,
   switchAction,
 } from "./commands/auth.js";
+import { completionCommand } from "./commands/completion.js";
 import { datasetCommand } from "./commands/dataset.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { sandboxCommand } from "./commands/sandbox.js";
 import { IS_DEV_BUILD } from "./lib/api/client.js";
 import { MaintenanceError, errorDetail } from "./lib/api/errors.js";
+import { runComplete } from "./lib/completion/run.js";
 import { NO_DESCRIPTION, NO_OPTION, YES_DESCRIPTION, YES_OPTION } from "./lib/confirm.js";
 import { printMaintenanceBanner } from "./lib/maintenance-banner.js";
 import { fetchAndDisplayNotices } from "./lib/notices.js";
@@ -73,6 +75,7 @@ program.addCommand(datasetCommand);
 program.addCommand(sandboxCommand);
 program.addCommand(adminCommand);
 program.addCommand(doctorCommand);
+program.addCommand(completionCommand);
 
 // ============================================================================
 // Root-level shortcuts (convenience aliases)
@@ -135,6 +138,20 @@ if (IS_DEV_BUILD) {
 
 // Initialize update check before parsing (may block up to 5s on first run)
 async function main() {
+  // Shell completion (epic #1144 phase 5b, #1149, D1). Must sit above
+  // initUpdateCheck() and return WITHOUT calling program.parseAsync(): on a
+  // cold cache, initUpdateCheck() does a blocking network fetch, and
+  // parseAsync() would run the preAction hook's unconditional GET /notices.
+  // Either one blows the ~100ms completion latency budget, and __complete
+  // must never touch the network at all -- not even with a timeout, since a
+  // timeout still pays DNS and connect on exactly the networks where this
+  // matters. Returning here, before parseAsync(), is what skips the
+  // preAction hook.
+  if (process.argv[2] === "__complete") {
+    await runComplete(program, process.argv.slice(3));
+    return;
+  }
+
   const pendingUpdate = await initUpdateCheck();
 
   if (pendingUpdate) {
