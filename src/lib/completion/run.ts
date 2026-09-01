@@ -7,7 +7,13 @@
  * Two guarantees this function makes that nothing else in the CLI has to:
  * it never performs network I/O (D1 -- not even a fetch with a short
  * timeout, since a timeout still pays DNS and connect on exactly the
- * captive-portal networks where this matters), and it never throws. A
+ * captive-portal networks where this matters), and CANDIDATE RESOLUTION
+ * never throws. The scope of that second one is deliberate: the try/catch
+ * covers getCandidates(), not the stdout writes after it, so an EPIPE from
+ * a closed stdout is still unhandled. Every shell script here invokes this
+ * via command substitution and reads to EOF, so that path is not reachable
+ * from the supported callers -- but it is not a whole-function guarantee
+ * and the earlier wording implied it was (#1173 review). A
  * completion request that crashes mid-TAB is worse than one that silently
  * offers nothing, so any failure in candidate resolution is swallowed here
  * and degrades to zero candidates -- the same "no stack trace at the

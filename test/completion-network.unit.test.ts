@@ -8,8 +8,18 @@
  * (D1's guard), not a reimplementation of it.
  *
  * D1: `__complete` must sit above `initUpdateCheck()` and return WITHOUT
- * calling `program.parseAsync()`, so neither the cold-cache update check nor
- * the `preAction` hook's `GET /notices` ever fires. Case 1 proves the
+ * calling `program.parseAsync()`. Be precise about what removing the guard
+ * would actually do, since an earlier version of this docstring got it wrong
+ * (#1173 review): `__complete` is not a registered Commander command, so
+ * parseAsync() would exit 1 with "unknown command" BEFORE any preAction hook
+ * runs -- it would not fire `GET /notices`, it would simply stop working.
+ * The network cost this guard genuinely avoids today is `initUpdateCheck()`,
+ * which blocks on a cold cache and runs before parseAsync() whatever command
+ * was typed. `GET /notices` is why `__complete` is not registered as a normal
+ * command in the first place, not something this guard skips.
+ *
+ * These tests assert the guarded path makes ZERO requests, which holds under
+ * either account and is the property that actually matters. Case 1 proves the
  * network side directly. Case 2 proves the latency consequence of the same
  * guard using a deliberately SLOW (not merely unreachable) local server: an
  * unreachable host can fail fast or hang depending on the machine's network

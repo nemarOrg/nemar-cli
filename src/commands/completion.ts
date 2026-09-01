@@ -64,9 +64,13 @@ completionCommand.addHelpText(
   `
 Description:
   Tab completion for subcommands, flags, and facet vocabularies. Subcommand
-  names, flags, and enum flags with a small declared vocabulary
-  (--source, --zarr, --powerline, --electrode-system) always complete --
-  they need no network and no cache.
+  names, flags, and the enum flags with a fixed declared vocabulary
+  (--source, --zarr, --powerline) always complete -- they need no network
+  and no cache.
+
+  --electrode-system also always completes from its declared six values,
+  but it is the one flag with BOTH: once a cache exists it completes from
+  the catalog instead, which can be a superset.
 
   --task, --modality, --license, and --bids-version complete from the real
   catalog instead, which needs a cache this command (or a successful

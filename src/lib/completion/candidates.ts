@@ -13,10 +13,20 @@
  * uses for the admin route table (D2).
  *
  * Facet enum values (`shared/facets.ts`) and Commander `.choices()` values
- * are both static and need no network or cache (D2). The facets endpoint
- * only widens `task`, `modality`, `license`, `bids-version`, and
- * `electrode-system` beyond what's declared statically -- everything else
- * (`--source`, `--zarr`, `--powerline`) has no dynamic counterpart at all.
+ * are both static and need no network or cache (D2).
+ *
+ * Three distinct cases, and "widens" is only accurate for one of them
+ * (#1173 review):
+ *   - `electrode-system` has a static `enumValues` AND a cache-backed
+ *     vocabulary. The endpoint genuinely WIDENS it, and the cache wins when
+ *     fresh, so its candidates can differ from the declared six.
+ *   - `task`, `modality`, `license`, `bids-version` have no static
+ *     vocabulary at all -- `task`/`modality`/`license` are the legacy
+ *     bespoke filters `shared/facets.ts` excludes by design, and
+ *     `bids-version`'s FacetDefinition carries no `enumValues`. The endpoint
+ *     is their ONLY source, not a widening of one.
+ *   - `--source`, `--zarr`, `--powerline` are static-only, no dynamic
+ *     counterpart.
  */
 
 import type { Command, Option } from "commander";

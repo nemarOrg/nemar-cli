@@ -138,15 +138,29 @@ if (IS_DEV_BUILD) {
 
 // Initialize update check before parsing (may block up to 5s on first run)
 async function main() {
-  // Shell completion (epic #1144 phase 5b, #1149, D1). Must sit above
-  // initUpdateCheck() and return WITHOUT calling program.parseAsync(): on a
-  // cold cache, initUpdateCheck() does a blocking network fetch, and
-  // parseAsync() would run the preAction hook's unconditional GET /notices.
-  // Either one blows the ~100ms completion latency budget, and __complete
-  // must never touch the network at all -- not even with a timeout, since a
-  // timeout still pays DNS and connect on exactly the networks where this
-  // matters. Returning here, before parseAsync(), is what skips the
-  // preAction hook.
+  // Shell completion (epic #1144 phase 5b, #1149, D1). This guard does two
+  // separable things; an earlier version of this comment conflated them and
+  // asserted something false (#1173 review).
+  //
+  // 1. It DISPATCHES `__complete`, which is deliberately not a registered
+  //    Commander command. Falling through to parseAsync() would not run it
+  //    slowly -- it would not run it at all: Commander's _findCommand finds
+  //    no match, takes the unknownCommand() branch, and exits 1 with
+  //    "error: unknown command '__complete'" BEFORE any preAction hook can
+  //    fire. Verified by disabling this guard and running it.
+  // 2. Sitting ABOVE initUpdateCheck() is what avoids the one network cost
+  //    that is real on this path today: on a cold cache initUpdateCheck()
+  //    does a blocking fetch (see update-check.ts), and it runs before
+  //    parseAsync() regardless of which command was typed.
+  //
+  // The preAction hook's unconditional GET /notices is a hazard of the
+  // ALTERNATIVE design, not of this one: it is why `__complete` is not
+  // registered as a normal command (see commands/completion.ts), not
+  // something this early return is currently skipping.
+  //
+  // The budget is ~100ms and __complete must touch the network zero times --
+  // not even with a timeout, since a timeout still pays DNS and connect on
+  // exactly the networks where someone is offline pressing TAB.
   if (process.argv[2] === "__complete") {
     await runComplete(program, process.argv.slice(3));
     return;

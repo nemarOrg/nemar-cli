@@ -132,14 +132,22 @@ describe("verification case 5: cache degradation", () => {
     }
   });
 
-  // A second, independently-discriminating wrong-shape case. The task/array
-  // case above happens to also be caught by run.ts's outer try/catch (a
-  // vocabulary entry's `.value` access throws when the entry is a bare
-  // string, not an object) -- defense in depth, but it means that case
-  // alone does not PROVE readCompletionCache's own zod validation is doing
-  // anything. This one is a shape violation that would NOT throw if
-  // unvalidated -- a numeric `value` silently stringifies -- so it can only
-  // be caught by the schema check itself.
+  // A second, independently-discriminating wrong-shape case.
+  //
+  // Be precise about the layering, because the first version of this comment
+  // was not (#1173 review). In NORMAL operation the task/array case is caught
+  // by the zod schema alone: datasetFacetsEnvelopeSchema.safeParse rejects it
+  // with invalid_type at path ["task"], so readCompletionCache returns null
+  // and run.ts's catch never sees anything. Both layers are not acting.
+  //
+  // What that case cannot do is PROVE the schema is load-bearing, because
+  // REMOVING the schema does not change the observable outcome: the bad shape
+  // then reaches `.value` on a bare string, throws, and run.ts's outer catch
+  // produces the same static-candidate fallback. The mutation is masked even
+  // though the layering is not redundant.
+  //
+  // This case closes that: a numeric `value` silently stringifies rather than
+  // throwing, so nothing downstream rejects it and only the schema check can.
   test("right JSON, wrong shape: a vocabulary entry's value is a number, not a string", async () => {
     const dir = freshDir();
     try {
@@ -235,5 +243,72 @@ describe("readCompletionCache() directly (supplements the subprocess tests above
   test("malformed JSON: returns null, does not throw", () => {
     writeFileSync(cacheFile(directDir), "{not valid json at all");
     expect(readCompletionCache()).toBeNull();
+  });
+});
+
+// #1173 comment review: --electrode-system is the ONLY flag with both a
+// static enumValues declaration and a cache-backed vocabulary, and nothing
+// exercised that duality. The help text now makes a user-facing claim about
+// it ("always completes from its declared six values, but once a cache
+// exists it completes from the catalog instead"), so the claim needs a test.
+describe("--electrode-system: the one flag with both a static enum and a cache", () => {
+  test("with no cache it completes the declared static values", async () => {
+    const dir = freshDir();
+    try {
+      const res = await runComplete(dir, ["dataset", "list", "--electrode-system", ""]);
+      expect(res.exitCode).toBe(0);
+      // The six declared in shared/facets.ts, and nothing invented.
+      expect(res.candidates.sort()).toEqual(
+        ["10-05", "10-10", "10-20", "biosemi", "egi-geodesic", "other"].sort(),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("with a fresh cache it completes the catalog superset instead", async () => {
+    const dir = freshDir();
+    try {
+      writeFileSync(
+        cacheFile(dir),
+        JSON.stringify({
+          cachedAt: Date.now(),
+          data: {
+            "electrode-system": [
+              { value: "10-10", count: 341 },
+              // A value that is NOT in the static six. If the static list
+              // were preferred, or merged, this would not appear alone.
+              { value: "10-10-extended", count: 3 },
+            ],
+          },
+        }),
+      );
+      const res = await runComplete(dir, ["dataset", "list", "--electrode-system", ""]);
+      expect(res.exitCode).toBe(0);
+      expect(res.candidates.sort()).toEqual(["10-10", "10-10-extended"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an EXPIRED cache falls back to the static six, not to nothing", async () => {
+    // The dual-source flag must degrade to its static half, unlike --task,
+    // which has no static half and correctly degrades to no candidates.
+    const dir = freshDir();
+    try {
+      writeFileSync(
+        cacheFile(dir),
+        JSON.stringify({
+          cachedAt: Date.now() - 2 * 60 * 60 * 1000,
+          data: { "electrode-system": [{ value: "10-10-extended", count: 3 }] },
+        }),
+      );
+      const res = await runComplete(dir, ["dataset", "list", "--electrode-system", ""]);
+      expect(res.exitCode).toBe(0);
+      expect(res.candidates).toContain("biosemi");
+      expect(res.candidates).not.toContain("10-10-extended");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
