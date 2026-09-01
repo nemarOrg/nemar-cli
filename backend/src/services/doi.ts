@@ -2,7 +2,10 @@
  * DOI provider dispatch layer
  *
  * Routes DOI operations to EZID or Zenodo based on the provider setting.
- * Each dataset has its own doi_provider; existing Zenodo datasets keep working.
+ * EZID is the sole provider for datasets (ADR 0007; the datasets.doi_provider
+ * column was dropped in #1182). The zenodo dispatch branch remains only for
+ * the retired paths a follow-up will remove; manifest_jobs still records a
+ * per-job doi_provider, which parseDoiProvider below validates.
  */
 
 import { datasetLandingUrl, datasetVersionLandingUrl } from "../../../shared/datacite-constants.js";
@@ -25,7 +28,8 @@ import { type ZenodoMetadata, createDeposition, getPrereservedDoi } from "./zeno
 
 export type DoiProvider = "ezid" | "zenodo";
 
-/** Parse and validate a doi_provider value from the database.
+/** Parse and validate a doi_provider value from the database
+ *  (manifest_jobs.doi_provider; the datasets column is gone, #1182).
  *  Throws on non-null unrecognized values (data integrity issue).
  *  Returns fallback only when raw is null/undefined (no provider configured yet). */
 export function parseDoiProvider(

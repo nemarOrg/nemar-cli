@@ -45,8 +45,9 @@ function seedDataset(db: Database, datasetId: string): void {
     "INSERT OR IGNORE INTO users (id, username, email, github_username, status) VALUES (1, 'alice', 'alice@nemar.org', 'alice', 'approved')",
   ).run();
   db.prepare(
-    "INSERT INTO datasets (dataset_id, owner_user_id, name, visibility, is_sandbox, ezid_identifier) VALUES (?, 1, ?, 'public', 0, ?)",
-  ).run(datasetId, datasetId, `doi:10.82901/NEMAR.${datasetId.toUpperCase()}`);
+    // concept_doi, not the dropped ezid_identifier column (#1182).
+    "INSERT INTO datasets (dataset_id, owner_user_id, name, visibility, is_sandbox, concept_doi) VALUES (?, 1, ?, 'public', 0, ?)",
+  ).run(datasetId, datasetId, `10.82901/nemar.${datasetId.toLowerCase()}`);
 }
 
 describe("migration 0060_withdrawal_columns", () => {

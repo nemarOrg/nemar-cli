@@ -328,9 +328,9 @@ export interface DoiInfoResponse {
   name: string;
   concept_doi: string | null;
   latest_version_doi: string | null;
+  /** Always "ezid" since #1182 (ADR 0007); kept for older backends. */
   doi_provider: "ezid" | "zenodo";
   zenodo_concept_url: string | null;
-  zenodo_latest_version_url: string | null;
   ezid_identifier: string | null;
   ezid_status: "reserved" | "public" | "unavailable" | null;
   doi_url: string | null;
