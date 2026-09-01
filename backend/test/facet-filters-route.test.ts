@@ -403,6 +403,7 @@ describe("D4/ADR 0005: unknown is excluded by default, and reported", () => {
       results: { id: string }[];
       warning?: string;
       excluded_unknown?: number;
+      excluded_unknown_by_facet?: Record<string, number>;
     };
     // The main FTS query is untouched by the fault (only .first() is
     // wrapped), so results still come back correctly.
@@ -412,7 +413,10 @@ describe("D4/ADR 0005: unknown is excluded by default, and reported", () => {
     // C1: excluded_unknown must be OMITTED, never computed against the
     // degraded fallback count -- even though the widened count query itself
     // succeeded and a buggy implementation would happily compute a number.
+    // Phase 4 (#1148), D5: excluded_unknown_by_facet is gated the same way
+    // -- a breakdown of an untrustworthy total is not trustworthy either.
     expect("excluded_unknown" in body).toBe(false);
+    expect("excluded_unknown_by_facet" in body).toBe(false);
   });
 });
 
@@ -459,6 +463,217 @@ describe("I2: excluded_unknown widens EACH active facet by its OWN nullTest", ()
   test("include_unknown=1 includes all three rows, not just the ones the first active facet would widen", async () => {
     const ids = await listIds(app, db, "subjects=10..30&duration=50..150&include_unknown=1");
     expect(ids.sort()).toEqual(["nm280001", "nm280002", "nm280003"]);
+  });
+});
+
+// Epic #1144 phase 4 (#1148), D5: per-facet attribution, computed in the
+// SAME widened-count query via conditional aggregation
+// (buildExcludedUnknownBreakdownSql), not a deferred second round trip.
+// Phase 3's "aggregate only" design is superseded; ADR 0031 is amended.
+describe("Phase 4 D5: excluded_unknown_by_facet, a row unknown in TWO active facets", () => {
+  let db: Database;
+  let app: App;
+
+  beforeEach(() => {
+    db = freshDb();
+    app = newApp();
+    // Baseline: satisfies both predicates, in the STRICT population.
+    insertDataset(db, "nm295001", { subject_count: 20, total_recording_duration: 100 });
+    // Unknown in subjects only.
+    insertDataset(db, "nm295002", { subject_count: null, total_recording_duration: 100 });
+    // Unknown in duration only.
+    insertDataset(db, "nm295003", { subject_count: 20, total_recording_duration: null });
+    // Unknown in BOTH active facets -- the row this describe block exists to
+    // pin: it must count once toward excluded_unknown (it is one row) but
+    // once in EACH bucket (subjects AND duration), so the buckets sum to
+    // more than the total.
+    insertDataset(db, "nm295004", { subject_count: null, total_recording_duration: null });
+  });
+
+  // Hand-computed: strict population is nm295001 alone (1). Widened
+  // population is all four rows (4). excluded_unknown = 4 - 1 = 3.
+  // excluded_unknown_by_facet.subjects counts widened rows with
+  // subject_count NULL: nm295002 and nm295004 -> 2.
+  // excluded_unknown_by_facet.duration counts widened rows with
+  // total_recording_duration NULL: nm295003 and nm295004 -> 2.
+  // Buckets sum to 4, one MORE than excluded_unknown (3), exactly because
+  // nm295004 is counted in both buckets but only once in the total.
+  test("GET /datasets: total is 3, both buckets are 2, buckets sum to 4 (> total)", async () => {
+    const res = await app.request("/?subjects=10..30&duration=50..150", {}, env(db));
+    const body = (await res.json()) as {
+      datasets: { dataset_id: string }[];
+      excluded_unknown?: number;
+      excluded_unknown_by_facet?: Record<string, number>;
+    };
+    expect(body.datasets.map((d) => d.dataset_id)).toEqual(["nm295001"]);
+    expect(body.excluded_unknown).toBe(3);
+    expect(body.excluded_unknown_by_facet).toEqual({ subjects: 2, duration: 2 });
+    const bucketSum = Object.values(body.excluded_unknown_by_facet ?? {}).reduce(
+      (a, b) => a + b,
+      0,
+    );
+    expect(bucketSum).toBeGreaterThan(body.excluded_unknown ?? Number.NaN);
+  });
+
+  test("GET /datasets/search: identical total and per-facet breakdown", async () => {
+    const res = await app.request("/search?q=nm295&subjects=10..30&duration=50..150", {}, env(db));
+    const body = (await res.json()) as {
+      results: { id: string }[];
+      excluded_unknown?: number;
+      excluded_unknown_by_facet?: Record<string, number>;
+    };
+    expect(body.excluded_unknown).toBe(3);
+    expect(body.excluded_unknown_by_facet).toEqual({ subjects: 2, duration: 2 });
+  });
+});
+
+describe("Phase 4 D5: excluded_unknown_by_facet, skewed per-facet counts", () => {
+  let db: Database;
+  let app: App;
+
+  beforeEach(() => {
+    db = freshDb();
+    app = newApp();
+    insertDataset(db, "nm296001", { subject_count: 20, total_recording_duration: 100 });
+    // Five rows unknown in subjects only.
+    for (let i = 2; i <= 6; i++) {
+      insertDataset(db, `nm29600${i}`, {
+        subject_count: null,
+        total_recording_duration: 100,
+      });
+    }
+    // One row unknown in duration only.
+    insertDataset(db, "nm296007", { subject_count: 20, total_recording_duration: null });
+  });
+
+  // Strict: nm296001 only (1). Widened: all 7. excluded_unknown = 6.
+  // No row here is unknown in BOTH facets, so the buckets sum EXACTLY to the
+  // total (5 + 1 = 6) -- the complementary case to the double-bucket test
+  // above, pinning that the arithmetic is exact (not just an inequality)
+  // when no row double-counts.
+  test("GET /datasets: subjects=5, duration=1, buckets sum exactly to the total", async () => {
+    const res = await app.request("/?subjects=10..30&duration=50..150", {}, env(db));
+    const body = (await res.json()) as {
+      excluded_unknown?: number;
+      excluded_unknown_by_facet?: Record<string, number>;
+    };
+    expect(body.excluded_unknown).toBe(6);
+    expect(body.excluded_unknown_by_facet).toEqual({ subjects: 5, duration: 1 });
+    const bucketSum = Object.values(body.excluded_unknown_by_facet ?? {}).reduce(
+      (a, b) => a + b,
+      0,
+    );
+    expect(bucketSum).toBe(body.excluded_unknown);
+  });
+
+  test("GET /datasets/search: same skewed breakdown", async () => {
+    const res = await app.request("/search?q=nm296&subjects=10..30&duration=50..150", {}, env(db));
+    const body = (await res.json()) as {
+      excluded_unknown?: number;
+      excluded_unknown_by_facet?: Record<string, number>;
+    };
+    expect(body.excluded_unknown).toBe(6);
+    expect(body.excluded_unknown_by_facet).toEqual({ subjects: 5, duration: 1 });
+  });
+});
+
+describe("Phase 4 D5: both excluded_unknown fields degrade together", () => {
+  let db: Database;
+  let app: App;
+
+  beforeEach(() => {
+    db = freshDb();
+    app = newApp();
+    insertDataset(db, "nm297001", { subject_count: 20, total_recording_duration: 100 });
+    insertDataset(db, "nm297002", { subject_count: null, total_recording_duration: 100 });
+  });
+
+  // GET /datasets: fails ONLY the widened breakdown query -- identifiable by
+  // its unique "SUM(CASE WHEN" marker (absent from the primary count, which
+  // wraps the row projection with no SUM at all) -- while the real primary
+  // count still runs. Mirrors excludedUnknownFailingD1 above for /search.
+  function breakdownFailingD1(target: Database): Bindings {
+    const base = realD1(target);
+    return {
+      DB: {
+        prepare(sql: string) {
+          const stmt = base.prepare(sql);
+          const isBreakdownQuery = sql.includes("SUM(CASE WHEN");
+          const wrapper = {
+            bind: (...args: unknown[]) => {
+              stmt.bind(...args);
+              return wrapper;
+            },
+            run: () => stmt.run(),
+            first: <T>() => {
+              if (isBreakdownQuery) throw new Error("simulated breakdown failure");
+              return stmt.first<T>();
+            },
+            all: <T>() => stmt.all<T>(),
+          };
+          return wrapper;
+        },
+      } as unknown as D1Database,
+      ENVIRONMENT: "development",
+    } as Bindings;
+  }
+
+  test("GET /datasets: a failed breakdown query omits BOTH fields, never 500s", async () => {
+    const res = await app.request("/?subjects=10..30", {}, breakdownFailingD1(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      datasets: { dataset_id: string }[];
+      excluded_unknown?: number;
+      excluded_unknown_by_facet?: Record<string, number>;
+    };
+    expect(body.datasets.map((d) => d.dataset_id)).toEqual(["nm297001"]);
+    expect("excluded_unknown" in body).toBe(false);
+    expect("excluded_unknown_by_facet" in body).toBe(false);
+  });
+
+  // GET /datasets' primary count wraps the row projection as `SELECT
+  // COUNT(*) AS total FROM (<projection>)`; the breakdown query never does
+  // (it reads `FROM datasets d` directly), so this marker isolates it from
+  // the breakdown query above.
+  function primaryCountFailingD1List(target: Database): Bindings {
+    const base = realD1(target);
+    return {
+      DB: {
+        prepare(sql: string) {
+          const stmt = base.prepare(sql);
+          const isPrimaryCount = sql.startsWith("SELECT COUNT(*) AS total FROM (");
+          const wrapper = {
+            bind: (...args: unknown[]) => {
+              stmt.bind(...args);
+              return wrapper;
+            },
+            run: () => stmt.run(),
+            first: <T>() => {
+              if (isPrimaryCount) throw new Error("simulated primary count failure");
+              return stmt.first<T>();
+            },
+            all: <T>() => stmt.all<T>(),
+          };
+          return wrapper;
+        },
+      } as unknown as D1Database,
+      ENVIRONMENT: "development",
+    } as Bindings;
+  }
+
+  test("GET /datasets: a failed PRIMARY count omits BOTH fields, even though the breakdown query itself would have succeeded", async () => {
+    const res = await app.request("/?subjects=10..30", {}, primaryCountFailingD1List(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      datasets: { dataset_id: string }[];
+      excluded_unknown?: number;
+      excluded_unknown_by_facet?: Record<string, number>;
+    };
+    // The main list query itself is untouched by the fault (only the
+    // wrapped .first() calls reject), so results still come back.
+    expect(body.datasets.map((d) => d.dataset_id)).toEqual(["nm297001"]);
+    expect("excluded_unknown" in body).toBe(false);
+    expect("excluded_unknown_by_facet" in body).toBe(false);
   });
 });
 
