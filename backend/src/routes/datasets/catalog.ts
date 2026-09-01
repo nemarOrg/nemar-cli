@@ -111,6 +111,38 @@ interface FilterQueryContext {
 }
 
 /**
+ * Relevance floor for semantic results (epic #1144 phase 6, issue #1150,
+ * D6). bge-small cosine scores against this catalog, measured across 12
+ * representative queries at six thresholds:
+ *
+ * | Threshold | Queries losing the semantic tier |
+ * |---|---|
+ * | 0.50-0.60 | 0 of 12 |
+ * | 0.65 (prior default) | 4 of 12: sleep, motor, seizure, infant (all single-word) |
+ * | 0.70 | 6 of 12 |
+ *
+ * At 0.65 those four queries fell through to `text_fallback` silently --
+ * the response carries no signal that the semantic tier was even
+ * attempted, let alone skipped. 0.60 is the highest threshold at which
+ * nothing in the measured set degrades, and it still filters real noise
+ * (`motor` returns 16 results at 0.55 vs 11 at 0.60), so it is not simply
+ * "off". Override per-request with ?min_score=0 to inspect the long tail.
+ */
+export const DEFAULT_MIN_SCORE = 0.6;
+
+/**
+ * Parse and clamp the `min_score` query param, defaulting to
+ * {@link DEFAULT_MIN_SCORE}. Exported for unit testing (#1150 D6): a test
+ * pins this function's no-param result to `DEFAULT_MIN_SCORE` so a silent
+ * revert to the old 0.65 fails.
+ */
+export function parseMinScore(c: FilterQueryContext): number {
+  const minScoreParam = c.req.query("min_score");
+  const parsed = minScoreParam === undefined ? Number.NaN : Number.parseFloat(minScoreParam);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(parsed, 1)) : DEFAULT_MIN_SCORE;
+}
+
+/**
  * Parse every filter query param -- the nine legacy bespoke filters plus the
  * full facet table (epic #1144 phase 3, #1147, D6) -- into one
  * `DatasetFilterOptions`, shared by both catalog endpoints so they can no
@@ -734,17 +766,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       throw err;
     }
 
-    // Relevance floor for semantic results. bge-small cosine scores under
-    // ~0.65 against this catalog tend to be topic-adjacent noise rather
-    // than real matches (e.g. any EEG dataset coming back for "sleep eeg").
-    // Override per-request with ?min_score=0 to inspect the long tail.
-    const DEFAULT_MIN_SCORE = 0.65;
-    const minScoreParam = c.req.query("min_score");
-    const parsedMinScore =
-      minScoreParam === undefined ? Number.NaN : Number.parseFloat(minScoreParam);
-    const minScore = Number.isFinite(parsedMinScore)
-      ? Math.max(0, Math.min(parsedMinScore, 1))
-      : DEFAULT_MIN_SCORE;
+    const minScore = parseMinScore(c);
 
     try {
       const envelope = await executeDatasetSearch(c.env.DB, c.env.AI, c.env.VECTORIZE, {
