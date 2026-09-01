@@ -21,6 +21,7 @@ import type { BidsTreeStats, getBidsTreeStats } from "../src/services/github";
 import {
   SIGNAL_DEFAULTS_SWEEP_MAX,
   runSignalDefaultsSweep,
+  runSignalDefaultsSweepCron,
 } from "../src/services/signal-defaults-sweep";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -431,5 +432,74 @@ describe("runSignalDefaultsSweep: entry-point invariants", () => {
       fetchStats: async () => emptyStats({ samplingFrequency: 250 }),
     });
     expect(result.processed).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cron-only wrapper guard (issue #1166, Option 2) -- mirrors
+// cron-dev-safety.test.ts's probe pattern. `runSignalDefaultsSweep` itself is
+// intentionally left unguarded above (the admin route needs it on staging);
+// `runSignalDefaultsSweepCron` is the thing `scheduled()` actually calls, and
+// only IT carries the isNonProductionEnv fence.
+// ---------------------------------------------------------------------------
+
+describe("runSignalDefaultsSweepCron", () => {
+  // Mirrors cron-dev-safety.test.ts's probe(): a D1 whose prepare() throws the
+  // instant it is reached, so "resolved/rejected without D1 being touched" (a
+  // caught error, a truthy `null` return) cannot be mistaken for "the guard
+  // fired" -- only `touched()` proves that.
+  function probe(): { db: D1Database; touched: () => boolean } {
+    let reached = false;
+    const db = {
+      prepare() {
+        reached = true;
+        throw new Error("probe: candidate query reached");
+      },
+    } as unknown as D1Database;
+    return { db, touched: () => reached };
+  }
+
+  for (const environment of ["development", "staging", "test"]) {
+    test(`never reaches D1 when ENVIRONMENT=${environment}`, async () => {
+      const p = probe();
+      const result = await runSignalDefaultsSweepCron({
+        ENVIRONMENT: environment,
+        DB: p.db,
+      } as unknown as Bindings);
+      expect(p.touched()).toBe(false);
+      expect(result).toBeNull();
+    });
+  }
+
+  // isNonProductionEnv is an allow-list and fails CLOSED: production, and any
+  // unset/unrecognized value, are treated as production so the wrapper still
+  // delegates rather than silently disabling the daily job on a config typo.
+  for (const environment of ["production", "", undefined, "prod", "Production"]) {
+    test(`reaches D1 when ENVIRONMENT=${JSON.stringify(environment)}`, async () => {
+      const p = probe();
+      // runSignalDefaultsSweep does not catch a candidate-query failure (by
+      // design -- see its doc comment), so the wrapper's delegated call
+      // rejects here too; the probe firing is what matters, not the outcome.
+      await expect(
+        runSignalDefaultsSweepCron({
+          ENVIRONMENT: environment,
+          DB: p.db,
+        } as unknown as Bindings),
+      ).rejects.toThrow(/probe: candidate query reached/);
+      expect(p.touched()).toBe(true);
+    });
+  }
+
+  test("the raw sweep still reaches D1 under development -- the admin backfill route is unaffected", async () => {
+    // This is the asymmetry Option 2 exists for. If a future change added an
+    // internal guard to runSignalDefaultsSweep itself, this is the test that
+    // would catch it: staging's POST /admin/datasets/signal-defaults-sweep
+    // calls the exported sweep directly, not the cron wrapper, so a guard
+    // here would silently break that backfill with nothing else failing.
+    const p = probe();
+    await expect(
+      runSignalDefaultsSweep({ ENVIRONMENT: "development", DB: p.db } as unknown as Bindings),
+    ).rejects.toThrow(/probe: candidate query reached/);
+    expect(p.touched()).toBe(true);
   });
 });
