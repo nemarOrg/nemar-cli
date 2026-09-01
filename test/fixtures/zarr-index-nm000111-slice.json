@@ -1,0 +1,145 @@
+{
+  "dataset_id": "nm000111",
+  "format": "nemar-zarr-index",
+  "format_version": 1,
+  "source_commit": "510a05377459cf857e60b861ab377bc53b5b5b29",
+  "updated_utc": "2026-07-30T06:54:59Z",
+  "store_count": 6,
+  "stores": [
+    {
+      "path": "sub-I003/eeg/sub-I003_task-sleep_eeg.edf",
+      "zarr": "sub-I003/eeg/sub-I003_task-sleep_eeg.zarr",
+      "source_key": "SHA256E-s154185620--92c2dc2efde9a811b4b5e458bc20f184493fc8af58077f509e1220407c1ddef7.edf",
+      "updated_utc": "2026-07-30T06:54:59Z",
+      "modalities": [
+        "eeg"
+      ],
+      "groups": [
+        {
+          "name": "eeg_200hz",
+          "modality": "EEG",
+          "rate": 200.0,
+          "n_channels": 19,
+          "n_samples": 5658000,
+          "duration_s": 28290.0
+        }
+      ],
+      "power_line_frequency": null
+    },
+    {
+      "path": "sub-I004/eeg/sub-I004_task-sleep_eeg.edf",
+      "zarr": "sub-I004/eeg/sub-I004_task-sleep_eeg.zarr",
+      "source_key": "SHA256E-s157455620--bc0c2b2ae719464a8cafe7cf4ad70639d14951a69dd310b63c55592bb99bbfce.edf",
+      "updated_utc": "2026-07-30T06:54:59Z",
+      "modalities": [
+        "eeg"
+      ],
+      "groups": [
+        {
+          "name": "eeg_200hz",
+          "modality": "EEG",
+          "rate": 200.0,
+          "n_channels": 19,
+          "n_samples": 5778000,
+          "duration_s": 28890.0
+        }
+      ],
+      "power_line_frequency": null
+    },
+    {
+      "path": "sub-I005/eeg/sub-I005_task-sleep_eeg.edf",
+      "zarr": "sub-I005/eeg/sub-I005_task-sleep_eeg.zarr",
+      "source_key": "SHA256E-s143067620--8c666ae94531f0dfad5301f09a3be87a13af813209166a703240375ec6803b2d.edf",
+      "updated_utc": "2026-07-30T06:54:59Z",
+      "modalities": [
+        "eeg"
+      ],
+      "groups": [
+        {
+          "name": "eeg_200hz",
+          "modality": "EEG",
+          "rate": 200.0,
+          "n_channels": 19,
+          "n_samples": 5250000,
+          "duration_s": 26250.0
+        }
+      ],
+      "power_line_frequency": null
+    },
+    {
+      "path": "sub-I006/eeg/sub-I006_task-sleep_eeg.edf",
+      "zarr": "sub-I006/eeg/sub-I006_task-sleep_eeg.zarr",
+      "source_key": "SHA256E-s146664620--4540ab0c2329e7b0742470c80ee97b8c39a566fab49b0481f193f7fca3913cd6.edf",
+      "updated_utc": "2026-07-30T06:54:59Z",
+      "modalities": [
+        "eeg"
+      ],
+      "groups": [
+        {
+          "name": "eeg_200hz",
+          "modality": "EEG",
+          "rate": 200.0,
+          "n_channels": 19,
+          "n_samples": 5382000,
+          "duration_s": 26910.0
+        }
+      ],
+      "power_line_frequency": null
+    },
+    {
+      "path": "sub-I007/eeg/sub-I007_task-sleep_eeg.edf",
+      "zarr": "sub-I007/eeg/sub-I007_task-sleep_eeg.zarr",
+      "source_key": "SHA256E-s152550620--e4fc74997855b07be59e5512bc8fbb8c3d73ed6d80e9ad46a0c612c46d216065.edf",
+      "updated_utc": "2026-07-30T06:54:59Z",
+      "modalities": [
+        "eeg"
+      ],
+      "groups": [
+        {
+          "name": "eeg_200hz",
+          "modality": "EEG",
+          "rate": 200.0,
+          "n_channels": 19,
+          "n_samples": 5598000,
+          "duration_s": 27990.0
+        }
+      ],
+      "power_line_frequency": null
+    },
+    {
+      "path": "sub-I008/eeg/sub-I008_task-sleep_eeg.edf",
+      "zarr": "sub-I008/eeg/sub-I008_task-sleep_eeg.zarr",
+      "source_key": "SHA256E-s120689632--7d4744746d62b7ed4cb99e152a8256e5299b1eadaeda7bfe19238945650dcb25.edf",
+      "updated_utc": "2026-07-30T06:54:59Z",
+      "modalities": [
+        "eeg"
+      ],
+      "groups": [
+        {
+          "name": "eeg_200hz",
+          "modality": "EEG",
+          "rate": 200.0,
+          "n_channels": 21,
+          "n_samples": 5424000,
+          "duration_s": 27120.0
+        }
+      ],
+      "power_line_frequency": null
+    }
+  ],
+  "failure_count": 2,
+  "failures": [
+    {
+      "path": "sub-I001/eeg/sub-I001_task-sleep_eeg.edf",
+      "zarr": "sub-I001/eeg/sub-I001_task-sleep_eeg.zarr",
+      "code": "corrupt_or_truncated",
+      "reason": "This recording's data file appears truncated or corrupt, so the viewer could not be generated."
+    },
+    {
+      "path": "sub-I002/eeg/sub-I002_task-sleep_eeg.edf",
+      "zarr": "sub-I002/eeg/sub-I002_task-sleep_eeg.zarr",
+      "code": "corrupt_or_truncated",
+      "reason": "This recording's data file appears truncated or corrupt, so the viewer could not be generated."
+    }
+  ]
+}

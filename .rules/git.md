@@ -1,5 +1,38 @@
 # Git & Version Control Standards
 
+## [STRICT] Nothing merges without a review, and nothing skips the PR
+
+**Why:** this is a standing rule that was already in force and got broken anyway,
+which is the only reason it is written here now. During epic #1144 a fix for
+issue #1164 was committed straight to the epic branch, with no PR and no review
+pass, on the judgement that it was small and its reasoning was obvious.
+
+That judgement was the same one that created the bug it was fixing. Phase 2b had
+shipped a sweep with a service, an admin endpoint and two test files and simply
+never wired it to the cron, and it looked complete from every angle anyone
+checked. "Too small to need review" is not a category that exists here; the
+severity of a defect is not proportional to the size of the diff that carries it.
+
+**The rule:**
+
+- **A pull request is merged only after a review pass.** No exceptions for size,
+  for obviousness, or for the author being confident.
+- **Every change reaches an integration branch through a pull request.** That
+  includes an epic branch. Committing directly to one bypasses the review gate
+  and is the same violation by another route.
+- The narrow carve-out is documentation that cannot affect behaviour: `.rules/`,
+  `.context/`, and the gitignored epic-state file. Anything under `src/`,
+  `backend/src/`, `shared/`, `scripts/`, `test/` or `backend/test/` is a PR.
+  Tests are included deliberately: a bad test does not break production, it
+  removes the thing that would have caught the break.
+
+**Record the review where it survives.** Post the findings and their resolution
+as a comment on the PR. Agent-driven reviews leave `reviewCount: 0` on GitHub, so
+a review that exists only in a local state file or a terminal scrollback is a
+review that nobody after you can find. Epic #1144 Phase 1 took three review
+rounds and its record lives in a gitignored file; Phases 2 and 2b posted theirs
+and are still readable.
+
 ## Commit Messages
 - **Format:** `<type>: <description>`
 - **Length:** <50 characters

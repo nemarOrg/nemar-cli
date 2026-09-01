@@ -6,6 +6,11 @@
  * verbatim.
  */
 
+import {
+  type DatasetFacetsEnvelope,
+  datasetFacetsEnvelopeSchema,
+  datasetSearchEnvelopeSchema,
+} from "../../../shared/contract/index.js";
 import { request } from "./client.js";
 
 /** ORCID identifier format: XXXX-XXXX-XXXX-XXXX (last char may be X) */
@@ -153,6 +158,15 @@ export interface DatasetsListResponse {
   // filters were NOT applied and catalog datasets are NOT included (#646).
   fallback?: boolean;
   warning?: string;
+  // Epic #1144 phase 3/4 (#1147/#1148): rows hidden by the default
+  // unknown-excluded facet policy -- present only when at least one facet
+  // filter (shared/facets.ts) is active. See dataset-facets.ts#buildFacetClauses.
+  excluded_unknown?: number;
+  // Epic #1144 phase 4 (#1148), D5: per-facet breakdown of excluded_unknown,
+  // keyed by FacetKey. Does NOT sum to excluded_unknown -- a dataset unknown
+  // in two active facets counts once in the total but once in EACH bucket.
+  // Always present together with excluded_unknown, never on its own.
+  excluded_unknown_by_facet?: Record<string, number>;
 }
 
 export interface DatasetListFilters {
@@ -170,10 +184,17 @@ export interface DatasetListFilters {
   /** Comma-separated license tiers (public, attribution, sharealike,
       noncommercial, noderiv, unknown), OR semantics. #653. */
   license?: string;
-  sort?: "newest" | "oldest" | "name" | "participants" | "size";
+  sort?: "newest" | "oldest" | "name" | "participants" | "size" | "citations";
   limit?: number;
   offset?: number;
   owner?: string;
+  /** Wire-ready facet query params (queryParam -> canonical value), built by
+   *  `lib/facet-options.ts#buildFacetParams` from the declared table in
+   *  `shared/facets.ts`. Epic #1144 phase 4 (#1148). */
+  facets?: Record<string, string>;
+  /** Widen every active facet's predicate to also match rows where that
+   *  field is unknown (NULL). Serialized as include_unknown=1. */
+  includeUnknown?: boolean;
 }
 
 export interface DatasetSearchResult {
@@ -187,13 +208,71 @@ export interface DatasetSearchResult {
   /** HED presence (#869): 1 = has HED, 0 = checked/none, null = not classified. */
   has_hed?: number | null;
   score: number;
+  /** FTS5 highlight (#646, epic #1144 phase 6/#1150 D2): `<mark>`-wrapped
+   *  matched terms around a README excerpt. Absent on the exact-id tier and
+   *  on semantic rows with no FTS match -- render nothing for those, not a
+   *  blank line. Untrusted dataset-supplied prose; sanitise before printing
+   *  (`src/lib/render/snippet.ts`), same class as Phase 5b's completion
+   *  candidate sanitisation. */
+  snippet?: string;
 }
 
 export interface DatasetSearchResponse {
   results: DatasetSearchResult[];
   count: number;
+  // Additive envelope fields (#1145, epic #1144 phase 1): `count` is now the
+  // true total for the query + filters, decoupled from page size (and can
+  // legitimately exceed `candidate_ceiling` -- see `truncated`). Types only
+  // this phase -- the CLI renders nothing new beyond surfacing `warning`
+  // (see src/commands/dataset.ts), same as the list endpoint already does.
+  returned?: number;
+  offset?: number;
+  limit?: number;
+  candidate_ceiling?: number;
+  /** True when `count` exceeds `candidate_ceiling`: more rows match than
+   *  this response's candidate window could ever supply (review round 3 S1). */
+  truncated?: boolean;
   method: "semantic" | "text" | "text_fallback" | "exact_id" | "unavailable";
   min_score?: number;
+  /** Set only when the backend's exact-count query failed and `count` fell
+   *  back to a page-derived lower bound (review round 3 I1). */
+  warning?: string;
+  /** Epic #1144 phase 3/4 (#1147/#1148): identical semantics to
+   *  `DatasetsListResponse#excluded_unknown` -- present only when at least
+   *  one facet filter is active. */
+  excluded_unknown?: number;
+  /** Epic #1144 phase 4 (#1148), D5: identical semantics to
+   *  `DatasetsListResponse#excluded_unknown_by_facet` -- per-facet breakdown,
+   *  does not sum to `excluded_unknown`, always present alongside it. */
+  excluded_unknown_by_facet?: Record<string, number>;
+}
+
+/**
+ * Filters `nemar dataset search` accepts (epic #1144 phase 4, #1148, D6).
+ * Phase 3 already made `GET /datasets/search` honour `license`, `author`,
+ * `task`, `has_doi`, `recent`, `data_complete` and the full facet table via
+ * the same `parseFilterQuery` the list endpoint uses -- this type is what
+ * makes those reachable from the CLI. Deliberately no `search`: this
+ * endpoint's free text is the `q` argument, not a `search` query param (D6).
+ */
+export interface DatasetSearchFilters {
+  modality?: string;
+  /** Only datasets with HED annotations (#869). Serialized as has_hed=1. */
+  hasHed?: boolean;
+  limit?: number;
+  author?: string;
+  task?: string;
+  /** Comma-separated license tiers, OR semantics. #653. */
+  license?: string;
+  hasDoi?: boolean;
+  /** Only datasets verified data-complete (#970). Serialized as data_complete=1. */
+  dataComplete?: boolean;
+  recent?: number;
+  /** Wire-ready facet query params, built by
+   *  `lib/facet-options.ts#buildFacetParams`. */
+  facets?: Record<string, string>;
+  /** Widen every active facet's predicate to also match unknown (NULL) rows. */
+  includeUnknown?: boolean;
 }
 
 /**
@@ -241,6 +320,12 @@ export async function listDatasets(
   if (filters.limit != null) params.set("limit", String(filters.limit));
   if (filters.offset != null) params.set("offset", String(filters.offset));
   if (filters.owner) params.set("owner", filters.owner);
+  if (filters.facets) {
+    for (const [key, value] of Object.entries(filters.facets)) {
+      params.set(key, value);
+    }
+  }
+  if (filters.includeUnknown) params.set("include_unknown", "1");
   const query = params.toString() ? `?${params.toString()}` : "";
   const response = await request<DatasetsListResponse>(
     `/datasets${query}`,
@@ -267,17 +352,64 @@ export async function resolveSourceId(sourceId: string): Promise<ResolveSourceRe
 }
 
 /**
+ * Facet vocabulary with counts (epic #1144 phase 5a's `GET /datasets/facets`,
+ * consumed by phase 5b's shell completion, #1149). Optional-auth like the
+ * other catalog reads above -- the response is identical for every caller.
+ *
+ * Bounded like update-check.ts's own npm-registry fetch (same 5s budget):
+ * one caller is the opportunistic, fire-and-forget refresh after a
+ * successful `dataset list`/`dataset search` (src/lib/completion/refresh.ts)
+ * -- without a timeout, a hung connection there would hold the CLI process
+ * open well after its output has already been rendered.
+ */
+export async function getFacets(): Promise<DatasetFacetsEnvelope> {
+  return request<DatasetFacetsEnvelope>(
+    "/datasets/facets",
+    { signal: AbortSignal.timeout(5000) },
+    "optional",
+    datasetFacetsEnvelopeSchema,
+  );
+}
+
+/**
  * Semantic dataset search
+ *
+ * Validated against the shared contract (#1145 review I5) -- previously the
+ * only endpoints doing this were the ones burned by a real drift bug
+ * (getCurrentUser's #895 nested-envelope regression); search had none, so a
+ * backend shape drift here would have silently cast to a malformed
+ * `DatasetSearchResponse` instead of failing loudly. The schema's field
+ * shapes don't line up 1:1 with this legacy interface (nullable columns,
+ * etc.), so the validated value is cast rather than returned as-is -- the
+ * validation itself, not the cast, is what the drift guard actually buys.
  */
 export async function searchDatasets(
   query: string,
-  filters: { modality?: string; limit?: number; hasHed?: boolean } = {},
+  filters: DatasetSearchFilters = {},
 ): Promise<DatasetSearchResponse> {
   const params = new URLSearchParams({ q: query });
   if (filters.modality) params.set("modality", filters.modality);
   if (filters.limit) params.set("limit", String(filters.limit));
   if (filters.hasHed) params.set("has_hed", "1");
-  return request<DatasetSearchResponse>(`/datasets/search?${params.toString()}`, {}, "optional");
+  if (filters.author) params.set("author", filters.author);
+  if (filters.task) params.set("task", filters.task);
+  if (filters.license) params.set("license", filters.license);
+  if (filters.hasDoi) params.set("has_doi", "true");
+  if (filters.dataComplete) params.set("data_complete", "1");
+  if (filters.recent) params.set("recent", String(filters.recent));
+  if (filters.facets) {
+    for (const [key, value] of Object.entries(filters.facets)) {
+      params.set(key, value);
+    }
+  }
+  if (filters.includeUnknown) params.set("include_unknown", "1");
+  const response = await request(
+    `/datasets/search?${params.toString()}`,
+    {},
+    "optional",
+    datasetSearchEnvelopeSchema,
+  );
+  return response as unknown as DatasetSearchResponse;
 }
 
 interface GetDatasetResponse {

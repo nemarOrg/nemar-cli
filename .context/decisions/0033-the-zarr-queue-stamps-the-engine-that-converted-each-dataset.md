@@ -1,4 +1,4 @@
-# ADR 0032: The Zarr queue stamps the engine that converted each dataset, and pre-existing rows are declared current
+# ADR 0033: The Zarr queue stamps the engine that converted each dataset, and pre-existing rows are declared current
 
 **Status:** accepted
 **Date:** 2026-09-01

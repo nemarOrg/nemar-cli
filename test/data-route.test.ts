@@ -209,7 +209,7 @@ describe("data.nemar.org route (epic #449, phase 1)", async () => {
       };
     };
 
-    expect(body.schema_version).toBe("0.3.0");
+    expect(body.schema_version).toBe("0.4.0");
     expect(body.doc_type).toBe("dataset");
     expect(body.dataset_id).toBe(TEST_DATASET);
     expect(body.source).toBe("nemar");

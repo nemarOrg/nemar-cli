@@ -41,7 +41,7 @@ Load-bearing ones to know before touching the relevant area:
 0029 (the Zarr conversion engine lives here, not in the Actions repo),
 0030 (bounded streaming is the default; `.set` is the exception),
 0031 (one annex policy module; `_motion.tsv` is data despite the extension),
-0032 (the queue stamps which engine converted each dataset; pre-stamp rows are declared current).
+0033 (the queue stamps which engine converted each dataset; pre-stamp rows are declared current).
 
 ---
 
@@ -337,7 +337,7 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   so do not read the rule as a description of what is currently in the bucket.
   A `--clean` rebuild reconciles rather than wiping first (ADR 0023).
   **A widening of discovery reaches the back catalog only through the engine
-  stamp** (ADR 0032): `reconcile` re-queues on a version change, and an engine
+  stamp** (ADR 0033): `reconcile` re-queues on a version change, and an engine
   upgrade bumps no version, so `zarr_queue.py`'s `ZARR_ENGINE_VERSION` is what
   makes already-converted datasets re-convert. Bump it when discovery widens —
   never when it narrows — and read `migrate_schema`'s note before touching how a
