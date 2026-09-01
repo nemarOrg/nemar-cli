@@ -112,6 +112,11 @@ describe("D2/D3: counts are datasets-carrying-the-value, not raw occurrences", (
     insertDataset(db, "nm310002", { modalities: "eeg" });
     // An empty tasks string contributes to no task bucket at all.
     insertDataset(db, "nm310003", { tasks: "" });
+    // Commas with nothing between them: split() produces only empty
+    // tokens, which is a DIFFERENT guard (the post-split filter) than the
+    // whole-column-empty case above (the early `if (!raw) continue`) --
+    // this row is truthy overall, so it reaches split() at all.
+    insertDataset(db, "nm310004", { tasks: ",," });
   });
 
   test("a modality repeated within one row's comma-joined value counts once for that row", async () => {
@@ -125,6 +130,8 @@ describe("D2/D3: counts are datasets-carrying-the-value, not raw occurrences", (
   test("an empty tasks string is excluded from every bucket (no empty-string entry)", async () => {
     const { body } = await getFacets(app, db);
     expect(body.task?.values.some((e) => e.value === "")).toBe(false);
+    // Only nm310004 has non-empty comma content, and it's ALL empty tokens
+    // after split -- so it contributes zero distinct tasks too.
     expect(body.task?.distinct_total).toBe(0);
   });
 });
@@ -174,7 +181,9 @@ describe("D2: task truncation reports distinct_total and truncated honestly", ()
     // sorts first), task_0001..task_0059 with one dataset each -- 60
     // distinct tasks total, well past the top-50 cutoff.
     for (let i = 0; i < 60; i++) {
-      insertDataset(db, `nm33${String(i).padStart(4, "0")}`, { tasks: `task_${String(i).padStart(4, "0")}` });
+      insertDataset(db, `nm33${String(i).padStart(4, "0")}`, {
+        tasks: `task_${String(i).padStart(4, "0")}`,
+      });
     }
   });
 
@@ -239,6 +248,19 @@ describe("D2: ordering is deterministic for ties (count desc, then value asc)", 
     // even though 'a' < 'p' alphabetically.
     expect(values.indexOf("public")).toBeLessThan(values.indexOf("attribution"));
     expect(values.indexOf("public")).toBeLessThan(values.indexOf("sharealike"));
+  });
+
+  // The license/enum vocabularies above are ordered by SQL (`ORDER BY count
+  // DESC, value ASC`); `modality`/`task` are a SEPARATE implementation --
+  // tallied and sorted in JS (`sortVocabulary`) -- so the same tie-break
+  // guarantee needs its own coverage rather than assuming the SQL-side test
+  // above also exercises it.
+  test("modality (JS-tallied) ties are also ordered by value ascending", async () => {
+    insertDataset(db, "nm350005", { modalities: "meg" });
+    insertDataset(db, "nm350006", { modalities: "eeg" });
+    const { body } = await getFacets(app, db);
+    const tied = (body.modality ?? []).filter((e) => ["meg", "eeg"].includes(e.value));
+    expect(tied.map((e) => e.value)).toEqual(["eeg", "meg"]);
   });
 });
 
