@@ -23,11 +23,20 @@
  * an internal `isNonProductionEnv` guard in each sweep of the kind
  * `archive-retry.ts`, `manifest-sweep.ts`, `doi-reconcile.ts` and
  * `import-retry.ts` already carry and `cron-dev-safety.test.ts` probes at
- * runtime. The three sweeps with admin backfill endpoints
- * (`runAvailabilityReportSweep`, `runRecordingStatsSweep`,
- * `runSignalDefaultsSweep`) deliberately do not self-guard, because the same
- * function serves the admin route that staging needs. That asymmetry is a real
- * gap and is tracked separately; it is not something this commit introduced.
+ * runtime.
+ *
+ * The three sweeps with admin backfill endpoints (`runAvailabilityReportSweep`,
+ * `runRecordingStatsSweep`, `runSignalDefaultsSweep`) deliberately do NOT
+ * self-guard, because the same exported function serves the admin route that
+ * staging needs for manual backfill (issue #1166, Option 2). Instead each has
+ * a same-module `<name>Cron` wrapper that carries the `isNonProductionEnv`
+ * guard, and it is the WRAPPER that `scheduled()` calls -- see
+ * `runAvailabilityReportSweepCron` and friends. The "cron-wrapped" kind below
+ * enforces the asymmetry from this side (the raw sweep must never be called
+ * directly from `scheduled()`, and its wrapper must be the one wired
+ * prod-only); `cron-dev-safety.test.ts`-style tests enforce it from the
+ * runtime side (the wrapper never reaches D1 outside production, the raw
+ * sweep still does).
  *
  * An earlier version of this file claimed to match the
  * `admin-route-inventory` / `api-export-surface` convention. It does not, and
@@ -52,20 +61,29 @@ const INDEX_PATH = join(import.meta.dir, "../src/index.ts");
  * the point is that adding a service without deciding how it recurs is the
  * error, not merely forgetting one particular call.
  *
- *  - `prod-only`  driven from the `if (prodOnlyJobs)` block in `scheduled()`
- *  - `all-envs`   driven unconditionally (scoped internally instead; see
- *                 `sweepBlockedBidsValidationRequests`, which narrows to the
- *                 dev id range rather than skipping, per cron-dev-safety)
- *  - `helper`     not a sweep at all: a SQL/query builder that happens to
- *                 carry the word in its name
+ *  - `prod-only`    driven from the `if (prodOnlyJobs)` block in `scheduled()`
+ *  - `all-envs`     driven unconditionally (scoped internally instead; see
+ *                   `sweepBlockedBidsValidationRequests`, which narrows to the
+ *                   dev id range rather than skipping, per cron-dev-safety)
+ *  - `cron-wrapped` NOT called directly from `scheduled()` at all (issue
+ *                   #1166, Option 2): the exported sweep stays unguarded so
+ *                   the admin backfill route can still call it on staging,
+ *                   and a same-module `<name>Cron` wrapper -- itself declared
+ *                   `prod-only` above -- carries the guard and is what
+ *                   `scheduled()` actually calls.
+ *  - `helper`       not a sweep at all: a SQL/query builder that happens to
+ *                   carry the word in its name
  */
-const SWEEP_WIRING: Record<string, "prod-only" | "all-envs" | "helper"> = {
+const SWEEP_WIRING: Record<string, "prod-only" | "all-envs" | "cron-wrapped" | "helper"> = {
   archiveRetrySweep: "prod-only",
   manifestIntegritySweep: "prod-only",
   sweepImportRetries: "prod-only",
-  runAvailabilityReportSweep: "prod-only",
-  runRecordingStatsSweep: "prod-only",
-  runSignalDefaultsSweep: "prod-only",
+  runAvailabilityReportSweep: "cron-wrapped",
+  runAvailabilityReportSweepCron: "prod-only",
+  runRecordingStatsSweep: "cron-wrapped",
+  runRecordingStatsSweepCron: "prod-only",
+  runSignalDefaultsSweep: "cron-wrapped",
+  runSignalDefaultsSweepCron: "prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
   availabilityReportSweepWhere: "helper",
   availabilityReportSweepCandidateQuery: "helper",
@@ -146,6 +164,28 @@ function callCount(code: string, name: string): number {
   return code.split(`${name}(env)`).length - 1;
 }
 
+/**
+ * The non-comment source lines of whichever `src/services/*.ts` file
+ * declares `export function <exportName>(` or `export const <exportName> =`,
+ * or null if none does. Used to check that a `<name>Cron` wrapper's own
+ * defining file actually calls the raw sweep it is supposed to wrap --
+ * declaring the wrapper `prod-only` above proves nothing about whether it
+ * delegates to anything.
+ */
+function serviceFileCodeLinesDefining(exportName: string): string[] | null {
+  const patterns = [
+    new RegExp(`^export\\s+(?:async\\s+)?function\\s+${exportName}\\s*\\(`),
+    new RegExp(`^export\\s+const\\s+${exportName}\\s*=`),
+  ];
+  for (const file of readdirSync(SERVICES_DIR).filter((f) => f.endsWith(".ts"))) {
+    const lines = readFileSync(join(SERVICES_DIR, file), "utf-8").split("\n");
+    if (lines.some((l) => patterns.some((re) => re.test(l.trim())))) {
+      return codeLines(lines);
+    }
+  }
+  return null;
+}
+
 describe("every sweep service is declared and driven", () => {
   const sweeps = discoverSweepExports();
 
@@ -162,7 +202,7 @@ describe("every sweep service is declared and driven", () => {
   }
 
   for (const [name, kind] of Object.entries(SWEEP_WIRING)) {
-    if (kind === "helper") continue;
+    if (kind === "helper" || kind === "cron-wrapped") continue;
 
     test(`${name} is actually called in scheduled()`, () => {
       expect(callCount(allCode, name)).toBeGreaterThanOrEqual(1);
@@ -184,6 +224,33 @@ describe("every sweep service is declared and driven", () => {
         expect(callCount(allCode, name)).toBe(callCount(prodOnlyCode, name));
       });
     }
+  }
+
+  for (const [name, kind] of Object.entries(SWEEP_WIRING)) {
+    if (kind !== "cron-wrapped") continue;
+    const cronName = `${name}Cron`;
+
+    test(`${name} is never called directly in scheduled() (bypasses its wrapper's guard)`, () => {
+      // The raw sweep has no internal isNonProductionEnv guard, by design --
+      // the admin backfill route needs it callable on staging (issue #1166,
+      // Option 2). A direct call here would run it from the dev/staging
+      // worker unguarded, defeating the entire reason the wrapper exists.
+      expect(callCount(allCode, name)).toBe(0);
+    });
+
+    test(`${name} declares a cron wrapper that is itself wired prod-only`, () => {
+      expect(SWEEP_WIRING[cronName]).toBe("prod-only");
+    });
+
+    test(`${cronName} actually delegates to ${name}`, () => {
+      // Declaring the wrapper prod-only proves it is CALLED from the right
+      // place; it proves nothing about whether it calls the sweep it is
+      // named after. A wrapper that only logs and returns would pass every
+      // other assertion in this file.
+      const code = serviceFileCodeLinesDefining(cronName)?.join("\n") ?? null;
+      expect(code).not.toBeNull();
+      expect(code).toContain(`${name}(env)`);
+    });
   }
 });
 
