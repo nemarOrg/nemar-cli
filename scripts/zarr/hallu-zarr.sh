@@ -37,12 +37,22 @@
 #   ./hallu-zarr.sh --stats              # print queue status and exit
 #   ./hallu-zarr.sh --requeue failed     # dry-run: what a requeue would revive
 #   ./hallu-zarr.sh --requeue all --execute   # revive failed + data_failed
+#   ./hallu-zarr.sh --backfill-dir-formats            # dry-run: the #1172 sweep
+#   ./hallu-zarr.sh --backfill-dir-formats --execute  # requeue what it found
 #
 # --requeue exists because the retry budget for `failed` was spent on OOM-killed
 # workers taking whole datasets down (#1110), and `data_failed` was reachable by
 # a classifier that recorded a runtime out-of-memory as a permanent property of
 # the data (#1111). Both give-ups predate the fixes, so they deserve one more
 # attempt; a genuine data failure simply returns to data_failed next run.
+#
+# --backfill-dir-formats is the one-off recovery for the cohort stranded before
+# the queue stamped an engine version (#1172): MEG/iEEG datasets converted before
+# epic #1095 taught discovery to see MEF3 `.mefd`, CTF `.ds` and 4D/BTi recording
+# DIRECTORIES. Those runs found nothing, succeeded, and were marked `done`, so
+# neither `reconcile` (no version change) nor the engine stamp (added after they
+# converted) can reach them. It reads the published index and the dataset file
+# list to identify them by evidence, and requeues only with --execute.
 #
 # Every conversion rebuilds the whole dataset (the driver's --clean) so the
 # serving copy mirrors the current dataset. --clean RECONCILES rather than
@@ -127,12 +137,17 @@ ONLY_DATASET=""
 LIMIT="${ZARR_LIMIT:-0}"
 STATS_ONLY=""
 REQUEUE=""
-REQUEUE_EXECUTE=""
+BACKFILL_DIR_FORMATS=""
+# Shared by --requeue and --backfill-dir-formats: both default to reporting and
+# write only when this is set, so one spelling of "yes, actually do it" serves
+# both recoveries.
+EXECUTE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dataset) ONLY_DATASET="$2"; shift 2 ;;
     --limit) LIMIT="$2"; shift 2 ;;
     --stats) STATS_ONLY=1; shift ;;
+    --backfill-dir-formats) BACKFILL_DIR_FORMATS=1; shift ;;
     # `shift 2` would fail on a bare `--requeue` (one positional left), and since
     # this script runs without `set -e` a failed shift leaves $# unchanged and the
     # loop spins forever. Take a value only when one is actually there.
@@ -143,7 +158,7 @@ while [[ $# -gt 0 ]]; do
         REQUEUE="failed"; shift
       fi
       ;;
-    --execute) REQUEUE_EXECUTE=1; shift ;;
+    --execute) EXECUTE=1; shift ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -379,6 +394,32 @@ convert_dataset() {
 # nothing. It also skips setup(): that does `git reset --hard` on the driver
 # clone, which a running conversion is reading from. SQLite's own locking covers
 # the concurrent write, which is a single fast UPDATE.
+# The #1172 backfill sweep sits in the same pre-lock, pre-setup() position, for
+# the same two reasons: an operator reaches for it precisely while a drain may be
+# holding the lock for hours, and it must not `git reset --hard` a clone that a
+# running conversion is reading from. It is read-only against the archive until
+# --execute, and even then its only write is the same single fast UPDATE that
+# --requeue performs, which SQLite's own locking covers.
+if [[ -n "$BACKFILL_DIR_FORMATS" ]]; then
+  if [[ -n "$REQUEUE" ]]; then
+    err "--backfill-dir-formats and --requeue are different recoveries; run one at a time"
+    exit 2
+  fi
+  if [[ ! -f "$QUEUE" ]]; then
+    err "queue script not found at $QUEUE; run once without --backfill-dir-formats to set up the clone"
+    exit 1
+  fi
+  backfill_args=(backfill-dir-formats --api-base "$API_BASE")
+  # --dataset and --limit are forwarded for the same reason --requeue forwards
+  # --dataset: accepting a narrowing flag and ignoring it turns a deliberately
+  # scoped run into a full-archive one.
+  [[ -n "$ONLY_DATASET" ]] && backfill_args+=(--dataset "$ONLY_DATASET")
+  [[ "$LIMIT" -gt 0 ]] && backfill_args+=(--limit "$LIMIT")
+  [[ -n "$EXECUTE" ]] && backfill_args+=(--execute)
+  qpy "${backfill_args[@]}"
+  exit $?
+fi
+
 if [[ -n "$REQUEUE" ]]; then
   if [[ ! -f "$QUEUE" ]]; then
     err "queue script not found at $QUEUE; run once without --requeue to set up the clone"
@@ -390,7 +431,7 @@ if [[ -n "$REQUEUE" ]]; then
   # of them.
   requeue_args=(requeue --status "$REQUEUE")
   [[ -n "$ONLY_DATASET" ]] && requeue_args+=(--dataset "$ONLY_DATASET")
-  [[ -n "$REQUEUE_EXECUTE" ]] && requeue_args+=(--execute)
+  [[ -n "$EXECUTE" ]] && requeue_args+=(--execute)
   qpy "${requeue_args[@]}"
   exit $?
 fi
