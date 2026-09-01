@@ -235,6 +235,54 @@ export const datasetSearchEnvelopeSchema = z
 export const datasetDetailEnvelopeSchema = z.object({ dataset: datasetDetailSchema }).passthrough();
 
 /**
+ * Envelope for GET /datasets/facets (epic #1144 phase 5a, #1170, D2): the
+ * facet vocabulary -- distinct values with counts -- the CLI needs to
+ * validate/autocomplete flags like `--task` (1040 distinct labels measured
+ * against the real catalog) or `--electrode-system` (six values nobody has
+ * written down outside the source) against what the catalog actually
+ * contains. Six keys reuse their `shared/facets.ts` FacetKey verbatim as the
+ * response key (the four ENUM-kind facets `electrode-system`/`source`/
+ * `zarr`/`powerline`, plus the two VERSION-kind facets `bids-version`/
+ * `hed-version`); `license`/`modality`/`task` are the pre-existing legacy
+ * filters that predate the facet table and never had a FacetKey to reuse.
+ *
+ * `task` alone carries `distinct_total`/`truncated` instead of a bare array:
+ * a truncated list that looks complete is the exact failure mode this
+ * endpoint exists to prevent for its 1040 real values.
+ *
+ * Every key is OPTIONAL and ABSENT (not `[]`) when its backing query failed
+ * (D5/ADR 0005) -- `[]` means the query succeeded and found genuinely no
+ * values (`hed-version`/`powerline` may legitimately be `[]` today). `warning`
+ * is set only when at least one key was omitted this way.
+ */
+const facetVocabularyEntrySchema = z.object({
+  value: z.string(),
+  count: z.number().int().nonnegative(),
+});
+
+const facetTaskVocabularySchema = z.object({
+  values: z.array(facetVocabularyEntrySchema),
+  distinct_total: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+});
+
+export const datasetFacetsEnvelopeSchema = z
+  .object({
+    "electrode-system": z.array(facetVocabularyEntrySchema).optional(),
+    source: z.array(facetVocabularyEntrySchema).optional(),
+    zarr: z.array(facetVocabularyEntrySchema).optional(),
+    powerline: z.array(facetVocabularyEntrySchema).optional(),
+    "bids-version": z.array(facetVocabularyEntrySchema).optional(),
+    "hed-version": z.array(facetVocabularyEntrySchema).optional(),
+    license: z.array(facetVocabularyEntrySchema).optional(),
+    modality: z.array(facetVocabularyEntrySchema).optional(),
+    task: facetTaskVocabularySchema.optional(),
+    warning: z.string().optional(),
+  })
+  .passthrough();
+export type DatasetFacetsEnvelope = z.infer<typeof datasetFacetsEnvelopeSchema>;
+
+/**
  * data.nemar.org landing payload — conforms to neuroschema v0.4.0
  * core/dataset.schema.json. Passthrough + optional on the deep nested blocks
  * (demographics/data_summary/provenance/extensions) which neuroschema fully
