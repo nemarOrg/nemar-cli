@@ -21,6 +21,8 @@
  */
 
 import type { LicenseTier } from "../lib/license";
+import type { AuthUser } from "../types/bindings";
+import { hasRole } from "../types/bindings";
 import { type FacetFilterValues, buildFacetClauses } from "./dataset-facets";
 
 /** Build an injection-safe FTS5 MATCH expression: tokenize to alphanumerics
@@ -163,4 +165,42 @@ export function buildDatasetFilterClauses(
   clauses += buildFacetClauses(params, opts.facets, opts.includeUnknown ?? false);
 
   return clauses;
+}
+
+/**
+ * FROM/JOIN/WHERE base for the public (non-`?mine`) `GET /datasets`
+ * population. Extracted out of that handler's own `buildPublicBase()`
+ * closure in epic #1144 phase 5a (#1170, D4): the facets vocabulary
+ * (`dataset-facet-vocabulary.ts`) must count over EXACTLY the population an
+ * anonymous caller can already list, and a hand-copied second WHERE clause
+ * is exactly how the vocabulary would end up advertising a value no list
+ * query can actually return. The list handler now calls this with its own
+ * request-scoped `status`/`user`/`owner`; the facets endpoint calls it with
+ * the literal `("active", undefined, undefined)` -- no `?status=` override,
+ * no admin bypass, no `?owner=` filter, which is precisely the anonymous
+ * default.
+ *
+ * `user` only needs `role` (not the full `AuthUser`) but takes the whole
+ * shape so callers can pass `c.get("user")` directly without picking fields.
+ */
+export function buildPublicCatalogBase(
+  status: string,
+  user: AuthUser | undefined,
+  owner: string | undefined,
+): { from: string; params: (string | number)[] } {
+  const prefixParams: (string | number)[] = [status];
+  let from = `
+    FROM datasets d
+    LEFT JOIN users u ON d.owner_user_id = u.id
+    WHERE d.status = ?
+      AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)
+  `;
+  if (!user || !hasRole(user.role, "admin")) {
+    from += " AND d.visibility = 'public'";
+  }
+  if (owner) {
+    from += " AND COALESCE(d.uploader, u.username) = ?";
+    prefixParams.push(owner);
+  }
+  return { from, params: prefixParams };
 }
