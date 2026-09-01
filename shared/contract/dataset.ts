@@ -90,6 +90,13 @@ export const catalogItemSchema = z
     // on is also projected here, raw and nullable -- a facet a caller can
     // filter by but never see the value of is a result set with no way to
     // check. Absent on older backends (additive, passthrough).
+    // Raw, un-COALESCEd counterparts of `participants` and `file_size`
+    // (#1177 integration review). Those two are display aliases that render an
+    // unmeasured NULL as 0, which made `include_unknown=1` return rows whose
+    // value was never measured looking like a confident zero. These carry the
+    // honest value; the aliases above stay for existing consumers.
+    subject_count: z.number().int().nullable().optional(),
+    file_size_bytes: z.number().nullable().optional(),
     sessions_count: z.number().int().nullable().optional(),
     age_min: z.number().nullable().optional(),
     age_max: z.number().nullable().optional(),

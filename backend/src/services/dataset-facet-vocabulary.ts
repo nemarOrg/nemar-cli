@@ -82,7 +82,12 @@ const GROUPED_VOCAB_KEYS = [
 export type GroupedVocabKey = (typeof GROUPED_VOCAB_KEYS)[number];
 
 /** The `datasets` column each grouped vocabulary key reads (D2's "Source column"). */
-const GROUPED_VOCAB_COLUMNS: Record<GroupedVocabKey, string> = {
+/** Exported so a test can assert this binds each key to the SAME column as
+ *  dataset-facets.ts's FACET_DEFINITIONS does (#1177 integration review).
+ *  The duplication is deliberate -- see the note above -- but only the KEY
+ *  sets were ever checked, so a column rename touching one map would make
+ *  filtering and the vocabulary endpoint disagree with every test green. */
+export const GROUPED_VOCAB_COLUMNS: Record<GroupedVocabKey, string> = {
   "electrode-system": "d.electrode_system",
   source: "d.source",
   zarr: "d.zarr_status",

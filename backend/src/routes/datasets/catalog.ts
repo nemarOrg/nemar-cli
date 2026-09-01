@@ -40,8 +40,25 @@ import type { DatasetsRouter } from "./shared";
  * both `GET /datasets` branches (the `?mine` shape, formerly 28 columns, and
  * the public shape, formerly 33) stay in lockstep rather than drifting apart
  * as two hand-copied column lists.
+ *
+ * `subject_count` and `file_size` are here for a reason worth stating,
+ * because they look redundant (#1177 integration review). Both are ALSO
+ * projected as `COALESCE(..., 0) AS participants` / `AS file_size`, a display
+ * convention that predates this epic and that the website depends on. Phase 3
+ * then made both filterable facets whose nullTest treats NULL as "unknown",
+ * so `include_unknown=1` deliberately returns rows whose value was never
+ * measured -- and the COALESCE rendered every one of them as a confident `0`,
+ * indistinguishable from a measured zero. That is the exact "unknown reported
+ * as a value" failure ADR 0005 and ADR 0031 exist to prevent, arrived at by
+ * composing a pre-existing display convention with a new filter contract.
+ *
+ * The raw columns are additive, so the COALESCEd aliases keep working for
+ * existing consumers. Do not "simplify" by dropping either half: the aliases
+ * are the wire contract, these are the honest values.
  */
-const FACET_PROJECTION_COLUMNS = `d.sessions_count,
+const FACET_PROJECTION_COLUMNS = `d.subject_count,
+               d.file_size AS file_size_bytes,
+               d.sessions_count,
                d.age_min,
                d.age_max,
                d.bids_version,

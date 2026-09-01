@@ -72,6 +72,14 @@ describe("verification case 6: shell completion scripts", () => {
       expect(result.stdout).toContain("nemar");
     });
 
+    // 20s, not the 5s default (#1177 integration review). This test spawns
+    // TWO processes -- `bun run src/index.ts completion <shell>` to emit the
+    // script, then the shell itself to parse it -- and under a full-suite run
+    // with hundreds of concurrent subprocesses that occasionally exceeds 5s.
+    // It failed once at 5001ms in a full run while passing standalone and in
+    // the next full run, which is subprocess contention, not a syntax error.
+    // A syntax check has no reason to be tightly time-bounded; a real hang
+    // still fails, just later.
     test.skipIf(!installed)(
       `${shell.name}: syntactically valid (${shell.binary} available)`,
       async () => {
@@ -88,6 +96,7 @@ describe("verification case 6: shell completion scripts", () => {
           cleanup();
         }
       },
+      20_000,
     );
   }
 });

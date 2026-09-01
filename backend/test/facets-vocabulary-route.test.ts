@@ -17,7 +17,11 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { FACETS } from "../../shared/facets";
 import { registerCatalogRoutes } from "../src/routes/datasets/catalog";
-import { FACET_VOCABULARY_KEYS } from "../src/services/dataset-facet-vocabulary";
+import {
+  FACET_VOCABULARY_KEYS,
+  GROUPED_VOCAB_COLUMNS,
+} from "../src/services/dataset-facet-vocabulary";
+import { FACET_DEFINITIONS } from "../src/services/dataset-facets";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
@@ -504,5 +508,50 @@ describe("gaps found by mutation after the first review round", () => {
     expect(body.source).toBeUndefined();
     // The whole point: no s-maxage on a response that is missing a vocabulary.
     expect(res.headers.get("Cache-Control")).toBe("no-store");
+  });
+});
+
+// #1177 integration review, Important. The vocabulary endpoint and the filter
+// engine each keep their own facet-to-column map. The duplication is
+// deliberate and documented, but only the KEY SETS were ever compared: a
+// column rename applied to one map and not the other would make `--zarr`
+// filter one column while `/facets` offered values from another, with every
+// test still green. This asserts they bind the same key to the same column.
+describe("the two facet-to-column maps agree (#1177 review)", () => {
+  test("every shared key binds to the same column in both maps", () => {
+    const mismatches: string[] = [];
+    for (const [key, vocabColumn] of Object.entries(GROUPED_VOCAB_COLUMNS)) {
+      const spec = FACET_DEFINITIONS.find((f) => f.key === key);
+      // `license` is vocabulary-only: it is a legacy filter with no
+      // FacetDefinition, so there is nothing to compare it against.
+      if (!spec) continue;
+      const filterColumn = "column" in spec ? spec.column : undefined;
+      if (filterColumn !== vocabColumn) {
+        mismatches.push(`${key}: filter=${filterColumn} vocabulary=${vocabColumn}`);
+      }
+    }
+    expect(mismatches).toEqual([]);
+  });
+
+  test("the comparison is not vacuous: shared keys exist", () => {
+    const shared = Object.keys(GROUPED_VOCAB_COLUMNS).filter((k) =>
+      FACET_DEFINITIONS.some((f) => f.key === k),
+    );
+    expect(shared.length).toBeGreaterThanOrEqual(6);
+  });
+});
+
+// Suggestion 4 from the same review: the correspondence test above filters
+// FACETS to valueKind "enum", so the two version-kind facets were never
+// checked against the vocabulary keys. Both are present today; a third added
+// later would ship with no vocabulary entry and nothing would fail.
+describe("version-kind facets also have vocabulary keys (#1177 review)", () => {
+  test("no version facet is missing from the facets response shape", () => {
+    const versionFacets = FACETS.filter((f) => f.valueKind === "version");
+    expect(versionFacets.length).toBeGreaterThan(0);
+    const missing = versionFacets
+      .map((f) => f.key)
+      .filter((k) => !(FACET_VOCABULARY_KEYS as readonly string[]).includes(k));
+    expect(missing).toEqual([]);
   });
 });

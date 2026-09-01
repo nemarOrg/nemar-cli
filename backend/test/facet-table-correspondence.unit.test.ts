@@ -179,10 +179,13 @@ describe("D7: every facet's column is projected on both GET /datasets branches",
   // checked; `citations` reads `num_citations`, which the public branch has
   // aliased since #804 and the ?mine branch gained here for parity).
   const expectedColumns: Record<FacetKey, string[]> = {
-    subjects: ["participants"], // subject_count is COALESCEd + aliased already
+    // #1177 integration review: `participants` is the COALESCEd alias, which
+    // renders an unmeasured NULL as 0. The raw column is what an
+    // include_unknown caller needs, so both are required now.
+    subjects: ["participants", "subject_count"],
     channels: ["channel_count_min", "channel_count_max", "n_channels"],
     sessions: ["sessions_count"],
-    size: ["file_size"],
+    size: ["file_size", "file_size_bytes"], // alias + raw, same reason as subjects
     files: ["total_files"],
     citations: ["num_citations"],
     duration: ["total_recording_duration"],
@@ -243,5 +246,71 @@ describe("D7: every facet's column is projected on both GET /datasets branches",
       }
     }
     expect(missing).toEqual([]);
+  });
+});
+
+// #1177 integration review, Critical. The D7 checks above assert only that a
+// column is a KEY on the row. That is structurally unable to catch value loss,
+// which is exactly what happened: `subjects` and `size` are facets whose
+// nullTest treats NULL as "unknown", so include_unknown deliberately returns
+// never-measured rows -- and the pre-existing `COALESCE(..., 0)` display alias
+// rendered every one of them as a confident 0, indistinguishable from a
+// measured zero. Key presence was satisfied the whole time.
+//
+// This asserts VALUES, and specifically that a caller can tell the two apart.
+describe("D7 addendum: an unknown value survives to the wire as null", () => {
+  let db: Database;
+  let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
+
+  function env(): Bindings {
+    return { DB: realD1(db), ENVIRONMENT: "development" } as Bindings;
+  }
+
+  beforeEach(() => {
+    db = freshDb();
+    app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+    registerCatalogRoutes(app);
+    // A genuine, measured zero.
+    db.run(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, visibility, status,
+         is_sandbox, subject_count, file_size)
+       VALUES ('nm950001', 'measured zero', -1, 'public', 'active', 0, 0, 0)`,
+    );
+    // Never measured. dataset-reindex re-queries exactly this state as an
+    // ongoing candidate condition, so it is common, not a corner case.
+    db.run(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, visibility, status,
+         is_sandbox, subject_count, file_size)
+       VALUES ('nm950002', 'never measured', -1, 'public', 'active', 0, NULL, NULL)`,
+    );
+  });
+
+  test("measured zero and never-measured are distinguishable on GET /datasets", async () => {
+    const res = await app.request("/", {}, env());
+    const body = (await res.json()) as { datasets: Record<string, unknown>[] };
+    const byId = new Map(body.datasets.map((d) => [d.dataset_id as string, d]));
+
+    const measured = byId.get("nm950001");
+    const unknown = byId.get("nm950002");
+
+    // The display aliases stay as they were: both read 0. That is the
+    // pre-existing wire contract and the website depends on it.
+    expect(measured?.participants).toBe(0);
+    expect(unknown?.participants).toBe(0);
+
+    // The raw columns are what carry the truth.
+    expect(measured?.subject_count).toBe(0);
+    expect(unknown?.subject_count).toBeNull();
+    expect(measured?.file_size_bytes).toBe(0);
+    expect(unknown?.file_size_bytes).toBeNull();
+  });
+
+  test("include_unknown returns the never-measured row without inventing a value", async () => {
+    // The whole point of include_unknown: surface rows whose value is not
+    // known. Returning one that claims 0 defeats it.
+    const res = await app.request("/?subjects=5..10&include_unknown=1", {}, env());
+    const body = (await res.json()) as { datasets: Record<string, unknown>[] };
+    expect(body.datasets.map((d) => d.dataset_id)).toEqual(["nm950002"]);
+    expect(body.datasets[0].subject_count).toBeNull();
   });
 });

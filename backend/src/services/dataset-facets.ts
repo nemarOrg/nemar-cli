@@ -524,13 +524,6 @@ export function buildFacetClauses(
   return clauses;
 }
 
-/** Exported for the correspondence test (`shared/facets.ts` <-> here) and
- *  for any caller that needs a single facet's binding (none currently do
- *  outside tests). */
-export function getFacetSqlSpec(key: string): FacetSqlSpec | undefined {
-  return FACET_DEFINITIONS_BY_KEY.get(key);
-}
-
 /** One `, SUM(...)` clause per active facet, plus the parallel key list a
  *  caller needs to map each `unk_N` result column back to its {@link FacetKey}. */
 export interface ExcludedUnknownBreakdownSql {
