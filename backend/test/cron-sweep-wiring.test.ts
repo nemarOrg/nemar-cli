@@ -214,13 +214,21 @@ describe("every sweep service is declared and driven", () => {
       });
 
       test(`${name} is called ONLY inside the prod-only block`, () => {
-        // These reach the shared, hardcoded `nemarDatasets` org (ORG_NAME in
-        // services/github/shared.ts is not environment-scoped) or the prod
-        // EZID shoulder. A call site outside the guard would run them from the
-        // dev worker against that same shared org. Note the D1 and S3 halves
-        // are NOT the risk: S3_BUCKET is env-scoped to nemar-dev, and per
-        // AGENTS.md the dev catalog was purged to fixtures and is no longer a
-        // production mirror.
+        // MOST of these reach the shared, hardcoded `nemarDatasets` org
+        // (ORG_NAME in services/github/shared.ts is not environment-scoped) or
+        // the prod EZID shoulder, so a call site outside the guard would run
+        // them from the dev worker against that same shared org. The D1 and S3
+        // halves are NOT the risk anywhere: S3_BUCKET is env-scoped to
+        // nemar-dev, and per AGENTS.md the dev catalog was purged to fixtures
+        // and is no longer a production mirror.
+        //
+        // `runRecordingStatsSweepCron` is the exception and this assertion is
+        // weaker for it: that sweep touches ONLY S3 and D1 (index.ts says so
+        // where it is wired), so it has no shared-org exposure to fence. It is
+        // held to the same rule for consistency and because the prod-only
+        // default in AGENTS.md applies regardless, not because an escape would
+        // be dangerous. Do not read this comment as evidence that it would.
+        // #1167 review, finding 3.
         expect(callCount(allCode, name)).toBe(callCount(prodOnlyCode, name));
       });
     }

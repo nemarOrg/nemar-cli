@@ -36,6 +36,7 @@ import { archiveRetrySweep } from "./services/archive-retry";
 import { AUTO_IMPORT_CRON, autoImportTick } from "./services/auto-import";
 import { runAvailabilityReportSweepCron } from "./services/availability-report";
 import { fetchAndSyncCitationCounts } from "./services/citation-counts-sync";
+import { sweepLogLines } from "./services/cron-sweep-log";
 import { drainEmbeddingDirty } from "./services/dataset-search";
 import { DEV_EPHEMERAL_BAND_END, DEV_EPHEMERAL_BAND_START } from "./services/datasetId";
 import { deleteDatasetCascade } from "./services/deletion";
@@ -814,18 +815,17 @@ export default {
       ctx.waitUntil(
         runAvailabilityReportSweepCron(env)
           .then((r) => {
-            // null means the wrapper's own isNonProductionEnv guard skipped
-            // the run (already logged there) -- not "ran and did nothing",
-            // which would otherwise print a fabricated processed=0 line.
-            if (!r) return;
-            if (r.processed > 0 || (r.remaining ?? 0) > 0) {
-              console.log(
+            // A null result means the wrapper's guard skipped the run and
+            // already logged it; sweepLogLines owns that decision so it can be
+            // tested without invoking scheduled(). See #1167 review.
+            const lines = sweepLogLines(
+              "availability-report-sweep",
+              r,
+              (r) =>
                 `[availability-report-sweep] processed=${r.processed} written=${r.written} errors=${r.errors.length} remaining=${r.remaining ?? "?"}`,
-              );
-            }
-            for (const e of r.errors) {
-              console.error(`[availability-report-sweep] ${e.dataset_id}: ${e.error}`);
-            }
+            );
+            if (lines.info) console.log(lines.info);
+            for (const e of lines.errors) console.error(e);
           })
           .catch((err) =>
             console.error(
@@ -851,18 +851,17 @@ export default {
       ctx.waitUntil(
         runRecordingStatsSweepCron(env)
           .then((r) => {
-            // null means the wrapper's own isNonProductionEnv guard skipped
-            // the run (already logged there) -- not "ran and did nothing",
-            // which would otherwise print a fabricated processed=0 line.
-            if (!r) return;
-            if (r.processed > 0 || (r.remaining ?? 0) > 0) {
-              console.log(
+            // A null result means the wrapper's guard skipped the run and
+            // already logged it; sweepLogLines owns that decision so it can be
+            // tested without invoking scheduled(). See #1167 review.
+            const lines = sweepLogLines(
+              "recording-stats-sweep",
+              r,
+              (r) =>
                 `[recording-stats-sweep] processed=${r.processed} measured=${r.measured} unmeasured=${r.unmeasured} errors=${r.errors.length} remaining=${r.remaining ?? "?"}`,
-              );
-            }
-            for (const e of r.errors) {
-              console.error(`[recording-stats-sweep] ${e.dataset_id}: ${e.error}`);
-            }
+            );
+            if (lines.info) console.log(lines.info);
+            for (const e of lines.errors) console.error(e);
           })
           .catch((err) =>
             console.error(
@@ -912,18 +911,17 @@ export default {
       ctx.waitUntil(
         runSignalDefaultsSweepCron(env)
           .then((r) => {
-            // null means the wrapper's own isNonProductionEnv guard skipped
-            // the run (already logged there) -- not "ran and did nothing",
-            // which would otherwise print a fabricated processed=0 line.
-            if (!r) return;
-            if (r.processed > 0 || (r.remaining ?? 0) > 0) {
-              console.log(
+            // A null result means the wrapper's guard skipped the run and
+            // already logged it; sweepLogLines owns that decision so it can be
+            // tested without invoking scheduled(). See #1167 review.
+            const lines = sweepLogLines(
+              "signal-defaults-sweep",
+              r,
+              (r) =>
                 `[signal-defaults-sweep] processed=${r.processed} populated=${r.populated} noData=${r.noData} errors=${r.errors.length} remaining=${r.remaining ?? "?"}`,
-              );
-            }
-            for (const e of r.errors) {
-              console.error(`[signal-defaults-sweep] ${e.dataset_id}: ${e.error}`);
-            }
+            );
+            if (lines.info) console.log(lines.info);
+            for (const e of lines.errors) console.error(e);
           })
           .catch((err) =>
             console.error(
