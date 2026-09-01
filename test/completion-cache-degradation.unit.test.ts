@@ -312,3 +312,67 @@ describe("--electrode-system: the one flag with both a static enum and a cache",
     }
   });
 });
+
+// Test-review follow-up on #1173: `--hed-version` was missing from
+// candidates.ts's DYNAMIC_FACET_KEY_BY_FLAG even though it is
+// `--bids-version`'s exact structural twin (shared/facets.ts: both
+// `valueKind: "version"`, no `enumValues`) and a first-class member of the
+// facets contract (`datasetFacetsEnvelopeSchema`) and of
+// `GROUPED_VOCAB_KEYS` (backend/src/services/dataset-facet-vocabulary.ts).
+// Measured against the real catalog (755 public rows, review follow-up),
+// `hed_version` is populated for 271 of them and genuinely has candidates to
+// offer once wired up -- this is not a defensive no-op fix. Still seeded
+// here rather than checked against a live facets response, for determinism:
+// a test that depends on whatever production happens to hold right now is
+// not a test.
+//
+// The seeded values below are deliberately NOT all core-HED `8.x`: the real
+// column is dominated by `8.x` but also carries library-schema versions
+// (`score_2.0.0`, `score_1.1.0` -- a different HED namespace) and one
+// pre-8.0 legacy value (`3.0.0`). getCandidates() must pass all of them
+// through unfiltered -- there is no "hed versions look like 8.x" rule to
+// encode, and writing one into either the code or this comment would be
+// false for three of 755 rows.
+describe("regression: --hed-version was never wired to the dynamic cache (#1173 follow-up)", () => {
+  test("a seeded hed-version cache completes, exactly like its twin --bids-version", async () => {
+    const dir = freshDir();
+    try {
+      writeFileSync(
+        cacheFile(dir),
+        JSON.stringify({
+          cachedAt: Date.now(),
+          data: {
+            "hed-version": [
+              { value: "8.4.0", count: 150 },
+              { value: "8.1.0", count: 80 },
+              { value: "8.0.0", count: 15 },
+              { value: "score_2.0.0", count: 1 },
+              { value: "score_1.1.0", count: 1 },
+              { value: "3.0.0", count: 1 },
+            ],
+          },
+        }),
+      );
+      const res = await runComplete(dir, ["dataset", "list", "--hed-version", ""]);
+      expect(res.exitCode).toBe(0);
+      // No filtering, normalizing, or "8.x" assumption: the library-schema
+      // and legacy values pass through exactly like the core ones.
+      expect(res.candidates.sort()).toEqual(
+        ["3.0.0", "8.0.0", "8.1.0", "8.4.0", "score_1.1.0", "score_2.0.0"].sort(),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("with no cache it offers nothing, not an error (no static fallback exists)", async () => {
+    const dir = freshDir();
+    try {
+      const res = await runComplete(dir, ["dataset", "list", "--hed-version", ""]);
+      expect(res.exitCode).toBe(0);
+      expect(res.candidates).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

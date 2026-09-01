@@ -55,12 +55,21 @@ export type CompletionDirectiveValue =
 /** The CLI flag (as declared in `shared/facets.ts` or a plain `.option()`
  *  call) mapped to the key the facets endpoint enriches it under (D2's
  *  table). `--source`, `--zarr`, and `--powerline` are deliberately absent:
- *  they have a declared static enum and nothing dynamic on top of it. */
+ *  they have a declared static enum and nothing dynamic on top of it.
+ *  `--hed-version` was missing here even though it is `--bids-version`'s
+ *  exact structural twin (test-review follow-up on #1173): both are
+ *  `valueKind: "version"` with no `enumValues` in shared/facets.ts, so
+ *  neither has a static fallback, and both are first-class members of
+ *  `GROUPED_VOCAB_KEYS` in backend/src/services/dataset-facet-vocabulary.ts
+ *  and of `datasetFacetsEnvelopeSchema`. Without this entry, `--hed-version`
+ *  could never complete anything -- not from the cache, and not from a
+ *  static list, because it never had one. */
 const DYNAMIC_FACET_KEY_BY_FLAG: Partial<Record<string, keyof DatasetFacetsEnvelope>> = {
   "--task": "task",
   "--modality": "modality",
   "--license": "license",
   "--bids-version": "bids-version",
+  "--hed-version": "hed-version",
   "--electrode-system": "electrode-system",
 };
 
