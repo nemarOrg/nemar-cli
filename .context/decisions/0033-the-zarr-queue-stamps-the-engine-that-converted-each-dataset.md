@@ -63,9 +63,24 @@ that is the sweep's job, and if the sweep misses a dataset the stamp will not ca
 design: if a NULL ever reappears (a driver older than this file writing into a migrated DB,
 a hand-edited row), the failure mode must be "leave it alone", not "re-convert the archive".
 
-`engine_stale` is reported on every reconcile even when zero, and `--no-engine-requeue`
-counts without acting, so the cost of a bump is readable before it is paid.
-A bump made carelessly is still a several-day drain — the guard makes that visible, not
+**A bump is armed by merging it, so it needs a second step, not merely a loud one.**
+The Hallu cron's `setup()` resets the driver clone to `origin/$DRIVER_REF` on every run, so
+merging a change to `ZARR_ENGINE_VERSION` *deploys* it: the next hourly tick would reconcile
+under the new constant and re-queue the back catalog with nobody watching.
+`--no-engine-requeue` and the reported `engine_stale` count make that legible, but only to
+somebody already looking, and only after the fact.
+So `reconcile` also refuses: above `--engine-requeue-limit` stamp-stale rows (25 by default)
+it requeues **none** of them, reports `engine_requeue_blocked`, and leaves the queue as it
+found it until one run is explicitly acknowledged — `--engine-requeue-ack`, spelled on the
+node as `touch $STATE_DIR/.zarr-engine-bump-ack`, which the script consumes so it arms exactly
+one run. `hallu-zarr.sh --preview-engine-bump` answers "what would this cost" beforehand,
+read-only, without touching the network or the lock.
+
+Blocking is all-or-nothing and scoped to the stamp. A partial requeue would split the archive
+across two engines with no record of where the line fell, and a guard that also stopped
+genuinely new datasets converting would be a worse failure than the one it prevents.
+What it costs is one extra step in a procedure that should be rare; what it does not prevent
+is an operator who acknowledges without previewing. A mass requeue becomes deliberate, not
 impossible.
 
 The stamp governs `done` rows only. `failed` and `data_failed` stay terminal for this

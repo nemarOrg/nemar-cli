@@ -41,6 +41,7 @@ Load-bearing ones to know before touching the relevant area:
 0029 (the Zarr conversion engine lives here, not in the Actions repo),
 0030 (bounded streaming is the default; `.set` is the exception),
 0031 (one annex policy module; `_motion.tsv` is data despite the extension),
+0032 (facet filters are declared once and report what they exclude),
 0033 (the queue stamps which engine converted each dataset; pre-stamp rows are declared current).
 
 ---
@@ -341,7 +342,14 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   upgrade bumps no version, so `zarr_queue.py`'s `ZARR_ENGINE_VERSION` is what
   makes already-converted datasets re-convert. Bump it when discovery widens —
   never when it narrows — and read `migrate_schema`'s note before touching how a
-  NULL stamp is interpreted. The cohort stranded before the stamp existed
+  NULL stamp is interpreted.
+  **Bumping it is a two-step procedure, because merging a bump deploys it**
+  (`setup()` resets the clone every run, so the next hourly tick would run it):
+  preview with `hallu-zarr.sh --preview-engine-bump`, then arm exactly one run
+  with `touch $STATE_DIR/.zarr-engine-bump-ack` (the script consumes the file).
+  Until then a bump over `--engine-requeue-limit` (25) re-queues **nothing** and
+  every reconcile logs `ENGINE BUMP PENDING ACK`; new datasets keep converting
+  normally throughout. The cohort stranded before the stamp existed
   (directory-format datasets converted before 2026-08-22, #1172) is recovered by
   `hallu-zarr.sh --backfill-dir-formats`, dry-run by default.
 
