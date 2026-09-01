@@ -388,3 +388,121 @@ describe("D4: cache header is present on a healthy response, with no Vary", () =
     expect(res.headers.get("Vary")).toBeNull();
   });
 });
+
+// #1171 test review. Each block below exists because a mutation to the
+// production line it targets produced ZERO failures across the whole suite.
+describe("gaps found by mutation after the first review round", () => {
+  let db: Database;
+  let app: App;
+
+  beforeEach(() => {
+    db = freshDb();
+    app = newApp();
+  });
+
+  // Rated 9/10 by the reviewer. `bids-version` is one of the nine documented
+  // vocabularies and the only one no test asserted on: deleting it from the
+  // response entirely left 18/18 green. The generic key-list test added
+  // earlier catches it now, but a direct assertion is what names the field
+  // when it breaks, and it pins the VALUES rather than only the key.
+  test("bids-version returns the distinct versions with counts", async () => {
+    insertDataset(db, "nm330001", { bids_version: "1.9.0" });
+    insertDataset(db, "nm330002", { bids_version: "1.9.0" });
+    insertDataset(db, "nm330003", { bids_version: "1.10.0" });
+    const { body } = await getFacets(app, db);
+    expect(body["bids-version"]).toEqual([
+      { value: "1.9.0", count: 2 },
+      { value: "1.10.0", count: 1 },
+    ]);
+  });
+
+  // Rated 6/10. The existing truncation test uses 60 distinct tasks, which
+  // cannot distinguish `>` from `>=`. At EXACTLY the cap nothing is cut, so
+  // `truncated` must be false -- a `>=` regression would claim a complete
+  // list was truncated.
+  test("exactly TASK_TOP_N distinct tasks is NOT truncated", async () => {
+    // 50 distinct task labels across 50 datasets, one each.
+    for (let i = 0; i < 50; i++) {
+      insertDataset(db, `nm3400${String(i).padStart(2, "0")}`, { tasks: `task${i}` });
+    }
+    const { body } = await getFacets(app, db);
+    expect(body.task?.distinct_total).toBe(50);
+    expect(body.task?.truncated).toBe(false);
+    expect(body.task?.values.length).toBe(50);
+  });
+
+  // Rated 6/10. NULL exclusion is real in the SQL but only incidentally
+  // covered: every fixture that populates a grouped column does so on 100%
+  // of its rows, so a regression letting NULLs through would surface as a
+  // literal null/"null" entry that nothing asserts against. One mixed fixture
+  // covers all five nullable grouped columns at once.
+  test("NULLs never appear as a value in any grouped vocabulary", async () => {
+    insertDataset(db, "nm350001", {
+      electrode_system: "10-10",
+      source: "openneuro",
+      zarr_status: "ready",
+      power_line_frequency: 60,
+      bids_version: "1.9.0",
+    });
+    // Every one of those five left NULL on this row.
+    insertDataset(db, "nm350002", {});
+    const { body } = await getFacets(app, db);
+    for (const key of [
+      "electrode-system",
+      "source",
+      "zarr",
+      "powerline",
+      "bids-version",
+    ] as const) {
+      const values = (body[key] ?? []).map((e) => e.value);
+      expect(values).not.toContain(null as unknown as string);
+      expect(values).not.toContain("null");
+      // Exactly the one populated row contributes; the NULL row contributes
+      // nothing rather than a phantom bucket.
+      expect(body[key]?.length).toBe(1);
+      expect(body[key]?.[0].count).toBe(1);
+    }
+  });
+
+  // Rated 7/10. The production comment says a degraded response is left at
+  // the no-store default "so a transient query failure doesn't get pinned at
+  // the edge", and nothing verified it. Forcing the header on regardless
+  // passed 149/149. A regression here pins an INCOMPLETE vocabulary at the
+  // CDN for up to five minutes for every anonymous caller.
+  test("a degraded response is never edge-cached", async () => {
+    insertDataset(db, "nm360001", { source: "openneuro" });
+    const failing = ((target: Database): Bindings => {
+      const base = realD1(target);
+      return {
+        DB: {
+          prepare(sql: string) {
+            const stmt = base.prepare(sql);
+            const isSource = sql.includes("d.source AS value");
+            const wrapper = {
+              bind: (...args: unknown[]) => {
+                stmt.bind(...args);
+                return wrapper;
+              },
+              run: () => stmt.run(),
+              first: <T>() => stmt.first<T>(),
+              all: <T>() => {
+                if (isSource) throw new Error("simulated source vocabulary failure");
+                return stmt.all<T>();
+              },
+            };
+            return wrapper;
+          },
+        } as unknown as D1Database,
+        ENVIRONMENT: "development",
+      } as Bindings;
+    })(db);
+
+    const res = await app.request("/facets", {}, failing);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as FacetsBody;
+    expect(body.warning).toBeDefined();
+    expect(body.source).toBeUndefined();
+    // The whole point: no s-maxage on a response that is missing a vocabulary.
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+  });
+});

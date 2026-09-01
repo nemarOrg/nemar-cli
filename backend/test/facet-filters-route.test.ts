@@ -1085,3 +1085,69 @@ describe("an invalid facet range surfaces as 400 on both endpoints", () => {
     expect(body.error).toContain("abc");
   });
 });
+
+// #1171 test review, the most serious finding of that round and NOT specific
+// to the facets endpoint: `buildPublicCatalogBase` carries the visibility gate
+// for `GET /datasets`, and inverting its admin branch --
+// `if (!user || !hasRole(user.role, "admin"))` -> `if (user && hasRole(...))`,
+// which shows anonymous callers private datasets and restricts admins to
+// public ones -- passed 148 of 149 tests. The single failure was in the facets
+// suite and only incidentally, because that endpoint always calls with
+// `user === undefined`.
+//
+// So the list endpoint's own visibility gate had no coverage before or after
+// the Phase 5a extraction, and the extraction gave that unguarded logic a
+// second caller. These tests pin it on the original caller, where it matters:
+// no fixture in this file previously inserted a non-public dataset at all.
+describe("GET /datasets visibility: anonymous, member and admin", () => {
+  let db: Database;
+  let app: App;
+  const MEMBER_KEY = "visibility-member-key-0123456789abcdef01234567";
+  const ADMIN_KEY = "visibility-admin-key-0123456789abcdef012345678";
+
+  beforeEach(async () => {
+    db = freshDb();
+    app = newApp();
+    insertDataset(db, "nm400001", { name: "Public Fixture" });
+    insertDataset(db, "nm400002", { name: "Private Fixture", visibility: "private" });
+    db.run(
+      "INSERT INTO users (id, username, email, password_hash, status, role, email_verified) VALUES (11, 'member11', 'm11@example.org', 'x', 'approved', 'member', 1)",
+    );
+    db.run(
+      "INSERT INTO users (id, username, email, password_hash, status, role, email_verified) VALUES (12, 'admin12', 'a12@example.org', 'x', 'approved', 'admin', 1)",
+    );
+    const insertToken = db.query(
+      "INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)",
+    );
+    insertToken.run(11, await hashApiKey(MEMBER_KEY), MEMBER_KEY.slice(0, 8));
+    insertToken.run(12, await hashApiKey(ADMIN_KEY), ADMIN_KEY.slice(0, 8));
+  });
+
+  async function listIds(headers: Record<string, string> = {}): Promise<string[]> {
+    const res = await app.request("/", { headers }, env(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { datasets: { dataset_id: string }[] };
+    return body.datasets.map((d) => d.dataset_id).sort();
+  }
+
+  test("an anonymous caller sees only the public dataset", async () => {
+    expect(await listIds()).toEqual(["nm400001"]);
+  });
+
+  test("an authenticated NON-admin sees only the public dataset", async () => {
+    // The branch an inverted gate would flip open. Distinct from the
+    // anonymous case: here `user` is set but `hasRole(user.role, "admin")`
+    // is false, so only the second half of the condition is doing the work.
+    expect(await listIds({ Authorization: `Bearer ${MEMBER_KEY}` })).toEqual(["nm400001"]);
+  });
+
+  test("an authenticated admin sees the private dataset too", async () => {
+    // The other direction: an inverted gate would hide it. Without this
+    // case, dropping the admin branch entirely would still pass the two
+    // tests above.
+    expect(await listIds({ Authorization: `Bearer ${ADMIN_KEY}` })).toEqual([
+      "nm400001",
+      "nm400002",
+    ]);
+  });
+});
