@@ -46,7 +46,32 @@ facet is `col BETWEEN ? AND ?`. A `pair` facet is
 `col_max >= ? AND col_min <= ?` -- overlap, because `--age 5..18` must match a
 dataset spanning 12..25 (it does contain participants in that range);
 containment is the tempting-looking wrong answer and reads identically for
-any fixture whose ranges happen to nest.
+any fixture whose ranges happen to nest. A `pair` facet's NULL test is
+`min IS NULL OR max IS NULL`, not `AND`: either bound being unknown means the
+row's range isn't fully known, so `include_unknown=1` must widen it in. `AND`
+would have been indistinguishable from `OR` for `recording_duration_min/max`
+and `channel_count_min/max`, which migration 0070 documents as written
+together, atomically, only on a successful recording-stats sweep read -- but
+it is observably wrong for `age_min`/`age_max`, which predates that sweep
+entirely (migration 0020) and is backfilled independently per bound
+(migration 0023's comment: "each is COALESCE-preserved independently").
+
+**An unrecognised enum token is a 400, except for the one filter that
+predates this table.** The `powerline`, `electrode-system`, `source`, and
+`zarr` facets reject any token outside their declared `enumValues`, naming
+the bad token and listing the valid values -- the same posture
+`RangeParseError` already takes for a bad range. Silently dropping it (as an
+earlier version of this table did, mirroring `parseLicenseTierFilter`) lets
+`?source=opennuero` return the whole unfiltered catalog with a 200: when
+every token in a facet is unrecognised, the facet vanishes rather than being
+enforced, and the response looks like "no matches" when it is actually "the
+filter never took effect." The pre-existing `license` param
+(`parseLicenseTierFilter` in `backend/src/lib/license.ts`) keeps its
+original drop-unrecognised behaviour: it predates this table, the website
+already depends on its current semantics, and changing it is a breaking
+change out of scope here. The asymmetry is deliberate: a newly declared
+facet gets the strict contract; the filter that already shipped keeps the
+contract it shipped with.
 
 **A derived range beats a sampled exemplar, with a documented fallback.**
 `--channels` binds to `COALESCE(channel_count_min/max, n_channels)` on each
@@ -69,16 +94,33 @@ since silently including it would make `--rate 1000` return datasets of
 unknown rate. `include_unknown=1` widens every ACTIVE facet's predicate with
 its declared NULL test. Both catalog envelopes gain `excluded_unknown`: the
 count that would have matched with unknowns included, minus the count that
-did, computed only when a facet is active (an unfiltered list pays nothing)
-and via the existing `Promise.allSettled` / `countSearchMatchesSafely`
-degradation paths, so a failure omits the field rather than 500ing an
-otherwise-good response. This is the same posture ADR 0005 already commits
-to for availability: a gap is reported out of band, never faked and never
-allowed to block delivery. It matters immediately, not hypothetically:
-`--duration`, `--rate`, and `--recordings` filter columns that are 0%
-populated in production today, so recall is genuinely low until the Phase
-2/2b sweeps finish, and `excluded_unknown` is what tells a caller which of
-"no matches" and "matches excluded because unknown" they are looking at.
+did, computed only when a facet is active (an unfiltered list pays nothing),
+degrading to an omitted field (never a faked or stale number) on failure --
+the same posture ADR 0005 already commits to for availability: a gap is
+reported out of band, never faked and never allowed to block delivery. The
+two endpoints reach that degradation differently, and the difference has a
+cost: `catalog.ts`'s `executeAndReturn` extends its pre-existing
+`Promise.allSettled` with a third, parallel branch for the widened count, so
+the extra query is concurrent with the main list/count round trip.
+`dataset-search.ts` has no such fan-out to extend -- `computeExcludedUnknownCount`
+is a NEW sequential `await` after `countSearchMatchesSafely` inside its own
+try/catch, which is a genuine second round trip added to the request, not a
+free ride on an existing one. Either way, the widened count is only computed
+when the primary count itself succeeded (C1 correction, below); diffing a
+real widened count against a degraded primary count would print a
+confident-looking, likely-wrong number next to a warning that says the total
+is unreliable. It matters immediately, not hypothetically for two of the
+three columns this touches first: `--duration` and `--recordings` are
+genuinely sweep-only (migration 0070's `recording_stats`, no reindex path),
+so their recall is low until the Phase 2/2b sweeps finish. `--rate`
+(`sampling_frequency`) is NOT sweep-gated the same way: migration 0071 and
+`dataset-metadata-columns.ts#writeDatasetMetadataColumns` show it (and
+`power_line_frequency`/`eeg_reference`/`placement_scheme`) is also written by
+ordinary reindex traffic, independent of the `signal-defaults-sweep.ts`
+backfill -- so its population climbs with everyday activity, not only with a
+one-time sweep completing. `excluded_unknown` is what tells a caller which
+of "no matches" and "matches excluded because unknown" they are looking at,
+for whichever reason a column is still sparse.
 
 ## Consequences
 
@@ -93,13 +135,21 @@ populated in production today, so recall is genuinely low until the Phase
   (`isAnyFacetActive`) instead of hand-enumerating facet keys as a third
   maintained list -- closing off the exact enumeration-drift shape that left
   Phase 2b's untested OR-gate terms silently inert.
-- Every facet's column must also be projected (a test enforces it), which
+- Every facet's column must also be projected (the D7 describe block in
+  `backend/test/facet-table-correspondence.unit.test.ts` enforces it), which
   surfaced and closed a pre-existing gap: the `?mine` branch of `GET
   /datasets` had never projected `num_citations` at all, even though the
   public branch has since #804. A user could have filtered `--citations` on
   their own datasets and never seen the number that justified the result.
 - `excluded_unknown` costs one extra COUNT query per request, but only when a
   facet is active -- the common unfiltered browse/search path is unaffected.
+  The cost is not identical on both endpoints: `GET /datasets` runs it
+  concurrently with the main query and its own count inside
+  `executeAndReturn`'s `Promise.allSettled`, while `GET /datasets/search`
+  runs it as a genuine extra sequential round trip after
+  `countSearchMatchesSafely` returns (see the M1 correction above) -- a
+  facet-filtered search request is one full round trip slower than a
+  facet-filtered list request for the same reason.
 - `bids_version`/`hed_version` stay prefix/exact only in this phase (a
   lexicographic `>=` is already wrong on production data: `'1.9.0' >
   '1.10.0'` as strings). A true semver range needs either a derived sortable
@@ -146,6 +196,11 @@ populated in production today, so recall is genuinely low until the Phase
 - Migration 0070 (`recording_stats`) and 0071 (`signal_defaults`) column
   comments, for the exact NULL semantics each facet reads.
 - `backend/src/lib/license.ts#parseLicenseTierFilter` -- the drop-unrecognised
-  idiom the `enum` facet kind mirrors.
+  idiom an earlier version of the `enum` facet kind mirrored; `license` keeps
+  it, the declared facets no longer do (#1165 review P1, see the asymmetry
+  note above).
+- Migration 0020 (`age_min`/`age_max`) and 0023 (its backfill, "each is
+  COALESCE-preserved independently") -- why that pair's NULL test is `OR`,
+  unlike the atomically-written pairs from migration 0070.
 - nm000111: confirmed live case where `n_channels` (19) disagrees with the
   true per-recording distribution (70/124 recordings actually at 20).

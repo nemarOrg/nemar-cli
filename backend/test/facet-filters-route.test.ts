@@ -115,8 +115,55 @@ describe("D1: overlap, not containment, for pair facets", () => {
     db.query(
       "UPDATE datasets SET recording_duration_min = 100, recording_duration_max = 200 WHERE dataset_id = 'nm200001'",
     ).run();
-    const ids = await listIds(app, db, "recording-length=150..250");
+    const ids = await listIds(app, db, "recording_length=150..250");
     expect(ids).toContain("nm200001");
+  });
+
+  // #1165 review M6: the age facet above has a negative control (a
+  // populated-but-non-overlapping row); recording-length had none, so
+  // deleting its binding from FACET_DEFINITIONS entirely -- filtering would
+  // then do nothing -- left every recording-length test in this file still
+  // green. nm200002 gets a POPULATED, clearly-non-overlapping pair (not
+  // NULL, which the "unknown excluded by default" policy would exclude for
+  // an unrelated reason and so wouldn't catch a deleted binding).
+  test("--recording-length overlap: excludes a populated store outside the query range (negative control)", async () => {
+    db.query(
+      "UPDATE datasets SET recording_duration_min = 1, recording_duration_max = 5 WHERE dataset_id = 'nm200002'",
+    ).run();
+    const ids = await listIds(app, db, "recording_length=150..250");
+    expect(ids).not.toContain("nm200002");
+  });
+});
+
+describe("P2: a pair facet's NULL test is OR, not AND -- one known bound is not a known range", () => {
+  let db: Database;
+  let app: App;
+
+  beforeEach(() => {
+    db = freshDb();
+    app = newApp();
+  });
+
+  // Under the old `(min IS NULL AND max IS NULL)` test, a row with only ONE
+  // bound populated would be treated as "known" (neither branch of the AND
+  // is true) and so would never be widened in by include_unknown=1 -- wrong,
+  // because a range with an unknown side isn't a known range. Under the
+  // correct OR test, either bound missing means the row is excluded by
+  // default and widened in by include_unknown=1, same as a fully-unknown row.
+  test("age: a row with only age_min set is excluded by default and widened in by include_unknown", async () => {
+    insertDataset(db, "nm201001", { age_min: 40 }); // age_max left NULL
+    const filtered = await listIds(app, db, "age=5..18");
+    expect(filtered).not.toContain("nm201001");
+    const widened = await listIds(app, db, "age=5..18&include_unknown=1");
+    expect(widened).toContain("nm201001");
+  });
+
+  test("recording-length: a row with only recording_duration_max set is excluded by default and widened in by include_unknown", async () => {
+    insertDataset(db, "nm201002", { recording_duration_max: 300 }); // min left NULL
+    const filtered = await listIds(app, db, "recording_length=150..250");
+    expect(filtered).not.toContain("nm201002");
+    const widened = await listIds(app, db, "recording_length=150..250&include_unknown=1");
+    expect(widened).toContain("nm201002");
   });
 });
 
@@ -304,6 +351,115 @@ describe("D4/ADR 0005: unknown is excluded by default, and reported", () => {
     expect(body.results.map((r) => r.id)).toEqual(["nm220001"]);
     expect("excluded_unknown" in body).toBe(false);
   });
+
+  // #1165 review C1: the inverse of excludedUnknownFailingD1 above -- fails
+  // ONLY the PRIMARY (non-widened) count query, identifiable by the ABSENCE
+  // of the widened query's distinctive "OR ... IS NULL" clause, while the
+  // widened count query still succeeds against real SQLite. Before the fix,
+  // GET /datasets/search's computeExcludedUnknownCount ran unconditionally
+  // once a facet was active, diffing a real widened count against
+  // countSearchMatchesSafely's page-derived fallback (`offset + page.length`)
+  // and reporting a confident-looking number right next to a `warning` that
+  // says the total itself is unreliable. `catalog.ts`'s `executeAndReturn`
+  // already gates on `countSucceeded` for the exact same reason; this is
+  // the search-endpoint twin of that gate.
+  function primaryCountFailingD1(target: Database): Bindings {
+    const base = realD1(target);
+    return {
+      DB: {
+        prepare(sql: string) {
+          const stmt = base.prepare(sql);
+          const isCountQuery = sql.includes("SELECT COUNT(*) AS total FROM datasets d");
+          const isWidenedCount = sql.includes("total_recording_duration IS NULL");
+          const wrapper = {
+            bind: (...args: unknown[]) => {
+              stmt.bind(...args);
+              return wrapper;
+            },
+            run: () => stmt.run(),
+            first: <T>() => {
+              if (isCountQuery && !isWidenedCount) {
+                throw new Error("simulated primary count failure");
+              }
+              return stmt.first<T>();
+            },
+            all: <T>() => stmt.all<T>(),
+          };
+          return wrapper;
+        },
+      } as unknown as D1Database,
+      ENVIRONMENT: "development",
+    } as Bindings;
+  }
+
+  test("GET /datasets/search: a failed PRIMARY count never reports excluded_unknown against it", async () => {
+    const res = await app.request(
+      "/search?q=Unknown+Policy+Fixture&duration=50..150",
+      {},
+      primaryCountFailingD1(db),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      results: { id: string }[];
+      warning?: string;
+      excluded_unknown?: number;
+    };
+    // The main FTS query is untouched by the fault (only .first() is
+    // wrapped), so results still come back correctly.
+    expect(body.results.map((r) => r.id)).toEqual(["nm220001"]);
+    // countSearchMatchesSafely's fallback kicked in for the primary count.
+    expect(body.warning).toBeDefined();
+    // C1: excluded_unknown must be OMITTED, never computed against the
+    // degraded fallback count -- even though the widened count query itself
+    // succeeded and a buggy implementation would happily compute a number.
+    expect("excluded_unknown" in body).toBe(false);
+  });
+});
+
+// #1165 review I2: every test above (and in the "shared/facets.ts +
+// dataset-facets.ts" loop further down) activates exactly ONE facet, so a
+// mutation that widens EVERY active facet using the FIRST active facet's
+// nullTest -- instead of each facet's own -- passes the entire existing
+// suite (with one facet active, "the first active facet's nullTest" and
+// "this facet's own nullTest" are the same test). `subjects` (index 0 in
+// FACET_DEFINITIONS) and `duration` (index 6) are chosen so `subjects` is
+// unambiguously "first" in iteration order.
+describe("I2: excluded_unknown widens EACH active facet by its OWN nullTest", () => {
+  let db: Database;
+  let app: App;
+
+  beforeEach(() => {
+    db = freshDb();
+    app = newApp();
+    insertDataset(db, "nm280001", { subject_count: 20, total_recording_duration: 100 });
+    // subjects unknown, duration known -- only correctly widened in via
+    // subjects' OWN nullTest.
+    insertDataset(db, "nm280002", { subject_count: null, total_recording_duration: 100 });
+    // duration unknown, subjects known -- only correctly widened in via
+    // duration's OWN nullTest. A "reuse the first active facet's nullTest"
+    // bug would widen this row's duration clause with subjects' nullTest
+    // (subject_count IS NULL), which is false here, wrongly excluding it.
+    insertDataset(db, "nm280003", { subject_count: 20, total_recording_duration: null });
+  });
+
+  test("excluded_unknown with two active facets matches a hand-computed expectation", async () => {
+    const res = await app.request("/?subjects=10..30&duration=50..150", {}, env(db));
+    const body = (await res.json()) as {
+      datasets: { dataset_id: string }[];
+      excluded_unknown?: number;
+    };
+    // Default (both predicates required): only nm280001 satisfies both.
+    expect(body.datasets.map((d) => d.dataset_id)).toEqual(["nm280001"]);
+    // Hand-computed widened count: all three qualify once EACH facet widens
+    // by its own NULL test (nm280002 via subjects', nm280003 via
+    // duration's). excluded_unknown = 3 - 1 = 2.
+    expect(body.excluded_unknown).toBe(2);
+  });
+
+  test("include_unknown=1 includes all three rows, not just the ones the first active facet would widen", async () => {
+    const ids = await listIds(app, db, "subjects=10..30&duration=50..150&include_unknown=1");
+    expect(ids.sort()).toEqual(["nm280001", "nm280002", "nm280003"]);
+  });
 });
 
 describe("D5: bids_version is prefix/exact only, never a lexicographic >=", () => {
@@ -319,10 +475,13 @@ describe("D5: bids_version is prefix/exact only, never a lexicographic >=", () =
     insertDataset(db, "nm230004", { bids_version: "1.11.0" });
     insertDataset(db, "nm230005", { bids_version: "v1.2.1" });
     insertDataset(db, "nm230006", { bids_version: "1.80.0" });
+    // #1165 review M4: an uppercase leading 'V', to catch a case-sensitive
+    // LTRIM regressing back to only stripping lowercase 'v'.
+    insertDataset(db, "nm230007", { bids_version: "V3.4.0" });
   });
 
   test("--bids-version 1.10 matches 1.10.0 and 1.10.1 by prefix, not 1.9.0 or 1.11.0", async () => {
-    const ids = (await listIds(app, db, "bids-version=1.10")).sort();
+    const ids = (await listIds(app, db, "bids_version=1.10")).sort();
     expect(ids).toEqual(["nm230002", "nm230003"]);
   });
 
@@ -331,22 +490,27 @@ describe("D5: bids_version is prefix/exact only, never a lexicographic >=", () =
     // wrongly include '1.9.0', because '1.9.0' > '1.10' as a string
     // ('9' > '1' at the second character). Prefix/exact matching cannot
     // make this mistake; this assertion fails if anyone reintroduces `>=`.
-    const ids = await listIds(app, db, "bids-version=1.10");
+    const ids = await listIds(app, db, "bids_version=1.10");
     expect(ids).not.toContain("nm230001");
   });
 
   test("leading 'v' is normalized on both the filter value and the stored column", async () => {
-    const ids = await listIds(app, db, "bids-version=1.2.1");
+    const ids = await listIds(app, db, "bids_version=1.2.1");
     expect(ids).toEqual(["nm230005"]);
   });
 
   test("--bids-version 1.8 matches '1.8'/'1.8.%' only, never '1.80.0'", async () => {
-    const ids = await listIds(app, db, "bids-version=1.8");
+    const ids = await listIds(app, db, "bids_version=1.8");
     expect(ids).not.toContain("nm230006");
+  });
+
+  test("an uppercase leading 'V' on the STORED value is normalized too, not just the filter value", async () => {
+    const ids = await listIds(app, db, "bids_version=3.4.0");
+    expect(ids).toEqual(["nm230007"]);
   });
 });
 
-describe("D5: enum facets OR their members and drop unrecognised tokens", () => {
+describe("D5/P1: enum facets OR their members; an unrecognised token is a 400", () => {
   let db: Database;
   let app: App;
 
@@ -359,18 +523,39 @@ describe("D5: enum facets OR their members and drop unrecognised tokens", () => 
   });
 
   test("a recognised token filters normally", async () => {
-    const ids = await listIds(app, db, "electrode-system=10-20");
+    const ids = await listIds(app, db, "electrode_system=10-20");
     expect(ids).toEqual(["nm240001"]);
   });
 
-  test("mixed recognised+unrecognised: keeps the recognised member, drops the rest", async () => {
-    const ids = await listIds(app, db, "electrode-system=10-20,bogus-token");
-    expect(ids).toEqual(["nm240001"]);
+  // #1165 review P1: an unrecognised enum token used to be dropped (mixed
+  // recognised+unrecognised kept only the recognised member; ALL-unrecognised
+  // meant "no filter", returning the whole unfiltered catalog with a 200).
+  // That let `?source=opennuero` silently return everything. The new
+  // enum facets 400 instead, naming the bad token and listing the valid
+  // values -- matching how RangeParseError already surfaces a bad range.
+  test("mixed recognised+unrecognised: 400s naming the bad token, does NOT silently keep the recognised member", async () => {
+    const res = await app.request("/?electrode_system=10-20,bogus-token", {}, env(db));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("bogus-token");
+    expect(body.error).toContain("electrode-system");
+    // Every valid value is named so the caller can self-correct.
+    expect(body.error).toContain("10-20");
+    expect(body.error).toContain("biosemi");
   });
 
-  test("ALL-unrecognised tokens mean 'no filter', never 'match nothing'", async () => {
-    const ids = (await listIds(app, db, "electrode-system=bogus-token")).sort();
-    expect(ids).toEqual(["nm240001", "nm240002", "nm240003"]);
+  test("ALL-unrecognised tokens 400 too -- never 'no filter', never 'match nothing'", async () => {
+    const res = await app.request("/?electrode_system=bogus-token", {}, env(db));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("bogus-token");
+  });
+
+  test("an unrecognised token 400s on GET /datasets/search too", async () => {
+    const res = await app.request("/search?q=anything&electrode_system=bogus-token", {}, env(db));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("bogus-token");
   });
 
   test("powerline binds numerically: 50 does not also match the 60 row", async () => {
@@ -378,8 +563,8 @@ describe("D5: enum facets OR their members and drop unrecognised tokens", () => 
     expect(ids).toEqual(["nm240002"]);
   });
 
-  test("a comma-separated enum ORs its members", async () => {
-    const ids = (await listIds(app, db, "electrode-system=10-20,biosemi")).sort();
+  test("a comma-separated enum of ALL-recognised tokens ORs its members", async () => {
+    const ids = (await listIds(app, db, "electrode_system=10-20,biosemi")).sort();
     expect(ids).toEqual(["nm240001", "nm240002"]);
   });
 });
@@ -516,8 +701,17 @@ describe("shared/facets.ts + dataset-facets.ts: every facet, both endpoints", ()
   });
 
   for (const facet of FACETS) {
+    // #1165 review I3: the wire uses `queryParam` (snake_case), not `key`
+    // (which stays hyphenated for the four multi-word facets) -- the test
+    // NAME still reads `--${facet.key}` since that's the CLI-flag-style
+    // label these tests were written under, but the actual query string
+    // below is built from `facet.queryParam`.
     test(`--${facet.key} matching value includes the fixture (GET /datasets)`, async () => {
-      const ids = await listIds(app, db, `${facet.key}=${encodeURIComponent(matching[facet.key])}`);
+      const ids = await listIds(
+        app,
+        db,
+        `${facet.queryParam}=${encodeURIComponent(matching[facet.key])}`,
+      );
       expect(ids).toContain(FIXTURE_ID);
     });
 
@@ -525,7 +719,7 @@ describe("shared/facets.ts + dataset-facets.ts: every facet, both endpoints", ()
       const ids = await listIds(
         app,
         db,
-        `${facet.key}=${encodeURIComponent(nonMatching[facet.key])}`,
+        `${facet.queryParam}=${encodeURIComponent(nonMatching[facet.key])}`,
       );
       expect(ids).not.toContain(FIXTURE_ID);
     });
@@ -534,7 +728,7 @@ describe("shared/facets.ts + dataset-facets.ts: every facet, both endpoints", ()
       const ids = await searchIds(
         app,
         db,
-        `q=${encodeURIComponent("Facet Exercise")}&${facet.key}=${encodeURIComponent(matching[facet.key])}`,
+        `q=${encodeURIComponent("Facet Exercise")}&${facet.queryParam}=${encodeURIComponent(matching[facet.key])}`,
       );
       expect(ids).toContain(FIXTURE_ID);
     });
@@ -543,7 +737,7 @@ describe("shared/facets.ts + dataset-facets.ts: every facet, both endpoints", ()
       const ids = await searchIds(
         app,
         db,
-        `q=${encodeURIComponent("Facet Exercise")}&${facet.key}=${encodeURIComponent(nonMatching[facet.key])}`,
+        `q=${encodeURIComponent("Facet Exercise")}&${facet.queryParam}=${encodeURIComponent(nonMatching[facet.key])}`,
       );
       expect(ids).not.toContain(FIXTURE_ID);
     });

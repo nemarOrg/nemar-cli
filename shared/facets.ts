@@ -8,7 +8,7 @@
  * This file is the CLI/wire-facing half of the split: facet key, CLI flag,
  * value kind, enum members, unit, label. NO SQL, no D1 types -- those live in
  * `backend/src/services/dataset-facets.ts`, which binds each of these keys to
- * columns and NULL semantics. `test/facet-table-correspondence.unit.test.ts`
+ * columns and NULL semantics. `backend/test/facet-table-correspondence.unit.test.ts`
  * asserts the two files declare the exact same set of keys in both
  * directions, so a half-added facet fails CI rather than silently doing
  * nothing when a flag is wired to it in a later phase.
@@ -35,12 +35,25 @@ import { datasetSourceSchema } from "./contract/dataset.js";
 export type FacetValueKind = "number" | "bytes" | "duration" | "enum" | "text" | "version";
 
 export interface FacetDefinition {
-  /** Stable identifier, also used as the HTTP query-string parameter name
-   *  (`?channels=64..`) so the CLI flag, the wire param, and this table's key
-   *  never drift into three different spellings of the same facet. */
+  /** Stable identifier used internally (the `FacetKey` that indexes
+   *  `FacetFilterValues` and `dataset-facets.ts`'s SQL table). NOT
+   *  necessarily the HTTP query-string parameter -- see {@link queryParam}.
+   *  Several keys (`recording-length`, `electrode-system`, `bids-version`,
+   *  `hed-version`) are hyphenated to match the CLI flag; the wire form of
+   *  those four is the underscored `queryParam` instead (#1165 review I3:
+   *  a hyphenated query param, e.g. `?recording-length=`, is off the
+   *  snake_case house style every other param uses -- `has_hed`,
+   *  `data_complete`, `min_score`). */
   readonly key: string;
-  /** The CLI flag phase 4 will register (e.g. `--recording-length`). */
+  /** The CLI flag phase 4 will register (e.g. `--recording-length`).
+   *  Kebab-case, independent of {@link queryParam}. */
   readonly flag: string;
+  /** The HTTP query-string parameter name (e.g. `recording_length`),
+   *  snake_case per the house style. Equal to {@link key} for every facet
+   *  whose key has no hyphen; explicitly overridden below for the four that
+   *  do, so `key` can stay hyphenated (matching `flag`) without leaking a
+   *  hyphen onto the wire. */
+  readonly queryParam: string;
   readonly valueKind: FacetValueKind;
   /** Human-readable label for help text / the phase 5 facets endpoint. */
   readonly label: string;
@@ -83,6 +96,7 @@ export const FACETS: readonly FacetDefinition[] = [
   {
     key: "subjects",
     flag: "--subjects",
+    queryParam: "subjects",
     valueKind: "number",
     label: "Subject count",
     unit: "subjects",
@@ -90,6 +104,7 @@ export const FACETS: readonly FacetDefinition[] = [
   {
     key: "channels",
     flag: "--channels",
+    queryParam: "channels",
     valueKind: "number",
     label: "Channel count",
     unit: "channels",
@@ -97,29 +112,49 @@ export const FACETS: readonly FacetDefinition[] = [
   {
     key: "sessions",
     flag: "--sessions",
+    queryParam: "sessions",
     valueKind: "number",
     label: "Session count",
     unit: "sessions",
   },
-  { key: "size", flag: "--size", valueKind: "bytes", label: "Dataset size" },
-  { key: "files", flag: "--files", valueKind: "number", label: "File count", unit: "files" },
+  { key: "size", flag: "--size", queryParam: "size", valueKind: "bytes", label: "Dataset size" },
+  {
+    key: "files",
+    flag: "--files",
+    queryParam: "files",
+    valueKind: "number",
+    label: "File count",
+    unit: "files",
+  },
   {
     key: "citations",
     flag: "--citations",
+    queryParam: "citations",
     valueKind: "number",
     label: "Citation count",
     unit: "citations",
   },
-  { key: "duration", flag: "--duration", valueKind: "duration", label: "Total recording duration" },
+  {
+    key: "duration",
+    flag: "--duration",
+    queryParam: "duration",
+    valueKind: "duration",
+    label: "Total recording duration",
+  },
   {
     key: "recording-length",
     flag: "--recording-length",
+    // #1165 review I3: snake_case on the wire (D1's column name too),
+    // hyphenated everywhere else (key, flag) -- see the queryParam doc
+    // comment on FacetDefinition.
+    queryParam: "recording_length",
     valueKind: "duration",
     label: "Per-recording duration",
   },
   {
     key: "recordings",
     flag: "--recordings",
+    queryParam: "recordings",
     valueKind: "number",
     label: "Recording count",
     unit: "recordings",
@@ -127,24 +162,54 @@ export const FACETS: readonly FacetDefinition[] = [
   {
     key: "unavailable",
     flag: "--unavailable",
+    queryParam: "unavailable",
     valueKind: "number",
     label: "Unavailable recording count",
     unit: "recordings",
   },
-  { key: "age", flag: "--age", valueKind: "number", label: "Participant age", unit: "years" },
-  { key: "rate", flag: "--rate", valueKind: "number", label: "Sampling rate", unit: "Hz" },
+  {
+    key: "age",
+    flag: "--age",
+    queryParam: "age",
+    valueKind: "number",
+    label: "Participant age",
+    unit: "years",
+  },
+  {
+    key: "rate",
+    flag: "--rate",
+    queryParam: "rate",
+    valueKind: "number",
+    label: "Sampling rate",
+    unit: "Hz",
+  },
   {
     key: "powerline",
     flag: "--powerline",
+    queryParam: "powerline",
     valueKind: "enum",
     label: "Power line frequency",
     enumValues: POWERLINE_VALUES,
   },
-  { key: "reference", flag: "--reference", valueKind: "text", label: "EEG reference" },
-  { key: "placement", flag: "--placement", valueKind: "text", label: "Electrode placement scheme" },
+  {
+    key: "reference",
+    flag: "--reference",
+    queryParam: "reference",
+    valueKind: "text",
+    label: "EEG reference",
+  },
+  {
+    key: "placement",
+    flag: "--placement",
+    queryParam: "placement",
+    valueKind: "text",
+    label: "Electrode placement scheme",
+  },
   {
     key: "electrode-system",
     flag: "--electrode-system",
+    // #1165 review I3: snake_case on the wire; see recording-length above.
+    queryParam: "electrode_system",
     valueKind: "enum",
     label: "Electrode system",
     enumValues: ELECTRODE_SYSTEM_VALUES,
@@ -152,6 +217,7 @@ export const FACETS: readonly FacetDefinition[] = [
   {
     key: "source",
     flag: "--source",
+    queryParam: "source",
     valueKind: "enum",
     label: "Source archive",
     enumValues: SOURCE_VALUES,
@@ -159,12 +225,27 @@ export const FACETS: readonly FacetDefinition[] = [
   {
     key: "zarr",
     flag: "--zarr",
+    queryParam: "zarr",
     valueKind: "enum",
     label: "Zarr conversion status",
     enumValues: ZARR_STATUS_VALUES,
   },
-  { key: "bids-version", flag: "--bids-version", valueKind: "version", label: "BIDS version" },
-  { key: "hed-version", flag: "--hed-version", valueKind: "version", label: "HED version" },
+  {
+    key: "bids-version",
+    flag: "--bids-version",
+    // #1165 review I3: snake_case on the wire; see recording-length above.
+    queryParam: "bids_version",
+    valueKind: "version",
+    label: "BIDS version",
+  },
+  {
+    key: "hed-version",
+    flag: "--hed-version",
+    // #1165 review I3: snake_case on the wire; see recording-length above.
+    queryParam: "hed_version",
+    valueKind: "version",
+    label: "HED version",
+  },
 ] as const;
 
 export type FacetKey = (typeof FACETS)[number]["key"];

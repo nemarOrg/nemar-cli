@@ -552,6 +552,16 @@ async function countSearchMatchesSafely(
  * active, so an unfiltered search pays nothing for it. On failure, omits the
  * field rather than degrading `count`/`results` or 500ing the response --
  * ADR 0005: this is reporting, never a precondition for serving.
+ *
+ * `countSucceeded` (#1165 review C1) gates this the same way `catalog.ts`'s
+ * `executeAndReturn` gates its own `excludedUnknown` diff on `countSucceeded`:
+ * `actualCount` is only a real total when the primary count query itself
+ * succeeded. Every caller here gets `actualCount` from
+ * `countSearchMatchesSafely`, which on failure substitutes `pageLowerBound`
+ * (an "at least this many" bound derived from the returned page, paired with
+ * a `warning`) -- diffing a real widened count against that fallback would
+ * report a confident-looking (and often wrong) number right next to a
+ * warning that says the total is unreliable. Skip the diff entirely instead.
  */
 async function computeExcludedUnknownCount(
   db: D1Database,
@@ -559,8 +569,10 @@ async function computeExcludedUnknownCount(
   semanticIds: string[],
   filters: DatasetFilterOptions,
   actualCount: number,
+  countSucceeded: boolean,
 ): Promise<number | undefined> {
   if (!isAnyFacetActive(filters.facets)) return undefined;
+  if (!countSucceeded) return undefined;
   try {
     const widenedCount = await countSearchMatches(db, ftsMatch, semanticIds, {
       ...filters,
@@ -761,7 +773,14 @@ export async function executeDatasetSearch(
         filters,
         offset + page.length,
       );
-      const excludedUnknown = await computeExcludedUnknownCount(db, ftsMatch, [], filters, count);
+      const excludedUnknown = await computeExcludedUnknownCount(
+        db,
+        ftsMatch,
+        [],
+        filters,
+        count,
+        warning === undefined,
+      );
       return buildEnvelope(lexical, "text", count, warning, excludedUnknown);
     }
     let semantic: SearchResult[] = [];
@@ -787,7 +806,14 @@ export async function executeDatasetSearch(
         filters,
         offset + page.length,
       );
-      const excludedUnknown = await computeExcludedUnknownCount(db, ftsMatch, [], filters, count);
+      const excludedUnknown = await computeExcludedUnknownCount(
+        db,
+        ftsMatch,
+        [],
+        filters,
+        count,
+        warning === undefined,
+      );
       return buildEnvelope(lexical, "text_fallback", count, warning, excludedUnknown);
     }
     const semanticFiltered = applyMinScore(semantic);
@@ -800,7 +826,14 @@ export async function executeDatasetSearch(
         filters,
         offset + page.length,
       );
-      const excludedUnknown = await computeExcludedUnknownCount(db, ftsMatch, [], filters, count);
+      const excludedUnknown = await computeExcludedUnknownCount(
+        db,
+        ftsMatch,
+        [],
+        filters,
+        count,
+        warning === undefined,
+      );
       return buildEnvelope(lexical, "text_fallback", count, warning, excludedUnknown);
     }
     // The union `count` describes is exactly what the fused results are
@@ -821,6 +854,7 @@ export async function executeDatasetSearch(
       semanticIds,
       filters,
       count,
+      warning === undefined,
     );
     return buildEnvelope(fused, "semantic", count, warning, excludedUnknown);
   } catch (err) {

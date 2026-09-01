@@ -7,7 +7,7 @@
  * widens with. See
  * `.context/decisions/0031-facet-filters-are-declared-once-and-report-what-they-exclude.md`.
  *
- * `test/facet-table-correspondence.unit.test.ts` asserts this file and
+ * `backend/test/facet-table-correspondence.unit.test.ts` asserts this file and
  * `shared/facets.ts` declare the exact same set of keys in both directions.
  *
  * Two filter kinds, because half the columns Phases 2/2b added are ranges:
@@ -186,7 +186,15 @@ export const FACET_DEFINITIONS: readonly FacetSqlSpec[] = [
     minColumn: "d.recording_duration_min",
     maxColumn: "d.recording_duration_max",
     rangeKind: "duration",
-    nullTest: "(d.recording_duration_min IS NULL AND d.recording_duration_max IS NULL)",
+    // OR, not AND (#1165 review P2): either bound unknown means the row's
+    // range isn't fully known, so include_unknown=1 must widen it in.
+    // Migration 0070 documents this pair (with channel_count_min/max) as
+    // written together, atomically, only on a successful recording-stats
+    // sweep read -- so in practice the two columns never split -- but
+    // that is a fact about how the write path currently behaves, not a
+    // property this predicate should lean on; see the age_min/age_max
+    // pair below, where the equivalent atomic-write assumption is false.
+    nullTest: "(d.recording_duration_min IS NULL OR d.recording_duration_max IS NULL)",
   },
   {
     key: "recordings",
@@ -210,7 +218,16 @@ export const FACET_DEFINITIONS: readonly FacetSqlSpec[] = [
     minColumn: "d.age_min",
     maxColumn: "d.age_max",
     rangeKind: "number",
-    nullTest: "(d.age_min IS NULL AND d.age_max IS NULL)",
+    // OR, not AND (#1165 review P2): either bound unknown means the row's
+    // range isn't fully known, so include_unknown=1 must widen it in. This
+    // pair is NOT written atomically like recording_duration_min/max above:
+    // migration 0020 added age_min/age_max well before the recording-stats
+    // sweep existed, populated independently by two different paths
+    // (llm-enrich's webhook and refreshMetadataAfterVersionDoi), and
+    // migration 0023's backfill explicitly COALESCE-preserves each bound
+    // on its own -- a row can genuinely have one bound set and the other
+    // still NULL.
+    nullTest: "(d.age_min IS NULL OR d.age_max IS NULL)",
   },
   {
     key: "rate",
@@ -298,21 +315,47 @@ export function isAnyFacetActive(facets: FacetFilterValues | undefined): boolean
 }
 
 /**
- * Parse every facet's raw query-string value (via `getParam(key)`, keyed by
- * the facet's own `key` -- e.g. `?recording-length=10..20`) into a validated
- * {@link FacetFilterValues} bag. Throws {@link RangeParseError} (from
- * `shared/range.ts`) on an invalid range; the caller (the route handler) is
- * expected to translate that into a 400. Enum tokens that don't match the
- * declared vocabulary are DROPPED, mirroring `parseLicenseTierFilter`: a
- * facet with zero surviving tokens is treated as not requested at all, never
- * as "match nothing" (see `shared/facets.ts` / D5).
+ * Thrown by {@link parseFacetFilters} when an `enum`-kind facet gets a token
+ * outside its declared vocabulary (#1165 review P1). Mirrors
+ * {@link RangeParseError}'s role: a rejection the route handler is expected
+ * to translate into a 400, naming the bad token and listing the valid
+ * values rather than silently ignoring it. See ADR 0031 for why this is
+ * deliberately NOT the same policy `parseLicenseTierFilter` uses for the
+ * pre-existing `license` param.
+ */
+export class FacetEnumParseError extends Error {
+  constructor(
+    readonly key: FacetKey,
+    readonly badTokens: readonly string[],
+    readonly allowedValues: readonly string[],
+  ) {
+    super(
+      `Invalid value${badTokens.length > 1 ? "s" : ""} for facet "${key}": ` +
+        `${badTokens.map((t) => `"${t}"`).join(", ")} -- must be one of: ${allowedValues.join(", ")}`,
+    );
+    this.name = "FacetEnumParseError";
+  }
+}
+
+/**
+ * Parse every facet's raw query-string value (via `getParam(queryParam)`,
+ * keyed by the facet's snake_case wire `queryParam` -- e.g.
+ * `?recording_length=10..20` -- NOT its (possibly hyphenated) internal
+ * `key`; see `shared/facets.ts`'s `queryParam` doc comment, #1165 review
+ * I3) into a validated {@link FacetFilterValues} bag, indexed by `key`.
+ * Throws {@link RangeParseError} (from `shared/range.ts`) on an invalid
+ * range, or {@link FacetEnumParseError} on an unrecognised enum token
+ * (#1165 review P1); the caller (the route handler) is expected to
+ * translate either into a 400. This is a deliberate asymmetry with the
+ * pre-existing `license` param (`parseLicenseTierFilter`), which still
+ * drops unrecognised tokens silently -- see ADR 0031.
  */
 export function parseFacetFilters(
   getParam: (key: string) => string | undefined,
 ): FacetFilterValues {
   const result: Partial<Record<FacetKey, FacetValue>> = {};
   for (const facet of FACETS) {
-    const raw = getParam(facet.key);
+    const raw = getParam(facet.queryParam);
     if (raw === undefined || raw.trim() === "") continue;
     switch (facet.valueKind) {
       case "number":
@@ -324,14 +367,15 @@ export function parseFacetFilters(
       }
       case "enum": {
         const allowed = new Set(facet.enumValues ?? []);
-        const values = [
-          ...new Set(
-            raw
-              .split(",")
-              .map((t) => t.trim().toLowerCase())
-              .filter((t) => allowed.has(t)),
-          ),
-        ];
+        const tokens = raw
+          .split(",")
+          .map((t) => t.trim().toLowerCase())
+          .filter((t) => t !== "");
+        const badTokens = [...new Set(tokens.filter((t) => !allowed.has(t)))];
+        if (badTokens.length > 0) {
+          throw new FacetEnumParseError(facet.key, badTokens, facet.enumValues ?? []);
+        }
+        const values = [...new Set(tokens)];
         if (values.length > 0) {
           result[facet.key] = { kind: "enum", values };
         }
@@ -420,10 +464,14 @@ function buildVersionPredicate(
 ): BuiltPredicate {
   // `bids_version`/`hed_version` are prefix/exact only (D5): production holds
   // 1.9.0, 1.10.0, 1.10.1, 1.11.0, and a lexicographic `>=` is wrong on that
-  // data today ('1.9.0' > '1.10.0' as strings). LTRIM strips a leading 'v'
-  // from the STORED value (production also holds "v1.2.1") the same way the
-  // parsed filter value already had its own leading 'v' stripped.
-  const normalizedColumn = `LTRIM(${spec.column}, 'v')`;
+  // data today ('1.9.0' > '1.10.0' as strings). LTRIM's second argument is a
+  // set of characters, not a case-insensitive prefix -- 'vV' strips a leading
+  // 'v' OR 'V' from the STORED value (production holds "v1.2.1"; a stored
+  // "V1.2.1" is untested but not ruled out), matching how the parsed filter
+  // value already had its own leading 'v' stripped case-insensitively via
+  // `/^v/i` (#1165 review M4: a bare `'v'` here would silently stop matching
+  // the moment a stored value used the uppercase form).
+  const normalizedColumn = `LTRIM(${spec.column}, 'vV')`;
   const pattern = `${escapeLikePattern(value.prefix)}.%`;
   return {
     sql: `(${normalizedColumn} = ? OR ${normalizedColumn} LIKE ? ESCAPE '\\')`,

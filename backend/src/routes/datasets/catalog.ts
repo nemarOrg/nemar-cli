@@ -12,7 +12,11 @@ import { RangeParseError } from "../../../../shared/range.js";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import { parseLicenseTierFilter } from "../../lib/license";
 import { optionalAuthMiddleware } from "../../middleware/auth";
-import { isAnyFacetActive, parseFacetFilters } from "../../services/dataset-facets";
+import {
+  FacetEnumParseError,
+  isAnyFacetActive,
+  parseFacetFilters,
+} from "../../services/dataset-facets";
 import {
   type DatasetFilterOptions,
   buildDatasetFilterClauses,
@@ -26,8 +30,9 @@ import type { DatasetsRouter } from "./shared";
 /**
  * Epic #1144 phase 3 (#1147), D7: every column the facet filter table binds
  * to must also be projected -- raw, un-COALESCEd so NULL stays NULL -- or a
- * user could filter on a fact they can never see the value of
- * (test/facet-projection.unit.test.ts enforces this). One shared fragment so
+ * user could filter on a fact they can never see the value of (the D7
+ * describe block in backend/test/facet-table-correspondence.unit.test.ts
+ * enforces this). One shared fragment so
  * both `GET /datasets` branches (the `?mine` shape, formerly 28 columns, and
  * the public shape, formerly 33) stay in lockstep rather than drifting apart
  * as two hand-copied column lists.
@@ -115,10 +120,13 @@ interface FilterQueryContext {
  * matching, and setting both would AND the query against itself through two
  * different matchers.
  *
- * Throws {@link RangeParseError} on an invalid facet range
- * (`shared/range.ts`); the caller is expected to translate that into a 400.
- * An unrecognised enum token is dropped, not an error (see
- * `parseFacetFilters`).
+ * Throws {@link RangeParseError} on an invalid facet range (`shared/range.ts`)
+ * or `FacetEnumParseError` on an unrecognised enum token (#1165 review P1,
+ * ADR 0031); the caller is expected to translate either into a 400. The
+ * pre-existing `license` param keeps its original drop-unrecognised
+ * behaviour (`parseLicenseTierFilter`) -- a deliberate asymmetry, not an
+ * oversight, since it predates this table and the website already depends
+ * on its current semantics.
  */
 export function parseFilterQuery(
   c: FilterQueryContext,
@@ -358,9 +366,10 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
    * license, data_complete, has_hed, include_unknown, and the facet table
    * (epic #1144 phase 3, #1147) -- see shared/facets.ts for the full list of
    * facet query params (subjects, channels, sessions, size, files, citations,
-   * duration, recording-length, recordings, unavailable, age, rate,
-   * powerline, reference, placement, electrode-system, source, zarr,
-   * bids-version, hed-version).
+   * duration, recording_length, recordings, unavailable, age, rate,
+   * powerline, reference, placement, electrode_system, source, zarr,
+   * bids_version, hed_version -- snake_case on the wire per #1165 review I3,
+   * even though the four multi-word ones stay hyphenated as CLI flags).
    * Pagination: limit (1-200, default 50), offset (>= 0, default 0)
    * Response includes total_count, limit, offset for client-side pagination
    */
@@ -390,7 +399,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     try {
       filters = parseFilterQuery(c);
     } catch (err) {
-      if (err instanceof RangeParseError) {
+      if (err instanceof RangeParseError || err instanceof FacetEnumParseError) {
         return c.json({ error: err.message }, 400);
       }
       throw err;
@@ -475,13 +484,27 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
 
       // D4/ADR 0005: only pay for the widened-count query when a facet is
       // actually active -- an unfiltered ?mine list costs nothing extra.
+      // #1165 review M5: wrapped in its own try/catch -- this is a
+      // reporting-only extra (excluded_unknown), so a throw building it must
+      // omit the field, not 500 the whole (otherwise-good) list response the
+      // way an uncaught throw here would. Dormant today (buildFacetClauses
+      // has no path that throws for validated `filters`), but the primary
+      // query build above stays unwrapped on purpose: without it there is no
+      // valid response to return anyway.
       let excludedUnknownQuery: { query: string; params: (string | number)[] } | undefined;
       if (isAnyFacetActive(filters.facets)) {
-        const widenedParams: (string | number)[] = [status, user.id];
-        const widenedQuery =
-          minePrefix +
-          buildDatasetFilterClauses(widenedParams, { ...filters, includeUnknown: true });
-        excludedUnknownQuery = { query: widenedQuery, params: widenedParams };
+        try {
+          const widenedParams: (string | number)[] = [status, user.id];
+          const widenedQuery =
+            minePrefix +
+            buildDatasetFilterClauses(widenedParams, { ...filters, includeUnknown: true });
+          excludedUnknownQuery = { query: widenedQuery, params: widenedParams };
+        } catch (err) {
+          console.warn(
+            "[datasets] failed to build excluded_unknown widened query, omitting field:",
+            err instanceof Error ? err.message : String(err),
+          );
+        }
       }
 
       // --mine path is always authed and per-user; the no-store default
@@ -562,13 +585,23 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     query += buildDatasetFilterClauses(params, filters);
     query += buildSortClause(sort);
 
+    // #1165 review M5: same try/catch as the ?mine branch above -- a
+    // reporting-only field must degrade on its own failure, not 500 the
+    // whole list. See that branch's comment for the full rationale.
     let excludedUnknownQuery: { query: string; params: (string | number)[] } | undefined;
     if (isAnyFacetActive(filters.facets)) {
-      const { sql: widenedPrefix, params: widenedParams } = buildPublicPrefix();
-      const widenedQuery =
-        widenedPrefix +
-        buildDatasetFilterClauses(widenedParams, { ...filters, includeUnknown: true });
-      excludedUnknownQuery = { query: widenedQuery, params: widenedParams };
+      try {
+        const { sql: widenedPrefix, params: widenedParams } = buildPublicPrefix();
+        const widenedQuery =
+          widenedPrefix +
+          buildDatasetFilterClauses(widenedParams, { ...filters, includeUnknown: true });
+        excludedUnknownQuery = { query: widenedQuery, params: widenedParams };
+      } catch (err) {
+        console.warn(
+          "[datasets] failed to build excluded_unknown widened query, omitting field:",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
     }
 
     // CF edge cache: anonymous list responses are identical for all callers
@@ -627,7 +660,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     try {
       filters = parseFilterQuery(c, { includeSearch: false });
     } catch (err) {
-      if (err instanceof RangeParseError) {
+      if (err instanceof RangeParseError || err instanceof FacetEnumParseError) {
         return c.json({ error: err.message }, 400);
       }
       throw err;

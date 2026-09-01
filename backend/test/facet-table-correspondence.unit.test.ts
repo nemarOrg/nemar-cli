@@ -11,8 +11,11 @@
  *     dead CLI flag or an unreachable SQL binding.
  *  2. `hasActiveFilters` (dataset-search.ts) returns true for EACH facet
  *     key individually, not just "some" facet -- an OR-gate term deleted
- *     for one specific key is exactly the class of bug that left 22 of 154
- *     tests green in Phase 2b (only tested in aggregate, never per-term).
+ *     for one specific key is exactly the class of bug the epic's Phase 2b
+ *     incident (PR #1162 review I2) already demonstrated elsewhere: deleting
+ *     any single term of a 5-term OR gate (`hasSignalDefaults`, in
+ *     `test/data-route.unit.test.ts`) left 154 tests passing, because only
+ *     one of the five terms had a dedicated single-term test.
  *  3. Every facet's bound column(s) appear in the actual projected SQL of
  *     both `GET /datasets` branches (driven through the real route, not a
  *     hand-copied column list) -- a facet a caller can filter by but never
@@ -56,14 +59,25 @@ describe("shared/facets.ts <-> dataset-facets.ts correspondence", () => {
     expect(FACETS.length).toBe(vocabKeys.size);
     expect(FACET_DEFINITIONS.length).toBe(sqlKeys.size);
   });
+
+  // #1165 review I3: `queryParam` is the wire form; the house style for
+  // every other query param is snake_case (`has_hed`, `data_complete`,
+  // `has_doi`, `min_score`). `key`/`flag` are allowed to stay hyphenated
+  // (they're internal/CLI-facing) -- this only pins `queryParam`, so a
+  // future facet can't reintroduce a hyphenated query string.
+  test("every facet's queryParam is snake_case (no hyphens)", () => {
+    const offenders = FACETS.filter((f) => !/^[a-z0-9_]+$/.test(f.queryParam)).map((f) => f.key);
+    expect(offenders).toEqual([]);
+  });
 });
 
 describe("hasActiveFilters: every facet key is its own OR-gate term", () => {
   // Each of the twenty facets, driven through a MINIMAL valid FacetValue for
   // its own kind -- not a shared fixture -- so a deleted term for ONE key
-  // fails only that key's test, not all twenty at once (mirrors the epic's
-  // own post-mortem: an aggregate assertion let 22/154 tests stay green
-  // when one OR-gate term was deleted).
+  // fails only that key's test, not all twenty at once. Mirrors the epic's
+  // Phase 2b incident (PR #1162 review I2): deleting any single term of a
+  // 5-term OR gate left the whole suite green because only one term had a
+  // dedicated single-term test -- an aggregate assertion cannot catch that.
   for (const facet of FACETS) {
     test(`facets.${facet.key} alone makes hasActiveFilters true`, () => {
       const filters: DatasetFilterOptions = {
@@ -79,6 +93,43 @@ describe("hasActiveFilters: every facet key is its own OR-gate term", () => {
 
   test("an empty facets object (no keys) makes hasActiveFilters false", () => {
     expect(hasActiveFilters({ facets: {} })).toBe(false);
+  });
+});
+
+// #1165 review I1: the facet loop above drives all twenty facet terms of
+// `hasActiveFilters`'s OR gate individually, but the nine PRE-EXISTING
+// legacy terms (search/modality/author/task/hasDoi/hasHed/dataComplete/
+// recent/licenseTiers) had no per-term coverage at all -- only the aggregate
+// "no facets and no legacy filter" / "an empty facets object" tests above
+// touch them, and both leave every legacy term at its falsy default, so
+// deleting any ONE of the nine (e.g. `filters.hasHed ||`) leaves the whole
+// suite green. Mirrors the per-facet loop above: one minimal truthy value
+// per legacy field, each its own test.
+describe("hasActiveFilters: every legacy (pre-facet-table) filter is its own OR-gate term", () => {
+  const legacyCases: readonly [string, DatasetFilterOptions][] = [
+    ["search", { search: "eeg" }],
+    ["modality", { modality: "eeg" }],
+    ["author", { author: "Ada" }],
+    ["task", { task: "rest" }],
+    ["hasDoi", { hasDoi: true }],
+    ["hasHed", { hasHed: true }],
+    ["dataComplete", { dataComplete: true }],
+    ["recent", { recent: 1 }],
+    ["licenseTiers", { licenseTiers: ["public"] }],
+  ];
+
+  for (const [name, filters] of legacyCases) {
+    test(`legacy filter "${name}" alone makes hasActiveFilters true`, () => {
+      expect(hasActiveFilters(filters)).toBe(true);
+    });
+  }
+
+  test("recent=0 alone does NOT make hasActiveFilters true (falsy guard, not just presence)", () => {
+    expect(hasActiveFilters({ recent: 0 })).toBe(false);
+  });
+
+  test("an empty licenseTiers array alone does NOT make hasActiveFilters true", () => {
+    expect(hasActiveFilters({ licenseTiers: [] })).toBe(false);
   });
 });
 
