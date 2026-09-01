@@ -32,6 +32,7 @@ import { getCurrentUser } from "../lib/api/auth.js";
 import { requestDownloadCredentials, requestUploadCredentials } from "../lib/api/data.js";
 import {
   type Dataset,
+  type DatasetSearchResult,
   type DatasetsListResponse,
   type NemarMetadataPayload,
   ORCID_REGEX,
@@ -154,7 +155,9 @@ import {
 import { checkPrerequisitesForCommand } from "../lib/prerequisites.js";
 import { DownloadProgressTracker, formatBytes } from "../lib/progress.js";
 import { promptForProvenance } from "../lib/provenance.js";
+import { renderSnippetLine, truncateTokenList } from "../lib/render/snippet.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
+import { theme } from "../lib/theme.js";
 import type { UploadProgress } from "../lib/upload-progress.js";
 import {
   clearUploadProgress,
@@ -1650,6 +1653,171 @@ function renderDatasetTable(
 }
 
 /**
+ * Column layout for `nemar dataset search`'s result table (epic #1144 phase
+ * 6, issue #1150, D4). Derives widths from the terminal width, shrinking the
+ * name column first and then dropping the least load-bearing columns (HED,
+ * then Subj, then Modality) in that order before the row would otherwise
+ * overflow -- but never touching `idWidth`: the id is what the user copies
+ * into their next command, so it is never truncated at any width, even if
+ * every other column has already been dropped and the row still overflows.
+ */
+export interface SearchColumnPlan {
+  idWidth: number;
+  nameWidth: number;
+  modWidth: number;
+  subjWidth: number;
+  showModality: boolean;
+  showSubj: boolean;
+  showHed: boolean;
+}
+
+const SEARCH_MAX_NAME_WIDTH = 35;
+const SEARCH_MIN_NAME_WIDTH = 8;
+const SEARCH_FLOOR_NAME_WIDTH = 4;
+const SEARCH_MOD_WIDTH = 10;
+const SEARCH_SUBJ_WIDTH = 6;
+const SEARCH_HED_WIDTH = 3;
+const SEARCH_COLUMN_GAP = 2;
+/** Fallback terminal width (#1150 D4): `process.stdout.columns` is
+ *  `undefined` for piped/non-TTY output, which is the common case for a
+ *  scripted or redirected invocation. */
+export const SEARCH_DEFAULT_COLUMNS = 80;
+
+/**
+ * Plan the search table's column widths for a given terminal width. Never
+ * throws (#1150 D7): a non-finite or non-positive `columns` (a terminal
+ * capability probe gone wrong) falls back to {@link SEARCH_DEFAULT_COLUMNS}
+ * rather than producing a degenerate or negative-width layout.
+ */
+export function planSearchColumns(
+  results: Pick<DatasetSearchResult, "id" | "name">[],
+  columns: number,
+): SearchColumnPlan {
+  const safeColumns =
+    Number.isFinite(columns) && columns > 0 ? Math.floor(columns) : SEARCH_DEFAULT_COLUMNS;
+  const idWidth = Math.max(10, ...results.map((r) => r.id.length));
+  let nameWidth = Math.min(
+    SEARCH_MAX_NAME_WIDTH,
+    Math.max(10, ...results.map((r) => r.name.length)),
+  );
+  let showModality = true;
+  let showSubj = true;
+  let showHed = true;
+
+  const totalWidth = (): number => {
+    let width = idWidth + SEARCH_COLUMN_GAP + nameWidth;
+    if (showModality) width += SEARCH_COLUMN_GAP + SEARCH_MOD_WIDTH;
+    if (showSubj) width += SEARCH_COLUMN_GAP + SEARCH_SUBJ_WIDTH;
+    if (showHed) width += SEARCH_COLUMN_GAP + SEARCH_HED_WIDTH;
+    return width;
+  };
+
+  while (totalWidth() > safeColumns && nameWidth > SEARCH_MIN_NAME_WIDTH) nameWidth--;
+  if (totalWidth() > safeColumns && showHed) showHed = false;
+  if (totalWidth() > safeColumns && showSubj) showSubj = false;
+  if (totalWidth() > safeColumns && showModality) showModality = false;
+  // Extremely narrow terminals: shrink further rather than drop the name
+  // column entirely -- id + name is the minimum a search result is legible
+  // by.
+  while (totalWidth() > safeColumns && nameWidth > SEARCH_FLOOR_NAME_WIDTH) nameWidth--;
+
+  return {
+    idWidth,
+    nameWidth,
+    modWidth: SEARCH_MOD_WIDTH,
+    subjWidth: SEARCH_SUBJ_WIDTH,
+    showModality,
+    showSubj,
+    showHed,
+  };
+}
+
+/**
+ * Render `nemar dataset search`'s human-readable result table as an array
+ * of lines (epic #1144 phase 6, issue #1150). No `Score` column (D1: RRF
+ * score is a ranking artefact on a scale the CLI's old 0.8/0.5 thresholds
+ * never matched -- row order already encodes relevance, and the freed width
+ * goes to the snippet). A snippet line follows its row only when one comes
+ * back from the API (D2); a row without one leaves no blank line behind.
+ *
+ * Row CONTENT rendering is fault-isolated (#1150 D7): a malformed
+ * `modalities` or `snippet` on one result degrades that row to its plainest
+ * safe form rather than aborting the whole table -- the dataset list the
+ * user asked for is the deliverable, the decoration is not allowed to take
+ * it down.
+ *
+ * The scope is narrower than "per-row" first reads, and the difference is
+ * worth knowing (#1174 review): `planSearchColumns` runs ONCE over the whole
+ * result set before the per-row try/catch, so a malformed `id` or `name`
+ * throws out of this function entirely. That is caught one level up by the
+ * command's own fallback to a plain id/name listing. The command still never
+ * fails, which is D7's actual guarantee -- but in that case every row loses
+ * its full rendering, not just the offending one.
+ */
+export function renderSearchResultLines(results: DatasetSearchResult[], columns: number): string[] {
+  const plan = planSearchColumns(results, columns);
+  const lines: string[] = [];
+
+  const headerParts = ["ID".padEnd(plan.idWidth), "Name".padEnd(plan.nameWidth)];
+  if (plan.showModality) headerParts.push("Modality".padEnd(plan.modWidth));
+  if (plan.showSubj) headerParts.push("Subj".padEnd(plan.subjWidth));
+  if (plan.showHed) headerParts.push("HED".padEnd(SEARCH_HED_WIDTH));
+  const header = headerParts.join("  ");
+  lines.push(theme.muted(header));
+  lines.push(theme.muted("-".repeat(header.length)));
+
+  for (const result of results) {
+    try {
+      const name =
+        result.name.length > plan.nameWidth
+          ? `${result.name.substring(0, plan.nameWidth - 3)}...`
+          : result.name;
+
+      const rowParts = [theme.id(result.id.padEnd(plan.idWidth)), name.padEnd(plan.nameWidth)];
+      if (plan.showModality) {
+        rowParts.push(
+          truncateTokenList(result.modalities || "-", plan.modWidth).padEnd(plan.modWidth),
+        );
+      }
+      if (plan.showSubj) {
+        rowParts.push(
+          (result.participants ? String(result.participants) : "-").padEnd(plan.subjWidth),
+        );
+      }
+      if (plan.showHed) {
+        rowParts.push(result.has_hed === 1 ? theme.metric("HED") : theme.muted("-"));
+      }
+      lines.push(rowParts.join("  "));
+
+      // Defence-in-depth beyond renderSnippetLine's own guard (#1150 D7):
+      // a snippet that fails to render costs this row its garnish, never
+      // the row itself, never the rest of the table.
+      //
+      // This layer is DOUBLY masked and no test can see it (#1174 review):
+      // renderSnippetLine already cannot throw for any input reachable here,
+      // and if it somehow did, the per-row catch below would handle it with
+      // the same visible outcome. Kept because the cost is a try/catch and
+      // the failure it guards against is a search silently losing rows, but
+      // do not mistake the passing suite for proof that it does anything.
+      let snippetLine: string | null = null;
+      try {
+        snippetLine = renderSnippetLine(result.snippet);
+      } catch {
+        snippetLine = null;
+      }
+      if (snippetLine) lines.push(`    ${snippetLine}`);
+    } catch {
+      // A single malformed row must not take down the rest of the table
+      // (#1150 D7) -- fall back to the two fields that matter most: the id
+      // the user copies onward, and the name that tells them what it is.
+      lines.push(`${result.id ?? "?"}  ${result.name ?? "?"}`);
+    }
+  }
+
+  return lines;
+}
+
+/**
  * Validate `--license` tiers up front, shared by `list` and `search` (epic
  * #1144 phase 4, #1148, D4/D6). The API tolerantly drops unknown tokens (so
  * the website degrades gracefully), which would silently return an
@@ -1991,14 +2159,14 @@ Examples:
       // falls back to a page-derived lower bound rather than 500ing), same
       // vocabulary and treatment as the list command's `response.warning`.
       if (response.warning) {
-        console.log(chalk.yellow(`\n⚠ ${response.warning}`));
+        console.log(theme.warn(`\n⚠ ${response.warning}`));
       }
 
       // Epic #1144 phase 4 (#1148), D5: same stderr-only, count-gated,
       // always-attributed note as the list command.
       if (response.excluded_unknown !== undefined && response.excluded_unknown > 0) {
         console.error(
-          chalk.dim(
+          theme.muted(
             formatExcludedUnknownNote(
               response.excluded_unknown,
               response.excluded_unknown_by_facet ?? {},
@@ -2009,9 +2177,9 @@ Examples:
 
       if (response.results.length === 0) {
         console.log();
-        console.log(chalk.yellow("No datasets match your search."));
+        console.log(theme.warn("No datasets match your search."));
         console.log(
-          chalk.dim("Try different search terms or use 'nemar dataset list' for browsing."),
+          theme.muted("Try different search terms or use 'nemar dataset list' for browsing."),
         );
         triggerOpportunisticRefresh();
         return;
@@ -2019,49 +2187,51 @@ Examples:
 
       console.log();
       console.log(
-        chalk.bold(
+        theme.label(
           `Search results for "${query}" (${response.results.length} found, ${response.method}):`,
         ),
       );
       console.log();
 
-      const idWidth = Math.max(10, ...response.results.map((r) => r.id.length));
-      const nameWidth = Math.min(35, Math.max(10, ...response.results.map((r) => r.name.length)));
-      const modWidth = 10;
-      const subjWidth = 6;
+      // Terminal-capability probe: never throws, never yields a degenerate
+      // width (#1150 D4/D7). `process.stdout.columns` is `undefined` for
+      // piped/non-TTY stdout -- the common case for a scripted invocation --
+      // in which case the table lays out for SEARCH_DEFAULT_COLUMNS (80).
+      let columns = SEARCH_DEFAULT_COLUMNS;
+      try {
+        const raw = process.stdout.columns;
+        if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
+          columns = Math.floor(raw);
+        }
+      } catch {
+        columns = SEARCH_DEFAULT_COLUMNS;
+      }
 
-      const header = [
-        "Score".padEnd(5),
-        "ID".padEnd(idWidth),
-        "Name".padEnd(nameWidth),
-        "Modality".padEnd(modWidth),
-        "Subj".padEnd(subjWidth),
-        "HED".padEnd(3),
-      ].join("  ");
-      console.log(chalk.dim(header));
-      console.log(chalk.dim("-".repeat(header.length)));
-
-      for (const result of response.results) {
-        const name =
-          result.name.length > nameWidth
-            ? `${result.name.substring(0, nameWidth - 3)}...`
-            : result.name;
-        const scoreColor =
-          result.score >= 0.8 ? chalk.green : result.score >= 0.5 ? chalk.yellow : chalk.dim;
-
-        const row = [
-          scoreColor(String(result.score).padEnd(5)),
-          chalk.cyan(result.id.padEnd(idWidth)),
-          name.padEnd(nameWidth),
-          (result.modalities || "-").substring(0, modWidth).padEnd(modWidth),
-          (result.participants ? String(result.participants) : "-").padEnd(subjWidth),
-          result.has_hed === 1 ? chalk.magenta("HED") : chalk.dim("-"),
-        ].join("  ");
-        console.log(row);
+      try {
+        for (const line of renderSearchResultLines(response.results, columns)) {
+          console.log(line);
+        }
+      } catch (renderErr) {
+        // Presentation must never fail a command that already has its data
+        // (#1150 D7): the search succeeded and `response.results` is real:
+        // a bug in the table renderer degrades to the simplest possible
+        // listing, not to "Search failed".
+        if (process.env.VERBOSE) {
+          console.error(
+            theme.muted(
+              `[search] table rendering failed, falling back to a plain list: ${
+                renderErr instanceof Error ? renderErr.message : String(renderErr)
+              }`,
+            ),
+          );
+        }
+        for (const result of response.results) {
+          console.log(`${result.id}  ${result.name}`);
+        }
       }
 
       console.log();
-      console.log(chalk.dim("For details: nemar dataset status <dataset-id>"));
+      console.log(theme.muted("For details: nemar dataset status <dataset-id>"));
       triggerOpportunisticRefresh();
     } catch (error) {
       spinner.fail("Search failed");
