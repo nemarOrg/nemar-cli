@@ -530,3 +530,47 @@ export function buildFacetClauses(
 export function getFacetSqlSpec(key: string): FacetSqlSpec | undefined {
   return FACET_DEFINITIONS_BY_KEY.get(key);
 }
+
+/** One `, SUM(...)` clause per active facet, plus the parallel key list a
+ *  caller needs to map each `unk_N` result column back to its {@link FacetKey}. */
+export interface ExcludedUnknownBreakdownSql {
+  /** `", SUM(CASE WHEN <nullTest> THEN 1 ELSE 0 END) AS unk_0, ..."` -- append
+   *  directly after `SELECT COUNT(*) AS total`. Empty string when no facet is
+   *  active, so `SELECT COUNT(*) AS total${selectFragment} FROM ...` degrades
+   *  to a plain count with no behaviour change. */
+  readonly selectFragment: string;
+  /** `keysInOrder[i]` is the {@link FacetKey} whose count the result row's
+   *  `unk_<i>` column holds, in the SAME order the SUM clauses were emitted. */
+  readonly keysInOrder: FacetKey[];
+}
+
+/**
+ * Epic #1144 phase 4 (#1148), D5: builds the conditional-aggregation SELECT
+ * fragment that gives `excluded_unknown_by_facet` its per-facet breakdown in
+ * the SAME query that already computes the widened `excluded_unknown` total
+ * -- no extra round trip. `unk_N` (a positional index, not the facet key
+ * itself) because four facet keys are hyphenated (`recording-length`,
+ * `electrode-system`, `bids-version`, `hed-version`) and are not valid SQL
+ * identifiers unquoted; the caller maps `unk_N` back to a real {@link
+ * FacetKey} via `keysInOrder`.
+ *
+ * MUST be run against `FROM datasets d ...` directly, never against a query
+ * wrapping the row projection: `nullTest` expressions read raw columns like
+ * `d.subject_count IS NULL`, and the projection already COALESCEs several of
+ * those to a default (`COALESCE(d.subject_count, 0) AS participants`) before
+ * an outer query could see them, and drops the `d` alias entirely. See D5's
+ * "one structural change" in the phase 4 plan.
+ */
+export function buildExcludedUnknownBreakdownSql(
+  facets: FacetFilterValues | undefined,
+): ExcludedUnknownBreakdownSql {
+  if (!facets) return { selectFragment: "", keysInOrder: [] };
+  const keysInOrder: FacetKey[] = [];
+  let selectFragment = "";
+  for (const spec of FACET_DEFINITIONS) {
+    if (facets[spec.key] === undefined) continue;
+    selectFragment += `, SUM(CASE WHEN ${spec.nullTest} THEN 1 ELSE 0 END) AS unk_${keysInOrder.length}`;
+    keysInOrder.push(spec.key);
+  }
+  return { selectFragment, keysInOrder };
+}
