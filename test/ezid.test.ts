@@ -142,7 +142,7 @@ describe("utility functions", () => {
   });
 
   // Bug #984: dataset_versions.doi is stored WITHOUT the "doi:" scheme
-  // prefix (unlike datasets.ezid_identifier, which has it), and EZID
+  // prefix (unlike the derived concept identifier, which has it), and EZID
   // rejects an unprefixed identifier with "invalid identifier". withdraw.ts
   // runs every identifier it hands to makeUnavailable/makePublic through
   // ensureDoiScheme first.

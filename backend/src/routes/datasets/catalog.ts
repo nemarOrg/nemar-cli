@@ -112,6 +112,38 @@ export function deriveFileSizeFormatted(fileSize: unknown): string | null {
 }
 
 /**
+ * Explode the stored `attestation` JSON (#1182, migration 0071) back into
+ * the six flat attestation_* fields the detail contract declares
+ * (shared/contract/dataset.ts datasetDetailSchema) — the wire shape is
+ * unchanged from when they were six columns, so the CLI is unaffected. A
+ * NULL/absent column means "no attestation on record" (ADR 0024) and
+ * serves six nulls, exactly as six NULL columns did. Exported for unit
+ * testing.
+ */
+export function explodeAttestationFields(raw: unknown): Record<string, unknown> {
+  let parsed: Record<string, unknown> = {};
+  if (typeof raw === "string" && raw) {
+    try {
+      const val: unknown = JSON.parse(raw);
+      if (val && typeof val === "object" && !Array.isArray(val)) {
+        parsed = val as Record<string, unknown>;
+      }
+    } catch {
+      // json_valid CHECK makes this unreachable for stored rows; serve
+      // six nulls rather than 500 if it ever happens.
+    }
+  }
+  return {
+    attestation_deposit_type: parsed.deposit_type ?? null,
+    attestation_key_status: parsed.key_status ?? null,
+    attestation_deidentified: parsed.deidentified ?? null,
+    attestation_no_duplicate: parsed.no_duplicate ?? null,
+    attestation_upstream_source: parsed.upstream_source ?? null,
+    attestation_accepted_at: parsed.accepted_at ?? null,
+  };
+}
+
+/**
  * Shared list-row shaping: canonical latest_version tag plus the derived
  * file_size_formatted. The list projections previously served
  * `COALESCE(d.file_size_formatted, '')`, so the list fallback for an
@@ -1031,10 +1063,17 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     }
     // Detail keeps the old raw-column shape for file_size_formatted: a
     // string when file_size is measured and positive, null otherwise (the
-    // list branches coalesce to '' instead — see toListRow).
+    // list branches coalesce to '' instead — see toListRow). The stored
+    // attestation JSON is dropped from the payload and served as the six
+    // flat contract fields instead (wire shape unchanged from the
+    // six-column era).
+    const { attestation: attestationRaw, ...rest } = withCanonicalLatestVersion(
+      dataset as Record<string, unknown>,
+    );
     const detail = {
-      ...withCanonicalLatestVersion(dataset as Record<string, unknown>),
+      ...rest,
       file_size_formatted: deriveFileSizeFormatted(dataset.file_size),
+      ...explodeAttestationFields(attestationRaw),
     };
     return c.json({ dataset: detail });
   });

@@ -131,6 +131,27 @@ const createDatasetSchema = z.object({
   attestation: attestationSchema.optional(),
 });
 
+/**
+ * Serialize a validated attestation into the single `datasets.attestation`
+ * JSON column (#1182; the six flat columns were collapsed by migration
+ * 0071). Key names and value types match what that migration produced from
+ * the old columns: 0/1 integers for the booleans, null for the optional
+ * fields, and a UTC `YYYY-MM-DD HH:MM:SS` accepted_at (the same shape
+ * SQLite's datetime('now') wrote before). `deidentified` is always 1 here:
+ * the schema requires literal true. The wire contract still serves the six
+ * flat attestation_* fields; the detail route explodes this JSON back out.
+ */
+function attestationJson(attestation: z.infer<typeof attestationSchema>): string {
+  return JSON.stringify({
+    deposit_type: attestation.deposit_type,
+    key_status: attestation.key_status,
+    deidentified: 1,
+    no_duplicate: attestation.no_duplicate === undefined ? null : attestation.no_duplicate ? 1 : 0,
+    upstream_source: attestation.upstream_source ?? null,
+    accepted_at: new Date().toISOString().replace("T", " ").slice(0, 19),
+  });
+}
+
 // Sandbox file size limit: 10MB total in production (sandbox is for exercising
 // the workflow, not storing real data). Non-production staging (epic #923) needs
 // realistic exemplars, so it gets a larger cap; the exemplar clone tool bypasses
@@ -305,29 +326,13 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         // A resumed create is the same depositor re-affirming: record the
         // attestation they sent now (also backfills rows whose original
         // create predated attestation collection). Failure here must not
-        // block the resume; the columns stay NULL and the next attempt
+        // block the resume; the column stays NULL and the next attempt
         // records it.
         if (attestation) {
           try {
             await db
-              .prepare(
-                `UPDATE datasets SET
-                   attestation_deposit_type = ?,
-                   attestation_key_status = ?,
-                   attestation_deidentified = ?,
-                   attestation_no_duplicate = ?,
-                   attestation_upstream_source = ?,
-                   attestation_accepted_at = datetime('now')
-                 WHERE dataset_id = ?`,
-              )
-              .bind(
-                attestation.deposit_type,
-                attestation.key_status,
-                attestation.deidentified ? 1 : 0,
-                attestation.no_duplicate === undefined ? null : attestation.no_duplicate ? 1 : 0,
-                attestation.upstream_source ?? null,
-                datasetId,
-              )
+              .prepare("UPDATE datasets SET attestation = ? WHERE dataset_id = ?")
+              .bind(attestationJson(attestation), datasetId)
               .run();
           } catch (err) {
             console.error(`Failed to record attestation on resumed ${datasetId}:`, err);
@@ -450,9 +455,10 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           // 'unknown' (0034) until enrichment sets the real value via
           // writeDatasetCatalogFields. If `license` is ever added here, add
           // license_tier alongside it or the tier will stay stale (#653).
-          // Attestation columns (0067) ride the claim INSERT because they are
-          // known at create time; NULLs mean "no attestation on record"
-          // (pre-attestation CLIs, server-side imports).
+          // The attestation JSON (0067, collapsed to one column by 0071)
+          // rides the claim INSERT because it is known at create time; NULL
+          // means "no attestation on record" (pre-attestation CLIs,
+          // server-side imports).
           // Manifest-derived seeds (#1091): subjects/size are known from the
           // declared file list, so the dashboard card is populated from the
           // first render; enrichment overwrites with authoritative values.
@@ -460,10 +466,8 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           await db
             .prepare(
               `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility,
-                subject_count, file_size,
-                attestation_deposit_type, attestation_key_status, attestation_deidentified,
-                attestation_no_duplicate, attestation_upstream_source, attestation_accepted_at)
-             VALUES (?, ?, ?, ?, '', ?, 'private', ?, ?, ?, ?, ?, ?, ?, ?)`,
+                subject_count, file_size, attestation)
+             VALUES (?, ?, ?, ?, '', ?, 'private', ?, ?, ?)`,
             )
             .bind(
               datasetId,
@@ -473,18 +477,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
               sandbox ? 1 : 0,
               seed.subjects,
               seed.bytes,
-              attestation?.deposit_type ?? null,
-              attestation?.key_status ?? null,
-              attestation ? 1 : null,
-              attestation
-                ? attestation.no_duplicate === undefined
-                  ? null
-                  : attestation.no_duplicate
-                    ? 1
-                    : 0
-                : null,
-              attestation?.upstream_source ?? null,
-              attestation ? new Date().toISOString().replace("T", " ").slice(0, 19) : null,
+              attestation ? attestationJson(attestation) : null,
             )
             .run();
           break; // ID claimed successfully
