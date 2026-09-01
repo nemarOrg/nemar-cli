@@ -34,7 +34,7 @@ import webhooks from "./routes/webhooks";
 import { zarrDataRoutes } from "./routes/zarr-data";
 import { archiveRetrySweep } from "./services/archive-retry";
 import { AUTO_IMPORT_CRON, autoImportTick } from "./services/auto-import";
-import { runAvailabilityReportSweep } from "./services/availability-report";
+import { runAvailabilityReportSweepCron } from "./services/availability-report";
 import { fetchAndSyncCitationCounts } from "./services/citation-counts-sync";
 import { drainEmbeddingDirty } from "./services/dataset-search";
 import { DEV_EPHEMERAL_BAND_END, DEV_EPHEMERAL_BAND_START } from "./services/datasetId";
@@ -54,8 +54,8 @@ import { sweepImportRetries } from "./services/import-retry";
 import { manifestIntegritySweep } from "./services/manifest-sweep";
 import { getActiveNotices } from "./services/notices";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
-import { runRecordingStatsSweep } from "./services/recording-stats-sweep";
-import { runSignalDefaultsSweep } from "./services/signal-defaults-sweep";
+import { runRecordingStatsSweepCron } from "./services/recording-stats-sweep";
+import { runSignalDefaultsSweepCron } from "./services/signal-defaults-sweep";
 import {
   FIRST_WARNING_DAYS,
   STALENESS_LIMIT_DAYS,
@@ -799,6 +799,12 @@ export default {
       // a mirror D1 this would write to production dataset repos. It also has no
       // dataset-id prefix filter, exactly like archiveRetrySweep above.
       //
+      // Called via the Cron wrapper (#1166): the exported sweep itself is left
+      // unguarded because the admin backfill route calls it directly and needs
+      // it to keep working on staging, so the fence lives in
+      // runAvailabilityReportSweepCron instead. Kept inside this block too,
+      // belt and braces, exactly like archiveRetrySweep's own internal guard.
+      //
       // Self-limiting rather than exhaustive: capped at 10 GitHub commits per
       // run (AVAILABILITY_REPORT_SWEEP_MAX) because a burst of writes trips
       // GitHub's secondary rate limit on the shared PAT. It drains ~10/day and
@@ -806,8 +812,12 @@ export default {
       // large backlog is meant to be cleared with `nemar admin
       // availability-report --all`, not by waiting on this.
       ctx.waitUntil(
-        runAvailabilityReportSweep(env)
+        runAvailabilityReportSweepCron(env)
           .then((r) => {
+            // null means the wrapper's own isNonProductionEnv guard skipped
+            // the run (already logged there) -- not "ran and did nothing",
+            // which would otherwise print a fabricated processed=0 line.
+            if (!r) return;
             if (r.processed > 0 || (r.remaining ?? 0) > 0) {
               console.log(
                 `[availability-report-sweep] processed=${r.processed} written=${r.written} errors=${r.errors.length} remaining=${r.remaining ?? "?"}`,
@@ -832,9 +842,19 @@ export default {
       // no DOI/bucket mutation. Kept in the prod-only block anyway --
       // AGENTS.md's default stands absent a specific reason to carve out an
       // exception, and there is none here.
+      //
+      // Called via the Cron wrapper (#1166): the exported sweep itself is left
+      // unguarded because the admin backfill route calls it directly and needs
+      // it to keep working on staging, so the fence lives in
+      // runRecordingStatsSweepCron instead. Kept inside this block too, belt
+      // and braces, exactly like archiveRetrySweep's own internal guard.
       ctx.waitUntil(
-        runRecordingStatsSweep(env)
+        runRecordingStatsSweepCron(env)
           .then((r) => {
+            // null means the wrapper's own isNonProductionEnv guard skipped
+            // the run (already logged there) -- not "ran and did nothing",
+            // which would otherwise print a fabricated processed=0 line.
+            if (!r) return;
             if (r.processed > 0 || (r.remaining ?? 0) > 0) {
               console.log(
                 `[recording-stats-sweep] processed=${r.processed} measured=${r.measured} unmeasured=${r.unmeasured} errors=${r.errors.length} remaining=${r.remaining ?? "?"}`,
@@ -883,9 +903,19 @@ export default {
       // Bounded tighter than that sibling (15 per run, hard max 30, against
       // its 200) because each candidate costs a root tree, up to 25 subject
       // subtrees and a few blob fetches rather than one signed S3 GET.
+      //
+      // Called via the Cron wrapper (#1166): the exported sweep itself is left
+      // unguarded because the admin backfill route calls it directly and needs
+      // it to keep working on staging, so the fence lives in
+      // runSignalDefaultsSweepCron instead. Kept inside this block too, belt
+      // and braces, exactly like archiveRetrySweep's own internal guard.
       ctx.waitUntil(
-        runSignalDefaultsSweep(env)
+        runSignalDefaultsSweepCron(env)
           .then((r) => {
+            // null means the wrapper's own isNonProductionEnv guard skipped
+            // the run (already logged there) -- not "ran and did nothing",
+            // which would otherwise print a fabricated processed=0 line.
+            if (!r) return;
             if (r.processed > 0 || (r.remaining ?? 0) > 0) {
               console.log(
                 `[signal-defaults-sweep] processed=${r.processed} populated=${r.populated} noData=${r.noData} errors=${r.errors.length} remaining=${r.remaining ?? "?"}`,
