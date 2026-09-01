@@ -41,6 +41,7 @@
  */
 
 import type { Bindings } from "../types/bindings";
+import { isNonProductionEnv } from "./environment";
 import { getBidsTreeStats } from "./github";
 import { getDatasetsToken } from "./github-auth";
 
@@ -320,4 +321,36 @@ export async function runSignalDefaultsSweep(
     errors,
     remaining: remainingRow?.n ?? null,
   };
+}
+
+/**
+ * Cron-only wrapper (issue #1166, Option 2). `runSignalDefaultsSweep` itself
+ * stays UNGUARDED on purpose: `POST /admin/datasets/signal-defaults-sweep`
+ * calls it directly and is not environment-gated, so an operator can still
+ * drive a backfill outside production. Note the fleet is NOT what that
+ * reaches: this sweep's candidate SQL filters `is_sandbox` without the
+ * `is_exemplar = 1` carve-out (issue #1168), and exemplars are inserted
+ * `is_sandbox = 1`, so on staging the only candidate is `nm099999`.
+ * Only the recurring daily-cron caller needs
+ * the production fence, so the guard lives here instead of inside the sweep
+ * -- guarding the sweep itself would quietly take the admin route down
+ * outside production too.
+ *
+ * Returns `null` when skipped so the `scheduled()` call site can tell "ran
+ * with nothing to do" (a real result with `processed: 0`) apart from "did not
+ * run at all". The call site's `if (!r) return` is what acts on that. Without
+ * it the summary line would not be "fabricated" -- its own
+ * `processed > 0 || remaining > 0` gate already suppresses an all-zero
+ * result -- the failure is that reading `r.processed` off `null` throws, and
+ * the chained `.catch()` then reports a skipped run as a crashed one
+ * ("sweep failed: TypeError"). #1167 review, finding 2.
+ */
+export async function runSignalDefaultsSweepCron(
+  env: Bindings,
+): Promise<SignalDefaultsSweepResult | null> {
+  if (isNonProductionEnv(env)) {
+    console.log("[signal-defaults-sweep] skipped (non-production)");
+    return null;
+  }
+  return runSignalDefaultsSweep(env);
 }

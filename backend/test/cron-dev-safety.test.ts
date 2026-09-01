@@ -202,7 +202,17 @@ describe("prod-safety gates use the fail-closed helper, not a literal comparison
   // only environment-aware backstop behind the env-blind visibility carve-outs)
   // and the prod webhook dev-range short-circuit. A structural pin, matching
   // this repo's admin-route-inventory / api-export-surface convention.
-  const FILES = ["../src/index.ts", "../src/routes/webhooks/github.ts"];
+  // Extended in #1167: the three sweep services gained their own
+  // isNonProductionEnv guards (issue #1166), so they are now exactly the
+  // kind of file this pin exists for. They were clean when added; this
+  // keeps them that way.
+  const FILES = [
+    "../src/index.ts",
+    "../src/routes/webhooks/github.ts",
+    "../src/services/availability-report.ts",
+    "../src/services/recording-stats-sweep.ts",
+    "../src/services/signal-defaults-sweep.ts",
+  ];
 
   for (const rel of FILES) {
     test(`${rel} has no raw ENVIRONMENT === "production" gate`, async () => {
