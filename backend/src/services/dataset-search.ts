@@ -7,6 +7,7 @@
  * Vectors carry zero facts; every display field is hydrated from `datasets`.
  */
 
+import { isAnyFacetActive } from "./dataset-facets";
 import {
   type DatasetFilterOptions,
   buildDatasetFilterClauses,
@@ -353,8 +354,18 @@ async function embedAndQuery(
  *  to qualify the stale-vector-drift warning in {@link semanticSearchHydrated}
  *  (#1145 review I2): an id dropped by hydrateDatasetsByIds might be a
  *  genuinely stale/deleted vector, or might simply have failed an active
- *  filter -- the two are indistinguishable from the count alone. */
-function hasActiveFilters(filters: DatasetFilterOptions): boolean {
+ *  filter -- the two are indistinguishable from the count alone.
+ *
+ *  Epic #1144 phase 3 (#1147): folds in `isAnyFacetActive(filters.facets)`
+ *  rather than hand-enumerating the twenty facet keys as a third
+ *  hand-maintained list alongside this one and `dataset-facets.ts`'s own
+ *  table -- exactly the enumeration-drift shape that left Phase 2b's
+ *  untested OR-gate terms silently inert (see `.rules/testing.md`). Exported
+ *  for direct unit testing of each OR-gate term (it is a leaf predicate, not
+ *  an orchestration entry point -- reaching it only through
+ *  {@link semanticSearchHydrated}'s console.warn side effect would mean
+ *  scraping log output instead of asserting behaviour). */
+export function hasActiveFilters(filters: DatasetFilterOptions): boolean {
   return Boolean(
     filters.search ||
       filters.modality ||
@@ -364,7 +375,8 @@ function hasActiveFilters(filters: DatasetFilterOptions): boolean {
       filters.hasHed ||
       filters.dataComplete ||
       (filters.recent && filters.recent > 0) ||
-      (filters.licenseTiers && filters.licenseTiers.length > 0),
+      (filters.licenseTiers && filters.licenseTiers.length > 0) ||
+      isAnyFacetActive(filters.facets),
   );
 }
 
@@ -532,6 +544,48 @@ async function countSearchMatchesSafely(
   }
 }
 
+/**
+ * Epic #1144 phase 3 (#1147), D4: the count of rows that would have matched
+ * if every active facet's NULL rows had been included, minus the count that
+ * actually did -- i.e. how many rows the default unknown-excluded policy is
+ * hiding right now. Skipped (returns `undefined`, not `0`) when no facet is
+ * active, so an unfiltered search pays nothing for it. On failure, omits the
+ * field rather than degrading `count`/`results` or 500ing the response --
+ * ADR 0005: this is reporting, never a precondition for serving.
+ *
+ * `countSucceeded` (#1165 review C1) gates this the same way `catalog.ts`'s
+ * `executeAndReturn` gates its own `excludedUnknown` diff on `countSucceeded`:
+ * `actualCount` is only a real total when the primary count query itself
+ * succeeded. Every caller here gets `actualCount` from
+ * `countSearchMatchesSafely`, which on failure substitutes `pageLowerBound`
+ * (an "at least this many" bound derived from the returned page, paired with
+ * a `warning`) -- diffing a real widened count against that fallback would
+ * report a confident-looking (and often wrong) number right next to a
+ * warning that says the total is unreliable. Skip the diff entirely instead.
+ */
+async function computeExcludedUnknownCount(
+  db: D1Database,
+  ftsMatch: string | null,
+  semanticIds: string[],
+  filters: DatasetFilterOptions,
+  actualCount: number,
+  countSucceeded: boolean,
+): Promise<number | undefined> {
+  if (!isAnyFacetActive(filters.facets)) return undefined;
+  if (!countSucceeded) return undefined;
+  try {
+    const widenedCount = await countSearchMatches(db, ftsMatch, semanticIds, {
+      ...filters,
+      includeUnknown: true,
+    });
+    return Math.max(0, widenedCount - actualCount);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[search] excluded_unknown count failed, omitting field: ${msg}`);
+    return undefined;
+  }
+}
+
 /** Reciprocal-rank fusion of semantic + lexical result lists (k=60). Dedups by
  *  id, keeps the FTS snippet, and sorts by fused score. */
 export function rrfFuse(semantic: SearchResult[], lexical: SearchResult[], k = 60): SearchResult[] {
@@ -581,6 +635,10 @@ export interface DatasetSearchEnvelope {
   method: string;
   min_score: number;
   warning?: string;
+  /** D4/ADR 0005: rows hidden by the default unknown-excluded facet policy
+   *  (see {@link computeExcludedUnknownCount}). Absent when no facet is
+   *  active, or when the widened count itself failed. */
+  excluded_unknown?: number;
 }
 
 /**
@@ -664,6 +722,7 @@ export async function executeDatasetSearch(
     method: string,
     count: number,
     warning?: string,
+    excludedUnknown?: number,
   ): DatasetSearchEnvelope => {
     const page = rows.slice(offset, offset + limit);
     return {
@@ -677,6 +736,7 @@ export async function executeDatasetSearch(
       method,
       min_score: minScore,
       ...(warning !== undefined ? { warning } : {}),
+      ...(excludedUnknown !== undefined ? { excluded_unknown: excludedUnknown } : {}),
     };
   };
 
@@ -713,7 +773,15 @@ export async function executeDatasetSearch(
         filters,
         offset + page.length,
       );
-      return buildEnvelope(lexical, "text", count, warning);
+      const excludedUnknown = await computeExcludedUnknownCount(
+        db,
+        ftsMatch,
+        [],
+        filters,
+        count,
+        warning === undefined,
+      );
+      return buildEnvelope(lexical, "text", count, warning, excludedUnknown);
     }
     let semantic: SearchResult[] = [];
     try {
@@ -738,7 +806,15 @@ export async function executeDatasetSearch(
         filters,
         offset + page.length,
       );
-      return buildEnvelope(lexical, "text_fallback", count, warning);
+      const excludedUnknown = await computeExcludedUnknownCount(
+        db,
+        ftsMatch,
+        [],
+        filters,
+        count,
+        warning === undefined,
+      );
+      return buildEnvelope(lexical, "text_fallback", count, warning, excludedUnknown);
     }
     const semanticFiltered = applyMinScore(semantic);
     if (semanticFiltered.length === 0) {
@@ -750,20 +826,37 @@ export async function executeDatasetSearch(
         filters,
         offset + page.length,
       );
-      return buildEnvelope(lexical, "text_fallback", count, warning);
+      const excludedUnknown = await computeExcludedUnknownCount(
+        db,
+        ftsMatch,
+        [],
+        filters,
+        count,
+        warning === undefined,
+      );
+      return buildEnvelope(lexical, "text_fallback", count, warning, excludedUnknown);
     }
     // The union `count` describes is exactly what the fused results are
     // drawn from: the FTS match plus the (min-score-filtered) semantic ids.
     const fused = rrfFuse(semanticFiltered, lexical);
     const page = fused.slice(offset, offset + limit);
+    const semanticIds = semanticFiltered.map((r) => r.id);
     const { count, warning } = await countSearchMatchesSafely(
       db,
       ftsMatch,
-      semanticFiltered.map((r) => r.id),
+      semanticIds,
       filters,
       offset + page.length,
     );
-    return buildEnvelope(fused, "semantic", count, warning);
+    const excludedUnknown = await computeExcludedUnknownCount(
+      db,
+      ftsMatch,
+      semanticIds,
+      filters,
+      count,
+      warning === undefined,
+    );
+    return buildEnvelope(fused, "semantic", count, warning, excludedUnknown);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Only the expected missing-FTS-table case degrades to "unavailable"

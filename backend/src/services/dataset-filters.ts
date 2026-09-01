@@ -21,6 +21,7 @@
  */
 
 import type { LicenseTier } from "../lib/license";
+import { type FacetFilterValues, buildFacetClauses } from "./dataset-facets";
 
 /** Build an injection-safe FTS5 MATCH expression: tokenize to alphanumerics
  *  (dropping all FTS5 operator chars), quote each token and prefix-match it,
@@ -60,6 +61,21 @@ export interface DatasetFilterOptions {
   dataComplete?: boolean;
   recent?: number;
   licenseTiers?: LicenseTier[];
+  /**
+   * The declared facet vocabulary (epic #1144 phase 3, #1147) --
+   * `shared/facets.ts` + `dataset-facets.ts`. Kept separate from the flat
+   * legacy fields above rather than folded in: those nine fields have
+   * irregular, bespoke semantics (FTS routing, LIKE-joined comma lists) that
+   * don't fit a declared table, while every facet here shares one of five
+   * regular shapes. See ADR 0031.
+   */
+  facets?: FacetFilterValues;
+  /** Widens every ACTIVE facet's predicate with its declared NULL test
+   *  (D4/ADR 0005): a NULL never satisfies a SQL comparison, so unknown rows
+   *  are excluded by default, and this is the explicit escape hatch. Has no
+   *  effect on the legacy filters above (none of them are facet-table
+   *  entries) or when `facets` is empty/absent. */
+  includeUnknown?: boolean;
 }
 
 /**
@@ -140,6 +156,11 @@ export function buildDatasetFilterClauses(
     clauses += " AND COALESCE(d.publish_date, d.created_at) > datetime('now', ?)";
     params.push(`-${opts.recent} days`);
   }
+
+  // Epic #1144 phase 3 (#1147): the declared facet table's generic walk,
+  // appended after the bespoke clauses above rather than merged into them --
+  // see the `facets` field doc comment on DatasetFilterOptions and ADR 0031.
+  clauses += buildFacetClauses(params, opts.facets, opts.includeUnknown ?? false);
 
   return clauses;
 }
