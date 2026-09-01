@@ -39,6 +39,7 @@
 #   ./hallu-zarr.sh --requeue all --execute   # revive failed + data_failed
 #   ./hallu-zarr.sh --backfill-dir-formats            # dry-run: the #1172 sweep
 #   ./hallu-zarr.sh --backfill-dir-formats --execute  # requeue what it found
+#   ./hallu-zarr.sh --preview-engine-bump             # what an engine bump costs
 #
 # --requeue exists because the retry budget for `failed` was spent on OOM-killed
 # workers taking whole datasets down (#1110), and `data_failed` was reachable by
@@ -127,6 +128,18 @@ export AWS_DEFAULT_REGION="$AWS_REGION"
 QUEUE_DB="${ZARR_QUEUE_DB:-${STATE_DIR}/zarr-queue.db}"
 LOG_FILE="${ZARR_LOG_FILE:-${STATE_DIR}/.nm-zarr.log}"
 LOCK_FILE="${ZARR_LOCK_FILE:-${STATE_DIR}/.nm-zarr.lock}"
+# --- engine-bump guard (nemarOrg/nemar-cli#1172, ADR 0033) --------------------
+# `setup()` resets the driver clone to origin/$DRIVER_REF on every run, so
+# MERGING a bump of ZARR_ENGINE_VERSION deploys it: without a guard the next
+# hourly tick would reconcile under the new constant and re-queue the back
+# catalog with nobody watching. Above this many stamp-stale rows, reconcile
+# requeues NONE of them and says so; conversion of genuinely new datasets is
+# unaffected. Preview with `--preview-engine-bump`, then arm ONE run:
+#
+#   touch /mnt/local/zarr-state/.zarr-engine-bump-ack     # cron picks it up
+#   ZARR_ENGINE_BUMP_ACK=1 ./hallu-zarr.sh                # or a manual run
+ENGINE_REQUEUE_LIMIT="${ZARR_ENGINE_REQUEUE_LIMIT:-25}"
+ENGINE_ACK_FILE="${ZARR_ENGINE_BUMP_ACK_FILE:-${STATE_DIR}/.zarr-engine-bump-ack}"
 # NEMAR_WEBHOOK_TOKEN may be exported by the environment; the callback is skipped
 # when it is empty (the viewer reads index.json, not D1, so the callback is only
 # D1 bookkeeping).
@@ -138,6 +151,7 @@ LIMIT="${ZARR_LIMIT:-0}"
 STATS_ONLY=""
 REQUEUE=""
 BACKFILL_DIR_FORMATS=""
+PREVIEW_ENGINE_BUMP=""
 # Shared by --requeue and --backfill-dir-formats: both default to reporting and
 # write only when this is set, so one spelling of "yes, actually do it" serves
 # both recoveries.
@@ -148,6 +162,7 @@ while [[ $# -gt 0 ]]; do
     --limit) LIMIT="$2"; shift 2 ;;
     --stats) STATS_ONLY=1; shift ;;
     --backfill-dir-formats) BACKFILL_DIR_FORMATS=1; shift ;;
+    --preview-engine-bump) PREVIEW_ENGINE_BUMP=1; shift ;;
     # `shift 2` would fail on a bare `--requeue` (one positional left), and since
     # this script runs without `set -e` a failed shift leaves $# unchanged and the
     # loop spins forever. Take a value only when one is actually there.
@@ -394,6 +409,26 @@ convert_dataset() {
 # nothing. It also skips setup(): that does `git reset --hard` on the driver
 # clone, which a running conversion is reading from. SQLite's own locking covers
 # the concurrent write, which is a single fast UPDATE.
+# `--preview-engine-bump` answers "what would a bump cost" BEFORE one lands, and
+# is the reason ADR 0033 can claim a bump is visible rather than merely loud
+# after the fact. It runs `engine-preview`, which reads the queue and nothing
+# else -- no network, no writes -- so it is safe here, ahead of the lock and of
+# setup(), exactly like --requeue and for the same reasons.
+#
+# Note this deliberately does NOT run a real reconcile with --no-engine-requeue.
+# That would be a preview with side effects: reconcile enqueues new datasets,
+# parks unlisted ones, and resets stale `inprogress` rows -- writes that would
+# race a drain holding the lock. `--no-engine-requeue` remains available on
+# `zarr_queue.py reconcile` for anyone who wants that instead.
+if [[ -n "$PREVIEW_ENGINE_BUMP" ]]; then
+  if [[ ! -f "$QUEUE" ]]; then
+    err "queue script not found at $QUEUE; run once without --preview-engine-bump to set up the clone"
+    exit 1
+  fi
+  qpy engine-preview
+  exit $?
+fi
+
 # The #1172 backfill sweep sits in the same pre-lock, pre-setup() position, for
 # the same two reasons: an operator reaches for it precisely while a drain may be
 # holding the lock for hours, and it must not `git reset --hard` a clone that a
@@ -556,12 +591,37 @@ fi
 # "run complete: processed 0 dataset(s)" with exit 0 -- a green cron tick that
 # enqueued nothing, repeatable every hour for as long as the API stayed sick.
 # Fail loud instead, the same way setup() treats every git step.
-if ! reconcile_out="$(qpy reconcile --api-base "$API_BASE")"; then
+#
+# The engine-bump guard is armed here (#1172). An ack is consumed BEFORE the run
+# rather than after: a crash mid-reconcile would otherwise leave the file in
+# place and arm every subsequent tick, and losing an ack to a crashed run is the
+# safe direction to fail -- the operator re-touches it, versus a mass requeue
+# nobody asked for twice.
+reconcile_args=(reconcile --api-base "$API_BASE" --engine-requeue-limit "$ENGINE_REQUEUE_LIMIT")
+if [[ -n "${ZARR_ENGINE_BUMP_ACK:-}" ]]; then
+  log "engine bump acknowledged via ZARR_ENGINE_BUMP_ACK"
+  reconcile_args+=(--engine-requeue-ack)
+elif [[ -f "$ENGINE_ACK_FILE" ]]; then
+  log "engine bump acknowledged via $ENGINE_ACK_FILE (consumed; touch it again to re-arm)"
+  rm -f "$ENGINE_ACK_FILE"
+  reconcile_args+=(--engine-requeue-ack)
+fi
+if ! reconcile_out="$(qpy "${reconcile_args[@]}")"; then
   err "FATAL: reconcile failed (catalog unreachable, or queue error); nothing was"
   err "enqueued this run. Not draining -- an empty queue here would be a lie."
   exit 1
 fi
 log "reconcile: $reconcile_out"
+# The command-substitution above captures stdout, so the pending-ack notice would
+# otherwise reach the log only as part of that one line. Re-raise it as its own
+# ERROR line: a bump waiting on an operator must not be something you find by
+# reading to the end of a reconcile summary.
+case "$reconcile_out" in
+  *"ENGINE BUMP PENDING ACK"*)
+    err "an engine bump is waiting for acknowledgement; nothing was requeued for the stamp."
+    err "Preview: $0 --preview-engine-bump   Apply: touch $ENGINE_ACK_FILE (arms the next run)"
+    ;;
+esac
 n=0
 while :; do
   # An empty line means "queue drained"; a NON-ZERO exit means the queue could
