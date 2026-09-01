@@ -87,7 +87,7 @@ export interface BidsTreeStats {
    *  `*_eeg.json` ONLY -- deliberately independent of the root-vs-subject
    *  preference below (#1153 review, I4): this is a single sampled
    *  recording's value (migration 0054's "exemplar" caveat -- see
-   *  migration 0071 for the sibling caveat on the four signal_defaults
+   *  migration 0072 for the sibling caveat on the four signal_defaults
    *  fields), not a dataset default, so it must not inherit from a
    *  root-level sidecar the way signal_defaults correctly does. Undefined
    *  when no EEG `*_channels.tsv` / `*_eeg.json` was sampled. */

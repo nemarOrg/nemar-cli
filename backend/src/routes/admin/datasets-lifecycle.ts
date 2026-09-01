@@ -523,7 +523,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
 
   /**
    * POST /admin/datasets/signal-defaults-sweep?limit=N — backfill that seeds
-   * BIDS signal defaults (migration 0071: sampling_frequency,
+   * BIDS signal defaults (migration 0072: sampling_frequency,
    * power_line_frequency, eeg_reference, placement_scheme) from each
    * dataset's exemplar `*_eeg.json` sidecar (epic #1144 Phase 2b, issue
    * #1153). Modelled on recording-stats-sweep above: one implementation
@@ -565,7 +565,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     } catch (err) {
       console.error("[signal-defaults-sweep] candidate query failed:", err);
       return c.json(
-        { error: "Failed to query sweep candidates (is migration 0071 applied?)" },
+        { error: "Failed to query sweep candidates (is migration 0072 applied?)" },
         500,
       );
     }

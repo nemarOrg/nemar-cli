@@ -4,7 +4,7 @@
  * sidecar parsers backing neuroschema's `signal_defaults` block. Pure
  * helpers: parse a BIDS `*_channels.tsv` / `*_eeg.json` exemplar and derive
  * the catalog columns added in migration 0054 (`n_channels`,
- * `electrode_system`) and migration 0071 (`sampling_frequency`,
+ * `electrode_system`) and migration 0072 (`sampling_frequency`,
  * `power_line_frequency`, `eeg_reference`, `placement_scheme`). The
  * enrichment path (getBidsTreeStats) samples one exemplar EEG recording and
  * feeds the content here; everything in this module is I/O-free and

@@ -34,7 +34,7 @@ export interface DatasetMetadataColumns {
   /** `SamplingFrequency` (Hz) from the preferred `*_eeg.json` sidecar (epic
    *  #1144 Phase 2b, #1153). Serves `signal_defaults.sampling_frequency`.
    *  One exemplar sidecar's declared value, not a verified per-dataset
-   *  aggregate -- see migration 0071's caveat. */
+   *  aggregate -- see migration 0072's caveat. */
   sampling_frequency: number | null;
   /** `PowerLineFrequency` (Hz), coerced to exactly 50 or 60 (#1153). Serves
    *  `signal_defaults.power_line_frequency`. */
@@ -98,7 +98,7 @@ export interface MetadataColumnInputs {
    * `SamplingFrequency` (Hz) from `getBidsTreeStats`'s root-preferred `*_eeg.json`
    * sidecar (#1153). Omit when no sidecar was sampled or the key was
    * absent/invalid. One exemplar sidecar's declared value, not a verified
-   * per-dataset aggregate -- see migration 0071's caveat.
+   * per-dataset aggregate -- see migration 0072's caveat.
    */
   samplingFrequency?: number;
   /**

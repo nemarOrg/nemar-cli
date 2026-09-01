@@ -527,9 +527,9 @@ describe("migration 0020 file shape", () => {
   });
 });
 
-describe("migration 0071 file shape (#1153)", () => {
+describe("migration 0072 file shape (#1153)", () => {
   test("contains the five signal_defaults ALTER TABLE statements, and no new channel_system column", async () => {
-    const path = `${import.meta.dir}/../backend/src/db/migrations/0071_signal_defaults.sql`;
+    const path = `${import.meta.dir}/../backend/src/db/migrations/0072_signal_defaults.sql`;
     const sql = await Bun.file(path).text();
     for (const col of [
       "sampling_frequency REAL",

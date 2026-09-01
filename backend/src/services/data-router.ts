@@ -582,7 +582,7 @@ export interface DatasetDataSummary {
  * block is omitted (set to null) by the builder when every field is null,
  * matching `data_summary`'s gating. Every field below is one exemplar
  * sidecar's declared value, not a verified per-dataset aggregate -- see
- * migration 0071's caveat.
+ * migration 0072's caveat.
  */
 export interface DatasetSignalDefaults {
   sampling_frequency: number | null;
@@ -739,7 +739,7 @@ export interface DatasetRowForMetadata {
   recordings_measured: number | null;
   channel_count_min: number | null;
   channel_count_max: number | null;
-  /** signal_defaults columns from migration 0071 (epic #1144 Phase 2b,
+  /** signal_defaults columns from migration 0072 (epic #1144 Phase 2b,
    *  #1153), all null until the signal-defaults-sweep or a live reindex
    *  first computes them for this dataset. See DatasetSignalDefaults for
    *  what each serves. `electrode_system` predates this phase (migration

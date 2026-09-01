@@ -266,18 +266,18 @@ describe("POST /admin/datasets/signal-defaults-sweep (real route, zero real cand
 });
 
 // ---------------------------------------------------------------------------
-// Candidate query failure -> 500 (migration 0071 not applied)
+// Candidate query failure -> 500 (migration 0072 not applied)
 // ---------------------------------------------------------------------------
 
 const MIGRATIONS_DIR = join(import.meta.dir, "..", "src/db/migrations");
 
-/** Every migration EXCEPT 0071, so admin auth tables (earlier migrations)
+/** Every migration EXCEPT 0072, so admin auth tables (earlier migrations)
  *  exist but the signal-defaults columns/predicate do not -- reproduces "is
- *  migration 0071 applied?" for real instead of asserting on a fabricated
+ *  migration 0072 applied?" for real instead of asserting on a fabricated
  *  D1 error. */
-function dbMissingMigration0071(): Database {
+function dbMissingMigration0072(): Database {
   const files = readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith(".sql") && f !== "0071_signal_defaults.sql")
+    .filter((f) => f.endsWith(".sql") && f !== "0072_signal_defaults.sql")
     .sort();
   const built = new Database(":memory:");
   for (const file of files) {
@@ -287,8 +287,8 @@ function dbMissingMigration0071(): Database {
 }
 
 describe("POST /admin/datasets/signal-defaults-sweep: candidate query failure", () => {
-  test("returns 500 with a migration-0071 hint when the signal-defaults columns don't exist", async () => {
-    db = dbMissingMigration0071();
+  test("returns 500 with a migration-0072 hint when the signal-defaults columns don't exist", async () => {
+    db = dbMissingMigration0072();
     candidateLimitCalls = [];
     app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
     app.route("/admin", adminRoutes);
@@ -297,6 +297,6 @@ describe("POST /admin/datasets/signal-defaults-sweep: candidate query failure", 
     const res = await post("/admin/datasets/signal-defaults-sweep");
     expect(res.status).toBe(500);
     const body = await res.json();
-    expect(body.error).toContain("migration 0071");
+    expect(body.error).toContain("migration 0072");
   });
 });

@@ -141,7 +141,7 @@ describe("writeDatasetMetadataColumns honest-size columns", () => {
 });
 
 // Epic #1144 Phase 2b (#1153): the four signal_defaults value columns
-// (migration 0071), written by the same COALESCE UPDATE as n_channels/
+// (migration 0072), written by the same COALESCE UPDATE as n_channels/
 // electrode_system. Real D1 write, not a hand-copied SQL string -- this
 // drives the actual writeDatasetMetadataColumns bind order, so a
 // transposition among the four new positional binds (e.g. eeg_reference
