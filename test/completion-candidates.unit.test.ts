@@ -165,10 +165,20 @@ describe("regression: --flag=value single-token form (zsh/fish tokenize this way
   });
 
   test("a boolean flag before '=' offers nothing (it takes no value to complete)", () => {
+    // The flag is deliberately named `--source`, and deliberately declared
+    // BOOLEAN (no `<value>`), so that staticEnumFor("--source") would happily
+    // return the four source values if the takes-a-value guard were dropped.
+    //
+    // The obvious version of this test used `--doi` and proved nothing:
+    // `valueCandidatesFor` returns [] for a boolean flag anyway, so removing
+    // `!optionTakesValue(opt)` from the guard left the whole suite green
+    // (#1173 review flagged it, and it reproduced). This spelling makes the
+    // guard the only thing standing between a boolean flag and a populated
+    // value list, so deleting it fails here.
     const program = new Command("nemar");
     const list = program.command("list");
-    list.addOption(new Option("--doi"));
-    expect(getCandidates(program, ["list", "--doi=x"])).toEqual([]);
+    list.addOption(new Option("--source"));
+    expect(getCandidates(program, ["list", "--source=op"])).toEqual([]);
   });
 
   test("an undeclared flag before '=' offers nothing, not an error", () => {
