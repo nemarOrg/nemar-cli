@@ -13,7 +13,7 @@
  * decided to colour a given run.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   renderSnippetLine,
   sanitizeSnippetText,
@@ -214,5 +214,62 @@ describe("sanitizeSnippetText: C1 control bytes, not just C0 (#1174 review)", ()
     // 0xA0 is the first byte past C1. Widening the range one byte too far
     // would start eating non-breaking spaces and accented text.
     expect(sanitizeSnippetText("café naïve  end")).toBe("café naïve  end");
+  });
+});
+
+// #1174 test review: swapping theme.match and theme.muted inside
+// renderSnippetLine passed all 23 existing snippet tests, because they strip
+// ANSI before comparing content (deliberately, so they do not depend on
+// ambient FORCE_COLOR) and the colour test only checks that SOME escape byte
+// is present. So "matched terms emphasised, everything else dim" was asserted
+// in prose and by nothing else: a regression inverting emphasis would ship.
+//
+// These force colour on and assert WHICH segment carries WHICH role. The
+// codes are written as escapes, never as raw bytes, so this file stays free
+// of the control characters it exists to reason about.
+describe("renderSnippetLine: emphasis lands on the matched term (#1174 review)", () => {
+  const MATCH_ON = "\u001b[32m";
+  const MATCH_OFF = "\u001b[39m";
+  const MUTED_ON = "\u001b[2m";
+  const MUTED_OFF = "\u001b[22m";
+  const originalForceColor = process.env.FORCE_COLOR;
+
+  beforeEach(() => {
+    process.env.FORCE_COLOR = "1";
+  });
+  afterEach(() => {
+    // Restore by DELETING when it was unset. Assigning undefined coerces to
+    // the string "undefined", which is truthy and leaks into every later test
+    // in the same process -- the exact bug filed as #1175.
+    if (originalForceColor === undefined) delete process.env.FORCE_COLOR;
+    else process.env.FORCE_COLOR = originalForceColor;
+  });
+
+  async function renderColoured(input: string): Promise<string> {
+    // Fresh import so chalk re-evaluates FORCE_COLOR for this block.
+    const mod = await import(`../src/lib/render/snippet.js?colour=${Date.now()}`);
+    return mod.renderSnippetLine(input, 80) ?? "";
+  }
+
+  test("the marked term carries the match role, the prose carries muted", async () => {
+    const out = await renderColoured("before <mark>TERM</mark> after");
+    expect(out).toContain(`${MATCH_ON}TERM${MATCH_OFF}`);
+    expect(out).toContain(`${MUTED_ON}before ${MUTED_OFF}`);
+    expect(out).toContain(`${MUTED_ON} after${MUTED_OFF}`);
+    // The inverse must NOT appear: term dimmed, or prose emphasised.
+    expect(out).not.toContain(`${MUTED_ON}TERM${MUTED_OFF}`);
+    expect(out).not.toContain(`${MATCH_ON}before `);
+  });
+
+  test("every marked term is emphasised, not just the first", async () => {
+    const out = await renderColoured("a <mark>ONE</mark> b <mark>TWO</mark> c");
+    expect(out).toContain(`${MATCH_ON}ONE${MATCH_OFF}`);
+    expect(out).toContain(`${MATCH_ON}TWO${MATCH_OFF}`);
+  });
+
+  test("a snippet with no marks is entirely muted, with no match colour", async () => {
+    const out = await renderColoured("nothing highlighted here");
+    expect(out).toContain(MUTED_ON);
+    expect(out).not.toContain(MATCH_ON);
   });
 });

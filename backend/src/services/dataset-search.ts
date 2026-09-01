@@ -30,6 +30,33 @@ const EMBEDDING_MODEL = "@cf/baai/bge-small-en-v1.5";
 // raises both. SEARCH_CANDIDATE_CEILING is unrelated: a plain SQL `LIMIT`
 // with no `IN (...)` placeholder list behind it, so it is NOT bounded by
 // buildInPlaceholders and does not need to move in lockstep (#1145 review S2).
+/**
+ * Relevance floor for semantic results (epic #1144 phase 6, issue #1150,
+ * D6). bge-small cosine scores against this catalog, measured across 12
+ * representative queries at six thresholds:
+ *
+ * | Threshold | Queries losing the semantic tier |
+ * |---|---|
+ * | 0.50-0.60 | 0 of 12 |
+ * | 0.65 (prior default) | 4 of 12: sleep, motor, seizure, infant (all single-word) |
+ * | 0.70 | 6 of 12 |
+ *
+ * At 0.65 those four queries fell through to `text_fallback` silently --
+ * the response carries no signal that the semantic tier was even
+ * attempted, let alone skipped. 0.60 is the highest threshold at which
+ * nothing in the measured set degrades, and it still filters real noise
+ * (`motor` returns 16 results at 0.55 vs 11 at 0.60), so it is not simply
+ * "off". Override per-request with ?min_score=0 to inspect the long tail.
+ *
+ * Lives HERE, not in the route module that reads the query parameter, because
+ * this file needs it too: `executeDatasetSearch` applies the same floor when a
+ * direct caller omits `minScore`, and its own doc advertises it as safely
+ * reusable. D6 originally changed only the route's copy and left a second
+ * hardcoded 0.65 in this file, so an HTTP request got 0.60 while a direct call
+ * silently got 0.65 (#1174 review). One constant, both consumers.
+ */
+export const DEFAULT_MIN_SCORE = 0.6;
+
 export const SEMANTIC_TOPK = 100;
 export const SEARCH_CANDIDATE_CEILING = 300;
 
@@ -763,7 +790,9 @@ export async function executeDatasetSearch(
     ? Math.min(Math.max(Math.trunc(opts.limit), 1), 100)
     : 20;
   const offset = Number.isFinite(opts.offset) ? Math.max(Math.trunc(opts.offset), 0) : 0;
-  const minScore = Number.isFinite(opts.minScore) ? Math.max(0, Math.min(opts.minScore, 1)) : 0.65;
+  const minScore = Number.isFinite(opts.minScore)
+    ? Math.max(0, Math.min(opts.minScore, 1))
+    : DEFAULT_MIN_SCORE;
   const trimmed = opts.query.trim();
   // Match every NEMAR id shape: nm (native), on (OpenNeuro mirror), and ds
   // (legacy catalog OR an OpenNeuro source id whose mirror is on######). `on`

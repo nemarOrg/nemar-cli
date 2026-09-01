@@ -1792,6 +1792,13 @@ export function renderSearchResultLines(results: DatasetSearchResult[], columns:
       // Defence-in-depth beyond renderSnippetLine's own guard (#1150 D7):
       // a snippet that fails to render costs this row its garnish, never
       // the row itself, never the rest of the table.
+      //
+      // This layer is DOUBLY masked and no test can see it (#1174 review):
+      // renderSnippetLine already cannot throw for any input reachable here,
+      // and if it somehow did, the per-row catch below would handle it with
+      // the same visible outcome. Kept because the cost is a try/catch and
+      // the failure it guards against is a search silently losing rows, but
+      // do not mistake the passing suite for proof that it does anything.
       let snippetLine: string | null = null;
       try {
         snippetLine = renderSnippetLine(result.snippet);

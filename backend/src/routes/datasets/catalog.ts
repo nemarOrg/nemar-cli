@@ -26,7 +26,7 @@ import {
   buildPublicCatalogBase,
   escapeLikePattern,
 } from "../../services/dataset-filters";
-import { executeDatasetSearch } from "../../services/dataset-search";
+import { DEFAULT_MIN_SCORE, executeDatasetSearch } from "../../services/dataset-search";
 import { isValidDatasetId } from "../../services/datasetId";
 import { hasRole } from "../../types/bindings";
 import type { DatasetsRouter } from "./shared";
@@ -80,6 +80,10 @@ export function withCanonicalLatestVersion<T extends Record<string, unknown>>(ro
   return typeof v === "string" && v ? { ...row, latest_version: toVersionTag(v) } : row;
 }
 
+// Re-exported so existing importers keep their path; the constant itself
+// now lives with executeDatasetSearch, the other consumer (#1174 review).
+export { DEFAULT_MIN_SCORE };
+
 /**
  * Clamp raw `limit`/`offset` query values for GET /datasets/search (#1145),
  * mirroring the list endpoint's clamping idiom (see the `GET /` handler
@@ -109,26 +113,6 @@ export function parseSearchPagination(
 interface FilterQueryContext {
   req: { query: (name: string) => string | undefined };
 }
-
-/**
- * Relevance floor for semantic results (epic #1144 phase 6, issue #1150,
- * D6). bge-small cosine scores against this catalog, measured across 12
- * representative queries at six thresholds:
- *
- * | Threshold | Queries losing the semantic tier |
- * |---|---|
- * | 0.50-0.60 | 0 of 12 |
- * | 0.65 (prior default) | 4 of 12: sleep, motor, seizure, infant (all single-word) |
- * | 0.70 | 6 of 12 |
- *
- * At 0.65 those four queries fell through to `text_fallback` silently --
- * the response carries no signal that the semantic tier was even
- * attempted, let alone skipped. 0.60 is the highest threshold at which
- * nothing in the measured set degrades, and it still filters real noise
- * (`motor` returns 16 results at 0.55 vs 11 at 0.60), so it is not simply
- * "off". Override per-request with ?min_score=0 to inspect the long tail.
- */
-export const DEFAULT_MIN_SCORE = 0.6;
 
 /**
  * Parse and clamp the `min_score` query param, defaulting to

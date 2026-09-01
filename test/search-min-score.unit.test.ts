@@ -59,3 +59,51 @@ describe("parseMinScore", () => {
     expect(parseMinScore(ctx)).toBe(DEFAULT_MIN_SCORE);
   });
 });
+
+// #1174 test review. D6 changed the route's default to 0.60 and left a
+// SECOND hardcoded 0.65 in executeDatasetSearch's own fallback, which its
+// doc advertises as "safely reusable directly". So an HTTP request got 0.60
+// while a direct call silently got 0.65, and every test in the repo passed.
+//
+// The constant now lives in the service and the route re-exports it. This is
+// a structural pin in the shape this repo already uses for the ADR index and
+// the route inventory: it reads the production source and fails if a numeric
+// min-score default reappears anywhere but the single definition.
+describe("the min-score default exists exactly once (#1174 review)", () => {
+  const FILES = [
+    "../backend/src/services/dataset-search.ts",
+    "../backend/src/routes/datasets/catalog.ts",
+  ];
+
+  test("no file hardcodes a min-score fallback literal", async () => {
+    const offenders: string[] = [];
+    for (const rel of FILES) {
+      const src = await Bun.file(new URL(rel, import.meta.url)).text();
+      src.split("\n").forEach((line, i) => {
+        const code = line.trim();
+        // Comments legitimately cite 0.65 as the PRIOR default in the
+        // measurement table, so only executable lines are considered.
+        if (code.startsWith("*") || code.startsWith("//") || code.startsWith("/*")) return;
+        // The one permitted numeric assignment is the definition itself.
+        if (code.startsWith("export const DEFAULT_MIN_SCORE")) return;
+        if (/minScore[^\n]*[:?]\s*0\.\d+/.test(code) || /:\s*0\.6[05]\b/.test(code)) {
+          offenders.push(`${rel}:${i + 1}: ${code}`);
+        }
+      });
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test("both consumers reference the shared constant by name", async () => {
+    const service = await Bun.file(
+      new URL("../backend/src/services/dataset-search.ts", import.meta.url),
+    ).text();
+    const route = await Bun.file(
+      new URL("../backend/src/routes/datasets/catalog.ts", import.meta.url),
+    ).text();
+    // executeDatasetSearch's own fallback, and parseMinScore's.
+    expect(service).toContain("DEFAULT_MIN_SCORE");
+    expect(route).toContain("DEFAULT_MIN_SCORE");
+    expect(DEFAULT_MIN_SCORE).toBe(0.6);
+  });
+});

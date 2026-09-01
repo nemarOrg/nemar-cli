@@ -116,14 +116,25 @@ const MAX_SNIPPET_INPUT_LENGTH = 400;
  * an empty one): snippets are absent on the exact-id tier and on semantic
  * rows with no FTS match (#1150 D2).
  *
- * Never throws (#1150 D7). Verified by mutation: with the `typeof` check
- * below removed, a non-string `rawSnippet` (an API/schema drift) still does
- * not escape this function -- the surrounding try/catch is what actually
- * catches the resulting `TypeError` from calling a string method on it. The
- * explicit `typeof` guard stays anyway as a fast, self-documenting rejection
- * of that specific shape rather than relying only on the general-purpose
- * catch to paper over it. Either way the result is "no snippet for this
- * row", never a propagated error.
+ * Never throws (#1150 D7). Be precise about WHICH layer earns that, because
+ * three of the four here are not individually falsifiable and an earlier
+ * version of this comment disclosed only one of them (#1174 review):
+ *
+ *  - The `MAX_SNIPPET_INPUT_LENGTH` bound IS load-bearing on its own.
+ *    Removing it fails a test directly.
+ *  - The falsy check and the `typeof` check are both masked by the try/catch
+ *    below: delete either, or both, and every test still passes, because
+ *    `undefined.length` and `"".length` on a non-string throw and are caught
+ *    identically. They stay as a fast, self-documenting rejection of the
+ *    shapes we expect, not because a test can tell they are there.
+ *  - The try/catch itself is, today, provably dead: with the guards in place
+ *    no test drives an input into the body that throws. It is a backstop
+ *    against a FUTURE guard regression, not a currently-exercised path.
+ *
+ * That is a deliberate belt-and-braces arrangement for untrusted input on a
+ * path that must never fail a search, not an accident. Recording which parts
+ * a test can actually see is the point: do not read the passing suite as
+ * evidence that all four layers work.
  */
 export function renderSnippetLine(rawSnippet: string | undefined | null): string | null {
   if (!rawSnippet || typeof rawSnippet !== "string") return null;
