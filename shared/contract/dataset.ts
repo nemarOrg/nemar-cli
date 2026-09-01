@@ -162,6 +162,20 @@ export const searchHitSchema = z
   .passthrough();
 export type SearchHit = z.infer<typeof searchHitSchema>;
 
+/**
+ * Epic #1144 phase 4 (#1148), D5: per-facet breakdown of `excluded_unknown`,
+ * keyed by `FacetKey` (`shared/facets.ts`) -- how many rows in the WIDENED
+ * population are unknown for EACH active facet individually. Buckets do NOT
+ * sum to `excluded_unknown`: a row unknown in two active facets counts once
+ * toward the total but once in EACH bucket, so `sum(values) >=
+ * excluded_unknown`, with equality only when no row is unknown in more than
+ * one active facet. A consumer must never present these as a partition of
+ * the total. Always present together with `excluded_unknown` (same
+ * success/failure gate: both are computed by one query and both are omitted
+ * together on failure), never on its own.
+ */
+const excludedUnknownByFacetSchema = z.record(z.string(), z.number().int().nonnegative());
+
 /** Envelope for GET /datasets. */
 export const datasetListEnvelopeSchema = z
   .object({
@@ -177,6 +191,7 @@ export const datasetListEnvelopeSchema = z
     // count itself failed, so its absence never masquerades as "nothing was
     // excluded".
     excluded_unknown: z.number().int().nonnegative().optional(),
+    excluded_unknown_by_facet: excludedUnknownByFacetSchema.optional(),
   })
   .passthrough();
 export type DatasetListEnvelope = z.infer<typeof datasetListEnvelopeSchema>;
@@ -212,6 +227,7 @@ export const datasetSearchEnvelopeSchema = z
     // `excluded_unknown` for the exact semantics -- identical field, mirrored
     // here since /datasets/search now shares the same facet engine.
     excluded_unknown: z.number().int().nonnegative().optional(),
+    excluded_unknown_by_facet: excludedUnknownByFacetSchema.optional(),
   })
   .passthrough();
 
