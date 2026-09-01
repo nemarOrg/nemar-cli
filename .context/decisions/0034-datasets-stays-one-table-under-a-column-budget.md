@@ -64,14 +64,19 @@ Migration `0071_reclaim_column_budget` rebuilds the table at 87 columns
 
 The rebuild's statement ordering is load-bearing and cascade-safe:
 `datasets` has three FK children —
-`access_requests` and `dataset_collaborators` (`ON DELETE CASCADE`, two of them
-written `REFERENCES "datasets"` and invisible to a naive grep)
-and `dataset_versions` (NO ACTION) —
+`access_requests` and `dataset_collaborators` (`ON DELETE CASCADE`, both keyed on
+`datasets(id)`) and `dataset_versions` (NO ACTION), which is keyed on
+`datasets(dataset_id)`, the TEXT natural key, not on `id`.
+Two of the three are written `REFERENCES "datasets"` with quotes,
+so a grep for `REFERENCES datasets(id)` finds only one of them;
+migration 0026 documented this same trap already —
 and `DROP TABLE` performs an implicit DELETE that fires CASCADE
 even under `PRAGMA defer_foreign_keys`
 (deferral postpones violation reporting, not the action).
 So the children are rescued into plain tables and emptied before the drop,
-and restored after the rename.
+and restored after the rename,
+which is safe for either FK target because both `id` and `dataset_id`
+are copied verbatim and unchanged.
 Guard statements (`_rebuild_guard`, `CHECK (ok = 1)`) abort the migration
 before anything destructive if a copy miscounts,
 and `datasets.id` (sparse; production MIN 48, MAX 61277; the FTS5 rowid)

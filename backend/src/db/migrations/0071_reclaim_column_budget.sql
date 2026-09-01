@@ -29,11 +29,16 @@
 -- which fires ON DELETE CASCADE on FK children even under
 -- `PRAGMA defer_foreign_keys` (deferral postpones violation REPORTING, not
 -- the ACTION). `datasets` has THREE FK children -- access_requests
--- (CASCADE), dataset_collaborators (CASCADE), dataset_versions (NO ACTION)
--- -- so the children are rescued into plain tables and EMPTIED before the
--- drop; the implicit DELETE then has nothing to cascade onto and nothing to
--- violate. They are restored after the rename, when every parent row exists
--- again under its original id.
+-- (CASCADE) and dataset_collaborators (CASCADE), both keyed on
+-- datasets(id), plus dataset_versions (NO ACTION), which is keyed on
+-- datasets(dataset_id), the TEXT natural key, NOT on id. Two of the three
+-- are also spelled `REFERENCES "datasets"` with quotes, so a grep for
+-- `REFERENCES datasets(id)` finds only one of them -- exactly the trap
+-- migration 0026 already documented. So the children are rescued into plain
+-- tables and EMPTIED before the drop; the implicit DELETE then has nothing
+-- to cascade onto and nothing to violate. They are restored after the
+-- rename, which is safe for either FK target because both id and dataset_id
+-- are copied verbatim and unchanged.
 --
 -- The `_rebuild_guard` table aborts the migration BEFORE anything
 -- destructive if a copy went wrong: inserting a false comparison (0) or a
