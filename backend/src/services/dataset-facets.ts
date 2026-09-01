@@ -166,12 +166,15 @@ export const FACET_DEFINITIONS: readonly FacetSqlSpec[] = [
   {
     key: "citations",
     kind: "scalar",
-    column: "d.num_citations",
+    // Derived, not stored (#1182): the num_citations column is gone and the
+    // total is the sum of the two addends everywhere it is served (see the
+    // catalog projections). Both addends are NOT NULL DEFAULT 0 (migration
+    // 0048), so the sum is never NULL -- this nullTest never matches a row,
+    // which is correct: there is no "unknown citation count" state for
+    // include_unknown to widen into.
+    column: "(d.num_dataset_citations + d.num_datapaper_citations)",
     rangeKind: "number",
-    // num_citations is NOT NULL DEFAULT 0 (migration 0048) -- this test never
-    // matches a row, which is correct: there is no "unknown citation count"
-    // state for include_unknown to widen into.
-    nullTest: "d.num_citations IS NULL",
+    nullTest: "(d.num_dataset_citations + d.num_datapaper_citations) IS NULL",
   },
   {
     key: "duration",

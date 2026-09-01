@@ -10,7 +10,6 @@ import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { authMiddleware } from "../../middleware/auth";
 import { cliVersionGuard } from "../../middleware/cliVersion";
-import { formatFileSize } from "../../services/dataset-metadata-columns";
 import { generateDatasetId, isValidDatasetId } from "../../services/datasetId";
 import {
   type GitHubRepo,
@@ -346,14 +345,9 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           try {
             await db
               .prepare(
-                "UPDATE datasets SET subject_count = ?, file_size = ?, file_size_formatted = ? WHERE dataset_id = ? AND metadata_updated_at IS NULL",
+                "UPDATE datasets SET subject_count = ?, file_size = ? WHERE dataset_id = ? AND metadata_updated_at IS NULL",
               )
-              .bind(
-                resumeSeed.subjects,
-                resumeSeed.bytes,
-                formatFileSize(resumeSeed.bytes),
-                datasetId,
-              )
+              .bind(resumeSeed.subjects, resumeSeed.bytes, datasetId)
               .run();
           } catch (err) {
             console.error(`Failed to seed manifest stats on resumed ${datasetId}:`, err);
@@ -466,10 +460,10 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           await db
             .prepare(
               `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility,
-                subject_count, file_size, file_size_formatted,
+                subject_count, file_size,
                 attestation_deposit_type, attestation_key_status, attestation_deidentified,
                 attestation_no_duplicate, attestation_upstream_source, attestation_accepted_at)
-             VALUES (?, ?, ?, ?, '', ?, 'private', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, '', ?, 'private', ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .bind(
               datasetId,
@@ -479,7 +473,6 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
               sandbox ? 1 : 0,
               seed.subjects,
               seed.bytes,
-              formatFileSize(seed.bytes),
               attestation?.deposit_type ?? null,
               attestation?.key_status ?? null,
               attestation ? 1 : null,

@@ -930,7 +930,10 @@ describe("shared/facets.ts + dataset-facets.ts: every facet, both endpoints", ()
       sessions_count: 3,
       file_size: 500 * 1024 * 1024,
       total_files: 120,
-      num_citations: 4,
+      // The citations facet filters the derived sum of these two addends
+      // (#1182); there is no stored num_citations column to seed.
+      num_dataset_citations: 3,
+      num_datapaper_citations: 1,
       total_recording_duration: 3600,
       recording_duration_min: 100,
       recording_duration_max: 200,

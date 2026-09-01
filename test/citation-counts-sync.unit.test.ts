@@ -38,14 +38,14 @@ function realD1(db: Database): D1Database {
   } as unknown as D1Database;
 }
 
-// Minimal datasets schema with the columns 0048 adds (the migration test
-// asserts the real ADD COLUMNs; this isolates the sync logic).
+// Minimal datasets schema with the citation columns as of migration 0071
+// (#1182): only the two addends are stored; the served num_citations total
+// is derived as their sum (see the counts() helper below).
 const SCHEMA = `
 CREATE TABLE datasets (
   dataset_id TEXT NOT NULL UNIQUE,
   source_id TEXT,
   name TEXT NOT NULL,
-  num_citations INTEGER NOT NULL DEFAULT 0,
   num_dataset_citations INTEGER NOT NULL DEFAULT 0,
   num_datapaper_citations INTEGER NOT NULL DEFAULT 0,
   citations_updated_at TEXT
@@ -106,7 +106,7 @@ const ROWS: CitationCountRow[] = [
 function counts(id: string): Record<string, number> {
   return db
     .query(
-      "SELECT num_citations, num_dataset_citations, num_datapaper_citations FROM datasets WHERE dataset_id = ?",
+      "SELECT (num_dataset_citations + num_datapaper_citations) AS num_citations, num_dataset_citations, num_datapaper_citations FROM datasets WHERE dataset_id = ?",
     )
     .get(id) as Record<string, number>;
 }
