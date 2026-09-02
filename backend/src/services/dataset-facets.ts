@@ -296,7 +296,7 @@ export const FACET_DEFINITIONS: readonly FacetSqlSpec[] = [
  * inconsistency means the filter engine cannot be trusted at all. Failing the
  * import fails the deploy loudly, which is strictly better than serving
  * unfiltered results that look filtered. Same posture as
- * `buildInPlaceholders`, which throws rather than emit wrong SQL.
+ * the facet binding, which throws rather than emit wrong SQL.
  */
 const UNBOUND_FACETS = FACETS.filter((f) => !FACET_DEFINITIONS.some((d) => d.key === f.key));
 if (UNBOUND_FACETS.length > 0) {
