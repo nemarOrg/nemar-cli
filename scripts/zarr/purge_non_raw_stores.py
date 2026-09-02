@@ -529,11 +529,16 @@ def interpret_s3_ls_result(returncode: int, stdout: str) -> tuple[int, int] | No
 # test suite (see the PR description); the pure functions they call are.
 
 
-def stat_prefix(bucket: str, key_prefix: str, *, timeout: int = _AWS_OP_TIMEOUT) -> tuple[int, int]:
+def stat_prefix(key_prefix: str, *, timeout: int = _AWS_OP_TIMEOUT) -> tuple[int, int]:
     """`(object_count, total_bytes)` actually present on S3 under `key_prefix`
     (a full `s3://bucket/...` URL), read fresh right before any delete
     decision -- this is the "confirm against S3" step; nothing is ever
     deleted on the strength of the index alone.
+
+    No `bucket` parameter: `key_prefix` is a complete `s3://` URL and already
+    names it. It used to take one and ignore it, which reads as though the two
+    could disagree -- and a caller that passed a bucket not matching the URL
+    would have been silently right about nothing.
     """
     res = subprocess.run(
         ["aws", "s3", "ls", key_prefix, "--recursive", "--summarize", *_AWS_TIMEOUTS],
@@ -569,7 +574,7 @@ def _execute_target_step(bucket: str, dataset_id: str, step: dict, *, execute: b
     base = {"rel_store": rel_store, "path": entry.get("path"), "key_prefix": key_prefix}
 
     try:
-        count, total_bytes = stat_prefix(bucket, key_prefix)
+        count, total_bytes = stat_prefix(key_prefix)
     except Exception as exc:  # noqa: BLE001 - reported as this target's outcome
         return {**base, "state": "stat_error", "object_count": 0, "bytes": 0, "error": str(exc)}
 
@@ -955,8 +960,16 @@ def main(argv: list[str] | None = None) -> int:
     else:
         dataset_ids = list_dataset_ids(args.bucket)
     if args.all and not dataset_ids:
+        # Non-zero, like the `--from-index-snapshot` directory check above.
+        # "--all found nothing" is never a normal outcome: the bucket holds ~800
+        # dataset prefixes, so an empty list means the listing was wrong (a bad
+        # bucket name, no credentials, the wrong profile) or the snapshot
+        # directory is empty. Exiting 0 with a notice made every one of those
+        # read as "nothing to purge, all clean" to a caller that checks the exit
+        # code, which is what a cron or a CI step does.
         where = snapshot_dir if snapshot_dir else f"s3://{args.bucket}/"
-        print(f"[purge] no datasets found under {where}", flush=True)
+        print(f"[purge] ERROR: --all found no datasets under {where}", flush=True)
+        return 2
     if snapshot_dir:
         print(
             f"[purge] snapshot mode: store lists read from {snapshot_dir} "

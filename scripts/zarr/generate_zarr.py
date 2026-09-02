@@ -506,7 +506,8 @@ def apply_worker_mem_limit(
     try:
         import resource
 
-        _soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
+        # Only the hard limit is read: the soft one is what this call REPLACES.
+        hard = resource.getrlimit(resource.RLIMIT_DATA)[1]
         # Keep the hard limit where it is so the next task can raise the soft
         # one back up; a task needing MORE than the previous one must not be
         # capped by it.
@@ -2602,6 +2603,10 @@ def merge_index(
         if e.get("path") not in new_fail_paths and e.get("path") not in new_pending_paths
     }
 
+    # Deliberately NOT dict[str, FailureEntry]: the values below are a mix of
+    # `_failure_entry` results and entries read verbatim out of a PUBLISHED
+    # index, which this function does not re-validate. Claiming the TypedDict
+    # here would assert a shape for a document written by an earlier engine.
     fails: dict[str, dict] = {}
     if prior and isinstance(prior.get("failures"), list):
         for f in prior["failures"]:
@@ -2636,7 +2641,11 @@ def merge_index(
         if isinstance(e, dict) and isinstance(e.get("path"), str):
             n = e.get("attempts")
             prior_attempts[e["path"]] = int(n) if isinstance(n, int) and n > 0 else 0
-    pends: dict[str, dict] = {}
+    # Every value here comes from `_pending_entry`, so the container carries the
+    # TypedDict rather than a bare dict: a hand-built entry missing `zarr` or
+    # `attempts` is then a type error at the call site instead of a schema
+    # violation at the end of the run.
+    pends: dict[str, PendingEntry] = {}
     for e in prior_pending or []:
         # Carry forward a recording this run never touched (an incremental run
         # converts only what changed), minus anything now resolved or excluded.
@@ -2984,6 +2993,12 @@ class PriorEventRows:
         return zarr_rel in self._by_rel
 
     def _row_group(self, i: int):
+        """The i-th row group as a `pyarrow.Table` (cached: consecutive stores
+        usually share one). Untyped because `pyarrow` is an optional import in
+        this module -- `self._pa` is the module object, so there is no name to
+        annotate with -- but every caller indexes it by column and filters it,
+        i.e. treats it as a Table, which is what it is.
+        """
         if self._cached is None or self._cached[0] != i:
             self._cached = (i, self._file.read_row_group(i))
         return self._cached[1]
@@ -3306,24 +3321,36 @@ _AWS_RM_SHARDS = int(os.environ.get("ZARR_AWS_RM_SHARDS", "8"))
 def _s3_child_prefixes(url: str) -> list[str]:
     """Immediate child prefixes of an ``s3://bucket/prefix/`` URL (delimited LIST).
 
-    Used to shard a recursive delete. Returns [] on any error or when the prefix
-    has no subdirectories, so the caller falls back to one unsharded rm.
+    ``[]`` means the prefix genuinely HAS no subdirectories. A failed listing
+    RAISES: the empty list and the failure used to be the same answer, which is
+    only harmless for the caller this was written for. ``_rm_recursive`` reads
+    ``[]`` as "nothing to shard" and falls back to one unsharded delete, so it is
+    correct either way -- but ``purge_non_raw_stores.list_dataset_ids`` reads the
+    same ``[]`` as "this bucket holds no datasets" and ``discover_excluded_stores``
+    as "this tree has no stranded stores", and both then report a clean, empty
+    result for a run that could not see the bucket at all.
+
+    Same rule as ``s3_read_json`` and ``s3_download_file``, for the same reason:
+    an absence is an answer, an error is not.
     """
     rest = url[len("s3://") :]
     bucket, _, prefix = rest.partition("/")
-    try:
-        res = subprocess.run(
-            [
-                "aws", "s3api", "list-objects-v2", "--bucket", bucket,
-                "--prefix", prefix, "--delimiter", "/",
-                "--query", "CommonPrefixes[].Prefix", "--output", "text",
-                *_AWS_TIMEOUTS,
-            ],
-            capture_output=True, text=True, timeout=_AWS_OP_TIMEOUT, env=_aws_env(),
+    res = subprocess.run(
+        [
+            "aws", "s3api", "list-objects-v2", "--bucket", bucket,
+            "--prefix", prefix, "--delimiter", "/",
+            "--query", "CommonPrefixes[].Prefix", "--output", "text",
+            *_AWS_TIMEOUTS,
+        ],
+        capture_output=True, text=True, timeout=_AWS_OP_TIMEOUT, env=_aws_env(),
+        check=False,  # the return code is inspected below rather than raised on
+    )
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"_s3_child_prefixes: aws s3api list-objects-v2 {url} exited "
+            f"{res.returncode}: {res.stderr.strip()}"
         )
-    except (subprocess.SubprocessError, OSError):
-        return []
-    if res.returncode != 0 or res.stdout.strip() in ("", "None"):
+    if res.stdout.strip() in ("", "None"):
         return []
     return [f"s3://{bucket}/{p}" for p in res.stdout.split() if p and p != "None"]
 
@@ -3338,7 +3365,20 @@ def _rm_recursive(url: str) -> None:
     finishes with an unsharded sweep so any key directly under `url` -- which no
     child prefix covers -- is deleted too.
     """
-    children = _s3_child_prefixes(url) if _AWS_RM_SHARDS > 1 else []
+    # A failed LIST is not fatal HERE, and only here: the unsharded delete below
+    # removes the whole prefix on its own, so sharding is a speed-up whose
+    # failure costs time, not correctness. Every other caller of
+    # `_s3_child_prefixes` reads its result as a fact about the bucket and must
+    # see the error, which is why the tolerance lives at this call site rather
+    # than inside the helper.
+    try:
+        children = _s3_child_prefixes(url) if _AWS_RM_SHARDS > 1 else []
+    except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
+        print(
+            f"::warning::could not list shards for {url} ({exc}); deleting unsharded",
+            flush=True,
+        )
+        children = []
     if children:
         print(f"[zarr] deleting {url} across {len(children)} shard(s)", flush=True)
         errors: list[BaseException] = []
@@ -5471,7 +5511,11 @@ def main() -> int:
     converted_entries: list[dict] = []
     manifest_entries: list[dict] = []
     failures: list[str] = []
-    failure_entries: list[dict] = []
+    failure_entries: list[FailureEntry] = []
+    # NOT PendingEntry: these are the merge's INPUT, carrying only what this run
+    # observed (path, reason, last_error, last_attempt_utc). `merge_index` is
+    # what derives `zarr` and the attempt count and produces the published
+    # entries -- see `_pending_entry`.
     pending_entries: list[dict] = []
     # Event rows go to disk as each recording finishes, never into a list that
     # grows with the dataset: nm000281 is ~25k stores (#1060).
@@ -5795,7 +5839,14 @@ def main() -> int:
     # recordings are now listed in `pending`, and the queue re-queues a `done`
     # dataset that has any (zarr_queue.reconcile), which re-runs it with --clean.
     # So publish the commit the stores were actually built from.
-    index_commit = prior_commit if (infra_failures and is_commit_sha(prior_commit)) else head
+    # `or head` is not dead code for a type checker's benefit: `is_commit_sha`
+    # narrows the value at runtime but not for the reader, and `head_commit` is
+    # published as the index's `source_commit`, where None would serialize as
+    # JSON null -- the on008083 shape (#1197) that took an empty commit all the
+    # way into a published document.
+    index_commit = (
+        prior_commit if (infra_failures and is_commit_sha(prior_commit) and prior_commit) else head
+    )
     biosigio_version = installed_biosigio_version()
 
     def build_index(merge_prior: dict | None, merge_pending: list | None) -> dict:

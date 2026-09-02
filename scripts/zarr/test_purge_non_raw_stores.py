@@ -50,6 +50,7 @@ from purge_non_raw_stores import (  # type: ignore[import-not-found]
     plan_live_index_rewrite,
     prepare_targets,
     purge_dataset,
+    list_dataset_ids,
     read_index_with_etag,
     rewrite_index,
     select_purge_candidates,
@@ -900,10 +901,15 @@ class MainSnapshotWiringTests(unittest.TestCase):
                 rc = main(["--all", "--from-index-snapshot", td, "--audit-log",
                            str(Path(td) / "audit.json")])
             out = buf.getvalue()
-            self.assertEqual(rc, 0)
+            # Non-zero, like the nonexistent-directory check above: "--all found
+            # nothing" is never a normal outcome (the bucket holds ~800 dataset
+            # prefixes), so it means the listing or the snapshot directory is
+            # wrong. Exiting 0 made that indistinguishable from "all clean" to a
+            # cron or CI step that checks only the exit code.
+            self.assertEqual(rc, 2)
             # Must not have fallen back to listing the bucket.
             self.assertIn(td, out)
-            self.assertIn("0 dataset(s)", out)
+            self.assertIn("no datasets", out)
 
 
 # A real "aws" stand-in over a local directory, with genuine ETag semantics:
@@ -960,6 +966,14 @@ if args[:2] == ["s3api", "get-object"]:
 if args[:2] == ["s3api", "put-object"]:
     bucket, key = opt(args, "--bucket"), opt(args, "--key")
     path = local(bucket, key)
+    # A NON-412 write failure, the way an internal error or a revoked
+    # credential looks: a real non-zero exit with a real stderr, so the
+    # script's own classification runs rather than being patched around.
+    if os.environ.get("PURGE_TEST_PUT_FAIL"):
+        sys.stderr.write(
+            "An error occurred (InternalError) when calling PutObject\\n"
+        )
+        sys.exit(1)
     if "--if-match" in args:
         want = opt(args, "--if-match")
         have = etag(path) if os.path.exists(path) else None
@@ -1015,6 +1029,13 @@ if args[:2] == ["s3", "rm"]:
     sys.exit(0)
 
 if args[:2] == ["s3api", "list-objects-v2"]:
+    # A failed LIST must not read as an empty bucket.
+    if os.environ.get("PURGE_TEST_LIST_FAIL"):
+        sys.stderr.write("An error occurred (AccessDenied) when calling ListObjectsV2\\n")
+        sys.exit(1)
+    if os.environ.get("PURGE_TEST_LIST_EMPTY"):
+        print("None")
+        sys.exit(0)
     print("None")
     sys.exit(0)
 sys.exit(0)
@@ -1189,6 +1210,61 @@ class ConditionalIndexWriteTests(unittest.TestCase):
         with self.assertRaises(IndexPreconditionFailed):
             write_index(BUCKET, DATASET, {"marker": 2}, if_match=etag)
         self.assertEqual(self.live_index(), {"marker": 1})
+
+    def test_a_non_412_write_failure_is_an_error_not_a_conflict(self):
+        """A failed conditional PUT that is NOT a precondition failure must be
+        classified as an ERROR, never folded into the conflict path and never
+        reported as a successful rewrite.
+
+        The two are handled by the same `except` neighbourhood and mean opposite
+        things: a 412 says another writer won and the newer document is intact
+        (nothing to fix, re-run later), while a 500 / AccessDenied / expired
+        credential says this rewrite did not happen and the index still lists
+        stores whose objects this run has already DELETED. Reporting the second
+        as the first would tell an operator the bucket is consistent when it is
+        not.
+        """
+        # The stub reads this and fails put-object the way S3 would on an
+        # internal error -- a real non-zero exit with a real stderr, not a
+        # patched function.
+        os.environ["PURGE_TEST_PUT_FAIL"] = "1"
+        self.addCleanup(os.environ.pop, "PURGE_TEST_PUT_FAIL", None)
+
+        result = self.run_purge()
+        self.assertEqual(result["status"], "error")
+        self.assertFalse(result["index_rewritten"])
+        # Specifically NOT the conflict verdict: no other writer was involved.
+        # The key is set only on the 412 branch, so its ABSENCE is the negative
+        # (`dataset_has_issue` reads `status`, not this flag).
+        self.assertFalse(result.get("index_rewrite_conflict"))
+        self.assertIn("InternalError", result["error"])
+        self.assertTrue(dataset_has_issue(result))
+        # And the document is untouched, so the next run recomputes from it.
+        self.assertEqual(len(self.live_index()["stores"]), 2)
+
+    def test_a_failed_listing_raises_instead_of_reading_as_an_empty_bucket(self):
+        """`_s3_child_prefixes` returning [] on error made "the listing failed"
+        and "there is nothing here" the same answer. `list_dataset_ids` reads
+        that as "this bucket holds no datasets", so `--all` swept nothing and
+        said so cheerfully."""
+        os.environ["PURGE_TEST_LIST_FAIL"] = "1"
+        self.addCleanup(os.environ.pop, "PURGE_TEST_LIST_FAIL", None)
+        with self.assertRaises(RuntimeError):
+            list_dataset_ids(BUCKET)
+
+    def test_all_exits_non_zero_when_the_listing_returns_nothing(self):
+        """The bucket holds ~800 dataset prefixes, so an empty `--all` means the
+        listing was wrong (bad bucket, no credentials, wrong profile), not that
+        there is nothing to purge. Exiting 0 made those indistinguishable to a
+        cron or CI step that checks only the exit code."""
+        os.environ["PURGE_TEST_LIST_EMPTY"] = "1"
+        self.addCleanup(os.environ.pop, "PURGE_TEST_LIST_EMPTY", None)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = main(["--all", "--bucket", BUCKET, "--audit-log",
+                       os.path.join(self.dir, "audit.json")])
+        self.assertEqual(rc, 2)
+        self.assertIn("no datasets", buf.getvalue())
 
     def test_a_missing_index_reads_as_absent(self):
         os.unlink(self.index_path())
