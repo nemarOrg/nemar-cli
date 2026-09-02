@@ -9,13 +9,14 @@
  *   1. CORS restricted to NEMAR origins (so a third-party site can't cross-origin
  *      stream our chunks in a browser) -- the S3 data stays openly downloadable,
  *      but the *browser* path is funnelled through and gated here.
- *   2. Range pass-through (zarrita range-reads sharded level-0).
+ *   2. Range pass-through (zarrita range-reads sharded level-0); a single
+ *      accepted byte-range is now edge-cached too, not just relayed
+ *      (#1178 phase 1) -- see item 3.
  *   3. Edge caching via the Workers Cache API (the hot path -- index.json,
- *      zarr.json, and the small non-sharded view-pyramid chunks -- is shared
- *      across all users and caches with a near-total hit rate). Phase 1
- *      (#1178 items 3-4, #1035) extended this to single-range chunk reads
- *      too, since level-0 is Range-only and every such request used to skip
- *      the edge entirely.
+ *      zarr.json, the small non-sharded view-pyramid chunks, and now
+ *      single-range chunk reads -- is shared across all users and caches
+ *      with a near-total hit rate). Before phase 1, every Range request
+ *      (which level-0 always is) skipped the edge entirely.
  *
  * Only PUBLIC datasets are served (private data is never browser-streamable).
  * Mounted on the `zarr.nemar.org` host fork in index.ts and path-mounted at
@@ -79,15 +80,25 @@ function s3PublicUrl(env: Bindings, key: string, base?: string): string {
  *  (a bare fetch, or a viewer that hasn't picked up the new token yet) keeps
  *  a short TTL so a re-conversion surfaces quickly there instead.
  *
- *  index.json is 95% of Worker egress (#1035): the zarr-ready callback
- *  already purges it on rebuild (services/cloudflare.ts zarrPurgeTargets),
- *  so an untokened hour-long TTL is safe -- that purge is what actually
- *  invalidates it, not the TTL.
+ *  index.json is 95% of Worker egress (#1035). The zarr-ready callback
+ *  purges it on rebuild via zarrPurgeTargets() (services/cloudflare.ts) --
+ *  but CLOUDFLARE_API_TOKEN/CLOUDFLARE_ZONE_ID are unset in production today
+ *  (wrangler-sccn.toml), so that purge is currently a documented no-op and
+ *  the TTL below is the ONLY bound on staleness right now, not a backstop
+ *  under an active purge. (Separately: Cloudflare's purge-by-URL cannot
+ *  reach a Cache API entry stored under a custom cache key -- that applies
+ *  to the `__cr` range entries above, NOT to index.json, whose cache key
+ *  equals its own URL.) Raising this TTL further should wait until the
+ *  purge is verified working in staging once the zone id is provisioned.
  *
- *  Chunk objects get a long TTL regardless of tokening: they're immutable
- *  for a given conversion and the /webhooks/zarr-ready purge handles the
- *  rare in-place replace. */
-export function cacheControlFor(key: string, tokened: boolean): string {
+ *  Chunk objects get a long TTL regardless of tokening and are never a
+ *  purge target -- zarrPurgeTargets() only ever lists index.json and each
+ *  changed store's zarr.json, never a chunk URL (enumerating every chunk
+ *  for a URL-list purge isn't worthwhile, and prefix purge is
+ *  Enterprise-only) -- so chunks rely entirely on the 24h TTL plus ETag
+ *  revalidation, with no purge backstop at all, active or not. */
+export function cacheControlFor(key: string, opts: { tokened: boolean }): string {
+  const { tokened } = opts;
   if (key.endsWith("/zarr.json")) {
     return tokened
       ? "public, max-age=86400, stale-while-revalidate=86400"
@@ -96,7 +107,7 @@ export function cacheControlFor(key: string, tokened: boolean): string {
   if (key.endsWith("/index.json")) {
     return tokened
       ? "public, max-age=86400, stale-while-revalidate=86400"
-      : "public, max-age=3600, stale-while-revalidate=86400";
+      : "public, max-age=300, stale-while-revalidate=3600";
   }
   return "public, max-age=86400, stale-while-revalidate=86400";
 }
@@ -108,34 +119,71 @@ export function cacheControlFor(key: string, tokened: boolean): string {
  *  missing-object branch in serve() below). */
 const NOT_FOUND_CACHE_CONTROL = "public, max-age=60";
 
+/** Header carrying the real upstream Content-Range while a range entry is
+ *  stored at the edge as a synthetic 200 (the Cache API refuses to store a
+ *  206 outright). Both the write site (serve()'s cache-put branch) and the
+ *  read site (respondFromCache()) reference this one constant so the header
+ *  name can't drift between them. */
+const NEMAR_CONTENT_RANGE_HEADER = "x-nemar-content-range";
+
+/** Skip the edge cache for anything above these sizes, rather than let one
+ *  huge object crowd out the working set or exceed whatever per-entry size
+ *  limit the real Workers Cache API enforces. Applied only once the
+ *  upstream Content-Length is known; an object with no Content-Length is
+ *  never cached either, since its size can't be checked (#1181 review
+ *  item 4). Exported so tests can build fixtures at the exact boundary
+ *  instead of hand-copying these numbers. */
+export const RANGE_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+export const FULL_OBJECT_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+
+/** A range spec that has passed parseCacheableRange(): exactly one
+ *  `bytes=A-B` / `bytes=A-` / `bytes=-N`, lowercased and whitespace-free. */
+export type NormalizedRange = string & { readonly __brand: "NormalizedRange" };
+
+/** A cache key built by canonicalCacheUrl(): origin + re-encoded S3 key
+ *  (+ `v` if tokened), never a raw, possibly differently-encoded request
+ *  pathname. */
+export type CanonicalCacheUrl = string & { readonly __brand: "CanonicalCacheUrl" };
+
 /**
- * Canonical edge-cache key: origin + path + at most the `v` query
- * parameter. Every other query parameter is dropped -- including a
- * client-supplied `__cr` (see rangeCacheUrl below), which would otherwise
- * let a request poison the range-keyed cache by forging the synthetic
- * parameter, and any other param a viewer might attach. This also lets a
- * `?v=` tokened request and an untokened request for the same object share
- * a cache entry keyspace distinction that's meaningful (tokened vs not),
- * rather than fragmenting on every unrelated query string.
+ * Canonical edge-cache key for an object: origin + "/" + the normalised S3
+ * key, with each path segment individually `encodeURIComponent`'d, plus the
+ * `v` query parameter when present.
+ *
+ * Deriving this from the already-decoded/normalised `key` -- not the raw
+ * request pathname -- means two differently percent-encoded spellings of
+ * the same object collapse onto the identical cache key instead of
+ * fragmenting the cache into one entry per spelling. No other query
+ * parameter can leak in either: `v` is the only one the caller (serve())
+ * ever reads off the request before calling this.
  */
-export function canonicalCacheUrl(reqUrl: URL): string {
-  const canonical = new URL(`${reqUrl.origin}${reqUrl.pathname}`);
-  const v = reqUrl.searchParams.get("v");
-  if (v) canonical.searchParams.set("v", v);
-  return canonical.toString();
+export function canonicalCacheUrl(
+  origin: string,
+  key: string,
+  v: string | null,
+): CanonicalCacheUrl {
+  const encodedPath = key
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  const url = new URL(`${origin}/${encodedPath}`);
+  if (v) url.searchParams.set("v", v);
+  return url.toString() as CanonicalCacheUrl;
 }
 
 /**
  * Range-keyed cache URL: the canonical URL plus one extra query parameter
  * carrying the normalised range (e.g. `__cr=bytes%3D0-999`).
  *
- * A URL *fragment* can't be used for this: the Cache API keys purely on the
- * request URL and, like a browser, never transmits or stores anything after
- * `#`, so two different ranges "keyed" by fragment would collide on the same
- * entry. A query parameter IS visible to (and keyable by) the Cache API,
- * which is why the range rides there instead.
+ * A URL *fragment* can't be used for this: per RFC 3986 a fragment is
+ * client-side only and is never transmitted to a server as part of a
+ * request, so the Cache API -- which keys purely on the request it's
+ * given -- would never see it; two different ranges "keyed" by fragment
+ * would be indistinguishable to it and collide on one entry. A query
+ * parameter IS part of the request, hence visible to (and keyable by) the
+ * Cache API, which is why the range rides there instead.
  */
-function rangeCacheUrl(canonical: string, normalizedRange: string): string {
+function rangeCacheUrl(canonical: CanonicalCacheUrl, normalizedRange: NormalizedRange): string {
   const url = new URL(canonical);
   url.searchParams.set("__cr", normalizedRange);
   return url.toString();
@@ -148,9 +196,9 @@ function rangeCacheUrl(canonical: string, normalizedRange: string): string {
  * malformed spec -- returns null so the caller passes the request through
  * uncached, exactly as any Range request did before this change.
  */
-export function parseCacheableRange(header: string): string | null {
+export function parseCacheableRange(header: string): NormalizedRange | null {
   const normalized = header.replace(/\s+/g, "").toLowerCase();
-  return /^bytes=(\d+-\d+|\d+-|-\d+)$/.test(normalized) ? normalized : null;
+  return /^bytes=(\d+-\d+|\d+-|-\d+)$/.test(normalized) ? (normalized as NormalizedRange) : null;
 }
 
 async function isPublicDataset(env: Bindings, datasetId: string): Promise<boolean> {
@@ -183,8 +231,27 @@ const defaultDeps: ZarrDataDeps = {
   fetch: (...args: Parameters<typeof fetch>) => fetch(...args),
 };
 
+/** Write to the edge cache without letting a rejected (or throwing)
+ *  `cache.put()` surface as an unhandled rejection under `waitUntil` --
+ *  Workers reports those as a bare isolate error with none of this
+ *  context. `key` is the S3 object key (for log correlation); `cacheKeyUrl`
+ *  is the actual cache key that was written (#1181 review item 6). */
+function safeCachePut(
+  cache: CacheLike,
+  cacheKeyUrl: string,
+  key: string,
+  entry: Response,
+): Promise<void> {
+  return Promise.resolve(cache.put(new Request(cacheKeyUrl, { method: "GET" }), entry)).catch(
+    (err) => {
+      console.error("[zarr-data] cache.put failed", { key, cacheKeyUrl }, err);
+    },
+  );
+}
+
 /**
- * Rebuild the client-facing response from a cache hit.
+ * Rebuild the client-facing response from a cache hit (a data entry OR a
+ * cached missing-object 404 -- both flow through here).
  *
  *  - The Cache API does not honour `Vary: Origin` the way a browser cache
  *    does -- `match()` here is keyed purely on our own canonical/range URL,
@@ -196,7 +263,7 @@ const defaultDeps: ZarrDataDeps = {
  *    stale allowed value), then set the current origin's headers.
  *  - The Cache API refuses to store a 206 response at all (`cache.put`
  *    throws), so a range entry was written as a synthetic 200 with the
- *    upstream Content-Range preserved under `X-Nemar-Content-Range` (see
+ *    upstream Content-Range preserved under NEMAR_CONTENT_RANGE_HEADER (see
  *    the cache-put branch in serve()). Restore the real 206 + Content-Range
  *    here, on the way back out, and drop the synthetic header.
  */
@@ -212,9 +279,9 @@ function respondFromCache(
   for (const [k, v] of Object.entries(cors)) headers.set(k, v);
 
   let status = hit.status;
-  const storedRange = headers.get("x-nemar-content-range");
+  const storedRange = headers.get(NEMAR_CONTENT_RANGE_HEADER);
   if (storedRange) {
-    headers.delete("x-nemar-content-range");
+    headers.delete(NEMAR_CONTENT_RANGE_HEADER);
     headers.set("content-range", storedRange);
     status = 206;
   }
@@ -259,9 +326,27 @@ async function serve(c: Context<{ Bindings: Bindings }>, isHead: boolean, deps: 
   }
   const key = `${datasetId}/zarr/${rest}`;
 
+  // Gate FIRST, before ANY cache lookup, on every request regardless of hit
+  // or miss (#1181 review item 1): a dataset flipped to private must stop
+  // being served immediately, not up to a day later when the last-primed
+  // cache entry's TTL happens to expire. One indexed D1 point read; this
+  // mirrors the data.nemar.org route's loadPublishedDataset gate (both
+  // data-plane hosts bypass the api rate limiter by design). A Range
+  // request always paid this cost even before there was a cache to check
+  // (Range responses were never cached pre-#1178), so this is not a new
+  // cost on that path -- only a now-universal one on the full-object and
+  // negative-404 paths that used to be gated "on miss only". Keeping the
+  // missing-object 404 negative cache below is safe precisely because this
+  // gate now runs first: a cache lookup can only ever be reached once we've
+  // reconfirmed the dataset is CURRENTLY public.
+  if (!(await isPublicDataset(c.env, datasetId))) {
+    return c.body(null, 404, { ...cors, "Cache-Control": NOT_FOUND_CACHE_CONTROL });
+  }
+
   const reqUrl = new URL(c.req.url);
-  const tokened = Boolean(reqUrl.searchParams.get("v"));
-  const canonical = canonicalCacheUrl(reqUrl);
+  const v = reqUrl.searchParams.get("v");
+  const tokened = Boolean(v);
+  const canonical = canonicalCacheUrl(reqUrl.origin, key, v);
 
   const rangeHeader = c.req.header("range");
   const normalizedRange = rangeHeader ? parseCacheableRange(rangeHeader) : null;
@@ -280,16 +365,20 @@ async function serve(c: Context<{ Bindings: Bindings }>, isHead: boolean, deps: 
     if (hit) {
       return respondFromCache(hit, cors, c.env, datasetId, key);
     }
-  }
-
-  // Gate on cache miss only (a cached object/404 was already gated when
-  // first stored). This per-request D1 read on cache misses mirrors the
-  // data.nemar.org route's loadPublishedDataset gate (both data-plane hosts
-  // bypass the api rate limiter by design); the non-Worker cache-rule
-  // migration noted in the runbook removes the Worker + D1 from the hot
-  // path entirely if viewing volume warrants it.
-  if (!(await isPublicDataset(c.env, datasetId))) {
-    return c.body(null, 404, { ...cors, "Cache-Control": NOT_FOUND_CACHE_CONTROL });
+    if (normalizedRange) {
+      // The range key missed. Also check the canonical (no-range) key: if a
+      // PRIOR request already cached this object as missing (404), reuse
+      // that instead of re-hitting S3 for every distinct range a client
+      // probes -- otherwise a ranged probe storm against one missing object
+      // never converges, since each new range mints its own cache key
+      // (#1181 review item 2). A cached full-object 200 at the canonical
+      // key is deliberately NOT reused here -- answering a specific byte
+      // range with the full body would be wrong.
+      const canonicalHit = await cache.match(new Request(canonical, { method: "GET" }));
+      if (canonicalHit && canonicalHit.status === 404) {
+        return respondFromCache(canonicalHit, cors, c.env, datasetId, key);
+      }
+    }
   }
 
   const upstream = await deps.fetch(s3PublicUrl(c.env, key, deps.s3Base), {
@@ -302,16 +391,22 @@ async function serve(c: Context<{ Bindings: Bindings }>, isHead: boolean, deps: 
     // about the object, not any one byte window of it) so a probe storm for
     // a missing object (e.g. an unconverted view level) stops at the edge
     // instead of re-hitting S3 on every retry. HEAD probes are excluded
-    // (never cached, never put, see below), as is the private-dataset 404
-    // above -- that gate's state can flip and must not be pinned at the edge.
+    // (never cached, never put, see below).
     if (!isHead) {
       const notFound = new Response(null, {
         status: 404,
         headers: { "Cache-Control": NOT_FOUND_CACHE_CONTROL },
       });
-      c.executionCtx.waitUntil(cache.put(new Request(canonical, { method: "GET" }), notFound));
+      c.executionCtx.waitUntil(safeCachePut(cache, canonical, key, notFound));
     }
     return c.body(null, 404, { ...cors, "Cache-Control": NOT_FOUND_CACHE_CONTROL });
+  }
+  if (upstream.status === 416) {
+    // Out-of-range single-range request: pass the real status through
+    // (never collapse it into the generic 502 mapping below) with whatever
+    // Content-Range upstream sent, uncached (#1181 review item 5).
+    const cr = upstream.headers.get("content-range");
+    return c.body(null, 416, cr ? { ...cors, "Content-Range": cr } : cors);
   }
   if (!upstream.ok && upstream.status !== 206) {
     return c.body(null, 502, cors);
@@ -319,11 +414,11 @@ async function serve(c: Context<{ Bindings: Bindings }>, isHead: boolean, deps: 
 
   const headers = new Headers(cors);
   for (const h of ["content-type", "content-length", "content-range", "etag", "last-modified"]) {
-    const v = upstream.headers.get(h);
-    if (v) headers.set(h, v);
+    const hv = upstream.headers.get(h);
+    if (hv) headers.set(h, hv);
   }
   headers.set("Accept-Ranges", "bytes");
-  headers.set("Cache-Control", cacheControlFor(key, tokened));
+  headers.set("Cache-Control", cacheControlFor(key, { tokened }));
 
   const body = isHead ? null : upstream.body;
   const res = new Response(body, { status: upstream.status, headers });
@@ -339,26 +434,42 @@ async function serve(c: Context<{ Bindings: Bindings }>, isHead: boolean, deps: 
   }
 
   // Cache at the edge. clone() so the body is still streamable to the
-  // client while waitUntil writes the cache copy.
+  // client while waitUntil writes the cache copy. Both branches below skip
+  // the clone()/put() entirely (stream straight through, no edge copy) when
+  // Content-Length is missing or exceeds the relevant size cap (#1181
+  // review item 4) -- there is no cap-then-drop; the cap is checked BEFORE
+  // any clone happens.
   //  - A full-object 200 (no Range header at all) caches under the
   //    canonical key, as before this change.
   //  - An accepted single-range 206 caches under the range key, but the
   //    Workers Cache API refuses to store a 206 response outright -- so it
   //    is written as a synthetic 200, with Content-Range moved to
-  //    X-Nemar-Content-Range, and rebuilt back into a real 206 on the way
-  //    out (respondFromCache above).
+  //    NEMAR_CONTENT_RANGE_HEADER, and rebuilt back into a real 206 on the
+  //    way out (respondFromCache above). A 206 that arrives with no
+  //    Content-Range at all is a fail-closed case: don't guess, just stream
+  //    it through uncached and warn (#1181 review item 3).
   //  - A bypassed Range (multi-range/malformed) is never cached, and
-  //    neither is any other non-206 answer to an accepted range (e.g. 416).
+  //    neither is any other non-206 answer to an accepted range (e.g. a 200
+  //    that ignored the Range entirely).
   if (!isHead && !bypassCache) {
+    const contentLengthHeader = headers.get("content-length");
+    const contentLength = contentLengthHeader ? Number(contentLengthHeader) : null;
+
     if (!rangeHeader && upstream.status === 200) {
-      c.executionCtx.waitUntil(cache.put(new Request(cacheKeyUrl, { method: "GET" }), res.clone()));
+      if (contentLength !== null && contentLength <= FULL_OBJECT_CACHE_MAX_BYTES) {
+        c.executionCtx.waitUntil(safeCachePut(cache, cacheKeyUrl, key, res.clone()));
+      }
     } else if (normalizedRange && upstream.status === 206) {
-      const cacheHeaders = new Headers(headers);
-      const contentRange = cacheHeaders.get("content-range");
-      cacheHeaders.delete("content-range");
-      if (contentRange) cacheHeaders.set("x-nemar-content-range", contentRange);
-      const cacheEntry = new Response(res.clone().body, { status: 200, headers: cacheHeaders });
-      c.executionCtx.waitUntil(cache.put(new Request(cacheKeyUrl, { method: "GET" }), cacheEntry));
+      const contentRange = headers.get("content-range");
+      if (!contentRange) {
+        console.warn(`[zarr-data] 206 without Content-Range, not caching: ${key}`);
+      } else if (contentLength !== null && contentLength <= RANGE_CACHE_MAX_BYTES) {
+        const cacheHeaders = new Headers(headers);
+        cacheHeaders.delete("content-range");
+        cacheHeaders.set(NEMAR_CONTENT_RANGE_HEADER, contentRange);
+        const cacheEntry = new Response(res.clone().body, { status: 200, headers: cacheHeaders });
+        c.executionCtx.waitUntil(safeCachePut(cache, cacheKeyUrl, key, cacheEntry));
+      }
     }
   }
   return res;
@@ -373,6 +484,17 @@ export function createZarrDataRoutes(
   deps: ZarrDataDeps = defaultDeps,
 ): Hono<{ Bindings: Bindings }> {
   const app = new Hono<{ Bindings: Bindings }>();
+
+  // Any uncaught throw from a handler -- including a CacheLike.match/put
+  // that throws -- lands here instead of a bare, CORS-less Workers 500
+  // (#1181 review item 7). Log with the path for correlation and still
+  // answer with CORS, so a genuinely allowed browser origin gets a readable
+  // 500 instead of an opaque CORS-blocked network error stacked on top of
+  // the underlying failure.
+  app.onError((err, c) => {
+    console.error("[zarr-data] unhandled", { path: c.req.path }, err);
+    return c.body(null, 500, corsHeaders(c.req.header("origin") ?? null));
+  });
 
   // #901: the zarr host fork in index.ts dispatches straight here, bypassing the
   // api middleware stack (and its rate limiter). As the highest-volume data-plane
