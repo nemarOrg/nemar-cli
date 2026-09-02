@@ -364,6 +364,41 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   explicitly authorized purge — some are still served until it completes,
   so do not read the rule as a description of what is currently in the bucket.
   A `--clean` rebuild reconciles rather than wiping first (ADR 0023).
+  **`index.json` is format v3 and is the mandatory entry point** — anonymous
+  in-prefix ListBucket is denied, so it is how a client learns what is served.
+  Schema: `shared/zarr-index.schema.json`, validated by the converter before
+  upload and served at `GET /schemas/zarr-index-v3.json`.
+  `contract_base` is the only URL a client may hardcode; `data_base` / `s3_uri`
+  say where the bytes are today and are per-dataset so one dataset can be
+  mirrored without rewriting anyone's client.
+  `source_commit` is always a 40-hex SHA — the converter refuses to publish an
+  index without one (on008083 shipped `""`).
+  **Coverage balances by construction:**
+  `discovered_count == store_count + failure_count + pending_count`.
+  `failures[]` is what will not convert without a change to the data or the
+  converter, and each entry now carries a `detail` (exception class plus first
+  message line, local paths stripped) so an opaque `file_read_error` is
+  diagnosable from the public index. `pending[]` is new and is the other half:
+  recordings with no store that are still expected to convert
+  (`infra_failure` / `memory_budget` / `not_attempted`), with an `attempts`
+  count. These used to be omitted "so they retry next run" and then never did,
+  because a run that converted anything is marked `done`; `zarr_queue` now
+  re-queues such a dataset after a backoff (1 h, 6 h, 24 h, then weekly) for at
+  most 5 rounds, after which the recording becomes a typed `retry_exhausted`
+  failure. Per-store `source_key` moved OUT of the index into a sibling
+  `manifest.json` (nothing on the website read it; it was 18 percent of
+  nm000281's 12.8 MB index).
+  Stores also carry a structured `nemar` root attribute — dataset id, DOI,
+  license, citation, source commit, source tree, derived, HED version, engine
+  version, contract URL — read once per run from `GET /datasets/<id>`, so a
+  client that has the store has the attribution.
+  Units are the one thing that is deliberately half-done: the in-memory path
+  applies the recording's `channels.tsv` (resolved by BIDS inheritance and
+  passed EXPLICITLY, because on the MaxShield path the exporter is handed a
+  filtered copy in a scratch directory where sibling auto-detection finds
+  nothing), the streaming path cannot until biosigio#127/#128 ships. That
+  disagreement is why `ZARR_ENGINE_VERSION` is still `"2"` after index v3:
+  a store's `units_report` is present exactly when the sidecar was applied.
   **A widening of discovery reaches the back catalog only through the engine
   stamp** (ADR 0033): `reconcile` re-queues on a version change, and an engine
   upgrade bumps no version, so `zarr_queue.py`'s `ZARR_ENGINE_VERSION` is what
