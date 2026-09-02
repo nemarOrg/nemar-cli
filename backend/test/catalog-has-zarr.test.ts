@@ -12,9 +12,13 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
-import { registerCatalogRoutes } from "../src/routes/datasets/catalog";
+import {
+  deriveZarrIndexUrl,
+  parseZarrDataFailures,
+  registerCatalogRoutes,
+} from "../src/routes/datasets/catalog";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -130,6 +134,60 @@ describe("has_zarr filter: GET /datasets", () => {
     insertDataset(db, "nm400005", { name: "Ready, count never populated", zarr_status: "ready" });
     const rows = await listDatasets(app, db, "has_zarr=1");
     expect(rows.map((r) => r.dataset_id)).not.toContain("nm400005");
+  });
+});
+
+// PR #1201 review, item 8: has_zarr combined with an unrelated legacy filter
+// (has_hed) and a facet-adjacent one (modality), through the real route --
+// proves the two clauses AND together rather than one silently overriding
+// the other.
+describe("has_zarr combined with another filter: GET /datasets", () => {
+  let db: Database;
+  let app: App;
+
+  beforeEach(() => {
+    db = freshDb();
+    app = newApp();
+    insertDataset(db, "nm405001", {
+      name: "Ready + HED",
+      zarr_status: "ready",
+      zarr_store_count: 3,
+      has_hed: 1,
+      modalities: "eeg",
+    });
+    insertDataset(db, "nm405002", {
+      name: "Ready, no HED",
+      zarr_status: "ready",
+      zarr_store_count: 3,
+      has_hed: 0,
+      modalities: "eeg",
+    });
+    insertDataset(db, "nm405003", {
+      name: "HED, but not ready",
+      zarr_status: "pending",
+      has_hed: 1,
+      modalities: "eeg",
+    });
+    insertDataset(db, "nm405004", {
+      name: "Ready + HED, different modality",
+      zarr_status: "ready",
+      zarr_store_count: 3,
+      has_hed: 1,
+      modalities: "meg",
+    });
+  });
+
+  test("has_zarr=1&has_hed=1 requires BOTH -- excludes the not-ready and no-HED rows", async () => {
+    const rows = await listDatasets(app, db, "has_zarr=1&has_hed=1");
+    // nm405001/nm405004 are both ready+HED (differing only by modality,
+    // irrelevant to this filter pair); nm405002 lacks HED and nm405003
+    // isn't ready -- both correctly excluded.
+    expect(rows.map((r) => r.dataset_id).sort()).toEqual(["nm405001", "nm405004"]);
+  });
+
+  test("has_zarr=1&modality=eeg requires BOTH -- excludes the ready+HED meg row", async () => {
+    const rows = await listDatasets(app, db, "has_zarr=1&modality=eeg");
+    expect(rows.map((r) => r.dataset_id).sort()).toEqual(["nm405001", "nm405002"]);
   });
 });
 
@@ -277,6 +335,35 @@ describe("zarr_index_url is derived, and null when not ready", () => {
   });
 });
 
+// PR #1201 review, item 8: deriveZarrIndexUrl unit-tested directly, beyond
+// the route-level "default prod host" coverage above -- a non-default base
+// (staging's zarr-test.nemar.org) and a base carrying its own trailing
+// slash, which a caller could plausibly pass since ZARR_CACHE_BASE_URL is a
+// raw env var with no format enforcement upstream.
+describe("deriveZarrIndexUrl (unit)", () => {
+  test("works with a non-default (staging) base host", () => {
+    expect(deriveZarrIndexUrl("https://zarr-test.nemar.org", "on007763", "ready")).toBe(
+      "https://zarr-test.nemar.org/on007763/zarr/index.json",
+    );
+  });
+
+  test("a base with its own trailing slash does not produce a double slash", () => {
+    expect(deriveZarrIndexUrl("https://zarr.nemar.org/", "on007763", "ready")).toBe(
+      "https://zarr.nemar.org/on007763/zarr/index.json",
+    );
+  });
+
+  test("null base (ZARR_CACHE_BASE_URL unset) is always null regardless of status", () => {
+    expect(deriveZarrIndexUrl(null, "on007763", "ready")).toBeNull();
+  });
+
+  test("non-'ready' status is always null regardless of base", () => {
+    expect(deriveZarrIndexUrl("https://zarr.nemar.org", "on007763", "pending")).toBeNull();
+    expect(deriveZarrIndexUrl("https://zarr.nemar.org", "on007763", null)).toBeNull();
+    expect(deriveZarrIndexUrl("https://zarr.nemar.org", "on007763", undefined)).toBeNull();
+  });
+});
+
 describe("zarr_data_failures is a parsed object on GET /datasets/:id, never a raw string", () => {
   let db: Database;
   let app: App;
@@ -313,6 +400,19 @@ describe("zarr_data_failures is a parsed object on GET /datasets/:id, never a ra
       zarr_status: "ready",
       zarr_store_count: 2,
       zarr_data_failures: JSON.stringify([{ path: "a" }, { path: "b" }, { path: "c" }]),
+    });
+    // PR #1201 review, item 1: malformed input must never 500 the response.
+    insertDataset(db, "nm044005", {
+      name: "Malformed JSON",
+      zarr_status: "ready",
+      zarr_store_count: 2,
+      zarr_data_failures: "{not valid json",
+    });
+    insertDataset(db, "nm044006", {
+      name: "Bare number (parses, but neither object nor array)",
+      zarr_status: "ready",
+      zarr_store_count: 2,
+      zarr_data_failures: "42",
     });
   });
 
@@ -351,5 +451,72 @@ describe("zarr_data_failures is a parsed object on GET /datasets/:id, never a ra
     };
     expect(body.dataset.zarr_data_failures).toEqual({ count: 3, detail_ref: "zarr/index.json" });
     expect(typeof body.dataset.zarr_data_failures).toBe("object");
+  });
+
+  test("malformed JSON never 500s the response -- 200 with zarr_data_failures null", async () => {
+    const res = await app.request("/nm044005", {}, env(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { dataset: { zarr_data_failures: unknown } };
+    expect(body.dataset.zarr_data_failures).toBeNull();
+  });
+
+  test("a bare parsed number never 500s the response -- 200 with zarr_data_failures null", async () => {
+    const res = await app.request("/nm044006", {}, env(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { dataset: { zarr_data_failures: unknown } };
+    expect(body.dataset.zarr_data_failures).toBeNull();
+  });
+});
+
+describe("parseZarrDataFailures: malformed input logs and returns null (PR #1201 review, item 1)", () => {
+  let originalError: typeof console.error;
+  let calls: unknown[][];
+
+  beforeEach(() => {
+    calls = [];
+    originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      calls.push(args);
+    };
+  });
+
+  afterEach(() => {
+    console.error = originalError;
+  });
+
+  test("an unparseable non-empty string logs '[catalog] zarr_data_failures unparseable...' and returns null", () => {
+    const result = parseZarrDataFailures("{not valid json", "nm044005");
+    expect(result).toBeNull();
+    expect(calls.length).toBe(1);
+    const [message, detail] = calls[0] as [string, { dataset_id?: string; reason?: string }];
+    expect(message).toBe("[catalog] zarr_data_failures unparseable, treating as none");
+    expect(detail.dataset_id).toBe("nm044005");
+    expect(typeof detail.reason).toBe("string");
+    expect(detail.reason?.length).toBeGreaterThan(0);
+  });
+
+  test("a bare number (parses fine, but is neither object nor array) also logs and returns null", () => {
+    const result = parseZarrDataFailures("42", "nm044006");
+    expect(result).toBeNull();
+    expect(calls.length).toBe(1);
+    const [message, detail] = calls[0] as [string, { dataset_id?: string; reason?: string }];
+    expect(message).toBe("[catalog] zarr_data_failures unparseable, treating as none");
+    expect(detail.dataset_id).toBe("nm044006");
+    expect(detail.reason).toContain("number");
+  });
+
+  test("a well-formed object does NOT log (the common, expected case stays silent)", () => {
+    const result = parseZarrDataFailures(
+      JSON.stringify({ count: 1, detail_ref: "zarr/index.json" }),
+      "nm044001",
+    );
+    expect(result).toEqual({ count: 1, detail_ref: "zarr/index.json" });
+    expect(calls.length).toBe(0);
+  });
+
+  test("null/absent input does NOT log either", () => {
+    expect(parseZarrDataFailures(null, "nm044003")).toBeNull();
+    expect(parseZarrDataFailures(undefined, "nm044003")).toBeNull();
+    expect(calls.length).toBe(0);
   });
 });
