@@ -3871,6 +3871,359 @@ def build_real_edf(directory: str, stem: str, n_channels: int = 4,
     return path
 
 
+# --- real recordings ----------------------------------------------------------
+# A handful of assertions can only be made against an actual archived recording:
+# the resampling relation `sample_index` rests on is a property of biosigIO plus
+# a real acquisition rate, and a hand-built fixture at the SERVING rate would
+# never exercise it (#1060 names nm000329 for exactly this reason).
+#
+# Downloads are cached OUTSIDE the repository -- nothing to commit, and one
+# download per host rather than one per worktree -- and every failure path skips
+# rather than fails: these tests need the network, and a flaky connection must
+# not turn a converter change red. Mirrors biosigio's own
+# `biosigio/tests/real_data.py`, with `unittest.SkipTest` in place of
+# `pytest.skip` so `python test_generate_zarr.py` behaves the same as pytest.
+REAL_DATA_CACHE_ENV = "NEMAR_ZARR_REAL_DATA_CACHE"
+REAL_DATA_SKIP_ENV = "NEMAR_ZARR_SKIP_REAL_DATA"
+_REAL_DATA_DEFAULT_CACHE = os.path.join(
+    os.path.expanduser("~"), ".cache", "nemar-zarr-tests", "real_data"
+)
+# data.nemar.org resets the connection for urllib's default `Python-urllib/x.y`
+# User-Agent (a generic anti-bot header check -- any other string clears it).
+_REAL_DATA_USER_AGENT = (
+    "nemar-cli-zarr-tests/1.0 (+https://github.com/nemarOrg/nemar-cli)"
+)
+
+
+def fetch_real_file(url: str, *, min_bytes: int = 1) -> str:
+    """Local path to `url`, downloading it into the shared cache on first use.
+
+    Raises `unittest.SkipTest` (never fails) when the download is unavailable or
+    opted out of. URLs must be VERSIONED (`/nm000329/v1.0.7/...`): the point of a
+    real-data assertion is that it is made against known bytes, and `latest`
+    would silently change what was verified.
+    """
+    if os.environ.get(REAL_DATA_SKIP_ENV):
+        raise unittest.SkipTest(
+            f"real-data test skipped: {REAL_DATA_SKIP_ENV} is set"
+        )
+    cache = os.environ.get(REAL_DATA_CACHE_ENV) or _REAL_DATA_DEFAULT_CACHE
+    os.makedirs(cache, exist_ok=True)
+    dest = os.path.join(cache, url.rsplit("/", 1)[-1])
+    if os.path.exists(dest) and os.path.getsize(dest) >= min_bytes:
+        return dest
+    import urllib.error
+    import urllib.request
+
+    part = dest + ".part"
+    try:
+        request = urllib.request.Request(
+            url, headers={"User-Agent": _REAL_DATA_USER_AGENT}
+        )
+        with urllib.request.urlopen(request, timeout=30) as resp, open(part, "wb") as fh:
+            shutil.copyfileobj(resp, fh, 4 * 1024 * 1024)
+        os.replace(part, dest)
+    except Exception as exc:  # noqa: BLE001 - offline is a skip, never a failure
+        with contextlib.suppress(OSError):
+            os.unlink(part)
+        raise unittest.SkipTest(f"real-data test skipped: could not fetch {url} ({exc})")
+    if os.path.getsize(dest) < min_bytes:
+        os.unlink(dest)
+        raise unittest.SkipTest(f"real-data test skipped: {url} looked truncated")
+    return dest
+
+
+class TestSampleIndexAgainstARealRateChange(unittest.TestCase):
+    """#1060's acceptance criterion: `sample_index` verified to within one sample
+    on a dataset that actually changes rate (nm000329, 1000 Hz -> 250 Hz).
+
+    A recording built at the serving rate cannot check this at all -- the whole
+    class of error the column exists to remove only appears when the source and
+    target rates differ. Three independent checks, none of which re-uses the
+    formula under test:
+
+    1. The store's own geometry: level-0 `n_samples` is `round(n_native *
+       target / native)`, i.e. the grid really is `t[n] = n / rate`.
+    2. No filter delay: the served signal correlates with the NATIVE samples
+       taken at the same absolute times, peaking at lag 0. `resample_poly` is
+       zero-phase, and this is what proves it for the exporter we ship.
+    3. The dataset's own `sample` column (onsets in native samples, written by
+       whoever curated it) scaled to the serving rate.
+    """
+
+    VERSION = "v1.0.7"
+    STEM = "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-calibration_run-0"
+    BASE = "https://data.nemar.org/nm000329"
+    NATIVE_RATE = 1000.0
+    SERVING_RATE = 250.0
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import numpy  # noqa: F401
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+        cls.recording = fetch_real_file(
+            f"{cls.BASE}/{cls.VERSION}/{cls.STEM}_eeg.bdf", min_bytes=100_000_000
+        )
+        cls.events = fetch_real_file(f"{cls.BASE}/{cls.VERSION}/{cls.STEM}_events.tsv")
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.store = os.path.join(cls._tmp.name, "real.zarr")
+        # The real converter entry point on the real bytes: same call
+        # `convert_one` makes.
+        convert_recording(cls.recording, cls.events, cls.store)
+        cls.meta = store_metadata(cls.store)
+        cls.group = cls.meta["groups"][0]
+        with open(cls.events, encoding="utf-8") as fh:
+            cls.parsed = parse_events_tsv(fh.read())
+        cls.rows = event_rows_for_store(
+            "sub-1/ses-0/eeg/x_eeg.zarr", f"{cls.STEM}_eeg.bdf",
+            cls.meta["groups"], cls.parsed,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        if hasattr(cls, "_tmp"):
+            cls._tmp.cleanup()
+
+    def native_samples(self):
+        """(labels, n_samples, first-channel signal) straight from the BDF."""
+        import pyedflib
+
+        reader = pyedflib.EdfReader(self.recording)
+        try:
+            labels = reader.getSignalLabels()
+            n = int(reader.getNSamples()[0])
+            return labels, n, reader
+        except Exception:
+            reader.close()
+            raise
+
+    def test_the_dataset_really_changes_rate(self):
+        # Guard the premise: if the archive ever re-published this at 250 Hz,
+        # every assertion below would pass while checking nothing.
+        self.assertEqual(self.group["source_rate_hz"], self.NATIVE_RATE)
+        self.assertEqual(self.group["rate"], self.SERVING_RATE)
+
+    def test_level_zero_is_the_nominal_grid_over_the_same_span(self):
+        _labels, n_native, reader = self.native_samples()
+        try:
+            self.assertGreater(n_native, 0)
+        finally:
+            reader.close()
+        expected = round(n_native * self.SERVING_RATE / self.NATIVE_RATE)
+        self.assertEqual(self.group["n_samples"], expected)
+        # ...so sample n is at t = n / rate, which is what the formula assumes.
+        self.assertAlmostEqual(
+            self.group["duration_s"], n_native / self.NATIVE_RATE, places=3
+        )
+
+    def test_the_served_signal_carries_no_filter_delay(self):
+        """If `resample_poly` left its FIR group delay in, every sample index
+        would be off by that delay and the column would be confidently wrong.
+
+        Compared against the NATIVE samples at the same absolute times
+        (1000 -> 250 is an exact 4, so `native[::4]` is the zero-phase reference
+        and no resampler is involved in the reference at all).
+        """
+        import numpy as np
+        import zarr
+
+        root = zarr.open_group(self.store, mode="r")
+        group = root[self.group["name"]]
+        label = dict(group.attrs)["channels"][0]["label"]
+        served = np.asarray(group["0"][0, :], dtype=np.float64)
+
+        labels, _n, reader = self.native_samples()
+        try:
+            self.assertIn(label, labels, "store channel is not a native channel")
+            native = reader.readSignal(labels.index(label)).astype(np.float64)
+        finally:
+            reader.close()
+
+        step = int(self.NATIVE_RATE // self.SERVING_RATE)
+        reference = native[::step]
+        n = min(len(served), len(reference)) - 20
+        a = served[10 : 10 + n] - served[10 : 10 + n].mean()
+        b = reference[10 : 10 + n] - reference[10 : 10 + n].mean()
+        lags = range(-8, 9)
+        scores = {
+            lag: float(np.dot(a, np.roll(b, lag)) / (np.linalg.norm(a) * np.linalg.norm(b)))
+            for lag in lags
+        }
+        best = max(scores, key=scores.get)
+        self.assertGreater(
+            scores[0], 0.9,
+            "the served channel does not track the native one at all -- the "
+            f"channel mapping is wrong, not the delay (r={scores[0]:.3f})",
+        )
+        self.assertEqual(
+            best, 0,
+            f"served level 0 lags the native grid by {best} sample(s); "
+            "sample_index would be off by the same amount",
+        )
+
+    def test_every_onset_lands_on_the_grid_within_one_sample(self):
+        """The acceptance criterion, checked against the grid itself rather than
+        against the formula: the level-0 timestamps are `n / rate`, and the
+        published index must be the nearest of them.
+
+        Measured on this recording: 72 events, worst disagreement 1 sample, and
+        every one of those is an exact TIE -- the onset sits exactly half a
+        sample (0.002 s at 250 Hz) between two level-0 samples, e.g. 39.302 s ->
+        9825.5. The published rule takes the later sample and `argmin` takes the
+        earlier; neither is more correct, and no rule can do better than one
+        sample there. On every event that is not a tie the two agree exactly,
+        which is the assertion that would break if the formula drifted.
+        """
+        import numpy as np
+
+        rate = self.group["rate"]
+        grid = np.arange(self.group["n_samples"], dtype=np.float64) / rate
+        self.assertGreater(len(self.rows["onset_s"]), 50, "fixture lost its events")
+        ties = 0
+        for onset, published in zip(self.rows["onset_s"], self.rows["sample_index"]):
+            nearest = int(np.argmin(np.abs(grid - onset)))
+            delta = abs(published - nearest)
+            self.assertLessEqual(
+                delta, 1, f"onset {onset} published {published}, grid says {nearest}"
+            )
+            if delta == 0:
+                continue
+            ties += 1
+            # The only licensed disagreement: equidistant from both samples.
+            self.assertAlmostEqual(
+                abs(grid[published] - onset), abs(grid[nearest] - onset), places=9,
+                msg=f"onset {onset} is off by a sample and is NOT a tie",
+            )
+        # The fixture has to contain some, or the tie branch above is untested
+        # and this test is weaker than it reads.
+        self.assertGreater(ties, 0)
+
+    def test_the_datasets_own_native_sample_column_agrees(self):
+        """nm000329's events.tsv carries a `sample` column in NATIVE samples,
+        written by whoever curated the dataset. It is the one ground truth here
+        that owes nothing to this converter -- and it agrees to within one
+        sample, disagreeing only on the same ties (a native sample number
+        divided by 4 lands on x.5 for exactly those events)."""
+        self.assertIn("sample", self.rows, "fixture lost its `sample` column")
+        ratio = self.SERVING_RATE / self.NATIVE_RATE
+        for native, published in zip(self.rows["sample"], self.rows["sample_index"]):
+            scaled = int(native) * ratio
+            self.assertLessEqual(
+                abs(published - round(scaled)), 1,
+                f"curated sample {native} -> {scaled}, published {published}",
+            )
+            if published != round(scaled):
+                self.assertAlmostEqual(scaled % 1, 0.5, places=9)
+
+
+class TestSampleIndexOnANonIntegerRateRatio(unittest.TestCase):
+    """512 Hz -> 250 Hz: the ratio is 125/256, so there is no whole-sample
+    relationship between the source and serving grids at all.
+
+    Synthetic on purpose, and the comment matters: nm000329 (the real-data check
+    above) is an exact 4, so it CANNOT distinguish a formula that quietly assumes
+    an integer decimation from one that does not. Nothing in the archive was
+    handy at a fractional ratio, so this fixture is the only thing standing
+    between that assumption and a silently mis-aligned file. The recording is a
+    real EDF written by pyedflib and converted by the real exporter -- only the
+    samples are synthetic.
+    """
+
+    RATE = 512
+    SERVING_RATE = 250.0
+    SECONDS = 20
+    ONSETS = [0.0, 0.001, 1.003, 7.777, 12.5, 19.999]
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import numpy  # noqa: F401
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+        cls._tmp = tempfile.TemporaryDirectory()
+        d = cls._tmp.name
+        cls.recording = build_real_edf(
+            d, "sub-01_task-x_eeg", n_channels=3, rate=cls.RATE, seconds=cls.SECONDS
+        )
+        cls.events = os.path.join(d, "sub-01_task-x_events.tsv")
+        with open(cls.events, "w") as fh:
+            fh.writelines(
+                ["onset\tduration\ttrial_type\n"]
+                + [f"{onset}\t0.1\tgo\n" for onset in cls.ONSETS]
+            )
+        cls.store = os.path.join(d, "out.zarr")
+        convert_recording(cls.recording, cls.events, cls.store)
+        cls.meta = store_metadata(cls.store)
+        cls.group = cls.meta["groups"][0]
+        with open(cls.events) as fh:
+            cls.rows = event_rows_for_store(
+                "sub-01/eeg/x_eeg.zarr", "sub-01/eeg/sub-01_task-x_eeg.edf",
+                cls.meta["groups"], parse_events_tsv(fh.read()),
+            )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_the_ratio_really_is_fractional(self):
+        self.assertEqual(self.group["source_rate_hz"], float(self.RATE))
+        self.assertEqual(self.group["rate"], self.SERVING_RATE)
+        self.assertNotEqual((self.RATE / self.SERVING_RATE) % 1, 0.0)
+
+    def test_level_zero_length_follows_the_rate_ratio(self):
+        n_native = self.RATE * self.SECONDS
+        self.assertEqual(
+            self.group["n_samples"], round(n_native * self.SERVING_RATE / self.RATE)
+        )
+
+    def test_every_onset_lands_on_the_grid_within_one_sample(self):
+        import numpy as np
+
+        grid = np.arange(self.group["n_samples"], dtype=np.float64) / self.group["rate"]
+        for onset, published in zip(self.rows["onset_s"], self.rows["sample_index"]):
+            nearest = int(np.argmin(np.abs(grid - onset)))
+            self.assertLessEqual(
+                abs(published - nearest), 1,
+                f"onset {onset} published as {published}, grid says {nearest}",
+            )
+
+    def test_the_acquisition_rate_is_the_wrong_rate_to_index_with(self):
+        """The error the column exists to remove. A client reading the BIDS
+        sidecar sees 512 Hz and computes `onset * 512`; level 0 is 250 Hz, so
+        that index is roughly twice as far along the array as the event -- and
+        for most of this recording it is off the end of it entirely. The index
+        publishes the SERVING rate per group precisely so that guess is never
+        needed."""
+        n_samples = self.group["n_samples"]
+        wrong = [round(onset * self.RATE) for onset in self.ONSETS]
+        published = list(self.rows["sample_index"])
+        self.assertNotEqual(wrong, published)
+        # ...and it is not a rounding-scale disagreement, it is a different array
+        # position: the last onset indexes past the end of level 0.
+        self.assertGreater(wrong[-1], n_samples)
+        self.assertLessEqual(published[-1], n_samples)
+
+    def test_deriving_the_index_from_the_native_sample_number_disagrees(self):
+        """The sub-sample error #1060 names. A client that rounds the onset to a
+        NATIVE sample first and scales that -- what the BIDS `sample` column
+        invites -- rounds twice, and on a fractional ratio the two roundings
+        disagree wherever the true position sits within a quarter sample of a
+        tie. It is bounded by one sample, which is exactly why nobody notices it
+        without a column to compare against."""
+        ratio = self.SERVING_RATE / self.RATE
+        onset = 0.086  # 21.5 level-0 samples: the tie band
+        published = sample_index_for(onset, self.SERVING_RATE)
+        two_step = round(round(onset * self.RATE) * ratio)
+        self.assertEqual(published, 22)
+        self.assertEqual(two_step, 21)
+
+
 class TestSourceTree(unittest.TestCase):
     def test_raw_is_the_default(self):
         self.assertEqual(source_tree_for("sub-01/eeg/sub-01_task-x_eeg.set"), "raw")
