@@ -154,7 +154,7 @@
         },
         "units_report": {
           "type": "object",
-          "description": "biosigIO's per-file account of what the BIDS channels.tsv `units` column did (biosigio#125), republished so a unit that could NOT be adopted is visible without opening the store. Absent when channels.tsv was not applied -- which today includes every store built on the streaming path (biosigio#127).",
+          "description": "biosigIO's per-file account of what the BIDS channels.tsv `units` column did (biosigio#125), republished so a unit that could NOT be adopted is visible without opening the store. Absent when no channels.tsv was applied to the recording -- either the dataset ships none that inherits to it, or the sidecar could not be read. Never means \"applied cleanly\". Both the in-memory and the streaming exporter apply it (biosigio>=1.2.7), so the two cannot disagree about a recording's units.",
           "properties": {
             "converted": { "type": "integer", "minimum": 0 },
             "relabelled": { "type": "integer", "minimum": 0 },

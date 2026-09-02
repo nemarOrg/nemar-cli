@@ -2982,15 +2982,15 @@ def store_metadata(store_path: str) -> dict:
         # adopted is visible on the PUBLIC surface: a store whose report says
         # `kept_importer_unit` is serving numbers the sidecar disagrees with, and
         # before this that was only discoverable by reading the conversion log.
-        # Absent on any store built by the streaming path until biosigio#127
-        # teaches `stream_to_zarr` to apply channels.tsv -- absence means "not
-        # applied", never "applied cleanly".
+        # Absence means "no channels.tsv applied to this recording" -- either the
+        # dataset ships none that inherits to it, or the read failed and the
+        # driver said so. It never means "applied cleanly".
+        #
         # Two locations, on purpose. The in-memory path records it in the
         # recording metadata, which `to_zarr` serializes into
-        # `recording_metadata`; biosigio#128 also writes it as a ROOT attr, which
-        # is the only place the streaming exporter can put it (it never builds a
-        # Recording). Root wins when both exist -- it is the newer, exporter-level
-        # statement.
+        # `recording_metadata`; the streaming exporter never builds a Recording,
+        # so biosigio#128 writes it as a ROOT attr instead. Root wins when both
+        # exist -- it is the exporter-level statement, made after any importer's.
         rec_meta = ra.get("recording_metadata")
         for candidate in (
             ra.get("channels_tsv_units"),
@@ -3466,117 +3466,34 @@ def _recording_size_bytes(primary_local: str) -> int:
     return total
 
 
-_WARNED_NO_CHANNELS_TSV_API = [False]
-_BIDS_CHANNELS_OFF: dict[str, str] = {}
-_BIDS_CHANNELS_PROBED = [False]
+def bids_channels_arg(channels_local: str | None) -> str:
+    """The `bids_channels` value for both biosigIO exporters: the resolved sidecar
+    path, or "off".
 
+    Never "auto" (biosigIO's default), and that is the whole point. "auto" looks
+    for a SIBLING `_channels.tsv` next to the file it was handed, which is the
+    wrong question twice over:
 
-def _bids_channels_off(recording_cls) -> dict:
-    """`{"bids_channels": "off"}` when `Recording.from_file` accepts it, else `{}`.
+    * The file this driver hands the exporter is not the recording's own path. It
+      is a scratch materialisation in `work/`, and on the ADR 0028 MaxShield path
+      it is the Signal-Space-Separated copy at `work/sss_<basename>`. Sibling
+      detection there finds whatever this driver happened to stage, or nothing.
+    * BIDS inheritance is not siblinghood. The sidecar that applies to
+      `sub-01/eeg/..._eeg.edf` may live in `sub-01/` or at the dataset root; the
+      resolution that finds it is `channels_tsv_for`, which is also what the
+      channel-count fidelity gate consults. The gate and the conversion must
+      agree about WHICH sidecar applies, or the gate is checking a different file
+      than the one that shaped the store.
 
-    Probed rather than passed blindly: an unsupported keyword is a `TypeError`
-    that would fail EVERY recording on a node whose venv predates the pin, and
-    the whole point of turning the switch off is a refinement, not a
-    prerequisite -- an older library has no sibling auto-apply to disable, so
-    omitting the keyword there is exactly equivalent. Probed once per process
-    (the signature cannot change under us) and cached.
+    So the path is always resolved from the ORIGINAL BIDS `primary` and passed
+    explicitly, and "off" says "there is no applicable sidecar" rather than
+    leaving the exporter to guess. biosigio>=1.2.7 accepts the path form on
+    `Recording.from_file` AND `stream_to_zarr` and acts on it (biosigio#128,
+    closing #127); on 1.2.6 the streaming exporter had no such parameter and
+    `from_file` accepted a path and silently ignored it, which is why the pin is
+    a floor and not a preference.
     """
-    if not _BIDS_CHANNELS_PROBED[0]:
-        _BIDS_CHANNELS_PROBED[0] = True
-        try:
-            import inspect
-
-            if "bids_channels" in inspect.signature(recording_cls.from_file).parameters:
-                _BIDS_CHANNELS_OFF["bids_channels"] = "off"
-        except (TypeError, ValueError):  # unintrospectable callable
-            pass
-    return dict(_BIDS_CHANNELS_OFF)
-
-
-_WARNED_STREAM_NO_CHANNELS = [False]
-
-
-def stream_channels_kwarg(stream_fn, channels_local: str | None) -> dict:
-    """`{"bids_channels": <path>}` for the streaming exporter when the installed
-    biosigIO can act on an explicit sidecar path, else `{}`.
-
-    Two things make this a capability probe rather than a version check.
-
-    `stream_to_zarr` gaining `bids_channels` IS the change that makes the path
-    form work (biosigio#128, closing #127), so its signature is the honest test.
-    And `Recording.from_file`'s signature is NOT: biosigio 1.2.6 ACCEPTS
-    `bids_channels=<path>` there and silently treats anything that is not "auto"
-    as "off" (measured -- the units report comes back None), so probing the
-    keyword's presence on that function would report support that does not exist.
-    That is exactly why the in-memory path calls `bids.apply_channels_tsv`
-    explicitly instead of passing the path down: `apply_channels_tsv` works on
-    both releases, `bids_channels=<path>` on only one.
-
-    Until the streaming exporter can take it, a streamed store carries the units
-    its importer read while an in-memory one carries the sidecar's -- the
-    disagreement that keeps `ZARR_ENGINE_VERSION` where it is. Said out loud once
-    per run rather than left to be inferred from a missing index field.
-    """
-    if not channels_local:
-        return {}
-    try:
-        import inspect
-
-        supported = "bids_channels" in inspect.signature(stream_fn).parameters
-    except (TypeError, ValueError):  # unintrospectable callable
-        supported = False
-    if supported:
-        return {"bids_channels": channels_local}
-    if not _WARNED_STREAM_NO_CHANNELS[0]:
-        _WARNED_STREAM_NO_CHANNELS[0] = True
-        print(
-            "::warning::installed biosigIO's stream_to_zarr cannot apply "
-            "channels.tsv (needs biosigio#127/#128); STREAMED stores this run "
-            "carry the units their importer read, while in-memory ones carry the "
-            "sidecar's. `units_report` is absent on the streamed entries, which "
-            "is how to tell them apart",
-            flush=True,
-        )
-    return {}
-
-
-def _apply_channels_tsv(rec, channels_local: str | None) -> None:
-    """Adopt the BIDS `_channels.tsv`'s types and UNITS onto an in-memory recording.
-
-    biosigIO >= 1.2.6 converts a channel's samples into the unit the sidecar
-    declares rather than merely relabelling them (biosigio#125, closing #122), and
-    records what it did in `rec.metadata["channels_tsv_units"]`, which `to_zarr`
-    serializes into the store and `store_metadata` republishes as the index's
-    `units_report`. Without this call the sidecar is consulted only by the
-    fidelity gate's row count and the served samples stay in whatever unit the
-    importer happened to read.
-
-    Only the in-memory path can do this today: `stream_to_zarr` gains it in
-    biosigio#127. Until then a dataset's small and large recordings can disagree
-    on units, which is why the engine version is NOT bumped in this change --
-    re-converting the back catalogue under a half-applied rule would bake the
-    disagreement into the archive.
-
-    A biosigIO too old to have the function degrades to the previous behaviour
-    with one warning, rather than failing every recording on a node whose venv
-    predates the pin.
-    """
-    if not channels_local or not os.path.exists(channels_local):
-        return
-    from biosigio import bids  # type: ignore[import-not-found]  # lazy: runtime-only dep
-
-    apply_fn = getattr(bids, "apply_channels_tsv", None)
-    if apply_fn is None:
-        if not _WARNED_NO_CHANNELS_TSV_API[0]:
-            _WARNED_NO_CHANNELS_TSV_API[0] = True
-            print(
-                "::warning::installed biosigIO has no bids.apply_channels_tsv; "
-                "channels.tsv units are NOT applied and `units_report` will be "
-                "absent from every store this run (needs biosigio>=1.2.6)",
-                flush=True,
-            )
-        return
-    apply_fn(rec, channels_local)
+    return channels_local if channels_local and os.path.exists(channels_local) else "off"
 
 
 def convert_recording(
@@ -3654,22 +3571,18 @@ def convert_recording(
         # the fastest channel's grid rather than failing the conversion. biosigIO
         # defaults to "error" everywhere else so no one gets resampled data unknowingly
         # (requires biosigio>=1.1.4; ignored for non-EDF formats). See nemar-cli#737.
-        # bids_channels="off": the sidecar is applied EXACTLY ONCE, by
-        # `_apply_channels_tsv` below, using this driver's own BIDS-inheritance
-        # resolution. biosigIO's own "auto" looks for a SIBLING `_channels.tsv`
-        # next to the file, which resolves a different (smaller) set of files: a
-        # sidecar inherited from `sub-01/` or the dataset root applies to a
-        # recording under `sub-01/eeg/` and is not its sibling, and the file this
-        # driver hands the importer lives in a scratch directory where the only
-        # sidecar present is the one it staged. Leaving "auto" on would also apply
-        # a staged sidecar twice, and `_adopt_units` CONVERTS samples.
+        # `bids_channels` is the resolved sidecar path or "off", never "auto" --
+        # see `bids_channels_arg` for why sibling auto-detection is the wrong
+        # question for a scratch materialisation. The importer applies it before
+        # the suffix override below, which deliberately has the last word on
+        # modality (see its comment), and records what the `units` column did in
+        # `rec.metadata["channels_tsv_units"]` -> the store's `recording_metadata`
+        # -> the index entry's `units_report`.
         rec = Recording.from_file(
-            primary_local, mixed_rate="resample", **_bids_channels_off(Recording)
+            primary_local,
+            mixed_rate="resample",
+            bids_channels=bids_channels_arg(channels_local),
         )
-        # BEFORE the events sidecar and before the suffix override: this adopts
-        # per-channel types and units, and the suffix override below deliberately
-        # has the last word on modality (see its comment).
-        _apply_channels_tsv(rec, channels_local)
         if events_local and os.path.exists(events_local):
             bids.apply_events_tsv(rec, events_local)
         # Suffix-driven modality: group + resample the whole recording by its BIDS
@@ -3705,14 +3618,11 @@ def convert_recording(
                 # Keep the temp channel-major memmap on the same (fast) scratch volume as
                 # the store; it is a sibling temp dir, not synced to S3.
                 scratch_dir=os.path.dirname(store_path) or None,
-                # The sidecar EXPLICITLY, never by sibling auto-detection. The
-                # path handed to the exporter is not always the recording's own:
-                # on the ADR 0028 MaxShield path it is the Signal-Space-Separated
-                # copy at `work/sss_<basename>`, which has no channels.tsv beside
-                # it, so an auto-detecting exporter would silently serve importer
-                # units and MNE-inferred types. Empty until the installed
-                # biosigIO can act on it -- see `stream_channels_kwarg`.
-                **stream_channels_kwarg(stream_to_zarr, channels_local),
+                # The same explicit sidecar the in-memory path uses, so the two
+                # exporters cannot disagree about a recording's units -- the
+                # disagreement that held the engine bump back until biosigio#128
+                # gave `stream_to_zarr` this parameter. See `bids_channels_arg`.
+                bids_channels=bids_channels_arg(channels_local),
             )
         except MixedSamplingRateError:
             # A mixed per-channel-rate EDF can't stream on a single grid; the

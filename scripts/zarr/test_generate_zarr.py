@@ -14,7 +14,6 @@ Run with:
 from __future__ import annotations
 
 import contextlib
-import inspect
 import io
 import json
 import os
@@ -4555,11 +4554,14 @@ class TestRealRecordingV3Fields(unittest.TestCase):
 
     def test_sibling_auto_detection_is_not_what_applies_the_sidecar(self):
         """A sidecar sitting beside the recording but NOT the one this driver
-        resolved must not be picked up: `bids_channels` is off, so the only
-        sidecar that can shape a store is the one passed in.
+        resolved must not be picked up: with no sidecar resolved the driver
+        passes `bids_channels="off"`, so the only sidecar that can ever shape a
+        store is one this driver chose.
 
         Without this, the SSS test above could pass for the wrong reason on some
-        future release whose auto-detection searches more widely.
+        future release whose auto-detection searches more widely -- and a staged
+        sidecar would be at risk of being applied twice, which matters because
+        adopting a unit CONVERTS samples rather than relabelling them.
         """
         with tempfile.TemporaryDirectory() as d:
             recording = os.path.join(d, "sub-01_task-rest_eeg.edf")
@@ -4572,72 +4574,76 @@ class TestRealRecordingV3Fields(unittest.TestCase):
             convert_recording(recording, None, store)
             self.assertNotIn("units_report", store_metadata(store))
 
-    def test_streaming_gets_the_sidecar_when_the_library_can_take_it(self):
-        """The streaming exporter's sidecar argument, probed against the REAL
-        `stream_to_zarr` rather than a stand-in.
-
-        biosigIO 1.2.6's streaming exporter has no `bids_channels` parameter
-        (that is biosigio#127/#128), so on the pinned release the right behaviour
-        is to pass nothing -- and passing the path anyway would be worse than
-        useless: 1.2.6's `Recording.from_file` ACCEPTS `bids_channels=<path>` and
-        silently ignores it, so a version-blind driver would believe the sidecar
-        had been applied. This asserts the rule against both real function
-        signatures, so it starts asserting the opposite the moment the pin moves.
-        """
-        from biosigio import Recording, stream_to_zarr
-
-        kwargs = generate_zarr.stream_channels_kwarg(stream_to_zarr, self.channels)
-        supported = "bids_channels" in inspect.signature(stream_to_zarr).parameters
-        if supported:
-            self.assertEqual(kwargs, {"bids_channels": self.channels})
-        else:
-            self.assertEqual(kwargs, {})
-        # No sidecar resolved -> nothing to pass, whatever the library supports.
-        self.assertEqual(generate_zarr.stream_channels_kwarg(stream_to_zarr, None), {})
-        # And the in-memory path never relies on the keyword to APPLY anything:
-        # it turns auto-detection off and calls apply_channels_tsv itself.
+    def test_bids_channels_arg_is_the_path_or_off_never_auto(self):
+        """"auto" is biosigIO's default and is always wrong here: it resolves the
+        sidecar as a SIBLING of the file the exporter was handed, which is a
+        scratch materialisation (and, on the MaxShield path, a filtered copy).
+        The driver therefore passes the resolved path, or "off" when no sidecar
+        applies -- an explicit "there is none" rather than a guess."""
+        self.assertEqual(generate_zarr.bids_channels_arg(self.channels), self.channels)
+        self.assertEqual(generate_zarr.bids_channels_arg(None), "off")
+        self.assertEqual(generate_zarr.bids_channels_arg(""), "off")
+        # Staged but missing (a failed sidecar read) is "off", not a path the
+        # exporter would raise on.
         self.assertEqual(
-            generate_zarr._bids_channels_off(Recording), {"bids_channels": "off"}
+            generate_zarr.bids_channels_arg("/no/such/_channels.tsv"), "off"
         )
 
-    def test_streaming_path_converts_with_the_sidecar_argument(self):
-        """Drive the real streaming exporter through `convert_recording` with a
-        sidecar resolved, so the call site is exercised rather than just the
-        kwarg helper. Recorded at the biosigIO boundary because on the pinned
-        release there is no observable effect to assert instead: the real
-        exporter still runs and writes the store, the wrapper only notes what it
-        was called with.
+    def test_the_streaming_exporter_applies_the_sidecar_too(self):
+        """The two exporters must not disagree about a recording's units.
+
+        This is the assertion that was impossible on biosigio 1.2.6, whose
+        `stream_to_zarr` had no `bids_channels` parameter at all: a dataset's
+        small recordings carried the sidecar's units and its large ones carried
+        the importer's, which is exactly why the engine bump waited for
+        biosigio#128. Now it is an observable property of a real streamed store,
+        so a regression on either path fails here rather than being inferred from
+        a missing index field.
         """
-        calls: list[dict] = []
-        import biosigio
-
-        real = biosigio.stream_to_zarr
-
-        def recording_stream_to_zarr(*args, **kwargs):
-            calls.append(kwargs)
-            return real(*args, **kwargs)
-
+        if not generate_zarr._EDF_STREAMABLE:
+            self.skipTest("installed biosigio does not stream EDF")
         with tempfile.TemporaryDirectory() as d:
             store = os.path.join(d, "streamed.zarr")
-            biosigio.stream_to_zarr = recording_stream_to_zarr
             saved = generate_zarr.STREAM_EDF_MIN_BYTES
             try:
-                # Force the streaming branch for a small real EDF.
+                # Force the streaming branch for a small real EDF, so this runs
+                # the same exporter a multi-GB recording would.
                 generate_zarr.STREAM_EDF_MIN_BYTES = 1
+                self.assertTrue(
+                    generate_zarr.should_stream(self.recording, os.path.getsize(self.recording))
+                )
                 convert_recording(
                     self.recording, None, store, channels_local=self.channels
                 )
             finally:
                 generate_zarr.STREAM_EDF_MIN_BYTES = saved
-                biosigio.stream_to_zarr = real
+            report = store_metadata(store)["units_report"]
+            self.assertIs(report["units_column_present"], True)
+
+    def test_a_streamed_recording_with_no_sidecar_beside_it(self):
+        """The MaxShield geometry on the STREAMING path: the exporter is handed a
+        filtered copy in a directory with no channels.tsv, and must still apply
+        the sidecar the driver resolved. Sibling auto-detection would find
+        nothing here."""
         if not generate_zarr._EDF_STREAMABLE:
             self.skipTest("installed biosigio does not stream EDF")
-        self.assertEqual(len(calls), 1, "the streaming exporter must have been used")
-        expected = generate_zarr.stream_channels_kwarg(real, self.channels)
-        if expected:
-            self.assertEqual(calls[0].get("bids_channels"), self.channels)
-        else:
-            self.assertNotIn("bids_channels", calls[0])
+        with tempfile.TemporaryDirectory() as d:
+            filtered = os.path.join(d, "sss_sub-01_task-rest_eeg.edf")
+            shutil.copyfile(self.recording, filtered)
+            self.assertEqual(
+                [f for f in os.listdir(d) if f.endswith("_channels.tsv")], [],
+                "the fixture must have NO sidecar beside the recording",
+            )
+            store = os.path.join(d, "out.zarr")
+            saved = generate_zarr.STREAM_EDF_MIN_BYTES
+            try:
+                generate_zarr.STREAM_EDF_MIN_BYTES = 1
+                convert_recording(filtered, None, store, channels_local=self.channels)
+            finally:
+                generate_zarr.STREAM_EDF_MIN_BYTES = saved
+            self.assertIs(
+                store_metadata(store)["units_report"]["units_column_present"], True
+            )
 
     def test_channels_tsv_resolution_is_shared_with_the_fidelity_gate(self):
         head = {
