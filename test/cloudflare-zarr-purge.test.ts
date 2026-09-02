@@ -11,6 +11,7 @@
 import { describe, expect, test } from "bun:test";
 import "./setup";
 import {
+  ZARR_DATASET_DOCUMENTS,
   normalizePurgeUrls,
   purgeCacheUrls,
   zarrPurgeTargets,
@@ -24,7 +25,14 @@ function env(overrides: Partial<Bindings> = {}): Bindings {
 }
 
 describe("zarrPurgeTargets", () => {
-  test("returns index.json + each changed store's zarr.json", () => {
+  test("returns every dataset document + each changed store's zarr.json", () => {
+    // All three documents are rewritten by the same conversion, so all three
+    // are purged with it. manifest.json used to be left out while carrying the
+    // 24-hour chunk TTL, which let a re-conversion's manifest disagree with the
+    // fresh index at the edge for a day (epic #1181 phase 9); events.parquet
+    // would have inherited the same gap. A dataset that published no events
+    // file is still listed -- purging an absent URL is a no-op, and this
+    // function cannot know what the run published.
     const targets = zarrPurgeTargets(
       env({ ZARR_CACHE_BASE_URL: "https://zarr.nemar.org" }),
       "nm000104",
@@ -32,9 +40,16 @@ describe("zarrPurgeTargets", () => {
     );
     expect(targets).toEqual([
       "https://zarr.nemar.org/nm000104/zarr/index.json",
+      "https://zarr.nemar.org/nm000104/zarr/manifest.json",
+      "https://zarr.nemar.org/nm000104/zarr/events.parquet",
       "https://zarr.nemar.org/nm000104/zarr/sub-01/eeg/sub-01_task-rest_eeg.zarr/zarr.json",
       "https://zarr.nemar.org/nm000104/zarr/sub-02/emg/sub-02_task-x_emg.zarr/zarr.json",
     ]);
+    // ...and the list is the shared constant, not a second copy that could
+    // drift from the one cacheControlFor's TTL rule reads.
+    expect(targets.slice(0, ZARR_DATASET_DOCUMENTS.length)).toEqual(
+      ZARR_DATASET_DOCUMENTS.map((name) => `https://zarr.nemar.org/nm000104/zarr/${name}`),
+    );
   });
 
   test("strips a trailing slash from the base url", () => {
@@ -43,7 +58,11 @@ describe("zarrPurgeTargets", () => {
       "nm000104",
       [],
     );
-    expect(targets).toEqual(["https://zarr.nemar.org/nm000104/zarr/index.json"]);
+    expect(targets).toEqual([
+      "https://zarr.nemar.org/nm000104/zarr/index.json",
+      "https://zarr.nemar.org/nm000104/zarr/manifest.json",
+      "https://zarr.nemar.org/nm000104/zarr/events.parquet",
+    ]);
   });
 
   test("returns [] when the cache host is unset", () => {
@@ -56,7 +75,11 @@ describe("zarrPurgeTargets", () => {
       "nm000104",
       ["", "  "],
     );
-    expect(targets).toEqual(["https://zarr.nemar.org/nm000104/zarr/index.json"]);
+    expect(targets).toEqual([
+      "https://zarr.nemar.org/nm000104/zarr/index.json",
+      "https://zarr.nemar.org/nm000104/zarr/manifest.json",
+      "https://zarr.nemar.org/nm000104/zarr/events.parquet",
+    ]);
   });
 
   test("strips leading/trailing slashes so the URL has no double slash", () => {
@@ -65,7 +88,7 @@ describe("zarrPurgeTargets", () => {
       "nm000104",
       ["/sub-01/eeg/sub-01_task-rest_eeg.zarr/"],
     );
-    expect(targets[1]).toBe(
+    expect(targets[ZARR_DATASET_DOCUMENTS.length]).toBe(
       "https://zarr.nemar.org/nm000104/zarr/sub-01/eeg/sub-01_task-rest_eeg.zarr/zarr.json",
     );
   });

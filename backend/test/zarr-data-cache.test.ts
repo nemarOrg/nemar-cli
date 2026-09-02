@@ -1716,24 +1716,17 @@ describe("telemetry bytes on the redirect path (#1181 phase 6 / issue #1061)", (
   });
 });
 
-describe("zarrPurgeTargets (epic #1181 phase 9)", () => {
+describe("the TTL rule and the purge list cover the same documents (phase 9)", () => {
+  // The purge list itself is asserted in test/cloudflare-zarr-purge.test.ts;
+  // what belongs HERE is the cross-module claim, because the bug was the two
+  // halves disagreeing: manifest.json had the chunk TTL (a day) and no purge,
+  // so a re-conversion's manifest could disagree with the fresh index at the
+  // edge for 24 hours. Driven by the shared constant, so a document added to
+  // one side and not the other cannot pass.
   const env = { ZARR_CACHE_BASE_URL: "https://zarr.nemar.org/" } as unknown as Bindings;
 
-  test("purges every dataset-level document plus each changed store's zarr.json", () => {
-    expect(zarrPurgeTargets(env, "on000001", ["sub-01/eeg/a_eeg.zarr"])).toEqual([
-      "https://zarr.nemar.org/on000001/zarr/index.json",
-      "https://zarr.nemar.org/on000001/zarr/manifest.json",
-      "https://zarr.nemar.org/on000001/zarr/events.parquet",
-      "https://zarr.nemar.org/on000001/zarr/sub-01/eeg/a_eeg.zarr/zarr.json",
-    ]);
-  });
-
-  test("the TTL rule and the purge list cover the same documents", () => {
-    // The bug this pairing exists to prevent: manifest.json had the chunk TTL
-    // (a day) and no purge, so a re-conversion's manifest could disagree with
-    // the fresh index at the edge for 24 hours. Asserted against the shared
-    // constant rather than a second hand-written list, which would drift.
-    const purged = zarrPurgeTargets(env, "on000001", []);
+  test("every purged document has the short untokened TTL, and no chunk does", () => {
+    const purged = zarrPurgeTargets(env, "on000001", ["sub-01/eeg/a_eeg.zarr"]);
     for (const name of ZARR_DATASET_DOCUMENTS) {
       expect(purged).toContain(`https://zarr.nemar.org/on000001/zarr/${name}`);
       expect(cacheControlFor(`on000001/zarr/${name}`, { tokened: false })).toBe(
@@ -1745,10 +1738,6 @@ describe("zarrPurgeTargets (epic #1181 phase 9)", () => {
       "public, max-age=86400, stale-while-revalidate=86400",
     );
     expect(purged.some((url) => url.includes("/c/0/0"))).toBe(false);
-  });
-
-  test("no cache host configured means nothing to purge", () => {
-    expect(zarrPurgeTargets({} as Bindings, "on000001", ["a.zarr"])).toEqual([]);
   });
 });
 
