@@ -236,3 +236,12 @@ Both recovery tools live in the backup repo, not here:
   Verifies sha256 and row counts, and refuses production without `--force-prod`.
 - `scripts/run-local.sh --nemar-cli <path>` — loads a real snapshot into a local
   miniflare D1 and runs `wrangler dev` against it.
+
+**A restore is only as good as its largest statement.** The backup renders one
+INSERT per row and D1 refuses any statement over ~100 KB on restore
+(`SQLITE_TOOBIG`), so a single oversized row makes the whole backup
+unrestorable — and nothing at backup time detects it (#1188: 15 such
+statements, found only by rehearsing a real restore). Row payloads are
+therefore bounded at the write path (ADR 0036: counts and pointers, never
+inline per-file lists; `AUDIT_DETAILS_MAX_BYTES` in `backend/src/db/audit-log.ts`),
+and migration 0074 compacted the rows that had already outgrown the limit.
