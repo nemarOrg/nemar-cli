@@ -9,6 +9,7 @@
  * without DB/network.
  */
 
+import { auditLogStatement } from "../db/audit-log.js";
 import { SYSTEM_USER_ID } from "../lib/constants.js";
 import type { Bindings } from "../types/bindings.js";
 import { deleteDatasetCascade } from "./deletion.js";
@@ -134,10 +135,14 @@ async function writeAudit(
   details: unknown,
 ): Promise<void> {
   try {
-    await db
-      .prepare("INSERT INTO audit_log (action, resource_id, details) VALUES (?, ?, ?)")
-      .bind(action, datasetId, JSON.stringify(details))
-      .run();
+    // Through auditLogStatement so these writes inherit the shared details
+    // size bound (#1189). userId null = system-initiated.
+    await auditLogStatement(db, {
+      userId: null,
+      action,
+      resourceId: datasetId,
+      details: JSON.stringify(details),
+    }).run();
   } catch (err) {
     console.error(`[import-recovery] audit_log write failed for ${datasetId}:`, err);
   }

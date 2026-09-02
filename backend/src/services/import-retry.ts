@@ -24,6 +24,7 @@
  * logic is exhaustively unit-tested without D1 or GitHub.
  */
 
+import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { parseSqliteUtc } from "./auto-import.js";
 import { stampDatasetIntegrity } from "./dataset-metadata-columns.js";
@@ -32,7 +33,7 @@ import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { triggerOpenNeuroOnboard } from "./github.js";
 import type { DatasetVersionIntegrityResult } from "./import-integrity.js";
-import { verifyDatasetVersionS3 } from "./import-integrity.js";
+import { integrityAuditSummary, verifyDatasetVersionS3 } from "./import-integrity.js";
 import { OPENNEURO_UPSTREAM_MARKER } from "./import-recovery.js";
 
 /** ~2 weeks: the window an incomplete/failed import is retried before an
@@ -244,10 +245,16 @@ async function writeAudit(
   details: unknown,
 ): Promise<void> {
   try {
-    await db
-      .prepare("INSERT INTO audit_log (action, resource_id, details) VALUES (?, ?, ?)")
-      .bind(action, datasetId, JSON.stringify(details))
-      .run();
+    // Through auditLogStatement, not a hand-rolled INSERT, so these writes
+    // inherit the shared details size bound (#1189) -- the retry engine is
+    // one of the two writers of integrity-result payloads that made the
+    // backup unrestorable (#1188). userId null = system-initiated.
+    await auditLogStatement(db, {
+      userId: null,
+      action,
+      resourceId: datasetId,
+      details: JSON.stringify(details),
+    }).run();
   } catch (err) {
     console.error(`[import-retry] audit_log write failed for ${datasetId}:`, err);
   }
@@ -341,7 +348,16 @@ export async function reclassifyCompleteRows(
         `[import-retry] reclassify-to-incomplete UPDATE matched 0 rows for ${row.dataset_id}`,
       );
     }
-    await writeAudit(env.DB, "import_reclassified_incomplete", row.dataset_id, verified);
+    // The bounded summary (#1189), never the raw `verified`: its inlined
+    // key arrays are the same unbounded shape that made import_verify_forced
+    // rows unrestorable (#1188). The per-path detail belongs to the
+    // availability report the summary points at.
+    await writeAudit(
+      env.DB,
+      "import_reclassified_incomplete",
+      row.dataset_id,
+      integrityAuditSummary(verified),
+    );
     reclassified++;
   }
 

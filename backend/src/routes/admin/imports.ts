@@ -17,7 +17,8 @@ import { stampDatasetIntegrity } from "../../services/dataset-metadata-columns";
 import { deleteDatasetCascade } from "../../services/deletion";
 import { type GitHubRepo, createRepository, deleteRepository } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
-import { verifyDatasetVersionS3 } from "../../services/import-integrity";
+import type { DatasetVersionIntegrityResult } from "../../services/import-integrity";
+import { integrityAuditSummary, verifyDatasetVersionS3 } from "../../services/import-integrity";
 import { IMPORT_STATUSES } from "../../services/import-recovery";
 import { recoverRow } from "../../services/import-retry";
 import { hasRole } from "../../types/bindings";
@@ -72,6 +73,35 @@ export function isValidSourceIdForDataset(
 ): boolean {
   const rule = SOURCE_ID_RULES.get(source);
   return rule ? rule(datasetId, sourceId) === true : false;
+}
+
+/**
+ * The `import_verify_forced` audit write, as a bound statement (#1189).
+ *
+ * `details` is the bounded {@link integrityAuditSummary} -- counts and a
+ * pointer to `.nemar/availability-report.json` -- never
+ * `JSON.stringify(verified)`, whose inlined key arrays are what made the D1
+ * backup unrestorable (#1188).
+ *
+ * Extracted from the verify route body so a real-D1 test can drive the
+ * write: the route itself cannot be exercised past verifyDatasetVersionS3
+ * without live AWS credentials (its S3 listing hardcodes a
+ * `*.s3.*.amazonaws.com` host; see imports-verify-route.test.ts), and the
+ * no-mocks policy rules out faking that call. Same seam discipline as
+ * stampDatasetIntegrity.
+ */
+export function importVerifyAuditStatement(
+  db: D1Database,
+  userId: number,
+  datasetId: string,
+  verified: DatasetVersionIntegrityResult,
+): D1PreparedStatement {
+  return auditLogStatement(db, {
+    userId,
+    action: "import_verify_forced",
+    resourceId: datasetId,
+    details: JSON.stringify(integrityAuditSummary(verified)),
+  });
 }
 
 export function registerImportRoutes(admin: AdminRouter): void {
@@ -513,12 +543,7 @@ export function registerImportRoutes(admin: AdminRouter): void {
       );
     }
 
-    await auditLogStatement(c.env.DB, {
-      userId: c.get("user").id,
-      action: "import_verify_forced",
-      resourceId: datasetId,
-      details: JSON.stringify(verified),
-    }).run();
+    await importVerifyAuditStatement(c.env.DB, c.get("user").id, datasetId, verified).run();
 
     // Explicit pick, not a spread: verifyDatasetVersionS3's runtime result
     // carries extra bytesPresent/declaredBytes/declaredFiles/version fields
