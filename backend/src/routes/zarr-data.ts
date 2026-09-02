@@ -810,15 +810,24 @@ export function createZarrDataRoutes(
     // millisecond of CPU and zero bytes through this Worker -- the IP-keyed
     // data-ip bucket exists to bound a runaway PROXIED loop, not to punish a
     // cluster behind one NAT address for traffic that never touches D1, the
-    // edge cache, or S3 through here. Exempt them and log a counter instead
-    // of enforcing, per the issue. Uses the SAME predicate serve() uses to
-    // pick its response branch (see isRedirectCandidate's doc comment), so
-    // this can never exempt a request that serve() actually proxies.
-    if (isRedirectCandidate(c.req.method, c.req.path, c.req.header("origin") ?? null)) {
-      console.info("[zarr-data] rate-limit exempt (redirect candidate)", { path: c.req.path });
-      return next();
-    }
-    const res = await rateLimiter(c as unknown as Parameters<typeof rateLimiter>[0], next);
+    // edge cache, or S3 through here. Observe-only (#1181 phase 6 review
+    // item 5): rateLimiter still counts these against the SAME shared
+    // bucket a proxied request from this IP would be enforced against, but
+    // never blocks this one, and logs at most one console.warn per window
+    // instead of the unconditional per-request log this used to be. Uses
+    // the SAME predicate serve() uses to pick its response branch (see
+    // isRedirectCandidate's doc comment), so this can never observe-only a
+    // request that serve() actually proxies.
+    const observeOnly = isRedirectCandidate(
+      c.req.method,
+      c.req.path,
+      c.req.header("origin") ?? null,
+    );
+    const res = await rateLimiter(
+      c as unknown as Parameters<typeof rateLimiter>[0],
+      next,
+      observeOnly ? { observeOnly: true } : undefined,
+    );
     // rateLimiter returns a bare 429 (no zarr CORS) when the bucket is exhausted;
     // without ACAO the browser sees an opaque failure instead of a readable 429 +
     // retry_after. Re-apply the zarr CORS headers so the viewer can back off.

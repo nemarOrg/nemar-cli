@@ -1654,19 +1654,20 @@ describe("bytesFromRangeHeader (#1181 phase 6 / issue #1061)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Rate-limiter exemption for redirect candidates (#1181 phase 6 / issue
-// #1061). rateLimiter's own request counter reads/writes the REAL
-// `caches.default` global directly -- a different cache from the
-// deps.cache() seam this file otherwise uses for zarr-data.ts's OWN edge
-// cache, an unrelated concern. bun:test has no `caches` global at all, and
-// every describe block above sidesteps that by keeping ENVIRONMENT:
-// "development" in testEnv(), which is rateLimiter's own documented bypass
-// (see middleware/rateLimit.ts). This block is the one place that needs the
-// REAL, non-bypassed rateLimiter code path, so it installs a real in-memory
-// CacheStorage stand-in for its own duration only -- the same technique
-// rate-limit-buckets.test.ts uses for the same reason, restored in afterAll
-// so no other suite sharing this process (root `bun test` runs test/ and
-// backend/test/ together, see AGENTS.md) sees a stray global.
+// Observe-only rate limiting for redirect candidates (#1181 phase 6 / issue
+// #1061 / PR #1202 review item 5). rateLimiter's own request counter
+// reads/writes the REAL `caches.default` global directly -- a different
+// cache from the deps.cache() seam this file otherwise uses for
+// zarr-data.ts's OWN edge cache, an unrelated concern. bun:test has no
+// `caches` global at all, and every describe block above sidesteps that by
+// keeping ENVIRONMENT: "development" in testEnv(), which is rateLimiter's
+// own documented bypass (see middleware/rateLimit.ts). This block is the
+// one place that needs the REAL, non-bypassed rateLimiter code path, so it
+// installs a real in-memory CacheStorage stand-in for its own duration only
+// -- the same technique rate-limit-buckets.test.ts uses for the same
+// reason, restored in afterAll so no other suite sharing this process (root
+// `bun test` runs test/ and backend/test/ together, see AGENTS.md) sees a
+// stray global.
 // ---------------------------------------------------------------------------
 
 class RateLimitCache implements Cache {
@@ -1705,9 +1706,8 @@ class RateLimitCache implements Cache {
     this.store.clear();
   }
 
-  /** Read back the counter rateLimiter itself wrote (`{"count": N}`), or
-   *  undefined if this bucket key was never touched at all -- the strongest
-   *  proof that a redirect candidate never reached the enforcement code. */
+  /** Read back the counter rateLimiter itself wrote (`{"count": N, ...}`),
+   *  or undefined if this bucket key was never touched at all. */
   count(url: string): number | undefined {
     const entry = this.store.get(url);
     return entry ? (JSON.parse(entry.body) as { count: number }).count : undefined;
@@ -1754,9 +1754,10 @@ describe("rate limiter exemption for redirect candidates (#1181 phase 6 / issue 
     return { ...testEnv(), ENVIRONMENT: "production" } as Bindings;
   }
 
-  test("a redirect candidate never touches the data-ip counter, no matter the IP or volume", async () => {
+  test("a redirect candidate counts toward the shared data-ip bucket, but never 429s (observe-only, #1181 phase 6 review item 5)", async () => {
     const ip = "203.0.113.10";
-    for (let i = 0; i < 5; i++) {
+    const key = `https://rate-limit.internal/rl:data-ip:${ip}`;
+    for (let i = 1; i <= 5; i++) {
       const res = await requestWith(
         app,
         CHUNK_PATH,
@@ -1764,15 +1765,17 @@ describe("rate limiter exemption for redirect candidates (#1181 phase 6 / issue 
         rlEnv(),
       );
       expect(res.status).toBe(302);
+      // The counter increments on every hit -- observe-only COUNTS against
+      // the same shared bucket a proxied request would be enforced
+      // against, it just never blocks the redirect itself.
+      expect(rlCache.count(key)).toBe(i);
     }
-    // Never created -- proves the middleware skipped rateLimiter entirely
-    // for these hits, not just that they landed under a generous cap.
-    expect(rlCache.count(`https://rate-limit.internal/rl:data-ip:${ip}`)).toBeUndefined();
   });
 
-  test("a redirect candidate still succeeds even once the SAME IP's data-ip bucket is fully exhausted", async () => {
+  test("a redirect candidate still succeeds (never 429s) even once the SAME IP's bucket is fully exhausted, and keeps counting", async () => {
     const ip = "203.0.113.11";
-    rlCache.seedCount(`https://rate-limit.internal/rl:data-ip:${ip}`, __limits.DATA_MAX_REQUESTS);
+    const key = `https://rate-limit.internal/rl:data-ip:${ip}`;
+    rlCache.seedCount(key, __limits.DATA_MAX_REQUESTS);
 
     const res = await requestWith(
       app,
@@ -1781,6 +1784,68 @@ describe("rate limiter exemption for redirect candidates (#1181 phase 6 / issue 
       rlEnv(),
     );
     expect(res.status).toBe(302);
+    expect(rlCache.count(key)).toBe(__limits.DATA_MAX_REQUESTS + 1);
+  });
+
+  test("N+1 redirects crossing the cap produce exactly one console.warn, never one per request", async () => {
+    const ip = "203.0.113.14";
+    const key = `https://rate-limit.internal/rl:data-ip:${ip}`;
+    // Seed one below the cap so the SECOND request below is the one that
+    // crosses it -- proves the boundary behaviour at the real production
+    // DATA_MAX_REQUESTS cap without looping thousands of requests.
+    rlCache.seedCount(key, __limits.DATA_MAX_REQUESTS - 1);
+
+    const originalWarn = console.warn;
+    const warnings: unknown[][] = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args);
+    };
+    try {
+      // Request #1: reads count = DATA_MAX_REQUESTS - 1, still under cap --
+      // no warn yet, but it does push the counter up to the cap.
+      const first = await requestWith(
+        app,
+        CHUNK_PATH,
+        { headers: { "CF-Connecting-IP": ip } },
+        rlEnv(),
+      );
+      expect(first.status).toBe(302);
+      expect(warnings.length).toBe(0);
+      expect(rlCache.count(key)).toBe(__limits.DATA_MAX_REQUESTS);
+
+      // Request #2 (the "N+1"th for this window): reads count =
+      // DATA_MAX_REQUESTS, >= cap for the first time -- exactly one warn,
+      // never a 429.
+      const second = await requestWith(
+        app,
+        CHUNK_PATH,
+        { headers: { "CF-Connecting-IP": ip } },
+        rlEnv(),
+      );
+      expect(second.status).toBe(302);
+      expect(warnings.length).toBe(1);
+      expect(String(warnings[0][0])).toContain("would have tripped");
+      const payload = warnings[0][1] as { ipHash: string; path: string; count: number };
+      expect(payload.path).toBe(CHUNK_PATH);
+      // The logged count is post-increment (this request's own hit included).
+      expect(payload.count).toBe(__limits.DATA_MAX_REQUESTS + 1);
+      // Hashed, not the raw client IP, in the log line.
+      expect(payload.ipHash).not.toBe(ip);
+      expect(typeof payload.ipHash).toBe("string");
+
+      // A third, still-over-cap redirect in the SAME window does not warn
+      // again -- "never per request".
+      const third = await requestWith(
+        app,
+        CHUNK_PATH,
+        { headers: { "CF-Connecting-IP": ip } },
+        rlEnv(),
+      );
+      expect(third.status).toBe(302);
+      expect(warnings.length).toBe(1);
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 
   test("a proxied GET (index.json, no Origin) DOES charge the data-ip bucket and 429s at the real cap", async () => {

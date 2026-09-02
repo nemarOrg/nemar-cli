@@ -311,19 +311,26 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   DOIs are permanent and require explicit confirmation.
 - **Zarr.** A derived, latest-only serving copy, not a source of truth.
   `zarr.nemar.org` is the stable contract for it (issue #1061, epic #1181 phase 6):
-  `index.json` (and phase 2's `catalog.json`) stays proxied, edge-cached, and D1-gated,
-  but a plain `GET` for a store object with no allowlisted browser `Origin` — libraries,
-  HPC jobs, agents — 302s straight to the public S3 object instead of streaming through
-  the Worker, so every request is still counted without this Worker carrying the bytes
-  (Cloudflare's terms restrict proxying large files at this scale on a non-Enterprise
-  plan). `HEAD` is never redirected regardless of Origin: fsspec's `info()` and rclone's
-  sync both probe with HEAD, and rclone's HTTP backend does not follow HEAD redirects.
-  The redirect branch skips the D1 visibility gate entirely — the bucket's own
+  `index.json` stays proxied, edge-cached, and D1-gated. Phase 2's `catalog.json` is a
+  SEPARATE route (no `<id>/zarr/` segment, so it can never match the redirect predicate
+  at all) that stays proxied and edge-cached too, but has no D1 gate of its own — its
+  source document only ever lists already-public datasets. A plain `GET` for a store
+  object with no allowlisted browser `Origin` — libraries, HPC jobs, agents — 302s
+  straight to the public S3 object instead of streaming through the Worker, so every
+  request is still counted without this Worker carrying the bytes (Cloudflare's terms
+  restrict proxying large files at this scale on a non-Enterprise plan). `HEAD` is
+  never redirected regardless of Origin: fsspec's `info()` and rclone's sync both probe
+  with HEAD, and rclone's HTTP backend does not follow HEAD redirects. The redirect
+  branch skips the D1 visibility gate entirely, and validates the dataset id itself
+  (`isValidDatasetId`) rather than trusting the path shape — the bucket's own
   `NotResource` deny-list (`backend/src/services/bucket-policy.ts`) is the real
   enforcement point, so a redirect that 403s at S3 for a private dataset leaks nothing
-  the proxied 404 does not — and the rate limiter exempts these hits from the data-ip
-  bucket rather than throttling traffic that never touches D1, the edge cache, or S3
-  through the Worker.
+  the proxied 404 does not. The rate limiter counts these hits toward the SAME shared
+  data-ip bucket a proxied request from that IP would be enforced against, without ever
+  blocking the redirect itself (`rateLimiter`'s `observeOnly` option,
+  `backend/src/middleware/rateLimit.ts`) — it logs at most one `console.warn` per
+  window, the first time the bucket crosses the point enforcement would have tripped,
+  never a per-request log.
   The converter is `scripts/zarr/` **in this repo** and runs on the SDSC Hallu
   cron (`scripts/zarr/hallu-zarr.sh`, hourly at `:30`), never in GitHub Actions —
   Actions cannot finish a large dataset inside the 120-minute cap (ADR 0029).

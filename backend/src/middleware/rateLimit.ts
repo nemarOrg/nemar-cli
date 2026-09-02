@@ -242,7 +242,31 @@ async function isPrivilegedToken(env: Bindings, hashedApiKey: string): Promise<b
   }
 }
 
-export async function rateLimiter(c: RateLimitContext, next: Next) {
+export interface RateLimiterOptions {
+  /**
+   * Count this request against its bucket's cache entry -- the SAME
+   * IP-keyed bucket a proxied request from the same client is enforced
+   * against -- without ever blocking THIS request (#1181 phase 6 / issue
+   * #1061). Built for the zarr sub-app's redirect branch: a 302 costs a
+   * fraction of a millisecond of CPU and zero bytes through this Worker, so
+   * it must never itself 429, but the counter is still the SAME shared
+   * bucket -- a client hammering an IP hard enough to matter is still
+   * visible, and a later PROXIED request from that IP correctly 429s once
+   * the shared bucket is exhausted, observed traffic included.
+   *
+   * Logs exactly ONE `console.warn` per window, the first time the count
+   * reaches the point enforcement would have blocked -- never per request,
+   * which would be the same noise this option replaces (an unconditional
+   * per-request log the zarr sub-app used to emit for every exempted hit).
+   */
+  observeOnly?: boolean;
+}
+
+export async function rateLimiter(
+  c: RateLimitContext,
+  next: Next,
+  options: RateLimiterOptions = {},
+) {
   // Skip rate limiting in development
   if (c.env.ENVIRONMENT === "development") {
     await next();
@@ -290,13 +314,46 @@ export async function rateLimiter(c: RateLimitContext, next: Next) {
   try {
     const cache = caches.default;
 
-    // Get current count from cache
+    // Get current count (and, for the observe-only path, whether this
+    // window already warned once) from cache.
     const cached = await cache.match(cacheKey);
     let count = 0;
+    let warned = false;
 
     if (cached) {
-      const data = (await cached.json()) as { count: number };
+      const data = (await cached.json()) as { count: number; warned?: boolean };
       count = data.count;
+      warned = data.warned === true;
+    }
+
+    if (options.observeOnly) {
+      // Never block -- just record the hit against the shared bucket and
+      // warn once if it crossed the trip point. `warned` rides in the same
+      // cache record as `count` so it resets on the same window TTL.
+      if (count >= maxRequests && !warned) {
+        // Hashed, not raw: this is a log line, not the enforcement key
+        // itself (which stays keyed on the raw IP, same as before) --
+        // avoids putting a raw client IP into structured logs.
+        const ipHash = await hashApiKey(rawKey);
+        console.warn("[rate-limit] observe-only bucket would have tripped", {
+          ipHash,
+          path,
+          count: count + 1,
+        });
+        warned = true;
+      }
+      const newCount = count + 1;
+      await cache.put(
+        cacheKey,
+        new Response(JSON.stringify({ count: newCount, warned }), {
+          headers: {
+            "Content-Type": "application/json",
+            "Cache-Control": `max-age=${WINDOW_SIZE}`,
+          },
+        }),
+      );
+      await next();
+      return;
     }
 
     if (count >= maxRequests) {
@@ -322,7 +379,7 @@ export async function rateLimiter(c: RateLimitContext, next: Next) {
 
     // Increment counter and store in cache with TTL
     const newCount = count + 1;
-    const response = new Response(JSON.stringify({ count: newCount }), {
+    const response = new Response(JSON.stringify({ count: newCount, warned }), {
       headers: {
         "Content-Type": "application/json",
         "Cache-Control": `max-age=${WINDOW_SIZE}`,
