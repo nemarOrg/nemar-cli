@@ -89,6 +89,20 @@ export PATH
 # consumes it, to record TEST_MODE=1 for the "[test]" log prefix, without a
 # second parse of the arguments.
 #
+# TEST_PREPASS_SEEN is the one variable this pre-pass sets that nothing else
+# derives or overrides: a raw record of "--test was literally present in the
+# original argv", independent of whatever the real parser below does with it.
+# The guard rails further down key off THIS, not off the real parser's
+# TEST_MODE, because a value-taking flag with a permissive parser can consume
+# the following token as ITS OWN value -- `--dataset --test` used to leave
+# `--test` swallowed as a dataset id, so TEST_MODE stayed unset and the guard
+# block (which checked TEST_MODE) never ran at all, even though this pre-pass
+# had already applied test defaults on top of whatever prod values were
+# ambient. `--dataset`/`--limit` now refuse a value starting with "--" (see
+# the arg parser below), which closes that specific hole, but the guard
+# rails no longer trust TEST_MODE to agree with reality regardless: as long
+# as this pre-pass's own scan saw "--test" anywhere in argv, the guards run.
+#
 # ZARR_JOBS defaults to 4, not nproc like the prod default: a test instance
 # runs on the SAME Hallu box as the prod backfill and must not contend with it
 # for cores.
@@ -106,8 +120,10 @@ export PATH
 # CLI plumbing (already used for staging e2e tests, AGENTS.md's "isolated
 # NEMAR_CONFIG_DIR" pattern), not a new mechanism -- this just wires --test
 # into the hook that was already there.
+TEST_PREPASS_SEEN=""
 for _pretest_arg in "$@"; do
   if [[ "$_pretest_arg" == "--test" ]]; then
+    TEST_PREPASS_SEEN=1
     export API_BASE="${API_BASE:-https://api-test.nemar.org}"
     export TEST_API_URL="${TEST_API_URL:-https://api-test.nemar.org}"
     export S3_BUCKET="${S3_BUCKET:-nemar-dev}"
@@ -203,16 +219,35 @@ PREVIEW_ENGINE_BUMP=""
 # write only when this is set, so one spelling of "yes, actually do it" serves
 # both recoveries.
 EXECUTE=""
-# Set by the pre-pass above already choosing the test defaults; recorded here
-# too (harmlessly redundant with the pre-pass's own scan) so every downstream
-# reader -- log()/err()'s "[test]" prefix, the guard rails, --print-config --
-# can just test one variable instead of re-scanning "$@".
+# TEST_MODE is set below once this parser actually consumes a bare --test
+# token (the pre-pass's TEST_PREPASS_SEEN is the raw, can't-be-swallowed
+# record used by the guard rails; TEST_MODE here only drives log()/err()'s
+# "[test]" prefix and --print-config's own display of it).
 TEST_MODE=""
 PRINT_CONFIG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dataset) ONLY_DATASET="$2"; shift 2 ;;
-    --limit) LIMIT="$2"; shift 2 ;;
+    # A value starting with "--" is refused rather than silently consumed as
+    # the dataset id / limit: `--dataset --test` used to swallow the --test
+    # token this way, which is exactly the hole TEST_PREPASS_SEEN (pre-pass,
+    # above) exists to not depend on -- but refusing it here is still the
+    # right UX rather than quietly treating "--test" as a dataset id.
+    --dataset)
+      if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
+        ONLY_DATASET="$2"; shift 2
+      else
+        echo "Error: --dataset requires a value" >&2
+        exit 1
+      fi
+      ;;
+    --limit)
+      if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
+        LIMIT="$2"; shift 2
+      else
+        echo "Error: --limit requires a value" >&2
+        exit 1
+      fi
+      ;;
     --stats) STATS_ONLY=1; shift ;;
     --backfill-dir-formats) BACKFILL_DIR_FORMATS=1; shift ;;
     --preview-engine-bump) PREVIEW_ENGINE_BUMP=1; shift ;;
@@ -248,7 +283,46 @@ err() {
 # fails with EPERM. Make the tree writable first, then remove.
 safe_rm() { [[ -n "${1:-}" && -e "$1" ]] || return 0; chmod -R u+w "$1" 2>/dev/null; rm -rf "$1"; }
 
-# --- Test-mode guard rails -----------------------------------------------------
+# --- Guard-rail path/host normalization ---------------------------------------
+# Shared by the guard rails below. A path is collapsed to a canonical form
+# before comparing against a hardcoded prod default: repeated "/" anywhere
+# (not just trailing) is squashed to one, then a trailing "/" is stripped, so
+# "/mnt/local/zarr-state/" and "/mnt/local//zarr-state" both compare equal to
+# "/mnt/local/zarr-state". When the directory already exists, resolve it with
+# `realpath` too, so a symlink or a relative component collapses to the same
+# canonical form as the hardcoded constant. It usually WON'T exist yet here --
+# these guards run before `mkdir -p "$WORK_DIR" "$STATE_DIR"` -- so the
+# string-normalized form is what most comparisons actually run on; `realpath`
+# only firms it up further on a real Hallu box where the prod dirs are long-lived.
+_normalize_guard_path() {
+  local p="$1"
+  while [[ "$p" == *//* ]]; do p="${p//\/\//\/}"; done
+  while [[ "$p" == */ && "$p" != "/" ]]; do p="${p%/}"; done
+  if [[ -d "$p" ]]; then
+    p="$(realpath "$p" 2>/dev/null || echo "$p")"
+  fi
+  echo "$p"
+}
+
+# True if $1 names the production API host (api.nemar.org), independent of
+# case, scheme, port, trailing slash, or path: lowercase, strip a leading
+# "scheme://", strip everything from the first "/" or "?" onward, strip a
+# trailing ":port". "https://API.NEMAR.ORG/foo", "http://api.nemar.org:8443"
+# and bare "api.nemar.org" all match; "api-test.nemar.org" does not, because
+# the comparison is exact-host, not substring -- a plain `*api.nemar.org*`
+# match would also (harmlessly, but wrongly) flag "api-test.nemar.org" itself
+# as prod, since "-test" sits BEFORE the dot, not inside the substring being
+# searched for.
+_is_prod_api_host() {
+  local url="${1,,}"
+  url="${url#*://}"
+  url="${url%%/*}"
+  url="${url%%\?*}"
+  url="${url%%:*}"
+  [[ "$url" == "api.nemar.org" ]]
+}
+
+# --- Test-mode guard rails / prod TEST_API_URL leak guard ----------------------
 # --test picks safe defaults (above), but an operator can still export a PROD
 # value alongside --test (e.g. a stale `S3_BUCKET=nemar` left in their shell).
 # Catch that here and fail loud rather than silently converting against prod
@@ -257,21 +331,28 @@ safe_rm() { [[ -n "${1:-}" && -e "$1" ]] || return 0; chmod -R u+w "$1" 2>/dev/n
 # resolving to the prod state dir -- mkdir'ing (or writing under) that path
 # just to report the guard failure would defeat the guard. Plain stderr only;
 # nothing under $STATE_DIR exists yet at this point in the script.
-if [[ -n "$TEST_MODE" ]]; then
+#
+# This keys off TEST_PREPASS_SEEN (set by the raw argv scan at the top of the
+# file), NOT off TEST_MODE (set by the arg parser just above). They agree in
+# every case this parser can produce today, but TEST_PREPASS_SEEN is the one
+# that cannot be made to disagree by a future value-taking flag with a
+# permissive parser -- see the pre-pass comment for the `--dataset --test`
+# history here.
+if [[ -n "$TEST_PREPASS_SEEN" ]]; then
   guard_failed=""
   guard_err() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] ERROR: $*" >&2; }
   if [[ "$S3_BUCKET" == "nemar" ]]; then
     guard_err "--test refuses S3_BUCKET=nemar (the production bucket)."
     guard_failed=1
   fi
-  if [[ "$API_BASE" == *"api.nemar.org"* ]]; then
+  if _is_prod_api_host "$API_BASE"; then
     guard_err "--test refuses API_BASE=$API_BASE (the production catalog)."
     guard_failed=1
   fi
   # TEST_API_URL is the `nemar` CLI's own API-base override (see the pre-pass
   # comment above) -- checked separately from API_BASE because they are read
   # by two different programs and could disagree.
-  if [[ "${TEST_API_URL:-}" == *"api.nemar.org"* ]]; then
+  if [[ -n "${TEST_API_URL:-}" ]] && _is_prod_api_host "$TEST_API_URL"; then
     guard_err "--test refuses TEST_API_URL=$TEST_API_URL (the production catalog)."
     guard_failed=1
   fi
@@ -279,8 +360,12 @@ if [[ -n "$TEST_MODE" ]]; then
     guard_err "--test refuses AWS_PROFILE=nemar-zarr (the production credential)."
     guard_failed=1
   fi
-  if [[ "$STATE_DIR" == "/mnt/local/zarr-state" ]]; then
-    guard_err "--test refuses STATE_DIR=/mnt/local/zarr-state (the production state dir)."
+  if [[ "$(_normalize_guard_path "$STATE_DIR")" == "$(_normalize_guard_path /mnt/local/zarr-state)" ]]; then
+    guard_err "--test refuses STATE_DIR=$STATE_DIR (the production state dir)."
+    guard_failed=1
+  fi
+  if [[ "$(_normalize_guard_path "$WORK_DIR")" == "$(_normalize_guard_path /mnt/local/zarr-scratch)" ]]; then
+    guard_err "--test refuses WORK_DIR=$WORK_DIR (the production scratch dir)."
     guard_failed=1
   fi
   if [[ -n "$guard_failed" ]]; then
@@ -290,6 +375,17 @@ if [[ -n "$TEST_MODE" ]]; then
     exit 1
   fi
   unset guard_failed
+else
+  # The complementary leak in the other direction: TEST_API_URL left exported
+  # in the shell from an earlier --test session must not silently steer a
+  # PLAIN prod run's `nemar` CLI invocation at api-test.nemar.org. Unset it
+  # rather than trusting that nobody left it exported; log one line (plain
+  # stderr, same reasoning as the guards above -- no LOG_FILE write here)
+  # only when there was actually something to unset.
+  if [[ -n "${TEST_API_URL:-}" ]]; then
+    echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] unsetting stale TEST_API_URL=$TEST_API_URL for this prod run" >&2
+    unset TEST_API_URL
+  fi
 fi
 
 # --- --print-config -------------------------------------------------------------
@@ -325,6 +421,12 @@ if [[ -n "$PRINT_CONFIG" ]]; then
   fi
   cat <<EOF
 TEST_MODE=${TEST_MODE:-0}
+ONLY_DATASET=$ONLY_DATASET
+LIMIT=$LIMIT
+REQUEUE=$REQUEUE
+BACKFILL_DIR_FORMATS=${BACKFILL_DIR_FORMATS:-0}
+PREVIEW_ENGINE_BUMP=${PREVIEW_ENGINE_BUMP:-0}
+EXECUTE=${EXECUTE:-0}
 API_BASE=$API_BASE
 TEST_API_URL=${TEST_API_URL:-}
 CALLBACK_URL=$CALLBACK_URL
