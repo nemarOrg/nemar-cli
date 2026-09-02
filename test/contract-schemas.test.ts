@@ -181,6 +181,55 @@ describe("catalog item schema", () => {
       }),
     ).not.toThrow();
   });
+
+  // Issue #1068, epic #1181 phase 8: the fidelity verification sweep's verdict.
+  test("accepts the #1068 zarr_verify_status/zarr_verified_at fields", () => {
+    const parsed = catalogItemSchema.parse({
+      ...row,
+      zarr_status: "ready",
+      zarr_verify_status: "verified",
+      zarr_verified_at: "2026-09-02 00:00:00",
+    });
+    expect(parsed.zarr_verify_status).toBe("verified");
+    expect(parsed.zarr_verified_at).toBe("2026-09-02 00:00:00");
+  });
+
+  test("zarr_verify_status/zarr_verified_at are optional and null (a fresh conversion the sweep hasn't reached yet)", () => {
+    expect(() => catalogItemSchema.parse(row)).not.toThrow();
+    const parsed = catalogItemSchema.parse({
+      ...row,
+      zarr_verify_status: null,
+      zarr_verified_at: null,
+    });
+    expect(parsed.zarr_verify_status).toBeNull();
+    expect(parsed.zarr_verified_at).toBeNull();
+  });
+
+  test("rejects an out-of-enum zarr_verify_status", () => {
+    expect(() => catalogItemSchema.parse({ ...row, zarr_verify_status: "bogus" })).toThrow();
+  });
+
+  // The cross-field invariant a regressed sweep write (or a future path that
+  // sets the two independently) would violate.
+  test("REJECTS zarr_verified_at set when zarr_verify_status is null", () => {
+    expect(() =>
+      catalogItemSchema.parse({
+        ...row,
+        zarr_verify_status: null,
+        zarr_verified_at: "2026-09-02 00:00:00",
+      }),
+    ).toThrow();
+  });
+
+  test("ACCEPTS zarr_verified_at set when zarr_verify_status is non-null (the consistent pair)", () => {
+    expect(() =>
+      catalogItemSchema.parse({
+        ...row,
+        zarr_verify_status: "failed",
+        zarr_verified_at: "2026-09-02 00:00:00",
+      }),
+    ).not.toThrow();
+  });
 });
 
 describe("detail schema: zarr_data_failures (#1191, fixes #1188)", () => {
@@ -264,6 +313,29 @@ describe("detail schema: zarr_data_failures (#1191, fixes #1188)", () => {
         zarr_index_url: "https://zarr.nemar.org/on007763/zarr/index.json",
       }),
     ).toThrow();
+  });
+
+  // Issue #1068, epic #1181 phase 8: same zarr_verified_at/zarr_verify_status
+  // invariant as catalogItemSchema, re-applied after `.extend()` -- proven
+  // separately for the same reason as the zarr_index_url pair above.
+  test("also REJECTS zarr_verified_at set when zarr_verify_status is null", () => {
+    expect(() =>
+      datasetDetailSchema.parse({
+        ...detailRow,
+        zarr_verify_status: null,
+        zarr_verified_at: "2026-09-02 00:00:00",
+      }),
+    ).toThrow();
+  });
+
+  test("also ACCEPTS the consistent zarr_verify_status/zarr_verified_at pair", () => {
+    expect(() =>
+      datasetDetailSchema.parse({
+        ...detailRow,
+        zarr_verify_status: "unverifiable",
+        zarr_verified_at: "2026-09-02 00:00:00",
+      }),
+    ).not.toThrow();
   });
 });
 
