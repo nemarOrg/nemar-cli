@@ -198,7 +198,9 @@ describe("buildCoverageReport", () => {
    * is one prepared query; faking it lets us pin the totals tally without
    * standing up a real D1.
    */
-  function stubEnv(rows: { dataset_id: string; version: string; doi: string; concept_doi: string | null }[]): Bindings {
+  function stubEnv(
+    rows: { dataset_id: string; version: string; doi: string; concept_doi: string | null }[],
+  ): Bindings {
     const fakeDB = {
       prepare: (_sql: string) => ({
         all: async <T>() => ({ results: rows as unknown as T[], success: true, meta: {} }),
@@ -253,8 +255,7 @@ describe("buildCoverageReport", () => {
     // is forced. If the implementation pushes (not index-assigns), the
     // returned order would be the inverse of the input.
     const fetcher: SummaryFetcher = async (id) => {
-      const delay =
-        { nm000aaa: 80, nm000bbb: 60, nm000ccc: 40, nm000ddd: 20 }[id] ?? 0;
+      const delay = { nm000aaa: 80, nm000bbb: 60, nm000ccc: 40, nm000ddd: 20 }[id] ?? 0;
       await new Promise((resolve) => setTimeout(resolve, delay));
       return JSON.stringify({ schema_version: "1.1" });
     };

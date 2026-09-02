@@ -90,8 +90,8 @@ describe("verifyGitHubWebhookSignature", () => {
     // The contract is "return false, never throw", so callers can collapse
     // every negative into a single 401.
     expect(await verifyGitHubWebhookSignature("body", "not-a-real-signature", SECRET)).toBe(false);
-    expect(
-      await verifyGitHubWebhookSignature("body", "sha256=zzzzzzzzzzzzzzzzzz", SECRET),
-    ).toBe(false);
+    expect(await verifyGitHubWebhookSignature("body", "sha256=zzzzzzzzzzzzzzzzzz", SECRET)).toBe(
+      false,
+    );
   });
 });

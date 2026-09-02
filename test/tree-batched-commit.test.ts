@@ -8,7 +8,7 @@
  * it would against api.github.com.
  */
 
-import { beforeAll, beforeEach, afterAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import "./setup"; // ensures NEMAR_CONFIG_DIR isolation
 import { type FakeGithubServer, json, startFakeGithub } from "./helpers/fetch-counter";
 
@@ -101,8 +101,7 @@ beforeAll(() => {
       }
       return json(201, { sha: nextTreeSha });
     },
-    [`POST /repos/nemarDatasets/${REPO}/git/commits`]: () =>
-      json(201, { sha: nextCommitSha }),
+    [`POST /repos/nemarDatasets/${REPO}/git/commits`]: () => json(201, { sha: nextCommitSha }),
     [`PATCH /repos/nemarDatasets/${REPO}/git/refs/heads/${BRANCH}`]: () => {
       if (refUpdateBehavior === "conflict-always") {
         return json(422, { message: "Update is not a fast forward" });
@@ -130,7 +129,15 @@ beforeAll(() => {
       }),
     [`GET /repos/nemarDatasets/${REPO}/git/trees/${BASE_TREE_SHA}`]: () => {
       const entries = bidsignoreExists
-        ? [{ path: ".bidsignore", mode: "100644", type: "blob", sha: "bidsblob01", size: bidsignoreContent.length }]
+        ? [
+            {
+              path: ".bidsignore",
+              mode: "100644",
+              type: "blob",
+              sha: "bidsblob01",
+              size: bidsignoreContent.length,
+            },
+          ]
         : [];
       return json(200, { sha: baseTreeSha, tree: entries, truncated: false });
     },
@@ -185,9 +192,9 @@ describe("commitFilesAsTree", () => {
     const result = await commitFilesAsTree(REPO, BRANCH, [], "noop", PAT);
     expect(result).toBe(baseCommitSha);
     expect(fake.calls.length).toBe(1);
-    expect(
-      fake.countByMethodPath[`GET /repos/nemarDatasets/${REPO}/git/ref/heads/${BRANCH}`],
-    ).toBe(1);
+    expect(fake.countByMethodPath[`GET /repos/nemarDatasets/${REPO}/git/ref/heads/${BRANCH}`]).toBe(
+      1,
+    );
   });
 
   test("single-file commit makes exactly 4 GitHub calls", async () => {
@@ -223,9 +230,9 @@ describe("commitFilesAsTree", () => {
     const sha = await commitFilesAsTree(REPO, "master", files, "master commit", PAT);
     expect(sha).toBe(nextCommitSha);
     expect(fake.countByMethodPath[`GET /repos/nemarDatasets/${REPO}/branches/master`]).toBe(1);
-    expect(
-      fake.countByMethodPath[`PATCH /repos/nemarDatasets/${REPO}/git/refs/heads/master`],
-    ).toBe(1);
+    expect(fake.countByMethodPath[`PATCH /repos/nemarDatasets/${REPO}/git/refs/heads/master`]).toBe(
+      1,
+    );
   });
 
   test("ref-update fast-forward 422 retries with refetched base; second commit parents the new base", async () => {
@@ -337,9 +344,9 @@ describe("deployWorkflows", () => {
     // validateDeployedWorkflows() (issue #472). Exactly 4 calls: branch,
     // tree, commit, ref-update.
     expect(fake.calls.length).toBe(4);
-    expect(
-      fake.countByMethodPath[`GET /repos/nemarDatasets/${REPO}/actions/workflows`] ?? 0,
-    ).toBe(0);
+    expect(fake.countByMethodPath[`GET /repos/nemarDatasets/${REPO}/actions/workflows`] ?? 0).toBe(
+      0,
+    );
 
     // The tree body contains all workflow paths in one shot.
     const treeBody = lastBody<{ tree: Array<{ path: string }> }>(
@@ -378,9 +385,7 @@ describe("validateDeployedWorkflows", () => {
     expect(result.valid.sort()).toEqual([...expected].sort());
     expect(result.missing).toEqual([]);
     expect(result.errors).toEqual([]);
-    expect(
-      fake.countByMethodPath[`GET /repos/nemarDatasets/${REPO}/actions/workflows`],
-    ).toBe(1);
+    expect(fake.countByMethodPath[`GET /repos/nemarDatasets/${REPO}/actions/workflows`]).toBe(1);
   });
 
   test("partial listing -> missing reports the gaps, no retry", async () => {
@@ -395,9 +400,7 @@ describe("validateDeployedWorkflows", () => {
     expect(result.valid).toEqual([expected[0]]);
     expect(result.missing.sort()).toEqual([...expected.slice(1)].sort());
     expect(result.errors).toEqual([]);
-    expect(
-      fake.countByMethodPath[`GET /repos/nemarDatasets/${REPO}/actions/workflows`],
-    ).toBe(1);
+    expect(fake.countByMethodPath[`GET /repos/nemarDatasets/${REPO}/actions/workflows`]).toBe(1);
   });
 
   test("API error surfaces in errors, never throws", async () => {
@@ -411,9 +414,7 @@ describe("validateDeployedWorkflows", () => {
     expect(result.missing).toEqual([]);
     expect(result.errors.length).toBeGreaterThan(0);
     expect(result.errors.join(" ")).toMatch(/500|validation/i);
-    expect(
-      fake.countByMethodPath[`GET /repos/nemarDatasets/${REPO}/actions/workflows`],
-    ).toBe(3);
+    expect(fake.countByMethodPath[`GET /repos/nemarDatasets/${REPO}/actions/workflows`]).toBe(3);
   });
 });
 
@@ -485,9 +486,9 @@ describe("commitEnrichmentWithBidsignore (admin + webhook enrichment path)", () 
     expect(fake.countByMethodPath[`POST /repos/nemarDatasets/${REPO}/git/trees`]).toBe(undefined);
     expect(fake.countByMethodPath[`POST /repos/nemarDatasets/${REPO}/git/commits`]).toBe(undefined);
     // Must hit the Contents API instead.
-    expect(
-      fake.countByMethodPath[`PUT /repos/nemarDatasets/${REPO}/contents/${META_PATH}`],
-    ).toBe(1);
+    expect(fake.countByMethodPath[`PUT /repos/nemarDatasets/${REPO}/contents/${META_PATH}`]).toBe(
+      1,
+    );
   });
 
   test(".bidsignore read failure -> commits metadata alone, surfaces bidsignoreReadError", async () => {
@@ -505,9 +506,9 @@ describe("commitEnrichmentWithBidsignore (admin + webhook enrichment path)", () 
     expect(result.commitMode).toBe("single");
     expect(result.bidsignoreUpdated).toBe(false);
     expect(result.bidsignoreReadError).toBeDefined();
-    expect(
-      fake.countByMethodPath[`PUT /repos/nemarDatasets/${REPO}/contents/${META_PATH}`],
-    ).toBe(1);
+    expect(fake.countByMethodPath[`PUT /repos/nemarDatasets/${REPO}/contents/${META_PATH}`]).toBe(
+      1,
+    );
   }, 15_000);
 
   test("additionalFiles non-empty + bidsignore unchanged -> batched commit, extra file in tree", async () => {
@@ -541,9 +542,9 @@ describe("commitEnrichmentWithBidsignore (admin + webhook enrichment path)", () 
     expect(paths).toEqual(["participants.tsv", META_PATH].sort());
     const partEntry = treeBody?.tree.find((t) => t.path === "participants.tsv");
     expect(partEntry?.content).toBe(participantsContent);
-    expect(
-      fake.countByMethodPath[`PUT /repos/nemarDatasets/${REPO}/contents/${META_PATH}`],
-    ).toBe(undefined);
+    expect(fake.countByMethodPath[`PUT /repos/nemarDatasets/${REPO}/contents/${META_PATH}`]).toBe(
+      undefined,
+    );
   });
 
   test("additionalFiles non-empty + bidsignore needs update -> all three files batched", async () => {

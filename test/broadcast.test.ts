@@ -102,7 +102,7 @@ describe("markdownToEmailHtml", () => {
   });
 
   test("escapes HTML entities", () => {
-    const result = markdownToEmailHtml("Use <script> & \"quotes\"");
+    const result = markdownToEmailHtml('Use <script> & "quotes"');
     expect(result).toContain("&lt;script&gt;");
     expect(result).toContain("&amp;");
     expect(result).toContain("&quot;quotes&quot;");
@@ -173,9 +173,7 @@ describe("broadcastRequestSchema (issue #381)", () => {
     });
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(result.error.issues.some((i) => /mutually|exactly one/i.test(i.message))).toBe(
-        true,
-      );
+      expect(result.error.issues.some((i) => /mutually|exactly one/i.test(i.message))).toBe(true);
     }
   });
 

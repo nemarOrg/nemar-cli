@@ -124,9 +124,7 @@ describe("shouldDispatchEnrichment", () => {
     });
 
     test("dispatches with force=true on a release branch push", () => {
-      const decision = shouldDispatchEnrichment(
-        pushEvent({ ref: "refs/heads/release/v1.0.0" }),
-      );
+      const decision = shouldDispatchEnrichment(pushEvent({ ref: "refs/heads/release/v1.0.0" }));
       expect(decision.dispatch).toBe(true);
       if (decision.dispatch) {
         expect(decision.ref).toBe("release/v1.0.0");
@@ -168,7 +166,9 @@ describe("shouldDispatchEnrichment", () => {
       // the same code path as the wrong-owner case so we don't accidentally
       // dispatch on a payload we can't fully validate. Code-review #605.
       const decision = shouldDispatchEnrichment(
-        pushEvent({ repository: { name: "nm099999" } } as Partial<Parameters<typeof shouldDispatchEnrichment>[0]>),
+        pushEvent({ repository: { name: "nm099999" } } as Partial<
+          Parameters<typeof shouldDispatchEnrichment>[0]
+        >),
       );
       expect(decision.dispatch).toBe(false);
       if (!decision.dispatch) expect(decision.reason).toBe("wrong_owner");
@@ -199,17 +199,13 @@ describe("shouldDispatchEnrichment", () => {
     });
 
     test("does not dispatch on a tag push (refs/tags/...)", () => {
-      const decision = shouldDispatchEnrichment(
-        pushEvent({ ref: "refs/tags/v1.0.0" }),
-      );
+      const decision = shouldDispatchEnrichment(pushEvent({ ref: "refs/tags/v1.0.0" }));
       expect(decision.dispatch).toBe(false);
       if (!decision.dispatch) expect(decision.reason).toBe("ref_not_main_or_release");
     });
 
     test("does not dispatch on a feature-branch push", () => {
-      const decision = shouldDispatchEnrichment(
-        pushEvent({ ref: "refs/heads/feature/x" }),
-      );
+      const decision = shouldDispatchEnrichment(pushEvent({ ref: "refs/heads/feature/x" }));
       expect(decision.dispatch).toBe(false);
       if (!decision.dispatch) expect(decision.reason).toBe("ref_not_main_or_release");
     });
@@ -232,9 +228,7 @@ describe("shouldDispatchEnrichment", () => {
     });
 
     test("does not dispatch when commits + head_commit are both empty", () => {
-      const decision = shouldDispatchEnrichment(
-        pushEvent({ commits: [], head_commit: null }),
-      );
+      const decision = shouldDispatchEnrichment(pushEvent({ commits: [], head_commit: null }));
       expect(decision.dispatch).toBe(false);
       if (!decision.dispatch) expect(decision.reason).toBe("no_enrichment_paths_touched");
     });
@@ -313,25 +307,19 @@ describe("shouldDispatchVersionDoi", () => {
     });
 
     test("dispatches on a release-candidate tag", () => {
-      const decision = shouldDispatchVersionDoi(
-        tagPushEvent({ ref: "refs/tags/v1.2.3-rc1" }),
-      );
+      const decision = shouldDispatchVersionDoi(tagPushEvent({ ref: "refs/tags/v1.2.3-rc1" }));
       expect(decision.dispatch).toBe(true);
       if (decision.dispatch) expect(decision.tag).toBe("v1.2.3-rc1");
     });
 
     test("dispatches on an alpha tag (no trailing number)", () => {
-      const decision = shouldDispatchVersionDoi(
-        tagPushEvent({ ref: "refs/tags/v0.1.0-alpha" }),
-      );
+      const decision = shouldDispatchVersionDoi(tagPushEvent({ ref: "refs/tags/v0.1.0-alpha" }));
       expect(decision.dispatch).toBe(true);
       if (decision.dispatch) expect(decision.tag).toBe("v0.1.0-alpha");
     });
 
     test("dispatches on a beta tag with a number", () => {
-      const decision = shouldDispatchVersionDoi(
-        tagPushEvent({ ref: "refs/tags/v2.0.0-beta3" }),
-      );
+      const decision = shouldDispatchVersionDoi(tagPushEvent({ ref: "refs/tags/v2.0.0-beta3" }));
       expect(decision.dispatch).toBe(true);
       if (decision.dispatch) expect(decision.tag).toBe("v2.0.0-beta3");
     });
@@ -354,42 +342,32 @@ describe("shouldDispatchVersionDoi", () => {
     });
 
     test("does not dispatch on a branch push (no refs/tags/ prefix)", () => {
-      const decision = shouldDispatchVersionDoi(
-        tagPushEvent({ ref: "refs/heads/main" }),
-      );
+      const decision = shouldDispatchVersionDoi(tagPushEvent({ ref: "refs/heads/main" }));
       expect(decision.dispatch).toBe(false);
       if (!decision.dispatch) expect(decision.reason).toBe("ref_not_version_tag");
     });
 
     test("does not dispatch on a tag missing the v prefix", () => {
-      const decision = shouldDispatchVersionDoi(
-        tagPushEvent({ ref: "refs/tags/1.0.0" }),
-      );
+      const decision = shouldDispatchVersionDoi(tagPushEvent({ ref: "refs/tags/1.0.0" }));
       expect(decision.dispatch).toBe(false);
       if (!decision.dispatch) expect(decision.reason).toBe("ref_not_version_tag");
     });
 
     test("does not dispatch on a non-semver tag", () => {
-      const decision = shouldDispatchVersionDoi(
-        tagPushEvent({ ref: "refs/tags/vfoo" }),
-      );
+      const decision = shouldDispatchVersionDoi(tagPushEvent({ ref: "refs/tags/vfoo" }));
       expect(decision.dispatch).toBe(false);
       if (!decision.dispatch) expect(decision.reason).toBe("ref_not_version_tag");
     });
 
     test("does not dispatch on a tag with too few version components", () => {
-      const decision = shouldDispatchVersionDoi(
-        tagPushEvent({ ref: "refs/tags/v1.0" }),
-      );
+      const decision = shouldDispatchVersionDoi(tagPushEvent({ ref: "refs/tags/v1.0" }));
       expect(decision.dispatch).toBe(false);
       if (!decision.dispatch) expect(decision.reason).toBe("ref_not_version_tag");
     });
 
     test("does not dispatch on an unsupported pre-release suffix", () => {
       // We only allow rc/alpha/beta — `v1.0.0-snapshot` is rejected.
-      const decision = shouldDispatchVersionDoi(
-        tagPushEvent({ ref: "refs/tags/v1.0.0-snapshot" }),
-      );
+      const decision = shouldDispatchVersionDoi(tagPushEvent({ ref: "refs/tags/v1.0.0-snapshot" }));
       expect(decision.dispatch).toBe(false);
       if (!decision.dispatch) expect(decision.reason).toBe("ref_not_version_tag");
     });
@@ -421,7 +399,9 @@ describe("shouldDispatchVersionDoi", () => {
       // change. Parallel to the enrichment-side coverage; pin both so a
       // refactor can't accidentally break one while keeping the other.
       const decision = shouldDispatchVersionDoi(
-        tagPushEvent({ repository: { name: "nm099999" } } as Partial<Parameters<typeof shouldDispatchVersionDoi>[0]>),
+        tagPushEvent({ repository: { name: "nm099999" } } as Partial<
+          Parameters<typeof shouldDispatchVersionDoi>[0]
+        >),
       );
       expect(decision.dispatch).toBe(false);
       if (!decision.dispatch) expect(decision.reason).toBe("wrong_owner");

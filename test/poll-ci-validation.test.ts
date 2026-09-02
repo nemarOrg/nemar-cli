@@ -18,7 +18,7 @@
 
 import { describe, expect, test } from "bun:test";
 import "./setup";
-import { pollCiValidation, type ValidationProbe } from "../src/commands/admin";
+import { type ValidationProbe, pollCiValidation } from "../src/commands/admin";
 
 /** Build a probe that returns a queued sequence of results, one per call. */
 function queuedProbe(
@@ -37,9 +37,7 @@ function queuedProbe(
 
 describe("pollCiValidation", () => {
   test("returns immediately when first probe reports all-clear (missing=[], errors=[])", async () => {
-    const { probe, calls } = queuedProbe([
-      { valid: ["a.yml", "b.yml"], missing: [], errors: [] },
-    ]);
+    const { probe, calls } = queuedProbe([{ valid: ["a.yml", "b.yml"], missing: [], errors: [] }]);
     const result = await pollCiValidation("nm099999", probe, [0, 0]);
     expect(result).not.toBeNull();
     expect(result?.missing).toEqual([]);
@@ -50,9 +48,7 @@ describe("pollCiValidation", () => {
   });
 
   test("returns immediately when probe reports errors (retry wouldn't help)", async () => {
-    const { probe, calls } = queuedProbe([
-      { valid: [], missing: [], errors: ["GitHub API 500"] },
-    ]);
+    const { probe, calls } = queuedProbe([{ valid: [], missing: [], errors: ["GitHub API 500"] }]);
     const result = await pollCiValidation("nm099999", probe, [0, 0]);
     expect(result).not.toBeNull();
     expect(result?.errors).toEqual(["GitHub API 500"]);

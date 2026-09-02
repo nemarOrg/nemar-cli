@@ -21,7 +21,9 @@ async function exportPkcs8Pem(key: CryptoKey): Promise<string> {
   const bytes = new Uint8Array(buf);
   let bin = "";
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  const b64 = btoa(bin).match(/.{1,64}/g)!.join("\n");
+  const b64 = btoa(bin)
+    .match(/.{1,64}/g)!
+    .join("\n");
   return `-----BEGIN PRIVATE KEY-----\n${b64}\n-----END PRIVATE KEY-----\n`;
 }
 
@@ -78,13 +80,12 @@ describe("signAppJwt", () => {
     const now = 1_700_000_000;
     const fromNumber = await signAppJwt(987654, pem, now);
     const fromString = await signAppJwt("987654", pem, now);
-    const issFrom = (jwt: string) =>
-      (decodeJsonPart(jwt.split(".")[1]) as { iss: string }).iss;
+    const issFrom = (jwt: string) => (decodeJsonPart(jwt.split(".")[1]) as { iss: string }).iss;
     expect(issFrom(fromNumber)).toBe("987654");
     expect(issFrom(fromString)).toBe("987654");
   });
 
-  test("appId=0 still serializes iss as the string \"0\"", async () => {
+  test('appId=0 still serializes iss as the string "0"', async () => {
     const { pem } = await generateKeypair();
     const jwt = await signAppJwt(0, pem, 1_700_000_000);
     const payload = decodeJsonPart(jwt.split(".")[1]) as { iss: string };
@@ -98,12 +99,7 @@ describe("signAppJwt", () => {
     const [headerPart, payloadPart, sigPart] = jwt.split(".");
     const signingInput = new TextEncoder().encode(`${headerPart}.${payloadPart}`);
     const signature = base64urlToBytes(sigPart);
-    const ok = await crypto.subtle.verify(
-      "RSASSA-PKCS1-v1_5",
-      publicKey,
-      signature,
-      signingInput,
-    );
+    const ok = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", publicKey, signature, signingInput);
     expect(ok).toBe(true);
   });
 

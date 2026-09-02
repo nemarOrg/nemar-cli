@@ -167,7 +167,9 @@ describe("manifest - annex pointer parsing", () => {
 describe("manifest - selectGitBackedCanaries (#503)", () => {
   const { selectGitBackedCanaries } = require("../backend/src/services/manifest");
 
-  function fixture(paths: string[]): Record<string, { key: string; size: number; checksum: string }> {
+  function fixture(
+    paths: string[],
+  ): Record<string, { key: string; size: number; checksum: string }> {
     const files: Record<string, { key: string; size: number; checksum: string }> = {};
     for (const p of paths) {
       files[p] = { key: `git:${p}-sha`, size: 100, checksum: `git:${p}-sha` };

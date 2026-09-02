@@ -14,6 +14,7 @@ import { adminMiddleware, authMiddleware } from "../../middleware/auth";
 import { auditLogStatement } from "../../db/audit-log";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import { stampDatasetIntegrity } from "../../services/dataset-metadata-columns";
+import { datasetIdListParam } from "../../services/dataset-search";
 import { deleteDatasetCascade } from "../../services/deletion";
 import { type GitHubRepo, createRepository, deleteRepository } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
@@ -604,15 +605,19 @@ export function registerImportRoutes(admin: AdminRouter): void {
       const { dataset_ids } = c.req.valid("json");
       const db = c.env.DB;
 
-      const placeholders = dataset_ids.map(() => "?").join(", ");
+      // The schema admits up to 200 ids, twice D1's 100-bound-parameter
+      // ceiling, so a per-id placeholder list would 500 with
+      // `too many SQL variables` on any batch above 100 -- the same defect
+      // #1193 fixed on the search path. One json_each parameter instead, so
+      // the count is independent of the batch size.
       const result = await db
         .prepare(
           `UPDATE import_jobs
               SET next_retry_at = datetime('now', '+6 hours'), updated_at = datetime('now')
-            WHERE dataset_id IN (${placeholders})
+            WHERE dataset_id IN (SELECT value FROM json_each(?))
               AND status IN ('incomplete', 'failed', 'quarantined')`,
         )
-        .bind(...dataset_ids)
+        .bind(datasetIdListParam(dataset_ids))
         .run();
       const updated = result.meta.changes ?? 0;
 

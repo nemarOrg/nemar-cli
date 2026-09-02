@@ -30,11 +30,7 @@ import {
   initDataset,
 } from "../src/lib/git-annex/init";
 import { copyToAnnexRemote } from "../src/lib/git-annex/transfer";
-import {
-  computeAddTargets,
-  listAnnexedPaths,
-  listTrackedPaths,
-} from "../src/lib/upload/transfer";
+import { computeAddTargets, listAnnexedPaths, listTrackedPaths } from "../src/lib/upload/transfer";
 
 describe("chunkAddTargets", () => {
   test("empty list produces no chunks", () => {
@@ -55,7 +51,10 @@ describe("chunkAddTargets", () => {
 
   test("splits by byte budget before the count limit", () => {
     // 4 paths of ~60 bytes with a 130-byte budget: two per chunk.
-    const paths = Array.from({ length: 4 }, (_, i) => `sub-0${i}/ses-01/ieeg/${"x".repeat(40)}.eeg`);
+    const paths = Array.from(
+      { length: 4 },
+      (_, i) => `sub-0${i}/ses-01/ieeg/${"x".repeat(40)}.eeg`,
+    );
     const chunks = chunkAddTargets(paths, 500, 130);
     expect(chunks.map((c) => c.length)).toEqual([2, 2]);
     expect(chunks.flat()).toEqual(paths);
@@ -279,10 +278,21 @@ describe("gitAnnexAdd with a target list (real git-annex)", () => {
 
 /** Register a directory special remote and return its name. */
 async function initDirectoryRemote(dir: string, name: string): Promise<string> {
-  const remoteDir = join(TMP_DIR, `${name}-store-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const remoteDir = join(
+    TMP_DIR,
+    `${name}-store-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  );
   mkdirSync(remoteDir, { recursive: true });
   const init = await runCmd(
-    ["git", "annex", "initremote", name, "type=directory", `directory=${remoteDir}`, "encryption=none"],
+    [
+      "git",
+      "annex",
+      "initremote",
+      name,
+      "type=directory",
+      `directory=${remoteDir}`,
+      "encryption=none",
+    ],
     dir,
   );
   expect(init.exitCode).toBe(0);
@@ -326,7 +336,14 @@ describe("progress file outliving .git (#884 review blocker, real repos)", () =>
 
     // First run: targeted add + copy to a directory special remote; the
     // location log records both files at the remote.
-    expect((await gitAnnexAdd(dir, dataFiles.map((f) => f.path))).success).toBe(true);
+    expect(
+      (
+        await gitAnnexAdd(
+          dir,
+          dataFiles.map((f) => f.path),
+        )
+      ).success,
+    ).toBe(true);
     await initDirectoryRemote(dir, "test-dir");
     expect((await copyToAnnexRemote(dir, "test-dir", 1)).success).toBe(true);
     expect(await listAnnexedPaths(dir, "test-dir")).toEqual(new Set(dataFiles.map((f) => f.path)));
@@ -352,7 +369,14 @@ describe("progress file outliving .git (#884 review blocker, real repos)", () =>
 
     // Re-add + re-copy re-establishes the location log; the post-copy
     // verification predicate finds nothing missing.
-    expect((await gitAnnexAdd(dir, addTargets.map((f) => f.path))).success).toBe(true);
+    expect(
+      (
+        await gitAnnexAdd(
+          dir,
+          addTargets.map((f) => f.path),
+        )
+      ).success,
+    ).toBe(true);
     await initDirectoryRemote(dir, "test-dir");
     expect((await copyToAnnexRemote(dir, "test-dir", 1)).success).toBe(true);
     const annexed = await listAnnexedPaths(dir);
@@ -371,7 +395,14 @@ describe("progress file outliving .git (#884 review blocker, real repos)", () =>
     for (const file of dataFiles) {
       writeDataFile(dir, file.path, file.path.repeat(200));
     }
-    expect((await gitAnnexAdd(dir, dataFiles.map((f) => f.path))).success).toBe(true);
+    expect(
+      (
+        await gitAnnexAdd(
+          dir,
+          dataFiles.map((f) => f.path),
+        )
+      ).success,
+    ).toBe(true);
     await initDirectoryRemote(dir, "test-dir");
 
     // Copy only a.edf; c.edf's content never reaches the remote.

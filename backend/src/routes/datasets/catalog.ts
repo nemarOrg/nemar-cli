@@ -166,7 +166,7 @@ export { DEFAULT_MIN_SCORE };
  * Clamp raw `limit`/`offset` query values for GET /datasets/search (#1145),
  * mirroring the list endpoint's clamping idiom (see the `GET /` handler
  * below) but with search's own historical default/ceiling: `limit` defaults
- * to 20 and is capped at 100 (the Vectorize / `buildInPlaceholders` ceiling),
+ * to 20 and is capped at 100 (the Vectorize candidate-window ceiling),
  * and -- new in #1145 -- `offset` is now accepted and clamped; there was no
  * offset support before, so nothing past the first 100 results was reachable.
  * Fixes two adjacent bugs: `limit=-5` used to fall through to

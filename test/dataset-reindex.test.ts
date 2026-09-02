@@ -39,7 +39,9 @@ describe("buildReindexFilterQuery", () => {
     expect(q.sql).toContain("total_files IS NULL");
     // The stamp lives in sweep_stamps since migration 0073 (#1183).
     expect(q.sql).toContain("json_extract(sweep_stamps, '$.metadata_updated_at') IS NULL");
-    expect(q.sql).toContain("json_extract(sweep_stamps, '$.metadata_updated_at') < datetime('now', ?)");
+    expect(q.sql).toContain(
+      "json_extract(sweep_stamps, '$.metadata_updated_at') < datetime('now', ?)",
+    );
     // The NULL predicates are OR'd so any single NULL field triggers a match.
     const between = q.sql.split("subject_count IS NULL")[1] ?? "";
     expect(between.toUpperCase()).toContain(" OR ");
@@ -64,7 +66,9 @@ describe("buildReindexFilterQuery", () => {
     const q = buildReindexFilterQuery("stale");
     expect(q.params).toEqual(["-30 days"]);
     expect(q.sql).toContain("json_extract(sweep_stamps, '$.metadata_updated_at') IS NULL");
-    expect(q.sql).toContain("json_extract(sweep_stamps, '$.metadata_updated_at') < datetime('now', ?)");
+    expect(q.sql).toContain(
+      "json_extract(sweep_stamps, '$.metadata_updated_at') < datetime('now', ?)",
+    );
   });
 
   test("filter=stale honors olderThanDays override", () => {
@@ -189,10 +193,7 @@ describe("extractEnrichmentSubErrors", () => {
         metadata_columns_error: "d1 down",
         issue_creation_error: "no perms",
       }),
-    ).toEqual([
-      "metadata_columns_error: d1 down",
-      "issue_creation_error: no perms",
-    ]);
+    ).toEqual(["metadata_columns_error: d1 down", "issue_creation_error: no perms"]);
   });
 });
 

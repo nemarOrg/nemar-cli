@@ -304,9 +304,7 @@ describe("mtime change detection (#884 review: same-size rewrites)", () => {
 
   test("same-size different-mtime invalidates tracking", () => {
     const progress = initUploadProgress(testDir, "nm000123", timedFiles);
-    const rewritten = timedFiles.map((f, i) =>
-      i === 0 ? { ...f, mtimeMs: f.mtimeMs + 5000 } : f,
-    );
+    const rewritten = timedFiles.map((f, i) => (i === 0 ? { ...f, mtimeMs: f.mtimeMs + 5000 } : f));
     expect(hasFileListChanged(progress, rewritten)).toBe(true);
   });
 
@@ -314,9 +312,7 @@ describe("mtime change detection (#884 review: same-size rewrites)", () => {
     const progress = initUploadProgress(testDir, "nm000123", timedFiles);
     markFileUploaded(progress, timedFiles[0].path);
     markFileUploaded(progress, timedFiles[1].path);
-    const rewritten = timedFiles.map((f, i) =>
-      i === 0 ? { ...f, mtimeMs: f.mtimeMs + 5000 } : f,
-    );
+    const rewritten = timedFiles.map((f, i) => (i === 0 ? { ...f, mtimeMs: f.mtimeMs + 5000 } : f));
     const needing = getFilesNeedingUpload(progress, rewritten);
     expect(needing.map((f) => f.path)).toEqual([timedFiles[0].path]);
   });
@@ -356,7 +352,10 @@ describe("mtime change detection (#884 review: same-size rewrites)", () => {
     const progress = initUploadProgress(testDir, "nm000123", timedFiles);
     const rewritten = { ...timedFiles[0], mtimeMs: timedFiles[0].mtimeMs + 5000 };
     // Re-upload of the rewritten file records its new mtime...
-    markFileUploaded(progress, rewritten.path, { size: rewritten.size, mtimeMs: rewritten.mtimeMs });
+    markFileUploaded(progress, rewritten.path, {
+      size: rewritten.size,
+      mtimeMs: rewritten.mtimeMs,
+    });
     markFileUploaded(progress, timedFiles[1].path);
     // ...so the next run sees a stable list again.
     expect(hasFileListChanged(progress, [rewritten, timedFiles[1]])).toBe(false);

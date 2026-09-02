@@ -35,7 +35,9 @@ async function exportPkcs8Pem(key: CryptoKey): Promise<string> {
   const bytes = new Uint8Array(buf);
   let bin = "";
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  const b64 = btoa(bin).match(/.{1,64}/g)!.join("\n");
+  const b64 = btoa(bin)
+    .match(/.{1,64}/g)!
+    .join("\n");
   return `-----BEGIN PRIVATE KEY-----\n${b64}\n-----END PRIVATE KEY-----\n`;
 }
 
@@ -75,7 +77,7 @@ describe("signAppJwt", () => {
     expect(payload.iss).toBe("987654");
   });
 
-  test("appId=0 still serializes iss as the string \"0\"", async () => {
+  test('appId=0 still serializes iss as the string "0"', async () => {
     // Defends against a future truthy-check refactor swallowing falsy IDs.
     const { pem } = await generateKeypair();
     const jwt = await signAppJwt(0, pem, 1_700_000_000);
@@ -98,10 +100,7 @@ describe("signAppJwt", () => {
 
   test("rejects PKCS#1 and encrypted PKCS#8 with actionable messages", async () => {
     await expect(
-      signAppJwt(
-        1,
-        "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----",
-      ),
+      signAppJwt(1, "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----"),
     ).rejects.toThrow(/PKCS#1/);
     await expect(
       signAppJwt(
@@ -157,10 +156,10 @@ function defaultResponder(_req: Request): Response {
 }
 
 function cannedTokenResponse(token: string, expiresAt: Date): Response {
-  return new Response(
-    JSON.stringify({ token, expires_at: expiresAt.toISOString() }),
-    { status: 201, headers: { "Content-Type": "application/json" } },
-  );
+  return new Response(JSON.stringify({ token, expires_at: expiresAt.toISOString() }), {
+    status: 201,
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
 let server: FakeServer;
@@ -201,8 +200,7 @@ describe("fetchInstallationToken", () => {
 
   test("throws with the response body on non-2xx", async () => {
     server.setResponder(
-      () =>
-        new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 }),
+      () => new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 }),
     );
     const jwt = await signAppJwt(100, pem);
     await expect(fetchInstallationToken(jwt, 111, { baseUrl: server.baseUrl })).rejects.toThrow(
@@ -213,9 +211,12 @@ describe("fetchInstallationToken", () => {
   test("rejects responses missing or empty token", async () => {
     server.setResponder(
       () =>
-        new Response(JSON.stringify({ token: "", expires_at: new Date(Date.now() + 3600_000).toISOString() }), {
-          status: 201,
-        }),
+        new Response(
+          JSON.stringify({ token: "", expires_at: new Date(Date.now() + 3600_000).toISOString() }),
+          {
+            status: 201,
+          },
+        ),
     );
     const jwt = await signAppJwt(100, pem);
     await expect(fetchInstallationToken(jwt, 111, { baseUrl: server.baseUrl })).rejects.toThrow(
@@ -234,9 +235,7 @@ describe("fetchInstallationToken", () => {
   test("rejects tokens whose expires_at is already in the past", async () => {
     // Skew / replay defense: a token born expired should never make it
     // into the cache.
-    server.setResponder(() =>
-      cannedTokenResponse("ghs_dead", new Date(Date.now() - 60_000)),
-    );
+    server.setResponder(() => cannedTokenResponse("ghs_dead", new Date(Date.now() - 60_000)));
     const jwt = await signAppJwt(100, pem);
     await expect(fetchInstallationToken(jwt, 111, { baseUrl: server.baseUrl })).rejects.toThrow(
       /already expired/,
@@ -255,7 +254,9 @@ describe("getInstallationToken (caching)", () => {
   test("expiring-soon entry triggers a refresh", async () => {
     // entryIsFresh threshold is 5 min; seed with 4 min remaining.
     __seedInstallationTokenCacheForTests(111, "ghs_old", Date.now() + 4 * 60 * 1000);
-    server.setResponder(() => cannedTokenResponse("ghs_new", new Date(Date.now() + 60 * 60 * 1000)));
+    server.setResponder(() =>
+      cannedTokenResponse("ghs_new", new Date(Date.now() + 60 * 60 * 1000)),
+    );
     const token = await getInstallationToken(env, 111, { baseUrl: server.baseUrl });
     expect(token).toBe("ghs_new");
     expect(server.capturedRequests).toHaveLength(1);
@@ -290,17 +291,19 @@ describe("getInstallationToken (caching)", () => {
 
   test("missing App secrets surface as an actionable error", async () => {
     const partial = { ...env, GITHUB_APP_PRIVATE_KEY: undefined } as Bindings;
-    await expect(
-      getInstallationToken(partial, 111, { baseUrl: server.baseUrl }),
-    ).rejects.toThrow(/GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY/);
+    await expect(getInstallationToken(partial, 111, { baseUrl: server.baseUrl })).rejects.toThrow(
+      /GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY/,
+    );
   });
 
   test("a failed mint does not poison the cache", async () => {
     server.setResponder(() => new Response("nope", { status: 500 }));
-    await expect(
-      getInstallationToken(env, 111, { baseUrl: server.baseUrl }),
-    ).rejects.toThrow(/HTTP 500/);
-    server.setResponder(() => cannedTokenResponse("ghs_retry", new Date(Date.now() + 60 * 60 * 1000)));
+    await expect(getInstallationToken(env, 111, { baseUrl: server.baseUrl })).rejects.toThrow(
+      /HTTP 500/,
+    );
+    server.setResponder(() =>
+      cannedTokenResponse("ghs_retry", new Date(Date.now() + 60 * 60 * 1000)),
+    );
     expect(await getInstallationToken(env, 111, { baseUrl: server.baseUrl })).toBe("ghs_retry");
   });
 
@@ -318,7 +321,9 @@ describe("getInstallationToken (caching)", () => {
     server.setResponder(() =>
       cannedTokenResponse("ghs_after_clear", new Date(Date.now() + 60 * 60 * 1000)),
     );
-    expect(await getInstallationToken(env, 111, { baseUrl: server.baseUrl })).toBe("ghs_after_clear");
+    expect(await getInstallationToken(env, 111, { baseUrl: server.baseUrl })).toBe(
+      "ghs_after_clear",
+    );
   });
 
   test("signAppJwt failure during refresh clears the cache for the next call", async () => {
@@ -326,12 +331,14 @@ describe("getInstallationToken (caching)", () => {
     // Confirm the cleanup path handles JWT-signing failures the same way
     // it handles network failures.
     const badEnv = { ...env, GITHUB_APP_PRIVATE_KEY: "garbage" } as Bindings;
-    await expect(
-      getInstallationToken(badEnv, 111, { baseUrl: server.baseUrl }),
-    ).rejects.toThrow(/PKCS#8 PEM/);
+    await expect(getInstallationToken(badEnv, 111, { baseUrl: server.baseUrl })).rejects.toThrow(
+      /PKCS#8 PEM/,
+    );
     expect(server.capturedRequests).toHaveLength(0);
     // Recover with a good env on the next call.
-    server.setResponder(() => cannedTokenResponse("ghs_recovered", new Date(Date.now() + 60 * 60 * 1000)));
+    server.setResponder(() =>
+      cannedTokenResponse("ghs_recovered", new Date(Date.now() + 60 * 60 * 1000)),
+    );
     expect(await getInstallationToken(env, 111, { baseUrl: server.baseUrl })).toBe("ghs_recovered");
   });
 });

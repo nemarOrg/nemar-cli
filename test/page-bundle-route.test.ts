@@ -24,8 +24,8 @@
 import { describe, expect, test } from "bun:test";
 import "./setup";
 
-import type { Bindings } from "../backend/src/types/bindings";
 import { dataRoutes } from "../backend/src/routes/data";
+import type { Bindings } from "../backend/src/types/bindings";
 
 function findRoute(method: string, path: string) {
   return dataRoutes.routes.find((r) => r.method === method && r.path === path);

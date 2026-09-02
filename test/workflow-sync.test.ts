@@ -9,13 +9,13 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import "./setup";
-import { type FakeGithubServer, json, startFakeGithub } from "./helpers/fetch-counter";
 import {
   __resetRateLimitStateForTests,
   ensureWorkflowsDeployed,
   getWorkflowTemplates,
   syncWorkflowTemplates,
 } from "../backend/src/services/github";
+import { type FakeGithubServer, json, startFakeGithub } from "./helpers/fetch-counter";
 
 const REPO = "nm099999";
 const BRANCH = "main";

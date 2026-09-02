@@ -15,9 +15,9 @@
  * actually ran against the prod D1.
  */
 
+import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
 
 const MIGRATION_PATH = join(
   import.meta.dir,

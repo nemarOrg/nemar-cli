@@ -13,11 +13,7 @@ import { DownloadProgressTracker, parseGitAnnexProgressLine } from "../src/lib/p
  * Build a byte-progress event in the actual git-annex --json-progress shape.
  * git-annex nests `file`/`key`/`command` under `action` for in-flight events.
  */
-function progressEvent(
-  file: string,
-  bytes: number,
-  total: number,
-): Record<string, unknown> {
+function progressEvent(file: string, bytes: number, total: number): Record<string, unknown> {
   return {
     action: { command: "get", file, key: `SHA256E-s${total}--${file}` },
     "byte-progress": bytes,
