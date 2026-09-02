@@ -154,7 +154,24 @@ const NATIVE_SUMMARY = JSON.stringify(
     version: "1.0.0",
   }),
 );
+// Production carries 5 audit rows whose `details` is not valid JSON at all.
+// The migration guards these with CASE rather than an AND chain, because
+// json_type() RAISES on malformed JSON and SQLite guarantees short-circuit
+// evaluation for CASE but not for AND operands.
+//
+// LIMIT OF THIS FIXTURE, stated rather than implied (#1190 review): replacing
+// the migration's CASE guards with a plain AND chain leaves these tests GREEN,
+// because SQLite's planner happens to evaluate this particular non-indexed
+// single-table predicate left to right. So these cases prove the shipped
+// migration leaves malformed rows alone; they do NOT prove the CASE guard is
+// what makes that true, and they would not catch a refactor that dropped it.
+// The guard is correct and load-bearing on the documented semantics; treat its
+// removal as a real change even if CI stays green.
 const NON_JSON_DETAILS = "plain text log line, not JSON at all";
+// Malformed in three different ways, so the leave-alone path is exercised
+// against more than one failure shape.
+const TRUNCATED_JSON_DETAILS = '{"complete":false,"missingKeys":["a","b"';
+const TRAILING_COMMA_JSON_DETAILS = '{"complete":false,"missingKeys":["a",]}';
 const UNRELATED_ARRAY_DETAILS = JSON.stringify({
   dataset_ids: ["on000002", "on000003"],
   updated: 2,
@@ -191,6 +208,8 @@ function seed(db: Database): void {
   seedAudit(db, "import_verify_forced", "on000001", NATIVE_SUMMARY);
   seedAudit(db, "user_login", null, null);
   seedAudit(db, "legacy_note", null, NON_JSON_DETAILS);
+  seedAudit(db, "legacy_truncated", null, TRUNCATED_JSON_DETAILS);
+  seedAudit(db, "legacy_trailing_comma", null, TRAILING_COMMA_JSON_DETAILS);
   seedAudit(db, "import_dispatch_cooldown", "on000002,on000003", UNRELATED_ARRAY_DETAILS);
   seedAudit(db, "some_other_action", "on000004", SINGLE_ARRAY_DETAILS);
 
@@ -314,6 +333,20 @@ describe("migration 0074: compact oversized payloads", () => {
         }
       ).details,
     ).toBe(NON_JSON_DETAILS);
+    // Two further malformed shapes: the migration must leave each byte-for-byte
+    // rather than nulling or partially rewriting it.
+    for (const [action, original] of [
+      ["legacy_truncated", TRUNCATED_JSON_DETAILS],
+      ["legacy_trailing_comma", TRAILING_COMMA_JSON_DETAILS],
+    ] as const) {
+      expect(
+        (
+          db.query("SELECT details FROM audit_log WHERE action = ?").get(action) as {
+            details: string | null;
+          }
+        ).details,
+      ).toBe(original);
+    }
     expect(auditDetails(db, "on000002,on000003")).toBe(UNRELATED_ARRAY_DETAILS);
     expect(auditDetails(db, "on000004")).toBe(SINGLE_ARRAY_DETAILS);
   });

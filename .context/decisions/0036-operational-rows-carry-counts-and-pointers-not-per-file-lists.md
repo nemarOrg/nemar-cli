@@ -63,9 +63,33 @@ so the next unbounded payload shape cannot recreate the failure.
   instead store counts plus a pointer,
   or argue its way past the write-time bound in an ADR superseding this one.
 - Hand-rolled `INSERT INTO audit_log` call sites predating #903 bypass the
-  bound until they converge on `auditLogStatement`;
-  the two import services were converged in #1189,
-  the rest write small fixed-shape payloads today.
+  bound until they converge on `auditLogStatement`.
+  Three were converged in #1189: the two import services,
+  and the owner draft-delete route (`routes/datasets/draft-delete.ts`),
+  which embedded `steps.s3.failed` from `deleteDatasetCascade` --
+  and `deleteObjects` pushes EVERY key of a failed batch into that array,
+  so a single S3 outage during an owner delete could reproduce
+  exactly the unbounded shape this ADR exists to prevent.
+  It was found in review, after an earlier draft of this ADR asserted
+  the remaining sites were all small and fixed-shape; that claim was wrong,
+  which is itself the argument for the write-time bound rather than
+  a per-call-site audit.
+  The sites still hand-rolled today (`index.ts` scheduled_cleanup, capped at
+  `MAX_DELETIONS_PER_RUN`; `auth.ts`; `publication.ts`; `collaborators.ts`;
+  `upload.ts`; `dataset-search.ts`; `auto-import.ts`)
+  were each checked and write small fixed-shape payloads,
+  but that is a property of today's code, not a guarantee --
+  converging them is the durable fix.
+
+- `zarr_data_failures` changes shape on the wire, from an array to
+  `{count, detail_ref}`. It is not declared in `shared/contract/dataset.ts`,
+  and nothing in this repo reads it, but the detail route serves it
+  incidentally through `SELECT d.*` (`routes/datasets/catalog.ts`),
+  so it IS wire-visible. The observability dashboard in `nemarOrg/website`
+  is the known consumer and lives outside this repo;
+  a reader doing `.length` or `.map()` on it will break.
+  Tracked as a heads-up against that repo rather than blocked here,
+  because the count it now carries is the number that dashboard actually shows.
 
 ## Alternatives considered
 
