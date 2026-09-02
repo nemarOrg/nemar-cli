@@ -176,3 +176,76 @@ describe("nemar dataset search --has-zarr", () => {
     }
   });
 });
+
+// Issue #1068, epic #1181 phase 8: --has-zarr-verified is a SEPARATE,
+// stricter filter alongside --has-zarr above (decision 2: has_zarr keeps
+// its existing meaning; has_zarr_verified is additive, not a replacement).
+describe("nemar dataset list --has-zarr-verified", () => {
+  test("maps to ?has_zarr_verified=1 on the real request", async () => {
+    const server = startCaptureServer(EMPTY_LIST_ENVELOPE);
+    try {
+      const result = await runCli(["dataset", "list", "--json", "--has-zarr-verified"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(server.requests.length).toBe(1);
+      expect(server.requests[0].searchParams.get("has_zarr_verified")).toBe("1");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("without the flag, has_zarr_verified is absent from the query string", async () => {
+    const server = startCaptureServer(EMPTY_LIST_ENVELOPE);
+    try {
+      const result = await runCli(["dataset", "list", "--json"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(server.requests[0].searchParams.has("has_zarr_verified")).toBe(false);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("stacks with --has-zarr without either overriding the other", async () => {
+    const server = startCaptureServer(EMPTY_LIST_ENVELOPE);
+    try {
+      const result = await runCli(
+        ["dataset", "list", "--json", "--has-zarr", "--has-zarr-verified"],
+        server.url,
+      );
+      expect(result.exitCode).toBe(0);
+      const params = server.requests[0].searchParams;
+      expect(params.get("has_zarr")).toBe("1");
+      expect(params.get("has_zarr_verified")).toBe("1");
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("nemar dataset search --has-zarr-verified", () => {
+  test("maps to ?has_zarr_verified=1 on the real request", async () => {
+    const server = startCaptureServer(EMPTY_SEARCH_ENVELOPE);
+    try {
+      const result = await runCli(
+        ["dataset", "search", "resting state", "--json", "--has-zarr-verified"],
+        server.url,
+      );
+      expect(result.exitCode).toBe(0);
+      const params = server.requests[0].searchParams;
+      expect(params.get("has_zarr_verified")).toBe("1");
+      expect(params.get("q")).toBe("resting state");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("without the flag, has_zarr_verified is absent from the query string", async () => {
+    const server = startCaptureServer(EMPTY_SEARCH_ENVELOPE);
+    try {
+      const result = await runCli(["dataset", "search", "resting state", "--json"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(server.requests[0].searchParams.has("has_zarr_verified")).toBe(false);
+    } finally {
+      server.stop();
+    }
+  });
+});
