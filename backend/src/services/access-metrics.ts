@@ -25,7 +25,14 @@ export interface AccessEvent {
   /**
    * Source-specific discriminator stored as a blob:
    *   archive -> the version string (e.g. "1.0.0")
-   *   zarr    -> object class ("index" | "metadata" | "chunk")
+   *   zarr    -> object class ("index" | "metadata" | "chunk"), or
+   *              "chunk-redirect" for a store object answered with a 302
+   *              to the public S3 object rather than proxied bytes
+   *              (#1181 phase 6 / issue #1061) -- `bytes` on that event
+   *              reflects only what the client's Range header asked for,
+   *              never what S3 actually returned, so the dashboard should
+   *              treat it as a distinct series rather than folding it into
+   *              a served-bytes total with the other three.
    */
   detail: string;
   /**
