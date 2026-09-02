@@ -123,7 +123,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
     // ADR 0007: EZID is the sole DOI provider. The datasets table no longer
     // carries a doi_provider column (#1182), so a zenodo mint could not be
     // recorded correctly even if it succeeded — reject it up front. The
-    // zenodo code paths below are retired with it (follow-up: remove them).
+    // retired zenodo mint branch itself was removed in #1186.
     if (body.provider !== "ezid") {
       return c.json(
         {
@@ -311,10 +311,11 @@ export function registerDoiRoutes(admin: AdminRouter): void {
 
       // Update dataset with DOI info. The EZID identifier is derived from
       // concept_doi at read time (conceptEzidIdentifier, #1182), not stored.
-      if (provider === "ezid") {
-        await db
-          .prepare(
-            `
+      // provider is always "ezid" here (the guard above 400s anything else);
+      // the retired zenodo write branch was removed in #1186.
+      await db
+        .prepare(
+          `
         UPDATE datasets
         SET concept_doi = ?,
             ezid_status = ?,
@@ -322,25 +323,9 @@ export function registerDoiRoutes(admin: AdminRouter): void {
             updated_at = datetime('now')
         WHERE dataset_id = ?
       `,
-          )
-          .bind(result.doi, result.status, body.sandbox ? 1 : 0, datasetId)
-          .run();
-      } else {
-        await db
-          .prepare(
-            `
-        UPDATE datasets
-        SET concept_doi = ?,
-            zenodo_concept_id = ?,
-            doi_provider = 'zenodo',
-            is_sandbox = ?,
-            updated_at = datetime('now')
-        WHERE dataset_id = ?
-      `,
-          )
-          .bind(result.doi, result.providerRecordId, body.sandbox ? 1 : 0, datasetId)
-          .run();
-      }
+        )
+        .bind(result.doi, result.status, body.sandbox ? 1 : 0, datasetId)
+        .run();
 
       // Audit log
       await auditLogStatement(db, {
@@ -369,16 +354,8 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         response.metadata_warning = bidsMetadataWarning;
       }
 
-      if (provider === "ezid") {
-        response.ezid_identifier = result.providerRecordId;
-        response.doi_url = `https://doi.org/${result.doi}`;
-      } else {
-        const zenodoId = Number.parseInt(result.providerRecordId);
-        if (!Number.isNaN(zenodoId)) {
-          response.zenodo_id = zenodoId;
-          response.zenodo_url = formatRecordUrl(zenodoId, body.sandbox);
-        }
-      }
+      response.ezid_identifier = result.providerRecordId;
+      response.doi_url = `https://doi.org/${result.doi}`;
 
       return c.json(response);
     } catch (error) {
