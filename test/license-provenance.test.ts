@@ -2,10 +2,10 @@
  * Unit tests for license detection/validation and provenance compatibility.
  */
 
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import {
   RECOMMENDED_LICENSES,
@@ -171,14 +171,18 @@ describe("updateLicenseInDescription", () => {
   test("sets License field in dataset_description.json", () => {
     writeDesc({ Name: "Test", License: "CC0-1.0" });
     updateLicenseInDescription(tmpDir, "CC-BY-4.0");
-    const updated = JSON.parse(readFileSync(join(tmpDir, "dataset_description.json"), "utf-8")) as Record<string, unknown>;
+    const updated = JSON.parse(
+      readFileSync(join(tmpDir, "dataset_description.json"), "utf-8"),
+    ) as Record<string, unknown>;
     expect(updated.License).toBe("CC-BY-4.0");
   });
 
   test("adds License field when not present", () => {
     writeDesc({ Name: "Test" });
     updateLicenseInDescription(tmpDir, "CC-BY-4.0");
-    const updated = JSON.parse(readFileSync(join(tmpDir, "dataset_description.json"), "utf-8")) as Record<string, unknown>;
+    const updated = JSON.parse(
+      readFileSync(join(tmpDir, "dataset_description.json"), "utf-8"),
+    ) as Record<string, unknown>;
     expect(updated.License).toBe("CC-BY-4.0");
   });
 

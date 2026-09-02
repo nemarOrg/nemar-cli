@@ -88,6 +88,26 @@ export interface DatasetFilterOptions {
  * FTS5 index (`d.id IN (SELECT rowid FROM datasets_fts WHERE … MATCH …)`) plus
  * dataset_id/source_id LIKE, replacing the old `c.search_text` LIKE.
  */
+/** D1's per-statement bound-parameter ceiling. */
+export const MAX_BOUND_PARAMS = 100;
+
+/** Throw before binding if a statement would exceed {@link MAX_BOUND_PARAMS}.
+ *
+ *  Local SQLite allows far more variables than D1 does, so a query that
+ *  overflows on D1 runs fine in tests -- which is how #1193 shipped: every
+ *  faceted text search 500'd in production with D1's opaque
+ *  `too many SQL variables`, and no local test could reproduce it. Applied
+ *  centrally in {@link buildDatasetFilterClauses} rather than per call site,
+ *  because the facet vocabulary is a growing surface and a new caller should
+ *  inherit the ceiling instead of having to remember it (#1195 review I5). */
+export function assertBoundParamBudget(params: readonly unknown[], context: string): void {
+  if (params.length > MAX_BOUND_PARAMS) {
+    throw new Error(
+      `${context}: ${params.length} bound parameters exceeds D1's limit of ${MAX_BOUND_PARAMS}. Collapse per-item placeholder lists into a single json_each parameter.`,
+    );
+  }
+}
+
 export function buildDatasetFilterClauses(
   params: (string | number)[],
   opts: DatasetFilterOptions,
@@ -164,6 +184,7 @@ export function buildDatasetFilterClauses(
   // see the `facets` field doc comment on DatasetFilterOptions and ADR 0032.
   clauses += buildFacetClauses(params, opts.facets, opts.includeUnknown ?? false);
 
+  assertBoundParamBudget(params, "dataset filter query");
   return clauses;
 }
 

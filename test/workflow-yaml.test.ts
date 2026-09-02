@@ -120,9 +120,7 @@ describe("CI workflow templates", () => {
         jobs: Record<string, { steps: Array<Record<string, unknown>> }>;
       };
       for (const [jobName, job] of Object.entries(parsed.jobs)) {
-        const mintIdx = job.steps.findIndex(
-          (s) => s.uses === "actions/create-github-app-token@v1",
-        );
+        const mintIdx = job.steps.findIndex((s) => s.uses === "actions/create-github-app-token@v1");
         // Not every job in a shim template mints (e.g. pr-merge's
         // cleanup-staging job uses AWS only). Only check when present.
         if (mintIdx < 0) continue;

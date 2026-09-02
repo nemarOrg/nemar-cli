@@ -25,12 +25,12 @@ const EMBEDDING_MODEL = "@cf/baai/bge-small-en-v1.5";
  * makes `count` -- now computed once by `countSearchMatches` -- stable across
  * every page size.
  */
-// SEMANTIC_TOPK sized the old per-id placeholder list; since #1193 the ids
-// reads this constant directly, not a separate literal) -- raising one
-// raises both. SEARCH_CANDIDATE_CEILING is unrelated: a plain SQL `LIMIT`
-// with no `IN (...)` placeholder list behind it, so it is NOT bounded by
-// travel as ONE json_each parameter, so it no longer bounds the parameter
-// count and does not need to move in lockstep (#1145 review S2).
+// SEMANTIC_TOPK used to size a per-id `IN (?,?,...)` placeholder list, so it
+// bounded the statement's parameter count directly. Since #1193 the ids travel
+// as ONE json_each parameter, so raising it no longer moves that count at all.
+// SEARCH_CANDIDATE_CEILING was always unrelated: a plain SQL `LIMIT` with no
+// placeholder list behind it, so the two never needed to move in lockstep
+// (#1145 review S2).
 /**
  * Relevance floor for semantic results (epic #1144 phase 6, issue #1150,
  * D6). bge-small cosine scores against this catalog, measured across 12
@@ -252,11 +252,6 @@ async function writeEmbedDrainAudit(
 // truth (the single source after the nemar_catalog drop).
 // ---------------------------------------------------------------------------
 
-/** Build a comma-joined `?` placeholder list for a SQL `IN (...)`. The only
- *  lists this ever builds are semantic-id lists (hydrateDatasetsByIds'
- *  `ids`, countSearchMatches' `semanticIds`), both bounded by `SEMANTIC_TOPK`
- *  -- so the throw bound reads that constant directly rather than a
- *  duplicated literal (#1145 review S2). */
 /** Match `d.dataset_id` against a list of ids using ONE bound parameter.
  *
  *  D1 caps bound parameters per statement well below SQLite's own ceiling, and
@@ -266,28 +261,16 @@ async function writeEmbedDrainAudit(
  *  `too many SQL variables` (#1193) -- while the catalog-list path, which has
  *  no semantic leg, kept working. `json_each` collapses the list to a single
  *  JSON parameter, so the count no longer scales with SEMANTIC_TOPK. */
+// Re-exported so the search module stays the one import site for callers
+// that need the ceiling; the guard itself lives with the filter builder that
+// applies it (#1195 review I5).
+export { MAX_BOUND_PARAMS, assertBoundParamBudget } from "./dataset-filters";
+
 export const DATASET_ID_IN_JSON_LIST = "d.dataset_id IN (SELECT value FROM json_each(?))";
 
 /** The single bound value for {@link DATASET_ID_IN_JSON_LIST}. */
 export function datasetIdListParam(ids: string[]): string {
   return JSON.stringify(ids);
-}
-
-/** D1's per-statement bound-parameter ceiling. */
-export const MAX_BOUND_PARAMS = 100;
-
-/** Throw before binding if a statement would exceed {@link MAX_BOUND_PARAMS}.
- *
- *  Local SQLite allows far more variables than D1 does, so a query that
- *  overflows on D1 runs fine in tests -- which is how #1193 shipped. This
- *  turns D1's opaque `too many SQL variables` into a message naming the query
- *  and the count, and makes the ceiling enforceable off-D1. */
-export function assertBoundParamBudget(params: readonly unknown[], context: string): void {
-  if (params.length > MAX_BOUND_PARAMS) {
-    throw new Error(
-      `${context}: ${params.length} bound parameters exceeds D1's limit of ${MAX_BOUND_PARAMS}. Collapse per-item placeholder lists into a single json_each parameter.`,
-    );
-  }
 }
 
 interface HydrateRow {
@@ -327,7 +310,6 @@ export async function hydrateDatasetsByIds(
   if (ids.length === 0) return [];
   const params: (string | number)[] = [datasetIdListParam(ids)];
   const filterClauses = buildDatasetFilterClauses(params, filters);
-  assertBoundParamBudget(params, "hydrateDatasetsByIds");
   const results = await db
     .prepare(
       `SELECT d.dataset_id AS id, d.name, d.modalities, d.subject_count AS participants,
@@ -554,7 +536,6 @@ export async function countSearchMatches(
   }
   if (disjuncts.length === 0) return 0;
   const filterClauses = buildDatasetFilterClauses(params, filters);
-  assertBoundParamBudget(params, "countSearchMatches");
   const row = await db
     .prepare(
       `SELECT COUNT(*) AS total FROM datasets d
@@ -633,7 +614,6 @@ async function countWidenedWithBreakdown(
   if (disjuncts.length === 0) return { total: 0, byFacet: {} };
   const widenedFilters: DatasetFilterOptions = { ...filters, includeUnknown: true };
   const filterClauses = buildDatasetFilterClauses(params, widenedFilters);
-  assertBoundParamBudget(params, "countWidenedWithBreakdown");
   const breakdown = buildExcludedUnknownBreakdownSql(widenedFilters.facets);
   const row = await db
     .prepare(

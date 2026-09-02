@@ -17,8 +17,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { TEST_CONFIG, sleep, testRequest } from "./setup";
 
 // Only run these tests when explicitly enabled AND API key is available
-const SHOULD_RUN =
-  process.env.RUN_ZENODO_TESTS === "true" && !!process.env.ZENODO_SANDBOX_API_KEY;
+const SHOULD_RUN = process.env.RUN_ZENODO_TESTS === "true" && !!process.env.ZENODO_SANDBOX_API_KEY;
 
 // We need a dataset to test with - use disposable test dataset
 const TEST_DATASET_ID = process.env.TEST_DATASET_ID || "nm099999";
@@ -94,9 +93,7 @@ afterAll(async () => {
     }
     console.error("\n⚠️  Manual cleanup required in Zenodo sandbox!");
     console.error("   Visit https://sandbox.zenodo.org/deposit to review orphaned depositions");
-    console.error(
-      `   Failed IDs: ${cleanupFailures.map((f) => f.depositionId).join(", ")}\n`,
-    );
+    console.error(`   Failed IDs: ${cleanupFailures.map((f) => f.depositionId).join(", ")}\n`);
   } else {
     console.log("   ✓ Cleanup complete\n");
   }
@@ -213,8 +210,12 @@ describe("Zenodo Sandbox Integration", () => {
         // 1. "Production DOI blocked" - environment check
         // 2. "already has a concept DOI" - DOI exists check
         // 3. "Cannot create DOI for sandbox datasets" - sandbox dataset check
-        const validErrors = ["Production DOI", "already has a concept DOI", "Cannot create DOI for sandbox datasets"];
-        expect(validErrors.some(msg => data.error.includes(msg))).toBe(true);
+        const validErrors = [
+          "Production DOI",
+          "already has a concept DOI",
+          "Cannot create DOI for sandbox datasets",
+        ];
+        expect(validErrors.some((msg) => data.error.includes(msg))).toBe(true);
         console.log(`   ✓ Production DOI blocked: ${data.error}`);
       }
     });
@@ -312,7 +313,10 @@ describe("Zenodo Sandbox Integration", () => {
         return;
       }
 
-      const deposition = (await createResponse.json()) as { id: number; metadata: { title: string } };
+      const deposition = (await createResponse.json()) as {
+        id: number;
+        metadata: { title: string };
+      };
       createdDepositions.push(deposition.id);
       console.log(`   ✓ Created test deposition ${deposition.id}`);
 
@@ -340,7 +344,9 @@ describe("Zenodo Sandbox Integration", () => {
 
       expect(updateResponse.ok).toBe(true);
 
-      const updated = (await updateResponse.json()) as { metadata: { title: string; description: string } };
+      const updated = (await updateResponse.json()) as {
+        metadata: { title: string; description: string };
+      };
       expect(updated.metadata.title).toBe("Updated Title");
       expect(updated.metadata.description).toBe("Updated description");
       console.log(`   ✓ Updated deposition metadata`);
@@ -407,7 +413,9 @@ describe("Zenodo Sandbox Integration", () => {
 
       expect(updateResponse.ok).toBe(true);
 
-      const updated = (await updateResponse.json()) as { metadata: { keywords: string[]; license: string } };
+      const updated = (await updateResponse.json()) as {
+        metadata: { keywords: string[]; license: string };
+      };
       expect(updated.metadata.keywords).toEqual(["neuroscience", "BIDS", "EEG"]);
       expect(updated.metadata.license).toBe("cc-by-nc-4.0");
       console.log(`   ✓ Updated keywords and license`);
@@ -987,7 +995,9 @@ describe("Zenodo Sandbox Integration", () => {
       expect(uploaded.filename).toBe("single.txt");
       expect(uploaded.filesize).toBeGreaterThan(0);
       expect(uploaded.checksum).toMatch(/^[a-f0-9]+$/);
-      console.log(`   ✓ Uploaded file (${uploaded.filesize} bytes, checksum: ${uploaded.checksum})`);
+      console.log(
+        `   ✓ Uploaded file (${uploaded.filesize} bytes, checksum: ${uploaded.checksum})`,
+      );
     });
 
     test("can upload multiple files", async () => {

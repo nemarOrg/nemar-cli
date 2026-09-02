@@ -12,13 +12,13 @@
 
 import { describe, expect, test } from "bun:test";
 
+import type { DatasetVersionRow } from "../backend/src/services/data-router";
 import {
-  isBundleComplete,
   type PageBundleComponent,
+  isBundleComplete,
   pickVersion,
   settled,
 } from "../backend/src/services/page-bundle";
-import type { DatasetVersionRow } from "../backend/src/services/data-router";
 
 function rows(...versions: string[]): DatasetVersionRow[] {
   // dataset_versions are returned ORDER BY created_at DESC, so [0] is latest.

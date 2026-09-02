@@ -144,12 +144,7 @@ describe("buildBidsFilterArgs — pass-through include / exclude", () => {
 
   test("exclude appends --exclude flags (default AND combining)", () => {
     const r = buildBidsFilterArgs({ exclude: "derivatives/**,sourcedata/**" });
-    expect(r.args).toEqual([
-      "--exclude",
-      "derivatives/**",
-      "--exclude",
-      "sourcedata/**",
-    ]);
+    expect(r.args).toEqual(["--exclude", "derivatives/**", "--exclude", "sourcedata/**"]);
   });
 });
 
@@ -181,12 +176,7 @@ describe("buildBidsFilterArgs — composition", () => {
       subjects: "sub-01",
       exclude: "derivatives/**",
     });
-    expect(r.args).toEqual([
-      "--include",
-      "sub-01/**",
-      "--exclude",
-      "derivatives/**",
-    ]);
+    expect(r.args).toEqual(["--include", "sub-01/**", "--exclude", "derivatives/**"]);
   });
 
   test("only-exclude is still active", () => {
@@ -199,27 +189,15 @@ describe("buildBidsFilterArgs — stimuli/derivatives default-skip", () => {
   test("excludeStimuli adds stimuli excludes but does not set active", () => {
     const r = buildBidsFilterArgs({ excludeStimuli: true });
     expect(r.active).toBe(false);
-    expect(r.args).toEqual([
-      "--exclude",
-      "stimuli/**",
-      "--exclude",
-      "**/stimuli/**",
-    ]);
+    expect(r.args).toEqual(["--exclude", "stimuli/**", "--exclude", "**/stimuli/**"]);
     expect(r.summary).toEqual(["skipping stimuli/ (use --stimuli to include)"]);
   });
 
   test("excludeDerivatives adds derivatives excludes but does not set active", () => {
     const r = buildBidsFilterArgs({ excludeDerivatives: true });
     expect(r.active).toBe(false);
-    expect(r.args).toEqual([
-      "--exclude",
-      "derivatives/**",
-      "--exclude",
-      "**/derivatives/**",
-    ]);
-    expect(r.summary).toEqual([
-      "skipping derivatives/ (use --derivatives to include)",
-    ]);
+    expect(r.args).toEqual(["--exclude", "derivatives/**", "--exclude", "**/derivatives/**"]);
+    expect(r.summary).toEqual(["skipping derivatives/ (use --derivatives to include)"]);
   });
 
   test("both flags emit both exclude pairs in order", () => {
@@ -312,12 +290,7 @@ describe("chooseGetFilter — explicit paths bypass default-skip", () => {
 
   test("--stimuli alone (no paths) drops stimuli excludes, keeps derivatives", () => {
     const r = chooseGetFilter(undefined, { stimuli: true });
-    expect(r.args).toEqual([
-      "--exclude",
-      "derivatives/**",
-      "--exclude",
-      "**/derivatives/**",
-    ]);
+    expect(r.args).toEqual(["--exclude", "derivatives/**", "--exclude", "**/derivatives/**"]);
   });
 
   test("both flags (no paths) drop all default excludes", () => {

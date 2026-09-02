@@ -381,11 +381,7 @@ describe("buildDataCiteXml", () => {
       publisher: "NEMAR",
       publicationYear: 2026,
       resourceTypeGeneral: "Dataset",
-      fundingReferences: [
-        { funderName: "NIH" },
-        { funderName: "   " },
-        { funderName: "" },
-      ],
+      fundingReferences: [{ funderName: "NIH" }, { funderName: "   " }, { funderName: "" }],
     };
 
     const xml = buildDataCiteXml(metadata);
@@ -566,7 +562,7 @@ describe("bidsToDataCite", () => {
     expect(curator?.orcid).toBe("0000-0002-1825-0097");
     const xml = buildDataCiteXml(metadata);
     expect(xml).toContain("0000-0002-1825-0097");
-    expect(xml).toContain("nameIdentifierScheme=\"ORCID\"");
+    expect(xml).toContain('nameIdentifierScheme="ORCID"');
   });
 
   test("DataCurator appears in generated DataCite XML", () => {
@@ -656,11 +652,7 @@ describe("bidsToDataCite", () => {
   test("filters empty enrichment fundingInfo entries (issue #459)", () => {
     const bids = { Name: "Test", Authors: ["Doe, John"] };
     const enrichment = {
-      fundingInfo: [
-        { funderName: "Real Funder" },
-        { funderName: "" },
-        { funderName: "   " },
-      ],
+      fundingInfo: [{ funderName: "Real Funder" }, { funderName: "" }, { funderName: "   " }],
     };
 
     const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids, enrichment);
@@ -812,9 +804,7 @@ describe("bidsToDataCite", () => {
 
     const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids);
 
-    const refs = metadata.relatedIdentifiers?.filter(
-      (r) => r.relationType === "References",
-    );
+    const refs = metadata.relatedIdentifiers?.filter((r) => r.relationType === "References");
     expect(refs).toHaveLength(1);
     expect(refs?.[0]?.identifier).toBe("10.1109/TNSRE.2021.3082551");
     expect(refs?.[0]?.relatedIdentifierType).toBe("DOI");
@@ -823,12 +813,14 @@ describe("bidsToDataCite", () => {
   test("preserves MeSH scheme info through bidsToDataCite to XML", () => {
     const bids = { Name: "Test", Authors: ["Doe, John"] };
     const enrichment = {
-      keywords: [{
-        value: "Electroencephalography",
-        subjectScheme: "MeSH",
-        schemeURI: "https://meshb.nlm.nih.gov/",
-        valueURI: "https://id.nlm.nih.gov/mesh/D004569",
-      }],
+      keywords: [
+        {
+          value: "Electroencephalography",
+          subjectScheme: "MeSH",
+          schemeURI: "https://meshb.nlm.nih.gov/",
+          valueURI: "https://id.nlm.nih.gov/mesh/D004569",
+        },
+      ],
     };
 
     const metadata = bidsToDataCite("nm000103", "10.82901/NEMAR.ABC", bids, enrichment);
@@ -1077,7 +1069,11 @@ describe("nemarMetadataToEnrichment v2", () => {
     const result = nemarMetadataToEnrichment({
       version: "2.0",
       related_identifiers: [
-        { identifier: "https://physionet.org/content/chbmit", identifier_type: "URL", relation_type: "IsDerivedFrom" },
+        {
+          identifier: "https://physionet.org/content/chbmit",
+          identifier_type: "URL",
+          relation_type: "IsDerivedFrom",
+        },
       ],
     });
     expect(result.relatedDois).toHaveLength(1);

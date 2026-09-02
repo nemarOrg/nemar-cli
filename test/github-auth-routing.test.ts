@@ -35,9 +35,7 @@ describe("getDatasetsAuth", () => {
   });
 
   test("falls back to kind=pat when nemarDatasets install ID is missing", () => {
-    const auth = getDatasetsAuth(
-      makeEnv({ GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: undefined }),
-    );
+    const auth = getDatasetsAuth(makeEnv({ GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: undefined }));
     expect(auth.kind).toBe("pat");
   });
 });

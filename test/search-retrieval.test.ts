@@ -41,9 +41,20 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseSearchPagination } from "../backend/src/routes/datasets/catalog";
-import { buildFtsMatch } from "../backend/src/services/dataset-filters";
 import { parseFacetFilters } from "../backend/src/services/dataset-facets";
-import { MAX_BOUND_PARAMS, SEARCH_CANDIDATE_CEILING, SEMANTIC_TOPK, assertBoundParamBudget, countSearchMatches, datasetIdListParam, executeDatasetSearch, ftsSearch, hydrateDatasetsByIds, lookupDatasetById } from "../backend/src/services/dataset-search";
+import { buildFtsMatch } from "../backend/src/services/dataset-filters";
+import {
+  MAX_BOUND_PARAMS,
+  SEARCH_CANDIDATE_CEILING,
+  SEMANTIC_TOPK,
+  assertBoundParamBudget,
+  countSearchMatches,
+  datasetIdListParam,
+  executeDatasetSearch,
+  ftsSearch,
+  hydrateDatasetsByIds,
+  lookupDatasetById,
+} from "../backend/src/services/dataset-search";
 
 const MIG = join(import.meta.dir, "..", "backend/src/db/migrations");
 const sql = (f: string) => readFileSync(join(MIG, f), "utf8");
@@ -856,10 +867,27 @@ describe("search stays within D1's bound-parameter ceiling (#1193)", () => {
     // exist in BASE_SCHEMA can be used here.)
     const facets = parseFacetFilters((k) => (k === "subjects" ? "50..100" : undefined));
     expect(Object.keys(facets).length).toBeGreaterThan(0);
-    await expect(
-      countSearchMatches(db, "sleep", ids, { facets }),
-    ).resolves.toBeGreaterThanOrEqual(0);
+    await expect(countSearchMatches(db, "sleep", ids, { facets })).resolves.toBeGreaterThanOrEqual(
+      0,
+    );
   });
+
+  // Second of the three converted sites. countSearchMatches is covered above;
+  // this covers the one that hydrates the rows users actually see, so a
+  // regression in just this site cannot ship green (#1195 review I4).
+  test("hydrateDatasetsByIds carries a full semantic leg within the ceiling", async () => {
+    const db = realD1(freshDb());
+    const ids = Array.from({ length: SEMANTIC_TOPK }, (_, i) => `on${String(i).padStart(6, "0")}`);
+    const facets = parseFacetFilters((k) => (k === "subjects" ? "50..100" : undefined));
+    await expect(hydrateDatasetsByIds(db, ids, { facets })).resolves.toEqual([]);
+  });
+
+  // The third converted site, countWidenedWithBreakdown, is deliberately NOT
+  // covered here and cannot be with the current seams: it is module-private,
+  // and its only caller (computeExcludedUnknownCount) wraps it in try/catch to
+  // degrade the excluded_unknown diff rather than fail the search. So a
+  // parameter-count regression there would be SWALLOWED, not surfaced --
+  // stated rather than left for the next reader to discover.
 
   test("assertBoundParamBudget throws before D1 would", () => {
     expect(() => assertBoundParamBudget(new Array(MAX_BOUND_PARAMS).fill(0), "ok")).not.toThrow();

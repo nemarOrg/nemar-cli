@@ -5,25 +5,25 @@
  * against the EZID test shoulder (doi:10.5072/FK2).
  */
 
-import { describe, test, expect } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
-  percentEncode,
-  percentDecode,
-  encodeAnvl,
-  decodeAnvl,
-  getDoiUrl,
-  extractDoi,
-  ensureDoiScheme,
-  isTestShoulder,
-  checkStatus,
-  mintIdentifier,
-  getIdentifier,
-  updateIdentifier,
-  deleteIdentifier,
-  makePublic,
-  TEST_SHOULDER,
-  PRODUCTION_SHOULDER,
   type EzidAuth,
+  PRODUCTION_SHOULDER,
+  TEST_SHOULDER,
+  checkStatus,
+  decodeAnvl,
+  deleteIdentifier,
+  encodeAnvl,
+  ensureDoiScheme,
+  extractDoi,
+  getDoiUrl,
+  getIdentifier,
+  isTestShoulder,
+  makePublic,
+  mintIdentifier,
+  percentDecode,
+  percentEncode,
+  updateIdentifier,
 } from "../backend/src/services/ezid";
 
 // Test credentials (public, safe to use)
@@ -89,7 +89,7 @@ describe("ANVL encoding", () => {
   test("decodeAnvl handles continuation lines", () => {
     const body = [
       "success: doi:10.5072/FK2TEST",
-      "datacite: <?xml version=\"1.0\"?>",
+      'datacite: <?xml version="1.0"?>',
       " <resource>",
       " <title>Test</title>",
       " </resource>",

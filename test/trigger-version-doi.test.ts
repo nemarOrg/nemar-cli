@@ -8,8 +8,8 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import "./setup";
-import { type FakeGithubServer, startFakeGithub } from "./helpers/fetch-counter";
 import { triggerVersionDoiRun } from "../backend/src/services/github";
+import { type FakeGithubServer, startFakeGithub } from "./helpers/fetch-counter";
 
 const DISPATCH_PATH = "/repos/nemarDatasets/.github/dispatches";
 
