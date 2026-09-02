@@ -324,9 +324,11 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   deployment where they are the same file. A stale out-of-clone copy left at the
   old path is inert, not a fallback. Manual recovery for one dataset is
   `hallu-zarr.sh --dataset <id>`.
-  A second, independently-stated `--test` instance (own state dir, own AWS
-  profile, `api-test.nemar.org`/`nemar-dev`) converts into `zarr-test.nemar.org`
-  without touching any of this — see [systems inventory](.context/systems-inventory.md) §3.4.
+  A second, independently-stated `--test` instance
+  (own state dir, own AWS profile, `api-test.nemar.org`/`nemar-dev`)
+  converts into `nemar-dev`'s S3 zarr prefix, served at `zarr-test.nemar.org`,
+  without touching any of this
+  — see [systems inventory](.context/systems-inventory.md) §3.4.
   "Every run" is load-bearing and used to be a lie during a backfill: a run holds
   the lock until the queue empties, so `setup()` never re-ran and the node sat two
   deploys behind for two days (#1129). The drain now re-checks `origin/$DRIVER_REF`
