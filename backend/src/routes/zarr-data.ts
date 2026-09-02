@@ -29,6 +29,7 @@ import { rateLimiter } from "../middleware/rateLimit.js";
 import { recordAccess, zarrObjectType } from "../services/access-metrics";
 import { normalizeBidsPath } from "../services/data-router";
 import { isValidDatasetId } from "../services/datasetId";
+import { ZarrCatalogForbiddenError, fetchZarrCatalogObject } from "../services/zarr-catalog";
 import type { Bindings } from "../types/bindings.js";
 
 /** Origins allowed to read zarr chunks cross-origin in a browser: the NEMAR
@@ -482,6 +483,87 @@ async function serve(c: Context<{ Bindings: Bindings }>, isHead: boolean, deps: 
   return res;
 }
 
+/**
+ * GET /catalog.json -> the top-level Zarr discovery front door (#1062, epic
+ * #1181 phase 2): one JSON document listing every publicly streamable
+ * dataset, for a client (human or agent) with no dataset id to start from
+ * and no s3:ListBucket. Published to `s3://<bucket>/zarr-catalog.json` by
+ * the daily cron / `POST /admin/zarr-catalog/publish`
+ * (services/zarr-catalog.ts); this route only proxies + edge-caches it.
+ * Unlike `serve()` above, there is no D1 read here at all: the document
+ * only ever lists already-public datasets (built at publish time by the
+ * SQL in zarr-catalog.ts), so there is no per-request visibility gate to
+ * check for this single, top-level object.
+ *
+ * Always a SIGNED GET (Worker creds), unlike `serve()`'s per-dataset
+ * objects, which fetch unsigned-first: the bucket-root key's read policy is
+ * a separate, narrower carve-out from the per-dataset prefix policy (see
+ * bucket-policy.ts), so this works whether or not the root key happens to
+ * be anonymously readable. `deps.s3Base` (the phase 1 test seam, #1199)
+ * doubles as the signed request's endpoint override when set, so tests use
+ * the exact same local upstream `serve()`'s tests already stand up.
+ *
+ * A 403 from S3 -- {@link ZarrCatalogForbiddenError}, a policy/IAM
+ * regression on a fixed, always-expected-to-exist key -- answers 503, kept
+ * distinct from the 404 a genuine "not published yet" (or any other
+ * `fetchZarrCatalogObject` throw, mapped to 502) gets, matching how `serve()`
+ * separates a real absence from an infra failure above.
+ *
+ * Edge-cached via `deps.cache()` and `safeCachePut` for an hour -- the same
+ * mechanism `serve()` uses, kept as its own cache entry (keyed on this
+ * route's own URL) rather than sharing a helper with `respondFromCache()`,
+ * which exists to handle range/synthetic-206 reconstruction this route has
+ * no need for.
+ */
+async function serveCatalog(c: Context<{ Bindings: Bindings }>, deps: ZarrDataDeps): Promise<Response> {
+  const origin = c.req.header("origin") ?? null;
+  const cors = corsHeaders(origin);
+  const cache = deps.cache();
+  const cacheKeyUrl = new URL(c.req.url).toString();
+
+  const hit = await cache.match(new Request(cacheKeyUrl, { method: "GET" }));
+  if (hit) {
+    // Same per-request CORS reapplication as respondFromCache() above: the
+    // Cache API does not honour Vary: Origin, so one stored entry is shared
+    // across every requesting origin regardless of which origin primed it.
+    const headers = new Headers(hit.headers);
+    headers.delete("Access-Control-Allow-Origin");
+    for (const [k, v] of Object.entries(cors)) headers.set(k, v);
+    return new Response(hit.body, { status: hit.status, headers });
+  }
+
+  let object: { body: string; etag: string | null } | null;
+  try {
+    object = await fetchZarrCatalogObject(
+      {
+        bucket: c.env.S3_BUCKET,
+        region: c.env.AWS_REGION || "us-east-2",
+        accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+        endpointUrl: deps.s3Base,
+      },
+      deps.fetch,
+    );
+  } catch (err) {
+    if (err instanceof ZarrCatalogForbiddenError) {
+      console.error("[zarr-data] GET /catalog.json forbidden", { path: c.req.path }, err);
+      return c.body(null, 503, cors);
+    }
+    console.error("[zarr-data] GET /catalog.json fetch failed", { path: c.req.path }, err);
+    return c.body(null, 502, cors);
+  }
+  if (!object) return c.body(null, 404, cors);
+
+  const headers = new Headers(cors);
+  headers.set("Content-Type", "application/json");
+  headers.set("Cache-Control", "public, max-age=3600, stale-while-revalidate=3600");
+  if (object.etag) headers.set("ETag", object.etag);
+
+  const res = new Response(object.body, { status: 200, headers });
+  c.executionCtx.waitUntil(safeCachePut(cache, cacheKeyUrl, "zarr-catalog.json", res.clone()));
+  return res;
+}
+
 /** Build the zarr.nemar.org sub-app. `deps` is the dependency seam (#1178
  *  phase 1) that lets tests supply a real in-memory cache and a real local
  *  upstream instead of the Workers-only `caches.default` / bare `fetch`.
@@ -533,6 +615,10 @@ export function createZarrDataRoutes(
   // request with method still "HEAD"; serve() reads that to skip the body and do
   // an upstream HEAD instead of fetching bytes.
   app.get("/:datasetId/zarr/*", (c) => serve(c, c.req.method === "HEAD", deps));
+
+  // Coordinated with phase 1 (#1199): a single, clearly separated handler,
+  // kept above the root `/` handler below.
+  app.get("/catalog.json", (c) => serveCatalog(c, deps));
 
   // Friendly root so a bare zarr.nemar.org/ doesn't 404 confusingly.
   app.get("/", (c) =>
