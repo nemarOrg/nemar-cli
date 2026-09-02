@@ -7,7 +7,7 @@
  * numeric pin IS the tripwire: the next migration that widens `datasets`
  * past the ceiling fails here, in CI, instead of at deploy time.
  *
- * The exact-count pin (=== 92) is deliberate alongside the ceiling (<= 97):
+ * The exact-count pin (=== 81) is deliberate alongside the ceiling (<= 97):
  * an unexpected column count in EITHER direction means a migration changed
  * the table shape without this file being updated to acknowledge it. Raise
  * the pin consciously with each widening migration; never past the ceiling.
