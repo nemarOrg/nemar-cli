@@ -17,11 +17,31 @@ a real Hallu deployment or the repo's own working tree. Covers:
   verification (see hallu-zarr.sh's pre-pass comment).
 - Plain (non-`--test`) `--print-config` still resolves the production
   defaults -- `--test` must not leak into the untested path.
-- The test-mode guard rails: each of the five prod values (S3_BUCKET,
-  API_BASE, TEST_API_URL, AWS_PROFILE via ZARR_AWS_PROFILE, STATE_DIR via
-  ZARR_STATE_DIR) exported alongside `--test` is refused with a non-zero exit
-  and a message naming the offending value, and produces no stdout config
-  dump.
+- The test-mode guard rails: each of six prod values (S3_BUCKET, API_BASE,
+  TEST_API_URL, AWS_PROFILE via ZARR_AWS_PROFILE, STATE_DIR via
+  ZARR_STATE_DIR, WORK_DIR via ZARR_WORK_DIR) exported alongside `--test` is
+  refused with a non-zero exit and a message naming the offending value, and
+  produces no stdout config dump. The STATE_DIR/WORK_DIR checks are
+  normalized (trailing slash, doubled slash) and the API_BASE/TEST_API_URL
+  checks are case-insensitive and host-based (scheme, port, and path do not
+  matter; `api-test.nemar.org` is never mistaken for prod) -- each covered
+  by a dedicated variant below, not just the bare-string case.
+- The guard rails key off the raw pre-pass scan of argv (TEST_PREPASS_SEEN),
+  not the arg parser's derived TEST_MODE, so a value-taking flag that used to
+  swallow `--test` as its own value (`--dataset --test`, `--limit --test`)
+  cannot silently suppress them. Both flags now also refuse a value starting
+  with `--` outright, the same way `--requeue` already does.
+- A plain prod run (no `--test`) explicitly unsets an ambient `TEST_API_URL`
+  left over from an earlier `--test` session, so the `nemar` CLI can never
+  depend on stale shell state during a real prod conversion.
+- Every resolved config value `--print-config` prints, including the
+  operation flags (ONLY_DATASET, LIMIT, REQUEUE, BACKFILL_DIR_FORMATS,
+  PREVIEW_ENGINE_BUMP, EXECUTE) alongside the environment-derived ones, and
+  in every documented flag order/combination.
+- The eight `--test`-defaulted variables really are `export`ed (visible to a
+  child process, e.g. the `nemar` CLI binary), not merely shell-local.
+- A `.zarr-secrets.env` placed under the TEST state dir (not the prod one)
+  flips `NEMAR_WEBHOOK_TOKEN` to `present` in `--print-config`.
 - An explicit override (ZARR_JOBS=2) still wins over the `--test` default.
 - `--print-config` (with or without `--test`) creates no files under
   ZARR_BASE -- it must exit before `mkdir -p "$WORK_DIR" "$STATE_DIR"`.
@@ -34,6 +54,7 @@ Run:
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -139,6 +160,14 @@ def test_test_mode_print_config_defaults(dirs: tuple[Path, Path]) -> None:
     # No secrets file exists under the temp HOME/ZARR_BASE, so the token must
     # report absent -- and never its value, since none was ever provided.
     assert cfg["NEMAR_WEBHOOK_TOKEN"] == "absent"
+    # The operation flags print-config also reports, at their untouched
+    # defaults for a bare `--test --print-config`.
+    assert cfg["ONLY_DATASET"] == ""
+    assert cfg["LIMIT"] == "0"
+    assert cfg["REQUEUE"] == ""
+    assert cfg["BACKFILL_DIR_FORMATS"] == "0"
+    assert cfg["PREVIEW_ENGINE_BUMP"] == "0"
+    assert cfg["EXECUTE"] == "0"
 
 
 def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -> None:
@@ -160,6 +189,12 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
     # JOBS falls back to `nproc`, which varies by runner; just confirm it
     # resolved to a positive integer rather than being empty/non-numeric.
     assert cfg["JOBS"].isdigit() and int(cfg["JOBS"]) > 0
+    assert cfg["ONLY_DATASET"] == ""
+    assert cfg["LIMIT"] == "0"
+    assert cfg["REQUEUE"] == ""
+    assert cfg["BACKFILL_DIR_FORMATS"] == "0"
+    assert cfg["PREVIEW_ENGINE_BUMP"] == "0"
+    assert cfg["EXECUTE"] == "0"
 
 
 @pytest.mark.parametrize(
@@ -167,17 +202,66 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
     [
         ({"S3_BUCKET": "nemar"}, "S3_BUCKET=nemar"),
         ({"API_BASE": "https://api.nemar.org"}, "API_BASE=https://api.nemar.org"),
+        # Case-insensitive, host-based match: scheme/case/trailing-slash/port
+        # must not let a prod host slip past the guard.
+        ({"API_BASE": "https://API.NEMAR.ORG"}, "API_BASE=https://API.NEMAR.ORG"),
+        (
+            {"API_BASE": "http://api.nemar.org/"},
+            "API_BASE=http://api.nemar.org/",
+        ),
+        (
+            {"API_BASE": "https://api.nemar.org:8443"},
+            "API_BASE=https://api.nemar.org:8443",
+        ),
         (
             {"TEST_API_URL": "https://api.nemar.org"},
             "TEST_API_URL=https://api.nemar.org",
+        ),
+        (
+            {"TEST_API_URL": "https://API.NEMAR.ORG/"},
+            "TEST_API_URL=https://API.NEMAR.ORG/",
         ),
         ({"ZARR_AWS_PROFILE": "nemar-zarr"}, "AWS_PROFILE=nemar-zarr"),
         (
             {"ZARR_STATE_DIR": "/mnt/local/zarr-state"},
             "STATE_DIR=/mnt/local/zarr-state",
         ),
+        # Normalized: a trailing slash or a doubled slash must not let the
+        # prod state dir slip past a bare string-equality check.
+        (
+            {"ZARR_STATE_DIR": "/mnt/local/zarr-state/"},
+            "STATE_DIR=/mnt/local/zarr-state/",
+        ),
+        (
+            {"ZARR_STATE_DIR": "/mnt/local//zarr-state"},
+            "STATE_DIR=/mnt/local//zarr-state",
+        ),
+        # WORK_DIR was not guarded at all before this round -- same
+        # normalization applies to it as to STATE_DIR.
+        (
+            {"ZARR_WORK_DIR": "/mnt/local/zarr-scratch"},
+            "WORK_DIR=/mnt/local/zarr-scratch",
+        ),
+        (
+            {"ZARR_WORK_DIR": "/mnt/local/zarr-scratch/"},
+            "WORK_DIR=/mnt/local/zarr-scratch/",
+        ),
     ],
-    ids=["s3-bucket", "api-base", "test-api-url", "aws-profile", "state-dir"],
+    ids=[
+        "s3-bucket",
+        "api-base",
+        "api-base-uppercase",
+        "api-base-http-trailing-slash",
+        "api-base-port",
+        "test-api-url",
+        "test-api-url-uppercase-trailing-slash",
+        "aws-profile",
+        "state-dir",
+        "state-dir-trailing-slash",
+        "state-dir-double-slash",
+        "work-dir",
+        "work-dir-trailing-slash",
+    ],
 )
 def test_guard_rail_refuses_prod_value_with_test(
     dirs: tuple[Path, Path], extra_env: dict[str, str], needle: str
@@ -195,6 +279,52 @@ def test_guard_rail_refuses_prod_value_with_test(
     assert proc.stdout == ""
 
 
+@pytest.mark.parametrize(
+    "flag",
+    ["--dataset", "--limit"],
+    ids=["dataset", "limit"],
+)
+def test_value_flag_refuses_test_as_its_value(
+    dirs: tuple[Path, Path], flag: str
+) -> None:
+    """`--dataset --test` / `--limit --test` (value missing) must not swallow
+    the --test token as the flag's value -- that used to leave TEST_MODE
+    unset and no guard running, while the pre-pass had already applied test
+    defaults on top of an ambient prod S3_BUCKET. Refused outright now, the
+    same way --requeue already refuses a `--`-prefixed value.
+    """
+    zarr_base, home = dirs
+    proc = run_script(
+        [flag, "--test", "--print-config"],
+        zarr_base,
+        home,
+        extra_env={"S3_BUCKET": "nemar"},
+    )
+
+    assert proc.returncode != 0
+    assert "requires a value" in proc.stderr
+    assert proc.stdout == ""
+
+
+def test_test_api_url_unset_on_plain_prod_run(dirs: tuple[Path, Path]) -> None:
+    """A TEST_API_URL left exported from an earlier --test session must not
+    leak into a later plain (prod) run -- the `nemar` CLI would otherwise
+    keep pointing at api-test.nemar.org during a supposed prod conversion.
+    """
+    zarr_base, home = dirs
+    proc = run_script(
+        ["--print-config"],
+        zarr_base,
+        home,
+        extra_env={"TEST_API_URL": "https://api-test.nemar.org"},
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    cfg = parse_config(proc.stdout)
+    assert cfg["TEST_API_URL"] == ""
+    assert "unsetting stale TEST_API_URL" in proc.stderr
+
+
 def test_explicit_zarr_jobs_wins_over_test_default(dirs: tuple[Path, Path]) -> None:
     zarr_base, home = dirs
     proc = run_script(
@@ -204,6 +334,131 @@ def test_explicit_zarr_jobs_wins_over_test_default(dirs: tuple[Path, Path]) -> N
     assert proc.returncode == 0, proc.stderr
     cfg = parse_config(proc.stdout)
     assert cfg["JOBS"] == "2"
+
+
+def test_test_mode_env_vars_are_exported(dirs: tuple[Path, Path]) -> None:
+    """A regression that drops `export` from one of the pre-pass's defaults
+    must fail this test: `source`s the script in a `bash -c` wrapper and
+    dumps the CHILD shell's own environment (via a trap on EXIT, fired when
+    --print-config's `exit 0` unwinds the sourcing shell) rather than
+    hallu-zarr.sh's stdout, so this is checking real export visibility to a
+    child process (the `nemar` CLI, in the real run path), not just that the
+    variable has a value in the current shell.
+    """
+    zarr_base, home = dirs
+    env = base_env(zarr_base, home)
+    wrapper = (
+        f'trap "env" EXIT; source {shlex.quote(str(SCRIPT))} --test --print-config '
+        ">/dev/null 2>/dev/null"
+    )
+    proc = subprocess.run(
+        ["bash", "-c", wrapper],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    dumped: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            dumped[key] = value
+
+    for name in (
+        "TEST_API_URL",
+        "API_BASE",
+        "S3_BUCKET",
+        "ZARR_AWS_PROFILE",
+        "ZARR_STATE_DIR",
+        "ZARR_WORK_DIR",
+        "ZARR_DRIVER_REF",
+        "ZARR_JOBS",
+    ):
+        assert name in dumped, f"{name} missing from child env -- not exported?"
+
+    assert dumped["TEST_API_URL"] == "https://api-test.nemar.org"
+    assert dumped["API_BASE"] == "https://api-test.nemar.org"
+    assert dumped["S3_BUCKET"] == "nemar-dev"
+    assert dumped["ZARR_AWS_PROFILE"] == "nemar-zarr-dev"
+    assert dumped["ZARR_STATE_DIR"] == f"{zarr_base}/zarr-state-test"
+    assert dumped["ZARR_WORK_DIR"] == f"{zarr_base}/zarr-scratch-test"
+    assert dumped["ZARR_DRIVER_REF"] == "dev"
+    assert dumped["ZARR_JOBS"] == "4"
+
+
+def test_secrets_present_in_test_state_dir_flips_token(
+    dirs: tuple[Path, Path],
+) -> None:
+    zarr_base, home = dirs
+    test_state_dir = zarr_base / "zarr-state-test"
+    test_state_dir.mkdir(parents=True)
+    (test_state_dir / ".zarr-secrets.env").write_text("NEMAR_WEBHOOK_TOKEN=abc123\n")
+
+    proc = run_script(["--test", "--print-config"], zarr_base, home)
+
+    assert proc.returncode == 0, proc.stderr
+    cfg = parse_config(proc.stdout)
+    assert cfg["NEMAR_WEBHOOK_TOKEN"] == "present"
+
+
+def test_secrets_at_prod_path_not_used_in_test_mode(
+    dirs: tuple[Path, Path],
+) -> None:
+    """A secrets file sitting at the PROD state dir must not be read by a
+    --test run -- each instance reads only its own state dir's secrets file.
+    """
+    zarr_base, home = dirs
+    prod_state_dir = zarr_base / "zarr-state"
+    prod_state_dir.mkdir(parents=True)
+    (prod_state_dir / ".zarr-secrets.env").write_text("NEMAR_WEBHOOK_TOKEN=prodtoken\n")
+
+    proc = run_script(["--test", "--print-config"], zarr_base, home)
+
+    assert proc.returncode == 0, proc.stderr
+    cfg = parse_config(proc.stdout)
+    assert cfg["NEMAR_WEBHOOK_TOKEN"] == "absent"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--print-config", "--test"],
+        ["--test", "--dataset", "xx099905", "--print-config"],
+        ["--requeue", "all", "--test", "--print-config"],
+        ["--backfill-dir-formats", "--test", "--print-config"],
+        ["--preview-engine-bump", "--test", "--print-config"],
+    ],
+    ids=[
+        "print-config-before-test",
+        "test-dataset-print-config",
+        "requeue-all-test-print-config",
+        "backfill-dir-formats-test-print-config",
+        "preview-engine-bump-test-print-config",
+    ],
+)
+def test_flag_order_and_combinations_resolve_test_defaults(
+    dirs: tuple[Path, Path], args: list[str]
+) -> None:
+    zarr_base, home = dirs
+    proc = run_script(args, zarr_base, home)
+
+    assert proc.returncode == 0, proc.stderr
+    cfg = parse_config(proc.stdout)
+    assert cfg["TEST_MODE"] == "1"
+    assert cfg["S3_BUCKET"] == "nemar-dev"
+    assert cfg["API_BASE"] == "https://api-test.nemar.org"
+    assert cfg["TEST_API_URL"] == "https://api-test.nemar.org"
+
+    if "--dataset" in args:
+        assert cfg["ONLY_DATASET"] == "xx099905"
+    if "--requeue" in args:
+        assert cfg["REQUEUE"] == "all"
+    if "--backfill-dir-formats" in args:
+        assert cfg["BACKFILL_DIR_FORMATS"] == "1"
+    if "--preview-engine-bump" in args:
+        assert cfg["PREVIEW_ENGINE_BUMP"] == "1"
 
 
 def test_print_config_creates_no_files_in_test_mode(dirs: tuple[Path, Path]) -> None:
