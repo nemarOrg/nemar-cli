@@ -360,9 +360,10 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   and an embedded classic `.set` loads fully even with `preload=False`.
   Discovery and dispatch are raw-only (ADR 0027):
   nothing under `derivatives/`, `sourcedata/`, or `code/` becomes a *new* store.
-  Stores published under those trees before that landed are a separate,
-  explicitly authorized purge — some are still served until it completes,
-  so do not read the rule as a description of what is currently in the bucket.
+  Stores published under those trees before that landed are being deleted by
+  `scripts/zarr/purge_non_raw_stores.py`; index v3 stops republishing them at the
+  same time (see the coverage paragraph below), so the index describes what is
+  served rather than what the bucket still happens to hold mid-purge.
   A `--clean` rebuild reconciles rather than wiping first (ADR 0023).
   **`index.json` is format v3 and is the mandatory entry point** — anonymous
   in-prefix ListBucket is denied, so it is how a client learns what is served.
@@ -395,9 +396,9 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   the shortest delay (1 h) and does NOT advance `retry_round`** — nothing has
   failed for it, so a dataset merely too large to finish in one run must not burn
   its rounds on recordings nobody has tried yet. The converter reports the split
-  as `pending_count` and `not_attempted_count` on the callback. Per-store `source_key` moved OUT of the index into a sibling
-  `manifest.json` (nothing on the website read it; it was 18 percent of
-  nm000281's 12.8 MB index).
+  as `pending_count` and `not_attempted_count` on the callback.
+  Per-store `source_key` moved OUT of the index into a sibling `manifest.json`
+  (nothing on the website read it; it was 18 percent of nm000281's 12.8 MB index).
   The index also publishes dataset-level `doi` / `license` / `citation` /
   `hed_version` and a `layout` object of `const` path templates, so an MCP recipe
   (ADR 0025) is computable from `index.json` plus one array-metadata fetch with no
