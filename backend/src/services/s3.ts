@@ -22,6 +22,12 @@ export interface PresignedUrlOptions {
   region: string;
   accessKeyId: string;
   secretAccessKey: string;
+  /** Test-only origin override (e.g. "http://127.0.0.1:PORT") for signing
+   *  against a local receiver instead of `https://<bucket>.s3.<region>.amazonaws.com`
+   *  (#1062, epic #1181 phase 2: zarr-catalog.ts's PUT/GET tests use a real
+   *  local `Bun.serve()` instead of mocking fetch, per .rules/testing.md).
+   *  No production caller sets this. */
+  endpointUrl?: string;
 }
 
 interface GenerateUrlsParams {
