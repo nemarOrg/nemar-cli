@@ -168,6 +168,16 @@
       ],
       "description": "HED schema version the dataset's annotations use, or null."
     },
+    "events_parquet": {
+      "type": "string",
+      "pattern": "^https://",
+      "description": "URL of this dataset's events file, one Parquet row per (event, channel group) across every store (#1060). ABSENT means there is no file to read: the dataset has no events.tsv anywhere, or this run could not publish one -- never assume the path exists. Columns: store_path (joins to stores[].zarr), subject, session, task, run, onset_s, duration_s, sample_index, group_name, trial_type, value, hed, then the remaining events.tsv columns under their own names (x_-prefixed only on a collision with those). sample_index is the LEVEL-0 sample the onset falls on, computed by the converter -- which is the only party that knows the exact resampling relation -- so a client never re-derives it."
+    },
+    "events_row_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Rows in events_parquet. Present exactly when events_parquet is. NOT the event count: a store with two channel groups contributes two rows per event, one per group, because an onset lands on a different sample in each. The per-store event counts are stores[].n_events, produced by the same parse."
+    },
     "layout": {
       "type": "object",
       "additionalProperties": false,
@@ -177,7 +187,7 @@
         "view_levels",
         "scale_offset"
       ],
-      "description": "How to turn this index's numbers into reads, so an MCP recipe (ADR 0025) is computable from index.json plus ONE array-metadata fetch, with no probing. Paths are relative to contract_base; <zarr> is a store's `zarr`, <group> a groups[].name, <L> a view level. const values: a client may hardcode them once it has checked format_version, and changing the layout is therefore a schema change rather than a silent one.",
+      "description": "How to turn this index's numbers into reads, so an MCP recipe (ADR 0025) is computable from index.json plus ONE array-metadata fetch, with no probing. Paths are relative to contract_base; <zarr> is a store's `zarr`, <group> a groups[].name, <L> a view level. `events` is the exception and is stated against data_base, because it is a single object rather than a store path and the index also publishes its URL directly as events_parquet -- which is what says whether it EXISTS. const values: a client may hardcode them once it has checked format_version, and changing the layout is therefore a schema change rather than a silent one.",
       "properties": {
         "level0": {
           "const": "<zarr>/<group>/0"
@@ -190,6 +200,9 @@
         },
         "scale_offset": {
           "const": "level-0 array attrs scale[] and offset[]; physical = digital * scale + offset"
+        },
+        "events": {
+          "const": "<data_base>events.parquet"
         }
       }
     }
@@ -465,5 +478,5 @@
       "additionalProperties": false
     }
   },
-  "$comment": "STABILITY POLICY. This schema is CLOSED at format_version 3: every object is additionalProperties:false, so a document carrying a field this schema does not name is invalid and the producer refuses to publish it. Additive change within v3 ships as format_version 3 with NEW OPTIONAL fields only, declared here -- a client pinned to v3 keeps validating. A BREAKING change (a removed or retyped field, a narrowed enum) is format_version 4 at a NEW schema path (/schemas/zarr-index-v4.json); this path keeps serving v3 for as long as any dataset publishes it, because the index is the mandatory entry point and a client cannot fall back to anything else. Read format_version before anything else."
+  "$comment": "STABILITY POLICY. This schema is CLOSED at format_version 3: every object is additionalProperties:false, so a document carrying a field this schema does not name is invalid and the producer refuses to publish it. Additive change within v3 ships as format_version 3 with NEW OPTIONAL fields only, declared here -- a client pinned to v3 keeps validating. That is what `events_parquet`/`events_row_count` and `layout.events` are (#1060): optional, so an index for a dataset with no events -- and one written before they existed -- still validates, and `layout.events` is deliberately absent from layout's `required` set for the same reason. A BREAKING change (a removed or retyped field, a narrowed enum) is format_version 4 at a NEW schema path (/schemas/zarr-index-v4.json); this path keeps serving v3 for as long as any dataset publishes it, because the index is the mandatory entry point and a client cannot fall back to anything else. Read format_version before anything else."
 }
