@@ -1411,6 +1411,20 @@ describe("redirect Location and the proxied fetch target are both correctly enco
   });
 });
 
+describe("invalid dataset ids never redirect, even with a plausible path shape (#1181 phase 6 review item 3)", () => {
+  for (const id of ["zz000001", "nm1234567", "nm999999"]) {
+    test(`${id} with no Origin falls through to the normal 404, not a redirect to a garbage URL`, async () => {
+      const res = await request(`/${id}/zarr/store.zarr/c/0/0`);
+      expect(res.status).toBe(404);
+      expect(res.headers.get("location")).toBeNull();
+      // isPublicDataset short-circuits on isValidDatasetId before ever
+      // reading D1 for a shape this obviously invalid -- same as it always
+      // did for these ids on the proxied path.
+      expect(countUpstream(`${id}/zarr/store.zarr/c/0/0`, "")).toBe(0);
+    });
+  }
+});
+
 function countingDb(inner: D1Database): { db: D1Database; prepareCalls: () => number } {
   let calls = 0;
   const wrapped = {
@@ -1587,6 +1601,26 @@ describe("isRedirectCandidate (#1181 phase 6 / issue #1061)", () => {
 
   test("malformed percent-encoding falls through to 'not a candidate' rather than throwing", () => {
     expect(isRedirectCandidate("GET", "/on000001/zarr/%", null)).toBe(false);
+  });
+
+  test("'zarr' as a prefix of a longer segment is not a candidate (#1181 phase 6 review item 2)", () => {
+    // The old `\/zarr\/?(.*)$` pattern matched "bogus" as `rest` here --
+    // neither shape reaches serve()'s `/:datasetId/zarr/*` route at all.
+    expect(isRedirectCandidate("GET", "/on000001/zarrbogus", null)).toBe(false);
+    expect(isRedirectCandidate("GET", "/on000001/zarr-x", null)).toBe(false);
+  });
+
+  test("an invalid dataset id is never a candidate, even with a plausible path shape (#1181 phase 6 review item 3)", () => {
+    expect(isRedirectCandidate("GET", "/zz000001/zarr/store.zarr/c/0/0", null)).toBe(false); // wrong prefix
+    expect(isRedirectCandidate("GET", "/nm1234567/zarr/store.zarr/c/0/0", null)).toBe(false); // too many digits
+    expect(isRedirectCandidate("GET", "/nm999999/zarr/store.zarr/c/0/0", null)).toBe(false); // over the 99999 cap
+  });
+
+  test("catalog.json can never match the zarr object path shape, for any Origin (#1181 phase 6 review item 7)", () => {
+    for (const origin of [null, "https://nemar.org", "https://evil.example.org"]) {
+      expect(isRedirectCandidate("GET", "/catalog.json", origin)).toBe(false);
+      expect(isRedirectCandidate("GET", "/zarrproxy/catalog.json", origin)).toBe(false);
+    }
   });
 });
 

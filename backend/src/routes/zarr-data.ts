@@ -89,20 +89,39 @@ export function corsHeaders(origin: string | null): Record<string, string> {
  * Path shape for a zarr object request, tolerant of both entry points:
  *   `/<id>/zarr/<rest>`            (zarr.nemar.org host fork)
  *   `/zarrproxy/<id>/zarr/<rest>`  (path-mounted on api.nemar.org / workers.dev)
+ * Anchored on the `zarr` segment itself -- `(?:\/(.*))?$` requires either
+ * end-of-string right after `zarr` or a literal `/` before any rest, so
+ * `/on000001/zarrbogus` or `/on000001/zarr-x` cannot match (#1181 phase 6
+ * review item 2: the old `\/zarr\/?(.*)$` treated "bogus" as `rest` for
+ * `/on000001/zarrbogus`, misclassifying it as a redirect candidate that
+ * never actually reaches serve()'s `/:datasetId/zarr/*` route at all).
  * Mirrors ZARR_PATH_RE in middleware/rateLimit.ts (kept as an independent
  * literal rather than imported from there -- this file already imports
  * `rateLimiter` FROM rateLimit.ts, so importing the other direction too
- * would create a cycle).
+ * would create a cycle). The id is captured too (group 1) so
+ * isRedirectCandidate can validate it below -- the path shape alone
+ * (`[a-z]{2}\d+`) doesn't enforce the real id contract (exactly 6 digits,
+ * an `nm`/`xx`/`on` prefix, `<= 99999`; see isValidDatasetId).
  */
-const ZARR_OBJECT_PATH_RE = /^(?:\/zarrproxy)?\/[a-z]{2}\d+\/zarr\/?(.*)$/;
+const ZARR_OBJECT_PATH_RE = /^(?:\/zarrproxy)?\/([a-z]{2}\d+)\/zarr(?:\/(.*))?$/;
 
 /**
  * True when a request to this sub-app WILL take the redirect branch in
  * serve() below, rather than being proxied: a `GET` (never `HEAD` -- see
  * the module doc comment, that rule is load-bearing) for a store object --
  * not the always-proxied `index.json`, and not an empty/malformed path,
- * which the proxied branch 404s either way -- with no allowlisted browser
- * `Origin`.
+ * which the proxied branch 404s either way -- on a VALID dataset id, with
+ * no allowlisted browser `Origin`.
+ *
+ * The id check matters on its own (#1181 phase 6 review item 3): without
+ * it, `zz000001` (wrong prefix), `nm1234567` (too many digits), and
+ * `nm999999` (over the 99999 cap) all satisfied the old path-shape-only
+ * regex and got redirected to a garbage S3 URL -- with `recordAccess`
+ * writing an invalid dataset id into Analytics Engine -- while the exact
+ * same request with a browser Origin correctly 404'd via serve()'s
+ * isPublicDataset -> isValidDatasetId gate. A malformed id must fall
+ * through to that SAME 404 path regardless of Origin, not take a
+ * different, D1-free branch of its own.
  *
  * Called from exactly two places: serve()'s own routing decision, and the
  * rate-limit middleware below that exempts these hits from the data-ip
@@ -117,9 +136,11 @@ export function isRedirectCandidate(method: string, path: string, origin: string
   if (allowedOrigin(origin)) return false;
   const match = ZARR_OBJECT_PATH_RE.exec(path);
   if (!match) return false;
+  const [, datasetId, rawRest] = match;
+  if (!isValidDatasetId(datasetId)) return false;
   let rest: string | null;
   try {
-    rest = normalizeBidsPath(decodeURIComponent(match[1]));
+    rest = normalizeBidsPath(decodeURIComponent(rawRest ?? ""));
   } catch {
     // Malformed percent-encoding: fall through to the proxied path, which
     // hits the same decodeURIComponent call and 500s via onError -- the
@@ -128,8 +149,10 @@ export function isRedirectCandidate(method: string, path: string, origin: string
   }
   // index.json is always top-level (the producer never nests a store under
   // that name) and stays proxied/edge-cached/D1-gated -- the contract entry
-  // point (#1061). Phase 2's catalog.json will need the same exemption once
-  // it exists.
+  // point (#1061). catalog.json (phase 2, #1062) is a SEPARATE route
+  // (`GET /catalog.json`, no `<id>/zarr/` segment at all) and can never
+  // match ZARR_OBJECT_PATH_RE in the first place, so it needs no exemption
+  // here -- see the "catalog.json can never match" unit tests.
   return Boolean(rest) && rest !== "index.json";
 }
 
