@@ -4381,6 +4381,24 @@ class TestIndexSchemaSelfCheck(unittest.TestCase):
             biosigio_version="1.2.6",
         )
 
+    def test_the_validator_is_installed_so_this_class_can_fail(self):
+        """Without `jsonschema` every other test here is vacuous.
+
+        `validate_document` degrades to a loud warning when the validator is
+        missing -- deliberately, so an old venv on the conversion node still
+        converts rather than refusing to publish over a lint dependency. The
+        cost is that the positive cases below then pass without validating
+        anything, and the negative cases ERROR on their own import. Both read
+        like a green schema gate.
+
+        This is the tripwire: it fails, by name, in exactly the environment
+        where the rest of the class stops meaning anything. CI installs the
+        validator for this job (`.github/workflows/test.yml`), and so does
+        `scripts/zarr/requirements.txt`; if either drops it, this is what says
+        so.
+        """
+        import jsonschema  # noqa: F401 - presence IS the assertion
+
     def test_a_built_index_validates(self):
         validate_document(self.index(), INDEX_SCHEMA_PATH, "index")
 

@@ -122,6 +122,17 @@ jobs:
           bash -n scripts/zarr/hallu-zarr.sh
           shellcheck --severity=warning scripts/zarr/hallu-zarr.sh
 
+      # jsonschema ONLY -- deliberately not the whole requirements.txt. This job
+      # is the fast, pure-Python tier: it has no biosigIO/MNE/zarr and the tests
+      # that need them self-skip (`patch-duration-test` below is the job that
+      # installs the real stack). But the index/manifest schema self-check is
+      # pure Python, and without the validator installed those tests do not
+      # fail -- they ERROR on the import, and `validate_document`'s deliberate
+      # "warn and continue" degradation makes the positive cases pass vacuously.
+      # A schema gate nobody can see failing is not a gate (#1059).
+      - name: Install jsonschema
+        run: uv pip install --system "jsonschema>=4.21"
+
       - name: Converter helper tests
         run: python scripts/zarr/test_generate_zarr.py
 
