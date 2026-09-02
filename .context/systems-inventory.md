@@ -84,7 +84,7 @@ A fourth cron on this host (`hallu_cron_pipeline.sh`, 3 AM) belongs to the unrel
 |---|---|---|
 | `0 * * * *` | `~/.local/share/nemar-cli/scripts/hallu-sync.sh` | `/data/qumulo/openneuro/.nm-sync-cron.log` |
 | `15 * * * *` | `~/.local/share/nemar-cli/scripts/hallu-qa-sync.sh` | `/data/qumulo/openneuro/.nm-qa-sync-cron.log` |
-| `30 * * * *` | `/data/projects/yahya/nemar/hallu-zarr.sh` (with `ZARR_JOBS=24`) | `/mnt/local/zarr-state/.nm-zarr-cron.log` |
+| `30 * * * *` | `/mnt/local/zarr-state/nemar-cli/scripts/zarr/hallu-zarr.sh` (with `ZARR_JOBS=24`) | `/mnt/local/zarr-state/.nm-zarr-cron.log` |
 
 **There are two `nemar-cli` clones on this host, and only one of them is live.**
 Cron runs the scripts out of `/home/yahya/.local/share/nemar-cli`.
@@ -132,13 +132,13 @@ because SQLite locking over NFS is fragile.
 | Path | What it is |
 |---|---|
 | `/mnt/local/zarr-state/zarr-queue.db` | the work queue (SQLite) |
-| `/mnt/local/zarr-state/nemar-cli/` | clone of `nemarOrg/nemar-cli`; supplies the driver (`git pull` is the deploy path) |
+| `/mnt/local/zarr-state/nemar-cli/` | clone of `nemarOrg/nemar-cli`; supplies both the Python driver AND (since #1109) `hallu-zarr.sh` itself — `git reset --hard` is the deploy path for both, see below |
 | `/mnt/local/zarr-state/.zarr-venv/` | the Python environment biosigio installs into |
 | `/mnt/local/zarr-state/.nm-zarr.lock` | single-instance lock |
 | `/mnt/local/zarr-state/.nm-zarr.log` | detailed per-recording log (tens of MB; `grep -a`) |
 | `/mnt/local/zarr-state/.nm-zarr-cron.log` | one line per dataset start/finish |
 | `/mnt/local/zarr-scratch/` | per-dataset scratch, swept on each run |
-| `/data/projects/yahya/nemar/.zarr-secrets.env` | credentials, mode 600 |
+| `/mnt/local/zarr-state/.zarr-secrets.env` | credentials, mode 600 |
 
 Everything except the secrets is rebuildable, so the whole state directory is disposable.
 
@@ -152,27 +152,52 @@ ssh hallu '/mnt/local/zarr-state/.zarr-venv/bin/python \
 
 #### Deploying a converter change
 
-Two halves deploy differently, and the difference has bitten twice.
+**Both halves deploy themselves in the normal case, driver and shell script alike.**
+This section used to describe a two-halves, hand-placed-script reality
+that predated #1109 (which moved `hallu-zarr.sh` into the checkout);
+AGENTS.md's Zarr paragraph already carries the corrected description,
+and the ground truth below was re-verified against the live crontab, 2026-09-02.
 
-**The Python driver deploys itself.** `setup()` runs
-`git fetch && git reset --hard origin/$ZARR_DRIVER_REF` (default `main`) on the `nemar-cli` clone,
+`setup()` runs `git fetch && git reset --hard origin/$ZARR_DRIVER_REF` (default `main`)
+on the `nemar-cli` clone every run,
 then installs from that clone's `scripts/zarr/requirements.txt`
 with `--refresh-package biosigio --upgrade-package biosigio`
 so a version bump takes effect rather than resolving against a stale index cache.
+Since #1109 moved `hallu-zarr.sh` into the checkout,
+cron invokes the CLONE's own copy of the script, not a separately-maintained one.
+The live crontab confirms it:
 
-**`hallu-zarr.sh` cannot deploy itself,** because it has to exist before the clone does.
-It is a hand-placed copy that git never touches.
-The script compares itself against the repo copy each run and logs `DRIFT:` when they differ,
-but it deliberately does not self-copy: bash reads a script incrementally,
-so rewriting the running file mid-run resumes execution at a garbage byte offset.
-Deploy with an atomic rename, never an in-place overwrite:
+```
+30 * * * * mkdir -p /mnt/local/zarr-state && ZARR_JOBS=24 ZARR_DRIVER_REF=main \
+  /mnt/local/zarr-state/nemar-cli/scripts/zarr/hallu-zarr.sh \
+  >> /mnt/local/zarr-state/.nm-zarr-cron.log 2>&1
+```
+
+So the same `git reset --hard` that redeploys the Python driver
+also redeploys `hallu-zarr.sh` itself, on the very next hourly tick.
+
+**Hand-placement with `scp` + an atomic rename is now only for bootstrapping a node
+that has no clone yet** — the script has to exist before the clone does.
+The script compares itself against the clone's own copy each run
+and logs `DRIFT:` when they differ;
+in the normal (post-#1109) deployment the two paths are the same file,
+so this comparison is a no-op.
+A stale out-of-clone copy left at an old bootstrap path is inert, not a fallback
+(ADR 0029 carries a 2026-09-02 amendment noting exactly this).
+
+Bootstrap recipe, for a node with no clone at all:
 
 ```bash
-scp scripts/zarr/hallu-zarr.sh hallu:/data/projects/yahya/nemar/.hallu-zarr.sh.new
-ssh hallu 'cd /data/projects/yahya/nemar && bash -n .hallu-zarr.sh.new \
-  && cp -p hallu-zarr.sh hallu-zarr.sh.bak-$(date +%Y%m%d) \
-  && chmod +x .hallu-zarr.sh.new && mv .hallu-zarr.sh.new hallu-zarr.sh'
+ssh hallu 'mkdir -p /mnt/local/zarr-state'
+scp scripts/zarr/hallu-zarr.sh hallu:/mnt/local/zarr-state/hallu-zarr.sh
+ssh hallu 'chmod +x /mnt/local/zarr-state/hallu-zarr.sh
+           ZARR_DRIVER_REF=main /mnt/local/zarr-state/hallu-zarr.sh --stats'
 ```
+
+(`--stats` here only to avoid triggering a real reconcile/drain during the recipe walkthrough;
+drop it to let `setup()` clone the driver and start the queue for real.)
+`setup()` then clones `ZARR_DRIVER_REF` into `/mnt/local/zarr-state/nemar-cli/`,
+and every run after that invokes the clone's own copy going forward.
 
 #### The self-deploy is once per process, not once per hour
 
@@ -200,6 +225,125 @@ Ending it is safe by design and loses only the in-flight dataset:
 the queue is persistent, `reconcile` recovers a stale `inprogress`,
 and the next run sweeps orphaned scratch.
 Datasets already marked `done` are not reprocessed.
+
+### 3.4 Zarr conversion test instance (`zarr-test.nemar.org`, nemarOrg/nemar-cli#1180, epic #1181 phase 3)
+
+A second, independently-stated invocation of the same `hallu-zarr.sh` — not a fork, not a
+separate script — run with `--test`.
+It converts real BIDS recordings from `nemar-db-dev`'s catalog into `s3://nemar-dev/<id>/zarr/`,
+which `zarr-test.nemar.org` serves,
+so a converter change can be observed against a real re-conversion
+before it reaches all ~40k production stores.
+Before this, the only thing that ever populated `nemar-dev/*/zarr/*`
+was the copy phase of `nemar admin exemplar create --include-derived`
+— there is no standalone `copy` subcommand;
+`--include-derived` is a flag on `create`, and the copy is one internal phase of it —
+which cross-bucket-copies bytes prod already produced
+and cannot exercise a converter change at all.
+
+**What it converts.**
+`reconcile --api-base https://api-test.nemar.org` enqueues exactly what `nemar-db-dev` marks
+public — today that is the seven `xx0999NN` exemplar-fleet datasets
+(`scripts/exemplar-fleet.json`) plus any dev-range (`xx09*`) upload.
+No separate allowlist.
+
+**Verified live, 2026-09-02:**
+`hallu-zarr.sh --test --dataset xx099905` (branch `feature/issue-1180-phase3-staging-pipeline`)
+cloned metadata from `api-test.nemar.org`,
+streamed all 5 raw `.bdf` recordings from `s3://nemar-dev/xx099905/objects/`,
+converted, and pushed to `s3://nemar-dev/xx099905/zarr/`.
+[`https://zarr-test.nemar.org/xx099905/zarr/index.json`](https://zarr-test.nemar.org/xx099905/zarr/index.json)
+served the fresh result immediately:
+`store_count: 5`, `updated_utc: 2026-09-02T16:08:31Z`, `source_commit` matching the clone's HEAD.
+Prod's `zarr-queue.db` mtime and `.nm-zarr.lock` were unchanged before/after;
+`s3://nemar/xx099905/zarr/` (prod bucket, admin credentials) listed zero objects;
+`api.nemar.org/datasets/xx099905` 404s (the id exists only in dev).
+The webhook callback was skipped exactly as designed —
+no `.zarr-secrets.env` exists yet at `/mnt/local/zarr-state-test/`,
+the script logged the non-fatal warning,
+and `api-test.nemar.org/datasets/xx099905`'s
+`zarr_status`/`zarr_store_count`/`zarr_converted_at` stayed `null`
+— S3 is the source of truth the viewer reads, and it advanced regardless.
+
+**State is fully separate from prod**, on the same box:
+
+| Path | What it is |
+|---|---|
+| `/mnt/local/zarr-state-test/zarr-queue.db` | the test instance's work queue (SQLite; own `flock`, never contends with prod's) |
+| `/mnt/local/zarr-state-test/nemar-cli/` | clone of `nemarOrg/nemar-cli`, tracking `ZARR_DRIVER_REF=dev` by default |
+| `/mnt/local/zarr-state-test/.zarr-venv/` | the test instance's own Python environment |
+| `/mnt/local/zarr-state-test/.nm-zarr.lock` | single-instance lock, independent of prod's |
+| `/mnt/local/zarr-state-test/.nm-zarr.log` | detailed per-recording log; only the wrapper's own start/done/error lines carry a `[test]` prefix — output redirected into it from the driver and the `nemar` CLI does not |
+| `/mnt/local/zarr-state-test/.nm-zarr-cron.log` | one line per dataset start/finish (once the nightly cron below is installed) |
+| `/mnt/local/zarr-scratch-test/` | per-dataset scratch, swept on each run, separate from prod's `/mnt/local/zarr-scratch/` |
+| `/mnt/local/zarr-state-test/.zarr-secrets.env` | `NEMAR_WEBHOOK_TOKEN` for the dev worker; **not present as of this writing** — the callback is skipped and the script says so loudly, non-fatally |
+
+**Credentials, resolved by `--test` only when the variable is otherwise unset**
+(an explicit env var still wins,
+and `--test` refuses six prod values outright, normalized and case-insensitively —
+see the guard rails in `hallu-zarr.sh`):
+
+| Variable | `--test` default | Notes |
+|---|---|---|
+| `API_BASE` | `https://api-test.nemar.org` | the Python driver/queue's catalog and webhook base |
+| `TEST_API_URL` | `https://api-test.nemar.org` | **a second, separate hook** — the `nemar` CLI binary that `convert_dataset()` shells out to for the metadata clone resolves its own API base independently of `API_BASE` (`src/lib/api/client.ts` `getApiUrl()`); missed by issue #1180's original env-var inventory, found live during this phase's verification |
+| `S3_BUCKET` | `nemar-dev` | |
+| `ZARR_AWS_PROFILE` | `nemar-zarr-dev` | IAM user `nemar-hallu-zarr-dev`, `s3:Get/Put/Delete` on `nemar-dev/*/zarr/*` + `GetObject` on `nemar-dev/*/objects/*` + `ListBucket`; cannot write to the prod bucket — per the IAM policy as provisioned 2026-09-02 (inline policy `zarr-rw-dev` on user `nemar-hallu-zarr-dev`, no IaC in this repo) |
+| `ZARR_STATE_DIR` | `${ZARR_BASE:-/mnt/local}/zarr-state-test` | |
+| `ZARR_WORK_DIR` | `${ZARR_BASE:-/mnt/local}/zarr-scratch-test` | |
+| `ZARR_DRIVER_REF` | `dev` | tracks the same unreleased branch the rest of staging tracks |
+| `ZARR_JOBS` | `4` | deliberately low — a test instance shares Hallu's cores with the prod backfill and must not contend with it |
+
+**Ops sanity check, no side effects:**
+`hallu-zarr.sh --test --print-config` (or plain `--print-config` for the prod defaults)
+prints every resolved value and exits 0 before touching the filesystem, network, or lock
+— safe to run at any time, from any state dir.
+
+**Run one dataset by hand:**
+
+```bash
+ssh hallu '/mnt/local/zarr-state-test/nemar-cli/scripts/zarr/hallu-zarr.sh --test --dataset xx099905'
+```
+
+(or `--test --limit 1` to let `reconcile` pick the next queued dataset instead of naming one).
+Watch `/mnt/local/zarr-state-test/.nm-zarr.log`;
+confirm the fresh store at `https://zarr-test.nemar.org/<id>/zarr/index.json`.
+
+**Bootstrapping a node with no test clone yet**
+(same shape as the prod bootstrap in §3.3 — the script has to exist before the clone does):
+
+```bash
+ssh hallu 'mkdir -p /mnt/local/zarr-state-test'
+scp scripts/zarr/hallu-zarr.sh hallu:/mnt/local/zarr-state-test/hallu-zarr.sh
+ssh hallu 'chmod +x /mnt/local/zarr-state-test/hallu-zarr.sh
+           ZARR_DRIVER_REF=<branch> /mnt/local/zarr-state-test/hallu-zarr.sh --test --print-config'
+```
+
+`setup()` then clones `ZARR_DRIVER_REF` into `/mnt/local/zarr-state-test/nemar-cli/`
+on the first real (non-`--print-config`) invocation, same as prod.
+Once that clone exists, cron and manual runs alike should invoke the CLONE's copy
+(`/mnt/local/zarr-state-test/nemar-cli/scripts/zarr/hallu-zarr.sh --test ...`),
+not the hand-placed bootstrap copy,
+so `setup()`'s self-deploy keeps it current
+— identical reasoning to §3.3's driver/script split.
+
+**Cron (documented here; not installed by this phase — see the PR for what remains for ops):**
+
+```
+15 3 * * * /mnt/local/zarr-state-test/nemar-cli/scripts/zarr/hallu-zarr.sh --test >> /mnt/local/zarr-state-test/.nm-zarr-cron.log 2>&1
+```
+
+Nightly and off the prod cron's `:30` hourly tick
+— deliberately infrequent, since the test catalog is small
+and the point is observability, not throughput.
+
+**What is NOT shared with prod:**
+state directory, lock, queue db, venv, driver clone,
+`ZARR_JOBS` (capped to protect prod's cores), S3 bucket, IAM profile, API base,
+webhook token/secrets file.
+**What IS shared:**
+the Hallu box itself and its cores (hence the low `ZARR_JOBS`),
+and the `nemar-cli` GitHub repo the driver is cloned from (different ref).
 
 ---
 
