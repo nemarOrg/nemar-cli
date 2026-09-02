@@ -14,7 +14,10 @@ One row per dataset:
                             --   | unlisted (dropped from the public catalog)
          attempts, last_error, next_retry_at (epoch),
          enqueued_at (ISO), updated_at (epoch),
-         engine_version)    -- the discovery generation it was converted under
+         engine_version,    -- the discovery generation it was converted under
+         pending_count,     -- recordings the last run left unconverted but still
+                            --   expects to convert (index.json's `pending`)
+         retry_round)       -- how many pending-driven retries it has had
 
 `failed` is an INFRA failure that exhausted its bounded retries (transient: a
 crashed worker / S3 blip — could be re-tried manually). `data_failed` is a
@@ -36,7 +39,11 @@ Subcommands (all take --db):
     next
         Atomically claim the oldest eligible job -> `inprogress`; print
         "<dataset_id>\t<latest_version>" (nothing if the queue is drained).
-    done DATASET VERSION         mark converted at VERSION (stamps the engine).
+    done DATASET VERSION [--pending-count N]
+        mark converted at VERSION (stamps the engine). A non-zero --pending-count
+        means the run left recordings unconverted for a retryable reason: the row
+        stays `done` (what converted is served) but carries a backoff, and
+        `reconcile` re-queues it when that elapses, up to PENDING_MAX_ROUNDS.
     fail DATASET "ERROR" [--max-attempts N] [--backoff-base S] [--deterministic]
         attempts++; reschedule (pending + next_retry_at) until max-attempts, then
         terminal `failed`. `--deterministic` is terminal at once as `data_failed`.
@@ -82,10 +89,22 @@ CREATE TABLE IF NOT EXISTS jobs (
   next_retry_at     INTEGER NOT NULL DEFAULT 0,
   enqueued_at       TEXT,
   updated_at        INTEGER NOT NULL DEFAULT 0,
-  engine_version    TEXT
+  engine_version    TEXT,
+  pending_count     INTEGER NOT NULL DEFAULT 0,
+  retry_round       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 """
+
+# Columns added after the table existed in production. `CREATE TABLE IF NOT
+# EXISTS` cannot add a column to a table that is already there, so every entry
+# here is also applied by `migrate_schema` on connect. Constant DEFAULTs only:
+# SQLite requires that for `ALTER TABLE ... ADD COLUMN` with NOT NULL.
+_ADDED_COLUMNS = (
+    ("engine_version", "TEXT"),
+    ("pending_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("retry_round", "INTEGER NOT NULL DEFAULT 0"),
+)
 
 DATASET_ID_RE = re.compile(r"^(nm|on)[0-9]{6}$")
 
@@ -118,6 +137,39 @@ ZARR_ENGINE_VERSION = "2"
 # stamp or a rolled-back driver could leave behind.
 DEFAULT_ENGINE_REQUEUE_LIMIT = 25
 
+# --- pending-retry policy (nemarOrg/nemar-cli#1197) --------------------------
+# A conversion that leaves recordings unconverted for an INFRA reason (a crashed
+# worker, a transient S3 error, the node's free memory at that instant) still
+# returns 0 and is marked `done`, because the recordings that DID convert are on
+# S3 and worth serving (ADR 0005). Before index v3 those recordings were then
+# stranded: nothing retried them and nothing said so. on008083 lost five that way
+# and they appeared in neither `stores` nor `failures` for weeks.
+#
+# The index now lists them in `pending`, and this is the other half: a `done` row
+# whose last run reported `pending_count > 0` is re-queued automatically, after a
+# backoff that grows with the number of rounds already spent on it.
+#
+# The backoff is per ROUND, not exponential from a base, because the useful
+# spacing here is not geometric: an hour catches a transient blip, six hours
+# catches an overloaded evening, a day catches a bad node, and after that the
+# honest reading is "this needs a person", so the retry drops to weekly rather
+# than either giving up or spinning.
+PENDING_BACKOFF_SECONDS = (3600, 6 * 3600, 24 * 3600, 7 * 86400, 7 * 86400)
+# Rounds a dataset gets before its pending recordings stop being re-queued. Paired
+# with `generate_zarr.PENDING_MAX_ATTEMPTS`, which promotes the recording to a
+# typed `retry_exhausted` failure at the same count -- that promotion is what
+# actually drives `pending_count` to 0, so this is the backstop for a converter
+# that never gets to run the promotion.
+PENDING_MAX_ROUNDS = 5
+
+
+def pending_backoff_seconds(retry_round: int) -> int:
+    """Seconds to wait before re-queueing a `done` dataset that has pending
+    recordings, given how many rounds it has already had. Round 1 is the first
+    retry; anything past the table holds at its last entry."""
+    idx = max(1, retry_round) - 1
+    return PENDING_BACKOFF_SECONDS[min(idx, len(PENDING_BACKOFF_SECONDS) - 1)]
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -144,11 +196,16 @@ def _vtag(v: str | None) -> str:
 
 
 def migrate_schema(conn: sqlite3.Connection, engine_version: str = ZARR_ENGINE_VERSION) -> int:
-    """Add `engine_version` to a pre-existing `jobs` table and seed it.
+    """Add the post-hoc columns (`_ADDED_COLUMNS`) to a pre-existing `jobs` table
+    and seed `engine_version`.
 
     Returns how many rows were seeded (0 on a brand-new or already-migrated DB).
     Additive: `CREATE TABLE IF NOT EXISTS` cannot add a column to a table that
-    already exists, which is why this is here at all.
+    already exists, which is why this is here at all. Only `engine_version` needs
+    SEEDING -- `pending_count`/`retry_round` (#1197) carry a constant 0 default,
+    which is the correct reading for a row converted before they existed: no
+    pending recordings were recorded, so none are outstanding as far as anything
+    can tell, and the next conversion writes the real number.
 
     **The ALTER and the seeding are deliberately decoupled, and the seed runs on
     EVERY connect.** SQLite makes an `ALTER TABLE ... ADD COLUMN` durable the
@@ -190,9 +247,11 @@ def migrate_schema(conn: sqlite3.Connection, engine_version: str = ZARR_ENGINE_V
     requeues exactly the rows that predate the bump, automatically.
     """
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
-    if "engine_version" not in cols:
+    for name, decl in _ADDED_COLUMNS:
+        if name in cols:
+            continue
         try:
-            conn.execute("ALTER TABLE jobs ADD COLUMN engine_version TEXT")
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {decl}")
         except sqlite3.OperationalError as exc:
             # Another process added it between our PRAGMA and this statement.
             # That is a benign race, not a failure -- but only for this exact
@@ -336,6 +395,14 @@ def reconcile(
     # with no line saying so.
     rejected = 0
     engine_stale = 0
+    # Coverage bookkeeping (#1197): how many `done` datasets still owe recordings,
+    # how many were re-queued for that this run, and how many have spent their
+    # rounds and now need a person. Reported on every reconcile so a growing
+    # stranded population is visible in the cron log rather than only in an index
+    # nobody opens.
+    pending_outstanding = 0
+    pending_requeued = 0
+    pending_exhausted = 0
     # (dataset_id, version to convert) for rows the STAMP alone would requeue.
     # Held until the walk finishes so the guard below can judge the whole bump
     # rather than the first N rows of it.
@@ -349,7 +416,8 @@ def reconcile(
             rejected += 1
             continue
         row = conn.execute(
-            "SELECT status, converted_version, latest_version, engine_version FROM jobs"
+            "SELECT status, converted_version, latest_version, engine_version,"
+            " pending_count, retry_round, next_retry_at FROM jobs"
             " WHERE dataset_id=?",
             (dataset_id,),
         ).fetchone()
@@ -371,6 +439,25 @@ def reconcile(
             stale_engine = _engine_is_stale(row["engine_version"], engine_version)
             if stale_engine:
                 engine_stale += 1
+            # Recordings this dataset still owes (#1197). A `done` row can be
+            # serving what converted while five recordings sit in the index's
+            # `pending` list, which nothing used to revisit: the run returned 0,
+            # the row went `done`, and the queue never looked again. Re-queue it
+            # once its backoff has elapsed, and stop after PENDING_MAX_ROUNDS so a
+            # recording that will never convert cannot occupy the queue forever
+            # (the converter promotes it to a `retry_exhausted` failure at the
+            # same count, which is what normally ends the loop first).
+            pending_n = int(row["pending_count"] or 0)
+            rounds = int(row["retry_round"] or 0)
+            pending_due = (
+                pending_n > 0
+                and rounds < PENDING_MAX_ROUNDS
+                and int(row["next_retry_at"] or 0) <= now
+            )
+            if pending_n > 0:
+                pending_outstanding += 1
+                if rounds >= PENDING_MAX_ROUNDS:
+                    pending_exhausted += 1
             if version_changed:
                 conn.execute(
                     "UPDATE jobs SET latest_version=?, status='pending', attempts=0,"
@@ -378,6 +465,17 @@ def reconcile(
                     (latest, now, dataset_id),
                 )
                 enq += 1
+            elif pending_due:
+                # Deliberately ahead of the stamp-only branch: this is ordinary
+                # unfinished work on the CURRENT engine, not part of a bump, so it
+                # must not be held back by the engine-requeue guard.
+                conn.execute(
+                    "UPDATE jobs SET latest_version=?, status='pending', attempts=0,"
+                    " next_retry_at=0, updated_at=? WHERE dataset_id=?",
+                    (latest or row["latest_version"], now, dataset_id),
+                )
+                enq += 1
+                pending_requeued += 1
             elif stale_engine and engine_requeue:
                 # Deferred, not applied: see the guard after the walk. A
                 # stamp-only requeue may have no `latest` (a catalog row with no
@@ -474,6 +572,9 @@ def reconcile(
         "engine_requeued": engine_requeued,
         "engine_pending": len(stamp_only) if engine_requeue_blocked else 0,
         "engine_requeue_blocked": engine_requeue_blocked,
+        "pending_outstanding": pending_outstanding,
+        "pending_requeued": pending_requeued,
+        "pending_exhausted": pending_exhausted,
     }
 
 
@@ -501,6 +602,7 @@ def mark_done(
     dataset_id: str,
     version: str,
     engine_version: str = ZARR_ENGINE_VERSION,
+    pending_count: int = 0,
 ) -> None:
     # Store the canonical tag, not whatever the caller happened to hold. `_vtag`
     # already makes reconcile's comparisons prefix-agnostic, so a bare value is
@@ -513,11 +615,42 @@ def mark_done(
     # parameter rather than a bare constant read so a test can express "this row
     # was converted by the old engine" through the real code path instead of
     # writing the column by hand.
-    conn.execute(
-        "UPDATE jobs SET status='done', converted_version=?, last_error=NULL,"
-        " next_retry_at=0, engine_version=?, updated_at=? WHERE dataset_id=?",
-        (_vtag(version), engine_version, _now(), dataset_id),
-    )
+    #
+    # `pending_count` is the converter's own count of recordings that have no
+    # store yet but are still expected to convert (#1197). A `done` row carrying
+    # one is not finished, only serving what it has -- so it keeps a
+    # `retry_round` and a `next_retry_at`, and `reconcile` re-queues it when that
+    # time arrives. A clean run RESETS both: whatever was outstanding no longer
+    # is, and a dataset that succeeds after four bad rounds must not be one round
+    # from exhaustion the next time something transient happens to it.
+    pending = max(0, int(pending_count))
+    now = _now()
+    if pending:
+        row = conn.execute(
+            "SELECT retry_round FROM jobs WHERE dataset_id=?", (dataset_id,)
+        ).fetchone()
+        rounds = int((row["retry_round"] if row else 0) or 0) + 1
+        conn.execute(
+            "UPDATE jobs SET status='done', converted_version=?, last_error=NULL,"
+            " engine_version=?, pending_count=?, retry_round=?, next_retry_at=?,"
+            " updated_at=? WHERE dataset_id=?",
+            (
+                _vtag(version),
+                engine_version,
+                pending,
+                rounds,
+                now + pending_backoff_seconds(rounds),
+                now,
+                dataset_id,
+            ),
+        )
+    else:
+        conn.execute(
+            "UPDATE jobs SET status='done', converted_version=?, last_error=NULL,"
+            " next_retry_at=0, engine_version=?, pending_count=0, retry_round=0,"
+            " updated_at=? WHERE dataset_id=?",
+            (_vtag(version), engine_version, now, dataset_id),
+        )
     conn.commit()
 
 
@@ -1197,6 +1330,15 @@ def main() -> int:
     p = sub.add_parser("done")
     p.add_argument("dataset")
     p.add_argument("version")
+    p.add_argument(
+        "--pending-count",
+        type=int,
+        default=0,
+        help="recordings the converter left in the index's `pending` list (#1197)."
+        " A `done` row carrying one is re-queued by reconcile after a backoff"
+        " (1h, 6h, 24h, then weekly), up to 5 rounds. 0 clears the counter and the"
+        " round.",
+    )
 
     p = sub.add_parser("fail")
     p.add_argument("dataset")
@@ -1291,7 +1433,12 @@ def main() -> int:
             f"reconcile: seen={len(datasets)} enqueued={res['enqueued']} "
             f"recovered_stale={res['recovered_stale']} unlisted={res['unlisted']} "
             f"rejected={res['rejected']} engine={ZARR_ENGINE_VERSION} "
-            f"engine_stale={res['engine_stale']} engine_requeued={res['engine_requeued']}"
+            f"engine_stale={res['engine_stale']} engine_requeued={res['engine_requeued']} "
+            # Coverage (#1197), on every run for the same reason engine_stale is:
+            # a steady zero is what makes the run that says otherwise legible.
+            f"pending_outstanding={res['pending_outstanding']} "
+            f"pending_requeued={res['pending_requeued']} "
+            f"pending_exhausted={res['pending_exhausted']}"
             + (
                 " (engine requeue SUPPRESSED by --no-engine-requeue)"
                 if args.no_engine_requeue and res["engine_stale"]
@@ -1348,7 +1495,7 @@ def main() -> int:
         return 0
 
     if args.cmd == "done":
-        mark_done(conn, args.dataset, args.version)
+        mark_done(conn, args.dataset, args.version, pending_count=args.pending_count)
         return 0
 
     if args.cmd == "requeue":
