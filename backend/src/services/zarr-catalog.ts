@@ -75,6 +75,16 @@ export interface ZarrCatalogSourceRow {
   zarr_converted_at: string | null;
   zarr_source_commit: string | null;
   zarr_errors: number | null;
+  /** Issue #1068 (epic #1181 phase 8): the standing fidelity verification
+   *  sweep's verdict/timestamp, projected from the JSON sweep_stamps column
+   *  by the candidate SQL below (ADR 0034/0035 -- no new column). Null on a
+   *  freshly-converted dataset the sweep has not reached yet; the catalog
+   *  population itself is UNCHANGED (still every has_zarr row) -- a
+   *  consumer that wants only verified entries filters on
+   *  `zarr_verify_status` client-side or calls the API with
+   *  `has_zarr_verified=1`. */
+  zarr_verify_status: string | null;
+  zarr_verified_at: string | null;
 }
 
 export interface ZarrCatalogDataset {
@@ -94,6 +104,9 @@ export interface ZarrCatalogDataset {
   zarr_converted_at: string | null;
   zarr_source_commit: string | null;
   zarr_errors: number | null;
+  /** Issue #1068 (epic #1181 phase 8). See {@link ZarrCatalogSourceRow}. */
+  zarr_verify_status: string | null;
+  zarr_verified_at: string | null;
   index_url: string;
 }
 
@@ -119,7 +132,9 @@ export const ZARR_CATALOG_CANDIDATE_SQL = `SELECT
     d.dataset_id, d.name, d.concept_doi, d.license, d.modalities, d.tasks,
     d.subject_count, d.has_hed, d.hed_version, d.zarr_status, d.zarr_store_count,
     d.recording_count, d.recordings_unavailable, d.total_recording_duration,
-    d.zarr_converted_at, d.zarr_source_commit, d.zarr_errors
+    d.zarr_converted_at, d.zarr_source_commit, d.zarr_errors,
+    json_extract(d.sweep_stamps, '$.zarr_verify_status') AS zarr_verify_status,
+    json_extract(d.sweep_stamps, '$.zarr_verified_at') AS zarr_verified_at
   FROM datasets d
   WHERE d.status = 'active' AND d.visibility = 'public'
     AND d.zarr_status = 'ready' AND COALESCE(d.zarr_store_count, 0) > 0
@@ -172,6 +187,8 @@ export function buildZarrCatalog(
     zarr_converted_at: row.zarr_converted_at,
     zarr_source_commit: row.zarr_source_commit,
     zarr_errors: row.zarr_errors,
+    zarr_verify_status: row.zarr_verify_status,
+    zarr_verified_at: row.zarr_verified_at,
     index_url: `${base}${row.dataset_id}/zarr/index.json`,
   }));
   return {

@@ -143,6 +143,27 @@ describe("ZARR_CATALOG_CANDIDATE_SQL: the real exclusion predicate", () => {
     const rows = candidateRows(db);
     expect(rows.map((r) => r.dataset_id)).toEqual(["on500001", "on500002", "xx099901"]);
   });
+
+  // Issue #1068, epic #1181 phase 8: the two verify fields are derived from
+  // the JSON sweep_stamps column (ADR 0034/0035), not a stored column --
+  // proved at the real SQL entry point, not just in buildZarrCatalog's pure
+  // unit tests below.
+  test("zarr_verify_status/zarr_verified_at are derived from sweep_stamps via json_extract", () => {
+    db.query("UPDATE datasets SET sweep_stamps = ? WHERE dataset_id = 'on500001'").run(
+      JSON.stringify({ zarr_verify_status: "verified", zarr_verified_at: "2026-09-01 00:00:00" }),
+    );
+    const rows = candidateRows(db);
+    const row = rows.find((r) => r.dataset_id === "on500001");
+    expect(row?.zarr_verify_status).toBe("verified");
+    expect(row?.zarr_verified_at).toBe("2026-09-01 00:00:00");
+  });
+
+  test("a never-swept row (sweep_stamps NULL) projects both verify fields as null", () => {
+    const rows = candidateRows(db);
+    const row = rows.find((r) => r.dataset_id === "on500001");
+    expect(row?.zarr_verify_status).toBeNull();
+    expect(row?.zarr_verified_at).toBeNull();
+  });
 });
 
 describe("buildZarrCatalog: shape, ordering, and CSV-to-array parsing", () => {
@@ -164,6 +185,9 @@ describe("buildZarrCatalog: shape, ordering, and CSV-to-array parsing", () => {
     zarr_converted_at: "2026-08-01T00:00:00.000Z",
     zarr_source_commit: "abc123",
     zarr_errors: 0,
+    // Issue #1068, epic #1181 phase 8.
+    zarr_verify_status: "verified",
+    zarr_verified_at: "2026-08-02T00:00:00.000Z",
     ...overrides,
   });
 
@@ -224,6 +248,29 @@ describe("buildZarrCatalog: shape, ordering, and CSV-to-array parsing", () => {
     expect(d.zarr_converted_at).toBe("2026-08-01T00:00:00.000Z");
     expect(d.zarr_source_commit).toBe("abc123");
     expect(d.zarr_errors).toBe(0);
+    expect(d.zarr_verify_status).toBe("verified");
+    expect(d.zarr_verified_at).toBe("2026-08-02T00:00:00.000Z");
+  });
+
+  // Issue #1068 (epic #1181 phase 8), decision 2: the catalog POPULATION is
+  // unchanged (still every has_zarr row), and the two verify fields ride
+  // along per entry -- null on a fresh conversion the sweep has not reached.
+  test("zarr_verify_status/zarr_verified_at are null on a fresh, unverified conversion", () => {
+    const catalog = buildZarrCatalog([row({ zarr_verify_status: null, zarr_verified_at: null })], {
+      contractBase: "https://zarr.nemar.org",
+    });
+    expect(catalog.count).toBe(1);
+    expect(catalog.datasets[0].zarr_verify_status).toBeNull();
+    expect(catalog.datasets[0].zarr_verified_at).toBeNull();
+  });
+
+  test("a 'failed' verdict still rides along on its own entry -- population is not filtered by verdict", () => {
+    const catalog = buildZarrCatalog(
+      [row({ dataset_id: "on500009", zarr_verify_status: "failed" })],
+      { contractBase: "https://zarr.nemar.org" },
+    );
+    expect(catalog.count).toBe(1);
+    expect(catalog.datasets[0].zarr_verify_status).toBe("failed");
   });
 
   test("preserves the input row order (the SQL query owns ORDER BY dataset_id)", () => {
