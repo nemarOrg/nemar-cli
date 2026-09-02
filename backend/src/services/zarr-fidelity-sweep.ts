@@ -247,7 +247,16 @@ export interface ZarrFidelityStoreJson {
 }
 
 /** Shape of the parsed `<id>/zarr/index.json` this module reads (subset,
- *  v1/v3-tolerant -- see the module doc). */
+ *  v1/v3-tolerant -- see the module doc).
+ *
+ *  TRUST BOUNDARY: `unknown` fields because the document is fetched from the
+ *  serving bucket and written by a cron on another host. The index's own
+ *  invariants (`store_count` matching `stores`, the coverage equation) are
+ *  enforced by the producer, `check_index_invariant` in
+ *  `scripts/zarr/generate_zarr.py`, and are NOT re-checked here: this sweep
+ *  compares published chunks against the source recordings and reports what it
+ *  could not check (`unchecked`), so a self-inconsistent index shows up as
+ *  unchecked samples rather than as a validation error. */
 export interface ZarrFidelityIndexJson {
   source_commit?: unknown;
   store_count?: unknown;
