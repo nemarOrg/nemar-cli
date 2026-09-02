@@ -360,10 +360,64 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   and an embedded classic `.set` loads fully even with `preload=False`.
   Discovery and dispatch are raw-only (ADR 0027):
   nothing under `derivatives/`, `sourcedata/`, or `code/` becomes a *new* store.
-  Stores published under those trees before that landed are a separate,
-  explicitly authorized purge — some are still served until it completes,
-  so do not read the rule as a description of what is currently in the bucket.
+  Stores published under those trees before that landed are being deleted by
+  `scripts/zarr/purge_non_raw_stores.py`; index v3 stops republishing them at the
+  same time (see the coverage paragraph below), so the index describes what is
+  served rather than what the bucket still happens to hold mid-purge.
   A `--clean` rebuild reconciles rather than wiping first (ADR 0023).
+  **`index.json` is format v3 and is the mandatory entry point** — anonymous
+  in-prefix ListBucket is denied, so it is how a client learns what is served.
+  Schema: `shared/zarr-index.schema.json`, validated by the converter before
+  upload and served at `GET /schemas/zarr-index-v3.json`.
+  `contract_base` is the only URL a client may hardcode; `data_base` / `s3_uri`
+  say where the bytes are today and are per-dataset so one dataset can be
+  mirrored without rewriting anyone's client.
+  `source_commit` is always a 40-hex SHA — the converter refuses to publish an
+  index without one (on008083 shipped `""`).
+  **Coverage balances by construction:**
+  `discovered_count == store_count + failure_count + pending_count`.
+  A carried-over store under `derivatives/`/`sourcedata/`/`code/` is DROPPED from
+  the index rather than republished — those stores are being deleted by
+  `purge_non_raw_stores.py`, not served — and each drop is logged with its cause
+  and counted as `non_raw_dropped` on the callback, never in the index. So
+  `source_tree` is always `raw`.
+  `failures[]` is what will not convert without a change to the data or the
+  converter, and each entry now carries a `detail` (exception class plus first
+  message line, local paths stripped) so an opaque `file_read_error` is
+  diagnosable from the public index. `pending[]` is new and is the other half:
+  recordings with no store that are still expected to convert
+  (`infra_failure` / `memory_budget` / `not_attempted`), with an `attempts`
+  count. These used to be omitted "so they retry next run" and then never did,
+  because a run that converted anything is marked `done`; `zarr_queue` now
+  re-queues such a dataset on its own. **Only the ATTEMPTED pendings
+  (`infra_failure`, `memory_budget`) drive the backoff table (1 h, 6 h, 24 h,
+  then weekly) and the 5-round exhaustion cap, after which the recording becomes
+  a typed `retry_exhausted` failure. A `not_attempted` pending is re-queued at
+  the shortest delay (1 h) and does NOT advance `retry_round`** — nothing has
+  failed for it, so a dataset merely too large to finish in one run must not burn
+  its rounds on recordings nobody has tried yet. The converter reports the split
+  as `pending_count` and `not_attempted_count` on the callback.
+  Per-store `source_key` moved OUT of the index into a sibling `manifest.json`
+  (nothing on the website read it; it was 18 percent of nm000281's 12.8 MB index).
+  The index also publishes dataset-level `doi` / `license` / `citation` /
+  `hed_version` and a `layout` object of `const` path templates, so an MCP recipe
+  (ADR 0025) is computable from `index.json` plus one array-metadata fetch with no
+  probing.
+  Stores also carry a structured `nemar` root attribute — dataset id, DOI,
+  license, citation, source commit, source tree, derived, HED version, engine
+  version, contract URL — read once per run from `GET /datasets/<id>`, so a
+  client that has the store has the attribution.
+  Served samples carry the unit the recording's `channels.tsv` declares, on
+  BOTH conversion paths (biosigio>=1.2.7). The sidecar is resolved by BIDS
+  inheritance — the same resolution the channel-count fidelity gate uses — and
+  passed EXPLICITLY as `bids_channels`, never biosigIO's `"auto"`: the file an
+  exporter is handed is a scratch materialisation, and on the MaxShield path it
+  is the filtered copy at `work/sss_<basename>`, so sibling detection is the
+  wrong question. `units_report` on a store entry is present exactly when a
+  sidecar was applied. **Index v3 is what `ZARR_ENGINE_VERSION = "3"` carries
+  to the back catalogue**, and the units change is why that bump needed the
+  1.2.7 floor: below it the streaming exporter could not apply the sidecar at
+  all, so the two paths would have disagreed.
   **A widening of discovery reaches the back catalog only through the engine
   stamp** (ADR 0033): `reconcile` re-queues on a version change, and an engine
   upgrade bumps no version, so `zarr_queue.py`'s `ZARR_ENGINE_VERSION` is what

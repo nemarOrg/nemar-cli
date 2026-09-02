@@ -17,6 +17,8 @@ This document contains workflows that have been **tested and validated** through
 6. [IAM Eventual Consistency Fix](#6-iam-eventual-consistency-fix)
 7. [GitHub Invitation Auto-Accept](#7-github-invitation-auto-accept)
 8. [Commit Authorship for NEMAR Users](#8-commit-authorship-for-nemar-users)
+9. [Zarr Test-Instance Bootstrap (`hallu-zarr.sh --test`)](#9-zarr-test-instance-bootstrap-hallu-zarrsh---test)
+10. [Zarr Engine-Version Bump (index format v3)](#10-zarr-engine-version-bump-index-format-v3)
 
 ---
 
@@ -1140,6 +1142,157 @@ curl -s -o /dev/null -w '%{http_code}\n' https://api.nemar.org/datasets/xx099905
   and this run proved the artifact half works completely on its own
   -- `zarr-test.nemar.org` served the fresh store even with `zarr_status` still `null`,
   which is the same "the viewer reads index.json, not D1" property documented for prod.
+
+---
+
+## 10. Zarr Engine-Version Bump (index format v3)
+
+**Validated:** 2026-09-02 -- `ZARR_ENGINE_VERSION = "3"` IS armed by phase 7;
+staging re-converts itself automatically, production still needs the two-step ack.
+**Prototype:** nemarOrg/nemar-cli#1059 / #1197 / #1064, epic #1181 phase 7 (ADR 0033)
+**Purpose:** Reach the back catalogue with a producer-side change. Index format v3,
+structured store provenance, coverage accounting, and the channels.tsv units change
+are all producer-side,
+so an already-converted dataset only picks them up when `reconcile` re-queues it --
+and the only thing that re-queues a `done` row on an unchanged dataset version
+is a change to `zarr_queue.py`'s `ZARR_ENGINE_VERSION` (ADR 0033).
+
+### Why the floor is biosigio>=1.2.7 and not 1.2.6
+
+The units half of this bump changes the BYTES: adopting a channels.tsv `units`
+value converts the channel's samples into that unit rather than relabelling them
+(biosigio#125). On 1.2.6 only the in-memory exporter could do it --
+`stream_to_zarr` had no `bids_channels` parameter at all -- so a dataset's small
+recordings would have converted under the sidecar's units and its large ones under
+the importer's, and a full re-conversion would have baked that split into the
+serving copy. 1.2.7 (biosigio#128) gives both exporters the same parameter, which
+is what makes one coherent re-conversion possible.
+
+Worth knowing, because no capability probe saves you from it: 1.2.6's
+`Recording.from_file` **accepts** `bids_channels=<path>` and silently treats
+anything that is not `"auto"` as `"off"` (measured -- the units report comes back
+`None`). A driver that passed the path form on 1.2.6 would believe the sidecar had
+been applied and serve importer units. Only the floor prevents that.
+
+### Staging proves the wave first, at no cost
+
+Merging this into the epic branch is enough to exercise the whole bump on the
+`--test` instance before production sees it:
+
+- Production tracks `main` (`ZARR_DRIVER_REF=main`), so it does not run this code
+  until the release.
+- The staging instance tracks the epic branch nightly and its queue holds only the
+  7 curated `xx0999NN` exemplars. That is under `ENGINE_REQUEUE_LIMIT` (25), so
+  `reconcile` requeues them WITHOUT an ack and the fleet re-converts through
+  engine 3 on its own -- eeg / ieeg / emg / meg / multi-modal / HED coverage,
+  which is the point of the fleet.
+- Verify with the served artifact rather than the queue:
+
+```bash
+curl -s https://zarr-test.nemar.org/xx099905/zarr/index.json | python3 -m json.tool | head -40
+# Expect: format_version 3, engine_version "3", biosigio_version "1.2.7",
+#         contract_base https://zarr-test.nemar.org/xx099905/zarr/,
+#         discovered_count == store_count + failure_count + pending_count,
+#         and units_report on the store entries whose recordings ship a channels.tsv.
+curl -s https://zarr-test.nemar.org/xx099905/zarr/manifest.json | python3 -m json.tool | head -20
+```
+
+### What an MCP broker reads (ADR 0025)
+
+Index v3 is meant to make a serving recipe computable from `index.json` plus ONE
+array-metadata fetch, with no probing -- the broker is stateless, so anything it
+cannot read from the index it must discover by request, and discovery-by-404 is
+what #1178 item 2 removed. The index therefore carries, per group,
+`n_view_levels` / `view_chunk_columns` / `chunk_samples` / `shard_samples` /
+`source_rate_hz`, and at the top level a `layout` object of `const` templates:
+
+```json
+"layout": {
+  "level0": "<zarr>/<group>/0",
+  "view": "<zarr>/<group>/view/<L>",
+  "view_levels": "1..n_view_levels from the group attrs",
+  "scale_offset": "level-0 array attrs scale[] and offset[]; physical = digital * scale + offset"
+}
+```
+
+Paths are relative to `contract_base`. `<zarr>` is a store's `zarr`, `<group>` a
+`groups[].name`, `<L>` a view level in `1..n_view_levels`. The templates are
+`const` in the schema, so a client may hardcode them once it has checked
+`format_version` -- and changing the layout becomes a schema change rather than a
+silent one. Dataset-level `doi` / `license` / `citation` / `hed_version` are
+published at the top level too (already fetched once per run for the store
+attrs), so a citation tool needs this document and nothing else.
+
+```bash
+# The whole recipe, from one fetch:
+curl -s https://zarr-test.nemar.org/xx099905/zarr/index.json |
+  python3 -c 'import json,sys; d=json.load(sys.stdin); s=d["stores"][0]; g=s["groups"][0]; \
+    print(d["contract_base"] + d["layout"]["level0"].replace("<zarr>", s["zarr"]).replace("<group>", g["name"]))'
+```
+
+### The production bump, at release
+
+```bash
+# 1. Release to main as usual. The pin and the engine constant are ALREADY in the
+#    tree -- phase 7 carries them; do NOT re-bump anything by hand.
+#    scripts/zarr/requirements.txt:  biosigio[zarr,meg,mef3,hdf5]>=1.2.7
+#    scripts/zarr/hallu-zarr.sh:     BIOSIGIO_SPEC fallback floor  >=1.2.7
+#    scripts/zarr/zarr_queue.py:     ZARR_ENGINE_VERSION = "3"
+
+# 2. Merging to main DEPLOYS it: setup() resets the Hallu clone to
+#    origin/$DRIVER_REF every run, so the next hourly tick runs the new constant.
+#    It re-queues nothing yet -- the guard below holds it, because ~800 rows is
+#    far over ENGINE_REQUEUE_LIMIT.
+
+# 3. Preview the cost before paying it. Read-only, no network, no writes.
+ssh hallu '/mnt/local/zarr-state/nemar-cli/scripts/zarr/hallu-zarr.sh --preview-engine-bump'
+#    Expect: engine-preview: current=3 ... stale=<~800>, i.e. the whole catalogue.
+
+# 4. Arm EXACTLY ONE run. The script consumes the file; re-touch it to re-arm.
+ssh hallu 'touch /mnt/local/zarr-state/.zarr-engine-bump-ack'
+
+# 5. Watch the next tick's reconcile line for engine_requeued=<n>, then the drain.
+ssh hallu 'tail -f /mnt/local/zarr-state/.nm-zarr.log'
+```
+
+### Test Results
+
+| Test | Result | Notes |
+|------|--------|-------|
+| `reconcile` requeues on a stamp change | PASS | `EngineStampRequeueTest`, unchanged by phase 7 |
+| A bump over `--engine-requeue-limit` (25) requeues nothing until acked | PASS | `EngineBumpGuardTest`, unchanged |
+| Pending-driven requeue is NOT blocked by an unacked bump | PASS | `PendingRetryTest::test_the_engine_bump_guard_does_not_block_a_pending_requeue` |
+| Coverage invariant holds on a full and a partial run | PASS | `TestCoverageInvariant` |
+| A carried-over non-raw store is dropped, counted and logged | PASS | `test_a_non_raw_store_is_dropped_and_counted` |
+| Index and manifest validate against their schemas before upload | PASS | `TestIndexSchemaSelfCheck` |
+
+### Gotchas and Warnings
+
+1. **Bump only when discovery WIDENS -- or when what a store CONTAINS does.**
+   Index v3 finds the same recordings; what changed is what a store says
+   (provenance, view geometry) and, for the units change, what it contains.
+   That is what makes a re-conversion worth ~800 datasets of Hallu compute.
+   A narrowing must never bump it (ADR 0033).
+2. **Until step 4, every reconcile logs `ENGINE BUMP PENDING ACK`** and requeues
+   nothing for the stamp; new datasets keep converting normally throughout.
+   The shell re-raises that notice as its own ERROR line, so it is not something
+   you find by reading to the end of a reconcile summary.
+3. **`pending_count` / `retry_round` arrive by `ALTER TABLE`,** not by
+   `CREATE TABLE IF NOT EXISTS`, and default to a constant 0 --
+   deliberately, so the ~800 pre-existing `done` rows do NOT look outstanding on
+   the first reconcile after deploy and re-queue the archive by accident
+   (the same trap `engine_version`'s NULL seeding exists to avoid).
+4. **The re-conversion rewrites every index and writes a new `manifest.json`.**
+   `source_key` disappears from index.json as datasets are re-converted, so a
+   consumer reading it (there is none on nemar.org) would break gradually rather
+   than all at once.
+
+### Architecture Implications
+
+- One engine bump carries every producer-side change in this phase, which is why
+  they were bundled: the archive is re-converted once, not once per feature.
+- `contract_base` in the index is the only URL clients are told to hardcode, so a
+  later move of the bytes needs no engine bump at all -- just a re-publish.
 
 ---
 

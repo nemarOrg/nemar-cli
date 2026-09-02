@@ -17,6 +17,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import generate_zarr
+from zarr_queue import ZARR_ENGINE_VERSION  # type: ignore[import-not-found]  # noqa: E402
+
 from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (sibling module via sys.path)
     _AWS_OP_TIMEOUT,
     _AWS_RM_TIMEOUT,
@@ -39,6 +42,7 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     annex_key_size,
     bids_suffix_modality,
     compute_clean_orphans,
+    convert_one,
     convert_recording,
     projected_peak_bytes,
     per_recording_ceiling_bytes,
@@ -108,7 +112,34 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     split_index,
     split_members_for,
     store_rel_for,
+    INDEX_SCHEMA_PATH,
+    MANIFEST_SCHEMA_PATH,
+    PENDING_MAX_ATTEMPTS,
+    channels_tsv_for,
+    check_index_invariant,
+    dataset_citation,
+    discover_primaries,
+    _failure_entry,
+    events_summary,
+    failure_detail,
+    fetch_dataset_row,
+    is_commit_sha,
+    merge_manifest,
+    nemar_store_attrs,
+    source_tree_for,
+    redact_secrets,
+    strip_local_paths,
+    validate_document,
 )
+
+
+# Real-shaped 40-hex commit SHAs. `merge_index` refuses anything else since index
+# v3: a published index that does not name the commit it was built from is
+# unreproducible and cannot seed the next incremental diff, and one was actually
+# published that way (on008083 carried `source_commit: ""`, #1197). A placeholder
+# like "sha" would now assert the wrong contract.
+SHA_OLD = "0" * 39 + "1"
+SHA_NEW = "0" * 39 + "2"
 
 
 def by_dir(primaries: list[str]) -> dict[str, list[str]]:
@@ -549,7 +580,7 @@ class TestSidecarRebuildsDirectoryRecordings(unittest.TestCase):
 class TestMergeIndex(unittest.TestCase):
     def test_upsert_remove_and_carry_over(self):
         prior = {
-            "source_commit": "old",
+            "source_commit": SHA_OLD,
             "stores": [
                 {"zarr": "sub-01/eeg/a_eeg.zarr", "store": "old-a"},
                 {"zarr": "sub-02/eeg/b_eeg.zarr", "store": "keep-b"},
@@ -557,23 +588,33 @@ class TestMergeIndex(unittest.TestCase):
         }
         converted = [{"zarr": "sub-01/eeg/a_eeg.zarr", "store": "new-a"}]
         index = merge_index(
-            prior, "nm000104", "newsha", converted, ["sub-02/eeg/b_eeg.zarr"], "2026-06-02T00:00:00Z"
+            prior, "nm000104", SHA_NEW, converted, ["sub-02/eeg/b_eeg.zarr"], "2026-06-02T00:00:00Z"
         )
-        self.assertEqual(index["source_commit"], "newsha")
+        self.assertEqual(index["source_commit"], SHA_NEW)
         self.assertEqual(index["store_count"], 1)
         self.assertEqual(index["format"], "nemar-zarr-index")
-        self.assertEqual(index["stores"], [{"zarr": "sub-01/eeg/a_eeg.zarr", "store": "new-a"}])
+        # v3 normalizes every published entry, this run's and the carried-over
+        # ones alike, so one index never mixes shapes (see _normalize_store_entry).
+        self.assertEqual(
+            index["stores"],
+            [{
+                "zarr": "sub-01/eeg/a_eeg.zarr",
+                "store": "new-a",
+                "source_tree": "raw",
+                "derived": False,
+            }],
+        )
 
     def test_no_prior_builds_fresh(self):
         index = merge_index(
-            None, "nm000104", "sha", [{"zarr": "x/y_eeg.zarr"}], [], "2026-06-02T00:00:00Z"
+            None, "nm000104", SHA_NEW, [{"zarr": "x/y_eeg.zarr"}], [], "2026-06-02T00:00:00Z"
         )
         self.assertEqual(index["store_count"], 1)
         self.assertEqual([s["zarr"] for s in index["stores"]], ["x/y_eeg.zarr"])
 
     def test_stores_sorted_by_zarr_path(self):
         converted = [{"zarr": "b.zarr"}, {"zarr": "a.zarr"}]
-        index = merge_index(None, "nm000104", "sha", converted, [], "2026-06-02T00:00:00Z")
+        index = merge_index(None, "nm000104", SHA_NEW, converted, [], "2026-06-02T00:00:00Z")
         self.assertEqual([s["zarr"] for s in index["stores"]], ["a.zarr", "b.zarr"])
 
 
@@ -2265,7 +2306,7 @@ class TestFailureReasons(unittest.TestCase):
 
     def test_merge_index_records_failures(self):
         index = merge_index(
-            None, "nm000104", "sha", [{"zarr": "a_eeg.zarr", "path": "a_eeg.set"}], [],
+            None, "nm000104", SHA_NEW, [{"zarr": "a_eeg.zarr", "path": "a_eeg.set"}], [],
             "2026-06-13T00:00:00Z",
             [{"path": "b-ave.fif", "zarr": "b-ave.zarr", "code": "not_continuous",
               "reason": "derivative"}],
@@ -2278,13 +2319,13 @@ class TestFailureReasons(unittest.TestCase):
     def test_merge_index_failure_clears_when_path_converts(self):
         # A path that failed before but converts now drops out of `failures`.
         prior = {
-            "source_commit": "old",
+            "source_commit": SHA_OLD,
             "stores": [],
             "failures": [{"path": "x_eeg.set", "zarr": "x_eeg.zarr",
                           "code": "corrupt_or_truncated", "reason": "..."}],
         }
         index = merge_index(
-            prior, "nm000104", "new", [{"zarr": "x_eeg.zarr", "path": "x_eeg.set"}], [],
+            prior, "nm000104", SHA_NEW, [{"zarr": "x_eeg.zarr", "path": "x_eeg.set"}], [],
             "2026-06-13T00:00:00Z", [],
         )
         self.assertEqual(index["failure_count"], 0)
@@ -2293,12 +2334,12 @@ class TestFailureReasons(unittest.TestCase):
     def test_merge_index_path_never_in_both_stores_and_failures(self):
         # A recording that newly fails drops its stale store entry.
         prior = {
-            "source_commit": "old",
+            "source_commit": SHA_OLD,
             "stores": [{"zarr": "x_eeg.zarr", "path": "x_eeg.set"}],
             "failures": [],
         }
         index = merge_index(
-            prior, "nm000104", "new", [], [], "2026-06-13T00:00:00Z",
+            prior, "nm000104", SHA_NEW, [], [], "2026-06-13T00:00:00Z",
             [{"path": "x_eeg.set", "zarr": "x_eeg.zarr", "code": "not_continuous",
               "reason": "..."}],
         )
@@ -2310,12 +2351,12 @@ class TestFailureReasons(unittest.TestCase):
 
     def test_merge_index_drops_failure_for_removed_store(self):
         prior = {
-            "source_commit": "old", "stores": [],
+            "source_commit": SHA_OLD, "stores": [],
             "failures": [{"path": "gone_eeg.set", "zarr": "gone_eeg.zarr",
                           "code": "not_continuous", "reason": "..."}],
         }
         index = merge_index(
-            prior, "nm000104", "new", [], ["gone_eeg.zarr"], "2026-06-13T00:00:00Z", [],
+            prior, "nm000104", SHA_NEW, [], ["gone_eeg.zarr"], "2026-06-13T00:00:00Z", [],
         )
         self.assertEqual(index["failure_count"], 0)
 
@@ -2326,7 +2367,7 @@ class TestFailureReasons(unittest.TestCase):
         # file we deliberately no longer serve. A genuine current failure for
         # a still-discoverable path must survive alongside it.
         prior = {
-            "source_commit": "old",
+            "source_commit": SHA_OLD,
             "stores": [],
             "failures": [
                 {"path": "derivatives/preprocessed/sub-01_task-x-epo.fif",
@@ -2338,7 +2379,7 @@ class TestFailureReasons(unittest.TestCase):
             ],
         }
         index = merge_index(
-            prior, "nm000104", "new", [], [], "2026-06-13T00:00:00Z", [],
+            prior, "nm000104", SHA_NEW, [], [], "2026-06-13T00:00:00Z", [],
         )
         self.assertEqual(index["failure_count"], 1)
         self.assertEqual(
@@ -2794,7 +2835,7 @@ class TestCleanOrphanSelection(unittest.TestCase):
         # --clean rewrites the index fresh (prior=None), so the derivatives
         # store -- never touched -- simply has no entry in the new index.
         index = merge_index(
-            None, "on005520", "sha", [], sorted(orphans),
+            None, "on005520", SHA_NEW, [], sorted(orphans),
             "2026-08-20T00:00:00Z",
             [{"path": head[1], "zarr": "sub-01/eeg/sub-01_task-rest_eeg.zarr",
               "code": "corrupt_or_truncated", "reason": "..."}],
@@ -3780,6 +3821,1720 @@ class TestStreamingPeakIsChannelAware(unittest.TestCase):
             projected_peak_bytes(name, 100 * 1024**2, 1),
             projected_peak_bytes(name, 100 * 1024**2, 66),
         )
+
+def build_real_edf(directory: str, stem: str, n_channels: int = 4,
+                   rate: int = 200, seconds: int = 60) -> str:
+    """Write a REAL, spec-compliant EDF+ with pyedflib and return its path.
+
+    Not a fixture file in the repo, and not a stub: `test/fixtures/bids-minimal`'s
+    `.edf` is a 1 KB placeholder that pyedflib refuses to open ("the label is
+    incorrect"), so it cannot exercise a conversion at all. This writes one with
+    the same library biosigIO's importer reads it back with, so everything
+    downstream -- the importer, the resampler, the Zarr writer, the attrs this
+    module then republishes -- is the real code on real samples. 60 s at 200 Hz is
+    the smallest size that still produces a multi-level view pyramid, which is
+    what the geometry assertions need.
+    """
+    import numpy as np
+    import pyedflib
+
+    path = os.path.join(directory, f"{stem}.edf")
+    writer = pyedflib.EdfWriter(path, n_channels, file_type=pyedflib.FILETYPE_EDFPLUS)
+    writer.setSignalHeaders([
+        {
+            "label": f"E{i + 1}",
+            "dimension": "uV",
+            "sample_frequency": rate,
+            "physical_max": 500.0,
+            "physical_min": -500.0,
+            "digital_max": 32767,
+            "digital_min": -32768,
+            "transducer": "",
+            "prefilter": "",
+        }
+        for i in range(n_channels)
+    ])
+    rng = np.random.default_rng(0)
+    writer.writeSamples([rng.normal(0, 20, rate * seconds) for _ in range(n_channels)])
+    writer.close()
+    return path
+
+
+class TestSourceTree(unittest.TestCase):
+    def test_raw_is_the_default(self):
+        self.assertEqual(source_tree_for("sub-01/eeg/sub-01_task-x_eeg.set"), "raw")
+
+    def test_names_the_excluded_tree_it_sits_under(self):
+        self.assertEqual(
+            source_tree_for("derivatives/prep/sub-01/eeg/sub-01_eeg.set"), "derivatives"
+        )
+        self.assertEqual(source_tree_for("sourcedata/sub-01/eeg/x_eeg.set"), "sourcedata")
+        self.assertEqual(source_tree_for("code/x_eeg.set"), "code")
+
+    def test_segment_boundary_is_respected(self):
+        # `mycode/` and `derivatives_old/` are ordinary directories, matching
+        # in_excluded_tree's own rule.
+        self.assertEqual(source_tree_for("mycode/sub-01_eeg.set"), "raw")
+        self.assertEqual(source_tree_for("derivatives_old/sub-01_eeg.set"), "raw")
+
+
+class TestFailureDetail(unittest.TestCase):
+    """`detail` is the field that makes an opaque `file_read_error` diagnosable
+    from the published index (#1197). It must name the exception and keep the
+    message while dropping the conversion node's scratch paths, which are a fresh
+    mkdtemp name every run."""
+
+    def test_names_the_exception_class_and_first_line(self):
+        detail = failure_detail(ValueError("could not find measurement data\nsecond line"))
+        self.assertEqual(detail, "ValueError: could not find measurement data")
+
+    def test_strips_absolute_paths(self):
+        exc = OSError(
+            "/mnt/local/zarr-scratch/tmpab12/work/sub-01_eeg.edf: the file is not "
+            "EDF(+) or BDF(+) compliant the label is incorrect"
+        )
+        detail = failure_detail(exc)
+        self.assertNotIn("/mnt/local", detail)
+        self.assertIn("<path>", detail)
+        # The diagnosis itself survives -- that is the whole point of the field.
+        self.assertIn("not EDF(+) or BDF(+) compliant", detail)
+
+    def test_leaves_non_path_slashes_alone(self):
+        self.assertEqual(strip_local_paths("min/max envelope"), "min/max envelope")
+
+    def test_accepts_a_bare_string_for_a_synthesized_failure(self):
+        # A worker killed while running alone has no exception to report.
+        self.assertEqual(failure_detail("killed its worker process"),
+                         "killed its worker process")
+
+    def test_length_capped(self):
+        self.assertLessEqual(len(failure_detail(ValueError("x" * 5000))), 300)
+
+    def test_strips_windows_paths(self):
+        # MNE formats paths out of a recording's own header, so a Windows path
+        # can reach a Linux conversion node's error message.
+        detail = failure_detail(
+            OSError(r"C:\Users\hallu\scratch\sub-01_eeg.edf is not EDF(+) compliant")
+        )
+        self.assertNotIn("Users", detail)
+        self.assertIn("<path>", detail)
+        self.assertIn("not EDF(+) compliant", detail)
+
+
+class TestDetailRedaction(unittest.TestCase):
+    """`detail` and `last_error` are published in index.json on a PUBLIC bucket,
+    and the driver shells out to `aws` and reads HTTP -- so an exception message
+    can quote a presigned URL, a request header, or a key id. Path stripping does
+    not cover any of that; none of them is a filesystem path.
+
+    Each case is a real message shape (AWS error text, a curl failure), and each
+    asserts BOTH halves: the secret is gone and the diagnosis survives. A
+    redactor that returned a constant would pass the first half alone.
+    """
+
+    def assert_redacted(self, message: str, secret: str, keep: str = ""):
+        detail = failure_detail(RuntimeError(message))
+        self.assertNotIn(secret, detail, f"secret survived in {detail!r}")
+        self.assertIn("[redacted]", detail)
+        if keep:
+            self.assertIn(keep, detail, f"diagnosis lost from {detail!r}")
+
+    def test_authorization_header(self):
+        self.assert_redacted(
+            "PUT failed with Authorization: AWS4-HMAC-SHA256 SignedHeaders=host",
+            "AWS4-HMAC-SHA256",
+            keep="PUT failed",
+        )
+
+    def test_bearer_token(self):
+        self.assert_redacted(
+            "callback rejected: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig",
+            "eyJhbGciOiJIUzI1NiJ9",
+            keep="callback rejected",
+        )
+
+    def test_x_amz_query_parameters(self):
+        # A presigned URL is the realistic leak: `aws s3 cp` quotes the whole
+        # request line on a 403.
+        self.assert_redacted(
+            "403 for https://nemar.s3.us-east-2.amazonaws.com/k?X-Amz-Signature=deadbeefcafe0123",
+            "deadbeefcafe0123",
+            keep="403",
+        )
+
+    def test_x_amz_credential_is_covered_by_the_prefix_rule(self):
+        self.assert_redacted(
+            "denied: https://h/k?X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20260902",
+            "AKIAIOSFODNN7EXAMPLE",
+            keep="denied",
+        )
+
+    def test_signature_field(self):
+        self.assert_redacted(
+            "SignatureDoesNotMatch signature: abc123def456+/=",
+            "abc123def456",
+            keep="SignatureDoesNotMatch",
+        )
+
+    def test_bare_access_key_id(self):
+        # AWS error text quotes the key id with no URL around it.
+        self.assert_redacted(
+            "The AWS Access Key Id AKIAIOSFODNN7EXAMPLE does not exist in our records",
+            "AKIAIOSFODNN7EXAMPLE",
+            keep="does not exist in our records",
+        )
+
+    def test_sts_session_key_id(self):
+        # ASIA is the form the Hallu profile's session credentials actually take.
+        self.assert_redacted(
+            "expired token for ASIAY34FZKBOKMUTVV7A",
+            "ASIAY34FZKBOKMUTVV7A",
+            keep="expired token",
+        )
+
+    def test_token_query_parameter(self):
+        self.assert_redacted(
+            "POST https://api.nemar.org/webhooks/zarr-ready?token=s3cr3tvalue -> 401",
+            "s3cr3tvalue",
+            keep="401",
+        )
+
+    def test_key_query_parameter(self):
+        self.assert_redacted("GET https://h/p?key=abc123secret", "abc123secret")
+
+    def test_a_url_shaped_message_keeps_its_diagnosis(self):
+        # #1197's whole point: an operator must still be able to tell WHAT failed.
+        detail = failure_detail(
+            RuntimeError("HTTP 503 from https://nemar.s3.us-east-2.amazonaws.com/a/b.edf")
+        )
+        self.assertIn("HTTP 503", detail)
+
+    def test_an_innocent_message_is_left_alone(self):
+        """A redactor that fired on ordinary text would destroy every diagnosis.
+
+        The false-positive risk is real and specific here: BIDS filenames and
+        column names routinely contain the very words the patterns key on, and
+        the words alone must never be enough -- only the `?name=value` and
+        `Header: value` SHAPES are. A redactor that ate `primary_key.csv` would
+        make a corrupt-file report unreadable while leaking nothing.
+        """
+        for clean in (
+            "Could not find measurement data",
+            "channels.tsv declares 74 channels but the store has 1",
+            "min/max envelope mismatch",
+            # "token"/"key" inside BIDS entities and filenames.
+            "sub-01_task-tokenTask_eeg.edf is not EDF(+) compliant",
+            "sub-02_task-keypress_run-1_eeg.vhdr: header missing",
+            "primary_key.csv could not be parsed",
+            "no key column found in participants.tsv",
+            "token count mismatch in the events sidecar",
+            # A bare `key=` with no query string around it is a log field, not a
+            # secret -- the patterns require the `?`/`&` that makes it a URL.
+            "reader reported key=value for channel E1",
+            # And the words as ordinary prose.
+            "the signature of read_raw_edf changed upstream",
+            "authorization to publish this dataset is pending",
+        ):
+            with self.subTest(message=clean):
+                self.assertEqual(redact_secrets(clean), clean)
+                self.assertNotIn("[redacted]", failure_detail(RuntimeError(clean)))
+
+    def test_redaction_survives_the_length_cap(self):
+        # Cap applied AFTER redaction, so truncation can never expose a tail.
+        detail = failure_detail(
+            RuntimeError("x" * 250 + " Bearer supersecrettokenvalue0123456789")
+        )
+        self.assertNotIn("supersecrettokenvalue", detail)
+        self.assertLessEqual(len(detail), 300)
+
+    def test_empty_is_none(self):
+        self.assertIsNone(failure_detail(None))
+
+
+class TestEventsSummary(unittest.TestCase):
+    """`n_events` / `trial_types` let a client judge a dataset, and pick an
+    epoching strategy, without reading a signal byte (#1059)."""
+
+    def test_counts_rows_and_trial_types(self):
+        text = (
+            "onset\tduration\ttrial_type\n"
+            "0.0\t0.5\tgo\n"
+            "1.0\t0.5\tstop\n"
+            "2.0\t0.5\tgo\n"
+        )
+        self.assertEqual(
+            events_summary(text), {"n_events": 3, "trial_types": {"go": 2, "stop": 1}}
+        )
+
+    def test_no_events_file_omits_both_keys(self):
+        # Absent keys mean "no events.tsv", which is not the same claim as
+        # "an events.tsv with no trial types".
+        self.assertEqual(events_summary(None), {})
+
+    def test_no_trial_type_column_is_an_empty_object(self):
+        self.assertEqual(
+            events_summary("onset\tduration\n0.0\t0.5\n"),
+            {"n_events": 1, "trial_types": {}},
+        )
+
+    def test_na_values_are_not_counted(self):
+        text = "onset\ttrial_type\n0.0\tn/a\n1.0\t\n2.0\tgo\n"
+        self.assertEqual(events_summary(text)["trial_types"], {"go": 1})
+        self.assertEqual(events_summary(text)["n_events"], 3)
+
+
+class TestDatasetProvenanceAttrs(unittest.TestCase):
+    """The structured `nemar` root attribute (#1064). Prose provenance is useless
+    to the machines that are increasingly what reads these stores."""
+
+    ROW = {
+        "name": "Resting state EEG",
+        "authors": "Doe J, Roe R",
+        "concept_doi": "10.82901/nemar.on007763",
+        "license": "CC0",
+        "hed_version": "8.2.0",
+        "latest_version": "v1.0.2",
+        "created_at": "2024-05-01T00:00:00Z",
+    }
+
+    def attrs(self, row):
+        return nemar_store_attrs(
+            dataset_id="on007763",
+            source_commit="a" * 40,
+            source_tree="raw",
+            derived=False,
+            engine_version="2",
+            contract_url="https://zarr.nemar.org/on007763/zarr/sub-01/eeg/x_eeg.zarr/",
+            row=row,
+        )
+
+    def test_carries_the_catalog_fields(self):
+        a = self.attrs(self.ROW)
+        self.assertEqual(a["doi"], "10.82901/nemar.on007763")
+        self.assertEqual(a["license"], "CC0")
+        self.assertEqual(a["hed_version"], "8.2.0")
+        self.assertEqual(a["source_commit"], "a" * 40)
+        self.assertEqual(a["engine_version"], "2")
+        self.assertEqual(a["source_tree"], "raw")
+        self.assertIs(a["derived"], False)
+
+    def test_missing_catalog_row_leaves_fields_null_not_invented(self):
+        a = self.attrs(None)
+        for key in ("doi", "license", "citation", "hed_version"):
+            self.assertIsNone(a[key], key)
+        # The fields the converter knows by itself are still stated.
+        self.assertEqual(a["dataset_id"], "on007763")
+        self.assertEqual(a["source_commit"], "a" * 40)
+
+    def test_citation_composes_from_the_row(self):
+        citation = dataset_citation(self.ROW)
+        self.assertIn("Doe J, Roe R", citation)
+        self.assertIn("(2024)", citation)
+        self.assertIn("Resting state EEG (v1.0.2).", citation)
+        self.assertIn("https://doi.org/10.82901/nemar.on007763", citation)
+
+    def test_citation_needs_a_name(self):
+        self.assertIsNone(dataset_citation({"authors": "Doe J"}))
+        self.assertIsNone(dataset_citation(None))
+
+    def test_citation_omits_the_parts_the_row_lacks(self):
+        citation = dataset_citation({"name": "Untitled"})
+        self.assertEqual(citation, "Untitled. NEMAR.")
+
+
+class TestFetchDatasetRow(unittest.TestCase):
+    """`fetch_dataset_row` against a REAL HTTP server on a real socket -- the
+    provenance attrs depend on its parsing (two response shapes) and on it never
+    failing a conversion when the catalog is unreachable."""
+
+    def serve(self, handler_body: bytes | None, status: int = 200):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
+                if handler_body is None:
+                    self.send_error(500)
+                    return
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(handler_body)))
+                self.end_headers()
+                self.wfile.write(handler_body)
+
+            def log_message(self, *_args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_port}"
+
+    def test_reads_a_bare_row(self):
+        base = self.serve(json.dumps({"dataset_id": "on007763", "license": "CC0"}).encode())
+        row, failed = fetch_dataset_row(base, "on007763")
+        self.assertEqual(row["license"], "CC0")
+        self.assertIs(failed, False)
+
+    def test_reads_a_row_wrapped_in_dataset(self):
+        base = self.serve(json.dumps({"dataset": {"license": "CC-BY-4.0"}}).encode())
+        row, failed = fetch_dataset_row(base, "on007763")
+        self.assertEqual(row["license"], "CC-BY-4.0")
+        self.assertIs(failed, False)
+
+    def test_a_500_is_reported_as_a_FETCH_FAILURE_not_an_absent_field(self):
+        """The distinction the flag exists for.
+
+        A catalog outage and a dataset with no license both leave `doi`/`license`
+        null in every store's `nemar` attrs. One is a fact about the run, fixed
+        by re-converting; the other is a fact about the dataset. Without the flag
+        an outage silently publishes a whole conversion wave claiming to have no
+        license, and afterwards nothing distinguishes those stores from datasets
+        that genuinely have none.
+        """
+        base = self.serve(None)  # the handler send_error(500)s
+        row, failed = fetch_dataset_row(base, "on007763")
+        self.assertIsNone(row)
+        self.assertIs(failed, True)
+
+    def test_a_row_that_lacks_a_field_is_NOT_a_fetch_failure(self):
+        # The other half of the same distinction: a 200 with no license is data.
+        base = self.serve(json.dumps({"dataset_id": "on007763", "name": "N"}).encode())
+        row, failed = fetch_dataset_row(base, "on007763")
+        self.assertIs(failed, False)
+        self.assertIsNone(nemar_store_attrs(
+            dataset_id="on007763", source_commit="a" * 40, source_tree="raw",
+            derived=False, engine_version="3",
+            contract_url="https://zarr.nemar.org/on007763/zarr/x.zarr/",
+            row=row, provenance_fetch_failed=failed,
+        )["license"])
+
+    def test_a_non_object_body_is_a_fetch_failure(self):
+        # A 200 that is not an object is a broken catalog, not an absent field.
+        base = self.serve(json.dumps(["not", "an", "object"]).encode())
+        row, failed = fetch_dataset_row(base, "on007763")
+        self.assertIsNone(row)
+        self.assertIs(failed, True)
+
+    def test_the_flag_reaches_the_store_attrs(self):
+        attrs = nemar_store_attrs(
+            dataset_id="on007763", source_commit="a" * 40, source_tree="raw",
+            derived=False, engine_version="3",
+            contract_url="https://zarr.nemar.org/on007763/zarr/x.zarr/",
+            row=None, provenance_fetch_failed=True,
+        )
+        self.assertIs(attrs["provenance_fetch_failed"], True)
+        self.assertIsNone(attrs["doi"])
+        # Always present, so a consumer never has to ask whether the key exists
+        # to know whether a null is meaningful.
+        clean = nemar_store_attrs(
+            dataset_id="on007763", source_commit="a" * 40, source_tree="raw",
+            derived=False, engine_version="3",
+            contract_url="https://zarr.nemar.org/on007763/zarr/x.zarr/",
+            row={"name": "N", "license": "CC0"},
+        )
+        self.assertIs(clean["provenance_fetch_failed"], False)
+
+
+class TestIndexFormatV3(unittest.TestCase):
+    """The v3 envelope (#1059): where the bytes are, which engine made them, and
+    a `source_commit` that is always a real commit."""
+
+    HEAD = "b" * 40
+
+    def build(self, **kwargs):
+        base = {
+            "prior": None,
+            "dataset_id": "on007763",
+            "head_commit": self.HEAD,
+            "converted": [{"zarr": "sub-01/eeg/a_eeg.zarr", "path": "sub-01/eeg/a_eeg.edf"}],
+            "removed_store_rels": [],
+            "updated_utc": "2026-09-02T00:00:00Z",
+        }
+        base.update(kwargs)
+        return merge_index(
+            base.pop("prior"),
+            base.pop("dataset_id"),
+            base.pop("head_commit"),
+            base.pop("converted"),
+            base.pop("removed_store_rels"),
+            base.pop("updated_utc"),
+            **base,
+        )
+
+    def test_declares_the_data_plane(self):
+        index = self.build(bucket="nemar", region="us-east-2")
+        self.assertEqual(index["format"], "nemar-zarr-index")
+        self.assertEqual(index["format_version"], 3)
+        self.assertEqual(index["contract_base"], "https://zarr.nemar.org/on007763/zarr/")
+        self.assertEqual(
+            index["data_base"], "https://nemar.s3.us-east-2.amazonaws.com/on007763/zarr/"
+        )
+        self.assertEqual(index["data_base_kind"], "s3-public")
+        self.assertEqual(index["s3_uri"], "s3://nemar/on007763/zarr/")
+        self.assertEqual(index["s3_region"], "us-east-2")
+        self.assertIs(index["s3_anonymous"], True)
+        self.assertEqual(index["n_recordings"], index["store_count"])
+
+    def test_contract_base_is_not_derived_from_the_bucket(self):
+        # The test instance publishes its own host while writing to nemar-dev.
+        index = self.build(contract_base="https://zarr-test.nemar.org", bucket="nemar-dev")
+        self.assertEqual(index["contract_base"], "https://zarr-test.nemar.org/on007763/zarr/")
+        self.assertEqual(
+            index["data_base"], "https://nemar-dev.s3.us-east-2.amazonaws.com/on007763/zarr/"
+        )
+
+    def test_stamps_the_engine_and_the_library(self):
+        index = self.build(engine_version="7", biosigio_version="1.2.6")
+        self.assertEqual(index["engine_version"], "7")
+        self.assertEqual(index["biosigio_version"], "1.2.6")
+
+    def test_refuses_to_build_without_a_real_commit(self):
+        # on008083 published `source_commit: ""` while D1 held the real SHA.
+        for bad in ("", "abc123", None, "z" * 40, "A" * 40):
+            with self.subTest(commit=bad), self.assertRaises(ValueError):
+                self.build(head_commit=bad)
+
+    def test_is_commit_sha(self):
+        self.assertTrue(is_commit_sha("0123456789abcdef" + "0" * 24))
+        self.assertFalse(is_commit_sha("0123456789ABCDEF" + "0" * 24))  # upper-case
+        self.assertFalse(is_commit_sha("0" * 39))
+        self.assertFalse(is_commit_sha(None))
+
+    def test_source_key_is_not_published_in_the_index(self):
+        index = self.build(
+            converted=[{
+                "zarr": "sub-01/eeg/a_eeg.zarr",
+                "path": "sub-01/eeg/a_eeg.edf",
+                "source_key": "SHA256E-s100--abc.edf",
+            }],
+        )
+        self.assertNotIn("source_key", index["stores"][0])
+
+    def test_a_carried_over_v1_entry_is_normalized(self):
+        # An index built incrementally on top of a v1 one must not publish a
+        # half-v1 document: `source_key` goes, `source_tree`/`derived` appear.
+        prior = {
+            "source_commit": "a" * 40,
+            "stores": [{
+                "zarr": "sub-02/eeg/b_eeg.zarr",
+                "path": "sub-02/eeg/b_eeg.edf",
+                "source_key": "SHA256E-s200--old.edf",
+            }],
+        }
+        index = self.build(prior=prior)
+        carried = next(s for s in index["stores"] if s["zarr"] == "sub-02/eeg/b_eeg.zarr")
+        self.assertNotIn("source_key", carried)
+        self.assertEqual(carried["source_tree"], "raw")
+        self.assertIs(carried["derived"], False)
+
+    def test_manifest_carries_the_source_key(self):
+        manifest = merge_manifest(
+            None,
+            "on007763",
+            [{"zarr": "sub-01/eeg/a_eeg.zarr", "source_key": "SHA256E-s100--abc.edf",
+              "size_bytes": 100}],
+            ["sub-01/eeg/a_eeg.zarr"],
+            "2026-09-02T00:00:00Z",
+        )
+        self.assertEqual(manifest["format"], "nemar-zarr-manifest")
+        self.assertEqual(manifest["format_version"], 1)
+        self.assertEqual(manifest["stores"], [{
+            "zarr": "sub-01/eeg/a_eeg.zarr",
+            "source_key": "SHA256E-s100--abc.edf",
+            "size_bytes": 100,
+        }])
+
+    def test_manifest_tracks_the_index_store_set(self):
+        # A store the index no longer publishes must not linger in the manifest,
+        # or the two documents disagree about what exists.
+        prior = {"stores": [
+            {"zarr": "gone.zarr", "source_key": "k1", "size_bytes": 1},
+            {"zarr": "kept.zarr", "source_key": "k2", "size_bytes": 2},
+        ]}
+        manifest = merge_manifest(prior, "on007763", [], ["kept.zarr"], "2026-09-02T00:00:00Z")
+        self.assertEqual([s["zarr"] for s in manifest["stores"]], ["kept.zarr"])
+
+
+class TestCoverageInvariant(unittest.TestCase):
+    """#1197's acceptance criterion: every discovered raw recording is accounted
+    for exactly once, in the published document."""
+
+    HEAD = "c" * 40
+    A = "sub-01/eeg/a_eeg.edf"
+    B = "sub-02/eeg/b_eeg.edf"
+    C = "sub-03/eeg/c_eeg.edf"
+
+    def build(self, converted=(), failures=(), pending=(), discovered=None, **kw):
+        return merge_index(
+            kw.pop("prior", None),
+            "on008083",
+            self.HEAD,
+            list(converted),
+            [],
+            "2026-09-02T00:00:00Z",
+            list(failures),
+            list(pending),
+            discovered=discovered,
+            **kw,
+        )
+
+    def test_full_run_balances(self):
+        index = self.build(
+            converted=[{"zarr": store_rel_for(self.A), "path": self.A}],
+            failures=[{"path": self.B, "zarr": store_rel_for(self.B),
+                       "code": "corrupt_or_truncated", "reason": "...", "detail": "..."}],
+            pending=[{"path": self.C, "reason": "infra_failure", "last_error": "boom"}],
+            discovered=[self.A, self.B, self.C],
+        )
+        self.assertEqual(index["discovered_count"], 3)
+        self.assertEqual((index["store_count"], index["failure_count"],
+                          index["pending_count"]), (1, 1, 1))
+        check_index_invariant(index)
+
+    def test_partial_run_lists_the_untouched_recordings(self):
+        # The five recordings on008083 lost: discovered, not attempted, and
+        # before v3 present in neither list.
+        index = self.build(
+            converted=[{"zarr": store_rel_for(self.A), "path": self.A}],
+            discovered=[self.A, self.B, self.C],
+        )
+        check_index_invariant(index)
+        self.assertEqual(index["pending_count"], 2)
+        reasons = {p["path"]: p for p in index["pending"]}
+        self.assertEqual(reasons[self.B]["reason"], "not_attempted")
+        self.assertEqual(reasons[self.B]["attempts"], 0)
+        self.assertEqual(reasons[self.B]["zarr"], store_rel_for(self.B))
+
+    def test_entries_for_undiscovered_paths_are_dropped(self):
+        prior = {"source_commit": "a" * 40,
+                 "stores": [{"zarr": store_rel_for(self.C), "path": self.C}]}
+        index = self.build(
+            prior=prior,
+            converted=[{"zarr": store_rel_for(self.A), "path": self.A}],
+            discovered=[self.A],
+        )
+        check_index_invariant(index)
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+
+    def test_a_non_raw_store_is_dropped_and_counted(self):
+        """A carried-over store under `derivatives/` must NOT be republished.
+
+        ADR 0027 made discovery raw-only and `purge_non_raw_stores.py` is the
+        authorised deletion of what it stopped producing, so those stores are not
+        hosted -- an index that kept describing one would advertise bytes that are
+        being removed. The drop is deliberate, but it is LOUD: `merge_index` logs
+        each one with the tree that excluded it, and `main` reports the count as
+        `non_raw_dropped` on the callback, because "the index lost 92 stores"
+        needs a cause attached when an orphan-detection bug is the alternative
+        reading.
+        """
+        legacy = "derivatives/preprocessed/sub-09/eeg/sub-09_task-x_eeg.set"
+        prior = {
+            "source_commit": "a" * 40,
+            "stores": [
+                {"zarr": store_rel_for(legacy), "path": legacy,
+                 "source_key": "SHA256E-s9--legacy"},
+            ],
+        }
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            index = self.build(
+                prior=prior,
+                converted=[{"zarr": store_rel_for(self.A), "path": self.A}],
+                discovered=[self.A],
+            )
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        self.assertEqual(index["store_count"], 1)
+        self.assertNotIn("legacy_store_count", index)
+        # Named, with the reason, rather than vanishing.
+        log = buf.getvalue()
+        self.assertIn(legacy, log)
+        self.assertIn("derivatives", log)
+        self.assertEqual(index["discovered_count"], 1)
+        check_index_invariant(index)
+
+    def test_non_raw_store_paths_counts_from_the_prior_index(self):
+        """The callback's `non_raw_dropped` is read from the PRIOR PUBLISHED
+        index, not from the merge's filtering.
+
+        Production always runs `--clean`, which passes `prior=None` to the merge:
+        the entries never enter, so the filter never sees them -- yet they are
+        still gone from the index a client fetches next. Counting from the merge
+        would report 0 on exactly the path that matters.
+        """
+        prior = {"stores": [
+            {"path": "derivatives/prep/a_eeg.set", "zarr": "derivatives/prep/a_eeg.zarr"},
+            {"path": "sourcedata/b_eeg.set", "zarr": "sourcedata/b_eeg.zarr"},
+            {"path": "code/c_eeg.set", "zarr": "code/c_eeg.zarr"},
+            {"path": "sub-01/meg/sub-01_acq-crosstalk_meg.fif",
+             "zarr": "sub-01/meg/sub-01_acq-crosstalk_meg.zarr"},
+            {"path": self.A, "zarr": store_rel_for(self.A)},
+        ]}
+        dropped = generate_zarr.non_raw_store_paths(prior)
+        self.assertEqual(len(dropped), 4, dropped)
+        self.assertNotIn(self.A, dropped)
+        self.assertEqual(generate_zarr.non_raw_store_paths(None), [])
+        self.assertEqual(generate_zarr.non_raw_store_paths({}), [])
+
+    def test_excluded_reason_names_the_cause(self):
+        self.assertEqual(generate_zarr.excluded_reason("derivatives/x_eeg.set"), "derivatives")
+        self.assertEqual(generate_zarr.excluded_reason("sub-01/sourcedata/x_eeg.set"), "sourcedata")
+        self.assertEqual(generate_zarr.excluded_reason("code/x_eeg.set"), "code")
+        self.assertEqual(
+            generate_zarr.excluded_reason("sub-01/meg/sub-01_acq-crosstalk_meg.fif"),
+            "bids-calibration",
+        )
+        self.assertIsNone(generate_zarr.excluded_reason("sub-01/eeg/a_eeg.set"))
+
+    def test_a_non_raw_failure_or_pending_entry_cannot_survive(self):
+        # The same rule on the other two lists: a non-raw path has no business in
+        # any of them, and the carry-forward already refused one.
+        prior = {
+            "source_commit": "a" * 40,
+            "stores": [],
+            "failures": [{"path": "derivatives/prep/x-epo.fif", "zarr": "derivatives/prep/x-epo.zarr",
+                          "code": "not_continuous", "reason": "..."}],
+            "pending": [{"path": "code/y_eeg.set", "reason": "infra_failure", "attempts": 2}],
+        }
+        index = merge_index(
+            prior, "on008083", self.HEAD, [], [], "2026-09-02T00:00:00Z", [], [],
+            discovered=[self.A], prior_pending=prior["pending"],
+        )
+        self.assertEqual(index["failure_count"], 0)
+        self.assertEqual([p["path"] for p in index["pending"]], [self.A])
+        check_index_invariant(index)
+
+    def test_errors_counts_this_runs_failures_typed_and_not(self):
+        index = self.build(
+            converted=[{"zarr": store_rel_for(self.A), "path": self.A}],
+            failures=[{"path": self.B, "zarr": store_rel_for(self.B),
+                       "code": "not_continuous", "reason": "..."}],
+            pending=[{"path": self.C, "reason": "infra_failure"}],
+            discovered=[self.A, self.B, self.C],
+            errors=2,
+        )
+        self.assertEqual(index["errors"], 2)
+
+    def test_discovered_primaries_match_the_worklist(self):
+        # The coverage denominator has to be the set the converter would attempt,
+        # not a second walk that could drift from it.
+        head = [
+            "sub-01/eeg/sub-01_task-x_eeg.set",
+            "sub-01/eeg/sub-01_task-x_eeg.fdt",
+            "derivatives/prep/sub-01/eeg/sub-01_task-x_eeg.set",
+            "sub-02/meg/sub-02_task-x_acq-crosstalk_meg.fif",
+            "dataset_description.json",
+        ]
+        convert, _remove = compute_worklist(head, [], full=True)
+        self.assertEqual(discover_primaries(head), convert)
+        self.assertEqual(discover_primaries(head), ["sub-01/eeg/sub-01_task-x_eeg.set"])
+
+
+class TestPendingRetries(unittest.TestCase):
+    """Pending entries age, and stop aging (#1197). An infra failure that will
+    never succeed must not promise forever that it is about to."""
+
+    HEAD = "d" * 40
+    PATH = "sub-01/eeg/a_eeg.edf"
+
+    def run_round(self, prior_pending, reason="infra_failure", last_error="boom"):
+        return merge_index(
+            None, "on008083", self.HEAD, [], [], "2026-09-02T00:00:00Z", [],
+            [{"path": self.PATH, "reason": reason, "last_error": last_error}],
+            discovered=[self.PATH],
+            prior_pending=prior_pending,
+        )
+
+    def test_attempts_start_at_one_and_accumulate(self):
+        index = self.run_round(None)
+        self.assertEqual(index["pending"][0]["attempts"], 1)
+        self.assertEqual(index["pending"][0]["reason"], "infra_failure")
+        self.assertEqual(index["pending"][0]["last_error"], "boom")
+        self.assertEqual(index["pending"][0]["last_attempt_utc"], "2026-09-02T00:00:00Z")
+
+        index = self.run_round(index["pending"])
+        self.assertEqual(index["pending"][0]["attempts"], 2)
+
+    def test_exhaustion_promotes_to_a_typed_failure(self):
+        pending = None
+        for round_n in range(1, PENDING_MAX_ATTEMPTS):
+            index = self.run_round(pending)
+            self.assertEqual(index["pending_count"], 1, f"round {round_n}")
+            pending = index["pending"]
+        # The round that reaches the cap moves it out of `pending` for good.
+        index = self.run_round(pending)
+        self.assertEqual(index["pending_count"], 0)
+        self.assertEqual(index["failure_count"], 1)
+        failure = index["failures"][0]
+        self.assertEqual(failure["code"], "retry_exhausted")
+        self.assertEqual(failure["detail"], "boom")
+        self.assertEqual(failure["attempts"], PENDING_MAX_ATTEMPTS)
+        self.assertTrue(failure["reason"])
+        check_index_invariant(index)
+
+    def test_a_memory_budget_pending_is_reason_tagged(self):
+        index = self.run_round(None, reason="memory_budget")
+        self.assertEqual(index["pending"][0]["reason"], "memory_budget")
+
+    def test_converting_clears_the_pending_entry(self):
+        first = self.run_round(None)
+        index = merge_index(
+            None, "on008083", self.HEAD,
+            [{"zarr": store_rel_for(self.PATH), "path": self.PATH}],
+            [], "2026-09-02T01:00:00Z", [], [],
+            discovered=[self.PATH],
+            prior_pending=first["pending"],
+        )
+        self.assertEqual(index["pending_count"], 0)
+        self.assertEqual(index["store_count"], 1)
+        check_index_invariant(index)
+
+    def test_a_path_is_never_in_two_lists(self):
+        index = merge_index(
+            None, "on008083", self.HEAD,
+            [{"zarr": store_rel_for(self.PATH), "path": self.PATH}],
+            [], "2026-09-02T00:00:00Z", [],
+            [{"path": self.PATH, "reason": "infra_failure"}],
+            discovered=[self.PATH],
+        )
+        self.assertEqual(index["store_count"], 0)
+        self.assertEqual(index["pending_count"], 1)
+        check_index_invariant(index)
+
+    def test_not_attempted_never_ages_toward_exhaustion(self):
+        # A recording a `--limit`ed run never reached has not failed at anything.
+        pending = None
+        for _ in range(PENDING_MAX_ATTEMPTS + 2):
+            index = merge_index(
+                None, "on008083", self.HEAD, [], [], "2026-09-02T00:00:00Z", [], [],
+                discovered=[self.PATH], prior_pending=pending,
+            )
+            pending = index["pending"]
+        self.assertEqual(index["pending_count"], 1)
+        self.assertEqual(index["pending"][0]["reason"], "not_attempted")
+        self.assertEqual(index["pending"][0]["attempts"], 0)
+
+
+class TestIndexSchemaSelfCheck(unittest.TestCase):
+    """The converter validates the document it is about to publish. index.json is
+    the mandatory entry point (in-prefix ListBucket is denied), so a malformed one
+    has no fallback for any consumer."""
+
+    HEAD = "e" * 40
+
+    def index(self):
+        return merge_index(
+            None, "on007763", self.HEAD,
+            [{"zarr": "sub-01/eeg/a_eeg.zarr", "path": "sub-01/eeg/a_eeg.edf",
+              "updated_utc": "2026-09-02T00:00:00Z", "source_tree": "raw",
+              "derived": False, "modalities": ["eeg"],
+              "groups": [{"name": "eeg_200hz", "modality": "EEG", "rate": 200.0,
+                          "n_channels": 4, "n_samples": 12000, "duration_s": 60.0,
+                          "n_view_levels": 3, "view_chunk_columns": 1024,
+                          "source_rate_hz": 200.0, "chunk_samples": 800,
+                          "shard_samples": 12000}],
+              "n_events": 3, "trial_types": {"go": 2, "stop": 1},
+              "units_report": {"converted": 1, "relabelled": 0,
+                               "kept_importer_unit": 0, "units_column_present": True}}],
+            [], "2026-09-02T00:00:00Z",
+            [{"path": "sub-02/eeg/b_eeg.edf", "zarr": "sub-02/eeg/b_eeg.zarr",
+              "code": "file_read_error", "reason": "...", "detail": "OSError: ..."}],
+            [{"path": "sub-03/eeg/c_eeg.edf", "reason": "infra_failure",
+              "last_error": "boom"}],
+            discovered=["sub-01/eeg/a_eeg.edf", "sub-02/eeg/b_eeg.edf",
+                        "sub-03/eeg/c_eeg.edf"],
+            biosigio_version="1.2.6",
+        )
+
+    def test_the_validator_is_installed_so_this_class_can_fail(self):
+        """Without `jsonschema` every other test here is vacuous.
+
+        `validate_document` degrades to a loud warning when the validator is
+        missing -- deliberately, so an old venv on the conversion node still
+        converts rather than refusing to publish over a lint dependency. The
+        cost is that the positive cases below then pass without validating
+        anything, and the negative cases ERROR on their own import. Both read
+        like a green schema gate.
+
+        This is the tripwire: it fails, by name, in exactly the environment
+        where the rest of the class stops meaning anything. CI installs the
+        validator for this job (`.github/workflows/test.yml`), and so does
+        `scripts/zarr/requirements.txt`; if either drops it, this is what says
+        so.
+        """
+        import jsonschema  # noqa: F401 - presence IS the assertion
+
+    def test_a_built_index_validates(self):
+        validate_document(self.index(), INDEX_SCHEMA_PATH, "index")
+
+    def test_the_index_declares_its_stability_policy(self):
+        # A schema with no stated policy is one every client has to guess at.
+        with open(INDEX_SCHEMA_PATH) as fh:
+            schema = json.load(fh)
+        self.assertIn("format_version 3", schema["$comment"])
+        self.assertIn("additionalProperties", schema["$comment"])
+        self.assertIn("v4", schema["$comment"])
+        with open(MANIFEST_SCHEMA_PATH) as fh:
+            self.assertIn("format_version 1", json.load(fh)["$comment"])
+
+    def test_the_layout_recipe_is_published(self):
+        """An MCP recipe (ADR 0025) has to be computable from index.json plus ONE
+        array-metadata fetch. The broker is stateless, so anything absent from
+        the index it must discover by request -- and discovery-by-404 is what
+        #1178 item 2 removed. The numbers were already here; these are the path
+        templates and the sample-value rule that make them usable."""
+        layout = self.index()["layout"]
+        self.assertEqual(layout["level0"], "<zarr>/<group>/0")
+        self.assertEqual(layout["view"], "<zarr>/<group>/view/<L>")
+        self.assertIn("n_view_levels", layout["view_levels"])
+        self.assertIn("physical = digital * scale + offset", layout["scale_offset"])
+        # `const` in the schema, so a client may hardcode it after checking
+        # format_version -- and a layout change becomes a schema change.
+        with open(INDEX_SCHEMA_PATH) as fh:
+            props = json.load(fh)["properties"]["layout"]["properties"]
+        self.assertEqual(props["level0"]["const"], layout["level0"])
+
+    def test_dataset_provenance_is_hoisted_to_the_top_level(self):
+        index = merge_index(
+            None, "on007763", self.HEAD, [], [], "2026-09-02T00:00:00Z", [], [],
+            discovered=[],
+            dataset_row={"name": "N", "authors": "Doe J", "concept_doi": "10.82901/x",
+                         "license": "CC0", "hed_version": "8.2.0",
+                         "created_at": "2024-01-01"},
+        )
+        self.assertEqual(index["doi"], "10.82901/x")
+        self.assertEqual(index["license"], "CC0")
+        self.assertEqual(index["hed_version"], "8.2.0")
+        self.assertIn("Doe J", index["citation"])
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_dataset_provenance_is_null_without_a_row(self):
+        # Already fetched once per run, so publishing it is free -- but a catalog
+        # that has no DOI yet must yield null rather than an invented string.
+        index = merge_index(
+            None, "on007763", self.HEAD, [], [], "2026-09-02T00:00:00Z", [], [],
+            discovered=[],
+        )
+        for key in ("doi", "license", "citation", "hed_version"):
+            self.assertIsNone(index[key], key)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_zero_store_index_validates(self):
+        # A dataset whose every recording failed still publishes an index, and it
+        # is the shape most likely to be built by a path nobody exercised.
+        index = merge_index(
+            None, "on008083", self.HEAD, [], [], "2026-09-02T00:00:00Z",
+            [_failure_entry("sub-01/eeg/a_eeg.edf", "file_read_error", "OSError: x")],
+            [],
+            discovered=["sub-01/eeg/a_eeg.edf"],
+        )
+        self.assertEqual(index["store_count"], 0)
+        self.assertEqual(index["stores"], [])
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_mutated_index_is_rejected(self):
+        import jsonschema
+
+        for mutate in (
+            lambda d: d.__setitem__("source_commit", ""),
+            lambda d: d.__setitem__("format_version", 1),
+            lambda d: d.__setitem__("store_count", -1),
+            lambda d: d.__setitem__("data_base_kind", "gopher"),
+            lambda d: d.__setitem__("stray_key", 1),
+            lambda d: d["pending"][0].__setitem__("reason", "because"),
+            lambda d: d["stores"][0].pop("source_tree"),
+            lambda d: d["failures"][0].pop("code"),
+            # The "no source_key in the index" rule (#1178 item 5) is now
+            # CHECKABLE rather than a convention: the store object is closed, so
+            # a producer that forgot to strip it cannot publish.
+            lambda d: d["stores"][0].__setitem__("source_key", "SHA256E-s1--a"),
+            # Every sub-object closed, so a typo'd key fails here rather than
+            # being served to clients that ignore it.
+            lambda d: d["stores"][0].__setitem__("stray", 1),
+            lambda d: d["stores"][0]["groups"][0].__setitem__("stray", 1),
+            lambda d: d["failures"][0].__setitem__("stray", 1),
+            lambda d: d["pending"][0].__setitem__("stray", 1),
+            # A group with no name cannot be addressed at all: the layout
+            # recipe's <group> has nothing to substitute.
+            lambda d: d["stores"][0]["groups"][0].pop("name"),
+            # http:// is not the contract: the data plane is HTTPS-only.
+            lambda d: d.__setitem__("contract_base", "http://zarr.nemar.org/x/zarr/"),
+            lambda d: d.__setitem__("data_base", "ftp://example.org/"),
+            # A failure or pending entry must name a STORE path.
+            lambda d: d["failures"][0].__setitem__("zarr", "sub-02/eeg/b_eeg.edf"),
+            lambda d: d["pending"][0].__setitem__("zarr", "nope"),
+            lambda d: d.pop("layout"),
+            lambda d: d["layout"].__setitem__("level0", "<zarr>/<group>/level0"),
+        ):
+            doc = json.loads(json.dumps(self.index()))
+            mutate(doc)
+            with self.subTest(mutation=str(mutate)), self.assertRaises(
+                jsonschema.ValidationError
+            ):
+                validate_document(doc, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_built_manifest_validates(self):
+        manifest = merge_manifest(
+            None, "on007763",
+            [{"zarr": "sub-01/eeg/a_eeg.zarr", "source_key": "SHA256E-s100--a.edf",
+              "size_bytes": 100}],
+            ["sub-01/eeg/a_eeg.zarr"], "2026-09-02T00:00:00Z",
+        )
+        validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_a_mutated_manifest_is_rejected(self):
+        import jsonschema
+
+        manifest = merge_manifest(
+            None, "on007763",
+            [{"zarr": "sub-01/eeg/a_eeg.zarr", "source_key": "k", "size_bytes": 1}],
+            ["sub-01/eeg/a_eeg.zarr"], "2026-09-02T00:00:00Z",
+        )
+        manifest["stores"][0]["zarr"] = "sub-01/eeg/a_eeg.set"  # not a store path
+        with self.assertRaises(jsonschema.ValidationError):
+            validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
+
+class TestRealRecordingV3Fields(unittest.TestCase):
+    """End-to-end over the STORE-LEVEL functions on a real recording.
+
+    Not `convert_one`: that uploads with `aws s3 sync`, so a whole-run test would
+    need S3 credentials and a bucket. Everything between the file and the upload
+    is exercised here on real bytes -- biosigIO reads a real EDF, writes a real
+    Zarr v3 store, and `store_metadata` reads back the very attrs the index
+    republishes. That is the half where a biosigIO attr rename would silently
+    empty the new fields.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+        cls._tmp = tempfile.TemporaryDirectory()
+        d = cls._tmp.name
+        cls.recording = build_real_edf(d, "sub-01_task-rest_eeg")
+        cls.channels = os.path.join(d, "sub-01_task-rest_channels.tsv")
+        with open(cls.channels, "w") as fh:
+            fh.writelines(
+                ["name\ttype\tunits\n"] + [f"E{i + 1}\tEEG\tV\n" for i in range(4)]
+            )
+        cls.events = os.path.join(d, "sub-01_task-rest_events.tsv")
+        with open(cls.events, "w") as fh:
+            fh.writelines(
+                ["onset\tduration\ttrial_type\n"]
+                + [
+                    f"{i * 5.0}\t0.5\t{'go' if i % 2 == 0 else 'stop'}\n"
+                    for i in range(6)
+                ]
+            )
+        cls.store = os.path.join(d, "sub-01_task-rest_eeg.zarr")
+        convert_recording(
+            cls.recording, cls.events, cls.store, channels_local=cls.channels
+        )
+        cls.meta = store_metadata(cls.store)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_view_geometry_is_republished_from_the_store(self):
+        group = self.meta["groups"][0]
+        # Without n_view_levels the website reader probes view/1, view/2, ...
+        # until a 404 (#1178 item 2).
+        self.assertGreaterEqual(group["n_view_levels"], 1)
+        # Constant COLUMNS per view chunk is what turns a zoomed-out read from
+        # 594 requests into 3 (#1178 item 1, biosigio 1.2.6).
+        self.assertEqual(group["view_chunk_columns"], 1024)
+
+    def test_source_rate_is_the_acquisition_rate_not_the_serving_cap(self):
+        group = self.meta["groups"][0]
+        self.assertEqual(group["source_rate_hz"], 200.0)
+        self.assertGreater(group["chunk_samples"], 0)
+        self.assertGreater(group["shard_samples"], 0)
+
+    def test_units_report_is_published_when_channels_tsv_was_applied(self):
+        report = self.meta["units_report"]
+        self.assertIs(report["units_column_present"], True)
+        for key in ("converted", "relabelled", "kept_importer_unit"):
+            self.assertIsInstance(report[key], int)
+
+    def test_no_units_report_when_no_channels_tsv_applies(self):
+        # Absence means "not applied", never "applied cleanly" -- the distinction
+        # a consumer needs while the streaming path still cannot apply it.
+        with tempfile.TemporaryDirectory() as d:
+            store = os.path.join(d, "plain_eeg.zarr")
+            convert_recording(self.recording, None, store)
+            self.assertNotIn("units_report", store_metadata(store))
+
+    def test_events_summary_matches_the_applied_events_tsv(self):
+        with open(self.events) as fh:
+            summary = events_summary(fh.read())
+        self.assertEqual(summary["n_events"], 6)
+        self.assertEqual(summary["trial_types"], {"go": 3, "stop": 3})
+
+    def test_provenance_attrs_land_in_the_store_root(self):
+        import zarr
+
+        embed_root_attr(
+            self.store,
+            "nemar",
+            nemar_store_attrs(
+                dataset_id="on007763",
+                source_commit="f" * 40,
+                source_tree=source_tree_for("sub-01/eeg/sub-01_task-rest_eeg.edf"),
+                derived=False,
+                engine_version="2",
+                contract_url="https://zarr.nemar.org/on007763/zarr/x.zarr/",
+                row={"name": "N", "license": "CC0"},
+            ),
+        )
+        attrs = dict(zarr.open_group(self.store, mode="r").attrs)
+        self.assertEqual(attrs["nemar"]["license"], "CC0")
+        self.assertEqual(attrs["nemar"]["source_tree"], "raw")
+        # biosigIO's own attributes are untouched.
+        self.assertEqual(attrs["format"], "biosigio-zarr")
+        self.assertIn("channel_groups", attrs)
+
+    def test_sidecar_applies_to_a_recording_with_no_sidecar_beside_it(self):
+        """The ADR 0028 MaxShield shape, without needing a MaxShield recording.
+
+        On that path `primary_local` is the Signal-Space-Separated copy at
+        `work/sss_<basename>` -- a real file at a path where no channels.tsv is
+        adjacent. biosigIO's own `bids_channels="auto"` resolves the sidecar as a
+        SIBLING, so it would find nothing there and silently serve importer units
+        and MNE-inferred types. This reproduces exactly that geometry with a real
+        EDF at a renamed path in an empty directory, and asserts the sidecar still
+        reaches the conversion.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            filtered = os.path.join(d, "sss_sub-01_task-rest_eeg.edf")
+            shutil.copyfile(self.recording, filtered)
+            self.assertEqual(
+                [f for f in os.listdir(d) if f.endswith("_channels.tsv")], [],
+                "the fixture must have NO sidecar beside the recording",
+            )
+            store = os.path.join(d, "out.zarr")
+            convert_recording(filtered, None, store, channels_local=self.channels)
+            report = store_metadata(store)["units_report"]
+            self.assertIs(report["units_column_present"], True)
+
+    def test_sibling_auto_detection_is_not_what_applies_the_sidecar(self):
+        """A sidecar sitting beside the recording but NOT the one this driver
+        resolved must not be picked up: with no sidecar resolved the driver
+        passes `bids_channels="off"`, so the only sidecar that can ever shape a
+        store is one this driver chose.
+
+        Without this, the SSS test above could pass for the wrong reason on some
+        future release whose auto-detection searches more widely -- and a staged
+        sidecar would be at risk of being applied twice, which matters because
+        adopting a unit CONVERTS samples rather than relabelling them.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            recording = os.path.join(d, "sub-01_task-rest_eeg.edf")
+            shutil.copyfile(self.recording, recording)
+            # A sibling naming channels the recording does not have: applied, it
+            # would report nothing changed; ignored, there is no report at all.
+            with open(os.path.join(d, "sub-01_task-rest_channels.tsv"), "w") as fh:
+                fh.write("name\ttype\tunits\nNOPE\tEEG\tV\n")
+            store = os.path.join(d, "out.zarr")
+            convert_recording(recording, None, store)
+            self.assertNotIn("units_report", store_metadata(store))
+
+    def test_bids_channels_arg_is_the_path_or_off_never_auto(self):
+        """"auto" is biosigIO's default and is always wrong here: it resolves the
+        sidecar as a SIBLING of the file the exporter was handed, which is a
+        scratch materialisation (and, on the MaxShield path, a filtered copy).
+        The driver therefore passes the resolved path, or "off" when no sidecar
+        applies -- an explicit "there is none" rather than a guess."""
+        self.assertEqual(generate_zarr.bids_channels_arg(self.channels), self.channels)
+        self.assertEqual(generate_zarr.bids_channels_arg(None), "off")
+        self.assertEqual(generate_zarr.bids_channels_arg(""), "off")
+        # Staged but missing (a failed sidecar read) is "off", not a path the
+        # exporter would raise on.
+        self.assertEqual(
+            generate_zarr.bids_channels_arg("/no/such/_channels.tsv"), "off"
+        )
+
+    def test_the_streaming_exporter_applies_the_sidecar_too(self):
+        """The two exporters must not disagree about a recording's units.
+
+        This is the assertion that was impossible on biosigio 1.2.6, whose
+        `stream_to_zarr` had no `bids_channels` parameter at all: a dataset's
+        small recordings carried the sidecar's units and its large ones carried
+        the importer's, which is exactly why the engine bump waited for
+        biosigio#128. Now it is an observable property of a real streamed store,
+        so a regression on either path fails here rather than being inferred from
+        a missing index field.
+        """
+        if not generate_zarr._EDF_STREAMABLE:
+            self.skipTest("installed biosigio does not stream EDF")
+        with tempfile.TemporaryDirectory() as d:
+            store = os.path.join(d, "streamed.zarr")
+            saved = generate_zarr.STREAM_EDF_MIN_BYTES
+            try:
+                # Force the streaming branch for a small real EDF, so this runs
+                # the same exporter a multi-GB recording would.
+                generate_zarr.STREAM_EDF_MIN_BYTES = 1
+                self.assertTrue(
+                    generate_zarr.should_stream(self.recording, os.path.getsize(self.recording))
+                )
+                convert_recording(
+                    self.recording, None, store, channels_local=self.channels
+                )
+            finally:
+                generate_zarr.STREAM_EDF_MIN_BYTES = saved
+            report = store_metadata(store)["units_report"]
+            self.assertIs(report["units_column_present"], True)
+
+    def test_a_streamed_recording_with_no_sidecar_beside_it(self):
+        """The MaxShield geometry on the STREAMING path: the exporter is handed a
+        filtered copy in a directory with no channels.tsv, and must still apply
+        the sidecar the driver resolved. Sibling auto-detection would find
+        nothing here."""
+        if not generate_zarr._EDF_STREAMABLE:
+            self.skipTest("installed biosigio does not stream EDF")
+        with tempfile.TemporaryDirectory() as d:
+            filtered = os.path.join(d, "sss_sub-01_task-rest_eeg.edf")
+            shutil.copyfile(self.recording, filtered)
+            self.assertEqual(
+                [f for f in os.listdir(d) if f.endswith("_channels.tsv")], [],
+                "the fixture must have NO sidecar beside the recording",
+            )
+            store = os.path.join(d, "out.zarr")
+            saved = generate_zarr.STREAM_EDF_MIN_BYTES
+            try:
+                generate_zarr.STREAM_EDF_MIN_BYTES = 1
+                convert_recording(filtered, None, store, channels_local=self.channels)
+            finally:
+                generate_zarr.STREAM_EDF_MIN_BYTES = saved
+            self.assertIs(
+                store_metadata(store)["units_report"]["units_column_present"], True
+            )
+
+    def test_channels_tsv_resolution_is_shared_with_the_fidelity_gate(self):
+        head = {
+            "sub-01/eeg/sub-01_task-rest_eeg.edf",
+            "sub-01/eeg/sub-01_task-rest_channels.tsv",
+            "sub-01/sub-01_channels.tsv",
+        }
+        self.assertEqual(
+            channels_tsv_for("sub-01/eeg/sub-01_task-rest_eeg.edf", head),
+            "sub-01/eeg/sub-01_task-rest_channels.tsv",
+        )
+
+
+class TestMainRefusesToPublish(unittest.TestCase):
+    """The refuse-to-publish guards must still write a `failed` callback.
+
+    `hallu-zarr.sh` POSTs whatever the callback file contains. A failure path
+    that writes NO file posts nothing, so the `converting` signal the driver sent
+    when it started the dataset is never superseded and D1 sits at
+    `zarr_status='pending'` forever -- the dashboard shows a conversion in flight
+    with nothing running. #774 fixed exactly that for the total-failure branch;
+    the two schema guards were added later and returned 1 directly, reopening it.
+
+    Drives `main()` end to end: a real git repo, a real (stub) `aws` executable
+    on PATH, real argument parsing, real callback file. Only the SCHEMA is
+    swapped -- for one that rejects every document -- because a producer bug is
+    otherwise not reachable from outside.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        os.makedirs(self.repo)
+        def run(*args):
+            subprocess.run(args, cwd=self.repo, check=True, capture_output=True)
+
+        run("git", "init", "-q", "-b", "main")
+        run("git", "config", "user.email", "t@example.org")
+        run("git", "config", "user.name", "t")
+        # A dataset with NO recordings: `convert` is empty, so nothing is
+        # downloaded or converted and the guard is the only thing under test.
+        with open(os.path.join(self.repo, "dataset_description.json"), "w") as fh:
+            json.dump({"Name": "guard fixture", "BIDSVersion": "1.8.0"}, fh)
+        run("git", "add", "-A")
+        run("git", "commit", "-q", "-m", "init")
+
+        # A real executable standing in for `aws`, reporting NoSuchKey so the
+        # prior index/manifest reads take their legitimate first-run path. Same
+        # approach as TestAwsRunner, which stands python3 in for aws.
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        self.aws = os.path.join(bindir, "aws")
+        with open(self.aws, "w") as fh:
+            fh.write("#!/bin/sh\necho 'NoSuchKey' >&2\nexit 1\n")
+        os.chmod(self.aws, 0o755)
+        self._path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + self._path
+
+        self.callback = os.path.join(self.dir, "cb.json")
+        self._schemas = (generate_zarr.INDEX_SCHEMA_PATH, generate_zarr.MANIFEST_SCHEMA_PATH)
+
+    def tearDown(self):
+        os.environ["PATH"] = self._path
+        (generate_zarr.INDEX_SCHEMA_PATH, generate_zarr.MANIFEST_SCHEMA_PATH) = self._schemas
+        self._tmp.cleanup()
+
+    def reject_everything(self) -> str:
+        """A valid draft 2020-12 schema that no instance satisfies."""
+        path = os.path.join(self.dir, "reject.schema.json")
+        with open(path, "w") as fh:
+            json.dump({"$schema": "https://json-schema.org/draft/2020-12/schema",
+                       "not": {}}, fh)
+        return path
+
+    def run_main(self) -> int:
+        argv = [
+            "generate_zarr.py",
+            "--dataset-id", "on008083",
+            "--repo-dir", self.repo,
+            "--bucket", "nemar-test",
+            "--callback-out", self.callback,
+            "--clean",
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                return generate_zarr.main()
+        finally:
+            sys.argv = saved
+
+    def read_callback(self) -> dict:
+        self.assertTrue(
+            os.path.exists(self.callback),
+            "no callback file: the driver would POST nothing and D1 would stay "
+            "at zarr_status='pending' forever",
+        )
+        with open(self.callback) as fh:
+            return json.load(fh)
+
+    def assert_failed_shape(self, body: dict):
+        self.assertEqual(body["status"], "failed")
+        self.assertEqual(body["dataset_id"], "on008083")
+        # Same shape as the total-failure branch, so the backend's one handler
+        # reads all three exits identically.
+        for key in (
+            "store_count", "commit", "converted", "removed", "errors", "failed",
+            "failure_count", "data_failures", "deterministic", "pool_breaks",
+            "pending_count", "discovered_count", "not_attempted_count",
+            "provenance_fetch_failed",
+        ):
+            self.assertIn(key, body, key)
+        self.assertRegex(body["commit"], r"^[0-9a-f]{40}$")
+
+    def test_a_refused_index_writes_a_failed_callback(self):
+        generate_zarr.INDEX_SCHEMA_PATH = self.reject_everything()
+        rc = self.run_main()
+        self.assertEqual(rc, 1)
+        body = self.read_callback()
+        self.assert_failed_shape(body)
+        # And it names the cause: a schema violation has no per-recording failure
+        # to point at, so without this the callback says "failed" and no more.
+        self.assertIn("index refused", body["error"])
+
+    def test_a_refused_manifest_writes_a_failed_callback(self):
+        generate_zarr.MANIFEST_SCHEMA_PATH = self.reject_everything()
+        rc = self.run_main()
+        self.assertEqual(rc, 1)
+        body = self.read_callback()
+        self.assert_failed_shape(body)
+        self.assertIn("manifest refused", body["error"])
+
+    def test_a_clean_run_with_nothing_to_convert_publishes(self):
+        """The control: with both schemas intact this run reaches the upload.
+
+        Without it the two tests above could pass because `main` failed for some
+        unrelated reason -- a missing git object, the stub `aws` -- rather than at
+        the guard. Here the stub `aws` fails the UPLOAD, so `main` raises rather
+        than returning 1, which proves the guards were what returned 1 above.
+        """
+        with self.assertRaises(RuntimeError):
+            self.run_main()
+
+
+STUB_AWS = '#!/usr/bin/env python3\n"""Minimal `aws` stand-in for the converter\'s main()-level tests: a real\nexecutable over local files, so s3_read_json / aws_cp / head-object all run."""\nimport os\nimport shutil\nimport sys\n\nROOT = os.environ["ZARR_TEST_S3_ROOT"]\n\n\ndef local(uri):\n    return os.path.join(ROOT, uri.split("/", 3)[3].replace("/", "_"))\n\n\nargs = [a for a in sys.argv[1:] if not a.startswith("--cli-")]\nargs = [a for a in args if a not in ("--only-show-errors",)]\nif args[:2] == ["s3", "cp"]:\n    src, dst = args[2], args[3]\n    if src.startswith("s3://"):\n        path = local(src)\n        if not os.path.exists(path):\n            sys.stderr.write("NoSuchKey\\n")\n            sys.exit(1)\n        with open(path) as fh:\n            sys.stdout.write(fh.read())\n    else:\n        shutil.copyfile(src, local(dst))\n    sys.exit(0)\nif args[:2] == ["s3api", "head-object"]:\n    print(\'"deadbeef"\')\n    sys.exit(0)\nsys.exit(0)\n'
+
+
+class TestMainCleanRunAgainstPriorIndexes(unittest.TestCase):
+    """A `--clean` run over a REAL prior index, v1 and v3, through `main()`.
+
+    This is the production path (hallu-zarr.sh always passes `--clean`) and no
+    test reached it: every prior-index behaviour was exercised through
+    `merge_index` directly, which `--clean` hands `prior=None` -- so the facts
+    that must survive a clean rebuild travel a route nothing covered. They come
+    from the PUBLISHED document rather than from what the merge is given:
+    the `pending` attempt counts (reset every run, and a recording could never
+    reach the exhaustion cap on the only path production runs), and the count of
+    non-raw stores the run drops from the index.
+
+    The stub `aws` is a real executable backed by local files, so `s3_read_json`,
+    `aws_cp` and the ETag read all execute.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.s3 = os.path.join(self.dir, "s3")
+        os.makedirs(self.repo)
+        os.makedirs(self.s3)
+
+        def run(*args):
+            subprocess.run(args, cwd=self.repo, check=True, capture_output=True)
+
+        run("git", "init", "-q", "-b", "main")
+        run("git", "config", "user.email", "t@example.org")
+        run("git", "config", "user.name", "t")
+        with open(os.path.join(self.repo, "dataset_description.json"), "w") as fh:
+            json.dump({"Name": "clean fixture", "BIDSVersion": "1.8.0"}, fh)
+        run("git", "add", "-A")
+        run("git", "commit", "-q", "-m", "init")
+        self.head = subprocess.run(
+            ["git", "-C", self.repo, "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+        # A real `aws` stand-in over local files: `cp s3://... -` reads,
+        # `cp <file> s3://...` writes, `s3api head-object` answers the ETag read.
+        # The root arrives by environment rather than being baked in, so the
+        # script is a fixed file with no interpolation.
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        script = os.path.join(bindir, "aws")
+        with open(script, "w") as fh:
+            fh.write(STUB_AWS)
+        os.chmod(script, 0o755)
+        self._env = (os.environ.get("PATH"), os.environ.get("ZARR_TEST_S3_ROOT"))
+        os.environ["PATH"] = bindir + os.pathsep + (self._env[0] or "")
+        os.environ["ZARR_TEST_S3_ROOT"] = self.s3
+        self.callback = os.path.join(self.dir, "cb.json")
+        self.log = ""
+
+    def tearDown(self):
+        path, root = self._env
+        if path is not None:
+            os.environ["PATH"] = path
+        if root is None:
+            os.environ.pop("ZARR_TEST_S3_ROOT", None)
+        else:
+            os.environ["ZARR_TEST_S3_ROOT"] = root
+        self._tmp.cleanup()
+
+    def put(self, key, doc):
+        with open(os.path.join(self.s3, "on008083_zarr_" + key), "w") as fh:
+            json.dump(doc, fh)
+
+    def published(self, key):
+        path = os.path.join(self.s3, "on008083_zarr_" + key)
+        self.assertTrue(os.path.exists(path), key + " was not published")
+        with open(path) as fh:
+            return json.load(fh)
+
+    def prior_v3(self, **overrides):
+        doc = {
+            "dataset_id": "on008083", "format": "nemar-zarr-index",
+            "format_version": 3, "source_commit": "a" * 40,
+            "store_count": 0, "stores": [], "failure_count": 0, "failures": [],
+            "pending_count": 0, "pending": [],
+        }
+        doc.update(overrides)
+        return doc
+
+    def run_main(self):
+        argv = [
+            "generate_zarr.py",
+            "--dataset-id", "on008083",
+            "--repo-dir", self.repo,
+            "--bucket", "nemar-test",
+            "--callback-out", self.callback,
+            "--clean",
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = generate_zarr.main()
+            self.log = out.getvalue()
+            return rc
+        finally:
+            sys.argv = saved
+
+    def callback_body(self):
+        with open(self.callback) as fh:
+            return json.load(fh)
+
+    def test_a_clean_run_over_a_v1_prior_index(self):
+        # The realistic first re-conversion: what is on S3 today is v1.
+        self.put("index.json", {
+            "dataset_id": "on008083", "format": "nemar-zarr-index",
+            "format_version": 1, "source_commit": "a" * 40, "store_count": 1,
+            "stores": [{"path": "sub-01/eeg/a_eeg.edf",
+                        "zarr": "sub-01/eeg/a_eeg.zarr",
+                        "source_key": "SHA256E-s1--a"}],
+            "failure_count": 0, "failures": [],
+        })
+        self.assertEqual(self.run_main(), 0)
+        index = self.published("index.json")
+        self.assertEqual(index["format_version"], 3)
+        self.assertEqual(index["source_commit"], self.head)
+        # The v1 entry's recording is not at HEAD, so it does not carry -- and
+        # its `source_key` is nowhere in the v3 document.
+        self.assertEqual(index["store_count"], 0)
+        self.assertNotIn("source_key", json.dumps(index))
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+        validate_document(self.published("manifest.json"), MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_a_clean_run_over_a_v3_prior_index(self):
+        self.put("index.json", self.prior_v3())
+        self.assertEqual(self.run_main(), 0)
+        index = self.published("index.json")
+        self.assertEqual(index["format_version"], 3)
+        self.assertEqual(index["engine_version"], ZARR_ENGINE_VERSION)
+        self.assertEqual(index["layout"]["level0"], "<zarr>/<group>/0")
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_the_manifest_is_published_alongside_the_index(self):
+        self.put("index.json", self.prior_v3())
+        self.put("manifest.json", {
+            "format": "nemar-zarr-manifest", "format_version": 1,
+            "dataset_id": "on008083", "updated_utc": "2026-09-01T00:00:00Z",
+            "stores": [{"zarr": "sub-01/eeg/a_eeg.zarr",
+                        "source_key": "SHA256E-s1--a", "size_bytes": 1}],
+        })
+        self.assertEqual(self.run_main(), 0)
+        manifest = self.published("manifest.json")
+        # Restricted to the rels the index publishes, so the two documents can
+        # never disagree about which stores exist. Nothing is served here, so
+        # the stale entry goes.
+        self.assertEqual(manifest["stores"], [])
+        self.assertEqual(manifest["dataset_id"], "on008083")
+        validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_pending_attempts_are_read_from_the_published_index(self):
+        """The fact `--clean` would otherwise reset on every run.
+
+        `main` sources `prior_pending` from the document it read, not from what
+        it hands the merge -- which under `--clean` is `None`. Without that, a
+        recording failing for an infra reason would restart at attempt 1 forever
+        and `retry_exhausted` would be unreachable in production.
+        """
+        path = "sub-01/eeg/a_eeg.edf"
+        self.put("index.json", self.prior_v3(
+            pending_count=1,
+            pending=[{"path": path, "zarr": store_rel_for(path),
+                      "reason": "infra_failure", "attempts": 4,
+                      "last_error": "RuntimeError: boom",
+                      "last_attempt_utc": "2026-09-01T00:00:00Z"}],
+        ))
+        self.assertEqual(self.run_main(), 0)
+        # The recording is not at HEAD any more, so the entry drops rather than
+        # ageing -- what is asserted here is that `main` READ it: the attempt
+        # history reached the merge, which is the wiring `--clean` breaks.
+        self.assertEqual(self.published("index.json")["pending_count"], 0)
+        # And the merge does age it when the recording IS still discovered,
+        # through the same argument main passes.
+        index = merge_index(
+            None, "on008083", self.head, [], [], "2026-09-02T00:00:00Z", [],
+            [{"path": path, "reason": "infra_failure", "last_error": "boom"}],
+            discovered=[path],
+            prior_pending=self.prior_v3(
+                pending=[{"path": path, "reason": "infra_failure", "attempts": 4}]
+            )["pending"],
+        )
+        # 4 + 1 == PENDING_MAX_ATTEMPTS, so this is the round that promotes it.
+        self.assertEqual(index["pending_count"], 0)
+        self.assertEqual(index["failures"][0]["code"], "retry_exhausted")
+        self.assertEqual(index["failures"][0]["attempts"], PENDING_MAX_ATTEMPTS)
+
+    def test_non_raw_stores_are_dropped_reported_and_logged(self):
+        self.put("index.json", self.prior_v3(
+            store_count=2,
+            stores=[
+                {"path": "derivatives/prep/a_eeg.set",
+                 "zarr": "derivatives/prep/a_eeg.zarr",
+                 "source_tree": "raw", "derived": False},
+                {"path": "sourcedata/b_eeg.set", "zarr": "sourcedata/b_eeg.zarr",
+                 "source_tree": "raw", "derived": False},
+            ],
+        ))
+        self.assertEqual(self.run_main(), 0)
+        body = self.callback_body()
+        self.assertEqual(body["non_raw_dropped"], 2)
+        # Named in the log, with the tree, so the count has a cause attached.
+        self.assertIn("derivatives/prep/a_eeg.set", self.log)
+        self.assertIn("sourcedata", self.log)
+        index = self.published("index.json")
+        self.assertEqual(index["stores"], [])
+        self.assertNotIn("legacy_store_count", index)
+
+    def test_the_callback_reports_every_new_field(self):
+        self.put("index.json", self.prior_v3())
+        self.assertEqual(self.run_main(), 0)
+        body = self.callback_body()
+        for key in (
+            "pending_count", "discovered_count", "not_attempted_count",
+            "non_raw_dropped", "provenance_fetch_failed", "manifest_upload_failed",
+        ):
+            self.assertIn(key, body, key)
+        self.assertEqual(body["status"], "ready")
+        self.assertIs(body["manifest_upload_failed"], False)
+        # Nothing to convert, so the catalog was never read: not a failure.
+        self.assertIs(body["provenance_fetch_failed"], False)
+
+    def test_a_missing_prior_index_is_the_first_run_path(self):
+        # No document at all: the stub reports NoSuchKey, which must read as
+        # "first run" rather than raising.
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.published("index.json")["store_count"], 0)
+        self.assertEqual(self.callback_body()["non_raw_dropped"], 0)
+
+
+class TestConvertOneEndToEnd(unittest.TestCase):
+    """`convert_one` in LOCAL mode over a real recording, up to the upload.
+
+    The store entry is assembled here -- `store_metadata`'s spread, the events
+    summary, the `units_report` annotation, the SSS flags -- and every test of
+    those pieces called them individually. So the assembly itself, which is
+    where a key gets mis-set or dropped, was covered by nothing.
+
+    `--local` reads the working tree directly (the Hallu path after `nemar
+    dataset download`), so no S3 is needed until the `aws s3 sync`, which the
+    stub below absorbs. Everything before it is the real code on real bytes.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.eeg = os.path.join(self.repo, "sub-01", "eeg")
+        os.makedirs(self.eeg)
+        self.primary = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+        build_real_edf(self.eeg, "sub-01_task-rest_eeg", seconds=30)
+        with open(os.path.join(self.eeg, "sub-01_task-rest_channels.tsv"), "w") as fh:
+            fh.writelines(
+                ["name\ttype\tunits\n"] + [f"E{i + 1}\tEEG\tV\n" for i in range(4)]
+            )
+        with open(os.path.join(self.eeg, "sub-01_task-rest_events.tsv"), "w") as fh:
+            fh.writelines(
+                ["onset\tduration\ttrial_type\n"]
+                + [f"{i * 2.0}\t0.5\t{'go' if i % 2 == 0 else 'stop'}\n"
+                   for i in range(8)]
+            )
+        # `aws s3 sync` is the only external call convert_one makes in local
+        # mode; a real no-op executable absorbs it.
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        self._path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + self._path
+        self._work = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        os.environ["PATH"] = self._path
+        self._work.cleanup()
+        self._tmp.cleanup()
+
+    def convert(self, head_files=None, dataset_row=None, provenance_failed=False):
+        files = head_files if head_files is not None else {
+            self.primary,
+            "sub-01/eeg/sub-01_task-rest_channels.tsv",
+            "sub-01/eeg/sub-01_task-rest_events.tsv",
+        }
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on007763",
+            "head": "b" * 40, "head_files": files, "local": True,
+            "tmp": self._work.name, "updated": "2026-09-02T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org",
+            "engine_version": "3",
+            "dataset_row": dataset_row,
+            "provenance_fetch_failed": provenance_failed,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+        })
+        return convert_one(self.primary)
+
+    def test_the_entry_carries_the_sidecar_annotation(self):
+        result = self.convert()
+        self.assertTrue(result["ok"], result.get("error"))
+        entry = result["entry"]
+        report = entry["units_report"]
+        # Which sidecar shaped the store, and that the CONVERTER chose it rather
+        # than the exporter stumbling on a sibling -- two separate claims, both
+        # of which matter on the MaxShield path where sibling detection finds
+        # nothing.
+        self.assertIs(report["sidecar_supplied"], True)
+        self.assertEqual(report["sidecar"], "sub-01/eeg/sub-01_task-rest_channels.tsv")
+        self.assertIs(report["units_column_present"], True)
+        self.assertNotIn("channels_tsv_read_error", entry)
+
+    def test_the_entry_is_a_complete_v3_store_entry(self):
+        entry = self.convert()["entry"]
+        self.assertEqual(entry["path"], self.primary)
+        self.assertEqual(entry["zarr"], store_rel_for(self.primary))
+        self.assertEqual(entry["source_tree"], "raw")
+        self.assertIs(entry["derived"], False)
+        self.assertEqual(entry["n_events"], 8)
+        self.assertEqual(entry["trial_types"], {"go": 4, "stop": 4})
+        self.assertEqual(entry["modalities"], ["eeg"])
+        self.assertGreaterEqual(entry["groups"][0]["n_view_levels"], 1)
+        # And `source_key` is NOT here: it moved to the manifest (#1178 item 5).
+        self.assertNotIn("source_key", entry)
+        self.assertIn("source_key", self.convert()["manifest"])
+
+    def test_the_entry_validates_inside_a_real_index(self):
+        # The assembled entry has to satisfy the closed store schema, which is
+        # what the producer enforces before publishing.
+        entry = self.convert()["entry"]
+        index = merge_index(
+            None, "on007763", "b" * 40, [entry], [], "2026-09-02T00:00:00Z",
+            [], [], discovered=[self.primary],
+        )
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_an_unreadable_sidecar_is_recorded_not_collapsed(self):
+        """A channels.tsv that APPLIES but cannot be read must not look like a
+        dataset that ships none: both leave `units_report` absent, and only one
+        of them means the store is serving importer units unintentionally."""
+        # Declared at HEAD, absent from the working tree and from git: the read
+        # fails the way a pack/tree desync would.
+        files = {self.primary, "sub-01/sub-01_channels.tsv"}
+        entry = self.convert(head_files=files)["entry"]
+        self.assertIs(entry["channels_tsv_read_error"], True)
+        self.assertNotIn("units_report", entry)
+
+    def test_it_converts_with_a_failed_provenance_fetch(self):
+        """A catalog outage must not cost a conversion.
+
+        The store's `nemar` attrs then carry nulls plus
+        `provenance_fetch_failed: true`; that the flag lands in the ATTRS is
+        asserted in TestRealRecordingV3Fields (the store is deleted by
+        `convert_one`'s `finally`, so it cannot be read back from here). What
+        this covers is the path itself: the flag threads through the worker
+        context without breaking the conversion.
+        """
+        result = self.convert(dataset_row=None, provenance_failed=True)
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertEqual(result["entry"]["path"], self.primary)
+
 
 if __name__ == "__main__":
     unittest.main()

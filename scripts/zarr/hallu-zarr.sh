@@ -143,6 +143,7 @@ for _pretest_arg in "$@"; do
     export TEST_API_URL="${TEST_API_URL:-https://api-test.nemar.org}"
     export S3_BUCKET="${S3_BUCKET:-nemar-dev}"
     export ZARR_AWS_PROFILE="${ZARR_AWS_PROFILE:-nemar-zarr-dev}"
+    export ZARR_CONTRACT_BASE="${ZARR_CONTRACT_BASE:-https://zarr-test.nemar.org}"
     export ZARR_STATE_DIR="${ZARR_STATE_DIR:-${ZARR_BASE:-/mnt/local}/zarr-state-test}"
     export ZARR_WORK_DIR="${ZARR_WORK_DIR:-${ZARR_BASE:-/mnt/local}/zarr-scratch-test}"
     export ZARR_DRIVER_REF="${ZARR_DRIVER_REF:-dev}"
@@ -187,15 +188,28 @@ DRIVER_REPO="${ZARR_DRIVER_REPO:-${STATE_DIR}/nemar-cli}"   # clone of nemarOrg/
 DRIVER_REF="${ZARR_DRIVER_REF:-main}"
 VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 # Fallback only (used when the clone predates scripts/zarr/requirements.txt, which
-# is the real pin). Floor is 1.2.4, not 1.2.3: 1.2.3 added MEF3 .mefd / 4D-BTi
-# import (so a run below that floor would discover a .mefd/BTi recording via
-# generate_zarr.py's dir_recording_of/bti_recordings and then fail to convert it),
-# and 1.2.4 additionally reads MATLAB v7.3 (HDF5) EEGLAB `.set` and recovers three
-# false EDF/BDF rejections. Extras are not optional here: [mef3] carries pymef and
-# [hdf5] carries h5py, and without either the matching recordings raise ImportError
-# at convert time even though discovery finds them.
-BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.4}"
+# is the real pin). Floor is 1.2.6: 1.2.3 added MEF3 .mefd / 4D-BTi import (so a
+# run below it would discover a .mefd/BTi recording via generate_zarr.py's
+# dir_recording_of/bti_recordings and then fail to convert it), 1.2.4 added MATLAB
+# v7.3 (HDF5) EEGLAB `.set` plus three recovered EDF/BDF rejections, 1.2.5 fixed
+# CTF `.hc` coil naming, 1.2.6 is what index format v3 reads (constant-column view
+# chunking with the geometry declared in attrs, channels.tsv units CONVERTING
+# samples with a per-file report, resource exhaustion propagating as MemoryError),
+# and 1.2.7 gives `stream_to_zarr` the same `bids_channels` parameter as
+# `Recording.from_file` -- which is what makes engine "3" safe, since below that
+# floor the streaming and in-memory paths disagree about a recording's units.
+# Extras are not optional here: [mef3] carries pymef and [hdf5] carries h5py, and
+# without either the matching recordings raise ImportError at convert time even
+# though discovery finds them.
+BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.7}"
 API_BASE="${API_BASE:-https://api.nemar.org}"
+# The STABLE base published in each index as `contract_base` and in each store's
+# `nemar.contract_url` (#1059/#1064). Distinct from S3_BUCKET/AWS_REGION, which
+# say where the bytes physically are today: this is the URL clients are told they
+# may hardcode, so it must NOT be derived from the bucket. The --test pre-pass
+# above defaults it to zarr-test.nemar.org, so a test-instance index never
+# advertises the production host.
+CONTRACT_BASE="${ZARR_CONTRACT_BASE:-https://zarr.nemar.org}"
 CALLBACK_URL="${ZARR_CALLBACK_URL:-${API_BASE}/webhooks/zarr-ready}"
 S3_BUCKET="${S3_BUCKET:-nemar}"
 AWS_REGION="${AWS_DEFAULT_REGION:-us-east-2}"
@@ -450,6 +464,7 @@ EXECUTE=${EXECUTE:-0}
 API_BASE=$API_BASE
 TEST_API_URL=${TEST_API_URL:-}
 CALLBACK_URL=$CALLBACK_URL
+CONTRACT_BASE=$CONTRACT_BASE
 S3_BUCKET=$S3_BUCKET
 AWS_REGION=$AWS_REGION
 AWS_PROFILE=$AWS_PROFILE
@@ -620,6 +635,11 @@ convert_dataset() {
   # the previous dataset's `deterministic` and get mis-marked terminal. Set from
   # the callback further down on a real conversion run.
   LAST_DETERMINISTIC=false
+  # Same reasoning as LAST_DETERMINISTIC: reset per dataset so a run that writes
+  # no callback cannot inherit the previous dataset's pending count and put this
+  # row into a retry loop it never earned.
+  LAST_PENDING_COUNT=0
+  LAST_NOT_ATTEMPTED=0
   log "[$id] start (version=${version:-?})"
 
   # In-progress signal so the observability dashboard's "Processing" tile reflects
@@ -655,6 +675,7 @@ convert_dataset() {
   VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" "$DRIVER" \
     --dataset-id "$id" --repo-dir "$dir" \
     --bucket "$S3_BUCKET" --region "$AWS_REGION" --clean \
+    --contract-base "$CONTRACT_BASE" --api-base "$API_BASE" \
     --jobs "$JOBS" --callback-out "$cb" >>"$LOG_FILE" 2>&1 || rc=$?
 
   # Read the driver's classification BEFORE the scratch is reclaimed. The
@@ -664,13 +685,21 @@ convert_dataset() {
   # partial success returns rc=0 -> `done` regardless of this value (#774).
   if [[ -f "$cb" ]]; then
     LAST_DETERMINISTIC="$(jq -r '.deterministic // false' "$cb" 2>/dev/null || echo false)"
-    # A run where ANYTHING converted returns rc=0 and is marked `done` below, so
-    # recordings that failed for a retryable reason are not re-attempted by the
-    # queue on their own. That is a real gap (#1113); until the queue tracks
-    # per-recording state, make it loud and actionable instead of silent.
+    # Recordings the index lists as `pending` (#1197). Handed to `qpy done` so the
+    # row carries a backoff and reconcile re-queues it on its own -- which is what
+    # #1113's "until the queue tracks per-recording state" was waiting for. The
+    # manual recovery below stays for an operator who does not want to wait an
+    # hour, and for the case where the rounds have run out.
+    LAST_PENDING_COUNT="$(jq -r '.pending_count // 0' "$cb" 2>/dev/null || echo 0)"
+    [[ "$LAST_PENDING_COUNT" =~ ^[0-9]+$ ]] || LAST_PENDING_COUNT=0
+    # The subset never attempted. Forwarded separately because the queue treats
+    # it differently: re-queued at the shortest delay, without spending a retry
+    # round, since nothing has actually failed for those recordings.
+    LAST_NOT_ATTEMPTED="$(jq -r '.not_attempted_count // 0' "$cb" 2>/dev/null || echo 0)"
+    [[ "$LAST_NOT_ATTEMPTED" =~ ^[0-9]+$ ]] || LAST_NOT_ATTEMPTED=0
     retryable="$(jq -r '.retryable_failures // 0' "$cb" 2>/dev/null || echo 0)"
     if [[ "$retryable" =~ ^[0-9]+$ && "$retryable" -gt 0 ]]; then
-      err "[$id] $retryable recording(s) failed for a RETRYABLE reason but the dataset will be marked done; recover with: $0 --dataset $id --requeue done --execute"
+      err "[$id] $retryable recording(s) failed for a RETRYABLE reason; they are listed as pending in index.json and the dataset will be re-queued automatically after a backoff. To retry now: $0 --dataset $id --requeue done --execute"
     fi
     # POST on every outcome (not just rc==0) so the backend records failures too.
     if [[ -n "$NEMAR_WEBHOOK_TOKEN" ]]; then
@@ -926,7 +955,8 @@ while :; do
   # is attributable, not worth abandoning a backfill mid-queue.
   if convert_dataset "$id" "$version"; then
     # shellcheck disable=SC1010  # `done` is the queue subcommand, not the keyword
-    qpy done "$id" "$version" ||
+    qpy done "$id" "$version" --pending-count "${LAST_PENDING_COUNT:-0}" \
+      --not-attempted-count "${LAST_NOT_ATTEMPTED:-0}" ||
       err "[$id] converted, but marking it done FAILED; the row stays inprogress until the stale sweep reclaims it (~6h) and it will be converted again"
   elif [[ "$LAST_DETERMINISTIC" == "true" ]]; then
     # Every recording is an unreadable DATA failure -- terminal, no retry (#774).

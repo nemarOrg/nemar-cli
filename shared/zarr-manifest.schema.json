@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://api.nemar.org/schemas/zarr-manifest-v1.json",
+  "title": "NEMAR Zarr producer manifest (format_version 1)",
+  "description": "Producer-side sidecar at <data_base>manifest.json, holding the git-annex source key each store was built from. This lived in index.json until format v3: on nm000281 the per-store source_key was 2.3 MB of a 12.8 MB index (18 percent) that no consumer read, and index.json is fetched by every dataset-page visit. Split out rather than deleted because the producer still needs it to answer 'which blob is this store made of'. Nothing on nemar.org reads this file; it carries no serving contract and may change shape more freely than the index.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "format_version",
+    "dataset_id",
+    "stores"
+  ],
+  "properties": {
+    "format": {
+      "const": "nemar-zarr-manifest"
+    },
+    "format_version": {
+      "const": 1
+    },
+    "dataset_id": {
+      "type": "string",
+      "pattern": "^[a-z]{2}[0-9]{6}$"
+    },
+    "updated_utc": {
+      "type": "string"
+    },
+    "stores": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "zarr"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "zarr": {
+            "type": "string",
+            "pattern": "\\.zarr$",
+            "description": "Store path relative to the dataset's zarr prefix -- the join key back to the index's stores[]."
+          },
+          "source_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The git-annex key of the recording's primary file (e.g. SHA256E-s123--...), or null when the recording is not annexed or the key could not be read."
+          },
+          "size_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Source size in bytes as declared by the annex key itself, or null when the key carries no size."
+          }
+        }
+      }
+    }
+  },
+  "$comment": "STABILITY POLICY. Closed at format_version 1 (additionalProperties:false throughout), and PRODUCER-INTERNAL: nothing on nemar.org reads this file, so it carries no serving contract and may change shape more freely than the index. Additive change ships as format_version 1 with new optional fields; a breaking change is format_version 2 at /schemas/zarr-manifest-v2.json."
+}
