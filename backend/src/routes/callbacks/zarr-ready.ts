@@ -79,6 +79,22 @@ interface ZarrReadyBody {
   provenance_fetch_failed?: boolean;
   /** index.json published but manifest.json was not. */
   manifest_upload_failed?: boolean;
+  /**
+   * Rows in the `<id>/zarr/events.parquet` this run published, or null when it
+   * published none (issue #1060). Null covers three cases the converter's own
+   * log distinguishes -- the dataset has no events, the node's venv has no
+   * pyarrow, or the build/upload failed -- so `events_upload_failed` separates
+   * the last one: "no events" and "we could not say what the events are" must
+   * not read the same from here.
+   *
+   * Reported, not persisted. The row count belongs to the published index
+   * (`events_row_count`), which is where a consumer reads it; a column here
+   * would spend the `datasets` column budget (ADR 0034) on a number that is
+   * already served, and the events file has no failure history to summarize the
+   * way `zarr_data_failures` does.
+   */
+  events_row_count?: number | null;
+  events_upload_failed?: boolean;
 }
 
 /**
@@ -202,6 +218,11 @@ const zarrReadyBodySchema = z
     non_raw_dropped: numeric.optional().catch(undefined),
     provenance_fetch_failed: z.boolean().optional().catch(undefined),
     manifest_upload_failed: z.boolean().optional().catch(undefined),
+    // `nullable` rather than optional-only: the converter sends null when it
+    // published no events file, and the reason it published none is what
+    // `events_upload_failed` separates (issue #1060).
+    events_row_count: numeric.nullable().optional().catch(undefined),
+    events_upload_failed: z.boolean().optional().catch(undefined),
   })
   .passthrough();
 

@@ -477,6 +477,30 @@ describe("the callback body is validated, never trusted", () => {
     expect(body?.manifest_upload_failed).toBe(false);
   });
 
+  test("the events.parquet fields survive validation, null included", () => {
+    // Null is the converter's way of saying it published no events file, and
+    // `events_upload_failed` is what separates "no events" from "we could not
+    // say what the events are" (#1060). A schema that dropped the null would
+    // make the two indistinguishable here.
+    const published = parseZarrReadyBody({
+      dataset_id: DATASET,
+      status: "ready",
+      events_row_count: 5120,
+      events_upload_failed: false,
+    });
+    expect(published?.events_row_count).toBe(5120);
+    expect(published?.events_upload_failed).toBe(false);
+
+    const none = parseZarrReadyBody({
+      dataset_id: DATASET,
+      status: "ready",
+      events_row_count: null,
+      events_upload_failed: true,
+    });
+    expect(none?.events_row_count).toBeNull();
+    expect(none?.events_upload_failed).toBe(true);
+  });
+
   test("a body with no usable dataset_id is rejected", () => {
     // The one field with no sensible default: it is what the UPDATE keys on.
     const realWarn = console.warn;
