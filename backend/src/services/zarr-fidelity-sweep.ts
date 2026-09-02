@@ -19,18 +19,27 @@
  * here) -- they are always plain git blobs. Fetching them by RAW CONTENT URL
  * (`raw.githubusercontent.com/<org>/<repo>/<commit>/<path>`) is therefore
  * sufficient, and is a plain unauthenticated public-CDN GET: no GitHub App
- * installation token, no PAT, no shared API rate limit, and it 404s outright
- * for a private repo. That is a materially different exposure than
- * `signal-defaults-sweep.ts`'s `getBidsTreeStats`, which is PROD-ONLY
- * specifically because it spends the shared GitHub App/PAT reading the
- * shared `nemarDatasets` org (see that sweep's cron-wiring comment in
- * index.ts). This sweep touches only S3 (the index) and this same public,
- * credential-free content host, so -- like `recording-stats-sweep.ts` --
- * it is safe on the non-production cron: AGENTS.md's dev-cron fence exists
- * to stop a job from emailing a real user, dispatching GitHub WORK (a
- * mutation, or an authenticated read that spends the shared org's quota)
- * against `nemarDatasets`, or mutating a real DOI/prod-bucket object; this
- * sweep does none of those.
+ * installation token, no PAT, no shared API rate limit. It is also the
+ * reason candidates are restricted to PUBLIC, ACTIVE datasets (the
+ * candidate SQL): a private repo cannot be read anonymously, so verifying
+ * one would only ever produce `unverifiable` noise, never a real verdict.
+ * That is a materially different exposure than `signal-defaults-sweep.ts`'s
+ * `getBidsTreeStats`, which is PROD-ONLY specifically because it spends the
+ * shared GitHub App/PAT reading the shared `nemarDatasets` org (see that
+ * sweep's cron-wiring comment in index.ts). This sweep touches only S3
+ * (the index) and this same public, credential-free content host, so --
+ * like `recording-stats-sweep.ts` -- it is safe on the non-production cron.
+ *
+ * FAIL-OPEN ON THE CANDIDATE ROW, NEVER ON THE VERDICT. A transient infra
+ * failure (a thrown S3 fetch, a non-404 sidecar response, a network error,
+ * or the fetch budget running out mid-dataset) aborts THAT DATASET's
+ * verification for this run: nothing is stamped, the failure is recorded in
+ * the run's `errors`, and the row is untouched -- still a candidate next
+ * time (see `resolveSidecar`'s tri-state result and its callers). Only a
+ * clean, confirmed absence (404 at every nearest-first candidate path) is
+ * "no ground truth here", and only a value that actually parsed counts as
+ * checked (`sidecar_unparseable`/`store_metadata_invalid` below never
+ * silently pass as verified).
  *
  * NEAREST-FIRST, NOT A FULL BIDS-INHERITANCE WALK. generate_zarr.py's own
  * `expected_channel_count_for` / `power_line_frequency_for` resolve the
@@ -40,12 +49,23 @@
  * exists to avoid) or the version manifest (versioned by published tag, not
  * by the store's own `source_commit`). `bidsSidecarCandidates` below is the
  * brief's sanctioned fallback: a small, fixed, nearest-first candidate list
- * (recording directory, subject directory, dataset root) that covers the
- * placements real BIDS datasets actually use, tried in order and cached per
- * dataset run so repeated subject-/root-level defaults cost one fetch each.
- * `MAX_SIDECAR_FETCHES_PER_DATASET` is a hard safety net on top of that
- * cache so one dataset with nothing but misses can't blow the Worker's
- * subrequest budget.
+ * (recording directory, session directory, subject directory, dataset
+ * root) that covers the placements real BIDS datasets actually use, tried
+ * in order and cached per dataset run so a repeated session-/subject-/
+ * root-level default costs one fetch each.
+ *
+ * TWO FETCH BUDGETS. `ZARR_FIDELITY_SWEEP_WIDE_BUDGET` bounds the WHOLE
+ * invocation (every index fetch plus every sidecar fetch, across every
+ * candidate dataset); once it is spent the batch stops and remaining
+ * candidates are left completely untouched (never fetched, never errored --
+ * `budget_exhausted` in the result says why `processed` came in low).
+ * `ZARR_FIDELITY_MAX_SIDECAR_FETCHES_PER_DATASET` additionally bounds ONE
+ * dataset's sidecar fetches so a single pathological dataset (nothing but
+ * misses) cannot spend the whole sweep-wide budget by itself. Either budget
+ * running out mid-dataset surfaces as the SAME "error" outcome
+ * `resolveSidecar` already uses for a real infra failure (reason
+ * `budget_exhausted`), which is what aborts that one dataset per the
+ * fail-open rule above -- it is never turned into "absent".
  *
  * Modelled on recording-stats-sweep.ts's shape: candidate SQL, a bounded
  * per-invocation cap, three-way per-dataset error handling (throw/d1-error
@@ -68,7 +88,8 @@ import type { PresignedUrlOptions } from "./s3.js";
  *  `MODALITY_RATES`, mirrored here -- kept in sync deliberately rather than
  *  imported, since this is Python and this is the TypeScript verification
  *  side reading the SAME published fact back out of the index). Keys are
- *  UPPERCASE to match a `group.modality` value uppercased at lookup time. */
+ *  UPPERCASE; lookup trims and uppercases the index's `modality` value
+ *  before matching (issue #1068 PR #1203 review, item 8). */
 export const ZARR_FIDELITY_MODALITY_RATE_CAPS: Record<string, number> = {
   EEG: 250,
   MEG: 250,
@@ -81,23 +102,32 @@ export const ZARR_FIDELITY_MODALITY_RATE_CAPS: Record<string, number> = {
 export const ZARR_FIDELITY_MAX_SAMPLE_STORES = 40;
 
 /** Hard cap on `zarr_verify_examples`: at most this many {path, code}
- *  entries, and the cap below also bounds the serialized byte size. */
+ *  entries, and the cap below also bounds the serialized byte size. The
+ *  total mismatch count (before truncation) is stamped separately as
+ *  `zarr_verify_mismatch_count`, so a truncated list never hides how many
+ *  mismatches were actually found (PR #1203 review, item 7). */
 export const ZARR_FIDELITY_MAX_EXAMPLES = 20;
 
 /** Hard byte cap on the serialized `zarr_verify_examples` JSON array. */
 export const ZARR_FIDELITY_MAX_EXAMPLES_BYTES = 4096;
 
-/** Safety net on top of the per-dataset resolution cache: at most this many
- *  sidecar candidate fetches (across every sampled store) per dataset per
- *  run, so a dataset with nothing but 404s can't consume an unbounded
- *  subrequest budget. Sized generously above the common case (3 candidates
- *  x 2 suffix-kinds x a modest number of distinct directories among the
- *  sample, after subject-/root-level candidates are cached across stores). */
-export const ZARR_FIDELITY_MAX_SIDECAR_FETCHES = 150;
+/** Per-dataset sidecar-fetch cap (PR #1203 review, item 3): 40 sampled
+ *  stores x 2 files (channels.tsv + one modality sidecar) plus slack for
+ *  multi-modality stores and nearest-first misses, so one pathological
+ *  dataset cannot spend the whole sweep-wide budget below by itself. */
+export const ZARR_FIDELITY_MAX_SIDECAR_FETCHES_PER_DATASET = 90;
 
-/** Default / max datasets per invocation (decision 1). */
+/** Sweep-wide fetch budget (PR #1203 review, item 3): every index fetch
+ *  plus every sidecar fetch, summed across the WHOLE invocation. Once
+ *  spent, `runZarrFidelitySweep` stops the batch -- remaining candidates
+ *  are left completely untouched, not errored, not stamped. */
+export const ZARR_FIDELITY_SWEEP_WIDE_BUDGET = 600;
+
+/** Default / max datasets per invocation (decision 1; max lowered from 100
+ *  to 25 in PR #1203 review, item 3, so one admin call cannot alone spend
+ *  the sweep-wide budget across pathological datasets). */
 export const ZARR_FIDELITY_SWEEP_DEFAULT = 25;
-export const ZARR_FIDELITY_SWEEP_MAX = 100;
+export const ZARR_FIDELITY_SWEEP_MAX = 25;
 
 const GITHUB_RAW_ORIGIN = "https://raw.githubusercontent.com";
 
@@ -109,33 +139,49 @@ export interface ZarrFidelityMismatchExample {
 }
 
 /**
- * Candidates (decision 1): converted-with-stores datasets never verified, OR
- * verified against a commit that is no longer the dataset's current
- * `zarr_source_commit` -- a re-conversion re-arms verification. `github_repo
- * IS NOT NULL` is a defensive narrowing beyond the brief's literal predicate
- * (not a change to it): a row with no repo has nothing this sweep could ever
- * fetch a sidecar from, so it would only ever resolve `unverifiable` --
- * excluding it here just avoids wasted candidate slots, same reasoning
- * channel-montage-sweep / signal-defaults-sweep already apply to their own
- * candidate sets.
+ * Candidates (decision 1, amended by PR #1203 review items 5): converted,
+ * PUBLIC, active datasets never verified, OR verified against a commit that
+ * is no longer the dataset's current `zarr_source_commit`, OR stamped with
+ * a null/unusable commit. The last clause fixes a fossilisation bug the
+ * code reviewer reproduced: `zarr_verified_commit` written as JSON `null`
+ * (an unverifiable dataset with no fetchable index commit) makes
+ * `... != zarr_source_commit` evaluate to SQL NULL forever after, which is
+ * never true, so the row could never become a candidate again even once a
+ * real commit appeared. `runZarrFidelitySweep` also now stamps `''`
+ * instead of `null` for that case (belt and braces -- new writes never
+ * reproduce the fossil, and this predicate still catches any that already
+ * did or ever do again).
+ *
+ * `status = 'active' AND visibility = 'public'` (item 5): a private repo
+ * cannot be read anonymously via raw.githubusercontent.com, so including
+ * one here would only ever manufacture `unverifiable` noise.
+ * `github_repo IS NOT NULL` is a defensive narrowing beyond the brief's
+ * literal predicate (not a change to it): a row with no repo has nothing
+ * this sweep could ever fetch a sidecar from.
  */
 export const ZARR_FIDELITY_SWEEP_CANDIDATE_SQL = `SELECT dataset_id, github_repo FROM datasets
-   WHERE zarr_status = 'ready'
+   WHERE status = 'active'
+     AND visibility = 'public'
+     AND zarr_status = 'ready'
      AND zarr_store_count > 0
      AND github_repo IS NOT NULL
      AND (
        json_extract(sweep_stamps, '$.zarr_verified_at') IS NULL
+       OR json_extract(sweep_stamps, '$.zarr_verified_commit') IS NULL
        OR json_extract(sweep_stamps, '$.zarr_verified_commit') != zarr_source_commit
      )
    ORDER BY dataset_id
    LIMIT ?`;
 
 export const ZARR_FIDELITY_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n FROM datasets
-   WHERE zarr_status = 'ready'
+   WHERE status = 'active'
+     AND visibility = 'public'
+     AND zarr_status = 'ready'
      AND zarr_store_count > 0
      AND github_repo IS NOT NULL
      AND (
        json_extract(sweep_stamps, '$.zarr_verified_at') IS NULL
+       OR json_extract(sweep_stamps, '$.zarr_verified_commit') IS NULL
        OR json_extract(sweep_stamps, '$.zarr_verified_commit') != zarr_source_commit
      )`;
 
@@ -144,10 +190,11 @@ export const ZARR_FIDELITY_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n FROM data
  * text (`.rules/testing.md`: never hand-copy). Writes ONLY `sweep_stamps`
  * (decision 1 / ADR 0034) -- no other `datasets` column changes, on any
  * verdict. `json(?)` wraps the examples parameter so it lands as a nested
- * JSON array, not an escaped string (`json_set(x, '$.k', ?)` with a raw TEXT
- * bind would store the literal characters `[...]`, unreadable by
- * `json_extract('$.k[0]')`). Bind order: commit, status, examples-json,
- * sampled, checked, dataset_id.
+ * JSON array, not an escaped string. Bind order: commit (never null --
+ * `''` when the index has no usable commit, PR #1203 review item 5),
+ * status, examples-json, sampled, checked, checked_channels,
+ * checked_duration, checked_rate, unchecked, mismatch_count,
+ * examples_truncated (0/1), dataset_id.
  */
 export const ZARR_FIDELITY_SWEEP_STAMP_SQL = `UPDATE datasets
    SET sweep_stamps = json_set(
@@ -157,7 +204,13 @@ export const ZARR_FIDELITY_SWEEP_STAMP_SQL = `UPDATE datasets
      '$.zarr_verify_status', ?,
      '$.zarr_verify_examples', json(?),
      '$.zarr_verify_sampled', ?,
-     '$.zarr_verify_checked', ?
+     '$.zarr_verify_checked', ?,
+     '$.zarr_verify_checked_channels', ?,
+     '$.zarr_verify_checked_duration', ?,
+     '$.zarr_verify_checked_rate', ?,
+     '$.zarr_verify_unchecked', ?,
+     '$.zarr_verify_mismatch_count', ?,
+     '$.zarr_verify_examples_truncated', ?
    )
    WHERE dataset_id = ?`;
 
@@ -214,12 +267,18 @@ const FULL_COMMIT_RE = /^[0-9a-f]{40}$/i;
  * walk). `suffix` is the sidecar's own trailing name, e.g. `"channels.tsv"`
  * or `"eeg.json"`.
  *
- * Three placements, nearest first, deduplicated:
+ * Four placements, nearest first, deduplicated (PR #1203 review, item 9):
  *  1. the recording's own directory, full BIDS entities (a per-recording
  *     override);
- *  2. the subject directory (session entity included when present), a
- *     dataset's most common "shared default" placement;
- *  3. the dataset root, bare (the dataset-wide default).
+ *  2. the SESSION directory (`sub-XX/ses-YY/sub-XX_ses-YY_<suffix>`), only
+ *     when the recording carries both a `sub-` and a `ses-` entity -- a
+ *     session-scoped default lives IN the session directory, never
+ *     combined with the subject directory (the earlier, wrong shape this
+ *     replaces: `sub-XX/sub-XX_ses-YY_<suffix>` is not a path any BIDS
+ *     writer produces);
+ *  3. the SUBJECT directory, WITHOUT the session entity
+ *     (`sub-XX/sub-XX_<suffix>`) -- a cross-session subject default;
+ *  4. the dataset root, bare (the dataset-wide default).
  *
  * Exported for direct unit testing.
  */
@@ -229,7 +288,6 @@ export function bidsSidecarCandidates(recordingPath: string, suffix: string): st
 
   const filename = parts[parts.length - 1];
   const dir = parts.slice(0, -1).join("/");
-  const subjectDir = parts[0].startsWith("sub-") ? parts[0] : null;
 
   const dot = filename.lastIndexOf(".");
   const stem = dot > 0 ? filename.slice(0, dot) : filename;
@@ -242,6 +300,9 @@ export function bidsSidecarCandidates(recordingPath: string, suffix: string): st
   const subjectEntity = entityTokens.find((t) => t.startsWith("sub-")) ?? null;
   const sessionEntity = entityTokens.find((t) => t.startsWith("ses-")) ?? null;
 
+  const subjectDir = parts[0].startsWith("sub-") ? parts[0] : null;
+  const sessionDir = subjectDir && parts[1]?.startsWith("ses-") ? `${parts[0]}/${parts[1]}` : null;
+
   const candidates: string[] = [];
   const add = (candidateDir: string, entities: string[]): void => {
     const name = entities.length > 0 ? `${entities.join("_")}_${suffix}` : suffix;
@@ -249,20 +310,37 @@ export function bidsSidecarCandidates(recordingPath: string, suffix: string): st
     if (!candidates.includes(path)) candidates.push(path);
   };
 
-  add(dir, entityTokens);
-  if (subjectDir) {
-    const subjectEntities = [subjectEntity, sessionEntity].filter((e): e is string => e !== null);
-    add(subjectDir, subjectEntities);
+  add(dir, entityTokens); // 1: recording-level override
+  if (sessionDir && subjectEntity && sessionEntity) {
+    add(sessionDir, [subjectEntity, sessionEntity]); // 2: session-level default
   }
-  add("", []);
+  if (subjectDir && subjectEntity) {
+    add(subjectDir, [subjectEntity]); // 3: subject-level default, no session entity
+  }
+  add("", []); // 4: dataset-wide default
 
   return candidates;
+}
+
+/**
+ * Whether every group's `n_channels` is present and numeric (PR #1203
+ * review, item 4). A store with zero groups is vacuously valid (its total
+ * is legitimately 0, a real fact to compare against channels.tsv); a store
+ * with a group whose `n_channels` is missing or non-numeric cannot be
+ * trusted for ANY check (not just the channel count), since the same
+ * malformed-metadata condition casts doubt on the rest of that group's
+ * fields too -- see `verifyStore`'s `store_metadata_invalid` branch.
+ */
+export function zarrFidelityStoreMetadataValid(groups: readonly ZarrFidelityGroupJson[]): boolean {
+  return groups.every((g) => toFiniteNumber(g.n_channels) !== null);
 }
 
 /** Total channels a store serves, summed across its groups -- mirrors
  *  generate_zarr.py's `store_total_channels` exactly (the SAME rule the
  *  converter's own conversion-time gate uses), so a post-hoc disagreement
- *  here reflects real drift, not a differently-derived total. */
+ *  here reflects real drift, not a differently-derived total. Callers must
+ *  check {@link zarrFidelityStoreMetadataValid} first; this assumes every
+ *  group's `n_channels` is already known-numeric. */
 export function zarrFidelityStoreChannelTotal(groups: readonly ZarrFidelityGroupJson[]): number {
   return groups.reduce((sum, g) => sum + (toFiniteNumber(g.n_channels) ?? 0), 0);
 }
@@ -321,14 +399,30 @@ async function fetchFidelityIndex(
   return (await response.json()) as ZarrFidelityIndexJson;
 }
 
+/** Tri-state result of one candidate-path fetch attempt (PR #1203 review,
+ *  item 1): a 404 is the expected "not at this candidate" signal; any other
+ *  non-2xx (5xx, 429, ...) or a network throw is an infra ERROR, never
+ *  folded into "absent" -- the caller must abort, not guess. */
+type SidecarFetchOutcome =
+  | { kind: "content"; body: string }
+  | { kind: "absent" }
+  | { kind: "error"; reason: string };
+
+function rawContentUrl(base: string, repo: string, commit: string, path: string): string {
+  const encoded = path
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+  return `${base}/${ORG_NAME}/${repo}/${commit}/${encoded}`;
+}
+
 /**
  * One candidate fetch against the public, credential-free content host (see
- * the module doc for why this is dev-safe). A 404 is the expected "not at
- * this candidate" signal; any other non-2xx or network error is logged and
- * treated the same as a miss for resolution purposes -- fail-open, mirroring
- * generate_zarr.py's `expected_channel_count_for`, which turns the gate off
- * for a recording rather than treating an unreadable ground truth as a
- * mismatch.
+ * the module doc for why this is dev-safe). Only a 404 is "absent"; a 5xx,
+ * a 429, any other non-2xx, or a network throw is `{kind:"error"}` (PR
+ * #1203 review, item 1) -- the caller (`resolveSidecar`) must abort that
+ * dataset's verification rather than silently treating an infra hiccup as
+ * "nothing here".
  */
 async function fetchSidecarCandidate(
   base: string,
@@ -336,66 +430,79 @@ async function fetchSidecarCandidate(
   commit: string,
   path: string,
   fetchImpl: typeof fetch,
-): Promise<string | null> {
-  const encoded = path
-    .split("/")
-    .map((seg) => encodeURIComponent(seg))
-    .join("/");
-  const url = `${base}/${ORG_NAME}/${repo}/${commit}/${encoded}`;
+): Promise<SidecarFetchOutcome> {
+  const url = rawContentUrl(base, repo, commit, path);
   let response: Response;
   try {
     response = await fetchImpl(url);
   } catch (err) {
-    console.warn(
-      `[zarr-fidelity-sweep] network error fetching ${url}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return null;
+    return {
+      kind: "error",
+      reason: `network error fetching ${url}: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
-  if (response.status === 404) return null;
+  if (response.status === 404) return { kind: "absent" };
   if (!response.ok) {
-    console.warn(`[zarr-fidelity-sweep] non-2xx ${response.status} fetching ${url}`);
-    return null;
+    return { kind: "error", reason: `HTTP ${response.status} fetching ${url}` };
   }
-  return response.text();
+  return { kind: "content", body: await response.text() };
 }
 
-/** Per-dataset-run resolution state: a content cache (path -> content, or
- *  null for a confirmed miss) shared across every sampled store so a
- *  subject-/root-level default is fetched at most once, and a hard fetch
- *  budget as the safety net described in the module doc. */
+/** Per-dataset-run resolution state: a content cache (path -> the tri-state
+ *  outcome, minus "error" which is never cached -- see `resolveSidecar`)
+ *  shared across every sampled store so a session-/subject-/root-level
+ *  default is fetched at most once, plus the two fetch budgets (sweep-wide
+ *  and per-dataset) and the "already logged this unknown modality" set
+ *  (PR #1203 review, item 8). */
 interface FidelityRunContext {
-  cache: Map<string, string | null>;
-  budget: { remaining: number };
+  datasetId: string;
+  cache: Map<string, { kind: "content"; body: string } | { kind: "absent" }>;
+  perDatasetBudget: { remaining: number };
+  sweepBudget: { remaining: number };
   githubRawBase: string;
   repo: string;
   commit: string;
   fetchImpl: typeof fetch;
+  loggedUnknownModalities: Set<string>;
 }
+
+/** Resolution result for one sidecar suffix against one recording: a hit
+ *  (with the WINNING candidate path, for logging), a clean absence at every
+ *  candidate, or an error that must abort the dataset (PR #1203 review,
+ *  item 1). */
+type SidecarResolution =
+  | { kind: "content"; path: string; body: string }
+  | { kind: "absent" }
+  | { kind: "error"; reason: string };
 
 async function resolveSidecar(
   ctx: FidelityRunContext,
   recordingPath: string,
   suffix: string,
-): Promise<{ path: string; content: string } | null> {
+): Promise<SidecarResolution> {
   for (const candidate of bidsSidecarCandidates(recordingPath, suffix)) {
-    if (ctx.cache.has(candidate)) {
-      const cached = ctx.cache.get(candidate) ?? null;
-      if (cached !== null) return { path: candidate, content: cached };
-      continue;
+    const cached = ctx.cache.get(candidate);
+    if (cached) {
+      if (cached.kind === "content") return { kind: "content", path: candidate, body: cached.body };
+      continue; // cached "absent" -- try the next candidate
     }
-    if (ctx.budget.remaining <= 0) return null;
-    ctx.budget.remaining--;
-    const content = await fetchSidecarCandidate(
+    if (ctx.sweepBudget.remaining <= 0 || ctx.perDatasetBudget.remaining <= 0) {
+      return { kind: "error", reason: "budget_exhausted" };
+    }
+    ctx.sweepBudget.remaining--;
+    ctx.perDatasetBudget.remaining--;
+    const outcome = await fetchSidecarCandidate(
       ctx.githubRawBase,
       ctx.repo,
       ctx.commit,
       candidate,
       ctx.fetchImpl,
     );
-    ctx.cache.set(candidate, content);
-    if (content !== null) return { path: candidate, content };
+    if (outcome.kind === "error") return outcome; // never cached; the caller aborts
+    ctx.cache.set(candidate, outcome);
+    if (outcome.kind === "content") return { kind: "content", path: candidate, body: outcome.body };
   }
-  return null;
+  return { kind: "absent" };
 }
 
 /**
@@ -404,8 +511,9 @@ async function resolveSidecar(
  * path order (`sampleEvenly`, reused from bids-tree.ts) plus every store
  * whose group has `n_channels === 1` -- a single-channel recording is the
  * shape most likely to reveal a truncation bug (biosigio#110's own
- * signature), so it is never left to chance by the even spread. Exported
- * for direct unit testing.
+ * signature, later confirmed genuine for nm000182/nm000183 -- see issue
+ * #1068), so it is never left to chance by the even spread. Exported for
+ * direct unit testing.
  */
 export function zarrFidelitySelectSample(
   stores: readonly ZarrFidelityStoreJson[],
@@ -431,60 +539,160 @@ export function zarrFidelitySelectSample(
   return sample;
 }
 
+/** Bounded accumulator for mismatch examples (PR #1203 review, item 7):
+ *  `count` is the TOTAL number of mismatches found, independent of
+ *  truncation, so a truncated `examples` list never hides how many
+ *  mismatches were actually found; `truncated` is set the moment either
+ *  cap (20 entries, 4 KB serialized) would be exceeded. Exported for
+ *  direct unit testing. */
+export interface ZarrFidelityMismatchAccumulator {
+  examples: ZarrFidelityMismatchExample[];
+  count: number;
+  truncated: boolean;
+}
+
+export function createZarrFidelityMismatchAccumulator(): ZarrFidelityMismatchAccumulator {
+  return { examples: [], count: 0, truncated: false };
+}
+
+export function recordZarrFidelityMismatch(
+  acc: ZarrFidelityMismatchAccumulator,
+  entry: ZarrFidelityMismatchExample,
+): void {
+  acc.count++;
+  if (acc.truncated) return;
+  if (acc.examples.length >= ZARR_FIDELITY_MAX_EXAMPLES) {
+    acc.truncated = true;
+    return;
+  }
+  const candidate = [...acc.examples, entry];
+  if (
+    new TextEncoder().encode(JSON.stringify(candidate)).length > ZARR_FIDELITY_MAX_EXAMPLES_BYTES
+  ) {
+    acc.truncated = true;
+    return;
+  }
+  acc.examples.push(entry);
+}
+
+/** Per-store verification result (PR #1203 review, items 1, 2, 4): `"ok"`
+ *  carries per-CHECK-KIND checked flags (item 2) so a store that merely got
+ *  a 200 it could not parse never silently counts as checked; `"invalid"`
+ *  is `store_metadata_invalid` (item 4) -- no checks were even attempted;
+ *  `"error"` must abort the whole dataset (item 1). */
+type StoreVerification =
+  | {
+      kind: "ok";
+      checkedChannels: boolean;
+      checkedDuration: boolean;
+      checkedRate: boolean;
+      mismatches: ZarrFidelityMismatchExample[];
+    }
+  | { kind: "invalid" }
+  | { kind: "error"; reason: string };
+
+function logSidecarUnparseable(ctx: FidelityRunContext, path: string, detail: string): void {
+  console.warn(
+    `[zarr-fidelity-sweep] sidecar_unparseable dataset=${ctx.datasetId} url=${rawContentUrl(ctx.githubRawBase, ctx.repo, ctx.commit, path)} detail=${detail}`,
+  );
+}
+
 /**
- * Verify one sampled store against its own ground truth. Returns whether any
- * ground truth was reachable at all (`checked`) and the mismatches found (a
- * store can be `checked` with zero mismatches).
+ * Verify one sampled store against its own ground truth.
+ *
+ * `store_metadata_invalid` (item 4): a group with a missing/non-numeric
+ * `n_channels` makes the WHOLE store unverifiable -- not just the channel
+ * check -- because the same malformed field casts doubt on the group
+ * array's integrity in general, and the brief is explicit that this must
+ * never produce `channel_count_mismatch` or a `failed` verdict.
+ *
+ * `sidecar_unparseable` (item 2): a reachable (200) body that fails to
+ * parse -- `channels.tsv` with no usable data rows, or JSON that does not
+ * even parse -- is logged with the resolved URL and contributes nothing
+ * checked; it must never read as "verified".
  */
 async function verifyStore(
   store: ZarrFidelityStoreJson & { path: string },
   ctx: FidelityRunContext,
-): Promise<{ checked: boolean; mismatches: ZarrFidelityMismatchExample[] }> {
-  const mismatches: ZarrFidelityMismatchExample[] = [];
-  let checked = false;
+): Promise<StoreVerification> {
   const groups = (Array.isArray(store.groups) ? store.groups : []) as ZarrFidelityGroupJson[];
 
+  if (!zarrFidelityStoreMetadataValid(groups)) {
+    console.warn(
+      `[zarr-fidelity-sweep] store_metadata_invalid dataset=${ctx.datasetId} store=${store.path}`,
+    );
+    return { kind: "invalid" };
+  }
+
+  let checkedChannels = false;
+  let checkedDuration = false;
+  let checkedRate = false;
+  const mismatches: ZarrFidelityMismatchExample[] = [];
+
   // Channel count: total store channels vs. channels.tsv's data-row count.
-  const channelsHit = await resolveSidecar(ctx, store.path, "channels.tsv");
-  if (channelsHit) {
-    const parsed = parseChannelsTsv(channelsHit.content);
-    if (parsed) {
-      checked = true;
+  const channelsRes = await resolveSidecar(ctx, store.path, "channels.tsv");
+  if (channelsRes.kind === "error") return { kind: "error", reason: channelsRes.reason };
+  if (channelsRes.kind === "content") {
+    const parsed = parseChannelsTsv(channelsRes.body);
+    if (parsed && parsed.count >= 1) {
+      checkedChannels = true;
       const total = zarrFidelityStoreChannelTotal(groups);
       if (total < parsed.count) {
         mismatches.push({ path: store.path, code: "channel_count_mismatch" });
       }
+    } else {
+      logSidecarUnparseable(ctx, channelsRes.path, "channels.tsv has no usable data rows");
     }
   }
 
-  // Duration + rate, resolved once per distinct modality among this store's
-  // groups (a mixed-modality store is rare, but keeps this correct if one
-  // ever exists).
+  // Duration + rate, resolved once per distinct (trimmed, lowercased)
+  // modality among this store's groups (a mixed-modality store is rare,
+  // but keeps this correct if one ever exists).
   const byModality = new Map<string, ZarrFidelityGroupJson[]>();
   for (const g of groups) {
-    const modality = typeof g.modality === "string" ? g.modality.toLowerCase() : null;
-    if (!modality) continue;
+    const raw = typeof g.modality === "string" ? g.modality.trim() : "";
+    if (!raw) continue;
+    const modality = raw.toLowerCase();
     const list = byModality.get(modality) ?? [];
     list.push(g);
     byModality.set(modality, list);
   }
 
   for (const [modality, modalityGroups] of byModality) {
-    const sidecarHit = await resolveSidecar(ctx, store.path, `${modality}.json`);
-    if (!sidecarHit) continue;
-    checked = true;
+    const sidecarRes = await resolveSidecar(ctx, store.path, `${modality}.json`);
+    if (sidecarRes.kind === "error") return { kind: "error", reason: sidecarRes.reason };
+    if (sidecarRes.kind !== "content") continue;
 
-    const recordingDuration = parseRecordingDuration(sidecarHit.content);
+    try {
+      JSON.parse(sidecarRes.body);
+    } catch {
+      logSidecarUnparseable(ctx, sidecarRes.path, "invalid JSON");
+      continue;
+    }
+
+    const recordingDuration = parseRecordingDuration(sidecarRes.body);
     if (recordingDuration !== null) {
+      checkedDuration = true;
       const storeDuration = zarrFidelityStoreDuration(modalityGroups);
       if (storeDuration !== null && Math.abs(storeDuration - recordingDuration) > 1) {
         mismatches.push({ path: store.path, code: "duration_mismatch" });
       }
     }
 
-    const samplingFrequency = parseSamplingFrequency(sidecarHit.content);
+    const samplingFrequency = parseSamplingFrequency(sidecarRes.body);
     const cap = ZARR_FIDELITY_MODALITY_RATE_CAPS[modality.toUpperCase()];
-    if (samplingFrequency !== null && cap !== undefined) {
+    if (cap === undefined) {
+      // Unknown modality (item 8): log once per DATASET (loggedUnknownModalities
+      // is per-dataset-run scoped, unlike the per-store cache), and skip only
+      // the rate check -- channel/duration checks above are unaffected.
+      if (!ctx.loggedUnknownModalities.has(modality)) {
+        ctx.loggedUnknownModalities.add(modality);
+        console.warn(
+          `[zarr-fidelity-sweep] unknown modality "${modality}" dataset=${ctx.datasetId}; skipping rate check`,
+        );
+      }
+    } else if (samplingFrequency !== null) {
+      checkedRate = true;
       const expectedRate = Math.min(samplingFrequency, cap);
       for (const g of modalityGroups) {
         const rate = toFiniteNumber(g.rate);
@@ -497,31 +705,26 @@ async function verifyStore(
     }
   }
 
-  return { checked, mismatches };
-}
-
-/** Append to a bounded examples array, respecting both the entry-count cap
- *  and the serialized-byte cap (decision 1: "hard cap 20 entries and 4 KB").
- *  Exported for direct unit testing. */
-export function pushZarrFidelityExample(
-  examples: ZarrFidelityMismatchExample[],
-  entry: ZarrFidelityMismatchExample,
-): void {
-  if (examples.length >= ZARR_FIDELITY_MAX_EXAMPLES) return;
-  const candidate = [...examples, entry];
-  const bytes = new TextEncoder().encode(JSON.stringify(candidate)).length;
-  if (bytes > ZARR_FIDELITY_MAX_EXAMPLES_BYTES) return;
-  examples.push(entry);
+  return { kind: "ok", checkedChannels, checkedDuration, checkedRate, mismatches };
 }
 
 interface DatasetVerificationOutcome {
   /** null means "could not even produce a verdict" -- an infra error the
    *  caller should record and leave the row an untouched candidate. */
   status: ZarrFidelityVerdict | null;
-  commit: string | null;
+  /** Never null when `status` is non-null: `''` when the index has no
+   *  usable commit (PR #1203 review, item 5 -- never JSON null, which
+   *  fossilises the candidate predicate). */
+  commit: string;
   sampled: number;
   checked: number;
+  checkedChannels: number;
+  checkedDuration: number;
+  checkedRate: number;
+  unchecked: number;
   examples: ZarrFidelityMismatchExample[];
+  mismatchCount: number;
+  examplesTruncated: boolean;
   error?: string;
 }
 
@@ -532,69 +735,98 @@ async function verifyDataset(
   githubRawBase: string,
   fetchIndexImpl: typeof fetch,
   fetchSidecarImpl: typeof fetch,
+  sweepBudget: { remaining: number },
 ): Promise<DatasetVerificationOutcome> {
+  const empty = {
+    commit: "",
+    sampled: 0,
+    checked: 0,
+    checkedChannels: 0,
+    checkedDuration: 0,
+    checkedRate: 0,
+    unchecked: 0,
+    examples: [],
+    mismatchCount: 0,
+    examplesTruncated: false,
+  };
+
+  if (sweepBudget.remaining <= 0) {
+    return { status: null, ...empty, error: "budget_exhausted" };
+  }
+  sweepBudget.remaining--;
+
   let index: ZarrFidelityIndexJson | null;
   try {
     index = await fetchFidelityIndex(s3Options, datasetId, fetchIndexImpl);
   } catch (err) {
     return {
       status: null,
-      commit: null,
-      sampled: 0,
-      checked: 0,
-      examples: [],
+      ...empty,
       error: `s3: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
   if (!index) {
-    return {
-      status: null,
-      commit: null,
-      sampled: 0,
-      checked: 0,
-      examples: [],
-      error: "zarr_status=ready but index.json is absent",
-    };
+    return { status: null, ...empty, error: "zarr_status=ready but index.json is absent" };
   }
 
   const commit =
     typeof index.source_commit === "string" && FULL_COMMIT_RE.test(index.source_commit)
       ? index.source_commit
-      : null;
+      : "";
   const stores = (Array.isArray(index.stores) ? index.stores : []) as ZarrFidelityStoreJson[];
   const sample = zarrFidelitySelectSample(stores);
 
   if (!commit) {
     // No fetchable ref -- ADR 0005: report the gap, don't fake a verdict.
-    return {
-      status: "unverifiable",
-      commit: null,
-      sampled: sample.length,
-      checked: 0,
-      examples: [],
-    };
+    return { status: "unverifiable", ...empty, sampled: sample.length, unchecked: sample.length };
   }
 
   const ctx: FidelityRunContext = {
+    datasetId,
     cache: new Map(),
-    budget: { remaining: ZARR_FIDELITY_MAX_SIDECAR_FETCHES },
+    perDatasetBudget: { remaining: ZARR_FIDELITY_MAX_SIDECAR_FETCHES_PER_DATASET },
+    sweepBudget,
     githubRawBase,
     repo,
     commit,
     fetchImpl: fetchSidecarImpl,
+    loggedUnknownModalities: new Set(),
   };
 
   let checkedCount = 0;
-  const examples: ZarrFidelityMismatchExample[] = [];
+  let checkedChannelsCount = 0;
+  let checkedDurationCount = 0;
+  let checkedRateCount = 0;
+  const acc = createZarrFidelityMismatchAccumulator();
+
   for (const store of sample) {
-    const { checked, mismatches } = await verifyStore(store, ctx);
-    if (checked) checkedCount++;
-    for (const m of mismatches) pushZarrFidelityExample(examples, m);
+    const result = await verifyStore(store, ctx);
+    if (result.kind === "error") {
+      return { status: null, ...empty, commit, sampled: sample.length, error: result.reason };
+    }
+    if (result.kind === "invalid") continue; // unverifiable for this store; not checked
+    if (result.checkedChannels) checkedChannelsCount++;
+    if (result.checkedDuration) checkedDurationCount++;
+    if (result.checkedRate) checkedRateCount++;
+    if (result.checkedChannels || result.checkedDuration || result.checkedRate) checkedCount++;
+    for (const m of result.mismatches) recordZarrFidelityMismatch(acc, m);
   }
 
   const status: ZarrFidelityVerdict =
-    checkedCount === 0 ? "unverifiable" : examples.length > 0 ? "failed" : "verified";
-  return { status, commit, sampled: sample.length, checked: checkedCount, examples };
+    checkedCount === 0 ? "unverifiable" : acc.count > 0 ? "failed" : "verified";
+  return {
+    status,
+    commit,
+    sampled: sample.length,
+    checked: checkedCount,
+    checkedChannels: checkedChannelsCount,
+    checkedDuration: checkedDurationCount,
+    checkedRate: checkedRateCount,
+    unchecked: sample.length - checkedCount,
+    examples: acc.examples,
+    mismatchCount: acc.count,
+    examplesTruncated: acc.truncated,
+  };
 }
 
 export interface ZarrFidelityDatasetResult {
@@ -602,7 +834,13 @@ export interface ZarrFidelityDatasetResult {
   verdict: ZarrFidelityVerdict;
   sampled: number;
   checked: number;
+  checked_channels: number;
+  checked_duration: number;
+  checked_rate: number;
+  unchecked: number;
   examples: ZarrFidelityMismatchExample[];
+  mismatch_count: number;
+  examples_truncated: boolean;
 }
 
 export interface ZarrFidelitySweepResult {
@@ -619,6 +857,10 @@ export interface ZarrFidelitySweepResult {
   /** Candidates still unverified after this run; null if the count query
    *  failed. */
   remaining: number | null;
+  /** True when the sweep-wide fetch budget ran out before every requested
+   *  candidate could be attempted (PR #1203 review, item 3): datasets past
+   *  this point were never touched at all. */
+  budget_exhausted: boolean;
 }
 
 /**
@@ -630,16 +872,17 @@ export interface ZarrFidelitySweepResult {
  * callers can never drift.
  *
  * A dataset whose index can't even be fetched (S3 infra error, or
- * `zarr_status='ready'` but index.json absent) is recorded in `errors` and
- * left completely untouched -- no stamp write, stays a candidate for the
- * next run -- exactly recording-stats-sweep's "throw -> stays a candidate"
- * handling for the identical shape of failure.
+ * `zarr_status='ready'` but index.json absent), or whose sample hits an
+ * infra error or a spent fetch budget partway through verification, is
+ * recorded in `errors` and left completely untouched -- no stamp write,
+ * stays a candidate for the next run (PR #1203 review, item 1).
  *
  * Test-only DI seams (`s3Options.endpointUrl`, `githubRawBase`,
- * `fetchIndexImpl`, `fetchSidecarImpl`) mirror `zarr-catalog.ts`'s
- * `endpointUrl` / `runRecordingStatsSweep`'s `fetchIndex` idiom: every real
- * caller omits them, so production always resolves the real S3 host and the
- * real `raw.githubusercontent.com`.
+ * `fetchIndexImpl`, `fetchSidecarImpl`, `sweepWideBudget`) mirror
+ * `zarr-catalog.ts`'s `endpointUrl` / `runRecordingStatsSweep`'s
+ * `fetchIndex` idiom: every real caller omits them, so production always
+ * resolves the real S3 host, the real `raw.githubusercontent.com`, and the
+ * real {@link ZARR_FIDELITY_SWEEP_WIDE_BUDGET}.
  *
  * Throws only if the candidate query itself fails. Per-dataset failures are
  * collected into `errors`, never thrown.
@@ -652,6 +895,7 @@ export async function runZarrFidelitySweep(
     githubRawBase?: string;
     fetchIndexImpl?: typeof fetch;
     fetchSidecarImpl?: typeof fetch;
+    sweepWideBudget?: number;
   },
 ): Promise<ZarrFidelitySweepResult> {
   const requested = opts?.limit ?? ZARR_FIDELITY_SWEEP_DEFAULT;
@@ -672,14 +916,24 @@ export async function runZarrFidelitySweep(
   const githubRawBase = opts?.githubRawBase ?? GITHUB_RAW_ORIGIN;
   const fetchIndexImpl = opts?.fetchIndexImpl ?? fetch;
   const fetchSidecarImpl = opts?.fetchSidecarImpl ?? fetch;
+  const sweepBudget = { remaining: opts?.sweepWideBudget ?? ZARR_FIDELITY_SWEEP_WIDE_BUDGET };
 
   let verified = 0;
   let failed = 0;
   let unverifiable = 0;
+  let budgetExhausted = false;
   const results: ZarrFidelityDatasetResult[] = [];
   const errors: { dataset_id: string; error: string }[] = [];
 
   for (const { dataset_id, github_repo } of candidates) {
+    if (sweepBudget.remaining <= 0) {
+      // Sweep-wide budget already spent by an earlier candidate: this and
+      // every remaining candidate are left completely untouched (PR #1203
+      // review, item 3) -- no error entry, no stamp, no fetch attempted.
+      budgetExhausted = true;
+      break;
+    }
+
     const repo = github_repo.split("/")[1] ?? github_repo;
     const outcome = await verifyDataset(
       dataset_id,
@@ -688,10 +942,12 @@ export async function runZarrFidelitySweep(
       githubRawBase,
       fetchIndexImpl,
       fetchSidecarImpl,
+      sweepBudget,
     );
 
     if (outcome.status === null) {
       errors.push({ dataset_id, error: outcome.error ?? "zarr-fidelity-sweep: unknown error" });
+      if (outcome.error === "budget_exhausted") budgetExhausted = true;
       continue;
     }
 
@@ -703,6 +959,12 @@ export async function runZarrFidelitySweep(
           JSON.stringify(outcome.examples),
           outcome.sampled,
           outcome.checked,
+          outcome.checkedChannels,
+          outcome.checkedDuration,
+          outcome.checkedRate,
+          outcome.unchecked,
+          outcome.mismatchCount,
+          outcome.examplesTruncated ? 1 : 0,
           dataset_id,
         )
         .run();
@@ -722,7 +984,13 @@ export async function runZarrFidelitySweep(
       verdict: outcome.status,
       sampled: outcome.sampled,
       checked: outcome.checked,
+      checked_channels: outcome.checkedChannels,
+      checked_duration: outcome.checkedDuration,
+      checked_rate: outcome.checkedRate,
+      unchecked: outcome.unchecked,
       examples: outcome.examples,
+      mismatch_count: outcome.mismatchCount,
+      examples_truncated: outcome.examplesTruncated,
     });
 
     if (outcome.status === "failed") {
@@ -738,6 +1006,7 @@ export async function runZarrFidelitySweep(
           details: JSON.stringify({
             sampled: outcome.sampled,
             checked: outcome.checked,
+            mismatch_count: outcome.mismatchCount,
             examples: outcome.examples,
           }),
         }).run();
@@ -752,12 +1021,13 @@ export async function runZarrFidelitySweep(
     .catch(() => null);
 
   return {
-    processed: candidates.length,
+    processed: results.length + errors.length,
     verified,
     failed,
     unverifiable,
     results,
     errors,
     remaining: remainingRow?.n ?? null,
+    budget_exhausted: budgetExhausted,
   };
 }
