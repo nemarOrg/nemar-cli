@@ -171,7 +171,13 @@ export function deriveZarrIndexUrl(
 ): string | null {
   if (!zarrBaseUrl || zarrStatus !== "ready") return null;
   if (typeof datasetId !== "string" || !datasetId) return null;
-  return `${zarrBaseUrl}/${datasetId}/zarr/index.json`;
+  // PR #1201 review, item 8: strip a trailing slash so a base carrying one
+  // (zarrCacheBaseUrl already strips it, but this function's own contract
+  // shouldn't rely on every caller pre-normalizing) never produces a
+  // double slash -- matches zarr-catalog.ts#buildZarrCatalog's contractBase
+  // normalization for the identical `<base>/<id>/zarr/index.json` shape.
+  const base = zarrBaseUrl.replace(/\/+$/, "");
+  return `${base}/${datasetId}/zarr/index.json`;
 }
 
 /**
@@ -183,20 +189,38 @@ export function deriveZarrIndexUrl(
  * every existing array-shaped row in place, and every write path since
  * (#1190) writes the object shape directly, so an array should not exist any
  * more -- but this stays defensive per the issue's instruction rather than
- * trusting that invariant. An unparseable/absent/null value serves null (no
- * known failures on record), matching the column's own NULL semantics.
- * Exported for unit testing.
+ * trusting that invariant. An absent/null value serves null (no known
+ * failures on record), matching the column's own NULL semantics -- SILENTLY,
+ * since that is the expected, common case.
+ *
+ * A NON-EMPTY value this function cannot make sense of -- a string that
+ * fails `JSON.parse`, or a value that parses/arrives as neither an object
+ * nor an array (a bare number, boolean, or `null`-via-`"null"`) -- also
+ * serves null (PR #1201 review, item 1: never 500 the response over one
+ * dataset's malformed bookkeeping column), but is NOT silent: it is a data
+ * anomaly worth an operator's attention, so it is logged at `console.error`
+ * with the dataset id and a reason before returning. `datasetId` is
+ * threaded in for exactly that message. Exported for unit testing.
  */
 export function parseZarrDataFailures(
   raw: unknown,
+  datasetId: string,
 ): { count: number; detail_ref: string; compacted_by?: string } | null {
+  const unparseable = (reason: string): null => {
+    console.error("[catalog] zarr_data_failures unparseable, treating as none", {
+      dataset_id: datasetId,
+      reason,
+    });
+    return null;
+  };
+
   let parsed: unknown;
   if (typeof raw === "string") {
     if (!raw) return null;
     try {
       parsed = JSON.parse(raw);
-    } catch {
-      return null;
+    } catch (err) {
+      return unparseable(err instanceof Error ? err.message : String(err));
     }
   } else if (raw != null) {
     parsed = raw;
@@ -214,7 +238,9 @@ export function parseZarrDataFailures(
     const compacted_by = typeof obj.compacted_by === "string" ? obj.compacted_by : undefined;
     return compacted_by !== undefined ? { count, detail_ref, compacted_by } : { count, detail_ref };
   }
-  return null;
+  return unparseable(
+    `parsed value is ${parsed === null ? "null" : typeof parsed}, expected an object or array`,
+  );
 }
 
 /**
@@ -320,7 +346,13 @@ export function parseFilterQuery(
   const hasDoi = c.req.query("has_doi") === "true";
   // #869: accept the website FilterSidebar's `has_hed=1` and a `true` for parity.
   const hasHed = c.req.query("has_hed") === "1" || c.req.query("has_hed") === "true";
-  // #1062: same `1`/`true` convention as has_hed.
+  // #1062: same `1`/`true` convention as has_hed. Any other value --
+  // `has_zarr=false`, `has_zarr=yes`, `has_zarr=0`, ... -- is IGNORED, same
+  // as the equivalent has_hed values: only the two literal strings above
+  // switch the filter on, so anything else is indistinguishable from the
+  // param being absent (no filtering, not "explicitly excluded"). PR #1201
+  // review, item 8: documented here because it is easy to assume `=false`
+  // means "exclude zarr datasets" when it silently means "no filter".
   const hasZarr = c.req.query("has_zarr") === "1" || c.req.query("has_zarr") === "true";
   // #970: same `1`/`true` convention.
   const dataComplete =
@@ -1171,7 +1203,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     const detail = {
       ...rest,
       file_size_formatted: deriveFileSizeFormatted(dataset.file_size),
-      zarr_data_failures: parseZarrDataFailures(zarrDataFailuresRaw),
+      zarr_data_failures: parseZarrDataFailures(zarrDataFailuresRaw, dataset.dataset_id as string),
       // #1062: derived from the raw zarr_status this SELECT d.* already
       // carries -- same helper the list rows use (toListRow).
       zarr_index_url: deriveZarrIndexUrl(
