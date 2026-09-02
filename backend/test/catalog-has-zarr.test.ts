@@ -141,6 +141,102 @@ describe("has_zarr filter: GET /datasets", () => {
 // (has_hed) and a facet-adjacent one (modality), through the real route --
 // proves the two clauses AND together rather than one silently overriding
 // the other.
+// Issue #1068, epic #1181 phase 8: has_zarr keeps its EXISTING meaning
+// ("converted", ready + stores) under every caller that already relies on
+// it; has_zarr_verified is a SEPARATE, stricter filter this sweep feeds.
+describe("has_zarr_verified filter: GET /datasets (issue #1068, epic #1181 phase 8)", () => {
+  let db: Database;
+  let app: App;
+
+  beforeEach(() => {
+    db = freshDb();
+    app = newApp();
+    insertDataset(db, "nm004301", {
+      name: "Ready with stores, verified",
+      zarr_status: "ready",
+      zarr_store_count: 3,
+      sweep_stamps: JSON.stringify({ zarr_verify_status: "verified" }),
+    });
+    insertDataset(db, "nm004302", {
+      name: "Ready with stores, failed verification",
+      zarr_status: "ready",
+      zarr_store_count: 3,
+      sweep_stamps: JSON.stringify({ zarr_verify_status: "failed" }),
+    });
+    insertDataset(db, "nm004303", {
+      name: "Ready with stores, unverifiable",
+      zarr_status: "ready",
+      zarr_store_count: 3,
+      sweep_stamps: JSON.stringify({ zarr_verify_status: "unverifiable" }),
+    });
+    insertDataset(db, "nm004304", {
+      name: "Ready with stores, never swept",
+      zarr_status: "ready",
+      zarr_store_count: 3,
+    });
+    insertDataset(db, "nm004305", {
+      name: "Not converted at all",
+      zarr_status: "pending",
+    });
+  });
+
+  test("has_zarr=1 (UNCHANGED meaning) returns every converted row regardless of verify status", async () => {
+    const rows = await listDatasets(app, db, "has_zarr=1");
+    expect(rows.map((r) => r.dataset_id).sort()).toEqual([
+      "nm004301",
+      "nm004302",
+      "nm004303",
+      "nm004304",
+    ]);
+  });
+
+  test("has_zarr_verified=1 returns ONLY the verified row", async () => {
+    const rows = await listDatasets(app, db, "has_zarr_verified=1");
+    expect(rows.map((r) => r.dataset_id)).toEqual(["nm004301"]);
+  });
+
+  test("has_zarr_verified=true (website convention) behaves identically to =1", async () => {
+    const rows = await listDatasets(app, db, "has_zarr_verified=true");
+    expect(rows.map((r) => r.dataset_id)).toEqual(["nm004301"]);
+  });
+
+  test("no has_zarr_verified filter returns every row, including the unswept/failed/unverifiable ones", async () => {
+    const rows = await listDatasets(app, db, "");
+    expect(rows.map((r) => r.dataset_id).sort()).toEqual([
+      "nm004301",
+      "nm004302",
+      "nm004303",
+      "nm004304",
+      "nm004305",
+    ]);
+  });
+
+  test("the zarr_verify_status/zarr_verified_at fields are present on the list row", async () => {
+    const rows = await listDatasets(app, db, "");
+    const verified = rows.find((r) => r.dataset_id === "nm004301") as unknown as {
+      zarr_verify_status?: string | null;
+    };
+    const neverSwept = rows.find((r) => r.dataset_id === "nm004304") as unknown as {
+      zarr_verify_status?: string | null;
+    };
+    expect(verified.zarr_verify_status).toBe("verified");
+    expect(neverSwept.zarr_verify_status).toBeNull();
+  });
+
+  test("GET /datasets/:id also derives zarr_verify_status/zarr_verified_at", async () => {
+    db.query(
+      "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.zarr_verified_at', '2026-09-01 00:00:00') WHERE dataset_id = 'nm004301'",
+    ).run();
+    const res = await app.request("/nm004301", {}, env(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      dataset: { zarr_verify_status?: string | null; zarr_verified_at?: string | null };
+    };
+    expect(body.dataset.zarr_verify_status).toBe("verified");
+    expect(body.dataset.zarr_verified_at).toBe("2026-09-01 00:00:00");
+  });
+});
+
 describe("has_zarr combined with another filter: GET /datasets", () => {
   let db: Database;
   let app: App;

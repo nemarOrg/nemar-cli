@@ -77,6 +77,12 @@ const FACET_PROJECTION_COLUMNS = `d.subject_count,
                d.zarr_failure_count,
                d.zarr_deterministic,
                d.zarr_failed_at,
+               -- Issue #1068 (epic #1181 phase 8): the standing fidelity
+               -- verification sweep's verdict, derived from the JSON
+               -- sweep_stamps column (ADR 0034/0035 -- no new column).
+               -- Null until the sweep reaches this dataset.
+               json_extract(d.sweep_stamps, '$.zarr_verify_status') AS zarr_verify_status,
+               json_extract(d.sweep_stamps, '$.zarr_verified_at') AS zarr_verified_at,
                d.total_recording_duration,
                d.recording_duration_min,
                d.recording_duration_max,
@@ -318,7 +324,8 @@ export function parseMinScore(c: FilterQueryContext): number {
 
 /**
  * Parse every filter query param -- the legacy bespoke filters (nine as of
- * epic #1144 phase 3, #1147, D6; has_zarr added by issue #1062) plus the
+ * epic #1144 phase 3, #1147, D6; has_zarr added by issue #1062;
+ * has_zarr_verified added by issue #1068, epic #1181 phase 8) plus the
  * full facet table -- into one
  * `DatasetFilterOptions`, shared by both catalog endpoints so they can no
  * longer drift apart on which filters they honour. Before this, `GET
@@ -354,6 +361,13 @@ export function parseFilterQuery(
   // review, item 8: documented here because it is easy to assume `=false`
   // means "exclude zarr datasets" when it silently means "no filter".
   const hasZarr = c.req.query("has_zarr") === "1" || c.req.query("has_zarr") === "true";
+  // #1068 (epic #1181 phase 8): same `1`/`true` convention as has_zarr, and
+  // deliberately a SEPARATE param rather than a stricter value for
+  // `has_zarr` -- see dataset-filters.ts's `hasZarrVerified` doc comment for
+  // why `has_zarr`'s existing meaning must not narrow under callers already
+  // relying on it.
+  const hasZarrVerified =
+    c.req.query("has_zarr_verified") === "1" || c.req.query("has_zarr_verified") === "true";
   // #970: same `1`/`true` convention.
   const dataComplete =
     c.req.query("data_complete") === "1" || c.req.query("data_complete") === "true";
@@ -374,6 +388,7 @@ export function parseFilterQuery(
     hasDoi,
     hasHed,
     hasZarr,
+    hasZarrVerified,
     dataComplete,
     recent,
     licenseTiers,
@@ -627,7 +642,8 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
    *   - Admin: all datasets (including private managed datasets)
    *
    * Filter params: modality, author, task, has_doi, recent, sort, search, owner,
-   * license, data_complete, has_hed, has_zarr, include_unknown, and the facet table
+   * license, data_complete, has_hed, has_zarr, has_zarr_verified, include_unknown,
+   * and the facet table
    * (epic #1144 phase 3, #1147) -- see shared/facets.ts for the full list of
    * facet query params (subjects, channels, sessions, size, files, citations,
    * duration, recording_length, recordings, unavailable, age, rate,
@@ -1133,6 +1149,11 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
           ORDER BY created_at DESC
           LIMIT 1
         ) AS latest_version,
+        -- Issue #1068 (epic #1181 phase 8): same derivation as the list
+        -- projection above (FACET_PROJECTION_COLUMNS) -- d.* alone does not
+        -- surface a json_extract expression.
+        json_extract(d.sweep_stamps, '$.zarr_verify_status') AS zarr_verify_status,
+        json_extract(d.sweep_stamps, '$.zarr_verified_at') AS zarr_verified_at,
         u.username as owner_username,
         u.github_username as owner_github
       FROM datasets d
