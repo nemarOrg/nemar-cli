@@ -515,7 +515,10 @@ async function serve(c: Context<{ Bindings: Bindings }>, isHead: boolean, deps: 
  * which exists to handle range/synthetic-206 reconstruction this route has
  * no need for.
  */
-async function serveCatalog(c: Context<{ Bindings: Bindings }>, deps: ZarrDataDeps): Promise<Response> {
+async function serveCatalog(
+  c: Context<{ Bindings: Bindings }>,
+  deps: ZarrDataDeps,
+): Promise<Response> {
   const origin = c.req.header("origin") ?? null;
   const cors = corsHeaders(origin);
   const cache = deps.cache();
