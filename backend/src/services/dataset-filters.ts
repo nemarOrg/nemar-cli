@@ -65,9 +65,10 @@ export interface DatasetFilterOptions {
    *  hasHed/dataComplete above -- not a facet-table entry, because the
    *  underlying `zarr` facet (dataset-facets.ts) already exists as an ENUM
    *  match on the raw `zarr_status` value; this is a distinct derived
-   *  predicate (ready AND store_count > 0). Phase 8 will tighten this to
-   *  "converted AND verified" once a verification signal exists; update the
-   *  clause below then. */
+   *  predicate (ready AND store_count > 0). `hasZarr`'s meaning is STABLE:
+   *  phase 8 adds a SEPARATE `has_zarr_verified` filter for "converted AND
+   *  verified" rather than redefining this one out from under existing
+   *  callers (PR #1201 review, item 9). */
   hasZarr?: boolean;
   dataComplete?: boolean;
   recent?: number;
