@@ -102,6 +102,19 @@ export const catalogItemSchema = z
     age_max: z.number().nullable().optional(),
     bids_version: z.string().nullable().optional(),
     zarr_status: z.enum(["pending", "ready", "failed"]).nullable().optional(),
+    // Issue #1062 (epic #1181 phase 2): zarr conversion facts beyond the
+    // bare status (migrations 0035/0046; ADR 0034 -- derive, don't add
+    // columns, these already exist). zarr_index_url is DERIVED at read time
+    // (not a stored column): the absolute <ZARR_HOSTNAME>/<id>/zarr/index.json
+    // URL when zarr_status is 'ready', else null.
+    zarr_store_count: z.number().int().nullable().optional(),
+    zarr_converted_at: z.string().nullable().optional(),
+    zarr_source_commit: z.string().nullable().optional(),
+    zarr_errors: z.number().int().nullable().optional(),
+    zarr_failure_count: z.number().int().nullable().optional(),
+    zarr_deterministic: zeroOneNullable.optional(),
+    zarr_failed_at: z.string().nullable().optional(),
+    zarr_index_url: z.string().nullable().optional(),
     total_recording_duration: z.number().nullable().optional(),
     recording_duration_min: z.number().nullable().optional(),
     recording_duration_max: z.number().nullable().optional(),
@@ -142,6 +155,20 @@ export const datasetDetailSchema = catalogItemSchema
     attestation_no_duplicate: zeroOneNullable.optional(),
     attestation_upstream_source: z.string().nullable().optional(),
     attestation_accepted_at: z.string().nullable().optional(),
+    // #1191 (fixes #1188): the stored JSON is parsed server-side into this
+    // bounded summary before being served -- never the raw string, and (a
+    // legacy shape that should not exist post migration-0074, but is
+    // rejected here defensively) never a bare array of per-file entries.
+    // detail_ref points at the published Zarr index's `failures` list,
+    // which is where the full per-recording detail now lives.
+    zarr_data_failures: z
+      .object({
+        count: z.number().int().nonnegative(),
+        detail_ref: z.string(),
+        compacted_by: z.string().optional(),
+      })
+      .nullable()
+      .optional(),
   })
   .passthrough();
 export type DatasetDetail = z.infer<typeof datasetDetailSchema>;
