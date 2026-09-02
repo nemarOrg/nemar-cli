@@ -1324,11 +1324,20 @@ export interface ZarrFidelityDatasetResult {
   verdict: "verified" | "failed" | "unverifiable";
   sampled: number;
   checked: number;
+  checked_channels: number;
+  checked_duration: number;
+  checked_rate: number;
+  unchecked: number;
   examples: ZarrFidelityMismatchExample[];
+  mismatch_count: number;
+  examples_truncated: boolean;
 }
 
 /** One batch of the zarr fidelity sweep
- *  (`POST /admin/datasets/zarr-fidelity-sweep`). */
+ *  (`POST /admin/datasets/zarr-fidelity-sweep`). `ok` is false (with a 502
+ *  status) only when every processed candidate errored -- a partial mix of
+ *  verdicts and errors, or an empty candidate set, is still `ok: true`
+ *  (#1203 review, item 6). */
 export interface ZarrFidelitySweepBatchResponse {
   processed: number;
   verified: number;
@@ -1338,10 +1347,14 @@ export interface ZarrFidelitySweepBatchResponse {
   errors: { dataset_id: string; error: string }[];
   /** Candidates still unverified after this run; null if the count query failed. */
   remaining: number | null;
+  /** True when the sweep-wide fetch budget ran out before every requested
+   *  candidate could be attempted; datasets past this point were never
+   *  touched at all (#1203 review, item 3). */
+  budget_exhausted: boolean;
+  ok: boolean;
 }
 
-/** Run one bounded zarr fidelity sweep batch (server default 25, clamped to
- *  [1,100]). */
+/** Run one bounded zarr fidelity sweep batch (server default and max: 25). */
 export async function zarrFidelitySweep(options?: {
   limit?: number;
 }): Promise<ZarrFidelitySweepBatchResponse> {

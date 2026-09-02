@@ -5236,7 +5236,7 @@ const zarrFidelitySweepCommand = new Command("zarr-fidelity-sweep").description(
 );
 
 zarrFidelitySweepCommand
-  .option("--limit <n>", "Datasets per batch (server clamps to [1,100])", "25")
+  .option("--limit <n>", "Datasets per batch (server clamps to [1,25])", "25")
   .option("--json", "Output raw JSON instead of the human summary")
   .action(async (options: { limit?: string; json?: boolean }) => {
     if (!requireAuth()) return;
@@ -5261,7 +5261,7 @@ zarrFidelitySweepCommand
       console.log();
       console.log(
         chalk.cyan(
-          `processed=${res.processed} verified=${res.verified} failed=${res.failed} unverifiable=${res.unverifiable} errors=${res.errors.length} remaining=${res.remaining ?? "unknown"}`,
+          `processed=${res.processed} verified=${res.verified} failed=${res.failed} unverifiable=${res.unverifiable} errors=${res.errors.length} remaining=${res.remaining ?? "unknown"}${res.budget_exhausted ? " budget_exhausted=true" : ""}`,
         ),
       );
       for (const r of res.results) {
@@ -5276,6 +5276,11 @@ zarrFidelitySweepCommand
         );
         for (const ex of r.examples) {
           console.log(`      ${chalk.red(ex.code)}: ${ex.path}`);
+        }
+        if (r.examples_truncated) {
+          console.log(
+            `      ${chalk.dim(`(${r.mismatch_count} mismatches total; showing first ${r.examples.length})`)}`,
+          );
         }
       }
       for (const e of res.errors) {
