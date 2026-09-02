@@ -95,6 +95,14 @@ interface ZarrReadyBody {
    */
   events_row_count?: number | null;
   events_upload_failed?: boolean;
+  /**
+   * Stores whose events.tsv produced no rows: every onset failed to parse, or
+   * the store has no channel group to anchor a sample index to. Each is a
+   * per-store `::warning::` on the node; this count is the only off-node
+   * signal, and 0 is healthy. Reported, not persisted, for the same reason as
+   * `events_row_count`.
+   */
+  events_stores_without_rows?: number;
 }
 
 /**
@@ -223,6 +231,7 @@ const zarrReadyBodySchema = z
     // `events_upload_failed` separates (issue #1060).
     events_row_count: numeric.nullable().optional().catch(undefined),
     events_upload_failed: z.boolean().optional().catch(undefined),
+    events_stores_without_rows: numeric.optional().catch(undefined),
   })
   .passthrough();
 
@@ -441,8 +450,18 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
     }
 
     console.log(
-      `[zarr-ready] dataset=${body.dataset_id} status=${status} stores=${body.store_count ?? "?"} converted=${body.converted?.length ?? 0} removed=${body.removed?.length ?? 0} purged=${purge?.submitted ?? 0} pool_breaks=${body.pool_breaks ?? "?"} pending=${body.pending_count ?? "?"} discovered=${body.discovered_count ?? "?"} events_rows=${body.events_row_count ?? "none"} events_upload_failed=${body.events_upload_failed ?? false} manifest_upload_failed=${body.manifest_upload_failed ?? false}`,
+      `[zarr-ready] dataset=${body.dataset_id} status=${status} stores=${body.store_count ?? "?"} converted=${body.converted?.length ?? 0} removed=${body.removed?.length ?? 0} purged=${purge?.submitted ?? 0} pool_breaks=${body.pool_breaks ?? "?"} pending=${body.pending_count ?? "?"} discovered=${body.discovered_count ?? "?"} events_rows=${body.events_row_count ?? "none"} events_upload_failed=${body.events_upload_failed ?? false} manifest_upload_failed=${body.manifest_upload_failed ?? false} events_stores_without_rows=${body.events_stores_without_rows ?? "?"}`,
     );
+
+    // A store that has an events.tsv but contributed no rows is data the
+    // consumer cannot see is missing: the file simply has no rows for that
+    // store. The node logs which stores; this is where the count reaches
+    // anyone else.
+    if ((body.events_stores_without_rows ?? 0) > 0) {
+      console.warn(
+        `[zarr-ready] dataset=${body.dataset_id} ${body.events_stores_without_rows} store(s) with an events.tsv produced no event rows (unparseable onsets or no channel group); see the conversion log for which`,
+      );
+    }
 
     // A sibling document the converter could not publish leaves the serving copy
     // internally inconsistent until the next run: manifest.json and index.json

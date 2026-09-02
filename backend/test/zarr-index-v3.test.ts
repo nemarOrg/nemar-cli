@@ -371,6 +371,7 @@ describe("POST /webhooks/zarr-ready persists the coverage counts", () => {
         events_row_count: 5120,
         events_upload_failed: false,
         manifest_upload_failed: false,
+        events_stores_without_rows: 0,
       });
       await post({
         dataset_id: DATASET,
@@ -379,6 +380,7 @@ describe("POST /webhooks/zarr-ready persists the coverage counts", () => {
         events_row_count: null,
         events_upload_failed: true,
         manifest_upload_failed: true,
+        events_stores_without_rows: 3,
       });
     } finally {
       console.log = realLog;
@@ -388,6 +390,13 @@ describe("POST /webhooks/zarr-ready persists the coverage counts", () => {
     expect(summaries[0]).toContain("events_rows=5120");
     expect(summaries[0]).toContain("events_upload_failed=false");
     expect(summaries[0]).toContain("manifest_upload_failed=false");
+    expect(summaries[0]).toContain("events_stores_without_rows=0");
+    // The per-store signal has no column either; the count is the only
+    // off-node trace of a store whose events.tsv yielded nothing.
+    expect(summaries[1]).toContain("events_stores_without_rows=3");
+    const rowless = warnings.filter((w) => w.includes("produced no event rows"));
+    expect(rowless).toHaveLength(1);
+    expect(rowless[0]).toContain("3 store(s)");
     // A healthy run says so and warns about nothing.
     expect(warnings.some((w) => w.includes("WITHOUT"))).toBe(true);
     const missing = warnings.filter((w) => w.includes("WITHOUT"));
