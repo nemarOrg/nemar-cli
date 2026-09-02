@@ -53,4 +53,39 @@
 #   every recording it has (nemarOrg/nemar-cli#1125). Fixed upstream too
 #   (mne-tools/mne-python#14191, merged), but no MNE release carries it yet;
 #   biosigIO's shim is gated on that and no-ops once one does.
-biosigio[zarr,meg,mef3,hdf5]>=1.2.5
+# >=1.2.6: three things index format v3 reads or depends on (epic #1181 phase 7).
+#   - View levels are chunked at a CONSTANT 1024 COLUMNS instead of a constant
+#     ~4 s, and the geometry is declared in attrs instead of having to be probed
+#     (biosigio#126, this repo's #1178 items 1-2). A viewport needs ~1000-2500
+#     columns at ANY level, so constant-seconds chunking made a zoomed-out read
+#     594 requests for 1.16 MB on a 40-minute store; constant-columns makes it 3.
+#     The attrs are what index v3 republishes per group: group `n_view_levels` /
+#     `view_levels` / `view_downsample` / `view_chunk_columns` / `chunk_seconds` /
+#     `shard_seconds`, level-0 `source_rate_hz` / `chunk_samples` / `shard_samples`,
+#     view-array `chunk_columns`, root `view_chunk_columns`.
+#   - `bids.apply_channels_tsv` CONVERTS a channel's samples into the unit the
+#     BIDS sidecar declares rather than only relabelling them, exempts the
+#     discrete channel types, and reports what it did per file in
+#     `rec.metadata["channels_tsv_units"]` (biosigio#125, closing #122). The
+#     converter now calls it on the in-memory path and republishes that report as
+#     the index's per-store `units_report`, so a unit that could NOT be adopted is
+#     visible on the public surface instead of silently served.
+#   - Resource exhaustion propagates as `MemoryError` (and friends) instead of
+#     being reclassified as a data failure (biosigio#124), which is what keeps
+#     `convert_one`'s `except MemoryError` handler -- and therefore the retryable
+#     `recording_memory_exceeded` code -- reachable for reader-side exhaustion.
+# NOT yet a floor: biosigio#127 (`stream_to_zarr` applying channels.tsv). Until it
+# ships, the STREAMING path leaves units as the importer read them while the
+# in-memory path adopts the sidecar's, so one dataset's small and large recordings
+# can disagree on units. That is why `ZARR_ENGINE_VERSION` stays at "2" in
+# zarr_queue.py: the back-catalog re-conversion must not be armed while that
+# disagreement exists. Raise this floor to the #127 release and bump the engine in
+# the same change (see AGENTS.md's Zarr paragraph for the two-step ack).
+biosigio[zarr,meg,mef3,hdf5]>=1.2.6
+
+# Draft 2020-12 validator for the converter's own pre-upload self-check: the index
+# it is about to publish is validated against `shared/zarr-index.schema.json` (and
+# the manifest against `shared/zarr-manifest.schema.json`) before either reaches
+# S3, so a producer bug surfaces here rather than in every consumer. The check
+# degrades to a loud warning when this is absent, so an older venv still converts.
+jsonschema>=4.21
