@@ -325,6 +325,47 @@ describe("has_zarr filter: GET /datasets/search", () => {
   });
 });
 
+// Issue #1068, epic #1181 phase 8, PR #1203 review item 14: has_zarr_verified
+// must filter GET /datasets/search server-side, not just the list endpoint.
+describe("has_zarr_verified filter: GET /datasets/search", () => {
+  let db: Database;
+  let app: App;
+
+  beforeEach(() => {
+    db = freshDb();
+    app = newApp();
+    insertDataset(db, "nm411001", {
+      name: "Search Verified Fixture Alpha",
+      zarr_status: "ready",
+      zarr_store_count: 5,
+      sweep_stamps: JSON.stringify({ zarr_verify_status: "verified" }),
+    });
+    insertDataset(db, "nm411002", {
+      name: "Search Verified Fixture Beta",
+      zarr_status: "ready",
+      zarr_store_count: 5,
+      sweep_stamps: JSON.stringify({ zarr_verify_status: "failed" }),
+    });
+  });
+
+  const Q = `q=${encodeURIComponent("Search Verified Fixture")}`;
+
+  test("has_zarr_verified=1 excludes a has_zarr row that failed verification", async () => {
+    const ids = await searchIds(app, db, `${Q}&has_zarr_verified=1`);
+    expect(ids).toEqual(["nm411001"]);
+  });
+
+  test("no has_zarr_verified filter returns both datasets from search", async () => {
+    const ids = await searchIds(app, db, Q);
+    expect(ids.sort()).toEqual(["nm411001", "nm411002"]);
+  });
+
+  test("has_zarr_verified also applies on the exact-id lookup tier", async () => {
+    const idsWithFilter = await searchIds(app, db, "q=nm411002&has_zarr_verified=1");
+    expect(idsWithFilter).not.toContain("nm411002");
+  });
+});
+
 describe("the zarr fields are present on GET /datasets rows", () => {
   let db: Database;
   let app: App;
