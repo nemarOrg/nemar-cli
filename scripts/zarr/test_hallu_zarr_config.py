@@ -174,6 +174,13 @@ def test_test_mode_print_config_defaults(dirs: tuple[Path, Path]) -> None:
     # hallu-zarr.sh. TEST_API_URL is that CLI's hook, and --test must set it.
     assert cfg["TEST_API_URL"] == "https://api-test.nemar.org"
     assert cfg["CALLBACK_URL"] == "https://api-test.nemar.org/webhooks/zarr-ready"
+    # The base the test instance's index.json advertises as `contract_base` and
+    # each store's `nemar.contract_url` (#1059/#1064). It is a SEPARATE default
+    # from S3_BUCKET on purpose -- the contract URL is the one clients may
+    # hardcode, so it must not be derivable from wherever the bytes happen to
+    # sit -- which also means --test has to steer it explicitly or a test index
+    # would publish the production host.
+    assert cfg["CONTRACT_BASE"] == "https://zarr-test.nemar.org"
     assert cfg["S3_BUCKET"] == "nemar-dev"
     assert cfg["AWS_PROFILE"] == "nemar-zarr-dev"
     assert cfg["STATE_DIR"] == state_dir
@@ -212,6 +219,7 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
     assert cfg["API_BASE"] == "https://api.nemar.org"
     assert cfg["TEST_API_URL"] == ""
     assert cfg["CALLBACK_URL"] == "https://api.nemar.org/webhooks/zarr-ready"
+    assert cfg["CONTRACT_BASE"] == "https://zarr.nemar.org"
     assert cfg["S3_BUCKET"] == "nemar"
     assert cfg["AWS_PROFILE"] == "nemar-zarr"
     assert cfg["STATE_DIR"] == f"{zarr_base}/zarr-state"
@@ -420,6 +428,7 @@ def test_test_mode_env_vars_are_exported(dirs: tuple[Path, Path]) -> None:
         "ZARR_WORK_DIR",
         "ZARR_DRIVER_REF",
         "ZARR_JOBS",
+        "ZARR_CONTRACT_BASE",
     ):
         assert name in dumped, f"{name} missing from child env -- not exported?"
 
