@@ -715,12 +715,27 @@ export interface ZarrIndexStoreJson {
   groups?: unknown;
 }
 
-/** Shape of the parsed `<id>/zarr/index.json` document (subset this module reads). */
+/**
+ * Shape of the parsed `<id>/zarr/index.json` document (subset this module reads).
+ *
+ * Spans format v1 and v3 (issue #1059). v3 is additive for everything read here:
+ * `pending_count`/`pending` and `discovered_count` are new, nothing was removed,
+ * and the one v3 REMOVAL (per-store `source_key`, moved to a sibling manifest,
+ * #1178 item 5) was never read by this module or by the website. So both
+ * versions parse through the same optional fields rather than a discriminated
+ * union -- there is no branch to take, and a `format_version` switch here would
+ * be a second thing to update for every future additive field.
+ */
 export interface ZarrIndexJson {
   store_count?: unknown;
   stores?: unknown;
   failure_count?: unknown;
   failures?: unknown;
+  /** v3: recordings with no store yet that are still expected to convert. */
+  pending_count?: unknown;
+  pending?: unknown;
+  /** v3: raw recordings the walker found, the coverage denominator. */
+  discovered_count?: unknown;
 }
 
 /**
@@ -775,20 +790,33 @@ function toFiniteNonNegativeNumber(value: unknown): number | null {
  *    that exercises the transposed-rule failure mode.
  *
  * 2. `index.stores` lists only recordings that CONVERTED. ADR 0027 made zarr
- *    discovery raw-only, so `stores` + `failures` is the complete raw set
- *    for a dataset converted since that landed. This does NOT describe
+ *    discovery raw-only, so `stores` + `failures` + `pending` is the complete
+ *    raw set for a dataset converted since that landed. This does NOT describe
  *    every dataset in the bucket today: AGENTS.md's Zarr section is explicit
  *    that stores published under `derivatives/`/`sourcedata/`/`code/` before
  *    the raw-only cutover are a separate, still-in-progress purge, and some
  *    are still served -- an unpurged legacy dataset's `stores` can include a
  *    non-raw entry. Recordings that failed conversion live in a sibling
- *    `failures` array and appear in neither -- so `recordingCount` is
- *    `store_count + failure_count`, never `stores.length` alone, or a
- *    corrupt/truncated upstream file silently vanishes from the count
- *    instead of showing up as "unavailable" (true regardless of the legacy
- *    caveat above). `store_count` (the converter's own authoritative field)
- *    is preferred over `stores.length`; the two should always agree, but
- *    the field is the source of truth, matching `storeCount` below.
+ *    `failures` array and appear in neither -- so `recordingCount` is a SUM,
+ *    never `stores.length` alone, or a corrupt/truncated upstream file
+ *    silently vanishes from the count instead of showing up as "unavailable"
+ *    (true regardless of the legacy caveat above). `store_count` (the
+ *    converter's own authoritative field) is preferred over `stores.length`;
+ *    the two should always agree, but the field is the source of truth,
+ *    matching `storeCount` below.
+ *
+ *    Index v3 adds the third bucket, `pending`: recordings with no store that
+ *    are still expected to convert (issue #1197). Before it they were in no
+ *    list at all -- on008083 had 43 raw recordings, 2 stores, 36 failures, and
+ *    five that appeared NOWHERE, so this function computed 38 of 43 and every
+ *    number derived from it was quietly short. Pending recordings therefore
+ *    count toward `recordingCount` and toward `recordingsUnavailable`: from a
+ *    reader's position "no viewer, come back later" and "no viewer, ever" are
+ *    both unavailable, and conflating them with "does not exist" is the bug.
+ *    `discovered_count` is preferred when present because it is the producer's
+ *    own denominator and the invariant it enforces
+ *    (`discovered == store + failure + pending`) makes it identical to the sum;
+ *    a v1 index has neither field, so the sum reduces to the old behaviour.
  *
  * A store whose groups all lack `duration_s` (or that has no groups at all)
  * is UNMEASURED: it contributes nothing to the duration sum/range and is
@@ -806,8 +834,12 @@ function toFiniteNonNegativeNumber(value: unknown): number | null {
 export function aggregateRecordingStats(index: ZarrIndexJson): RecordingStats {
   const stores: ZarrIndexStoreJson[] = Array.isArray(index.stores) ? index.stores : [];
   const failures: unknown[] = Array.isArray(index.failures) ? index.failures : [];
+  const pending: unknown[] = Array.isArray(index.pending) ? index.pending : [];
   const failureCount = toFiniteNonNegativeNumber(index.failure_count) ?? failures.length;
   const storeCount = toFiniteNonNegativeNumber(index.store_count) ?? stores.length;
+  // Both absent on a v1 index, where the sum below reduces to store + failure.
+  const pendingCount = toFiniteNonNegativeNumber(index.pending_count) ?? pending.length;
+  const discoveredCount = toFiniteNonNegativeNumber(index.discovered_count);
 
   let measuredCount = 0;
   let totalDuration = 0;
@@ -847,8 +879,10 @@ export function aggregateRecordingStats(index: ZarrIndexJson): RecordingStats {
     totalRecordingDuration: measuredCount > 0 ? totalDuration : null,
     recordingDurationMin: measuredCount > 0 ? durationMin : null,
     recordingDurationMax: measuredCount > 0 ? durationMax : null,
-    recordingCount: storeCount + failureCount,
-    recordingsUnavailable: failureCount,
+    // The producer's own denominator when it published one; otherwise the sum,
+    // which the producer's invariant makes the same number. Never `stores.length`.
+    recordingCount: discoveredCount ?? storeCount + failureCount + pendingCount,
+    recordingsUnavailable: failureCount + pendingCount,
     recordingsMeasured: measuredCount,
     channelCountMin: channelMin,
     channelCountMax: channelMax,

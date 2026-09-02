@@ -60,6 +60,16 @@ interface ZarrReadyBody {
   pool_breaks?: number; // worker-pool breaks RECOVERED this run; 0 is healthy
   measured_count?: number; // recordings whose peak RAM was actually measured
   calibration?: unknown[]; // per-format measured-vs-projected peak RAM
+  // Coverage (#1197, index format v3). `pending_count` is recordings with no
+  // store that the converter still expects to convert -- before v3 they were in
+  // no published list at all and nothing retried them; `discovered_count` is the
+  // raw recordings the walker found, i.e. the denominator that makes "2 of 43"
+  // sayable. Both ride in the existing bounded `zarr_data_failures` summary
+  // rather than getting columns of their own (ADR 0034: `datasets` stays one
+  // table under a column budget; ADR 0036: operational rows carry counts and
+  // pointers, not per-file lists).
+  pending_count?: number;
+  discovered_count?: number;
 }
 
 /**
@@ -85,6 +95,8 @@ export function zarrFailureColumns(body: {
   failure_count?: number;
   deterministic?: boolean;
   data_failures?: unknown;
+  pending_count?: number;
+  discovered_count?: number;
 }): {
   errors: number;
   failureCount: number;
@@ -104,6 +116,15 @@ export function zarrFailureColumns(body: {
   // Typed data failures are a SUBSET of total errors; clamp so a converter bug
   // (or a missing failure_count) can never render "3 data failures of 1 error".
   const failureCount = Math.min(rawFailureCount, errors);
+  const nonNegative = (value: unknown): number | null =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : null;
+  const pending = nonNegative(body.pending_count);
+  const discovered = nonNegative(body.discovered_count);
+  // The summary is written when there is anything to say -- a failure list, OR
+  // pending recordings with no failures at all, which is precisely the on008083
+  // shape (#1197) that used to leave the column NULL and the recordings
+  // invisible. `count` alone kept that case silent.
+  const hasSummary = dataFailures.length > 0 || (pending ?? 0) > 0;
   return {
     errors,
     failureCount,
@@ -112,10 +133,20 @@ export function zarrFailureColumns(body: {
     // deliberately unclamped -- the clamped display count is the separate
     // zarr_failure_count column (failureCount above). Row size is now
     // independent of how many recordings failed.
-    dataFailuresJson:
-      dataFailures.length > 0
-        ? JSON.stringify({ count: dataFailures.length, detail_ref: "zarr/index.json" })
-        : null,
+    //
+    // `pending`/`discovered` are additive keys on the same bounded object
+    // (#1191 announced the array -> {count, detail_ref} change; adding keys to
+    // that object is not a further break, and a consumer reading `count` is
+    // unaffected). They are counts, never lists: the per-recording detail lives
+    // in the published index that `detail_ref` names.
+    dataFailuresJson: hasSummary
+      ? JSON.stringify({
+          count: dataFailures.length,
+          detail_ref: "zarr/index.json",
+          ...(pending === null ? {} : { pending }),
+          ...(discovered === null ? {} : { discovered }),
+        })
+      : null,
     hadErrors: errors > 0,
   };
 }
@@ -296,7 +327,7 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
     }
 
     console.log(
-      `[zarr-ready] dataset=${body.dataset_id} status=${status} stores=${body.store_count ?? "?"} converted=${body.converted?.length ?? 0} removed=${body.removed?.length ?? 0} purged=${purge?.submitted ?? 0} pool_breaks=${body.pool_breaks ?? "?"}`,
+      `[zarr-ready] dataset=${body.dataset_id} status=${status} stores=${body.store_count ?? "?"} converted=${body.converted?.length ?? 0} removed=${body.removed?.length ?? 0} purged=${purge?.submitted ?? 0} pool_breaks=${body.pool_breaks ?? "?"} pending=${body.pending_count ?? "?"} discovered=${body.discovered_count ?? "?"}`,
     );
 
     // Peak-RAM calibration (#1111) is diagnostic rather than dashboard material,
