@@ -388,6 +388,10 @@ describe("POST /webhooks/zarr-ready persists the coverage counts", () => {
     }
     const summaries = lines.filter((l) => l.includes("[zarr-ready] dataset="));
     expect(summaries[0]).toContain("events_rows=5120");
+    // Validated and then never read is the same as not validated: these two have
+    // no column and no other consumer, so the log line is where they exist.
+    expect(summaries[0]).toContain("not_attempted=?");
+    expect(summaries[0]).toContain("non_raw_dropped=?");
     expect(summaries[0]).toContain("events_upload_failed=false");
     expect(summaries[0]).toContain("manifest_upload_failed=false");
     expect(summaries[0]).toContain("events_stores_without_rows=0");
@@ -403,6 +407,96 @@ describe("POST /webhooks/zarr-ready persists the coverage counts", () => {
     expect(missing).toHaveLength(1);
     expect(missing[0]).toContain("events.parquet + manifest.json");
     expect(summaries[1]).toContain("events_rows=none");
+  });
+
+  test("the operational counts with no column reach the summary log", async () => {
+    // `not_attempted_count` and `non_raw_dropped` are validated by the schema and
+    // persisted by nothing: the first is a subset of `pending` the bounded
+    // summary does not break out, the second is a per-run fact about carried-over
+    // stores (ADR 0027). If they are not on this line they are nowhere off-node.
+    const lines: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]) => lines.push(args.join(" "));
+    try {
+      await post({
+        dataset_id: DATASET,
+        status: "ready",
+        store_count: 2,
+        pending_count: 5,
+        discovered_count: 43,
+        not_attempted_count: 3,
+        non_raw_dropped: 92,
+      });
+    } finally {
+      console.log = realLog;
+    }
+    const summary = lines.find((l) => l.includes("[zarr-ready] dataset="));
+    expect(summary).toContain("not_attempted=3");
+    expect(summary).toContain("non_raw_dropped=92");
+  });
+
+  test("a fractional store_count is dropped, never bound into D1", async () => {
+    // The column is INTEGER but D1 binds what it is given, and SQLite keeps a
+    // REAL in an INTEGER column as-is. Before `.int()` a converter bug reporting
+    // 2.7 stores persisted 2.7 and every consumer downstream inherited a count no
+    // counting could produce. The rest of the body must still land, which is the
+    // whole point of per-field `.catch(undefined)`.
+    const realWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+    let res: Response;
+    try {
+      res = await post({
+        dataset_id: DATASET,
+        status: "ready",
+        store_count: 2.7,
+        commit: "b".repeat(40),
+        errors: 0,
+      });
+    } finally {
+      console.warn = realWarn;
+    }
+    expect(res.status).toBe(200);
+    const r = row();
+    expect(r.zarr_store_count).toBeNull();
+    expect(Number.isInteger(r.zarr_store_count ?? 0)).toBe(true);
+    // The neighbouring fields survived the one bad one.
+    expect(r.zarr_source_commit).toBe("b".repeat(40));
+    expect(r.zarr_status).toBe("ready");
+    expect(warnings.join(" ")).toContain("store_count");
+  });
+
+  test("every count field rejects a fractional value", () => {
+    // One primitive covers them all, so the guard is asserted once across the
+    // list rather than per field: a future count declared with a bare
+    // `z.number()` would show up here.
+    const realWarn = console.warn;
+    console.warn = () => {};
+    try {
+      for (const field of [
+        "store_count",
+        "errors",
+        "failure_count",
+        "pool_breaks",
+        "measured_count",
+        "pending_count",
+        "discovered_count",
+        "not_attempted_count",
+        "non_raw_dropped",
+        "events_row_count",
+        "events_stores_without_rows",
+      ]) {
+        const body = parseZarrReadyBody({
+          dataset_id: DATASET,
+          status: "ready",
+          [field]: 1.5,
+        }) as Record<string, unknown> | null;
+        expect(body).not.toBeNull();
+        expect(body?.[field]).toBeUndefined();
+      }
+    } finally {
+      console.warn = realWarn;
+    }
   });
 
   test("a failed run records them too", async () => {
