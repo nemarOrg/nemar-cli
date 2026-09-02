@@ -353,6 +353,49 @@ describe("POST /webhooks/zarr-ready persists the coverage counts", () => {
     expect(Object.keys(r)).not.toContain("zarr_discovered_count");
   });
 
+  test("the summary log names the sibling documents, and warns when one is missing", async () => {
+    // The only place these are visible to anyone not tailing the conversion
+    // node's cron log: neither has a column (ADR 0034) and neither fails the
+    // run, so an unpublished sibling would otherwise be silent.
+    const lines: string[] = [];
+    const warnings: string[] = [];
+    const realLog = console.log;
+    const realWarn = console.warn;
+    console.log = (...args: unknown[]) => lines.push(args.join(" "));
+    console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+    try {
+      await post({
+        dataset_id: DATASET,
+        status: "ready",
+        store_count: 2,
+        events_row_count: 5120,
+        events_upload_failed: false,
+        manifest_upload_failed: false,
+      });
+      await post({
+        dataset_id: DATASET,
+        status: "ready",
+        store_count: 2,
+        events_row_count: null,
+        events_upload_failed: true,
+        manifest_upload_failed: true,
+      });
+    } finally {
+      console.log = realLog;
+      console.warn = realWarn;
+    }
+    const summaries = lines.filter((l) => l.includes("[zarr-ready] dataset="));
+    expect(summaries[0]).toContain("events_rows=5120");
+    expect(summaries[0]).toContain("events_upload_failed=false");
+    expect(summaries[0]).toContain("manifest_upload_failed=false");
+    // A healthy run says so and warns about nothing.
+    expect(warnings.some((w) => w.includes("WITHOUT"))).toBe(true);
+    const missing = warnings.filter((w) => w.includes("WITHOUT"));
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toContain("events.parquet + manifest.json");
+    expect(summaries[1]).toContain("events_rows=none");
+  });
+
   test("a failed run records them too", async () => {
     // A total failure is exactly when coverage matters most, and it is the
     // branch that historically dropped fields (see zarr-pool-breaks.test.ts).

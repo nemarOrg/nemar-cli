@@ -441,8 +441,24 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
     }
 
     console.log(
-      `[zarr-ready] dataset=${body.dataset_id} status=${status} stores=${body.store_count ?? "?"} converted=${body.converted?.length ?? 0} removed=${body.removed?.length ?? 0} purged=${purge?.submitted ?? 0} pool_breaks=${body.pool_breaks ?? "?"} pending=${body.pending_count ?? "?"} discovered=${body.discovered_count ?? "?"}`,
+      `[zarr-ready] dataset=${body.dataset_id} status=${status} stores=${body.store_count ?? "?"} converted=${body.converted?.length ?? 0} removed=${body.removed?.length ?? 0} purged=${purge?.submitted ?? 0} pool_breaks=${body.pool_breaks ?? "?"} pending=${body.pending_count ?? "?"} discovered=${body.discovered_count ?? "?"} events_rows=${body.events_row_count ?? "none"} events_upload_failed=${body.events_upload_failed ?? false} manifest_upload_failed=${body.manifest_upload_failed ?? false}`,
     );
+
+    // A sibling document the converter could not publish leaves the serving copy
+    // internally inconsistent until the next run: manifest.json and index.json
+    // then disagree about which stores exist, and a missing events.parquet makes
+    // a dataset with events indistinguishable from one without. Neither fails
+    // the conversion (ADR 0005), and neither has a column -- so this warn is the
+    // only place the condition is visible to anyone not tailing the cron log.
+    if (body.events_upload_failed || body.manifest_upload_failed) {
+      const which = [
+        ...(body.events_upload_failed ? ["events.parquet"] : []),
+        ...(body.manifest_upload_failed ? ["manifest.json"] : []),
+      ].join(" + ");
+      console.warn(
+        `[zarr-ready] dataset=${body.dataset_id} published index.json WITHOUT ${which}; the next conversion republishes it`,
+      );
+    }
 
     // Peak-RAM calibration (#1111) is diagnostic rather than dashboard material,
     // so it is logged rather than given a column -- but it is logged HERE, on the
