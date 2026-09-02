@@ -714,25 +714,34 @@ describe("v-token round trip (#1181 review item 14)", () => {
 
 describe("HEAD never touches the cache", () => {
   test("(h) HEAD is never cached and never puts", async () => {
-    const head = await request(`/${PUBLIC_ID}/zarr/store.zarr/zarr.json`, { method: "HEAD" });
+    const key = `${PUBLIC_ID}/zarr/store.zarr/zarr.json`;
+    const head = await request(`/${key}`, { method: "HEAD" });
     expect(head.status).toBe(200);
-    expect(countUpstream(`${PUBLIC_ID}/zarr/store.zarr/zarr.json`, "")).toBe(1);
+    expect(countUpstream(key, "")).toBe(1);
+    // The fake upstream really received method HEAD, not a GET that just
+    // happened to match path/range (#1181 phase 6 review item 9) -- a
+    // regression that sent GET here would waste bandwidth pulling a full
+    // body for a HEAD probe.
+    expect(countUpstreamByMethod("HEAD", key, "")).toBe(1);
+    expect(countUpstreamByMethod("GET", key, "")).toBe(0);
 
     // A GET for the same object afterwards is still a miss -- HEAD wrote
     // nothing to the cache. An allowed Origin keeps this GET on the proxied
     // path (phase 6): a bare GET would redirect instead of reaching the
     // cache at all.
-    const get = await request(`/${PUBLIC_ID}/zarr/store.zarr/zarr.json`, {
+    const get = await request(`/${key}`, {
       headers: { Origin: BROWSER_ORIGIN },
     });
     expect(get.status).toBe(200);
-    expect(countUpstream(`${PUBLIC_ID}/zarr/store.zarr/zarr.json`, "")).toBe(2);
+    expect(countUpstream(key, "")).toBe(2);
+    expect(countUpstreamByMethod("GET", key, "")).toBe(1);
 
     // And a second HEAD, after that GET primed a cache entry, still goes
     // upstream -- HEAD never reads the cache either.
-    const head2 = await request(`/${PUBLIC_ID}/zarr/store.zarr/zarr.json`, { method: "HEAD" });
+    const head2 = await request(`/${key}`, { method: "HEAD" });
     expect(head2.status).toBe(200);
-    expect(countUpstream(`${PUBLIC_ID}/zarr/store.zarr/zarr.json`, "")).toBe(3);
+    expect(countUpstream(key, "")).toBe(3);
+    expect(countUpstreamByMethod("HEAD", key, "")).toBe(2);
   });
 
   test("(17) HEAD with a Range header is never cached, never puts, and forwards the Range upstream", async () => {
@@ -740,6 +749,7 @@ describe("HEAD never touches the cache", () => {
     const first = await request(CHUNK_PATH, { method: "HEAD", headers: { Range: range } });
     expect(first.status).toBe(206);
     expect(countUpstream(CHUNK_KEY, range)).toBe(1);
+    expect(countUpstreamByMethod("HEAD", CHUNK_KEY, range)).toBe(1);
 
     const second = await request(CHUNK_PATH, { method: "HEAD", headers: { Range: range } });
     expect(second.status).toBe(206);
@@ -747,6 +757,8 @@ describe("HEAD never touches the cache", () => {
     // a cache entry. The upstream log entry only exists because the Range
     // header really was forwarded (the fake server keys its log on it).
     expect(countUpstream(CHUNK_KEY, range)).toBe(2);
+    expect(countUpstreamByMethod("HEAD", CHUNK_KEY, range)).toBe(2);
+    expect(countUpstreamByMethod("GET", CHUNK_KEY, range)).toBe(0);
   });
 });
 
@@ -1470,6 +1482,42 @@ describe("no D1 read on the redirect path (#1181 phase 6 / issue #1061)", () => 
     expect(res.status).toBe(302);
     expect(prepareCalls()).toBe(0);
   });
+
+  test("8 concurrent redirect-candidate GETs: all 302, zero upstream requests, zero D1 queries (#1181 phase 6 review item 13)", async () => {
+    const { db: countedDb, prepareCalls } = countingDb(realD1(db));
+    const env = { ...testEnv(), DB: countedDb } as Bindings;
+
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => requestWithEnv(CHUNK_PATH, {}, env)),
+    );
+    for (const res of results) {
+      expect(res.status).toBe(302);
+    }
+    expect(requestLog.length).toBe(0);
+    expect(prepareCalls()).toBe(0);
+  });
+});
+
+describe("private dataset redirect safety: the bucket's own deny-list, not this route, is what blocks it (#1181 phase 6 review item 10)", () => {
+  test("following the 302 Location for a private dataset's chunk gets 403 directly from S3", async () => {
+    const path = `/${PRIVATE_ID}/zarr/store.zarr/zarr.json`;
+    const res = await request(path);
+    expect(res.status).toBe(302);
+    const location = res.headers.get("location");
+    expect(location).not.toBeNull();
+
+    // This IS the actual safety argument for the redirect branch skipping
+    // the D1 gate (decision 2 in the phase 6 brief, and the module doc
+    // comment above): the bucket's NotResource deny-list
+    // (services/bucket-policy.ts) denies ANONYMOUS s3:GetObject on a
+    // private dataset's ENTIRE prefix at the bucket level, independent of
+    // this Worker or D1. Fetch the Location directly -- exactly what a
+    // real client following the redirect would do -- and confirm S3
+    // itself, not this route, is what actually keeps the object private. A
+    // redirect that 403s here leaks nothing a proxied 404 does not.
+    const upstreamRes = await fetch(location as string);
+    expect(upstreamRes.status).toBe(403);
+  });
 });
 
 describe("/zarrproxy path-mount entry point (#1181 phase 6)", () => {
@@ -1499,6 +1547,89 @@ describe("/zarrproxy path-mount entry point (#1181 phase 6)", () => {
     );
     expect(res.status).toBe(200);
     expect(countUpstream(`${PUBLIC_ID}/zarr/index.json`, "")).toBe(1);
+  });
+
+  test("an allowed Origin through the path-mounted entry point is proxied with bytes + CORS, not redirected (#1181 phase 6 review item 8)", async () => {
+    const mounted = new Hono<{ Bindings: Bindings }>();
+    mounted.route("/zarrproxy", app);
+
+    const res = await requestWith(
+      mounted,
+      `/zarrproxy${CHUNK_PATH}`,
+      { headers: { Origin: BROWSER_ORIGIN } },
+      testEnv(),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("access-control-allow-origin")).toBe(BROWSER_ORIGIN);
+    expect(res.headers.get("location")).toBeNull();
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    expect(bytes).toEqual(CHUNK_BYTES);
+    expect(countUpstream(CHUNK_KEY, "")).toBe(1);
+  });
+});
+
+describe("edge-cache mechanics re-verified for a no-Origin index.json path (#1181 phase 6 review item 12)", () => {
+  // index.json is never a redirect candidate, so a BARE (no-Origin) request
+  // to it is still proxied and still runs the SAME edge-cache machinery the
+  // phase-1 tests above now exercise via an allowed-Origin store object.
+  // These re-confirm the same mechanics reached through the no-Origin path,
+  // which phase 6 made the common case for every OTHER object class.
+  const INDEX_PATH = `/${PUBLIC_ID}/zarr/index.json`;
+  const INDEX_KEY = `${PUBLIC_ID}/zarr/index.json`;
+
+  test("range-key miss then hit", async () => {
+    const range = "bytes=0-5";
+    const first = await request(INDEX_PATH, { headers: { Range: range } });
+    expect(first.status).toBe(206);
+    expect(countUpstream(INDEX_KEY, range)).toBe(1);
+
+    const second = await request(INDEX_PATH, { headers: { Range: range } });
+    expect(second.status).toBe(206);
+    expect(countUpstream(INDEX_KEY, range)).toBe(1); // hit, not a second fetch
+  });
+
+  test("a different range is a separate miss", async () => {
+    await request(INDEX_PATH, { headers: { Range: "bytes=0-5" } });
+    const res = await request(INDEX_PATH, { headers: { Range: "bytes=6-10" } });
+    expect(res.status).toBe(206);
+    expect(countUpstream(INDEX_KEY, "bytes=6-10")).toBe(1);
+    expect(countUpstream(INDEX_KEY, "bytes=0-5")).toBe(1); // untouched
+  });
+
+  test("size cap: a full object over FULL_OBJECT_CACHE_MAX_BYTES is served correctly and not cached", async () => {
+    // index.json's own fixture is small; swap in the oversized fixture for
+    // this one test only, restoring it in `finally` so no other test in
+    // this file (which shares OBJECTS at module scope) sees the swap.
+    const original = OBJECTS[INDEX_KEY];
+    OBJECTS[INDEX_KEY] = CAP_TEST_BYTES;
+    try {
+      const first = await request(INDEX_PATH);
+      expect(first.status).toBe(200);
+      expect(countUpstream(INDEX_KEY, "")).toBe(1);
+
+      const second = await request(INDEX_PATH);
+      expect(second.status).toBe(200);
+      expect(countUpstream(INDEX_KEY, "")).toBe(2); // not cached -- over the cap
+    } finally {
+      OBJECTS[INDEX_KEY] = original;
+    }
+  }, 20000);
+
+  test("a 206 with no Content-Range fails closed, uncached", async () => {
+    QUIRKS.set(INDEX_KEY, "no-content-range");
+    try {
+      const range = "bytes=0-5";
+      const first = await request(INDEX_PATH, { headers: { Range: range } });
+      expect(first.status).toBe(206);
+      expect(first.headers.get("content-range")).toBeNull();
+      expect(countUpstream(INDEX_KEY, range)).toBe(1);
+
+      const second = await request(INDEX_PATH, { headers: { Range: range } });
+      expect(second.status).toBe(206);
+      expect(countUpstream(INDEX_KEY, range)).toBe(2); // never cached
+    } finally {
+      QUIRKS.delete(INDEX_KEY);
+    }
   });
 });
 
