@@ -68,6 +68,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0032](0032-facet-filters-are-declared-once-and-report-what-they-exclude.md) - Facet filters are declared once in a shared table, and report what they exclude
 - [ADR 0033](0033-the-zarr-queue-stamps-the-engine-that-converted-each-dataset.md) - The Zarr queue stamps the engine that converted each dataset; pre-existing rows are declared current
 - [ADR 0034](0034-datasets-stays-one-table-under-a-column-budget.md) - `datasets` stays one table, under an enforced column budget
+- [ADR 0035](0035-sweep-stamps-live-in-one-json-column.md) - Sweep bookkeeping stamps live in one JSON column
 
 ## Backfill note (2026-07-31)
 
