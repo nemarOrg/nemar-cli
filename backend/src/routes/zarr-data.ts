@@ -156,13 +156,24 @@ export function bytesFromRangeHeader(rangeHeader: string | null): number {
   return 0; // open-ended `bytes=A-`: length unknown without hitting S3
 }
 
-function s3PublicUrl(env: Bindings, key: string, base?: string): string {
+/**
+ * Build the public S3 URL for a key -- the upstream fetch target for the
+ * proxied branch AND the redirect `Location` for the redirect branch
+ * (#1181 phase 6). `key` is the already-decoded, normalised S3 key (see
+ * serve()'s `rest`), so it is re-encoded per path segment here via
+ * encodeS3KeyPath() -- the SAME encoding canonicalCacheUrl() uses for the
+ * edge-cache key -- rather than interpolated raw. Exported for a direct
+ * unit test of the real (non-`base`) branch; production code never imports
+ * it from outside this file.
+ */
+export function s3PublicUrl(env: Bindings, key: string, base?: string): string {
+  const encodedKey = encodeS3KeyPath(key);
   // Test seam (#1178 phase 1): a real Bun.serve() upstream stands in for S3
   // in tests via deps.s3Base, instead of parsing env vars for a fake host.
-  if (base) return `${base}/${key}`;
+  if (base) return `${base}/${encodedKey}`;
   // Public-read object (deny-list policy makes a public dataset's prefix public).
   const region = env.AWS_REGION || "us-east-2";
-  return `https://${env.S3_BUCKET}.s3.${region}.amazonaws.com/${key}`;
+  return `https://${env.S3_BUCKET}.s3.${region}.amazonaws.com/${encodedKey}`;
 }
 
 /** Cache-Control for the origin + edge.
@@ -241,6 +252,26 @@ export type NormalizedRange = string & { readonly __brand: "NormalizedRange" };
 export type CanonicalCacheUrl = string & { readonly __brand: "CanonicalCacheUrl" };
 
 /**
+ * Percent-encode each path segment of an S3 key independently (never the
+ * whole key as one string, which would also escape the `/` separators).
+ *
+ * Shared by canonicalCacheUrl() (the edge-cache key) and s3PublicUrl() (the
+ * upstream fetch target AND the redirect Location, #1181 phase 6 review) so
+ * all three agree on the exact same encoded spelling for a given key. Before
+ * this was shared, s3PublicUrl() interpolated the raw (decoded) key
+ * unescaped: a literal `#` truncated the URL at the fragment, `?`/space
+ * broke the request line, and a non-Latin-1 character landed raw in a
+ * `Location` header, which workerd (unlike Bun, where tests ran) refuses to
+ * send at all.
+ */
+function encodeS3KeyPath(key: string): string {
+  return key
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+}
+
+/**
  * Canonical edge-cache key for an object: origin + "/" + the normalised S3
  * key, with each path segment individually `encodeURIComponent`'d, plus the
  * `v` query parameter when present.
@@ -257,11 +288,7 @@ export function canonicalCacheUrl(
   key: string,
   v: string | null,
 ): CanonicalCacheUrl {
-  const encodedPath = key
-    .split("/")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
-  const url = new URL(`${origin}/${encodedPath}`);
+  const url = new URL(`${origin}/${encodeS3KeyPath(key)}`);
   if (v) url.searchParams.set("v", v);
   return url.toString() as CanonicalCacheUrl;
 }

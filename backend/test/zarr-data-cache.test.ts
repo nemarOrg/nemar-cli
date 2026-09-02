@@ -54,6 +54,7 @@ import {
   createZarrDataRoutes,
   isRedirectCandidate,
   parseCacheableRange,
+  s3PublicUrl,
 } from "../src/routes/zarr-data";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -77,6 +78,17 @@ const QUIRK_BYTES = new Uint8Array(64).fill(3);
 // exceeds RANGE_CACHE_MAX_BYTES. Real bytes, real transfer -- not mocked.
 const CAP_TEST_BYTES = new Uint8Array(FULL_OBJECT_CACHE_MAX_BYTES + 1024).fill(9);
 
+// A store-object name with a space, '#', '?', '%', '+', and a non-ASCII
+// character -- every character class the encoding fix (#1181 phase 6
+// review item 1) has to survive. Registered in OBJECTS under its RAW
+// (decoded) spelling, exactly like every other fixture here; the fake
+// upstream below decodes the incoming request path before looking it up,
+// mirroring how S3 itself resolves a percent-encoded request path back to
+// the raw object key.
+const WEIRD_NAME = "weird #?%+café.bin";
+const WEIRD_KEY = `${PUBLIC_ID}/zarr/store.zarr/${WEIRD_NAME}`;
+const WEIRD_BYTES = new Uint8Array([9, 8, 7, 6, 5]);
+
 const OBJECTS: Record<string, Uint8Array> = {
   [`${PUBLIC_ID}/zarr/index.json`]: INDEX_JSON,
   [`${PUBLIC_ID}/zarr/store.zarr/zarr.json`]: ZARR_JSON,
@@ -85,6 +97,7 @@ const OBJECTS: Record<string, Uint8Array> = {
   [`${PUBLIC_ID}/zarr/store.zarr/c/quirk/no-length-header`]: QUIRK_BYTES,
   [`${PUBLIC_ID}/zarr/store.zarr/c/quirk/ignored-range`]: QUIRK_BYTES,
   [`${PUBLIC_ID}/zarr/store.zarr/c/big/oversized`]: CAP_TEST_BYTES,
+  [WEIRD_KEY]: WEIRD_BYTES,
   [`${PRIVATE_ID}/zarr/store.zarr/zarr.json`]: ZARR_JSON,
 };
 
@@ -134,14 +147,38 @@ function countUpstream(path: string, range = ""): number {
   return requestLog.filter((r) => r.path === path && r.range === range).length;
 }
 
+/** Same as countUpstream, but also asserts the HTTP method (#1181 phase 6
+ *  review item 9) -- countUpstream alone can't distinguish "the upstream
+ *  never saw this key/range" from "it saw it, but as the wrong method"
+ *  (e.g. a HEAD probe that accidentally streamed a GET's full body). */
+function countUpstreamByMethod(method: string, path: string, range = ""): number {
+  return requestLog.filter((r) => r.method === method && r.path === path && r.range === range)
+    .length;
+}
+
 beforeAll(() => {
   upstream = Bun.serve({
     port: 0,
     fetch(req) {
       const url = new URL(req.url);
-      const key = url.pathname.slice(1);
+      // Decode the incoming (percent-encoded, as a real client would send
+      // it) request path back to the raw key -- mirrors how S3 itself
+      // resolves a percent-encoded request path to the raw object key, and
+      // lets OBJECTS/QUIRKS stay keyed by the natural/raw spelling like
+      // every other fixture here (#1181 phase 6 review item 1).
+      const key = decodeURIComponent(url.pathname.slice(1));
       const range = req.headers.get("range") ?? "";
       requestLog.push({ method: req.method, path: key, range });
+
+      // Simulate the bucket's own NotResource deny-list (bucket-policy.ts):
+      // a private dataset's ENTIRE prefix is walled off from anonymous
+      // access at the bucket level, independent of whether the specific key
+      // exists -- this is the actual safety argument for the redirect
+      // branch skipping the D1 gate (#1181 phase 6 review item 10; see the
+      // "private dataset redirect safety" describe block below).
+      if (key.startsWith(`${PRIVATE_ID}/`)) {
+        return new Response(null, { status: 403 });
+      }
 
       const bytes = OBJECTS[key];
       if (!bytes) return new Response(null, { status: 404 });
@@ -422,6 +459,28 @@ describe("canonicalCacheUrl", () => {
   test("percent-encodes each path segment independently", () => {
     expect(canonicalCacheUrl("https://zarr.nemar.org", "on000001/zarr/a b/c~d.json", null)).toBe(
       "https://zarr.nemar.org/on000001/zarr/a%20b/c~d.json",
+    );
+  });
+});
+
+describe("s3PublicUrl (#1181 phase 6 review item 1)", () => {
+  test("the real (non-s3Base) branch builds a per-segment-encoded AWS URL", () => {
+    const env = { AWS_REGION: "us-east-2", S3_BUCKET: "nemar" } as unknown as Bindings;
+    expect(s3PublicUrl(env, "on000001/zarr/store.zarr/weird #?%+café.bin")).toBe(
+      "https://nemar.s3.us-east-2.amazonaws.com/on000001/zarr/store.zarr/weird%20%23%3F%25%2Bcaf%C3%A9.bin",
+    );
+  });
+
+  test("the real branch defaults AWS_REGION when unset", () => {
+    const env = { S3_BUCKET: "nemar" } as unknown as Bindings;
+    expect(s3PublicUrl(env, "on000001/zarr/index.json")).toBe(
+      "https://nemar.s3.us-east-2.amazonaws.com/on000001/zarr/index.json",
+    );
+  });
+
+  test("the s3Base (test-seam) branch also encodes, agreeing with the real branch", () => {
+    expect(s3PublicUrl({} as Bindings, "on000001/zarr/a b/c#d.bin", "http://localhost:1234")).toBe(
+      "http://localhost:1234/on000001/zarr/a%20b/c%23d.bin",
     );
   });
 });
@@ -1302,6 +1361,53 @@ describe("routing fork stays correct at the edges (#1181 phase 6 / issue #1061)"
       method: "HEAD",
     });
     expect(privateHead.status).toBe(404);
+  });
+
+  test("a literal 'null' Origin header on a store object still redirects with no ACAO (#1181 phase 6 review item 11)", async () => {
+    // `Origin: null` (the literal 4-char string, sent by some sandboxed
+    // browsing contexts) is not a URL allowedOrigin() can parse, so it must
+    // fall through to "not allowlisted" exactly like any other unparseable
+    // or unrecognised origin -- never crash, never get treated as trusted.
+    const res = await request(CHUNK_PATH, { headers: { Origin: "null" } });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  test("HEAD with a non-allowlisted Origin on a private dataset is 404, never redirected (#1181 phase 6 review item 11)", async () => {
+    const res = await request(`/${PRIVATE_ID}/zarr/store.zarr/zarr.json`, {
+      method: "HEAD",
+      headers: { Origin: "https://evil.example.org" },
+    });
+    expect(res.status).toBe(404);
+    expect(res.headers.get("location")).toBeNull();
+  });
+});
+
+describe("redirect Location and the proxied fetch target are both correctly encoded (#1181 phase 6 review item 1)", () => {
+  const WEIRD_REQUEST_PATH = `/${PUBLIC_ID}/zarr/store.zarr/${encodeURIComponent(WEIRD_NAME)}`;
+  const EXPECTED_ENCODED_KEY = WEIRD_KEY.split("/").map(encodeURIComponent).join("/");
+
+  test("the redirect branch: Location carries the exact per-segment-encoded key", async () => {
+    const res = await request(WEIRD_REQUEST_PATH);
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(
+      `http://localhost:${upstream.port}/${EXPECTED_ENCODED_KEY}`,
+    );
+    // The fake upstream never saw this request at all (redirect never
+    // fetches) -- confirms the Location is built, not derived from a probe.
+    expect(countUpstream(WEIRD_KEY, "")).toBe(0);
+  });
+
+  test("the proxied branch: the fake upstream receives the encoded path and serves the object", async () => {
+    const res = await request(WEIRD_REQUEST_PATH, { headers: { Origin: BROWSER_ORIGIN } });
+    expect(res.status).toBe(200);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    expect(bytes).toEqual(WEIRD_BYTES);
+    // countUpstream is keyed on the DECODED key the fake server resolves the
+    // encoded request path back to -- a hit here proves the wire request
+    // really carried the encoded spelling and the server correctly reversed
+    // it back to the exact same key serve() started from.
+    expect(countUpstream(WEIRD_KEY, "")).toBe(1);
   });
 });
 
