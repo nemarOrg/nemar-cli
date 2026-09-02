@@ -377,6 +377,29 @@ class RewriteIndexTests(unittest.TestCase):
         twice = rewrite_index(once, purged)
         self.assertEqual(once, twice)
 
+    def test_a_purge_drops_the_events_pointer_it_can_no_longer_vouch_for(self):
+        """The published events.parquet still holds rows for the store this just
+        removed, so `events_row_count` would overstate it and `events_parquet`
+        would name a file describing stores the index no longer lists (#1060).
+        Dropped as a pair -- the schema declares them as one -- until the next
+        conversion republishes both."""
+        index = self._index()
+        index["events_parquet"] = "https://nemar.s3.us-east-2.amazonaws.com/x/zarr/events.parquet"
+        index["events_row_count"] = 41
+        out = rewrite_index(index, {"derivatives/pipeline-x/sub-01_task-x_eeg.zarr"})
+        self.assertNotIn("events_parquet", out)
+        self.assertNotIn("events_row_count", out)
+
+    def test_purging_nothing_leaves_the_events_pointer_alone(self):
+        # A run that removes no entry has not invalidated anything, and a purge
+        # sweep over a clean dataset must not quietly un-publish its events.
+        index = self._index()
+        index["events_parquet"] = "https://nemar.s3.us-east-2.amazonaws.com/x/zarr/events.parquet"
+        index["events_row_count"] = 41
+        out = rewrite_index(index, {"nothing/matches/this.zarr"})
+        self.assertEqual(out["events_row_count"], 41)
+        self.assertEqual(out["events_parquet"], index["events_parquet"])
+
     def test_never_introduces_a_stores_or_failures_key_that_was_absent(self):
         index = {"dataset_id": DATASET, "format": "nemar-zarr-index"}
         out = rewrite_index(index, {"anything.zarr"})

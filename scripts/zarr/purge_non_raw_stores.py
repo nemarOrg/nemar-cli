@@ -249,6 +249,15 @@ def rewrite_index(index: dict, purged_rels: set[str]) -> dict:
     `stores`/`failures` entries keep their original content and relative
     order (filtered, never re-sorted or otherwise modified).
 
+    The ONE exception is the events pair (`events_parquet` /
+    `events_row_count`, #1060), which is dropped whenever this actually purges
+    something. The file on S3 still holds rows for the stores just removed, so
+    the count would overstate it and the pointer would name a file describing
+    stores this index no longer lists. Dropping both says "no events file
+    here" until the next conversion republishes it, which is the same rule the
+    converter follows: the index names that file only when it can vouch for
+    it. Dropped as a PAIR because the schema declares them as one.
+
     Idempotent: calling this twice with the same `purged_rels` on its own
     output is a no-op the second time, since the matching entries are already
     gone.
@@ -273,6 +282,10 @@ def rewrite_index(index: dict, purged_rels: set[str]) -> dict:
         ]
         out["failures"] = kept_failures
         out["failure_count"] = len(kept_failures)
+
+    if out.get("stores") != index.get("stores") or out.get("failures") != index.get("failures"):
+        out.pop("events_parquet", None)
+        out.pop("events_row_count", None)
 
     return out
 
