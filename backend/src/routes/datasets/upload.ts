@@ -10,7 +10,6 @@ import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { authMiddleware } from "../../middleware/auth";
 import { cliVersionGuard } from "../../middleware/cliVersion";
-import { formatFileSize } from "../../services/dataset-metadata-columns";
 import { generateDatasetId, isValidDatasetId } from "../../services/datasetId";
 import {
   type GitHubRepo,
@@ -131,6 +130,27 @@ const createDatasetSchema = z.object({
   sandbox: z.boolean().optional(), // If true, creates sandbox dataset (xx000XXX)
   attestation: attestationSchema.optional(),
 });
+
+/**
+ * Serialize a validated attestation into the single `datasets.attestation`
+ * JSON column (#1182; the six flat columns were collapsed by migration
+ * 0071). Key names and value types match what that migration produced from
+ * the old columns: 0/1 integers for the booleans, null for the optional
+ * fields, and a UTC `YYYY-MM-DD HH:MM:SS` accepted_at (the same shape
+ * SQLite's datetime('now') wrote before). `deidentified` is always 1 here:
+ * the schema requires literal true. The wire contract still serves the six
+ * flat attestation_* fields; the detail route explodes this JSON back out.
+ */
+function attestationJson(attestation: z.infer<typeof attestationSchema>): string {
+  return JSON.stringify({
+    deposit_type: attestation.deposit_type,
+    key_status: attestation.key_status,
+    deidentified: 1,
+    no_duplicate: attestation.no_duplicate === undefined ? null : attestation.no_duplicate ? 1 : 0,
+    upstream_source: attestation.upstream_source ?? null,
+    accepted_at: new Date().toISOString().replace("T", " ").slice(0, 19),
+  });
+}
 
 // Sandbox file size limit: 10MB total in production (sandbox is for exercising
 // the workflow, not storing real data). Non-production staging (epic #923) needs
@@ -306,29 +326,13 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         // A resumed create is the same depositor re-affirming: record the
         // attestation they sent now (also backfills rows whose original
         // create predated attestation collection). Failure here must not
-        // block the resume; the columns stay NULL and the next attempt
+        // block the resume; the column stays NULL and the next attempt
         // records it.
         if (attestation) {
           try {
             await db
-              .prepare(
-                `UPDATE datasets SET
-                   attestation_deposit_type = ?,
-                   attestation_key_status = ?,
-                   attestation_deidentified = ?,
-                   attestation_no_duplicate = ?,
-                   attestation_upstream_source = ?,
-                   attestation_accepted_at = datetime('now')
-                 WHERE dataset_id = ?`,
-              )
-              .bind(
-                attestation.deposit_type,
-                attestation.key_status,
-                attestation.deidentified ? 1 : 0,
-                attestation.no_duplicate === undefined ? null : attestation.no_duplicate ? 1 : 0,
-                attestation.upstream_source ?? null,
-                datasetId,
-              )
+              .prepare("UPDATE datasets SET attestation = ? WHERE dataset_id = ?")
+              .bind(attestationJson(attestation), datasetId)
               .run();
           } catch (err) {
             console.error(`Failed to record attestation on resumed ${datasetId}:`, err);
@@ -346,14 +350,9 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           try {
             await db
               .prepare(
-                "UPDATE datasets SET subject_count = ?, file_size = ?, file_size_formatted = ? WHERE dataset_id = ? AND metadata_updated_at IS NULL",
+                "UPDATE datasets SET subject_count = ?, file_size = ? WHERE dataset_id = ? AND json_extract(sweep_stamps, '$.metadata_updated_at') IS NULL",
               )
-              .bind(
-                resumeSeed.subjects,
-                resumeSeed.bytes,
-                formatFileSize(resumeSeed.bytes),
-                datasetId,
-              )
+              .bind(resumeSeed.subjects, resumeSeed.bytes, datasetId)
               .run();
           } catch (err) {
             console.error(`Failed to seed manifest stats on resumed ${datasetId}:`, err);
@@ -456,9 +455,10 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           // 'unknown' (0034) until enrichment sets the real value via
           // writeDatasetCatalogFields. If `license` is ever added here, add
           // license_tier alongside it or the tier will stay stale (#653).
-          // Attestation columns (0067) ride the claim INSERT because they are
-          // known at create time; NULLs mean "no attestation on record"
-          // (pre-attestation CLIs, server-side imports).
+          // The attestation JSON (0067, collapsed to one column by 0071)
+          // rides the claim INSERT because it is known at create time; NULL
+          // means "no attestation on record" (pre-attestation CLIs,
+          // server-side imports).
           // Manifest-derived seeds (#1091): subjects/size are known from the
           // declared file list, so the dashboard card is populated from the
           // first render; enrichment overwrites with authoritative values.
@@ -466,10 +466,8 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           await db
             .prepare(
               `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility,
-                subject_count, file_size, file_size_formatted,
-                attestation_deposit_type, attestation_key_status, attestation_deidentified,
-                attestation_no_duplicate, attestation_upstream_source, attestation_accepted_at)
-             VALUES (?, ?, ?, ?, '', ?, 'private', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                subject_count, file_size, attestation)
+             VALUES (?, ?, ?, ?, '', ?, 'private', ?, ?, ?)`,
             )
             .bind(
               datasetId,
@@ -479,19 +477,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
               sandbox ? 1 : 0,
               seed.subjects,
               seed.bytes,
-              formatFileSize(seed.bytes),
-              attestation?.deposit_type ?? null,
-              attestation?.key_status ?? null,
-              attestation ? 1 : null,
-              attestation
-                ? attestation.no_duplicate === undefined
-                  ? null
-                  : attestation.no_duplicate
-                    ? 1
-                    : 0
-                : null,
-              attestation?.upstream_source ?? null,
-              attestation ? new Date().toISOString().replace("T", " ").slice(0, 19) : null,
+              attestation ? attestationJson(attestation) : null,
             )
             .run();
           break; // ID claimed successfully
@@ -952,10 +938,13 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
   );
 
   /**
-   * POST /datasets/:id/finalize - Finalize dataset after upload
+   * POST /datasets/:id/finalize - Finalize dataset repo setup after upload
    *
-   * Applies branch protection and marks dataset as published.
-   * Should be called after initial upload is complete.
+   * Pre-publish setup on a still-private repo: ensures the default branch is
+   * "main", deploys the CI workflow shims, enables auto-merge, and applies the
+   * private-repo collaborator spec. Branch protection is NOT applied here; it is
+   * applied at make-public and removed at make-private (epic #713). Refuses on an
+   * already-public dataset, whose repo spec is owned by the publication flow.
    */
   datasetRoutes.post("/:id/finalize", authMiddleware, async (c) => {
     const datasetId = c.req.param("id");
@@ -965,9 +954,16 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
     try {
       // Verify dataset exists and user is owner
       const dataset = await db
-        .prepare("SELECT owner_user_id, github_repo, status FROM datasets WHERE dataset_id = ?")
+        .prepare(
+          "SELECT owner_user_id, github_repo, status, visibility FROM datasets WHERE dataset_id = ?",
+        )
         .bind(datasetId)
-        .first<{ owner_user_id: number; github_repo: string; status: string }>();
+        .first<{
+          owner_user_id: number;
+          github_repo: string;
+          status: string;
+          visibility: string;
+        }>();
 
       if (!dataset) {
         return c.json({ error: "Dataset not found" }, 404);
@@ -975,6 +971,24 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
 
       if (dataset.owner_user_id !== user.id && !hasRole(user.role, "admin")) {
         return c.json({ error: "Only dataset owner can finalize upload" }, 403);
+      }
+
+      // Finalize is a pre-publish step: it renames the default branch, re-commits
+      // workflow templates, and applies the PRIVATE-repo collaborator spec. Running
+      // it on an already-published dataset would push through the published-repo
+      // ruleset and re-apply the private spec to a public repo. Publication and its
+      // spec enforcement own the published repo instead.
+      // `visibility` is NOT NULL CHECK ('private','public') (migration 0006), so
+      // `=== "public"` is exhaustive today; revisit if a third state is ever added.
+      if (dataset.visibility === "public") {
+        return c.json(
+          {
+            error: "Cannot finalize a published dataset",
+            message:
+              "This dataset is already public; its repository spec is managed by the publication flow.",
+          },
+          409,
+        );
       }
 
       // Note: We could track finalization state separately if needed

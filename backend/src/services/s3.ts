@@ -687,6 +687,174 @@ export async function getArchiveSize(
   return maxSize;
 }
 
+/**
+ * Shape of a single channel-group entry within a zarr index store, as written
+ * by generate_zarr.py. Loosely typed (external JSON off S3, not a
+ * compile-time-guaranteed shape) -- aggregateRecordingStats validates every
+ * field defensively before using it.
+ *
+ * `rate` is deliberately NOT modeled here. generate_zarr.py caps it per
+ * modality at conversion time (`MODALITY_RATES` -- EEG/MEG 250 Hz, IEEG/EMG
+ * 1000 Hz), so the stored value describes the Zarr viewer's serving copy, not
+ * the recording's true acquisition rate. Surfacing it as
+ * `data_summary.sampling_frequency_range` would put NEMAR's own viewer
+ * setting into a FAIR metadata field and mislabel every dataset acquired
+ * above the cap (most modern EEG). The real rate lives in the BIDS sidecar
+ * (`SamplingFrequency` in `*_eeg.json`), populated by a different pipeline
+ * (the enrichment/reindex walk) -- out of scope for this phase.
+ * `data_summary.sampling_frequency_range` stays unpopulated because of this;
+ * do not "fix" that by reading `rate` off this shape.
+ */
+export interface ZarrIndexGroupJson {
+  n_channels?: unknown;
+  duration_s?: unknown;
+}
+
+/** Shape of a single converted recording entry in index.json's `stores` array. */
+export interface ZarrIndexStoreJson {
+  groups?: unknown;
+}
+
+/** Shape of the parsed `<id>/zarr/index.json` document (subset this module reads). */
+export interface ZarrIndexJson {
+  store_count?: unknown;
+  stores?: unknown;
+  failure_count?: unknown;
+  failures?: unknown;
+}
+
+/**
+ * Dataset-level recording statistics aggregated from a zarr index (epic
+ * #1144 Phase 2, issue #1146). Column names mirror neuroschema's
+ * dataSummary vocabulary (v0.4.0) 1:1 -- see migration 0070 for what NULL
+ * means on each field.
+ */
+export interface RecordingStats {
+  totalRecordingDuration: number | null;
+  recordingDurationMin: number | null;
+  recordingDurationMax: number | null;
+  recordingCount: number;
+  recordingsUnavailable: number;
+  recordingsMeasured: number;
+  channelCountMin: number | null;
+  channelCountMax: number | null;
+}
+
+/**
+ * Parse a JSON value as a non-negative finite number, REJECTING (not
+ * clamping) anything else: NaN, +/-Infinity, non-numbers, and negatives all
+ * become null. Every field this reads (n_channels, duration_s, store_count,
+ * failure_count) is `minimum: 0` in the vendored neuroschema bundle, so a
+ * negative input is malformed data, not a valid-but-inconvenient value.
+ * Rejecting rather than clamping to 0 matters: a clamped negative duration
+ * would be indistinguishable from a genuinely measured zero-length
+ * recording, which is exactly the ambiguity `measuredCount` below exists to
+ * avoid for the "nothing measured" case.
+ */
+function toFiniteNonNegativeNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/**
+ * Aggregate dataset-level recording statistics from a parsed zarr
+ * `index.json` (epic #1144 Phase 2, issue #1146). Pure -- no I/O -- so it is
+ * unit-testable against fixtures without a network call. `getZarrIndex`
+ * below is the only caller that fetches, and it already has the whole
+ * parsed body in hand: this is zero extra network for the feature.
+ *
+ * Two rules this function must get right, because real data cannot
+ * currently falsify either one on its own:
+ *
+ * 1. MAX within a store, SUM across stores. Channel groups within one store
+ *    are concurrent streams of a single recording (biosigIO names them
+ *    `{modality}_{rate}hz`, so a file mixing sampling rates yields several
+ *    groups); a store's duration is the longest of its groups, never their
+ *    sum. Every store sampled across the whole catalog to date has exactly
+ *    one group, so max and sum agree everywhere real data can check --
+ *    the synthetic multi-group fixture in the test suite is the only thing
+ *    that exercises the transposed-rule failure mode.
+ *
+ * 2. `index.stores` lists only recordings that CONVERTED. ADR 0027 made zarr
+ *    discovery raw-only, so `stores` + `failures` is the complete raw set
+ *    for a dataset converted since that landed. This does NOT describe
+ *    every dataset in the bucket today: AGENTS.md's Zarr section is explicit
+ *    that stores published under `derivatives/`/`sourcedata/`/`code/` before
+ *    the raw-only cutover are a separate, still-in-progress purge, and some
+ *    are still served -- an unpurged legacy dataset's `stores` can include a
+ *    non-raw entry. Recordings that failed conversion live in a sibling
+ *    `failures` array and appear in neither -- so `recordingCount` is
+ *    `store_count + failure_count`, never `stores.length` alone, or a
+ *    corrupt/truncated upstream file silently vanishes from the count
+ *    instead of showing up as "unavailable" (true regardless of the legacy
+ *    caveat above). `store_count` (the converter's own authoritative field)
+ *    is preferred over `stores.length`; the two should always agree, but
+ *    the field is the source of truth, matching `storeCount` below.
+ *
+ * A store whose groups all lack `duration_s` (or that has no groups at all)
+ * is UNMEASURED: it contributes nothing to the duration sum/range and is
+ * excluded from `recordingsMeasured`, but a group's `n_channels` still
+ * counts toward the channel-count range even when that same group has no
+ * duration (a channel count can be known before a full read is measured).
+ * The inverse also holds -- a group with `duration_s` but no `n_channels`
+ * (an old/degraded converter run) contributes to the duration sum and
+ * `recordingsMeasured` while leaving the channel range untouched, so
+ * `channelCountMin`/`Max` can be NULL independently of whether anything was
+ * measured. When nothing measured, `totalRecordingDuration`/min/max are
+ * NULL, not 0 -- a zero would read as "zero-length dataset" instead of "not
+ * measured yet" (ADR 0005: availability is reported, never faked).
+ */
+export function aggregateRecordingStats(index: ZarrIndexJson): RecordingStats {
+  const stores: ZarrIndexStoreJson[] = Array.isArray(index.stores) ? index.stores : [];
+  const failures: unknown[] = Array.isArray(index.failures) ? index.failures : [];
+  const failureCount = toFiniteNonNegativeNumber(index.failure_count) ?? failures.length;
+  const storeCount = toFiniteNonNegativeNumber(index.store_count) ?? stores.length;
+
+  let measuredCount = 0;
+  let totalDuration = 0;
+  let durationMin: number | null = null;
+  let durationMax: number | null = null;
+  let channelMin: number | null = null;
+  let channelMax: number | null = null;
+
+  for (const store of stores) {
+    const groups: unknown[] = Array.isArray(store?.groups) ? store.groups : [];
+    // MAX across this store's groups -- never sum. See rule 1 above.
+    let storeDuration: number | null = null;
+    for (const rawGroup of groups) {
+      if (!rawGroup || typeof rawGroup !== "object") continue;
+      const group = rawGroup as ZarrIndexGroupJson;
+
+      const nChannels = toFiniteNonNegativeNumber(group.n_channels);
+      if (nChannels !== null) {
+        channelMin = channelMin === null ? nChannels : Math.min(channelMin, nChannels);
+        channelMax = channelMax === null ? nChannels : Math.max(channelMax, nChannels);
+      }
+
+      const duration = toFiniteNonNegativeNumber(group.duration_s);
+      if (duration !== null) {
+        storeDuration = storeDuration === null ? duration : Math.max(storeDuration, duration);
+      }
+    }
+    if (storeDuration !== null) {
+      measuredCount++;
+      totalDuration += storeDuration;
+      durationMin = durationMin === null ? storeDuration : Math.min(durationMin, storeDuration);
+      durationMax = durationMax === null ? storeDuration : Math.max(durationMax, storeDuration);
+    }
+  }
+
+  return {
+    totalRecordingDuration: measuredCount > 0 ? totalDuration : null,
+    recordingDurationMin: measuredCount > 0 ? durationMin : null,
+    recordingDurationMax: measuredCount > 0 ? durationMax : null,
+    recordingCount: storeCount + failureCount,
+    recordingsUnavailable: failureCount,
+    recordingsMeasured: measuredCount,
+    channelCountMin: channelMin,
+    channelCountMax: channelMax,
+  };
+}
+
 /** Latest-only zarr conversion facts read from `<id>/zarr/index.json`. */
 export interface ZarrIndexInfo {
   /**
@@ -699,6 +867,12 @@ export interface ZarrIndexInfo {
   sourceCommit: string | null;
   /** ETag of index.json, mirrors what /webhooks/zarr-ready stores. */
   etag: string | null;
+  /**
+   * Dataset-level recording duration/count/channel-range facts, aggregated
+   * from the same parsed body (epic #1144 Phase 2). Zero extra network --
+   * getZarrIndex already fetched and parsed the whole index for storeCount.
+   */
+  recordingStats: RecordingStats;
 }
 
 /**
@@ -721,6 +895,10 @@ export interface ZarrIndexInfo {
  * globally broken -> mass-mark absent" risk is bounded by the operator inspecting
  * the sweep's ready/absent counts before draining (a known-converted dataset
  * coming back absent flags it).
+ *
+ * Also runs `aggregateRecordingStats` over the same parsed body (epic #1144
+ * Phase 2) -- zero extra network, since the whole index is already fetched
+ * and parsed here for `storeCount`/`sourceCommit`.
  */
 export async function getZarrIndex(
   options: PresignedUrlOptions,
@@ -749,9 +927,9 @@ export async function getZarrIndex(
   }
 
   const etag = response.headers.get("etag");
-  let parsed: { store_count?: unknown; source_commit?: unknown };
+  let parsed: ZarrIndexJson & { source_commit?: unknown };
   try {
-    parsed = (await response.json()) as { store_count?: unknown; source_commit?: unknown };
+    parsed = (await response.json()) as ZarrIndexJson & { source_commit?: unknown };
   } catch (err) {
     throw new Error(
       `getZarrIndex: ${key} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
@@ -761,6 +939,7 @@ export async function getZarrIndex(
     storeCount: typeof parsed.store_count === "number" ? parsed.store_count : null,
     sourceCommit: typeof parsed.source_commit === "string" ? parsed.source_commit : null,
     etag,
+    recordingStats: aggregateRecordingStats(parsed),
   };
 }
 

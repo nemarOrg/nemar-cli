@@ -31,6 +31,10 @@ function cols(partial: Partial<DatasetMetadataColumns>): DatasetMetadataColumns 
     tasks: null,
     n_channels: null,
     electrode_system: null,
+    sampling_frequency: null,
+    power_line_frequency: null,
+    eeg_reference: null,
+    placement_scheme: null,
     has_hed: null,
     hed_version: null,
     bytes_present: null,
@@ -132,6 +136,114 @@ describe("writeDatasetMetadataColumns honest-size columns", () => {
       .get() as { data_complete: number; bytes_present: number };
     expect(row.data_complete).toBe(1);
     expect(row.bytes_present).toBe(12_000_000_000);
+    db.close();
+  });
+});
+
+// Epic #1144 Phase 2b (#1153): the four signal_defaults value columns
+// (migration 0072), written by the same COALESCE UPDATE as n_channels/
+// electrode_system. Real D1 write, not a hand-copied SQL string -- this
+// drives the actual writeDatasetMetadataColumns bind order, so a
+// transposition among the four new positional binds (e.g. eeg_reference
+// landing in placement_scheme's slot) would surface here as a real
+// column-value mismatch, not just a passing type check.
+describe("writeDatasetMetadataColumns signal_defaults columns (#1153)", () => {
+  test("writes all four columns without transposition", async () => {
+    const db = freshDb();
+    seed(db);
+    await writeDatasetMetadataColumns(
+      realD1(db),
+      "nm000132",
+      cols({
+        sampling_frequency: 500,
+        power_line_frequency: 60,
+        eeg_reference: "average",
+        placement_scheme: "extended 10-10% system",
+      }),
+    );
+    const row = db
+      .prepare(
+        "SELECT sampling_frequency, power_line_frequency, eeg_reference, placement_scheme FROM datasets WHERE dataset_id = 'nm000132'",
+      )
+      .get() as {
+      sampling_frequency: number;
+      power_line_frequency: number;
+      eeg_reference: string;
+      placement_scheme: string;
+    };
+    // Four DISTINCT values so a positional swap between any two columns
+    // (the actual failure mode a transposed bind order produces) is
+    // observable -- two columns holding the same value would hide a swap
+    // between just those two.
+    expect(row.sampling_frequency).toBe(500);
+    expect(row.power_line_frequency).toBe(60);
+    expect(row.eeg_reference).toBe("average");
+    expect(row.placement_scheme).toBe("extended 10-10% system");
+    db.close();
+  });
+
+  test("COALESCE preserves prior signal_defaults values when a later write passes null", async () => {
+    const db = freshDb();
+    seed(db);
+    const d1 = realD1(db);
+    await writeDatasetMetadataColumns(
+      d1,
+      "nm000132",
+      cols({ sampling_frequency: 500, power_line_frequency: 60, eeg_reference: "average" }),
+    );
+    // A later reindex whose probe found no sidecar this time (nulls for
+    // these four fields) must not clobber the previously-probed values --
+    // same COALESCE contract as every other column this function writes.
+    await writeDatasetMetadataColumns(d1, "nm000132", cols({ subject_count: 5 }));
+    const row = db
+      .prepare(
+        "SELECT sampling_frequency, power_line_frequency, eeg_reference, subject_count FROM datasets WHERE dataset_id = 'nm000132'",
+      )
+      .get() as {
+      sampling_frequency: number;
+      power_line_frequency: number;
+      eeg_reference: string;
+      subject_count: number;
+    };
+    expect(row.sampling_frequency).toBe(500);
+    expect(row.power_line_frequency).toBe(60);
+    expect(row.eeg_reference).toBe("average");
+    expect(row.subject_count).toBe(5);
+    db.close();
+  });
+
+  test("stamps metadata_updated_at on a fresh row (sweep_stamps NULL) -- the COALESCE pin", async () => {
+    // The seeded row's sweep_stamps is NULL (post-0073 fresh-row shape); a
+    // missing COALESCE in the stamp write makes json_set return NULL and
+    // silently drops the stamp, so the reindex 'missing-metadata'/'stale'
+    // filters would re-select the row forever and the upload resume-seed
+    // guard would keep overwriting enriched values (#1183).
+    const db = freshDb();
+    seed(db);
+    await writeDatasetMetadataColumns(realD1(db), "nm000132", cols({ subject_count: 5 }));
+    const row = db
+      .prepare(
+        "SELECT json_extract(sweep_stamps, '$.metadata_updated_at') AS at FROM datasets WHERE dataset_id = 'nm000132'",
+      )
+      .get() as { at: string | null };
+    expect(row.at).not.toBeNull();
+    db.close();
+  });
+
+  test("does not touch signal_defaults_at -- that stamp is owned only by the sweep", async () => {
+    // Migration 0071 / 0055 precedent: writeDatasetMetadataColumns writes
+    // the VALUE columns but never the sweep's resumability stamp, so a live
+    // reindex populating these columns doesn't make the row look
+    // already-swept.
+    const db = freshDb();
+    seed(db);
+    await writeDatasetMetadataColumns(realD1(db), "nm000132", cols({ sampling_frequency: 500 }));
+    const row = db
+      .prepare(
+        "SELECT json_extract(sweep_stamps, '$.signal_defaults_at') AS signal_defaults_at FROM datasets WHERE dataset_id = 'nm000132'",
+      )
+      .get() as { signal_defaults_at: string | null };
+    expect(row.signal_defaults_at).toBeNull();
     db.close();
   });
 });

@@ -39,7 +39,7 @@ import {
 } from "./doi-orcid-discovery.js";
 import { buildOrcidEnrichment, resolveEzidAuth } from "./doi.js";
 import { resolveDatasetLandingBase } from "./environment.js";
-import { extractDoi, updateIdentifier } from "./ezid.js";
+import { conceptEzidIdentifier, extractDoi, updateIdentifier } from "./ezid.js";
 import { getDatasetsToken, getDatasetsTokenWithRefresher } from "./github-auth.js";
 import {
   EnrichmentCommitError,
@@ -239,7 +239,8 @@ export function decideSkipEnrichment(args: {
  *     the caller's GitHub Actions workflow to apply)
  *   - Updates datasets.enrichment_json + enrichment_updated_at in D1
  *   - Writes Phase 2 metadata columns (subject_count, modalities, ...)
- *   - Syncs DOI metadata to EZID when the dataset has an ezid_identifier
+ *   - Syncs DOI metadata to EZID when the dataset has a concept DOI (the
+ *     EZID identifier derives from it, #1182)
  *   - Creates a GitHub issue on the dataset repo when validation fails
  *     after all correction attempts
  *   - Updates the dataset name in D1 + the GitHub repo description when
@@ -291,7 +292,7 @@ export async function enrichDataset(
     name: string | null;
     github_repo: string | null;
     enrichment_json: string | null;
-    ezid_identifier: string | null;
+    concept_doi: string | null;
     is_sandbox: number | null;
     owner_username: string | null;
     owner_orcid: string | null;
@@ -299,7 +300,7 @@ export async function enrichDataset(
   try {
     dataset = await env.DB.prepare(
       `SELECT d.dataset_id, d.name, d.github_repo, d.enrichment_json,
-              d.ezid_identifier, d.is_sandbox,
+              d.concept_doi, d.is_sandbox,
               u.username AS owner_username, u.orcid AS owner_orcid
        FROM datasets d
        LEFT JOIN users u ON d.owner_user_id = u.id
@@ -311,7 +312,7 @@ export async function enrichDataset(
         name: string | null;
         github_repo: string | null;
         enrichment_json: string | null;
-        ezid_identifier: string | null;
+        concept_doi: string | null;
         is_sandbox: number | null;
         owner_username: string | null;
         owner_orcid: string | null;
@@ -950,7 +951,7 @@ export async function enrichDataset(
     // Cache in D1
     try {
       await env.DB.prepare(
-        "UPDATE datasets SET enrichment_json = ?, enrichment_updated_at = datetime('now'), updated_at = datetime('now') WHERE dataset_id = ?",
+        "UPDATE datasets SET enrichment_json = ?, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.enrichment_updated_at', datetime('now')), updated_at = datetime('now') WHERE dataset_id = ?",
       )
         .bind(metadataContent, datasetId)
         .run();
@@ -1039,7 +1040,7 @@ export async function enrichDataset(
     // Sync DOI metadata after enrichment if dataset has an EZID DOI.
     // Covers title, description, keywords, related identifiers, etc.
     let doiSyncError: string | undefined;
-    if (dataset.ezid_identifier) {
+    if (dataset.concept_doi) {
       try {
         const ezidAuth = resolveEzidAuth(
           {
@@ -1051,7 +1052,8 @@ export async function enrichDataset(
           !!dataset.is_sandbox,
         );
 
-        const doi = extractDoi(dataset.ezid_identifier);
+        const conceptIdentifier = conceptEzidIdentifier(dataset.concept_doi);
+        const doi = extractDoi(conceptIdentifier);
         let doiEnrichment = buildOrcidEnrichment(
           bidsDescription,
           dataset.owner_username || undefined,
@@ -1063,7 +1065,7 @@ export async function enrichDataset(
         }
         const dataciteMetadata = bidsToDataCite(datasetId, doi, bidsDescription, doiEnrichment);
         const dataciteXml = buildDataCiteXml(dataciteMetadata);
-        await updateIdentifier(ezidAuth, dataset.ezid_identifier, { dataciteXml });
+        await updateIdentifier(ezidAuth, conceptIdentifier, { dataciteXml });
         console.log(`[llm-enrich] Synced DOI metadata for ${datasetId}`);
       } catch (doiErr) {
         doiSyncError = errorMessage(doiErr);

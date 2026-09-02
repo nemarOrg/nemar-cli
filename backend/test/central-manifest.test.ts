@@ -163,7 +163,6 @@ describe("mintEzidVersionDoi", () => {
           name: "Test Dataset",
           github_repo: null,
           concept_doi: null,
-          ezid_identifier: null,
         },
         repoName: DATASET,
         version: VERSION,

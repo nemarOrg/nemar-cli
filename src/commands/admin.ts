@@ -1225,20 +1225,22 @@ doiCommand
 
         createSpinner.succeed("Concept DOI created successfully");
 
-        // Apply branch protection now that dataset has a DOI (permanent record)
-        const protectionSpinner = ora("Applying branch protection...").start();
+        // Finalize repo setup now that the dataset has a DOI: default branch,
+        // CI workflow shims, auto-merge, owner maintain. Branch protection is
+        // applied at make-public, not here (epic #713).
+        const protectionSpinner = ora("Finalizing repository setup...").start();
         try {
           const finalizeResult = await finalizeDataset(datasetId);
           if (finalizeResult.warnings && finalizeResult.warnings.length > 0) {
-            protectionSpinner.warn("Branch protection applied with warnings");
+            protectionSpinner.warn("Repository setup finalized with warnings");
             for (const warning of finalizeResult.warnings) {
               console.log(chalk.yellow(`  Warning: ${warning}`));
             }
           } else {
-            protectionSpinner.succeed("Branch protection applied");
+            protectionSpinner.succeed("Repository setup finalized");
           }
         } catch (protectionError) {
-          protectionSpinner.warn("Could not apply branch protection");
+          protectionSpinner.warn("Could not finalize repository setup");
           if (protectionError instanceof ApiError) {
             console.log(chalk.dim(`  ${protectionError.message}`));
             if (protectionError.statusCode === 403) {
@@ -1251,9 +1253,6 @@ doiCommand
               ),
             );
           }
-          console.log(
-            chalk.dim("  Manual setup: Go to GitHub repo Settings > Branches > Add rule"),
-          );
         }
 
         console.log();
@@ -1351,9 +1350,6 @@ doiCommand
         console.log(chalk.green("Latest Version DOI:"));
         console.log(`  DOI:  ${doiInfo.latest_version_doi}`);
         console.log(`  URL:  https://doi.org/${doiInfo.latest_version_doi}`);
-        if (doiInfo.zenodo_latest_version_url) {
-          console.log(`  Zenodo: ${doiInfo.zenodo_latest_version_url}`);
-        }
       } else if (doiInfo.concept_doi) {
         console.log(chalk.yellow("No version DOI published yet"));
         console.log(chalk.dim("  Version DOIs are created automatically on PR merge"));
@@ -2608,7 +2604,7 @@ Description:
 Requirements:
   - Dataset must not be a sandbox dataset
   - Dataset must have a GitHub repository
-  - Must be dataset owner or admin
+  - Admin only; owners request publication via 'nemar dataset publish request'
 
 Examples:
   $ nemar admin make-public nm000104
@@ -2689,7 +2685,11 @@ Examples:
           console.error(chalk.dim(JSON.stringify(error.details, null, 2)));
         }
         if (error.statusCode === 403) {
-          console.log(chalk.dim("  You must be the dataset owner or an admin to publish"));
+          console.log(
+            chalk.dim(
+              "  Admin only; owners request publication via 'nemar dataset publish request'",
+            ),
+          );
         } else if (error.statusCode === 400 && error.message.includes("sandbox")) {
           console.log(chalk.dim("  Sandbox datasets cannot be published"));
         }

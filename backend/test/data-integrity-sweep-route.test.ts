@@ -2,14 +2,13 @@
  * Real POST /admin/datasets/data-integrity-sweep route tests (epic #967
  * Phase 3, #970).
  *
- * test/data-integrity-sweep.unit.test.ts exercises the endpoint's SQL by
- * hand-copying it into local helper functions -- useful for pinning the exact
- * candidate/write logic, but it never calls the real Hono route, so a
- * scoping/validation change in the actual handler could silently diverge from
- * those helpers without failing anything. This file closes that gap: real
- * engine (bun:sqlite behind realD1, the real auth/admin middleware with a
- * seeded admin token, real route dispatch via Hono app.request()), mirroring
- * backend/test/exemplar-endpoint.test.ts.
+ * Real engine (bun:sqlite behind realD1, the real auth/admin middleware
+ * with a seeded admin token, real route dispatch via Hono app.request()),
+ * mirroring backend/test/exemplar-endpoint.test.ts. Candidate selection
+ * with actual candidate rows (including the sweep_stamps shapes, #1183) is
+ * covered in backend/test/sweep-stamps-candidates.test.ts, which replaced
+ * the old hand-copied test/data-integrity-sweep.unit.test.ts -- a copy of
+ * the handler's SQL can never catch the handler drifting.
  *
  * Deliberately scoped to an EMPTY (or non-candidate) datasets table so every
  * test here exercises parsing/validation/response shape with ZERO S3 calls --

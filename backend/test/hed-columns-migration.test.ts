@@ -5,7 +5,8 @@
  * applying every migration in order so the schema matches production, then
  * asserting the HED additions:
  *
- *   1. datasets gains has_hed, hed_version, hed_checked_at.
+ *   1. datasets gains has_hed, hed_version; the hed_checked_at stamp lives
+ *      under sweep_stamps -> $.hed_checked_at since migration 0073 (#1183).
  *   2. dataset_versions gains has_hed, hed_version.
  *   3. idx_datasets_has_hed exists.
  *   4. The columns round-trip a populated row (has_hed=1, hed_version='8.3.0',
@@ -13,8 +14,10 @@
  *   5. has_hed=0 (checked, no HED) is DISTINCT from NULL (not classified yet) on
  *      both tables -- the load-bearing not-checked vs checked-false distinction.
  *   6. A row inserted without setting the new columns reads back NULL.
- *   7. hed_checked_at IS NULL selects unswept datasets (phase 3 sweep predicate).
- *   8. CHECK (has_hed IN (0,1)) rejects out-of-domain values.
+ *   7. CHECK (has_hed IN (0,1)) rejects out-of-domain values.
+ *
+ * The hed-sweep's candidate predicate itself is covered at the route entry
+ * point in backend/test/sweep-stamps-candidates.test.ts.
  */
 
 import { Database } from "bun:sqlite";
@@ -54,11 +57,11 @@ function seedDataset(db: Database, datasetId: string): void {
 }
 
 describe("migration 0056_hed_columns", () => {
-  test("datasets gains has_hed, hed_version, hed_checked_at", () => {
+  test("datasets gains has_hed, hed_version; hed_checked_at is collapsed into sweep_stamps", () => {
     const db = freshDb();
-    expect(tableColumns(db, "datasets")).toEqual(
-      expect.arrayContaining(["has_hed", "hed_version", "hed_checked_at"]),
-    );
+    const cols = tableColumns(db, "datasets");
+    expect(cols).toEqual(expect.arrayContaining(["has_hed", "hed_version", "sweep_stamps"]));
+    expect(cols).not.toContain("hed_checked_at");
     db.close();
   });
 
@@ -83,10 +86,12 @@ describe("migration 0056_hed_columns", () => {
     const db = freshDb();
     seedDataset(db, "nm000132");
     db.prepare(
-      "UPDATE datasets SET has_hed = 1, hed_version = '8.3.0', hed_checked_at = '2026-06-29T00:00:00Z' WHERE dataset_id = ?",
+      "UPDATE datasets SET has_hed = 1, hed_version = '8.3.0', sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.hed_checked_at', '2026-06-29T00:00:00Z') WHERE dataset_id = ?",
     ).run("nm000132");
     const row = db
-      .prepare("SELECT has_hed, hed_version, hed_checked_at FROM datasets WHERE dataset_id = ?")
+      .prepare(
+        "SELECT has_hed, hed_version, json_extract(sweep_stamps, '$.hed_checked_at') AS hed_checked_at FROM datasets WHERE dataset_id = ?",
+      )
       .get("nm000132") as {
       has_hed: number;
       hed_version: string;
@@ -102,7 +107,9 @@ describe("migration 0056_hed_columns", () => {
     const db = freshDb();
     seedDataset(db, "nm000999");
     const row = db
-      .prepare("SELECT has_hed, hed_version, hed_checked_at FROM datasets WHERE dataset_id = ?")
+      .prepare(
+        "SELECT has_hed, hed_version, json_extract(sweep_stamps, '$.hed_checked_at') AS hed_checked_at FROM datasets WHERE dataset_id = ?",
+      )
       .get("nm000999") as {
       has_hed: number | null;
       hed_version: string | null;
@@ -120,7 +127,7 @@ describe("migration 0056_hed_columns", () => {
     // The phase-3 sweep stamps hed_checked_at and writes has_hed=0 when it finds
     // no HED -- that 0 must NOT read back as NULL, or the sweep would re-check it.
     db.prepare(
-      "UPDATE datasets SET has_hed = 0, hed_version = NULL, hed_checked_at = '2026-06-29T00:00:00Z' WHERE dataset_id = ?",
+      "UPDATE datasets SET has_hed = 0, hed_version = NULL, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.hed_checked_at', '2026-06-29T00:00:00Z') WHERE dataset_id = ?",
     ).run("nm000999");
     const row = db
       .prepare("SELECT has_hed, hed_version FROM datasets WHERE dataset_id = ?")
@@ -138,20 +145,6 @@ describe("migration 0056_hed_columns", () => {
       .get("nm000999") as { has_hed: number | null };
     expect(vrow.has_hed).toBe(0);
     expect(vrow.has_hed).not.toBeNull();
-    db.close();
-  });
-
-  test("hed_checked_at IS NULL selects unswept datasets, stamped drops out", () => {
-    const db = freshDb();
-    seedDataset(db, "nm000001"); // never swept
-    seedDataset(db, "nm000002"); // will be stamped
-    db.prepare(
-      "UPDATE datasets SET has_hed = 1, hed_checked_at = '2026-06-29T00:00:00Z' WHERE dataset_id = ?",
-    ).run("nm000002");
-    const candidates = db
-      .prepare("SELECT dataset_id FROM datasets WHERE hed_checked_at IS NULL ORDER BY dataset_id")
-      .all() as { dataset_id: string }[];
-    expect(candidates.map((r) => r.dataset_id)).toEqual(["nm000001"]);
     db.close();
   });
 

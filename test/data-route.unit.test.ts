@@ -625,6 +625,19 @@ function emptyRow(): DatasetRowForMetadata {
     tasks: null,
     data_complete: null,
     bytes_present: null,
+    total_recording_duration: null,
+    recording_duration_min: null,
+    recording_duration_max: null,
+    recording_count: null,
+    recordings_unavailable: null,
+    recordings_measured: null,
+    channel_count_min: null,
+    channel_count_max: null,
+    sampling_frequency: null,
+    power_line_frequency: null,
+    eeg_reference: null,
+    placement_scheme: null,
+    electrode_system: null,
   };
 }
 
@@ -827,7 +840,7 @@ describe("buildDatasetMetadata", () => {
       latestManifest: null,
       githubOrg: "nemarDatasets",
     });
-    expect(out.schema_version).toBe("0.3.0");
+    expect(out.schema_version).toBe("0.4.0");
     expect(out.doc_type).toBe("dataset");
     expect(out.dataset_id).toBe("nm099999");
     expect(out.source).toBe("nemar");
@@ -864,6 +877,271 @@ describe("buildDatasetMetadata", () => {
     expect(out.data_summary?.size_bytes).toBe(500);
     expect(out.data_summary?.total_files).toBe(3);
     expect(out.data_summary?.size_human).toBe("500 B");
+  });
+
+  // Epic #1144 Phase 2 (#1146): recording-stats columns surfaced on
+  // data_summary / extensions.nemar.
+  describe("recording-stats serving", () => {
+    test("data_summary carries recording_count/unavailable/duration even with no files/size", () => {
+      // Gate extension: the block must appear even when totalFiles/sizeBytes
+      // are both null, as long as a recording-stats column is populated.
+      const out = buildDatasetMetadata({
+        row: {
+          ...emptyRow(),
+          recording_count: 126,
+          recordings_unavailable: 2,
+          total_recording_duration: 3343170,
+        },
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out.data_summary).not.toBeNull();
+      expect(out.data_summary?.total_files).toBeNull();
+      expect(out.data_summary?.size_bytes).toBeNull();
+      expect(out.data_summary?.recording_count).toBe(126);
+      expect(out.data_summary?.recordings_unavailable).toBe(2);
+      expect(out.data_summary?.total_recording_duration).toBe(3343170);
+    });
+
+    test("range objects are present when at least one bound is known", () => {
+      const out = buildDatasetMetadata({
+        row: {
+          ...emptyRow(),
+          recording_count: 124,
+          recording_duration_min: 22410,
+          recording_duration_max: 31860,
+          channel_count_min: 19,
+          channel_count_max: 24,
+        },
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out.data_summary?.recording_duration_range).toEqual({ min: 22410, max: 31860 });
+      expect(out.data_summary?.channel_count_range).toEqual({ min: 19, max: 24 });
+    });
+
+    test("data_summary is non-null and channel_count_range survives when ONLY the channel columns are set (I2)", () => {
+      // Not reachable through today's sweep (all 8 stat columns always write
+      // together), but the gate must not assume that invariant: a future
+      // asymmetric write, a partial reset bug, or manual DB surgery must
+      // never cause a real, non-null range value to be silently dropped
+      // because recording_count/total_recording_duration happen to be null.
+      const out = buildDatasetMetadata({
+        row: { ...emptyRow(), channel_count_min: 19, channel_count_max: 24 },
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out.data_summary).not.toBeNull();
+      expect(out.data_summary?.recording_count).toBeNull();
+      expect(out.data_summary?.total_recording_duration).toBeNull();
+      expect(out.data_summary?.channel_count_range).toEqual({ min: 19, max: 24 });
+    });
+
+    test("range objects are omitted entirely (not {min:null,max:null}) when both bounds are null", () => {
+      const out = buildDatasetMetadata({
+        row: { ...emptyRow(), total_recording_duration: null, recording_count: 0 },
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out.data_summary).not.toBeNull(); // recording_count:0 is non-null
+      expect(out.data_summary && "recording_duration_range" in out.data_summary).toBe(false);
+      expect(out.data_summary && "channel_count_range" in out.data_summary).toBe(false);
+    });
+
+    test("recordings_measured is served from extensions.nemar, not data_summary", () => {
+      const out = buildDatasetMetadata({
+        row: { ...emptyRow(), recording_count: 124, recordings_measured: 6 },
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out.extensions.nemar.recordings_measured).toBe(6);
+      // Not part of the FAIR-core data_summary block (neuroschema does not
+      // define it there).
+      expect(out.data_summary).not.toBeNull();
+      expect(out.data_summary && "recordings_measured" in out.data_summary).toBe(false);
+    });
+  });
+
+  // Epic #1144 Phase 2b (#1153): signal_defaults block, sourced from
+  // migration 0072's four columns plus the pre-existing electrode_system.
+  describe("signal_defaults serving", () => {
+    test("null when every source column is null (nothing probed yet)", () => {
+      const out = buildDatasetMetadata({
+        row: emptyRow(),
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out.signal_defaults).toBeNull();
+    });
+
+    test("populated when all four value columns + electrode_system are set", () => {
+      const out = buildDatasetMetadata({
+        row: {
+          ...emptyRow(),
+          sampling_frequency: 500,
+          power_line_frequency: 60,
+          eeg_reference: "average",
+          placement_scheme: "extended 10-10% system",
+          electrode_system: "10-20",
+        },
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out.signal_defaults).toEqual({
+        sampling_frequency: 500,
+        power_line_frequency: 60,
+        reference: "average",
+        recording_type: null,
+        channel_system: "10-20",
+        placement_scheme: "extended 10-10% system",
+      });
+    });
+
+    test("channel_system is served from electrode_system, not a new column", () => {
+      const out = buildDatasetMetadata({
+        row: { ...emptyRow(), electrode_system: "biosemi" },
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out.signal_defaults?.channel_system).toBe("biosemi");
+    });
+
+    test("the block is present (non-null) when ONLY electrode_system is set -- the other four stay null", () => {
+      // electrode_system predates this phase (migration 0054) and can be
+      // populated (by channel-montage-sweep or reindex) independently of
+      // the new sidecar columns -- the gate must not require all five
+      // together.
+      const out = buildDatasetMetadata({
+        row: { ...emptyRow(), electrode_system: "egi-geodesic" },
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out.signal_defaults).not.toBeNull();
+      expect(out.signal_defaults?.sampling_frequency).toBeNull();
+      expect(out.signal_defaults?.power_line_frequency).toBeNull();
+      expect(out.signal_defaults?.reference).toBeNull();
+      expect(out.signal_defaults?.placement_scheme).toBeNull();
+      expect(out.signal_defaults?.channel_system).toBe("egi-geodesic");
+    });
+
+    test("recording_type is always null -- not derivable from anything probed", () => {
+      const out = buildDatasetMetadata({
+        row: { ...emptyRow(), sampling_frequency: 500 },
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out.signal_defaults?.recording_type).toBeNull();
+    });
+
+    // #1162 review, I2: hasSignalDefaults is a 5-term OR (the four sidecar
+    // columns + electrode_system). Deleting any ONE term left 154 tests
+    // passing before this block existed -- "populated when all four columns
+    // + electrode_system are set" above cannot catch that (every term is
+    // simultaneously true there), and only the electrode_system-only case
+    // had a dedicated single-term test. Each of the five columns gets its
+    // own test here so a deleted OR term fails exactly one of them.
+    describe("hasSignalDefaults gate: each of the five source columns independently produces a non-null block", () => {
+      test("sampling_frequency alone", () => {
+        const out = buildDatasetMetadata({
+          row: { ...emptyRow(), sampling_frequency: 500 },
+          parsedEnrichment: null,
+          versions: [],
+          latestManifest: null,
+          githubOrg: "nemarDatasets",
+        });
+        expect(out.signal_defaults).not.toBeNull();
+      });
+
+      test("power_line_frequency alone", () => {
+        const out = buildDatasetMetadata({
+          row: { ...emptyRow(), power_line_frequency: 60 },
+          parsedEnrichment: null,
+          versions: [],
+          latestManifest: null,
+          githubOrg: "nemarDatasets",
+        });
+        expect(out.signal_defaults).not.toBeNull();
+      });
+
+      test("eeg_reference alone", () => {
+        const out = buildDatasetMetadata({
+          row: { ...emptyRow(), eeg_reference: "average" },
+          parsedEnrichment: null,
+          versions: [],
+          latestManifest: null,
+          githubOrg: "nemarDatasets",
+        });
+        expect(out.signal_defaults).not.toBeNull();
+      });
+
+      test("placement_scheme alone", () => {
+        const out = buildDatasetMetadata({
+          row: { ...emptyRow(), placement_scheme: "10-20" },
+          parsedEnrichment: null,
+          versions: [],
+          latestManifest: null,
+          githubOrg: "nemarDatasets",
+        });
+        expect(out.signal_defaults).not.toBeNull();
+      });
+
+      test("electrode_system alone", () => {
+        const out = buildDatasetMetadata({
+          row: { ...emptyRow(), electrode_system: "10-20" },
+          parsedEnrichment: null,
+          versions: [],
+          latestManifest: null,
+          githubOrg: "nemarDatasets",
+        });
+        expect(out.signal_defaults).not.toBeNull();
+      });
+    });
+
+    // Mutation-check target for the power-line enum trap: a sidecar value
+    // out of {50, 60, null} must never reach the wire. The parser-level
+    // coercion is tested in channel-montage.unit.test.ts; this proves the
+    // builder passes the column through VERBATIM (no re-coercion, no silent
+    // pass-through of an out-of-enum row value the parser should have
+    // already caught) and that the served value round-trips exactly.
+    test("power_line_frequency passes through the exact stored value (50/60 only reach here by contract)", () => {
+      const out60 = buildDatasetMetadata({
+        row: { ...emptyRow(), power_line_frequency: 60 },
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out60.signal_defaults?.power_line_frequency).toBe(60);
+
+      const out50 = buildDatasetMetadata({
+        row: { ...emptyRow(), power_line_frequency: 50 },
+        parsedEnrichment: null,
+        versions: [],
+        latestManifest: null,
+        githubOrg: "nemarDatasets",
+      });
+      expect(out50.signal_defaults?.power_line_frequency).toBe(50);
+    });
   });
 
   test("full v2 enrichment + versions + manifest -> populated payload", () => {

@@ -7,8 +7,8 @@
  *     object-keyed form ({"Name": {orcid, ...}, ...}) the enrichment
  *     pipeline emits today, or the legacy array-of-objects form some older
  *     rows still carry.
- *   - formatFileSize: byte count -> human-readable string for the
- *     datasets.file_size_formatted column.
+ *   - formatFileSize: byte count -> human-readable string for the served
+ *     file_size_formatted field (derived at read time since #1182).
  */
 
 import { describe, expect, test } from "bun:test";

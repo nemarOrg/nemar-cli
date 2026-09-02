@@ -477,13 +477,26 @@ export function extractDoi(identifier: string): string {
  * Ensure an identifier carries the "doi:" scheme prefix EZID requires on
  * every `/id/{identifier}` call. Idempotent: a no-op when the prefix is
  * already there (checked case-insensitively, since EZID's own scheme match
- * is not case-sensitive), otherwise prepends it. `datasets.ezid_identifier`
- * is stored WITH the prefix; `dataset_versions.doi` is stored WITHOUT it
- * (see extractDoi) -- callers that build an EZID request from a version DOI
- * must run it through here first (bug #984).
+ * is not case-sensitive), otherwise prepends it. Concept identifiers from
+ * conceptEzidIdentifier below carry the prefix already;
+ * `dataset_versions.doi` is stored WITHOUT it (see extractDoi) -- callers
+ * that build an EZID request from a version DOI must run it through here
+ * first (bug #984).
  */
 export function ensureDoiScheme(identifier: string): string {
   return /^doi:/i.test(identifier) ? identifier : `doi:${identifier}`;
+}
+
+/**
+ * Compose the EZID identifier for a dataset's concept DOI. The dropped
+ * `datasets.ezid_identifier` column held exactly `'doi:' || UPPER(concept_doi)`
+ * for every row that had either value (verified over all production rows
+ * before #1182 removed the column), so the identifier is derived instead of
+ * stored. `concept_doi` is stored WITHOUT the `doi:` scheme prefix (see
+ * extractDoi); EZID identifiers carry it.
+ */
+export function conceptEzidIdentifier(conceptDoi: string): string {
+  return `doi:${conceptDoi.toUpperCase()}`;
 }
 
 /**

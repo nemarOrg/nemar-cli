@@ -1,5 +1,6 @@
 /**
- * Deposit attestation on POST /datasets (#1077, migration 0067).
+ * Deposit attestation on POST /datasets (#1077, migration 0067; collapsed
+ * to a single JSON `attestation` column by migration 0071, #1182).
  *
  * Real engine: bun:sqlite behind realD1, real auth middleware (seeded user +
  * token, real SHA-256 key hashing), real route via Hono app.request(). Covers
@@ -73,6 +74,8 @@ function post(body: unknown): Promise<Response> {
 }
 
 function attestationRow(datasetId: string) {
+  // The six flat columns collapsed into one JSON column (migration 0071);
+  // read the stored keys back out so the assertions below stay field-exact.
   return db
     .query<
       {
@@ -85,8 +88,12 @@ function attestationRow(datasetId: string) {
       },
       [string]
     >(
-      `SELECT attestation_deposit_type, attestation_key_status, attestation_deidentified,
-              attestation_no_duplicate, attestation_upstream_source, attestation_accepted_at
+      `SELECT json_extract(attestation, '$.deposit_type') AS attestation_deposit_type,
+              json_extract(attestation, '$.key_status') AS attestation_key_status,
+              json_extract(attestation, '$.deidentified') AS attestation_deidentified,
+              json_extract(attestation, '$.no_duplicate') AS attestation_no_duplicate,
+              json_extract(attestation, '$.upstream_source') AS attestation_upstream_source,
+              json_extract(attestation, '$.accepted_at') AS attestation_accepted_at
        FROM datasets WHERE dataset_id = ?`,
     )
     .get(datasetId);
@@ -99,8 +106,8 @@ beforeEach(async () => {
   await seedUser();
 });
 
-describe("migration 0067", () => {
-  test("attestation columns exist on datasets with their CHECK constraints", () => {
+describe("migration 0071 attestation storage", () => {
+  test("the six flat columns are gone; one JSON column with a json_valid CHECK remains", () => {
     const cols = db
       .query<{ name: string }, []>("PRAGMA table_info(datasets)")
       .all()
@@ -113,19 +120,15 @@ describe("migration 0067", () => {
       "attestation_upstream_source",
       "attestation_accepted_at",
     ]) {
-      expect(cols).toContain(col);
+      expect(cols).not.toContain(col);
     }
-    // CHECK constraints reject out-of-vocabulary values.
+    expect(cols).toContain("attestation");
+    // The vocabulary CHECKs went with the flat columns (zod enforces them at
+    // the route; the validation describe below covers that). What the DB
+    // still rejects is non-JSON garbage.
     seedIncomplete("xx090001");
     expect(() =>
-      db
-        .query("UPDATE datasets SET attestation_deposit_type = 'borrowed' WHERE dataset_id = ?")
-        .run("xx090001"),
-    ).toThrow(/CHECK/);
-    expect(() =>
-      db
-        .query("UPDATE datasets SET attestation_no_duplicate = 2 WHERE dataset_id = ?")
-        .run("xx090001"),
+      db.query("UPDATE datasets SET attestation = 'not json' WHERE dataset_id = ?").run("xx090001"),
     ).toThrow(/CHECK/);
   });
 });

@@ -153,7 +153,7 @@ export interface PublishDatasetResponse {
 }
 
 /**
- * Publish a dataset (make public) - owner or admin
+ * Publish a dataset (make public) - admin only
  * This is a one-way operation that cannot be undone
  */
 export async function publishDataset(datasetId: string): Promise<PublishDatasetResponse> {
@@ -328,9 +328,9 @@ export interface DoiInfoResponse {
   name: string;
   concept_doi: string | null;
   latest_version_doi: string | null;
+  /** Always "ezid" since #1182 (ADR 0007); kept for older backends. */
   doi_provider: "ezid" | "zenodo";
   zenodo_concept_url: string | null;
-  zenodo_latest_version_url: string | null;
   ezid_identifier: string | null;
   ezid_status: "reserved" | "public" | "unavailable" | null;
   doi_url: string | null;
@@ -773,7 +773,7 @@ export interface HedSweepBatchResponse {
   /** Could not classify (no dataset_description.json / probe error) -> NULL. */
   unknown: number;
   errors: { dataset_id: string; error: string }[];
-  /** Datasets still unswept (hed_checked_at IS NULL); 0 when the sweep is done. */
+  /** Datasets still unswept (no `$.hed_checked_at` in sweep_stamps); 0 when done. */
   remaining: number | null;
 }
 
@@ -922,7 +922,7 @@ export interface AvailabilityReportSweepBatchResponse {
   /** Successfully generated + committed this batch. */
   written: number;
   errors: { dataset_id: string; error: string }[];
-  /** Datasets still unswept (availability_report_at IS NULL); 0 when the sweep is done. */
+  /** Datasets still unswept (no `$.availability_report_at` in sweep_stamps); 0 when done. */
   remaining: number | null;
 }
 

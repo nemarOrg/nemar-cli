@@ -50,8 +50,7 @@ import { freshDb, realD1 } from "./helpers/d1";
 interface DatasetOverrides {
   visibility?: string;
   is_sandbox?: number;
-  doi_provider?: string;
-  ezid_identifier?: string | null;
+  concept_doi?: string | null;
   ezid_status?: string | null;
   withdrawn_at?: string | null;
   withdrawn_reason?: string | null;
@@ -63,23 +62,24 @@ function seedDataset(db: Database, datasetId: string, overrides: DatasetOverride
   ).run();
   const visibility = overrides.visibility ?? "public";
   const isSandbox = overrides.is_sandbox ?? 0;
-  const doiProvider = overrides.doi_provider ?? "ezid";
-  const ezidIdentifier =
-    overrides.ezid_identifier === undefined
-      ? `doi:10.82901/NEMAR.${datasetId.toUpperCase()}`
-      : overrides.ezid_identifier;
+  // The EZID identifier is derived as 'doi:' + UPPER(concept_doi) (#1182),
+  // so seeding the lowercase DOI yields the doi:10.82901/NEMAR.* identifiers
+  // the assertions below expect.
+  const conceptDoi =
+    overrides.concept_doi === undefined
+      ? `10.82901/nemar.${datasetId.toLowerCase()}`
+      : overrides.concept_doi;
   db.prepare(
     `INSERT INTO datasets
-       (dataset_id, owner_user_id, name, visibility, is_sandbox, doi_provider,
-        ezid_identifier, ezid_status, withdrawn_at, withdrawn_reason, github_repo)
-     VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (dataset_id, owner_user_id, name, visibility, is_sandbox, concept_doi,
+        ezid_status, withdrawn_at, withdrawn_reason, github_repo)
+     VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     datasetId,
     datasetId,
     visibility,
     isSandbox,
-    doiProvider,
-    ezidIdentifier,
+    conceptDoi,
     overrides.ezid_status ?? null,
     overrides.withdrawn_at ?? null,
     overrides.withdrawn_reason ?? null,
@@ -349,21 +349,15 @@ describe("withdrawDataset (dry-run + precondition-fail, zero network)", () => {
   });
 
   test("no EZID concept DOI -> skipped, no writes, no network", async () => {
+    // The identifier derives from concept_doi (#1182), so a NULL concept_doi
+    // is the one remaining "not EZID-managed" state (the per-dataset
+    // doi_provider column is gone; ADR 0007 makes EZID the sole provider).
     const db = freshDb();
-    seedDataset(db, "on008115", { ezid_identifier: null });
+    seedDataset(db, "on008115", { concept_doi: null });
     const result = await withdrawDataset(bareEnv(db), "on008115", "upstream_403", {
       dryRun: false,
     });
     expect("skipped" in result && result.skipped).toMatch(/no EZID concept DOI/i);
-  });
-
-  test("non-ezid doi_provider -> skipped, no writes, no network", async () => {
-    const db = freshDb();
-    seedDataset(db, "on008115", { doi_provider: "zenodo" });
-    const result = await withdrawDataset(bareEnv(db), "on008115", "upstream_403", {
-      dryRun: false,
-    });
-    expect("skipped" in result && result.skipped).toMatch(/EZID-managed/i);
   });
 
   test("visibility already private but NEVER withdrawn -> skip-unrelated-private, no writes, no network", async () => {
@@ -447,7 +441,7 @@ describe("restoreDataset (dry-run + precondition-fail, zero network)", () => {
   test("no EZID concept DOI -> skipped, no writes, no network", async () => {
     const db = freshDb();
     seedDataset(db, "on008115", {
-      ezid_identifier: null,
+      concept_doi: null,
       visibility: "private",
       withdrawn_at: "2026-07-20T00:00:00Z",
       withdrawn_reason: "upstream_403",

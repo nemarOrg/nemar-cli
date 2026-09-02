@@ -1,10 +1,14 @@
 /**
  * Channel-count + electrode-system classification for the catalog (#854 phase 2,
- * #858). Pure helpers: parse a BIDS `*_channels.tsv` / `*_eeg.json` exemplar and
- * derive the two catalog columns added in migration 0054 (`n_channels`,
- * `electrode_system`). The enrichment path (getBidsTreeStats) samples one
- * exemplar EEG recording and feeds the content here; everything in this module
- * is I/O-free and unit-tested with real-shape inputs.
+ * #858), widened in epic #1144 Phase 2b (#1153) with four more `*_eeg.json`
+ * sidecar parsers backing neuroschema's `signal_defaults` block. Pure
+ * helpers: parse a BIDS `*_channels.tsv` / `*_eeg.json` exemplar and derive
+ * the catalog columns added in migration 0054 (`n_channels`,
+ * `electrode_system`) and migration 0072 (`sampling_frequency`,
+ * `power_line_frequency`, `eeg_reference`, `placement_scheme`). The
+ * enrichment path (getBidsTreeStats) samples one exemplar EEG recording and
+ * feeds the content here; everything in this module is I/O-free and
+ * unit-tested with real-shape inputs.
  */
 
 import { STANDARD_1005_NAMES, STANDARD_1020_NAMES } from "./montage-label-sets.js";
@@ -103,6 +107,94 @@ export function parseEegChannelCount(content: string): number | null {
   }
   const v = obj.EEGChannelCount;
   return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null;
+}
+
+/**
+ * Read `SamplingFrequency` (Hz) from a `*_eeg.json` sidecar for
+ * `signal_defaults.sampling_frequency` (epic #1144 Phase 2b, #1153). Null on
+ * absent/invalid JSON, a non-number, a non-finite value, or <= 0 -- same
+ * shape as parseEegChannelCount, deliberately not merged with it: the file's
+ * contract is "parse one key, return null on anything invalid" per parser,
+ * not one do-everything sidecar reader.
+ */
+export function parseSamplingFrequency(content: string): number | null {
+  let obj: Record<string, unknown>;
+  try {
+    obj = JSON.parse(content) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const v = obj.SamplingFrequency;
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null;
+}
+
+/**
+ * Read `PowerLineFrequency` (Hz) from a `*_eeg.json` sidecar for
+ * `signal_defaults.power_line_frequency` (epic #1144 Phase 2b, #1153).
+ *
+ * neuroschema's `inheritable.schema.json` declares this field an ENUM --
+ * `[50, 60, null]` -- not a free number. A sidecar can legitimately carry
+ * `0`/`"n/a"` (power line filtering not applicable/unknown), a measured
+ * value like `59.94`, or a string; every one of those is OUT OF ENUM and
+ * must be dropped to null, never clamped or rounded to the nearest of
+ * 50/60. Rounding would fabricate a fact ("this dataset was recorded on
+ * 60Hz mains") the sidecar never asserted. Nothing runs AJV on the live
+ * serving path, so this coercion IS the enforcement.
+ */
+export function parsePowerLineFrequency(content: string): number | null {
+  let obj: Record<string, unknown>;
+  try {
+    obj = JSON.parse(content) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const v = obj.PowerLineFrequency;
+  return v === 50 || v === 60 ? v : null;
+}
+
+/**
+ * Reject BIDS's "not applicable" placeholder and blank strings. Shared by
+ * the two free-text sidecar parsers below; not exported -- an external
+ * caller with a genuinely different placeholder convention should not
+ * silently inherit this one.
+ */
+function nonPlaceholderString(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const trimmed = v.trim();
+  if (trimmed.length === 0 || trimmed.toLowerCase() === "n/a") return null;
+  return trimmed;
+}
+
+/**
+ * Read `EEGReference` from a `*_eeg.json` sidecar for
+ * `signal_defaults.reference` (epic #1144 Phase 2b, #1153). Only a string
+ * value is accepted -- `inheritable.schema.json` types `reference` as
+ * string|null, so an array-of-channel-names reference (a shape some BIDS
+ * sidecars use) is out of contract and dropped to null rather than joined
+ * or coerced.
+ */
+export function parseEegReference(content: string): string | null {
+  let obj: Record<string, unknown>;
+  try {
+    obj = JSON.parse(content) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  return nonPlaceholderString(obj.EEGReference);
+}
+
+/**
+ * Read `EEGPlacementScheme` from a `*_eeg.json` sidecar for
+ * `signal_defaults.placement_scheme` (epic #1144 Phase 2b, #1153).
+ */
+export function parsePlacementScheme(content: string): string | null {
+  let obj: Record<string, unknown>;
+  try {
+    obj = JSON.parse(content) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  return nonPlaceholderString(obj.EEGPlacementScheme);
 }
 
 /**

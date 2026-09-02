@@ -505,13 +505,13 @@ export function toHttpDate(value: string): string {
 // ===========================================================================
 // metadata.json builders
 //
-// Composes a neuroschema v0.3.0 `dataset` document from the catalog row in
+// Composes a neuroschema v0.4.0 `dataset` document from the catalog row in
 // D1, the parsed nemar_metadata.json enrichment payload, the dataset_versions
 // list, and (optionally) the latest version's S3 manifest. All pure: no D1,
 // S3, or network access happens here; callers in routes/data.ts wire the I/O.
 //
 // The wire format mirrors `~/Documents/git/nemar/neuroschema/schema/core/dataset.schema.json`
-// (v0.3.0). NEMAR-specific aggregates that aren't part of the FAIR core
+// (v0.4.0). NEMAR-specific aggregates that aren't part of the FAIR core
 // (version DOI list, derived BIDS subjects/sessions/tasks/runs tree) sit in
 // `extensions.nemar` per `schema/extensions/nemar.schema.json` which already
 // declares `additionalProperties: true`.
@@ -540,10 +540,58 @@ export interface DatasetDemographics {
   age_max?: number | null;
 }
 
+/** A `{min, max}` range object, per neuroschema's channel_count_range /
+ *  recording_duration_range shape (`additionalProperties: false` -- no other
+ *  keys). Omitted entirely from DatasetDataSummary when both bounds are
+ *  null, rather than emitted as `{min: null, max: null}`. */
+export interface DatasetStatRange {
+  min: number | null;
+  max: number | null;
+}
+
 export interface DatasetDataSummary {
   total_files: number | null;
   size_bytes: number | null;
   size_human: string | null;
+  /** store_count + failure_count from the zarr index -- every raw recording
+   *  discovery found for a dataset converted since ADR 0027's raw-only
+   *  cutover; a legacy dataset with unpurged derivative/sourcedata stores
+   *  (AGENTS.md's Zarr section) can still include a non-raw entry (epic
+   *  #1144 Phase 2). */
+  recording_count: number | null;
+  /** failure_count from the zarr index: recordings that could not be
+   *  summarised (truncated, corrupt, unsupported). */
+  recordings_unavailable: number | null;
+  /** Sum of per-store duration (seconds); a store's duration is the max
+   *  across its channel groups, never their sum. NULL (not 0) whenever
+   *  nothing has been measured yet -- see migration 0070. A lower bound on
+   *  the dataset's true total whenever recordings_unavailable is non-zero. */
+  total_recording_duration: number | null;
+  /** Present only when at least one bound is known. */
+  recording_duration_range?: DatasetStatRange;
+  /** Present only when at least one bound is known. The existing scalar
+   *  `n_channels` elsewhere in the row is a single sampled value, not this
+   *  range -- see the Phase 2 plan for why the scalar alone is misleading. */
+  channel_count_range?: DatasetStatRange;
+}
+
+/**
+ * neuroschema `signal_defaults` block (dataset.schema.json:133, backed by
+ * definitions/inheritable.schema.json) -- epic #1144 Phase 2b, issue #1153.
+ * Every field is independently nullable per the vendored schema; the whole
+ * block is omitted (set to null) by the builder when every field is null,
+ * matching `data_summary`'s gating. Every field below is one exemplar
+ * sidecar's declared value, not a verified per-dataset aggregate -- see
+ * migration 0072's caveat.
+ */
+export interface DatasetSignalDefaults {
+  sampling_frequency: number | null;
+  power_line_frequency: number | null;
+  reference: string | null;
+  /** Not derivable from anything NEMAR probes today; always null. */
+  recording_type: string | null;
+  channel_system: string | null;
+  placement_scheme: string | null;
 }
 
 export interface DatasetProvenance {
@@ -608,6 +656,19 @@ export interface NemarExtensionBlock {
    *  (the honest declared total) when data_complete=0. Same namespace rationale
    *  as data_complete. */
   bytes_present: number | null;
+  /**
+   * Recording-stats measurement completeness (epic #1144 Phase 2): how many
+   * of `data_summary.recording_count` actually yielded a duration. Lives
+   * here rather than in `data_summary` because it is a NEMAR-specific
+   * measurement-progress fact, not part of neuroschema's FAIR core --
+   * `recording_count` and `recordings_unavailable` already say how many
+   * recordings exist and how many failed; this says how many of the
+   * remainder have been measured so far (recording_stats_at IS NULL means
+   * "not yet swept" rather than "zero recordings measured", and this field
+   * distinguishes that from a genuinely all-unmeasured dataset). null before
+   * the sweep first runs a dataset.
+   */
+  recordings_measured: number | null;
 }
 
 export interface NeuroschemaDataset {
@@ -639,6 +700,7 @@ export interface NeuroschemaDataset {
   sessions_count: number | null;
   demographics: DatasetDemographics | null;
   data_summary: DatasetDataSummary | null;
+  signal_defaults: DatasetSignalDefaults | null;
   provenance: DatasetProvenance;
   external_links: DatasetExternalLinks;
   extensions: { nemar: NemarExtensionBlock };
@@ -665,6 +727,29 @@ export interface DatasetRowForMetadata {
   data_complete: number | null;
   /** Actual bytes present in S3 for the latest version (#970), or null. */
   bytes_present: number | null;
+  /** Recording-stats columns from migration 0070 (epic #1144 Phase 2), all
+   *  null until the recording-stats-sweep first computes them for this
+   *  dataset. See DatasetDataSummary / NemarExtensionBlock for what each
+   *  serves. */
+  total_recording_duration: number | null;
+  recording_duration_min: number | null;
+  recording_duration_max: number | null;
+  recording_count: number | null;
+  recordings_unavailable: number | null;
+  recordings_measured: number | null;
+  channel_count_min: number | null;
+  channel_count_max: number | null;
+  /** signal_defaults columns from migration 0072 (epic #1144 Phase 2b,
+   *  #1153), all null until the signal-defaults-sweep or a live reindex
+   *  first computes them for this dataset. See DatasetSignalDefaults for
+   *  what each serves. `electrode_system` predates this phase (migration
+   *  0054) but is selected here for the first time -- it was never served
+   *  on this endpoint until signal_defaults.channel_system needed it. */
+  sampling_frequency: number | null;
+  power_line_frequency: number | null;
+  eeg_reference: string | null;
+  placement_scheme: string | null;
+  electrode_system: string | null;
 }
 
 /**
@@ -931,6 +1016,48 @@ export function buildDatasetMetadata(input: {
 
   const latestVersionRow = versions[0] ?? null;
 
+  // Range objects (epic #1144 Phase 2): present only when at least one bound
+  // is known, per neuroschema convention -- {min: null, max: null} would be
+  // indistinguishable from "not yet computed" on the wire, so the key is
+  // omitted entirely rather than emitted with both bounds null.
+  const recordingDurationRange: DatasetStatRange | undefined =
+    row.recording_duration_min !== null || row.recording_duration_max !== null
+      ? { min: row.recording_duration_min, max: row.recording_duration_max }
+      : undefined;
+  const channelCountRange: DatasetStatRange | undefined =
+    row.channel_count_min !== null || row.channel_count_max !== null
+      ? { min: row.channel_count_min, max: row.channel_count_max }
+      : undefined;
+  // Gate on ALL 8 recording-stat columns, not just two of them: migration
+  // 0070 documents that channel_count_min/max can be populated independently
+  // of recording_count/total_recording_duration (they move together under
+  // today's sweep, which always writes all 8 in one UPDATE, but nothing
+  // enforces that at the type level -- a future asymmetric write, a partial
+  // reset bug, or manual DB surgery must not cause a real, non-null range
+  // value to be silently dropped from the response because the other two
+  // columns happened to be null).
+  const hasRecordingStats =
+    row.recording_count !== null ||
+    row.recordings_unavailable !== null ||
+    row.total_recording_duration !== null ||
+    row.recording_duration_min !== null ||
+    row.recording_duration_max !== null ||
+    row.recordings_measured !== null ||
+    row.channel_count_min !== null ||
+    row.channel_count_max !== null;
+
+  // signal_defaults (epic #1144 Phase 2b, #1153): omitted (null) unless at
+  // least one of the five source columns is populated -- recording_type has
+  // no source column and is never part of this gate (it would otherwise
+  // never contribute a true condition, which is fine, but it also must
+  // never be read as "populated" on its own since it's always null).
+  const hasSignalDefaults =
+    row.sampling_frequency !== null ||
+    row.power_line_frequency !== null ||
+    row.eeg_reference !== null ||
+    row.placement_scheme !== null ||
+    row.electrode_system !== null;
+
   return {
     schema_version: NEUROSCHEMA_VERSION,
     doc_type: "dataset",
@@ -971,13 +1098,28 @@ export function buildDatasetMetadata(input: {
           }
         : null,
     data_summary:
-      totalFiles !== null || sizeBytes !== null
+      totalFiles !== null || sizeBytes !== null || hasRecordingStats
         ? {
             total_files: totalFiles,
             size_bytes: sizeBytes,
             size_human: formatBytes(sizeBytes),
+            recording_count: row.recording_count,
+            recordings_unavailable: row.recordings_unavailable,
+            total_recording_duration: row.total_recording_duration,
+            ...(recordingDurationRange ? { recording_duration_range: recordingDurationRange } : {}),
+            ...(channelCountRange ? { channel_count_range: channelCountRange } : {}),
           }
         : null,
+    signal_defaults: hasSignalDefaults
+      ? {
+          sampling_frequency: row.sampling_frequency,
+          power_line_frequency: row.power_line_frequency,
+          reference: row.eeg_reference,
+          recording_type: null,
+          channel_system: row.electrode_system,
+          placement_scheme: row.placement_scheme,
+        }
+      : null,
     provenance: {
       // Coerce to tag form to match every other version field on the
       // wire (`extensions.nemar.versions[].version`,
@@ -1009,6 +1151,7 @@ export function buildDatasetMetadata(input: {
         pipeline_stage: v2?.pipeline_stage ?? null,
         data_complete: row.data_complete,
         bytes_present: row.bytes_present,
+        recordings_measured: row.recordings_measured,
       },
     },
   };

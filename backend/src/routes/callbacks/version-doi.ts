@@ -16,8 +16,8 @@ import {
   mintEzidVersionDoi,
 } from "../../services/central-manifest.js";
 import { refreshMetadataAfterVersionDoi } from "../../services/dataset-reindex.js";
-import { createEzidVersionDoi, parseDoiProvider } from "../../services/doi.js";
-import { TEST_SHOULDER } from "../../services/ezid.js";
+import { createEzidVersionDoi } from "../../services/doi.js";
+import { TEST_SHOULDER, conceptEzidIdentifier } from "../../services/ezid.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
 import { downloadReleaseArchive } from "../../services/github.js";
 import { generateManifest } from "../../services/manifest.js";
@@ -36,7 +36,7 @@ export function registerVersionDoiRoutes(webhooks: WebhookRouter): void {
    * to GITHUB_WEBHOOK_SECRET during the secret-untangle rollout — both held
    * the same value historically, see https://docs.nemar.org/admin/github-app-setup/).
    *
-   * Routes to EZID or Zenodo based on dataset's doi_provider setting.
+   * EZID-only since #1182 (ADR 0007): the doi_provider column is gone.
    */
   webhooks.post("/publish-version-doi", async (c) => {
     // Validate webhook token
@@ -104,9 +104,7 @@ export function registerVersionDoiRoutes(webhooks: WebhookRouter): void {
         github_repo: string | null;
         concept_doi: string | null;
         zenodo_concept_id: string | null;
-        ezid_identifier: string | null;
         ezid_status: string | null;
-        doi_provider: string | null;
       }>();
 
     if (!dataset) {
@@ -124,20 +122,15 @@ export function registerVersionDoiRoutes(webhooks: WebhookRouter): void {
       ); // Return 200 so workflow doesn't fail
     }
 
-    const provider = parseDoiProvider(dataset.doi_provider);
-
-    // Auto-detect sandbox from EZID test shoulder prefix
+    // EZID is the sole provider (ADR 0007); the doi_provider column is gone
+    // (#1182) and the identifier derives from concept_doi. The zenodo
+    // handler below is unreachable and kept only until the follow-up removes
+    // the retired zenodo paths. Auto-detect sandbox from the EZID test
+    // shoulder prefix.
     const sandboxPrefix = TEST_SHOULDER.replace(/^doi:/, "").split("/")[0];
-    const sandbox =
-      provider === "ezid" && dataset.ezid_identifier
-        ? dataset.ezid_identifier.includes(sandboxPrefix)
-        : false;
+    const sandbox = conceptEzidIdentifier(dataset.concept_doi).includes(sandboxPrefix);
 
-    // Route to appropriate provider
-    if (provider === "ezid") {
-      return handleEzidVersionDoi(c, dataset, version, release_url, sandbox);
-    }
-    return handleZenodoVersionDoi(c, dataset, version, release_url, sandbox);
+    return handleEzidVersionDoi(c, dataset, version, release_url, sandbox);
   });
 
   /**
@@ -355,7 +348,6 @@ async function handleEzidVersionDoi(
     description: string | null;
     github_repo: string | null;
     concept_doi: string | null;
-    ezid_identifier: string | null;
   },
   version: string,
   releaseUrl: string,
@@ -383,12 +375,13 @@ async function handleEzidVersionDoiAsync(
     description: string | null;
     github_repo: string | null;
     concept_doi: string | null;
-    ezid_identifier: string | null;
   },
   version: string,
   sandbox: boolean,
 ) {
-  if (!dataset.ezid_identifier) {
+  // The identifier derives from concept_doi (#1182): no concept DOI means
+  // no EZID identifier.
+  if (!dataset.concept_doi) {
     return c.json({ error: "No EZID identifier found for this dataset.", skipped: true }, 200);
   }
   if (!dataset.github_repo) {
@@ -555,13 +548,14 @@ async function handleEzidVersionDoiLegacy(
     description: string | null;
     github_repo: string | null;
     concept_doi: string | null;
-    ezid_identifier: string | null;
   },
   version: string,
   _releaseUrl: string,
   sandbox: boolean,
 ) {
-  if (!dataset.ezid_identifier) {
+  // The identifier derives from concept_doi (#1182): no concept DOI means
+  // no EZID identifier.
+  if (!dataset.concept_doi) {
     return c.json(
       {
         error: "No EZID identifier found for this dataset.",
@@ -609,7 +603,7 @@ async function handleEzidVersionDoiLegacy(
       },
       {
         datasetId: dataset.dataset_id,
-        conceptIdentifier: dataset.ezid_identifier,
+        conceptIdentifier: conceptEzidIdentifier(dataset.concept_doi),
         version,
         bidsDescription,
         githubRepo: dataset.github_repo,
@@ -883,10 +877,9 @@ async function handleZenodoVersionDoi(
     let dbError: string | undefined;
     const centralFlow = isCentralManifestWorkflowEnabled(c.env);
     try {
-      await c.env.DB.prepare("UPDATE datasets SET zenodo_latest_version_id = ? WHERE id = ?")
-        .bind(published.id.toString(), dataset.id)
-        .run();
-
+      // zenodo_latest_version_id was dropped in #1182; nothing to record on
+      // the datasets row here any more (this whole handler is unreachable —
+      // see the EZID-only routing above).
       if (!centralFlow && published.doi) {
         // Legacy path inserts the dataset_versions row inline. Under the
         // central flow the /webhooks/manifest-ready callback owns the

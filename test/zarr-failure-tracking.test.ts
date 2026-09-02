@@ -1,6 +1,9 @@
 /**
- * #774: /webhooks/zarr-ready persists per-dataset conversion-failure detail so
- * the observability dashboard can render a live failures table.
+ * #774: /webhooks/zarr-ready persists per-dataset conversion-failure state
+ * for the observability dashboard. Since #1189 the `zarr_data_failures`
+ * column carries a bounded summary (entry count + a pointer to the Zarr
+ * index's `failures` list), never the per-entry detail -- the inlined array
+ * is what made the D1 backup unrestorable (#1188).
  *
  * Two parts, no mocks:
  *  - zarrFailureColumns(): the pure derivation of the failure columns from the
@@ -28,7 +31,10 @@ describe("zarrFailureColumns (#774)", () => {
     });
   });
 
-  test("partial run: typed data failures -> JSON + counts, not yet terminal", () => {
+  test("partial run: typed data failures -> bounded summary + counts, not yet terminal", () => {
+    // #1189: the column stores a count and a pointer to the Zarr index's
+    // `failures` list, never the entries themselves (the inlined array is
+    // what made the D1 backup unrestorable, #1188).
     const df = [{ path: "sub-01_meg.fif", code: "maxshield", reason: "needs MaxFilter" }];
     const f = zarrFailureColumns({
       errors: 3,
@@ -39,7 +45,10 @@ describe("zarrFailureColumns (#774)", () => {
     expect(f.errors).toBe(3);
     expect(f.failureCount).toBe(1);
     expect(f.deterministic).toBe(0);
-    expect(JSON.parse(f.dataFailuresJson as string)).toEqual(df);
+    expect(JSON.parse(f.dataFailuresJson as string)).toEqual({
+      count: 1,
+      detail_ref: "zarr/index.json",
+    });
     expect(f.hadErrors).toBe(true);
   });
 
@@ -85,20 +94,24 @@ describe("zarrFailureColumns (#774)", () => {
     ).toBe(1);
   });
 
-  test("data_failures items are sanitized to known fields + length-capped", () => {
+  test("stored payload size is independent of the entries (counts + pointer only)", () => {
+    // Successor to the old per-entry sanitize/length-cap test: since #1189
+    // nothing from an entry is stored at all, so a huge or malformed item
+    // cannot bloat the row -- only the entry count and the pointer land.
     const f = zarrFailureColumns({
-      errors: 2,
+      errors: 3,
       data_failures: [
         { path: "p", code: "c", reason: "r", junk: { huge: "x".repeat(99999) } },
         "not-an-object",
         { code: "x".repeat(200) },
       ],
     });
-    const parsed = JSON.parse(f.dataFailuresJson as string);
-    expect(parsed).toHaveLength(3);
-    expect(parsed[0]).toEqual({ path: "p", code: "c", reason: "r" }); // junk dropped
-    expect(parsed[1]).toEqual({}); // non-object -> empty
-    expect(parsed[2].code.length).toBe(64); // capped
+    expect(JSON.parse(f.dataFailuresJson as string)).toEqual({
+      count: 3,
+      detail_ref: "zarr/index.json",
+    });
+    expect((f.dataFailuresJson as string).length).toBeLessThan(100);
+    expect(f.dataFailuresJson).not.toContain("x".repeat(64));
   });
 });
 
@@ -189,7 +202,10 @@ describe("migration 0046 + zarr-ready handler SQL", () => {
     expect(r.zarr_store_count).toBe(5);
     expect(r.zarr_errors).toBe(2);
     expect(r.zarr_deterministic).toBe(0);
-    expect(JSON.parse(r.zarr_data_failures as string)).toHaveLength(1);
+    expect(JSON.parse(r.zarr_data_failures as string)).toEqual({
+      count: 1,
+      detail_ref: "zarr/index.json",
+    });
     expect(r.zarr_failed_at).not.toBeNull();
   });
 

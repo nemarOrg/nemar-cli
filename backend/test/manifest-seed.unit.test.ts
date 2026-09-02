@@ -106,19 +106,20 @@ describe("POST /datasets resume branch seeds catalog stats", () => {
       { DB: realD1(db), ENVIRONMENT: "test" } as Bindings,
     );
     expect(res.status).toBe(500); // fails closed at S3 AFTER the seed UPDATE
+    // file_size_formatted is no longer a stored column (#1182): the wire
+    // field is derived from file_size at read time, covered by
+    // dataset-detail-contract.test.ts.
     const row = db
       .query<
         {
           subject_count: number | null;
           file_size: number | null;
-          file_size_formatted: string | null;
         },
         [string]
-      >("SELECT subject_count, file_size, file_size_formatted FROM datasets WHERE dataset_id = ?")
+      >("SELECT subject_count, file_size FROM datasets WHERE dataset_id = ?")
       .get("xx090010");
     expect(row?.subject_count).toBe(2);
     expect(row?.file_size).toBe(850_500);
-    expect(row?.file_size_formatted).toMatch(/KB|MB/);
   });
 
   test("never overwrites a row enrichment already stamped", async () => {
@@ -127,9 +128,9 @@ describe("POST /datasets resume branch seeds catalog stats", () => {
     // manifest from clobbering the authoritative values (#1092 review).
     db.query(
       `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility,
-                             subject_count, file_size, file_size_formatted, metadata_updated_at)
+                             subject_count, file_size, sweep_stamps)
        VALUES ('xx090011', 'Enriched Fixture Dataset', NULL, ?, 'nemarDatasets/fixture2', 1, 'private',
-               42, 999999, '976.56 KB', datetime('now'))`,
+               42, 999999, json_object('metadata_updated_at', datetime('now')))`,
     ).run(userId);
     await app.request(
       "/datasets",

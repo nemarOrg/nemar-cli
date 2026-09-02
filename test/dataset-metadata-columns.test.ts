@@ -527,6 +527,29 @@ describe("migration 0020 file shape", () => {
   });
 });
 
+describe("migration 0072 file shape (#1153)", () => {
+  test("contains the five signal_defaults ALTER TABLE statements, and no new channel_system column", async () => {
+    const path = `${import.meta.dir}/../backend/src/db/migrations/0072_signal_defaults.sql`;
+    const sql = await Bun.file(path).text();
+    for (const col of [
+      "sampling_frequency REAL",
+      "power_line_frequency REAL",
+      "eeg_reference TEXT",
+      "placement_scheme TEXT",
+      "signal_defaults_at TEXT",
+    ]) {
+      expect(sql).toContain(`ALTER TABLE datasets ADD COLUMN ${col}`);
+    }
+    // channel_system is deliberately served from the pre-existing
+    // electrode_system column (migration 0054) -- a stray
+    // "ADD COLUMN channel_system" here would mean a duplicate, driftable
+    // copy of the same fact slipped in. (The prose comments legitimately
+    // mention "channel_system" by name to explain the omission, so this
+    // checks the ALTER TABLE statement specifically, not the whole file.)
+    expect(sql).not.toContain("ADD COLUMN channel_system");
+  });
+});
+
 describe("computeDatasetMetadataColumns HED mapping (#869)", () => {
   const base = {
     treePaths: TASK_PATHS,
@@ -551,5 +574,49 @@ describe("computeDatasetMetadataColumns HED mapping (#869)", () => {
     const cols = computeDatasetMetadataColumns(base);
     expect(cols.has_hed).toBeNull();
     expect(cols.hed_version).toBeNull();
+  });
+});
+
+// Epic #1144 Phase 2b (#1153): signal_defaults input mapping. Mirrors the
+// HED mapping block above -- four independent optional overrides, each
+// passed straight through with `?? null`, no cross-field logic.
+describe("computeDatasetMetadataColumns signal_defaults mapping (#1153)", () => {
+  const base = {
+    treePaths: TASK_PATHS,
+    participantsTsv: null,
+    s3Stats: null,
+  };
+
+  test("all four overrides map straight through, unswapped", () => {
+    // Four DISTINCT values (and distinct from any other numeric/string
+    // field this function sets) so a transposition between any two of the
+    // four -- or a collision with an unrelated field -- would be visible.
+    const cols = computeDatasetMetadataColumns({
+      ...base,
+      samplingFrequency: 500,
+      powerLineFrequency: 60,
+      eegReference: "average",
+      placementScheme: "extended 10-10% system",
+    });
+    expect(cols.sampling_frequency).toBe(500);
+    expect(cols.power_line_frequency).toBe(60);
+    expect(cols.eeg_reference).toBe("average");
+    expect(cols.placement_scheme).toBe("extended 10-10% system");
+  });
+
+  test("omitted overrides map to null (not probed yet)", () => {
+    const cols = computeDatasetMetadataColumns(base);
+    expect(cols.sampling_frequency).toBeNull();
+    expect(cols.power_line_frequency).toBeNull();
+    expect(cols.eeg_reference).toBeNull();
+    expect(cols.placement_scheme).toBeNull();
+  });
+
+  test("one override present, the other three still null (independent fields, not an all-or-nothing group)", () => {
+    const cols = computeDatasetMetadataColumns({ ...base, samplingFrequency: 250 });
+    expect(cols.sampling_frequency).toBe(250);
+    expect(cols.power_line_frequency).toBeNull();
+    expect(cols.eeg_reference).toBeNull();
+    expect(cols.placement_scheme).toBeNull();
   });
 });

@@ -208,6 +208,17 @@ export async function refreshDatasetMetadata(
     let electrodeSystemOverride: string | undefined;
     let hasHedOverride: boolean | undefined;
     let hedVersionOverride: string | undefined;
+    // signal_defaults overrides (epic #1144 Phase 2b, #1153): same probe,
+    // same root-preferred `*_eeg.json` sidecar as nChannels/electrodeSystem
+    // above -- no extra GitHub call. Note this does NOT stamp
+    // signal_defaults_at (that column is written only by
+    // signal-defaults-sweep.ts, mirroring channel_montage_checked_at's
+    // sweep-only ownership at migration 0055): a live reindex can populate
+    // these columns without making the row look already-swept.
+    let samplingFrequencyOverride: number | undefined;
+    let powerLineFrequencyOverride: number | undefined;
+    let eegReferenceOverride: string | undefined;
+    let placementSchemeOverride: string | undefined;
     try {
       const stats = await getBidsTreeStats(repoName, "main", pat);
       if (stats.modalities.length) modalitiesOverride = stats.modalities;
@@ -217,6 +228,10 @@ export async function refreshDatasetMetadata(
       electrodeSystemOverride = stats.electrodeSystem;
       hasHedOverride = stats.hasHed;
       hedVersionOverride = stats.hedVersion;
+      samplingFrequencyOverride = stats.samplingFrequency;
+      powerLineFrequencyOverride = stats.powerLineFrequency;
+      eegReferenceOverride = stats.eegReference;
+      placementSchemeOverride = stats.placementScheme;
     } catch (err) {
       console.warn(
         `[reindex] BIDS tree walk failed for ${datasetId}; using tree paths: ${errorMessage(err)}`,
@@ -260,6 +275,10 @@ export async function refreshDatasetMetadata(
       electrodeSystem: electrodeSystemOverride,
       hasHed: hasHedOverride,
       hedVersion: hedVersionOverride,
+      samplingFrequency: samplingFrequencyOverride,
+      powerLineFrequency: powerLineFrequencyOverride,
+      eegReference: eegReferenceOverride,
+      placementScheme: placementSchemeOverride,
       manifestVerification,
     });
     await writeDatasetMetadataColumns(db, datasetId, cols);
@@ -513,7 +532,7 @@ export function buildReindexFilterQuery(
       throw new Error(`Invalid older_than_days: ${recencyDays}`);
     }
     return {
-      sql: `${base} AND (subject_count IS NULL OR modalities IS NULL OR file_size IS NULL OR total_files IS NULL) AND (metadata_updated_at IS NULL OR metadata_updated_at < datetime('now', ?)) ORDER BY dataset_id`,
+      sql: `${base} AND (subject_count IS NULL OR modalities IS NULL OR file_size IS NULL OR total_files IS NULL) AND (json_extract(sweep_stamps, '$.metadata_updated_at') IS NULL OR json_extract(sweep_stamps, '$.metadata_updated_at') < datetime('now', ?)) ORDER BY dataset_id`,
       params: [`-${recencyDays} days`],
     };
   }
@@ -523,7 +542,7 @@ export function buildReindexFilterQuery(
       throw new Error(`Invalid older_than_days: ${days}`);
     }
     return {
-      sql: `${base} AND (metadata_updated_at IS NULL OR metadata_updated_at < datetime('now', ?)) ORDER BY dataset_id`,
+      sql: `${base} AND (json_extract(sweep_stamps, '$.metadata_updated_at') IS NULL OR json_extract(sweep_stamps, '$.metadata_updated_at') < datetime('now', ?)) ORDER BY dataset_id`,
       params: [`-${days} days`],
     };
   }

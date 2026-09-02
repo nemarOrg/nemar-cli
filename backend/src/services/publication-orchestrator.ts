@@ -22,15 +22,15 @@ import {
 } from "./central-manifest";
 import { type DataCiteEnrichment, nemarMetadataToEnrichment, parseNemarMetadata } from "./datacite";
 import {
+  type DoiProvider,
   createEzidVersionDoi,
-  parseDoiProvider,
   planReadmeBadgeCommit,
   resolveEzidAuth,
 } from "./doi";
 import { resolveEmailConfig, sendPublicationApprovedEmail } from "./email";
 import { resolveDatasetLandingBase } from "./environment";
 import { isExemplarPublishAllowed } from "./exemplar";
-import { TEST_SHOULDER, makePublic as ezidMakePublic } from "./ezid";
+import { TEST_SHOULDER, conceptEzidIdentifier, makePublic as ezidMakePublic } from "./ezid";
 import {
   checkWorkflowExists,
   createOrUpdateFile,
@@ -57,7 +57,6 @@ import {
   uploadManifest,
   waitForPublicPropagation,
 } from "./s3";
-import { publishDeposition } from "./zenodo";
 
 export { PUBLICATION_STEPS };
 export type { PublicationStep };
@@ -234,9 +233,7 @@ export interface ApproveDataset {
   github_repo: string | null;
   concept_doi: string | null;
   zenodo_concept_id: string | null;
-  ezid_identifier: string | null;
   ezid_status: string | null;
-  doi_provider: string | null;
   is_sandbox: number | null;
   owner_username: string;
   owner_email: string;
@@ -248,9 +245,6 @@ interface ApproveHelpers {
     stepName: PublicationStep,
   ): Promise<Record<string, unknown> | RespondOutcome>;
   getConceptDoi(stepName: PublicationStep): Promise<string | RespondOutcome>;
-  getZenodoConfig(
-    stepName: PublicationStep,
-  ): Promise<{ depositionId: number; token: string; isSandbox: boolean } | RespondOutcome>;
   getVersionTag(
     stepName: PublicationStep,
   ): Promise<
@@ -366,51 +360,6 @@ function createApproveHelpers(
     return row.concept_doi;
   }
 
-  // --- Helper: get Zenodo config from database ---
-  async function getZenodoConfig(
-    stepName: PublicationStep,
-  ): Promise<{ depositionId: number; token: string; isSandbox: boolean } | RespondOutcome> {
-    const row = await db
-      .prepare("SELECT zenodo_concept_id, is_sandbox FROM datasets WHERE dataset_id = ?")
-      .bind(datasetId)
-      .first<{ zenodo_concept_id: string | null; is_sandbox: number | null }>();
-    if (!row?.zenodo_concept_id) {
-      await updateProgress(stepName, "No Zenodo deposition found");
-      return c.json(
-        {
-          error: "No Zenodo deposition ID found",
-          step: stepName,
-          steps_completed: completed,
-          step_results: stepResults,
-        },
-        500,
-      );
-    }
-    const depositionId = Number.parseInt(row.zenodo_concept_id, 10);
-    if (Number.isNaN(depositionId)) {
-      const msg = `Invalid Zenodo deposition ID: ${row.zenodo_concept_id}`;
-      console.error(`[publish] ${msg} for dataset ${datasetId}`);
-      await updateProgress(stepName, msg);
-      return c.json(
-        { error: msg, step: stepName, steps_completed: completed, step_results: stepResults },
-        500,
-      );
-    }
-    const isSandbox = row.is_sandbox === 1;
-    const token = isSandbox ? c.env.ZENODO_SANDBOX_API_KEY : c.env.ZENODO_API_KEY;
-    if (!token) {
-      const msg = isSandbox
-        ? "Zenodo sandbox API key not configured"
-        : "Zenodo API key not configured";
-      await updateProgress(stepName, msg);
-      return c.json(
-        { error: msg, step: stepName, steps_completed: completed, step_results: stepResults },
-        500,
-      );
-    }
-    return { depositionId, token, isSandbox };
-  }
-
   // --- Helper: get version and tag from dataset_description.json ---
   // NOTE: This helper only reads; version defaulting is handled in update_metadata
   // to avoid creating [skip ci] commits that the create_tag step would tag.
@@ -426,7 +375,7 @@ function createApproveHelpers(
     return { version, tag: `v${version}`, datasetDesc };
   }
 
-  return { readDatasetDescription, getConceptDoi, getZenodoConfig, getVersionTag };
+  return { readDatasetDescription, getConceptDoi, getVersionTag };
 }
 
 async function stepCiCheck(c: ApproveStepContext): Promise<RespondOutcome | undefined> {
@@ -838,8 +787,9 @@ async function stepDoiCreate(c: ApproveStepContext): Promise<RespondOutcome | un
           }
         }
 
-        // Determine provider: use dataset's setting or default to ezid
-        const provider = parseDoiProvider(dataset.doi_provider);
+        // EZID is the sole provider (ADR 0007); the doi_provider column is
+        // gone (#1182), so this is a constant rather than a per-dataset read.
+        const provider: DoiProvider = "ezid";
 
         // Read BIDS metadata and enrichment for richer DOI records
         let bidsDesc: Record<string, unknown> | undefined;
@@ -875,9 +825,7 @@ async function stepDoiCreate(c: ApproveStepContext): Promise<RespondOutcome | un
         // "already exists" case by fetching the existing record. That makes
         // EZID minting idempotent under retry, which is what we want here:
         // EZID/DataCite propagation can briefly fail with transient 5xx or
-        // network errors during approval. Zenodo's createDeposition is NOT
-        // idempotent (each call mints a fresh deposition), so we only retry
-        // when the provider is EZID.
+        // network errors during approval.
         const { createConceptDoi: doiDispatch } = await import("./doi");
         const doiCall = () =>
           doiDispatch(
@@ -905,44 +853,21 @@ async function stepDoiCreate(c: ApproveStepContext): Promise<RespondOutcome | un
               DATASET_LANDING_BASE_URL: c.env.DATASET_LANDING_BASE_URL,
             },
           );
-        const { result: doiResult, attempts: doiAttempts } =
-          provider === "ezid"
-            ? await withRetry(doiCall, "doi_create")
-            : { result: await doiCall(), attempts: 1 };
-        if (provider === "ezid") {
-          await db
-            .prepare(
-              "UPDATE datasets SET concept_doi = ?, ezid_identifier = ?, ezid_status = ?, doi_provider = 'ezid', is_sandbox = ?, updated_at = datetime('now') WHERE dataset_id = ?",
-            )
-            .bind(
-              doiResult.doi,
-              doiResult.providerRecordId,
-              doiResult.status,
-              sandbox ? 1 : 0,
-              datasetId,
-            )
-            .run();
-        } else {
-          await db
-            .prepare(
-              "UPDATE datasets SET concept_doi = ?, zenodo_concept_id = ?, doi_provider = 'zenodo', is_sandbox = ?, updated_at = datetime('now') WHERE dataset_id = ?",
-            )
-            .bind(doiResult.doi, doiResult.providerRecordId, sandbox ? 1 : 0, datasetId)
-            .run();
-        }
+        const { result: doiResult, attempts: doiAttempts } = await withRetry(doiCall, "doi_create");
+        await db
+          .prepare(
+            "UPDATE datasets SET concept_doi = ?, ezid_status = ?, is_sandbox = ?, updated_at = datetime('now') WHERE dataset_id = ?",
+          )
+          .bind(doiResult.doi, doiResult.status, sandbox ? 1 : 0, datasetId)
+          .run();
 
         // Keep the in-memory `dataset` snapshot in sync with the DB write so
         // later steps in this same invocation (publish_doi, etc.) don't read
-        // a stale null and fail with "No EZID identifier found".
+        // a stale null. The EZID identifier itself is derived from
+        // concept_doi wherever it is needed (conceptEzidIdentifier, #1182).
         dataset.concept_doi = doiResult.doi;
-        dataset.doi_provider = provider;
         dataset.is_sandbox = sandbox ? 1 : 0;
-        if (provider === "ezid") {
-          dataset.ezid_identifier = doiResult.providerRecordId;
-          dataset.ezid_status = doiResult.status;
-        } else {
-          dataset.zenodo_concept_id = doiResult.providerRecordId;
-        }
+        dataset.ezid_status = doiResult.status;
 
         await updateProgress("doi_create", undefined, doiAttempts);
       } else {
@@ -1071,11 +996,9 @@ async function stepUpdateReadme(c: ApproveStepContext): Promise<RespondOutcome |
       if (isRespond(doiResult)) return doiResult;
       const conceptDoi = doiResult;
       const doiUrl = `https://doi.org/${conceptDoi}`;
-      const doiProvider = parseDoiProvider(dataset.doi_provider);
-      const badgeImg =
-        doiProvider === "zenodo"
-          ? `https://zenodo.org/badge/DOI/${conceptDoi}.svg`
-          : `https://img.shields.io/badge/DOI-${encodeURIComponent(conceptDoi)}-blue`;
+      // EZID is the sole provider (ADR 0007, #1182): always the shields.io
+      // badge; the zenodo badge form went with the doi_provider column.
+      const badgeImg = `https://img.shields.io/badge/DOI-${encodeURIComponent(conceptDoi)}-blue`;
       const doiBadge = `[![DOI](${badgeImg})](${doiUrl})`;
 
       const tree = await getTreeAtRef(repoName, "main", pat);
@@ -1301,93 +1224,47 @@ async function stepPublishDoi(c: ApproveStepContext): Promise<RespondOutcome | u
   const updateProgress = c.recorder.updateProgress;
   const completed = c.recorder.completed;
   const stepResults = c.recorder.stepResults;
-  const getZenodoConfig = c.helpers.getZenodoConfig;
 
   // Step: publish_doi - Publish DOI (permanent and irreversible!)
+  // EZID is the sole provider (ADR 0007); the retired Zenodo publish branch
+  // was removed in #1186 (its SQL named the dropped doi_provider column and
+  // would have failed at runtime if ever re-enabled).
   if (stepsToRun.includes("publish_doi")) {
     try {
       await startStep("publish_doi");
 
-      const provider = parseDoiProvider(dataset.doi_provider);
+      // EZID: transition the reserved DOI to public status. The identifier
+      // derives from concept_doi (#1182).
+      if (!dataset.concept_doi) {
+        await updateProgress("publish_doi", "No EZID identifier found");
+        return c.json(
+          {
+            error: "No EZID identifier found for dataset",
+            step: "publish_doi",
+            steps_completed: completed,
+            step_results: stepResults,
+          },
+          500,
+        );
+      }
 
-      if (provider === "ezid") {
-        // EZID: transition the reserved DOI to public status
-        if (!dataset.ezid_identifier) {
-          await updateProgress("publish_doi", "No EZID identifier found");
-          return c.json(
-            {
-              error: "No EZID identifier found for dataset",
-              step: "publish_doi",
-              steps_completed: completed,
-              step_results: stepResults,
-            },
-            500,
-          );
-        }
+      const auth = resolveEzidAuth(c.env, sandbox || !!dataset.is_sandbox);
+      const target = datasetLandingUrl(datasetId, resolveDatasetLandingBase(c.env));
+      await ezidMakePublic(auth, conceptEzidIdentifier(dataset.concept_doi), target);
 
-        const auth = resolveEzidAuth(c.env, sandbox || !!dataset.is_sandbox);
-        const target = datasetLandingUrl(datasetId, resolveDatasetLandingBase(c.env));
-        await ezidMakePublic(auth, dataset.ezid_identifier, target);
-
-        // Update EZID status in D1
-        try {
-          await db
-            .prepare(
-              "UPDATE datasets SET ezid_status = 'public', updated_at = datetime('now') WHERE dataset_id = ?",
-            )
-            .bind(datasetId)
-            .run();
-        } catch (dbErr) {
-          console.error(
-            `[publish] CRITICAL: EZID DOI published but database update failed for ${datasetId}:`,
-            dbErr,
-          );
-        }
-      } else {
-        // Zenodo: publish the deposition (irreversible)
-        const zenodoResult = await getZenodoConfig("publish_doi");
-        if (isRespond(zenodoResult)) return zenodoResult;
-        const { depositionId, token: zenodoToken, isSandbox } = zenodoResult;
-
-        const published = await publishDeposition(depositionId, zenodoToken, isSandbox);
-
-        // After publish, Zenodo confirms the concept DOI; update the database record.
-        // The DB update is in its own try/catch because the DOI is already published at
-        // this point; a DB failure must not be reported as "DOI publication failed."
-        if (published.doi) {
-          try {
-            await db
-              .prepare(
-                "UPDATE datasets SET concept_doi = ?, updated_at = datetime('now') WHERE dataset_id = ?",
-              )
-              .bind(published.doi, datasetId)
-              .run();
-          } catch (dbErr) {
-            console.error(
-              `[publish] CRITICAL: DOI published on Zenodo (${published.doi}) but database update failed for ${datasetId}:`,
-              dbErr,
-            );
-            await updateProgress(
-              "publish_doi",
-              `DOI published (${published.doi}) but DB update failed; manual correction required`,
-            );
-            return c.json(
-              {
-                error: `DOI was published successfully (${published.doi}) but database update failed. Manual database correction required.`,
-                published_doi: published.doi,
-                step: "publish_doi",
-                steps_completed: completed,
-                step_results: stepResults,
-              },
-              500,
-            );
-          }
-        } else {
-          console.error(
-            `[publish] Zenodo publish returned no DOI for dataset ${datasetId}; response:`,
-            published,
-          );
-        }
+      // Update EZID status in D1
+      try {
+        await db
+          .prepare(
+            "UPDATE datasets SET ezid_status = 'public', updated_at = datetime('now') WHERE dataset_id = ?",
+          )
+          .bind(datasetId)
+          .run();
+      } catch (dbErr) {
+        console.error(
+          `[publish] CRITICAL: EZID DOI published but database update failed for ${datasetId}:`,
+          dbErr,
+        );
       }
 
       await updateProgress("publish_doi");
@@ -1454,8 +1331,6 @@ async function stepVersionDoi(c: ApproveStepContext): Promise<RespondOutcome | u
               name: string;
               github_repo: string | null;
               concept_doi: string | null;
-              ezid_identifier: string | null;
-              doi_provider: string | null;
             }>();
 
         if (!freshDataset) {
@@ -1466,16 +1341,17 @@ async function stepVersionDoi(c: ApproveStepContext): Promise<RespondOutcome | u
             );
           }
           await updateProgress("version_doi");
-        } else if (!freshDataset.ezid_identifier) {
-          console.info(`[publish] version_doi skipped for ${datasetId}: no EZID identifier`);
-          await updateProgress("version_doi");
         } else if (!freshDataset.concept_doi) {
+          // The EZID identifier derives from concept_doi (#1182), so "no
+          // concept DOI" is also "no EZID identifier" -- one gate now.
           console.info(`[publish] version_doi skipped for ${datasetId}: no concept DOI`);
           await updateProgress("version_doi");
         } else {
           // Auto-detect sandbox from EZID test shoulder prefix (both paths).
           const sandboxPrefix = TEST_SHOULDER.replace(/^doi:/, "").split("/")[0];
-          const isSandboxDoi = freshDataset.ezid_identifier.includes(sandboxPrefix);
+          const isSandboxDoi = conceptEzidIdentifier(freshDataset.concept_doi).includes(
+            sandboxPrefix,
+          );
 
           if (isCentralManifestWorkflowEnabled(c.env)) {
             // Central flow (#751): cheap O(1) mint + dispatch. No inline
@@ -1537,7 +1413,7 @@ async function stepVersionDoi(c: ApproveStepContext): Promise<RespondOutcome | u
               },
               {
                 datasetId,
-                conceptIdentifier: freshDataset.ezid_identifier,
+                conceptIdentifier: conceptEzidIdentifier(freshDataset.concept_doi),
                 version,
                 bidsDescription: repoMeta.bidsDescription,
                 githubRepo: freshDataset.github_repo || `nemarDatasets/${repoName}`,
@@ -1949,9 +1825,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
       github_repo: string | null;
       concept_doi: string | null;
       zenodo_concept_id: string | null;
-      ezid_identifier: string | null;
       ezid_status: string | null;
-      doi_provider: string | null;
       is_sandbox: number | null;
       is_exemplar: number | null;
       owner_username: string;

@@ -53,6 +53,56 @@ def test_user_creation(real_db):
 
 **Ask:** What am I actually testing? Would this catch real bugs?
 
+## [STRICT] Test the entry point, not the piece
+
+**Why:** a test that calls a helper directly cannot catch a regression in how the
+*caller* derives that helper's inputs, which is where these bugs actually live.
+
+**The rule:** if production reaches a behaviour through an orchestration function
+or an HTTP route, the test drives THAT. Exercising an exported helper, a SQL
+constant, or a pure sub-function in isolation is a supplement, never the coverage.
+
+**Smells that mean the test cannot fail:**
+- It loops over a parameter the function under test does not accept.
+- It re-implements production logic locally (fetch-then-slice, a hand-copied SQL
+  string) and then asserts on its own arithmetic.
+- Its assertion is satisfied by how the fixture was built, not by behaviour.
+- The fixture is too small to reach the boundary it claims to probe.
+
+**Never hand-copy a SQL statement into a test.** Export the real one and import it.
+A copy tests itself: edit the production statement and the test still passes.
+
+**Evidence (epic #1144, four separate instances):** a count test looped over a
+`limit` its function had no parameter for; a paging test used offsets that stayed
+inside the buggy window; a sweep's own function and HTTP route were never invoked
+by any test, so removing its bound and transposing its counters both left 165
+tests green; a `?reset=1` SQL string was hand-copied, so dropping a column from
+the real route passed everything.
+
+## [STRICT] Prove the test fails
+
+**A test nobody has watched fail is not yet a test.**
+
+Before claiming a test covers something, mutate the single line of production code
+it targets, run it, and confirm it fails for the expected reason. Then revert and
+confirm `git status --porcelain` is clean.
+
+**One perturbation at a time.** Reverting a whole change proves the change matters;
+reverting one piece at a time proves each piece is individually guarded. Two fixes
+reverted together mask each other: in epic #1144 a candidate-window fix and a count
+fix were verified as a pair, and the window half turned out to have no coverage at
+all.
+
+**Check the mutation actually applied.** A substitution that silently matched
+nothing, followed by a green run, reads exactly like a passing verification.
+
+**When real data cannot falsify the rule, say so in the test.** If the production
+corpus makes two implementations agree (epic #1144: no dataset had a multi-group
+store, so `max` and `sum` were indistinguishable across the whole catalog), then a
+synthetic fixture is the only thing standing between a transposed rule and silent
+corruption. Write that in the comment, or the next reader deletes the "redundant"
+fixture.
+
 ## Test Data Management
 - **Sample data:** Request from user or use production samples
 - **Test databases:** Use Docker containers or test instances

@@ -31,6 +31,21 @@ export interface DatasetMetadataColumns {
   n_channels: number | null;
   /** Scalp montage class: 10-20|10-10|10-05|biosemi|egi-geodesic|other (#854/#858). */
   electrode_system: string | null;
+  /** `SamplingFrequency` (Hz) from the preferred `*_eeg.json` sidecar (epic
+   *  #1144 Phase 2b, #1153). Serves `signal_defaults.sampling_frequency`.
+   *  One exemplar sidecar's declared value, not a verified per-dataset
+   *  aggregate -- see migration 0072's caveat. */
+  sampling_frequency: number | null;
+  /** `PowerLineFrequency` (Hz), coerced to exactly 50 or 60 (#1153). Serves
+   *  `signal_defaults.power_line_frequency`. */
+  power_line_frequency: number | null;
+  /** `EEGReference` from the preferred sidecar (#1153). Serves
+   *  `signal_defaults.reference`; named `eeg_reference` to avoid the SQL
+   *  keyword. */
+  eeg_reference: string | null;
+  /** `EEGPlacementScheme` from the preferred sidecar (#1153). Serves
+   *  `signal_defaults.placement_scheme`. */
+  placement_scheme: string | null;
   /** HED presence as 0/1, or null when not classified yet (#869). */
   has_hed: number | null;
   /** Declared `HEDVersion` (array form comma-joined), or null (#869). */
@@ -79,6 +94,28 @@ export interface MetadataColumnInputs {
    * Scalp montage class from `getBidsTreeStats` (#858). Omit when undetermined.
    */
   electrodeSystem?: string;
+  /**
+   * `SamplingFrequency` (Hz) from `getBidsTreeStats`'s root-preferred `*_eeg.json`
+   * sidecar (#1153). Omit when no sidecar was sampled or the key was
+   * absent/invalid. One exemplar sidecar's declared value, not a verified
+   * per-dataset aggregate -- see migration 0072's caveat.
+   */
+  samplingFrequency?: number;
+  /**
+   * `PowerLineFrequency` (Hz) from `getBidsTreeStats`, already coerced to
+   * exactly 50 or 60 (#1153). Omit when absent or out-of-enum.
+   */
+  powerLineFrequency?: number;
+  /**
+   * `EEGReference` from `getBidsTreeStats`'s preferred sidecar (#1153). Omit
+   * when absent, non-string, or the BIDS "n/a" placeholder.
+   */
+  eegReference?: string;
+  /**
+   * `EEGPlacementScheme` from `getBidsTreeStats`'s preferred sidecar (#1153).
+   * Omit when absent or the "n/a" placeholder.
+   */
+  placementScheme?: string;
   /**
    * HED presence from `getBidsTreeStats` probeHed (#869): true/false when the ref
    * was probed, omit when the probe couldn't run (-> column stays NULL).
@@ -201,6 +238,10 @@ export function computeDatasetMetadataColumns(input: MetadataColumnInputs): Data
     tasks: tasksArr.length ? tasksArr.join(",") : null,
     n_channels: input.nChannels ?? null,
     electrode_system: input.electrodeSystem ?? null,
+    sampling_frequency: input.samplingFrequency ?? null,
+    power_line_frequency: input.powerLineFrequency ?? null,
+    eeg_reference: input.eegReference ?? null,
+    placement_scheme: input.placementScheme ?? null,
     // Tri-state via `== null` (intentionally catches undefined AND null): probe
     // didn't run -> null = not classified yet; false -> 0 = checked, no HED;
     // true -> 1 = checked, has HED.
@@ -241,16 +282,19 @@ export async function writeDatasetMetadataColumns(
            age_min = COALESCE(?, age_min),
            age_max = COALESCE(?, age_max),
            file_size = COALESCE(?, file_size),
-           file_size_formatted = CASE WHEN ? IS NOT NULL THEN ? ELSE file_size_formatted END,
            total_files = COALESCE(?, total_files),
            tasks = COALESCE(?, tasks),
            n_channels = COALESCE(?, n_channels),
            electrode_system = COALESCE(?, electrode_system),
+           sampling_frequency = COALESCE(?, sampling_frequency),
+           power_line_frequency = COALESCE(?, power_line_frequency),
+           eeg_reference = COALESCE(?, eeg_reference),
+           placement_scheme = COALESCE(?, placement_scheme),
            has_hed = COALESCE(?, has_hed),
            hed_version = COALESCE(?, hed_version),
            bytes_present = COALESCE(?, bytes_present),
            data_complete = COALESCE(?, data_complete),
-           metadata_updated_at = datetime('now'),
+           sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.metadata_updated_at', datetime('now')),
            updated_at = datetime('now')
        WHERE dataset_id = ?`,
     )
@@ -260,15 +304,14 @@ export async function writeDatasetMetadataColumns(
       cols.age_min,
       cols.age_max,
       cols.file_size,
-      // file_size_formatted moves in lockstep with file_size (#1092 review):
-      // rewritten whenever file_size is written (formatFileSize(0) is null,
-      // matching "nothing to display"), untouched when file_size is null.
-      cols.file_size,
-      formatFileSize(cols.file_size),
       cols.total_files,
       cols.tasks,
       cols.n_channels,
       cols.electrode_system,
+      cols.sampling_frequency,
+      cols.power_line_frequency,
+      cols.eeg_reference,
+      cols.placement_scheme,
       cols.has_hed,
       cols.hed_version,
       cols.bytes_present,
@@ -448,7 +491,7 @@ export async function stampDatasetIntegrity(
       .prepare(
         `UPDATE datasets
          SET file_size = ?, total_files = ?, data_complete = ?, bytes_present = ?,
-             data_checked_at = datetime('now')
+             sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.data_checked_at', datetime('now'))
          WHERE dataset_id = ?`,
       )
       .bind(
@@ -463,7 +506,9 @@ export async function stampDatasetIntegrity(
   }
 
   await db
-    .prepare("UPDATE datasets SET data_checked_at = datetime('now') WHERE dataset_id = ?")
+    .prepare(
+      "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.data_checked_at', datetime('now')) WHERE dataset_id = ?",
+    )
     .bind(datasetId)
     .run();
   return "unknown";
@@ -547,8 +592,10 @@ export async function writeDatasetCatalogFields(
 
 /**
  * Format a byte count as a short human-readable string (`"23.2 GB"`,
- * `"4.31 GB"`). Mirrors the format the legacy nemar.org catalog uses for
- * `file_size_formatted` so the column stays consistent.
+ * `"4.31 GB"`). Binary units (1024) — distinct from the decimal
+ * `formatBytes` in services/s3.ts. This is the canonical formatter for the
+ * served `file_size_formatted` field, which is derived at read time from
+ * `file_size` (#1182; the stored column is gone).
  */
 export function formatFileSize(bytes: number | null | undefined): string | null {
   if (bytes == null || !Number.isFinite(bytes) || bytes <= 0) return null;

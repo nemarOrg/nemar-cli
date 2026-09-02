@@ -2,7 +2,7 @@
  * DOI provider dispatch layer tests
  *
  * Tests ORCID validation, DOI dispatch routing, ORCID auto-injection,
- * provider parsing, and DataCite version relation enrichment.
+ * and DataCite version relation enrichment.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -19,7 +19,6 @@ import {
   buildVersionIdentifier,
   createConceptDoi,
   createEzidVersionDoi,
-  parseDoiProvider,
 } from "../backend/src/services/doi";
 // The CLI-side llm-enrich fork was deleted (dead code since enrichment moved
 // to the central workflow); these tests pin the backend implementation.
@@ -50,36 +49,6 @@ describe("ORCID validation", () => {
 
   test("rejects too short", () => {
     expect(orcidRegex.test("0000-0002-1825-009")).toBe(false);
-  });
-});
-
-describe("parseDoiProvider", () => {
-  test("returns 'ezid' for 'ezid' input", () => {
-    expect(parseDoiProvider("ezid")).toBe("ezid");
-  });
-
-  test("returns 'zenodo' for 'zenodo' input", () => {
-    expect(parseDoiProvider("zenodo")).toBe("zenodo");
-  });
-
-  test("returns fallback for null", () => {
-    expect(parseDoiProvider(null)).toBe("ezid");
-  });
-
-  test("returns fallback for undefined", () => {
-    expect(parseDoiProvider(undefined)).toBe("ezid");
-  });
-
-  test("throws for invalid non-null string", () => {
-    expect(() => parseDoiProvider("datacite")).toThrow('Unknown doi_provider "datacite"');
-  });
-
-  test("uses custom fallback when provided", () => {
-    expect(parseDoiProvider(null, "zenodo")).toBe("zenodo");
-  });
-
-  test("throws for empty string", () => {
-    expect(() => parseDoiProvider("")).toThrow('Unknown doi_provider ""');
   });
 });
 

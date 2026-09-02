@@ -46,6 +46,10 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // Catalog / search / discovery
   "GET /": 2,
   "GET /search": 2,
+  // Epic #1144 phase 5a (#1170): no middleware -- the response never depends
+  // on auth (see catalog.ts's GET /facets doc comment), so there is only one
+  // handler in the chain, unlike every other GET here.
+  "GET /facets": 1,
   "GET /resolve/:sourceId": 2,
   "GET /:id": 2,
 
@@ -87,6 +91,7 @@ const EXPECTED_CHAINS: Record<string, string[]> = {
   "POST /:id/finalize": ["auth", "handler"],
   "GET /": ["optionalAuth", "handler"],
   "GET /search": ["optionalAuth", "handler"],
+  "GET /facets": ["handler"],
   "GET /resolve/:sourceId": ["optionalAuth", "handler"],
   "GET /:id": ["optionalAuth", "handler"],
   "POST /:id/request-access": ["auth", "handler"],
@@ -125,7 +130,7 @@ describe("datasets route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(datasetRoutes.routes.length).toBe(57);
+    expect(datasetRoutes.routes.length).toBe(58);
   });
 
   test("middleware identity per chain slot is pinned", () => {
@@ -141,6 +146,16 @@ describe("datasets route inventory", () => {
     const gets = datasetRoutes.routes.filter((r) => r.method === "GET").map((r) => r.path);
     expect(gets.indexOf("/search")).toBeGreaterThanOrEqual(0);
     expect(gets.indexOf("/search")).toBeLessThan(gets.indexOf("/:id"));
+  });
+
+  // Epic #1144 phase 5a (#1170), D1: the SECOND instance of the same
+  // static-vs-param overlap trap as /search above -- /facets is also one
+  // path segment, so it collides with /:id under TrieRouter's first-match
+  // semantics and must stay registered first.
+  test("GET /facets registers before GET /:id (TrieRouter first-match)", () => {
+    const gets = datasetRoutes.routes.filter((r) => r.method === "GET").map((r) => r.path);
+    expect(gets.indexOf("/facets")).toBeGreaterThanOrEqual(0);
+    expect(gets.indexOf("/facets")).toBeLessThan(gets.indexOf("/:id"));
   });
 
   // The datasets router deliberately has NO router-level middleware — auth is

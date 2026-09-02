@@ -11,6 +11,7 @@
  */
 
 import type { Bindings } from "../types/bindings.js";
+import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { createOrUpdateFile } from "./github/contents.js";
 import {
@@ -272,7 +273,7 @@ export async function writeAvailabilityReport(
  *  catalog ds* rows have none), not sandbox, not yet stamped. */
 const AVAILABILITY_REPORT_SWEEP_BASE_WHERE = `github_repo IS NOT NULL
      AND (is_sandbox = 0 OR is_sandbox IS NULL)
-     AND availability_report_at IS NULL`;
+     AND json_extract(sweep_stamps, '$.availability_report_at') IS NULL`;
 
 /** Appended to the base predicate when `?missing-only=1` narrows candidacy to
  *  datasets already known incomplete (data_complete = 0, migration 0059). */
@@ -294,6 +295,17 @@ export function availabilityReportSweepCandidateQuery(missingOnly: boolean): str
      ORDER BY dataset_id
      LIMIT ?`;
 }
+
+/**
+ * The stamp write on a successful report commit. Exported so a test can
+ * exercise the exact SQL text (the write is only reachable end-to-end after
+ * a real GitHub commit, which tests cannot perform): the COALESCE is
+ * load-bearing -- json_set on a NULL sweep_stamps column returns NULL and
+ * would silently discard the stamp (#1183), leaving the row a permanent
+ * re-sweep candidate.
+ */
+export const AVAILABILITY_REPORT_STAMP_SQL =
+  "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.availability_report_at', datetime('now')) WHERE dataset_id = ?";
 
 /** `remaining` COUNT for the sweep -- identical scoping to the candidate query. */
 export function availabilityReportSweepRemainingQuery(missingOnly: boolean): string {
@@ -359,11 +371,7 @@ export async function runAvailabilityReportSweep(
   for (const { dataset_id } of candidates) {
     try {
       await writeAvailabilityReport(env, dataset_id);
-      await env.DB.prepare(
-        "UPDATE datasets SET availability_report_at = datetime('now') WHERE dataset_id = ?",
-      )
-        .bind(dataset_id)
-        .run();
+      await env.DB.prepare(AVAILABILITY_REPORT_STAMP_SQL).bind(dataset_id).run();
       written++;
     } catch (err) {
       errors.push({ dataset_id, error: errorMessage(err) });
@@ -375,4 +383,36 @@ export async function runAvailabilityReportSweep(
     .catch(() => null);
 
   return { processed: candidates.length, written, errors, remaining: remainingRow?.n ?? null };
+}
+
+/**
+ * Cron-only wrapper (issue #1166, Option 2). `runAvailabilityReportSweep`
+ * itself stays UNGUARDED on purpose: `POST
+ * /admin/datasets/availability-report-sweep` calls it directly and is not
+ * environment-gated, so an operator can still drive a backfill outside
+ * production. Note the exemplar fleet is NOT what that reaches:
+ * AVAILABILITY_REPORT_SWEEP_BASE_WHERE filters `is_sandbox` without the
+ * `is_exemplar = 1` carve-out (issue #1168), and exemplars are inserted
+ * `is_sandbox = 1`, so on staging the only candidate is `nm099999`. Only
+ * the recurring daily-cron caller needs the production fence, so the guard
+ * lives here instead of inside the sweep -- guarding the sweep itself would
+ * quietly take the admin route down outside production too.
+ *
+ * Returns `null` when skipped so the `scheduled()` call site can tell "ran
+ * with nothing to do" (a real result with `processed: 0`) apart from "did not
+ * run at all". The call site's `if (!r) return` is what acts on that. Without
+ * it the summary line would not be "fabricated" -- its own
+ * `processed > 0 || remaining > 0` gate already suppresses an all-zero
+ * result -- the failure is that reading `r.processed` off `null` throws, and
+ * the chained `.catch()` then reports a skipped run as a crashed one
+ * ("sweep failed: TypeError"). #1167 review, finding 2.
+ */
+export async function runAvailabilityReportSweepCron(
+  env: Bindings,
+): Promise<AvailabilityReportSweepResult | null> {
+  if (isNonProductionEnv(env)) {
+    console.log("[availability-report-sweep] skipped (non-production)");
+    return null;
+  }
+  return runAvailabilityReportSweep(env);
 }

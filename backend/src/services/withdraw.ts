@@ -50,7 +50,7 @@ import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { resolveEzidAuth } from "./doi.js";
 import { resolveDatasetLandingBase } from "./environment.js";
-import { ensureDoiScheme, makePublic, makeUnavailable } from "./ezid.js";
+import { conceptEzidIdentifier, ensureDoiScheme, makePublic, makeUnavailable } from "./ezid.js";
 import { applyDatasetVisibility } from "./visibility.js";
 import type { VisibilityTransitionResult } from "./visibility.js";
 
@@ -115,9 +115,8 @@ interface TransitionOptions {
 
 interface WithdrawCandidate {
   dataset_id: string;
-  ezid_identifier: string | null;
+  concept_doi: string | null;
   ezid_status: string | null;
-  doi_provider: string | null;
   visibility: string;
   is_sandbox: number | null;
   withdrawn_at: string | null;
@@ -191,7 +190,7 @@ async function loadDatasetForTransition(
 ): Promise<WithdrawCandidate | null> {
   return db
     .prepare(
-      `SELECT dataset_id, ezid_identifier, ezid_status, doi_provider, visibility, is_sandbox, withdrawn_at
+      `SELECT dataset_id, concept_doi, ezid_status, visibility, is_sandbox, withdrawn_at
        FROM datasets WHERE dataset_id = ?`,
     )
     .bind(datasetId)
@@ -354,7 +353,9 @@ export async function withdrawDataset(
   if (!dataset) {
     return { dataset_id: datasetId, dry_run: dryRun, skipped: "Dataset not found" };
   }
-  if (dataset.doi_provider !== "ezid" || !dataset.ezid_identifier) {
+  // EZID is the sole provider (ADR 0007), so "has a concept DOI" IS "has an
+  // EZID concept DOI"; the identifier is derived, not stored (#1182).
+  if (!dataset.concept_doi) {
     return {
       dataset_id: datasetId,
       dry_run: dryRun,
@@ -362,6 +363,7 @@ export async function withdrawDataset(
         "Dataset has no EZID concept DOI; withdrawal is only supported for EZID-managed DOIs",
     };
   }
+  const conceptIdentifier = conceptEzidIdentifier(dataset.concept_doi);
 
   const versions = await loadVersionDois(db, datasetId);
   const action = decideWithdrawAction({
@@ -388,7 +390,7 @@ export async function withdrawDataset(
   }
 
   const resumed = action === "resume";
-  const plannedDois = buildPlannedDois(dataset.ezid_identifier, versions, "unavailable");
+  const plannedDois = buildPlannedDois(conceptIdentifier, versions, "unavailable");
 
   if (dryRun) {
     return {
@@ -423,17 +425,17 @@ export async function withdrawDataset(
 
   let conceptOk = false;
   try {
-    await makeUnavailable(auth, ensureDoiScheme(dataset.ezid_identifier), reason);
+    await makeUnavailable(auth, conceptIdentifier, reason);
     conceptOk = true;
     dois.push({
-      doi: dataset.ezid_identifier,
+      doi: conceptIdentifier,
       kind: "concept",
       action: "unavailable",
       status: "ok",
     });
   } catch (err) {
     dois.push({
-      doi: dataset.ezid_identifier,
+      doi: conceptIdentifier,
       kind: "concept",
       action: "unavailable",
       status: "failed",
@@ -444,7 +446,7 @@ export async function withdrawDataset(
   for (const v of versions) {
     try {
       // dataset_versions.doi is stored WITHOUT the "doi:" scheme prefix
-      // (unlike datasets.ezid_identifier); EZID rejects an unprefixed
+      // (unlike the derived concept identifier); EZID rejects an unprefixed
       // identifier as "invalid identifier" (bug #984).
       await makeUnavailable(auth, ensureDoiScheme(v.doi), reason);
       await markVersionEzidStatus(db, datasetId, v.version, "unavailable");
@@ -519,13 +521,15 @@ export async function restoreDataset(
   if (!dataset) {
     return { dataset_id: datasetId, dry_run: dryRun, skipped: "Dataset not found" };
   }
-  if (dataset.doi_provider !== "ezid" || !dataset.ezid_identifier) {
+  // Same derived-identifier gate as withdrawDataset above (#1182, ADR 0007).
+  if (!dataset.concept_doi) {
     return {
       dataset_id: datasetId,
       dry_run: dryRun,
       skipped: "Dataset has no EZID concept DOI; restore is only supported for EZID-managed DOIs",
     };
   }
+  const conceptIdentifier = conceptEzidIdentifier(dataset.concept_doi);
   if (!dataset.withdrawn_at) {
     return {
       dataset_id: datasetId,
@@ -535,7 +539,7 @@ export async function restoreDataset(
   }
 
   const versions = await loadVersionDois(db, datasetId);
-  const plannedDois = buildPlannedDois(dataset.ezid_identifier, versions, "public");
+  const plannedDois = buildPlannedDois(conceptIdentifier, versions, "public");
 
   if (dryRun) {
     return {
@@ -566,16 +570,12 @@ export async function restoreDataset(
 
   let conceptOk = false;
   try {
-    await makePublic(
-      auth,
-      ensureDoiScheme(dataset.ezid_identifier),
-      datasetLandingUrl(datasetId, landingBase),
-    );
+    await makePublic(auth, conceptIdentifier, datasetLandingUrl(datasetId, landingBase));
     conceptOk = true;
-    dois.push({ doi: dataset.ezid_identifier, kind: "concept", action: "public", status: "ok" });
+    dois.push({ doi: conceptIdentifier, kind: "concept", action: "public", status: "ok" });
   } catch (err) {
     dois.push({
-      doi: dataset.ezid_identifier,
+      doi: conceptIdentifier,
       kind: "concept",
       action: "public",
       status: "failed",

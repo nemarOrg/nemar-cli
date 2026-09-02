@@ -32,6 +32,7 @@ import { resolveDatasetLandingBase } from "../../services/environment";
 import { isExemplarPublishAllowed } from "../../services/exemplar";
 import {
   type EzidAuth,
+  conceptEzidIdentifier,
   extractDoi,
   updateIdentifier as ezidUpdateIdentifier,
 } from "../../services/ezid";
@@ -107,9 +108,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         github_repo: string | null;
         concept_doi: string | null;
         zenodo_concept_id: string | null;
-        ezid_identifier: string | null;
         ezid_status: string | null;
-        doi_provider: string | null;
         owner_username: string;
         owner_orcid: string | null;
         is_sandbox: number | null;
@@ -119,6 +118,21 @@ export function registerDoiRoutes(admin: AdminRouter): void {
 
     if (!dataset) {
       return c.json({ error: "Dataset not found" }, 404);
+    }
+
+    // ADR 0007: EZID is the sole DOI provider. The datasets table no longer
+    // carries a doi_provider column (#1182), so a zenodo mint could not be
+    // recorded correctly even if it succeeded — reject it up front. The
+    // retired zenodo mint branch itself was removed in #1186.
+    if (body.provider !== "ezid") {
+      return c.json(
+        {
+          error: "Unsupported DOI provider",
+          message: "EZID is the sole DOI provider (ADR 0007); provider must be 'ezid'.",
+          provider: body.provider,
+        },
+        400,
+      );
     }
 
     // Block DOI creation for sandbox datasets, except staging exemplars (epic #923).
@@ -295,39 +309,23 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         },
       );
 
-      // Update dataset with DOI info
-      if (provider === "ezid") {
-        await db
-          .prepare(
-            `
+      // Update dataset with DOI info. The EZID identifier is derived from
+      // concept_doi at read time (conceptEzidIdentifier, #1182), not stored.
+      // provider is always "ezid" here (the guard above 400s anything else);
+      // the retired zenodo write branch was removed in #1186.
+      await db
+        .prepare(
+          `
         UPDATE datasets
         SET concept_doi = ?,
-            ezid_identifier = ?,
             ezid_status = ?,
-            doi_provider = 'ezid',
             is_sandbox = ?,
             updated_at = datetime('now')
         WHERE dataset_id = ?
       `,
-          )
-          .bind(result.doi, result.providerRecordId, result.status, body.sandbox ? 1 : 0, datasetId)
-          .run();
-      } else {
-        await db
-          .prepare(
-            `
-        UPDATE datasets
-        SET concept_doi = ?,
-            zenodo_concept_id = ?,
-            doi_provider = 'zenodo',
-            is_sandbox = ?,
-            updated_at = datetime('now')
-        WHERE dataset_id = ?
-      `,
-          )
-          .bind(result.doi, result.providerRecordId, body.sandbox ? 1 : 0, datasetId)
-          .run();
-      }
+        )
+        .bind(result.doi, result.status, body.sandbox ? 1 : 0, datasetId)
+        .run();
 
       // Audit log
       await auditLogStatement(db, {
@@ -356,16 +354,8 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         response.metadata_warning = bidsMetadataWarning;
       }
 
-      if (provider === "ezid") {
-        response.ezid_identifier = result.providerRecordId;
-        response.doi_url = `https://doi.org/${result.doi}`;
-      } else {
-        const zenodoId = Number.parseInt(result.providerRecordId);
-        if (!Number.isNaN(zenodoId)) {
-          response.zenodo_id = zenodoId;
-          response.zenodo_url = formatRecordUrl(zenodoId, body.sandbox);
-        }
-      }
+      response.ezid_identifier = result.providerRecordId;
+      response.doi_url = `https://doi.org/${result.doi}`;
 
       return c.json(response);
     } catch (error) {
@@ -419,7 +409,6 @@ export function registerDoiRoutes(admin: AdminRouter): void {
           description: string | null;
           concept_doi: string | null;
           zenodo_concept_id: string | null;
-          zenodo_latest_version_id: string | null;
           owner_username: string;
           is_sandbox: number | null;
           is_exemplar: number | null;
@@ -518,18 +507,18 @@ export function registerDoiRoutes(admin: AdminRouter): void {
 
         const versionDoi = publishedDeposition.doi || publishedDeposition.metadata?.doi;
 
-        // Update dataset with version DOI
+        // Update dataset with version DOI (zenodo_latest_version_id was
+        // dropped in #1182; the deposition id still lands in the audit log).
         await db
           .prepare(
             `
       UPDATE datasets
       SET latest_version_doi = ?,
-          zenodo_latest_version_id = ?,
           updated_at = datetime('now')
       WHERE dataset_id = ?
     `,
           )
-          .bind(versionDoi || null, publishedDeposition.id.toString(), datasetId)
+          .bind(versionDoi || null, datasetId)
           .run();
 
         // Audit log
@@ -578,8 +567,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
       .prepare(
         `
     SELECT dataset_id, name, concept_doi, latest_version_doi,
-           zenodo_concept_id, zenodo_latest_version_id,
-           ezid_identifier, ezid_status, doi_provider
+           zenodo_concept_id, ezid_status
     FROM datasets
     WHERE dataset_id = ?
   `,
@@ -591,29 +579,27 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         concept_doi: string | null;
         latest_version_doi: string | null;
         zenodo_concept_id: string | null;
-        zenodo_latest_version_id: string | null;
-        ezid_identifier: string | null;
         ezid_status: string | null;
-        doi_provider: string | null;
       }>();
 
     if (!dataset) {
       return c.json({ error: "Dataset not found" }, 404);
     }
 
+    // doi_provider and ezid_identifier are no longer stored (#1182):
+    // EZID is the sole provider (ADR 0007) and the identifier derives from
+    // concept_doi. zenodo_latest_version_url is gone with its column;
+    // zenodo_concept_id survives as the doomsday backup reference.
     return c.json({
       dataset_id: dataset.dataset_id,
       name: dataset.name,
       concept_doi: dataset.concept_doi,
       latest_version_doi: dataset.latest_version_doi,
-      doi_provider: dataset.doi_provider || "zenodo",
+      doi_provider: "ezid",
       zenodo_concept_url: dataset.zenodo_concept_id
         ? formatRecordUrl(Number.parseInt(dataset.zenodo_concept_id))
         : null,
-      zenodo_latest_version_url: dataset.zenodo_latest_version_id
-        ? formatRecordUrl(Number.parseInt(dataset.zenodo_latest_version_id))
-        : null,
-      ezid_identifier: dataset.ezid_identifier,
+      ezid_identifier: dataset.concept_doi ? conceptEzidIdentifier(dataset.concept_doi) : null,
       ezid_status: dataset.ezid_status,
       doi_url: dataset.concept_doi ? `https://doi.org/${dataset.concept_doi}` : null,
     });
@@ -640,8 +626,8 @@ export function registerDoiRoutes(admin: AdminRouter): void {
     const dataset = await db
       .prepare(
         `
-      SELECT d.dataset_id, d.concept_doi, d.ezid_identifier, d.ezid_status,
-             d.doi_provider, d.github_repo, d.name, d.is_sandbox,
+      SELECT d.dataset_id, d.concept_doi, d.ezid_status,
+             d.github_repo, d.name, d.is_sandbox,
              u.username as owner_username, u.orcid as owner_orcid
       FROM datasets d
       JOIN users u ON d.owner_user_id = u.id
@@ -652,9 +638,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
       .first<{
         dataset_id: string;
         concept_doi: string | null;
-        ezid_identifier: string | null;
         ezid_status: string | null;
-        doi_provider: string | null;
         github_repo: string | null;
         name: string;
         is_sandbox: number | null;
@@ -666,9 +650,12 @@ export function registerDoiRoutes(admin: AdminRouter): void {
       return c.json({ error: "Dataset not found" }, 404);
     }
 
-    if (dataset.doi_provider !== "ezid" || !dataset.ezid_identifier) {
+    // EZID is the sole provider (ADR 0007); the identifier derives from
+    // concept_doi (#1182), so "has a concept DOI" is the whole gate.
+    if (!dataset.concept_doi) {
       return c.json({ error: "DOI update is only supported for EZID-managed DOIs" }, 400);
     }
+    const conceptIdentifier = conceptEzidIdentifier(dataset.concept_doi);
 
     const isSandbox = !!dataset.is_sandbox;
     let auth: EzidAuth;
@@ -728,7 +715,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
           );
         }
         const bidsDesc = parsed as Record<string, unknown>;
-        const doi = extractDoi(dataset.ezid_identifier);
+        const doi = extractDoi(conceptIdentifier);
         let enrichment = buildOrcidEnrichment(
           bidsDesc,
           dataset.owner_username,
@@ -785,7 +772,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         }
       }
 
-      const updated = await ezidUpdateIdentifier(auth, dataset.ezid_identifier, updateOptions);
+      const updated = await ezidUpdateIdentifier(auth, conceptIdentifier, updateOptions);
 
       // Update DB
       await db
@@ -808,7 +795,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         const pat = await getDatasetsToken(c.env);
         for (const ver of versions.results || []) {
           try {
-            const versionIdentifier = `${dataset.ezid_identifier}.V${ver.version.toUpperCase()}`;
+            const versionIdentifier = `${conceptIdentifier}.V${ver.version.toUpperCase()}`;
             const repoName = dataset.github_repo?.split("/")[1];
             if (!repoName) {
               warnings.push(`Version ${ver.version}: skipped DOI update (no valid github_repo)`);
@@ -860,9 +847,9 @@ export function registerDoiRoutes(admin: AdminRouter): void {
 
       return c.json({
         message: "DOI updated successfully",
-        ezid_identifier: dataset.ezid_identifier,
+        ezid_identifier: conceptIdentifier,
         status: updated.status,
-        doi_url: `https://doi.org/${extractDoi(dataset.ezid_identifier)}`,
+        doi_url: `https://doi.org/${extractDoi(conceptIdentifier)}`,
         metadata_refreshed: metadataRefreshed,
         version_dois_updated: versionDoiUpdated,
         ...(warnings.length > 0 ? { warnings } : {}),
@@ -1034,15 +1021,11 @@ export function registerDoiRoutes(admin: AdminRouter): void {
     const db = c.env.DB;
 
     const dataset = await db
-      .prepare(
-        "SELECT dataset_id, github_repo, ezid_identifier, doi_provider, is_sandbox FROM datasets WHERE dataset_id = ?",
-      )
+      .prepare("SELECT dataset_id, github_repo, is_sandbox FROM datasets WHERE dataset_id = ?")
       .bind(datasetId)
       .first<{
         dataset_id: string;
         github_repo: string | null;
-        ezid_identifier: string | null;
-        doi_provider: string | null;
         is_sandbox: number | null;
       }>();
 
@@ -1084,7 +1067,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
 
       await db
         .prepare(
-          "UPDATE datasets SET enrichment_json = ?, enrichment_updated_at = datetime('now'), updated_at = datetime('now') WHERE dataset_id = ?",
+          "UPDATE datasets SET enrichment_json = ?, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.enrichment_updated_at', datetime('now')), updated_at = datetime('now') WHERE dataset_id = ?",
         )
         .bind(metadataContent, datasetId)
         .run();

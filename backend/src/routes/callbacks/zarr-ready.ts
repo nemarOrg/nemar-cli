@@ -69,6 +69,16 @@ interface ZarrReadyBody {
  * `zarr_failed_at`, so a clean run clears the failure detail and the dashboard
  * can sort/filter recent failures. Defensive against missing/garbage fields so
  * the always-200 callback contract holds.
+ *
+ * `dataFailuresJson` is a bounded summary -- an entry count plus a pointer --
+ * never the entries themselves (#1189). This column used to store the full
+ * sanitized `data_failures` array (largest production row: 877 entries,
+ * 178 KB), which pushed `datasets` rows past D1's ~100 KB statement limit in
+ * the single-INSERT-per-row backup and made it unrestorable (#1188). The
+ * per-entry detail (path/code/reason) is owned by the published Zarr index's
+ * `failures` list at `<dataset>/zarr/index.json` in the serving bucket
+ * (scripts/zarr/generate_zarr.py writes it; purge_non_raw_stores.py rewrites
+ * it), which is what `detail_ref` names.
  */
 export function zarrFailureColumns(body: {
   errors?: number;
@@ -94,23 +104,18 @@ export function zarrFailureColumns(body: {
   // Typed data failures are a SUBSET of total errors; clamp so a converter bug
   // (or a missing failure_count) can never render "3 data failures of 1 error".
   const failureCount = Math.min(rawFailureCount, errors);
-  // Store only the known fields, length-capped: the values are display-only on
-  // the dashboard and `datasets` is heavily queried, so a malformed/huge
-  // data_failures item must not bloat the row's TEXT column.
-  const sanitized = dataFailures.map((item) => {
-    if (typeof item !== "object" || item === null) return {};
-    const i = item as Record<string, unknown>;
-    return {
-      ...(typeof i.path === "string" ? { path: i.path.slice(0, 512) } : {}),
-      ...(typeof i.code === "string" ? { code: i.code.slice(0, 64) } : {}),
-      ...(typeof i.reason === "string" ? { reason: i.reason.slice(0, 256) } : {}),
-    };
-  });
   return {
     errors,
     failureCount,
     deterministic: body.deterministic === true ? 1 : 0,
-    dataFailuresJson: sanitized.length > 0 ? JSON.stringify(sanitized) : null,
+    // `count` is the reported entry count of the index's failures list,
+    // deliberately unclamped -- the clamped display count is the separate
+    // zarr_failure_count column (failureCount above). Row size is now
+    // independent of how many recordings failed.
+    dataFailuresJson:
+      dataFailures.length > 0
+        ? JSON.stringify({ count: dataFailures.length, detail_ref: "zarr/index.json" })
+        : null,
     hadErrors: errors > 0,
   };
 }
@@ -173,6 +178,13 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
           .run();
         changed = result.meta.changes ?? 0;
       } else if (status === "ready") {
+        // recording_stats_at -> NULL (epic #1144 Phase 2, issue #1146): a
+        // reconverted index may carry different duration/count/channel
+        // facts, so this dataset must be re-picked by the next
+        // recording-stats-sweep. Nulled on THIS branch only -- the 'failed'
+        // branch below leaves it (and every stat column) untouched, because
+        // a bad rebuild must never erase good numbers already computed from
+        // the last good index.
         const result = await c.env.DB.prepare(
           `UPDATE datasets
            SET zarr_status = 'ready',
@@ -185,7 +197,8 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
                zarr_deterministic = ?,
                zarr_data_failures = ?,
                zarr_pool_breaks = ?,
-               zarr_failed_at = CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END
+               zarr_failed_at = CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END,
+               sweep_stamps = json_remove(sweep_stamps, '$.recording_stats_at')
            WHERE dataset_id = ?`,
         )
           .bind(

@@ -88,8 +88,9 @@ export const ARCHIVE_RETRY_SWEEP_QUERY = `SELECT dataset_id, latest_version_doi,
   WHERE archive_status = 'failed'
     AND latest_version_doi IS NOT NULL
     AND archive_retry_count < ?
-    AND (archive_checked_at IS NULL OR archive_checked_at < datetime('now', '-6 hours'))
-  ORDER BY archive_checked_at ASC
+    AND (json_extract(sweep_stamps, '$.archive_checked_at') IS NULL
+         OR json_extract(sweep_stamps, '$.archive_checked_at') < datetime('now', '-6 hours'))
+  ORDER BY json_extract(sweep_stamps, '$.archive_checked_at') ASC
   LIMIT 20`;
 
 interface SweepRow {
@@ -167,7 +168,7 @@ export async function archiveRetrySweep(env: Bindings): Promise<void> {
       await env.DB.prepare(
         `UPDATE datasets
             SET archive_retry_count = archive_retry_count + 1,
-                archive_checked_at = datetime('now')
+                sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now'))
           WHERE dataset_id = ?`,
       )
         .bind(row.dataset_id)
