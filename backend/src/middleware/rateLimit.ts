@@ -23,6 +23,7 @@
 
 import type { Context, Next } from "hono";
 import { hashApiKey } from "../services/token";
+import { hashIp } from "../services/web-session";
 import type { Bindings, Variables } from "../types/bindings";
 
 // Rate limit configuration
@@ -334,7 +335,9 @@ export async function rateLimiter(
         // Hashed, not raw: this is a log line, not the enforcement key
         // itself (which stays keyed on the raw IP, same as before) --
         // avoids putting a raw client IP into structured logs.
-        const ipHash = await hashApiKey(rawKey);
+        // Same helper web-session.ts uses for privacy-preserving IP storage, so
+        // every IP hash in the codebase is produced by one named function.
+        const ipHash = await hashIp(rawKey);
         console.warn("[rate-limit] observe-only bucket would have tripped", {
           ipHash,
           path,
