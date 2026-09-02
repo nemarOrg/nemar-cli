@@ -1197,6 +1197,39 @@ curl -s https://zarr-test.nemar.org/xx099905/zarr/index.json | python3 -m json.t
 curl -s https://zarr-test.nemar.org/xx099905/zarr/manifest.json | python3 -m json.tool | head -20
 ```
 
+### What an MCP broker reads (ADR 0025)
+
+Index v3 is meant to make a serving recipe computable from `index.json` plus ONE
+array-metadata fetch, with no probing -- the broker is stateless, so anything it
+cannot read from the index it must discover by request, and discovery-by-404 is
+what #1178 item 2 removed. The index therefore carries, per group,
+`n_view_levels` / `view_chunk_columns` / `chunk_samples` / `shard_samples` /
+`source_rate_hz`, and at the top level a `layout` object of `const` templates:
+
+```json
+"layout": {
+  "level0": "<zarr>/<group>/0",
+  "view": "<zarr>/<group>/view/<L>",
+  "view_levels": "1..n_view_levels from the group attrs",
+  "scale_offset": "level-0 array attrs scale[] and offset[]; physical = digital * scale + offset"
+}
+```
+
+Paths are relative to `contract_base`. `<zarr>` is a store's `zarr`, `<group>` a
+`groups[].name`, `<L>` a view level in `1..n_view_levels`. The templates are
+`const` in the schema, so a client may hardcode them once it has checked
+`format_version` -- and changing the layout becomes a schema change rather than a
+silent one. Dataset-level `doi` / `license` / `citation` / `hed_version` are
+published at the top level too (already fetched once per run for the store
+attrs), so a citation tool needs this document and nothing else.
+
+```bash
+# The whole recipe, from one fetch:
+curl -s https://zarr-test.nemar.org/xx099905/zarr/index.json |
+  python3 -c 'import json,sys; d=json.load(sys.stdin); s=d["stores"][0]; g=s["groups"][0]; \
+    print(d["contract_base"] + d["layout"]["level0"].replace("<zarr>", s["zarr"]).replace("<group>", g["name"]))'
+```
+
 ### The production bump, at release
 
 ```bash

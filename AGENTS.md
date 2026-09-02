@@ -398,6 +398,10 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   as `pending_count` and `not_attempted_count` on the callback. Per-store `source_key` moved OUT of the index into a sibling
   `manifest.json` (nothing on the website read it; it was 18 percent of
   nm000281's 12.8 MB index).
+  The index also publishes dataset-level `doi` / `license` / `citation` /
+  `hed_version` and a `layout` object of `const` path templates, so an MCP recipe
+  (ADR 0025) is computable from `index.json` plus one array-metadata fetch with no
+  probing.
   Stores also carry a structured `nemar` root attribute — dataset id, DOI,
   license, citation, source commit, source tree, derived, HED version, engine
   version, contract URL — read once per run from `GET /datasets/<id>`, so a
