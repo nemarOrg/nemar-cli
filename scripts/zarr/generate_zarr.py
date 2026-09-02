@@ -959,17 +959,74 @@ _DETAIL_MAX_CHARS = 300
 # the punctuation that normally ENDS a path in prose, so
 # "corrupt file (/scratch/x.edf): ..." loses the path and keeps the sentence.
 _LOCAL_PATH_RE = re.compile(r"(?<![\w.])(?:/[^\s'\"()\[\]{},;:]+)+")
+# A Windows-style path, which reaches us through a library that formats one even
+# on Linux (MNE embeds paths from a recording's own header) and through anyone
+# running the converter on Windows. Same treatment as a POSIX path.
+_WINDOWS_PATH_RE = re.compile(r"(?<![\w.])[A-Za-z]:[\\/][^\s'\"()\[\]{},;:]*")
+
+# --- credential redaction ----------------------------------------------------
+# The driver shells out to `aws` and reads HTTP, so an exception message can
+# quote a presigned URL, a request header, or a key id -- and `detail` /
+# `last_error` are PUBLISHED in index.json, on a public bucket, fetched by every
+# dataset-page visit. Path stripping alone does not cover that: it was written
+# for scratch directories, and a presigned S3 URL is not a filesystem path.
+#
+# Redaction is by VALUE, not by whole-message suppression: the diagnosis is the
+# reason these fields exist (#1197), so "SignatureDoesNotMatch" has to survive
+# while the signature does not.
+_REDACTED = "[redacted]"
+_SECRET_PATTERNS = (
+    # `Authorization: AWS4-HMAC-SHA256 Credential=...` / `Bearer <token>`.
+    re.compile(r"(?i)\b(authorization\s*[:=]\s*)\S+"),
+    re.compile(r"(?i)\bbearer\s+[\w.\-+/=]+"),
+    # Every AWS SigV4 query parameter, signature and credential included. Kept as
+    # one alternation so a new X-Amz-* parameter is covered by the prefix rule.
+    re.compile(r"(?i)([?&]x-amz-[\w-]+=)[^\s&'\"]*"),
+    re.compile(r"(?i)\b(signature\s*[:=]\s*)[\w+/=%]+"),
+    # Bare access-key ids, which appear in AWS error text without a URL around
+    # them ("The AWS Access Key Id AKIA... does not exist"). ASIA is the STS
+    # session form the Hallu profile actually uses.
+    re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    # Any query parameter whose NAME says it is a secret, wherever it appears.
+    re.compile(r"(?i)([?&](?:token|key|secret|password|passwd|sig|signature)=)[^\s&'\"]*"),
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Replace credential-shaped substrings in `text` with `[redacted]`.
+
+    Applied to everything the converter publishes as `detail` or `last_error`.
+    The failure mode this closes is narrow but real: a presigned-URL or
+    credential error from `aws s3 cp` becomes an uncoded failure, whose message
+    is then written verbatim into a world-readable index.json. Nothing else in
+    the pipeline was going to catch that, because the message is not a path and
+    not a secret the driver ever held in a variable.
+    """
+    for pattern in _SECRET_PATTERNS:
+        # A capture group means "keep the label, drop the value"; no group means
+        # the whole match is the secret.
+        text = pattern.sub(
+            lambda m: (m.group(1) + _REDACTED) if m.groups() else _REDACTED, text
+        )
+    return text
 
 
 def strip_local_paths(text: str) -> str:
-    """Replace absolute filesystem paths in `text` with `<path>`.
+    """Replace absolute filesystem paths in `text` with `<path>`, POSIX and
+    Windows alike.
 
     The conversion host's scratch directory is a fresh `mkdtemp` name every run,
     so a raw exception message publishes a directory that does not exist by the
     time anyone reads it, and makes two identical failures look different. The
     entry already carries the recording's BIDS `path`, so nothing is lost.
+
+    Runs AFTER `redact_secrets` in `failure_detail`, deliberately: a presigned
+    URL's path component would otherwise be collapsed to `<path>` first, taking
+    the `X-Amz-Signature` query string with it in some messages and leaving it in
+    others depending on punctuation. Redacting first makes the outcome the same
+    either way.
     """
-    return _LOCAL_PATH_RE.sub("<path>", text)
+    return _WINDOWS_PATH_RE.sub("<path>", _LOCAL_PATH_RE.sub("<path>", text))
 
 
 def failure_detail(exc: BaseException | str | None) -> str | None:
@@ -982,6 +1039,10 @@ def failure_detail(exc: BaseException | str | None) -> str | None:
     from an importer gap without SSH access to the conversion node. The sanitized
     `reason` stays exactly as it was for the viewer; this rides alongside it for
     the human. #1197
+
+    Published on a public bucket, so it is redacted (`redact_secrets`) as well as
+    path-stripped: an `aws` or HTTP failure can quote a presigned URL, an
+    Authorization header, or an access-key id, and none of those are paths.
     """
     if exc is None:
         return None
@@ -990,7 +1051,9 @@ def failure_detail(exc: BaseException | str | None) -> str | None:
     else:
         text, prefix = str(exc), f"{type(exc).__name__}: "
     first = next((ln for ln in text.splitlines() if ln.strip()), "")
-    detail = (prefix + strip_local_paths(first)).strip()
+    # Redact BEFORE stripping paths -- see `strip_local_paths` for why the order
+    # is load-bearing.
+    detail = (prefix + strip_local_paths(redact_secrets(first))).strip()
     if not detail:
         return None
     return detail[:_DETAIL_MAX_CHARS]

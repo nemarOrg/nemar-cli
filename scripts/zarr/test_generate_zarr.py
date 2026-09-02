@@ -123,6 +123,7 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     merge_manifest,
     nemar_store_attrs,
     source_tree_for,
+    redact_secrets,
     strip_local_paths,
     validate_document,
 )
@@ -3904,6 +3905,122 @@ class TestFailureDetail(unittest.TestCase):
 
     def test_length_capped(self):
         self.assertLessEqual(len(failure_detail(ValueError("x" * 5000))), 300)
+
+    def test_strips_windows_paths(self):
+        # MNE formats paths out of a recording's own header, so a Windows path
+        # can reach a Linux conversion node's error message.
+        detail = failure_detail(
+            OSError(r"C:\Users\hallu\scratch\sub-01_eeg.edf is not EDF(+) compliant")
+        )
+        self.assertNotIn("Users", detail)
+        self.assertIn("<path>", detail)
+        self.assertIn("not EDF(+) compliant", detail)
+
+
+class TestDetailRedaction(unittest.TestCase):
+    """`detail` and `last_error` are published in index.json on a PUBLIC bucket,
+    and the driver shells out to `aws` and reads HTTP -- so an exception message
+    can quote a presigned URL, a request header, or a key id. Path stripping does
+    not cover any of that; none of them is a filesystem path.
+
+    Each case is a real message shape (AWS error text, a curl failure), and each
+    asserts BOTH halves: the secret is gone and the diagnosis survives. A
+    redactor that returned a constant would pass the first half alone.
+    """
+
+    def assert_redacted(self, message: str, secret: str, keep: str = ""):
+        detail = failure_detail(RuntimeError(message))
+        self.assertNotIn(secret, detail, f"secret survived in {detail!r}")
+        self.assertIn("[redacted]", detail)
+        if keep:
+            self.assertIn(keep, detail, f"diagnosis lost from {detail!r}")
+
+    def test_authorization_header(self):
+        self.assert_redacted(
+            "PUT failed with Authorization: AWS4-HMAC-SHA256 SignedHeaders=host",
+            "AWS4-HMAC-SHA256",
+            keep="PUT failed",
+        )
+
+    def test_bearer_token(self):
+        self.assert_redacted(
+            "callback rejected: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig",
+            "eyJhbGciOiJIUzI1NiJ9",
+            keep="callback rejected",
+        )
+
+    def test_x_amz_query_parameters(self):
+        # A presigned URL is the realistic leak: `aws s3 cp` quotes the whole
+        # request line on a 403.
+        self.assert_redacted(
+            "403 for https://nemar.s3.us-east-2.amazonaws.com/k?X-Amz-Signature=deadbeefcafe0123",
+            "deadbeefcafe0123",
+            keep="403",
+        )
+
+    def test_x_amz_credential_is_covered_by_the_prefix_rule(self):
+        self.assert_redacted(
+            "denied: https://h/k?X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20260902",
+            "AKIAIOSFODNN7EXAMPLE",
+            keep="denied",
+        )
+
+    def test_signature_field(self):
+        self.assert_redacted(
+            "SignatureDoesNotMatch signature: abc123def456+/=",
+            "abc123def456",
+            keep="SignatureDoesNotMatch",
+        )
+
+    def test_bare_access_key_id(self):
+        # AWS error text quotes the key id with no URL around it.
+        self.assert_redacted(
+            "The AWS Access Key Id AKIAIOSFODNN7EXAMPLE does not exist in our records",
+            "AKIAIOSFODNN7EXAMPLE",
+            keep="does not exist in our records",
+        )
+
+    def test_sts_session_key_id(self):
+        # ASIA is the form the Hallu profile's session credentials actually take.
+        self.assert_redacted(
+            "expired token for ASIAY34FZKBOKMUTVV7A",
+            "ASIAY34FZKBOKMUTVV7A",
+            keep="expired token",
+        )
+
+    def test_token_query_parameter(self):
+        self.assert_redacted(
+            "POST https://api.nemar.org/webhooks/zarr-ready?token=s3cr3tvalue -> 401",
+            "s3cr3tvalue",
+            keep="401",
+        )
+
+    def test_key_query_parameter(self):
+        self.assert_redacted("GET https://h/p?key=abc123secret", "abc123secret")
+
+    def test_a_url_shaped_message_keeps_its_diagnosis(self):
+        # #1197's whole point: an operator must still be able to tell WHAT failed.
+        detail = failure_detail(
+            RuntimeError("HTTP 503 from https://nemar.s3.us-east-2.amazonaws.com/a/b.edf")
+        )
+        self.assertIn("HTTP 503", detail)
+
+    def test_an_innocent_message_is_left_alone(self):
+        # A redactor that fired on ordinary text would destroy every diagnosis.
+        for clean in (
+            "Could not find measurement data",
+            "channels.tsv declares 74 channels but the store has 1",
+            "min/max envelope mismatch",
+        ):
+            self.assertNotIn("[redacted]", redact_secrets(clean))
+
+    def test_redaction_survives_the_length_cap(self):
+        # Cap applied AFTER redaction, so truncation can never expose a tail.
+        detail = failure_detail(
+            RuntimeError("x" * 250 + " Bearer supersecrettokenvalue0123456789")
+        )
+        self.assertNotIn("supersecrettokenvalue", detail)
+        self.assertLessEqual(len(detail), 300)
 
     def test_empty_is_none(self):
         self.assertIsNone(failure_detail(None))
