@@ -37,8 +37,25 @@ const ZARR_CATALOG_FORMAT_VERSION = 1 as const;
 const ZARR_CATALOG_KEY = "zarr-catalog.json";
 
 /**
+ * `PresignedUrlOptions` plus a TEST-ONLY origin override (PR #1201 review,
+ * item 4). This does NOT live on the shared `PresignedUrlOptions` in s3.ts:
+ * every other S3 caller in this codebase always signs against the real
+ * `<bucket>.s3.<region>.amazonaws.com` host, so a dead field only this
+ * module's tests ever set does not belong on a type ~30 production call
+ * sites share. `endpointUrl`, when set, replaces that host entirely (see
+ * {@link catalogObjectUrl}) so a test can point signing at a local
+ * `Bun.serve()` receiver without mocking `fetch`.
+ */
+export interface ZarrCatalogS3Options extends PresignedUrlOptions {
+  endpointUrl?: string;
+}
+
+/**
  * One `datasets` row shaped exactly as {@link ZARR_CATALOG_CANDIDATE_SQL}
  * projects it, so a test can hand-build fixtures without a full row.
+ * `zarr_status` is carried through (not just filtered on in SQL) so
+ * {@link buildZarrCatalog} can enforce its own eligibility postcondition --
+ * see that function's doc comment.
  */
 export interface ZarrCatalogSourceRow {
   dataset_id: string;
@@ -50,6 +67,7 @@ export interface ZarrCatalogSourceRow {
   subject_count: number | null;
   has_hed: number | null;
   hed_version: string | null;
+  zarr_status: string | null;
   zarr_store_count: number | null;
   recording_count: number | null;
   recordings_unavailable: number | null;
@@ -99,7 +117,7 @@ export interface ZarrCatalog {
  */
 export const ZARR_CATALOG_CANDIDATE_SQL = `SELECT
     d.dataset_id, d.name, d.concept_doi, d.license, d.modalities, d.tasks,
-    d.subject_count, d.has_hed, d.hed_version, d.zarr_store_count,
+    d.subject_count, d.has_hed, d.hed_version, d.zarr_status, d.zarr_store_count,
     d.recording_count, d.recordings_unavailable, d.total_recording_duration,
     d.zarr_converted_at, d.zarr_source_commit, d.zarr_errors
   FROM datasets d
@@ -110,6 +128,14 @@ export const ZARR_CATALOG_CANDIDATE_SQL = `SELECT
 /**
  * Pure builder: candidate rows -> the published document shape. No I/O, so
  * every shape/ordering/exclusion decision is testable without D1 or S3.
+ *
+ * Defends its own postcondition (PR #1201 review, item 2): re-applies the
+ * exact `zarr_status === 'ready' && store_count > 0` eligibility test that
+ * {@link ZARR_CATALOG_CANDIDATE_SQL}'s WHERE clause already enforces, so a
+ * future caller that hands this function an unfiltered (or differently
+ * filtered) row set still cannot publish a non-ready or zero-store entry --
+ * the document's own invariant does not depend on every caller re-deriving
+ * the right SQL.
  *
  * `opts.contractBase` is the Zarr cache host origin (e.g.
  * "https://zarr.nemar.org"); a trailing slash is added if missing, and every
@@ -123,7 +149,10 @@ export function buildZarrCatalog(
   opts: { contractBase: string; generatedUtc?: string },
 ): ZarrCatalog {
   const base = opts.contractBase.endsWith("/") ? opts.contractBase : `${opts.contractBase}/`;
-  const datasets: ZarrCatalogDataset[] = rows.map((row) => ({
+  const eligible = rows.filter(
+    (row) => row.zarr_status === "ready" && (row.zarr_store_count ?? 0) > 0,
+  );
+  const datasets: ZarrCatalogDataset[] = eligible.map((row) => ({
     dataset_id: row.dataset_id,
     name: row.name,
     doi: row.concept_doi,
@@ -155,14 +184,14 @@ export function buildZarrCatalog(
   };
 }
 
-function catalogObjectUrl(options: PresignedUrlOptions): string {
+function catalogObjectUrl(options: ZarrCatalogS3Options): string {
   const origin = (
     options.endpointUrl ?? `https://${options.bucket}.s3.${options.region}.amazonaws.com`
   ).replace(/\/+$/, "");
   return `${origin}/${ZARR_CATALOG_KEY}`;
 }
 
-function catalogS3Client(options: PresignedUrlOptions): AwsClient {
+function catalogS3Client(options: ZarrCatalogS3Options): AwsClient {
   return new AwsClient({
     accessKeyId: options.accessKeyId,
     secretAccessKey: options.secretAccessKey,
@@ -172,23 +201,55 @@ function catalogS3Client(options: PresignedUrlOptions): AwsClient {
 }
 
 /**
+ * Thrown by {@link fetchZarrCatalogObject} on a 403 (PR #1201 review, item
+ * 5) -- distinct from the `null` "not yet published" (404) result, so a
+ * caller can answer 503 (misconfigured access) instead of a 404 that
+ * masquerades as "not published yet". `bucket`/`key` ride along so a caller
+ * that only logs `err.message` still gets both in the text.
+ *
+ * `backend/src/routes/zarr-data.ts`'s `GET /catalog.json` currently folds
+ * this into its generic catch (502) until it is updated to distinguish it
+ * as 503 -- see that route's own doc comment / the epic tracking issue.
+ */
+export class ZarrCatalogForbiddenError extends Error {
+  constructor(
+    readonly bucket: string,
+    readonly key: string,
+  ) {
+    super(`zarr-catalog: 403 fetching ${key} from bucket ${bucket} (forbidden)`);
+    this.name = "ZarrCatalogForbiddenError";
+  }
+}
+
+/**
  * Signed GET of `zarr-catalog.json` (Worker creds -- works whether or not
  * the bucket-root key is anonymously readable, unlike the per-dataset
- * manifest helpers in s3.ts which try unsigned first). Null on 404/403
- * (not yet published, or a creds/policy gap treated as absence -- mirrors
- * `getZarrIndex`'s treatment of the analogous per-dataset object); any
- * other non-2xx throws.
+ * manifest helpers in s3.ts which try unsigned first).
+ *
+ * Returns `null` ONLY for a genuine absence (404 -- not yet published).
+ * A 403 is NOT folded into that same `null` result (PR #1201 review, item
+ * 5): unlike `getZarrIndex`'s per-dataset analogue, where "the Worker's
+ * creds lack ListBucket on a legitimately-missing object" and "creds are
+ * broken" are both acceptable to treat as absent, a 403 here on a fixed,
+ * always-expected-to-exist key is far more likely a policy/IAM regression
+ * than a first-ever publish that hasn't happened yet -- so it is logged at
+ * `error` (not `warn`) and thrown as {@link ZarrCatalogForbiddenError}
+ * rather than silently reported as "not published". Any other non-2xx
+ * still throws a plain `Error` (a true infra failure).
  */
 export async function fetchZarrCatalogObject(
-  options: PresignedUrlOptions,
+  options: ZarrCatalogS3Options,
 ): Promise<{ body: string; etag: string | null } | null> {
   const aws = catalogS3Client(options);
   const signed = await aws.sign(catalogObjectUrl(options), { method: "GET" });
   const response = await fetch(signed);
   if (response.status === 404) return null;
   if (response.status === 403) {
-    console.warn("[zarr-catalog] 403 fetching zarr-catalog.json (absent or credentials issue)");
-    return null;
+    console.error("[zarr-catalog] 403 fetching zarr-catalog.json (forbidden)", {
+      bucket: options.bucket,
+      key: ZARR_CATALOG_KEY,
+    });
+    throw new ZarrCatalogForbiddenError(options.bucket, ZARR_CATALOG_KEY);
   }
   if (!response.ok) {
     throw new Error(`fetchZarrCatalogObject: HTTP ${response.status} for zarr-catalog.json`);
@@ -197,14 +258,13 @@ export async function fetchZarrCatalogObject(
 }
 
 /**
- * Signed PUT of `zarr-catalog.json`. FAILS LOUD on any non-2xx (brief #4,
- * IAM note): never swallows a 403 -- the Worker's IAM role needs an explicit
- * `s3:PutObject` grant on this key before this can succeed in production,
- * and a caller that ate the error would leave a stale/empty catalog
- * published with no signal anything was wrong.
+ * Signed PUT of `zarr-catalog.json`. FAILS LOUD on any non-2xx (brief #4):
+ * never swallows a 403 -- if IAM ever regresses, a caller that ate the
+ * error would leave a stale/empty catalog published with no signal anything
+ * was wrong.
  */
 export async function uploadZarrCatalogJson(
-  options: PresignedUrlOptions,
+  options: ZarrCatalogS3Options,
   json: string,
 ): Promise<void> {
   const aws = catalogS3Client(options);
@@ -229,27 +289,44 @@ export async function uploadZarrCatalogJson(
  * safe to run on the non-prod cron (see that call site's allowlist comment
  * in index.ts): it can never touch the production catalog object.
  *
- * Throws if `ZARR_CACHE_BASE_URL` is unconfigured (every `index_url` would
- * otherwise be a relative, non-functional path) or if the S3 PUT fails --
- * both callers (the cron wrapper and the admin route) are expected to catch
- * and log/500 rather than let this silently no-op.
+ * Throws if `ZARR_CACHE_BASE_URL` or `S3_BUCKET` is unconfigured (the
+ * former would make every `index_url` a relative, non-functional path; the
+ * latter would sign a PUT against `https://undefined.s3....` and fail
+ * opaquely deep inside aws4fetch instead of here, at the boundary, with a
+ * name) or if the S3 PUT fails -- both callers (the cron wrapper and the
+ * admin route) are expected to catch and log/500 rather than let this
+ * silently no-op.
+ *
+ * `s3Options.endpointUrl` mirrors `runRecordingStatsSweep`'s `fetchIndex`
+ * injection (services/recording-stats-sweep.ts): a test-only seam so
+ * `backend/test/zarr-catalog-publish-route.test.ts` can drive this exact
+ * function -- the one both production callers use -- against a real local
+ * `Bun.serve()` receiver instead of AWS, with the one true network boundary
+ * substituted rather than re-implemented at the test level. Both production
+ * callers (the cron in index.ts and the admin route) omit it, so it is
+ * always `undefined` outside a test.
  */
-export async function publishZarrCatalog(env: Bindings): Promise<{ count: number; bytes: number }> {
+export async function publishZarrCatalog(
+  env: Bindings,
+  s3Options?: { endpointUrl?: string },
+): Promise<{ count: number; bytes: number }> {
   const base = zarrCacheBaseUrl(env);
   if (!base) {
     throw new Error("publishZarrCatalog: ZARR_CACHE_BASE_URL is not configured");
   }
+  if (!env.S3_BUCKET) {
+    throw new Error("publishZarrCatalog: S3_BUCKET is not configured");
+  }
   const rows = await env.DB.prepare(ZARR_CATALOG_CANDIDATE_SQL).all<ZarrCatalogSourceRow>();
   const catalog = buildZarrCatalog(rows.results ?? [], { contractBase: base });
   const json = JSON.stringify(catalog);
-  await uploadZarrCatalogJson(
-    {
-      bucket: env.S3_BUCKET,
-      region: env.AWS_REGION,
-      accessKeyId: env.AWS_ACCESS_KEY_ID,
-      secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
-    },
-    json,
-  );
+  const options: ZarrCatalogS3Options = {
+    bucket: env.S3_BUCKET,
+    region: env.AWS_REGION,
+    accessKeyId: env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+    endpointUrl: s3Options?.endpointUrl,
+  };
+  await uploadZarrCatalogJson(options, json);
   return { count: catalog.count, bytes: new TextEncoder().encode(json).length };
 }
