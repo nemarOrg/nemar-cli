@@ -92,9 +92,24 @@ export PATH
 # ZARR_JOBS defaults to 4, not nproc like the prod default: a test instance
 # runs on the SAME Hallu box as the prod backfill and must not contend with it
 # for cores.
+#
+# TEST_API_URL is NOT part of issue #1180's env-var inventory -- that
+# inventory covers this script and the Python driver/queue, both of which
+# already take API_BASE/--api-base. It missed that convert_dataset() also
+# shells out to the separate `nemar` CLI binary (`nemar dataset download`),
+# whose own API base resolution (src/lib/api/client.ts getApiUrl()) is
+# entirely independent of API_BASE: it reads TEST_API_URL first, then a
+# stored account config, then defaults to api.nemar.org. Without this, the
+# metadata clone step in --test mode looks up the dataset against PROD and
+# fails "Dataset not found" for a dev-only xx0999NN exemplar, discovered live
+# against xx099905 during this phase's verification. TEST_API_URL is existing
+# CLI plumbing (already used for staging e2e tests, AGENTS.md's "isolated
+# NEMAR_CONFIG_DIR" pattern), not a new mechanism -- this just wires --test
+# into the hook that was already there.
 for _pretest_arg in "$@"; do
   if [[ "$_pretest_arg" == "--test" ]]; then
     export API_BASE="${API_BASE:-https://api-test.nemar.org}"
+    export TEST_API_URL="${TEST_API_URL:-https://api-test.nemar.org}"
     export S3_BUCKET="${S3_BUCKET:-nemar-dev}"
     export ZARR_AWS_PROFILE="${ZARR_AWS_PROFILE:-nemar-zarr-dev}"
     export ZARR_STATE_DIR="${ZARR_STATE_DIR:-${ZARR_BASE:-/mnt/local}/zarr-state-test}"
@@ -253,6 +268,13 @@ if [[ -n "$TEST_MODE" ]]; then
     guard_err "--test refuses API_BASE=$API_BASE (the production catalog)."
     guard_failed=1
   fi
+  # TEST_API_URL is the `nemar` CLI's own API-base override (see the pre-pass
+  # comment above) -- checked separately from API_BASE because they are read
+  # by two different programs and could disagree.
+  if [[ "${TEST_API_URL:-}" == *"api.nemar.org"* ]]; then
+    guard_err "--test refuses TEST_API_URL=$TEST_API_URL (the production catalog)."
+    guard_failed=1
+  fi
   if [[ "$AWS_PROFILE" == "nemar-zarr" ]]; then
     guard_err "--test refuses AWS_PROFILE=nemar-zarr (the production credential)."
     guard_failed=1
@@ -304,6 +326,7 @@ if [[ -n "$PRINT_CONFIG" ]]; then
   cat <<EOF
 TEST_MODE=${TEST_MODE:-0}
 API_BASE=$API_BASE
+TEST_API_URL=${TEST_API_URL:-}
 CALLBACK_URL=$CALLBACK_URL
 S3_BUCKET=$S3_BUCKET
 AWS_REGION=$AWS_REGION

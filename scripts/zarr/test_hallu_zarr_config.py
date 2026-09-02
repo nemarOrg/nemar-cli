@@ -7,15 +7,21 @@ subprocess, no mocks: every assertion here is against the script's real
 stdout/stderr/exit code, run against a temp HOME/ZARR_BASE so nothing touches
 a real Hallu deployment or the repo's own working tree. Covers:
 
-- `--test` resolves every documented default (API_BASE, S3_BUCKET,
-  ZARR_AWS_PROFILE, ZARR_STATE_DIR, ZARR_WORK_DIR, ZARR_DRIVER_REF, ZARR_JOBS)
-  only when the variable is otherwise unset.
+- `--test` resolves every documented default (API_BASE, TEST_API_URL,
+  S3_BUCKET, ZARR_AWS_PROFILE, ZARR_STATE_DIR, ZARR_WORK_DIR, ZARR_DRIVER_REF,
+  ZARR_JOBS) only when the variable is otherwise unset. TEST_API_URL steers
+  the separate `nemar` CLI binary that convert_dataset() shells out to for
+  the metadata clone -- it has its own API-base resolution independent of
+  API_BASE (src/lib/api/client.ts getApiUrl()), missed by issue #1180's
+  env-var inventory and found live against xx099905 during this phase's
+  verification (see hallu-zarr.sh's pre-pass comment).
 - Plain (non-`--test`) `--print-config` still resolves the production
   defaults -- `--test` must not leak into the untested path.
-- The test-mode guard rails: each of the four prod values (S3_BUCKET,
-  API_BASE, AWS_PROFILE via ZARR_AWS_PROFILE, STATE_DIR via ZARR_STATE_DIR)
-  exported alongside `--test` is refused with a non-zero exit and a message
-  naming the offending value, and produces no stdout config dump.
+- The test-mode guard rails: each of the five prod values (S3_BUCKET,
+  API_BASE, TEST_API_URL, AWS_PROFILE via ZARR_AWS_PROFILE, STATE_DIR via
+  ZARR_STATE_DIR) exported alongside `--test` is refused with a non-zero exit
+  and a message naming the offending value, and produces no stdout config
+  dump.
 - An explicit override (ZARR_JOBS=2) still wins over the `--test` default.
 - `--print-config` (with or without `--test`) creates no files under
   ZARR_BASE -- it must exit before `mkdir -p "$WORK_DIR" "$STATE_DIR"`.
@@ -111,6 +117,10 @@ def test_test_mode_print_config_defaults(dirs: tuple[Path, Path]) -> None:
 
     assert cfg["TEST_MODE"] == "1"
     assert cfg["API_BASE"] == "https://api-test.nemar.org"
+    # The `nemar` CLI (shelled out to for the metadata clone) resolves its own
+    # API base independently of API_BASE -- see the pre-pass comment in
+    # hallu-zarr.sh. TEST_API_URL is that CLI's hook, and --test must set it.
+    assert cfg["TEST_API_URL"] == "https://api-test.nemar.org"
     assert cfg["CALLBACK_URL"] == "https://api-test.nemar.org/webhooks/zarr-ready"
     assert cfg["S3_BUCKET"] == "nemar-dev"
     assert cfg["AWS_PROFILE"] == "nemar-zarr-dev"
@@ -140,6 +150,7 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
 
     assert cfg["TEST_MODE"] == "0"
     assert cfg["API_BASE"] == "https://api.nemar.org"
+    assert cfg["TEST_API_URL"] == ""
     assert cfg["CALLBACK_URL"] == "https://api.nemar.org/webhooks/zarr-ready"
     assert cfg["S3_BUCKET"] == "nemar"
     assert cfg["AWS_PROFILE"] == "nemar-zarr"
@@ -156,13 +167,17 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
     [
         ({"S3_BUCKET": "nemar"}, "S3_BUCKET=nemar"),
         ({"API_BASE": "https://api.nemar.org"}, "API_BASE=https://api.nemar.org"),
+        (
+            {"TEST_API_URL": "https://api.nemar.org"},
+            "TEST_API_URL=https://api.nemar.org",
+        ),
         ({"ZARR_AWS_PROFILE": "nemar-zarr"}, "AWS_PROFILE=nemar-zarr"),
         (
             {"ZARR_STATE_DIR": "/mnt/local/zarr-state"},
             "STATE_DIR=/mnt/local/zarr-state",
         ),
     ],
-    ids=["s3-bucket", "api-base", "aws-profile", "state-dir"],
+    ids=["s3-bucket", "api-base", "test-api-url", "aws-profile", "state-dir"],
 )
 def test_guard_rail_refuses_prod_value_with_test(
     dirs: tuple[Path, Path], extra_env: dict[str, str], needle: str
