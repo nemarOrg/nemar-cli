@@ -15,8 +15,8 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import "./setup";
-import { type FakeGithubServer, startFakeGithub } from "./helpers/fetch-counter";
 import { triggerArchiveGeneration } from "../backend/src/services/github";
+import { type FakeGithubServer, startFakeGithub } from "./helpers/fetch-counter";
 
 const CENTRAL_DISPATCH_PATH = "/repos/nemarDatasets/.github/dispatches";
 
@@ -107,12 +107,7 @@ describe("triggerArchiveGeneration", () => {
     // the dispatch target (which is always .github), only logged. Verify
     // the dispatch goes through with the dataset_id from the second
     // argument regardless of what `repo` says.
-    await triggerArchiveGeneration(
-      "some-legacy-name",
-      "nm099999",
-      "1.0.0",
-      "test-pat",
-    );
+    await triggerArchiveGeneration("some-legacy-name", "nm099999", "1.0.0", "test-pat");
 
     expect(fake.calls.length).toBe(1);
     expect(fake.calls[0].path).toBe(CENTRAL_DISPATCH_PATH);

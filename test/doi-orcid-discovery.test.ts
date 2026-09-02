@@ -67,7 +67,7 @@ describe("extractDoisFromBids", () => {
   test("extracts DOIs from HowToAcknowledge", () => {
     const result = extractDoisFromBids({
       HowToAcknowledge:
-        'Please cite: Kappenman et al. (2020). ERP CORE. https://doi.org/10.31234/osf.io/4azqm',
+        "Please cite: Kappenman et al. (2020). ERP CORE. https://doi.org/10.31234/osf.io/4azqm",
     });
     expect(result).toHaveLength(1);
     expect(result[0]).toEqual({
@@ -78,8 +78,7 @@ describe("extractDoisFromBids", () => {
 
   test("extracts multiple DOIs from HowToAcknowledge", () => {
     const result = extractDoisFromBids({
-      HowToAcknowledge:
-        'Cite 10.1234/abc and also https://doi.org/10.5678/def for this dataset.',
+      HowToAcknowledge: "Cite 10.1234/abc and also https://doi.org/10.5678/def for this dataset.",
     });
     expect(result).toHaveLength(2);
     expect(result[0].doi).toBe("10.1234/abc");
@@ -89,7 +88,7 @@ describe("extractDoisFromBids", () => {
   test("strips trailing punctuation from HowToAcknowledge DOIs", () => {
     const result = extractDoisFromBids({
       HowToAcknowledge:
-        'See https://doi.org/10.31234/osf.io/4azqm. Also cite 10.1234/foo; and 10.5678/bar:',
+        "See https://doi.org/10.31234/osf.io/4azqm. Also cite 10.1234/foo; and 10.5678/bar:",
     });
     expect(result).toHaveLength(3);
     expect(result[0].doi).toBe("10.31234/osf.io/4azqm");
@@ -99,7 +98,7 @@ describe("extractDoisFromBids", () => {
 
   test("deduplicates DOIs between HowToAcknowledge and ReferencesAndLinks", () => {
     const result = extractDoisFromBids({
-      HowToAcknowledge: 'Cite https://doi.org/10.31234/osf.io/4azqm',
+      HowToAcknowledge: "Cite https://doi.org/10.31234/osf.io/4azqm",
       ReferencesAndLinks: ["https://doi.org/10.31234/osf.io/4azqm"],
     });
     expect(result).toHaveLength(1);
@@ -120,7 +119,11 @@ describe("extractDoisFromRelatedIdentifiers", () => {
     const result = extractDoisFromRelatedIdentifiers(
       [
         { identifier: "10.1234/foo", identifier_type: "DOI", relation_type: "References" },
-        { identifier: "https://example.com", identifier_type: "URL", relation_type: "IsDescribedBy" },
+        {
+          identifier: "https://example.com",
+          identifier_type: "URL",
+          relation_type: "IsDescribedBy",
+        },
         { identifier: "10.5678/bar", identifier_type: "DOI", relation_type: "IsSupplementedBy" },
       ],
       new Set(),
@@ -147,7 +150,11 @@ describe("extractDoisFromRelatedIdentifiers", () => {
   test("skips non-DOI identifiers", () => {
     const result = extractDoisFromRelatedIdentifiers(
       [
-        { identifier: "https://github.com/test", identifier_type: "URL", relation_type: "IsDescribedBy" },
+        {
+          identifier: "https://github.com/test",
+          identifier_type: "URL",
+          relation_type: "IsDescribedBy",
+        },
       ],
       new Set(),
     );
@@ -160,11 +167,7 @@ describe("extractDoisFromRelatedIdentifiers", () => {
 // ---------------------------------------------------------------------------
 
 describe("matchCreatorsToAuthors", () => {
-  const makeCreator = (
-    familyName: string,
-    givenName: string,
-    orcid?: string,
-  ): DataCiteCreator => ({
+  const makeCreator = (familyName: string, givenName: string, orcid?: string): DataCiteCreator => ({
     name: `${familyName}, ${givenName}`,
     familyName,
     givenName,
@@ -223,10 +226,7 @@ describe("matchCreatorsToAuthors", () => {
   });
 
   test("each author matched at most once", () => {
-    const creators = [
-      makeCreator("Smith", "John"),
-      makeCreator("Smith", "Jane"),
-    ];
+    const creators = [makeCreator("Smith", "John"), makeCreator("Smith", "Jane")];
     const matches = matchCreatorsToAuthors(creators, ["Smith, John"]);
     expect(matches).toHaveLength(1);
     expect(matches[0].matchedCreator.givenName).toBe("John");
@@ -234,10 +234,7 @@ describe("matchCreatorsToAuthors", () => {
 
   test("each creator matched at most once", () => {
     const creators = [makeCreator("Smith", "John")];
-    const matches = matchCreatorsToAuthors(creators, [
-      "Smith, John",
-      "Smith, J.",
-    ]);
+    const matches = matchCreatorsToAuthors(creators, ["Smith, John", "Smith, J."]);
     expect(matches).toHaveLength(1);
     // "Smith, John" should win (exact match in pass 1)
     expect(matches[0].bidsAuthor).toBe("Smith, John");
@@ -272,4 +269,3 @@ describe("matchCreatorsToAuthors", () => {
     expect(matches[0].confidence).toBe("exact");
   });
 });
-

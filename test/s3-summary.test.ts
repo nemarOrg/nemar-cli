@@ -20,11 +20,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import {
-  deleteObjects,
-  generatePresignedPutUrls,
-  loadSummary,
-} from "../backend/src/services/s3";
+import { deleteObjects, generatePresignedPutUrls, loadSummary } from "../backend/src/services/s3";
 
 const TEST_DATASET = "xx000001";
 const TEST_VERSION = "1.0.0";

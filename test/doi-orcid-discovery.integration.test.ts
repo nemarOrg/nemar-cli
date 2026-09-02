@@ -61,12 +61,7 @@ describe("queryDataCiteDoi", () => {
 describe("discoverOrcidsFromReferencedDois", () => {
   test("discovers ORCIDs from MNE-BIDS JOSS paper", async () => {
     const result = await discoverOrcidsFromReferencedDois({
-      Authors: [
-        "Appelhoff, Stefan",
-        "Jas, Mainak",
-        "Gramfort, Alexandre",
-        "Unknown Author",
-      ],
+      Authors: ["Appelhoff, Stefan", "Jas, Mainak", "Gramfort, Alexandre", "Unknown Author"],
       ReferencesAndLinks: ["10.21105/joss.01896"],
     });
 
@@ -97,9 +92,7 @@ describe("discoverOrcidsFromReferencedDois", () => {
     });
     expect(result.discoveries["Appelhoff, Stefan"]).toBeDefined();
     // ORCID format should be valid (XXXX-XXXX-XXXX-XXXX)
-    expect(result.discoveries["Appelhoff, Stefan"].orcid).toMatch(
-      /^\d{4}-\d{4}-\d{4}-[\dX]{4}$/,
-    );
+    expect(result.discoveries["Appelhoff, Stefan"].orcid).toMatch(/^\d{4}-\d{4}-\d{4}-[\dX]{4}$/);
   });
 
   test("skips authors with existing ORCIDs", async () => {

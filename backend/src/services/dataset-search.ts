@@ -25,11 +25,12 @@ const EMBEDDING_MODEL = "@cf/baai/bge-small-en-v1.5";
  * makes `count` -- now computed once by `countSearchMatches` -- stable across
  * every page size.
  */
-// SEMANTIC_TOPK is also `buildInPlaceholders`' hard ceiling (that function
-// reads this constant directly, not a separate literal) -- raising one
-// raises both. SEARCH_CANDIDATE_CEILING is unrelated: a plain SQL `LIMIT`
-// with no `IN (...)` placeholder list behind it, so it is NOT bounded by
-// buildInPlaceholders and does not need to move in lockstep (#1145 review S2).
+// SEMANTIC_TOPK used to size a per-id `IN (?,?,...)` placeholder list, so it
+// bounded the statement's parameter count directly. Since #1193 the ids travel
+// as ONE json_each parameter, so raising it no longer moves that count at all.
+// SEARCH_CANDIDATE_CEILING was always unrelated: a plain SQL `LIMIT` with no
+// placeholder list behind it, so the two never needed to move in lockstep
+// (#1145 review S2).
 /**
  * Relevance floor for semantic results (epic #1144 phase 6, issue #1150,
  * D6). bge-small cosine scores against this catalog, measured across 12
@@ -251,16 +252,25 @@ async function writeEmbedDrainAudit(
 // truth (the single source after the nemar_catalog drop).
 // ---------------------------------------------------------------------------
 
-/** Build a comma-joined `?` placeholder list for a SQL `IN (...)`. The only
- *  lists this ever builds are semantic-id lists (hydrateDatasetsByIds'
- *  `ids`, countSearchMatches' `semanticIds`), both bounded by `SEMANTIC_TOPK`
- *  -- so the throw bound reads that constant directly rather than a
- *  duplicated literal (#1145 review S2). */
-export function buildInPlaceholders(n: number): string {
-  if (!Number.isInteger(n) || n < 1 || n > SEMANTIC_TOPK) {
-    throw new Error(`buildInPlaceholders: n must be an integer in 1..${SEMANTIC_TOPK}, got ${n}`);
-  }
-  return new Array(n).fill("?").join(",");
+/** Match `d.dataset_id` against a list of ids using ONE bound parameter.
+ *
+ *  D1 caps bound parameters per statement well below SQLite's own ceiling, and
+ *  a semantic leg contributes up to {@link SEMANTIC_TOPK} ids. Binding those
+ *  one-per-id consumed nearly the whole budget, so appending even a single
+ *  facet-filter parameter overflowed it and EVERY faceted text search returned
+ *  `too many SQL variables` (#1193) -- while the catalog-list path, which has
+ *  no semantic leg, kept working. `json_each` collapses the list to a single
+ *  JSON parameter, so the count no longer scales with SEMANTIC_TOPK. */
+// Re-exported so the search module stays the one import site for callers
+// that need the ceiling; the guard itself lives with the filter builder that
+// applies it (#1195 review I5).
+export { MAX_BOUND_PARAMS, assertBoundParamBudget } from "./dataset-filters";
+
+export const DATASET_ID_IN_JSON_LIST = "d.dataset_id IN (SELECT value FROM json_each(?))";
+
+/** The single bound value for {@link DATASET_ID_IN_JSON_LIST}. */
+export function datasetIdListParam(ids: string[]): string {
+  return JSON.stringify(ids);
 }
 
 interface HydrateRow {
@@ -298,14 +308,14 @@ export async function hydrateDatasetsByIds(
   filters: DatasetFilterOptions = {},
 ): Promise<SearchResult[]> {
   if (ids.length === 0) return [];
-  const params: (string | number)[] = [...ids];
+  const params: (string | number)[] = [datasetIdListParam(ids)];
   const filterClauses = buildDatasetFilterClauses(params, filters);
   const results = await db
     .prepare(
       `SELECT d.dataset_id AS id, d.name, d.modalities, d.subject_count AS participants,
               d.concept_doi AS doi, d.tasks, d.authors, d.has_hed
        FROM datasets d
-       WHERE d.dataset_id IN (${buildInPlaceholders(ids.length)})
+       WHERE ${DATASET_ID_IN_JSON_LIST}
          AND d.status = 'active' AND d.visibility = 'public'
          AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)${filterClauses}`,
     )
@@ -506,7 +516,7 @@ export async function ftsSearch(
  * query has no FTS match expression, a failed/empty semantic tier has no ids
  * -- and both empty yields `count = 0` without a query. `semanticIds` is
  * expected to already be capped at `SEMANTIC_TOPK` (100), which is also
- * `buildInPlaceholders`' hard ceiling.
+ * the semantic candidate window (bound as one json_each parameter since #1193).
  */
 export async function countSearchMatches(
   db: D1Database,
@@ -521,8 +531,8 @@ export async function countSearchMatches(
     params.push(ftsMatch);
   }
   if (semanticIds.length > 0) {
-    disjuncts.push(`d.dataset_id IN (${buildInPlaceholders(semanticIds.length)})`);
-    params.push(...semanticIds);
+    disjuncts.push(DATASET_ID_IN_JSON_LIST);
+    params.push(datasetIdListParam(semanticIds));
   }
   if (disjuncts.length === 0) return 0;
   const filterClauses = buildDatasetFilterClauses(params, filters);
@@ -598,8 +608,8 @@ async function countWidenedWithBreakdown(
     params.push(ftsMatch);
   }
   if (semanticIds.length > 0) {
-    disjuncts.push(`d.dataset_id IN (${buildInPlaceholders(semanticIds.length)})`);
-    params.push(...semanticIds);
+    disjuncts.push(DATASET_ID_IN_JSON_LIST);
+    params.push(datasetIdListParam(semanticIds));
   }
   if (disjuncts.length === 0) return { total: 0, byFacet: {} };
   const widenedFilters: DatasetFilterOptions = { ...filters, includeUnknown: true };

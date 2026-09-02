@@ -85,9 +85,9 @@ describe("isAccessDeniedError (#822 fail-fast)", () => {
         "fatal error: An error occurred (AccessDenied) when calling the CopyObject operation: Access Denied",
       ),
     ).toBe(true);
-    expect(isAccessDeniedError("An error occurred (403) when calling the HeadObject operation")).toBe(
-      true,
-    );
+    expect(
+      isAccessDeniedError("An error occurred (403) when calling the HeadObject operation"),
+    ).toBe(true);
     expect(isAccessDeniedError("download failed: ... Forbidden")).toBe(true);
     // bare human-readable form (no parenthesized code) also matches
     expect(isAccessDeniedError("fatal error: Access Denied")).toBe(true);

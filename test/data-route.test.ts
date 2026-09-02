@@ -563,9 +563,7 @@ describe("data.nemar.org catalog index (#584)", async () => {
     // dominated by real `nm` datasets; the dev/staging catalog is purged to the
     // exemplar fleet only (epic #923, 2026-07-20), so there it lists xx0999
     // links instead of nm.
-    expect(body).toMatch(
-      IS_PRODUCTION_TARGET ? /href="\/nm\d+\/"/ : /href="\/xx0999\d{2}\/"/,
-    );
+    expect(body).toMatch(IS_PRODUCTION_TARGET ? /href="\/nm\d+\/"/ : /href="\/xx0999\d{2}\/"/);
     expect(body).not.toContain(">nm099999/<");
     // Plain sandbox datasets must never appear in the data catalog. The one
     // permitted exception is the staging exemplar fleet (xx0999NN), which is

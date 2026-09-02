@@ -8,12 +8,12 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import "./setup";
-import { type FakeGithubServer, startFakeGithub } from "./helpers/fetch-counter";
 import {
   __resetRateLimitStateForTests,
   __seedRateLimitStateForTests,
   githubFetchWithRetry,
 } from "../backend/src/services/github";
+import { type FakeGithubServer, startFakeGithub } from "./helpers/fetch-counter";
 
 const PATH = "/repos/nemarDatasets/nm099999/branches/main";
 
@@ -529,8 +529,7 @@ describe("Coverage of additional retry paths", () => {
   });
 
   test("maxAttempts exhausted on a transient response returns the final response", async () => {
-    nextHandler = () =>
-      new Response("{}", { status: 503, headers: plainHeaders() });
+    nextHandler = () => new Response("{}", { status: 503, headers: plainHeaders() });
 
     const res = await githubFetchWithRetry(
       `${fake.url}${PATH}`,
@@ -633,7 +632,9 @@ describe("Structured logging", () => {
           return null;
         }
       })
-      .filter((entry): entry is Record<string, unknown> => entry !== null && entry.tag === "github-rl");
+      .filter(
+        (entry): entry is Record<string, unknown> => entry !== null && entry.tag === "github-rl",
+      );
     expect(rlLines.length).toBe(1);
     const entry = rlLines[0];
     expect(entry.method).toBe("GET");

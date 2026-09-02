@@ -887,11 +887,7 @@ describe("Dataset Collaborators API", () => {
         dataset_id: string;
         collaborators: Array<{ username: string }>;
         count: number;
-      }>(
-        "/datasets/nm099999/collaborators",
-        {},
-        TEST_CONFIG.adminApiKey,
-      );
+      }>("/datasets/nm099999/collaborators", {}, TEST_CONFIG.adminApiKey);
 
       expect(status).toBe(200);
       expect(data.dataset_id).toBe("nm099999");

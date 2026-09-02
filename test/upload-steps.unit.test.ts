@@ -202,9 +202,9 @@ describe("virtual-memory preflight (#884)", () => {
 
   test("detectVirtualMemoryLimit returns a valid shape on this machine (real shell)", async () => {
     const limit = await detectVirtualMemoryLimit();
-    expect(limit === "unlimited" || limit === null || (typeof limit === "number" && limit > 0)).toBe(
-      true,
-    );
+    expect(
+      limit === "unlimited" || limit === null || (typeof limit === "number" && limit > 0),
+    ).toBe(true);
   });
 });
 

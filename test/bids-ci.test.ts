@@ -198,7 +198,10 @@ describe("bids-ci - push --pr", () => {
     // either hung waiting for DNS+auth (local) or surfaced different error
     // strings (CI) and only ever exercised the failure path, never the
     // skip-PR-on-main logic the test name claims to verify.
-    const remoteDir = join(TMP_DIR, `remote-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const remoteDir = join(
+      TMP_DIR,
+      `remote-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    );
     mkdirSync(remoteDir, { recursive: true });
     await runCmd(["git", "init", "--bare"], remoteDir);
 

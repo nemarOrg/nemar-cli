@@ -41,11 +41,15 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseSearchPagination } from "../backend/src/routes/datasets/catalog";
+import { parseFacetFilters } from "../backend/src/services/dataset-facets";
 import { buildFtsMatch } from "../backend/src/services/dataset-filters";
 import {
+  MAX_BOUND_PARAMS,
   SEARCH_CANDIDATE_CEILING,
   SEMANTIC_TOPK,
+  assertBoundParamBudget,
   countSearchMatches,
+  datasetIdListParam,
   executeDatasetSearch,
   ftsSearch,
   hydrateDatasetsByIds,
@@ -832,9 +836,67 @@ describe("exact-id tier through executeDatasetSearch (#1145 review C1)", () => {
   });
 });
 
-describe("SEMANTIC_TOPK stays within buildInPlaceholders' hard ceiling", () => {
-  test("SEMANTIC_TOPK is a valid buildInPlaceholders bound (<= 100)", () => {
-    expect(SEMANTIC_TOPK).toBeLessThanOrEqual(100);
+describe("search stays within D1's bound-parameter ceiling (#1193)", () => {
+  // The semantic leg used to bind one parameter per id, so a text search sat
+  // at ~SEMANTIC_TOPK parameters before any filter and a single facet pushed
+  // it over D1's limit: every faceted text search 500'd in production while
+  // the catalog-list path (no semantic leg) kept working. The ids now travel
+  // as ONE json_each parameter, so the count no longer scales with
+  // SEMANTIC_TOPK.
+  test("a full semantic leg costs exactly one bound parameter", () => {
+    const ids = Array.from({ length: SEMANTIC_TOPK }, (_, i) => `on${String(i).padStart(6, "0")}`);
+    const params = [datasetIdListParam(ids)];
+    expect(params).toHaveLength(1);
+    expect(JSON.parse(params[0] as string)).toHaveLength(SEMANTIC_TOPK);
+  });
+
+  // The regression test proper: drive the REAL query builder with a full
+  // semantic leg AND facet filters, the combination that 500'd in production.
+  // Binding the ids one-per-parameter overflows D1's ceiling here, so this
+  // fails if the json_each collapse is ever undone. It calls
+  // countSearchMatches directly (not executeDatasetSearch) because the defect
+  // lives in how THAT function binds its own inputs, and because the semantic
+  // leg comes from Vectorize, which no local test can populate -- which is
+  // precisely why nothing caught #1193.
+  test("a full semantic leg plus facet filters stays within the ceiling", async () => {
+    const db = realD1(freshDb());
+    const ids = Array.from({ length: SEMANTIC_TOPK }, (_, i) => `on${String(i).padStart(6, "0")}`);
+    // `subjects` alone is enough to prove it: with the ids bound one-per-id
+    // this statement carries SEMANTIC_TOPK + 1 fts + 2 range params, past the
+    // ceiling; with json_each it carries four. (Only facets whose columns
+    // exist in BASE_SCHEMA can be used here.)
+    const facets = parseFacetFilters((k) => (k === "subjects" ? "50..100" : undefined));
+    expect(Object.keys(facets).length).toBeGreaterThan(0);
+    await expect(countSearchMatches(db, "sleep", ids, { facets })).resolves.toBeGreaterThanOrEqual(
+      0,
+    );
+  });
+
+  // Second of the three converted sites. countSearchMatches is covered above;
+  // this covers the one that hydrates the rows users actually see, so a
+  // regression in just this site cannot ship green (#1195 review I4).
+  test("hydrateDatasetsByIds carries a full semantic leg within the ceiling", async () => {
+    const db = realD1(freshDb());
+    const ids = Array.from({ length: SEMANTIC_TOPK }, (_, i) => `on${String(i).padStart(6, "0")}`);
+    const facets = parseFacetFilters((k) => (k === "subjects" ? "50..100" : undefined));
+    await expect(hydrateDatasetsByIds(db, ids, { facets })).resolves.toEqual([]);
+  });
+
+  // The third converted site, countWidenedWithBreakdown, is deliberately NOT
+  // covered here and cannot be with the current seams: it is module-private,
+  // and its only caller (computeExcludedUnknownCount) wraps it in try/catch to
+  // degrade the excluded_unknown diff rather than fail the search. So a
+  // parameter-count regression there would be SWALLOWED, not surfaced --
+  // stated rather than left for the next reader to discover.
+
+  test("assertBoundParamBudget throws before D1 would", () => {
+    expect(() => assertBoundParamBudget(new Array(MAX_BOUND_PARAMS).fill(0), "ok")).not.toThrow();
+    expect(() => assertBoundParamBudget(new Array(MAX_BOUND_PARAMS + 1).fill(0), "over")).toThrow(
+      /exceeds D1's limit/,
+    );
+  });
+
+  test("SEMANTIC_TOPK is positive", () => {
     expect(SEMANTIC_TOPK).toBeGreaterThan(0);
   });
 

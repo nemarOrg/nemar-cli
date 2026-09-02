@@ -48,14 +48,7 @@ describe("enumerateBidsSubjects", () => {
 
   test("sorts subjects naturally (lexicographic on the id including prefix)", () => {
     expect(
-      enumerateBidsSubjects(
-        tree(
-          "sub-10/eeg/x",
-          "sub-02/eeg/x",
-          "sub-01/eeg/x",
-          "sub-21/eeg/x",
-        ),
-      ),
+      enumerateBidsSubjects(tree("sub-10/eeg/x", "sub-02/eeg/x", "sub-01/eeg/x", "sub-21/eeg/x")),
     ).toEqual(["sub-01", "sub-02", "sub-10", "sub-21"]);
   });
 
@@ -77,9 +70,9 @@ describe("enumerateBidsSubjects", () => {
   });
 
   test("supports alphanumeric subject ids (BIDS allows them)", () => {
-    expect(
-      enumerateBidsSubjects(tree("sub-NDARAC462DZH/eeg/x", "sub-NDARAE866UVF/eeg/x")),
-    ).toEqual(["sub-NDARAC462DZH", "sub-NDARAE866UVF"]);
+    expect(enumerateBidsSubjects(tree("sub-NDARAC462DZH/eeg/x", "sub-NDARAE866UVF/eeg/x"))).toEqual(
+      ["sub-NDARAC462DZH", "sub-NDARAE866UVF"],
+    );
   });
 
   test("rejects hyphenated-label subject ids (non-conformant per BIDS spec)", () => {
@@ -88,9 +81,7 @@ describe("enumerateBidsSubjects", () => {
     // if you're hitting this, the upstream is already non-conformant and
     // needs to fix labels first. Pinning the behavior so a future regex
     // tweak can't silently start matching them.
-    expect(
-      enumerateBidsSubjects(tree("sub-PD-01/eeg/x", "sub-PD-02/eeg/x")),
-    ).toEqual([]);
+    expect(enumerateBidsSubjects(tree("sub-PD-01/eeg/x", "sub-PD-02/eeg/x"))).toEqual([]);
   });
 });
 
@@ -116,9 +107,7 @@ describe("buildPlaceholderParticipantsTsv", () => {
 
 describe("ensureParticipantsTsv", () => {
   test("returns null content when participants.tsv already exists", () => {
-    const out = ensureParticipantsTsv(
-      tree("participants.tsv", "sub-01/eeg/x", "sub-02/eeg/x"),
-    );
+    const out = ensureParticipantsTsv(tree("participants.tsv", "sub-01/eeg/x", "sub-02/eeg/x"));
     expect(out.alreadyPresent).toBe(true);
     expect(out.contentToCommit).toBeNull();
     expect(out.subjects).toEqual(["sub-01", "sub-02"]);

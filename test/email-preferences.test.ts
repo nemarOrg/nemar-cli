@@ -9,8 +9,8 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
-import { TEST_CONFIG, sleep } from "./setup";
 import { parseEmailPreferences } from "../backend/src/services/email";
+import { TEST_CONFIG, sleep } from "./setup";
 
 // ============================================================================
 // Unit tests for parseEmailPreferences
@@ -26,14 +26,22 @@ describe("parseEmailPreferences", () => {
     const result = parseEmailPreferences(
       JSON.stringify({ user_approval: false, publication_request: true, announcements: true }),
     );
-    expect(result).toEqual({ user_approval: false, publication_request: true, announcements: true });
+    expect(result).toEqual({
+      user_approval: false,
+      publication_request: true,
+      announcements: true,
+    });
   });
 
   test("valid JSON with all disabled", () => {
     const result = parseEmailPreferences(
       JSON.stringify({ user_approval: false, publication_request: false, announcements: false }),
     );
-    expect(result).toEqual({ user_approval: false, publication_request: false, announcements: false });
+    expect(result).toEqual({
+      user_approval: false,
+      publication_request: false,
+      announcements: false,
+    });
   });
 
   test("missing fields default to true", () => {
@@ -42,17 +50,21 @@ describe("parseEmailPreferences", () => {
   });
 
   test("partial fields: only user_approval set", () => {
-    const result = parseEmailPreferences(
-      JSON.stringify({ user_approval: false }),
-    );
-    expect(result).toEqual({ user_approval: false, publication_request: true, announcements: true });
+    const result = parseEmailPreferences(JSON.stringify({ user_approval: false }));
+    expect(result).toEqual({
+      user_approval: false,
+      publication_request: true,
+      announcements: true,
+    });
   });
 
   test("partial fields: only publication_request set", () => {
-    const result = parseEmailPreferences(
-      JSON.stringify({ publication_request: false }),
-    );
-    expect(result).toEqual({ user_approval: true, publication_request: false, announcements: true });
+    const result = parseEmailPreferences(JSON.stringify({ publication_request: false }));
+    expect(result).toEqual({
+      user_approval: true,
+      publication_request: false,
+      announcements: true,
+    });
   });
 
   test("corrupt JSON returns all enabled", () => {
@@ -69,7 +81,11 @@ describe("parseEmailPreferences", () => {
     const result = parseEmailPreferences(
       JSON.stringify({ user_approval: false, publication_request: true, unknown_field: false }),
     );
-    expect(result).toEqual({ user_approval: false, publication_request: true, announcements: true });
+    expect(result).toEqual({
+      user_approval: false,
+      publication_request: true,
+      announcements: true,
+    });
   });
 
   test("null values in fields default to true", () => {
