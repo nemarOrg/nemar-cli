@@ -1642,6 +1642,11 @@ describe("bytesFromRangeHeader (#1181 phase 6 / issue #1061)", () => {
     expect(bytesFromRangeHeader(null)).toBe(0);
   });
 
+  test("an inverted range (end < start) returns 0, never a negative number (#1181 phase 6 review item 4)", () => {
+    expect(bytesFromRangeHeader("bytes=100-50")).toBe(0);
+    expect(bytesFromRangeHeader("bytes=1-0")).toBe(0);
+  });
+
   test("multi-range / malformed: 0", () => {
     expect(bytesFromRangeHeader("bytes=0-1,4-5")).toBe(0);
     expect(bytesFromRangeHeader("garbage")).toBe(0);

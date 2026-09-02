@@ -173,7 +173,18 @@ export function bytesFromRangeHeader(rangeHeader: string | null): number {
   const normalized = parseCacheableRange(rangeHeader);
   if (!normalized) return 0;
   const bounded = /^bytes=(\d+)-(\d+)$/.exec(normalized);
-  if (bounded) return Number(bounded[2]) - Number(bounded[1]) + 1;
+  if (bounded) {
+    // parseCacheableRange only checks the digits-A-digits SHAPE, not that
+    // end >= start -- "bytes=100-50" is syntactically a valid single range
+    // and would otherwise compute -49 here, landing a negative byte count
+    // in Analytics Engine (#1181 phase 6 review item 4). Real S3 answers an
+    // inverted range with 416, same as any other out-of-range request, so
+    // there is never a real number of bytes served for one -- fall back to
+    // the same "unknown" 0 as every other unmeasurable case here.
+    const start = Number(bounded[1]);
+    const end = Number(bounded[2]);
+    return end >= start ? end - start + 1 : 0;
+  }
   const suffix = /^bytes=-(\d+)$/.exec(normalized);
   if (suffix) return Number(suffix[1]);
   return 0; // open-ended `bytes=A-`: length unknown without hitting S3
