@@ -93,9 +93,9 @@ describe("availability_report_at stamp (0061, collapsed by 0073)", () => {
     db.prepare(
       "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.availability_report_at', datetime('now')) WHERE dataset_id = ?",
     ).run("nm000002");
-    const candidates = db
-      .prepare(availabilityReportSweepCandidateQuery(false))
-      .all(50) as { dataset_id: string }[];
+    const candidates = db.prepare(availabilityReportSweepCandidateQuery(false)).all(50) as {
+      dataset_id: string;
+    }[];
     expect(candidates.map((r) => r.dataset_id)).toEqual(["nm000001"]);
     db.close();
   });

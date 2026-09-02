@@ -339,9 +339,9 @@ describe("archive-ready 'ready' UPDATE persists completeness", () => {
       "nemarDatasets/on004624",
       "on004624",
     );
-    const candidate = db
-      .prepare(availabilityReportSweepCandidateQuery(false))
-      .all(50) as Array<{ dataset_id: string }>;
+    const candidate = db.prepare(availabilityReportSweepCandidateQuery(false)).all(50) as Array<{
+      dataset_id: string;
+    }>;
     expect(candidate.map((r) => r.dataset_id)).toContain("on004624");
   });
 
