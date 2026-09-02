@@ -639,6 +639,7 @@ convert_dataset() {
   # no callback cannot inherit the previous dataset's pending count and put this
   # row into a retry loop it never earned.
   LAST_PENDING_COUNT=0
+  LAST_NOT_ATTEMPTED=0
   log "[$id] start (version=${version:-?})"
 
   # In-progress signal so the observability dashboard's "Processing" tile reflects
@@ -691,6 +692,11 @@ convert_dataset() {
     # hour, and for the case where the rounds have run out.
     LAST_PENDING_COUNT="$(jq -r '.pending_count // 0' "$cb" 2>/dev/null || echo 0)"
     [[ "$LAST_PENDING_COUNT" =~ ^[0-9]+$ ]] || LAST_PENDING_COUNT=0
+    # The subset never attempted. Forwarded separately because the queue treats
+    # it differently: re-queued at the shortest delay, without spending a retry
+    # round, since nothing has actually failed for those recordings.
+    LAST_NOT_ATTEMPTED="$(jq -r '.not_attempted_count // 0' "$cb" 2>/dev/null || echo 0)"
+    [[ "$LAST_NOT_ATTEMPTED" =~ ^[0-9]+$ ]] || LAST_NOT_ATTEMPTED=0
     retryable="$(jq -r '.retryable_failures // 0' "$cb" 2>/dev/null || echo 0)"
     if [[ "$retryable" =~ ^[0-9]+$ && "$retryable" -gt 0 ]]; then
       err "[$id] $retryable recording(s) failed for a RETRYABLE reason; they are listed as pending in index.json and the dataset will be re-queued automatically after a backoff. To retry now: $0 --dataset $id --requeue done --execute"
@@ -949,7 +955,8 @@ while :; do
   # is attributable, not worth abandoning a backfill mid-queue.
   if convert_dataset "$id" "$version"; then
     # shellcheck disable=SC1010  # `done` is the queue subcommand, not the keyword
-    qpy done "$id" "$version" --pending-count "${LAST_PENDING_COUNT:-0}" ||
+    qpy done "$id" "$version" --pending-count "${LAST_PENDING_COUNT:-0}" \
+      --not-attempted-count "${LAST_NOT_ATTEMPTED:-0}" ||
       err "[$id] converted, but marking it done FAILED; the row stays inprogress until the stale sweep reclaims it (~6h) and it will be converted again"
   elif [[ "$LAST_DETERMINISTIC" == "true" ]]; then
     # Every recording is an unreadable DATA failure -- terminal, no retry (#774).

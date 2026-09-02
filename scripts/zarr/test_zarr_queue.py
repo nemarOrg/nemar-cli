@@ -876,6 +876,85 @@ class PendingRetryTest(unittest.TestCase):
         self.assertEqual(res["pending_requeued"], 1)
         self.assertEqual(self.row()["status"], "pending")
 
+    def test_not_attempted_pendings_do_not_spend_a_round(self):
+        """A recording nothing has tried yet must not cost an exhaustion round.
+
+        A dataset too large to finish in one run reports pendings every time. If
+        those advanced `retry_round`, five runs would exhaust it and it would
+        look permanently broken while nothing had ever actually failed.
+        """
+        before = int(time.time())
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=4, not_attempted_count=4)
+        row = self.row()
+        self.assertEqual(row["pending_count"], 4)
+        self.assertEqual(row["retry_round"], 0, "no round spent")
+        # Re-queued at the SHORTEST delay rather than the round-1 backoff, which
+        # here happen to be the same number -- so assert the round, above, too.
+        self.assertGreaterEqual(row["next_retry_at"], before + PENDING_BACKOFF_SECONDS[0])
+
+    def test_not_attempted_pendings_never_exhaust(self):
+        for _ in range(PENDING_MAX_ROUNDS + 3):
+            mark_done(
+                self.conn, "nm000001", "1.0.0", pending_count=2, not_attempted_count=2
+            )
+            self.due_now()
+            res = reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+            self.assertEqual(res["pending_requeued"], 1)
+            self.assertEqual(res["pending_exhausted"], 0)
+            claim_next(self.conn)
+        self.assertEqual(self.row()["retry_round"], 0)
+
+    def test_a_mixed_batch_spends_a_round(self):
+        # One genuinely failing recording alongside three untried ones: something
+        # HAS failed, so the backoff applies.
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=4, not_attempted_count=3)
+        self.assertEqual(self.row()["retry_round"], 1)
+        self.assertEqual(self.row()["pending_count"], 4)
+
+    def test_only_attempted_pendings_drive_exhaustion(self):
+        for _ in range(PENDING_MAX_ROUNDS):
+            mark_done(
+                self.conn, "nm000001", "1.0.0", pending_count=3, not_attempted_count=2
+            )
+            self.due_now()
+            res = reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+            if self.row()["status"] == "pending":
+                claim_next(self.conn)
+        self.assertEqual(self.row()["retry_round"], PENDING_MAX_ROUNDS)
+        self.assertEqual(res["pending_exhausted"], 1)
+
+    def test_not_attempted_is_clamped_to_pending(self):
+        # A converter bug must not be able to make the attempted count negative,
+        # which would silently turn a failing dataset into a never-exhausting one.
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=2, not_attempted_count=9)
+        self.assertEqual(self.row()["pending_count"], 2)
+        self.assertEqual(self.row()["retry_round"], 0)
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=2, not_attempted_count=-5)
+        self.assertEqual(self.row()["retry_round"], 1, "negative reads as zero untried")
+
+    def test_a_clean_run_still_clears_a_not_attempted_backlog(self):
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=3, not_attempted_count=3)
+        self.assertEqual(self.row()["pending_count"], 3)
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=0)
+        self.assertEqual(self.row()["pending_count"], 0)
+        self.assertEqual(self.row()["next_retry_at"], 0)
+
+    def test_the_cli_passes_both_counts_through(self):
+        # hallu-zarr.sh forwards both; a flag the parser accepts but never threads
+        # would leave every other test in this class green.
+        db = os.path.join(self._tmp.name, "q.db")
+        argv = [
+            "zarr_queue.py", "--db", db, "done", "nm000001", "1.0.0",
+            "--pending-count", "5", "--not-attempted-count", "5",
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            self.assertEqual(main(), 0)
+        finally:
+            sys.argv = saved
+        self.assertEqual(self.row()["pending_count"], 5)
+        self.assertEqual(self.row()["retry_round"], 0, "all untried: no round spent")
+
     def test_the_cli_passes_the_pending_count_through(self):
         # `hallu-zarr.sh` reaches this via `qpy done <id> <ver> --pending-count N`,
         # so drive the real argument parser: a flag the parser accepts but never

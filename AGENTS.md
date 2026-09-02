@@ -388,9 +388,14 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   (`infra_failure` / `memory_budget` / `not_attempted`), with an `attempts`
   count. These used to be omitted "so they retry next run" and then never did,
   because a run that converted anything is marked `done`; `zarr_queue` now
-  re-queues such a dataset after a backoff (1 h, 6 h, 24 h, then weekly) for at
-  most 5 rounds, after which the recording becomes a typed `retry_exhausted`
-  failure. Per-store `source_key` moved OUT of the index into a sibling
+  re-queues such a dataset on its own. **Only the ATTEMPTED pendings
+  (`infra_failure`, `memory_budget`) drive the backoff table (1 h, 6 h, 24 h,
+  then weekly) and the 5-round exhaustion cap, after which the recording becomes
+  a typed `retry_exhausted` failure. A `not_attempted` pending is re-queued at
+  the shortest delay (1 h) and does NOT advance `retry_round`** — nothing has
+  failed for it, so a dataset merely too large to finish in one run must not burn
+  its rounds on recordings nobody has tried yet. The converter reports the split
+  as `pending_count` and `not_attempted_count` on the callback. Per-store `source_key` moved OUT of the index into a sibling
   `manifest.json` (nothing on the website read it; it was 18 percent of
   nm000281's 12.8 MB index).
   Stores also carry a structured `nemar` root attribute — dataset id, DOI,

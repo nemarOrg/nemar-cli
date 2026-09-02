@@ -39,11 +39,13 @@ Subcommands (all take --db):
     next
         Atomically claim the oldest eligible job -> `inprogress`; print
         "<dataset_id>\t<latest_version>" (nothing if the queue is drained).
-    done DATASET VERSION [--pending-count N]
+    done DATASET VERSION [--pending-count N] [--not-attempted-count N]
         mark converted at VERSION (stamps the engine). A non-zero --pending-count
         means the run left recordings unconverted for a retryable reason: the row
         stays `done` (what converted is served) but carries a backoff, and
         `reconcile` re-queues it when that elapses, up to PENDING_MAX_ROUNDS.
+        --not-attempted-count is the subset never tried: re-queued at the
+        shortest delay without advancing the round, since nothing failed.
     fail DATASET "ERROR" [--max-attempts N] [--backoff-base S] [--deterministic]
         attempts++; reschedule (pending + next_retry_at) until max-attempts, then
         terminal `failed`. `--deterministic` is terminal at once as `data_failed`.
@@ -182,6 +184,12 @@ PENDING_BACKOFF_SECONDS = (3600, 6 * 3600, 24 * 3600, 7 * 86400, 7 * 86400)
 # typed `retry_exhausted` failure at the same count -- that promotion is what
 # actually drives `pending_count` to 0, so this is the backstop for a converter
 # that never gets to run the promotion.
+#
+# Only ATTEMPTED pendings (`infra_failure`, `memory_budget`) spend a round. A
+# `not_attempted` recording has not failed at anything, so `mark_done` re-queues
+# it at PENDING_BACKOFF_SECONDS[0] without advancing the round -- otherwise a
+# dataset that is merely too large to finish in one run would burn its five
+# rounds on recordings nothing had ever tried, and then look permanently broken.
 PENDING_MAX_ROUNDS = 5
 
 
@@ -625,6 +633,7 @@ def mark_done(
     version: str,
     engine_version: str = ZARR_ENGINE_VERSION,
     pending_count: int = 0,
+    not_attempted_count: int = 0,
 ) -> None:
     # Store the canonical tag, not whatever the caller happened to hold. `_vtag`
     # already makes reconcile's comparisons prefix-agnostic, so a bare value is
@@ -645,9 +654,22 @@ def mark_done(
     # time arrives. A clean run RESETS both: whatever was outstanding no longer
     # is, and a dataset that succeeds after four bad rounds must not be one round
     # from exhaustion the next time something transient happens to it.
+    #
+    # `not_attempted_count` is the subset that was never TRIED -- a run that
+    # stopped early, or a worklist that did not reach them. Nothing has gone
+    # wrong with those recordings, so they must not spend the retry rounds a
+    # genuinely failing recording gets: they are re-queued at the SHORTEST delay
+    # and do NOT advance `retry_round`. Otherwise a dataset that is merely large
+    # would exhaust its five rounds on recordings that had never once been
+    # attempted, and then look permanently broken. Only `infra_failure` and
+    # `memory_budget` pendings drive the backoff table and exhaustion.
     pending = max(0, int(pending_count))
+    # Clamped: `not_attempted` is a subset of pending by construction, and a
+    # converter bug must not be able to make the difference negative.
+    not_attempted = min(max(0, int(not_attempted_count)), pending)
+    attempted_pending = pending - not_attempted
     now = _now()
-    if pending:
+    if attempted_pending:
         row = conn.execute(
             "SELECT retry_round FROM jobs WHERE dataset_id=?", (dataset_id,)
         ).fetchone()
@@ -662,6 +684,28 @@ def mark_done(
                 pending,
                 rounds,
                 now + pending_backoff_seconds(rounds),
+                now,
+                dataset_id,
+            ),
+        )
+    elif pending:
+        # Every outstanding recording is `not_attempted`: re-queue soon, and
+        # leave `retry_round` exactly where it was so this costs nothing from the
+        # exhaustion budget.
+        row = conn.execute(
+            "SELECT retry_round FROM jobs WHERE dataset_id=?", (dataset_id,)
+        ).fetchone()
+        rounds = int((row["retry_round"] if row else 0) or 0)
+        conn.execute(
+            "UPDATE jobs SET status='done', converted_version=?, last_error=NULL,"
+            " engine_version=?, pending_count=?, retry_round=?, next_retry_at=?,"
+            " updated_at=? WHERE dataset_id=?",
+            (
+                _vtag(version),
+                engine_version,
+                pending,
+                rounds,
+                now + PENDING_BACKOFF_SECONDS[0],
                 now,
                 dataset_id,
             ),
@@ -1361,6 +1405,15 @@ def main() -> int:
         " (1h, 6h, 24h, then weekly), up to 5 rounds. 0 clears the counter and the"
         " round.",
     )
+    p.add_argument(
+        "--not-attempted-count",
+        type=int,
+        default=0,
+        help="the subset of --pending-count that was never ATTEMPTED. Those are"
+        " re-queued at the shortest delay and do NOT advance the retry round:"
+        " nothing has gone wrong with them, so they must not spend the exhaustion"
+        " budget a genuinely failing recording needs.",
+    )
 
     p = sub.add_parser("fail")
     p.add_argument("dataset")
@@ -1517,7 +1570,13 @@ def main() -> int:
         return 0
 
     if args.cmd == "done":
-        mark_done(conn, args.dataset, args.version, pending_count=args.pending_count)
+        mark_done(
+            conn,
+            args.dataset,
+            args.version,
+            pending_count=args.pending_count,
+            not_attempted_count=args.not_attempted_count,
+        )
         return 0
 
     if args.cmd == "requeue":
