@@ -20,10 +20,50 @@ export const AUDIT_LOG_INSERT_SQL = `INSERT INTO audit_log (user_id, action, res
    VALUES (?, ?, ?, ?, ?)`;
 
 /**
+ * Upper bound, in UTF-8 bytes, on an audit row's `details` payload (#1189).
+ *
+ * The D1 backup renders each row as one INSERT statement, and D1 refuses to
+ * execute a statement over ~100 KB on restore (SQLITE_TOOBIG, #1188) -- so an
+ * unbounded `details` column is a row that can be written but never restored.
+ * 16 KB leaves a wide margin under that limit even after the backup's SQL
+ * quote-escaping (worst case doubles the payload), while being far above any
+ * legitimate summary payload: an audit row carries flags, counts, and a
+ * pointer to the artifact that owns the detail, not the detail itself.
+ */
+export const AUDIT_DETAILS_MAX_BYTES = 16_384;
+
+/** Characters of an oversized payload kept in the truncation marker -- enough
+ *  to expose a JSON payload's leading summary fields for identification. */
+const AUDIT_DETAILS_HEAD_CHARS = 2_000;
+
+/**
+ * Bound a `details` payload to {@link AUDIT_DETAILS_MAX_BYTES}: a payload at
+ * or under the limit passes through untouched; an oversized one is replaced
+ * by a small JSON marker recording that it was dropped, its original size,
+ * and its head. This is deliberately lossy -- by the time a payload is this
+ * large it is per-file detail that belongs in the artifact that owns it
+ * (see #1189), and preserving it here is what made the backup unrestorable.
+ */
+export function boundAuditDetails(details: string | null): string | null {
+  if (details === null) return null;
+  const bytes = new TextEncoder().encode(details).byteLength;
+  if (bytes <= AUDIT_DETAILS_MAX_BYTES) return details;
+  return JSON.stringify({
+    audit_details_truncated: true,
+    original_bytes: bytes,
+    head: details.slice(0, AUDIT_DETAILS_HEAD_CHARS),
+  });
+}
+
+/**
  * Positional params for AUDIT_LOG_INSERT_SQL. Exported separately so the
  * behavioral test can run the production SQL + marshaling against bun:sqlite
  * (same approach as user-tombstone.ts, whose test uses a different driver API
  * than D1).
+ *
+ * `details` is bounded here, in the shared marshaling, rather than at call
+ * sites: every write through auditLogStatement inherits the bound, so the
+ * next unbounded payload shape cannot silently recreate #1188.
  */
 export function auditLogParams(
   entry: AuditLogEntry,
@@ -33,7 +73,7 @@ export function auditLogParams(
     entry.action,
     entry.resourceType ?? null,
     entry.resourceId ?? null,
-    entry.details ?? null,
+    boundAuditDetails(entry.details ?? null),
   ];
 }
 

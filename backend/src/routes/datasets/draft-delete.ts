@@ -6,6 +6,7 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
+import { auditLogStatement } from "../../db/audit-log";
 import { authMiddleware } from "../../middleware/auth";
 import { deleteDatasetCascade } from "../../services/deletion";
 import { hasRole } from "../../types/bindings";
@@ -109,21 +110,20 @@ export function registerDraftDeleteRoutes(datasetRoutes: DatasetsRouter): void {
 
     // Audit log (best-effort).
     try {
-      await db
-        .prepare("INSERT INTO audit_log (action, user_id, details) VALUES (?, ?, ?)")
-        .bind(
-          "dataset_deleted",
-          currentUser.id,
-          JSON.stringify({
-            dataset_id: datasetId,
-            dataset_name: dataset.name,
-            owner_user_id: dataset.owner_user_id,
-            via: "owner_draft_delete",
-            steps: result.steps,
-            warnings: result.warnings,
-          }),
-        )
-        .run();
+      await auditLogStatement(db, {
+        userId: currentUser.id,
+        action: "dataset_deleted",
+        resourceType: "dataset",
+        resourceId: datasetId,
+        details: JSON.stringify({
+          dataset_id: datasetId,
+          dataset_name: dataset.name,
+          owner_user_id: dataset.owner_user_id,
+          via: "owner_draft_delete",
+          steps: result.steps,
+          warnings: result.warnings,
+        }),
+      }).run();
     } catch (err) {
       console.error("Failed to write owner-delete audit log:", err);
       result.warnings.push("Audit log write failed");

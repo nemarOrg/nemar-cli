@@ -155,6 +155,54 @@ export interface DatasetVersionIntegrityResult extends ImportIntegrityResult {
   version: string | null;
 }
 
+/**
+ * Bounded audit summary of a {@link DatasetVersionIntegrityResult} (#1189).
+ *
+ * Flags, counts, and a pointer -- never the key arrays. Audit rows used to
+ * inline `missingKeys`/`zeroByteKeys` in full via JSON.stringify(verified),
+ * which scaled row size with the dataset's file count (largest production
+ * row: 12,397 keys, 1.15 MB) and made the hourly D1 backup unrestorable
+ * (#1188: a row's single-INSERT backup statement exceeded D1's ~100 KB
+ * statement limit). The per-file detail lives in the artifact that owns it,
+ * `.nemar/availability-report.json` on the dataset repo's `main`
+ * (services/availability-report.ts), which is richer than the arrays were:
+ * keyed by manifest path rather than annex key (two paths can share one
+ * key), with a per-entry reason (`zero_byte` / `absent`), versioned in git.
+ *
+ * An explicit pick, not a spread, for the same reason the verify route's
+ * response is (routes/admin/imports.ts): a field added to the result type
+ * later must not silently start being persisted -- least of all a new
+ * unbounded one.
+ *
+ * Migration 0074 rewrites pre-existing array-carrying audit rows into this
+ * same shape (plus a `compacted_by` marker); keep the two in sync.
+ */
+export function integrityAuditSummary(verified: DatasetVersionIntegrityResult): {
+  complete: boolean;
+  expectedCount: number;
+  presentCount: number;
+  bytesPresent: number;
+  declaredBytes: number;
+  declaredFiles: number;
+  version: string | null;
+  missing_count: number;
+  zero_byte_count: number;
+  detail_ref: string;
+} {
+  return {
+    complete: verified.complete,
+    expectedCount: verified.expectedCount,
+    presentCount: verified.presentCount,
+    bytesPresent: verified.bytesPresent,
+    declaredBytes: verified.declaredBytes,
+    declaredFiles: verified.declaredFiles,
+    version: verified.version,
+    missing_count: verified.missingKeys.length,
+    zero_byte_count: verified.zeroByteKeys.length,
+    detail_ref: ".nemar/availability-report.json",
+  };
+}
+
 /** A resolved, parsed manifest -- version and files travel together so
  *  "we have files but no version" (or vice versa) is unrepresentable. */
 export interface ResolvedManifest {
