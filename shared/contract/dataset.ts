@@ -39,7 +39,7 @@ const zeroOneNullable = z.union([z.literal(0), z.literal(1)]).nullable();
  * Mirrors backend/src/routes/datasets/catalog.ts. Comma-joined string fields
  * (modalities/tasks/authors) are the current wire form; #899 does not change them.
  */
-export const catalogItemSchema = z
+const catalogItemObjectSchema = z
   .object({
     dataset_id: z.string(),
     // Aliased `d.dataset_id AS id` on the public branch, but the ?mine=true
@@ -102,6 +102,19 @@ export const catalogItemSchema = z
     age_max: z.number().nullable().optional(),
     bids_version: z.string().nullable().optional(),
     zarr_status: z.enum(["pending", "ready", "failed"]).nullable().optional(),
+    // Issue #1062 (epic #1181 phase 2): zarr conversion facts beyond the
+    // bare status (migrations 0035/0046; ADR 0034 -- derive, don't add
+    // columns, these already exist). zarr_index_url is DERIVED at read time
+    // (not a stored column): the absolute <ZARR_HOSTNAME>/<id>/zarr/index.json
+    // URL when zarr_status is 'ready', else null.
+    zarr_store_count: z.number().int().nullable().optional(),
+    zarr_converted_at: z.string().nullable().optional(),
+    zarr_source_commit: z.string().nullable().optional(),
+    zarr_errors: z.number().int().nullable().optional(),
+    zarr_failure_count: z.number().int().nullable().optional(),
+    zarr_deterministic: zeroOneNullable.optional(),
+    zarr_failed_at: z.string().nullable().optional(),
+    zarr_index_url: z.string().nullable().optional(),
     total_recording_duration: z.number().nullable().optional(),
     recording_duration_min: z.number().nullable().optional(),
     recording_duration_max: z.number().nullable().optional(),
@@ -115,7 +128,36 @@ export const catalogItemSchema = z
     placement_scheme: z.string().nullable().optional(),
   })
   .passthrough();
-export type CatalogItem = z.infer<typeof catalogItemSchema>;
+
+/**
+ * Cross-field contract invariant (PR #1201 review, item 3): `zarr_index_url`
+ * is DERIVED at read time (backend/src/routes/datasets/catalog.ts's
+ * `deriveZarrIndexUrl`) and must be null/absent unless `zarr_status` is
+ * exactly `'ready'` -- the same guard that derivation function itself
+ * enforces. Asserting it here at the contract level means a regression in
+ * that derivation (or a future write path that sets the two fields
+ * independently) fails schema validation instead of silently shipping a
+ * URL that points at a store which was never converted. Shared by both
+ * `catalogItemSchema` and `datasetDetailSchema` (below) since both carry
+ * the pair.
+ */
+function assertZarrIndexUrlOnlyWhenReady(
+  val: { zarr_index_url?: string | null; zarr_status?: string | null },
+  ctx: z.RefinementCtx,
+): void {
+  if (val.zarr_index_url != null && val.zarr_status !== "ready") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "zarr_index_url must be null/absent unless zarr_status is 'ready'",
+      path: ["zarr_index_url"],
+    });
+  }
+}
+
+export const catalogItemSchema = catalogItemObjectSchema.superRefine(
+  assertZarrIndexUrlOnlyWhenReady,
+);
+export type CatalogItem = z.infer<typeof catalogItemObjectSchema>;
 
 /**
  * GET /datasets/:id detail. Backend returns `SELECT d.* , participants,
@@ -125,8 +167,15 @@ export type CatalogItem = z.infer<typeof catalogItemSchema>;
  * through as raw JSON `null` for an un-backfilled dataset — override them to
  * nullable here (the list schema keeps them strict because the list COALESCEs).
  * Passthrough covers the many other raw `d.*` columns.
+ *
+ * Extends `catalogItemObjectSchema` -- the PRE-refine object -- rather than
+ * `catalogItemSchema` (the exported, refined one): `.extend()` is a
+ * `ZodObject` method that `.superRefine()`'s `ZodEffects` wrapper does not
+ * have, so the base object is what every consumer of the shared shape
+ * extends from; the zarr_index_url/zarr_status invariant is re-applied at
+ * the end of this chain instead of inherited.
  */
-export const datasetDetailSchema = catalogItemSchema
+export const datasetDetailSchema = catalogItemObjectSchema
   .extend({
     file_size: z.number().nonnegative().nullable(),
     modalities: z.string().nullable().optional(),
@@ -142,8 +191,23 @@ export const datasetDetailSchema = catalogItemSchema
     attestation_no_duplicate: zeroOneNullable.optional(),
     attestation_upstream_source: z.string().nullable().optional(),
     attestation_accepted_at: z.string().nullable().optional(),
+    // #1191 (fixes #1188): the stored JSON is parsed server-side into this
+    // bounded summary before being served -- never the raw string, and (a
+    // legacy shape that should not exist post migration-0074, but is
+    // rejected here defensively) never a bare array of per-file entries.
+    // detail_ref points at the published Zarr index's `failures` list,
+    // which is where the full per-recording detail now lives.
+    zarr_data_failures: z
+      .object({
+        count: z.number().int().nonnegative(),
+        detail_ref: z.string(),
+        compacted_by: z.string().optional(),
+      })
+      .nullable()
+      .optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine(assertZarrIndexUrlOnlyWhenReady);
 export type DatasetDetail = z.infer<typeof datasetDetailSchema>;
 
 /**

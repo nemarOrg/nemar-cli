@@ -64,6 +64,7 @@ import {
   deletionDate,
   warningStageForDaysLeft,
 } from "./services/staleness";
+import { publishZarrCatalog } from "./services/zarr-catalog";
 import type { Bindings, Variables } from "./types/bindings";
 
 // Create the API app with all routes
@@ -280,6 +281,22 @@ export const NON_PROD_SANDBOX_CLEANUP_QUERY = `SELECT dataset_id FROM datasets
 
 export const PROD_SANDBOX_CLEANUP_QUERY =
   "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'xx%' AND is_exemplar = 0 AND created_at < datetime('now', '-14 days') AND status = 'active' LIMIT ?";
+
+/**
+ * Daily-cron jobs INTENTIONALLY driven from OUTSIDE the `if (prodOnlyJobs)`
+ * block below, i.e. also on the dev/staging worker's tick, not just
+ * production's (PR #1201 review, item 6). This exists so that decision is a
+ * greppable, named declaration -- not only inferable from where a call site
+ * happens to sit in the file -- mirroring AGENTS.md's "a new daily job is
+ * production-only BY DEFAULT" default: a name only belongs in this list
+ * after confirming it cannot email a real user, dispatch GitHub work
+ * against the shared `nemarDatasets` org, or mutate a real DOI or the PROD
+ * bucket -- `publishZarrCatalog` (services/zarr-catalog.ts) qualifies
+ * because it only ever reads/writes the CALLING env's own D1 and S3 bucket.
+ * `backend/test/cron-sweep-wiring.test.ts` pins that every name here is
+ * both actually called and called outside the guarded block.
+ */
+export const DEV_CRON_ALLOWLIST = ["publishZarrCatalog"] as const;
 
 async function scheduledCleanup(env: Bindings): Promise<void> {
   const db = env.DB;
@@ -944,6 +961,23 @@ export default {
         .catch((err) =>
           console.error(
             "[citation-sync] failed:",
+            err instanceof Error ? (err.stack ?? err.message) : err,
+          ),
+        ),
+    );
+    // #1062 (epic #1181 phase 2): republish the top-level Zarr discovery
+    // catalog (zarr-catalog.json), after the sweeps above. ALLOWED ON THE
+    // NON-PROD CRON -- listed in DEV_CRON_ALLOWLIST above: it only reads
+    // this env's own D1 and writes this env's own S3 bucket (env.S3_BUCKET)
+    // -- no email, no GitHub dispatch against the shared nemarDatasets org,
+    // no DOI mutation -- so a dev-worker run can never touch the production
+    // catalog object or a real user/repo.
+    ctx.waitUntil(
+      publishZarrCatalog(env)
+        .then((r) => console.log(`[zarr-catalog] published count=${r.count} bytes=${r.bytes}`))
+        .catch((err) =>
+          console.error(
+            "[zarr-catalog] publish failed:",
             err instanceof Error ? (err.stack ?? err.message) : err,
           ),
         ),

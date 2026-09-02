@@ -271,3 +271,52 @@ describe("the prod-only gate keeps its polarity", () => {
     expect(allCode).toContain("const prodOnlyJobs = !isNonProductionEnv(env);");
   });
 });
+
+/**
+ * `publishZarrCatalog` (#1062, epic #1181 phase 2; PR #1201 review, item 6)
+ * is not sweep-shaped -- its name carries no "sweep" substring, so it falls
+ * outside `discoverSweepExports()`'s pattern and outside `SWEEP_WIRING`'s
+ * declared-vs-discovered symmetry check above by design (that machinery is
+ * documented, in this file's own header, as sweep-specific -- forcing an
+ * unrelated export through it would make the "every sweep is wired"
+ * trip-wire test spuriously fail for a change to `discoverSweepExports()`'s
+ * regex having nothing to do with sweeps). It gets its own targeted
+ * assertions instead, over the same `allCode`/`prodOnlyCode`/`isScheduled`/
+ * `callCount` machinery every sweep above is checked with.
+ */
+describe("publishZarrCatalog is wired into the daily cron (outside the sweep framework)", () => {
+  const NAME = "publishZarrCatalog";
+
+  test("is declared in the DEV_CRON_ALLOWLIST named constant in index.ts", () => {
+    // The constant is the greppable, human-visible form of the dev-cron
+    // decision (PR #1201 review, item 6); this pins that the decision was
+    // actually recorded, not just made in someone's head.
+    expect(allCode).toContain("DEV_CRON_ALLOWLIST");
+    expect(allCode).toContain(`"${NAME}"`);
+  });
+
+  test("is called at least once in scheduled()", () => {
+    expect(callCount(allCode, NAME)).toBeGreaterThanOrEqual(1);
+  });
+
+  test("is wrapped in ctx.waitUntil", () => {
+    expect(isScheduled(allCode, NAME)).toBe(true);
+  });
+
+  test("is called OUTSIDE the prod-only block -- it also runs on the dev cron", () => {
+    expect(callCount(prodOnlyCode, NAME)).toBe(0);
+    expect(callCount(allCode, NAME)).toBeGreaterThan(callCount(prodOnlyCode, NAME));
+  });
+
+  test("its ctx.waitUntil chain includes a .catch (a rejection must never crash scheduled())", () => {
+    const idx = allCode.indexOf(`${NAME}(env)`);
+    expect(idx).toBeGreaterThanOrEqual(0);
+    // A generous window: the real call chains `.then(...).catch(...)` across
+    // several lines, but this is not meant to prove exact adjacency, only
+    // that a .catch exists for THIS call and not some unrelated one --
+    // `NAME` appears nowhere else in index.ts (the declaration test above
+    // already pins that as a side effect of checking the allowlist quote).
+    const window = allCode.slice(idx, idx + 400);
+    expect(window).toContain(".catch(");
+  });
+});

@@ -13,6 +13,7 @@ import { RangeParseError } from "../../../../shared/range.js";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import { parseLicenseTierFilter } from "../../lib/license";
 import { optionalAuthMiddleware } from "../../middleware/auth";
+import { zarrCacheBaseUrl } from "../../services/cloudflare";
 import { getFacetVocabulary } from "../../services/dataset-facet-vocabulary";
 import {
   FacetEnumParseError,
@@ -29,7 +30,7 @@ import {
 import { formatFileSize } from "../../services/dataset-metadata-columns";
 import { DEFAULT_MIN_SCORE, executeDatasetSearch } from "../../services/dataset-search";
 import { isValidDatasetId } from "../../services/datasetId";
-import { hasRole } from "../../types/bindings";
+import { type Bindings, hasRole } from "../../types/bindings";
 import type { DatasetsRouter } from "./shared";
 
 /**
@@ -64,6 +65,18 @@ const FACET_PROJECTION_COLUMNS = `d.subject_count,
                d.age_max,
                d.bids_version,
                d.zarr_status,
+               -- Issue #1062 (epic #1181 phase 2): zarr conversion facts
+               -- beyond the bare status, so a client can decide
+               -- stream-versus-download without probing <id>/zarr/index.json
+               -- per dataset. ADR 0034: all seven already exist as columns
+               -- (migrations 0035/0046); nothing new is stored here.
+               d.zarr_store_count,
+               d.zarr_converted_at,
+               d.zarr_source_commit,
+               d.zarr_errors,
+               d.zarr_failure_count,
+               d.zarr_deterministic,
+               d.zarr_failed_at,
                d.total_recording_duration,
                d.recording_duration_min,
                d.recording_duration_max,
@@ -144,18 +157,117 @@ export function explodeAttestationFields(raw: unknown): Record<string, unknown> 
 }
 
 /**
- * Shared list-row shaping: canonical latest_version tag plus the derived
- * file_size_formatted. The list projections previously served
- * `COALESCE(d.file_size_formatted, '')`, so the list fallback for an
- * unmeasured/zero size stays `''` (the detail route serves null instead,
- * matching its old raw-column passthrough). Guarded on `file_size` being
- * selected so the degraded fallback query (which projects neither field)
- * passes through unchanged.
+ * Derived, not stored (issue #1062, epic #1181 phase 2): the absolute URL of
+ * a dataset's published Zarr index, or null when there is nothing ready to
+ * point at. `zarrBaseUrl` is the Zarr cache host origin (`zarrCacheBaseUrl`,
+ * services/cloudflare.ts, backed by `ZARR_CACHE_BASE_URL`) -- null when that
+ * env var is unset, in which case this always returns null rather than
+ * emitting a relative/broken URL. Exported for unit testing.
  */
-function toListRow<T extends Record<string, unknown>>(row: T): T {
+export function deriveZarrIndexUrl(
+  zarrBaseUrl: string | null,
+  datasetId: unknown,
+  zarrStatus: unknown,
+): string | null {
+  if (!zarrBaseUrl || zarrStatus !== "ready") return null;
+  if (typeof datasetId !== "string" || !datasetId) return null;
+  // PR #1201 review, item 8: strip a trailing slash so a base carrying one
+  // (zarrCacheBaseUrl already strips it, but this function's own contract
+  // shouldn't rely on every caller pre-normalizing) never produces a
+  // double slash -- matches zarr-catalog.ts#buildZarrCatalog's contractBase
+  // normalization for the identical `<base>/<id>/zarr/index.json` shape.
+  const base = zarrBaseUrl.replace(/\/+$/, "");
+  return `${base}/${datasetId}/zarr/index.json`;
+}
+
+/**
+ * Parse the stored `zarr_data_failures` JSON (#1191, migration 0074) into
+ * the `{count, detail_ref, compacted_by?}` object the contract declares,
+ * instead of forwarding the raw stored string -- served only by `GET
+ * /datasets/:id`'s `SELECT d.*` passthrough (list/search never project this
+ * column). Defensive against a legacy ARRAY value: migration 0074 compacted
+ * every existing array-shaped row in place, and every write path since
+ * (#1190) writes the object shape directly, so an array should not exist any
+ * more -- but this stays defensive per the issue's instruction rather than
+ * trusting that invariant. An absent/null value serves null (no known
+ * failures on record), matching the column's own NULL semantics -- SILENTLY,
+ * since that is the expected, common case.
+ *
+ * A NON-EMPTY value this function cannot make sense of -- a string that
+ * fails `JSON.parse`, or a value that parses/arrives as neither an object
+ * nor an array (a bare number, boolean, or `null`-via-`"null"`) -- also
+ * serves null (PR #1201 review, item 1: never 500 the response over one
+ * dataset's malformed bookkeeping column), but is NOT silent: it is a data
+ * anomaly worth an operator's attention, so it is logged at `console.error`
+ * with the dataset id and a reason before returning. `datasetId` is
+ * threaded in for exactly that message. Exported for unit testing.
+ */
+export function parseZarrDataFailures(
+  raw: unknown,
+  datasetId: string,
+): { count: number; detail_ref: string; compacted_by?: string } | null {
+  const unparseable = (reason: string): null => {
+    console.error("[catalog] zarr_data_failures unparseable, treating as none", {
+      dataset_id: datasetId,
+      reason,
+    });
+    return null;
+  };
+
+  let parsed: unknown;
+  if (typeof raw === "string") {
+    if (!raw) return null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      return unparseable(err instanceof Error ? err.message : String(err));
+    }
+  } else if (raw != null) {
+    parsed = raw;
+  } else {
+    return null;
+  }
+
+  if (Array.isArray(parsed)) {
+    return { count: parsed.length, detail_ref: "zarr/index.json" };
+  }
+  if (parsed && typeof parsed === "object") {
+    const obj = parsed as Record<string, unknown>;
+    const count = typeof obj.count === "number" ? obj.count : 0;
+    const detail_ref = typeof obj.detail_ref === "string" ? obj.detail_ref : "zarr/index.json";
+    const compacted_by = typeof obj.compacted_by === "string" ? obj.compacted_by : undefined;
+    return compacted_by !== undefined ? { count, detail_ref, compacted_by } : { count, detail_ref };
+  }
+  return unparseable(
+    `parsed value is ${parsed === null ? "null" : typeof parsed}, expected an object or array`,
+  );
+}
+
+/**
+ * Shared list-row shaping: canonical latest_version tag, the derived
+ * file_size_formatted, and (#1062) the derived zarr_index_url. The list
+ * projections previously served `COALESCE(d.file_size_formatted, '')`, so
+ * the list fallback for an unmeasured/zero size stays `''` (the detail route
+ * serves null instead, matching its old raw-column passthrough). Guarded on
+ * `file_size` being selected so the degraded fallback query (which projects
+ * neither field, nor zarr_status) passes through unchanged.
+ */
+function toListRow<T extends Record<string, unknown>>(row: T, zarrBaseUrl: string | null): T {
   const shaped = withCanonicalLatestVersion(row);
   if (!("file_size" in shaped)) return shaped;
-  return { ...shaped, file_size_formatted: deriveFileSizeFormatted(shaped.file_size) ?? "" };
+  return {
+    ...shaped,
+    file_size_formatted: deriveFileSizeFormatted(shaped.file_size) ?? "",
+    ...("zarr_status" in shaped
+      ? {
+          zarr_index_url: deriveZarrIndexUrl(
+            zarrBaseUrl,
+            shaped.dataset_id,
+            (shaped as Record<string, unknown>).zarr_status,
+          ),
+        }
+      : {}),
+  };
 }
 
 // Re-exported so existing importers keep their path; the constant itself
@@ -205,8 +317,9 @@ export function parseMinScore(c: FilterQueryContext): number {
 }
 
 /**
- * Parse every filter query param -- the nine legacy bespoke filters plus the
- * full facet table (epic #1144 phase 3, #1147, D6) -- into one
+ * Parse every filter query param -- the legacy bespoke filters (nine as of
+ * epic #1144 phase 3, #1147, D6; has_zarr added by issue #1062) plus the
+ * full facet table -- into one
  * `DatasetFilterOptions`, shared by both catalog endpoints so they can no
  * longer drift apart on which filters they honour. Before this, `GET
  * /datasets/search` built only `{ modality, hasHed }` and silently ignored
@@ -233,6 +346,14 @@ export function parseFilterQuery(
   const hasDoi = c.req.query("has_doi") === "true";
   // #869: accept the website FilterSidebar's `has_hed=1` and a `true` for parity.
   const hasHed = c.req.query("has_hed") === "1" || c.req.query("has_hed") === "true";
+  // #1062: same `1`/`true` convention as has_hed. Any other value --
+  // `has_zarr=false`, `has_zarr=yes`, `has_zarr=0`, ... -- is IGNORED, same
+  // as the equivalent has_hed values: only the two literal strings above
+  // switch the filter on, so anything else is indistinguishable from the
+  // param being absent (no filtering, not "explicitly excluded"). PR #1201
+  // review, item 8: documented here because it is easy to assume `=false`
+  // means "exclude zarr datasets" when it silently means "no filter".
+  const hasZarr = c.req.query("has_zarr") === "1" || c.req.query("has_zarr") === "true";
   // #970: same `1`/`true` convention.
   const dataComplete =
     c.req.query("data_complete") === "1" || c.req.query("data_complete") === "true";
@@ -252,6 +373,7 @@ export function parseFilterQuery(
     task: c.req.query("task"),
     hasDoi,
     hasHed,
+    hasZarr,
     dataComplete,
     recent,
     licenseTiers,
@@ -287,6 +409,7 @@ function buildSortClause(sort: string): string {
 async function executeAndReturn(
   c: { json: (data: unknown, status?: number) => Response },
   db: D1Database,
+  env: Bindings,
   baseQuery: string,
   baseParams: (string | number)[],
   pagination: { limit: number; offset: number },
@@ -302,6 +425,10 @@ async function executeAndReturn(
   excludedUnknownQuery?: { query: string; params: (string | number)[]; keysInOrder: FacetKey[] },
 ) {
   const { limit, offset } = pagination;
+  // #1062: computed once per request, reused for every row's derived
+  // zarr_index_url (both the main result set and the degraded fallback
+  // below) rather than re-reading env per row.
+  const zarrBaseUrl = zarrCacheBaseUrl(env);
   try {
     const paginatedQuery = `${baseQuery} LIMIT ? OFFSET ?`;
     const countQuery = `SELECT COUNT(*) AS total FROM (${baseQuery})`;
@@ -409,7 +536,7 @@ async function executeAndReturn(
     }
 
     return c.json({
-      datasets: result.results.map(toListRow),
+      datasets: result.results.map((row) => toListRow(row, zarrBaseUrl)),
       count: result.results.length,
       total_count: totalCount,
       limit,
@@ -463,7 +590,7 @@ async function executeAndReturn(
           .bind(limit, offset)
           .all();
         return c.json({
-          datasets: (fallback.results || []).map(toListRow),
+          datasets: (fallback.results || []).map((row) => toListRow(row, zarrBaseUrl)),
           count: fallback.results?.length || 0,
           total_count: fallback.results?.length || 0,
           limit,
@@ -500,7 +627,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
    *   - Admin: all datasets (including private managed datasets)
    *
    * Filter params: modality, author, task, has_doi, recent, sort, search, owner,
-   * license, data_complete, has_hed, include_unknown, and the facet table
+   * license, data_complete, has_hed, has_zarr, include_unknown, and the facet table
    * (epic #1144 phase 3, #1147) -- see shared/facets.ts for the full list of
    * facet query params (subjects, channels, sessions, size, files, citations,
    * duration, recording_length, recordings, unavailable, age, rate,
@@ -665,7 +792,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       // --mine path is always authed and per-user; the no-store default
       // set at the top of the handler is the right header here. See #639
       // + the union-path Vary block below for the anonymous-shareable case.
-      return executeAndReturn(c, db, query, params, { limit, offset }, excludedUnknownQuery);
+      return executeAndReturn(c, db, c.env, query, params, { limit, offset }, excludedUnknownQuery);
     }
 
     // Single-table read from the `datasets` source of truth (#646). Folded legacy
@@ -789,7 +916,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
       c.header("Vary", "Authorization");
     }
-    return executeAndReturn(c, db, query, params, { limit, offset }, excludedUnknownQuery);
+    return executeAndReturn(c, db, c.env, query, params, { limit, offset }, excludedUnknownQuery);
   });
 
   /**
@@ -1066,13 +1193,24 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     // list branches coalesce to '' instead — see toListRow). The stored
     // attestation JSON is dropped from the payload and served as the six
     // flat contract fields instead (wire shape unchanged from the
-    // six-column era).
-    const { attestation: attestationRaw, ...rest } = withCanonicalLatestVersion(
-      dataset as Record<string, unknown>,
-    );
+    // six-column era). #1191: zarr_data_failures is likewise dropped as a
+    // raw string and re-served as the parsed {count, detail_ref} object.
+    const {
+      attestation: attestationRaw,
+      zarr_data_failures: zarrDataFailuresRaw,
+      ...rest
+    } = withCanonicalLatestVersion(dataset as Record<string, unknown>);
     const detail = {
       ...rest,
       file_size_formatted: deriveFileSizeFormatted(dataset.file_size),
+      zarr_data_failures: parseZarrDataFailures(zarrDataFailuresRaw, dataset.dataset_id as string),
+      // #1062: derived from the raw zarr_status this SELECT d.* already
+      // carries -- same helper the list rows use (toListRow).
+      zarr_index_url: deriveZarrIndexUrl(
+        zarrCacheBaseUrl(c.env),
+        dataset.dataset_id,
+        dataset.zarr_status,
+      ),
       ...explodeAttestationFields(attestationRaw),
     };
     return c.json({ dataset: detail });

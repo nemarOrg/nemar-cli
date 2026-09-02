@@ -789,7 +789,10 @@ export function formatBytes(bytes: number | null): string | null {
   return `${value.toFixed(decimals)} ${units[unit]}`;
 }
 
-function splitCsv(value: string | null): string[] {
+// Exported (#1062, epic #1181 phase 2) so zarr-catalog.ts's document builder
+// reuses this exact comma-split rather than re-implementing it -- the two
+// callers must never drift on how `modalities`/`tasks` become arrays.
+export function splitCsv(value: string | null): string[] {
   if (!value) return [];
   return value
     .split(",")

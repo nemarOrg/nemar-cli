@@ -13,6 +13,7 @@ import { describe, expect, test } from "bun:test";
 import {
   NEUROSCHEMA_VERSION,
   catalogItemSchema,
+  datasetDetailSchema,
   datasetListEnvelopeSchema,
   datasetSearchEnvelopeSchema,
   isVersionTag,
@@ -112,6 +113,157 @@ describe("catalog item schema", () => {
 
   test("rejects an out-of-domain data_complete value", () => {
     expect(() => catalogItemSchema.parse({ ...row, data_complete: 2 })).toThrow();
+  });
+
+  test("accepts the #1062 zarr fields, including the derived zarr_index_url", () => {
+    const parsed = catalogItemSchema.parse({
+      ...row,
+      zarr_status: "ready",
+      zarr_store_count: 41,
+      zarr_converted_at: "2026-08-01T00:00:00.000Z",
+      zarr_source_commit: "abc123",
+      zarr_errors: 0,
+      zarr_failure_count: 0,
+      zarr_deterministic: 0,
+      zarr_failed_at: null,
+      zarr_index_url: "https://zarr.nemar.org/on007763/zarr/index.json",
+    });
+    expect(parsed.zarr_store_count).toBe(41);
+    expect(parsed.zarr_index_url).toBe("https://zarr.nemar.org/on007763/zarr/index.json");
+  });
+
+  test("the #1062 zarr fields are optional and nullable (older backends / not-yet-converted rows)", () => {
+    expect(() => catalogItemSchema.parse(row)).not.toThrow();
+    const parsed = catalogItemSchema.parse({
+      ...row,
+      zarr_store_count: null,
+      zarr_converted_at: null,
+      zarr_source_commit: null,
+      zarr_errors: null,
+      zarr_failure_count: null,
+      zarr_deterministic: null,
+      zarr_failed_at: null,
+      zarr_index_url: null,
+    });
+    expect(parsed.zarr_index_url).toBeNull();
+  });
+
+  // PR #1201 review, item 3: the cross-field invariant a regressed
+  // deriveZarrIndexUrl (or a future write path setting the two fields
+  // independently) would violate -- caught at the contract layer, not just
+  // trusted from the derivation function's own code.
+  test("REJECTS zarr_index_url set when zarr_status is not 'ready'", () => {
+    expect(() =>
+      catalogItemSchema.parse({
+        ...row,
+        zarr_status: "pending",
+        zarr_index_url: "https://zarr.nemar.org/on007763/zarr/index.json",
+      }),
+    ).toThrow();
+  });
+
+  test("REJECTS zarr_index_url set when zarr_status is null (never converted)", () => {
+    expect(() =>
+      catalogItemSchema.parse({
+        ...row,
+        zarr_status: null,
+        zarr_index_url: "https://zarr.nemar.org/on007763/zarr/index.json",
+      }),
+    ).toThrow();
+  });
+
+  test("ACCEPTS zarr_index_url set when zarr_status IS 'ready' (the consistent pair)", () => {
+    expect(() =>
+      catalogItemSchema.parse({
+        ...row,
+        zarr_status: "ready",
+        zarr_index_url: "https://zarr.nemar.org/on007763/zarr/index.json",
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe("detail schema: zarr_data_failures (#1191, fixes #1188)", () => {
+  const detailRow = {
+    dataset_id: "on007763",
+    id: "on007763",
+    name: "Test",
+    description: null,
+    status: "active",
+    visibility: "public",
+    concept_doi: null,
+    doi: null,
+    created_at: "2026-01-01T00:00:00Z",
+    owner_username: "someone",
+    source: "openneuro",
+    modalities: "meg",
+    participants: 41,
+    tasks: "rest",
+    authors: "Doe, J.",
+    license: "CC0",
+    file_size: 123456,
+  };
+
+  test("accepts the bounded {count, detail_ref} summary object", () => {
+    const parsed = datasetDetailSchema.parse({
+      ...detailRow,
+      zarr_data_failures: { count: 36, detail_ref: "zarr/index.json" },
+    });
+    expect(parsed.zarr_data_failures).toEqual({ count: 36, detail_ref: "zarr/index.json" });
+  });
+
+  test("accepts the summary object with the optional compacted_by (migration 0074 rows)", () => {
+    const parsed = datasetDetailSchema.parse({
+      ...detailRow,
+      zarr_data_failures: {
+        count: 877,
+        detail_ref: "zarr/index.json",
+        compacted_by: "migration_0074",
+      },
+    });
+    expect(parsed.zarr_data_failures?.compacted_by).toBe("migration_0074");
+  });
+
+  test("accepts null (no known failures on record)", () => {
+    const parsed = datasetDetailSchema.parse({ ...detailRow, zarr_data_failures: null });
+    expect(parsed.zarr_data_failures).toBeNull();
+  });
+
+  test("zarr_data_failures is optional (older backends omit it entirely)", () => {
+    expect(() => datasetDetailSchema.parse(detailRow)).not.toThrow();
+  });
+
+  test("REJECTS a raw string -- the pre-#1191 shape must never validate again", () => {
+    expect(() =>
+      datasetDetailSchema.parse({
+        ...detailRow,
+        zarr_data_failures: JSON.stringify({ count: 36, detail_ref: "zarr/index.json" }),
+      }),
+    ).toThrow();
+  });
+
+  test("rejects a bare array (the pre-migration-0074 per-file list shape)", () => {
+    expect(() =>
+      datasetDetailSchema.parse({
+        ...detailRow,
+        zarr_data_failures: [{ path: "a", code: "x" }],
+      }),
+    ).toThrow();
+  });
+
+  // PR #1201 review, item 3: datasetDetailSchema carries the same
+  // zarr_index_url/zarr_status invariant as catalogItemSchema -- re-applied
+  // via superRefine after `.extend()`, since `.extend()` is not available on
+  // a ZodEffects. Proven here so a future refactor that drops the reapply
+  // (e.g. reordering the chain) fails this test, not just the list schema's.
+  test("also REJECTS zarr_index_url set when zarr_status is not 'ready'", () => {
+    expect(() =>
+      datasetDetailSchema.parse({
+        ...detailRow,
+        zarr_status: "pending",
+        zarr_index_url: "https://zarr.nemar.org/on007763/zarr/index.json",
+      }),
+    ).toThrow();
   });
 });
 

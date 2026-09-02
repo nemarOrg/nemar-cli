@@ -120,6 +120,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "listUsers",
     "publishDataset",
     "publishVersionDoi",
+    "publishZarrCatalog",
     "reindexBulk",
     "reindexDataset",
     "remintExemplarDois",
@@ -163,6 +164,7 @@ const POST_SPLIT_ADDITIONS = [
   "doctorFix", // #1130, CLI wrapper for POST /admin/doctor/fix
   "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
   "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion
+  "publishZarrCatalog", // #1062, epic #1181 phase 2: POST /admin/zarr-catalog/publish
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */

@@ -1284,3 +1284,26 @@ export async function doctorFix(options: {
     true,
   );
 }
+
+// ============================================================================
+// Zarr catalog (issue #1062, epic #1181 phase 2)
+// ============================================================================
+
+export interface PublishZarrCatalogResponse {
+  count: number;
+  bytes: number;
+}
+
+/**
+ * Rebuild and republish the top-level Zarr discovery catalog
+ * (`zarr-catalog.json`) to this environment's own S3 bucket. The daily cron
+ * does this automatically; this is the on-demand escape hatch for an
+ * operator who doesn't want to wait for the next tick.
+ */
+export async function publishZarrCatalog(): Promise<PublishZarrCatalogResponse> {
+  return request<PublishZarrCatalogResponse>(
+    "/admin/zarr-catalog/publish",
+    { method: "POST" },
+    true,
+  );
+}

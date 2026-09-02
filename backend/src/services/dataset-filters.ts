@@ -60,6 +60,16 @@ export interface DatasetFilterOptions {
   task?: string;
   hasDoi?: boolean;
   hasHed?: boolean;
+  /** Only datasets with a ready Zarr copy holding at least one store (issue
+   *  #1062, epic #1181 phase 2). Same nullable-safe bespoke-filter shape as
+   *  hasHed/dataComplete above -- not a facet-table entry, because the
+   *  underlying `zarr` facet (dataset-facets.ts) already exists as an ENUM
+   *  match on the raw `zarr_status` value; this is a distinct derived
+   *  predicate (ready AND store_count > 0). `hasZarr`'s meaning is STABLE:
+   *  phase 8 adds a SEPARATE `has_zarr_verified` filter for "converted AND
+   *  verified" rather than redefining this one out from under existing
+   *  callers (PR #1201 review, item 9). */
+  hasZarr?: boolean;
   dataComplete?: boolean;
   recent?: number;
   licenseTiers?: LicenseTier[];
@@ -161,6 +171,13 @@ export function buildDatasetFilterClauses(
     // #869: has_hed is nullable (NULL = not classified yet), so `= 1` cleanly
     // excludes both 0 (checked, no HED) and NULL. Backed by idx_datasets_has_hed.
     clauses += " AND d.has_hed = 1";
+  }
+  if (opts.hasZarr) {
+    // #1062: zarr_status is nullable (NULL/'pending'/'failed' all excluded by
+    // `= 'ready'`); COALESCE'd store_count guards a 'ready' row whose count
+    // was never populated (an older converter run). Backed by the existing
+    // idx_datasets_zarr_status (migration 0035/0071) -- no new index needed.
+    clauses += " AND d.zarr_status = 'ready' AND COALESCE(d.zarr_store_count, 0) > 0";
   }
   if (opts.dataComplete) {
     // #970: same nullable-safe idiom as has_hed -- `= 1` excludes both 0

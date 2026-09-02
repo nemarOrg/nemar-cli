@@ -178,6 +178,8 @@ export interface DatasetListFilters {
   hasDoi?: boolean;
   /** Only datasets with HED annotations (#869). Serialized as has_hed=1. */
   hasHed?: boolean;
+  /** Only datasets with a ready Zarr copy (#1062). Serialized as has_zarr=1. */
+  hasZarr?: boolean;
   /** Only datasets verified data-complete (#970). Serialized as data_complete=1. */
   dataComplete?: boolean;
   recent?: number;
@@ -259,6 +261,8 @@ export interface DatasetSearchFilters {
   modality?: string;
   /** Only datasets with HED annotations (#869). Serialized as has_hed=1. */
   hasHed?: boolean;
+  /** Only datasets with a ready Zarr copy (#1062). Serialized as has_zarr=1. */
+  hasZarr?: boolean;
   limit?: number;
   author?: string;
   task?: string;
@@ -314,6 +318,7 @@ export async function listDatasets(
   if (filters.license) params.set("license", filters.license);
   if (filters.hasDoi) params.set("has_doi", "true");
   if (filters.hasHed) params.set("has_hed", "1");
+  if (filters.hasZarr) params.set("has_zarr", "1");
   if (filters.dataComplete) params.set("data_complete", "1");
   if (filters.recent) params.set("recent", String(filters.recent));
   if (filters.sort) params.set("sort", filters.sort);
@@ -391,6 +396,7 @@ export async function searchDatasets(
   if (filters.modality) params.set("modality", filters.modality);
   if (filters.limit) params.set("limit", String(filters.limit));
   if (filters.hasHed) params.set("has_hed", "1");
+  if (filters.hasZarr) params.set("has_zarr", "1");
   if (filters.author) params.set("author", filters.author);
   if (filters.task) params.set("task", filters.task);
   if (filters.license) params.set("license", filters.license);
