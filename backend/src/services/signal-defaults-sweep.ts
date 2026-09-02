@@ -65,7 +65,7 @@ export const SIGNAL_DEFAULTS_SWEEP_CANDIDATE_SQL = `SELECT dataset_id, github_re
    WHERE status = 'active'
      AND github_repo IS NOT NULL
      AND (is_sandbox = 0 OR is_sandbox IS NULL)
-     AND signal_defaults_at IS NULL
+     AND json_extract(sweep_stamps, '$.signal_defaults_at') IS NULL
    ORDER BY dataset_id
    LIMIT ?`;
 
@@ -73,7 +73,7 @@ export const SIGNAL_DEFAULTS_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n FROM da
    WHERE status = 'active'
      AND github_repo IS NOT NULL
      AND (is_sandbox = 0 OR is_sandbox IS NULL)
-     AND signal_defaults_at IS NULL`;
+     AND json_extract(sweep_stamps, '$.signal_defaults_at') IS NULL`;
 
 /**
  * The per-candidate write on a probe that found at least one usable key.
@@ -102,7 +102,7 @@ export const SIGNAL_DEFAULTS_SWEEP_WRITE_SQL = `UPDATE datasets
        power_line_frequency = COALESCE(?, power_line_frequency),
        eeg_reference = COALESCE(?, eeg_reference),
        placement_scheme = COALESCE(?, placement_scheme),
-       signal_defaults_at = datetime('now')
+       sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.signal_defaults_at', datetime('now'))
    WHERE dataset_id = ?`;
 
 /**
@@ -111,7 +111,7 @@ export const SIGNAL_DEFAULTS_SWEEP_WRITE_SQL = `UPDATE datasets
  * but found no usable sidecar key.
  */
 export const SIGNAL_DEFAULTS_SWEEP_STAMP_ONLY_SQL = `UPDATE datasets
-   SET signal_defaults_at = datetime('now')
+   SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.signal_defaults_at', datetime('now'))
    WHERE dataset_id = ?`;
 
 /**
@@ -120,12 +120,12 @@ export const SIGNAL_DEFAULTS_SWEEP_STAMP_ONLY_SQL = `UPDATE datasets
  * sweep SQL above.
  */
 export const SIGNAL_DEFAULTS_SWEEP_RESET_SQL = `UPDATE datasets
-   SET signal_defaults_at = NULL,
+   SET sweep_stamps = json_remove(sweep_stamps, '$.signal_defaults_at'),
        sampling_frequency = NULL,
        power_line_frequency = NULL,
        eeg_reference = NULL,
        placement_scheme = NULL
-   WHERE signal_defaults_at IS NOT NULL`;
+   WHERE json_extract(sweep_stamps, '$.signal_defaults_at') IS NOT NULL`;
 
 /** Positional bind values for SIGNAL_DEFAULTS_SWEEP_WRITE_SQL's 4 value
  *  placeholders + trailing dataset_id. */

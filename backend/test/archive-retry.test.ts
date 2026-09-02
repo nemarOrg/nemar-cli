@@ -10,6 +10,7 @@ import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { ARCHIVE_READY_UPDATE_SQL } from "../src/routes/callbacks/archive-ready";
 import {
   ARCHIVE_RETRY_SWEEP_QUERY,
   MAX_ARCHIVE_RETRIES,
@@ -121,17 +122,22 @@ function insertDataset(
     archive_checked_at?: string | null;
   },
 ): void {
+  // The stamp lives in sweep_stamps -> $.archive_checked_at since migration
+  // 0073 (#1183). A NULL archive_checked_at leaves sweep_stamps NULL (the
+  // fresh post-0073 row shape), which the sweep must treat as never-checked.
   db.prepare(
     `INSERT INTO datasets
        (dataset_id, owner_user_id, name, visibility, is_sandbox,
-        archive_status, latest_version_doi, archive_retry_count, archive_checked_at)
-     VALUES (?, 1, ?, 'public', 0, ?, ?, COALESCE(?, 0), ?)`,
+        archive_status, latest_version_doi, archive_retry_count, sweep_stamps)
+     VALUES (?, 1, ?, 'public', 0, ?, ?, COALESCE(?, 0),
+             CASE WHEN ? IS NULL THEN NULL ELSE json_object('archive_checked_at', ?) END)`,
   ).run(
     d.dataset_id,
     d.dataset_id,
     d.archive_status ?? null,
     d.latest_version_doi ?? null,
     d.archive_retry_count ?? 0,
+    d.archive_checked_at ?? null,
     d.archive_checked_at ?? null,
   );
 }
@@ -152,12 +158,9 @@ describe("migration 0040: archive_retry_count", () => {
 
   test("ready callback UPDATE resets the count to 0", () => {
     insertDataset(db, { dataset_id: "nm000001", archive_status: "failed", archive_retry_count: 2 });
-    db.prepare(
-      `UPDATE datasets
-         SET archive_status = 'ready', archive_checked_at = datetime('now'),
-             archive_size = ?, archive_retry_count = 0
-       WHERE dataset_id = ?`,
-    ).run(123, "nm000001");
+    // The route's own UPDATE, imported rather than copied so this cannot
+    // drift from what production runs.
+    db.prepare(ARCHIVE_READY_UPDATE_SQL).run(123, null, null, null, "nm000001");
     const row = db
       .prepare("SELECT archive_status, archive_retry_count FROM datasets WHERE dataset_id = ?")
       .get("nm000001") as { archive_status: string; archive_retry_count: number };

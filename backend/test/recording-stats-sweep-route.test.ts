@@ -120,7 +120,7 @@ function seedDataset(
   );
   if (opts.stamped) {
     db.prepare(
-      "UPDATE datasets SET recording_stats_at = '2026-08-01 00:00:00' WHERE dataset_id = ?",
+      "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.recording_stats_at', '2026-08-01 00:00:00') WHERE dataset_id = ?",
     ).run(id);
   }
 }
@@ -190,10 +190,11 @@ describe("POST /admin/datasets/recording-stats-sweep (real route, zero real cand
     const body = await res.json();
     expect(body.reset).toBe(1);
 
-    const r = db.query("SELECT * FROM datasets WHERE dataset_id = 'nm000503'").get() as Record<
-      string,
-      unknown
-    >;
+    const r = db
+      .query(
+        "SELECT *, json_extract(sweep_stamps, '$.recording_stats_at') AS recording_stats_at FROM datasets WHERE dataset_id = 'nm000503'",
+      )
+      .get() as Record<string, unknown>;
     // Every one of the 9 columns, checked individually -- a reset that
     // forgets exactly one (e.g. recording_count) would still pass a test
     // that only checks `reset: 1` or a couple of the columns.
@@ -214,7 +215,9 @@ describe("POST /admin/datasets/recording-stats-sweep (real route, zero real cand
     const body = await res.json();
     expect(body.reset).toBe(1);
     const r = db
-      .query("SELECT recording_stats_at FROM datasets WHERE dataset_id = 'nm000504'")
+      .query(
+        "SELECT json_extract(sweep_stamps, '$.recording_stats_at') AS recording_stats_at FROM datasets WHERE dataset_id = 'nm000504'",
+      )
       .get() as { recording_stats_at: string | null };
     expect(r.recording_stats_at).toBeNull();
   });

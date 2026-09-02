@@ -94,7 +94,7 @@ export async function syncCitationCounts(
           `UPDATE datasets
              SET num_dataset_citations = ?,
                  num_datapaper_citations = ?,
-                 citations_updated_at = datetime('now')
+                 sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.citations_updated_at', datetime('now'))
            WHERE dataset_id = ? OR source_id = ?`,
         )
         .bind(r.num_dataset_citations, r.num_datapaper_citations, r.dataset_id, r.dataset_id),

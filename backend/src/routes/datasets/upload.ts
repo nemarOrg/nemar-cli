@@ -350,7 +350,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           try {
             await db
               .prepare(
-                "UPDATE datasets SET subject_count = ?, file_size = ? WHERE dataset_id = ? AND metadata_updated_at IS NULL",
+                "UPDATE datasets SET subject_count = ?, file_size = ? WHERE dataset_id = ? AND json_extract(sweep_stamps, '$.metadata_updated_at') IS NULL",
               )
               .bind(resumeSeed.subjects, resumeSeed.bytes, datasetId)
               .run();

@@ -77,10 +77,7 @@ describe("sweepLogLines: a real result", () => {
     };
     const lines = sweepLogLines("x-sweep", r, summary);
     expect(lines.info).toBeNull();
-    expect(lines.errors).toEqual([
-      "[x-sweep] nm000111: boom",
-      "[x-sweep] *: auth failed",
-    ]);
+    expect(lines.errors).toEqual(["[x-sweep] nm000111: boom", "[x-sweep] *: auth failed"]);
   });
 
   test("the label prefixes every error line", () => {

@@ -157,8 +157,10 @@ describe("refreshDatasetMetadata: signal_defaults override threading (#1162 revi
   test("signal_defaults_at is NOT stamped by reindex -- that stamp is owned only by the sweep", async () => {
     await refreshDatasetMetadata(env(), REPO);
     const row = db
-      .query("SELECT signal_defaults_at FROM datasets WHERE dataset_id = ?")
-      .get(REPO) as { signal_defaults_at: string | null };
-    expect(row.signal_defaults_at).toBeNull();
+      .query(
+        "SELECT json_extract(sweep_stamps, '$.signal_defaults_at') AS at FROM datasets WHERE dataset_id = ?",
+      )
+      .get(REPO) as { at: string | null };
+    expect(row.at).toBeNull();
   });
 });

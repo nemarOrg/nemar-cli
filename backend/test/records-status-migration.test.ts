@@ -40,10 +40,14 @@ describe("migration 0041: records columns", () => {
     db = freshDb();
   });
 
-  test("adds records_status / records_checked_at, NULL by default", () => {
+  test("adds records_status; records_checked_at reads NULL by default from sweep_stamps", () => {
+    // The 0041 records_checked_at column is collapsed into sweep_stamps ->
+    // $.records_checked_at by migration 0073 (#1183).
     insertDataset(db, "nm000001");
     const row = db
-      .prepare("SELECT records_status, records_checked_at FROM datasets WHERE dataset_id = ?")
+      .prepare(
+        "SELECT records_status, json_extract(sweep_stamps, '$.records_checked_at') AS records_checked_at FROM datasets WHERE dataset_id = ?",
+      )
       .get("nm000001") as Record<string, unknown>;
     expect(row.records_status).toBeNull();
     expect(row.records_checked_at).toBeNull();
@@ -70,24 +74,22 @@ describe("migration 0041: records columns", () => {
   });
 
   test("records-ready UPDATE flips status + stamps checked_at; 0 rows for unknown dataset", () => {
+    // The handler's exact UPDATE shape: the fresh row's sweep_stamps is NULL,
+    // so this also pins the COALESCE (json_set on NULL discards the write).
     insertDataset(db, "nm000001");
-    const ok = db
-      .prepare(
-        "UPDATE datasets SET records_status = ?, records_checked_at = datetime('now') WHERE dataset_id = ?",
-      )
-      .run("ready", "nm000001");
+    const sql =
+      "UPDATE datasets SET records_status = ?, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.records_checked_at', datetime('now')) WHERE dataset_id = ?";
+    const ok = db.prepare(sql).run("ready", "nm000001");
     expect(ok.changes).toBe(1);
     const row = db
-      .prepare("SELECT records_status, records_checked_at FROM datasets WHERE dataset_id = ?")
+      .prepare(
+        "SELECT records_status, json_extract(sweep_stamps, '$.records_checked_at') AS records_checked_at FROM datasets WHERE dataset_id = ?",
+      )
       .get("nm000001") as { records_status: string; records_checked_at: string };
     expect(row.records_status).toBe("ready");
     expect(row.records_checked_at).not.toBeNull();
 
-    const miss = db
-      .prepare(
-        "UPDATE datasets SET records_status = ?, records_checked_at = datetime('now') WHERE dataset_id = ?",
-      )
-      .run("failed", "nm999999");
+    const miss = db.prepare(sql).run("failed", "nm999999");
     expect(miss.changes).toBe(0);
   });
 });

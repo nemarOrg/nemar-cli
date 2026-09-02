@@ -7,7 +7,7 @@
  * numeric pin IS the tripwire: the next migration that widens `datasets`
  * past the ceiling fails here, in CI, instead of at deploy time.
  *
- * The exact-count pin (=== 92) is deliberate alongside the ceiling (<= 97):
+ * The exact-count pin (=== 81) is deliberate alongside the ceiling (<= 97):
  * an unexpected column count in EITHER direction means a migration changed
  * the table shape without this file being updated to acknowledge it. Raise
  * the pin consciously with each widening migration; never past the ceiling.
@@ -26,21 +26,23 @@ beforeAll(() => {
 });
 
 describe("datasets column budget", () => {
-  test("exactly 92 columns after all migrations", () => {
-    const count = db
-      .query("SELECT COUNT(*) AS n FROM pragma_table_info('datasets')")
-      .get() as { n: number };
-    expect(count.n).toBe(92);
+  test("exactly 81 columns after all migrations", () => {
+    // 92 after 0072; 0073 collapses the 12 sweep stamps into one
+    // sweep_stamps JSON column (#1183): 92 + 1 - 12 = 81.
+    const count = db.query("SELECT COUNT(*) AS n FROM pragma_table_info('datasets')").get() as {
+      n: number;
+    };
+    expect(count.n).toBe(81);
   });
 
   test("stays under the 97-column ceiling (D1 hard cap is 100)", () => {
-    const count = db
-      .query("SELECT COUNT(*) AS n FROM pragma_table_info('datasets')")
-      .get() as { n: number };
+    const count = db.query("SELECT COUNT(*) AS n FROM pragma_table_info('datasets')").get() as {
+      n: number;
+    };
     expect(count.n).toBeLessThanOrEqual(97);
   });
 
-  test("index set is exactly the 23 the rebuild recreates", () => {
+  test("index set is exactly the 22 surviving 0073", () => {
     const names = (
       db
         .query(
@@ -68,7 +70,6 @@ describe("datasets column budget", () => {
       "idx_datasets_status",
       "idx_datasets_subject_count",
       "idx_datasets_visibility",
-      "idx_datasets_zarr_checked_at",
       "idx_datasets_zarr_failed_at",
       "idx_datasets_zarr_status",
       "idx_datasets_zenodo_concept",

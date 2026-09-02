@@ -773,7 +773,7 @@ export interface HedSweepBatchResponse {
   /** Could not classify (no dataset_description.json / probe error) -> NULL. */
   unknown: number;
   errors: { dataset_id: string; error: string }[];
-  /** Datasets still unswept (hed_checked_at IS NULL); 0 when the sweep is done. */
+  /** Datasets still unswept (no `$.hed_checked_at` in sweep_stamps); 0 when done. */
   remaining: number | null;
 }
 
@@ -922,7 +922,7 @@ export interface AvailabilityReportSweepBatchResponse {
   /** Successfully generated + committed this batch. */
   written: number;
   errors: { dataset_id: string; error: string }[];
-  /** Datasets still unswept (availability_report_at IS NULL); 0 when the sweep is done. */
+  /** Datasets still unswept (no `$.availability_report_at` in sweep_stamps); 0 when done. */
   remaining: number | null;
 }
 

@@ -38,9 +38,10 @@ function realD1(db: Database): D1Database {
   } as unknown as D1Database;
 }
 
-// Minimal datasets schema with the citation columns as of migration 0071
-// (#1182): only the two addends are stored; the served num_citations total
-// is derived as their sum (see the counts() helper below).
+// Minimal datasets schema with the citation columns as of migration 0073
+// (#1183): only the two addends are stored (the served num_citations total
+// is derived as their sum, see counts() below), and the sweep stamp lives
+// under sweep_stamps -> $.citations_updated_at rather than its own column.
 const SCHEMA = `
 CREATE TABLE datasets (
   dataset_id TEXT NOT NULL UNIQUE,
@@ -48,7 +49,7 @@ CREATE TABLE datasets (
   name TEXT NOT NULL,
   num_dataset_citations INTEGER NOT NULL DEFAULT 0,
   num_datapaper_citations INTEGER NOT NULL DEFAULT 0,
-  citations_updated_at TEXT
+  sweep_stamps TEXT CHECK (sweep_stamps IS NULL OR json_valid(sweep_stamps))
 );`;
 
 let db: Database;
@@ -133,11 +134,16 @@ describe("syncCitationCounts", () => {
   });
 
   test("stamps citations_updated_at on updated rows", async () => {
+    // Every seeded row starts at sweep_stamps NULL (a fresh post-0073 row),
+    // so this also pins the COALESCE in the production UPDATE: json_set on
+    // a NULL column returns NULL and would silently discard the stamp.
     await syncCitationCounts(realD1(db), ROWS);
     const stamped = db
-      .query("SELECT citations_updated_at FROM datasets WHERE dataset_id = 'on005964'")
-      .get() as { citations_updated_at: string | null };
-    expect(stamped.citations_updated_at).not.toBeNull();
+      .query(
+        "SELECT json_extract(sweep_stamps, '$.citations_updated_at') AS at FROM datasets WHERE dataset_id = 'on005964'",
+      )
+      .get() as { at: string | null };
+    expect(stamped.at).not.toBeNull();
   });
 
   test("never inserts a row for an unknown dataset", async () => {

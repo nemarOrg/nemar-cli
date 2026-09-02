@@ -193,9 +193,10 @@ describe("migration 0071: datasets rebuild", () => {
   });
 
   test("ids are copied verbatim (sparse, never reassigned)", () => {
-    const rows = db
-      .query("SELECT id, dataset_id FROM datasets ORDER BY id")
-      .all() as { id: number; dataset_id: string }[];
+    const rows = db.query("SELECT id, dataset_id FROM datasets ORDER BY id").all() as {
+      id: number;
+      dataset_id: string;
+    }[];
     expect(rows).toEqual([
       { id: IDS.full, dataset_id: "nm000048" },
       { id: IDS.partial, dataset_id: "nm001000" },
@@ -301,17 +302,17 @@ describe("migration 0071: datasets rebuild", () => {
   });
 
   test("sqlite_sequence is re-seeded at MAX(id); a fresh INSERT takes max+1", () => {
-    const seq = db
-      .query("SELECT seq FROM sqlite_sequence WHERE name = 'datasets'")
-      .get() as { seq: number } | null;
+    const seq = db.query("SELECT seq FROM sqlite_sequence WHERE name = 'datasets'").get() as {
+      seq: number;
+    } | null;
     expect(seq?.seq).toBe(IDS.none);
 
     db.query(
       "INSERT INTO datasets (dataset_id, name, owner_user_id) VALUES ('nm900001', 'Fresh Row', 1)",
     ).run();
-    const fresh = db
-      .query("SELECT id FROM datasets WHERE dataset_id = 'nm900001'")
-      .get() as { id: number };
+    const fresh = db.query("SELECT id FROM datasets WHERE dataset_id = 'nm900001'").get() as {
+      id: number;
+    };
     expect(fresh.id).toBe(IDS.none + 1);
   });
 
@@ -322,7 +323,9 @@ describe("migration 0071: datasets rebuild", () => {
     const matchRowids = (d: Database) =>
       (
         d
-          .query("SELECT rowid FROM datasets_fts WHERE datasets_fts MATCH 'aardvark' ORDER BY rowid")
+          .query(
+            "SELECT rowid FROM datasets_fts WHERE datasets_fts MATCH 'aardvark' ORDER BY rowid",
+          )
           .all() as { rowid: number }[]
       ).map((r) => r.rowid);
     const expected = matchRowids(before);
@@ -339,24 +342,28 @@ describe("migration 0071: datasets rebuild", () => {
 
   test("recreated triggers fire: a name UPDATE reindexes search and dirties the embedding", () => {
     expect(
-      (db.query("SELECT embedding_dirty FROM datasets WHERE id = ?").get(IDS.none) as {
-        embedding_dirty: number;
-      }).embedding_dirty,
+      (
+        db.query("SELECT embedding_dirty FROM datasets WHERE id = ?").get(IDS.none) as {
+          embedding_dirty: number;
+        }
+      ).embedding_dirty,
     ).toBe(0);
 
     db.query("UPDATE datasets SET name = 'Zebrafish LFP Nights' WHERE id = ?").run(IDS.none);
 
     const hits = (
-      db
-        .query("SELECT rowid FROM datasets_fts WHERE datasets_fts MATCH 'zebrafish'")
-        .all() as { rowid: number }[]
+      db.query("SELECT rowid FROM datasets_fts WHERE datasets_fts MATCH 'zebrafish'").all() as {
+        rowid: number;
+      }[]
     ).map((r) => r.rowid);
     expect(hits).toEqual([IDS.none]);
 
     expect(
-      (db.query("SELECT embedding_dirty FROM datasets WHERE id = ?").get(IDS.none) as {
-        embedding_dirty: number;
-      }).embedding_dirty,
+      (
+        db.query("SELECT embedding_dirty FROM datasets WHERE id = ?").get(IDS.none) as {
+          embedding_dirty: number;
+        }
+      ).embedding_dirty,
     ).toBe(1);
   });
 });
