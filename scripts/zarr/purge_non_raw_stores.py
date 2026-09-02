@@ -15,9 +15,11 @@ and this script is that follow-up.
 This is a standalone script, not a `generate_zarr.py` entry point (a
 concurrent edit to that file cannot conflict with it), and it imports rather
 than re-derives the raw/non-raw distinction: `is_excluded_from_discovery`,
-`safe_store_prefix`, `_rm_recursive`, `s3_read_json`, `aws_cp`, and the S3
+`safe_store_prefix`, `_rm_recursive`, `s3_read_json`, and the S3
 listing helpers all come from `generate_zarr.py` so the two files cannot drift
-apart on what counts as "excluded" or how a store's S3 prefix is built.
+apart on what counts as "excluded" or how a store's S3 prefix is built. The
+index WRITE is this file's own (`write_index`), because it is conditional --
+`aws_cp` cannot carry an `--if-match`.
 
 Safety design
 -------------
@@ -62,8 +64,14 @@ Safety design
   confirmed against S3 before deletion. The snapshot is validated as a
   `nemar-zarr-index` for that exact `dataset_id` (`load_snapshot_index`), and
   the index rewrite is computed from the LIVE document and skipped when it does
-  not list the purged stores (`plan_snapshot_index_rewrite`) -- publishing the
+  not list the purged stores (`plan_live_index_rewrite`) -- publishing the
   snapshot itself would restore the very entries being cleaned up.
+* The index rewrite is a CONDITIONAL write. The live document is re-read (with
+  its ETag) immediately before the write, the rewrite is recomputed from it, and
+  the PUT carries `--if-match`, so a converter run that published a new index
+  while this one was deleting cannot be silently rolled back: the conflict is
+  reported for that dataset (`index_rewrite_conflict`) and the newer document is
+  left alone.
 * The ordering (delete before index rewrite, always exactly once) and
   error-isolation decisions (an errored target's index entry always
   survives; an already-absent one is folded in without a second delete
@@ -104,7 +112,6 @@ from generate_zarr import (  # type: ignore[import-not-found]  (sibling module v
     _aws_env,
     _rm_recursive,
     _s3_child_prefixes,
-    aws_cp,
     is_excluded_from_discovery,
     s3_read_json,
     safe_store_prefix,
@@ -290,21 +297,24 @@ def rewrite_index(index: dict, purged_rels: set[str]) -> dict:
     return out
 
 
-def plan_snapshot_index_rewrite(live_index: dict | None, purged_rels: set[str]) -> dict | None:
-    """Decide whether a snapshot-mode purge should rewrite the LIVE index.
+def plan_live_index_rewrite(live_index: dict | None, purged_rels: set[str]) -> dict | None:
+    """Decide whether a purge should rewrite the LIVE index, and how.
 
     Returns the rewritten live document, or `None` when no write is warranted.
 
-    This exists because snapshot mode reads its candidates from a SAVED index
-    while the authoritative document on S3 has usually moved on. Feeding the
-    snapshot itself to `write_index` would publish a stale document over a
-    fresher one -- for the stranded stores this mode was built for, that means
-    resurrecting hundreds of non-raw entries a converter rebuild had already
-    dropped, i.e. undoing the exact cleanup being performed. So the rewrite is
-    always computed from the live document, never from the snapshot, and is
-    skipped entirely when the live document does not mention any purged store
-    (the normal stranded case: the bytes were orphaned in S3 precisely because
-    the index stopped listing them).
+    Every mode goes through this, and every mode computes the rewrite from the
+    document that is on S3 *now* rather than from the one its candidates came
+    from. Snapshot mode made that obvious -- it reads candidates from a SAVED
+    index while the authoritative document has usually moved on, so publishing
+    the snapshot would resurrect hundreds of non-raw entries a converter rebuild
+    had already dropped, undoing the exact cleanup being performed. The live
+    mode has the same exposure on a shorter fuse: deleting a large prefix takes
+    minutes, and anything published in that window would be rolled back by a
+    rewrite computed from the pre-delete read.
+
+    `None` means there is nothing to write: no live document at all, or one that
+    does not mention any purged store (the normal stranded case -- the bytes
+    were orphaned in S3 precisely because the index stopped listing them).
     """
     if not live_index or not purged_rels:
         return None
@@ -599,31 +609,116 @@ def discover_excluded_stores(bucket: str, dataset_id: str) -> set[str]:
     return found
 
 
-def write_index(bucket: str, dataset_id: str, index: dict) -> None:
-    """Write the rewritten `index.json` back to S3.
+class IndexPreconditionFailed(Exception):
+    """The live `index.json` changed between the read this rewrite was computed
+    from and the write. The write is ABANDONED rather than retried or forced:
+    the other writer is a converter run publishing a whole new document, and
+    replaying a rewrite computed from the old one would silently roll it back.
+    """
 
-    `index.json`'s destination is a single S3 object, so a single `aws s3 cp`
-    PUT is already atomic there: a reader sees the previous full body or the
-    new full body, never a partial one. The "write to a sibling temp path,
-    then swap" half of the atomic-write pattern `generate_zarr.py`'s
-    `fix_source_file_attr` uses for a local file applies here to the LOCAL
-    staging file this function builds before that PUT -- the full document is
-    written out completely before anything is uploaded, so a crash mid-dump
-    never touches the object this uploads. Mirrors `generate_zarr.py main()`'s
-    own `index.json` write for this exact file.
+
+def read_index_with_etag(bucket: str, dataset_id: str) -> tuple[dict | None, str | None]:
+    """`(index, etag)` for a dataset's live `index.json`, or `(None, None)` when
+    there is none.
+
+    One `get-object` call for both, on purpose: the ETag has to be the one the
+    body that produced this rewrite actually had, and a separate `head-object`
+    could observe a different version. Raises for any failure that is not a
+    genuine absence -- the same rule `s3_read_json` follows, for the same reason
+    (treating a credentials or network error as "no index" would rewrite the
+    document from nothing).
+    """
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as fh:
+        tmp_path = fh.name
+    try:
+        res = subprocess.run(
+            [
+                "aws", "s3api", "get-object", "--bucket", bucket,
+                "--key", f"{dataset_id}/zarr/index.json", tmp_path,
+                "--query", "ETag", "--output", "text", *_AWS_TIMEOUTS,
+            ],
+            capture_output=True, text=True, timeout=_AWS_OP_TIMEOUT, env=_aws_env(),
+            check=False,  # the return code IS the answer: absent vs failed
+        )
+        if res.returncode != 0:
+            err = res.stderr.lower()
+            if "nosuchkey" in err or "404" in err or "not found" in err:
+                return None, None
+            raise RuntimeError(
+                f"read_index_with_etag: aws s3api get-object exited "
+                f"{res.returncode}: {res.stderr.strip()}"
+            )
+        with open(tmp_path, encoding="utf-8") as fh:
+            index = json.load(fh)
+        # `--output text` prints the quoted ETag; S3 wants it back verbatim on
+        # `--if-match`, so only the surrounding whitespace is stripped.
+        return index, res.stdout.strip()
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+
+
+def write_index(bucket: str, dataset_id: str, index: dict, *, if_match: str | None) -> None:
+    """Write the rewritten `index.json` back to S3, CONDITIONALLY.
+
+    `index.json`'s destination is a single S3 object, so a single PUT is already
+    atomic there: a reader sees the previous full body or the new full body,
+    never a partial one. The "write to a sibling temp path, then swap" half of
+    the atomic-write pattern `generate_zarr.py`'s `fix_source_file_attr` uses
+    for a local file applies here to the LOCAL staging file this function builds
+    before that PUT -- the full document is written out completely before
+    anything is uploaded, so a crash mid-dump never touches the object.
+
+    Atomic is not the same as safe, though, and that is what `if_match` is for.
+    This tool reads the index, deletes objects (slowly -- a big prefix is
+    minutes), and only then writes the document back. A converter run that
+    publishes a NEW index in that window would be silently reverted by an
+    unconditional PUT, taking every store it had just added with it. So the
+    write carries `--if-match` with the ETag the rewrite was computed from and
+    S3 refuses it (412) if anything else has written since; the caller reports
+    the conflict for that dataset and leaves the newer document alone, because a
+    rewrite computed from a stale body cannot be salvaged by retrying it.
+
+    `if_match=None` is not "skip the check" -- there is no such mode. It means
+    the object did not exist at read time, and the write is then conditional on
+    it still not existing (`--if-none-match "*"`), so a converter that published
+    a first index in the meantime is not clobbered either.
+
+    Single attempt, deliberately: `_aws`'s retry loop would re-send a
+    conditional PUT whose first attempt may in fact have succeeded, turning a
+    lost response into a phantom conflict report.
     """
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
         json.dump(index, fh, separators=(",", ":"))
         tmp_path = fh.name
+    condition = ["--if-match", if_match] if if_match else ["--if-none-match", "*"]
     try:
-        aws_cp(
-            tmp_path,
-            f"s3://{bucket}/{dataset_id}/zarr/index.json",
-            extra=["--content-type", "application/json", "--cache-control", "public, max-age=60"],
+        res = subprocess.run(
+            [
+                "aws", "s3api", "put-object", "--bucket", bucket,
+                "--key", f"{dataset_id}/zarr/index.json", "--body", tmp_path,
+                "--content-type", "application/json",
+                "--cache-control", "public, max-age=60",
+                *condition, *_AWS_TIMEOUTS,
+            ],
+            capture_output=True, text=True, timeout=_AWS_OP_TIMEOUT, env=_aws_env(),
+            check=False,  # a 412 is a verdict to report, not an exception to raise
         )
     finally:
         with contextlib.suppress(OSError):
             os.unlink(tmp_path)
+    if res.returncode == 0:
+        return
+    err = res.stderr.lower()
+    if "preconditionfailed" in err or "412" in err or "conditionalrequestconflict" in err:
+        raise IndexPreconditionFailed(
+            f"index.json for {dataset_id} changed between this run's read and its "
+            f"write (if-match {if_match or '<absent>'}); the rewrite was NOT applied "
+            "and the newer document is untouched -- re-run to recompute it"
+        )
+    raise RuntimeError(
+        f"write_index: aws s3api put-object exited {res.returncode}: {res.stderr.strip()}"
+    )
 
 
 def write_audit_log(path: str, report: dict) -> None:
@@ -780,29 +875,39 @@ def purge_dataset(
 
     purged_rels = summary["purged_rels"]
     if execute and purged_rels:
-        if snapshot_dir:
-            # Compute the rewrite from the LIVE document, never the snapshot --
-            # see plan_snapshot_index_rewrite for why publishing the snapshot
-            # would undo the cleanup it is performing.
-            try:
-                live_index = s3_read_json(bucket, index_key)
-            except Exception as exc:  # noqa: BLE001 - surfaced; data is already deleted
-                result["status"] = "error"
-                result["error"] = f"purge succeeded but live index read failed: {exc}"
-                return result
-            new_index = plan_snapshot_index_rewrite(live_index, purged_rels)
-            if new_index is None:
-                result["index_rewrite_skipped"] = (
-                    "no live index.json to rewrite"
-                    if not live_index
-                    else "live index does not list the purged stores"
-                )
-                return result
-        else:
-            new_index = rewrite_index(index, purged_rels)
+        # ALWAYS recompute from the LIVE document, whichever mode selected the
+        # candidates. Deletion takes minutes on a large prefix, so the document
+        # read at the top of this function is old by now, and a converter run
+        # that published a new index in that window would be reverted by a
+        # rewrite computed from the stale body -- taking every store it had just
+        # added with it. The snapshot path has always done this (a snapshot is
+        # stale BY CONSTRUCTION); the live path needed it for the same reason,
+        # just on a shorter fuse.
         try:
-            write_index(bucket, dataset_id, new_index)
+            live_index, live_etag = read_index_with_etag(bucket, dataset_id)
+        except Exception as exc:  # noqa: BLE001 - surfaced; data is already deleted
+            result["status"] = "error"
+            result["error"] = f"purge succeeded but live index read failed: {exc}"
+            return result
+        new_index = plan_live_index_rewrite(live_index, purged_rels)
+        if new_index is None:
+            result["index_rewrite_skipped"] = (
+                "no live index.json to rewrite"
+                if not live_index
+                else "live index does not list the purged stores"
+            )
+            return result
+        try:
+            write_index(bucket, dataset_id, new_index, if_match=live_etag)
             result["index_rewritten"] = True
+        except IndexPreconditionFailed as exc:
+            # Not an ordinary write failure: something else published while this
+            # ran. Reported as its own status so an operator can tell "S3 was
+            # broken" from "someone else was working on this dataset", and so a
+            # bulk run's exit code flags it (dataset_has_issue reads `status`).
+            result["status"] = "error"
+            result["index_rewrite_conflict"] = True
+            result["error"] = f"purge succeeded but the index rewrite was abandoned: {exc}"
         except Exception as exc:  # noqa: BLE001 - surfaced; data is already deleted
             result["status"] = "error"
             result["error"] = f"purge succeeded but index rewrite failed: {exc}"
