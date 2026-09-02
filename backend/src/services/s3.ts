@@ -839,7 +839,22 @@ export function aggregateRecordingStats(index: ZarrIndexJson): RecordingStats {
   const storeCount = toFiniteNonNegativeNumber(index.store_count) ?? stores.length;
   // Both absent on a v1 index, where the sum below reduces to store + failure.
   const pendingCount = toFiniteNonNegativeNumber(index.pending_count) ?? pending.length;
-  const discoveredCount = toFiniteNonNegativeNumber(index.discovered_count);
+  const declaredDiscovered = toFiniteNonNegativeNumber(index.discovered_count);
+  const summed = storeCount + failureCount + pendingCount;
+  // The producer enforces `discovered == store + failure + pending` before it
+  // publishes, so these agree -- and that is exactly why a disagreement must not
+  // be believed silently. It means one of the two is wrong, and the sum is the
+  // one derived from data this function can see: `discovered_count` is a single
+  // integer that could be stale (a partially rewritten index) while the arrays
+  // and their counts are internally consistent. Prefer the declared value when
+  // it checks out, fall back to the sum with a warning when it does not.
+  let discoveredCount = declaredDiscovered;
+  if (declaredDiscovered !== null && declaredDiscovered !== summed) {
+    console.warn(
+      `aggregateRecordingStats: index coverage disagrees -- discovered_count=${declaredDiscovered} but store(${storeCount})+failure(${failureCount})+pending(${pendingCount})=${summed}; using the sum`,
+    );
+    discoveredCount = null;
+  }
 
   let measuredCount = 0;
   let totalDuration = 0;
@@ -879,9 +894,9 @@ export function aggregateRecordingStats(index: ZarrIndexJson): RecordingStats {
     totalRecordingDuration: measuredCount > 0 ? totalDuration : null,
     recordingDurationMin: measuredCount > 0 ? durationMin : null,
     recordingDurationMax: measuredCount > 0 ? durationMax : null,
-    // The producer's own denominator when it published one; otherwise the sum,
-    // which the producer's invariant makes the same number. Never `stores.length`.
-    recordingCount: discoveredCount ?? storeCount + failureCount + pendingCount,
+    // The producer's own denominator when it published one AND it checks out;
+    // otherwise the sum. Never `stores.length`.
+    recordingCount: discoveredCount ?? summed,
     recordingsUnavailable: failureCount + pendingCount,
     recordingsMeasured: measuredCount,
     channelCountMin: channelMin,
@@ -899,6 +914,17 @@ export interface ZarrIndexInfo {
   storeCount: number | null;
   /** Source dataset commit the conversion was built from. */
   sourceCommit: string | null;
+  /**
+   * The discovery/dispatch generation that produced this index
+   * (`zarr_queue.ZARR_ENGINE_VERSION`, index v3+). null on a v1 index, which
+   * predates the field.
+   *
+   * Read because a producer-side change reaches the back catalogue only through
+   * this stamp (ADR 0033): during a re-conversion wave the catalog holds a mix
+   * of engines, and a sweep or a dashboard that cannot tell them apart cannot
+   * say whether a dataset's facts are the new ones yet.
+   */
+  engineVersion: string | null;
   /** ETag of index.json, mirrors what /webhooks/zarr-ready stores. */
   etag: string | null;
   /**
@@ -961,9 +987,12 @@ export async function getZarrIndex(
   }
 
   const etag = response.headers.get("etag");
-  let parsed: ZarrIndexJson & { source_commit?: unknown };
+  let parsed: ZarrIndexJson & { source_commit?: unknown; engine_version?: unknown };
   try {
-    parsed = (await response.json()) as ZarrIndexJson & { source_commit?: unknown };
+    parsed = (await response.json()) as ZarrIndexJson & {
+      source_commit?: unknown;
+      engine_version?: unknown;
+    };
   } catch (err) {
     throw new Error(
       `getZarrIndex: ${key} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
@@ -972,6 +1001,7 @@ export async function getZarrIndex(
   return {
     storeCount: typeof parsed.store_count === "number" ? parsed.store_count : null,
     sourceCommit: typeof parsed.source_commit === "string" ? parsed.source_commit : null,
+    engineVersion: typeof parsed.engine_version === "string" ? parsed.engine_version : null,
     etag,
     recordingStats: aggregateRecordingStats(parsed),
   };

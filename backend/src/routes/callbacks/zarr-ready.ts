@@ -7,6 +7,7 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
+import { z } from "zod";
 import { purgeCacheUrls, zarrPurgeTargets } from "../../services/cloudflare.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
 import { type WebhookRouter, timingSafeEqual } from "../webhooks/shared.js";
@@ -70,6 +71,14 @@ interface ZarrReadyBody {
   // pointers, not per-file lists).
   pending_count?: number;
   discovered_count?: number;
+  /** The subset of `pending_count` never attempted (re-queued without a round). */
+  not_attempted_count?: number;
+  /** Carried-over stores dropped as non-raw (ADR 0027); operational only. */
+  non_raw_dropped?: number;
+  /** The catalog read failed, so this wave's provenance nulls are about the run. */
+  provenance_fetch_failed?: boolean;
+  /** index.json published but manifest.json was not. */
+  manifest_upload_failed?: boolean;
 }
 
 /**
@@ -151,6 +160,84 @@ export function zarrFailureColumns(body: {
   };
 }
 
+/**
+ * Wire shape of the callback body, validated rather than trusted.
+ *
+ * The handler used to read fields off an `as ZarrReadyBody` cast, which is a
+ * compile-time fiction: the body is JSON from a cron on another host. A field
+ * arriving as the wrong type reached D1 as-is (`.bind()` accepts anything) or
+ * threw inside the handler and returned 500 -- and a 500 here is the worst
+ * outcome available, because the driver's POST is fire-and-forget, so the state
+ * is simply lost and the row keeps whatever it had.
+ *
+ * `.catch(undefined)` per optional field is the point: ONE malformed field is
+ * dropped and logged, and everything else in the body is still recorded. Failing
+ * the whole callback over, say, a non-numeric `pool_breaks` would discard the
+ * store count and the commit along with it. `passthrough()` keeps unknown fields
+ * out of the way rather than rejecting them, so a newer converter that sends a
+ * field this backend has not learned yet still gets its known fields persisted.
+ */
+const numeric = z.number().finite().nonnegative();
+const zarrReadyBodySchema = z
+  .object({
+    dataset_id: z.string(),
+    status: z.enum(["ready", "failed", "converting"]).optional().catch(undefined),
+    store_count: numeric.optional().catch(undefined),
+    index_etag: z.string().optional().catch(undefined),
+    commit: z.string().optional().catch(undefined),
+    converted: z.array(z.string()).optional().catch(undefined),
+    removed: z.array(z.string()).optional().catch(undefined),
+    error: z.string().optional().catch(undefined),
+    errors: numeric.optional().catch(undefined),
+    failed: z.array(z.string()).optional().catch(undefined),
+    failure_count: numeric.optional().catch(undefined),
+    data_failures: z.array(z.unknown()).optional().catch(undefined),
+    deterministic: z.boolean().optional().catch(undefined),
+    pool_breaks: numeric.optional().catch(undefined),
+    measured_count: numeric.optional().catch(undefined),
+    calibration: z.array(z.unknown()).optional().catch(undefined),
+    pending_count: numeric.optional().catch(undefined),
+    discovered_count: numeric.optional().catch(undefined),
+    not_attempted_count: numeric.optional().catch(undefined),
+    non_raw_dropped: numeric.optional().catch(undefined),
+    provenance_fetch_failed: z.boolean().optional().catch(undefined),
+    manifest_upload_failed: z.boolean().optional().catch(undefined),
+  })
+  .passthrough();
+
+/**
+ * Validate a parsed callback body, logging every field the producer sent in a
+ * shape this backend cannot use. Returns null only when `dataset_id` itself is
+ * unusable -- the one field with no sensible default, since it is what the
+ * UPDATE keys on.
+ */
+export function parseZarrReadyBody(raw: unknown): ZarrReadyBody | null {
+  const result = zarrReadyBodySchema.safeParse(raw);
+  if (!result.success) {
+    console.warn(
+      `[zarr-ready] unusable body: ${result.error.issues
+        .map((i) => `${i.path.join(".")}: ${i.message}`)
+        .join("; ")}`,
+    );
+    return null;
+  }
+  // `.catch(undefined)` swallows per-field failures silently, so re-derive which
+  // declared fields the producer sent and this backend then dropped. Without
+  // this, a converter that starts sending `pool_breaks` as a string looks
+  // exactly like one that stopped sending it.
+  const source = raw as Record<string, unknown>;
+  const dropped = Object.keys(zarrReadyBodySchema.shape).filter(
+    (key) =>
+      source[key] !== undefined && (result.data as Record<string, unknown>)[key] === undefined,
+  );
+  if (dropped.length > 0) {
+    console.warn(
+      `[zarr-ready] dropped malformed field(s) for dataset=${String(source.dataset_id)}: ${dropped.join(", ")}`,
+    );
+  }
+  return result.data as ZarrReadyBody;
+}
+
 export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
   webhooks.post("/zarr-ready", async (c) => {
     const token = c.req.header("X-Webhook-Token");
@@ -165,12 +252,18 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
       return c.json({ error: "Invalid webhook token" }, 401);
     }
 
-    let body: ZarrReadyBody;
+    let raw: unknown;
     try {
-      body = (await c.req.json()) as ZarrReadyBody;
+      raw = await c.req.json();
     } catch {
       return c.json({ error: "Invalid JSON in request body" }, 400);
     }
+
+    const parsedBody = parseZarrReadyBody(raw);
+    if (!parsedBody) {
+      return c.json({ error: "Invalid request body" }, 400);
+    }
+    const body: ZarrReadyBody = parsedBody;
 
     if (typeof body.dataset_id !== "string" || !isValidDatasetId(body.dataset_id)) {
       return c.json({ error: "dataset_id must be a valid dataset id" }, 400);

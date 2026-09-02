@@ -23,9 +23,13 @@
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
-import { registerZarrReadyRoutes, zarrFailureColumns } from "../src/routes/callbacks/zarr-ready";
+import {
+  parseZarrReadyBody,
+  registerZarrReadyRoutes,
+  zarrFailureColumns,
+} from "../src/routes/callbacks/zarr-ready";
 import { SCHEMA_NAMES, schemaRoutes } from "../src/routes/schemas";
-import { type ZarrIndexJson, aggregateRecordingStats } from "../src/services/s3";
+import { type ZarrIndexJson, aggregateRecordingStats, getZarrIndex } from "../src/services/s3";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
@@ -154,12 +158,33 @@ describe("aggregateRecordingStats spans index v1 and v3", () => {
     expect(stats.totalRecordingDuration).toBe(372);
   });
 
-  test("discovered_count is used as the denominator when present", () => {
-    // A producer that discovers more than it accounts for would be a converter
-    // bug (its own invariant check refuses to publish that), but if one ever
-    // reached the bucket the honest total is the one it discovered.
-    const stats = aggregateRecordingStats(v3Index({ discovered_count: 43 }));
-    expect(stats.recordingCount).toBe(43);
+  test("discovered_count is used as the denominator when it checks out", () => {
+    // 2 stores + 1 failure + 2 pending = 5, which is what the fixture declares.
+    const stats = aggregateRecordingStats(v3Index());
+    expect(stats.recordingCount).toBe(5);
+  });
+
+  test("a discovered_count that disagrees with the sum is not believed", () => {
+    // The producer enforces `discovered == store + failure + pending` before it
+    // publishes, so a disagreement means one of the two is wrong -- and the sum
+    // is the one derived from data this function can actually see. A stale
+    // single integer (a partially rewritten index) would otherwise silently
+    // become the denominator of every coverage number downstream.
+    const warnings: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      const stats = aggregateRecordingStats(v3Index({ discovered_count: 43 }));
+      expect(stats.recordingCount).toBe(5);
+    } finally {
+      console.warn = realWarn;
+    }
+    // And it says so: a fallback nobody can see is how the disagreement would
+    // persist unnoticed.
+    expect(warnings.join(" ")).toContain("coverage disagrees");
+    expect(warnings.join(" ")).toContain("43");
   });
 
   test("the counts fall back to the arrays when the fields are missing", () => {
@@ -387,6 +412,189 @@ describe("POST /webhooks/zarr-ready persists the coverage counts", () => {
   });
 });
 
+describe("the callback body is validated, never trusted", () => {
+  test("a malformed field is dropped and logged, not 500'd", () => {
+    // The body is JSON from a cron on another host. Before validation a wrong
+    // type reached D1 as-is or threw inside the handler -- and a 500 here is the
+    // worst outcome available, because the driver's POST is fire-and-forget, so
+    // the state is simply lost.
+    const warnings: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    let body: ReturnType<typeof parseZarrReadyBody>;
+    try {
+      body = parseZarrReadyBody({
+        dataset_id: DATASET,
+        status: "ready",
+        store_count: 7,
+        pool_breaks: "three", // wrong type
+        pending_count: -1, // out of range
+      });
+    } finally {
+      console.warn = realWarn;
+    }
+    expect(body).not.toBeNull();
+    // The one bad field goes; everything else in the body survives, which is the
+    // whole point of per-field `.catch`.
+    expect(body?.store_count).toBe(7);
+    expect(body?.status).toBe("ready");
+    expect(body?.pool_breaks).toBeUndefined();
+    expect(body?.pending_count).toBeUndefined();
+    expect(warnings.join(" ")).toContain("pool_breaks");
+    expect(warnings.join(" ")).toContain("pending_count");
+  });
+
+  test("unknown fields pass through rather than failing the callback", () => {
+    // A newer converter that sends a field this backend has not learned yet must
+    // still get its known fields persisted.
+    const body = parseZarrReadyBody({
+      dataset_id: DATASET,
+      status: "ready",
+      store_count: 3,
+      some_future_field: { nested: true },
+    });
+    expect(body?.store_count).toBe(3);
+  });
+
+  test("the coverage fields survive validation", () => {
+    const body = parseZarrReadyBody({
+      dataset_id: DATASET,
+      status: "ready",
+      pending_count: 5,
+      discovered_count: 43,
+      not_attempted_count: 2,
+      non_raw_dropped: 92,
+      provenance_fetch_failed: true,
+      manifest_upload_failed: false,
+    });
+    expect(body?.pending_count).toBe(5);
+    expect(body?.discovered_count).toBe(43);
+    expect(body?.not_attempted_count).toBe(2);
+    expect(body?.non_raw_dropped).toBe(92);
+    expect(body?.provenance_fetch_failed).toBe(true);
+    expect(body?.manifest_upload_failed).toBe(false);
+  });
+
+  test("a body with no usable dataset_id is rejected", () => {
+    // The one field with no sensible default: it is what the UPDATE keys on.
+    const realWarn = console.warn;
+    console.warn = () => {};
+    try {
+      expect(parseZarrReadyBody({ status: "ready" })).toBeNull();
+      expect(parseZarrReadyBody({ dataset_id: 42 })).toBeNull();
+      expect(parseZarrReadyBody(null)).toBeNull();
+      expect(parseZarrReadyBody("nope")).toBeNull();
+    } finally {
+      console.warn = realWarn;
+    }
+  });
+
+  test("a garbage body reaches the handler as a 400, never a 500", async () => {
+    // Driven through the REAL route, because the handler is where a throw would
+    // have become a 500.
+    const db = freshDb();
+    const app = new Hono<{ Bindings: Bindings }>();
+    registerZarrReadyRoutes(app);
+    const realWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const res = await app.request(
+        "/zarr-ready",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Webhook-Token": TOKEN },
+          body: JSON.stringify({ status: "ready", store_count: "lots" }),
+        },
+        { DB: realD1(db), NEMAR_WEBHOOK_TOKEN: TOKEN, ENVIRONMENT: "test" } as Bindings,
+      );
+      expect(res.status).toBe(400);
+    } finally {
+      console.warn = realWarn;
+    }
+  });
+});
+
+describe("getZarrIndex reads raw v1 and v3 JSON off the wire", () => {
+  /**
+   * Drives the REAL `getZarrIndex` against a REAL server on a real socket, so
+   * the request signing, the HTTP round trip, the JSON parse, the ETag read and
+   * the aggregation all execute. Every other test of this area hands
+   * `aggregateRecordingStats` a literal, so nothing covered how the response is
+   * actually read -- `engine_version` could have been pulled off the wrong field
+   * and every test would still pass.
+   *
+   * The only substitution is the HOSTNAME: `getZarrIndex` builds an
+   * `https://<bucket>.s3.<region>.amazonaws.com/...` URL, so the wrapper below
+   * redirects that one host to the loopback server and delegates to the real
+   * `fetch`. That is what a DNS override would do; no business logic is replaced,
+   * and the assertions are about what the function returns from a real response.
+   */
+  const options = {
+    bucket: "nemar",
+    region: "us-east-2",
+    accessKeyId: "AKIAIOSFODNN7EXAMPLE",
+    secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+  };
+
+  async function readIndex(body: unknown) {
+    const server = Bun.serve({
+      port: 0,
+      fetch: () =>
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json", ETag: '"abc123"' },
+        }),
+    });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const req = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(req.url);
+      if (url.hostname.endsWith("amazonaws.com")) {
+        const local = new URL(url.pathname + url.search, `http://127.0.0.1:${server.port}`);
+        return realFetch(new Request(local, req));
+      }
+      return realFetch(input as RequestInfo, init);
+    }) as typeof fetch;
+    try {
+      return await getZarrIndex(options, DATASET);
+    } finally {
+      globalThis.fetch = realFetch;
+      server.stop(true);
+    }
+  }
+
+  test("a v1 index parses and aggregates", async () => {
+    const info = await readIndex(v1Index());
+    expect(info).not.toBeNull();
+    expect(info?.storeCount).toBe(2);
+    expect(info?.sourceCommit).toBe("a".repeat(40));
+    expect(info?.etag).toBe('"abc123"');
+    // v1 predates the engine stamp: null, not a guess.
+    expect(info?.engineVersion).toBeNull();
+    expect(info?.recordingStats.recordingCount).toBe(3);
+    expect(info?.recordingStats.recordingsUnavailable).toBe(1);
+  });
+
+  test("a v3 index parses, aggregates and reports the engine", async () => {
+    const info = await readIndex(v3Index());
+    expect(info?.storeCount).toBe(2);
+    expect(info?.sourceCommit).toBe("a".repeat(40));
+    // The stamp a re-conversion wave is tracked by (ADR 0033).
+    expect(info?.engineVersion).toBe("2");
+    // Pending recordings counted: 2 stores + 1 failure + 2 pending.
+    expect(info?.recordingStats.recordingCount).toBe(5);
+    expect(info?.recordingStats.recordingsUnavailable).toBe(3);
+    expect(info?.recordingStats.totalRecordingDuration).toBe(372);
+  });
+
+  test("a non-string engine_version is rejected rather than coerced", async () => {
+    const info = await readIndex(v3Index({ engine_version: 3 }));
+    expect(info?.engineVersion).toBeNull();
+  });
+});
+
 describe("GET /schemas/:name serves the published contracts", () => {
   const app = new Hono<{ Bindings: Bindings }>();
   app.route("/schemas", schemaRoutes);
@@ -422,6 +630,34 @@ describe("GET /schemas/:name serves the published contracts", () => {
     expect((schema.properties as Record<string, { const?: unknown }>).format.const).toBe(
       "nemar-zarr-manifest",
     );
+  });
+
+  test("it is reachable on the REAL app, at the real path", async () => {
+    /**
+     * The mount, not just the sub-app. A route that works in isolation and was
+     * never wired into `backend/src/index.ts` serves 404 in production while its
+     * own tests pass -- and `index.ts` mounts the api sub-app twice (at `/` and
+     * `/nemar`), so "mounted" is not one fact.
+     *
+     * Imported lazily: `index.ts` pulls in the whole worker (crons, every
+     * service), so importing it at module scope would tie this file's other
+     * describes to that graph.
+     */
+    const { default: worker } = (await import("../src/index")) as {
+      default: { fetch: (req: Request, env: Bindings) => Promise<Response> };
+    };
+    const env = { DB: realD1(freshDb()), ENVIRONMENT: "test" } as Bindings;
+    for (const path of [
+      "https://api.nemar.org/schemas/zarr-index-v3.json",
+      "https://api.nemar.org/nemar/schemas/zarr-index-v3.json",
+    ]) {
+      const res = await worker.fetch(new Request(path), env);
+      expect(res.status).toBe(200);
+      const schema = (await res.json()) as Record<string, unknown>;
+      expect((schema.properties as Record<string, { const?: unknown }>).format_version.const).toBe(
+        3,
+      );
+    }
   });
 
   test("an unknown schema 404s and names what is available", async () => {
