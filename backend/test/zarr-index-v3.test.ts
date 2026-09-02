@@ -1,0 +1,434 @@
+/**
+ * Index format v3 on the CONSUMER side (issues #1059, #1197; epic #1181 phase 7).
+ *
+ * Three things have to hold at once:
+ *
+ * 1. `aggregateRecordingStats` reads v1 and v3. v3 is additive for everything
+ *    this backend reads, so the same code path must produce the old answer on an
+ *    old index and the fuller answer on a new one -- no version branch, no
+ *    regression for the ~800 datasets whose published index is still v1.
+ * 2. Pending recordings COUNT. on008083 published 43 raw recordings as 2 stores
+ *    and 36 failures, with five in no list at all; every number derived from that
+ *    index was quietly short by five, and nothing anywhere said so (#1197).
+ * 3. The two new counts reach D1 inside the existing bounded summary object and
+ *    NOT as new columns (ADR 0034/0036), including in the case that motivated
+ *    them: pending recordings with no failures at all, which used to leave
+ *    `zarr_data_failures` NULL.
+ *
+ * The handler tests drive the REAL Hono route against a real D1 (bun:sqlite plus
+ * the actual migrations), like zarr-pool-breaks.test.ts -- not a copy of its SQL,
+ * which could not catch a divergence between the copy and the handler.
+ */
+
+import type { Database } from "bun:sqlite";
+import { beforeEach, describe, expect, test } from "bun:test";
+import { Hono } from "hono";
+import { registerZarrReadyRoutes, zarrFailureColumns } from "../src/routes/callbacks/zarr-ready";
+import { SCHEMA_NAMES, schemaRoutes } from "../src/routes/schemas";
+import { type ZarrIndexJson, aggregateRecordingStats } from "../src/services/s3";
+import type { Bindings } from "../src/types/bindings";
+import { freshDb, realD1 } from "./helpers/d1";
+
+/**
+ * `crypto.subtle.timingSafeEqual` is a Cloudflare Workers extension to Web
+ * Crypto that bun's runtime lacks, so the handler's token check throws before
+ * reaching any behavior under test. Supplying the missing PLATFORM primitive is
+ * not a mock of business logic: the handler's own check still runs against it,
+ * and "rejects a wrong token" below proves it is live. Same shape as the
+ * polyfill in zarr-pool-breaks.test.ts.
+ */
+const subtle = crypto.subtle as SubtleCrypto & {
+  timingSafeEqual?: (a: ArrayBufferView, b: ArrayBufferView) => boolean;
+};
+if (typeof subtle.timingSafeEqual !== "function") {
+  subtle.timingSafeEqual = (a: ArrayBufferView, b: ArrayBufferView): boolean => {
+    const x = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+    const y = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+    if (x.length !== y.length) return false;
+    let diff = 0;
+    for (let i = 0; i < x.length; i++) diff |= (x[i] as number) ^ (y[i] as number);
+    return diff === 0;
+  };
+}
+
+const TOKEN = "zarr-index-v3-webhook-token";
+const DATASET = "on008083";
+
+/** A group as the converter writes it, with the v3 geometry fields. */
+const group = (overrides: Record<string, unknown> = {}) => ({
+  name: "eeg_250hz",
+  modality: "EEG",
+  rate: 250,
+  n_channels: 129,
+  n_samples: 43_000,
+  duration_s: 172,
+  n_view_levels: 4,
+  view_chunk_columns: 1024,
+  source_rate_hz: 500,
+  chunk_samples: 1000,
+  shard_samples: 75_000,
+  ...overrides,
+});
+
+/** A v1 index: no `pending`, no `discovered_count`, per-store `source_key`. */
+const v1Index = (): ZarrIndexJson =>
+  ({
+    dataset_id: DATASET,
+    format: "nemar-zarr-index",
+    format_version: 1,
+    source_commit: "a".repeat(40),
+    store_count: 2,
+    stores: [
+      {
+        path: "sub-01/eeg/a_eeg.edf",
+        zarr: "sub-01/eeg/a_eeg.zarr",
+        source_key: "SHA256E-s1--a",
+        groups: [group()],
+      },
+      {
+        path: "sub-02/eeg/b_eeg.edf",
+        zarr: "sub-02/eeg/b_eeg.zarr",
+        source_key: "SHA256E-s2--b",
+        groups: [group({ duration_s: 200, n_channels: 64 })],
+      },
+    ],
+    failure_count: 1,
+    failures: [{ path: "sub-03/eeg/c_eeg.edf", code: "file_read_error", reason: "..." }],
+  }) as unknown as ZarrIndexJson;
+
+/** The same dataset in v3: the five silent recordings are now `pending`. */
+const v3Index = (overrides: Partial<Record<string, unknown>> = {}): ZarrIndexJson =>
+  ({
+    ...v1Index(),
+    format_version: 3,
+    contract_base: `https://zarr.nemar.org/${DATASET}/zarr/`,
+    data_base: `https://nemar.s3.us-east-2.amazonaws.com/${DATASET}/zarr/`,
+    data_base_kind: "s3-public",
+    s3_uri: `s3://nemar/${DATASET}/zarr/`,
+    s3_region: "us-east-2",
+    s3_anonymous: true,
+    engine_version: "2",
+    biosigio_version: "1.2.6",
+    discovered_count: 5,
+    n_recordings: 2,
+    errors: 3,
+    pending_count: 2,
+    pending: [
+      {
+        path: "sub-04/eeg/d_eeg.edf",
+        zarr: "sub-04/eeg/d_eeg.zarr",
+        reason: "infra_failure",
+        attempts: 2,
+      },
+      {
+        path: "sub-05/eeg/e_eeg.edf",
+        zarr: "sub-05/eeg/e_eeg.zarr",
+        reason: "not_attempted",
+        attempts: 0,
+      },
+    ],
+    ...overrides,
+  }) as unknown as ZarrIndexJson;
+
+describe("aggregateRecordingStats spans index v1 and v3", () => {
+  test("a v1 index yields exactly what it always did", () => {
+    const stats = aggregateRecordingStats(v1Index());
+    expect(stats.recordingCount).toBe(3); // 2 stores + 1 failure
+    expect(stats.recordingsUnavailable).toBe(1);
+    expect(stats.recordingsMeasured).toBe(2);
+    expect(stats.totalRecordingDuration).toBe(372);
+    expect(stats.recordingDurationMin).toBe(172);
+    expect(stats.recordingDurationMax).toBe(200);
+    expect(stats.channelCountMin).toBe(64);
+    expect(stats.channelCountMax).toBe(129);
+  });
+
+  test("a v3 index counts pending recordings as existing and unavailable", () => {
+    const stats = aggregateRecordingStats(v3Index());
+    // 5 discovered, not 3: the two pending recordings exist in the dataset and
+    // have no viewer. Reporting 3 is what made on008083 look complete.
+    expect(stats.recordingCount).toBe(5);
+    expect(stats.recordingsUnavailable).toBe(3); // 1 failed + 2 pending
+    // Durations are untouched by coverage accounting -- only stores are measured.
+    expect(stats.recordingsMeasured).toBe(2);
+    expect(stats.totalRecordingDuration).toBe(372);
+  });
+
+  test("discovered_count is used as the denominator when present", () => {
+    // A producer that discovers more than it accounts for would be a converter
+    // bug (its own invariant check refuses to publish that), but if one ever
+    // reached the bucket the honest total is the one it discovered.
+    const stats = aggregateRecordingStats(v3Index({ discovered_count: 43 }));
+    expect(stats.recordingCount).toBe(43);
+  });
+
+  test("the counts fall back to the arrays when the fields are missing", () => {
+    const stats = aggregateRecordingStats(
+      v3Index({
+        discovered_count: undefined,
+        pending_count: undefined,
+        store_count: undefined,
+        failure_count: undefined,
+      }),
+    );
+    expect(stats.recordingCount).toBe(5); // 2 stores + 1 failure + 2 pending
+    expect(stats.recordingsUnavailable).toBe(3);
+  });
+
+  test("a garbage pending_count is rejected, not clamped into the total", () => {
+    for (const bad of [-4, Number.NaN, Number.POSITIVE_INFINITY, "7", null]) {
+      const stats = aggregateRecordingStats(
+        v3Index({ pending_count: bad, discovered_count: undefined }),
+      );
+      // Falls back to pending.length (2), never to a negative or NaN total.
+      expect(stats.recordingCount).toBe(5);
+    }
+  });
+
+  test("v3 geometry fields do not disturb the aggregation", () => {
+    // `source_rate_hz` is the ACQUISITION rate and `rate` the serving cap; a
+    // reader that confused them would report the wrong durations here.
+    const stats = aggregateRecordingStats(v3Index());
+    expect(stats.recordingDurationMax).toBe(200);
+  });
+
+  test("an empty index is zero recordings, not null durations of one", () => {
+    const stats = aggregateRecordingStats({} as ZarrIndexJson);
+    expect(stats.recordingCount).toBe(0);
+    expect(stats.recordingsUnavailable).toBe(0);
+    expect(stats.totalRecordingDuration).toBeNull();
+  });
+});
+
+describe("zarrFailureColumns carries the coverage counts", () => {
+  test("pending and discovered ride in the bounded summary", () => {
+    const f = zarrFailureColumns({
+      errors: 41,
+      failure_count: 36,
+      deterministic: false,
+      data_failures: Array.from({ length: 36 }, (_, i) => ({ path: `p${i}` })),
+      pending_count: 5,
+      discovered_count: 43,
+    });
+    expect(JSON.parse(f.dataFailuresJson as string)).toEqual({
+      count: 36,
+      detail_ref: "zarr/index.json",
+      pending: 5,
+      discovered: 43,
+    });
+  });
+
+  test("pending alone is enough to write the summary", () => {
+    // The case the old shape lost entirely: no typed failures, five recordings
+    // outstanding, column NULL, recordings invisible (#1197).
+    const f = zarrFailureColumns({ errors: 5, pending_count: 5, discovered_count: 43 });
+    const parsed = JSON.parse(f.dataFailuresJson as string);
+    expect(parsed.count).toBe(0);
+    expect(parsed.pending).toBe(5);
+    expect(parsed.discovered).toBe(43);
+  });
+
+  test("a clean run still writes no summary at all", () => {
+    const f = zarrFailureColumns({ errors: 0, pending_count: 0, discovered_count: 41 });
+    expect(f.dataFailuresJson).toBeNull();
+    expect(f.hadErrors).toBe(false);
+  });
+
+  test("an old converter sending neither count keeps the #1191 shape", () => {
+    const f = zarrFailureColumns({ errors: 1, data_failures: [{ path: "a" }] });
+    expect(JSON.parse(f.dataFailuresJson as string)).toEqual({
+      count: 1,
+      detail_ref: "zarr/index.json",
+    });
+  });
+
+  test("garbage counts are omitted rather than persisted", () => {
+    const f = zarrFailureColumns({
+      errors: 1,
+      data_failures: [{ path: "a" }],
+      pending_count: -3,
+      discovered_count: Number.NaN,
+    });
+    const parsed = JSON.parse(f.dataFailuresJson as string);
+    expect(parsed).not.toHaveProperty("pending");
+    expect(parsed).not.toHaveProperty("discovered");
+  });
+
+  test("the summary stays bounded no matter how many recordings failed", () => {
+    // #1188/#1189: an 877-entry array was 178 KB in one row and made the D1
+    // backup unrestorable. Row size must not scale with the failure count.
+    const big = zarrFailureColumns({
+      errors: 900,
+      failure_count: 877,
+      data_failures: Array.from({ length: 877 }, (_, i) => ({ path: `p${i}`, code: "x" })),
+      pending_count: 23,
+      discovered_count: 900,
+    });
+    expect((big.dataFailuresJson as string).length).toBeLessThan(120);
+  });
+});
+
+describe("POST /webhooks/zarr-ready persists the coverage counts", () => {
+  let db: Database;
+  let app: Hono<{ Bindings: Bindings }>;
+
+  const post = (body: Record<string, unknown>) =>
+    app.request(
+      "/zarr-ready",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Webhook-Token": TOKEN },
+        body: JSON.stringify(body),
+      },
+      { DB: realD1(db), NEMAR_WEBHOOK_TOKEN: TOKEN, ENVIRONMENT: "test" } as Bindings,
+    );
+
+  const row = () =>
+    db.query("SELECT * FROM datasets WHERE dataset_id = ?").get(DATASET) as Record<string, unknown>;
+
+  beforeEach(() => {
+    db = freshDb();
+    app = new Hono<{ Bindings: Bindings }>();
+    registerZarrReadyRoutes(app);
+    db.query(
+      `INSERT INTO users (username, email, password_hash, status, role, email_verified)
+       VALUES ('covowner', 'covowner@example.org', 'x', 'approved', 'user', 1)`,
+    ).run();
+    const owner = db
+      .query<{ id: number }, []>("SELECT id FROM users WHERE username='covowner'")
+      .get();
+    if (!owner) throw new Error("seed: owner insert failed");
+    db.query(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility)
+       VALUES (?, 'Coverage fixture', ?, 'active', 'public')`,
+    ).run(DATASET, owner.id);
+  });
+
+  test("a ready run records pending and discovered without a new column", async () => {
+    const res = await post({
+      dataset_id: DATASET,
+      status: "ready",
+      store_count: 2,
+      errors: 41,
+      failure_count: 36,
+      data_failures: [{ path: "sub-03/eeg/c_eeg.edf", code: "file_read_error" }],
+      pending_count: 5,
+      discovered_count: 43,
+    });
+    expect(res.status).toBe(200);
+    const r = row();
+    expect(r.zarr_status).toBe("ready");
+    expect(r.zarr_store_count).toBe(2);
+    const summary = JSON.parse(r.zarr_data_failures as string);
+    expect(summary.pending).toBe(5);
+    expect(summary.discovered).toBe(43);
+    expect(summary.detail_ref).toBe("zarr/index.json");
+    // No column was added for either count (ADR 0034).
+    expect(Object.keys(r)).not.toContain("zarr_pending_count");
+    expect(Object.keys(r)).not.toContain("zarr_discovered_count");
+  });
+
+  test("a failed run records them too", async () => {
+    // A total failure is exactly when coverage matters most, and it is the
+    // branch that historically dropped fields (see zarr-pool-breaks.test.ts).
+    const res = await post({
+      dataset_id: DATASET,
+      status: "failed",
+      errors: 43,
+      pending_count: 43,
+      discovered_count: 43,
+    });
+    expect(res.status).toBe(200);
+    const summary = JSON.parse(row().zarr_data_failures as string);
+    expect(summary.pending).toBe(43);
+    expect(summary.discovered).toBe(43);
+  });
+
+  test("a clean run clears a prior coverage summary", async () => {
+    await post({
+      dataset_id: DATASET,
+      status: "ready",
+      store_count: 2,
+      errors: 5,
+      pending_count: 5,
+      discovered_count: 43,
+    });
+    expect(row().zarr_data_failures).not.toBeNull();
+
+    await post({
+      dataset_id: DATASET,
+      status: "ready",
+      store_count: 43,
+      errors: 0,
+      pending_count: 0,
+      discovered_count: 43,
+    });
+    expect(row().zarr_data_failures).toBeNull();
+    expect(row().zarr_failed_at).toBeNull();
+  });
+
+  test("an old converter that sends neither count still succeeds", async () => {
+    const res = await post({ dataset_id: DATASET, status: "ready", store_count: 7 });
+    expect(res.status).toBe(200);
+    expect(row().zarr_store_count).toBe(7);
+  });
+
+  test("rejects a wrong token", async () => {
+    const res = await app.request(
+      "/zarr-ready",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Webhook-Token": "nope" },
+        body: JSON.stringify({ dataset_id: DATASET, status: "ready" }),
+      },
+      { DB: realD1(db), NEMAR_WEBHOOK_TOKEN: TOKEN, ENVIRONMENT: "test" } as Bindings,
+    );
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("GET /schemas/:name serves the published contracts", () => {
+  const app = new Hono<{ Bindings: Bindings }>();
+  app.route("/schemas", schemaRoutes);
+
+  test("serves the v3 index schema as a JSON Schema document", async () => {
+    const res = await app.request("/schemas/zarr-index-v3.json");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/schema+json");
+    expect(res.headers.get("cache-control")).toContain("max-age=");
+    const schema = (await res.json()) as Record<string, unknown>;
+    expect(schema.$schema).toBe("https://json-schema.org/draft/2020-12/schema");
+    // The served bytes ARE the file the converter validates against before
+    // upload, so the fields it enforces have to be here.
+    const props = schema.properties as Record<string, unknown>;
+    for (const key of [
+      "contract_base",
+      "data_base",
+      "s3_uri",
+      "discovered_count",
+      "pending_count",
+      "engine_version",
+      "source_commit",
+    ]) {
+      expect(props).toHaveProperty(key);
+    }
+    expect((schema.properties as Record<string, { const?: unknown }>).format_version.const).toBe(3);
+  });
+
+  test("serves the manifest schema", async () => {
+    const res = await app.request("/schemas/zarr-manifest-v1.json");
+    expect(res.status).toBe(200);
+    const schema = (await res.json()) as Record<string, unknown>;
+    expect((schema.properties as Record<string, { const?: unknown }>).format.const).toBe(
+      "nemar-zarr-manifest",
+    );
+  });
+
+  test("an unknown schema 404s and names what is available", async () => {
+    const res = await app.request("/schemas/nope.json");
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { available: string[] };
+    expect(body.available).toEqual(SCHEMA_NAMES);
+    expect(body.available).toContain("zarr-index-v3.json");
+  });
+});
