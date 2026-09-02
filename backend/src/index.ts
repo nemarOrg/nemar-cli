@@ -64,6 +64,7 @@ import {
   deletionDate,
   warningStageForDaysLeft,
 } from "./services/staleness";
+import { publishZarrCatalog } from "./services/zarr-catalog";
 import type { Bindings, Variables } from "./types/bindings";
 
 // Create the API app with all routes
@@ -944,6 +945,23 @@ export default {
         .catch((err) =>
           console.error(
             "[citation-sync] failed:",
+            err instanceof Error ? (err.stack ?? err.message) : err,
+          ),
+        ),
+    );
+    // #1062 (epic #1181 phase 2): republish the top-level Zarr discovery
+    // catalog (zarr-catalog.json), after the sweeps above. ALLOWED ON THE
+    // NON-PROD CRON (see the ALLOWLIST note earlier in this function): it
+    // only reads this env's own D1 and writes this env's own S3 bucket
+    // (env.S3_BUCKET) -- no email, no GitHub dispatch against the shared
+    // nemarDatasets org, no DOI mutation -- so a dev-worker run can never
+    // touch the production catalog object or a real user/repo.
+    ctx.waitUntil(
+      publishZarrCatalog(env)
+        .then((r) => console.log(`[zarr-catalog] published count=${r.count} bytes=${r.bytes}`))
+        .catch((err) =>
+          console.error(
+            "[zarr-catalog] publish failed:",
             err instanceof Error ? (err.stack ?? err.message) : err,
           ),
         ),
