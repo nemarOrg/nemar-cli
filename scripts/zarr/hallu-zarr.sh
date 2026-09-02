@@ -305,20 +305,25 @@ _normalize_guard_path() {
 }
 
 # True if $1 names the production API host (api.nemar.org), independent of
-# case, scheme, port, trailing slash, or path: lowercase, strip a leading
-# "scheme://", strip everything from the first "/" or "?" onward, strip a
-# trailing ":port". "https://API.NEMAR.ORG/foo", "http://api.nemar.org:8443"
-# and bare "api.nemar.org" all match; "api-test.nemar.org" does not, because
-# the comparison is exact-host, not substring -- a plain `*api.nemar.org*`
-# match would also (harmlessly, but wrongly) flag "api-test.nemar.org" itself
-# as prod, since "-test" sits BEFORE the dot, not inside the substring being
-# searched for.
+# case, scheme, port, trailing slash, path, or a trailing DNS root dot:
+# lowercase, strip a leading "scheme://", strip everything from the first
+# "/" or "?" onward, strip a trailing ":port", strip trailing "."s.
+# "https://API.NEMAR.ORG/foo", "http://api.nemar.org:8443", bare
+# "api.nemar.org", and "https://api.nemar.org./" (the trailing dot marks an
+# absolute FQDN in DNS -- resolvers treat it identically to the same name
+# without one, so a naive comparison would let it slip past as a different
+# string while it resolves to the same production host) all match;
+# "api-test.nemar.org" does not, because the comparison is exact-host, not
+# substring -- a plain `*api.nemar.org*` match would also (harmlessly, but
+# wrongly) flag "api-test.nemar.org" itself as prod, since "-test" sits
+# BEFORE the dot, not inside the substring being searched for.
 _is_prod_api_host() {
   local url="${1,,}"
   url="${url#*://}"
   url="${url%%/*}"
   url="${url%%\?*}"
   url="${url%%:*}"
+  while [[ "$url" == *. ]]; do url="${url%.}"; done
   [[ "$url" == "api.nemar.org" ]]
 }
 

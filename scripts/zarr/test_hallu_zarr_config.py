@@ -23,9 +23,10 @@ a real Hallu deployment or the repo's own working tree. Covers:
   refused with a non-zero exit and a message naming the offending value, and
   produces no stdout config dump. The STATE_DIR/WORK_DIR checks are
   normalized (trailing slash, doubled slash) and the API_BASE/TEST_API_URL
-  checks are case-insensitive and host-based (scheme, port, and path do not
-  matter; `api-test.nemar.org` is never mistaken for prod) -- each covered
-  by a dedicated variant below, not just the bare-string case.
+  checks are case-insensitive and host-based (scheme, port, path, and a
+  trailing DNS root dot do not matter; `api-test.nemar.org` is never
+  mistaken for prod) -- each covered by a dedicated variant below, not just
+  the bare-string case.
 - The guard rails key off the raw pre-pass scan of argv (TEST_PREPASS_SEEN),
   not the arg parser's derived TEST_MODE, so a value-taking flag that used to
   swallow `--test` as its own value (`--dataset --test`, `--limit --test`)
@@ -213,6 +214,14 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
             {"API_BASE": "https://api.nemar.org:8443"},
             "API_BASE=https://api.nemar.org:8443",
         ),
+        # Trailing DNS root dot: "api.nemar.org." is DNS-identical to
+        # "api.nemar.org" (an absolute FQDN), so a naive string comparison
+        # that doesn't strip it would let this slip past as a "different"
+        # host while it resolves to production.
+        (
+            {"API_BASE": "https://api.nemar.org./"},
+            "API_BASE=https://api.nemar.org./",
+        ),
         (
             {"TEST_API_URL": "https://api.nemar.org"},
             "TEST_API_URL=https://api.nemar.org",
@@ -220,6 +229,10 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
         (
             {"TEST_API_URL": "https://API.NEMAR.ORG/"},
             "TEST_API_URL=https://API.NEMAR.ORG/",
+        ),
+        (
+            {"TEST_API_URL": "https://API.NEMAR.ORG.:443/"},
+            "TEST_API_URL=https://API.NEMAR.ORG.:443/",
         ),
         ({"ZARR_AWS_PROFILE": "nemar-zarr"}, "AWS_PROFILE=nemar-zarr"),
         (
@@ -253,8 +266,10 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
         "api-base-uppercase",
         "api-base-http-trailing-slash",
         "api-base-port",
+        "api-base-dns-root-dot",
         "test-api-url",
         "test-api-url-uppercase-trailing-slash",
+        "test-api-url-uppercase-dns-root-dot-port",
         "aws-profile",
         "state-dir",
         "state-dir-trailing-slash",
