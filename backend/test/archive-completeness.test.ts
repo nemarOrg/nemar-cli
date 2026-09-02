@@ -303,20 +303,22 @@ describe("archive-ready 'ready' UPDATE persists completeness", () => {
   });
 
   test("'ready' marks the availability report stale so the sweep regenerates it", () => {
-    // availability_report_at IS NULL is the sweep's candidacy predicate
-    // (availabilityReportSweepWhere), so nulling it here is the entire enqueue.
-    // Verified against that predicate below rather than just asserting NULL, so
-    // this breaks if the sweep ever changes how it selects candidates.
-    db.prepare("UPDATE datasets SET availability_report_at = ? WHERE dataset_id = ?").run(
-      "2026-07-23 00:00:00",
-      "on004624",
-    );
+    // json_extract(sweep_stamps, '$.availability_report_at') IS NULL is the
+    // sweep's candidacy predicate (availabilityReportSweepWhere), so removing
+    // the key here is the entire enqueue (#1183). Verified against the sweep's
+    // own imported predicate below rather than just asserting NULL, so this
+    // breaks if the sweep ever changes how it selects candidates.
+    db.prepare(
+      "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.availability_report_at', ?) WHERE dataset_id = ?",
+    ).run("2026-07-23 00:00:00", "on004624");
     db.prepare(READY_SQL).run(1024, 0, 3, 100, "on004624");
 
     const stamp = db
-      .prepare("SELECT availability_report_at FROM datasets WHERE dataset_id = ?")
-      .get("on004624") as { availability_report_at: string | null };
-    expect(stamp.availability_report_at).toBeNull();
+      .prepare(
+        "SELECT json_extract(sweep_stamps, '$.availability_report_at') AS at FROM datasets WHERE dataset_id = ?",
+      )
+      .get("on004624") as { at: string | null };
+    expect(stamp.at).toBeNull();
 
     // The dataset must now actually be selected by the sweep's own predicate.
     db.prepare("UPDATE datasets SET github_repo = ? WHERE dataset_id = ?").run(
@@ -324,13 +326,8 @@ describe("archive-ready 'ready' UPDATE persists completeness", () => {
       "on004624",
     );
     const candidate = db
-      .prepare(
-        `SELECT dataset_id FROM datasets
-         WHERE github_repo IS NOT NULL
-           AND (is_sandbox = 0 OR is_sandbox IS NULL)
-           AND availability_report_at IS NULL`,
-      )
-      .all() as Array<{ dataset_id: string }>;
+      .prepare(availabilityReportSweepCandidateQuery(false))
+      .all(50) as Array<{ dataset_id: string }>;
     expect(candidate.map((r) => r.dataset_id)).toContain("on004624");
   });
 
@@ -343,10 +340,9 @@ describe("archive-ready 'ready' UPDATE persists completeness", () => {
       "on004624",
     );
     // Already reported at some point in the past -> not a candidate.
-    db.prepare("UPDATE datasets SET availability_report_at = ? WHERE dataset_id = ?").run(
-      "2026-07-23 00:00:00",
-      "on004624",
-    );
+    db.prepare(
+      "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.availability_report_at', ?) WHERE dataset_id = ?",
+    ).run("2026-07-23 00:00:00", "on004624");
     const candidates = () =>
       (
         db.prepare(availabilityReportSweepCandidateQuery(false)).all(50) as Array<{
@@ -364,7 +360,7 @@ describe("archive-ready 'ready' UPDATE persists completeness", () => {
 
     // The sweep stamps on success -> drained, and it does not come back.
     db.prepare(
-      "UPDATE datasets SET availability_report_at = datetime('now') WHERE dataset_id = ?",
+      "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.availability_report_at', datetime('now')) WHERE dataset_id = ?",
     ).run("on004624");
     expect(candidates()).not.toContain("on004624");
   });

@@ -80,7 +80,11 @@ function seedDataset(id: string, githubRepo = `nemarDatasets/${id}`): void {
 }
 
 const row = (id: string) =>
-  db.query("SELECT * FROM datasets WHERE dataset_id = ?").get(id) as Record<string, unknown>;
+  db
+    .query(
+      "SELECT *, json_extract(sweep_stamps, '$.signal_defaults_at') AS signal_defaults_at FROM datasets WHERE dataset_id = ?",
+    )
+    .get(id) as Record<string, unknown>;
 
 function emptyStats(overrides: Partial<BidsTreeStats> = {}): BidsTreeStats {
   return { modalities: [], subjectCount: 0, tasks: [], ...overrides };
@@ -103,7 +107,7 @@ describe("runSignalDefaultsSweep: three-way outcome handling", () => {
     db.prepare(
       `UPDATE datasets
          SET sampling_frequency = 512, power_line_frequency = 60,
-             eeg_reference = 'average', signal_defaults_at = NULL
+             eeg_reference = 'average'
        WHERE dataset_id = 'nm000800'`,
     ).run();
 
@@ -281,7 +285,7 @@ describe("runSignalDefaultsSweep: channelMontageProbeError is treated like THROW
     seedDataset("nm000808");
     db.prepare(
       `UPDATE datasets
-         SET sampling_frequency = 512, signal_defaults_at = NULL
+         SET sampling_frequency = 512
        WHERE dataset_id = 'nm000808'`,
     ).run();
     const probeErrorFetch: typeof getBidsTreeStats = async () =>
@@ -425,7 +429,7 @@ describe("runSignalDefaultsSweep: entry-point invariants", () => {
   test("an already-stamped row is not a candidate", async () => {
     seedDataset("nm000831");
     db.prepare(
-      "UPDATE datasets SET signal_defaults_at = '2026-08-01 00:00:00' WHERE dataset_id = 'nm000831'",
+      "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.signal_defaults_at', '2026-08-01 00:00:00') WHERE dataset_id = 'nm000831'",
     ).run();
     const result = await runSignalDefaultsSweep(env(), {
       pat: "fake-pat",

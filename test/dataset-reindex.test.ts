@@ -37,8 +37,9 @@ describe("buildReindexFilterQuery", () => {
     expect(q.sql).toContain("modalities IS NULL");
     expect(q.sql).toContain("file_size IS NULL");
     expect(q.sql).toContain("total_files IS NULL");
-    expect(q.sql).toContain("metadata_updated_at IS NULL");
-    expect(q.sql).toContain("metadata_updated_at < datetime('now', ?)");
+    // The stamp lives in sweep_stamps since migration 0073 (#1183).
+    expect(q.sql).toContain("json_extract(sweep_stamps, '$.metadata_updated_at') IS NULL");
+    expect(q.sql).toContain("json_extract(sweep_stamps, '$.metadata_updated_at') < datetime('now', ?)");
     // The NULL predicates are OR'd so any single NULL field triggers a match.
     const between = q.sql.split("subject_count IS NULL")[1] ?? "";
     expect(between.toUpperCase()).toContain(" OR ");
@@ -62,8 +63,8 @@ describe("buildReindexFilterQuery", () => {
   test("filter=stale uses default 30 days when not overridden", () => {
     const q = buildReindexFilterQuery("stale");
     expect(q.params).toEqual(["-30 days"]);
-    expect(q.sql).toContain("metadata_updated_at IS NULL");
-    expect(q.sql).toContain("metadata_updated_at < datetime('now', ?)");
+    expect(q.sql).toContain("json_extract(sweep_stamps, '$.metadata_updated_at') IS NULL");
+    expect(q.sql).toContain("json_extract(sweep_stamps, '$.metadata_updated_at') < datetime('now', ?)");
   });
 
   test("filter=stale honors olderThanDays override", () => {

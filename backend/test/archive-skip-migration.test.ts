@@ -59,14 +59,14 @@ describe("migration 0043: archive_skip_reason", () => {
     const r = db
       .prepare(
         `UPDATE datasets
-         SET archive_skip_reason = ?, archive_status = NULL, archive_retry_count = 0, archive_checked_at = datetime('now')
+         SET archive_skip_reason = ?, archive_status = NULL, archive_retry_count = 0, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now'))
          WHERE dataset_id = ?`,
       )
       .run("dataset 680.0 GB exceeds 100.0 GB archive limit; use direct download", "on005752");
     expect(r.changes).toBe(1);
     const row = db
       .prepare(
-        "SELECT archive_skip_reason, archive_status, archive_retry_count, archive_checked_at FROM datasets WHERE dataset_id = ?",
+        "SELECT archive_skip_reason, archive_status, archive_retry_count, json_extract(sweep_stamps, '$.archive_checked_at') AS archive_checked_at FROM datasets WHERE dataset_id = ?",
       )
       .get("on005752") as {
       archive_skip_reason: string;
@@ -86,11 +86,11 @@ describe("migration 0043: archive_skip_reason", () => {
     insertDataset(db, "on005752"); // skipped (oversized)
     insertDataset(db, "nm000001"); // absent (no archive, under threshold)
     db.prepare(
-      "UPDATE datasets SET archive_skip_reason = ?, archive_checked_at = datetime('now') WHERE dataset_id = ?",
+      "UPDATE datasets SET archive_skip_reason = ?, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now')) WHERE dataset_id = ?",
     ).run("oversized", "on005752");
-    db.prepare("UPDATE datasets SET archive_checked_at = datetime('now') WHERE dataset_id = ?").run(
-      "nm000001",
-    );
+    db.prepare(
+      "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now')) WHERE dataset_id = ?",
+    ).run("nm000001");
 
     const skipped = db
       .prepare(
@@ -102,7 +102,7 @@ describe("migration 0043: archive_skip_reason", () => {
     // 'absent' = checked, no archive, no skip reason, status NULL
     const absent = db
       .prepare(
-        "SELECT dataset_id FROM datasets WHERE archive_checked_at IS NOT NULL AND archive_skip_reason IS NULL AND archive_status IS NULL",
+        "SELECT dataset_id FROM datasets WHERE json_extract(sweep_stamps, '$.archive_checked_at') IS NOT NULL AND archive_skip_reason IS NULL AND archive_status IS NULL",
       )
       .all() as { dataset_id: string }[];
     expect(absent.map((r) => r.dataset_id)).toEqual(["nm000001"]);
@@ -118,7 +118,7 @@ describe("migration 0043: archive_skip_reason", () => {
     const row = db
       .prepare(
         `SELECT dataset_id, file_size, total_files FROM datasets
-         WHERE visibility = 'public' AND archive_checked_at IS NULL
+         WHERE visibility = 'public' AND json_extract(sweep_stamps, '$.archive_checked_at') IS NULL
          ORDER BY dataset_id LIMIT 1`,
       )
       .get() as { dataset_id: string; file_size: number; total_files: number };
@@ -131,12 +131,13 @@ describe("migration 0043: archive_skip_reason", () => {
     insertDataset(db, "on005752");
     // previously skipped (oversized)
     db.prepare(
-      "UPDATE datasets SET archive_skip_reason = 'oversized', archive_checked_at = datetime('now') WHERE dataset_id = ?",
+      "UPDATE datasets SET archive_skip_reason = 'oversized', sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now')) WHERE dataset_id = ?",
     ).run("on005752");
     // a real zip now lands -> the 'ready' UPDATE must null the stale reason
     db.prepare(
       `UPDATE datasets
-       SET archive_status = 'ready', archive_checked_at = datetime('now'),
+       SET archive_status = 'ready',
+           sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now')),
            archive_size = ?, archive_retry_count = 0, archive_skip_reason = NULL
        WHERE dataset_id = ?`,
     ).run(500, "on005752");

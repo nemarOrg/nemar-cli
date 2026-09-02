@@ -67,7 +67,11 @@ function seedDataset(id: string): void {
 }
 
 const row = (id: string) =>
-  db.query("SELECT * FROM datasets WHERE dataset_id = ?").get(id) as Record<string, unknown>;
+  db
+    .query(
+      "SELECT *, json_extract(sweep_stamps, '$.recording_stats_at') AS recording_stats_at FROM datasets WHERE dataset_id = ?",
+    )
+    .get(id) as Record<string, unknown>;
 
 function stats(overrides: Partial<RecordingStats> = {}): RecordingStats {
   return {
@@ -102,9 +106,12 @@ describe("runRecordingStatsSweep: three-way outcome handling (C1)", () => {
     // re-nulled by a reconversion (the zarr-ready callback's 'ready'
     // branch) -- exactly the scenario a transient S3 blip must not corrupt.
     db.prepare(
+      // sweep_stamps = '{}' is the post-reconversion shape: the zarr-ready
+      // 'ready' branch json_remove()s the recording_stats_at key from the
+      // stamps object, leaving the object without the key (#1183).
       `UPDATE datasets
          SET total_recording_duration = 9999, recording_count = 3, recordings_measured = 3,
-             recording_stats_at = NULL
+             sweep_stamps = '{}'
        WHERE dataset_id = 'on007800'`,
     ).run();
 

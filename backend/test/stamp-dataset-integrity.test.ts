@@ -81,7 +81,8 @@ describe("stampDatasetIntegrity", () => {
 
     const dataset = db
       .prepare(
-        `SELECT file_size, total_files, bytes_present, data_complete, data_checked_at
+        `SELECT file_size, total_files, bytes_present, data_complete,
+                json_extract(sweep_stamps, '$.data_checked_at') AS data_checked_at
            FROM datasets WHERE dataset_id='on002814'`,
       )
       .get() as {
@@ -158,7 +159,7 @@ describe("stampDatasetIntegrity", () => {
     expect(outcome).toBe("unknown");
     const dataset = db
       .prepare(
-        "SELECT data_complete, file_size, data_checked_at FROM datasets WHERE dataset_id='on002814'",
+        "SELECT data_complete, file_size, json_extract(sweep_stamps, '$.data_checked_at') AS data_checked_at FROM datasets WHERE dataset_id='on002814'",
       )
       .get() as { data_complete: number; file_size: number; data_checked_at: string | null };
     expect(dataset.data_complete).toBe(1); // preserved, not nulled
@@ -180,7 +181,9 @@ describe("stampDatasetIntegrity", () => {
 
     expect(outcome).toBe("unknown");
     const dataset = db
-      .prepare("SELECT data_complete, data_checked_at FROM datasets WHERE dataset_id='on002814'")
+      .prepare(
+        "SELECT data_complete, json_extract(sweep_stamps, '$.data_checked_at') AS data_checked_at FROM datasets WHERE dataset_id='on002814'",
+      )
       .get() as { data_complete: number | null; data_checked_at: string | null };
     expect(dataset.data_complete).toBeNull(); // never classified, stays NULL
     expect(dataset.data_checked_at).not.toBeNull();

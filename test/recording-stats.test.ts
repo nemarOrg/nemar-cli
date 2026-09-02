@@ -277,7 +277,7 @@ CREATE TABLE datasets (
   dataset_id TEXT PRIMARY KEY,
   status TEXT NOT NULL DEFAULT 'active',
   zarr_status TEXT,
-  recording_stats_at TEXT
+  sweep_stamps TEXT CHECK (sweep_stamps IS NULL OR json_valid(sweep_stamps))
 );
 `;
 
@@ -294,7 +294,9 @@ function seedCandidateFixture(db: Database) {
   ins.run("nm000402", "active", null); // excluded: not zarr-ready
   ins.run("nm000403", "withdrawn", "ready"); // excluded: not active
   ins.run("nm000404", "active", "ready"); // excluded: already stamped below
-  db.run("UPDATE datasets SET recording_stats_at = datetime('now') WHERE dataset_id = 'nm000404'");
+  db.run(
+    "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.recording_stats_at', datetime('now')) WHERE dataset_id = 'nm000404'",
+  );
 }
 
 const GENEROUS_LIMIT = 100;
@@ -320,7 +322,7 @@ describe("recording-stats-sweep candidate/remaining SQL (pinned)", () => {
     seedCandidateFixture(db);
     expect(remaining(db)).toBe(3);
     db.run(
-      "UPDATE datasets SET recording_stats_at = datetime('now') WHERE dataset_id = 'nm000400'",
+      "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.recording_stats_at', datetime('now')) WHERE dataset_id = 'nm000400'",
     );
     expect(remaining(db)).toBe(2);
     expect(candidates(db)).toEqual(["nm000401", "xx000090"]);

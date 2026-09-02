@@ -155,11 +155,15 @@ export function deriveArchiveCompleteness(body: ArchiveReadyBody): ArchiveComple
  * and overwriting with NULL would downgrade a known state to "not
  * assessed".
  *
- * Clearing availability_report_at marks the per-file report stale so
- * the availability-report sweep regenerates it: that column IS the
- * sweep's candidacy predicate (availabilityReportSweepWhere ->
- * `availability_report_at IS NULL`), so nulling it here is the whole
- * enqueue. Deliberately a column write and NOT a direct
+ * Removing the availability_report_at stamp marks the per-file report
+ * stale so the availability-report sweep regenerates it: that stamp IS
+ * the sweep's candidacy predicate (availabilityReportSweepWhere ->
+ * `json_extract(sweep_stamps, '$.availability_report_at') IS NULL`), so
+ * json_remove here is the whole enqueue (json_extract reads a removed
+ * key as NULL, #1183). The json_set half of the same expression stamps
+ * archive_checked_at; COALESCE guards the never-swept NULL column, on
+ * which json_set alone would return NULL and drop the write.
+ * Deliberately a stamp write and NOT a direct
  * writeAvailabilityReport call: that helper does a GitHub commit
  * (createOrUpdateFile = a GET-sha + PUT pair on raw fetch, with no
  * rate-limit retry), and the sweep caps itself at 10 per invocation
@@ -170,14 +174,16 @@ export function deriveArchiveCompleteness(body: ArchiveReadyBody): ArchiveComple
  */
 export const ARCHIVE_READY_UPDATE_SQL = `UPDATE datasets
            SET archive_status = 'ready',
-               archive_checked_at = datetime('now'),
                archive_size = ?,
                archive_retry_count = 0,
                archive_skip_reason = NULL,
                archive_complete = COALESCE(?, archive_complete),
                archive_absent_files = COALESCE(?, archive_absent_files),
                archive_declared_files = COALESCE(?, archive_declared_files),
-               availability_report_at = NULL
+               sweep_stamps = json_remove(
+                 json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now')),
+                 '$.availability_report_at'
+               )
            WHERE dataset_id = ?`;
 
 export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
@@ -269,7 +275,7 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
            SET archive_skip_reason = ?,
                archive_status = NULL,
                archive_retry_count = 0,
-               archive_checked_at = datetime('now')
+               sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now'))
            WHERE dataset_id = ?`,
         )
           .bind(body.reason ?? "archive skipped (size policy)", body.dataset_id)
@@ -289,7 +295,7 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
         const result = await c.env.DB.prepare(
           `UPDATE datasets
            SET archive_status = 'failed',
-               archive_checked_at = datetime('now')
+               sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now'))
            WHERE dataset_id = ?`,
         )
           .bind(body.dataset_id)

@@ -128,9 +128,9 @@ describe("POST /datasets resume branch seeds catalog stats", () => {
     // manifest from clobbering the authoritative values (#1092 review).
     db.query(
       `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, visibility,
-                             subject_count, file_size, metadata_updated_at)
+                             subject_count, file_size, sweep_stamps)
        VALUES ('xx090011', 'Enriched Fixture Dataset', NULL, ?, 'nemarDatasets/fixture2', 1, 'private',
-               42, 999999, datetime('now'))`,
+               42, 999999, json_object('metadata_updated_at', datetime('now')))`,
     ).run(userId);
     await app.request(
       "/datasets",

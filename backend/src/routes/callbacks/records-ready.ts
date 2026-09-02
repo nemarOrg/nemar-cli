@@ -69,7 +69,7 @@ export function registerRecordsReadyRoutes(webhooks: WebhookRouter): void {
     let changed = 0;
     try {
       const result = await c.env.DB.prepare(
-        "UPDATE datasets SET records_status = ?, records_checked_at = datetime('now') WHERE dataset_id = ?",
+        "UPDATE datasets SET records_status = ?, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.records_checked_at', datetime('now')) WHERE dataset_id = ?",
       )
         .bind(status, body.dataset_id)
         .run();

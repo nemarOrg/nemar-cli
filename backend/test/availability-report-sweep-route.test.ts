@@ -105,7 +105,9 @@ function post(path: string): Promise<Response> {
   );
 }
 
-/** Seed a dataset row. `stamped` sets availability_report_at so it is excluded. */
+/** Seed a dataset row. `stamped` sets the availability_report_at stamp in
+ *  sweep_stamps (#1183) so it is excluded; otherwise sweep_stamps stays NULL,
+ *  the fresh post-0073 row shape the sweep must treat as never-stamped. */
 function seedDataset(
   id: string,
   opts: {
@@ -116,14 +118,14 @@ function seedDataset(
   } = {},
 ): void {
   db.prepare(
-    `INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo, is_sandbox, availability_report_at, data_complete)
+    `INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo, is_sandbox, sweep_stamps, data_complete)
      VALUES (?, ?, 1, ?, ?, ?, ?)`,
   ).run(
     id,
     id,
     opts.githubRepo === undefined ? `nemarDatasets/${id}` : opts.githubRepo,
     opts.isSandbox ?? 0,
-    opts.stamped ? "2026-07-01 00:00:00" : null,
+    opts.stamped ? '{"availability_report_at":"2026-07-01 00:00:00"}' : null,
     opts.dataComplete ?? null,
   );
 }
@@ -201,9 +203,11 @@ describe("POST /admin/datasets/availability-report-sweep (real route, zero real 
     const body = await res.json();
     expect(body.reset).toBe(2);
     const row = db
-      .query("SELECT availability_report_at FROM datasets WHERE dataset_id = 'nm000300'")
-      .get() as { availability_report_at: string | null };
-    expect(row.availability_report_at).toBeNull();
+      .query(
+        "SELECT json_extract(sweep_stamps, '$.availability_report_at') AS at FROM datasets WHERE dataset_id = 'nm000300'",
+      )
+      .get() as { at: string | null };
+    expect(row.at).toBeNull();
   });
 
   test("?limit=999 is clamped to AVAILABILITY_REPORT_SWEEP_MAX at the bound SQL parameter", async () => {
@@ -293,7 +297,7 @@ describe("availability-report-sweep candidate SQL (pinned, no route dispatch)", 
     expect(remainingCount()).toBe(2);
 
     db.prepare(
-      "UPDATE datasets SET availability_report_at = datetime('now') WHERE dataset_id = ?",
+      "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.availability_report_at', datetime('now')) WHERE dataset_id = ?",
     ).run("nm000300");
     expect(remainingCount()).toBe(1);
     expect(candidates(false)).toEqual(["on000301"]);

@@ -273,7 +273,7 @@ export async function writeAvailabilityReport(
  *  catalog ds* rows have none), not sandbox, not yet stamped. */
 const AVAILABILITY_REPORT_SWEEP_BASE_WHERE = `github_repo IS NOT NULL
      AND (is_sandbox = 0 OR is_sandbox IS NULL)
-     AND availability_report_at IS NULL`;
+     AND json_extract(sweep_stamps, '$.availability_report_at') IS NULL`;
 
 /** Appended to the base predicate when `?missing-only=1` narrows candidacy to
  *  datasets already known incomplete (data_complete = 0, migration 0059). */
@@ -361,7 +361,7 @@ export async function runAvailabilityReportSweep(
     try {
       await writeAvailabilityReport(env, dataset_id);
       await env.DB.prepare(
-        "UPDATE datasets SET availability_report_at = datetime('now') WHERE dataset_id = ?",
+        "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.availability_report_at', datetime('now')) WHERE dataset_id = ?",
       )
         .bind(dataset_id)
         .run();

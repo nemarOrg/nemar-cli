@@ -193,7 +193,7 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
                zarr_data_failures = ?,
                zarr_pool_breaks = ?,
                zarr_failed_at = CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END,
-               recording_stats_at = NULL
+               sweep_stamps = json_remove(sweep_stamps, '$.recording_stats_at')
            WHERE dataset_id = ?`,
         )
           .bind(

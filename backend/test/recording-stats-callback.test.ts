@@ -63,7 +63,11 @@ function post(body: Record<string, unknown>): Promise<Response> {
 }
 
 const row = () =>
-  db.query("SELECT * FROM datasets WHERE dataset_id = ?").get(DATASET) as Record<string, unknown>;
+  db
+    .query(
+      "SELECT *, json_extract(sweep_stamps, '$.recording_stats_at') AS recording_stats_at FROM datasets WHERE dataset_id = ?",
+    )
+    .get(DATASET) as Record<string, unknown>;
 
 beforeEach(() => {
   db = freshDb();
@@ -88,7 +92,7 @@ beforeEach(() => {
            recording_duration_max = 28890, recording_count = 8,
            recordings_unavailable = 2, recordings_measured = 6,
            channel_count_min = 19, channel_count_max = 21,
-           recording_stats_at = '2026-08-01 00:00:00'
+           sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.recording_stats_at', '2026-08-01 00:00:00')
      WHERE dataset_id = ?`,
   ).run(DATASET);
 });

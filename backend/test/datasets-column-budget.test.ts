@@ -26,11 +26,13 @@ beforeAll(() => {
 });
 
 describe("datasets column budget", () => {
-  test("exactly 92 columns after all migrations", () => {
+  test("exactly 81 columns after all migrations", () => {
+    // 92 after 0072; 0073 collapses the 12 sweep stamps into one
+    // sweep_stamps JSON column (#1183): 92 + 1 - 12 = 81.
     const count = db
       .query("SELECT COUNT(*) AS n FROM pragma_table_info('datasets')")
       .get() as { n: number };
-    expect(count.n).toBe(92);
+    expect(count.n).toBe(81);
   });
 
   test("stays under the 97-column ceiling (D1 hard cap is 100)", () => {
@@ -40,7 +42,7 @@ describe("datasets column budget", () => {
     expect(count.n).toBeLessThanOrEqual(97);
   });
 
-  test("index set is exactly the 23 the rebuild recreates", () => {
+  test("index set is exactly the 22 surviving 0073", () => {
     const names = (
       db
         .query(
@@ -68,7 +70,6 @@ describe("datasets column budget", () => {
       "idx_datasets_status",
       "idx_datasets_subject_count",
       "idx_datasets_visibility",
-      "idx_datasets_zarr_checked_at",
       "idx_datasets_zarr_failed_at",
       "idx_datasets_zarr_status",
       "idx_datasets_zenodo_concept",

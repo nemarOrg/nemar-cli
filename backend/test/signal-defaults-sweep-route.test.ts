@@ -118,7 +118,7 @@ function seedDataset(
   );
   if (opts.stamped) {
     db.prepare(
-      "UPDATE datasets SET signal_defaults_at = '2026-08-01 00:00:00' WHERE dataset_id = ?",
+      "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.signal_defaults_at', '2026-08-01 00:00:00') WHERE dataset_id = ?",
     ).run(id);
   }
   if (opts.isSandbox) {
@@ -201,10 +201,11 @@ describe("POST /admin/datasets/signal-defaults-sweep (real route, zero real cand
     const body = await res.json();
     expect(body.reset).toBe(1);
 
-    const r = db.query("SELECT * FROM datasets WHERE dataset_id = 'nm000903'").get() as Record<
-      string,
-      unknown
-    >;
+    const r = db
+      .query(
+        "SELECT *, json_extract(sweep_stamps, '$.signal_defaults_at') AS signal_defaults_at FROM datasets WHERE dataset_id = 'nm000903'",
+      )
+      .get() as Record<string, unknown>;
     expect(r.signal_defaults_at).toBeNull();
     expect(r.sampling_frequency).toBeNull();
     expect(r.power_line_frequency).toBeNull();
@@ -271,13 +272,17 @@ describe("POST /admin/datasets/signal-defaults-sweep (real route, zero real cand
 
 const MIGRATIONS_DIR = join(import.meta.dir, "..", "src/db/migrations");
 
-/** Every migration EXCEPT 0072, so admin auth tables (earlier migrations)
- *  exist but the signal-defaults columns/predicate do not -- reproduces "is
- *  migration 0072 applied?" for real instead of asserting on a fabricated
- *  D1 error. */
+/** Every migration EXCEPT 0072 and 0073 (0073 collapses 0072's stamp into
+ *  sweep_stamps and cannot apply without it), so admin auth tables (earlier
+ *  migrations) exist but the signal-defaults columns/predicate do not --
+ *  reproduces "are migrations 0072/0073 applied?" for real instead of
+ *  asserting on a fabricated D1 error. */
 function dbMissingMigration0072(): Database {
   const files = readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith(".sql") && f !== "0072_signal_defaults.sql")
+    .filter(
+      (f) =>
+        f.endsWith(".sql") && f !== "0072_signal_defaults.sql" && f !== "0073_collapse_sweep_stamps.sql",
+    )
     .sort();
   const built = new Database(":memory:");
   for (const file of files) {
@@ -287,7 +292,7 @@ function dbMissingMigration0072(): Database {
 }
 
 describe("POST /admin/datasets/signal-defaults-sweep: candidate query failure", () => {
-  test("returns 500 with a migration-0072 hint when the signal-defaults columns don't exist", async () => {
+  test("returns 500 with a migration hint when the signal-defaults schema doesn't exist", async () => {
     db = dbMissingMigration0072();
     candidateLimitCalls = [];
     app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -297,6 +302,6 @@ describe("POST /admin/datasets/signal-defaults-sweep: candidate query failure", 
     const res = await post("/admin/datasets/signal-defaults-sweep");
     expect(res.status).toBe(500);
     const body = await res.json();
-    expect(body.error).toContain("migration 0072");
+    expect(body.error).toContain("migrations 0072/0073");
   });
 });

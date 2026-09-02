@@ -951,7 +951,7 @@ export async function enrichDataset(
     // Cache in D1
     try {
       await env.DB.prepare(
-        "UPDATE datasets SET enrichment_json = ?, enrichment_updated_at = datetime('now'), updated_at = datetime('now') WHERE dataset_id = ?",
+        "UPDATE datasets SET enrichment_json = ?, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.enrichment_updated_at', datetime('now')), updated_at = datetime('now') WHERE dataset_id = ?",
       )
         .bind(metadataContent, datasetId)
         .run();

@@ -294,7 +294,7 @@ export async function writeDatasetMetadataColumns(
            hed_version = COALESCE(?, hed_version),
            bytes_present = COALESCE(?, bytes_present),
            data_complete = COALESCE(?, data_complete),
-           metadata_updated_at = datetime('now'),
+           sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.metadata_updated_at', datetime('now')),
            updated_at = datetime('now')
        WHERE dataset_id = ?`,
     )
@@ -491,7 +491,7 @@ export async function stampDatasetIntegrity(
       .prepare(
         `UPDATE datasets
          SET file_size = ?, total_files = ?, data_complete = ?, bytes_present = ?,
-             data_checked_at = datetime('now')
+             sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.data_checked_at', datetime('now'))
          WHERE dataset_id = ?`,
       )
       .bind(
@@ -506,7 +506,9 @@ export async function stampDatasetIntegrity(
   }
 
   await db
-    .prepare("UPDATE datasets SET data_checked_at = datetime('now') WHERE dataset_id = ?")
+    .prepare(
+      "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.data_checked_at', datetime('now')) WHERE dataset_id = ?",
+    )
     .bind(datasetId)
     .run();
   return "unknown";

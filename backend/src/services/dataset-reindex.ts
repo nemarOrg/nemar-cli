@@ -532,7 +532,7 @@ export function buildReindexFilterQuery(
       throw new Error(`Invalid older_than_days: ${recencyDays}`);
     }
     return {
-      sql: `${base} AND (subject_count IS NULL OR modalities IS NULL OR file_size IS NULL OR total_files IS NULL) AND (metadata_updated_at IS NULL OR metadata_updated_at < datetime('now', ?)) ORDER BY dataset_id`,
+      sql: `${base} AND (subject_count IS NULL OR modalities IS NULL OR file_size IS NULL OR total_files IS NULL) AND (json_extract(sweep_stamps, '$.metadata_updated_at') IS NULL OR json_extract(sweep_stamps, '$.metadata_updated_at') < datetime('now', ?)) ORDER BY dataset_id`,
       params: [`-${recencyDays} days`],
     };
   }
@@ -542,7 +542,7 @@ export function buildReindexFilterQuery(
       throw new Error(`Invalid older_than_days: ${days}`);
     }
     return {
-      sql: `${base} AND (metadata_updated_at IS NULL OR metadata_updated_at < datetime('now', ?)) ORDER BY dataset_id`,
+      sql: `${base} AND (json_extract(sweep_stamps, '$.metadata_updated_at') IS NULL OR json_extract(sweep_stamps, '$.metadata_updated_at') < datetime('now', ?)) ORDER BY dataset_id`,
       params: [`-${days} days`],
     };
   }

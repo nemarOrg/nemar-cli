@@ -6,7 +6,9 @@
  * applying every migration in order so the schema matches production, then
  * asserting the honest-size additions:
  *
- *   1. datasets gains bytes_present, data_complete, data_checked_at.
+ *   1. datasets gains bytes_present, data_complete; the data_checked_at stamp
+ *      lives under sweep_stamps -> $.data_checked_at since migration 0073
+ *      (#1183).
  *   2. dataset_versions gains file_size, total_files, bytes_present, data_complete.
  *   3. idx_datasets_data_complete exists.
  *   4. The columns round-trip a populated row.
@@ -14,7 +16,9 @@
  *      audited yet) -- the load-bearing not-checked vs checked-incomplete
  *      distinction, mirroring has_hed.
  *   6. A row inserted without setting the new columns reads back NULL.
- *   7. data_checked_at IS NULL selects unswept datasets (sweep predicate).
+ *
+ * The data-integrity sweep's candidate predicate itself is covered at the
+ * route entry point in backend/test/sweep-stamps-candidates.test.ts.
  *   8. CHECK (data_complete IN (0,1)) rejects out-of-domain values.
  */
 
@@ -53,11 +57,11 @@ function seedDataset(db: Database, datasetId: string): void {
 }
 
 describe("migration 0059_data_complete_columns", () => {
-  test("datasets gains bytes_present, data_complete, data_checked_at", () => {
+  test("datasets gains bytes_present, data_complete; data_checked_at is collapsed into sweep_stamps", () => {
     const db = freshDb();
-    expect(tableColumns(db, "datasets")).toEqual(
-      expect.arrayContaining(["bytes_present", "data_complete", "data_checked_at"]),
-    );
+    const cols = tableColumns(db, "datasets");
+    expect(cols).toEqual(expect.arrayContaining(["bytes_present", "data_complete", "sweep_stamps"]));
+    expect(cols).not.toContain("data_checked_at");
     db.close();
   });
 
@@ -82,11 +86,11 @@ describe("migration 0059_data_complete_columns", () => {
     const db = freshDb();
     seedDataset(db, "nm000132");
     db.prepare(
-      "UPDATE datasets SET bytes_present = 1024, data_complete = 1, data_checked_at = '2026-07-21T00:00:00Z' WHERE dataset_id = ?",
+      "UPDATE datasets SET bytes_present = 1024, data_complete = 1, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.data_checked_at', '2026-07-21T00:00:00Z') WHERE dataset_id = ?",
     ).run("nm000132");
     const row = db
       .prepare(
-        "SELECT bytes_present, data_complete, data_checked_at FROM datasets WHERE dataset_id = ?",
+        "SELECT bytes_present, data_complete, json_extract(sweep_stamps, '$.data_checked_at') AS data_checked_at FROM datasets WHERE dataset_id = ?",
       )
       .get("nm000132") as {
       bytes_present: number;
@@ -104,7 +108,7 @@ describe("migration 0059_data_complete_columns", () => {
     seedDataset(db, "nm000999");
     const row = db
       .prepare(
-        "SELECT bytes_present, data_complete, data_checked_at FROM datasets WHERE dataset_id = ?",
+        "SELECT bytes_present, data_complete, json_extract(sweep_stamps, '$.data_checked_at') AS data_checked_at FROM datasets WHERE dataset_id = ?",
       )
       .get("nm000999") as {
       bytes_present: number | null;
@@ -124,7 +128,7 @@ describe("migration 0059_data_complete_columns", () => {
     // key is missing/truncated -- that 0 must NOT read back as NULL, or the sweep
     // would re-check it forever.
     db.prepare(
-      "UPDATE datasets SET data_complete = 0, bytes_present = 36, data_checked_at = '2026-07-21T00:00:00Z' WHERE dataset_id = ?",
+      "UPDATE datasets SET data_complete = 0, bytes_present = 36, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.data_checked_at', '2026-07-21T00:00:00Z') WHERE dataset_id = ?",
     ).run("nm000999");
     const row = db
       .prepare("SELECT data_complete, bytes_present FROM datasets WHERE dataset_id = ?")
@@ -144,20 +148,6 @@ describe("migration 0059_data_complete_columns", () => {
       .get("nm000999") as { data_complete: number | null };
     expect(vrow.data_complete).toBe(0);
     expect(vrow.data_complete).not.toBeNull();
-    db.close();
-  });
-
-  test("data_checked_at IS NULL selects unswept datasets, stamped drops out", () => {
-    const db = freshDb();
-    seedDataset(db, "nm000001"); // never swept
-    seedDataset(db, "nm000002"); // will be stamped
-    db.prepare(
-      "UPDATE datasets SET data_complete = 1, data_checked_at = '2026-07-21T00:00:00Z' WHERE dataset_id = ?",
-    ).run("nm000002");
-    const candidates = db
-      .prepare("SELECT dataset_id FROM datasets WHERE data_checked_at IS NULL ORDER BY dataset_id")
-      .all() as { dataset_id: string }[];
-    expect(candidates.map((r) => r.dataset_id)).toEqual(["nm000001"]);
     db.close();
   });
 

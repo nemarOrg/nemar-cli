@@ -98,7 +98,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
          WHERE owner_user_id != ${SYSTEM_USER_ID}
            AND (is_sandbox = 0 OR is_sandbox IS NULL)
            AND visibility = 'public'
-           AND archive_checked_at IS NULL
+           AND json_extract(sweep_stamps, '$.archive_checked_at') IS NULL
          ORDER BY dataset_id
          LIMIT ?`,
         )
@@ -137,7 +137,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
           await db
             .prepare(
               // Clear any stale archive_skip_reason: a real zip exists (#752).
-              "UPDATE datasets SET archive_status = 'ready', archive_size = ?, archive_checked_at = datetime('now'), archive_skip_reason = NULL WHERE dataset_id = ?",
+              "UPDATE datasets SET archive_status = 'ready', archive_size = ?, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now')), archive_skip_reason = NULL WHERE dataset_id = ?",
             )
             .bind(size, dataset_id)
             .run();
@@ -151,7 +151,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
           if (decision.skip) {
             await db
               .prepare(
-                "UPDATE datasets SET archive_skip_reason = ?, archive_checked_at = datetime('now') WHERE dataset_id = ?",
+                "UPDATE datasets SET archive_skip_reason = ?, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now')) WHERE dataset_id = ?",
               )
               .bind(decision.reason ?? "archive skipped (size policy)", dataset_id)
               .run();
@@ -159,7 +159,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
           } else {
             await db
               .prepare(
-                "UPDATE datasets SET archive_checked_at = datetime('now') WHERE dataset_id = ?",
+                "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now')) WHERE dataset_id = ?",
               )
               .bind(dataset_id)
               .run();
@@ -183,7 +183,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
        WHERE owner_user_id != ${SYSTEM_USER_ID}
          AND (is_sandbox = 0 OR is_sandbox IS NULL)
          AND visibility = 'public'
-         AND archive_checked_at IS NULL`,
+         AND json_extract(sweep_stamps, '$.archive_checked_at') IS NULL`,
       )
       .first<{ n: number }>()
       .catch((err) => {
@@ -242,7 +242,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
            AND (is_sandbox = 0 OR is_sandbox IS NULL)
            AND visibility = 'public'
            AND zarr_status IS NULL
-           AND zarr_checked_at IS NULL
+           AND json_extract(sweep_stamps, '$.zarr_checked_at') IS NULL
          ORDER BY dataset_id
          LIMIT ?`,
         )
@@ -290,7 +290,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
                  zarr_store_count = ?,
                  zarr_index_etag = COALESCE(?, zarr_index_etag),
                  zarr_source_commit = COALESCE(?, zarr_source_commit),
-                 zarr_checked_at = datetime('now')
+                 sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.zarr_checked_at', datetime('now'))
              WHERE dataset_id = ?`,
             )
             .bind(index.storeCount, index.etag, index.sourceCommit, dataset_id)
@@ -300,7 +300,9 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
           // No index.json: stamp checked so the sweep won't rescan, but leave
           // zarr_status NULL (absence is not a 'failed' conversion).
           await db
-            .prepare("UPDATE datasets SET zarr_checked_at = datetime('now') WHERE dataset_id = ?")
+            .prepare(
+              "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.zarr_checked_at', datetime('now')) WHERE dataset_id = ?",
+            )
             .bind(dataset_id)
             .run();
           absent++;
@@ -320,7 +322,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
          AND (is_sandbox = 0 OR is_sandbox IS NULL)
          AND visibility = 'public'
          AND zarr_status IS NULL
-         AND zarr_checked_at IS NULL`,
+         AND json_extract(sweep_stamps, '$.zarr_checked_at') IS NULL`,
       )
       .first<{ n: number }>()
       .catch((err) => {
@@ -369,8 +371,9 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       const res = await db
         .prepare(
           `UPDATE datasets
-         SET channel_montage_checked_at = NULL, n_channels = NULL, electrode_system = NULL
-         WHERE channel_montage_checked_at IS NOT NULL`,
+         SET sweep_stamps = json_remove(sweep_stamps, '$.channel_montage_checked_at'),
+             n_channels = NULL, electrode_system = NULL
+         WHERE json_extract(sweep_stamps, '$.channel_montage_checked_at') IS NOT NULL`,
         )
         .run();
       return c.json({ reset: res.meta?.changes ?? 0 });
@@ -391,7 +394,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
          WHERE github_repo IS NOT NULL
            AND (is_sandbox = 0 OR is_sandbox IS NULL)
            AND modalities LIKE '%eeg%'
-           AND channel_montage_checked_at IS NULL
+           AND json_extract(sweep_stamps, '$.channel_montage_checked_at') IS NULL
          ORDER BY dataset_id
          LIMIT ?`,
         )
@@ -445,7 +448,8 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
         await db
           .prepare(
             `UPDATE datasets
-           SET n_channels = ?, electrode_system = ?, channel_montage_checked_at = datetime('now')
+           SET n_channels = ?, electrode_system = ?,
+               sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.channel_montage_checked_at', datetime('now'))
            WHERE dataset_id = ?`,
           )
           .bind(nChannels, electrodeSystem, dataset_id)
@@ -464,7 +468,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
        WHERE github_repo IS NOT NULL
          AND (is_sandbox = 0 OR is_sandbox IS NULL)
          AND modalities LIKE '%eeg%'
-         AND channel_montage_checked_at IS NULL`,
+         AND json_extract(sweep_stamps, '$.channel_montage_checked_at') IS NULL`,
       )
       .first<{ n: number }>();
 
@@ -565,7 +569,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     } catch (err) {
       console.error("[signal-defaults-sweep] candidate query failed:", err);
       return c.json(
-        { error: "Failed to query sweep candidates (is migration 0072 applied?)" },
+        { error: "Failed to query sweep candidates (are migrations 0072/0073 applied?)" },
         500,
       );
     }
@@ -599,8 +603,9 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       const res = await db
         .prepare(
           `UPDATE datasets
-         SET hed_checked_at = NULL, has_hed = NULL, hed_version = NULL
-         WHERE hed_checked_at IS NOT NULL`,
+         SET sweep_stamps = json_remove(sweep_stamps, '$.hed_checked_at'),
+             has_hed = NULL, hed_version = NULL
+         WHERE json_extract(sweep_stamps, '$.hed_checked_at') IS NOT NULL`,
         )
         .run();
       return c.json({ reset: res.meta?.changes ?? 0 });
@@ -623,7 +628,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
          FROM datasets d
          WHERE d.github_repo IS NOT NULL
            AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
-           AND d.hed_checked_at IS NULL
+           AND json_extract(d.sweep_stamps, '$.hed_checked_at') IS NULL
          ORDER BY d.dataset_id
          LIMIT ?`,
         )
@@ -695,14 +700,17 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
           await db
             .prepare(
               `UPDATE datasets
-             SET has_hed = ?, hed_version = ?, hed_checked_at = datetime('now')
+             SET has_hed = ?, hed_version = ?,
+                 sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.hed_checked_at', datetime('now'))
              WHERE dataset_id = ?`,
             )
             .bind(hasHedInt, hedVersion, dataset_id)
             .run();
         } else {
           await db
-            .prepare("UPDATE datasets SET hed_checked_at = datetime('now') WHERE dataset_id = ?")
+            .prepare(
+              "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.hed_checked_at', datetime('now')) WHERE dataset_id = ?",
+            )
             .bind(dataset_id)
             .run();
         }
@@ -719,7 +727,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
         `SELECT COUNT(*) AS n FROM datasets
        WHERE github_repo IS NOT NULL
          AND (is_sandbox = 0 OR is_sandbox IS NULL)
-         AND hed_checked_at IS NULL`,
+         AND json_extract(sweep_stamps, '$.hed_checked_at') IS NULL`,
       )
       .first<{ n: number }>();
 
@@ -785,8 +793,9 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       const res = await db
         .prepare(
           `UPDATE datasets
-         SET data_checked_at = NULL, data_complete = NULL, bytes_present = NULL
-         WHERE data_checked_at IS NOT NULL`,
+         SET sweep_stamps = json_remove(sweep_stamps, '$.data_checked_at'),
+             data_complete = NULL, bytes_present = NULL
+         WHERE json_extract(sweep_stamps, '$.data_checked_at') IS NOT NULL`,
         )
         .run();
       return c.json({ reset: res.meta?.changes ?? 0 });
@@ -820,13 +829,15 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     let candidacyClause: string;
     let candidacyParams: (string | number)[];
     if (beforeIso != null) {
-      candidacyClause = "(d.data_checked_at IS NULL OR d.data_checked_at < datetime(?))";
+      candidacyClause =
+        "(json_extract(d.sweep_stamps, '$.data_checked_at') IS NULL OR json_extract(d.sweep_stamps, '$.data_checked_at') < datetime(?))";
       candidacyParams = [beforeIso];
     } else if (olderThanDays != null) {
-      candidacyClause = "(d.data_checked_at IS NULL OR d.data_checked_at < datetime('now', ?))";
+      candidacyClause =
+        "(json_extract(d.sweep_stamps, '$.data_checked_at') IS NULL OR json_extract(d.sweep_stamps, '$.data_checked_at') < datetime('now', ?))";
       candidacyParams = [`-${olderThanDays} days`];
     } else {
-      candidacyClause = "d.data_checked_at IS NULL";
+      candidacyClause = "json_extract(d.sweep_stamps, '$.data_checked_at') IS NULL";
       candidacyParams = [];
     }
 
@@ -954,8 +965,8 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       const res = await db
         .prepare(
           `UPDATE datasets
-         SET availability_report_at = NULL
-         WHERE availability_report_at IS NOT NULL`,
+         SET sweep_stamps = json_remove(sweep_stamps, '$.availability_report_at')
+         WHERE json_extract(sweep_stamps, '$.availability_report_at') IS NOT NULL`,
         )
         .run();
       return c.json({ reset: res.meta?.changes ?? 0 });
@@ -1339,7 +1350,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       // Reset DOI and Zenodo fields on the dataset
       await db
         .prepare(
-          "UPDATE datasets SET concept_doi = NULL, latest_version_doi = NULL, ezid_status = NULL, zenodo_concept_id = NULL, enrichment_json = NULL, enrichment_updated_at = NULL, visibility = 'private' WHERE dataset_id = ?",
+          "UPDATE datasets SET concept_doi = NULL, latest_version_doi = NULL, ezid_status = NULL, zenodo_concept_id = NULL, enrichment_json = NULL, sweep_stamps = json_remove(sweep_stamps, '$.enrichment_updated_at'), visibility = 'private' WHERE dataset_id = ?",
         )
         .bind(datasetId)
         .run();

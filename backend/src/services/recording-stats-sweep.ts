@@ -41,14 +41,14 @@ import { type RecordingStats, getZarrIndex } from "./s3.js";
 export const RECORDING_STATS_SWEEP_CANDIDATE_SQL = `SELECT dataset_id FROM datasets
    WHERE status = 'active'
      AND zarr_status = 'ready'
-     AND recording_stats_at IS NULL
+     AND json_extract(sweep_stamps, '$.recording_stats_at') IS NULL
    ORDER BY dataset_id
    LIMIT ?`;
 
 export const RECORDING_STATS_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n FROM datasets
    WHERE status = 'active'
      AND zarr_status = 'ready'
-     AND recording_stats_at IS NULL`;
+     AND json_extract(sweep_stamps, '$.recording_stats_at') IS NULL`;
 
 /**
  * The per-candidate write on a SUCCESSFUL index read, exported so a test can
@@ -74,7 +74,7 @@ export const RECORDING_STATS_SWEEP_WRITE_SQL = `UPDATE datasets
        recordings_measured = ?,
        channel_count_min = ?,
        channel_count_max = ?,
-       recording_stats_at = datetime('now')
+       sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.recording_stats_at', datetime('now'))
    WHERE dataset_id = ?`;
 
 /**
@@ -89,7 +89,7 @@ export const RECORDING_STATS_SWEEP_WRITE_SQL = `UPDATE datasets
  * survive untouched.
  */
 export const RECORDING_STATS_SWEEP_STAMP_ONLY_SQL = `UPDATE datasets
-   SET recording_stats_at = datetime('now')
+   SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.recording_stats_at', datetime('now'))
    WHERE dataset_id = ?`;
 
 /**
@@ -100,7 +100,7 @@ export const RECORDING_STATS_SWEEP_STAMP_ONLY_SQL = `UPDATE datasets
  * silently outrun.
  */
 export const RECORDING_STATS_SWEEP_RESET_SQL = `UPDATE datasets
-   SET recording_stats_at = NULL,
+   SET sweep_stamps = json_remove(sweep_stamps, '$.recording_stats_at'),
        total_recording_duration = NULL,
        recording_duration_min = NULL,
        recording_duration_max = NULL,
@@ -109,7 +109,7 @@ export const RECORDING_STATS_SWEEP_RESET_SQL = `UPDATE datasets
        recordings_measured = NULL,
        channel_count_min = NULL,
        channel_count_max = NULL
-   WHERE recording_stats_at IS NOT NULL`;
+   WHERE json_extract(sweep_stamps, '$.recording_stats_at') IS NOT NULL`;
 
 /** Positional bind values for RECORDING_STATS_SWEEP_WRITE_SQL's 8 stat
  *  placeholders + trailing dataset_id. */

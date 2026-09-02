@@ -221,7 +221,9 @@ describe("writeDatasetMetadataColumns signal_defaults columns (#1153)", () => {
     seed(db);
     await writeDatasetMetadataColumns(realD1(db), "nm000132", cols({ sampling_frequency: 500 }));
     const row = db
-      .prepare("SELECT signal_defaults_at FROM datasets WHERE dataset_id = 'nm000132'")
+      .prepare(
+        "SELECT json_extract(sweep_stamps, '$.signal_defaults_at') AS signal_defaults_at FROM datasets WHERE dataset_id = 'nm000132'",
+      )
       .get() as { signal_defaults_at: string | null };
     expect(row.signal_defaults_at).toBeNull();
     db.close();
