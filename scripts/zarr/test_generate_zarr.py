@@ -127,6 +127,7 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     conform_events_table,
     event_rows_for_store,
     events_schema,
+    events_row_alert,
     events_summary,
     events_summary_of,
     parse_events_tsv,
@@ -4644,6 +4645,66 @@ class TestEventRowBuilder(unittest.TestCase):
         self.assertIsNone(self.rows(text="onset\n"))     # header only
         self.assertIsNone(self.rows(groups=[]))          # store with no groups
 
+    def test_duplicate_onsets_keep_both_rows_in_file_order(self):
+        """Two events at the same instant are two events -- a simultaneous
+        stimulus and response, or two annotation streams merged into one file.
+        The sort is stable, so their file order survives; de-duplicating or
+        reordering them would silently drop or re-pair a client's trials."""
+        rows = self.rows(
+            text="onset\tduration\ttrial_type\n1.5\t0.1\tfirst\n1.5\t0.2\tsecond\n"
+        )
+        self.assertEqual(rows["onset_s"], [1.5, 1.5])
+        self.assertEqual(rows["trial_type"], ["first", "second"])
+        self.assertEqual(rows["duration_s"], [0.1, 0.2])
+        self.assertEqual(rows["sample_index"], [375, 375])
+
+
+class TestEventsRowAlert(unittest.TestCase):
+    """The two conditions that leave a client with events it cannot use, and
+    which the parquet cannot show on its own: a store that contributes no rows
+    at all, and rows whose sample index is null throughout."""
+
+    PARSED = parse_events_tsv("onset\ttrial_type\n0.0\tgo\n1.0\tstop\n")
+    PRIMARY = "sub-01/eeg/sub-01_task-x_eeg.edf"
+
+    def build(self, groups):
+        return event_rows_for_store("a.zarr", self.PRIMARY, groups, self.PARSED)
+
+    def test_a_healthy_store_is_silent(self):
+        rows = self.build([{"name": "eeg_250hz", "rate": 250.0}])
+        self.assertIsNone(events_row_alert(self.PRIMARY, self.PARSED, rows))
+
+    def test_events_but_no_channel_groups_is_named(self):
+        """Unreachable through `main` -- `convert_one` refuses to publish a
+        store with no channel groups -- so this is the only place the branch can
+        be exercised at all. It stays because the alternative is a store that
+        silently vanishes from events.parquet if that guard ever changes."""
+        alert = events_row_alert(self.PRIMARY, self.PARSED, self.build([]))
+        self.assertIsNotNone(alert)
+        self.assertIn("::warning::", alert)
+        self.assertIn(self.PRIMARY, alert)
+        self.assertIn("no channel groups", alert)
+        self.assertIn("2 event(s)", alert)
+
+    def test_no_events_at_all_is_silent(self):
+        # No events.tsv, or an empty one: not a defect, and not worth a line in
+        # a log where most datasets would print it.
+        self.assertIsNone(events_row_alert(self.PRIMARY, None, None))
+        self.assertIsNone(events_row_alert(self.PRIMARY, parse_events_tsv("onset\n"), None))
+
+    def test_every_sample_index_null_is_named(self):
+        rows = self.build([{"name": "eeg_250hz", "rate": None}])
+        alert = events_row_alert(self.PRIMARY, self.PARSED, rows)
+        self.assertIn("no usable sample index", alert)
+        self.assertIn("2 row(s)", alert)
+
+    def test_one_usable_index_is_enough_to_stay_silent(self):
+        parsed = parse_events_tsv("onset\ttrial_type\nn/a\tgo\n1.0\tstop\n")
+        rows = event_rows_for_store(
+            "a.zarr", self.PRIMARY, [{"name": "eeg_250hz", "rate": 250.0}], parsed
+        )
+        self.assertIsNone(events_row_alert(self.PRIMARY, parsed, rows))
+
 
 class TestEventsParquetFile(unittest.TestCase):
     """The file itself: schema, order, and the bounded-memory write path.
@@ -4781,6 +4842,38 @@ class TestEventsParquetFile(unittest.TestCase):
         self.assertEqual(rows_for[rels[0]], [(0.0, "go"), (2.0, "go")])
         self.assertEqual(rows_for[changed], [(9.0, "new")])
         self.assertEqual(rows_for[rels[2]], [(0.0, "go"), (2.0, "go")])
+
+    def test_a_reconverted_store_never_inherits_prior_rows(self):
+        """`reconverted` is not `staged`: a store rebuilt this run that produced
+        no rows (its events.tsv was deleted or emptied) must publish none, not
+        fall through to the prior file and resurrect the old ones."""
+        import pyarrow.parquet as pq
+
+        first, rels = self.build(n_stores=2, n_events=2)
+        prior_path, _ = self.write(first, rels)
+
+        # Second run rebuilt BOTH stores; only one still has events.
+        second = EventsStaging()
+        second.add(rels[0], event_rows_for_store(
+            rels[0], "sub-000/eeg/sub-000_task-x_eeg.edf",
+            [{"name": "eeg_250hz", "rate": 250.0}],
+            parse_events_tsv("onset\ttrial_type\n4.0\tkept\n"),
+        ))
+        out = os.path.join(tempfile.mkdtemp(), "events.parquet")
+        total = write_events_parquet(
+            out, rels, second, PriorEventRows(prior_path), set(rels)
+        )
+        self.assertEqual(total, 1)
+        table = pq.read_table(out).to_pydict()
+        self.assertEqual(table["store_path"], [rels[0]])
+        self.assertEqual(table["trial_type"], ["kept"])
+        # Without the `reconverted` argument the same call carries them forward,
+        # which is what an unchanged (untouched) store needs.
+        carried = write_events_parquet(
+            os.path.join(tempfile.mkdtemp(), "events.parquet"),
+            rels, second, PriorEventRows(prior_path),
+        )
+        self.assertEqual(carried, 3)
 
     def test_a_store_dropped_from_the_index_loses_its_rows(self):
         # The rel list is the index's store list, so a removed recording's rows
@@ -5599,6 +5692,7 @@ class TestIndexSchemaSelfCheck(unittest.TestCase):
             # free-form file inventory nobody validates.
             lambda d: d["files"][0].__setitem__("name", "events.pq"),
             lambda d: d["files"][0].__setitem__("size_bytes", -1),
+            lambda d: d["files"][0].__setitem__("row_count", -1),
             lambda d: d["files"][0].pop("size_bytes"),
             lambda d: d["files"][0].__setitem__("stray", 1),
         ):
@@ -5992,6 +6086,18 @@ def local(uri):
 
 args = [a for a in sys.argv[1:] if not a.startswith("--cli-")]
 args = [a for a in args if a not in ("--only-show-errors",)]
+# Every invocation, in order, so a test can assert on what the converter did
+# NOT do -- "it never fetched the prior events file" is otherwise unobservable.
+log = os.environ.get("ZARR_TEST_S3_LOG")
+if log:
+    with open(log, "a") as fh:
+        fh.write(" ".join(args) + "\\n")
+# One key made to fail, the way a bucket policy or a transient S3 error would,
+# so the converter's own non-fatal handling runs for real.
+fail_key = os.environ.get("ZARR_TEST_S3_FAIL_KEY")
+if fail_key and any(fail_key in a for a in args):
+    sys.stderr.write("An error occurred (InternalError) when calling PutObject\\n")
+    sys.exit(1)
 if args[:2] == ["s3", "cp"]:
     src, dst = args[2], args[3]
     if src.startswith("s3://"):
@@ -6313,6 +6419,10 @@ class TestMainPublishesEventsParquet(unittest.TestCase):
         self._env = (os.environ.get("PATH"), os.environ.get("ZARR_TEST_S3_ROOT"))
         os.environ["PATH"] = bindir + os.pathsep + (self._env[0] or "")
         os.environ["ZARR_TEST_S3_ROOT"] = self.s3
+        # Every `aws` invocation, in order: the only way to assert that a run
+        # did NOT fetch the prior events file.
+        self.aws_log = os.path.join(self.dir, "aws.log")
+        os.environ["ZARR_TEST_S3_LOG"] = self.aws_log
         self.callback = os.path.join(self.dir, "cb.json")
 
     def tearDown(self):
@@ -6323,7 +6433,46 @@ class TestMainPublishesEventsParquet(unittest.TestCase):
             os.environ.pop("ZARR_TEST_S3_ROOT", None)
         else:
             os.environ["ZARR_TEST_S3_ROOT"] = root
+        os.environ.pop("ZARR_TEST_S3_LOG", None)
+        os.environ.pop("ZARR_TEST_S3_FAIL_KEY", None)
         self._tmp.cleanup()
+
+    def aws_calls(self) -> list[str]:
+        if not os.path.exists(self.aws_log):
+            return []
+        with open(self.aws_log) as fh:
+            return [ln for ln in fh.read().splitlines() if ln.strip()]
+
+    def downloads_of(self, name: str) -> list[str]:
+        """Calls that READ `name` from S3 (`cp s3://... <dest>`), not writes."""
+        return [
+            call
+            for call in self.aws_calls()
+            if call.startswith("s3 cp s3://") and name in call.split()[2]
+        ]
+
+    def add_store(self, sub: str, onsets: list[float] | None) -> str:
+        """A second/third recording in the same repo, with or without events.
+        Returns its repo-relative primary path (uncommitted -- the caller
+        commits, so a test controls which run sees it)."""
+        eeg = os.path.join(self.repo, sub, "eeg")
+        os.makedirs(eeg, exist_ok=True)
+        stem = f"{sub}_task-rest_eeg"
+        build_real_edf(eeg, stem, seconds=10)
+        if onsets is not None:
+            with open(os.path.join(eeg, f"{sub}_task-rest_events.tsv"), "w") as fh:
+                fh.writelines(
+                    ["onset\tduration\ttrial_type\n"]
+                    + [f"{onset}\t0.2\tgo\n" for onset in onsets]
+                )
+        return f"{sub}/eeg/{stem}.edf"
+
+    def commit(self, message: str) -> None:
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", message], cwd=self.repo, check=True,
+            capture_output=True,
+        )
 
     def run_main(self, *extra):
         argv = [
@@ -6466,6 +6615,197 @@ class TestMainPublishesEventsParquet(unittest.TestCase):
         self.assertIsNone(self.callback_body()["events_row_count"])
         self.assertIs(self.callback_body()["events_upload_failed"], False)
         validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_reconverted_store_that_lost_its_events_publishes_no_rows(self):
+        """The carry-forward defect. "Carried over" has to mean "this run did
+        not rebuild it", not "this run produced no rows for it": a store whose
+        events.tsv was deleted IS rebuilt, produces nothing, and must not have
+        its old rows resurrected from the published file forever."""
+        keeper = self.add_store("sub-02", [1.0, 2.0])
+        self.commit("add a second store with events")
+        self.assertEqual(self.run_main("--clean"), 0)
+        rel = store_rel_for(self.primary)
+        self.assertEqual(len(set(self.events_table()["store_path"])), 2)
+
+        os.remove(os.path.join(
+            self.repo, "sub-01/ses-1/eeg/sub-01_ses-1_task-rest_run-2_events.tsv"
+        ))
+        self.commit("drop the first store's events")
+        self.assertEqual(self.run_main("--clean"), 0)
+        table = self.events_table()
+        # The reconverted store is gone from the file; the untouched one is not.
+        self.assertNotIn(rel, set(table["store_path"]))
+        self.assertEqual(set(table["store_path"]), {store_rel_for(keeper)})
+        self.assertEqual(self.index()["events_row_count"], 2)
+        # ...and it is not reported as an unrecoverable carry-over, because it
+        # was not carried over at all.
+        self.assertNotIn("contribute no rows", self.log)
+
+    def test_a_first_clean_run_never_fetches_a_prior_for_event_less_stores(self):
+        """A store with no events.tsv is reconverted like any other, so it is
+        not "carried over" and there is nothing to carry: a first run must not
+        fetch a prior file (there is none) or warn about stores it just built."""
+        self.add_store("sub-03", None)  # no events.tsv at all
+        self.commit("add an event-less store")
+        self.assertEqual(self.run_main("--clean"), 0)
+        self.assertEqual(self.index()["store_count"], 2)
+        self.assertEqual(self.index()["events_row_count"], 5)
+        self.assertNotIn("contribute no rows", self.log)
+        self.assertEqual(self.downloads_of(EVENTS_PARQUET_NAME), [])
+
+    def test_an_onset_past_the_end_is_published_unclamped(self):
+        """A client bound-checks against groups[].n_samples; a clamped index
+        would be indistinguishable from an event on the last sample."""
+        with open(os.path.join(
+            self.repo, "sub-01/ses-1/eeg/sub-01_ses-1_task-rest_run-2_events.tsv"
+        ), "a") as fh:
+            fh.write("999.0\t0.5\tlate\tim9.png\n")  # the recording is 30 s
+        self.commit("add an event past the end")
+        self.assertEqual(self.run_main("--clean"), 0)
+        index = self.index()
+        group = index["stores"][0]["groups"][0]
+        table = self.events_table()
+        late = table["sample_index"][table["trial_type"].index("late")]
+        self.assertEqual(late, sample_index_for(999.0, group["rate"]))
+        self.assertGreater(late, group["n_samples"])
+
+    def test_a_store_whose_onsets_all_fail_to_parse_is_warned_and_counted(self):
+        """Rows with nothing but null sample indices are events a client cannot
+        epoch, and the row count alone cannot show it."""
+        with open(os.path.join(
+            self.repo, "sub-01/ses-1/eeg/sub-01_ses-1_task-rest_run-2_events.tsv"
+        ), "w") as fh:
+            fh.write("onset\tduration\ttrial_type\n")
+            fh.writelines(["n/a\t0.5\tgo\n", "later\t0.5\tstop\n"])
+        self.commit("break every onset")
+        self.assertEqual(self.run_main("--clean"), 0)
+        self.assertIn("no usable sample index for any event", self.log)
+        self.assertEqual(self.callback_body()["events_stores_without_rows"], 1)
+        table = self.events_table()
+        self.assertEqual(table["sample_index"], [None, None])
+
+    def test_a_healthy_run_counts_no_store_without_rows(self):
+        # The control: the counter is 0 on the ordinary path, so the assertion
+        # above is about the condition and not about the field always being 1.
+        self.assertEqual(self.run_main("--clean"), 0)
+        self.assertEqual(self.callback_body()["events_stores_without_rows"], 0)
+
+    def test_a_refused_index_uploads_no_events_file(self):
+        """Schema first, uploads second. A refused index means this run
+        publishes NOTHING -- and events.parquet is a destructive overwrite of a
+        file the live index still describes, so it must not already be gone by
+        the time the index is rejected."""
+        self.assertEqual(self.run_main("--clean"), 0)
+        published = self.published(EVENTS_PARQUET_NAME)
+        with open(published, "rb") as fh:
+            before = fh.read()
+        with open(os.path.join(
+            self.repo, "sub-01/ses-1/eeg/sub-01_ses-1_task-rest_run-2_events.tsv"
+        ), "a") as fh:
+            fh.write("29.0\t0.5\textra\tim9.png\n")  # would change the bytes
+        self.commit("add an event")
+        reject = os.path.join(self.dir, "reject.schema.json")
+        with open(reject, "w") as fh:
+            json.dump({"$schema": "https://json-schema.org/draft/2020-12/schema",
+                       "not": {}}, fh)
+        saved = generate_zarr.INDEX_SCHEMA_PATH
+        try:
+            generate_zarr.INDEX_SCHEMA_PATH = reject
+            self.assertEqual(self.run_main("--clean"), 1)
+        finally:
+            generate_zarr.INDEX_SCHEMA_PATH = saved
+        body = self.callback_body()
+        self.assertEqual(body["status"], "failed")
+        self.assertIn("index refused", body["error"])
+        self.assertIsNone(body["events_row_count"])
+        self.assertIs(body["events_upload_failed"], False)
+        # The object on S3 is untouched: same bytes as the good run left.
+        with open(published, "rb") as fh:
+            self.assertEqual(fh.read(), before)
+
+    def test_an_upload_that_precedes_a_rejection_is_reported_on_the_callback(self):
+        """The interleaving that CAN still overwrite: a document that passes the
+        pre-flight (row count 0) and fails on the real count. The file is
+        replaced and the index is refused, so the callback is the only place
+        that can say an object was rewritten by a run that published nothing."""
+        schema = os.path.join(self.dir, "row-count-zero.schema.json")
+        with open(schema, "w") as fh:
+            json.dump({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {"events_row_count": {"const": 0}},
+            }, fh)
+        saved = generate_zarr.INDEX_SCHEMA_PATH
+        try:
+            generate_zarr.INDEX_SCHEMA_PATH = schema
+            self.assertEqual(self.run_main("--clean"), 1)
+        finally:
+            generate_zarr.INDEX_SCHEMA_PATH = saved
+        body = self.callback_body()
+        self.assertEqual(body["status"], "failed")
+        self.assertIn("index refused", body["error"])
+        # The upload DID happen before the refusal, and the callback says so.
+        self.assertEqual(body["events_row_count"], 5)
+        self.assertIs(body["events_upload_failed"], False)
+        self.assertTrue(os.path.exists(
+            os.path.join(self.s3, "on007763_zarr_" + EVENTS_PARQUET_NAME)
+        ))
+        # ...and no index was published at all.
+        self.assertFalse(os.path.exists(os.path.join(self.s3, "on007763_zarr_index.json")))
+
+    def test_a_failed_events_upload_leaves_no_pointer_and_does_not_fail_the_run(self):
+        """ADR 0005: the stores and index.json are the serving copy. A failed
+        events upload is reported, the index names no file (the object on S3 is
+        the older one), and the run still publishes."""
+        os.environ["ZARR_TEST_S3_FAIL_KEY"] = EVENTS_PARQUET_NAME
+        # aws_cp retries with backoff; one attempt is enough here and keeps the
+        # test from sleeping through 14 seconds of real backoff.
+        saved = generate_zarr._aws.__kwdefaults__["retries"]
+        try:
+            generate_zarr._aws.__kwdefaults__["retries"] = 1
+            self.assertEqual(self.run_main("--clean"), 0)
+        finally:
+            generate_zarr._aws.__kwdefaults__["retries"] = saved
+            os.environ.pop("ZARR_TEST_S3_FAIL_KEY", None)
+        index = self.index()
+        self.assertEqual(index["store_count"], 1)
+        self.assertNotIn("events_parquet", index)
+        self.assertNotIn("events_row_count", index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+        body = self.callback_body()
+        self.assertEqual(body["status"], "ready")
+        self.assertIs(body["events_upload_failed"], True)
+        self.assertIsNone(body["events_row_count"])
+        self.assertIn("events.parquet was not published", self.log)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.s3, "on007763_zarr_" + EVENTS_PARQUET_NAME)
+        ))
+
+    def test_without_pyarrow_the_run_succeeds_and_publishes_no_events(self):
+        """The Hallu fallback install (biosigio only, no requirements.txt) has
+        no pyarrow. That must cost the events file and nothing else -- not the
+        conversion, and not a `failed` flag, since nothing was attempted."""
+        saved = sys.modules.get("pyarrow", "absent")
+        try:
+            # A real import failure, in the import system, not a patched
+            # function: `None` in sys.modules is what CPython raises ImportError
+            # for, which is exactly what a venv without the package does.
+            sys.modules["pyarrow"] = None  # type: ignore[assignment]
+            self.assertEqual(self.run_main("--clean"), 0)
+        finally:
+            if saved == "absent":
+                sys.modules.pop("pyarrow", None)
+            else:
+                sys.modules["pyarrow"] = saved
+        index = self.index()
+        self.assertEqual(index["store_count"], 1)
+        self.assertNotIn("events_parquet", index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+        body = self.callback_body()
+        self.assertEqual(body["status"], "ready")
+        self.assertIsNone(body["events_row_count"])
+        self.assertIs(body["events_upload_failed"], False)
+        self.assertIn("pyarrow is not installed", self.log)
 
     def test_an_unreadable_prior_file_is_reported_not_fatal(self):
         """ADR 0005: the stores and index.json are the serving copy, so a failure

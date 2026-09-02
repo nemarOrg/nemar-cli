@@ -2051,6 +2051,45 @@ def event_rows_for_store(
     return cols
 
 
+def events_row_alert(
+    primary_path: str,
+    parsed: ParsedEvents | None,
+    rows: dict[str, list] | None,
+) -> str | None:
+    """The `::warning::` a store's events deserve, or None when they are fine.
+
+    Two conditions, both invisible from the outside otherwise -- the parquet
+    either does not mention the store at all, or mentions it with a column of
+    nulls, and neither is distinguishable from "this recording has no events":
+
+    * The recording HAS events and the store has no named channel group, so
+      there is nothing to attach a rate (and therefore a sample index) to and
+      the store contributes no rows at all.
+    * Every published row has a null `sample_index`: either no onset cell parsed
+      as a number, or the group carries no rate. A client gets events it cannot
+      epoch.
+
+    Pure, and separate from the caller, because the first condition cannot be
+    reached through a real conversion (`convert_one` refuses to publish a store
+    with no channel groups) -- so a test can only reach that branch here.
+    """
+    if rows is None:
+        if parsed and parsed["rows"]:
+            return (
+                f"::warning::{primary_path} has {len(parsed['rows'])} event(s) but "
+                "the store has no channel groups, so it contributes no rows to "
+                "events.parquet"
+            )
+        return None
+    if rows["sample_index"] and all(v is None for v in rows["sample_index"]):
+        return (
+            f"::warning::no usable sample index for any event in {primary_path}: "
+            f"{len(rows['sample_index'])} row(s) published with sample_index null "
+            "(unparseable onsets, or a group with no rate)"
+        )
+    return None
+
+
 def expected_channel_count_for(
     repo_dir: str, primary_path: str, head_files: set[str], head: str
 ) -> int | None:
@@ -3007,6 +3046,7 @@ def write_events_parquet(
     ordered_rels: list[str],
     staged: EventsStaging,
     prior: PriorEventRows | None = None,
+    reconverted: set[str] | None = None,
 ) -> int:
     """Write `<id>/zarr/events.parquet` and return the row count.
 
@@ -3016,10 +3056,12 @@ def write_events_parquet(
     point at which the whole dataset is in memory. Rows accumulate only until
     `EVENTS_ROW_GROUP_ROWS`, then become a row group.
 
-    A store with rows from THIS run uses them; one that was not converted this run
-    keeps the rows the prior file has for it. A store in neither contributes
-    nothing (it has no events.tsv, or its rows are not recoverable without a
-    reconversion -- which is what the next `--clean` run does).
+    A store with rows from THIS run uses them. A store this run did NOT reconvert
+    keeps the rows the prior file has for it. `reconverted` is what separates the
+    two, and it is not `staged`: a store that WAS reconverted and produced no
+    rows (its events.tsv was deleted, or emptied) must publish no rows, not
+    silently inherit the ones the prior file still has for it. Passing None means
+    "nothing was reconverted", the read-only shape the pure writer tests use.
     """
     import pyarrow as pa  # type: ignore[import-not-found]  # lazy: optional dep
     import pyarrow.parquet as pq  # type: ignore[import-not-found]
@@ -3034,7 +3076,7 @@ def write_events_parquet(
             columns = staged.get(rel)
             if columns is not None:
                 table = events_table_from_columns(pa, schema, columns)
-            elif prior is not None:
+            elif prior is not None and not (reconverted and rel in reconverted):
                 table = prior.table_for(rel, schema)
             else:
                 table = None
@@ -3487,6 +3529,7 @@ def publish_events_parquet(
     *,
     bucket: str,
     dataset_id: str,
+    reconverted: set[str],
 ) -> EventsPublication:
     """Build and upload `<id>/zarr/events.parquet`.
 
@@ -3494,12 +3537,19 @@ def publish_events_parquet(
     missing, or this run could not write/upload the file -- the last of which
     sets `failed` and is reported on the callback.
 
+    `reconverted` is every store this run rebuilt, INCLUDING the ones that
+    produced no rows, and it is the thing "carried over" is defined against.
+    Defining it against the staged rows instead is wrong twice over: a
+    reconverted store whose events.tsv was deleted would keep republishing its
+    old rows from the prior file forever, and on a first `--clean` run every
+    event-less store would be reported as an unrecoverable carry-over it is not.
+
     Best-effort throughout, exactly like manifest.json: the stores and index.json
     are the serving copy, and ADR 0005 says partial data still serves. A failure
     here leaves the PREVIOUS file in place on S3, unreferenced by the new index
     until a later run republishes it.
     """
-    carried = [rel for rel in ordered_rels if rel not in staged]
+    carried = [rel for rel in ordered_rels if rel not in reconverted]
     if not staged.row_count and not carried:
         return {"file": None, "failed": False}
     try:
@@ -3526,7 +3576,7 @@ def publish_events_parquet(
                 prior = PriorEventRows(prior_local)
         with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as fh:
             local = fh.name
-        rows = write_events_parquet(local, ordered_rels, staged, prior)
+        rows = write_events_parquet(local, ordered_rels, staged, prior, reconverted)
         if not rows:
             # Every store's events.tsv was absent or empty. Publishing an empty
             # file would tell a client "no events" no more clearly than the
@@ -3540,12 +3590,15 @@ def publish_events_parquet(
         )
         missing = [rel for rel in carried if prior is None or rel not in prior]
         if missing:
-            # Carried-over stores whose rows are in no prior file: the first run
-            # after this shipped, or a prior file that predates them. Their events
-            # are simply absent from the file until the store is reconverted, and
-            # a client joining on `store_path` cannot tell that from "this
-            # recording has no events.tsv" -- so say it here, where an operator
-            # can see how many and re-run with --clean.
+            # Stores this run did NOT reconvert whose rows are in no prior file
+            # either: the first incremental run after this shipped, or a prior
+            # file that predates them. Their events are simply absent from the
+            # file until the store is reconverted, and a client joining on
+            # `store_path` cannot tell that from "this recording has no
+            # events.tsv" -- so say it here, where an operator can see how many
+            # and re-run with --clean. A store this run DID reconvert is never
+            # in this list, however few rows it produced: nothing is missing
+            # about a store whose events were just re-read.
             print(
                 f"::warning::{len(missing)} carried-over store(s) contribute no rows "
                 f"to {dataset_id}/zarr/events.parquet (no prior rows to carry); "
@@ -5257,10 +5310,19 @@ def main() -> int:
     # Event rows go to disk as each recording finishes, never into a list that
     # grows with the dataset: nm000281 is ~25k stores (#1060).
     events_staging = EventsStaging()
+    # Every store this run rebuilt, whether or not it produced event rows. This
+    # -- not the set of stores WITH rows -- is what "carried over from the prior
+    # events file" is defined against.
+    reconverted_rels: set[str] = set()
+    # Stores whose events could not be turned into usable rows: no channel
+    # groups to attach them to, or no usable sample index on any row. Counted
+    # for the callback so the condition is visible off-node.
+    events_stores_without_rows = 0
 
     n = len(convert)
 
     def record(r: dict, i: int) -> None:
+        nonlocal events_stores_without_rows
         # Log each recording as it finishes (live progress over a long backfill),
         # not all at once at the end.
         # Under-projection is the defect that caused the 2026-08-22 OOMs, and it is
@@ -5284,11 +5346,18 @@ def main() -> int:
             # Staged here rather than in the worker so the rows are built from the
             # entry's OWN groups -- the same rates the index publishes are the
             # rates `sample_index` is computed against.
+            rel_store = r["entry"]["zarr"]
+            reconverted_rels.add(rel_store)
+            parsed = r.get("events")
             rows = event_rows_for_store(
-                r["entry"]["zarr"], r["primary"], r["entry"].get("groups"), r.get("events")
+                rel_store, r["primary"], r["entry"].get("groups"), parsed
             )
             if rows:
-                events_staging.add(r["entry"]["zarr"], rows)
+                events_staging.add(rel_store, rows)
+            alert = events_row_alert(r["primary"], parsed, rows)
+            if alert:
+                events_stores_without_rows += 1
+                print(alert, flush=True)
             print(f"[zarr] [{i}/{n}] converted {r['primary']} -> {r['entry']['zarr']}", flush=True)
         else:
             failures.append(r["primary"])
@@ -5471,6 +5540,14 @@ def main() -> int:
     retryable_failures = infra_failures
     deterministic = bool(failures) and infra_failures == 0
 
+    # Set by the events.parquet step below. Bound HERE, before
+    # `write_failed_callback` closes over them, because the total-failure exit
+    # calls that callback before the events step has run -- and a name that only
+    # exists on the happy path would raise NameError inside the very handler
+    # whose job is to make a failure visible.
+    events_file: dict | None = None
+    events_upload_failed = False
+
     def write_failed_callback(error: str | None = None) -> None:
         """Write the `status: "failed"` callback body for a run that publishes
         nothing.
@@ -5510,6 +5587,14 @@ def main() -> int:
                         1 for e in pending_entries if e.get("reason") == "not_attempted"
                     ),
                     "provenance_fetch_failed": provenance_fetch_failed,
+                    # The events file, on the failure path too (#1060). A refused
+                    # index can still have been preceded by a successful
+                    # events.parquet upload, and an operator reading only the
+                    # callback would otherwise have no idea an object on S3 was
+                    # replaced by a run that then published nothing.
+                    "events_row_count": events_file["row_count"] if events_file else None,
+                    "events_upload_failed": events_upload_failed,
+                    "events_stores_without_rows": events_stores_without_rows,
                     # What went wrong, when it was the PRODUCER rather than the
                     # recordings: a schema violation or an unbalanced index has no
                     # per-recording failure to point at, so without this the
@@ -5546,10 +5631,6 @@ def main() -> int:
     # So publish the commit the stores were actually built from.
     index_commit = prior_commit if (infra_failures and is_commit_sha(prior_commit)) else head
     biosigio_version = installed_biosigio_version()
-    # Set by the events.parquet step below, inside the same guard: the index may
-    # only advertise a file this run actually published.
-    events_file: dict | None = None
-    events_upload_failed = False
     try:
         index = merge_index(
             prior,
@@ -5570,26 +5651,41 @@ def main() -> int:
             dataset_row=dataset_row,
         )
         check_index_invariant(index)
-        # events.parquet goes up BEFORE index.json, so `events_parquet` never
-        # names a file that is not there. It is best-effort and cannot fail the
-        # run; when it does not publish, the two fields stay absent and a client
-        # reads that as "this dataset has no events file", which is exactly what
-        # is true of the new index.
+        # SCHEMA FIRST, UPLOADS SECOND. A refused index means this run publishes
+        # nothing -- and "nothing" has to include events.parquet, which is a
+        # destructive overwrite of a file the LIVE index still describes. So the
+        # document is validated here, before anything is uploaded, in the exact
+        # shape it will take: the events pair is filled in with the values this
+        # run would use (the URL is deterministic; the row count is a
+        # placeholder, and `minimum: 0` makes 0 the strictest stand-in). A bug in
+        # either field therefore aborts BEFORE the overwrite rather than after
+        # it.
+        events_url = f"{index['data_base']}{EVENTS_PARQUET_NAME}"
+        validate_document(
+            {**index, "events_parquet": events_url, "events_row_count": 0},
+            INDEX_SCHEMA_PATH,
+            "index",
+        )
+        # events.parquet then goes up BEFORE index.json, so `events_parquet`
+        # never names a file that is not there. It is best-effort and cannot fail
+        # the run; when it does not publish, the two fields stay absent and a
+        # client reads that as "this dataset has no events file", which is
+        # exactly what is true of the new index.
         published_events = publish_events_parquet(
             events_staging,
             [e["zarr"] for e in index["stores"]],
             bucket=bucket,
             dataset_id=dataset_id,
+            reconverted=reconverted_rels,
         )
         events_file = published_events["file"]
         events_upload_failed = published_events["failed"]
         if events_file:
-            index["events_parquet"] = f"{index['data_base']}{EVENTS_PARQUET_NAME}"
+            index["events_parquet"] = events_url
             index["events_row_count"] = events_file["row_count"]
-        # Validate what is about to be published, not a copy of it. A producer bug
-        # caught here costs one run; the same bug reaching S3 costs every consumer,
-        # and index.json is the mandatory entry point (in-prefix ListBucket is
-        # denied), so there is no second source to fall back to.
+        # Validate what is about to be published, not a copy of it. The pre-flight
+        # above checked the same document with a stand-in row count; this checks
+        # the real one, so nothing reaches S3 unvalidated.
         validate_document(index, INDEX_SCHEMA_PATH, "index")
     except Exception as exc:  # noqa: BLE001 - refuse to publish a bad index
         print(
@@ -5733,6 +5829,12 @@ def main() -> int:
         # the same from outside.
         "events_row_count": events_file["row_count"] if events_file else None,
         "events_upload_failed": events_upload_failed,
+        # Stores whose events could not be turned into usable rows: no channel
+        # group to attach them to, or no usable sample index on any row. Zero is
+        # the healthy value. Each one is warned about by name as it happens, but
+        # a warning in a multi-megabyte cron log is not a signal anyone sees, so
+        # the count rides here as well (the same argument as `pool_breaks`).
+        "events_stores_without_rows": events_stores_without_rows,
     }
     with open(args.callback_out, "w") as fh:
         json.dump(callback, fh)
