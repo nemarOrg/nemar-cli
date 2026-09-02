@@ -1,10 +1,12 @@
 /**
- * zarr.nemar.org data plane (epic #684, Stream D enablement).
+ * zarr.nemar.org data plane (epic #684, Stream D enablement; redirects added
+ * #1178 phase 6 / issue #1061, epic #1181).
  *
- * The authoritative browser gateway for the per-recording Zarr serving copies.
- * The viewer (nemarOrg/website) reads stores from this host with zarrita; this
- * sub-app proxies the public S3 objects under `s3://<bucket>/<id>/zarr/...` and
- * adds the three things a browser needs that raw S3 does not give us here:
+ * The authoritative gateway for the per-recording Zarr serving copies -- but
+ * "gateway" no longer means "proxy" for every request. `index.json` (the
+ * contract entry point) and any request carrying an allowlisted browser
+ * `Origin` are proxied, exactly as before phase 6, and get the three things
+ * a browser needs that raw S3 does not give us here:
  *
  *   1. CORS restricted to NEMAR origins (so a third-party site can't cross-origin
  *      stream our chunks in a browser) -- the S3 data stays openly downloadable,
@@ -18,9 +20,30 @@
  *      with a near-total hit rate). Before phase 1, every Range request
  *      (which level-0 always is) skipped the edge entirely.
  *
- * Only PUBLIC datasets are served (private data is never browser-streamable).
- * Mounted on the `zarr.nemar.org` host fork in index.ts and path-mounted at
- * `/zarrproxy` for workers.dev/dev access.
+ * A plain GET for a store object with no allowlisted Origin -- libraries, HPC
+ * jobs, agents: the overwhelming majority of request volume -- gets none of
+ * that. It 302s straight to the public S3 object instead (phase 6):
+ * Cloudflare's terms restrict proxying large files at this scale on a
+ * non-Enterprise plan, and every request is still counted whether this
+ * Worker carries the bytes or not. The redirect branch runs BEFORE the D1
+ * visibility gate and never touches the edge cache or an upstream fetch --
+ * see isRedirectCandidate() and the redirect branch in serve() for why
+ * that's safe (short version: the bucket's own NotResource deny-list, see
+ * services/bucket-policy.ts, is the real enforcement point, so a redirect
+ * that 403s at S3 for a private dataset leaks nothing the proxied 404
+ * does not).
+ *
+ * HEAD is never redirected, regardless of Origin -- always answered by the
+ * proxied path. This is load-bearing: fsspec's `info()` and rclone's sync
+ * both probe with HEAD, and rclone's HTTP backend does not follow HEAD
+ * redirects (data.ts's fileOrIndexHandler documents the identical rule on
+ * the archive route).
+ *
+ * Only PUBLIC datasets are gated on the proxied branches (private data is
+ * never browser-streamable; the redirect branch relies on the bucket policy
+ * instead, see above). Mounted on the `zarr.nemar.org` host fork in
+ * index.ts and path-mounted at `/zarrproxy` for workers.dev/dev access --
+ * the same code serves both entry points, redirect included.
  */
 
 import type { Context } from "hono";
@@ -62,13 +85,129 @@ export function corsHeaders(origin: string | null): Record<string, string> {
   return headers;
 }
 
-function s3PublicUrl(env: Bindings, key: string, base?: string): string {
+/**
+ * Path shape for a zarr object request, tolerant of both entry points:
+ *   `/<id>/zarr/<rest>`            (zarr.nemar.org host fork)
+ *   `/zarrproxy/<id>/zarr/<rest>`  (path-mounted on api.nemar.org / workers.dev)
+ * Anchored on the `zarr` segment itself -- `(?:\/(.*))?$` requires either
+ * end-of-string right after `zarr` or a literal `/` before any rest, so
+ * `/on000001/zarrbogus` or `/on000001/zarr-x` cannot match (#1181 phase 6
+ * review item 2: the old `\/zarr\/?(.*)$` treated "bogus" as `rest` for
+ * `/on000001/zarrbogus`, misclassifying it as a redirect candidate that
+ * never actually reaches serve()'s `/:datasetId/zarr/*` route at all).
+ * Mirrors ZARR_PATH_RE in middleware/rateLimit.ts (kept as an independent
+ * literal rather than imported from there -- this file already imports
+ * `rateLimiter` FROM rateLimit.ts, so importing the other direction too
+ * would create a cycle). The id is captured too (group 1) so
+ * isRedirectCandidate can validate it below -- the path shape alone
+ * (`[a-z]{2}\d+`) doesn't enforce the real id contract (exactly 6 digits,
+ * an `nm`/`xx`/`on` prefix, `<= 99999`; see isValidDatasetId).
+ */
+const ZARR_OBJECT_PATH_RE = /^(?:\/zarrproxy)?\/([a-z]{2}\d+)\/zarr(?:\/(.*))?$/;
+
+/**
+ * True when a request to this sub-app WILL take the redirect branch in
+ * serve() below, rather than being proxied: a `GET` (never `HEAD` -- see
+ * the module doc comment, that rule is load-bearing) for a store object --
+ * not the always-proxied `index.json`, and not an empty/malformed path,
+ * which the proxied branch 404s either way -- on a VALID dataset id, with
+ * no allowlisted browser `Origin`.
+ *
+ * The id check matters on its own (#1181 phase 6 review item 3): without
+ * it, `zz000001` (wrong prefix), `nm1234567` (too many digits), and
+ * `nm999999` (over the 99999 cap) all satisfied the old path-shape-only
+ * regex and got redirected to a garbage S3 URL -- with `recordAccess`
+ * writing an invalid dataset id into Analytics Engine -- while the exact
+ * same request with a browser Origin correctly 404'd via serve()'s
+ * isPublicDataset -> isValidDatasetId gate. A malformed id must fall
+ * through to that SAME 404 path regardless of Origin, not take a
+ * different, D1-free branch of its own.
+ *
+ * Called from exactly two places: serve()'s own routing decision, and the
+ * rate-limit middleware below that exempts these hits from the data-ip
+ * bucket (#1181 phase 6 / issue #1061). Both call sites hand it the same
+ * raw `method` / `path` / `origin` triple a Hono middleware already has,
+ * so routing and rate-limiting can never disagree about which requests
+ * actually reach D1/the edge cache/S3 through this Worker -- there is
+ * exactly one rule, not two hand-written copies of it.
+ */
+export function isRedirectCandidate(method: string, path: string, origin: string | null): boolean {
+  if (method !== "GET") return false;
+  if (allowedOrigin(origin)) return false;
+  const match = ZARR_OBJECT_PATH_RE.exec(path);
+  if (!match) return false;
+  const [, datasetId, rawRest] = match;
+  if (!isValidDatasetId(datasetId)) return false;
+  let rest: string | null;
+  try {
+    rest = normalizeBidsPath(decodeURIComponent(rawRest ?? ""));
+  } catch {
+    // Malformed percent-encoding: fall through to the proxied path, which
+    // hits the same decodeURIComponent call and 500s via onError -- the
+    // same failure mode as today, not a new one.
+    return false;
+  }
+  // index.json is always top-level (the producer never nests a store under
+  // that name) and stays proxied/edge-cached/D1-gated -- the contract entry
+  // point (#1061). catalog.json (phase 2, #1062) is a SEPARATE route
+  // (`GET /catalog.json`, no `<id>/zarr/` segment at all) and can never
+  // match ZARR_OBJECT_PATH_RE in the first place, so it needs no exemption
+  // here -- see the "catalog.json can never match" unit tests.
+  return Boolean(rest) && rest !== "index.json";
+}
+
+/**
+ * Bytes to report for a redirect telemetry point, computed from the
+ * client's Range header rather than a blanket 0 -- unlike the archive
+ * route's 302 (which redirects the WHOLE file and never sees a Range), this
+ * one redirects a request that named its own slice, so the exact count is
+ * knowable without asking S3. A bounded (`A-B`) or suffix (`-N`) range has
+ * a known exact length; an open-ended (`A-`) range, a missing header, or
+ * anything parseCacheableRange() doesn't recognise as a single range does
+ * not (the total object size is unknown without an upstream fetch, which
+ * the redirect branch deliberately never makes) and falls back to 0 --
+ * never guessed (#1181 phase 6 / issue #1061).
+ */
+export function bytesFromRangeHeader(rangeHeader: string | null): number {
+  if (!rangeHeader) return 0;
+  const normalized = parseCacheableRange(rangeHeader);
+  if (!normalized) return 0;
+  const bounded = /^bytes=(\d+)-(\d+)$/.exec(normalized);
+  if (bounded) {
+    // parseCacheableRange only checks the digits-A-digits SHAPE, not that
+    // end >= start -- "bytes=100-50" is syntactically a valid single range
+    // and would otherwise compute -49 here, landing a negative byte count
+    // in Analytics Engine (#1181 phase 6 review item 4). Real S3 answers an
+    // inverted range with 416, same as any other out-of-range request, so
+    // there is never a real number of bytes served for one -- fall back to
+    // the same "unknown" 0 as every other unmeasurable case here.
+    const start = Number(bounded[1]);
+    const end = Number(bounded[2]);
+    return end >= start ? end - start + 1 : 0;
+  }
+  const suffix = /^bytes=-(\d+)$/.exec(normalized);
+  if (suffix) return Number(suffix[1]);
+  return 0; // open-ended `bytes=A-`: length unknown without hitting S3
+}
+
+/**
+ * Build the public S3 URL for a key -- the upstream fetch target for the
+ * proxied branch AND the redirect `Location` for the redirect branch
+ * (#1181 phase 6). `key` is the already-decoded, normalised S3 key (see
+ * serve()'s `rest`), so it is re-encoded per path segment here via
+ * encodeS3KeyPath() -- the SAME encoding canonicalCacheUrl() uses for the
+ * edge-cache key -- rather than interpolated raw. Exported for a direct
+ * unit test of the real (non-`base`) branch; production code never imports
+ * it from outside this file.
+ */
+export function s3PublicUrl(env: Bindings, key: string, base?: string): string {
+  const encodedKey = encodeS3KeyPath(key);
   // Test seam (#1178 phase 1): a real Bun.serve() upstream stands in for S3
   // in tests via deps.s3Base, instead of parsing env vars for a fake host.
-  if (base) return `${base}/${key}`;
+  if (base) return `${base}/${encodedKey}`;
   // Public-read object (deny-list policy makes a public dataset's prefix public).
   const region = env.AWS_REGION || "us-east-2";
-  return `https://${env.S3_BUCKET}.s3.${region}.amazonaws.com/${key}`;
+  return `https://${env.S3_BUCKET}.s3.${region}.amazonaws.com/${encodedKey}`;
 }
 
 /** Cache-Control for the origin + edge.
@@ -147,6 +286,26 @@ export type NormalizedRange = string & { readonly __brand: "NormalizedRange" };
 export type CanonicalCacheUrl = string & { readonly __brand: "CanonicalCacheUrl" };
 
 /**
+ * Percent-encode each path segment of an S3 key independently (never the
+ * whole key as one string, which would also escape the `/` separators).
+ *
+ * Shared by canonicalCacheUrl() (the edge-cache key) and s3PublicUrl() (the
+ * upstream fetch target AND the redirect Location, #1181 phase 6 review) so
+ * all three agree on the exact same encoded spelling for a given key. Before
+ * this was shared, s3PublicUrl() interpolated the raw (decoded) key
+ * unescaped: a literal `#` truncated the URL at the fragment, `?`/space
+ * broke the request line, and a non-Latin-1 character landed raw in a
+ * `Location` header, which workerd (unlike Bun, where tests ran) refuses to
+ * send at all.
+ */
+function encodeS3KeyPath(key: string): string {
+  return key
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+}
+
+/**
  * Canonical edge-cache key for an object: origin + "/" + the normalised S3
  * key, with each path segment individually `encodeURIComponent`'d, plus the
  * `v` query parameter when present.
@@ -163,11 +322,7 @@ export function canonicalCacheUrl(
   key: string,
   v: string | null,
 ): CanonicalCacheUrl {
-  const encodedPath = key
-    .split("/")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
-  const url = new URL(`${origin}/${encodedPath}`);
+  const url = new URL(`${origin}/${encodeS3KeyPath(key)}`);
   if (v) url.searchParams.set("v", v);
   return url.toString() as CanonicalCacheUrl;
 }
@@ -334,6 +489,52 @@ async function serve(c: Context<{ Bindings: Bindings }>, isHead: boolean, deps: 
   }
   const key = `${datasetId}/zarr/${rest}`;
 
+  // Redirect branch (#1181 phase 6 / issue #1061): a non-browser GET for a
+  // store object never touches D1, the edge cache, or an upstream fetch
+  // through this Worker -- see the module doc comment for why that's safe.
+  // isRedirectCandidate is the SAME predicate the rate-limit middleware
+  // below uses to decide whether to exempt the request from the data-ip
+  // bucket, so routing and rate-limiting can't disagree about which
+  // requests actually reach S3 through this Worker. `!isHead` is redundant
+  // with the predicate's own method check (HEAD can never be a redirect
+  // candidate) but is left explicit here: the HEAD-never-redirects rule is
+  // load-bearing enough (fsspec/rclone probe with HEAD; rclone's HTTP
+  // backend does not follow HEAD redirects) that it should be readable at
+  // the call site, not only inside the predicate.
+  if (!isHead && isRedirectCandidate(c.req.method, c.req.path, origin)) {
+    recordAccess(c.env, {
+      datasetId,
+      source: "zarr",
+      // Blob slots are fixed (buildAccessDataPoint always writes exactly
+      // three); a redirect isn't a new AccessSource, it's a marker in the
+      // existing `detail` slot that zarrObjectType() never produces on its
+      // own, so the dashboard can tell a redirected chunk apart from a
+      // proxied one without a schema change.
+      detail: "chunk-redirect",
+      bytes: bytesFromRangeHeader(c.req.header("range") ?? null),
+    });
+    return new Response(null, {
+      status: 302,
+      headers: {
+        Location: s3PublicUrl(c.env, key, deps.s3Base),
+        // The redirect TARGET is stable for a given key (bucket/region/key
+        // never change shape), unlike the proxied branch's per-object-class
+        // TTL from cacheControlFor() -- an hour is a reasonable middle
+        // ground for a value that in practice never changes.
+        "Cache-Control": "public, max-age=3600",
+        // Documents that the SAME URL answers differently for an
+        // allowlisted browser Origin (proxied bytes, not a redirect), even
+        // though nothing about this particular response is cached by us.
+        Vary: "Origin",
+        // No Content-Length (RFC 9110 SS8.6: it would describe the empty
+        // redirect body, not the S3 target) and no
+        // Access-Control-Allow-Origin (nothing of ours is exposed here --
+        // see data.ts's fileOrIndexHandler for the identical archive-route
+        // convention).
+      },
+    });
+  }
+
   // Gate FIRST, before ANY cache lookup, on every request regardless of hit
   // or miss (#1181 review item 1): a dataset flipped to private must stop
   // being served immediately, not up to a day later when the last-primed
@@ -347,6 +548,13 @@ async function serve(c: Context<{ Bindings: Bindings }>, isHead: boolean, deps: 
   // missing-object 404 negative cache below is safe precisely because this
   // gate now runs first: a cache lookup can only ever be reached once we've
   // reconfirmed the dataset is CURRENTLY public.
+  //
+  // This gate does NOT run on the redirect branch above (#1181 phase 6 /
+  // issue #1061): a redirect never touches D1, the edge cache, or an
+  // upstream fetch, so there is no cache entry or D1 staleness to protect
+  // here. The bucket's own NotResource deny-list (services/bucket-policy.ts)
+  // is the enforcement point on that path instead -- a redirect to a URL
+  // that 403s at S3 for a private dataset leaks nothing this 404 does not.
   if (!(await isPublicDataset(c.env, datasetId))) {
     return c.body(null, 404, { ...cors, "Cache-Control": NOT_FOUND_CACHE_CONTROL });
   }
@@ -598,7 +806,28 @@ export function createZarrDataRoutes(
   // Variables slot, all present at runtime on any Hono context.
   app.use("*", async (c, next) => {
     if (c.req.method === "OPTIONS") return next();
-    const res = await rateLimiter(c as unknown as Parameters<typeof rateLimiter>[0], next);
+    // Redirect candidates (#1181 phase 6 / issue #1061) cost a fraction of a
+    // millisecond of CPU and zero bytes through this Worker -- the IP-keyed
+    // data-ip bucket exists to bound a runaway PROXIED loop, not to punish a
+    // cluster behind one NAT address for traffic that never touches D1, the
+    // edge cache, or S3 through here. Observe-only (#1181 phase 6 review
+    // item 5): rateLimiter still counts these against the SAME shared
+    // bucket a proxied request from this IP would be enforced against, but
+    // never blocks this one, and logs at most one console.warn per window
+    // instead of the unconditional per-request log this used to be. Uses
+    // the SAME predicate serve() uses to pick its response branch (see
+    // isRedirectCandidate's doc comment), so this can never observe-only a
+    // request that serve() actually proxies.
+    const observeOnly = isRedirectCandidate(
+      c.req.method,
+      c.req.path,
+      c.req.header("origin") ?? null,
+    );
+    const res = await rateLimiter(
+      c as unknown as Parameters<typeof rateLimiter>[0],
+      next,
+      observeOnly ? { observeOnly: true } : undefined,
+    );
     // rateLimiter returns a bare 429 (no zarr CORS) when the bucket is exhausted;
     // without ACAO the browser sees an opaque failure instead of a readable 429 +
     // retry_after. Re-apply the zarr CORS headers so the viewer can back off.

@@ -214,6 +214,17 @@ describe("GET /catalog.json: success, miss then hit", () => {
     await requestCatalog();
     expect(prepareCount).toBe(0);
   });
+
+  test("no Origin is still proxied, never redirected -- catalog.json can never match the zarr redirect path shape (#1181 phase 6 review item 7)", async () => {
+    // Unlike a store object under /<id>/zarr/, this route has no
+    // <id>/zarr/ segment at all, so isRedirectCandidate's path regex can
+    // never match it -- there is no Origin-dependent fork here, only the
+    // one path serveCatalog() implements.
+    const res = await requestCatalog();
+    expect(res.status).toBe(200);
+    expect(res.headers.get("location")).toBeNull();
+    expect(upstreamRequests).toBe(1);
+  });
 });
 
 describe("GET /catalog.json: absence and failure", () => {
