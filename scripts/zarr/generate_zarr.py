@@ -69,6 +69,7 @@ from concurrent.futures import (
 )
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
+from typing import TypedDict
 
 # The engine stamp lives in `zarr_queue`, whose column decides which already-done
 # datasets re-convert (ADR 0033). The index republishes it so a consumer can tell
@@ -1969,7 +1970,61 @@ def installed_biosigio_version() -> str | None:
         return None
 
 
-def _normalize_store_entry(entry: dict) -> dict:
+class StoreEntry(TypedDict, total=False):
+    """One published `stores[]` entry. `total=False` throughout, because the
+    schema's `required` set is the contract and most keys are conditional --
+    `sss` only on an ADR 0028 store, `n_events`/`trial_types` only when an
+    events.tsv applies, `units_report` only when a channels.tsv did.
+
+    Declared for the reader, not the type checker: these dicts are assembled
+    from several sources (`store_metadata`'s spread, `events_summary`'s update,
+    the SSS path) and a mistyped key would otherwise only be caught by the
+    pre-upload schema self-check, at the end of a conversion.
+    """
+
+    path: str
+    zarr: str
+    updated_utc: str
+    source_tree: str
+    derived: bool
+    modalities: list[str]
+    groups: list[dict]
+    power_line_frequency: float | None
+    event_description_count: int
+    n_events: int
+    trial_types: dict[str, int]
+    units_report: dict
+    channels_tsv_read_error: bool
+    split_members: list[str]
+    sss: dict
+
+
+class FailureEntry(TypedDict):
+    """One published `failures[]` entry: a recording that will not convert
+    without a change to the data or the converter. `reason` is the sanitized
+    sentence a viewer shows; `detail` is the operator-facing cause."""
+
+    path: str
+    zarr: str
+    code: str
+    reason: str
+    detail: str | None
+    attempts: int
+
+
+class PendingEntry(TypedDict):
+    """One published `pending[]` entry: a discovered recording with no store
+    that is still expected to convert."""
+
+    path: str
+    zarr: str
+    reason: str
+    attempts: int
+    last_error: str | None
+    last_attempt_utc: str | None
+
+
+def _normalize_store_entry(entry: dict) -> StoreEntry:
     """Bring a store entry up to the v3 shape without inventing facts.
 
     Applied to CARRIED-OVER entries as well as this run's, so one index never
@@ -1992,7 +2047,7 @@ def _pending_entry(
     attempts: int,
     last_error: str | None = None,
     last_attempt_utc: str | None = None,
-) -> dict:
+) -> PendingEntry:
     return {
         "path": path,
         "zarr": store_rel_for(path),
@@ -2000,6 +2055,31 @@ def _pending_entry(
         "attempts": attempts,
         "last_error": last_error,
         "last_attempt_utc": last_attempt_utc,
+    }
+
+
+def _failure_entry(
+    path: str,
+    code: str,
+    detail: str | None = None,
+    attempts: int = 0,
+) -> FailureEntry:
+    """A `failures[]` entry, built in ONE place.
+
+    Mirrors `_pending_entry` for the same reason: the `zarr` rel-path and the
+    user-facing `reason` are DERIVED (`store_rel_for`, `reason_for_code`), and
+    three call sites were each deriving them again -- `record` in main, the
+    exhaustion promotion in `merge_index`, and the retry-exhausted path. A fourth
+    would have been written the same way, and a hand-built entry that skipped
+    `reason_for_code` would publish a code with no explanation for the viewer.
+    """
+    return {
+        "path": path,
+        "zarr": store_rel_for(path),
+        "code": code,
+        "reason": reason_for_code(code),
+        "detail": detail,
+        "attempts": attempts,
     }
 
 
@@ -2165,14 +2245,9 @@ def merge_index(
         if e["reason"] == "not_attempted" or e["attempts"] < PENDING_MAX_ATTEMPTS:
             continue
         del pends[p]
-        fails[p] = {
-            "path": p,
-            "zarr": store_rel_for(p),
-            "code": "retry_exhausted",
-            "reason": reason_for_code("retry_exhausted"),
-            "detail": e.get("last_error"),
-            "attempts": e["attempts"],
-        }
+        fails[p] = _failure_entry(
+            p, "retry_exhausted", e.get("last_error"), e["attempts"]
+        )
 
     ordered = [_normalize_store_entry(stores[k]) for k in sorted(stores)]
     ordered_fails = [fails[k] for k in sorted(fails)]
@@ -4362,13 +4437,7 @@ def main() -> int:
             code = r.get("code")
             detail = r.get("detail") or failure_detail(r.get("error"))
             if code and code not in RETRYABLE_CODES:
-                failure_entries.append({
-                    "path": r["primary"],
-                    "zarr": store_rel_for(r["primary"]),
-                    "code": code,
-                    "reason": reason_for_code(code),
-                    "detail": detail,
-                })
+                failure_entries.append(_failure_entry(r["primary"], code, detail))
             else:
                 pending_entries.append({
                     "path": r["primary"],
