@@ -310,6 +310,20 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   EZID is the registrar (ADR 0007 — not Zenodo, whatever `.context/research.md` says).
   DOIs are permanent and require explicit confirmation.
 - **Zarr.** A derived, latest-only serving copy, not a source of truth.
+  `zarr.nemar.org` is the stable contract for it (issue #1061, epic #1181 phase 6):
+  `index.json` (and phase 2's `catalog.json`) stays proxied, edge-cached, and D1-gated,
+  but a plain `GET` for a store object with no allowlisted browser `Origin` — libraries,
+  HPC jobs, agents — 302s straight to the public S3 object instead of streaming through
+  the Worker, so every request is still counted without this Worker carrying the bytes
+  (Cloudflare's terms restrict proxying large files at this scale on a non-Enterprise
+  plan). `HEAD` is never redirected regardless of Origin: fsspec's `info()` and rclone's
+  sync both probe with HEAD, and rclone's HTTP backend does not follow HEAD redirects.
+  The redirect branch skips the D1 visibility gate entirely — the bucket's own
+  `NotResource` deny-list (`backend/src/services/bucket-policy.ts`) is the real
+  enforcement point, so a redirect that 403s at S3 for a private dataset leaks nothing
+  the proxied 404 does not — and the rate limiter exempts these hits from the data-ip
+  bucket rather than throttling traffic that never touches D1, the edge cache, or S3
+  through the Worker.
   The converter is `scripts/zarr/` **in this repo** and runs on the SDSC Hallu
   cron (`scripts/zarr/hallu-zarr.sh`, hourly at `:30`), never in GitHub Actions —
   Actions cannot finish a large dataset inside the 120-minute cap (ADR 0029).
