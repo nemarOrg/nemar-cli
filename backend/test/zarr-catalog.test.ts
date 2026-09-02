@@ -13,7 +13,7 @@
  *  - `buildZarrCatalog` -- pure, so shape/ordering/CSV-parsing is asserted
  *    directly against hand-built rows as a supplement to the SQL test above.
  *  - `uploadZarrCatalogJson` (the PUT) -- exercised against a real local
- *    `Bun.serve()` receiver via `PresignedUrlOptions.endpointUrl`, per this
+ *    `Bun.serve()` receiver via `ZarrCatalogS3Options.endpointUrl`, per this
  *    repo's no-mock-fetch policy. Covers both a successful PUT and the
  *    403-must-throw fail-loud path.
  */
@@ -23,6 +23,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import type { Server } from "bun";
 import {
   ZARR_CATALOG_CANDIDATE_SQL,
+  ZarrCatalogForbiddenError,
   type ZarrCatalogSourceRow,
   buildZarrCatalog,
   fetchZarrCatalogObject,
@@ -155,6 +156,7 @@ describe("buildZarrCatalog: shape, ordering, and CSV-to-array parsing", () => {
     subject_count: 41,
     has_hed: 1,
     hed_version: "8.2.0",
+    zarr_status: "ready",
     zarr_store_count: 41,
     recording_count: 41,
     recordings_unavailable: 0,
@@ -244,6 +246,28 @@ describe("buildZarrCatalog: shape, ordering, and CSV-to-array parsing", () => {
     const parsed = Date.parse(catalog.generated_utc);
     expect(parsed).toBeGreaterThanOrEqual(before);
     expect(parsed).toBeLessThanOrEqual(Date.now());
+  });
+
+  // PR #1201 review, item 2: buildZarrCatalog must defend its OWN
+  // eligibility postcondition, not just trust that every caller pre-filters
+  // with ZARR_CATALOG_CANDIDATE_SQL's WHERE clause. Feeds a deliberately
+  // UNFILTERED row set -- exactly the shape a future caller (a different
+  // query, a batch backfill script, ...) might hand it -- and asserts only
+  // the genuinely eligible row survives.
+  test("defends its own postcondition: filters out non-ready/zero-store rows even when given unfiltered input", () => {
+    const catalog = buildZarrCatalog(
+      [
+        row({ dataset_id: "on600001", zarr_status: "ready", zarr_store_count: 5 }),
+        row({ dataset_id: "on600002", zarr_status: "pending", zarr_store_count: 5 }),
+        row({ dataset_id: "on600003", zarr_status: "failed", zarr_store_count: 5 }),
+        row({ dataset_id: "on600004", zarr_status: "ready", zarr_store_count: 0 }),
+        row({ dataset_id: "on600005", zarr_status: "ready", zarr_store_count: null }),
+        row({ dataset_id: "on600006", zarr_status: null, zarr_store_count: 5 }),
+      ],
+      { contractBase: "https://zarr.nemar.org" },
+    );
+    expect(catalog.datasets.map((d) => d.dataset_id)).toEqual(["on600001"]);
+    expect(catalog.count).toBe(1);
   });
 });
 
@@ -365,15 +389,44 @@ describe("fetchZarrCatalogObject: real local receiver, no mocked fetch", () => {
     expect(result).toBeNull();
   });
 
-  test("a 403 (absent-without-ListBucket, or a creds gap) also returns null, mirroring getZarrIndex", async () => {
+  // PR #1201 review, item 5: a 403 on this fixed, always-expected-to-exist
+  // key is far more likely an IAM/policy regression than "not published
+  // yet" -- so, unlike getZarrIndex's per-dataset analogue, it is NOT
+  // folded into the same null result as a 404. It throws a distinct typed
+  // error so a caller (once zarr-data.ts is updated) can answer 503 rather
+  // than a 404 that masquerades as "not published".
+  test("a 403 throws ZarrCatalogForbiddenError (distinct from the 404 null), not swallowed as absence", async () => {
     nextStatus = 403;
-    const result = await fetchZarrCatalogObject(options());
-    expect(result).toBeNull();
+    await expect(fetchZarrCatalogObject(options())).rejects.toBeInstanceOf(
+      ZarrCatalogForbiddenError,
+    );
   });
 
-  test("any other non-2xx (a real infra failure) throws", async () => {
+  test("a 403 logs at console.error (not warn) with the bucket and key", async () => {
+    nextStatus = 403;
+    const originalError = console.error;
+    const calls: unknown[][] = [];
+    console.error = (...args: unknown[]) => {
+      calls.push(args);
+    };
+    try {
+      await expect(fetchZarrCatalogObject(options())).rejects.toThrow();
+    } finally {
+      console.error = originalError;
+    }
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    const [message, detail] = calls[0] as [string, { bucket?: string; key?: string }];
+    expect(message).toContain("403");
+    expect(detail.bucket).toBe("test-bucket");
+    expect(detail.key).toBe("zarr-catalog.json");
+  });
+
+  test("any other non-2xx (a real infra failure) throws a plain Error, not ZarrCatalogForbiddenError", async () => {
     nextStatus = 500;
     await expect(fetchZarrCatalogObject(options())).rejects.toThrow(/500/);
+    await expect(fetchZarrCatalogObject(options())).rejects.not.toBeInstanceOf(
+      ZarrCatalogForbiddenError,
+    );
   });
 });
 
@@ -390,5 +443,21 @@ describe("publishZarrCatalog: configuration guard", () => {
       // ZARR_CACHE_BASE_URL intentionally omitted.
     } as unknown as Bindings;
     await expect(publishZarrCatalog(env)).rejects.toThrow(/ZARR_CACHE_BASE_URL/);
+  });
+
+  // PR #1201 review, item 6: an unconfigured bucket must fail here, with a
+  // name, rather than deep inside aws4fetch against `https://undefined.s3...`.
+  test("throws when S3_BUCKET is unconfigured, before attempting the PUT", async () => {
+    const db = freshDb();
+    const env = {
+      DB: realD1(db),
+      ENVIRONMENT: "development",
+      ZARR_CACHE_BASE_URL: "https://zarr.nemar.org",
+      AWS_REGION: "us-east-2",
+      AWS_ACCESS_KEY_ID: "AKIATEST",
+      AWS_SECRET_ACCESS_KEY: "secret",
+      // S3_BUCKET intentionally omitted.
+    } as unknown as Bindings;
+    await expect(publishZarrCatalog(env)).rejects.toThrow(/S3_BUCKET/);
   });
 });
