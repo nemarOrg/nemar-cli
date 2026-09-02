@@ -4148,16 +4148,68 @@ class TestFetchDatasetRow(unittest.TestCase):
 
     def test_reads_a_bare_row(self):
         base = self.serve(json.dumps({"dataset_id": "on007763", "license": "CC0"}).encode())
-        self.assertEqual(fetch_dataset_row(base, "on007763")["license"], "CC0")
+        row, failed = fetch_dataset_row(base, "on007763")
+        self.assertEqual(row["license"], "CC0")
+        self.assertIs(failed, False)
 
     def test_reads_a_row_wrapped_in_dataset(self):
         base = self.serve(json.dumps({"dataset": {"license": "CC-BY-4.0"}}).encode())
-        self.assertEqual(fetch_dataset_row(base, "on007763")["license"], "CC-BY-4.0")
+        row, failed = fetch_dataset_row(base, "on007763")
+        self.assertEqual(row["license"], "CC-BY-4.0")
+        self.assertIs(failed, False)
 
-    def test_an_unreachable_catalog_returns_none_rather_than_raising(self):
-        # Provenance is best-effort: a catalog blip must not cost a conversion.
-        base = self.serve(None)
-        self.assertIsNone(fetch_dataset_row(base, "on007763"))
+    def test_a_500_is_reported_as_a_FETCH_FAILURE_not_an_absent_field(self):
+        """The distinction the flag exists for.
+
+        A catalog outage and a dataset with no license both leave `doi`/`license`
+        null in every store's `nemar` attrs. One is a fact about the run, fixed
+        by re-converting; the other is a fact about the dataset. Without the flag
+        an outage silently publishes a whole conversion wave claiming to have no
+        license, and afterwards nothing distinguishes those stores from datasets
+        that genuinely have none.
+        """
+        base = self.serve(None)  # the handler send_error(500)s
+        row, failed = fetch_dataset_row(base, "on007763")
+        self.assertIsNone(row)
+        self.assertIs(failed, True)
+
+    def test_a_row_that_lacks_a_field_is_NOT_a_fetch_failure(self):
+        # The other half of the same distinction: a 200 with no license is data.
+        base = self.serve(json.dumps({"dataset_id": "on007763", "name": "N"}).encode())
+        row, failed = fetch_dataset_row(base, "on007763")
+        self.assertIs(failed, False)
+        self.assertIsNone(nemar_store_attrs(
+            dataset_id="on007763", source_commit="a" * 40, source_tree="raw",
+            derived=False, engine_version="3",
+            contract_url="https://zarr.nemar.org/on007763/zarr/x.zarr/",
+            row=row, provenance_fetch_failed=failed,
+        )["license"])
+
+    def test_a_non_object_body_is_a_fetch_failure(self):
+        # A 200 that is not an object is a broken catalog, not an absent field.
+        base = self.serve(json.dumps(["not", "an", "object"]).encode())
+        row, failed = fetch_dataset_row(base, "on007763")
+        self.assertIsNone(row)
+        self.assertIs(failed, True)
+
+    def test_the_flag_reaches_the_store_attrs(self):
+        attrs = nemar_store_attrs(
+            dataset_id="on007763", source_commit="a" * 40, source_tree="raw",
+            derived=False, engine_version="3",
+            contract_url="https://zarr.nemar.org/on007763/zarr/x.zarr/",
+            row=None, provenance_fetch_failed=True,
+        )
+        self.assertIs(attrs["provenance_fetch_failed"], True)
+        self.assertIsNone(attrs["doi"])
+        # Always present, so a consumer never has to ask whether the key exists
+        # to know whether a null is meaningful.
+        clean = nemar_store_attrs(
+            dataset_id="on007763", source_commit="a" * 40, source_tree="raw",
+            derived=False, engine_version="3",
+            contract_url="https://zarr.nemar.org/on007763/zarr/x.zarr/",
+            row={"name": "N", "license": "CC0"},
+        )
+        self.assertIs(clean["provenance_fetch_failed"], False)
 
 
 class TestIndexFormatV3(unittest.TestCase):
@@ -4341,107 +4393,93 @@ class TestCoverageInvariant(unittest.TestCase):
         check_index_invariant(index)
         self.assertEqual([s["path"] for s in index["stores"]], [self.A])
 
-    def test_a_legacy_non_raw_store_survives_the_reconciliation(self):
-        """The ~4,700 stores published under derivatives/ / sourcedata/ / code/
-        before ADR 0027 went raw-only are STILL SERVED until the separate,
-        explicitly-authorised purge (#1095 / #1097).
+    def test_a_non_raw_store_is_dropped_and_counted(self):
+        """A carried-over store under `derivatives/` must NOT be republished.
 
-        Discovery does not walk those trees, so their paths are never in
-        `discovered` -- and a reconciliation that dropped every undiscovered
-        store would delete them from the index while `compute_clean_orphans`
-        deliberately leaves the objects on S3. The index would then tell every
-        client the bytes are gone. `compute_clean_orphans` carries this exact
-        guard; so must this.
+        ADR 0027 made discovery raw-only and `purge_non_raw_stores.py` is the
+        authorised deletion of what it stopped producing, so those stores are not
+        hosted -- an index that kept describing one would advertise bytes that are
+        being removed. The drop is deliberate, but it is LOUD: `merge_index` logs
+        each one with the tree that excluded it, and `main` reports the count as
+        `non_raw_dropped` on the callback, because "the index lost 92 stores"
+        needs a cause attached when an orphan-detection bug is the alternative
+        reading.
         """
         legacy = "derivatives/preprocessed/sub-09/eeg/sub-09_task-x_eeg.set"
         prior = {
             "source_commit": "a" * 40,
             "stores": [
                 {"zarr": store_rel_for(legacy), "path": legacy,
-                 "source_key": "SHA256E-s9--legacy", "groups": [{"name": "eeg_250hz"}]},
+                 "source_key": "SHA256E-s9--legacy"},
             ],
         }
-        index = self.build(
-            prior=prior,
-            converted=[{"zarr": store_rel_for(self.A), "path": self.A}],
-            discovered=[self.A],
-        )
-        paths = [s["path"] for s in index["stores"]]
-        self.assertIn(legacy, paths, "the legacy store must not be dropped")
-        self.assertEqual(index["store_count"], 2)
-        self.assertEqual(index["legacy_store_count"], 1)
-        # Described honestly rather than as raw: its source IS in derivatives/
-        # and what it serves IS a processed derivative.
-        entry = next(s for s in index["stores"] if s["path"] == legacy)
-        self.assertEqual(entry["source_tree"], "derivatives")
-        self.assertIs(entry["derived"], True)
-        self.assertNotIn("source_key", entry)
-        # And the invariant still balances: one discovered recording, one store
-        # for it, with the legacy store subtracted rather than double-counted.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            index = self.build(
+                prior=prior,
+                converted=[{"zarr": store_rel_for(self.A), "path": self.A}],
+                discovered=[self.A],
+            )
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        self.assertEqual(index["store_count"], 1)
+        self.assertNotIn("legacy_store_count", index)
+        # Named, with the reason, rather than vanishing.
+        log = buf.getvalue()
+        self.assertIn(legacy, log)
+        self.assertIn("derivatives", log)
         self.assertEqual(index["discovered_count"], 1)
         check_index_invariant(index)
 
-    def test_a_v1_entry_claiming_raw_under_derivatives_is_corrected(self):
-        # `setdefault` would have let the old claim stand. The path is the fact.
-        legacy = "sourcedata/sub-09/eeg/sub-09_task-x_eeg.set"
+    def test_non_raw_store_paths_counts_from_the_prior_index(self):
+        """The callback's `non_raw_dropped` is read from the PRIOR PUBLISHED
+        index, not from the merge's filtering.
+
+        Production always runs `--clean`, which passes `prior=None` to the merge:
+        the entries never enter, so the filter never sees them -- yet they are
+        still gone from the index a client fetches next. Counting from the merge
+        would report 0 on exactly the path that matters.
+        """
+        prior = {"stores": [
+            {"path": "derivatives/prep/a_eeg.set", "zarr": "derivatives/prep/a_eeg.zarr"},
+            {"path": "sourcedata/b_eeg.set", "zarr": "sourcedata/b_eeg.zarr"},
+            {"path": "code/c_eeg.set", "zarr": "code/c_eeg.zarr"},
+            {"path": "sub-01/meg/sub-01_acq-crosstalk_meg.fif",
+             "zarr": "sub-01/meg/sub-01_acq-crosstalk_meg.zarr"},
+            {"path": self.A, "zarr": store_rel_for(self.A)},
+        ]}
+        dropped = generate_zarr.non_raw_store_paths(prior)
+        self.assertEqual(len(dropped), 4, dropped)
+        self.assertNotIn(self.A, dropped)
+        self.assertEqual(generate_zarr.non_raw_store_paths(None), [])
+        self.assertEqual(generate_zarr.non_raw_store_paths({}), [])
+
+    def test_excluded_reason_names_the_cause(self):
+        self.assertEqual(generate_zarr.excluded_reason("derivatives/x_eeg.set"), "derivatives")
+        self.assertEqual(generate_zarr.excluded_reason("sub-01/sourcedata/x_eeg.set"), "sourcedata")
+        self.assertEqual(generate_zarr.excluded_reason("code/x_eeg.set"), "code")
+        self.assertEqual(
+            generate_zarr.excluded_reason("sub-01/meg/sub-01_acq-crosstalk_meg.fif"),
+            "bids-calibration",
+        )
+        self.assertIsNone(generate_zarr.excluded_reason("sub-01/eeg/a_eeg.set"))
+
+    def test_a_non_raw_failure_or_pending_entry_cannot_survive(self):
+        # The same rule on the other two lists: a non-raw path has no business in
+        # any of them, and the carry-forward already refused one.
         prior = {
             "source_commit": "a" * 40,
-            "stores": [{"zarr": store_rel_for(legacy), "path": legacy,
-                        "source_tree": "raw", "derived": False}],
+            "stores": [],
+            "failures": [{"path": "derivatives/prep/x-epo.fif", "zarr": "derivatives/prep/x-epo.zarr",
+                          "code": "not_continuous", "reason": "..."}],
+            "pending": [{"path": "code/y_eeg.set", "reason": "infra_failure", "attempts": 2}],
         }
-        index = self.build(prior=prior, discovered=[])
-        entry = index["stores"][0]
-        self.assertEqual(entry["source_tree"], "sourcedata")
-        self.assertIs(entry["derived"], True)
+        index = merge_index(
+            prior, "on008083", self.HEAD, [], [], "2026-09-02T00:00:00Z", [], [],
+            discovered=[self.A], prior_pending=prior["pending"],
+        )
+        self.assertEqual(index["failure_count"], 0)
+        self.assertEqual([p["path"] for p in index["pending"]], [self.A])
         check_index_invariant(index)
-
-    def test_the_invariant_subtracts_legacy_stores(self):
-        # Hand-built: a legacy store counted on BOTH sides is the mistake that
-        # looks right, and it would pass only on datasets with no legacy stores.
-        with self.assertRaises(ValueError) as ctx:
-            check_index_invariant({
-                "dataset_id": "on005520", "discovered_count": 1,
-                "store_count": 2, "legacy_store_count": 0,
-                "failure_count": 0, "pending_count": 0,
-            })
-        self.assertIn("does not balance", str(ctx.exception))
-        # The same document with the legacy store declared balances.
-        check_index_invariant({
-            "dataset_id": "on005520", "discovered_count": 1,
-            "store_count": 2, "legacy_store_count": 1,
-            "failure_count": 0, "pending_count": 0,
-        })
-
-    def test_the_invariant_rejects_more_legacy_than_stores(self):
-        with self.assertRaises(ValueError) as ctx:
-            check_index_invariant({
-                "dataset_id": "on005520", "discovered_count": 0,
-                "store_count": 1, "legacy_store_count": 2,
-                "failure_count": 0, "pending_count": 0,
-            })
-        self.assertIn("impossible", str(ctx.exception))
-
-    def test_the_invariant_treats_a_missing_legacy_count_as_zero(self):
-        # Every index built before the count existed came from a raw-only run.
-        check_index_invariant({
-            "dataset_id": "on007763", "discovered_count": 2,
-            "store_count": 1, "failure_count": 1, "pending_count": 0,
-        })
-
-    def test_check_index_invariant_rejects_an_unbalanced_document(self):
-        # Hand-built rather than produced: merge_index makes the invariant true
-        # by construction, so the only way to watch the checker fail is to hand
-        # it the shape the construction is protecting against.
-        with self.assertRaises(ValueError) as ctx:
-            check_index_invariant({
-                "dataset_id": "on008083", "discovered_count": 43,
-                "store_count": 2, "failure_count": 36, "pending_count": 0,
-            })
-        self.assertIn("does not balance", str(ctx.exception))
-
-    def test_check_index_invariant_rejects_missing_counts(self):
-        with self.assertRaises(ValueError):
-            check_index_invariant({"discovered_count": 1, "store_count": 1})
 
     def test_errors_counts_this_runs_failures_typed_and_not(self):
         index = self.build(

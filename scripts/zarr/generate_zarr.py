@@ -1306,6 +1306,41 @@ def is_excluded_from_discovery(path: str) -> bool:
     return in_excluded_tree(path) or is_bids_calibration_file(path)
 
 
+def excluded_reason(path: str) -> str | None:
+    """WHY `is_excluded_from_discovery` rejects `path`, or None if it does not:
+    the excluded tree's name, or `bids-calibration`.
+
+    Exists so a drop can be logged with its cause. "Dropped a store" and
+    "dropped a store because it is under `derivatives/`" are very different
+    lines to find in a cron log when a real orphan bug is the alternative
+    explanation.
+    """
+    for tree in EXCLUDED_TREES:
+        if path.startswith(f"{tree}/") or f"/{tree}/" in path:
+            return tree
+    if is_bids_calibration_file(path):
+        return "bids-calibration"
+    return None
+
+
+def non_raw_store_paths(prior: dict | None) -> list[str]:
+    """Paths in a prior index's `stores` that discovery no longer walks.
+
+    The count `main` reports as `non_raw_dropped`. Read from the PRIOR PUBLISHED
+    index rather than from `merge_index`'s filtering, because the production path
+    is `--clean`: there `prior` is not passed to the merge at all, so the entries
+    never enter and the filter never sees them -- yet they are still gone from
+    the index a client will fetch next, which is the thing worth reporting.
+    """
+    return sorted(
+        str(e.get("path"))
+        for e in (prior or {}).get("stores", [])
+        if isinstance(e, dict)
+        and isinstance(e.get("path"), str)
+        and is_excluded_from_discovery(e["path"])
+    )
+
+
 def is_primary(path: str) -> bool:
     return lower_ext(path) in PRIMARY_EXTS and not is_excluded_from_discovery(path)
 
@@ -2098,21 +2133,13 @@ def _normalize_store_entry(entry: dict) -> StoreEntry:
     `derived` is stated by the SSS path, which also writes `sss`, so its absence
     is evidence rather than a guess.
 
-    A NON-RAW path is the exception, and it OVERRIDES rather than defaults. A
-    store under `derivatives/`/`sourcedata/`/`code/` is one of the pre-ADR-0027
-    survivors: whatever the old entry claimed, its source sits in that tree and
-    the signal it serves is a processed derivative, so both facts are stated
-    outright. Leaving them to `setdefault` would let a v1 entry that said
-    `source_tree: "raw"` keep saying it.
+    Every entry this reaches is raw by construction: `merge_index` drops a
+    carried-over store whose path is excluded from discovery (they are being
+    purged, not served), so `source_tree` is the only value the schema allows.
     """
     out: StoreEntry = {k: v for k, v in entry.items() if k != "source_key"}  # type: ignore[assignment]
-    tree = source_tree_for(str(out.get("path", "")))
-    if tree == "raw":
-        out.setdefault("source_tree", tree)
-        out.setdefault("derived", bool(out.get("sss")))
-    else:
-        out["source_tree"] = tree
-        out["derived"] = True
+    out.setdefault("source_tree", source_tree_for(str(out.get("path", ""))))
+    out.setdefault("derived", bool(out.get("sss")))
     return out
 
 
@@ -2302,21 +2329,28 @@ def merge_index(
 
     if discovered is not None:
         wanted = set(discovered)
-        # A store whose path is EXCLUDED from discovery is not an orphan: it is
-        # one of the ~4,700 already-published non-raw stores that ADR 0027's
-        # raw-only rule stopped producing but did NOT authorise deleting. They
-        # are still served until the separate, explicitly-authorised purge
-        # (nemarOrg/nemar-cli#1095 / #1097), and an index that dropped them would
-        # tell every client the bytes are gone while `compute_clean_orphans` --
-        # which carries this exact guard -- deliberately leaves them on S3. The
-        # index must describe what is served, so they are KEPT and counted apart.
-        # Same guard shape as the failures carry-forward above.
-        stores = {
-            z: e
-            for z, e in stores.items()
-            if e.get("path") in wanted
-            or is_excluded_from_discovery(str(e.get("path") or ""))
-        }
+        # A carried-over store whose path is EXCLUDED from discovery goes, and
+        # goes NOISILY. ADR 0027 made discovery raw-only and
+        # `purge_non_raw_stores.py` is the authorised deletion of what it stopped
+        # producing, so a non-raw store is not something the archive serves -- an
+        # index that kept describing one would advertise bytes that are being
+        # removed. But dropping a store silently is how a real orphan bug would
+        # hide, so each one is named with the reason it was excluded.
+        dropped_non_raw = sorted(
+            (str(e.get("path") or ""), excluded_reason(str(e.get("path") or "")))
+            for e in stores.values()
+            if e.get("path") not in wanted
+            and is_excluded_from_discovery(str(e.get("path") or ""))
+        )
+        for path, reason in dropped_non_raw:
+            print(
+                f"[zarr] dropping non-raw store from the index: {path} ({reason})",
+                flush=True,
+            )
+        stores = {z: e for z, e in stores.items() if e.get("path") in wanted}
+        # Failures and pending entries are filtered the same way, and the
+        # carry-forward above already refuses a now-excluded path, so neither
+        # list can carry a non-raw recording either.
         fails = {p: f for p, f in fails.items() if p in wanted}
         pends = {p: e for p, e in pends.items() if p in wanted}
         accounted = {e.get("path") for e in stores.values()} | set(fails) | set(pends)
@@ -2341,11 +2375,6 @@ def merge_index(
     ordered = [_normalize_store_entry(stores[k]) for k in sorted(stores)]
     ordered_fails = [fails[k] for k in sorted(fails)]
     ordered_pending = [pends[k] for k in sorted(pends)]
-    # Stores served from a tree discovery no longer walks. Counted so the
-    # coverage invariant can subtract them: they have no discovered recording to
-    # be accounted against, because discovery deliberately does not find their
-    # source any more.
-    legacy = [e for e in ordered if e.get("source_tree") != "raw"]
 
     prefix = f"{dataset_id}/zarr/"
     return {
@@ -2368,18 +2397,9 @@ def merge_index(
         "discovered_count": (
             len(set(discovered))
             if discovered is not None
-            # No discovered set supplied (a caller that only wants the merge):
-            # derive it from what IS accounted for, minus the legacy stores,
-            # which by definition have no discovered recording behind them.
-            else len(ordered) - len(legacy) + len(ordered_fails) + len(ordered_pending)
+            else len(ordered) + len(ordered_fails) + len(ordered_pending)
         ),
         "store_count": len(ordered),
-        # The subset of `store_count` served from `derivatives/`/`sourcedata/`/
-        # `code/`: published before ADR 0027 went raw-only, still served, and
-        # awaiting the separate purge. Zero for every dataset converted since.
-        # It exists so a consumer can check coverage without having to know that
-        # history: the invariant subtracts it.
-        "legacy_store_count": len(legacy),
         # #1059 asked for `n_recordings`; it is the store count under another
         # name. The discovered total is `discovered_count`, deliberately a
         # different word, because conflating the two is how coverage went
@@ -2397,48 +2417,35 @@ def merge_index(
 def check_index_invariant(index: dict) -> None:
     """Raise unless every discovered recording is accounted for exactly once.
 
-        discovered_count == (store_count - legacy_store_count)
-                            + failure_count + pending_count
+    `discovered_count == store_count + failure_count + pending_count` is the whole
+    of #1197's acceptance criterion, and `merge_index` makes it true by
+    construction -- which is exactly why it is worth asserting separately. The
+    construction is the thing that could regress, and a silently unbalanced index
+    is the failure mode being fixed: it looks complete and is not.
 
-    #1197's acceptance criterion, with the one subtraction history forces.
-    `legacy_store_count` is the stores served from `derivatives/`/`sourcedata/`/
-    `code/`, published before ADR 0027 went raw-only: discovery deliberately does
-    not walk those trees any more, so there is no discovered recording for them
-    to be accounted against, yet they are still served and so must appear in
-    `stores`. Counting them on both sides would be the honest-looking mistake --
-    it would make the equation fail on every legacy dataset and pass only where
-    the problem does not exist. Zero for anything converted since raw-only.
-
-    `merge_index` makes this true by construction, which is exactly why it is
-    worth asserting separately: the construction is the thing that could regress,
-    and a silently unbalanced index is the failure mode being fixed -- it looks
-    complete and is not.
+    There is no exemption for the pre-ADR-0027 non-raw stores. They are being
+    deleted, not served (`purge_non_raw_stores.py`), so a carried-over entry for
+    one is dropped by `merge_index` and reported as `non_raw_dropped` on the
+    callback -- it never reaches `store_count`, and the equation stays a plain
+    sum.
     """
     discovered = index.get("discovered_count")
-    store_count = index.get("store_count")
-    failure_count = index.get("failure_count")
-    pending_count = index.get("pending_count")
-    # Absent on an index built before legacy stores were counted apart; zero is
-    # the correct reading there, since every such index came from a raw-only run.
-    legacy_count = index.get("legacy_store_count", 0)
-    parts = (store_count, failure_count, pending_count, legacy_count)
+    parts = (
+        index.get("store_count"),
+        index.get("failure_count"),
+        index.get("pending_count"),
+    )
     if not isinstance(discovered, int) or any(not isinstance(n, int) for n in parts):
         raise ValueError(
             "index coverage counts are missing or non-integer: "
-            f"discovered={discovered!r} store/failure/pending/legacy={parts!r}"
+            f"discovered={discovered!r} store/failure/pending={parts!r}"
         )
-    if legacy_count > store_count:  # type: ignore[operator]
-        raise ValueError(
-            f"index coverage is impossible for {index.get('dataset_id')}: "
-            f"legacy_store_count={legacy_count} exceeds store_count={store_count}"
-        )
-    accounted = store_count - legacy_count + failure_count + pending_count  # type: ignore[operator]
-    if discovered != accounted:
+    if discovered != sum(parts):  # type: ignore[arg-type]
         raise ValueError(
             f"index coverage does not balance for {index.get('dataset_id')}: "
-            f"discovered_count={discovered} but (store_count-legacy_store_count)"
-            f"+failure_count+pending_count={accounted} "
-            f"(({store_count}-{legacy_count})+{failure_count}+{pending_count})"
+            f"discovered_count={discovered} but store_count+failure_count+"
+            f"pending_count={sum(parts)} "  # type: ignore[arg-type]
+            f"({parts[0]}+{parts[1]}+{parts[2]})"
         )
 
 
@@ -3343,6 +3350,7 @@ def nemar_store_attrs(
     engine_version: str,
     contract_url: str,
     row: dict | None = None,
+    provenance_fetch_failed: bool = False,
 ) -> dict:
     """The `nemar` root attribute written on every store (#1064). Pure.
 
@@ -3357,6 +3365,9 @@ def nemar_store_attrs(
     can be cited by whoever opens it. `row` is the public catalog row (GET
     /datasets/<id>); a field the catalog does not have stays None rather than
     being invented, so "unknown license" is distinguishable from "no license".
+    `provenance_fetch_failed` carries the third case: the nulls are there because
+    the catalog could not be read at all, which is a property of the RUN and is
+    fixed by re-converting rather than by editing the dataset.
     """
     row = row if isinstance(row, dict) else {}
     doi = row.get("concept_doi") or row.get("doi")
@@ -3376,18 +3387,32 @@ def nemar_store_attrs(
         # The stable URL for THIS store, so a copy of the store that has been
         # moved or vendored can still say where it came from.
         "contract_url": contract_url,
+        # True when the catalog read FAILED, so the nulls above are a property of
+        # this run rather than of the dataset. Present either way: a consumer
+        # that has to check `"provenance_fetch_failed" in attrs` to know whether
+        # an absence is meaningful is back where it started.
+        "provenance_fetch_failed": provenance_fetch_failed,
     }
 
 
-def fetch_dataset_row(api_base: str, dataset_id: str) -> dict | None:
-    """The public catalog row for a dataset (`GET <api_base>/datasets/<id>`), or
-    None when it cannot be read.
+def fetch_dataset_row(api_base: str, dataset_id: str) -> tuple[dict | None, bool]:
+    """`(row, fetch_failed)` for `GET <api_base>/datasets/<id>`.
 
     Read ONCE per run in `main` and passed to the workers, not fetched per
     recording: a dataset with 25k recordings would otherwise make 25k identical
     requests to the catalog. Best-effort by design -- the provenance attrs are
     written either way, with the catalog-sourced fields left None, because a
     catalog blip must not cost a conversion.
+
+    The second element is why this returns a tuple rather than an optional row.
+    "The catalog has no DOI for this dataset" and "we could not reach the
+    catalog" both produce `doi: null` in the store attrs, and they mean opposite
+    things: the first is a fact about the dataset, the second is a fact about the
+    run, fixed by re-converting. Without the flag, a catalog outage silently
+    publishes a whole conversion wave's worth of stores that claim to have no
+    license -- afterwards indistinguishable from datasets that genuinely have
+    none. `fetch_failed` is True ONLY for a transport/parse failure, never for a
+    row that simply lacks a field.
     """
     url = f"{api_base.rstrip('/')}/datasets/{dataset_id}"
     try:
@@ -3397,16 +3422,23 @@ def fetch_dataset_row(api_base: str, dataset_id: str) -> dict | None:
     except Exception as exc:  # noqa: BLE001 - provenance is best-effort
         print(
             f"::warning::could not read {url} ({exc}); store provenance attrs will "
-            "omit doi/license/citation/hed_version",
+            "omit doi/license/citation/hed_version and are flagged "
+            "provenance_fetch_failed",
             flush=True,
         )
-        return None
+        return None, True
     # The route wraps the row in `{dataset: {...}}` on some paths and returns it
     # bare on others; accept either rather than coupling to one shape.
     if isinstance(body, dict):
         inner = body.get("dataset")
-        return inner if isinstance(inner, dict) else body
-    return None
+        return (inner if isinstance(inner, dict) else body), False
+    # A 200 whose body is not an object is a broken catalog, not an absent field.
+    print(
+        f"::warning::{url} returned a non-object body; store provenance attrs are "
+        "flagged provenance_fetch_failed",
+        flush=True,
+    )
+    return None, True
 
 
 def electrode_positions_for(
@@ -3982,10 +4014,19 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # handed to biosigIO so the served samples carry the sidecar's units
         # (biosigio#125); the same resolution already feeds the fidelity gate.
         channels_local = None
+        channels_read_failed = False
         channels_rel = channels_tsv_for(primary, c["head_files"])
         if channels_rel:
             channels_text = _read_repo_text(c["repo"], c["head"], channels_rel)
             if channels_text is None:
+                # NOT the same as "this dataset ships no channels.tsv". A sidecar
+                # that applies is present at HEAD and we failed to read it, so the
+                # store is served with importer units and NOTHING on the public
+                # surface would say why -- `units_report` is simply absent, which
+                # is the same shape as a dataset that has no sidecar at all. The
+                # fidelity gate makes the same distinction and warns for the same
+                # reason (`expected_channel_count_for`). Recorded on the entry.
+                channels_read_failed = True
                 print(
                     f"::warning::could not read {channels_rel}; channels.tsv units "
                     f"are NOT applied to {primary}",
@@ -4027,6 +4068,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
                 engine_version=c["engine_version"],
                 contract_url=f"{c['contract_base'].rstrip('/')}/{c['dataset_id']}/zarr/{rel_store}/",
                 row=c.get("dataset_row"),
+                provenance_fetch_failed=bool(c.get("provenance_fetch_failed")),
             ),
         )
         # Guard the --delete sync: an empty/partial store would otherwise wipe a
@@ -4113,6 +4155,8 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
                 "sidecar": channels_rel,
                 "sidecar_supplied": True,
             }
+        if channels_read_failed:
+            entry["channels_tsv_read_error"] = True
         # For a split FIF, record all member source paths so the browser can map any
         # split file (e.g. a click on split-02) to this single head store.
         members = split_members_for(primary, c["head_files"])
@@ -4459,7 +4503,27 @@ def main() -> int:
     # the index from nothing. Without this a recording would reset to attempt 1
     # every run on the Hallu path (which always passes --clean) and could never
     # reach the exhaustion cap.
-    prior_pending = ((prior if prior is not None else prior_for_orphans) or {}).get("pending")
+    # The prior index as PUBLISHED, whichever branch read it. `--clean` passes
+    # `prior=None` to the merge (the index is rewritten fresh) but still reads the
+    # document for orphan detection, and two facts have to come from what was
+    # actually published rather than from what the merge is given: the pending
+    # attempt counts, and how many non-raw stores this run removes from the index.
+    prior_index_doc = prior if prior is not None else prior_for_orphans
+    prior_pending = (prior_index_doc or {}).get("pending")
+    dropped_non_raw_paths = non_raw_store_paths(prior_index_doc)
+    non_raw_dropped = len(dropped_non_raw_paths)
+    if dropped_non_raw_paths:
+        # Named individually, at most a handful of lines for the datasets that
+        # have them, because "the index lost 92 stores" needs a cause attached
+        # when the alternative reading is an orphan-detection bug (#1095/#1097;
+        # the deletion itself is purge_non_raw_stores.py's job, not this run's).
+        print(
+            f"[zarr] {non_raw_dropped} non-raw store(s) from the prior index will "
+            "not be republished (ADR 0027 raw-only; see purge_non_raw_stores.py):",
+            flush=True,
+        )
+        for path in dropped_non_raw_paths:
+            print(f"[zarr]   - {path} ({excluded_reason(path)})", flush=True)
 
     # --clean no longer wipes the serving prefix up front.
     #
@@ -4659,7 +4723,9 @@ def main() -> int:
     )
     # Per-dataset provenance for the stores' `nemar` root attribute (#1064).
     # Skipped when there is nothing to convert, so a no-op run makes no request.
-    dataset_row = fetch_dataset_row(args.api_base, dataset_id) if convert else None
+    dataset_row, provenance_fetch_failed = (
+        fetch_dataset_row(args.api_base, dataset_id) if convert else (None, False)
+    )
     with tempfile.TemporaryDirectory() as tmp:
         ctx = {
             "repo": repo, "bucket": bucket, "dataset_id": dataset_id, "head": head,
@@ -4668,6 +4734,7 @@ def main() -> int:
             "engine_version": ZARR_ENGINE_VERSION,
             # Read ONCE per run, not per recording: nm000281 has 25k of them.
             "dataset_row": dataset_row,
+            "provenance_fetch_failed": provenance_fetch_failed,
             "mem_budget": ram_ceiling,
             # Computed once here rather than re-derived per worker from a second,
             # independent /proc/meminfo read, which could disagree with this one.
@@ -4718,14 +4785,20 @@ def main() -> int:
     retryable_failures = infra_failures
     deterministic = bool(failures) and infra_failures == 0
 
-    # Hard fail: every attempted conversion errored and nothing was removed. Do
-    # NOT advance the checkpoint or rewrite the index (that would strand the
-    # failed recordings); return non-zero. Still write the callback (status
-    # "failed") so the driver can classify data-vs-infra and the backend records
-    # WHAT failed even on a total failure (#774 — previously no callback was
-    # written here, so total failures were invisible).
-    if convert and not converted_entries and not remove:
-        print(f"::error::all {len(convert)} conversion(s) failed; index left untouched", flush=True)
+    def write_failed_callback(error: str | None = None) -> None:
+        """Write the `status: "failed"` callback body for a run that publishes
+        nothing.
+
+        Every exit that returns 1 goes through here, and that is the point. The
+        driver POSTs whatever this file contains; if a failure path writes NO
+        file, `hallu-zarr.sh` posts nothing, the `converting` signal it sent at
+        the start is never superseded, and D1 sits at `zarr_status='pending'`
+        forever -- the dataset reads as "still converting" on the dashboard with
+        nothing running. That is exactly the invisible-failure shape #774 fixed
+        for the total-failure branch, and the two refuse-to-publish guards below
+        (a bad index, a bad manifest) reintroduced it: they were added later and
+        returned 1 directly.
+        """
         with open(args.callback_out, "w") as fh:
             json.dump(
                 {
@@ -4747,9 +4820,28 @@ def main() -> int:
                     # `discovered_count` is what makes "2 of 43" sayable at all.
                     "pending_count": len(pending_entries),
                     "discovered_count": len(discovered),
+                    "not_attempted_count": sum(
+                        1 for e in pending_entries if e.get("reason") == "not_attempted"
+                    ),
+                    "provenance_fetch_failed": provenance_fetch_failed,
+                    # What went wrong, when it was the PRODUCER rather than the
+                    # recordings: a schema violation or an unbalanced index has no
+                    # per-recording failure to point at, so without this the
+                    # callback would say "failed" and name no cause.
+                    **({"error": error} if error else {}),
                 },
                 fh,
             )
+
+    # Hard fail: every attempted conversion errored and nothing was removed. Do
+    # NOT advance the checkpoint or rewrite the index (that would strand the
+    # failed recordings); return non-zero. Still write the callback (status
+    # "failed") so the driver can classify data-vs-infra and the backend records
+    # WHAT failed even on a total failure (#774 — previously no callback was
+    # written here, so total failures were invisible).
+    if convert and not converted_entries and not remove:
+        print(f"::error::all {len(convert)} conversion(s) failed; index left untouched", flush=True)
+        write_failed_callback()
         return 1
 
     # Advance source_commit to HEAD unless there are INFRA failures to retry. A
@@ -4797,6 +4889,7 @@ def main() -> int:
             f"::error::refusing to publish {dataset_id}/zarr/index.json: {exc}",
             flush=True,
         )
+        write_failed_callback(f"index refused: {exc}")
         return 1
 
     manifest = merge_manifest(
@@ -4809,6 +4902,7 @@ def main() -> int:
             f"::error::refusing to publish {dataset_id}/zarr/manifest.json: {exc}",
             flush=True,
         )
+        write_failed_callback(f"manifest refused: {exc}")
         return 1
 
     # `delete=False` is deliberate -- aws_cp reads the file back by path after the
@@ -4840,6 +4934,7 @@ def main() -> int:
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
         json.dump(manifest, fh, separators=(",", ":"))
         manifest_local = fh.name
+    manifest_upload_failed = False
     try:
         aws_cp(
             manifest_local,
@@ -4847,6 +4942,11 @@ def main() -> int:
             extra=["--content-type", "application/json", "--cache-control", "public, max-age=60"],
         )
     except Exception as exc:  # noqa: BLE001 - never fail a good conversion over this
+        # Non-fatal by design (the index and the stores are already correct), but
+        # reported: the manifest is where `source_key` lives now, so a silent
+        # failure leaves the producer unable to say which blob a store came from,
+        # and a warning in a multi-megabyte cron log is not a signal anyone sees.
+        manifest_upload_failed = True
         print(f"::warning::manifest.json upload failed for {dataset_id}: {exc}", flush=True)
     finally:
         with contextlib.suppress(OSError):
@@ -4894,6 +4994,25 @@ def main() -> int:
         # dashboard can rank datasets by coverage without reading every index.
         "pending_count": index["pending_count"],
         "discovered_count": index["discovered_count"],
+        # The subset of `pending_count` that was never ATTEMPTED, as opposed to
+        # attempted and failed. They need a re-queue, not a backoff: nothing has
+        # gone wrong with them yet, so they must not consume the retry rounds a
+        # genuinely failing recording gets (see zarr_queue's pending policy).
+        "not_attempted_count": sum(
+            1 for e in index["pending"] if e.get("reason") == "not_attempted"
+        ),
+        # Carried-over stores dropped because their source sits in a tree
+        # discovery no longer walks (ADR 0027 raw-only) or is a BIDS calibration
+        # file. Reported rather than published: the index describes what IS
+        # served, and these are being deleted by `purge_non_raw_stores.py`, so
+        # the only place the number belongs is the operational record.
+        "non_raw_dropped": non_raw_dropped,
+        # True when the catalog could not be read, so this wave's stores carry
+        # null doi/license/citation/hed_version because of the RUN, not the data.
+        "provenance_fetch_failed": provenance_fetch_failed,
+        # True when index.json is published but manifest.json is not, so the two
+        # documents disagree about which stores exist until the next run.
+        "manifest_upload_failed": manifest_upload_failed,
     }
     with open(args.callback_out, "w") as fh:
         json.dump(callback, fh)

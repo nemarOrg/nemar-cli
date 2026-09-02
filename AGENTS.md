@@ -374,12 +374,12 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   `source_commit` is always a 40-hex SHA — the converter refuses to publish an
   index without one (on008083 shipped `""`).
   **Coverage balances by construction:**
-  `discovered_count == (store_count - legacy_store_count) + failure_count + pending_count`.
-  `legacy_store_count` is the stores served from `derivatives/`/`sourcedata/`/`code/`
-  from before ADR 0027 went raw-only: discovery does not walk those trees, so they
-  have no discovered recording to be accounted against, but they are still served
-  and so stay in `stores` (with `source_tree` naming the tree and `derived: true`)
-  until the separately authorised purge. Zero for anything converted since.
+  `discovered_count == store_count + failure_count + pending_count`.
+  A carried-over store under `derivatives/`/`sourcedata/`/`code/` is DROPPED from
+  the index rather than republished — those stores are being deleted by
+  `purge_non_raw_stores.py`, not served — and each drop is logged with its cause
+  and counted as `non_raw_dropped` on the callback, never in the index. So
+  `source_tree` is always `raw`.
   `failures[]` is what will not convert without a change to the data or the
   converter, and each entry now carries a `detail` (exception class plus first
   message line, local paths stripped) so an opaque `file_read_error` is
