@@ -60,9 +60,24 @@ import subprocess
 import sys
 import tempfile
 import time
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
+import urllib.request
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    wait,
+)
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
+
+# The engine stamp lives in `zarr_queue`, whose column decides which already-done
+# datasets re-convert (ADR 0033). The index republishes it so a consumer can tell
+# WHICH generation of the discovery rules produced a store without reading the
+# queue, and so an operator can spot a node running a stale driver. Imported
+# rather than copied: two constants would drift the moment one was bumped. This is
+# a sibling module in the same directory, which is on sys.path both when this file
+# is run as a script and when the test suite imports it.
+from zarr_queue import ZARR_ENGINE_VERSION
 
 # --- Path classification -------------------------------------------------
 
@@ -116,7 +131,43 @@ EXCLUDED_TREES = ("derivatives", "sourcedata", "code")
 _BIDS_CALIBRATION_SUFFIXES = ("_acq-crosstalk_meg.fif", "_acq-calibration_meg.dat")
 
 INDEX_FORMAT = "nemar-zarr-index"
-INDEX_FORMAT_VERSION = 1
+# v3 (nemarOrg/nemar-cli#1059, #1197, #1178 item 5). Additive over v1 for every
+# field a consumer already read, with ONE removal: per-store `source_key` moved to
+# the sibling producer manifest (see MANIFEST_FORMAT), because nothing on the
+# website read it and it was 18 percent of nm000281's 12.8 MB index. v2 was never
+# published; the number is skipped so "v3" means one thing everywhere.
+INDEX_FORMAT_VERSION = 3
+MANIFEST_FORMAT = "nemar-zarr-manifest"
+MANIFEST_FORMAT_VERSION = 1
+
+# JSON Schemas the published documents are validated against before upload. They
+# live in the repo (`shared/`) rather than beside this file so the backend can
+# serve the same bytes at GET /schemas/zarr-index-v3.json.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+INDEX_SCHEMA_PATH = os.path.join(_REPO_ROOT, "shared", "zarr-index.schema.json")
+MANIFEST_SCHEMA_PATH = os.path.join(_REPO_ROOT, "shared", "zarr-manifest.schema.json")
+
+# The STABLE base a client may hardcode. `data_base`/`s3_uri` say where the bytes
+# happen to live today and are derived from --bucket/--region; this one is
+# declared, because the whole point of publishing it is that it can stay put while
+# the storage behind it moves. `--contract-base` overrides it (hallu-zarr.sh
+# passes the test host in --test mode).
+DEFAULT_CONTRACT_BASE = "https://zarr.nemar.org"
+# Catalog the per-dataset provenance (DOI, license, HED version) is read from once
+# per run for the stores' `nemar` root attribute (#1064).
+DEFAULT_API_BASE = "https://api.nemar.org"
+
+# A published index MUST name the commit it was built from. on008083 published
+# `source_commit: ""` while D1 held the real SHA, which makes the index
+# unreproducible and the incremental diff impossible (#1197). Enforced in
+# `merge_index`, which refuses to build a document without one.
+COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+# Conversion attempts a `pending` recording gets before the producer stops
+# expecting it to convert and promotes it to a typed `retry_exhausted` failure.
+# Matches `zarr_queue.PENDING_MAX_ROUNDS`, which caps the queue side of the same
+# loop: a recording that will never convert must stop consuming the queue.
+PENDING_MAX_ATTEMPTS = 5
 
 # Per-modality canonical rate caps (Hz) passed to to_zarr. Keys are biosigIO's
 # uppercase modality names; the defaults already match, set explicitly so the
@@ -653,6 +704,7 @@ def memory_failure_result(
         "primary": primary,
         "error": f"exceeded its memory budget while converting: {exc}",
         "code": RecordingMemoryExceeded.code,
+        "detail": failure_detail(exc),
         "peak_rss": peak_rss,
     }
 
@@ -666,6 +718,13 @@ def count_infra_failures(failures: list, failure_entries: list) -> int:
     normally is not -- except the codes in ``RETRYABLE_CODES``, which are surfaced
     to the viewer but still depend on conditions rather than on the recording, so
     they must not let one bad hour bury a dataset permanently. #1110.
+
+    Since index v3 both of those land in the index's ``pending`` list rather than
+    in ``failure_entries``, so the subtraction already counts them and the
+    ``retryable_coded`` term is normally zero. It stays because the term is what
+    makes the rule TRUE rather than incidentally right: if a retryable code is
+    ever surfaced as a typed failure again, the verdict must not silently flip to
+    terminal. This number equals ``len(pending)`` for a run, by construction.
     """
     retryable_coded = sum(1 for e in failure_entries if e.get("code") in RETRYABLE_CODES)
     return len(failures) - len(failure_entries) + retryable_coded
@@ -876,8 +935,64 @@ _FALLBACK_REASONS = {
         "fine-calibration and cross-talk files, which this dataset does not provide "
         "for this recording, so no viewer copy is offered."
     ),
+    # NEMAR-side (not a biosigIO code): the producer gave up retrying. A recording
+    # that fails for an INFRA reason is listed in the index's `pending` with an
+    # attempt count instead of a failure; after PENDING_MAX_ATTEMPTS rounds it is
+    # promoted here, so a permanently failing recording stops consuming the queue
+    # and stops claiming it is about to appear. Its `detail` carries the last
+    # error, which is the thing an operator actually needs. #1197
+    "retry_exhausted": (
+        "This recording could not be prepared for viewing after several attempts, "
+        "so it is no longer being retried automatically."
+    ),
 }
 _GENERIC_REASON = _FALLBACK_REASONS["file_read_error"]
+
+# Longest `detail` / `last_error` string published per entry. These ride in a
+# document fetched by every dataset-page visit, and #1178 item 5 is about that
+# document's weight -- one pathological exception message must not undo it.
+_DETAIL_MAX_CHARS = 300
+
+# An absolute filesystem path inside an error message. `(?<![\w.])` is what keeps
+# it from matching the tail of "min/max" or a URL's path; the alternation excludes
+# the punctuation that normally ENDS a path in prose, so
+# "corrupt file (/scratch/x.edf): ..." loses the path and keeps the sentence.
+_LOCAL_PATH_RE = re.compile(r"(?<![\w.])(?:/[^\s'\"()\[\]{},;:]+)+")
+
+
+def strip_local_paths(text: str) -> str:
+    """Replace absolute filesystem paths in `text` with `<path>`.
+
+    The conversion host's scratch directory is a fresh `mkdtemp` name every run,
+    so a raw exception message publishes a directory that does not exist by the
+    time anyone reads it, and makes two identical failures look different. The
+    entry already carries the recording's BIDS `path`, so nothing is lost.
+    """
+    return _LOCAL_PATH_RE.sub("<path>", text)
+
+
+def failure_detail(exc: BaseException | str | None) -> str | None:
+    """Operator-facing cause for a failed recording: the exception class plus the
+    FIRST line of its message, local paths stripped, length-capped.
+
+    This is the field that makes `file_read_error` diagnosable. on008083 published
+    36 of them, every one reading "This recording could not be prepared for
+    viewing" -- true, sanitized, and useless: it cannot distinguish a corrupt EDF
+    from an importer gap without SSH access to the conversion node. The sanitized
+    `reason` stays exactly as it was for the viewer; this rides alongside it for
+    the human. #1197
+    """
+    if exc is None:
+        return None
+    if isinstance(exc, str):
+        text, prefix = exc, ""
+    else:
+        text, prefix = str(exc), f"{type(exc).__name__}: "
+    first = next((ln for ln in text.splitlines() if ln.strip()), "")
+    detail = (prefix + strip_local_paths(first)).strip()
+    if not detail:
+        return None
+    return detail[:_DETAIL_MAX_CHARS]
 
 
 def reason_for_code(code: str | None) -> str:
@@ -930,6 +1045,28 @@ def in_excluded_tree(path: str) -> bool:
     return any(
         path.startswith(f"{tree}/") or f"/{tree}/" in path for tree in EXCLUDED_TREES
     )
+
+
+def source_tree_for(path: str) -> str:
+    """Which BIDS tree a source recording lives in: "raw", or the excluded tree
+    that contains it (`derivatives` / `sourcedata` / `code`).
+
+    Published per store as `source_tree` (#1064). Since ADR 0027 every store this
+    converter WRITES is "raw" by construction, so the field looks like a constant
+    -- it is computed rather than asserted because the answer is knowable from the
+    path, and because stores published under those trees BEFORE raw-only landed
+    are still served (their purge is separate, authorized work) and must describe
+    themselves honestly if they are ever carried into an index again.
+
+    Deliberately NOT the same question as the store entry's `derived`, which is
+    about whether the SIGNAL was processed (ADR 0028 Signal-Space Separation). A
+    recording can sit in `derivatives/` and be served unprocessed, and an
+    SSS-filtered MEG store is derived while its source is raw.
+    """
+    for tree in EXCLUDED_TREES:
+        if path.startswith(f"{tree}/") or f"/{tree}/" in path:
+            return tree
+    return "raw"
 
 
 def is_bids_calibration_file(path: str) -> bool:
@@ -1464,6 +1601,83 @@ def store_total_channels(meta: dict) -> int:
     return sum(int(g.get("n_channels") or 0) for g in meta.get("groups", []))
 
 
+def channels_tsv_for(primary_path: str, head_files) -> str | None:
+    """Repo-relative path of the `_channels.tsv` that applies to a recording, or
+    None when none does.
+
+    BIDS inheritance, closest-file-wins: among the sidecars in the recording's
+    directory or an ancestor whose entities are a subset of the recording's, the
+    most specific one wins. Unlike the JSON sidecars there is no per-field merge
+    across levels -- a TSV is adopted whole.
+
+    Two callers, deliberately the same resolution: the fidelity gate reads it for
+    the ground-truth channel count, and the converter hands it to biosigIO's
+    `bids.apply_channels_tsv` so the served samples are in the unit the sidecar
+    declares. They must agree about WHICH file applies, or the gate would be
+    checking a different sidecar than the one that shaped the store.
+    """
+    stem = filename_stem(primary_path)
+    rec_dir = os.path.dirname(primary_path)
+    rec_ents = _bids_entities(stem)
+    candidates: list[tuple[int, int, str]] = []
+    for f in head_files:
+        if not f.endswith("_channels.tsv"):
+            continue
+        cdir = os.path.dirname(f)
+        if cdir and rec_dir != cdir and not rec_dir.startswith(cdir + "/"):
+            continue
+        cents = _bids_entities(filename_stem(f))
+        if any(rec_ents.get(k) != v for k, v in cents.items()):
+            continue
+        depth = cdir.count("/") + (1 if cdir else 0)
+        candidates.append((depth, len(cents), f))
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[-1][2]  # most specific
+
+
+def events_summary(events_text: str | None) -> dict:
+    """`{n_events, trial_types}` from the text of the events.tsv the converter
+    applies, or `{}` when no events.tsv applies.
+
+    Published per store so a client can judge whether a dataset is worth opening,
+    and which epoching strategy fits, without reading a signal byte (#1059). The
+    counts describe the SAME file biosigIO was handed, which is why this parses
+    the text rather than reading the store back: an events.tsv the converter did
+    not apply must not be counted.
+
+    An empty `trial_types` means the file has no `trial_type` column (or every row
+    is `n/a`); the absence of both keys means there was no events.tsv at all. The
+    distinction matters to a consumer deciding whether "no trial types" is a
+    property of the data or of the pipeline. Phase 9 moves this to a shared
+    parser; until then it is deliberately minimal -- header row, tab-separated,
+    no quoting rules, which is what BIDS specifies.
+    """
+    if events_text is None:
+        return {}
+    lines = [ln for ln in events_text.splitlines() if ln.strip()]
+    if not lines:
+        return {"n_events": 0, "trial_types": {}}
+    header = lines[0].split("\t")
+    try:
+        col = header.index("trial_type")
+    except ValueError:
+        col = -1
+    counts: dict[str, int] = {}
+    rows = lines[1:]
+    if col >= 0:
+        for line in rows:
+            fields = line.split("\t")
+            if col >= len(fields):
+                continue
+            value = fields[col].strip()
+            if not value or value.lower() == "n/a":
+                continue
+            counts[value] = counts.get(value, 0) + 1
+    return {"n_events": len(rows), "trial_types": dict(sorted(counts.items()))}
+
+
 def expected_channel_count_for(
     repo_dir: str, primary_path: str, head_files: set[str], head: str
 ) -> int | None:
@@ -1485,25 +1699,9 @@ def expected_channel_count_for(
     None and the gate is silently OFF for the recording -- fail-open by
     design: no ground truth, nothing to check against.
     """
-    stem = filename_stem(primary_path)
-    rec_dir = os.path.dirname(primary_path)
-    rec_ents = _bids_entities(stem)
-    candidates: list[tuple[int, int, str]] = []
-    for f in head_files:
-        if not f.endswith("_channels.tsv"):
-            continue
-        cdir = os.path.dirname(f)
-        if cdir and rec_dir != cdir and not rec_dir.startswith(cdir + "/"):
-            continue
-        cents = _bids_entities(filename_stem(f))
-        if any(rec_ents.get(k) != v for k, v in cents.items()):
-            continue
-        depth = cdir.count("/") + (1 if cdir else 0)
-        candidates.append((depth, len(cents), f))
-    if not candidates:
+    best = channels_tsv_for(primary_path, head_files)
+    if best is None:
         return None
-    candidates.sort()
-    best = candidates[-1][2]  # most specific
     text = _read_repo_text(repo_dir, head, best)
     if text is None:
         # NOT the same as "no channels.tsv exists". Ground truth is present at
@@ -1563,6 +1761,44 @@ def affected_primaries(
     return set()
 
 
+def _buildable_primaries(
+    head_files,
+) -> tuple[list[str], dict[str, str], set[str], set[str], set[str]]:
+    """Every recording discovery can build at HEAD, plus the bookkeeping the
+    incremental path needs.
+
+    Returns `(all_primaries, member_to_head, heads, dirrec_dirs, bti_dirs)`.
+    Factored out of `compute_worklist` so `discover_primaries` and the worklist
+    answer "what recordings exist" through the SAME code: the index's coverage
+    denominator has to be the set the converter would actually attempt, not a
+    second, subtly different walk of the tree.
+    """
+    primaries = [p for p in head_files if is_primary(p)]
+    # Directory-keyed recordings are derived from the files under them, not
+    # tracked paths of their own, so they are buildable primaries alongside the
+    # file primaries. CTF `.ds`/MEF3 `.mefd` are extension-derived; 4D/BTi is
+    # content-derived (see the two sections near the top of this file).
+    dirrec_dirs = dir_recordings(head_files)
+    bti_dirs = bti_recordings(head_files)
+    # Collapse FIF split groups to their chain head: only the head builds a store,
+    # and a change to any split routes to that head (member_to_head).
+    heads, member_to_head = split_heads_and_members(primaries)
+    return sorted([*heads, *dirrec_dirs, *bti_dirs]), member_to_head, heads, dirrec_dirs, bti_dirs
+
+
+def discover_primaries(head_files) -> list[str]:
+    """Every raw recording at HEAD, after the ADR 0027 exclusions.
+
+    This is the index's `discovered_count` -- the denominator of coverage and the
+    left-hand side of the invariant `discovered_count == store_count +
+    failure_count + pending_count`. Publishing it is what lets a consumer check
+    completeness without cloning the repository: on008083 served 2 stores and 36
+    failures out of 43 raw recordings, and the missing five were visible nowhere
+    (#1197).
+    """
+    return _buildable_primaries(head_files)[0]
+
+
 def compute_worklist(
     head_files: list[str],
     diff_entries: list[tuple[str, str]],
@@ -1576,17 +1812,9 @@ def compute_worklist(
     converts every primary at HEAD.
     """
     head_set = set(head_files)
-    primaries = [p for p in head_files if is_primary(p)]
-    # Directory-keyed recordings are derived from the files under them, not
-    # tracked paths of their own, so they are buildable primaries alongside the
-    # file primaries. CTF `.ds`/MEF3 `.mefd` are extension-derived; 4D/BTi is
-    # content-derived (see the two sections above).
-    dirrec_dirs = dir_recordings(head_files)
-    bti_dirs = bti_recordings(head_files)
-    # Collapse FIF split groups to their chain head: only the head builds a store,
-    # and a change to any split routes to that head (member_to_head).
-    heads, member_to_head = split_heads_and_members(primaries)
-    all_primaries = sorted([*heads, *dirrec_dirs, *bti_dirs])
+    all_primaries, member_to_head, heads, dirrec_dirs, bti_dirs = _buildable_primaries(
+        head_files
+    )
     # Keyed on ALL buildable primaries, not just the file heads. A directory
     # recording sits in the same parent directory as its sidecars -- CTF
     # `sub-01/meg/..._meg.ds` next to `sub-01/meg/..._events.tsv` -- so omitting
@@ -1714,6 +1942,67 @@ def compute_clean_orphans(prior_index: dict | None, convert: list[str]) -> set[s
     }
 
 
+def is_commit_sha(value: object) -> bool:
+    """True for a full 40-hex git commit SHA."""
+    return isinstance(value, str) and bool(COMMIT_SHA_RE.match(value))
+
+
+def installed_biosigio_version() -> str | None:
+    """The installed biosigIO release, or None when it cannot be determined.
+
+    Published as the index's `biosigio_version` so a store's geometry and unit
+    handling can be attributed to a specific library release -- the engine stamp
+    says which DISCOVERY generation ran, not which exporter wrote the bytes, and
+    the two move independently. Null rather than a guess: an unattributable store
+    must not claim a version.
+    """
+    try:
+        from importlib.metadata import version
+
+        return version("biosigio")
+    except Exception as exc:  # noqa: BLE001 - absent/odd metadata is not fatal
+        print(
+            f"::warning::could not determine the installed biosigio version ({exc}); "
+            "publishing biosigio_version: null",
+            flush=True,
+        )
+        return None
+
+
+def _normalize_store_entry(entry: dict) -> dict:
+    """Bring a store entry up to the v3 shape without inventing facts.
+
+    Applied to CARRIED-OVER entries as well as this run's, so one index never
+    mixes shapes: an entry written by the v1 producer carries `source_key` (which
+    v3 moved to the manifest, #1178 item 5) and carries neither `source_tree` nor
+    `derived`. The defaults are the only honest ones available from the entry
+    alone -- a store that exists was built from a discoverable raw recording, and
+    `derived` is stated by the SSS path, which also writes `sss`, so its absence
+    is evidence rather than a guess.
+    """
+    out = {k: v for k, v in entry.items() if k != "source_key"}
+    out.setdefault("source_tree", source_tree_for(str(out.get("path", ""))))
+    out.setdefault("derived", bool(out.get("sss")))
+    return out
+
+
+def _pending_entry(
+    path: str,
+    reason: str,
+    attempts: int,
+    last_error: str | None = None,
+    last_attempt_utc: str | None = None,
+) -> dict:
+    return {
+        "path": path,
+        "zarr": store_rel_for(path),
+        "reason": reason,
+        "attempts": attempts,
+        "last_error": last_error,
+        "last_attempt_utc": last_attempt_utc,
+    }
+
+
 def merge_index(
     prior: dict | None,
     dataset_id: str,
@@ -1722,21 +2011,62 @@ def merge_index(
     removed_store_rels: list[str],
     updated_utc: str,
     failures: list[dict] | None = None,
+    pending: list[dict] | None = None,
+    *,
+    discovered: list[str] | None = None,
+    errors: int | None = None,
+    contract_base: str = DEFAULT_CONTRACT_BASE,
+    bucket: str = "nemar",
+    region: str = "us-east-2",
+    engine_version: str = ZARR_ENGINE_VERSION,
+    biosigio_version: str | None = None,
+    prior_pending: list[dict] | None = None,
 ) -> dict:
-    """Fold this run's results into the prior index. Pure.
+    """Fold this run's results into the prior index and return the v3 document. Pure.
 
     `converted` is a list of store entries (each carries a `zarr` rel-path key);
     `removed_store_rels` are `*.zarr` rels to drop. Entries for unchanged stores
-    are carried over from `prior` verbatim.
+    are carried over from `prior`, normalized to the v3 shape.
 
-    `failures` is this run's typed data failures ({path, zarr, code, reason}) --
-    recordings that could not be converted for a reason the viewer should show.
-    They are merged like stores: prior failures carry over, a path that converted
-    (or whose store was removed) this run drops out, and this run's failures
-    overlay. A path is never in both `stores` and `failures`.
+    `failures` is this run's typed data failures ({path, zarr, code, reason,
+    detail}) -- recordings that will not convert without a change to the data or
+    the converter. They are merged like stores: prior failures carry over, a path
+    that converted (or whose store was removed) this run drops out, and this run's
+    failures overlay.
+
+    `pending` is this run's INFRA failures ({path, zarr, reason, last_error,
+    last_attempt_utc}) -- recordings that have no store yet but are still expected
+    to convert. Before v3 these were simply omitted, which is why on008083's five
+    silently-lost recordings were indistinguishable from "still generating"
+    forever (#1197). `attempts` is not supplied by the caller: it is a property of
+    the recording's HISTORY, so it is carried from `prior_pending` and
+    incremented here. At `PENDING_MAX_ATTEMPTS` the entry is promoted to a typed
+    `retry_exhausted` failure carrying its last error as `detail`, which is what
+    stops a permanently failing recording from consuming the queue forever.
+
+    `discovered` (every raw recording at HEAD) makes the coverage invariant hold
+    BY CONSTRUCTION rather than by hope: entries for paths that are not discovered
+    are dropped, and discovered paths in none of the three lists become
+    `not_attempted` pending entries. A partial run therefore still balances.
+
+    A path is never in more than one of `stores`, `failures`, `pending`.
+
+    Raises ValueError when `head_commit` is not a 40-hex SHA: an index that does
+    not name the commit it was built from is unreproducible and cannot seed the
+    next incremental diff, and one was published (on008083, #1197). Refusing here
+    means the run fails loudly instead of overwriting a good index with a broken
+    one.
     """
+    if not is_commit_sha(head_commit):
+        raise ValueError(
+            f"refusing to build an index for {dataset_id} with source_commit "
+            f"{head_commit!r}: a published index must name the 40-hex commit it "
+            "was built from (#1197)"
+        )
     failures = failures or []
+    pending = pending or []
     new_fail_paths = {f["path"] for f in failures if f.get("path")}
+    new_pending_paths = {p["path"] for p in pending if p.get("path")}
 
     stores: dict[str, dict] = {}
     if prior and isinstance(prior.get("stores"), list):
@@ -1747,9 +2077,13 @@ def merge_index(
         stores.pop(rel, None)
     for entry in converted:
         stores[entry["zarr"]] = entry
-    # A recording that newly FAILED must not keep a stale store entry.
-    stores = {z: e for z, e in stores.items() if e.get("path") not in new_fail_paths}
-    ordered = [stores[k] for k in sorted(stores)]
+    # A recording that newly FAILED (or is newly pending) must not keep a stale
+    # store entry claiming it is served.
+    stores = {
+        z: e
+        for z, e in stores.items()
+        if e.get("path") not in new_fail_paths and e.get("path") not in new_pending_paths
+    }
 
     fails: dict[str, dict] = {}
     if prior and isinstance(prior.get("failures"), list):
@@ -1767,27 +2101,220 @@ def merge_index(
                 fails[f["path"]] = f
     converted_paths = {e["path"] for e in converted if e.get("path")}
     removed_set = set(removed_store_rels)
-    # Drop prior failures that converted this run or whose recording was removed.
+    # Drop prior failures that converted this run, whose recording was removed, or
+    # that are now pending a retry instead.
     fails = {
         p: f
         for p, f in fails.items()
-        if p not in converted_paths and f.get("zarr") not in removed_set
+        if p not in converted_paths
+        and p not in new_pending_paths
+        and f.get("zarr") not in removed_set
     }
     for f in failures:
         fails[f["path"]] = f
-    ordered_fails = [fails[k] for k in sorted(fails)]
 
+    # --- pending -------------------------------------------------------------
+    prior_attempts: dict[str, int] = {}
+    for e in prior_pending or []:
+        if isinstance(e, dict) and isinstance(e.get("path"), str):
+            n = e.get("attempts")
+            prior_attempts[e["path"]] = int(n) if isinstance(n, int) and n > 0 else 0
+    pends: dict[str, dict] = {}
+    for e in prior_pending or []:
+        # Carry forward a recording this run never touched (an incremental run
+        # converts only what changed), minus anything now resolved or excluded.
+        if not (isinstance(e, dict) and isinstance(e.get("path"), str)):
+            continue
+        p = e["path"]
+        if p in converted_paths or p in fails or is_excluded_from_discovery(p):
+            continue
+        pends[p] = _pending_entry(
+            p,
+            str(e.get("reason") or "infra_failure"),
+            prior_attempts.get(p, 0),
+            e.get("last_error"),
+            e.get("last_attempt_utc"),
+        )
+    for e in pending:
+        p = e["path"]
+        pends[p] = _pending_entry(
+            p,
+            str(e.get("reason") or "infra_failure"),
+            prior_attempts.get(p, 0) + 1,
+            e.get("last_error"),
+            e.get("last_attempt_utc") or updated_utc,
+        )
+
+    if discovered is not None:
+        wanted = set(discovered)
+        stores = {z: e for z, e in stores.items() if e.get("path") in wanted}
+        fails = {p: f for p, f in fails.items() if p in wanted}
+        pends = {p: e for p, e in pends.items() if p in wanted}
+        accounted = {e.get("path") for e in stores.values()} | set(fails) | set(pends)
+        for p in wanted - accounted:
+            # Discovered, attempted by nobody this run: a `--limit`ed or
+            # short-circuited run, or a recording the worklist never reached.
+            # Recorded with attempts 0 so it neither ages toward exhaustion nor
+            # disappears from the accounting.
+            pends[p] = _pending_entry(p, "not_attempted", 0)
+
+    # Exhaustion: stop promising a recording that has had its rounds. Done AFTER
+    # the discovered reconciliation so a promoted entry is one that is still at
+    # HEAD, and `not_attempted` is exempt because it has not been tried at all.
+    for p, e in list(pends.items()):
+        if e["reason"] == "not_attempted" or e["attempts"] < PENDING_MAX_ATTEMPTS:
+            continue
+        del pends[p]
+        fails[p] = {
+            "path": p,
+            "zarr": store_rel_for(p),
+            "code": "retry_exhausted",
+            "reason": reason_for_code("retry_exhausted"),
+            "detail": e.get("last_error"),
+            "attempts": e["attempts"],
+        }
+
+    ordered = [_normalize_store_entry(stores[k]) for k in sorted(stores)]
+    ordered_fails = [fails[k] for k in sorted(fails)]
+    ordered_pending = [pends[k] for k in sorted(pends)]
+
+    prefix = f"{dataset_id}/zarr/"
     return {
-        "dataset_id": dataset_id,
         "format": INDEX_FORMAT,
         "format_version": INDEX_FORMAT_VERSION,
+        "dataset_id": dataset_id,
+        # The stable base, and the two forms of "where the bytes are today".
+        # Per-dataset rather than global so a single dataset can be mirrored or
+        # migrated without rewriting anyone's client (#1059).
+        "contract_base": f"{contract_base.rstrip('/')}/{prefix}",
+        "data_base": f"https://{bucket}.s3.{region}.amazonaws.com/{prefix}",
+        "data_base_kind": "s3-public",
+        "s3_uri": f"s3://{bucket}/{prefix}",
+        "s3_region": region,
+        "s3_anonymous": True,
         "source_commit": head_commit,
+        "engine_version": engine_version,
+        "biosigio_version": biosigio_version,
         "updated_utc": updated_utc,
+        "discovered_count": (
+            len(set(discovered))
+            if discovered is not None
+            else len(ordered) + len(ordered_fails) + len(ordered_pending)
+        ),
         "store_count": len(ordered),
-        "stores": ordered,
+        # #1059 asked for `n_recordings`; it is the store count under another
+        # name. The discovered total is `discovered_count`, deliberately a
+        # different word, because conflating the two is how coverage went
+        # unnoticed in the first place.
+        "n_recordings": len(ordered),
+        "errors": len(failures) + len(pending) if errors is None else errors,
         "failure_count": len(ordered_fails),
+        "pending_count": len(ordered_pending),
+        "stores": ordered,
         "failures": ordered_fails,
+        "pending": ordered_pending,
     }
+
+
+def check_index_invariant(index: dict) -> None:
+    """Raise unless every discovered recording is accounted for exactly once.
+
+    `discovered_count == store_count + failure_count + pending_count` is the whole
+    of #1197's acceptance criterion, and `merge_index` makes it true by
+    construction -- which is exactly why it is worth asserting separately. The
+    construction is the thing that could regress, and a silently unbalanced index
+    is the failure mode being fixed: it looks complete and is not.
+    """
+    discovered = index.get("discovered_count")
+    parts = (
+        index.get("store_count"),
+        index.get("failure_count"),
+        index.get("pending_count"),
+    )
+    if not isinstance(discovered, int) or any(not isinstance(n, int) for n in parts):
+        raise ValueError(
+            "index coverage counts are missing or non-integer: "
+            f"discovered={discovered!r} store/failure/pending={parts!r}"
+        )
+    if discovered != sum(parts):  # type: ignore[arg-type]
+        raise ValueError(
+            f"index coverage does not balance for {index.get('dataset_id')}: "
+            f"discovered_count={discovered} but store_count+failure_count+"
+            f"pending_count={sum(parts)} "  # type: ignore[arg-type]
+            f"({parts[0]}+{parts[1]}+{parts[2]})"
+        )
+
+
+def merge_manifest(
+    prior: dict | None,
+    dataset_id: str,
+    entries: list[dict],
+    store_rels: list[str],
+    updated_utc: str,
+) -> dict:
+    """Build the producer manifest (`<id>/zarr/manifest.json`). Pure.
+
+    Carries the git-annex `source_key` (and its declared size) per store. This
+    used to ride in index.json, where it was 2.3 MB of nm000281's 12.8 MB and read
+    by nothing: index.json is fetched on every dataset-page visit, the manifest by
+    no one but us (#1178 item 5).
+
+    Restricted to `store_rels` -- the rels the index actually publishes -- so the
+    two documents can never disagree about which stores exist.
+    """
+    by_rel: dict[str, dict] = {}
+    if prior and isinstance(prior.get("stores"), list):
+        for e in prior["stores"]:
+            if isinstance(e, dict) and isinstance(e.get("zarr"), str):
+                by_rel[e["zarr"]] = e
+    for e in entries:
+        by_rel[e["zarr"]] = e
+    keep = set(store_rels)
+    return {
+        "format": MANIFEST_FORMAT,
+        "format_version": MANIFEST_FORMAT_VERSION,
+        "dataset_id": dataset_id,
+        "updated_utc": updated_utc,
+        "stores": [
+            {
+                "zarr": rel,
+                "source_key": by_rel[rel].get("source_key"),
+                "size_bytes": by_rel[rel].get("size_bytes"),
+            }
+            for rel in sorted(keep & set(by_rel))
+        ],
+    }
+
+
+def validate_document(doc: dict, schema_path: str, label: str) -> None:
+    """Validate a document against its JSON Schema before it is uploaded.
+
+    A producer bug caught here costs one failed run; the same bug caught by a
+    consumer costs every consumer. Degrades to a loud warning rather than a
+    failure when `jsonschema` or the schema file is unavailable, so a node whose
+    venv predates the pin still converts -- the check is a guard rail, not a
+    dependency of serving.
+    """
+    try:
+        import jsonschema  # type: ignore[import-not-found]
+    except ImportError:
+        print(
+            f"::warning::jsonschema is not installed; the {label} was NOT validated "
+            "against its schema before upload (add it: scripts/zarr/requirements.txt)",
+            flush=True,
+        )
+        return
+    try:
+        with open(schema_path, encoding="utf-8") as fh:
+            schema = json.load(fh)
+    except OSError as exc:
+        print(
+            f"::warning::could not read {schema_path} ({exc}); the {label} was NOT "
+            "validated against its schema before upload",
+            flush=True,
+        )
+        return
+    jsonschema.validate(doc, schema)
 
 
 def parse_annex_key(blob_text: str) -> str | None:
@@ -2409,16 +2936,33 @@ def store_metadata(store_path: str) -> dict:
             mod = ga.get("modality")
             if mod:
                 modalities.add(str(mod).lower())
-            groups.append(
-                {
-                    "name": gname,
-                    "modality": mod,
-                    "rate": rate,
-                    "n_channels": ga.get("n_channels"),
-                    "n_samples": nsamp,
-                    "duration_s": (nsamp / rate) if rate and nsamp else None,
-                }
-            )
+            group = {
+                "name": gname,
+                "modality": mod,
+                "rate": rate,
+                "n_channels": ga.get("n_channels"),
+                "n_samples": nsamp,
+                "duration_s": (nsamp / rate) if rate and nsamp else None,
+            }
+            # Serving GEOMETRY, republished from the store's own attrs
+            # (biosigio>=1.2.6, biosigio#126). A reader that has the index has
+            # then already paid for the store's shape: `n_view_levels` removes
+            # the probe-until-404 walk over view/1..N, and `view_chunk_columns`
+            # says how many requests a viewport-sized read costs at any level
+            # (#1178 items 1-2). `source_rate_hz` is the ACQUISITION rate, the
+            # thing `rate` above is not -- `rate` is the NEMAR modality cap.
+            # Copied only when present, so an older store simply omits them.
+            for key in ("n_view_levels", "view_chunk_columns"):
+                if key in ga:
+                    group[key] = ga[key]
+            try:
+                la = dict(root[gname]["0"].attrs)
+            except Exception:  # noqa: BLE001 - level 0 absent/unreadable: omit
+                la = {}
+            for key in ("source_rate_hz", "chunk_samples", "shard_samples"):
+                if key in la:
+                    group[key] = la[key]
+            groups.append(group)
         # Count event descriptions when the events group exists and carries them.
         event_description_count: int | None = None
         if "events" in root:
@@ -2432,6 +2976,29 @@ def store_metadata(store_path: str) -> dict:
         }
         if event_description_count is not None:
             result["event_description_count"] = event_description_count
+        # biosigIO's own account of what the BIDS channels.tsv `units` column did
+        # (biosigio#125), which it records in the recording metadata and `to_zarr`
+        # serializes into the store root. Republished so a unit that could NOT be
+        # adopted is visible on the PUBLIC surface: a store whose report says
+        # `kept_importer_unit` is serving numbers the sidecar disagrees with, and
+        # before this that was only discoverable by reading the conversion log.
+        # Absent on any store built by the streaming path until biosigio#127
+        # teaches `stream_to_zarr` to apply channels.tsv -- absence means "not
+        # applied", never "applied cleanly".
+        # Two locations, on purpose. The in-memory path records it in the
+        # recording metadata, which `to_zarr` serializes into
+        # `recording_metadata`; biosigio#128 also writes it as a ROOT attr, which
+        # is the only place the streaming exporter can put it (it never builds a
+        # Recording). Root wins when both exist -- it is the newer, exporter-level
+        # statement.
+        rec_meta = ra.get("recording_metadata")
+        for candidate in (
+            ra.get("channels_tsv_units"),
+            rec_meta.get("channels_tsv_units") if isinstance(rec_meta, dict) else None,
+        ):
+            if isinstance(candidate, dict):
+                result["units_report"] = candidate
+                break
         return result
     except Exception as exc:  # noqa: BLE001 - best-effort metadata, never fatal
         print(f"::warning::store_metadata failed for {store_path}: {exc}", flush=True)
@@ -2532,6 +3099,117 @@ def fix_source_file_attr(store_path: str, bids_relpath: str) -> None:
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+
+# Matches `publisher` in backend/src/services/datacite.ts, shortened to the form a
+# reference list actually carries.
+_CITATION_PUBLISHER = "NEMAR"
+
+
+def dataset_citation(row: dict | None) -> str | None:
+    """A ready-to-paste citation string for a dataset, or None when the catalog
+    row does not carry enough to make one honestly.
+
+    #1064's point: a client that reads the data has the citation at the moment it
+    needs it, rather than reconstructing it later or not at all -- which has a
+    disproportionate effect on whether NEMAR gets cited correctly. Composed here
+    rather than fetched because the catalog has no citation column; every part
+    comes from the public row, and a missing part omits its segment instead of
+    printing an empty one.
+    """
+    if not isinstance(row, dict):
+        return None
+    name = str(row.get("name") or "").strip()
+    if not name:
+        return None
+    authors = str(row.get("authors") or "").strip()
+    doi = str(row.get("concept_doi") or row.get("doi") or "").strip()
+    version = str(row.get("latest_version") or "").strip()
+    year = str(row.get("created_at") or "")[:4]
+    parts: list[str] = []
+    if authors:
+        parts.append(authors)
+    if year.isdigit():
+        parts.append(f"({year})")
+    parts.append(f"{name}{f' ({version})' if version else ''}.")
+    parts.append(f"{_CITATION_PUBLISHER}.")
+    if doi:
+        parts.append(f"https://doi.org/{doi.removeprefix('doi:')}")
+    return " ".join(parts)
+
+
+def nemar_store_attrs(
+    dataset_id: str,
+    source_commit: str,
+    source_tree: str,
+    derived: bool,
+    engine_version: str,
+    contract_url: str,
+    row: dict | None = None,
+) -> dict:
+    """The `nemar` root attribute written on every store (#1064). Pure.
+
+    Store attributes carried provenance as PROSE -- a free-text `note` saying the
+    copy is derived and the BIDS source is authoritative. That is fine for a human
+    reading the JSON and useless to a client deciding whether the data is suitable,
+    and the population reading these stores is increasingly machine. This is the
+    structured half; biosigIO's own attributes (including that note) are left
+    exactly as they are.
+
+    DOI, license and citation especially: a store that carries its own attribution
+    can be cited by whoever opens it. `row` is the public catalog row (GET
+    /datasets/<id>); a field the catalog does not have stays None rather than
+    being invented, so "unknown license" is distinguishable from "no license".
+    """
+    row = row if isinstance(row, dict) else {}
+    doi = row.get("concept_doi") or row.get("doi")
+    return {
+        "dataset_id": dataset_id,
+        "doi": doi or None,
+        "license": row.get("license") or None,
+        "citation": dataset_citation(row),
+        "source_commit": source_commit,
+        # Which BIDS tree the source sits in, vs whether the SIGNAL was
+        # processed. #1064 flagged that "derivative" collides semantically
+        # between the two senses; carrying both, named apart, is the fix.
+        "source_tree": source_tree,
+        "derived": derived,
+        "hed_version": row.get("hed_version") or None,
+        "engine_version": engine_version,
+        # The stable URL for THIS store, so a copy of the store that has been
+        # moved or vendored can still say where it came from.
+        "contract_url": contract_url,
+    }
+
+
+def fetch_dataset_row(api_base: str, dataset_id: str) -> dict | None:
+    """The public catalog row for a dataset (`GET <api_base>/datasets/<id>`), or
+    None when it cannot be read.
+
+    Read ONCE per run in `main` and passed to the workers, not fetched per
+    recording: a dataset with 25k recordings would otherwise make 25k identical
+    requests to the catalog. Best-effort by design -- the provenance attrs are
+    written either way, with the catalog-sourced fields left None, because a
+    catalog blip must not cost a conversion.
+    """
+    url = f"{api_base.rstrip('/')}/datasets/{dataset_id}"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 - fixed https base
+            body = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001 - provenance is best-effort
+        print(
+            f"::warning::could not read {url} ({exc}); store provenance attrs will "
+            "omit doi/license/citation/hed_version",
+            flush=True,
+        )
+        return None
+    # The route wraps the row in `{dataset: {...}}` on some paths and returns it
+    # bare on others; accept either rather than coupling to one shape.
+    if isinstance(body, dict):
+        inner = body.get("dataset")
+        return inner if isinstance(inner, dict) else body
+    return None
 
 
 def electrode_positions_for(
@@ -2788,6 +3466,119 @@ def _recording_size_bytes(primary_local: str) -> int:
     return total
 
 
+_WARNED_NO_CHANNELS_TSV_API = [False]
+_BIDS_CHANNELS_OFF: dict[str, str] = {}
+_BIDS_CHANNELS_PROBED = [False]
+
+
+def _bids_channels_off(recording_cls) -> dict:
+    """`{"bids_channels": "off"}` when `Recording.from_file` accepts it, else `{}`.
+
+    Probed rather than passed blindly: an unsupported keyword is a `TypeError`
+    that would fail EVERY recording on a node whose venv predates the pin, and
+    the whole point of turning the switch off is a refinement, not a
+    prerequisite -- an older library has no sibling auto-apply to disable, so
+    omitting the keyword there is exactly equivalent. Probed once per process
+    (the signature cannot change under us) and cached.
+    """
+    if not _BIDS_CHANNELS_PROBED[0]:
+        _BIDS_CHANNELS_PROBED[0] = True
+        try:
+            import inspect
+
+            if "bids_channels" in inspect.signature(recording_cls.from_file).parameters:
+                _BIDS_CHANNELS_OFF["bids_channels"] = "off"
+        except (TypeError, ValueError):  # unintrospectable callable
+            pass
+    return dict(_BIDS_CHANNELS_OFF)
+
+
+_WARNED_STREAM_NO_CHANNELS = [False]
+
+
+def stream_channels_kwarg(stream_fn, channels_local: str | None) -> dict:
+    """`{"bids_channels": <path>}` for the streaming exporter when the installed
+    biosigIO can act on an explicit sidecar path, else `{}`.
+
+    Two things make this a capability probe rather than a version check.
+
+    `stream_to_zarr` gaining `bids_channels` IS the change that makes the path
+    form work (biosigio#128, closing #127), so its signature is the honest test.
+    And `Recording.from_file`'s signature is NOT: biosigio 1.2.6 ACCEPTS
+    `bids_channels=<path>` there and silently treats anything that is not "auto"
+    as "off" (measured -- the units report comes back None), so probing the
+    keyword's presence on that function would report support that does not exist.
+    That is exactly why the in-memory path calls `bids.apply_channels_tsv`
+    explicitly instead of passing the path down: `apply_channels_tsv` works on
+    both releases, `bids_channels=<path>` on only one.
+
+    Until the streaming exporter can take it, a streamed store carries the units
+    its importer read while an in-memory one carries the sidecar's -- the
+    disagreement that keeps `ZARR_ENGINE_VERSION` where it is. Said out loud once
+    per run rather than left to be inferred from a missing index field.
+    """
+    if not channels_local:
+        return {}
+    try:
+        import inspect
+
+        supported = "bids_channels" in inspect.signature(stream_fn).parameters
+    except (TypeError, ValueError):  # unintrospectable callable
+        supported = False
+    if supported:
+        return {"bids_channels": channels_local}
+    if not _WARNED_STREAM_NO_CHANNELS[0]:
+        _WARNED_STREAM_NO_CHANNELS[0] = True
+        print(
+            "::warning::installed biosigIO's stream_to_zarr cannot apply "
+            "channels.tsv (needs biosigio#127/#128); STREAMED stores this run "
+            "carry the units their importer read, while in-memory ones carry the "
+            "sidecar's. `units_report` is absent on the streamed entries, which "
+            "is how to tell them apart",
+            flush=True,
+        )
+    return {}
+
+
+def _apply_channels_tsv(rec, channels_local: str | None) -> None:
+    """Adopt the BIDS `_channels.tsv`'s types and UNITS onto an in-memory recording.
+
+    biosigIO >= 1.2.6 converts a channel's samples into the unit the sidecar
+    declares rather than merely relabelling them (biosigio#125, closing #122), and
+    records what it did in `rec.metadata["channels_tsv_units"]`, which `to_zarr`
+    serializes into the store and `store_metadata` republishes as the index's
+    `units_report`. Without this call the sidecar is consulted only by the
+    fidelity gate's row count and the served samples stay in whatever unit the
+    importer happened to read.
+
+    Only the in-memory path can do this today: `stream_to_zarr` gains it in
+    biosigio#127. Until then a dataset's small and large recordings can disagree
+    on units, which is why the engine version is NOT bumped in this change --
+    re-converting the back catalogue under a half-applied rule would bake the
+    disagreement into the archive.
+
+    A biosigIO too old to have the function degrades to the previous behaviour
+    with one warning, rather than failing every recording on a node whose venv
+    predates the pin.
+    """
+    if not channels_local or not os.path.exists(channels_local):
+        return
+    from biosigio import bids  # type: ignore[import-not-found]  # lazy: runtime-only dep
+
+    apply_fn = getattr(bids, "apply_channels_tsv", None)
+    if apply_fn is None:
+        if not _WARNED_NO_CHANNELS_TSV_API[0]:
+            _WARNED_NO_CHANNELS_TSV_API[0] = True
+            print(
+                "::warning::installed biosigIO has no bids.apply_channels_tsv; "
+                "channels.tsv units are NOT applied and `units_report` will be "
+                "absent from every store this run (needs biosigio>=1.2.6)",
+                flush=True,
+            )
+        return
+    apply_fn(rec, channels_local)
+
+
 def convert_recording(
     primary_local: str,
     events_local: str | None,
@@ -2798,6 +3589,7 @@ def convert_recording(
     mem_budget_bytes: int | None = None,
     hard_ceiling_bytes: int | None = None,
     projected_peak: int | None = None,
+    channels_local: str | None = None,
 ) -> None:
     modality = bids_suffix_modality(primary_local)
     size_bytes = _recording_size_bytes(primary_local)
@@ -2862,7 +3654,22 @@ def convert_recording(
         # the fastest channel's grid rather than failing the conversion. biosigIO
         # defaults to "error" everywhere else so no one gets resampled data unknowingly
         # (requires biosigio>=1.1.4; ignored for non-EDF formats). See nemar-cli#737.
-        rec = Recording.from_file(primary_local, mixed_rate="resample")
+        # bids_channels="off": the sidecar is applied EXACTLY ONCE, by
+        # `_apply_channels_tsv` below, using this driver's own BIDS-inheritance
+        # resolution. biosigIO's own "auto" looks for a SIBLING `_channels.tsv`
+        # next to the file, which resolves a different (smaller) set of files: a
+        # sidecar inherited from `sub-01/` or the dataset root applies to a
+        # recording under `sub-01/eeg/` and is not its sibling, and the file this
+        # driver hands the importer lives in a scratch directory where the only
+        # sidecar present is the one it staged. Leaving "auto" on would also apply
+        # a staged sidecar twice, and `_adopt_units` CONVERTS samples.
+        rec = Recording.from_file(
+            primary_local, mixed_rate="resample", **_bids_channels_off(Recording)
+        )
+        # BEFORE the events sidecar and before the suffix override: this adopts
+        # per-channel types and units, and the suffix override below deliberately
+        # has the last word on modality (see its comment).
+        _apply_channels_tsv(rec, channels_local)
         if events_local and os.path.exists(events_local):
             bids.apply_events_tsv(rec, events_local)
         # Suffix-driven modality: group + resample the whole recording by its BIDS
@@ -2898,6 +3705,14 @@ def convert_recording(
                 # Keep the temp channel-major memmap on the same (fast) scratch volume as
                 # the store; it is a sibling temp dir, not synced to S3.
                 scratch_dir=os.path.dirname(store_path) or None,
+                # The sidecar EXPLICITLY, never by sibling auto-detection. The
+                # path handed to the exporter is not always the recording's own:
+                # on the ADR 0028 MaxShield path it is the Signal-Space-Separated
+                # copy at `work/sss_<basename>`, which has no channels.tsv beside
+                # it, so an auto-detecting exporter would silently serve importer
+                # units and MNE-inferred types. Empty until the installed
+                # biosigIO can act on it -- see `stream_channels_kwarg`.
+                **stream_channels_kwarg(stream_to_zarr, channels_local),
             )
         except MixedSamplingRateError:
             # A mixed per-channel-rate EDF can't stream on a single grid; the
@@ -3055,11 +3870,30 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         plf = power_line_frequency_for(c["repo"], primary, c["head_files"], c["head"])
         descs = event_descriptions_for(c["repo"], primary, c["head_files"], c["head"])
         elec = electrode_positions_for(c["repo"], primary, c["head_files"], c["head"])
+        # channels.tsv is git-tracked TEXT (never annexed), so it is read from the
+        # repo and staged beside the recording rather than fetched from S3. It is
+        # handed to biosigIO so the served samples carry the sidecar's units
+        # (biosigio#125); the same resolution already feeds the fidelity gate.
+        channels_local = None
+        channels_rel = channels_tsv_for(primary, c["head_files"])
+        if channels_rel:
+            channels_text = _read_repo_text(c["repo"], c["head"], channels_rel)
+            if channels_text is None:
+                print(
+                    f"::warning::could not read {channels_rel}; channels.tsv units "
+                    f"are NOT applied to {primary}",
+                    flush=True,
+                )
+            else:
+                channels_local = os.path.join(work, os.path.basename(channels_rel))
+                with open(channels_local, "w", encoding="utf-8") as fh:
+                    fh.write(channels_text)
         convert_recording(
             primary_local, events_local, store_local, plf, descs or None, elec,
             mem_budget_bytes=c.get("mem_budget"),
             hard_ceiling_bytes=c.get("hard_ceiling"),
             projected_peak=(c.get("projections") or {}).get(primary),
+            channels_local=channels_local,
         )
         # biosigIO stamped recording_metadata.source_file with the scratch path
         # it was handed (this run's tmpdir); overwrite it with the stable,
@@ -3071,6 +3905,23 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             # directly (the ML streaming path) must not have to fetch index.json to
             # learn that this signal is a processed derivative.
             embed_root_attr(store_local, "sss", sss_meta)
+        # Structured provenance, in the store rather than only in the index
+        # (#1064). The population reading these stores is increasingly machine,
+        # and a client that has the store has the DOI, license and citation at the
+        # moment it needs them. biosigIO's own attributes are untouched.
+        embed_root_attr(
+            store_local,
+            "nemar",
+            nemar_store_attrs(
+                dataset_id=c["dataset_id"],
+                source_commit=c["head"],
+                source_tree=source_tree_for(primary),
+                derived=bool(sss_meta),
+                engine_version=c["engine_version"],
+                contract_url=f"{c['contract_base'].rstrip('/')}/{c['dataset_id']}/zarr/{rel_store}/",
+                row=c.get("dataset_row"),
+            ),
+        )
         # Guard the --delete sync: an empty/partial store would otherwise wipe a
         # previously-valid one. zarr.json => v3 root.
         validate_store(store_local)
@@ -3117,14 +3968,44 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             "--delete", "--only-show-errors",
             "--cache-control", "public, max-age=86400",
         ])
+        # `source_key` is deliberately NOT here any more: it moved to the sibling
+        # producer manifest in v3 (#1178 item 5). It was ~90 bytes per store that
+        # no consumer read -- 2.3 MB of nm000281's 12.8 MB index, fetched on every
+        # dataset-page visit.
         entry = {
             "path": primary,
             "zarr": rel_store,
-            "source_key": primary_key,
             "updated_utc": c["updated"],
+            "source_tree": source_tree_for(primary),
+            "derived": bool(sss_meta),
             # `_`-prefixed keys are diagnostics, never published.
             **{k: v for k, v in meta.items() if not k.startswith("_")},
         }
+        # Counted from the SAME events.tsv biosigIO was handed, so the numbers
+        # describe what is actually in the store (#1059).
+        events_text = None
+        if events_local and os.path.exists(events_local):
+            try:
+                with open(events_local, encoding="utf-8", errors="replace") as fh:
+                    events_text = fh.read()
+            except OSError as exc:
+                print(
+                    f"::warning::could not re-read {events_local} for the event "
+                    f"summary of {primary}: {exc}",
+                    flush=True,
+                )
+        entry.update(events_summary(events_text))
+        # Which channels.tsv shaped this store, and that the converter chose it
+        # rather than the exporter stumbling on a sibling. On the MaxShield path
+        # the exporter is handed `work/sss_<basename>`, where sibling detection
+        # finds nothing, so "a report is present" and "the right sidecar was
+        # used" are separate claims and both belong on the public surface.
+        if channels_rel and isinstance(entry.get("units_report"), dict):
+            entry["units_report"] = {
+                **entry["units_report"],
+                "sidecar": channels_rel,
+                "sidecar_supplied": True,
+            }
         # For a split FIF, record all member source paths so the browser can map any
         # split file (e.g. a click on split-02) to this single head store.
         members = split_members_for(primary, c["head_files"])
@@ -3143,6 +4024,13 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             "ok": True,
             "primary": primary,
             "entry": entry,
+            # The producer-only half of the entry: which annex blob this store was
+            # built from. Published in manifest.json, never in the index.
+            "manifest": {
+                "zarr": rel_store,
+                "source_key": primary_key,
+                "size_bytes": annex_key_size(primary_key),
+            },
             "peak_rss": peak_rss_bytes() if rss_trusted else None,
         }
     except MemoryError as exc:
@@ -3185,6 +4073,10 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             "primary": primary,
             "error": str(exc),
             "code": getattr(exc, "code", None),
+            # Published on the entry (typed) or as `last_error` (pending), which
+            # is the only way an uncoded failure says anything at all from
+            # outside the conversion node. #1197
+            "detail": failure_detail(exc),
         }
     finally:
         # Parallel workers share the NVMe scratch; reclaim each recording's copy
@@ -3303,7 +4195,12 @@ def _drain_with_admission(
                             broken.append(p)
                             continue
                         except Exception as exc:  # noqa: BLE001 - this worker died
-                            r = {"ok": False, "primary": p, "error": f"worker crashed: {exc}"}
+                            r = {
+                                "ok": False,
+                                "primary": p,
+                                "error": f"worker crashed: {exc}",
+                                "detail": failure_detail(exc),
+                            }
                         report(r)
                     admit()
         except BrokenProcessPool:
@@ -3334,11 +4231,13 @@ def _drain_with_admission(
         culprits = drain_once(suspects, 1)
         # cap=1, so at most one recording was in flight: it died running alone.
         for p in culprits:
+            killed = ("killed its worker process while running alone "
+                      "(out of memory, or a native crash in the reader)")
             report({
                 "ok": False,
                 "primary": p,
-                "error": "killed its worker process while running alone "
-                         "(out of memory, or a native crash in the reader)",
+                "error": killed,
+                "detail": failure_detail(killed),
             })
 
     if pool_breaks:
@@ -3385,6 +4284,22 @@ def main() -> int:
         "e.g. on Hallu after `nemar dataset download`) instead of downloading the "
         "annex blobs from S3",
     )
+    ap.add_argument(
+        "--contract-base",
+        default=DEFAULT_CONTRACT_BASE,
+        help="the STABLE base URL clients may hardcode, published as the index's "
+        "`contract_base` (<base>/<id>/zarr/) and as each store's `contract_url`. "
+        f"Default {DEFAULT_CONTRACT_BASE}; the --test Hallu instance passes its own "
+        "host so a test index never advertises the production one.",
+    )
+    ap.add_argument(
+        "--api-base",
+        default=DEFAULT_API_BASE,
+        help="catalog to read this dataset's DOI / license / HED version from, "
+        "once per run, for the stores' structured `nemar` provenance attribute "
+        f"(#1064). Default {DEFAULT_API_BASE}. Best-effort: an unreachable catalog "
+        "warns and leaves those fields null.",
+    )
     ap.add_argument("--callback-out", required=True, help="write the zarr-ready body here")
     ap.add_argument(
         "--jobs",
@@ -3414,6 +4329,12 @@ def main() -> int:
         prior = s3_read_json(bucket, f"{dataset_id}/zarr/index.json")
         prior_commit = (prior or {}).get("source_commit")
         full = args.full or not prior_commit or not is_ancestor(repo, prior_commit, head)
+    # The producer manifest tracks exactly the index's store set, so it is merged
+    # on the same terms: carried on the incremental path, rebuilt from this run
+    # under --clean (which reconverts every recording anyway).
+    prior_manifest = (
+        None if args.clean else s3_read_json(bucket, f"{dataset_id}/zarr/manifest.json")
+    )
 
     head_files = git_ls_files(repo, head)
     if full:
@@ -3422,6 +4343,16 @@ def main() -> int:
         assert prior_commit  # full is False only when prior_commit is a real ancestor SHA
         diff = git_diff_name_status(repo, prior_commit, head)
     convert, remove = compute_worklist(head_files, diff, full)
+    # Coverage denominator: every raw recording at HEAD, whether or not this run
+    # touches it. Publishing it is what lets a consumer check completeness without
+    # cloning the repo (#1197).
+    discovered = discover_primaries(head_files)
+    # `pending` attempt counts are a property of the RECORDING's history, not of
+    # this run, so they are carried even under --clean -- which otherwise rebuilds
+    # the index from nothing. Without this a recording would reset to attempt 1
+    # every run on the Hallu path (which always passes --clean) and could never
+    # reach the exhaustion cap.
+    prior_pending = ((prior if prior is not None else prior_for_orphans) or {}).get("pending")
 
     # --clean no longer wipes the serving prefix up front.
     #
@@ -3473,8 +4404,10 @@ def main() -> int:
 
     head_set = set(head_files)
     converted_entries: list[dict] = []
+    manifest_entries: list[dict] = []
     failures: list[str] = []
     failure_entries: list[dict] = []
+    pending_entries: list[dict] = []
 
     n = len(convert)
 
@@ -3497,20 +4430,41 @@ def main() -> int:
             )
         if r["ok"]:
             converted_entries.append(r["entry"])
+            if r.get("manifest"):
+                manifest_entries.append(r["manifest"])
             print(f"[zarr] [{i}/{n}] converted {r['primary']} -> {r['entry']['zarr']}", flush=True)
         else:
             failures.append(r["primary"])
-            # A typed biosigIO failure (it carries a .code) is a property of the
-            # DATA -- record WHY in the index so the viewer can explain it. An infra
-            # failure (no code: crashed worker, transient S3) is omitted so it
-            # retries on the next run rather than being shown as a data problem.
+            # Two destinations, and which one is the whole of #1197.
+            #
+            # A typed, non-retryable biosigIO/NEMAR failure is a property of the
+            # DATA (or a converter gap): it goes to `failures` with the code, the
+            # user-facing reason, AND the importer's own first line as `detail`,
+            # so an opaque `file_read_error` is diagnosable from the public index.
+            #
+            # Everything else -- an uncoded failure (crashed worker, transient S3)
+            # or a RETRYABLE code (the memory budget, which is a condition on a
+            # shared node, not a property of the recording) -- goes to `pending`.
+            # These used to be dropped on the floor so they would "retry next
+            # run", but a run where anything converted is marked `done`, so they
+            # never did: on008083 lost five recordings that appeared in neither
+            # list and were indistinguishable from "still generating" forever.
             code = r.get("code")
-            if code:
+            detail = r.get("detail") or failure_detail(r.get("error"))
+            if code and code not in RETRYABLE_CODES:
                 failure_entries.append({
                     "path": r["primary"],
                     "zarr": store_rel_for(r["primary"]),
                     "code": code,
                     "reason": reason_for_code(code),
+                    "detail": detail,
+                })
+            else:
+                pending_entries.append({
+                    "path": r["primary"],
+                    "reason": "memory_budget" if code else "infra_failure",
+                    "last_error": detail,
+                    "last_attempt_utc": updated,
                 })
             print(f"::warning::[{i}/{n}] conversion failed for {r['primary']}: {r['error']}", flush=True)
 
@@ -3602,10 +4556,17 @@ def main() -> int:
         f"skipped (#909)",
         flush=True,
     )
+    # Per-dataset provenance for the stores' `nemar` root attribute (#1064).
+    # Skipped when there is nothing to convert, so a no-op run makes no request.
+    dataset_row = fetch_dataset_row(args.api_base, dataset_id) if convert else None
     with tempfile.TemporaryDirectory() as tmp:
         ctx = {
             "repo": repo, "bucket": bucket, "dataset_id": dataset_id, "head": head,
             "head_files": head_set, "local": args.local, "tmp": tmp, "updated": updated,
+            "contract_base": args.contract_base,
+            "engine_version": ZARR_ENGINE_VERSION,
+            # Read ONCE per run, not per recording: nm000281 has 25k of them.
+            "dataset_row": dataset_row,
             "mem_budget": ram_ceiling,
             # Computed once here rather than re-derived per worker from a second,
             # independent /proc/meminfo read, which could disagree with this one.
@@ -3679,6 +4640,12 @@ def main() -> int:
                     "data_failures": failure_entries,
                     "deterministic": deterministic,
                     "pool_breaks": pool_breaks,
+                    # Coverage (#1197). Reported even here, where the index was
+                    # NOT rewritten: the queue's pending-driven requeue needs to
+                    # know a total failure left recordings outstanding, and
+                    # `discovered_count` is what makes "2 of 43" sayable at all.
+                    "pending_count": len(pending_entries),
+                    "discovered_count": len(discovered),
                 },
                 fh,
             )
@@ -3688,13 +4655,61 @@ def main() -> int:
     # typed data failure (a derivative, a corrupt file) is permanent -- retrying it
     # never helps and would pin the checkpoint forever on a derivative-heavy
     # dataset -- so it does not hold the commit back; it's recorded in the index's
-    # `failures` instead. An infra failure (no code: crashed worker, transient S3)
-    # keeps the prior commit ("" -> next run goes full) so it is re-diffed + retried.
+    # `failures` instead. An infra failure keeps the prior commit so the next run
+    # re-diffs and retries it.
     # (`infra_failures` / `deterministic` computed above, before the total-fail path.)
-    index_commit = head if not infra_failures else (prior_commit or "")
-    index = merge_index(
-        prior, dataset_id, index_commit, converted_entries, remove, updated, failure_entries
+    #
+    # The old fallback for "infra failures but no usable prior commit" was `""`,
+    # which is how on008083 came to publish an EMPTY source_commit while D1 held
+    # the real SHA (#1197). There is no longer anything to fall back FOR: those
+    # recordings are now listed in `pending`, and the queue re-queues a `done`
+    # dataset that has any (zarr_queue.reconcile), which re-runs it with --clean.
+    # So publish the commit the stores were actually built from.
+    index_commit = prior_commit if (infra_failures and is_commit_sha(prior_commit)) else head
+    biosigio_version = installed_biosigio_version()
+    try:
+        index = merge_index(
+            prior,
+            dataset_id,
+            index_commit,
+            converted_entries,
+            remove,
+            updated,
+            failure_entries,
+            pending_entries,
+            discovered=discovered,
+            errors=len(failures),
+            contract_base=args.contract_base,
+            bucket=bucket,
+            region=args.region,
+            biosigio_version=biosigio_version,
+            prior_pending=prior_pending,
+        )
+        check_index_invariant(index)
+        # Validate what is about to be published, not a copy of it. A producer bug
+        # caught here costs one run; the same bug reaching S3 costs every consumer,
+        # and index.json is the mandatory entry point (in-prefix ListBucket is
+        # denied), so there is no second source to fall back to.
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+    except Exception as exc:  # noqa: BLE001 - refuse to publish a bad index
+        print(
+            f"::error::refusing to publish {dataset_id}/zarr/index.json: {exc}",
+            flush=True,
+        )
+        return 1
+
+    manifest = merge_manifest(
+        prior_manifest, dataset_id, manifest_entries, [e["zarr"] for e in index["stores"]], updated
     )
+    try:
+        validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+    except Exception as exc:  # noqa: BLE001 - refuse to publish a bad manifest
+        print(
+            f"::error::refusing to publish {dataset_id}/zarr/manifest.json: {exc}",
+            flush=True,
+        )
+        return 1
+
     # `delete=False` is deliberate -- aws_cp reads the file back by path after the
     # handle closes -- but it left the upload as the file's only reader and nothing
     # as its owner, so every dataset conversion leaked one temp file into TMPDIR
@@ -3716,6 +4731,25 @@ def main() -> int:
     finally:
         with contextlib.suppress(OSError):
             os.unlink(index_local)
+
+    # The manifest is producer-only bookkeeping, so it is uploaded AFTER the index
+    # and a failure here does not fail the run: the serving copy and its entry
+    # point are already correct, and ADR 0005 says partial data still serves. The
+    # next run rewrites it.
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump(manifest, fh, separators=(",", ":"))
+        manifest_local = fh.name
+    try:
+        aws_cp(
+            manifest_local,
+            f"s3://{bucket}/{dataset_id}/zarr/manifest.json",
+            extra=["--content-type", "application/json", "--cache-control", "public, max-age=60"],
+        )
+    except Exception as exc:  # noqa: BLE001 - never fail a good conversion over this
+        print(f"::warning::manifest.json upload failed for {dataset_id}: {exc}", flush=True)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(manifest_local)
 
     # status stays "ready": the stores that converted + the index are on S3, so
     # the latest-only state is real and worth recording even on a partial run.
@@ -3752,6 +4786,13 @@ def main() -> int:
         # run is still marked `done` by the queue, so these need an explicit
         # requeue; they are reported here so that is visible. #1113
         "retryable_failures": retryable_failures,
+        # Coverage (#1197). These are what the queue turns into an AUTOMATIC
+        # re-queue of a `done` dataset (see zarr_queue.mark_done / reconcile), so
+        # #1113's "needs an explicit requeue" above is no longer the whole story;
+        # and what the backend records alongside the failure summary so a
+        # dashboard can rank datasets by coverage without reading every index.
+        "pending_count": index["pending_count"],
+        "discovered_count": index["discovered_count"],
     }
     with open(args.callback_out, "w") as fh:
         json.dump(callback, fh)

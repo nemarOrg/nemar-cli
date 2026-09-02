@@ -14,9 +14,11 @@ Run with:
 from __future__ import annotations
 
 import contextlib
+import inspect
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -108,7 +110,32 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     split_index,
     split_members_for,
     store_rel_for,
+    INDEX_SCHEMA_PATH,
+    MANIFEST_SCHEMA_PATH,
+    PENDING_MAX_ATTEMPTS,
+    channels_tsv_for,
+    check_index_invariant,
+    dataset_citation,
+    discover_primaries,
+    events_summary,
+    failure_detail,
+    fetch_dataset_row,
+    is_commit_sha,
+    merge_manifest,
+    nemar_store_attrs,
+    source_tree_for,
+    strip_local_paths,
+    validate_document,
 )
+
+
+# Real-shaped 40-hex commit SHAs. `merge_index` refuses anything else since index
+# v3: a published index that does not name the commit it was built from is
+# unreproducible and cannot seed the next incremental diff, and one was actually
+# published that way (on008083 carried `source_commit: ""`, #1197). A placeholder
+# like "sha" would now assert the wrong contract.
+SHA_OLD = "0" * 39 + "1"
+SHA_NEW = "0" * 39 + "2"
 
 
 def by_dir(primaries: list[str]) -> dict[str, list[str]]:
@@ -549,7 +576,7 @@ class TestSidecarRebuildsDirectoryRecordings(unittest.TestCase):
 class TestMergeIndex(unittest.TestCase):
     def test_upsert_remove_and_carry_over(self):
         prior = {
-            "source_commit": "old",
+            "source_commit": SHA_OLD,
             "stores": [
                 {"zarr": "sub-01/eeg/a_eeg.zarr", "store": "old-a"},
                 {"zarr": "sub-02/eeg/b_eeg.zarr", "store": "keep-b"},
@@ -557,23 +584,33 @@ class TestMergeIndex(unittest.TestCase):
         }
         converted = [{"zarr": "sub-01/eeg/a_eeg.zarr", "store": "new-a"}]
         index = merge_index(
-            prior, "nm000104", "newsha", converted, ["sub-02/eeg/b_eeg.zarr"], "2026-06-02T00:00:00Z"
+            prior, "nm000104", SHA_NEW, converted, ["sub-02/eeg/b_eeg.zarr"], "2026-06-02T00:00:00Z"
         )
-        self.assertEqual(index["source_commit"], "newsha")
+        self.assertEqual(index["source_commit"], SHA_NEW)
         self.assertEqual(index["store_count"], 1)
         self.assertEqual(index["format"], "nemar-zarr-index")
-        self.assertEqual(index["stores"], [{"zarr": "sub-01/eeg/a_eeg.zarr", "store": "new-a"}])
+        # v3 normalizes every published entry, this run's and the carried-over
+        # ones alike, so one index never mixes shapes (see _normalize_store_entry).
+        self.assertEqual(
+            index["stores"],
+            [{
+                "zarr": "sub-01/eeg/a_eeg.zarr",
+                "store": "new-a",
+                "source_tree": "raw",
+                "derived": False,
+            }],
+        )
 
     def test_no_prior_builds_fresh(self):
         index = merge_index(
-            None, "nm000104", "sha", [{"zarr": "x/y_eeg.zarr"}], [], "2026-06-02T00:00:00Z"
+            None, "nm000104", SHA_NEW, [{"zarr": "x/y_eeg.zarr"}], [], "2026-06-02T00:00:00Z"
         )
         self.assertEqual(index["store_count"], 1)
         self.assertEqual([s["zarr"] for s in index["stores"]], ["x/y_eeg.zarr"])
 
     def test_stores_sorted_by_zarr_path(self):
         converted = [{"zarr": "b.zarr"}, {"zarr": "a.zarr"}]
-        index = merge_index(None, "nm000104", "sha", converted, [], "2026-06-02T00:00:00Z")
+        index = merge_index(None, "nm000104", SHA_NEW, converted, [], "2026-06-02T00:00:00Z")
         self.assertEqual([s["zarr"] for s in index["stores"]], ["a.zarr", "b.zarr"])
 
 
@@ -2265,7 +2302,7 @@ class TestFailureReasons(unittest.TestCase):
 
     def test_merge_index_records_failures(self):
         index = merge_index(
-            None, "nm000104", "sha", [{"zarr": "a_eeg.zarr", "path": "a_eeg.set"}], [],
+            None, "nm000104", SHA_NEW, [{"zarr": "a_eeg.zarr", "path": "a_eeg.set"}], [],
             "2026-06-13T00:00:00Z",
             [{"path": "b-ave.fif", "zarr": "b-ave.zarr", "code": "not_continuous",
               "reason": "derivative"}],
@@ -2278,13 +2315,13 @@ class TestFailureReasons(unittest.TestCase):
     def test_merge_index_failure_clears_when_path_converts(self):
         # A path that failed before but converts now drops out of `failures`.
         prior = {
-            "source_commit": "old",
+            "source_commit": SHA_OLD,
             "stores": [],
             "failures": [{"path": "x_eeg.set", "zarr": "x_eeg.zarr",
                           "code": "corrupt_or_truncated", "reason": "..."}],
         }
         index = merge_index(
-            prior, "nm000104", "new", [{"zarr": "x_eeg.zarr", "path": "x_eeg.set"}], [],
+            prior, "nm000104", SHA_NEW, [{"zarr": "x_eeg.zarr", "path": "x_eeg.set"}], [],
             "2026-06-13T00:00:00Z", [],
         )
         self.assertEqual(index["failure_count"], 0)
@@ -2293,12 +2330,12 @@ class TestFailureReasons(unittest.TestCase):
     def test_merge_index_path_never_in_both_stores_and_failures(self):
         # A recording that newly fails drops its stale store entry.
         prior = {
-            "source_commit": "old",
+            "source_commit": SHA_OLD,
             "stores": [{"zarr": "x_eeg.zarr", "path": "x_eeg.set"}],
             "failures": [],
         }
         index = merge_index(
-            prior, "nm000104", "new", [], [], "2026-06-13T00:00:00Z",
+            prior, "nm000104", SHA_NEW, [], [], "2026-06-13T00:00:00Z",
             [{"path": "x_eeg.set", "zarr": "x_eeg.zarr", "code": "not_continuous",
               "reason": "..."}],
         )
@@ -2310,12 +2347,12 @@ class TestFailureReasons(unittest.TestCase):
 
     def test_merge_index_drops_failure_for_removed_store(self):
         prior = {
-            "source_commit": "old", "stores": [],
+            "source_commit": SHA_OLD, "stores": [],
             "failures": [{"path": "gone_eeg.set", "zarr": "gone_eeg.zarr",
                           "code": "not_continuous", "reason": "..."}],
         }
         index = merge_index(
-            prior, "nm000104", "new", [], ["gone_eeg.zarr"], "2026-06-13T00:00:00Z", [],
+            prior, "nm000104", SHA_NEW, [], ["gone_eeg.zarr"], "2026-06-13T00:00:00Z", [],
         )
         self.assertEqual(index["failure_count"], 0)
 
@@ -2326,7 +2363,7 @@ class TestFailureReasons(unittest.TestCase):
         # file we deliberately no longer serve. A genuine current failure for
         # a still-discoverable path must survive alongside it.
         prior = {
-            "source_commit": "old",
+            "source_commit": SHA_OLD,
             "stores": [],
             "failures": [
                 {"path": "derivatives/preprocessed/sub-01_task-x-epo.fif",
@@ -2338,7 +2375,7 @@ class TestFailureReasons(unittest.TestCase):
             ],
         }
         index = merge_index(
-            prior, "nm000104", "new", [], [], "2026-06-13T00:00:00Z", [],
+            prior, "nm000104", SHA_NEW, [], [], "2026-06-13T00:00:00Z", [],
         )
         self.assertEqual(index["failure_count"], 1)
         self.assertEqual(
@@ -2794,7 +2831,7 @@ class TestCleanOrphanSelection(unittest.TestCase):
         # --clean rewrites the index fresh (prior=None), so the derivatives
         # store -- never touched -- simply has no entry in the new index.
         index = merge_index(
-            None, "on005520", "sha", [], sorted(orphans),
+            None, "on005520", SHA_NEW, [], sorted(orphans),
             "2026-08-20T00:00:00Z",
             [{"path": head[1], "zarr": "sub-01/eeg/sub-01_task-rest_eeg.zarr",
               "code": "corrupt_or_truncated", "reason": "..."}],
@@ -3780,6 +3817,839 @@ class TestStreamingPeakIsChannelAware(unittest.TestCase):
             projected_peak_bytes(name, 100 * 1024**2, 1),
             projected_peak_bytes(name, 100 * 1024**2, 66),
         )
+
+def build_real_edf(directory: str, stem: str, n_channels: int = 4,
+                   rate: int = 200, seconds: int = 60) -> str:
+    """Write a REAL, spec-compliant EDF+ with pyedflib and return its path.
+
+    Not a fixture file in the repo, and not a stub: `test/fixtures/bids-minimal`'s
+    `.edf` is a 1 KB placeholder that pyedflib refuses to open ("the label is
+    incorrect"), so it cannot exercise a conversion at all. This writes one with
+    the same library biosigIO's importer reads it back with, so everything
+    downstream -- the importer, the resampler, the Zarr writer, the attrs this
+    module then republishes -- is the real code on real samples. 60 s at 200 Hz is
+    the smallest size that still produces a multi-level view pyramid, which is
+    what the geometry assertions need.
+    """
+    import numpy as np
+    import pyedflib
+
+    path = os.path.join(directory, f"{stem}.edf")
+    writer = pyedflib.EdfWriter(path, n_channels, file_type=pyedflib.FILETYPE_EDFPLUS)
+    writer.setSignalHeaders([
+        {
+            "label": f"E{i + 1}",
+            "dimension": "uV",
+            "sample_frequency": rate,
+            "physical_max": 500.0,
+            "physical_min": -500.0,
+            "digital_max": 32767,
+            "digital_min": -32768,
+            "transducer": "",
+            "prefilter": "",
+        }
+        for i in range(n_channels)
+    ])
+    rng = np.random.default_rng(0)
+    writer.writeSamples([rng.normal(0, 20, rate * seconds) for _ in range(n_channels)])
+    writer.close()
+    return path
+
+
+class TestSourceTree(unittest.TestCase):
+    def test_raw_is_the_default(self):
+        self.assertEqual(source_tree_for("sub-01/eeg/sub-01_task-x_eeg.set"), "raw")
+
+    def test_names_the_excluded_tree_it_sits_under(self):
+        self.assertEqual(
+            source_tree_for("derivatives/prep/sub-01/eeg/sub-01_eeg.set"), "derivatives"
+        )
+        self.assertEqual(source_tree_for("sourcedata/sub-01/eeg/x_eeg.set"), "sourcedata")
+        self.assertEqual(source_tree_for("code/x_eeg.set"), "code")
+
+    def test_segment_boundary_is_respected(self):
+        # `mycode/` and `derivatives_old/` are ordinary directories, matching
+        # in_excluded_tree's own rule.
+        self.assertEqual(source_tree_for("mycode/sub-01_eeg.set"), "raw")
+        self.assertEqual(source_tree_for("derivatives_old/sub-01_eeg.set"), "raw")
+
+
+class TestFailureDetail(unittest.TestCase):
+    """`detail` is the field that makes an opaque `file_read_error` diagnosable
+    from the published index (#1197). It must name the exception and keep the
+    message while dropping the conversion node's scratch paths, which are a fresh
+    mkdtemp name every run."""
+
+    def test_names_the_exception_class_and_first_line(self):
+        detail = failure_detail(ValueError("could not find measurement data\nsecond line"))
+        self.assertEqual(detail, "ValueError: could not find measurement data")
+
+    def test_strips_absolute_paths(self):
+        exc = OSError(
+            "/mnt/local/zarr-scratch/tmpab12/work/sub-01_eeg.edf: the file is not "
+            "EDF(+) or BDF(+) compliant the label is incorrect"
+        )
+        detail = failure_detail(exc)
+        self.assertNotIn("/mnt/local", detail)
+        self.assertIn("<path>", detail)
+        # The diagnosis itself survives -- that is the whole point of the field.
+        self.assertIn("not EDF(+) or BDF(+) compliant", detail)
+
+    def test_leaves_non_path_slashes_alone(self):
+        self.assertEqual(strip_local_paths("min/max envelope"), "min/max envelope")
+
+    def test_accepts_a_bare_string_for_a_synthesized_failure(self):
+        # A worker killed while running alone has no exception to report.
+        self.assertEqual(failure_detail("killed its worker process"),
+                         "killed its worker process")
+
+    def test_length_capped(self):
+        self.assertLessEqual(len(failure_detail(ValueError("x" * 5000))), 300)
+
+    def test_empty_is_none(self):
+        self.assertIsNone(failure_detail(None))
+
+
+class TestEventsSummary(unittest.TestCase):
+    """`n_events` / `trial_types` let a client judge a dataset, and pick an
+    epoching strategy, without reading a signal byte (#1059)."""
+
+    def test_counts_rows_and_trial_types(self):
+        text = (
+            "onset\tduration\ttrial_type\n"
+            "0.0\t0.5\tgo\n"
+            "1.0\t0.5\tstop\n"
+            "2.0\t0.5\tgo\n"
+        )
+        self.assertEqual(
+            events_summary(text), {"n_events": 3, "trial_types": {"go": 2, "stop": 1}}
+        )
+
+    def test_no_events_file_omits_both_keys(self):
+        # Absent keys mean "no events.tsv", which is not the same claim as
+        # "an events.tsv with no trial types".
+        self.assertEqual(events_summary(None), {})
+
+    def test_no_trial_type_column_is_an_empty_object(self):
+        self.assertEqual(
+            events_summary("onset\tduration\n0.0\t0.5\n"),
+            {"n_events": 1, "trial_types": {}},
+        )
+
+    def test_na_values_are_not_counted(self):
+        text = "onset\ttrial_type\n0.0\tn/a\n1.0\t\n2.0\tgo\n"
+        self.assertEqual(events_summary(text)["trial_types"], {"go": 1})
+        self.assertEqual(events_summary(text)["n_events"], 3)
+
+
+class TestDatasetProvenanceAttrs(unittest.TestCase):
+    """The structured `nemar` root attribute (#1064). Prose provenance is useless
+    to the machines that are increasingly what reads these stores."""
+
+    ROW = {
+        "name": "Resting state EEG",
+        "authors": "Doe J, Roe R",
+        "concept_doi": "10.82901/nemar.on007763",
+        "license": "CC0",
+        "hed_version": "8.2.0",
+        "latest_version": "v1.0.2",
+        "created_at": "2024-05-01T00:00:00Z",
+    }
+
+    def attrs(self, row):
+        return nemar_store_attrs(
+            dataset_id="on007763",
+            source_commit="a" * 40,
+            source_tree="raw",
+            derived=False,
+            engine_version="2",
+            contract_url="https://zarr.nemar.org/on007763/zarr/sub-01/eeg/x_eeg.zarr/",
+            row=row,
+        )
+
+    def test_carries_the_catalog_fields(self):
+        a = self.attrs(self.ROW)
+        self.assertEqual(a["doi"], "10.82901/nemar.on007763")
+        self.assertEqual(a["license"], "CC0")
+        self.assertEqual(a["hed_version"], "8.2.0")
+        self.assertEqual(a["source_commit"], "a" * 40)
+        self.assertEqual(a["engine_version"], "2")
+        self.assertEqual(a["source_tree"], "raw")
+        self.assertIs(a["derived"], False)
+
+    def test_missing_catalog_row_leaves_fields_null_not_invented(self):
+        a = self.attrs(None)
+        for key in ("doi", "license", "citation", "hed_version"):
+            self.assertIsNone(a[key], key)
+        # The fields the converter knows by itself are still stated.
+        self.assertEqual(a["dataset_id"], "on007763")
+        self.assertEqual(a["source_commit"], "a" * 40)
+
+    def test_citation_composes_from_the_row(self):
+        citation = dataset_citation(self.ROW)
+        self.assertIn("Doe J, Roe R", citation)
+        self.assertIn("(2024)", citation)
+        self.assertIn("Resting state EEG (v1.0.2).", citation)
+        self.assertIn("https://doi.org/10.82901/nemar.on007763", citation)
+
+    def test_citation_needs_a_name(self):
+        self.assertIsNone(dataset_citation({"authors": "Doe J"}))
+        self.assertIsNone(dataset_citation(None))
+
+    def test_citation_omits_the_parts_the_row_lacks(self):
+        citation = dataset_citation({"name": "Untitled"})
+        self.assertEqual(citation, "Untitled. NEMAR.")
+
+
+class TestFetchDatasetRow(unittest.TestCase):
+    """`fetch_dataset_row` against a REAL HTTP server on a real socket -- the
+    provenance attrs depend on its parsing (two response shapes) and on it never
+    failing a conversion when the catalog is unreachable."""
+
+    def serve(self, handler_body: bytes | None, status: int = 200):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
+                if handler_body is None:
+                    self.send_error(500)
+                    return
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(handler_body)))
+                self.end_headers()
+                self.wfile.write(handler_body)
+
+            def log_message(self, *_args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_port}"
+
+    def test_reads_a_bare_row(self):
+        base = self.serve(json.dumps({"dataset_id": "on007763", "license": "CC0"}).encode())
+        self.assertEqual(fetch_dataset_row(base, "on007763")["license"], "CC0")
+
+    def test_reads_a_row_wrapped_in_dataset(self):
+        base = self.serve(json.dumps({"dataset": {"license": "CC-BY-4.0"}}).encode())
+        self.assertEqual(fetch_dataset_row(base, "on007763")["license"], "CC-BY-4.0")
+
+    def test_an_unreachable_catalog_returns_none_rather_than_raising(self):
+        # Provenance is best-effort: a catalog blip must not cost a conversion.
+        base = self.serve(None)
+        self.assertIsNone(fetch_dataset_row(base, "on007763"))
+
+
+class TestIndexFormatV3(unittest.TestCase):
+    """The v3 envelope (#1059): where the bytes are, which engine made them, and
+    a `source_commit` that is always a real commit."""
+
+    HEAD = "b" * 40
+
+    def build(self, **kwargs):
+        base = {
+            "prior": None,
+            "dataset_id": "on007763",
+            "head_commit": self.HEAD,
+            "converted": [{"zarr": "sub-01/eeg/a_eeg.zarr", "path": "sub-01/eeg/a_eeg.edf"}],
+            "removed_store_rels": [],
+            "updated_utc": "2026-09-02T00:00:00Z",
+        }
+        base.update(kwargs)
+        return merge_index(
+            base.pop("prior"),
+            base.pop("dataset_id"),
+            base.pop("head_commit"),
+            base.pop("converted"),
+            base.pop("removed_store_rels"),
+            base.pop("updated_utc"),
+            **base,
+        )
+
+    def test_declares_the_data_plane(self):
+        index = self.build(bucket="nemar", region="us-east-2")
+        self.assertEqual(index["format"], "nemar-zarr-index")
+        self.assertEqual(index["format_version"], 3)
+        self.assertEqual(index["contract_base"], "https://zarr.nemar.org/on007763/zarr/")
+        self.assertEqual(
+            index["data_base"], "https://nemar.s3.us-east-2.amazonaws.com/on007763/zarr/"
+        )
+        self.assertEqual(index["data_base_kind"], "s3-public")
+        self.assertEqual(index["s3_uri"], "s3://nemar/on007763/zarr/")
+        self.assertEqual(index["s3_region"], "us-east-2")
+        self.assertIs(index["s3_anonymous"], True)
+        self.assertEqual(index["n_recordings"], index["store_count"])
+
+    def test_contract_base_is_not_derived_from_the_bucket(self):
+        # The test instance publishes its own host while writing to nemar-dev.
+        index = self.build(contract_base="https://zarr-test.nemar.org", bucket="nemar-dev")
+        self.assertEqual(index["contract_base"], "https://zarr-test.nemar.org/on007763/zarr/")
+        self.assertEqual(
+            index["data_base"], "https://nemar-dev.s3.us-east-2.amazonaws.com/on007763/zarr/"
+        )
+
+    def test_stamps_the_engine_and_the_library(self):
+        index = self.build(engine_version="7", biosigio_version="1.2.6")
+        self.assertEqual(index["engine_version"], "7")
+        self.assertEqual(index["biosigio_version"], "1.2.6")
+
+    def test_refuses_to_build_without_a_real_commit(self):
+        # on008083 published `source_commit: ""` while D1 held the real SHA.
+        for bad in ("", "abc123", None, "z" * 40, "A" * 40):
+            with self.subTest(commit=bad), self.assertRaises(ValueError):
+                self.build(head_commit=bad)
+
+    def test_is_commit_sha(self):
+        self.assertTrue(is_commit_sha("0123456789abcdef" + "0" * 24))
+        self.assertFalse(is_commit_sha("0123456789ABCDEF" + "0" * 24))  # upper-case
+        self.assertFalse(is_commit_sha("0" * 39))
+        self.assertFalse(is_commit_sha(None))
+
+    def test_source_key_is_not_published_in_the_index(self):
+        index = self.build(
+            converted=[{
+                "zarr": "sub-01/eeg/a_eeg.zarr",
+                "path": "sub-01/eeg/a_eeg.edf",
+                "source_key": "SHA256E-s100--abc.edf",
+            }],
+        )
+        self.assertNotIn("source_key", index["stores"][0])
+
+    def test_a_carried_over_v1_entry_is_normalized(self):
+        # An index built incrementally on top of a v1 one must not publish a
+        # half-v1 document: `source_key` goes, `source_tree`/`derived` appear.
+        prior = {
+            "source_commit": "a" * 40,
+            "stores": [{
+                "zarr": "sub-02/eeg/b_eeg.zarr",
+                "path": "sub-02/eeg/b_eeg.edf",
+                "source_key": "SHA256E-s200--old.edf",
+            }],
+        }
+        index = self.build(prior=prior)
+        carried = next(s for s in index["stores"] if s["zarr"] == "sub-02/eeg/b_eeg.zarr")
+        self.assertNotIn("source_key", carried)
+        self.assertEqual(carried["source_tree"], "raw")
+        self.assertIs(carried["derived"], False)
+
+    def test_manifest_carries_the_source_key(self):
+        manifest = merge_manifest(
+            None,
+            "on007763",
+            [{"zarr": "sub-01/eeg/a_eeg.zarr", "source_key": "SHA256E-s100--abc.edf",
+              "size_bytes": 100}],
+            ["sub-01/eeg/a_eeg.zarr"],
+            "2026-09-02T00:00:00Z",
+        )
+        self.assertEqual(manifest["format"], "nemar-zarr-manifest")
+        self.assertEqual(manifest["format_version"], 1)
+        self.assertEqual(manifest["stores"], [{
+            "zarr": "sub-01/eeg/a_eeg.zarr",
+            "source_key": "SHA256E-s100--abc.edf",
+            "size_bytes": 100,
+        }])
+
+    def test_manifest_tracks_the_index_store_set(self):
+        # A store the index no longer publishes must not linger in the manifest,
+        # or the two documents disagree about what exists.
+        prior = {"stores": [
+            {"zarr": "gone.zarr", "source_key": "k1", "size_bytes": 1},
+            {"zarr": "kept.zarr", "source_key": "k2", "size_bytes": 2},
+        ]}
+        manifest = merge_manifest(prior, "on007763", [], ["kept.zarr"], "2026-09-02T00:00:00Z")
+        self.assertEqual([s["zarr"] for s in manifest["stores"]], ["kept.zarr"])
+
+
+class TestCoverageInvariant(unittest.TestCase):
+    """#1197's acceptance criterion: every discovered raw recording is accounted
+    for exactly once, in the published document."""
+
+    HEAD = "c" * 40
+    A = "sub-01/eeg/a_eeg.edf"
+    B = "sub-02/eeg/b_eeg.edf"
+    C = "sub-03/eeg/c_eeg.edf"
+
+    def build(self, converted=(), failures=(), pending=(), discovered=None, **kw):
+        return merge_index(
+            kw.pop("prior", None),
+            "on008083",
+            self.HEAD,
+            list(converted),
+            [],
+            "2026-09-02T00:00:00Z",
+            list(failures),
+            list(pending),
+            discovered=discovered,
+            **kw,
+        )
+
+    def test_full_run_balances(self):
+        index = self.build(
+            converted=[{"zarr": store_rel_for(self.A), "path": self.A}],
+            failures=[{"path": self.B, "zarr": store_rel_for(self.B),
+                       "code": "corrupt_or_truncated", "reason": "...", "detail": "..."}],
+            pending=[{"path": self.C, "reason": "infra_failure", "last_error": "boom"}],
+            discovered=[self.A, self.B, self.C],
+        )
+        self.assertEqual(index["discovered_count"], 3)
+        self.assertEqual((index["store_count"], index["failure_count"],
+                          index["pending_count"]), (1, 1, 1))
+        check_index_invariant(index)
+
+    def test_partial_run_lists_the_untouched_recordings(self):
+        # The five recordings on008083 lost: discovered, not attempted, and
+        # before v3 present in neither list.
+        index = self.build(
+            converted=[{"zarr": store_rel_for(self.A), "path": self.A}],
+            discovered=[self.A, self.B, self.C],
+        )
+        check_index_invariant(index)
+        self.assertEqual(index["pending_count"], 2)
+        reasons = {p["path"]: p for p in index["pending"]}
+        self.assertEqual(reasons[self.B]["reason"], "not_attempted")
+        self.assertEqual(reasons[self.B]["attempts"], 0)
+        self.assertEqual(reasons[self.B]["zarr"], store_rel_for(self.B))
+
+    def test_entries_for_undiscovered_paths_are_dropped(self):
+        prior = {"source_commit": "a" * 40,
+                 "stores": [{"zarr": store_rel_for(self.C), "path": self.C}]}
+        index = self.build(
+            prior=prior,
+            converted=[{"zarr": store_rel_for(self.A), "path": self.A}],
+            discovered=[self.A],
+        )
+        check_index_invariant(index)
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+
+    def test_check_index_invariant_rejects_an_unbalanced_document(self):
+        # Hand-built rather than produced: merge_index makes the invariant true
+        # by construction, so the only way to watch the checker fail is to hand
+        # it the shape the construction is protecting against.
+        with self.assertRaises(ValueError) as ctx:
+            check_index_invariant({
+                "dataset_id": "on008083", "discovered_count": 43,
+                "store_count": 2, "failure_count": 36, "pending_count": 0,
+            })
+        self.assertIn("does not balance", str(ctx.exception))
+
+    def test_check_index_invariant_rejects_missing_counts(self):
+        with self.assertRaises(ValueError):
+            check_index_invariant({"discovered_count": 1, "store_count": 1})
+
+    def test_errors_counts_this_runs_failures_typed_and_not(self):
+        index = self.build(
+            converted=[{"zarr": store_rel_for(self.A), "path": self.A}],
+            failures=[{"path": self.B, "zarr": store_rel_for(self.B),
+                       "code": "not_continuous", "reason": "..."}],
+            pending=[{"path": self.C, "reason": "infra_failure"}],
+            discovered=[self.A, self.B, self.C],
+            errors=2,
+        )
+        self.assertEqual(index["errors"], 2)
+
+    def test_discovered_primaries_match_the_worklist(self):
+        # The coverage denominator has to be the set the converter would attempt,
+        # not a second walk that could drift from it.
+        head = [
+            "sub-01/eeg/sub-01_task-x_eeg.set",
+            "sub-01/eeg/sub-01_task-x_eeg.fdt",
+            "derivatives/prep/sub-01/eeg/sub-01_task-x_eeg.set",
+            "sub-02/meg/sub-02_task-x_acq-crosstalk_meg.fif",
+            "dataset_description.json",
+        ]
+        convert, _remove = compute_worklist(head, [], full=True)
+        self.assertEqual(discover_primaries(head), convert)
+        self.assertEqual(discover_primaries(head), ["sub-01/eeg/sub-01_task-x_eeg.set"])
+
+
+class TestPendingRetries(unittest.TestCase):
+    """Pending entries age, and stop aging (#1197). An infra failure that will
+    never succeed must not promise forever that it is about to."""
+
+    HEAD = "d" * 40
+    PATH = "sub-01/eeg/a_eeg.edf"
+
+    def run_round(self, prior_pending, reason="infra_failure", last_error="boom"):
+        return merge_index(
+            None, "on008083", self.HEAD, [], [], "2026-09-02T00:00:00Z", [],
+            [{"path": self.PATH, "reason": reason, "last_error": last_error}],
+            discovered=[self.PATH],
+            prior_pending=prior_pending,
+        )
+
+    def test_attempts_start_at_one_and_accumulate(self):
+        index = self.run_round(None)
+        self.assertEqual(index["pending"][0]["attempts"], 1)
+        self.assertEqual(index["pending"][0]["reason"], "infra_failure")
+        self.assertEqual(index["pending"][0]["last_error"], "boom")
+        self.assertEqual(index["pending"][0]["last_attempt_utc"], "2026-09-02T00:00:00Z")
+
+        index = self.run_round(index["pending"])
+        self.assertEqual(index["pending"][0]["attempts"], 2)
+
+    def test_exhaustion_promotes_to_a_typed_failure(self):
+        pending = None
+        for round_n in range(1, PENDING_MAX_ATTEMPTS):
+            index = self.run_round(pending)
+            self.assertEqual(index["pending_count"], 1, f"round {round_n}")
+            pending = index["pending"]
+        # The round that reaches the cap moves it out of `pending` for good.
+        index = self.run_round(pending)
+        self.assertEqual(index["pending_count"], 0)
+        self.assertEqual(index["failure_count"], 1)
+        failure = index["failures"][0]
+        self.assertEqual(failure["code"], "retry_exhausted")
+        self.assertEqual(failure["detail"], "boom")
+        self.assertEqual(failure["attempts"], PENDING_MAX_ATTEMPTS)
+        self.assertTrue(failure["reason"])
+        check_index_invariant(index)
+
+    def test_a_memory_budget_pending_is_reason_tagged(self):
+        index = self.run_round(None, reason="memory_budget")
+        self.assertEqual(index["pending"][0]["reason"], "memory_budget")
+
+    def test_converting_clears_the_pending_entry(self):
+        first = self.run_round(None)
+        index = merge_index(
+            None, "on008083", self.HEAD,
+            [{"zarr": store_rel_for(self.PATH), "path": self.PATH}],
+            [], "2026-09-02T01:00:00Z", [], [],
+            discovered=[self.PATH],
+            prior_pending=first["pending"],
+        )
+        self.assertEqual(index["pending_count"], 0)
+        self.assertEqual(index["store_count"], 1)
+        check_index_invariant(index)
+
+    def test_a_path_is_never_in_two_lists(self):
+        index = merge_index(
+            None, "on008083", self.HEAD,
+            [{"zarr": store_rel_for(self.PATH), "path": self.PATH}],
+            [], "2026-09-02T00:00:00Z", [],
+            [{"path": self.PATH, "reason": "infra_failure"}],
+            discovered=[self.PATH],
+        )
+        self.assertEqual(index["store_count"], 0)
+        self.assertEqual(index["pending_count"], 1)
+        check_index_invariant(index)
+
+    def test_not_attempted_never_ages_toward_exhaustion(self):
+        # A recording a `--limit`ed run never reached has not failed at anything.
+        pending = None
+        for _ in range(PENDING_MAX_ATTEMPTS + 2):
+            index = merge_index(
+                None, "on008083", self.HEAD, [], [], "2026-09-02T00:00:00Z", [], [],
+                discovered=[self.PATH], prior_pending=pending,
+            )
+            pending = index["pending"]
+        self.assertEqual(index["pending_count"], 1)
+        self.assertEqual(index["pending"][0]["reason"], "not_attempted")
+        self.assertEqual(index["pending"][0]["attempts"], 0)
+
+
+class TestIndexSchemaSelfCheck(unittest.TestCase):
+    """The converter validates the document it is about to publish. index.json is
+    the mandatory entry point (in-prefix ListBucket is denied), so a malformed one
+    has no fallback for any consumer."""
+
+    HEAD = "e" * 40
+
+    def index(self):
+        return merge_index(
+            None, "on007763", self.HEAD,
+            [{"zarr": "sub-01/eeg/a_eeg.zarr", "path": "sub-01/eeg/a_eeg.edf",
+              "updated_utc": "2026-09-02T00:00:00Z", "source_tree": "raw",
+              "derived": False, "modalities": ["eeg"],
+              "groups": [{"name": "eeg_200hz", "modality": "EEG", "rate": 200.0,
+                          "n_channels": 4, "n_samples": 12000, "duration_s": 60.0,
+                          "n_view_levels": 3, "view_chunk_columns": 1024,
+                          "source_rate_hz": 200.0, "chunk_samples": 800,
+                          "shard_samples": 12000}],
+              "n_events": 3, "trial_types": {"go": 2, "stop": 1},
+              "units_report": {"converted": 1, "relabelled": 0,
+                               "kept_importer_unit": 0, "units_column_present": True}}],
+            [], "2026-09-02T00:00:00Z",
+            [{"path": "sub-02/eeg/b_eeg.edf", "zarr": "sub-02/eeg/b_eeg.zarr",
+              "code": "file_read_error", "reason": "...", "detail": "OSError: ..."}],
+            [{"path": "sub-03/eeg/c_eeg.edf", "reason": "infra_failure",
+              "last_error": "boom"}],
+            discovered=["sub-01/eeg/a_eeg.edf", "sub-02/eeg/b_eeg.edf",
+                        "sub-03/eeg/c_eeg.edf"],
+            biosigio_version="1.2.6",
+        )
+
+    def test_a_built_index_validates(self):
+        validate_document(self.index(), INDEX_SCHEMA_PATH, "index")
+
+    def test_a_mutated_index_is_rejected(self):
+        import jsonschema
+
+        for mutate in (
+            lambda d: d.__setitem__("source_commit", ""),
+            lambda d: d.__setitem__("format_version", 1),
+            lambda d: d.__setitem__("store_count", -1),
+            lambda d: d.__setitem__("data_base_kind", "gopher"),
+            lambda d: d.__setitem__("stray_key", 1),
+            lambda d: d["pending"][0].__setitem__("reason", "because"),
+            lambda d: d["stores"][0].pop("source_tree"),
+            lambda d: d["failures"][0].pop("code"),
+        ):
+            doc = json.loads(json.dumps(self.index()))
+            mutate(doc)
+            with self.subTest(mutation=str(mutate)), self.assertRaises(
+                jsonschema.ValidationError
+            ):
+                validate_document(doc, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_built_manifest_validates(self):
+        manifest = merge_manifest(
+            None, "on007763",
+            [{"zarr": "sub-01/eeg/a_eeg.zarr", "source_key": "SHA256E-s100--a.edf",
+              "size_bytes": 100}],
+            ["sub-01/eeg/a_eeg.zarr"], "2026-09-02T00:00:00Z",
+        )
+        validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_a_mutated_manifest_is_rejected(self):
+        import jsonschema
+
+        manifest = merge_manifest(
+            None, "on007763",
+            [{"zarr": "sub-01/eeg/a_eeg.zarr", "source_key": "k", "size_bytes": 1}],
+            ["sub-01/eeg/a_eeg.zarr"], "2026-09-02T00:00:00Z",
+        )
+        manifest["stores"][0]["zarr"] = "sub-01/eeg/a_eeg.set"  # not a store path
+        with self.assertRaises(jsonschema.ValidationError):
+            validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
+
+class TestRealRecordingV3Fields(unittest.TestCase):
+    """End-to-end over the STORE-LEVEL functions on a real recording.
+
+    Not `convert_one`: that uploads with `aws s3 sync`, so a whole-run test would
+    need S3 credentials and a bucket. Everything between the file and the upload
+    is exercised here on real bytes -- biosigIO reads a real EDF, writes a real
+    Zarr v3 store, and `store_metadata` reads back the very attrs the index
+    republishes. That is the half where a biosigIO attr rename would silently
+    empty the new fields.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+        cls._tmp = tempfile.TemporaryDirectory()
+        d = cls._tmp.name
+        cls.recording = build_real_edf(d, "sub-01_task-rest_eeg")
+        cls.channels = os.path.join(d, "sub-01_task-rest_channels.tsv")
+        with open(cls.channels, "w") as fh:
+            fh.writelines(
+                ["name\ttype\tunits\n"] + [f"E{i + 1}\tEEG\tV\n" for i in range(4)]
+            )
+        cls.events = os.path.join(d, "sub-01_task-rest_events.tsv")
+        with open(cls.events, "w") as fh:
+            fh.writelines(
+                ["onset\tduration\ttrial_type\n"]
+                + [
+                    f"{i * 5.0}\t0.5\t{'go' if i % 2 == 0 else 'stop'}\n"
+                    for i in range(6)
+                ]
+            )
+        cls.store = os.path.join(d, "sub-01_task-rest_eeg.zarr")
+        convert_recording(
+            cls.recording, cls.events, cls.store, channels_local=cls.channels
+        )
+        cls.meta = store_metadata(cls.store)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_view_geometry_is_republished_from_the_store(self):
+        group = self.meta["groups"][0]
+        # Without n_view_levels the website reader probes view/1, view/2, ...
+        # until a 404 (#1178 item 2).
+        self.assertGreaterEqual(group["n_view_levels"], 1)
+        # Constant COLUMNS per view chunk is what turns a zoomed-out read from
+        # 594 requests into 3 (#1178 item 1, biosigio 1.2.6).
+        self.assertEqual(group["view_chunk_columns"], 1024)
+
+    def test_source_rate_is_the_acquisition_rate_not_the_serving_cap(self):
+        group = self.meta["groups"][0]
+        self.assertEqual(group["source_rate_hz"], 200.0)
+        self.assertGreater(group["chunk_samples"], 0)
+        self.assertGreater(group["shard_samples"], 0)
+
+    def test_units_report_is_published_when_channels_tsv_was_applied(self):
+        report = self.meta["units_report"]
+        self.assertIs(report["units_column_present"], True)
+        for key in ("converted", "relabelled", "kept_importer_unit"):
+            self.assertIsInstance(report[key], int)
+
+    def test_no_units_report_when_no_channels_tsv_applies(self):
+        # Absence means "not applied", never "applied cleanly" -- the distinction
+        # a consumer needs while the streaming path still cannot apply it.
+        with tempfile.TemporaryDirectory() as d:
+            store = os.path.join(d, "plain_eeg.zarr")
+            convert_recording(self.recording, None, store)
+            self.assertNotIn("units_report", store_metadata(store))
+
+    def test_events_summary_matches_the_applied_events_tsv(self):
+        with open(self.events) as fh:
+            summary = events_summary(fh.read())
+        self.assertEqual(summary["n_events"], 6)
+        self.assertEqual(summary["trial_types"], {"go": 3, "stop": 3})
+
+    def test_provenance_attrs_land_in_the_store_root(self):
+        import zarr
+
+        embed_root_attr(
+            self.store,
+            "nemar",
+            nemar_store_attrs(
+                dataset_id="on007763",
+                source_commit="f" * 40,
+                source_tree=source_tree_for("sub-01/eeg/sub-01_task-rest_eeg.edf"),
+                derived=False,
+                engine_version="2",
+                contract_url="https://zarr.nemar.org/on007763/zarr/x.zarr/",
+                row={"name": "N", "license": "CC0"},
+            ),
+        )
+        attrs = dict(zarr.open_group(self.store, mode="r").attrs)
+        self.assertEqual(attrs["nemar"]["license"], "CC0")
+        self.assertEqual(attrs["nemar"]["source_tree"], "raw")
+        # biosigIO's own attributes are untouched.
+        self.assertEqual(attrs["format"], "biosigio-zarr")
+        self.assertIn("channel_groups", attrs)
+
+    def test_sidecar_applies_to_a_recording_with_no_sidecar_beside_it(self):
+        """The ADR 0028 MaxShield shape, without needing a MaxShield recording.
+
+        On that path `primary_local` is the Signal-Space-Separated copy at
+        `work/sss_<basename>` -- a real file at a path where no channels.tsv is
+        adjacent. biosigIO's own `bids_channels="auto"` resolves the sidecar as a
+        SIBLING, so it would find nothing there and silently serve importer units
+        and MNE-inferred types. This reproduces exactly that geometry with a real
+        EDF at a renamed path in an empty directory, and asserts the sidecar still
+        reaches the conversion.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            filtered = os.path.join(d, "sss_sub-01_task-rest_eeg.edf")
+            shutil.copyfile(self.recording, filtered)
+            self.assertEqual(
+                [f for f in os.listdir(d) if f.endswith("_channels.tsv")], [],
+                "the fixture must have NO sidecar beside the recording",
+            )
+            store = os.path.join(d, "out.zarr")
+            convert_recording(filtered, None, store, channels_local=self.channels)
+            report = store_metadata(store)["units_report"]
+            self.assertIs(report["units_column_present"], True)
+
+    def test_sibling_auto_detection_is_not_what_applies_the_sidecar(self):
+        """A sidecar sitting beside the recording but NOT the one this driver
+        resolved must not be picked up: `bids_channels` is off, so the only
+        sidecar that can shape a store is the one passed in.
+
+        Without this, the SSS test above could pass for the wrong reason on some
+        future release whose auto-detection searches more widely.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            recording = os.path.join(d, "sub-01_task-rest_eeg.edf")
+            shutil.copyfile(self.recording, recording)
+            # A sibling naming channels the recording does not have: applied, it
+            # would report nothing changed; ignored, there is no report at all.
+            with open(os.path.join(d, "sub-01_task-rest_channels.tsv"), "w") as fh:
+                fh.write("name\ttype\tunits\nNOPE\tEEG\tV\n")
+            store = os.path.join(d, "out.zarr")
+            convert_recording(recording, None, store)
+            self.assertNotIn("units_report", store_metadata(store))
+
+    def test_streaming_gets_the_sidecar_when_the_library_can_take_it(self):
+        """The streaming exporter's sidecar argument, probed against the REAL
+        `stream_to_zarr` rather than a stand-in.
+
+        biosigIO 1.2.6's streaming exporter has no `bids_channels` parameter
+        (that is biosigio#127/#128), so on the pinned release the right behaviour
+        is to pass nothing -- and passing the path anyway would be worse than
+        useless: 1.2.6's `Recording.from_file` ACCEPTS `bids_channels=<path>` and
+        silently ignores it, so a version-blind driver would believe the sidecar
+        had been applied. This asserts the rule against both real function
+        signatures, so it starts asserting the opposite the moment the pin moves.
+        """
+        from biosigio import Recording, stream_to_zarr
+
+        kwargs = generate_zarr.stream_channels_kwarg(stream_to_zarr, self.channels)
+        supported = "bids_channels" in inspect.signature(stream_to_zarr).parameters
+        if supported:
+            self.assertEqual(kwargs, {"bids_channels": self.channels})
+        else:
+            self.assertEqual(kwargs, {})
+        # No sidecar resolved -> nothing to pass, whatever the library supports.
+        self.assertEqual(generate_zarr.stream_channels_kwarg(stream_to_zarr, None), {})
+        # And the in-memory path never relies on the keyword to APPLY anything:
+        # it turns auto-detection off and calls apply_channels_tsv itself.
+        self.assertEqual(
+            generate_zarr._bids_channels_off(Recording), {"bids_channels": "off"}
+        )
+
+    def test_streaming_path_converts_with_the_sidecar_argument(self):
+        """Drive the real streaming exporter through `convert_recording` with a
+        sidecar resolved, so the call site is exercised rather than just the
+        kwarg helper. Recorded at the biosigIO boundary because on the pinned
+        release there is no observable effect to assert instead: the real
+        exporter still runs and writes the store, the wrapper only notes what it
+        was called with.
+        """
+        calls: list[dict] = []
+        import biosigio
+
+        real = biosigio.stream_to_zarr
+
+        def recording_stream_to_zarr(*args, **kwargs):
+            calls.append(kwargs)
+            return real(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as d:
+            store = os.path.join(d, "streamed.zarr")
+            biosigio.stream_to_zarr = recording_stream_to_zarr
+            saved = generate_zarr.STREAM_EDF_MIN_BYTES
+            try:
+                # Force the streaming branch for a small real EDF.
+                generate_zarr.STREAM_EDF_MIN_BYTES = 1
+                convert_recording(
+                    self.recording, None, store, channels_local=self.channels
+                )
+            finally:
+                generate_zarr.STREAM_EDF_MIN_BYTES = saved
+                biosigio.stream_to_zarr = real
+        if not generate_zarr._EDF_STREAMABLE:
+            self.skipTest("installed biosigio does not stream EDF")
+        self.assertEqual(len(calls), 1, "the streaming exporter must have been used")
+        expected = generate_zarr.stream_channels_kwarg(real, self.channels)
+        if expected:
+            self.assertEqual(calls[0].get("bids_channels"), self.channels)
+        else:
+            self.assertNotIn("bids_channels", calls[0])
+
+    def test_channels_tsv_resolution_is_shared_with_the_fidelity_gate(self):
+        head = {
+            "sub-01/eeg/sub-01_task-rest_eeg.edf",
+            "sub-01/eeg/sub-01_task-rest_channels.tsv",
+            "sub-01/sub-01_channels.tsv",
+        }
+        self.assertEqual(
+            channels_tsv_for("sub-01/eeg/sub-01_task-rest_eeg.edf", head),
+            "sub-01/eeg/sub-01_task-rest_channels.tsv",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
