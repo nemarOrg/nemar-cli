@@ -106,12 +106,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
       # hallu-zarr.sh matches this job's paths filter but nothing checked it.
       # Its argument parser shipped an infinite loop and a silent scope-widening
       # bug during this epic, both found by hand-testing on the production node.
       - name: Shellcheck the driver script
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          bash -n scripts/zarr/hallu-zarr.sh
           shellcheck --severity=warning scripts/zarr/hallu-zarr.sh
 
       - name: Converter helper tests
@@ -125,6 +129,14 @@ jobs:
 
       - name: Power-line-frequency patch tests
         run: python scripts/zarr/test_patch_power_line_frequency.py
+
+      # --test / --print-config config-resolution tests (epic #1181 phase 3).
+      # pytest, not the plain `python <file>` the tests above use -- this file
+      # drives real subprocesses against hallu-zarr.sh rather than importing
+      # pure helpers, so parametrized cases (the four guard-rail conditions)
+      # read better as pytest cases than as a unittest subclass.
+      - name: Hallu zarr --test config tests
+        run: cd scripts/zarr && uv run --with pytest pytest test_hallu_zarr_config.py -v
 
   # Tier-2 duration backfill (scripts/patch_duration.py), moved here from
   # nemarDatasets/.github with the converter it imports (#1109). Unlike the
