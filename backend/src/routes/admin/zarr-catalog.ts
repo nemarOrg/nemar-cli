@@ -13,7 +13,22 @@
 import { publishZarrCatalog } from "../../services/zarr-catalog";
 import type { AdminRouter } from "./shared";
 
-export function registerZarrCatalogRoutes(admin: AdminRouter): void {
+/**
+ * `deps.publish` defaults to the real `publishZarrCatalog` and exists so
+ * `backend/test/zarr-catalog-publish-route.test.ts` can register this exact
+ * route against a fresh app with the S3 boundary substituted (a real local
+ * `Bun.serve()` receiver), the same "one true network boundary substituted"
+ * idiom `runRecordingStatsSweep`'s `fetchIndex` parameter uses -- not a
+ * second implementation of this handler's auth/error-shaping logic.
+ * `registerZarrCatalogRoutes(adminRoutes)` (routes/admin/index.ts) omits it,
+ * so production always resolves the default.
+ */
+export function registerZarrCatalogRoutes(
+  admin: AdminRouter,
+  deps: { publish?: typeof publishZarrCatalog } = {},
+): void {
+  const publish = deps.publish ?? publishZarrCatalog;
+
   /**
    * POST /admin/zarr-catalog/publish
    *
@@ -24,7 +39,7 @@ export function registerZarrCatalogRoutes(admin: AdminRouter): void {
    */
   admin.post("/zarr-catalog/publish", async (c) => {
     try {
-      const result = await publishZarrCatalog(c.env);
+      const result = await publish(c.env);
       return c.json(result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
