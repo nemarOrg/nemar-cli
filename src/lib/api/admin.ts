@@ -1307,3 +1307,50 @@ export async function publishZarrCatalog(): Promise<PublishZarrCatalogResponse> 
     true,
   );
 }
+
+// ============================================================================
+// Zarr fidelity verification sweep (issue #1068, epic #1181 phase 8)
+// ============================================================================
+
+/** One {path, code} mismatch example, bounded to 20 entries / 4 KB server-side. */
+export interface ZarrFidelityMismatchExample {
+  path: string;
+  code: "channel_count_mismatch" | "duration_mismatch" | "rate_mismatch";
+}
+
+/** Per-dataset outcome for every candidate the sweep reached a verdict for. */
+export interface ZarrFidelityDatasetResult {
+  dataset_id: string;
+  verdict: "verified" | "failed" | "unverifiable";
+  sampled: number;
+  checked: number;
+  examples: ZarrFidelityMismatchExample[];
+}
+
+/** One batch of the zarr fidelity sweep
+ *  (`POST /admin/datasets/zarr-fidelity-sweep`). */
+export interface ZarrFidelitySweepBatchResponse {
+  processed: number;
+  verified: number;
+  failed: number;
+  unverifiable: number;
+  results: ZarrFidelityDatasetResult[];
+  errors: { dataset_id: string; error: string }[];
+  /** Candidates still unverified after this run; null if the count query failed. */
+  remaining: number | null;
+}
+
+/** Run one bounded zarr fidelity sweep batch (server default 25, clamped to
+ *  [1,100]). */
+export async function zarrFidelitySweep(options?: {
+  limit?: number;
+}): Promise<ZarrFidelitySweepBatchResponse> {
+  const params = new URLSearchParams();
+  if (options?.limit != null) params.set("limit", String(options.limit));
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return request<ZarrFidelitySweepBatchResponse>(
+    `/admin/datasets/zarr-fidelity-sweep${query}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
