@@ -2034,10 +2034,22 @@ def _normalize_store_entry(entry: dict) -> StoreEntry:
     alone -- a store that exists was built from a discoverable raw recording, and
     `derived` is stated by the SSS path, which also writes `sss`, so its absence
     is evidence rather than a guess.
+
+    A NON-RAW path is the exception, and it OVERRIDES rather than defaults. A
+    store under `derivatives/`/`sourcedata/`/`code/` is one of the pre-ADR-0027
+    survivors: whatever the old entry claimed, its source sits in that tree and
+    the signal it serves is a processed derivative, so both facts are stated
+    outright. Leaving them to `setdefault` would let a v1 entry that said
+    `source_tree: "raw"` keep saying it.
     """
-    out = {k: v for k, v in entry.items() if k != "source_key"}
-    out.setdefault("source_tree", source_tree_for(str(out.get("path", ""))))
-    out.setdefault("derived", bool(out.get("sss")))
+    out: StoreEntry = {k: v for k, v in entry.items() if k != "source_key"}  # type: ignore[assignment]
+    tree = source_tree_for(str(out.get("path", "")))
+    if tree == "raw":
+        out.setdefault("source_tree", tree)
+        out.setdefault("derived", bool(out.get("sss")))
+    else:
+        out["source_tree"] = tree
+        out["derived"] = True
     return out
 
 
@@ -2227,7 +2239,21 @@ def merge_index(
 
     if discovered is not None:
         wanted = set(discovered)
-        stores = {z: e for z, e in stores.items() if e.get("path") in wanted}
+        # A store whose path is EXCLUDED from discovery is not an orphan: it is
+        # one of the ~4,700 already-published non-raw stores that ADR 0027's
+        # raw-only rule stopped producing but did NOT authorise deleting. They
+        # are still served until the separate, explicitly-authorised purge
+        # (nemarOrg/nemar-cli#1095 / #1097), and an index that dropped them would
+        # tell every client the bytes are gone while `compute_clean_orphans` --
+        # which carries this exact guard -- deliberately leaves them on S3. The
+        # index must describe what is served, so they are KEPT and counted apart.
+        # Same guard shape as the failures carry-forward above.
+        stores = {
+            z: e
+            for z, e in stores.items()
+            if e.get("path") in wanted
+            or is_excluded_from_discovery(str(e.get("path") or ""))
+        }
         fails = {p: f for p, f in fails.items() if p in wanted}
         pends = {p: e for p, e in pends.items() if p in wanted}
         accounted = {e.get("path") for e in stores.values()} | set(fails) | set(pends)
@@ -2252,6 +2278,11 @@ def merge_index(
     ordered = [_normalize_store_entry(stores[k]) for k in sorted(stores)]
     ordered_fails = [fails[k] for k in sorted(fails)]
     ordered_pending = [pends[k] for k in sorted(pends)]
+    # Stores served from a tree discovery no longer walks. Counted so the
+    # coverage invariant can subtract them: they have no discovered recording to
+    # be accounted against, because discovery deliberately does not find their
+    # source any more.
+    legacy = [e for e in ordered if e.get("source_tree") != "raw"]
 
     prefix = f"{dataset_id}/zarr/"
     return {
@@ -2274,9 +2305,18 @@ def merge_index(
         "discovered_count": (
             len(set(discovered))
             if discovered is not None
-            else len(ordered) + len(ordered_fails) + len(ordered_pending)
+            # No discovered set supplied (a caller that only wants the merge):
+            # derive it from what IS accounted for, minus the legacy stores,
+            # which by definition have no discovered recording behind them.
+            else len(ordered) - len(legacy) + len(ordered_fails) + len(ordered_pending)
         ),
         "store_count": len(ordered),
+        # The subset of `store_count` served from `derivatives/`/`sourcedata/`/
+        # `code/`: published before ADR 0027 went raw-only, still served, and
+        # awaiting the separate purge. Zero for every dataset converted since.
+        # It exists so a consumer can check coverage without having to know that
+        # history: the invariant subtracts it.
+        "legacy_store_count": len(legacy),
         # #1059 asked for `n_recordings`; it is the store count under another
         # name. The discovered total is `discovered_count`, deliberately a
         # different word, because conflating the two is how coverage went
@@ -2294,29 +2334,48 @@ def merge_index(
 def check_index_invariant(index: dict) -> None:
     """Raise unless every discovered recording is accounted for exactly once.
 
-    `discovered_count == store_count + failure_count + pending_count` is the whole
-    of #1197's acceptance criterion, and `merge_index` makes it true by
-    construction -- which is exactly why it is worth asserting separately. The
-    construction is the thing that could regress, and a silently unbalanced index
-    is the failure mode being fixed: it looks complete and is not.
+        discovered_count == (store_count - legacy_store_count)
+                            + failure_count + pending_count
+
+    #1197's acceptance criterion, with the one subtraction history forces.
+    `legacy_store_count` is the stores served from `derivatives/`/`sourcedata/`/
+    `code/`, published before ADR 0027 went raw-only: discovery deliberately does
+    not walk those trees any more, so there is no discovered recording for them
+    to be accounted against, yet they are still served and so must appear in
+    `stores`. Counting them on both sides would be the honest-looking mistake --
+    it would make the equation fail on every legacy dataset and pass only where
+    the problem does not exist. Zero for anything converted since raw-only.
+
+    `merge_index` makes this true by construction, which is exactly why it is
+    worth asserting separately: the construction is the thing that could regress,
+    and a silently unbalanced index is the failure mode being fixed -- it looks
+    complete and is not.
     """
     discovered = index.get("discovered_count")
-    parts = (
-        index.get("store_count"),
-        index.get("failure_count"),
-        index.get("pending_count"),
-    )
+    store_count = index.get("store_count")
+    failure_count = index.get("failure_count")
+    pending_count = index.get("pending_count")
+    # Absent on an index built before legacy stores were counted apart; zero is
+    # the correct reading there, since every such index came from a raw-only run.
+    legacy_count = index.get("legacy_store_count", 0)
+    parts = (store_count, failure_count, pending_count, legacy_count)
     if not isinstance(discovered, int) or any(not isinstance(n, int) for n in parts):
         raise ValueError(
             "index coverage counts are missing or non-integer: "
-            f"discovered={discovered!r} store/failure/pending={parts!r}"
+            f"discovered={discovered!r} store/failure/pending/legacy={parts!r}"
         )
-    if discovered != sum(parts):  # type: ignore[arg-type]
+    if legacy_count > store_count:  # type: ignore[operator]
+        raise ValueError(
+            f"index coverage is impossible for {index.get('dataset_id')}: "
+            f"legacy_store_count={legacy_count} exceeds store_count={store_count}"
+        )
+    accounted = store_count - legacy_count + failure_count + pending_count  # type: ignore[operator]
+    if discovered != accounted:
         raise ValueError(
             f"index coverage does not balance for {index.get('dataset_id')}: "
-            f"discovered_count={discovered} but store_count+failure_count+"
-            f"pending_count={sum(parts)} "  # type: ignore[arg-type]
-            f"({parts[0]}+{parts[1]}+{parts[2]})"
+            f"discovered_count={discovered} but (store_count-legacy_store_count)"
+            f"+failure_count+pending_count={accounted} "
+            f"(({store_count}-{legacy_count})+{failure_count}+{pending_count})"
         )
 
 

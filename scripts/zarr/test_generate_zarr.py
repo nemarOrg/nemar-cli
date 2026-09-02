@@ -4224,6 +4224,93 @@ class TestCoverageInvariant(unittest.TestCase):
         check_index_invariant(index)
         self.assertEqual([s["path"] for s in index["stores"]], [self.A])
 
+    def test_a_legacy_non_raw_store_survives_the_reconciliation(self):
+        """The ~4,700 stores published under derivatives/ / sourcedata/ / code/
+        before ADR 0027 went raw-only are STILL SERVED until the separate,
+        explicitly-authorised purge (#1095 / #1097).
+
+        Discovery does not walk those trees, so their paths are never in
+        `discovered` -- and a reconciliation that dropped every undiscovered
+        store would delete them from the index while `compute_clean_orphans`
+        deliberately leaves the objects on S3. The index would then tell every
+        client the bytes are gone. `compute_clean_orphans` carries this exact
+        guard; so must this.
+        """
+        legacy = "derivatives/preprocessed/sub-09/eeg/sub-09_task-x_eeg.set"
+        prior = {
+            "source_commit": "a" * 40,
+            "stores": [
+                {"zarr": store_rel_for(legacy), "path": legacy,
+                 "source_key": "SHA256E-s9--legacy", "groups": [{"name": "eeg_250hz"}]},
+            ],
+        }
+        index = self.build(
+            prior=prior,
+            converted=[{"zarr": store_rel_for(self.A), "path": self.A}],
+            discovered=[self.A],
+        )
+        paths = [s["path"] for s in index["stores"]]
+        self.assertIn(legacy, paths, "the legacy store must not be dropped")
+        self.assertEqual(index["store_count"], 2)
+        self.assertEqual(index["legacy_store_count"], 1)
+        # Described honestly rather than as raw: its source IS in derivatives/
+        # and what it serves IS a processed derivative.
+        entry = next(s for s in index["stores"] if s["path"] == legacy)
+        self.assertEqual(entry["source_tree"], "derivatives")
+        self.assertIs(entry["derived"], True)
+        self.assertNotIn("source_key", entry)
+        # And the invariant still balances: one discovered recording, one store
+        # for it, with the legacy store subtracted rather than double-counted.
+        self.assertEqual(index["discovered_count"], 1)
+        check_index_invariant(index)
+
+    def test_a_v1_entry_claiming_raw_under_derivatives_is_corrected(self):
+        # `setdefault` would have let the old claim stand. The path is the fact.
+        legacy = "sourcedata/sub-09/eeg/sub-09_task-x_eeg.set"
+        prior = {
+            "source_commit": "a" * 40,
+            "stores": [{"zarr": store_rel_for(legacy), "path": legacy,
+                        "source_tree": "raw", "derived": False}],
+        }
+        index = self.build(prior=prior, discovered=[])
+        entry = index["stores"][0]
+        self.assertEqual(entry["source_tree"], "sourcedata")
+        self.assertIs(entry["derived"], True)
+        check_index_invariant(index)
+
+    def test_the_invariant_subtracts_legacy_stores(self):
+        # Hand-built: a legacy store counted on BOTH sides is the mistake that
+        # looks right, and it would pass only on datasets with no legacy stores.
+        with self.assertRaises(ValueError) as ctx:
+            check_index_invariant({
+                "dataset_id": "on005520", "discovered_count": 1,
+                "store_count": 2, "legacy_store_count": 0,
+                "failure_count": 0, "pending_count": 0,
+            })
+        self.assertIn("does not balance", str(ctx.exception))
+        # The same document with the legacy store declared balances.
+        check_index_invariant({
+            "dataset_id": "on005520", "discovered_count": 1,
+            "store_count": 2, "legacy_store_count": 1,
+            "failure_count": 0, "pending_count": 0,
+        })
+
+    def test_the_invariant_rejects_more_legacy_than_stores(self):
+        with self.assertRaises(ValueError) as ctx:
+            check_index_invariant({
+                "dataset_id": "on005520", "discovered_count": 0,
+                "store_count": 1, "legacy_store_count": 2,
+                "failure_count": 0, "pending_count": 0,
+            })
+        self.assertIn("impossible", str(ctx.exception))
+
+    def test_the_invariant_treats_a_missing_legacy_count_as_zero(self):
+        # Every index built before the count existed came from a raw-only run.
+        check_index_invariant({
+            "dataset_id": "on007763", "discovered_count": 2,
+            "store_count": 1, "failure_count": 1, "pending_count": 0,
+        })
+
     def test_check_index_invariant_rejects_an_unbalanced_document(self):
         # Hand-built rather than produced: merge_index makes the invariant true
         # by construction, so the only way to watch the checker fail is to hand

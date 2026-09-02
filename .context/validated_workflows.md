@@ -1230,6 +1230,7 @@ ssh hallu 'tail -f /mnt/local/zarr-state/.nm-zarr.log'
 | A bump over `--engine-requeue-limit` (25) requeues nothing until acked | PASS | `EngineBumpGuardTest`, unchanged |
 | Pending-driven requeue is NOT blocked by an unacked bump | PASS | `PendingRetryTest::test_the_engine_bump_guard_does_not_block_a_pending_requeue` |
 | Coverage invariant holds on a full and a partial run | PASS | `TestCoverageInvariant` |
+| A legacy non-raw store survives the reconciliation and the invariant subtracts it | PASS | `test_a_legacy_non_raw_store_survives_the_reconciliation` |
 | Index and manifest validate against their schemas before upload | PASS | `TestIndexSchemaSelfCheck` |
 
 ### Gotchas and Warnings

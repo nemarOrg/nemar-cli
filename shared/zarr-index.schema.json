@@ -20,6 +20,7 @@
     "updated_utc",
     "discovered_count",
     "store_count",
+    "legacy_store_count",
     "n_recordings",
     "errors",
     "failure_count",
@@ -82,12 +83,17 @@
     "discovered_count": {
       "type": "integer",
       "minimum": 0,
-      "description": "Raw recordings the walker found at source_commit, after the ADR 0027 exclusions (derivatives/, sourcedata/, code/, BIDS MEG calibration files). The denominator of coverage. INVARIANT: discovered_count == store_count + failure_count + pending_count."
+      "description": "Raw recordings the walker found at source_commit, after the ADR 0027 exclusions (derivatives/, sourcedata/, code/, BIDS MEG calibration files). The denominator of coverage. INVARIANT: discovered_count == (store_count - legacy_store_count) + failure_count + pending_count."
     },
     "store_count": {
       "type": "integer",
       "minimum": 0,
       "description": "Recordings with a served store. Authoritative -- prefer it to stores.length."
+    },
+    "legacy_store_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "The subset of store_count whose source sits in derivatives/, sourcedata/ or code/. Published before ADR 0027 made discovery raw-only, still served, and awaiting a separate authorised purge. Subtracted in the coverage invariant because discovery no longer walks those trees, so they have no discovered recording to be accounted against. 0 for anything converted since raw-only."
     },
     "n_recordings": {
       "type": "integer",
@@ -132,7 +138,7 @@
         "source_tree": {
           "type": "string",
           "enum": ["raw", "derivatives", "sourcedata", "code"],
-          "description": "Which BIDS tree the SOURCE recording lives in. Always 'raw' for anything converted since ADR 0027; the other values exist only for stores published before it."
+          "description": "Which BIDS tree the SOURCE recording lives in. Always 'raw' for anything converted since ADR 0027; the other values mark the pre-raw-only stores that are still served, are counted in legacy_store_count, and always carry derived: true."
         },
         "derived": {
           "type": "boolean",
