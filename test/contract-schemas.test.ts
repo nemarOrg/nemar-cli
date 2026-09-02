@@ -147,6 +147,40 @@ describe("catalog item schema", () => {
     });
     expect(parsed.zarr_index_url).toBeNull();
   });
+
+  // PR #1201 review, item 3: the cross-field invariant a regressed
+  // deriveZarrIndexUrl (or a future write path setting the two fields
+  // independently) would violate -- caught at the contract layer, not just
+  // trusted from the derivation function's own code.
+  test("REJECTS zarr_index_url set when zarr_status is not 'ready'", () => {
+    expect(() =>
+      catalogItemSchema.parse({
+        ...row,
+        zarr_status: "pending",
+        zarr_index_url: "https://zarr.nemar.org/on007763/zarr/index.json",
+      }),
+    ).toThrow();
+  });
+
+  test("REJECTS zarr_index_url set when zarr_status is null (never converted)", () => {
+    expect(() =>
+      catalogItemSchema.parse({
+        ...row,
+        zarr_status: null,
+        zarr_index_url: "https://zarr.nemar.org/on007763/zarr/index.json",
+      }),
+    ).toThrow();
+  });
+
+  test("ACCEPTS zarr_index_url set when zarr_status IS 'ready' (the consistent pair)", () => {
+    expect(() =>
+      catalogItemSchema.parse({
+        ...row,
+        zarr_status: "ready",
+        zarr_index_url: "https://zarr.nemar.org/on007763/zarr/index.json",
+      }),
+    ).not.toThrow();
+  });
 });
 
 describe("detail schema: zarr_data_failures (#1191, fixes #1188)", () => {
@@ -213,6 +247,21 @@ describe("detail schema: zarr_data_failures (#1191, fixes #1188)", () => {
       datasetDetailSchema.parse({
         ...detailRow,
         zarr_data_failures: [{ path: "a", code: "x" }],
+      }),
+    ).toThrow();
+  });
+
+  // PR #1201 review, item 3: datasetDetailSchema carries the same
+  // zarr_index_url/zarr_status invariant as catalogItemSchema -- re-applied
+  // via superRefine after `.extend()`, since `.extend()` is not available on
+  // a ZodEffects. Proven here so a future refactor that drops the reapply
+  // (e.g. reordering the chain) fails this test, not just the list schema's.
+  test("also REJECTS zarr_index_url set when zarr_status is not 'ready'", () => {
+    expect(() =>
+      datasetDetailSchema.parse({
+        ...detailRow,
+        zarr_status: "pending",
+        zarr_index_url: "https://zarr.nemar.org/on007763/zarr/index.json",
       }),
     ).toThrow();
   });
