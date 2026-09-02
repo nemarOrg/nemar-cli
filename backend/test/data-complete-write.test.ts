@@ -212,6 +212,24 @@ describe("writeDatasetMetadataColumns signal_defaults columns (#1153)", () => {
     db.close();
   });
 
+  test("stamps metadata_updated_at on a fresh row (sweep_stamps NULL) -- the COALESCE pin", async () => {
+    // The seeded row's sweep_stamps is NULL (post-0073 fresh-row shape); a
+    // missing COALESCE in the stamp write makes json_set return NULL and
+    // silently drops the stamp, so the reindex 'missing-metadata'/'stale'
+    // filters would re-select the row forever and the upload resume-seed
+    // guard would keep overwriting enriched values (#1183).
+    const db = freshDb();
+    seed(db);
+    await writeDatasetMetadataColumns(realD1(db), "nm000132", cols({ subject_count: 5 }));
+    const row = db
+      .prepare(
+        "SELECT json_extract(sweep_stamps, '$.metadata_updated_at') AS at FROM datasets WHERE dataset_id = 'nm000132'",
+      )
+      .get() as { at: string | null };
+    expect(row.at).not.toBeNull();
+    db.close();
+  });
+
   test("does not touch signal_defaults_at -- that stamp is owned only by the sweep", async () => {
     // Migration 0071 / 0055 precedent: writeDatasetMetadataColumns writes
     // the VALUE columns but never the sweep's resumability stamp, so a live
