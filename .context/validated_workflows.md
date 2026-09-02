@@ -1072,53 +1072,73 @@ curl -s -o /dev/null -w '%{http_code}\n' https://api.nemar.org/datasets/xx099905
 
 1. **The `nemar` CLI resolves its API base independently of `$API_BASE`.**
    `convert_dataset()`'s metadata-clone step shells out to the separate `nemar` binary
-   (`nemar dataset download`), whose `getApiUrl()` (`src/lib/api/client.ts`) reads
-   `TEST_API_URL` first, then a stored account config, then defaults to `api.nemar.org` --
-   never `$API_BASE`. Without exporting `TEST_API_URL` too, `--test` mode's Python
-   side correctly targets `nemar-dev`/`api-test.nemar.org` while the `nemar` CLI silently
-   looks up the dataset in PROD, fails "Dataset not found" for any dev-only `xx0999NN`
-   exemplar, and `convert_dataset()` returns before the driver ever runs. This was missed
-   by issue #1180's own env-var inventory (which only covers this script and the Python
-   driver/queue) and found live on the first `--test --dataset` attempt. Fixed by having
-   `--test` export `TEST_API_URL` alongside `API_BASE` -- existing CLI plumbing (the same
-   hook AGENTS.md's staging-auth section already documents), not a new mechanism.
-2. **A non-login `ssh hallu '...'` does not get the PATH bootstrap for free.** The deployed
-   script bootstraps its own `PATH` internally, but any *ad-hoc* one-liner that calls `aws`
-   or `nemar` directly over SSH (rather than through the script) needs
-   `export PATH="$HOME/.local/homebrew/bin:$HOME/.local/bin:$PATH"` first, or the binary
-   simply isn't found.
-3. **The driver's own progress never reaches the outer wrapper log.** `convert_dataset()`
-   redirects the `nemar dataset download` and `generate_zarr.py` output straight to
-   `$LOG_FILE` (`.nm-zarr.log`); only `log()`/`err()` calls from `hallu-zarr.sh` itself
-   (start/done/error lines) reach whatever stdout/stderr you redirected the outer
-   invocation to (`manual-run.log` above). Watch `.nm-zarr.log` for real progress, not the
-   wrapper's own redirect target.
-4. **`--test --print-config` is genuinely side-effect-free**, confirmed by running it before
-   any clone existed and checking `find` under the temp `ZARR_BASE` came back empty --
-   useful as a pure sanity check while iterating on `ZARR_DRIVER_REF` overrides without
-   burning a `setup()` cycle (git clone + fresh venv + biosigio install, several minutes).
-5. **`setup()`'s venv/biosigio install is the slow part**, not the conversion itself: the
-   5-recording, 23 MB exemplar dataset converted in under 2 minutes once the venv was warm,
+   (`nemar dataset download`).
+   Its `getApiUrl()` (`src/lib/api/client.ts`) reads `TEST_API_URL` first,
+   then a stored account config,
+   then defaults to `api.nemar.org` -- never `$API_BASE`.
+   Without exporting `TEST_API_URL` too,
+   `--test` mode's Python side correctly targets `nemar-dev`/`api-test.nemar.org`
+   while the `nemar` CLI silently looks up the dataset in PROD,
+   fails "Dataset not found" for any dev-only `xx0999NN` exemplar,
+   and `convert_dataset()` returns before the driver ever runs.
+   This was missed by issue #1180's own env-var inventory
+   (which only covers this script and the Python driver/queue)
+   and found live on the first `--test --dataset` attempt.
+   Fixed by having `--test` export `TEST_API_URL` alongside `API_BASE`
+   -- existing CLI plumbing (the same hook AGENTS.md's staging-auth section already documents),
+   not a new mechanism.
+2. **A non-login `ssh hallu '...'` does not get the PATH bootstrap for free.**
+   The deployed script bootstraps its own `PATH` internally,
+   but any *ad-hoc* one-liner that calls `aws` or `nemar` directly over SSH
+   (rather than through the script)
+   needs `export PATH="$HOME/.local/homebrew/bin:$HOME/.local/bin:$PATH"` first,
+   or the binary simply isn't found.
+3. **The driver's own progress never reaches the outer wrapper log.**
+   `convert_dataset()` redirects the `nemar dataset download` and `generate_zarr.py` output
+   straight to `$LOG_FILE` (`.nm-zarr.log`);
+   only `log()`/`err()` calls from `hallu-zarr.sh` itself (start/done/error lines)
+   reach whatever stdout/stderr you redirected the outer invocation to
+   (`manual-run.log` above).
+   Watch `.nm-zarr.log` for real progress, not the wrapper's own redirect target.
+4. **`--test --print-config` is genuinely side-effect-free**,
+   confirmed by running it before any clone existed
+   and checking `find` under the temp `ZARR_BASE` came back empty
+   -- useful as a pure sanity check while iterating on `ZARR_DRIVER_REF` overrides
+   without burning a `setup()` cycle (git clone + fresh venv + biosigio install, several minutes).
+5. **`setup()`'s venv/biosigio install is the slow part**, not the conversion itself:
+   the 5-recording, 23 MB exemplar dataset converted in under 2 minutes once the venv was warm,
    but the first `--test` invocation on a bare bootstrap took several minutes for
-   `git clone` + `uv venv` + `uv pip install biosigio[...]`. Budget for that on a cold
-   bootstrap; it is a one-time cost per `ZARR_STATE_DIR`.
+   `git clone` + `uv venv` + `uv pip install biosigio[...]`.
+   Budget for that on a cold bootstrap; it is a one-time cost per `ZARR_STATE_DIR`.
+6. **After the first real run, invoke the CLONE's copy, not the bootstrap copy.**
+   Step 1 above hand-places the script at `/mnt/local/zarr-state-test/hallu-zarr.sh`
+   only to get `setup()` running for the first time;
+   every run after that (cron included, once installed)
+   should invoke `/mnt/local/zarr-state-test/nemar-cli/scripts/zarr/hallu-zarr.sh` instead,
+   the same self-deploying clone copy the prod cron already uses
+   (see systems-inventory.md §3.3's "Deploying a converter change")
+   -- otherwise the bootstrap copy silently drifts behind `origin/$ZARR_DRIVER_REF`
+   while the DRIFT warning is the only thing that would ever say so.
 
 ### Architecture Implications
 
-- **A prod-specific hardcode can hide outside the two files an inventory names.** Issue
-  #1180's inventory was thorough for `zarr_queue.py`/`generate_zarr.py` but did not consider
-  that `hallu-zarr.sh` also shells out to an entirely separate program (the TypeScript
-  `nemar` CLI) with its own, unrelated config-resolution path. Any future `--test`-style
-  harness around a shell driver that calls other CLIs should audit every subprocess the
-  driver launches, not just the language it itself is written in.
-- **Guard rails belong ahead of the first filesystem write, not after.** `--test`'s guard
-  checks run before `mkdir -p "$WORK_DIR" "$STATE_DIR"` specifically so a guard failure
-  (e.g. `ZARR_STATE_DIR` accidentally left at the prod path) never creates or writes under
-  the very path being refused.
-- **A derived-copy serving layer can validate itself without the bookkeeping half.** The
-  webhook callback (D1 `zarr_status`) and the actual served artifact (S3 `index.json`) are
-  independently observable, and this run proved the artifact half works completely on its
-  own -- `zarr-test.nemar.org` served the fresh store even with `zarr_status` still `null`,
+- **A prod-specific hardcode can hide outside the two files an inventory names.**
+  Issue #1180's inventory was thorough for `zarr_queue.py`/`generate_zarr.py`
+  but did not consider that `hallu-zarr.sh` also shells out to an entirely separate program
+  (the TypeScript `nemar` CLI) with its own, unrelated config-resolution path.
+  Any future `--test`-style harness around a shell driver that calls other CLIs
+  should audit every subprocess the driver launches,
+  not just the language it itself is written in.
+- **Guard rails belong ahead of the first filesystem write, not after.**
+  `--test`'s guard checks run before `mkdir -p "$WORK_DIR" "$STATE_DIR"`
+  specifically so a guard failure
+  (e.g. `ZARR_STATE_DIR` accidentally left at the prod path)
+  never creates or writes under the very path being refused.
+- **A derived-copy serving layer can validate itself without the bookkeeping half.**
+  The webhook callback (D1 `zarr_status`) and the actual served artifact (S3 `index.json`)
+  are independently observable,
+  and this run proved the artifact half works completely on its own
+  -- `zarr-test.nemar.org` served the fresh store even with `zarr_status` still `null`,
   which is the same "the viewer reads index.json, not D1" property documented for prod.
 
 ---
