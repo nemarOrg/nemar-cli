@@ -278,6 +278,21 @@ class RejectingPutCache implements CacheLike {
   }
 }
 
+/** Always misses, and put() throws SYNCHRONOUSLY -- a plain (non-async)
+ *  method, not one that returns a rejected promise -- reproducing the
+ *  documented Cache API behaviour for a 206 (#1181 final review: this is
+ *  the shape RejectingPutCache above did NOT cover, since an `async put()`
+ *  that throws always becomes a rejected promise, never a synchronous
+ *  throw, to its caller). */
+class SynchronousThrowPutCache implements CacheLike {
+  async match(): Promise<Response | undefined> {
+    return undefined;
+  }
+  put(): Promise<void> {
+    throw new Error("simulated synchronous cache.put throw");
+  }
+}
+
 /** match() throws synchronously -- for the onError/CORS test (#1181 review
  *  item 7). */
 class ThrowingMatchCache implements CacheLike {
@@ -964,6 +979,58 @@ describe("cache.put failures are logged, not fatal (#1181 review item 6)", () =>
         testEnv(),
       );
       expect(res.status).toBe(206);
+      expect(calls.some((args) => String(args[0]).includes("cache.put failed"))).toBe(true);
+    } finally {
+      console.error = originalError;
+    }
+  });
+
+  test("a synchronously-throwing CacheLike.put still serves the response; the failure is logged", async () => {
+    const throwingPutApp = createZarrDataRoutes({
+      ...testDeps(),
+      cache: () => new SynchronousThrowPutCache(),
+    });
+    const originalError = console.error;
+    const calls: unknown[][] = [];
+    console.error = (...args: unknown[]) => {
+      calls.push(args);
+    };
+    try {
+      const res = await requestWith(
+        throwingPutApp,
+        `/${PUBLIC_ID}/zarr/store.zarr/zarr.json`,
+        {},
+        testEnv(),
+      );
+      expect(res.status).toBe(200);
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      expect(bytes).toEqual(ZARR_JSON);
+      expect(calls.some((args) => String(args[0]).includes("cache.put failed"))).toBe(true);
+    } finally {
+      console.error = originalError;
+    }
+  });
+
+  test("a synchronously-throwing put on a range entry (the real 206 case) also still serves the response", async () => {
+    const throwingPutApp = createZarrDataRoutes({
+      ...testDeps(),
+      cache: () => new SynchronousThrowPutCache(),
+    });
+    const originalError = console.error;
+    const calls: unknown[][] = [];
+    console.error = (...args: unknown[]) => {
+      calls.push(args);
+    };
+    try {
+      const res = await requestWith(
+        throwingPutApp,
+        CHUNK_PATH,
+        { headers: { Range: "bytes=0-9" } },
+        testEnv(),
+      );
+      expect(res.status).toBe(206);
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      expect(bytes).toEqual(CHUNK_BYTES.slice(0, 10));
       expect(calls.some((args) => String(args[0]).includes("cache.put failed"))).toBe(true);
     } finally {
       console.error = originalError;

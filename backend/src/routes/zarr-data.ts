@@ -236,17 +236,24 @@ const defaultDeps: ZarrDataDeps = {
  *  Workers reports those as a bare isolate error with none of this
  *  context. `key` is the S3 object key (for log correlation); `cacheKeyUrl`
  *  is the actual cache key that was written (#1181 review item 6). */
-function safeCachePut(
+async function safeCachePut(
   cache: CacheLike,
   cacheKeyUrl: string,
   key: string,
   entry: Response,
 ): Promise<void> {
-  return Promise.resolve(cache.put(new Request(cacheKeyUrl, { method: "GET" }), entry)).catch(
-    (err) => {
-      console.error("[zarr-data] cache.put failed", { key, cacheKeyUrl }, err);
-    },
-  );
+  // A plain (non-async) CacheLike.put can throw SYNCHRONOUSLY -- the
+  // documented Cache API behaviour for a 206 -- rather than returning a
+  // rejected promise. Wrapping the call in a try/catch (not
+  // Promise.resolve(cache.put(...)).catch(...), which only ever sees a
+  // rejection: a synchronous throw during the cache.put(...) call
+  // expression happens before Promise.resolve is even reached) catches
+  // both shapes of failure the same way.
+  try {
+    await cache.put(new Request(cacheKeyUrl, { method: "GET" }), entry);
+  } catch (err) {
+    console.error("[zarr-data] cache.put failed", { key, cacheKeyUrl }, err);
+  }
 }
 
 /**
