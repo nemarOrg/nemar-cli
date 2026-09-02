@@ -29,6 +29,7 @@ import { authWebRoutes } from "./routes/auth-web";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
 import { sandboxRoutes } from "./routes/sandbox";
+import { schemaRoutes } from "./routes/schemas";
 import { userRoutes } from "./routes/users";
 import webhooks from "./routes/webhooks";
 import { zarrDataRoutes } from "./routes/zarr-data";
@@ -124,6 +125,7 @@ api.get("/", (c) => {
       datasets: "/datasets/*",
       sandbox: "/sandbox/*",
       webhooks: "/webhooks/*",
+      schemas: "/schemas/*",
     },
   });
 });
@@ -153,6 +155,11 @@ api.route("/admin", adminRoutes);
 api.route("/datasets", datasetRoutes);
 api.route("/sandbox", sandboxRoutes);
 api.route("/webhooks", webhooks);
+// Public JSON Schema documents (issue #1059). Static, D1-free, cached: the
+// bytes are the repo's own shared/*.schema.json, the same files the Zarr
+// converter validates against before upload, so the served contract cannot
+// drift from the one the producer enforces.
+api.route("/schemas", schemaRoutes);
 // Path-based mount of the data sub-app so it's reachable on every hostname
 // (api.nemar.org, *.workers.dev dev fallback, etc.). The Worker also serves
 // the same handlers at the root path when the request hits data.nemar.org;
