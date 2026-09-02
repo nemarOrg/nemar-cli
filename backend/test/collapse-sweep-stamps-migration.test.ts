@@ -285,9 +285,7 @@ describe("migration 0073: collapse sweep stamps", () => {
 
   test("sweep_stamps CHECK rejects invalid JSON but admits NULL", () => {
     expect(() =>
-      db
-        .query("UPDATE datasets SET sweep_stamps = 'not json' WHERE dataset_id = 'nm000100'")
-        .run(),
+      db.query("UPDATE datasets SET sweep_stamps = 'not json' WHERE dataset_id = 'nm000100'").run(),
     ).toThrow();
     db.query("UPDATE datasets SET sweep_stamps = NULL WHERE dataset_id = 'nm000100'").run();
   });

@@ -29,16 +29,16 @@ describe("datasets column budget", () => {
   test("exactly 81 columns after all migrations", () => {
     // 92 after 0072; 0073 collapses the 12 sweep stamps into one
     // sweep_stamps JSON column (#1183): 92 + 1 - 12 = 81.
-    const count = db
-      .query("SELECT COUNT(*) AS n FROM pragma_table_info('datasets')")
-      .get() as { n: number };
+    const count = db.query("SELECT COUNT(*) AS n FROM pragma_table_info('datasets')").get() as {
+      n: number;
+    };
     expect(count.n).toBe(81);
   });
 
   test("stays under the 97-column ceiling (D1 hard cap is 100)", () => {
-    const count = db
-      .query("SELECT COUNT(*) AS n FROM pragma_table_info('datasets')")
-      .get() as { n: number };
+    const count = db.query("SELECT COUNT(*) AS n FROM pragma_table_info('datasets')").get() as {
+      n: number;
+    };
     expect(count.n).toBeLessThanOrEqual(97);
   });
 

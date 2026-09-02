@@ -281,7 +281,9 @@ function dbMissingMigration0072(): Database {
   const files = readdirSync(MIGRATIONS_DIR)
     .filter(
       (f) =>
-        f.endsWith(".sql") && f !== "0072_signal_defaults.sql" && f !== "0073_collapse_sweep_stamps.sql",
+        f.endsWith(".sql") &&
+        f !== "0072_signal_defaults.sql" &&
+        f !== "0073_collapse_sweep_stamps.sql",
     )
     .sort();
   const built = new Database(":memory:");

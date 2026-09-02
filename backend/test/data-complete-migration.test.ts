@@ -60,7 +60,9 @@ describe("migration 0059_data_complete_columns", () => {
   test("datasets gains bytes_present, data_complete; data_checked_at is collapsed into sweep_stamps", () => {
     const db = freshDb();
     const cols = tableColumns(db, "datasets");
-    expect(cols).toEqual(expect.arrayContaining(["bytes_present", "data_complete", "sweep_stamps"]));
+    expect(cols).toEqual(
+      expect.arrayContaining(["bytes_present", "data_complete", "sweep_stamps"]),
+    );
     expect(cols).not.toContain("data_checked_at");
     db.close();
   });

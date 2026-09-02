@@ -115,11 +115,7 @@ beforeEach(async () => {
 
 describe("GET /datasets/:id detail contract", () => {
   test("serves the six attestation fields, num_citations, and file_size_formatted with contract types", async () => {
-    const res = await app.request(
-      `/datasets/${DATASET_ID}`,
-      { headers: authHeaders() },
-      env(),
-    );
+    const res = await app.request(`/datasets/${DATASET_ID}`, { headers: authHeaders() }, env());
     expect(res.status).toBe(200);
     const raw = (await res.json()) as { dataset: Record<string, unknown> };
     // Pre-existing contract quirk, out of scope for #1182: the schema's
@@ -168,9 +164,9 @@ describe("GET /datasets list contract", () => {
   test("the public branch serves the same derived values", async () => {
     // Arrange the row into public-catalog visibility; the route reads state
     // from D1 and the public branch has its own projection to cover.
-    db.query(
-      "UPDATE datasets SET visibility = 'public', is_sandbox = 0 WHERE dataset_id = ?",
-    ).run(DATASET_ID);
+    db.query("UPDATE datasets SET visibility = 'public', is_sandbox = 0 WHERE dataset_id = ?").run(
+      DATASET_ID,
+    );
     const res = await app.request("/datasets", {}, env());
     expect(res.status).toBe(200);
     const body = datasetListEnvelopeSchema.parse(await res.json());

@@ -93,7 +93,10 @@ let allCalls: { sql: string; rows: unknown[] }[];
  * cannot be read off the response body. Every query still executes against
  * the real SQLite `db`; this only observes.
  */
-function resultRecordingD1(target: Database, calls: { sql: string; rows: unknown[] }[]): D1Database {
+function resultRecordingD1(
+  target: Database,
+  calls: { sql: string; rows: unknown[] }[],
+): D1Database {
   const base = realD1(target);
   return {
     prepare(sql: string) {
@@ -183,7 +186,9 @@ function seedDataset(
 const stamp = (id: string, key: string): string | null =>
   (
     db
-      .query(`SELECT json_extract(sweep_stamps, '$.${key}') AS v FROM datasets WHERE dataset_id = ?`)
+      .query(
+        `SELECT json_extract(sweep_stamps, '$.${key}') AS v FROM datasets WHERE dataset_id = ?`,
+      )
       .get(id) as { v: string | null }
   ).v;
 
@@ -320,7 +325,8 @@ describe("POST /admin/datasets/channel-montage-sweep candidate selection", () =>
 
   test("?reset=1 removes only real stamps and clears the probed columns", async () => {
     seedDataset("nm000027", {
-      stamps: '{"channel_montage_checked_at":"2026-01-01 00:00:00","hed_checked_at":"2026-02-02 00:00:00"}',
+      stamps:
+        '{"channel_montage_checked_at":"2026-01-01 00:00:00","hed_checked_at":"2026-02-02 00:00:00"}',
     });
     db.query(
       "UPDATE datasets SET n_channels = 64, electrode_system = 'intl 10/20' WHERE dataset_id = 'nm000027'",
@@ -457,6 +463,37 @@ describe("POST /admin/datasets/data-integrity-sweep candidate selection and stam
     expect(body.errors.map((e) => e.dataset_id)).toEqual(["nm000046"]);
   });
 
+  // #980 regression guard, carried over from the deleted data-integrity unit
+  // test. `older-than` recomputes its cutoff as datetime('now', '-N days') on
+  // EVERY query, so a row this sweep just stamped drifts back inside the window
+  // on the next run and `remaining` can never converge to 0. `before` anchors
+  // the cutoff to a fixed instant, so a stamped row stays excluded. That
+  // difference is the entire reason `before` exists; if a rewrite ever made
+  // `older-than` anchored (or `before` moving), this test fails.
+  test("?older-than is a moving window (non-convergent) while ?before is anchored", async () => {
+    // Stamped one second ago: already behind a zero-day moving cutoff, but
+    // still after a fixed anchor set further back.
+    const justNow = db.query("SELECT datetime('now', '-1 seconds') AS t").get() as { t: string };
+    seedDataset("nm000049", {
+      githubRepo: repo("nm000049"),
+      stamps: JSON.stringify({ data_checked_at: justNow.t }),
+    });
+
+    // Moving window: the row re-qualifies even though it was just stamped.
+    const moving = await post("/admin/datasets/data-integrity-sweep?older-than=0");
+    const movingBody = (await moving.json()) as { errors: { dataset_id: string }[] };
+    expect(movingBody.errors.map((e) => e.dataset_id)).toEqual(["nm000049"]);
+
+    // Anchored cutoff placed before the stamp: the same row is excluded.
+    const anchored = await post("/admin/datasets/data-integrity-sweep?before=2020-01-01T00:00:00Z");
+    const anchoredBody = (await anchored.json()) as {
+      processed: number;
+      errors: { dataset_id: string }[];
+    };
+    expect(anchoredBody.processed).toBe(0);
+    expect(anchoredBody.errors).toEqual([]);
+  });
+
   test("?reset=1 removes only real stamps and clears the audit columns", async () => {
     seedDataset("nm000048", {
       githubRepo: repo("nm000048"),
@@ -511,6 +548,24 @@ describe("per-candidate stamp writes persist on a fresh row and end candidacy", 
       seedDataset("nm000060"); // sweep_stamps NULL
       db.prepare(sql).run(...(binds as never[]));
       expect(stamp("nm000060", key)).not.toBeNull();
+    });
+
+    // A stamp-only write must NOT touch updated_at: that column orders the
+    // catalog, so bumping it would re-sort every swept dataset to newest.
+    // Pinned here because the deleted per-sweep unit tests carried this
+    // invariant and the rewrite would otherwise drop it (#1187 review).
+    test(`${name} leaves updated_at untouched`, () => {
+      seedDataset("nm000060");
+      const sentinel = "2000-01-01 00:00:00";
+      db.prepare("UPDATE datasets SET updated_at = ? WHERE dataset_id = ?").run(
+        sentinel,
+        "nm000060",
+      );
+      db.prepare(sql).run(...(binds as never[]));
+      const row = db
+        .query("SELECT updated_at AS u FROM datasets WHERE dataset_id = ?")
+        .get("nm000060") as { u: string };
+      expect(row.u).toBe(sentinel);
     });
   }
 
