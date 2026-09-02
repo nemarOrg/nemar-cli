@@ -207,9 +207,8 @@ function catalogS3Client(options: ZarrCatalogS3Options): AwsClient {
  * masquerades as "not published yet". `bucket`/`key` ride along so a caller
  * that only logs `err.message` still gets both in the text.
  *
- * `backend/src/routes/zarr-data.ts`'s `GET /catalog.json` currently folds
- * this into its generic catch (502) until it is updated to distinguish it
- * as 503 -- see that route's own doc comment / the epic tracking issue.
+ * `backend/src/routes/zarr-data.ts`'s `GET /catalog.json` catches this
+ * specifically and answers 503, distinct from the plain-`Error` 502 path.
  */
 export class ZarrCatalogForbiddenError extends Error {
   constructor(
@@ -236,13 +235,21 @@ export class ZarrCatalogForbiddenError extends Error {
  * `error` (not `warn`) and thrown as {@link ZarrCatalogForbiddenError}
  * rather than silently reported as "not published". Any other non-2xx
  * still throws a plain `Error` (a true infra failure).
+ *
+ * `fetchImpl` defaults to the global `fetch` and exists so
+ * `backend/src/routes/zarr-data.ts`'s `GET /catalog.json` can pass its own
+ * `deps.fetch` (the phase 1 dependency seam, #1199) through to this exact
+ * function instead of re-implementing the signed-GET/403/404 handling at
+ * the route level -- the same "one function, every caller" reasoning
+ * `publishZarrCatalog` already documents for its own S3 wiring.
  */
 export async function fetchZarrCatalogObject(
   options: ZarrCatalogS3Options,
+  fetchImpl: typeof fetch = fetch,
 ): Promise<{ body: string; etag: string | null } | null> {
   const aws = catalogS3Client(options);
   const signed = await aws.sign(catalogObjectUrl(options), { method: "GET" });
-  const response = await fetch(signed);
+  const response = await fetchImpl(signed);
   if (response.status === 404) return null;
   if (response.status === 403) {
     console.error("[zarr-catalog] 403 fetching zarr-catalog.json (forbidden)", {
