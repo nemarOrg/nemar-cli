@@ -2742,6 +2742,7 @@ def merge_manifest(
     entries: list[dict],
     store_rels: list[str],
     updated_utc: str,
+    events_file: dict | None = None,
 ) -> dict:
     """Build the producer manifest (`<id>/zarr/manifest.json`). Pure.
 
@@ -2752,6 +2753,14 @@ def merge_manifest(
 
     Restricted to `store_rels` -- the rels the index actually publishes -- so the
     two documents can never disagree about which stores exist.
+
+    `events_file` is `{name, size_bytes, row_count}` for the events.parquet THIS
+    run uploaded, or None when it published none. Recorded rather than inferred:
+    the index says the file exists and how many rows it has, and this says how
+    many bytes the producer actually wrote -- which is what makes "the object on
+    S3 is the one this run wrote" checkable with a HEAD instead of a download.
+    Not carried over from `prior`: a run that published no file must not claim
+    the previous run's bytes.
     """
     by_rel: dict[str, dict] = {}
     if prior and isinstance(prior.get("stores"), list):
@@ -2766,6 +2775,7 @@ def merge_manifest(
         "format_version": MANIFEST_FORMAT_VERSION,
         "dataset_id": dataset_id,
         "updated_utc": updated_utc,
+        **({"files": [events_file]} if events_file else {}),
         "stores": [
             {
                 "zarr": rel,
@@ -3459,21 +3469,30 @@ def s3_download_file(bucket: str, key: str, dest: str) -> bool:
     )
 
 
+class EventsPublication(TypedDict):
+    """What a run did about `<id>/zarr/events.parquet`.
+
+    `file` is None whenever nothing was published, and the index must then point
+    at nothing. `failed` separates the reason: "this dataset has no events" and
+    "we could not say what its events are" must not look the same from outside.
+    """
+
+    file: dict | None
+    failed: bool
+
+
 def publish_events_parquet(
     staged: EventsStaging,
     ordered_rels: list[str],
     *,
     bucket: str,
     dataset_id: str,
-) -> tuple[int | None, bool]:
-    """Build and upload `<id>/zarr/events.parquet`. Returns
-    `(row_count | None, publish_failed)`.
+) -> EventsPublication:
+    """Build and upload `<id>/zarr/events.parquet`.
 
-    `None` means no file was published and the index must not point at one: the
-    dataset has no events at all, `pyarrow` is missing, or this run could not
-    write/upload the file. `publish_failed` distinguishes the last case, which is
-    reported on the callback -- "this dataset has no events" and "we failed to
-    say what its events are" must not look the same from outside.
+    Publishes nothing when the dataset has no events at all, `pyarrow` is
+    missing, or this run could not write/upload the file -- the last of which
+    sets `failed` and is reported on the callback.
 
     Best-effort throughout, exactly like manifest.json: the stores and index.json
     are the serving copy, and ADR 0005 says partial data still serves. A failure
@@ -3482,7 +3501,7 @@ def publish_events_parquet(
     """
     carried = [rel for rel in ordered_rels if rel not in staged]
     if not staged.row_count and not carried:
-        return None, False
+        return {"file": None, "failed": False}
     try:
         import pyarrow  # type: ignore[import-not-found]  # noqa: F401 - probe only
     except ImportError:
@@ -3492,7 +3511,7 @@ def publish_events_parquet(
             "not advertise one (add it: scripts/zarr/requirements.txt)",
             flush=True,
         )
-        return None, False
+        return {"file": None, "failed": False}
 
     prior: PriorEventRows | None = None
     prior_local: str | None = None
@@ -3512,7 +3531,7 @@ def publish_events_parquet(
             # Every store's events.tsv was absent or empty. Publishing an empty
             # file would tell a client "no events" no more clearly than the
             # absent `events_parquet` field does, and costs a fetch to learn it.
-            return None, False
+            return {"file": None, "failed": False}
         aws_cp(
             local,
             f"s3://{bucket}/{dataset_id}/zarr/{EVENTS_PARQUET_NAME}",
@@ -3533,14 +3552,21 @@ def publish_events_parquet(
                 "a --clean run rebuilds them",
                 flush=True,
             )
-        return rows, False
+        return {
+            "file": {
+                "name": EVENTS_PARQUET_NAME,
+                "size_bytes": os.path.getsize(local),
+                "row_count": rows,
+            },
+            "failed": False,
+        }
     except Exception as exc:  # noqa: BLE001 - never fail a good conversion over this
         print(
             f"::warning::{dataset_id}/zarr/{EVENTS_PARQUET_NAME} was not published: "
             f"{redact_secrets(str(exc))}",
             flush=True,
         )
-        return None, True
+        return {"file": None, "failed": True}
     finally:
         for path in (local, prior_local):
             if path:
@@ -5522,7 +5548,7 @@ def main() -> int:
     biosigio_version = installed_biosigio_version()
     # Set by the events.parquet step below, inside the same guard: the index may
     # only advertise a file this run actually published.
-    events_row_count: int | None = None
+    events_file: dict | None = None
     events_upload_failed = False
     try:
         index = merge_index(
@@ -5549,15 +5575,17 @@ def main() -> int:
         # run; when it does not publish, the two fields stay absent and a client
         # reads that as "this dataset has no events file", which is exactly what
         # is true of the new index.
-        events_row_count, events_upload_failed = publish_events_parquet(
+        published_events = publish_events_parquet(
             events_staging,
             [e["zarr"] for e in index["stores"]],
             bucket=bucket,
             dataset_id=dataset_id,
         )
-        if events_row_count:
+        events_file = published_events["file"]
+        events_upload_failed = published_events["failed"]
+        if events_file:
             index["events_parquet"] = f"{index['data_base']}{EVENTS_PARQUET_NAME}"
-            index["events_row_count"] = events_row_count
+            index["events_row_count"] = events_file["row_count"]
         # Validate what is about to be published, not a copy of it. A producer bug
         # caught here costs one run; the same bug reaching S3 costs every consumer,
         # and index.json is the mandatory entry point (in-prefix ListBucket is
@@ -5572,7 +5600,12 @@ def main() -> int:
         return 1
 
     manifest = merge_manifest(
-        prior_manifest, dataset_id, manifest_entries, [e["zarr"] for e in index["stores"]], updated
+        prior_manifest,
+        dataset_id,
+        manifest_entries,
+        [e["zarr"] for e in index["stores"]],
+        updated,
+        events_file=events_file,
     )
     try:
         validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
@@ -5698,7 +5731,7 @@ def main() -> int:
         # build/upload failed -- so `events_upload_failed` separates the last one:
         # "no events" and "we could not say what the events are" must not read
         # the same from outside.
-        "events_row_count": events_row_count,
+        "events_row_count": events_file["row_count"] if events_file else None,
         "events_upload_failed": events_upload_failed,
     }
     with open(args.callback_out, "w") as fh:

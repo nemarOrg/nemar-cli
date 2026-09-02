@@ -5578,6 +5578,40 @@ class TestIndexSchemaSelfCheck(unittest.TestCase):
         with self.assertRaises(jsonschema.ValidationError):
             validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
 
+    def test_the_manifest_records_the_published_events_file(self):
+        manifest = merge_manifest(
+            None, "on007763", [], [], "2026-09-02T00:00:00Z",
+            events_file={"name": EVENTS_PARQUET_NAME, "size_bytes": 4096, "row_count": 3},
+        )
+        self.assertEqual(manifest["files"][0]["size_bytes"], 4096)
+        validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+        # No file published, no claim about one: the previous run's object may
+        # still be on S3, and this document must not describe it.
+        bare = merge_manifest(None, "on007763", [], [], "2026-09-02T00:00:00Z")
+        self.assertNotIn("files", bare)
+        validate_document(bare, MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_a_mutated_manifest_file_entry_is_rejected(self):
+        import jsonschema
+
+        for mutate in (
+            # The enum is what stops this list from quietly becoming a
+            # free-form file inventory nobody validates.
+            lambda d: d["files"][0].__setitem__("name", "events.pq"),
+            lambda d: d["files"][0].__setitem__("size_bytes", -1),
+            lambda d: d["files"][0].pop("size_bytes"),
+            lambda d: d["files"][0].__setitem__("stray", 1),
+        ):
+            manifest = merge_manifest(
+                None, "on007763", [], [], "2026-09-02T00:00:00Z",
+                events_file={"name": EVENTS_PARQUET_NAME, "size_bytes": 1, "row_count": 1},
+            )
+            with self.subTest(mutation=str(mutate)), self.assertRaises(
+                jsonschema.ValidationError
+            ):
+                mutate(manifest)
+                validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
 
 class TestRealRecordingV3Fields(unittest.TestCase):
     """End-to-end over the STORE-LEVEL functions on a real recording.
@@ -6366,6 +6400,35 @@ class TestMainPublishesEventsParquet(unittest.TestCase):
         body = self.callback_body()
         self.assertEqual(body["events_row_count"], 5)
         self.assertIs(body["events_upload_failed"], False)
+
+    def test_the_manifest_records_the_bytes_the_run_wrote(self):
+        """The index says the file exists and how many rows it has; the producer
+        manifest says how many BYTES this run uploaded, so "the object on S3 is
+        the one this conversion wrote" is a HEAD away rather than a download."""
+        self.assertEqual(self.run_main("--clean"), 0)
+        with open(self.published("manifest.json")) as fh:
+            manifest = json.load(fh)
+        self.assertEqual(len(manifest["files"]), 1)
+        entry = manifest["files"][0]
+        self.assertEqual(entry["name"], EVENTS_PARQUET_NAME)
+        self.assertEqual(entry["row_count"], 5)
+        self.assertEqual(
+            entry["size_bytes"], os.path.getsize(self.published(EVENTS_PARQUET_NAME))
+        )
+        validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_a_run_that_publishes_no_file_claims_no_bytes(self):
+        # The previous run's file may still be on S3; the manifest must not
+        # inherit its size and read as though this run wrote it.
+        self.assertEqual(self.run_main("--clean"), 0)
+        published = self.published(EVENTS_PARQUET_NAME)
+        with open(published, "wb") as fh:
+            fh.write(b"not a parquet file")
+        self.assertEqual(self.run_main(), 0)
+        with open(self.published("manifest.json")) as fh:
+            manifest = json.load(fh)
+        self.assertNotIn("files", manifest)
+        validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
 
     def test_an_incremental_run_carries_the_rows_forward(self):
         """The store is not reconverted, so the published file is the only place
