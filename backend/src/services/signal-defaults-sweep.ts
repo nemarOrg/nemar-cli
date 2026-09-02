@@ -200,14 +200,14 @@ export interface SignalDefaultsSweepResult {
  * A GitHub-auth failure (missing/invalid App credentials) is caught here,
  * NOT allowed to propagate to the caller (#1162 review, I5): the ROUTE's
  * own catch assumes any throw out of this function means the candidate
- * query failed (its 500 hint literally says "is migration 0071 applied?"),
+ * query failed (its 500 hint literally says "is migration 0072 applied?"),
  * which was already false for an auth failure before this fix -- a
  * transient credential issue would have been misdiagnosed as a missing
  * migration. Instead this returns normally with a single batch-level entry
  * in `errors` (dataset_id: "*") and every candidate left untouched
  * (`processed: 0`), so the caller gets an honest, recoverable signal.
  *
- * Throws only if the candidate query itself fails (e.g. migration 0071 not
+ * Throws only if the candidate query itself fails (e.g. migration 0072 not
  * applied). Per-dataset failures are collected into `errors`, never thrown.
  */
 export async function runSignalDefaultsSweep(

@@ -973,7 +973,7 @@ describe("buildDatasetMetadata", () => {
   });
 
   // Epic #1144 Phase 2b (#1153): signal_defaults block, sourced from
-  // migration 0071's four columns plus the pre-existing electrode_system.
+  // migration 0072's four columns plus the pre-existing electrode_system.
   describe("signal_defaults serving", () => {
     test("null when every source column is null (nothing probed yet)", () => {
       const out = buildDatasetMetadata({

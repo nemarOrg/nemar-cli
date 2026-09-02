@@ -34,7 +34,7 @@ export interface DatasetMetadataColumns {
   /** `SamplingFrequency` (Hz) from the preferred `*_eeg.json` sidecar (epic
    *  #1144 Phase 2b, #1153). Serves `signal_defaults.sampling_frequency`.
    *  One exemplar sidecar's declared value, not a verified per-dataset
-   *  aggregate -- see migration 0071's caveat. */
+   *  aggregate -- see migration 0072's caveat. */
   sampling_frequency: number | null;
   /** `PowerLineFrequency` (Hz), coerced to exactly 50 or 60 (#1153). Serves
    *  `signal_defaults.power_line_frequency`. */
@@ -98,7 +98,7 @@ export interface MetadataColumnInputs {
    * `SamplingFrequency` (Hz) from `getBidsTreeStats`'s root-preferred `*_eeg.json`
    * sidecar (#1153). Omit when no sidecar was sampled or the key was
    * absent/invalid. One exemplar sidecar's declared value, not a verified
-   * per-dataset aggregate -- see migration 0071's caveat.
+   * per-dataset aggregate -- see migration 0072's caveat.
    */
   samplingFrequency?: number;
   /**
@@ -282,7 +282,6 @@ export async function writeDatasetMetadataColumns(
            age_min = COALESCE(?, age_min),
            age_max = COALESCE(?, age_max),
            file_size = COALESCE(?, file_size),
-           file_size_formatted = CASE WHEN ? IS NOT NULL THEN ? ELSE file_size_formatted END,
            total_files = COALESCE(?, total_files),
            tasks = COALESCE(?, tasks),
            n_channels = COALESCE(?, n_channels),
@@ -305,11 +304,6 @@ export async function writeDatasetMetadataColumns(
       cols.age_min,
       cols.age_max,
       cols.file_size,
-      // file_size_formatted moves in lockstep with file_size (#1092 review):
-      // rewritten whenever file_size is written (formatFileSize(0) is null,
-      // matching "nothing to display"), untouched when file_size is null.
-      cols.file_size,
-      formatFileSize(cols.file_size),
       cols.total_files,
       cols.tasks,
       cols.n_channels,
@@ -596,8 +590,10 @@ export async function writeDatasetCatalogFields(
 
 /**
  * Format a byte count as a short human-readable string (`"23.2 GB"`,
- * `"4.31 GB"`). Mirrors the format the legacy nemar.org catalog uses for
- * `file_size_formatted` so the column stays consistent.
+ * `"4.31 GB"`). Binary units (1024) — distinct from the decimal
+ * `formatBytes` in services/s3.ts. This is the canonical formatter for the
+ * served `file_size_formatted` field, which is derived at read time from
+ * `file_size` (#1182; the stored column is gone).
  */
 export function formatFileSize(bytes: number | null | undefined): string | null {
   if (bytes == null || !Number.isFinite(bytes) || bytes <= 0) return null;

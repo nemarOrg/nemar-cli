@@ -259,9 +259,12 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
       );
       await db
         .prepare(
-          "UPDATE datasets SET concept_doi = ?, ezid_identifier = ?, ezid_status = ?, doi_provider = 'ezid', updated_at = datetime('now') WHERE dataset_id = ?",
+          // ezid_identifier/doi_provider are no longer stored (#1182):
+          // the identifier derives from concept_doi and EZID is the sole
+          // provider (ADR 0007).
+          "UPDATE datasets SET concept_doi = ?, ezid_status = ?, updated_at = datetime('now') WHERE dataset_id = ?",
         )
-        .bind(result.doi, result.providerRecordId, result.status, datasetId)
+        .bind(result.doi, result.status, datasetId)
         .run();
       return c.json(
         {

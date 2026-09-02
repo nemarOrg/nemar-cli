@@ -199,7 +199,9 @@ export function buildPublicCatalogBase(
     from += " AND d.visibility = 'public'";
   }
   if (owner) {
-    from += " AND COALESCE(d.uploader, u.username) = ?";
+    // The uploader column was dropped in #1182 (0 non-null rows in
+    // production); the owning user's username is the only owner label.
+    from += " AND u.username = ?";
     prefixParams.push(owner);
   }
   return { from, params: prefixParams };

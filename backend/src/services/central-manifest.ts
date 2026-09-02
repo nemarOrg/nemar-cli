@@ -11,6 +11,7 @@
 
 import type { Bindings } from "../types/bindings.js";
 import { createEzidVersionDoi } from "./doi.js";
+import { conceptEzidIdentifier } from "./ezid.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { signManifestCallbackToken, triggerManifestGeneration } from "./github.js";
 import { errorMessage, readRepoMetadata } from "./repo-metadata.js";
@@ -186,14 +187,14 @@ export async function dispatchCentralManifestJob(
 }
 
 /** Dataset shape needed to mint an EZID version DOI (shared by the webhook
- *  async residual and the admin orchestrator). */
+ *  async residual and the admin orchestrator). The concept EZID identifier
+ *  is derived from concept_doi (conceptEzidIdentifier, #1182), not stored. */
 export interface EzidVersionDoiDataset {
   id: number;
   dataset_id: string;
   name: string;
   github_repo: string | null;
   concept_doi: string | null;
-  ezid_identifier: string | null;
 }
 
 /**
@@ -214,7 +215,7 @@ export async function mintEzidVersionDoi(
   },
 ): Promise<{ doi: string; warnings?: string[] }> {
   const { dataset, repoName, version, sandbox, pat } = params;
-  if (!dataset.ezid_identifier) {
+  if (!dataset.concept_doi) {
     throw new Error(`Dataset ${dataset.dataset_id} has no EZID identifier`);
   }
 
@@ -243,7 +244,7 @@ export async function mintEzidVersionDoi(
     },
     {
       datasetId: dataset.dataset_id,
-      conceptIdentifier: dataset.ezid_identifier,
+      conceptIdentifier: conceptEzidIdentifier(dataset.concept_doi),
       version,
       bidsDescription: repoMeta.bidsDescription,
       githubRepo: dataset.github_repo || `nemarDatasets/${repoName}`,

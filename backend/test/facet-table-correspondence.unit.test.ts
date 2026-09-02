@@ -176,8 +176,8 @@ describe("D7: every facet's column is projected on both GET /datasets branches",
   // to the JSON KEY it must appear under in an unaliased `d.<col>`
   // projection (the wire key is the raw column name unless the route
   // aliases it -- `channels`/`age` are pairs, so both min/max columns are
-  // checked; `citations` reads `num_citations`, which the public branch has
-  // aliased since #804 and the ?mine branch gained here for parity).
+  // checked; `citations` filters the derived sum of the two addend columns
+  // (#1182), which both branches project under the num_citations key).
   const expectedColumns: Record<FacetKey, string[]> = {
     // #1177 integration review: `participants` is the COALESCEd alias, which
     // renders an unmeasured NULL as 0. The raw column is what an

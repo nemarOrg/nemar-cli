@@ -308,7 +308,7 @@ describe("runSignalDefaultsSweep: channelMontageProbeError is treated like THROW
 
 // #1162 review, I5: a GitHub-auth failure (missing/invalid App
 // credentials) must be absorbed into a normal 200-shaped result, not
-// propagate as a throw the route would misreport as "is migration 0071
+// propagate as a throw the route would misreport as "is migration 0072
 // applied?".
 describe("runSignalDefaultsSweep: GitHub-auth failure handling", () => {
   test("with a real candidate and no `pat` override, a missing-auth-config throw is caught and reported gracefully", async () => {

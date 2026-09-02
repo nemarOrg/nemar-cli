@@ -37,9 +37,9 @@ INSERT OR IGNORE INTO tokens (user_id, api_key_hash, api_key_prefix)
 SELECT id, '7cd087c94ae729fafa05243282163c993306b173cfd88b83b32dd92c27ce14f9', 'nemar_test_aeef8' FROM users WHERE username = 'test-user';
 
 -- Test dataset nm099999
-INSERT OR IGNORE INTO datasets (dataset_id, name, description, owner_user_id, status, github_repo, visibility, is_sandbox, doi_provider)
+INSERT OR IGNORE INTO datasets (dataset_id, name, description, owner_user_id, status, github_repo, visibility, is_sandbox)
 SELECT 'nm099999', 'E2E Test Dataset', 'Persistent test dataset for E2E testing',
-       id, 'active', 'nemarDatasets/nm099999', 'private', 0, 'ezid'
+       id, 'active', 'nemarDatasets/nm099999', 'private', 0
 FROM users WHERE username = 'test-admin';
 
 -- S3 permissions for test users on nm099999

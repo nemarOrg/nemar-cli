@@ -73,16 +73,18 @@ function seedDataset(
     github_repo?: string | null;
   } = {},
 ): void {
+  // concept_doi seeds lowercase; the EZID identifier is derived from it as
+  // 'doi:' + UPPER(concept_doi) (#1182).
   db.prepare(
     `INSERT INTO datasets
-       (dataset_id, owner_user_id, name, visibility, is_sandbox, doi_provider,
-        ezid_identifier, ezid_status, withdrawn_at, withdrawn_reason, github_repo)
-     VALUES (?, 1, ?, ?, 0, 'ezid', ?, ?, ?, ?, ?)`,
+       (dataset_id, owner_user_id, name, visibility, is_sandbox, concept_doi,
+        ezid_status, withdrawn_at, withdrawn_reason, github_repo)
+     VALUES (?, 1, ?, ?, 0, ?, ?, ?, ?, ?)`,
   ).run(
     DATASET_ID,
     DATASET_ID,
     overrides.visibility ?? "public",
-    `doi:10.82901/NEMAR.${DATASET_ID.toUpperCase()}`,
+    `10.82901/nemar.${DATASET_ID.toLowerCase()}`,
     overrides.ezid_status ?? null,
     overrides.withdrawn_at ?? null,
     overrides.withdrawn_at ? "upstream_403" : null,

@@ -26,6 +26,7 @@ import {
   buildPublicCatalogBase,
   escapeLikePattern,
 } from "../../services/dataset-filters";
+import { formatFileSize } from "../../services/dataset-metadata-columns";
 import { DEFAULT_MIN_SCORE, executeDatasetSearch } from "../../services/dataset-search";
 import { isValidDatasetId } from "../../services/datasetId";
 import { hasRole } from "../../types/bindings";
@@ -95,6 +96,66 @@ export { buildDatasetFilterClauses, escapeLikePattern };
 export function withCanonicalLatestVersion<T extends Record<string, unknown>>(row: T): T {
   const v = row.latest_version;
   return typeof v === "string" && v ? { ...row, latest_version: toVersionTag(v) } : row;
+}
+
+/**
+ * `file_size_formatted` is a contract field (shared/contract/dataset.ts) but
+ * no longer a stored column (#1182): derive it from the row's `file_size` at
+ * read time. MUST use `formatFileSize` (binary/1024, the formatter the old
+ * write path used) — `formatBytes` from services/s3.ts is decimal/1000 and
+ * would silently shift every displayed size. formatFileSize returns null for
+ * null/0/non-finite input, mirroring the old writer's "nothing to display".
+ * Exported for unit testing.
+ */
+export function deriveFileSizeFormatted(fileSize: unknown): string | null {
+  return typeof fileSize === "number" ? formatFileSize(fileSize) : null;
+}
+
+/**
+ * Explode the stored `attestation` JSON (#1182, migration 0071) back into
+ * the six flat attestation_* fields the detail contract declares
+ * (shared/contract/dataset.ts datasetDetailSchema) — the wire shape is
+ * unchanged from when they were six columns, so the CLI is unaffected. A
+ * NULL/absent column means "no attestation on record" (ADR 0024) and
+ * serves six nulls, exactly as six NULL columns did. Exported for unit
+ * testing.
+ */
+export function explodeAttestationFields(raw: unknown): Record<string, unknown> {
+  let parsed: Record<string, unknown> = {};
+  if (typeof raw === "string" && raw) {
+    try {
+      const val: unknown = JSON.parse(raw);
+      if (val && typeof val === "object" && !Array.isArray(val)) {
+        parsed = val as Record<string, unknown>;
+      }
+    } catch {
+      // json_valid CHECK makes this unreachable for stored rows; serve
+      // six nulls rather than 500 if it ever happens.
+    }
+  }
+  return {
+    attestation_deposit_type: parsed.deposit_type ?? null,
+    attestation_key_status: parsed.key_status ?? null,
+    attestation_deidentified: parsed.deidentified ?? null,
+    attestation_no_duplicate: parsed.no_duplicate ?? null,
+    attestation_upstream_source: parsed.upstream_source ?? null,
+    attestation_accepted_at: parsed.accepted_at ?? null,
+  };
+}
+
+/**
+ * Shared list-row shaping: canonical latest_version tag plus the derived
+ * file_size_formatted. The list projections previously served
+ * `COALESCE(d.file_size_formatted, '')`, so the list fallback for an
+ * unmeasured/zero size stays `''` (the detail route serves null instead,
+ * matching its old raw-column passthrough). Guarded on `file_size` being
+ * selected so the degraded fallback query (which projects neither field)
+ * passes through unchanged.
+ */
+function toListRow<T extends Record<string, unknown>>(row: T): T {
+  const shaped = withCanonicalLatestVersion(row);
+  if (!("file_size" in shaped)) return shaped;
+  return { ...shaped, file_size_formatted: deriveFileSizeFormatted(shaped.file_size) ?? "" };
 }
 
 // Re-exported so existing importers keep their path; the constant itself
@@ -215,7 +276,9 @@ function buildSortClause(sort: string): string {
       return " ORDER BY file_size DESC";
     case "citations":
       // Most-cited first; ties fall back to newest so the order is stable (#804).
-      return " ORDER BY COALESCE(d.num_citations, 0) DESC, d.created_at DESC";
+      // The total is derived from the two NOT NULL DEFAULT 0 addends (#1182);
+      // there is no stored num_citations column any more.
+      return " ORDER BY (d.num_dataset_citations + d.num_datapaper_citations) DESC, d.created_at DESC";
     default:
       return " ORDER BY d.created_at DESC";
   }
@@ -346,7 +409,7 @@ async function executeAndReturn(
     }
 
     return c.json({
-      datasets: result.results.map(withCanonicalLatestVersion),
+      datasets: result.results.map(toListRow),
       count: result.results.length,
       total_count: totalCount,
       limit,
@@ -400,7 +463,7 @@ async function executeAndReturn(
           .bind(limit, offset)
           .all();
         return c.json({
-          datasets: (fallback.results || []).map(withCanonicalLatestVersion),
+          datasets: (fallback.results || []).map(toListRow),
           count: fallback.results?.length || 0,
           total_count: fallback.results?.length || 0,
           limit,
@@ -532,11 +595,12 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
                COALESCE(d.authors, '') AS authors,
                COALESCE(d.license, '') AS license,
                COALESCE(d.file_size, 0) AS file_size,
-               COALESCE(d.file_size_formatted, '') AS file_size_formatted,
-               -- #804: added here in #1147 -- the citations facet's column
+               -- #804: added here in #1147 -- the citations facet's value
                -- must be visible on this branch too (it was previously
-               -- projected only on the public branch below).
-               COALESCE(d.num_citations, 0) AS num_citations,
+               -- projected only on the public branch below). Derived from
+               -- the two NOT NULL DEFAULT 0 addends (#1182); no stored
+               -- num_citations column exists any more.
+               (d.num_dataset_citations + d.num_datapaper_citations) AS num_citations,
                -- #854: NULL until phase 2/3 populate them; the website's channel +
                -- montage filter reads NULL as "not classified yet".
                d.n_channels,
@@ -636,7 +700,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       const sql = `
       SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
              d.github_repo, d.concept_doi, d.concept_doi AS doi, d.created_at, d.updated_at,
-             COALESCE(d.uploader, u.username) AS owner_username,
+             u.username AS owner_username,
              d.source, d.source_id,
              COALESCE(d.modalities, '') AS modalities,
              COALESCE(d.subject_count, 0) AS participants,
@@ -644,8 +708,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
              COALESCE(d.authors, '') AS authors,
              COALESCE(d.license, '') AS license,
              COALESCE(d.file_size, 0) AS file_size,
-             COALESCE(d.file_size_formatted, '') AS file_size_formatted,
-             COALESCE(d.num_citations, 0) AS num_citations,
+             (d.num_dataset_citations + d.num_datapaper_citations) AS num_citations,
              COALESCE(d.num_dataset_citations, 0) AS num_dataset_citations,
              COALESCE(d.num_datapaper_citations, 0) AS num_datapaper_citations,
              -- #854: NULL until phase 2/3 populate them; the website's channel +
@@ -933,6 +996,10 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
         -- columns. Kept ALONGSIDE d.* so existing consumers of the raw
         -- subject_count column are unaffected (additive, no regression).
         COALESCE(d.subject_count, 0) AS participants,
+        -- num_citations is a contract field (shared/contract/dataset.ts) but
+        -- no longer a stored column (#1182): serve the sum of the two
+        -- NOT NULL DEFAULT 0 addends.
+        (d.num_dataset_citations + d.num_datapaper_citations) AS num_citations,
         (
           SELECT version FROM dataset_versions dv
           WHERE dv.dataset_id = d.dataset_id
@@ -994,6 +1061,20 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
       c.header("Vary", "Authorization");
     }
-    return c.json({ dataset: withCanonicalLatestVersion(dataset) });
+    // Detail keeps the old raw-column shape for file_size_formatted: a
+    // string when file_size is measured and positive, null otherwise (the
+    // list branches coalesce to '' instead — see toListRow). The stored
+    // attestation JSON is dropped from the payload and served as the six
+    // flat contract fields instead (wire shape unchanged from the
+    // six-column era).
+    const { attestation: attestationRaw, ...rest } = withCanonicalLatestVersion(
+      dataset as Record<string, unknown>,
+    );
+    const detail = {
+      ...rest,
+      file_size_formatted: deriveFileSizeFormatted(dataset.file_size),
+      ...explodeAttestationFields(attestationRaw),
+    };
+    return c.json({ dataset: detail });
   });
 }

@@ -523,7 +523,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
 
   /**
    * POST /admin/datasets/signal-defaults-sweep?limit=N — backfill that seeds
-   * BIDS signal defaults (migration 0071: sampling_frequency,
+   * BIDS signal defaults (migration 0072: sampling_frequency,
    * power_line_frequency, eeg_reference, placement_scheme) from each
    * dataset's exemplar `*_eeg.json` sidecar (epic #1144 Phase 2b, issue
    * #1153). Modelled on recording-stats-sweep above: one implementation
@@ -565,7 +565,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     } catch (err) {
       console.error("[signal-defaults-sweep] candidate query failed:", err);
       return c.json(
-        { error: "Failed to query sweep candidates (is migration 0071 applied?)" },
+        { error: "Failed to query sweep candidates (is migration 0072 applied?)" },
         500,
       );
     }
@@ -1008,15 +1008,12 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     const body = await c.req.json<{ doi?: string }>().catch(() => ({}));
 
     const dataset = await db
-      .prepare(
-        "SELECT dataset_id, github_repo, concept_doi, doi_provider FROM datasets WHERE dataset_id = ?",
-      )
+      .prepare("SELECT dataset_id, github_repo, concept_doi FROM datasets WHERE dataset_id = ?")
       .bind(datasetId)
       .first<{
         dataset_id: string;
         github_repo: string | null;
         concept_doi: string | null;
-        doi_provider: string | null;
       }>();
 
     if (!dataset) {
@@ -1075,7 +1072,8 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
           .bind(datasetId, version)
           .first<{ doi: string }>();
         if (!existing) {
-          const provider = dataset.doi_provider === "zenodo" ? "zenodo" : "ezid";
+          // EZID is the sole provider (ADR 0007, #1182).
+          const provider = "ezid";
           try {
             await db
               .prepare(
@@ -1341,7 +1339,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       // Reset DOI and Zenodo fields on the dataset
       await db
         .prepare(
-          "UPDATE datasets SET concept_doi = NULL, latest_version_doi = NULL, doi_provider = 'ezid', ezid_identifier = NULL, ezid_status = NULL, zenodo_concept_id = NULL, zenodo_latest_version_id = NULL, enrichment_json = NULL, enrichment_updated_at = NULL, visibility = 'private' WHERE dataset_id = ?",
+          "UPDATE datasets SET concept_doi = NULL, latest_version_doi = NULL, ezid_status = NULL, zenodo_concept_id = NULL, enrichment_json = NULL, enrichment_updated_at = NULL, visibility = 'private' WHERE dataset_id = ?",
         )
         .bind(datasetId)
         .run();

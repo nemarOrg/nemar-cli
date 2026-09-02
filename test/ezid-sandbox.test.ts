@@ -674,7 +674,7 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
     //   TEST_WITHDRAW_DATASET_ID=xx0999NN bun test test/ezid-sandbox.test.ts
     // A version DOI is seeded alongside the concept DOI (bug #984: dataset
     // dataset_versions.doi is stored WITHOUT the "doi:" scheme prefix, unlike
-    // datasets.ezid_identifier, and EZID rejected the unprefixed identifier
+    // the derived concept identifier, and EZID rejected the unprefixed identifier
     // with "invalid identifier" in production -- withdrawDataset/
     // restoreDataset now run every version DOI through ensureDoiScheme
     // before calling makeUnavailable/makePublic). This test mints the
@@ -720,12 +720,15 @@ describe.skipIf(!SHOULD_RUN)("EZID Sandbox Integration", { timeout: 30000 }, () 
         db.prepare(
           "INSERT INTO users (id, username, email, github_username, status) VALUES (1, 'alice', 'alice@nemar.org', 'alice', 'approved')",
         ).run();
+        // concept_doi is stored WITHOUT the "doi:" prefix; withdrawDataset
+        // derives the EZID identifier from it as 'doi:' + UPPER(concept_doi)
+        // (#1182), reproducing conceptIdentifier.
         db.prepare(
           `INSERT INTO datasets
-             (dataset_id, owner_user_id, name, visibility, is_sandbox, doi_provider,
-              ezid_identifier, github_repo)
-           VALUES (?, 1, ?, 'public', 1, 'ezid', ?, ?)`,
-        ).run(datasetId, datasetId, conceptIdentifier, `nemarDatasets/${datasetId}`);
+             (dataset_id, owner_user_id, name, visibility, is_sandbox,
+              concept_doi, github_repo)
+           VALUES (?, 1, ?, 'public', 1, ?, ?)`,
+        ).run(datasetId, datasetId, extractDoi(conceptIdentifier), `nemarDatasets/${datasetId}`);
         db.prepare(
           "INSERT INTO dataset_versions (dataset_id, version, doi, ezid_status) VALUES (?, '1.0.0', ?, 'public')",
         ).run(datasetId, versionDoi);

@@ -280,13 +280,16 @@ describe("POST /admin/datasets/recording-stats-sweep (real route, zero real cand
 
 const MIGRATIONS_DIR = join(import.meta.dir, "..", "src/db/migrations");
 
-/** Every migration EXCEPT 0070, so admin auth tables (earlier migrations)
+/** Every migration BEFORE 0070, so admin auth tables (earlier migrations)
  *  exist but the recording-stats columns/predicate do not -- reproduces
  *  "is migration 0070 applied?" for real instead of asserting on a
- *  fabricated D1 error. */
+ *  fabricated D1 error. Stops before 0070 (not merely skipping it) because
+ *  the 0071 rebuild (#1182) recreates the recording-stats columns
+ *  unconditionally, so "0070 skipped but later migrations applied" is no
+ *  longer a constructible schema. */
 function dbMissingMigration0070(): Database {
   const files = readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith(".sql") && f !== "0070_recording_stats.sql")
+    .filter((f) => f.endsWith(".sql") && f < "0070")
     .sort();
   const built = new Database(":memory:");
   for (const file of files) {

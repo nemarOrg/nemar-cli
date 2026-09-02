@@ -1350,9 +1350,6 @@ doiCommand
         console.log(chalk.green("Latest Version DOI:"));
         console.log(`  DOI:  ${doiInfo.latest_version_doi}`);
         console.log(`  URL:  https://doi.org/${doiInfo.latest_version_doi}`);
-        if (doiInfo.zenodo_latest_version_url) {
-          console.log(`  Zenodo: ${doiInfo.zenodo_latest_version_url}`);
-        }
       } else if (doiInfo.concept_doi) {
         console.log(chalk.yellow("No version DOI published yet"));
         console.log(chalk.dim("  Version DOIs are created automatically on PR merge"));
