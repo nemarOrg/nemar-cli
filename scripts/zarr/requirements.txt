@@ -63,25 +63,40 @@
 #     `view_levels` / `view_downsample` / `view_chunk_columns` / `chunk_seconds` /
 #     `shard_seconds`, level-0 `source_rate_hz` / `chunk_samples` / `shard_samples`,
 #     view-array `chunk_columns`, root `view_chunk_columns`.
-#   - `bids.apply_channels_tsv` CONVERTS a channel's samples into the unit the
-#     BIDS sidecar declares rather than only relabelling them, exempts the
-#     discrete channel types, and reports what it did per file in
-#     `rec.metadata["channels_tsv_units"]` (biosigio#125, closing #122). The
-#     converter now calls it on the in-memory path and republishes that report as
-#     the index's per-store `units_report`, so a unit that could NOT be adopted is
-#     visible on the public surface instead of silently served.
+#   - Adopting a channels.tsv `units` value CONVERTS the channel's samples into
+#     that unit rather than only relabelling them, exempts the discrete channel
+#     types, and reports what it did per file in
+#     `rec.metadata["channels_tsv_units"]` (biosigio#125, closing #122), which
+#     the converter republishes as the index's per-store `units_report` -- so a
+#     unit that could NOT be adopted is visible on the public surface instead of
+#     being silently served.
 #   - Resource exhaustion propagates as `MemoryError` (and friends) instead of
 #     being reclassified as a data failure (biosigio#124), which is what keeps
 #     `convert_one`'s `except MemoryError` handler -- and therefore the retryable
 #     `recording_memory_exceeded` code -- reachable for reader-side exhaustion.
-# NOT yet a floor: biosigio#127 (`stream_to_zarr` applying channels.tsv). Until it
-# ships, the STREAMING path leaves units as the importer read them while the
-# in-memory path adopts the sidecar's, so one dataset's small and large recordings
-# can disagree on units. That is why `ZARR_ENGINE_VERSION` stays at "2" in
-# zarr_queue.py: the back-catalog re-conversion must not be armed while that
-# disagreement exists. Raise this floor to the #127 release and bump the engine in
-# the same change (see AGENTS.md's Zarr paragraph for the two-step ack).
-biosigio[zarr,meg,mef3,hdf5]>=1.2.6
+# >=1.2.7: `stream_to_zarr` takes `bids_channels` too, with the same values as
+# `Recording.from_file` ("auto" / "off" / None / a path / a DataFrame), and the
+# trailing-slash sidecar lookup is fixed on both paths (biosigio#128, closing
+# #127). THIS IS A FLOOR, not a preference, and it is what lets the engine go to
+# "3":
+#   - Without it the two exporters disagree about units. 1.2.6's streaming
+#     exporter had no such parameter at all, so a dataset's small recordings
+#     carried the sidecar's units and its large ones carried the importer's --
+#     re-converting the archive under a half-applied rule would have baked that
+#     split into the serving copy, which is why phase 7 shipped with the engine
+#     still at "2".
+#   - 1.2.6's `Recording.from_file` ACCEPTS `bids_channels=<path>` and silently
+#     treats anything that is not "auto" as "off" (measured: the units report
+#     comes back None). So a driver that passes the path form on 1.2.6 believes
+#     the sidecar was applied and serves importer units. There is no capability
+#     probe that saves you from that; only the floor does.
+# The converter passes the sidecar EXPLICITLY on both paths (`bids_channels_arg`)
+# and never uses "auto": the file handed to an exporter is a scratch
+# materialisation, and on the ADR 0028 MaxShield path it is the filtered copy at
+# `work/sss_<basename>`, so sibling detection is the wrong question -- and BIDS
+# inheritance means the applicable sidecar may live in an ancestor directory
+# rather than beside the recording at all.
+biosigio[zarr,meg,mef3,hdf5]>=1.2.7
 
 # Draft 2020-12 validator for the converter's own pre-upload self-check: the index
 # it is about to publish is validated against `shared/zarr-index.schema.json` (and

@@ -192,13 +192,16 @@ VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 # run below it would discover a .mefd/BTi recording via generate_zarr.py's
 # dir_recording_of/bti_recordings and then fail to convert it), 1.2.4 added MATLAB
 # v7.3 (HDF5) EEGLAB `.set` plus three recovered EDF/BDF rejections, 1.2.5 fixed
-# CTF `.hc` coil naming, and 1.2.6 is what index format v3 reads: constant-column
-# view chunking with the geometry declared in attrs, `bids.apply_channels_tsv`
-# converting samples into the sidecar's units with a per-file report, and resource
-# exhaustion propagating as MemoryError. Extras are not optional here: [mef3]
-# carries pymef and [hdf5] carries h5py, and without either the matching
-# recordings raise ImportError at convert time even though discovery finds them.
-BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.6}"
+# CTF `.hc` coil naming, 1.2.6 is what index format v3 reads (constant-column view
+# chunking with the geometry declared in attrs, channels.tsv units CONVERTING
+# samples with a per-file report, resource exhaustion propagating as MemoryError),
+# and 1.2.7 gives `stream_to_zarr` the same `bids_channels` parameter as
+# `Recording.from_file` -- which is what makes engine "3" safe, since below that
+# floor the streaming and in-memory paths disagree about a recording's units.
+# Extras are not optional here: [mef3] carries pymef and [hdf5] carries h5py, and
+# without either the matching recordings raise ImportError at convert time even
+# though discovery finds them.
+BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.7}"
 API_BASE="${API_BASE:-https://api.nemar.org}"
 # The STABLE base published in each index as `contract_base` and in each store's
 # `nemar.contract_url` (#1059/#1064). Distinct from S3_BUCKET/AWS_REGION, which

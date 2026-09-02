@@ -392,13 +392,17 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   license, citation, source commit, source tree, derived, HED version, engine
   version, contract URL — read once per run from `GET /datasets/<id>`, so a
   client that has the store has the attribution.
-  Units are the one thing that is deliberately half-done: the in-memory path
-  applies the recording's `channels.tsv` (resolved by BIDS inheritance and
-  passed EXPLICITLY, because on the MaxShield path the exporter is handed a
-  filtered copy in a scratch directory where sibling auto-detection finds
-  nothing), the streaming path cannot until biosigio#127/#128 ships. That
-  disagreement is why `ZARR_ENGINE_VERSION` is still `"2"` after index v3:
-  a store's `units_report` is present exactly when the sidecar was applied.
+  Served samples carry the unit the recording's `channels.tsv` declares, on
+  BOTH conversion paths (biosigio>=1.2.7). The sidecar is resolved by BIDS
+  inheritance — the same resolution the channel-count fidelity gate uses — and
+  passed EXPLICITLY as `bids_channels`, never biosigIO's `"auto"`: the file an
+  exporter is handed is a scratch materialisation, and on the MaxShield path it
+  is the filtered copy at `work/sss_<basename>`, so sibling detection is the
+  wrong question. `units_report` on a store entry is present exactly when a
+  sidecar was applied. **Index v3 is what `ZARR_ENGINE_VERSION = "3"` carries
+  to the back catalogue**, and the units change is why that bump needed the
+  1.2.7 floor: below it the streaming exporter could not apply the sidecar at
+  all, so the two paths would have disagreed.
   **A widening of discovery reaches the back catalog only through the engine
   stamp** (ADR 0033): `reconcile` re-queues on a version change, and an engine
   upgrade bumps no version, so `zarr_queue.py`'s `ZARR_ENGINE_VERSION` is what

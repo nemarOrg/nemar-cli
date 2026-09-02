@@ -127,7 +127,29 @@ DATASET_ID_RE = re.compile(r"^(nm|on)[0-9]{6}$")
 # rather than adding them, so a mass requeue would buy nothing and cost a full
 # archive reconversion. Bump for "the engine can now see something it could not
 # see before", and for nothing else.
-ZARR_ENGINE_VERSION = "2"
+#
+# "3" is epic #1181 phase 7. This one is not a widening of DISCOVERY -- the same
+# recordings are found -- but of what a converted store SAYS and what it
+# contains, which reaches the back catalogue by exactly the same route and so
+# needs the same stamp:
+#   - index.json becomes format v3: the data plane is declared, coverage is
+#     accounted for (`discovered_count == store_count + failure_count +
+#     pending_count`), infra failures are published as `pending` instead of
+#     vanishing, typed failures carry a `detail`, and `source_key` moves to a
+#     sibling manifest (#1059, #1197, #1178 item 5).
+#   - Every store gains a structured `nemar` provenance attribute -- DOI,
+#     license, citation, source commit, engine version (#1064).
+#   - View levels are chunked at a constant 1024 columns with the geometry
+#     declared in attrs, so a zoomed-out read costs 3 requests instead of 594
+#     (#1178 items 1-2, via biosigio>=1.2.6).
+#   - The recording's channels.tsv is applied on BOTH conversion paths, so
+#     served samples carry the unit the BIDS sidecar declares. This one CHANGES
+#     THE BYTES, and it is why the bump waited for biosigio>=1.2.7: until
+#     `stream_to_zarr` took `bids_channels` (biosigio#128), a dataset's small
+#     and large recordings would have been converted under different unit rules
+#     and the split baked into the serving copy. `requirements.txt` carries the
+#     measurement behind that floor.
+ZARR_ENGINE_VERSION = "3"
 
 # How many stamp-stale rows a routine `reconcile` will requeue without an
 # explicit acknowledgement. Above this, it requeues none and says so (see
