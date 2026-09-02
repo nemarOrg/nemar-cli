@@ -1879,6 +1879,7 @@ const listCommand = datasetCommand
   )
   .option("--doi", "Show only datasets with DOIs")
   .option("--hed", "Show only datasets with HED annotations")
+  .option("--has-zarr", "Show only datasets with a ready Zarr copy (#1062)")
   .option("--complete", "Show only datasets verified data-complete (#970)")
   .option("--recent [days]", "Show recently published datasets")
   .addOption(
@@ -1979,6 +1980,7 @@ Examples:
         license: options.license,
         hasDoi: !!options.doi,
         hasHed: !!options.hed,
+        hasZarr: !!options.hasZarr,
         dataComplete: !!options.complete,
         recent: options.recent ? Number.parseInt(options.recent, 10) || 30 : undefined,
         sort: options.sort,
@@ -2091,6 +2093,7 @@ const searchCommand = datasetCommand
   )
   .option("--doi", "Show only datasets with DOIs")
   .option("--hed", "Show only datasets with HED annotations")
+  .option("--has-zarr", "Show only datasets with a ready Zarr copy (#1062)")
   .option("--complete", "Show only datasets verified data-complete (#970)")
   .option("--recent [days]", "Show recently published datasets")
   .option(
@@ -2137,6 +2140,7 @@ Examples:
       const response = await searchDatasets(query, {
         modality: options.modality,
         hasHed: !!options.hed,
+        hasZarr: !!options.hasZarr,
         limit: Number.parseInt(options.limit, 10),
         author: options.author,
         task: options.task,

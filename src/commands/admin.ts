@@ -74,6 +74,7 @@ import {
   hedSweepReset,
   listUsers,
   publishDataset,
+  publishZarrCatalog,
   reindexBulk,
   reindexDataset,
   remintExemplarDois,
@@ -6063,3 +6064,34 @@ function recomputeTotals(rows: SummaryVersionCoverage[]) {
 }
 
 adminCommand.addCommand(summaryCommand);
+
+// ============================================================================
+// Zarr catalog (issue #1062, epic #1181 phase 2): on-demand refresh of the
+// top-level Zarr discovery document (zarr-catalog.json). The daily cron
+// publishes it automatically; this is for an operator who doesn't want to
+// wait for the next tick.
+// ============================================================================
+
+const zarrCatalogCommand = new Command("zarr-catalog").description(
+  "Top-level Zarr discovery catalog (zarr-catalog.json)",
+);
+
+zarrCatalogCommand
+  .command("publish")
+  .description("Rebuild and republish zarr-catalog.json to this environment's bucket")
+  .action(async () => {
+    if (!requireAuth()) return;
+
+    const spinner = ora("Publishing zarr-catalog.json...").start();
+    try {
+      const result = await publishZarrCatalog();
+      spinner.succeed(
+        `Published zarr-catalog.json: ${result.count} dataset(s), ${result.bytes} bytes`,
+      );
+    } catch (err) {
+      handleCommandError(err, spinner, "Failed to publish zarr catalog");
+      process.exit(1);
+    }
+  });
+
+adminCommand.addCommand(zarrCatalogCommand);
