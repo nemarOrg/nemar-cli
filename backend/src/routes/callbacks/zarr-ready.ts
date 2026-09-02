@@ -130,6 +130,8 @@ export function zarrFailureColumns(body: {
   data_failures?: unknown;
   pending_count?: number;
   discovered_count?: number;
+  events_upload_failed?: boolean;
+  manifest_upload_failed?: boolean;
 }): {
   errors: number;
   failureCount: number;
@@ -153,11 +155,24 @@ export function zarrFailureColumns(body: {
     typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : null;
   const pending = nonNegative(body.pending_count);
   const discovered = nonNegative(body.discovered_count);
+  // A sibling document the converter could not publish leaves the serving copy
+  // internally inconsistent until the next run, and until now the ONLY trace of
+  // that off-node was a console.warn in the Worker log -- unqueryable, and gone
+  // with the log. These are the same additive-key treatment as pending/
+  // discovered (ADR 0034: no new column for a fact the bounded summary can
+  // carry), and they are written ONLY when true: a later run that publishes both
+  // siblings reports them false, the keys are then absent, and the row stops
+  // claiming a condition that has cleared.
+  const eventsUploadFailed = body.events_upload_failed === true;
+  const manifestUploadFailed = body.manifest_upload_failed === true;
   // The summary is written when there is anything to say -- a failure list, OR
   // pending recordings with no failures at all, which is precisely the on008083
   // shape (#1197) that used to leave the column NULL and the recordings
-  // invisible. `count` alone kept that case silent.
-  const hasSummary = dataFailures.length > 0 || (pending ?? 0) > 0;
+  // invisible. `count` alone kept that case silent. An unpublished sibling is
+  // also something to say: a run with no failures and no pending recordings that
+  // published index.json without its manifest is not a clean run.
+  const hasSummary =
+    dataFailures.length > 0 || (pending ?? 0) > 0 || eventsUploadFailed || manifestUploadFailed;
   return {
     errors,
     failureCount,
@@ -178,6 +193,8 @@ export function zarrFailureColumns(body: {
           detail_ref: "zarr/index.json",
           ...(pending === null ? {} : { pending }),
           ...(discovered === null ? {} : { discovered }),
+          ...(eventsUploadFailed ? { events_upload_failed: true } : {}),
+          ...(manifestUploadFailed ? { manifest_upload_failed: true } : {}),
         })
       : null,
     hadErrors: errors > 0,

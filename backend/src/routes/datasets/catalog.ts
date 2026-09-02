@@ -30,6 +30,7 @@ import {
 import { formatFileSize } from "../../services/dataset-metadata-columns";
 import { DEFAULT_MIN_SCORE, executeDatasetSearch } from "../../services/dataset-search";
 import { isValidDatasetId } from "../../services/datasetId";
+import { ZARR_VERIFIED_AT_PATH, ZARR_VERIFY_STATUS_PATH } from "../../services/sweep-stamps";
 import { type Bindings, hasRole } from "../../types/bindings";
 import type { DatasetsRouter } from "./shared";
 
@@ -81,8 +82,8 @@ const FACET_PROJECTION_COLUMNS = `d.subject_count,
                -- verification sweep's verdict, derived from the JSON
                -- sweep_stamps column (ADR 0034/0035 -- no new column).
                -- Null until the sweep reaches this dataset.
-               json_extract(d.sweep_stamps, '$.zarr_verify_status') AS zarr_verify_status,
-               json_extract(d.sweep_stamps, '$.zarr_verified_at') AS zarr_verified_at,
+               json_extract(d.sweep_stamps, '${ZARR_VERIFY_STATUS_PATH}') AS zarr_verify_status,
+               json_extract(d.sweep_stamps, '${ZARR_VERIFIED_AT_PATH}') AS zarr_verified_at,
                d.total_recording_duration,
                d.recording_duration_min,
                d.recording_duration_max,
@@ -188,7 +189,7 @@ export function deriveZarrIndexUrl(
 
 /**
  * Parse the stored `zarr_data_failures` JSON (#1191, migration 0074) into
- * the `{count, detail_ref, compacted_by?}` object the contract declares,
+ * the bounded summary object the contract declares,
  * instead of forwarding the raw stored string -- served only by `GET
  * /datasets/:id`'s `SELECT d.*` passthrough (list/search never project this
  * column). Defensive against a legacy ARRAY value: migration 0074 compacted
@@ -207,11 +208,32 @@ export function deriveZarrIndexUrl(
  * anomaly worth an operator's attention, so it is logged at `console.error`
  * with the dataset id and a reason before returning. `datasetId` is
  * threaded in for exactly that message. Exported for unit testing.
+ *
+ * **Every key the writer puts in this object has to be projected here.** The
+ * writer is `zarrFailureColumns` in `routes/callbacks/zarr-ready.ts`, and the
+ * column is served only through this function, so a key it writes and this
+ * projection drops does not exist as far as any consumer is concerned -- which
+ * is what happened to `pending`/`discovered`: #1197 added them to the stored
+ * summary specifically so a dataset could say "2 of 43", and the detail route
+ * silently served neither. `events_upload_failed`/`manifest_upload_failed` are
+ * the same shape (a sibling document the converter could not publish). The
+ * contract in `shared/contract/dataset.ts` declares the object CLOSED, so a new
+ * key needs three edits -- writer, this projection, contract -- and the
+ * round-trip test in `backend/test/catalog-has-zarr.test.ts` fails when one is
+ * missing.
  */
 export function parseZarrDataFailures(
   raw: unknown,
   datasetId: string,
-): { count: number; detail_ref: string; compacted_by?: string } | null {
+): {
+  count: number;
+  detail_ref: string;
+  compacted_by?: string;
+  pending?: number;
+  discovered?: number;
+  events_upload_failed?: boolean;
+  manifest_upload_failed?: boolean;
+} | null {
   const unparseable = (reason: string): null => {
     console.error("[catalog] zarr_data_failures unparseable, treating as none", {
       dataset_id: datasetId,
@@ -242,7 +264,26 @@ export function parseZarrDataFailures(
     const count = typeof obj.count === "number" ? obj.count : 0;
     const detail_ref = typeof obj.detail_ref === "string" ? obj.detail_ref : "zarr/index.json";
     const compacted_by = typeof obj.compacted_by === "string" ? obj.compacted_by : undefined;
-    return compacted_by !== undefined ? { count, detail_ref, compacted_by } : { count, detail_ref };
+    // Each optional key is projected only when the stored value has the type the
+    // contract declares: a garbage `pending` is dropped rather than served, for
+    // the same reason the whole object falls back to null rather than 500ing.
+    const counted = (value: unknown): number | undefined =>
+      typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+    const pending = counted(obj.pending);
+    const discovered = counted(obj.discovered);
+    // Written only when true (see zarrFailureColumns), so absence means "not
+    // reported as failed", which is the same reading as false.
+    const events_upload_failed = obj.events_upload_failed === true ? true : undefined;
+    const manifest_upload_failed = obj.manifest_upload_failed === true ? true : undefined;
+    return {
+      count,
+      detail_ref,
+      ...(compacted_by === undefined ? {} : { compacted_by }),
+      ...(pending === undefined ? {} : { pending }),
+      ...(discovered === undefined ? {} : { discovered }),
+      ...(events_upload_failed === undefined ? {} : { events_upload_failed }),
+      ...(manifest_upload_failed === undefined ? {} : { manifest_upload_failed }),
+    };
   }
   return unparseable(
     `parsed value is ${parsed === null ? "null" : typeof parsed}, expected an object or array`,
@@ -1152,8 +1193,8 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
         -- Issue #1068 (epic #1181 phase 8): same derivation as the list
         -- projection above (FACET_PROJECTION_COLUMNS) -- d.* alone does not
         -- surface a json_extract expression.
-        json_extract(d.sweep_stamps, '$.zarr_verify_status') AS zarr_verify_status,
-        json_extract(d.sweep_stamps, '$.zarr_verified_at') AS zarr_verified_at,
+        json_extract(d.sweep_stamps, '${ZARR_VERIFY_STATUS_PATH}') AS zarr_verify_status,
+        json_extract(d.sweep_stamps, '${ZARR_VERIFIED_AT_PATH}') AS zarr_verified_at,
         u.username as owner_username,
         u.github_username as owner_github
       FROM datasets d
