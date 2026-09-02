@@ -69,6 +69,13 @@ export function buildAccessDataPoint(event: AccessEvent): AnalyticsEngineDataPoi
 export function zarrObjectType(key: string): string {
   // Slash-anchored to match cacheControlFor() in zarr-data.ts and to avoid
   // misclassifying a hypothetical chunk like `..._index.json` as the store index.
+  //
+  // Deliberately NOT the same set as cacheControlFor's ZARR_DATASET_DOCUMENTS:
+  // manifest.json and events.parquet share that TTL and its purge, but this is
+  // an egress vocabulary, and "index.json is 95% of Worker egress" (#1035) is a
+  // measurement of index.json specifically. Folding two other documents into the
+  // same bucket would change what that number means; they fall through as
+  // "chunk" until there is a reason to give them a label of their own.
   if (key.endsWith("/index.json")) return "index";
   if (key.endsWith("/zarr.json")) return "metadata";
   return "chunk";

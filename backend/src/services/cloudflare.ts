@@ -109,12 +109,36 @@ export function zarrCacheBaseUrl(env: Bindings): string | null {
 }
 
 /**
+ * The DATASET-LEVEL documents of a Zarr serving copy: one object each, at the
+ * top of `<id>/zarr/`, rewritten by every conversion that changes anything.
+ *
+ * They are the two things a chunk is not -- freshness-sensitive and few enough
+ * to enumerate -- so they share one rule on both sides of the edge: a short
+ * untokened TTL in `cacheControlFor` (routes/zarr-data.ts), and a purge on
+ * re-conversion here. Declared once because the two lists silently disagreeing
+ * is precisely the bug this fixes: `manifest.json` was getting the 24-hour chunk
+ * TTL and no purge, so a re-conversion's manifest could stay stale at the edge
+ * for a day (epic #1181 phase 9).
+ *
+ * `catalog.json` is deliberately absent: it is the ARCHIVE-level catalog served
+ * by its own route (`GET /catalog.json`, no `<id>/zarr/` segment), not a
+ * per-dataset document, and it is purged on its own publish path.
+ */
+export const ZARR_DATASET_DOCUMENTS = ["index.json", "manifest.json", "events.parquet"] as const;
+
+/**
  * Build the absolute, cache-host URLs whose freshness matters most after a
- * store is (re)built: the dataset's `index.json` (so the viewer discovers
- * added/removed stores immediately) and each changed store's root `zarr.json`
- * (group metadata). Chunk objects are intentionally left to ride the edge TTL +
- * ETag revalidation -- enumerating every chunk URL for a URL-list purge is not
- * worthwhile, and prefix purge is Enterprise-only.
+ * store is (re)built: the dataset's documents (so the viewer discovers
+ * added/removed stores immediately, and a client joining `events.parquet` to
+ * the index does not join a stale file to a fresh one) and each changed store's
+ * root `zarr.json` (group metadata). Chunk objects are intentionally left to
+ * ride the edge TTL + ETag revalidation -- enumerating every chunk URL for a
+ * URL-list purge is not worthwhile, and prefix purge is Enterprise-only.
+ *
+ * A document this dataset does not have (a dataset with no events publishes no
+ * `events.parquet`) is still listed: a purge of an absent URL is a no-op at the
+ * edge, and skipping it would need this function to know what the run
+ * published, which it does not.
  */
 export function zarrPurgeTargets(
   env: Bindings,
@@ -123,7 +147,7 @@ export function zarrPurgeTargets(
 ): string[] {
   const base = zarrCacheBaseUrl(env);
   if (!base) return [];
-  const targets = [`${base}/${datasetId}/zarr/index.json`];
+  const targets = ZARR_DATASET_DOCUMENTS.map((name) => `${base}/${datasetId}/zarr/${name}`);
   for (const storePath of changedStorePaths) {
     const clean = storePath.trim().replace(/^\/+/, "").replace(/\/+$/, "");
     if (!clean) continue;

@@ -25,6 +25,37 @@
     "updated_utc": {
       "type": "string"
     },
+    "files": {
+      "type": "array",
+      "description": "Dataset-level objects this run published beside index.json, with the size it wrote. Producer bookkeeping, like the rest of this document: it is how a later run (or an operator) can tell that the events file on S3 is the one this conversion wrote without downloading it. Absent or empty when the run published none.",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "size_bytes"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "events.parquet"
+            ],
+            "description": "Object name relative to the dataset's zarr prefix. Enumerated rather than free-form: index.json and manifest.json describe themselves, so the only member today is the events file (#1060)."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Bytes the producer uploaded."
+          },
+          "row_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Rows in the file, matching the index's events_row_count. One row per (event, channel group), not per event."
+          }
+        }
+      }
+    },
     "stores": {
       "type": "array",
       "items": {

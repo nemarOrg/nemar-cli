@@ -104,3 +104,15 @@ biosigio[zarr,meg,mef3,hdf5]>=1.2.7
 # S3, so a producer bug surfaces here rather than in every consumer. The check
 # degrades to a loud warning when this is absent, so an older venv still converts.
 jsonschema>=4.21
+
+# Writes `<id>/zarr/events.parquet` (#1060): one columnar file per dataset, one
+# row per (event, channel group), with the level-0 sample index the converter
+# computes. Rows are staged per store and appended through a ParquetWriter, so
+# this is used for a streaming write, never to hold a 25k-store dataset in one
+# frame. biosigIO already pulls in numpy/pandas; pyarrow is the parquet writer
+# neither of them brings.
+# Like jsonschema, absence is survivable rather than fatal: the converter warns,
+# publishes no events file, and leaves index.json advertising none -- so a node
+# still running the fallback `BIOSIGIO_SPEC` install (no requirements.txt in its
+# clone) converts recordings as before.
+pyarrow>=15.0

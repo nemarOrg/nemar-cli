@@ -53,7 +53,9 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
+import pickle
 import re
 import shutil
 import subprocess
@@ -180,6 +182,11 @@ INDEX_LAYOUT = {
     "scale_offset": (
         "level-0 array attrs scale[] and offset[]; physical = digital * scale + offset"
     ),
+    # Stated against data_base rather than contract_base because it is one object,
+    # not a store path. Whether it EXISTS is said by the top-level
+    # `events_parquet` field, which is absent for a dataset with no events (#1060)
+    # -- the template here is how to read it, not a promise that it is there.
+    "events": "<data_base>events.parquet",
 }
 
 # Conversion attempts a `pending` recording gets before the producer stops
@@ -1760,45 +1767,327 @@ def channels_tsv_for(primary_path: str, head_files) -> str | None:
     return candidates[-1][2]  # most specific
 
 
-def events_summary(events_text: str | None) -> dict:
-    """`{n_events, trial_types}` from the text of the events.tsv the converter
-    applies, or `{}` when no events.tsv applies.
+# --- events -------------------------------------------------------------------
+# ONE parse of the events.tsv a store was built from feeds BOTH the per-store
+# `n_events`/`trial_types` in index.json (#1059) and the rows of
+# `<id>/zarr/events.parquet` (#1060). Two parsers would eventually disagree, and
+# a summary that contradicts the file a client can download is worse than no
+# summary: the summary is what a client uses to decide whether to fetch at all.
+
+# The published columns, in order (#1060). Every string one is dictionary-encoded
+# in the parquet; `onset_s` is float64, `duration_s` float32, `sample_index`
+# int64. A remaining events.tsv column passes through under its own name -- with
+# `x_` prefixed only when that name would collide with one of these.
+EVENTS_FIXED_COLUMNS = (
+    "store_path",
+    "subject",
+    "session",
+    "task",
+    "run",
+    "onset_s",
+    "duration_s",
+    "sample_index",
+    "group_name",
+    "trial_type",
+    "value",
+    "hed",
+)
+# events.tsv column (lower-cased) -> the fixed column it feeds. BIDS spells the
+# HED column `HED`, and real datasets use both cases, so the match is
+# case-insensitive; a second column that lower-cases to the same name passes
+# through instead of overwriting the first.
+EVENTS_SOURCE_COLUMNS = {
+    "onset": "onset_s",
+    "duration": "duration_s",
+    "trial_type": "trial_type",
+    "value": "value",
+    "hed": "hed",
+}
+EVENTS_PASSTHROUGH_PREFIX = "x_"
+# BIDS's null. A cell carrying it becomes a real null rather than three literal
+# characters a client would have to know to filter out.
+EVENTS_NA = "n/a"
+
+
+class ParsedEvents(TypedDict):
+    """A BIDS events.tsv exactly as read: the header, and the cells of each data
+    row. Values stay strings here -- typing them is the row builder's job, and
+    the summary needs only to count."""
+
+    columns: list[str]
+    rows: list[list[str]]
+
+
+def parse_events_tsv(events_text: str | None) -> ParsedEvents | None:
+    """Parse the text of the events.tsv the converter applied. `None` in, `None`
+    out -- "no events.tsv applies", which is not the same as an empty one.
+
+    Deliberately minimal (header row, tab-separated, no quoting rules), which is
+    what BIDS specifies. The one non-obvious rule is the UTF-8 BOM: a
+    spreadsheet-exported events.tsv starts with U+FEFF, which would otherwise
+    make the first column "\\ufeffonset" -- silently costing every row its onset,
+    and therefore its sample index. nm000329 ships exactly that file.
+
+    Blank lines are dropped anywhere, so a trailing newline is not an event.
+    """
+    if events_text is None:
+        return None
+    lines = [ln for ln in events_text.lstrip("\ufeff").splitlines() if ln.strip()]
+    if not lines:
+        return {"columns": [], "rows": []}
+    return {
+        "columns": [c.strip() for c in lines[0].split("\t")],
+        "rows": [ln.split("\t") for ln in lines[1:]],
+    }
+
+
+def events_summary_of(parsed: ParsedEvents | None) -> dict:
+    """`{n_events, trial_types}` for a parsed events.tsv, or `{}` when none
+    applies.
 
     Published per store so a client can judge whether a dataset is worth opening,
     and which epoching strategy fits, without reading a signal byte (#1059). The
-    counts describe the SAME file biosigIO was handed, which is why this parses
-    the text rather than reading the store back: an events.tsv the converter did
-    not apply must not be counted.
+    counts describe the SAME file the parquet rows are built from and the SAME
+    file biosigIO was handed -- one parse, one set of numbers.
 
-    An empty `trial_types` means the file has no `trial_type` column (or every row
-    is `n/a`); the absence of both keys means there was no events.tsv at all. The
-    distinction matters to a consumer deciding whether "no trial types" is a
-    property of the data or of the pipeline. Phase 9 moves this to a shared
-    parser; until then it is deliberately minimal -- header row, tab-separated,
-    no quoting rules, which is what BIDS specifies.
+    An empty `trial_types` means the file has no `trial_type` column (or every
+    row is `n/a`); the absence of both keys means there was no events.tsv at all.
+    The distinction matters to a consumer deciding whether "no trial types" is a
+    property of the data or of the pipeline.
     """
-    if events_text is None:
+    if parsed is None:
         return {}
-    lines = [ln for ln in events_text.splitlines() if ln.strip()]
-    if not lines:
-        return {"n_events": 0, "trial_types": {}}
-    header = lines[0].split("\t")
     try:
-        col = header.index("trial_type")
+        col = [c.lower() for c in parsed["columns"]].index("trial_type")
     except ValueError:
         col = -1
     counts: dict[str, int] = {}
-    rows = lines[1:]
     if col >= 0:
-        for line in rows:
-            fields = line.split("\t")
+        for fields in parsed["rows"]:
             if col >= len(fields):
                 continue
             value = fields[col].strip()
-            if not value or value.lower() == "n/a":
+            if not value or value.lower() == EVENTS_NA:
                 continue
             counts[value] = counts.get(value, 0) + 1
-    return {"n_events": len(rows), "trial_types": dict(sorted(counts.items()))}
+    return {"n_events": len(parsed["rows"]), "trial_types": dict(sorted(counts.items()))}
+
+
+def events_summary(events_text: str | None) -> dict:
+    """`{n_events, trial_types}` straight from the events.tsv text. The parse the
+    parquet rows come from, so the two can never disagree."""
+    return events_summary_of(parse_events_tsv(events_text))
+
+
+def _event_cell(fields: list[str], col: int) -> str | None:
+    """One cell as a published string: `None` for missing, blank, or `n/a`."""
+    if col < 0 or col >= len(fields):
+        return None
+    value = fields[col].strip()
+    return None if not value or value.lower() == EVENTS_NA else value
+
+
+def _event_number(fields: list[str], col: int) -> float | None:
+    """One cell as a float, or `None` when it is absent or not a number. A
+    malformed onset yields a null onset and a null `sample_index` rather than a
+    dropped row: the row still says an event was declared, and a client can see
+    that its position is unknown instead of silently getting one fewer event."""
+    raw = _event_cell(fields, col)
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def sample_index_for(onset_s: float | None, rate: float | None) -> int | None:
+    """The level-0 sample an onset falls on, or `None` when it cannot be computed.
+
+    ``round(onset_s * rate)``, where `rate` is the group's SERVING rate (the
+    level-0 `rate` attr the index republishes), ties going up. That is the whole
+    formula, and the reason it is this simple is worth writing down once, because
+    the point of publishing the column at all is that a client should not have to
+    re-derive it (#1060):
+
+    * biosigIO resamples level 0 to ``target_rate = min(native_rate, cap)`` with
+      ``scipy.signal.resample_poly(x, up, down)``, ``up/down =
+      Fraction(round(target), round(native))``, and trims/pads the result to
+      ``n_out = round(n_native * target / native)``. So level 0 is exactly the
+      grid ``t[n] = n / target_rate`` over the same span as the source -- both
+      exporters, in-memory and streaming, share ``_resample_channel``.
+    * ``resample_poly`` is ZERO-PHASE: it compensates the polyphase FIR's group
+      delay internally, so output sample ``n`` is at absolute time ``n / rate``
+      with no delay term to subtract. This is verified against a real
+      1000 Hz -> 250 Hz recording in the test suite (nm000329) by correlating the
+      served level-0 signal against the native samples taken at the same absolute
+      times; a filter delay would show up there as a non-zero lag.
+
+    The index is thus the only place the relation is known exactly -- a client
+    that guesses `rate` from the acquisition rate, or that subtracts a delay it
+    assumes is there, is wrong by a fraction of a sample everywhere the ratio is
+    not an integer.
+
+    NOT clamped to the group's length. An onset past the end of the recording is
+    a property of the data, and a clamped index would be indistinguishable from
+    an event that genuinely lands on the last sample; clients bound-check against
+    `groups[].n_samples`, which the index publishes beside this.
+    """
+    if onset_s is None or rate is None:
+        return None
+    try:
+        rate = float(rate)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(rate) or rate <= 0 or not math.isfinite(onset_s):
+        return None
+    return math.floor(onset_s * rate + 0.5)
+
+
+def _passthrough_column_names(columns: list[str]) -> dict[int, str]:
+    """Source-column index -> published column name, for the events.tsv columns
+    that are not one of the five the fixed columns consume.
+
+    `x_` is prefixed only on a collision -- with a fixed column name, or with a
+    name already taken (a duplicate header). Prefixing until free rather than
+    dropping: a duplicated or awkwardly-named column is malformed input, and
+    losing its values silently is the worse failure."""
+    taken = set(EVENTS_FIXED_COLUMNS)
+    consumed: set[str] = set()
+    out: dict[int, str] = {}
+    for i, raw in enumerate(columns):
+        name = raw.strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in EVENTS_SOURCE_COLUMNS and key not in consumed:
+            consumed.add(key)
+            continue
+        while name in taken:
+            name = EVENTS_PASSTHROUGH_PREFIX + name
+        taken.add(name)
+        out[i] = name
+    return out
+
+
+def event_rows_for_store(
+    zarr_rel: str,
+    primary_path: str,
+    groups: list[dict] | None,
+    parsed: ParsedEvents | None,
+) -> dict[str, list] | None:
+    """The `events.parquet` rows for one store, as a column -> values mapping, or
+    `None` when the store contributes none.
+
+    ONE ROW PER (EVENT, CHANNEL GROUP). A store's groups are concurrent streams
+    of one recording at different rates (biosigIO names them
+    `<modality>_<rate>hz`), so a single onset has a different sample index in
+    each; `group_name` is what tells the rows apart, and joining on it plus
+    `store_path` is how a client gets the index that matches the array it is
+    about to read. Rows are ordered by onset, then group name.
+
+    `subject`/`session`/`task`/`run` come from the recording's BIDS entities so
+    the file can be filtered without a join back to the index; `session` and
+    `run` are null for a dataset that uses neither.
+    """
+    if parsed is None or not parsed["rows"]:
+        return None
+    named = sorted(
+        (g for g in (groups or []) if isinstance(g, dict) and g.get("name")),
+        key=lambda g: str(g["name"]),
+    )
+    if not named:
+        return None
+
+    lower = [c.lower() for c in parsed["columns"]]
+
+    def source(name: str) -> int:
+        return lower.index(name) if name in lower else -1
+
+    onset_col = source("onset")
+    duration_col = source("duration")
+    trial_col = source("trial_type")
+    value_col = source("value")
+    hed_col = source("hed")
+    passthrough = _passthrough_column_names(parsed["columns"])
+
+    ents = _bids_entities(filename_stem(primary_path))
+    subject = ents.get("sub")
+    session = ents.get("ses")
+    task = ents.get("task")
+    run = ents.get("run")
+
+    cols: dict[str, list] = {name: [] for name in EVENTS_FIXED_COLUMNS}
+    for name in passthrough.values():
+        cols[name] = []
+
+    rows = parsed["rows"]
+    onsets = [_event_number(f, onset_col) for f in rows]
+    durations = [_event_number(f, duration_col) for f in rows]
+    # Onset order, with unparseable onsets last and file order preserved within
+    # a tie -- so the published order is deterministic for a given file.
+    order = sorted(
+        range(len(rows)),
+        key=lambda i: (onsets[i] is None, onsets[i] if onsets[i] is not None else 0.0, i),
+    )
+    for i in order:
+        fields = rows[i]
+        for group in named:
+            cols["store_path"].append(zarr_rel)
+            cols["subject"].append(subject)
+            cols["session"].append(session)
+            cols["task"].append(task)
+            cols["run"].append(run)
+            cols["onset_s"].append(onsets[i])
+            cols["duration_s"].append(durations[i])
+            cols["sample_index"].append(sample_index_for(onsets[i], group.get("rate")))
+            cols["group_name"].append(str(group["name"]))
+            cols["trial_type"].append(_event_cell(fields, trial_col))
+            cols["value"].append(_event_cell(fields, value_col))
+            cols["hed"].append(_event_cell(fields, hed_col))
+            for col, name in passthrough.items():
+                cols[name].append(_event_cell(fields, col))
+    return cols
+
+
+def events_row_alert(
+    primary_path: str,
+    parsed: ParsedEvents | None,
+    rows: dict[str, list] | None,
+) -> str | None:
+    """The `::warning::` a store's events deserve, or None when they are fine.
+
+    Two conditions, both invisible from the outside otherwise -- the parquet
+    either does not mention the store at all, or mentions it with a column of
+    nulls, and neither is distinguishable from "this recording has no events":
+
+    * The recording HAS events and the store has no named channel group, so
+      there is nothing to attach a rate (and therefore a sample index) to and
+      the store contributes no rows at all.
+    * Every published row has a null `sample_index`: either no onset cell parsed
+      as a number, or the group carries no rate. A client gets events it cannot
+      epoch.
+
+    Pure, and separate from the caller, because the first condition cannot be
+    reached through a real conversion (`convert_one` refuses to publish a store
+    with no channel groups) -- so a test can only reach that branch here.
+    """
+    if rows is None:
+        if parsed and parsed["rows"]:
+            return (
+                f"::warning::{primary_path} has {len(parsed['rows'])} event(s) but "
+                "the store has no channel groups, so it contributes no rows to "
+                "events.parquet"
+            )
+        return None
+    if rows["sample_index"] and all(v is None for v in rows["sample_index"]):
+        return (
+            f"::warning::no usable sample index for any event in {primary_path}: "
+            f"{len(rows['sample_index'])} row(s) published with sample_index null "
+            "(unparseable onsets, or a group with no rate)"
+        )
+    return None
 
 
 def expected_channel_count_for(
@@ -2492,6 +2781,7 @@ def merge_manifest(
     entries: list[dict],
     store_rels: list[str],
     updated_utc: str,
+    events_file: dict | None = None,
 ) -> dict:
     """Build the producer manifest (`<id>/zarr/manifest.json`). Pure.
 
@@ -2502,6 +2792,14 @@ def merge_manifest(
 
     Restricted to `store_rels` -- the rels the index actually publishes -- so the
     two documents can never disagree about which stores exist.
+
+    `events_file` is `{name, size_bytes, row_count}` for the events.parquet THIS
+    run uploaded, or None when it published none. Recorded rather than inferred:
+    the index says the file exists and how many rows it has, and this says how
+    many bytes the producer actually wrote -- which is what makes "the object on
+    S3 is the one this run wrote" checkable with a HEAD instead of a download.
+    Not carried over from `prior`: a run that published no file must not claim
+    the previous run's bytes.
     """
     by_rel: dict[str, dict] = {}
     if prior and isinstance(prior.get("stores"), list):
@@ -2516,6 +2814,7 @@ def merge_manifest(
         "format_version": MANIFEST_FORMAT_VERSION,
         "dataset_id": dataset_id,
         "updated_utc": updated_utc,
+        **({"files": [events_file]} if events_file else {}),
         "stores": [
             {
                 "zarr": rel,
@@ -2556,6 +2855,244 @@ def validate_document(doc: dict, schema_path: str, label: str) -> None:
         )
         return
     jsonschema.validate(doc, schema)
+
+
+# --- events.parquet -----------------------------------------------------------
+# One columnar file per dataset, at `<id>/zarr/events.parquet`, so a client can
+# plan epochs and shards with zero signal bytes read and the MCP (ADR 0025) has a
+# `get_events` source. The converter is the only party that knows the exact
+# resampling relation, so `sample_index` is computed HERE rather than re-derived
+# (differently, and wrong on non-integer rate ratios) by every client.
+#
+# Memory is the constraint that shapes the code below: nm000281 has ~25k stores,
+# and a dataset's rows do not fit in one table. So rows are staged per store on
+# disk as they arrive, and the file is written store by store into a
+# ParquetWriter -- never one giant frame.
+
+# Rows buffered before a row group is flushed. Big enough that a 25k-store
+# dataset does not end up with 25k row groups (each carries per-column
+# statistics in the footer), small enough that the buffer stays bounded.
+EVENTS_ROW_GROUP_ROWS = int(os.environ.get("ZARR_EVENTS_ROW_GROUP_ROWS", "65536"))
+EVENTS_PARQUET_NAME = "events.parquet"
+# IANA-registered media type for Apache Parquet.
+EVENTS_CONTENT_TYPE = "application/vnd.apache.parquet"
+
+
+class EventsStaging:
+    """This run's event rows, held on disk keyed by store, not in memory.
+
+    A pool worker returns one store's rows as they are converted and `main` hands
+    them straight to `add`, which serializes them and forgets them; `get` reads
+    one store back at write time. What stays resident is the offset table (one
+    entry per store) and the set of pass-through column names -- both proportional
+    to the STORE count, not the event count.
+
+    The backing file is an anonymous `tempfile.TemporaryFile`: it has no name in
+    the filesystem, so it cannot be left behind by a crash the way a
+    `delete=False` temp file was (#1068).
+    """
+
+    def __init__(self) -> None:
+        # Deliberately long-lived and deliberately anonymous: it is written
+        # to across a whole run and read at the end, and an unnamed temp file
+        # cannot be left behind on the node's scratch (#1068).
+        self._fh = tempfile.TemporaryFile()  # noqa: SIM115 - closed by GC/process exit
+        self._index: dict[str, tuple[int, int]] = {}
+        self._extras: set[str] = set()
+        self.row_count = 0
+
+    def add(self, zarr_rel: str, columns: dict[str, list]) -> None:
+        blob = pickle.dumps(columns, protocol=pickle.HIGHEST_PROTOCOL)
+        self._fh.seek(0, os.SEEK_END)
+        offset = self._fh.tell()
+        self._fh.write(blob)
+        self._index[zarr_rel] = (offset, len(blob))
+        self._extras.update(k for k in columns if k not in EVENTS_FIXED_COLUMNS)
+        self.row_count += len(columns.get("store_path", ()))
+
+    def __contains__(self, zarr_rel: object) -> bool:
+        return zarr_rel in self._index
+
+    def __len__(self) -> int:
+        return len(self._index)
+
+    @property
+    def extras(self) -> set[str]:
+        return set(self._extras)
+
+    def get(self, zarr_rel: str) -> dict[str, list] | None:
+        entry = self._index.get(zarr_rel)
+        if entry is None:
+            return None
+        offset, size = entry
+        self._fh.seek(offset)
+        return pickle.loads(self._fh.read(size))
+
+
+class PriorEventRows:
+    """Random access by store into the events.parquet a previous run published.
+
+    An incremental run converts only what changed, so the stores it did NOT touch
+    keep the rows they already had -- exactly how the index carries a store entry
+    forward. Row groups are indexed by the stores they contain (reading one
+    column, not the file), so carrying a store forward reads its rows and nothing
+    else; the last row group read is cached because the caller walks stores in
+    sorted order and the file is written in that same order.
+    """
+
+    def __init__(self, path: str) -> None:
+        import pyarrow as pa  # type: ignore[import-not-found]  # lazy: optional dep
+        import pyarrow.parquet as pq  # type: ignore[import-not-found]
+
+        self._pa = pa
+        self._file = pq.ParquetFile(path)
+        self.extras = {
+            name
+            for name in self._file.schema_arrow.names
+            if name not in EVENTS_FIXED_COLUMNS
+        }
+        self._by_rel: dict[str, list[int]] = {}
+        for i in range(self._file.num_row_groups):
+            column = self._file.read_row_group(i, columns=["store_path"])["store_path"]
+            for rel in column.unique().to_pylist():
+                if rel is not None:
+                    self._by_rel.setdefault(rel, []).append(i)
+        self._cached: tuple[int, object] | None = None
+
+    def __contains__(self, zarr_rel: object) -> bool:
+        return zarr_rel in self._by_rel
+
+    def _row_group(self, i: int):
+        if self._cached is None or self._cached[0] != i:
+            self._cached = (i, self._file.read_row_group(i))
+        return self._cached[1]
+
+    def table_for(self, zarr_rel: str, schema):
+        """The prior rows for one store, conformed to `schema`, or None."""
+        import pyarrow.compute as pc  # type: ignore[import-not-found]
+
+        groups = self._by_rel.get(zarr_rel)
+        if not groups:
+            return None
+        parts = []
+        for i in groups:
+            table = self._row_group(i)
+            mask = pc.equal(table["store_path"].cast(self._pa.string()), zarr_rel)
+            part = table.filter(mask)
+            if part.num_rows:
+                parts.append(part)
+        if not parts:
+            return None
+        table = parts[0] if len(parts) == 1 else self._pa.concat_tables(parts)
+        return conform_events_table(self._pa, table, schema)
+
+
+def events_schema(pa, extras):
+    """The parquet schema: the fixed columns (#1060) then the pass-through ones.
+
+    Extras are sorted rather than kept in first-seen order on purpose: workers
+    finish in arbitrary order, and a column order that depended on which
+    recording converted first would make two runs over the same commit produce
+    different files.
+    """
+    label = pa.dictionary(pa.int32(), pa.string())
+    fields = [
+        ("store_path", label),
+        ("subject", label),
+        ("session", label),
+        ("task", label),
+        ("run", label),
+        ("onset_s", pa.float64()),
+        ("duration_s", pa.float32()),
+        ("sample_index", pa.int64()),
+        ("group_name", label),
+        ("trial_type", label),
+        ("value", label),
+        ("hed", label),
+    ]
+    fields += [(name, label) for name in sorted(extras)]
+    return pa.schema(fields)
+
+
+def events_table_from_columns(pa, schema, columns: dict[str, list]):
+    """One store's staged columns as a table in the dataset-wide schema. A column
+    this store's events.tsv did not have is all-null, not absent: the file has one
+    schema, and a client must not have to ask which stores contributed which
+    columns."""
+    n = len(columns.get("store_path", ()))
+    arrays = [
+        pa.array(columns.get(field.name, [None] * n), type=field.type)
+        for field in schema
+    ]
+    return pa.Table.from_arrays(arrays, schema=schema)
+
+
+def conform_events_table(pa, table, schema):
+    """Bring a table read back from a prior file into `schema` -- filling a column
+    that file did not have with nulls, since a later run may have added one."""
+    n = table.num_rows
+    arrays = []
+    for field in schema:
+        if field.name in table.column_names:
+            column = table[field.name]
+            arrays.append(column if column.type == field.type else column.cast(field.type))
+        else:
+            arrays.append(pa.chunked_array([pa.nulls(n, field.type)]))
+    return pa.Table.from_arrays(arrays, schema=schema)
+
+
+def write_events_parquet(
+    out_path: str,
+    ordered_rels: list[str],
+    staged: EventsStaging,
+    prior: PriorEventRows | None = None,
+    reconverted: set[str] | None = None,
+) -> int:
+    """Write `<id>/zarr/events.parquet` and return the row count.
+
+    Stores are visited in the order given (the index's, i.e. sorted by `zarr`),
+    and each store's rows are already ordered by onset, so the file is sorted by
+    `store_path, onset_s` by construction -- no global sort, and therefore no
+    point at which the whole dataset is in memory. Rows accumulate only until
+    `EVENTS_ROW_GROUP_ROWS`, then become a row group.
+
+    A store with rows from THIS run uses them. A store this run did NOT reconvert
+    keeps the rows the prior file has for it. `reconverted` is what separates the
+    two, and it is not `staged`: a store that WAS reconverted and produced no
+    rows (its events.tsv was deleted, or emptied) must publish no rows, not
+    silently inherit the ones the prior file still has for it. Passing None means
+    "nothing was reconverted", the read-only shape the pure writer tests use.
+    """
+    import pyarrow as pa  # type: ignore[import-not-found]  # lazy: optional dep
+    import pyarrow.parquet as pq  # type: ignore[import-not-found]
+
+    schema = events_schema(pa, staged.extras | (prior.extras if prior else set()))
+    total = 0
+    buffered: list = []
+    buffered_rows = 0
+    writer = pq.ParquetWriter(out_path, schema, compression="zstd")
+    try:
+        for rel in ordered_rels:
+            columns = staged.get(rel)
+            if columns is not None:
+                table = events_table_from_columns(pa, schema, columns)
+            elif prior is not None and not (reconverted and rel in reconverted):
+                table = prior.table_for(rel, schema)
+            else:
+                table = None
+            if table is None or not table.num_rows:
+                continue
+            buffered.append(table)
+            buffered_rows += table.num_rows
+            total += table.num_rows
+            if buffered_rows >= EVENTS_ROW_GROUP_ROWS:
+                writer.write_table(pa.concat_tables(buffered))
+                buffered, buffered_rows = [], 0
+        if buffered:
+            writer.write_table(pa.concat_tables(buffered))
+    finally:
+        writer.close()
+    return total
 
 
 def parse_annex_key(blob_text: str) -> str | None:
@@ -2945,6 +3482,149 @@ def s3_read_json(bucket: str, key: str) -> dict | None:
         return json.loads(res.stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"corrupt JSON at s3://{bucket}/{key}: {exc}") from exc
+
+
+def s3_download_file(bucket: str, key: str, dest: str) -> bool:
+    """Download an S3 object to `dest`. False for a genuine 404, True on success.
+
+    Same rule as `s3_read_json`, for the same reason: "the object is not there"
+    is a legitimate first-run answer, and every OTHER failure (credentials,
+    network, wrong bucket) raises rather than being flattened into it. The caller
+    of this one carries rows forward from the object, so a swallowed error would
+    silently republish a file with those rows missing.
+    """
+    res = subprocess.run(
+        ["aws", "s3", "cp", f"s3://{bucket}/{key}", dest, "--only-show-errors", *_AWS_TIMEOUTS],
+        capture_output=True,
+        text=True,
+        timeout=_AWS_OP_TIMEOUT,
+        env=_aws_env(),
+    )
+    if res.returncode == 0:
+        return True
+    err = res.stderr.lower()
+    if "nosuchkey" in err or "404" in err or "not found" in err:
+        return False
+    raise RuntimeError(
+        f"s3_download_file: aws s3 cp s3://{bucket}/{key} exited {res.returncode}: "
+        f"{res.stderr.strip()}"
+    )
+
+
+class EventsPublication(TypedDict):
+    """What a run did about `<id>/zarr/events.parquet`.
+
+    `file` is None whenever nothing was published, and the index must then point
+    at nothing. `failed` separates the reason: "this dataset has no events" and
+    "we could not say what its events are" must not look the same from outside.
+    """
+
+    file: dict | None
+    failed: bool
+
+
+def publish_events_parquet(
+    staged: EventsStaging,
+    ordered_rels: list[str],
+    *,
+    bucket: str,
+    dataset_id: str,
+    reconverted: set[str],
+) -> EventsPublication:
+    """Build and upload `<id>/zarr/events.parquet`.
+
+    Publishes nothing when the dataset has no events at all, `pyarrow` is
+    missing, or this run could not write/upload the file -- the last of which
+    sets `failed` and is reported on the callback.
+
+    `reconverted` is every store this run rebuilt, INCLUDING the ones that
+    produced no rows, and it is the thing "carried over" is defined against.
+    Defining it against the staged rows instead is wrong twice over: a
+    reconverted store whose events.tsv was deleted would keep republishing its
+    old rows from the prior file forever, and on a first `--clean` run every
+    event-less store would be reported as an unrecoverable carry-over it is not.
+
+    Best-effort throughout, exactly like manifest.json: the stores and index.json
+    are the serving copy, and ADR 0005 says partial data still serves. A failure
+    here leaves the PREVIOUS file in place on S3, unreferenced by the new index
+    until a later run republishes it.
+    """
+    carried = [rel for rel in ordered_rels if rel not in reconverted]
+    if not staged.row_count and not carried:
+        return {"file": None, "failed": False}
+    try:
+        import pyarrow  # type: ignore[import-not-found]  # noqa: F401 - probe only
+    except ImportError:
+        print(
+            "::warning::pyarrow is not installed; "
+            f"{dataset_id}/zarr/events.parquet was NOT written and the index will "
+            "not advertise one (add it: scripts/zarr/requirements.txt)",
+            flush=True,
+        )
+        return {"file": None, "failed": False}
+
+    prior: PriorEventRows | None = None
+    prior_local: str | None = None
+    local: str | None = None
+    try:
+        if carried:
+            # Only an INCREMENTAL run reaches this: `--clean` (the Hallu path)
+            # rebuilds every store, so nothing is carried and nothing is fetched.
+            with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as fh:
+                prior_local = fh.name
+            if s3_download_file(bucket, f"{dataset_id}/zarr/{EVENTS_PARQUET_NAME}", prior_local):
+                prior = PriorEventRows(prior_local)
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as fh:
+            local = fh.name
+        rows = write_events_parquet(local, ordered_rels, staged, prior, reconverted)
+        if not rows:
+            # Every store's events.tsv was absent or empty. Publishing an empty
+            # file would tell a client "no events" no more clearly than the
+            # absent `events_parquet` field does, and costs a fetch to learn it.
+            return {"file": None, "failed": False}
+        aws_cp(
+            local,
+            f"s3://{bucket}/{dataset_id}/zarr/{EVENTS_PARQUET_NAME}",
+            extra=["--content-type", EVENTS_CONTENT_TYPE,
+                   "--cache-control", "public, max-age=60"],
+        )
+        missing = [rel for rel in carried if prior is None or rel not in prior]
+        if missing:
+            # Stores this run did NOT reconvert whose rows are in no prior file
+            # either: the first incremental run after this shipped, or a prior
+            # file that predates them. Their events are simply absent from the
+            # file until the store is reconverted, and a client joining on
+            # `store_path` cannot tell that from "this recording has no
+            # events.tsv" -- so say it here, where an operator can see how many
+            # and re-run with --clean. A store this run DID reconvert is never
+            # in this list, however few rows it produced: nothing is missing
+            # about a store whose events were just re-read.
+            print(
+                f"::warning::{len(missing)} carried-over store(s) contribute no rows "
+                f"to {dataset_id}/zarr/events.parquet (no prior rows to carry); "
+                "a --clean run rebuilds them",
+                flush=True,
+            )
+        return {
+            "file": {
+                "name": EVENTS_PARQUET_NAME,
+                "size_bytes": os.path.getsize(local),
+                "row_count": rows,
+            },
+            "failed": False,
+        }
+    except Exception as exc:  # noqa: BLE001 - never fail a good conversion over this
+        print(
+            f"::warning::{dataset_id}/zarr/{EVENTS_PARQUET_NAME} was not published: "
+            f"{redact_secrets(str(exc))}",
+            flush=True,
+        )
+        return {"file": None, "failed": True}
+    finally:
+        for path in (local, prior_local):
+            if path:
+                with contextlib.suppress(OSError):
+                    os.unlink(path)
 
 
 def _fetch_blob(
@@ -4180,7 +4860,13 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
                     f"summary of {primary}: {exc}",
                     flush=True,
                 )
-        entry.update(events_summary(events_text))
+        # ONE parse, feeding both the per-store summary published in the index
+        # and the rows `main` stages for events.parquet (#1060). The parsed rows
+        # travel back with the result rather than being re-read there: the events
+        # sidecar may be annexed, and this worker is the only place it is
+        # materialised.
+        parsed_events = parse_events_tsv(events_text)
+        entry.update(events_summary_of(parsed_events))
         # Which channels.tsv shaped this store, and that the converter chose it
         # rather than the exporter stumbling on a sibling. On the MaxShield path
         # the exporter is handed `work/sss_<basename>`, where sibling detection
@@ -4212,6 +4898,11 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             "ok": True,
             "primary": primary,
             "entry": entry,
+            # The events.tsv this store was built from, parsed once. `main` turns
+            # it into the store's events.parquet rows using the same `groups` it
+            # publishes in the entry, so the rates behind `sample_index` are the
+            # rates the index states.
+            "events": parsed_events,
             # The producer-only half of the entry: which annex blob this store was
             # built from. Published in manifest.json, never in the index.
             "manifest": {
@@ -4616,10 +5307,22 @@ def main() -> int:
     failures: list[str] = []
     failure_entries: list[dict] = []
     pending_entries: list[dict] = []
+    # Event rows go to disk as each recording finishes, never into a list that
+    # grows with the dataset: nm000281 is ~25k stores (#1060).
+    events_staging = EventsStaging()
+    # Every store this run rebuilt, whether or not it produced event rows. This
+    # -- not the set of stores WITH rows -- is what "carried over from the prior
+    # events file" is defined against.
+    reconverted_rels: set[str] = set()
+    # Stores whose events could not be turned into usable rows: no channel
+    # groups to attach them to, or no usable sample index on any row. Counted
+    # for the callback so the condition is visible off-node.
+    events_stores_without_rows = 0
 
     n = len(convert)
 
     def record(r: dict, i: int) -> None:
+        nonlocal events_stores_without_rows
         # Log each recording as it finishes (live progress over a long backfill),
         # not all at once at the end.
         # Under-projection is the defect that caused the 2026-08-22 OOMs, and it is
@@ -4640,6 +5343,21 @@ def main() -> int:
             converted_entries.append(r["entry"])
             if r.get("manifest"):
                 manifest_entries.append(r["manifest"])
+            # Staged here rather than in the worker so the rows are built from the
+            # entry's OWN groups -- the same rates the index publishes are the
+            # rates `sample_index` is computed against.
+            rel_store = r["entry"]["zarr"]
+            reconverted_rels.add(rel_store)
+            parsed = r.get("events")
+            rows = event_rows_for_store(
+                rel_store, r["primary"], r["entry"].get("groups"), parsed
+            )
+            if rows:
+                events_staging.add(rel_store, rows)
+            alert = events_row_alert(r["primary"], parsed, rows)
+            if alert:
+                events_stores_without_rows += 1
+                print(alert, flush=True)
             print(f"[zarr] [{i}/{n}] converted {r['primary']} -> {r['entry']['zarr']}", flush=True)
         else:
             failures.append(r["primary"])
@@ -4822,6 +5540,14 @@ def main() -> int:
     retryable_failures = infra_failures
     deterministic = bool(failures) and infra_failures == 0
 
+    # Set by the events.parquet step below. Bound HERE, before
+    # `write_failed_callback` closes over them, because the total-failure exit
+    # calls that callback before the events step has run -- and a name that only
+    # exists on the happy path would raise NameError inside the very handler
+    # whose job is to make a failure visible.
+    events_file: dict | None = None
+    events_upload_failed = False
+
     def write_failed_callback(error: str | None = None) -> None:
         """Write the `status: "failed"` callback body for a run that publishes
         nothing.
@@ -4861,6 +5587,14 @@ def main() -> int:
                         1 for e in pending_entries if e.get("reason") == "not_attempted"
                     ),
                     "provenance_fetch_failed": provenance_fetch_failed,
+                    # The events file, on the failure path too (#1060). A refused
+                    # index can still have been preceded by a successful
+                    # events.parquet upload, and an operator reading only the
+                    # callback would otherwise have no idea an object on S3 was
+                    # replaced by a run that then published nothing.
+                    "events_row_count": events_file["row_count"] if events_file else None,
+                    "events_upload_failed": events_upload_failed,
+                    "events_stores_without_rows": events_stores_without_rows,
                     # What went wrong, when it was the PRODUCER rather than the
                     # recordings: a schema violation or an unbalanced index has no
                     # per-recording failure to point at, so without this the
@@ -4917,10 +5651,41 @@ def main() -> int:
             dataset_row=dataset_row,
         )
         check_index_invariant(index)
-        # Validate what is about to be published, not a copy of it. A producer bug
-        # caught here costs one run; the same bug reaching S3 costs every consumer,
-        # and index.json is the mandatory entry point (in-prefix ListBucket is
-        # denied), so there is no second source to fall back to.
+        # SCHEMA FIRST, UPLOADS SECOND. A refused index means this run publishes
+        # nothing -- and "nothing" has to include events.parquet, which is a
+        # destructive overwrite of a file the LIVE index still describes. So the
+        # document is validated here, before anything is uploaded, in the exact
+        # shape it will take: the events pair is filled in with the values this
+        # run would use (the URL is deterministic; the row count is a
+        # placeholder, and `minimum: 0` makes 0 the strictest stand-in). A bug in
+        # either field therefore aborts BEFORE the overwrite rather than after
+        # it.
+        events_url = f"{index['data_base']}{EVENTS_PARQUET_NAME}"
+        validate_document(
+            {**index, "events_parquet": events_url, "events_row_count": 0},
+            INDEX_SCHEMA_PATH,
+            "index",
+        )
+        # events.parquet then goes up BEFORE index.json, so `events_parquet`
+        # never names a file that is not there. It is best-effort and cannot fail
+        # the run; when it does not publish, the two fields stay absent and a
+        # client reads that as "this dataset has no events file", which is
+        # exactly what is true of the new index.
+        published_events = publish_events_parquet(
+            events_staging,
+            [e["zarr"] for e in index["stores"]],
+            bucket=bucket,
+            dataset_id=dataset_id,
+            reconverted=reconverted_rels,
+        )
+        events_file = published_events["file"]
+        events_upload_failed = published_events["failed"]
+        if events_file:
+            index["events_parquet"] = events_url
+            index["events_row_count"] = events_file["row_count"]
+        # Validate what is about to be published, not a copy of it. The pre-flight
+        # above checked the same document with a stand-in row count; this checks
+        # the real one, so nothing reaches S3 unvalidated.
         validate_document(index, INDEX_SCHEMA_PATH, "index")
     except Exception as exc:  # noqa: BLE001 - refuse to publish a bad index
         print(
@@ -4931,7 +5696,12 @@ def main() -> int:
         return 1
 
     manifest = merge_manifest(
-        prior_manifest, dataset_id, manifest_entries, [e["zarr"] for e in index["stores"]], updated
+        prior_manifest,
+        dataset_id,
+        manifest_entries,
+        [e["zarr"] for e in index["stores"]],
+        updated,
+        events_file=events_file,
     )
     try:
         validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
@@ -5051,6 +5821,20 @@ def main() -> int:
         # True when index.json is published but manifest.json is not, so the two
         # documents disagree about which stores exist until the next run.
         "manifest_upload_failed": manifest_upload_failed,
+        # Rows in the events.parquet this run published, or null when it
+        # published none (#1060). Null covers three different things -- the
+        # dataset has no events, pyarrow is absent from the node's venv, or the
+        # build/upload failed -- so `events_upload_failed` separates the last one:
+        # "no events" and "we could not say what the events are" must not read
+        # the same from outside.
+        "events_row_count": events_file["row_count"] if events_file else None,
+        "events_upload_failed": events_upload_failed,
+        # Stores whose events could not be turned into usable rows: no channel
+        # group to attach them to, or no usable sample index on any row. Zero is
+        # the healthy value. Each one is warned about by name as it happens, but
+        # a warning in a multi-megabyte cron log is not a signal anyone sees, so
+        # the count rides here as well (the same argument as `pool_breaks`).
+        "events_stores_without_rows": events_stores_without_rows,
     }
     with open(args.callback_out, "w") as fh:
         json.dump(callback, fh)

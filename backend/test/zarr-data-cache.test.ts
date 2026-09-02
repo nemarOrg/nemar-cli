@@ -50,12 +50,14 @@ import {
   RANGE_CACHE_MAX_BYTES,
   type ZarrDataDeps,
   bytesFromRangeHeader,
+  cacheControlFor,
   canonicalCacheUrl,
   createZarrDataRoutes,
   isRedirectCandidate,
   parseCacheableRange,
   s3PublicUrl,
 } from "../src/routes/zarr-data";
+import { ZARR_DATASET_DOCUMENTS, zarrPurgeTargets } from "../src/services/cloudflare";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
@@ -71,6 +73,15 @@ for (let i = 0; i < CHUNK_BYTES.length; i++) CHUNK_BYTES[i] = i % 256;
 
 const ZARR_JSON = new TextEncoder().encode(JSON.stringify({ zarr_format: 3, node_type: "group" }));
 const INDEX_JSON = new TextEncoder().encode(JSON.stringify({ stores: ["store.zarr"] }));
+// The other two dataset-level documents (epic #1181 phase 9): same short TTL,
+// same purge, but redirect-eligible like any other store object. The parquet
+// bytes are the real file's magic + footer marker, not JSON -- the route is
+// content-agnostic, and a fixture that looked like JSON would hide it if it
+// ever stopped being.
+const MANIFEST_JSON = new TextEncoder().encode(
+  JSON.stringify({ format: "nemar-zarr-manifest", stores: [] }),
+);
+const EVENTS_PARQUET = new Uint8Array([0x50, 0x41, 0x52, 0x31, 0, 0, 0x50, 0x41, 0x52, 0x31]);
 const QUIRK_BYTES = new Uint8Array(64).fill(3);
 
 // One oversized buffer serves both size-cap tests (#1181 review item 4): a
@@ -91,6 +102,8 @@ const WEIRD_BYTES = new Uint8Array([9, 8, 7, 6, 5]);
 
 const OBJECTS: Record<string, Uint8Array> = {
   [`${PUBLIC_ID}/zarr/index.json`]: INDEX_JSON,
+  [`${PUBLIC_ID}/zarr/manifest.json`]: MANIFEST_JSON,
+  [`${PUBLIC_ID}/zarr/events.parquet`]: EVENTS_PARQUET,
   [`${PUBLIC_ID}/zarr/store.zarr/zarr.json`]: ZARR_JSON,
   [`${PUBLIC_ID}/zarr/store.zarr/c/0/0`]: CHUNK_BYTES,
   [`${PUBLIC_ID}/zarr/store.zarr/c/quirk/no-range-header`]: QUIRK_BYTES,
@@ -673,6 +686,28 @@ describe("Cache-Control by tokening (#1178 item 4 / #1035, #1181 review item 9)"
     expect(res.headers.get("cache-control")).toBe(
       "public, max-age=86400, stale-while-revalidate=86400",
     );
+  });
+
+  test("manifest.json and events.parquet share index.json's TTL (phase 9)", async () => {
+    // They are rewritten by the same conversion as index.json and purged with
+    // it. manifest.json used to fall through to the chunk branch and get a day
+    // of edge cache with no purge behind it, so a re-conversion's manifest
+    // could disagree with the fresh index for 24 hours.
+    for (const name of ["manifest.json", "events.parquet"]) {
+      const untokened = await request(`/${PUBLIC_ID}/zarr/${name}`, {
+        headers: { Origin: BROWSER_ORIGIN },
+      });
+      expect(untokened.status).toBe(200);
+      expect(untokened.headers.get("cache-control")).toBe(
+        "public, max-age=300, stale-while-revalidate=3600",
+      );
+      const tokened = await request(`/${PUBLIC_ID}/zarr/${name}?v=abc123`, {
+        headers: { Origin: BROWSER_ORIGIN },
+      });
+      expect(tokened.headers.get("cache-control")).toBe(
+        "public, max-age=86400, stale-while-revalidate=86400",
+      );
+    }
   });
 
   test("chunks are unchanged: 86400 regardless of tokening", async () => {
@@ -1681,6 +1716,31 @@ describe("telemetry bytes on the redirect path (#1181 phase 6 / issue #1061)", (
   });
 });
 
+describe("the TTL rule and the purge list cover the same documents (phase 9)", () => {
+  // The purge list itself is asserted in test/cloudflare-zarr-purge.test.ts;
+  // what belongs HERE is the cross-module claim, because the bug was the two
+  // halves disagreeing: manifest.json had the chunk TTL (a day) and no purge,
+  // so a re-conversion's manifest could disagree with the fresh index at the
+  // edge for 24 hours. Driven by the shared constant, so a document added to
+  // one side and not the other cannot pass.
+  const env = { ZARR_CACHE_BASE_URL: "https://zarr.nemar.org/" } as unknown as Bindings;
+
+  test("every purged document has the short untokened TTL, and no chunk does", () => {
+    const purged = zarrPurgeTargets(env, "on000001", ["sub-01/eeg/a_eeg.zarr"]);
+    for (const name of ZARR_DATASET_DOCUMENTS) {
+      expect(purged).toContain(`https://zarr.nemar.org/on000001/zarr/${name}`);
+      expect(cacheControlFor(`on000001/zarr/${name}`, { tokened: false })).toBe(
+        "public, max-age=300, stale-while-revalidate=3600",
+      );
+    }
+    // A chunk is neither: long TTL, no purge.
+    expect(cacheControlFor("on000001/zarr/store.zarr/c/0/0", { tokened: false })).toBe(
+      "public, max-age=86400, stale-while-revalidate=86400",
+    );
+    expect(purged.some((url) => url.includes("/c/0/0"))).toBe(false);
+  });
+});
+
 describe("isRedirectCandidate (#1181 phase 6 / issue #1061)", () => {
   test("GET to a store object with no Origin is a candidate", () => {
     expect(isRedirectCandidate("GET", "/on000001/zarr/store.zarr/c/0/0", null)).toBe(true);
@@ -1711,6 +1771,15 @@ describe("isRedirectCandidate (#1181 phase 6 / issue #1061)", () => {
 
   test("index.json is never a candidate", () => {
     expect(isRedirectCandidate("GET", "/on000001/zarr/index.json", null)).toBe(false);
+  });
+
+  test("manifest.json and events.parquet ARE candidates (phase 9)", () => {
+    // They share index.json's short TTL and its purge, but not its proxying:
+    // index.json is the one object every dataset-page visit fetches and the
+    // one whose D1 visibility gate is load-bearing. A bulk client pulling the
+    // events file should get the bytes straight from S3 like any other object.
+    expect(isRedirectCandidate("GET", "/on000001/zarr/events.parquet", null)).toBe(true);
+    expect(isRedirectCandidate("GET", "/on000001/zarr/manifest.json", null)).toBe(true);
   });
 
   test("an empty or malformed rest is never a candidate", () => {

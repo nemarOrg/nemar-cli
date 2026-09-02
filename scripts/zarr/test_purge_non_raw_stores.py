@@ -26,6 +26,7 @@ import contextlib
 import copy
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -33,8 +34,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import purge_non_raw_stores  # type: ignore[import-not-found]
 from purge_non_raw_stores import (  # type: ignore[import-not-found]
     INDEX_FORMAT,
+    IndexPreconditionFailed,
     _print_dataset_summary,
     assert_within_zarr_prefix,
     dataset_has_issue,
@@ -44,13 +47,16 @@ from purge_non_raw_stores import (  # type: ignore[import-not-found]
     main,
     parse_s3_ls_summary,
     plan_dataset_operations,
-    plan_snapshot_index_rewrite,
+    plan_live_index_rewrite,
     prepare_targets,
+    purge_dataset,
+    read_index_with_etag,
     rewrite_index,
     select_purge_candidates,
     snapshot_dataset_ids,
     summarize_target_outcomes,
     write_audit_log,
+    write_index,
 )
 
 BUCKET = "nemar"
@@ -376,6 +382,46 @@ class RewriteIndexTests(unittest.TestCase):
         once = rewrite_index(index, purged)
         twice = rewrite_index(once, purged)
         self.assertEqual(once, twice)
+
+    def test_a_purge_drops_the_events_pointer_it_can_no_longer_vouch_for(self):
+        """The published events.parquet still holds rows for the store this just
+        removed, so `events_row_count` would overstate it and `events_parquet`
+        would name a file describing stores the index no longer lists (#1060).
+        Dropped as a pair -- the schema declares them as one -- until the next
+        conversion republishes both."""
+        index = self._index()
+        index["events_parquet"] = "https://nemar.s3.us-east-2.amazonaws.com/x/zarr/events.parquet"
+        index["events_row_count"] = 41
+        out = rewrite_index(index, {"derivatives/pipeline-x/sub-01_task-x_eeg.zarr"})
+        self.assertNotIn("events_parquet", out)
+        self.assertNotIn("events_row_count", out)
+
+    def test_a_failures_only_rewrite_drops_the_pointer_too(self):
+        """The rewrite that changes no store entry but does drop a failure entry
+        still invalidates the count: `events_row_count` describes the file, and
+        the file describes a store set this document no longer matches. Keying
+        the drop on `stores` alone would miss it."""
+        index = self._index()
+        index["events_parquet"] = "https://nemar.s3.us-east-2.amazonaws.com/x/zarr/events.parquet"
+        index["events_row_count"] = 41
+        # Only the derivatives FAILURE entry matches; every store survives.
+        out = rewrite_index(
+            index, {"derivatives/pipeline-x/sub-01_task-broken_eeg.zarr"}
+        )
+        self.assertEqual(out["stores"], index["stores"])
+        self.assertEqual(out["failure_count"], 1)
+        self.assertNotIn("events_parquet", out)
+        self.assertNotIn("events_row_count", out)
+
+    def test_purging_nothing_leaves_the_events_pointer_alone(self):
+        # A run that removes no entry has not invalidated anything, and a purge
+        # sweep over a clean dataset must not quietly un-publish its events.
+        index = self._index()
+        index["events_parquet"] = "https://nemar.s3.us-east-2.amazonaws.com/x/zarr/events.parquet"
+        index["events_row_count"] = 41
+        out = rewrite_index(index, {"nothing/matches/this.zarr"})
+        self.assertEqual(out["events_row_count"], 41)
+        self.assertEqual(out["events_parquet"], index["events_parquet"])
 
     def test_never_introduces_a_stores_or_failures_key_that_was_absent(self):
         index = {"dataset_id": DATASET, "format": "nemar-zarr-index"}
@@ -730,14 +776,14 @@ class PlanSnapshotIndexRewriteTests(unittest.TestCase):
         writing anything here would resurrect the entries being cleaned up."""
         live = _index_doc(DATASET, [_store("sub-01/eeg/sub-01_task-a_eeg.edf")])
         self.assertIsNone(
-            plan_snapshot_index_rewrite(live, {"derivatives/prep/sub-01_task-a_eeg.zarr"})
+            plan_live_index_rewrite(live, {"derivatives/prep/sub-01_task-a_eeg.zarr"})
         )
 
     def test_rewrites_only_the_live_document_when_it_still_lists_them(self):
         raw = _store("sub-01/eeg/sub-01_task-a_eeg.edf")
         stale = _store("derivatives/prep/sub-01_task-a_eeg.edf")
         live = _index_doc(DATASET, [raw, stale], source_commit="b" * 40)
-        out = plan_snapshot_index_rewrite(live, {stale["zarr"]})
+        out = plan_live_index_rewrite(live, {stale["zarr"]})
         self.assertIsNotNone(out)
         self.assertEqual([e["zarr"] for e in out["stores"]], [raw["zarr"]])
         self.assertEqual(out["store_count"], 1)
@@ -752,22 +798,22 @@ class PlanSnapshotIndexRewriteTests(unittest.TestCase):
             failures=[_failure("derivatives/x/a_eeg.edf", "derivatives/x/a_eeg.zarr")],
             failure_count=1,
         )
-        out = plan_snapshot_index_rewrite(live, {"derivatives/x/a_eeg.zarr"})
+        out = plan_live_index_rewrite(live, {"derivatives/x/a_eeg.zarr"})
         self.assertIsNotNone(out)
         self.assertEqual(out["failures"], [])
         self.assertEqual(out["failure_count"], 0)
 
     def test_no_purged_rels_or_no_live_index_is_a_skip(self):
         live = _index_doc(DATASET, [_store("derivatives/x/a_eeg.edf")])
-        self.assertIsNone(plan_snapshot_index_rewrite(live, set()))
-        self.assertIsNone(plan_snapshot_index_rewrite(None, {"derivatives/x/a_eeg.zarr"}))
-        self.assertIsNone(plan_snapshot_index_rewrite({}, {"derivatives/x/a_eeg.zarr"}))
+        self.assertIsNone(plan_live_index_rewrite(live, set()))
+        self.assertIsNone(plan_live_index_rewrite(None, {"derivatives/x/a_eeg.zarr"}))
+        self.assertIsNone(plan_live_index_rewrite({}, {"derivatives/x/a_eeg.zarr"}))
 
     def test_does_not_mutate_the_live_index(self):
         stale = _store("derivatives/prep/a_eeg.edf")
         live = _index_doc(DATASET, [stale])
         before = copy.deepcopy(live)
-        plan_snapshot_index_rewrite(live, {stale["zarr"]})
+        plan_live_index_rewrite(live, {stale["zarr"]})
         self.assertEqual(live, before)
 
 
@@ -858,6 +904,303 @@ class MainSnapshotWiringTests(unittest.TestCase):
             # Must not have fallen back to listing the bucket.
             self.assertIn(td, out)
             self.assertIn("0 dataset(s)", out)
+
+
+# A real "aws" stand-in over a local directory, with genuine ETag semantics:
+# every object's ETag is the md5 of its bytes, put-object honours --if-match /
+# --if-none-match the way S3 does (412 on a mismatch), and the list/remove verbs
+# cover the stat-and-delete half of the pipeline. It stands in for the SERVICE,
+# never for logic under test: every line of purge_non_raw_stores that decides
+# anything runs for real against it, including the subprocess argv, the ETag
+# round trip, and the conflict detection.
+STUB_AWS = """#!/usr/bin/env python3
+import hashlib
+import json
+import os
+import shutil
+import sys
+
+ROOT = os.environ["PURGE_TEST_S3_ROOT"]
+
+
+def local(bucket, key):
+    return os.path.join(ROOT, bucket + "_" + key.replace("/", "_"))
+
+
+def etag(path):
+    with open(path, "rb") as fh:
+        return chr(34) + hashlib.md5(fh.read()).hexdigest() + chr(34)
+
+
+def opt(args, name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+
+args = [a for a in sys.argv[1:] if not a.startswith("--cli-")]
+args = [a for a in args if a not in ("--only-show-errors",)]
+flags_with_values = ("--bucket", "--key", "--body", "--content-type",
+                     "--cache-control", "--if-match", "--if-none-match",
+                     "--query", "--output", "--prefix", "--delimiter",
+                     "--max-items")
+
+if args[:2] == ["s3api", "get-object"]:
+    path = local(opt(args, "--bucket"), opt(args, "--key"))
+    positional = [
+        a for i, a in enumerate(args[2:], start=2)
+        if not a.startswith("--") and args[i - 1] not in flags_with_values
+    ]
+    dest = positional[0]
+    if not os.path.exists(path):
+        sys.stderr.write("An error occurred (NoSuchKey) when calling GetObject\\n")
+        sys.exit(1)
+    shutil.copyfile(path, dest)
+    print(etag(path))
+    sys.exit(0)
+
+if args[:2] == ["s3api", "put-object"]:
+    bucket, key = opt(args, "--bucket"), opt(args, "--key")
+    path = local(bucket, key)
+    if "--if-match" in args:
+        want = opt(args, "--if-match")
+        have = etag(path) if os.path.exists(path) else None
+        if have != want:
+            sys.stderr.write(
+                "An error occurred (PreconditionFailed) when calling PutObject\\n"
+            )
+            sys.exit(1)
+    if "--if-none-match" in args and os.path.exists(path):
+        sys.stderr.write("An error occurred (PreconditionFailed) when calling PutObject\\n")
+        sys.exit(1)
+    shutil.copyfile(opt(args, "--body"), path)
+    print(json.dumps({"ETag": etag(path)}))
+    sys.exit(0)
+
+if args[:2] == ["s3", "cp"]:
+    src, dst = args[2], args[3]
+    if src.startswith("s3://"):
+        bucket, _, key = src[len("s3://"):].partition("/")
+        path = local(bucket, key)
+        if not os.path.exists(path):
+            sys.stderr.write("NoSuchKey\\n")
+            sys.exit(1)
+        with open(path, "rb") as fh:
+            body = fh.read()
+        if dst == "-":
+            sys.stdout.buffer.write(body)
+        else:
+            with open(dst, "wb") as fh:
+                fh.write(body)
+    else:
+        bucket, _, key = dst[len("s3://"):].partition("/")
+        shutil.copyfile(src, local(bucket, key))
+    sys.exit(0)
+
+if args[:2] == ["s3", "ls"]:
+    bucket, _, key = args[2][len("s3://"):].partition("/")
+    head = bucket + "_" + key.replace("/", "_")
+    names = [n for n in os.listdir(ROOT) if n.startswith(head)]
+    total = len(names)
+    size = sum(os.path.getsize(os.path.join(ROOT, n)) for n in names)
+    print("")
+    print("Total Objects: %d" % total)
+    print("Total Size: %d" % size)
+    sys.exit(0 if total else 1)
+
+if args[:2] == ["s3", "rm"]:
+    bucket, _, key = args[2][len("s3://"):].partition("/")
+    head = bucket + "_" + key.replace("/", "_")
+    for name in list(os.listdir(ROOT)):
+        if name.startswith(head):
+            os.unlink(os.path.join(ROOT, name))
+    sys.exit(0)
+
+if args[:2] == ["s3api", "list-objects-v2"]:
+    print("None")
+    sys.exit(0)
+sys.exit(0)
+"""
+
+
+class ConditionalIndexWriteTests(unittest.TestCase):
+    """The index rewrite is a CONDITIONAL write, driven through purge_dataset.
+
+    Deleting a large prefix takes minutes, so the index this tool read at the
+    start is stale by the time it writes. An unconditional PUT would silently
+    revert a converter run that published in that window -- taking every store
+    it had just added with it -- and nothing downstream would ever say so.
+    These drive the real script against a real executable with real ETag
+    semantics: the read, the delete, the re-read, and the conditional PUT all
+    execute.
+    """
+
+    NON_RAW = "derivatives/prep/sub-01_task-x_eeg.set"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.s3 = os.path.join(self.dir, "s3")
+        os.makedirs(self.s3)
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        script = os.path.join(bindir, "aws")
+        with open(script, "w") as fh:
+            fh.write(STUB_AWS)
+        os.chmod(script, 0o755)
+        self._env = (os.environ.get("PATH"), os.environ.get("PURGE_TEST_S3_ROOT"))
+        os.environ["PATH"] = bindir + os.pathsep + (self._env[0] or "")
+        os.environ["PURGE_TEST_S3_ROOT"] = self.s3
+        self.put_index(self.index_doc())
+        # One object under the non-raw store, so it is a real delete target.
+        with open(os.path.join(
+            self.s3, f"{BUCKET}_{DATASET}_zarr_derivatives_prep_sub-01_task-x_eeg.zarr_c_0_0"
+        ), "wb") as fh:
+            fh.write(b"chunk")
+
+    def tearDown(self):
+        path, root = self._env
+        if path is not None:
+            os.environ["PATH"] = path
+        if root is None:
+            os.environ.pop("PURGE_TEST_S3_ROOT", None)
+        else:
+            os.environ["PURGE_TEST_S3_ROOT"] = root
+        self._tmp.cleanup()
+
+    def index_doc(self, **overrides) -> dict:
+        doc = {
+            "dataset_id": DATASET,
+            "format": INDEX_FORMAT,
+            "format_version": 3,
+            "source_commit": "a" * 40,
+            "store_count": 2,
+            "stores": [
+                _store(self.NON_RAW),
+                _store("sub-01/eeg/sub-01_task-x_eeg.set"),
+            ],
+            "failure_count": 0,
+            "failures": [],
+        }
+        doc.update(overrides)
+        return doc
+
+    def index_path(self) -> str:
+        return os.path.join(self.s3, f"{BUCKET}_{DATASET}_zarr_index.json")
+
+    def put_index(self, doc: dict) -> None:
+        with open(self.index_path(), "w") as fh:
+            json.dump(doc, fh)
+
+    def live_index(self) -> dict:
+        with open(self.index_path()) as fh:
+            return json.load(fh)
+
+    def run_purge(self) -> dict:
+        with contextlib.redirect_stdout(io.StringIO()):
+            return purge_dataset(BUCKET, DATASET, execute=True, check_extra=False)
+
+    def test_an_uncontested_run_rewrites_the_index(self):
+        result = self.run_purge()
+        self.assertEqual(result["status"], "ok", result.get("error"))
+        self.assertTrue(result["index_rewritten"])
+        self.assertEqual(
+            [e["zarr"] for e in self.live_index()["stores"]],
+            ["sub-01/eeg/sub-01_task-x_eeg.zarr"],
+        )
+
+    def test_a_concurrent_publish_is_detected_and_not_clobbered(self):
+        """A converter run publishes while this one deletes. The rewrite is then
+        computed from a body that no longer exists, so the PUT is refused and the
+        newer document survives -- reported, never overwritten."""
+        fresh = self.index_doc(
+            source_commit="b" * 40,
+            store_count=3,
+            stores=[
+                _store(self.NON_RAW),
+                _store("sub-01/eeg/sub-01_task-x_eeg.set"),
+                _store("sub-99/eeg/sub-99_task-new_eeg.set"),
+            ],
+        )
+
+        # The window is between the read that seeds the rewrite and the write.
+        # The real read runs; the object is replaced immediately after it, which
+        # is exactly the race a converter run creates.
+        original_read = purge_non_raw_stores.read_index_with_etag
+
+        def read_then_publish(bucket, dataset_id):
+            index, etag = original_read(bucket, dataset_id)
+            self.put_index(fresh)  # the concurrent converter run
+            return index, etag
+
+        purge_non_raw_stores.read_index_with_etag = read_then_publish
+        try:
+            result = self.run_purge()
+        finally:
+            purge_non_raw_stores.read_index_with_etag = original_read
+
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(result["index_rewrite_conflict"])
+        self.assertIn("abandoned", result["error"])
+        self.assertFalse(result["index_rewritten"])
+        self.assertTrue(dataset_has_issue(result))
+        # The newer document is intact -- including the store it added, which an
+        # unconditional PUT would have dropped from the index.
+        live = self.live_index()
+        self.assertEqual(live["source_commit"], "b" * 40)
+        self.assertIn(
+            "sub-99/eeg/sub-99_task-new_eeg.zarr", [e["zarr"] for e in live["stores"]]
+        )
+
+    def test_the_rewrite_is_recomputed_from_the_live_document(self):
+        """Not from the document the candidates came from. A store published
+        between the two reads has to survive the rewrite -- which is the whole
+        reason the second read exists."""
+        original_read = purge_non_raw_stores.read_index_with_etag
+
+        def read_after_publish(bucket, dataset_id):
+            # Publish BEFORE the rewrite's read, so the ETag matches and the
+            # write succeeds: the added store must still be in what is written.
+            self.put_index(self.index_doc(
+                stores=[
+                    _store(self.NON_RAW),
+                    _store("sub-01/eeg/sub-01_task-x_eeg.set"),
+                    _store("sub-99/eeg/sub-99_task-new_eeg.set"),
+                ],
+                store_count=3,
+            ))
+            return original_read(bucket, dataset_id)
+
+        purge_non_raw_stores.read_index_with_etag = read_after_publish
+        try:
+            result = self.run_purge()
+        finally:
+            purge_non_raw_stores.read_index_with_etag = original_read
+        self.assertEqual(result["status"], "ok", result.get("error"))
+        rels = [e["zarr"] for e in self.live_index()["stores"]]
+        self.assertNotIn("derivatives/prep/sub-01_task-x_eeg.zarr", rels)
+        self.assertIn("sub-99/eeg/sub-99_task-new_eeg.zarr", rels)
+
+    def test_read_index_with_etag_round_trips_a_real_object(self):
+        index, etag = read_index_with_etag(BUCKET, DATASET)
+        self.assertEqual(index["source_commit"], "a" * 40)
+        self.assertRegex(etag, r'^"[0-9a-f]{32}"$')
+        # The same etag writes; a stale one does not, and does not overwrite.
+        write_index(BUCKET, DATASET, {"marker": 1}, if_match=etag)
+        self.assertEqual(self.live_index(), {"marker": 1})
+        with self.assertRaises(IndexPreconditionFailed):
+            write_index(BUCKET, DATASET, {"marker": 2}, if_match=etag)
+        self.assertEqual(self.live_index(), {"marker": 1})
+
+    def test_a_missing_index_reads_as_absent(self):
+        os.unlink(self.index_path())
+        index, etag = read_index_with_etag(BUCKET, DATASET)
+        self.assertIsNone(index)
+        self.assertIsNone(etag)
+        # ...and the write is then conditional on it still being absent, so a
+        # first index published in the meantime is not clobbered either.
+        write_index(BUCKET, DATASET, {"marker": 1}, if_match=None)
+        with self.assertRaises(IndexPreconditionFailed):
+            write_index(BUCKET, DATASET, {"marker": 2}, if_match=None)
+        self.assertEqual(self.live_index(), {"marker": 1})
 
 
 if __name__ == "__main__":

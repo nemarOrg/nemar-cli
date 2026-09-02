@@ -403,6 +403,21 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   `hed_version` and a `layout` object of `const` path templates, so an MCP recipe
   (ADR 0025) is computable from `index.json` plus one array-metadata fetch with no
   probing.
+  **Events are a third document, `<id>/zarr/events.parquet`** (#1060): one row per
+  (event, channel group) across every store, with `sample_index` computed by the
+  converter — `round(onset_s * rate)` against the group's SERVING rate, which is
+  the only place the resampling relation is known exactly (`resample_poly` is
+  zero-phase, so there is no delay to subtract). It exists only when the index
+  names it (`events_parquet` / `events_row_count`); publishing it is best-effort
+  like the manifest, and the per-store `n_events` / `trial_types` come from the
+  same parse as its rows.
+  **The three dataset-level documents — `index.json`, `manifest.json`,
+  `events.parquet` — share one cache rule**: the short untokened TTL in
+  `cacheControlFor` and the zarr-ready purge list, both driven by
+  `ZARR_DATASET_DOCUMENTS` (`backend/src/services/cloudflare.ts`), because they
+  are rewritten together by every conversion. Only `index.json` is always
+  proxied; the other two redirect to S3 for non-browser clients like any store
+  object.
   Stores also carry a structured `nemar` root attribute — dataset id, DOI,
   license, citation, source commit, source tree, derived, HED version, engine
   version, contract URL — read once per run from `GET /datasets/<id>`, so a
