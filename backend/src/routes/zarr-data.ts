@@ -50,6 +50,7 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import { rateLimiter } from "../middleware/rateLimit.js";
 import { recordAccess, zarrObjectType } from "../services/access-metrics";
+import { ZARR_DATASET_DOCUMENTS } from "../services/cloudflare.js";
 import { normalizeBidsPath } from "../services/data-router";
 import { isValidDatasetId } from "../services/datasetId";
 import { ZarrCatalogForbiddenError, fetchZarrCatalogObject } from "../services/zarr-catalog";
@@ -220,8 +221,10 @@ export function s3PublicUrl(env: Bindings, key: string, base?: string): string {
  *  (a bare fetch, or a viewer that hasn't picked up the new token yet) keeps
  *  a short TTL so a re-conversion surfaces quickly there instead.
  *
- *  index.json is 95% of Worker egress (#1035). The zarr-ready callback
- *  purges it on rebuild via zarrPurgeTargets() (services/cloudflare.ts) --
+ *  index.json is 95% of Worker egress (#1035), and it shares its TTL with the
+ *  other dataset-level documents (manifest.json, events.parquet), which are
+ *  rewritten by the same conversion. The zarr-ready callback
+ *  purges all of them on rebuild via zarrPurgeTargets() (services/cloudflare.ts) --
  *  but CLOUDFLARE_API_TOKEN/CLOUDFLARE_ZONE_ID are unset in production today
  *  (wrangler-sccn.toml), so that purge is currently a documented no-op and
  *  the TTL below is the ONLY bound on staleness right now, not a backstop
@@ -232,9 +235,9 @@ export function s3PublicUrl(env: Bindings, key: string, base?: string): string {
  *  purge is verified working in staging once the zone id is provisioned.
  *
  *  Chunk objects get a long TTL regardless of tokening and are never a
- *  purge target -- zarrPurgeTargets() only ever lists index.json and each
- *  changed store's zarr.json, never a chunk URL (enumerating every chunk
- *  for a URL-list purge isn't worthwhile, and prefix purge is
+ *  purge target -- zarrPurgeTargets() only ever lists the dataset documents
+ *  and each changed store's zarr.json, never a chunk URL (enumerating every
+ *  chunk for a URL-list purge isn't worthwhile, and prefix purge is
  *  Enterprise-only) -- so chunks rely entirely on the 24h TTL plus ETag
  *  revalidation, with no purge backstop at all, active or not. */
 export function cacheControlFor(key: string, opts: { tokened: boolean }): string {
@@ -244,7 +247,12 @@ export function cacheControlFor(key: string, opts: { tokened: boolean }): string
       ? "public, max-age=86400, stale-while-revalidate=86400"
       : "public, max-age=60, stale-while-revalidate=300";
   }
-  if (key.endsWith("/index.json")) {
+  // index.json, manifest.json, events.parquet: the dataset-level documents,
+  // rewritten by every conversion and few enough to purge by URL. Same list the
+  // zarr-ready purge uses (services/cloudflare.ts), so the TTL and the purge
+  // cannot cover different files -- manifest.json used to fall through to the
+  // chunk branch below and get a day of edge cache with no purge behind it.
+  if (ZARR_DATASET_DOCUMENTS.some((name) => key.endsWith(`/${name}`))) {
     return tokened
       ? "public, max-age=86400, stale-while-revalidate=86400"
       : "public, max-age=300, stale-while-revalidate=3600";
