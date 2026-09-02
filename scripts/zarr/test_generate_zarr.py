@@ -28,6 +28,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import generate_zarr
+from zarr_queue import ZARR_ENGINE_VERSION  # type: ignore[import-not-found]  # noqa: E402
+
 from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (sibling module via sys.path)
     _AWS_OP_TIMEOUT,
     _AWS_RM_TIMEOUT,
@@ -40,6 +42,7 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     annex_key_size,
     bids_suffix_modality,
     compute_clean_orphans,
+    convert_one,
     convert_recording,
     projected_peak_bytes,
     per_recording_ceiling_bytes,
@@ -5026,9 +5029,9 @@ class TestMainRefusesToPublish(unittest.TestCase):
         self.dir = self._tmp.name
         self.repo = os.path.join(self.dir, "repo")
         os.makedirs(self.repo)
-        run = lambda *a: subprocess.run(  # noqa: E731
-            a, cwd=self.repo, check=True, capture_output=True
-        )
+        def run(*args):
+            subprocess.run(args, cwd=self.repo, check=True, capture_output=True)
+
         run("git", "init", "-q", "-b", "main")
         run("git", "config", "user.email", "t@example.org")
         run("git", "config", "user.name", "t")
@@ -5132,8 +5135,384 @@ class TestMainRefusesToPublish(unittest.TestCase):
         the guard. Here the stub `aws` fails the UPLOAD, so `main` raises rather
         than returning 1, which proves the guards were what returned 1 above.
         """
-        with self.assertRaises(Exception):
+        with self.assertRaises(RuntimeError):
             self.run_main()
+
+
+STUB_AWS = '#!/usr/bin/env python3\n"""Minimal `aws` stand-in for the converter\'s main()-level tests: a real\nexecutable over local files, so s3_read_json / aws_cp / head-object all run."""\nimport os\nimport shutil\nimport sys\n\nROOT = os.environ["ZARR_TEST_S3_ROOT"]\n\n\ndef local(uri):\n    return os.path.join(ROOT, uri.split("/", 3)[3].replace("/", "_"))\n\n\nargs = [a for a in sys.argv[1:] if not a.startswith("--cli-")]\nargs = [a for a in args if a not in ("--only-show-errors",)]\nif args[:2] == ["s3", "cp"]:\n    src, dst = args[2], args[3]\n    if src.startswith("s3://"):\n        path = local(src)\n        if not os.path.exists(path):\n            sys.stderr.write("NoSuchKey\\n")\n            sys.exit(1)\n        with open(path) as fh:\n            sys.stdout.write(fh.read())\n    else:\n        shutil.copyfile(src, local(dst))\n    sys.exit(0)\nif args[:2] == ["s3api", "head-object"]:\n    print(\'"deadbeef"\')\n    sys.exit(0)\nsys.exit(0)\n'
+
+
+class TestMainCleanRunAgainstPriorIndexes(unittest.TestCase):
+    """A `--clean` run over a REAL prior index, v1 and v3, through `main()`.
+
+    This is the production path (hallu-zarr.sh always passes `--clean`) and no
+    test reached it: every prior-index behaviour was exercised through
+    `merge_index` directly, which `--clean` hands `prior=None` -- so the facts
+    that must survive a clean rebuild travel a route nothing covered. They come
+    from the PUBLISHED document rather than from what the merge is given:
+    the `pending` attempt counts (reset every run, and a recording could never
+    reach the exhaustion cap on the only path production runs), and the count of
+    non-raw stores the run drops from the index.
+
+    The stub `aws` is a real executable backed by local files, so `s3_read_json`,
+    `aws_cp` and the ETag read all execute.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.s3 = os.path.join(self.dir, "s3")
+        os.makedirs(self.repo)
+        os.makedirs(self.s3)
+
+        def run(*args):
+            subprocess.run(args, cwd=self.repo, check=True, capture_output=True)
+
+        run("git", "init", "-q", "-b", "main")
+        run("git", "config", "user.email", "t@example.org")
+        run("git", "config", "user.name", "t")
+        with open(os.path.join(self.repo, "dataset_description.json"), "w") as fh:
+            json.dump({"Name": "clean fixture", "BIDSVersion": "1.8.0"}, fh)
+        run("git", "add", "-A")
+        run("git", "commit", "-q", "-m", "init")
+        self.head = subprocess.run(
+            ["git", "-C", self.repo, "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+        # A real `aws` stand-in over local files: `cp s3://... -` reads,
+        # `cp <file> s3://...` writes, `s3api head-object` answers the ETag read.
+        # The root arrives by environment rather than being baked in, so the
+        # script is a fixed file with no interpolation.
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        script = os.path.join(bindir, "aws")
+        with open(script, "w") as fh:
+            fh.write(STUB_AWS)
+        os.chmod(script, 0o755)
+        self._env = (os.environ.get("PATH"), os.environ.get("ZARR_TEST_S3_ROOT"))
+        os.environ["PATH"] = bindir + os.pathsep + (self._env[0] or "")
+        os.environ["ZARR_TEST_S3_ROOT"] = self.s3
+        self.callback = os.path.join(self.dir, "cb.json")
+        self.log = ""
+
+    def tearDown(self):
+        path, root = self._env
+        if path is not None:
+            os.environ["PATH"] = path
+        if root is None:
+            os.environ.pop("ZARR_TEST_S3_ROOT", None)
+        else:
+            os.environ["ZARR_TEST_S3_ROOT"] = root
+        self._tmp.cleanup()
+
+    def put(self, key, doc):
+        with open(os.path.join(self.s3, "on008083_zarr_" + key), "w") as fh:
+            json.dump(doc, fh)
+
+    def published(self, key):
+        path = os.path.join(self.s3, "on008083_zarr_" + key)
+        self.assertTrue(os.path.exists(path), key + " was not published")
+        with open(path) as fh:
+            return json.load(fh)
+
+    def prior_v3(self, **overrides):
+        doc = {
+            "dataset_id": "on008083", "format": "nemar-zarr-index",
+            "format_version": 3, "source_commit": "a" * 40,
+            "store_count": 0, "stores": [], "failure_count": 0, "failures": [],
+            "pending_count": 0, "pending": [],
+        }
+        doc.update(overrides)
+        return doc
+
+    def run_main(self):
+        argv = [
+            "generate_zarr.py",
+            "--dataset-id", "on008083",
+            "--repo-dir", self.repo,
+            "--bucket", "nemar-test",
+            "--callback-out", self.callback,
+            "--clean",
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = generate_zarr.main()
+            self.log = out.getvalue()
+            return rc
+        finally:
+            sys.argv = saved
+
+    def callback_body(self):
+        with open(self.callback) as fh:
+            return json.load(fh)
+
+    def test_a_clean_run_over_a_v1_prior_index(self):
+        # The realistic first re-conversion: what is on S3 today is v1.
+        self.put("index.json", {
+            "dataset_id": "on008083", "format": "nemar-zarr-index",
+            "format_version": 1, "source_commit": "a" * 40, "store_count": 1,
+            "stores": [{"path": "sub-01/eeg/a_eeg.edf",
+                        "zarr": "sub-01/eeg/a_eeg.zarr",
+                        "source_key": "SHA256E-s1--a"}],
+            "failure_count": 0, "failures": [],
+        })
+        self.assertEqual(self.run_main(), 0)
+        index = self.published("index.json")
+        self.assertEqual(index["format_version"], 3)
+        self.assertEqual(index["source_commit"], self.head)
+        # The v1 entry's recording is not at HEAD, so it does not carry -- and
+        # its `source_key` is nowhere in the v3 document.
+        self.assertEqual(index["store_count"], 0)
+        self.assertNotIn("source_key", json.dumps(index))
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+        validate_document(self.published("manifest.json"), MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_a_clean_run_over_a_v3_prior_index(self):
+        self.put("index.json", self.prior_v3())
+        self.assertEqual(self.run_main(), 0)
+        index = self.published("index.json")
+        self.assertEqual(index["format_version"], 3)
+        self.assertEqual(index["engine_version"], ZARR_ENGINE_VERSION)
+        self.assertEqual(index["layout"]["level0"], "<zarr>/<group>/0")
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_the_manifest_is_published_alongside_the_index(self):
+        self.put("index.json", self.prior_v3())
+        self.put("manifest.json", {
+            "format": "nemar-zarr-manifest", "format_version": 1,
+            "dataset_id": "on008083", "updated_utc": "2026-09-01T00:00:00Z",
+            "stores": [{"zarr": "sub-01/eeg/a_eeg.zarr",
+                        "source_key": "SHA256E-s1--a", "size_bytes": 1}],
+        })
+        self.assertEqual(self.run_main(), 0)
+        manifest = self.published("manifest.json")
+        # Restricted to the rels the index publishes, so the two documents can
+        # never disagree about which stores exist. Nothing is served here, so
+        # the stale entry goes.
+        self.assertEqual(manifest["stores"], [])
+        self.assertEqual(manifest["dataset_id"], "on008083")
+        validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_pending_attempts_are_read_from_the_published_index(self):
+        """The fact `--clean` would otherwise reset on every run.
+
+        `main` sources `prior_pending` from the document it read, not from what
+        it hands the merge -- which under `--clean` is `None`. Without that, a
+        recording failing for an infra reason would restart at attempt 1 forever
+        and `retry_exhausted` would be unreachable in production.
+        """
+        path = "sub-01/eeg/a_eeg.edf"
+        self.put("index.json", self.prior_v3(
+            pending_count=1,
+            pending=[{"path": path, "zarr": store_rel_for(path),
+                      "reason": "infra_failure", "attempts": 4,
+                      "last_error": "RuntimeError: boom",
+                      "last_attempt_utc": "2026-09-01T00:00:00Z"}],
+        ))
+        self.assertEqual(self.run_main(), 0)
+        # The recording is not at HEAD any more, so the entry drops rather than
+        # ageing -- what is asserted here is that `main` READ it: the attempt
+        # history reached the merge, which is the wiring `--clean` breaks.
+        self.assertEqual(self.published("index.json")["pending_count"], 0)
+        # And the merge does age it when the recording IS still discovered,
+        # through the same argument main passes.
+        index = merge_index(
+            None, "on008083", self.head, [], [], "2026-09-02T00:00:00Z", [],
+            [{"path": path, "reason": "infra_failure", "last_error": "boom"}],
+            discovered=[path],
+            prior_pending=self.prior_v3(
+                pending=[{"path": path, "reason": "infra_failure", "attempts": 4}]
+            )["pending"],
+        )
+        # 4 + 1 == PENDING_MAX_ATTEMPTS, so this is the round that promotes it.
+        self.assertEqual(index["pending_count"], 0)
+        self.assertEqual(index["failures"][0]["code"], "retry_exhausted")
+        self.assertEqual(index["failures"][0]["attempts"], PENDING_MAX_ATTEMPTS)
+
+    def test_non_raw_stores_are_dropped_reported_and_logged(self):
+        self.put("index.json", self.prior_v3(
+            store_count=2,
+            stores=[
+                {"path": "derivatives/prep/a_eeg.set",
+                 "zarr": "derivatives/prep/a_eeg.zarr",
+                 "source_tree": "raw", "derived": False},
+                {"path": "sourcedata/b_eeg.set", "zarr": "sourcedata/b_eeg.zarr",
+                 "source_tree": "raw", "derived": False},
+            ],
+        ))
+        self.assertEqual(self.run_main(), 0)
+        body = self.callback_body()
+        self.assertEqual(body["non_raw_dropped"], 2)
+        # Named in the log, with the tree, so the count has a cause attached.
+        self.assertIn("derivatives/prep/a_eeg.set", self.log)
+        self.assertIn("sourcedata", self.log)
+        index = self.published("index.json")
+        self.assertEqual(index["stores"], [])
+        self.assertNotIn("legacy_store_count", index)
+
+    def test_the_callback_reports_every_new_field(self):
+        self.put("index.json", self.prior_v3())
+        self.assertEqual(self.run_main(), 0)
+        body = self.callback_body()
+        for key in (
+            "pending_count", "discovered_count", "not_attempted_count",
+            "non_raw_dropped", "provenance_fetch_failed", "manifest_upload_failed",
+        ):
+            self.assertIn(key, body, key)
+        self.assertEqual(body["status"], "ready")
+        self.assertIs(body["manifest_upload_failed"], False)
+        # Nothing to convert, so the catalog was never read: not a failure.
+        self.assertIs(body["provenance_fetch_failed"], False)
+
+    def test_a_missing_prior_index_is_the_first_run_path(self):
+        # No document at all: the stub reports NoSuchKey, which must read as
+        # "first run" rather than raising.
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.published("index.json")["store_count"], 0)
+        self.assertEqual(self.callback_body()["non_raw_dropped"], 0)
+
+
+class TestConvertOneEndToEnd(unittest.TestCase):
+    """`convert_one` in LOCAL mode over a real recording, up to the upload.
+
+    The store entry is assembled here -- `store_metadata`'s spread, the events
+    summary, the `units_report` annotation, the SSS flags -- and every test of
+    those pieces called them individually. So the assembly itself, which is
+    where a key gets mis-set or dropped, was covered by nothing.
+
+    `--local` reads the working tree directly (the Hallu path after `nemar
+    dataset download`), so no S3 is needed until the `aws s3 sync`, which the
+    stub below absorbs. Everything before it is the real code on real bytes.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.eeg = os.path.join(self.repo, "sub-01", "eeg")
+        os.makedirs(self.eeg)
+        self.primary = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+        build_real_edf(self.eeg, "sub-01_task-rest_eeg", seconds=30)
+        with open(os.path.join(self.eeg, "sub-01_task-rest_channels.tsv"), "w") as fh:
+            fh.writelines(
+                ["name\ttype\tunits\n"] + [f"E{i + 1}\tEEG\tV\n" for i in range(4)]
+            )
+        with open(os.path.join(self.eeg, "sub-01_task-rest_events.tsv"), "w") as fh:
+            fh.writelines(
+                ["onset\tduration\ttrial_type\n"]
+                + [f"{i * 2.0}\t0.5\t{'go' if i % 2 == 0 else 'stop'}\n"
+                   for i in range(8)]
+            )
+        # `aws s3 sync` is the only external call convert_one makes in local
+        # mode; a real no-op executable absorbs it.
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        self._path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + self._path
+        self._work = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        os.environ["PATH"] = self._path
+        self._work.cleanup()
+        self._tmp.cleanup()
+
+    def convert(self, head_files=None, dataset_row=None, provenance_failed=False):
+        files = head_files if head_files is not None else {
+            self.primary,
+            "sub-01/eeg/sub-01_task-rest_channels.tsv",
+            "sub-01/eeg/sub-01_task-rest_events.tsv",
+        }
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on007763",
+            "head": "b" * 40, "head_files": files, "local": True,
+            "tmp": self._work.name, "updated": "2026-09-02T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org",
+            "engine_version": "3",
+            "dataset_row": dataset_row,
+            "provenance_fetch_failed": provenance_failed,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+        })
+        return convert_one(self.primary)
+
+    def test_the_entry_carries_the_sidecar_annotation(self):
+        result = self.convert()
+        self.assertTrue(result["ok"], result.get("error"))
+        entry = result["entry"]
+        report = entry["units_report"]
+        # Which sidecar shaped the store, and that the CONVERTER chose it rather
+        # than the exporter stumbling on a sibling -- two separate claims, both
+        # of which matter on the MaxShield path where sibling detection finds
+        # nothing.
+        self.assertIs(report["sidecar_supplied"], True)
+        self.assertEqual(report["sidecar"], "sub-01/eeg/sub-01_task-rest_channels.tsv")
+        self.assertIs(report["units_column_present"], True)
+        self.assertNotIn("channels_tsv_read_error", entry)
+
+    def test_the_entry_is_a_complete_v3_store_entry(self):
+        entry = self.convert()["entry"]
+        self.assertEqual(entry["path"], self.primary)
+        self.assertEqual(entry["zarr"], store_rel_for(self.primary))
+        self.assertEqual(entry["source_tree"], "raw")
+        self.assertIs(entry["derived"], False)
+        self.assertEqual(entry["n_events"], 8)
+        self.assertEqual(entry["trial_types"], {"go": 4, "stop": 4})
+        self.assertEqual(entry["modalities"], ["eeg"])
+        self.assertGreaterEqual(entry["groups"][0]["n_view_levels"], 1)
+        # And `source_key` is NOT here: it moved to the manifest (#1178 item 5).
+        self.assertNotIn("source_key", entry)
+        self.assertIn("source_key", self.convert()["manifest"])
+
+    def test_the_entry_validates_inside_a_real_index(self):
+        # The assembled entry has to satisfy the closed store schema, which is
+        # what the producer enforces before publishing.
+        entry = self.convert()["entry"]
+        index = merge_index(
+            None, "on007763", "b" * 40, [entry], [], "2026-09-02T00:00:00Z",
+            [], [], discovered=[self.primary],
+        )
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_an_unreadable_sidecar_is_recorded_not_collapsed(self):
+        """A channels.tsv that APPLIES but cannot be read must not look like a
+        dataset that ships none: both leave `units_report` absent, and only one
+        of them means the store is serving importer units unintentionally."""
+        # Declared at HEAD, absent from the working tree and from git: the read
+        # fails the way a pack/tree desync would.
+        files = {self.primary, "sub-01/sub-01_channels.tsv"}
+        entry = self.convert(head_files=files)["entry"]
+        self.assertIs(entry["channels_tsv_read_error"], True)
+        self.assertNotIn("units_report", entry)
+
+    def test_it_converts_with_a_failed_provenance_fetch(self):
+        """A catalog outage must not cost a conversion.
+
+        The store's `nemar` attrs then carry nulls plus
+        `provenance_fetch_failed: true`; that the flag lands in the ATTRS is
+        asserted in TestRealRecordingV3Fields (the store is deleted by
+        `convert_one`'s `finally`, so it cannot be read back from here). What
+        this covers is the path itself: the flag threads through the worker
+        context without breaking the conversion.
+        """
+        result = self.convert(dataset_row=None, provenance_failed=True)
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertEqual(result["entry"]["path"], self.primary)
 
 
 if __name__ == "__main__":

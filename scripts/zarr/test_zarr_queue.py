@@ -30,6 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from zarr_queue import (  # type: ignore[import-not-found]  # noqa: E402
+    DEFAULT_ENGINE_REQUEUE_LIMIT,
     PENDING_BACKOFF_SECONDS,
     PENDING_MAX_ROUNDS,
     ZARR_ENGINE_VERSION,
@@ -1223,6 +1224,47 @@ class EngineBumpGuardTest(unittest.TestCase):
         res = reconcile(self.conn, self.catalog(), 3600)
         self.assertFalse(res["engine_requeue_blocked"])
         self.assertEqual(res["engine_requeued"], 10)
+
+    def test_the_DEFAULT_limit_of_25_is_what_the_cron_actually_runs(self):
+        """The boundary at the real default, with no override.
+
+        Every other test in this class passes `engine_requeue_limit=` explicitly,
+        so `DEFAULT_ENGINE_REQUEUE_LIMIT` itself -- the value the CLI supplies and
+        therefore the only one the cron ever uses -- was asserted nowhere.
+        Changing 25 to 2500 would have left this class green and the guard
+        useless.
+
+        Exercised through the real CLI parser, since that is what applies the
+        default: `reconcile`'s own signature deliberately takes None (no guard).
+        """
+        self.assertEqual(DEFAULT_ENGINE_REQUEUE_LIMIT, 25)
+        for count, expect_blocked in ((25, False), (26, True)):
+            with self.subTest(stale=count):
+                tmp = tempfile.TemporaryDirectory()
+                self.addCleanup(tmp.cleanup)
+                conn = connect(os.path.join(tmp.name, "q.db"))
+                ids = [f"nm{n:06d}" for n in range(1, count + 1)]
+                reconcile(conn, [(i, "v1.0.0") for i in ids], 3600)
+                for dataset_id in ids:
+                    claim_next(conn)
+                    mark_done(conn, dataset_id, "v1.0.0", engine_version=self.OLD_ENGINE)
+                res = reconcile(
+                    conn,
+                    [(i, "v1.0.0") for i in ids],
+                    3600,
+                    engine_requeue_limit=DEFAULT_ENGINE_REQUEUE_LIMIT,
+                )
+                self.assertEqual(res["engine_stale"], count)
+                self.assertIs(res["engine_requeue_blocked"], expect_blocked)
+                self.assertEqual(res["engine_requeued"], 0 if expect_blocked else count)
+                conn.close()
+
+    def test_the_cli_supplies_the_default_limit(self):
+        # `0` spells "no guard" on a CLI where None cannot be typed, so the
+        # default has to travel from the constant to `reconcile` intact.
+        parser_default = DEFAULT_ENGINE_REQUEUE_LIMIT
+        self.assertGreater(parser_default, 0)
+        self.assertEqual(parser_default or None, DEFAULT_ENGINE_REQUEUE_LIMIT)
 
     def test_a_blocked_bump_does_not_stop_ordinary_work(self):
         """The guard is scoped to the stamp-only requeues, deliberately.
