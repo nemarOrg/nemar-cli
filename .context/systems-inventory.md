@@ -280,8 +280,13 @@ and `api-test.nemar.org/datasets/xx099905`'s
 
 **Credentials, resolved by `--test` only when the variable is otherwise unset**
 (an explicit env var still wins,
-and `--test` refuses six prod values outright, normalized and case-insensitively —
-see the guard rails in `hallu-zarr.sh`):
+and `--test` refuses six prod values outright — see the guard rails in `hallu-zarr.sh`).
+Each of the six is normalized for its own kind of value, and only two are case-folded:
+`API_BASE` and `TEST_API_URL` go through `_is_prod_api_host`,
+which lowercases and strips scheme, path, query, port and a trailing DNS dot;
+`STATE_DIR` and `WORK_DIR` are path-normalized (repeated and trailing `/` collapsed,
+`realpath` when the directory already exists) but NOT case-folded;
+`S3_BUCKET` and `AWS_PROFILE` are plain exact string equality:
 
 | Variable | `--test` default | Notes |
 |---|---|---|
@@ -291,7 +296,7 @@ see the guard rails in `hallu-zarr.sh`):
 | `ZARR_AWS_PROFILE` | `nemar-zarr-dev` | IAM user `nemar-hallu-zarr-dev`, `s3:Get/Put/Delete` on `nemar-dev/*/zarr/*` + `GetObject` on `nemar-dev/*/objects/*` + `ListBucket`; cannot write to the prod bucket — per the IAM policy as provisioned 2026-09-02 (inline policy `zarr-rw-dev` on user `nemar-hallu-zarr-dev`, no IaC in this repo) |
 | `ZARR_STATE_DIR` | `${ZARR_BASE:-/mnt/local}/zarr-state-test` | |
 | `ZARR_WORK_DIR` | `${ZARR_BASE:-/mnt/local}/zarr-scratch-test` | |
-| `ZARR_DRIVER_REF` | `dev` | tracks the same unreleased branch the rest of staging tracks |
+| `ZARR_DRIVER_REF` | `dev` | tracks the same unreleased branch the rest of staging tracks — but the installed cron line below overrides it with the epic branch while epic #1181 is open |
 | `ZARR_JOBS` | `4` | deliberately low — a test instance shares Hallu's cores with the prod backfill and must not contend with it |
 
 **Ops sanity check, no side effects:**
@@ -327,15 +332,27 @@ not the hand-placed bootstrap copy,
 so `setup()`'s self-deploy keeps it current
 — identical reasoning to §3.3's driver/script split.
 
-**Cron (documented here; not installed by this phase — see the PR for what remains for ops):**
+**Cron — INSTALLED. The line on Hallu, verbatim:**
 
 ```
-15 3 * * * /mnt/local/zarr-state-test/nemar-cli/scripts/zarr/hallu-zarr.sh --test >> /mnt/local/zarr-state-test/.nm-zarr-cron.log 2>&1
+15 3 * * * mkdir -p /mnt/local/zarr-state-test && ZARR_DRIVER_REF=feature/issue-1181-epic-zarr-serving /mnt/local/zarr-state-test/nemar-cli/scripts/zarr/hallu-zarr.sh --test >> /mnt/local/zarr-state-test/.nm-zarr-cron.log 2>&1
 ```
 
-Nightly and off the prod cron's `:30` hourly tick
+Nightly at 03:15 UTC and off the prod cron's `:30` hourly tick
 — deliberately infrequent, since the test catalog is small
 and the point is observability, not throughput.
+
+Two parts of that line are not decoration:
+
+- `mkdir -p` runs first so the redirect target's directory exists on a node where
+  the state dir has been wiped; `>>` would otherwise fail before the script ran,
+  and cron's only trace of it is mail nobody reads.
+- **`ZARR_DRIVER_REF` is set EXPLICITLY, overriding `--test`'s `dev` default**,
+  because staging's job while epic #1181 is open is to prove the epic branch
+  before `dev` has it. **Flip it to `dev` (or drop the override) once the epic
+  merges** — left pointing at the epic branch it would pin staging to a ref that
+  stops moving, and `setup()`'s self-deploy would keep resetting the clone to a
+  stale commit while looking perfectly healthy.
 
 **What is NOT shared with prod:**
 state directory, lock, queue db, venv, driver clone,

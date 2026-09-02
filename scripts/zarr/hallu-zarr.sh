@@ -726,9 +726,15 @@ convert_dataset() {
 # the concurrent write, which is a single fast UPDATE.
 # `--preview-engine-bump` answers "what would a bump cost" BEFORE one lands, and
 # is the reason ADR 0033 can claim a bump is visible rather than merely loud
-# after the fact. It runs `engine-preview`, which reads the queue and nothing
-# else -- no network, no writes -- so it is safe here, ahead of the lock and of
-# setup(), exactly like --requeue and for the same reasons.
+# after the fact. It runs `engine-preview`, which touches no network and changes
+# no job's STATE -- it only counts what a bump would re-queue. It is not
+# literally read-only: `zarr_queue.py`'s `main()` connects for every subcommand,
+# and `connect` runs `migrate_schema`, whose additive ALTER and `engine_version`
+# seed are by design idempotent and re-run on every connect. So a preview on a
+# node that has never run the current queue schema does write those, exactly as
+# the next reconcile would. That is safe ahead of the lock and of setup(), like
+# --requeue and for the same reasons: SQLite's own locking covers it, and it is
+# the same statements a concurrent drain has already run.
 #
 # Note this deliberately does NOT run a real reconcile with --no-engine-requeue.
 # That would be a preview with side effects: reconcile enqueues new datasets,
