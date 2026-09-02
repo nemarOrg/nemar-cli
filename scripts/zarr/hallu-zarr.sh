@@ -40,6 +40,9 @@
 #   ./hallu-zarr.sh --backfill-dir-formats            # dry-run: the #1172 sweep
 #   ./hallu-zarr.sh --backfill-dir-formats --execute  # requeue what it found
 #   ./hallu-zarr.sh --preview-engine-bump             # what an engine bump costs
+#   ./hallu-zarr.sh --test                     # against api-test.nemar.org / nemar-dev
+#   ./hallu-zarr.sh --test --print-config      # resolved --test config, no side effects
+#   ./hallu-zarr.sh --print-config             # resolved prod config, no side effects
 #
 # --requeue exists because the retry budget for `failed` was spent on OOM-killed
 # workers taking whole datasets down (#1110), and `data_failed` was reachable by
@@ -73,6 +76,35 @@ for p in "$HOME/.local/homebrew/bin" "$HOME/.bun/bin" "$HOME/.local/bin"; do
   [[ -d "$p" ]] && PATH="$p:$PATH"
 done
 export PATH
+
+# --- Test-mode pre-pass (nemarOrg/nemar-cli#1180, epic #1181 phase 3) ---------
+# A second, independently-stated Hallu invocation against zarr-test.nemar.org /
+# nemar-dev, not a code fork: --test is a scan over "$@" that runs BEFORE the
+# Config block below and exports a default for each variable ONLY when it is
+# still unset, so Config's existing "${VAR:-default}" everywhere just resolves
+# to the test value instead of the prod one. This has to be a separate pre-pass
+# rather than a case arm in the real parser further down, because the real
+# parser runs AFTER Config has already read its defaults -- too late to steer
+# them. --test is deliberately left in "$@": the real parser (below) still
+# consumes it, to record TEST_MODE=1 for the "[test]" log prefix, without a
+# second parse of the arguments.
+#
+# ZARR_JOBS defaults to 4, not nproc like the prod default: a test instance
+# runs on the SAME Hallu box as the prod backfill and must not contend with it
+# for cores.
+for _pretest_arg in "$@"; do
+  if [[ "$_pretest_arg" == "--test" ]]; then
+    export API_BASE="${API_BASE:-https://api-test.nemar.org}"
+    export S3_BUCKET="${S3_BUCKET:-nemar-dev}"
+    export ZARR_AWS_PROFILE="${ZARR_AWS_PROFILE:-nemar-zarr-dev}"
+    export ZARR_STATE_DIR="${ZARR_STATE_DIR:-${ZARR_BASE:-/mnt/local}/zarr-state-test}"
+    export ZARR_WORK_DIR="${ZARR_WORK_DIR:-${ZARR_BASE:-/mnt/local}/zarr-scratch-test}"
+    export ZARR_DRIVER_REF="${ZARR_DRIVER_REF:-dev}"
+    export ZARR_JOBS="${ZARR_JOBS:-4}"
+    break
+  fi
+done
+unset _pretest_arg
 
 # --- Config (environment-overridable) ----------------------------------------
 # ZARR_BASE is the SINGLE local drive this pipeline lives on. Both the hot
@@ -156,6 +188,12 @@ PREVIEW_ENGINE_BUMP=""
 # write only when this is set, so one spelling of "yes, actually do it" serves
 # both recoveries.
 EXECUTE=""
+# Set by the pre-pass above already choosing the test defaults; recorded here
+# too (harmlessly redundant with the pre-pass's own scan) so every downstream
+# reader -- log()/err()'s "[test]" prefix, the guard rails, --print-config --
+# can just test one variable instead of re-scanning "$@".
+TEST_MODE=""
+PRINT_CONFIG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dataset) ONLY_DATASET="$2"; shift 2 ;;
@@ -174,16 +212,119 @@ while [[ $# -gt 0 ]]; do
       fi
       ;;
     --execute) EXECUTE=1; shift ;;
+    --test) TEST_MODE=1; shift ;;
+    --print-config) PRINT_CONFIG=1; shift ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
-log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" | tee -a "$LOG_FILE"; }
-err() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] ERROR: $*" | tee -a "$LOG_FILE" >&2; }
+log() {
+  local prefix=""
+  [[ -n "$TEST_MODE" ]] && prefix="[test] "
+  echo "${prefix}[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" | tee -a "$LOG_FILE"
+}
+err() {
+  local prefix=""
+  [[ -n "$TEST_MODE" ]] && prefix="[test] "
+  echo "${prefix}[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] ERROR: $*" | tee -a "$LOG_FILE" >&2
+}
 
 # git-annex marks object files (and their dirs) read-only, so a plain `rm -rf`
 # fails with EPERM. Make the tree writable first, then remove.
 safe_rm() { [[ -n "${1:-}" && -e "$1" ]] || return 0; chmod -R u+w "$1" 2>/dev/null; rm -rf "$1"; }
+
+# --- Test-mode guard rails -----------------------------------------------------
+# --test picks safe defaults (above), but an operator can still export a PROD
+# value alongside --test (e.g. a stale `S3_BUCKET=nemar` left in their shell).
+# Catch that here and fail loud rather than silently converting against prod
+# with the safety flag on. Deliberately NOT using err()/log(): both tee to
+# $LOG_FILE, and one of the very things being guarded against is STATE_DIR
+# resolving to the prod state dir -- mkdir'ing (or writing under) that path
+# just to report the guard failure would defeat the guard. Plain stderr only;
+# nothing under $STATE_DIR exists yet at this point in the script.
+if [[ -n "$TEST_MODE" ]]; then
+  guard_failed=""
+  guard_err() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] ERROR: $*" >&2; }
+  if [[ "$S3_BUCKET" == "nemar" ]]; then
+    guard_err "--test refuses S3_BUCKET=nemar (the production bucket)."
+    guard_failed=1
+  fi
+  if [[ "$API_BASE" == *"api.nemar.org"* ]]; then
+    guard_err "--test refuses API_BASE=$API_BASE (the production catalog)."
+    guard_failed=1
+  fi
+  if [[ "$AWS_PROFILE" == "nemar-zarr" ]]; then
+    guard_err "--test refuses AWS_PROFILE=nemar-zarr (the production credential)."
+    guard_failed=1
+  fi
+  if [[ "$STATE_DIR" == "/mnt/local/zarr-state" ]]; then
+    guard_err "--test refuses STATE_DIR=/mnt/local/zarr-state (the production state dir)."
+    guard_failed=1
+  fi
+  if [[ -n "$guard_failed" ]]; then
+    guard_err "--test is a safety boundary: a prod value exported alongside it stops"
+    guard_err "the run rather than silently pointing it at prod. Unset the offending"
+    guard_err "variable(s) or point them at their nemar-dev/api-test equivalents."
+    exit 1
+  fi
+  unset guard_failed
+fi
+
+# --- --print-config -------------------------------------------------------------
+# The ops sanity check and the test seam: print every resolved config value and
+# exit before touching the filesystem, network, or lock. Placed ahead of the
+# `mkdir` below deliberately -- unlike --stats/--preview-engine-bump/--requeue
+# further down (which already accept `mkdir` as a side effect of getting this
+# far), --print-config's whole purpose is to be inspectable with zero side
+# effects, from a temp HOME/ZARR_BASE in a test as much as from a real one.
+if [[ -n "$PRINT_CONFIG" ]]; then
+  # Token presence only -- never the value. Resolved the same three-tier way
+  # load_secrets() (below) resolves it, but read-only and in a subshell: this
+  # must not source into the current process (that WOULD partly duplicate
+  # load_secrets()'s job) and must not tee an ERROR line to $LOG_FILE on a
+  # miss, since a miss is the common case (no secrets file yet) and
+  # --print-config promises no filesystem writes either way.
+  pc_secrets_file=""
+  if [[ -n "${ZARR_SECRETS_FILE:-}" && -f "${ZARR_SECRETS_FILE:-}" ]]; then
+    pc_secrets_file="$ZARR_SECRETS_FILE"
+  elif [[ -f "${STATE_DIR}/.zarr-secrets.env" ]]; then
+    pc_secrets_file="${STATE_DIR}/.zarr-secrets.env"
+  elif [[ -f "${BASH_SOURCE%/*}/.zarr-secrets.env" ]]; then
+    pc_secrets_file="${BASH_SOURCE%/*}/.zarr-secrets.env"
+  fi
+  pc_token="absent"
+  if [[ -n "$pc_secrets_file" ]]; then
+    # shellcheck source=/dev/null  # deployment-local, chmod-600, never in the repo
+    if [[ -n "$(source "$pc_secrets_file" 2>/dev/null; echo "${NEMAR_WEBHOOK_TOKEN:-}")" ]]; then
+      pc_token="present"
+    fi
+  elif [[ -n "${NEMAR_WEBHOOK_TOKEN:-}" ]]; then
+    pc_token="present"
+  fi
+  cat <<EOF
+TEST_MODE=${TEST_MODE:-0}
+API_BASE=$API_BASE
+CALLBACK_URL=$CALLBACK_URL
+S3_BUCKET=$S3_BUCKET
+AWS_REGION=$AWS_REGION
+AWS_PROFILE=$AWS_PROFILE
+ZARR_BASE=$ZARR_BASE
+WORK_DIR=$WORK_DIR
+STATE_DIR=$STATE_DIR
+JOBS=$JOBS
+DRIVER_REPO=$DRIVER_REPO
+DRIVER_REF=$DRIVER_REF
+VENV_DIR=$VENV_DIR
+BIOSIGIO_SPEC=$BIOSIGIO_SPEC
+QUEUE_DB=$QUEUE_DB
+LOG_FILE=$LOG_FILE
+LOCK_FILE=$LOCK_FILE
+ENGINE_REQUEUE_LIMIT=$ENGINE_REQUEUE_LIMIT
+ENGINE_ACK_FILE=$ENGINE_ACK_FILE
+NEMAR_WEBHOOK_TOKEN=$pc_token
+EOF
+  exit 0
+fi
 
 mkdir -p "$WORK_DIR" "$STATE_DIR"
 # The driver's tempfile.TemporaryDirectory() (per-recording materialize + store)
