@@ -65,6 +65,7 @@ import {
   warningStageForDaysLeft,
 } from "./services/staleness";
 import { publishZarrCatalog } from "./services/zarr-catalog";
+import { runZarrFidelitySweep } from "./services/zarr-fidelity-sweep";
 import type { Bindings, Variables } from "./types/bindings";
 
 // Create the API app with all routes
@@ -293,10 +294,17 @@ export const PROD_SANDBOX_CLEANUP_QUERY =
  * against the shared `nemarDatasets` org, or mutate a real DOI or the PROD
  * bucket -- `publishZarrCatalog` (services/zarr-catalog.ts) qualifies
  * because it only ever reads/writes the CALLING env's own D1 and S3 bucket.
+ * `runZarrFidelitySweep` (services/zarr-fidelity-sweep.ts, issue #1068,
+ * epic #1181 phase 8) qualifies for the same reason PLUS one more: its
+ * dataset-repo reads go through the public, credential-free
+ * `raw.githubusercontent.com` content host, never the GitHub API/App/PAT --
+ * see that module's doc comment for why that is a materially different,
+ * dev-safe exposure from `signal-defaults-sweep.ts`'s GitHub-API-based
+ * `getBidsTreeStats` (which IS prod-only, in the guarded block below).
  * `backend/test/cron-sweep-wiring.test.ts` pins that every name here is
  * both actually called and called outside the guarded block.
  */
-export const DEV_CRON_ALLOWLIST = ["publishZarrCatalog"] as const;
+export const DEV_CRON_ALLOWLIST = ["publishZarrCatalog", "runZarrFidelitySweep"] as const;
 
 async function scheduledCleanup(env: Bindings): Promise<void> {
   const db = env.DB;
@@ -978,6 +986,32 @@ export default {
         .catch((err) =>
           console.error(
             "[zarr-catalog] publish failed:",
+            err instanceof Error ? (err.stack ?? err.message) : err,
+          ),
+        ),
+    );
+    // Issue #1068 (epic #1181 phase 8): the standing Zarr fidelity
+    // verification sweep. ALLOWED ON THE NON-PROD CRON -- listed in
+    // DEV_CRON_ALLOWLIST above: it only reads this env's own S3 bucket plus
+    // the public, credential-free raw.githubusercontent.com content host,
+    // and writes only this env's own D1 -- no email, no GitHub App/PAT
+    // dispatch against the shared nemarDatasets org, no DOI mutation.
+    ctx.waitUntil(
+      runZarrFidelitySweep(env)
+        .then((r) => {
+          const failedIds = r.results
+            .filter((d) => d.verdict === "failed")
+            .map((d) => d.dataset_id);
+          console.log(
+            `[zarr-fidelity-sweep] processed=${r.processed} verified=${r.verified} failed=${r.failed} unverifiable=${r.unverifiable} errors=${r.errors.length} remaining=${r.remaining ?? "?"}${failedIds.length > 0 ? ` failedDatasets=${failedIds.join(",")}` : ""}`,
+          );
+          for (const e of r.errors) {
+            console.error(`[zarr-fidelity-sweep] ${e.dataset_id}: ${e.error}`);
+          }
+        })
+        .catch((err) =>
+          console.error(
+            "[zarr-fidelity-sweep] sweep failed:",
             err instanceof Error ? (err.stack ?? err.message) : err,
           ),
         ),

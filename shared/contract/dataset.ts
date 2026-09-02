@@ -115,6 +115,16 @@ const catalogItemObjectSchema = z
     zarr_deterministic: zeroOneNullable.optional(),
     zarr_failed_at: z.string().nullable().optional(),
     zarr_index_url: z.string().nullable().optional(),
+    // Issue #1068 (epic #1181 phase 8): the standing fidelity verification
+    // sweep's verdict, derived at read time from the JSON sweep_stamps
+    // column (ADR 0034/0035, no new column) -- see
+    // assertZarrVerifiedAtOnlyWhenStatusKnown below for the invariant. Both
+    // stay null/absent until the sweep (daily plus on-demand) reaches a
+    // freshly-converted dataset; a client that wants "converted AND
+    // verified" filters on `has_zarr_verified` rather than reading these
+    // two fields itself.
+    zarr_verify_status: z.enum(["verified", "failed", "unverifiable"]).nullable().optional(),
+    zarr_verified_at: z.string().nullable().optional(),
     total_recording_duration: z.number().nullable().optional(),
     recording_duration_min: z.number().nullable().optional(),
     recording_duration_max: z.number().nullable().optional(),
@@ -154,9 +164,35 @@ function assertZarrIndexUrlOnlyWhenReady(
   }
 }
 
-export const catalogItemSchema = catalogItemObjectSchema.superRefine(
-  assertZarrIndexUrlOnlyWhenReady,
-);
+/**
+ * Cross-field contract invariant (issue #1068, epic #1181 phase 8):
+ * `zarr_verified_at` is a timestamp of the LAST sweep run that produced
+ * `zarr_verify_status`, so it must be null/absent whenever the status itself
+ * is -- a dataset the sweep has never reached has neither. The reverse is
+ * not asserted: a non-null status with a null timestamp would be a stranger
+ * bug (the sweep only ever writes both together, see
+ * ZARR_FIDELITY_SWEEP_STAMP_SQL), but this direction is the one a producer
+ * could plausibly get wrong (stamping a status without its timestamp), so it
+ * is the one enforced. Shared by both schemas below, like
+ * assertZarrIndexUrlOnlyWhenReady.
+ */
+function assertZarrVerifiedAtRequiresStatus(
+  val: { zarr_verify_status?: string | null; zarr_verified_at?: string | null },
+  ctx: z.RefinementCtx,
+): void {
+  if (val.zarr_verified_at != null && val.zarr_verify_status == null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "zarr_verified_at must be null/absent unless zarr_verify_status is non-null",
+      path: ["zarr_verified_at"],
+    });
+  }
+}
+
+export const catalogItemSchema = catalogItemObjectSchema.superRefine((val, ctx) => {
+  assertZarrIndexUrlOnlyWhenReady(val, ctx);
+  assertZarrVerifiedAtRequiresStatus(val, ctx);
+});
 export type CatalogItem = z.infer<typeof catalogItemObjectSchema>;
 
 /**
@@ -207,7 +243,10 @@ export const datasetDetailSchema = catalogItemObjectSchema
       .optional(),
   })
   .passthrough()
-  .superRefine(assertZarrIndexUrlOnlyWhenReady);
+  .superRefine((val, ctx) => {
+    assertZarrIndexUrlOnlyWhenReady(val, ctx);
+    assertZarrVerifiedAtRequiresStatus(val, ctx);
+  });
 export type DatasetDetail = z.infer<typeof datasetDetailSchema>;
 
 /**

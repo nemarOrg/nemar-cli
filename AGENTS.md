@@ -379,6 +379,41 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   normally throughout. The cohort stranded before the stamp existed
   (directory-format datasets converted before 2026-08-22, #1172) is recovered by
   `hallu-zarr.sh --backfill-dir-formats`, dry-run by default.
+  **Verification is a standing sweep, not a conversion-time gate alone**
+  (issue #1068, epic #1181 phase 8): the converter's own
+  `channel_count_mismatch` check withholds an unfaithful store when it is
+  built, but `has_zarr` KEEPS ITS EXISTING MEANING (converted: `zarr_status
+  = 'ready'` with at least one store) so no caller of `?has_zarr=1` sees a
+  silently narrower result set. `has_zarr_verified` is the new, separate,
+  stricter filter: converted AND the fidelity sweep's last verdict was
+  `verified`. `backend/src/services/zarr-fidelity-sweep.ts`'s
+  `runZarrFidelitySweep` re-derives ground truth per sampled recording
+  (`channels.tsv` row count, sidecar `SamplingFrequency`/`RecordingDuration`)
+  from the dataset's own git-tracked BIDS metadata via the public,
+  credential-free `raw.githubusercontent.com` content host (never the
+  GitHub API/App/PAT, which is what makes it safe on the non-prod cron too
+  -- `DEV_CRON_ALLOWLIST` in index.ts) -- candidates are restricted to
+  `status='active' AND visibility='public'` for exactly that reason: a
+  private repo can't be read anonymously, so it would only ever produce
+  `unverifiable` noise. It FAILS OPEN ON THE ROW, never on the verdict: a
+  transient infra error (a non-2xx that isn't 404, a network throw, or
+  either fetch budget running out mid-dataset -- a sweep-wide 600 and a
+  per-dataset 90, both index plus sidecar fetches) aborts that one
+  dataset's verification for the run -- nothing is stamped, it lands in the
+  run's `errors`, and the row stays a candidate; only a clean 404 at every
+  nearest-first candidate path is real absence, and only a value that
+  actually parsed counts as checked. Stamps `zarr_verify_status`
+  (`verified` / `failed` / `unverifiable`) plus `zarr_verified_at` into
+  `sweep_stamps` (ADR 0034/0035 -- no new column); a re-conversion (a
+  changed `zarr_source_commit`) OR a stamped commit that is null (a fixed
+  fossilisation bug -- the write side now stamps `''`, never JSON `null`,
+  but the candidate predicate also re-arms on a null stamp so an
+  already-fossilised row un-sticks too) re-arms verification. A fresh
+  conversion shows `zarr_verify_status: null` until the daily sweep (plus
+  `POST /admin/datasets/zarr-fidelity-sweep`, `nemar admin
+  zarr-fidelity-sweep`) reaches it; the viewer keeps reading index.json
+  regardless (ADR 0005 -- verification is reported, never a precondition
+  for serving).
 
 ---
 
@@ -410,7 +445,7 @@ and what is historical. The entries worth knowing by name:
 | `nemar dataset publish` | request, status, resend |
 | `nemar dataset` (access) | request-access, access, invite, collaborators |
 | `nemar sandbox` | training run, status, reset — required before uploading |
-| `nemar admin` | users, approve, revoke, role, notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, doctor, summary, notice, email-preferences, e2e-test |
+| `nemar admin` | users, approve, revoke, role, notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, zarr-fidelity-sweep, doctor, summary, notice, email-preferences, e2e-test |
 | `nemar admin import*` | OpenNeuro import, status, rollback, retry, verify, recover (issue #754, epic #967) |
 | `nemar admin fleet` | drift, enforce, revalidate — governance across dataset repos (epic #713) |
 | `nemar admin exemplar` | create, status, remint-dois — the staging exemplar fleet |

@@ -153,6 +153,25 @@ export function parsePowerLineFrequency(content: string): number | null {
 }
 
 /**
+ * Read `RecordingDuration` (seconds) from a `*_eeg.json`/`*_ieeg.json`/
+ * `*_meg.json`/`*_emg.json` sidecar for the zarr fidelity sweep (issue
+ * #1068, epic #1181 phase 8) -- ground truth for `duration_mismatch`.
+ * Same shape as parseSamplingFrequency: null on absent/invalid JSON, a
+ * non-number, a non-finite value, or <= 0 (a recording cannot have zero or
+ * negative duration).
+ */
+export function parseRecordingDuration(content: string): number | null {
+  let obj: Record<string, unknown>;
+  try {
+    obj = JSON.parse(content) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const v = obj.RecordingDuration;
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null;
+}
+
+/**
  * Reject BIDS's "not applicable" placeholder and blank strings. Shared by
  * the two free-text sidecar parsers below; not exported -- an external
  * caller with a genuinely different placeholder convention should not

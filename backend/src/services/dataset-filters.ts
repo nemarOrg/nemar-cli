@@ -70,6 +70,15 @@ export interface DatasetFilterOptions {
    *  verified" rather than redefining this one out from under existing
    *  callers (PR #1201 review, item 9). */
   hasZarr?: boolean;
+  /** Only datasets whose Zarr copy has PASSED the standing fidelity
+   *  verification sweep (issue #1068, epic #1181 phase 8):
+   *  `has_zarr AND zarr_verify_status = 'verified'`. A strict narrowing of
+   *  `hasZarr` above, not a replacement for it -- a fresh conversion is
+   *  `has_zarr=true` with `zarr_verify_status` still null until the daily
+   *  sweep (services/zarr-fidelity-sweep.ts) reaches it; the viewer keeps
+   *  reading index.json regardless (ADR 0005). Same nullable-safe
+   *  bespoke-filter shape as `hasZarr`, not a facet-table entry. */
+  hasZarrVerified?: boolean;
   dataComplete?: boolean;
   recent?: number;
   licenseTiers?: LicenseTier[];
@@ -178,6 +187,16 @@ export function buildDatasetFilterClauses(
     // was never populated (an older converter run). Backed by the existing
     // idx_datasets_zarr_status (migration 0035/0071) -- no new index needed.
     clauses += " AND d.zarr_status = 'ready' AND COALESCE(d.zarr_store_count, 0) > 0";
+  }
+  if (opts.hasZarrVerified) {
+    // #1068: has_zarr's predicate ANDed with the sweep's stamped verdict.
+    // json_extract returns SQL NULL for a never-swept row (sweep_stamps NULL
+    // or the key absent/JSON-null -- ADR 0035), which never equals the
+    // string literal, so an unswept or non-'verified' row is excluded, same
+    // as has_hed/has_zarr's own NULL-excludes-by-default convention.
+    clauses +=
+      " AND d.zarr_status = 'ready' AND COALESCE(d.zarr_store_count, 0) > 0" +
+      " AND json_extract(d.sweep_stamps, '$.zarr_verify_status') = 'verified'";
   }
   if (opts.dataComplete) {
     // #970: same nullable-safe idiom as has_hed -- `= 1` excludes both 0

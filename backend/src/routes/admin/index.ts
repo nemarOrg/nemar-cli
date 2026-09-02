@@ -20,6 +20,7 @@ import type { AdminRouter } from "./shared";
 import { registerUsersRoutes } from "./users";
 import { registerWithdrawRoutes } from "./withdraw";
 import { registerZarrCatalogRoutes } from "./zarr-catalog";
+import { registerZarrFidelitySweepRoutes } from "./zarr-fidelity-sweep";
 
 export const adminRoutes: AdminRouter = new Hono();
 
@@ -37,3 +38,4 @@ registerExemplarRoutes(adminRoutes);
 registerNoticeRoutes(adminRoutes);
 registerWithdrawRoutes(adminRoutes);
 registerZarrCatalogRoutes(adminRoutes);
+registerZarrFidelitySweepRoutes(adminRoutes);
