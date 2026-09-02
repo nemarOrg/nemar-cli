@@ -392,11 +392,24 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   from the dataset's own git-tracked BIDS metadata via the public,
   credential-free `raw.githubusercontent.com` content host (never the
   GitHub API/App/PAT, which is what makes it safe on the non-prod cron too
-  -- `DEV_CRON_ALLOWLIST` in index.ts), and stamps `zarr_verify_status`
+  -- `DEV_CRON_ALLOWLIST` in index.ts) -- candidates are restricted to
+  `status='active' AND visibility='public'` for exactly that reason: a
+  private repo can't be read anonymously, so it would only ever produce
+  `unverifiable` noise. It FAILS OPEN ON THE ROW, never on the verdict: a
+  transient infra error (a non-2xx that isn't 404, a network throw, or
+  either fetch budget running out mid-dataset -- a sweep-wide 600 and a
+  per-dataset 90, both index plus sidecar fetches) aborts that one
+  dataset's verification for the run -- nothing is stamped, it lands in the
+  run's `errors`, and the row stays a candidate; only a clean 404 at every
+  nearest-first candidate path is real absence, and only a value that
+  actually parsed counts as checked. Stamps `zarr_verify_status`
   (`verified` / `failed` / `unverifiable`) plus `zarr_verified_at` into
   `sweep_stamps` (ADR 0034/0035 -- no new column); a re-conversion (a
-  changed `zarr_source_commit`) re-arms verification. A fresh conversion
-  shows `zarr_verify_status: null` until the daily sweep (plus
+  changed `zarr_source_commit`) OR a stamped commit that is null (a fixed
+  fossilisation bug -- the write side now stamps `''`, never JSON `null`,
+  but the candidate predicate also re-arms on a null stamp so an
+  already-fossilised row un-sticks too) re-arms verification. A fresh
+  conversion shows `zarr_verify_status: null` until the daily sweep (plus
   `POST /admin/datasets/zarr-fidelity-sweep`, `nemar admin
   zarr-fidelity-sweep`) reaches it; the viewer keeps reading index.json
   regardless (ADR 0005 -- verification is reported, never a precondition
