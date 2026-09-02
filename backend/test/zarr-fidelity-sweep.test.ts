@@ -704,9 +704,13 @@ describe("runZarrFidelitySweep: per-dataset verdicts", () => {
     // No indexFixtures entry -- the fixture server 404s.
 
     const result = await runZarrFidelitySweep(env(), runOpts());
-    expect(result.errors).toEqual([
-      { dataset_id: id, error: "zarr_status=ready but index.json is absent" },
-    ]);
+    expect(result.errors.map((e) => e.dataset_id)).toEqual([id]);
+    expect(result.errors[0].error).toContain("index.json is absent or unreadable");
+    // The message names the other reading of the same response: S3 answers a
+    // GET for a missing key with 403 when the caller cannot list the bucket, so
+    // an access regression 403s every candidate at once and would otherwise read
+    // as "every dataset lost its index".
+    expect(result.errors[0].error).toContain("403");
     const r = row(id);
     expect(r.zarr_verify_status).toBeNull();
   });

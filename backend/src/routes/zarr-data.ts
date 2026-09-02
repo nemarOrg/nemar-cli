@@ -519,6 +519,12 @@ async function serve(c: Context<{ Bindings: Bindings }>, isHead: boolean, deps: 
       // own, so the dashboard can tell a redirected chunk apart from a
       // proxied one without a schema change.
       detail: "chunk-redirect",
+      // ESTIMATED, and recorded BEFORE the 302 is even sent: the client fetches
+      // the object from S3 directly, so this Worker never learns whether it did,
+      // or how many bytes it actually got. `bytes` here is what the Range header
+      // ASKED for (0 when there is none, i.e. a full object of unknown size).
+      // "chunk-redirect" rows are therefore intent, not delivery -- do not sum
+      // them with proxied rows to get bytes served.
       bytes: bytesFromRangeHeader(c.req.header("range") ?? null),
     });
     return new Response(null, {

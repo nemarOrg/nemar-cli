@@ -424,6 +424,12 @@ function indexObjectUrl(options: ZarrFidelityS3Options, datasetId: string): stri
  * not expose the full `stores[]`/`groups[]` shape this sweep needs) --
  * mirrors that function's 404/403-as-absent, other-non-2xx-throws contract.
  * `fetchImpl` is the DI seam a test substitutes with a local receiver.
+ *
+ * 403 is treated as absence because S3 answers a GET for a missing key with 403
+ * rather than 404 when the caller lacks `s3:ListBucket` -- but it is ALSO what a
+ * credentials or bucket-policy regression looks like, and that shape is
+ * catalog-wide rather than per dataset. The caller's error string says so, so an
+ * incident does not read as "every dataset lost its index.json".
  */
 async function fetchFidelityIndex(
   options: ZarrFidelityS3Options,
@@ -823,7 +829,20 @@ async function verifyDataset(
     };
   }
   if (!index) {
-    return { status: null, ...empty, error: "zarr_status=ready but index.json is absent" };
+    // 404, or a 403 that S3 returns for a missing key when the caller cannot
+    // list the bucket. The second reading matters during an incident: a rotated
+    // key or a changed bucket policy 403s EVERY object, so this same message
+    // appears for every candidate at once. "absent or unreadable" says which
+    // question to ask; "absent" alone sent an operator looking for a converter
+    // bug per dataset.
+    return {
+      status: null,
+      ...empty,
+      error:
+        "zarr_status=ready but index.json is absent or unreadable (404, or 403 -- " +
+        "which is also how rotated credentials or a changed bucket policy look; " +
+        "if every candidate reports this, suspect access, not the converter)",
+    };
   }
 
   const commit =

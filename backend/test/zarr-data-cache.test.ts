@@ -2077,3 +2077,46 @@ describe("rate limiter exemption for redirect candidates (#1181 phase 6 / issue 
     expect(rlCache.count(key)).toBe(__limits.DATA_MAX_REQUESTS);
   });
 });
+
+describe("the redirect decision precedes the gate AND the cache (#1181 phase 6)", () => {
+  /**
+   * The ordering, pinned. `serve()` decides redirect-vs-proxy BEFORE the D1
+   * visibility gate and before any cache lookup, so a chunk already primed in
+   * the edge cache by an allowlisted browser Origin must still 302 for a
+   * library request -- the same URL, the same range, a warm entry sitting right
+   * there. Nothing else in this file fails if that order is inverted: every
+   * cache test uses a browser Origin (proxied), and every redirect test uses a
+   * cold key, so a reordered `serve()` would keep them all green while quietly
+   * proxying the traffic phase 6 exists to move OFF this Worker (Cloudflare's
+   * terms at this scale) and re-introducing a D1 read per chunk.
+   */
+  test("a primed range entry is still redirected for a non-allowlisted request", async () => {
+    const range = "bytes=0-9";
+
+    // Prime the edge entry through the proxied branch.
+    const primed = await request(CHUNK_PATH, {
+      headers: { Range: range, Origin: BROWSER_ORIGIN },
+    });
+    expect(primed.status).toBe(206);
+    expect(countUpstream(CHUNK_KEY, range)).toBe(1);
+
+    // The identical request without a browser Origin: redirected, not served
+    // from the warm entry.
+    const redirected = await request(CHUNK_PATH, { headers: { Range: range } });
+    expect(redirected.status).toBe(302);
+    expect(redirected.headers.get("location")).toContain(CHUNK_KEY);
+    // A 302, not a cached 206 wearing one: an empty body and no Content-Range.
+    expect(redirected.headers.get("content-range")).toBeNull();
+    expect(await redirected.arrayBuffer()).toHaveLength(0);
+    // And it never reached upstream either: the redirect branch does no fetch.
+    expect(countUpstream(CHUNK_KEY, range)).toBe(1);
+
+    // The proxied path still serves the warm entry, so the redirect did not
+    // evict or bypass anything -- both branches remain correct for the same key.
+    const again = await request(CHUNK_PATH, {
+      headers: { Range: range, Origin: BROWSER_ORIGIN },
+    });
+    expect(again.status).toBe(206);
+    expect(countUpstream(CHUNK_KEY, range)).toBe(1);
+  });
+});
