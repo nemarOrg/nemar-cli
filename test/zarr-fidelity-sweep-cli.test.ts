@@ -263,4 +263,51 @@ describe("nemar admin zarr-fidelity-sweep: output and exit code", () => {
       server.stop();
     }
   });
+
+  // PR #1203 review round 2: budget_exhausted=true with zero per-dataset
+  // errors used to exit 0 -- a sweep-wide budget cutoff means candidates
+  // past it were never even attempted, which is a partial run, not success.
+  test("budget_exhausted=true with no errors still exits non-zero (a partial sweep)", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer({
+      processed: 1,
+      verified: 1,
+      failed: 0,
+      unverifiable: 0,
+      results: [
+        { dataset_id: "on800001", verdict: "verified", sampled: 1, checked: 1, examples: [] },
+      ],
+      errors: [],
+      remaining: 5,
+      budget_exhausted: true,
+    });
+    try {
+      const result = await runCli(["admin", "zarr-fidelity-sweep", "--json"], server.url);
+      expect(result.exitCode).toBe(1);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("budget_exhausted=false with no errors and a real remaining count exits 0", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer({
+      processed: 1,
+      verified: 1,
+      failed: 0,
+      unverifiable: 0,
+      results: [
+        { dataset_id: "on800001", verdict: "verified", sampled: 1, checked: 1, examples: [] },
+      ],
+      errors: [],
+      remaining: 0,
+      budget_exhausted: false,
+    });
+    try {
+      const result = await runCli(["admin", "zarr-fidelity-sweep", "--json"], server.url);
+      expect(result.exitCode).toBe(0);
+    } finally {
+      server.stop();
+    }
+  });
 });

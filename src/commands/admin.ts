@@ -5287,12 +5287,16 @@ zarrFidelitySweepCommand
         console.log(`  ${chalk.red("error")}       ${e.dataset_id}: ${e.error}`);
       }
     }
-    // Non-zero exit on any per-dataset error OR an indeterminate (null)
-    // remaining, so a caller never reads a partial/uncertain sweep as
-    // success -- mirrors data-integrity-sweep/hed-sweep's convention. A
-    // 'failed' verdict is NOT itself a non-zero-exit condition: the sweep
-    // ran successfully and reported the truth, which is the whole point.
-    if (res.errors.length > 0 || res.remaining === null) process.exit(1);
+    // Non-zero exit on any per-dataset error, an indeterminate (null)
+    // remaining, OR a sweep-wide budget cutoff (this batch is partial --
+    // candidates past the cutoff were never even attempted), so a caller
+    // never reads a partial/uncertain sweep as success -- mirrors
+    // data-integrity-sweep/hed-sweep's convention. A 'failed' verdict is
+    // NOT itself a non-zero-exit condition: the sweep ran successfully and
+    // reported the truth, which is the whole point.
+    if (res.errors.length > 0 || res.remaining === null || res.budget_exhausted) {
+      process.exit(1);
+    }
   });
 
 adminCommand.addCommand(zarrFidelitySweepCommand);

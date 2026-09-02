@@ -994,7 +994,7 @@ describe("runZarrFidelitySweep: the two fetch budgets (item 3)", () => {
     const result = await runZarrFidelitySweep(env(), { ...runOpts(), sweepWideBudget: 1 });
     expect(result.budget_exhausted).toBe(true);
     expect(result.errors.length).toBe(1);
-    expect(result.errors[0].error).toBe("budget_exhausted");
+    expect(result.errors[0].error).toBe("sweep_budget_exhausted");
     expect(result.results).toEqual([]);
     expect(result.processed).toBe(1);
     // All three rows are still candidates: the errored one was never
@@ -1025,8 +1025,13 @@ describe("runZarrFidelitySweep: the two fetch budgets (item 3)", () => {
     expect(result.results).toEqual([]);
     expect(result.errors.length).toBe(1);
     expect(result.errors[0].dataset_id).toBe(id);
-    expect(result.errors[0].error).toBe("budget_exhausted");
+    expect(result.errors[0].error).toBe("dataset_budget_exhausted");
     expect(row(id).zarr_verify_status).toBeNull();
+    // A single dataset hitting its OWN 90-fetch cap is that dataset's
+    // error alone -- the sweep-wide budget (600) still has plenty left, so
+    // the top-level flag must NOT read as "the batch was cut short"
+    // (PR #1203 review round 2).
+    expect(result.budget_exhausted).toBe(false);
   });
 });
 

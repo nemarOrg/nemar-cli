@@ -54,18 +54,23 @@
  * in order and cached per dataset run so a repeated session-/subject-/
  * root-level default costs one fetch each.
  *
- * TWO FETCH BUDGETS. `ZARR_FIDELITY_SWEEP_WIDE_BUDGET` bounds the WHOLE
- * invocation (every index fetch plus every sidecar fetch, across every
- * candidate dataset); once it is spent the batch stops and remaining
- * candidates are left completely untouched (never fetched, never errored --
+ * TWO FETCH BUDGETS, TWO DISTINCT REASONS (PR #1203 review round 2).
+ * `ZARR_FIDELITY_SWEEP_WIDE_BUDGET` bounds the WHOLE invocation (every index
+ * fetch plus every sidecar fetch, across every candidate dataset); once it
+ * is spent the batch stops and remaining candidates are left completely
+ * untouched (never fetched, never errored -- the top-level
  * `budget_exhausted` in the result says why `processed` came in low).
  * `ZARR_FIDELITY_MAX_SIDECAR_FETCHES_PER_DATASET` additionally bounds ONE
  * dataset's sidecar fetches so a single pathological dataset (nothing but
  * misses) cannot spend the whole sweep-wide budget by itself. Either budget
- * running out mid-dataset surfaces as the SAME "error" outcome
- * `resolveSidecar` already uses for a real infra failure (reason
- * `budget_exhausted`), which is what aborts that one dataset per the
- * fail-open rule above -- it is never turned into "absent".
+ * running out mid-dataset surfaces as an "error" outcome from
+ * `resolveSidecar` (the same class of abort a real infra failure uses),
+ * but with a DIFFERENT reason string depending on which budget it was:
+ * `sweep_budget_exhausted` sets the top-level `budget_exhausted` flag
+ * (later candidates really are about to go untouched); a lone dataset's own
+ * `dataset_budget_exhausted` does not -- it is that ONE dataset's error,
+ * every other candidate in the batch is still processed normally. Neither
+ * is ever turned into "absent".
  *
  * Modelled on recording-stats-sweep.ts's shape: candidate SQL, a bounded
  * per-invocation cap, three-way per-dataset error handling (throw/d1-error
@@ -486,8 +491,17 @@ async function resolveSidecar(
       if (cached.kind === "content") return { kind: "content", path: candidate, body: cached.body };
       continue; // cached "absent" -- try the next candidate
     }
-    if (ctx.sweepBudget.remaining <= 0 || ctx.perDatasetBudget.remaining <= 0) {
-      return { kind: "error", reason: "budget_exhausted" };
+    if (ctx.sweepBudget.remaining <= 0) {
+      // Checked first: if the sweep-wide budget is what's gone, every
+      // remaining candidate dataset is about to be left untouched too, so
+      // the top-level `budget_exhausted` flag (set from this exact reason
+      // string in `runZarrFidelitySweep`) must reflect that -- distinct
+      // from a single dataset merely hitting its OWN 90-fetch cap while the
+      // sweep-wide budget still has plenty left (PR #1203 review round 2).
+      return { kind: "error", reason: "sweep_budget_exhausted" };
+    }
+    if (ctx.perDatasetBudget.remaining <= 0) {
+      return { kind: "error", reason: "dataset_budget_exhausted" };
     }
     ctx.sweepBudget.remaining--;
     ctx.perDatasetBudget.remaining--;
@@ -751,7 +765,7 @@ async function verifyDataset(
   };
 
   if (sweepBudget.remaining <= 0) {
-    return { status: null, ...empty, error: "budget_exhausted" };
+    return { status: null, ...empty, error: "sweep_budget_exhausted" };
   }
   sweepBudget.remaining--;
 
@@ -947,7 +961,12 @@ export async function runZarrFidelitySweep(
 
     if (outcome.status === null) {
       errors.push({ dataset_id, error: outcome.error ?? "zarr-fidelity-sweep: unknown error" });
-      if (outcome.error === "budget_exhausted") budgetExhausted = true;
+      // Only the SWEEP-WIDE budget running out means later candidates are
+      // about to go untouched -- a lone dataset exhausting its own 90-fetch
+      // cap ("dataset_budget_exhausted") is just that one dataset's error;
+      // every other candidate is still processed normally (PR #1203 review
+      // round 2).
+      if (outcome.error === "sweep_budget_exhausted") budgetExhausted = true;
       continue;
     }
 
