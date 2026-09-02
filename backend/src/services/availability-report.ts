@@ -296,6 +296,17 @@ export function availabilityReportSweepCandidateQuery(missingOnly: boolean): str
      LIMIT ?`;
 }
 
+/**
+ * The stamp write on a successful report commit. Exported so a test can
+ * exercise the exact SQL text (the write is only reachable end-to-end after
+ * a real GitHub commit, which tests cannot perform): the COALESCE is
+ * load-bearing -- json_set on a NULL sweep_stamps column returns NULL and
+ * would silently discard the stamp (#1183), leaving the row a permanent
+ * re-sweep candidate.
+ */
+export const AVAILABILITY_REPORT_STAMP_SQL =
+  "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.availability_report_at', datetime('now')) WHERE dataset_id = ?";
+
 /** `remaining` COUNT for the sweep -- identical scoping to the candidate query. */
 export function availabilityReportSweepRemainingQuery(missingOnly: boolean): string {
   return `SELECT COUNT(*) AS n FROM datasets WHERE ${availabilityReportSweepWhere(missingOnly)}`;
@@ -360,11 +371,7 @@ export async function runAvailabilityReportSweep(
   for (const { dataset_id } of candidates) {
     try {
       await writeAvailabilityReport(env, dataset_id);
-      await env.DB.prepare(
-        "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.availability_report_at', datetime('now')) WHERE dataset_id = ?",
-      )
-        .bind(dataset_id)
-        .run();
+      await env.DB.prepare(AVAILABILITY_REPORT_STAMP_SQL).bind(dataset_id).run();
       written++;
     } catch (err) {
       errors.push({ dataset_id, error: errorMessage(err) });

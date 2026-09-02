@@ -32,6 +32,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { adminRoutes } from "../src/routes/admin";
 import {
+  AVAILABILITY_REPORT_STAMP_SQL,
   AVAILABILITY_REPORT_SWEEP_MAX,
   availabilityReportSweepCandidateQuery,
   availabilityReportSweepRemainingQuery,
@@ -289,6 +290,23 @@ describe("availability-report-sweep candidate SQL (pinned, no route dispatch)", 
 
     expect(candidates(false)).toEqual(["nm000300", "nm000301", "nm000302"]);
     expect(candidates(true)).toEqual(["nm000300"]);
+  });
+
+  test("the stamp write persists on a fresh row (sweep_stamps NULL) and removes it from candidacy", () => {
+    // AVAILABILITY_REPORT_STAMP_SQL is the sweep's own write (imported, not
+    // copied); it is only reachable end-to-end after a real GitHub commit,
+    // so the exact SQL is pinned here instead. The seeded row's
+    // sweep_stamps is NULL -- the shape on which a missing COALESCE makes
+    // json_set return NULL and silently drop the stamp (#1183).
+    seedDataset("nm000306");
+    db.prepare(AVAILABILITY_REPORT_STAMP_SQL).run("nm000306");
+    const row = db
+      .query(
+        "SELECT json_extract(sweep_stamps, '$.availability_report_at') AS at FROM datasets WHERE dataset_id = 'nm000306'",
+      )
+      .get() as { at: string | null };
+    expect(row.at).not.toBeNull();
+    expect(candidates(false)).toEqual([]);
   });
 
   test("remaining count uses the same scoping as the base candidate query and decreases as rows are stamped", () => {

@@ -302,6 +302,20 @@ describe("archive-ready 'ready' UPDATE persists completeness", () => {
     expect(row.archive_absent_files).toBe(0);
   });
 
+  test("'ready' persists the archive_checked_at stamp on a fresh row (sweep_stamps NULL)", () => {
+    // insertDataset leaves sweep_stamps NULL -- the post-0073 fresh-row
+    // shape on which a missing COALESCE makes json_set return NULL and
+    // silently drop the stamp, turning the row into a permanent
+    // archive-sweep candidate (#1183).
+    db.prepare(READY_SQL).run(1024, 1, 0, 10, "on004624");
+    const row = db
+      .prepare(
+        "SELECT json_extract(sweep_stamps, '$.archive_checked_at') AS at FROM datasets WHERE dataset_id = ?",
+      )
+      .get("on004624") as { at: string | null };
+    expect(row.at).not.toBeNull();
+  });
+
   test("'ready' marks the availability report stale so the sweep regenerates it", () => {
     // json_extract(sweep_stamps, '$.availability_report_at') IS NULL is the
     // sweep's candidacy predicate (availabilityReportSweepWhere), so removing
