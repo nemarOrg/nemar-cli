@@ -4917,5 +4917,136 @@ class TestRealRecordingV3Fields(unittest.TestCase):
         )
 
 
+class TestMainRefusesToPublish(unittest.TestCase):
+    """The refuse-to-publish guards must still write a `failed` callback.
+
+    `hallu-zarr.sh` POSTs whatever the callback file contains. A failure path
+    that writes NO file posts nothing, so the `converting` signal the driver sent
+    when it started the dataset is never superseded and D1 sits at
+    `zarr_status='pending'` forever -- the dashboard shows a conversion in flight
+    with nothing running. #774 fixed exactly that for the total-failure branch;
+    the two schema guards were added later and returned 1 directly, reopening it.
+
+    Drives `main()` end to end: a real git repo, a real (stub) `aws` executable
+    on PATH, real argument parsing, real callback file. Only the SCHEMA is
+    swapped -- for one that rejects every document -- because a producer bug is
+    otherwise not reachable from outside.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        os.makedirs(self.repo)
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=self.repo, check=True, capture_output=True
+        )
+        run("git", "init", "-q", "-b", "main")
+        run("git", "config", "user.email", "t@example.org")
+        run("git", "config", "user.name", "t")
+        # A dataset with NO recordings: `convert` is empty, so nothing is
+        # downloaded or converted and the guard is the only thing under test.
+        with open(os.path.join(self.repo, "dataset_description.json"), "w") as fh:
+            json.dump({"Name": "guard fixture", "BIDSVersion": "1.8.0"}, fh)
+        run("git", "add", "-A")
+        run("git", "commit", "-q", "-m", "init")
+
+        # A real executable standing in for `aws`, reporting NoSuchKey so the
+        # prior index/manifest reads take their legitimate first-run path. Same
+        # approach as TestAwsRunner, which stands python3 in for aws.
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        self.aws = os.path.join(bindir, "aws")
+        with open(self.aws, "w") as fh:
+            fh.write("#!/bin/sh\necho 'NoSuchKey' >&2\nexit 1\n")
+        os.chmod(self.aws, 0o755)
+        self._path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + self._path
+
+        self.callback = os.path.join(self.dir, "cb.json")
+        self._schemas = (generate_zarr.INDEX_SCHEMA_PATH, generate_zarr.MANIFEST_SCHEMA_PATH)
+
+    def tearDown(self):
+        os.environ["PATH"] = self._path
+        (generate_zarr.INDEX_SCHEMA_PATH, generate_zarr.MANIFEST_SCHEMA_PATH) = self._schemas
+        self._tmp.cleanup()
+
+    def reject_everything(self) -> str:
+        """A valid draft 2020-12 schema that no instance satisfies."""
+        path = os.path.join(self.dir, "reject.schema.json")
+        with open(path, "w") as fh:
+            json.dump({"$schema": "https://json-schema.org/draft/2020-12/schema",
+                       "not": {}}, fh)
+        return path
+
+    def run_main(self) -> int:
+        argv = [
+            "generate_zarr.py",
+            "--dataset-id", "on008083",
+            "--repo-dir", self.repo,
+            "--bucket", "nemar-test",
+            "--callback-out", self.callback,
+            "--clean",
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                return generate_zarr.main()
+        finally:
+            sys.argv = saved
+
+    def read_callback(self) -> dict:
+        self.assertTrue(
+            os.path.exists(self.callback),
+            "no callback file: the driver would POST nothing and D1 would stay "
+            "at zarr_status='pending' forever",
+        )
+        with open(self.callback) as fh:
+            return json.load(fh)
+
+    def assert_failed_shape(self, body: dict):
+        self.assertEqual(body["status"], "failed")
+        self.assertEqual(body["dataset_id"], "on008083")
+        # Same shape as the total-failure branch, so the backend's one handler
+        # reads all three exits identically.
+        for key in (
+            "store_count", "commit", "converted", "removed", "errors", "failed",
+            "failure_count", "data_failures", "deterministic", "pool_breaks",
+            "pending_count", "discovered_count", "not_attempted_count",
+            "provenance_fetch_failed",
+        ):
+            self.assertIn(key, body, key)
+        self.assertRegex(body["commit"], r"^[0-9a-f]{40}$")
+
+    def test_a_refused_index_writes_a_failed_callback(self):
+        generate_zarr.INDEX_SCHEMA_PATH = self.reject_everything()
+        rc = self.run_main()
+        self.assertEqual(rc, 1)
+        body = self.read_callback()
+        self.assert_failed_shape(body)
+        # And it names the cause: a schema violation has no per-recording failure
+        # to point at, so without this the callback says "failed" and no more.
+        self.assertIn("index refused", body["error"])
+
+    def test_a_refused_manifest_writes_a_failed_callback(self):
+        generate_zarr.MANIFEST_SCHEMA_PATH = self.reject_everything()
+        rc = self.run_main()
+        self.assertEqual(rc, 1)
+        body = self.read_callback()
+        self.assert_failed_shape(body)
+        self.assertIn("manifest refused", body["error"])
+
+    def test_a_clean_run_with_nothing_to_convert_publishes(self):
+        """The control: with both schemas intact this run reaches the upload.
+
+        Without it the two tests above could pass because `main` failed for some
+        unrelated reason -- a missing git object, the stub `aws` -- rather than at
+        the guard. Here the stub `aws` fails the UPLOAD, so `main` raises rather
+        than returning 1, which proves the guards were what returned 1 above.
+        """
+        with self.assertRaises(Exception):
+            self.run_main()
+
+
 if __name__ == "__main__":
     unittest.main()
