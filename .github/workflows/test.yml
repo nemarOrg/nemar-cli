@@ -133,8 +133,9 @@ jobs:
       # --test / --print-config config-resolution tests (epic #1181 phase 3).
       # pytest, not the plain `python <file>` the tests above use -- this file
       # drives real subprocesses against hallu-zarr.sh rather than importing
-      # pure helpers, so parametrized cases (the four guard-rail conditions)
-      # read better as pytest cases than as a unittest subclass.
+      # pure helpers, so parametrized cases (the six guard-rail conditions,
+      # each with normalized/case-insensitive variants) read better as pytest
+      # cases than as a unittest subclass.
       - name: Hallu zarr --test config tests
         run: cd scripts/zarr && uv run --with pytest pytest test_hallu_zarr_config.py -v
 
