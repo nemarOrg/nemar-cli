@@ -84,6 +84,7 @@ const SWEEP_WIRING: Record<string, "prod-only" | "all-envs" | "cron-wrapped" | "
   runRecordingStatsSweepCron: "prod-only",
   runSignalDefaultsSweep: "cron-wrapped",
   runSignalDefaultsSweepCron: "prod-only",
+  runZarrFidelitySweep: "all-envs",
   sweepBlockedBidsValidationRequests: "all-envs",
   availabilityReportSweepWhere: "helper",
   availabilityReportSweepCandidateQuery: "helper",
@@ -317,6 +318,48 @@ describe("publishZarrCatalog is wired into the daily cron (outside the sweep fra
     // `NAME` appears nowhere else in index.ts (the declaration test above
     // already pins that as a side effect of checking the allowlist quote).
     const window = allCode.slice(idx, idx + 400);
+    expect(window).toContain(".catch(");
+  });
+});
+
+/**
+ * `runZarrFidelitySweep` (issue #1068, epic #1181 phase 8) mirrors
+ * `publishZarrCatalog`'s dev-safe shape immediately above -- it is
+ * sweep-shaped (so `discoverSweepExports()` finds it and `SWEEP_WIRING`
+ * declares it "all-envs" above), but it ALSO belongs in `DEV_CRON_ALLOWLIST`
+ * (it runs unconditionally, not narrowed internally like
+ * `sweepBlockedBidsValidationRequests`), so it gets the same dedicated,
+ * stronger checks `publishZarrCatalog` gets rather than only the generic
+ * "all-envs" callCount>=1 check above.
+ */
+describe("runZarrFidelitySweep is wired into the daily cron (outside the sweep framework)", () => {
+  const NAME = "runZarrFidelitySweep";
+
+  test("is declared in the DEV_CRON_ALLOWLIST named constant in index.ts", () => {
+    expect(allCode).toContain("DEV_CRON_ALLOWLIST");
+    expect(allCode).toContain(`"${NAME}"`);
+  });
+
+  test("is called at least once in scheduled()", () => {
+    expect(callCount(allCode, NAME)).toBeGreaterThanOrEqual(1);
+  });
+
+  test("is wrapped in ctx.waitUntil", () => {
+    expect(isScheduled(allCode, NAME)).toBe(true);
+  });
+
+  test("is called OUTSIDE the prod-only block -- it also runs on the dev cron", () => {
+    expect(callCount(prodOnlyCode, NAME)).toBe(0);
+    expect(callCount(allCode, NAME)).toBeGreaterThan(callCount(prodOnlyCode, NAME));
+  });
+
+  test("its ctx.waitUntil chain includes a .catch (a rejection must never crash scheduled())", () => {
+    const idx = allCode.indexOf(`${NAME}(env)`);
+    expect(idx).toBeGreaterThanOrEqual(0);
+    // A wider window than publishZarrCatalog's: this call's `.then()` builds
+    // a summary line with the failed-dataset ids (decision 3), so there is
+    // more code between the call and its `.catch(`.
+    const window = allCode.slice(idx, idx + 2000);
     expect(window).toContain(".catch(");
   });
 });
