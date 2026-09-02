@@ -88,6 +88,12 @@ import {
 } from "./channel-montage.js";
 import { ORG_NAME, sampleEvenly } from "./github.js";
 import type { PresignedUrlOptions } from "./s3.js";
+import {
+  ZARR_VERIFIED_AT_PATH,
+  ZARR_VERIFIED_COMMIT_PATH,
+  ZARR_VERIFY_ATTEMPTED_AT_PATH,
+  ZARR_VERIFY_STATUS_PATH,
+} from "./sweep-stamps.js";
 
 /** Per-modality serving-rate cap the converter applies (generate_zarr.py's
  *  `MODALITY_RATES`, mirrored here -- kept in sync deliberately rather than
@@ -171,11 +177,13 @@ export const ZARR_FIDELITY_SWEEP_CANDIDATE_SQL = `SELECT dataset_id, github_repo
      AND zarr_store_count > 0
      AND github_repo IS NOT NULL
      AND (
-       json_extract(sweep_stamps, '$.zarr_verified_at') IS NULL
-       OR json_extract(sweep_stamps, '$.zarr_verified_commit') IS NULL
-       OR json_extract(sweep_stamps, '$.zarr_verified_commit') != zarr_source_commit
+       json_extract(sweep_stamps, '${ZARR_VERIFIED_AT_PATH}') IS NULL
+       OR json_extract(sweep_stamps, '${ZARR_VERIFIED_COMMIT_PATH}') IS NULL
+       OR json_extract(sweep_stamps, '${ZARR_VERIFIED_COMMIT_PATH}') != zarr_source_commit
      )
-   ORDER BY dataset_id
+   ORDER BY json_extract(sweep_stamps, '${ZARR_VERIFY_ATTEMPTED_AT_PATH}') IS NOT NULL,
+            json_extract(sweep_stamps, '${ZARR_VERIFY_ATTEMPTED_AT_PATH}') ASC,
+            dataset_id
    LIMIT ?`;
 
 export const ZARR_FIDELITY_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n FROM datasets
@@ -185,9 +193,9 @@ export const ZARR_FIDELITY_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n FROM data
      AND zarr_store_count > 0
      AND github_repo IS NOT NULL
      AND (
-       json_extract(sweep_stamps, '$.zarr_verified_at') IS NULL
-       OR json_extract(sweep_stamps, '$.zarr_verified_commit') IS NULL
-       OR json_extract(sweep_stamps, '$.zarr_verified_commit') != zarr_source_commit
+       json_extract(sweep_stamps, '${ZARR_VERIFIED_AT_PATH}') IS NULL
+       OR json_extract(sweep_stamps, '${ZARR_VERIFIED_COMMIT_PATH}') IS NULL
+       OR json_extract(sweep_stamps, '${ZARR_VERIFIED_COMMIT_PATH}') != zarr_source_commit
      )`;
 
 /**
@@ -204,9 +212,9 @@ export const ZARR_FIDELITY_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n FROM data
 export const ZARR_FIDELITY_SWEEP_STAMP_SQL = `UPDATE datasets
    SET sweep_stamps = json_set(
      COALESCE(sweep_stamps, '{}'),
-     '$.zarr_verified_at', datetime('now'),
-     '$.zarr_verified_commit', ?,
-     '$.zarr_verify_status', ?,
+     '${ZARR_VERIFIED_AT_PATH}', datetime('now'),
+     '${ZARR_VERIFIED_COMMIT_PATH}', ?,
+     '${ZARR_VERIFY_STATUS_PATH}', ?,
      '$.zarr_verify_examples', json(?),
      '$.zarr_verify_sampled', ?,
      '$.zarr_verify_checked', ?,
@@ -216,6 +224,32 @@ export const ZARR_FIDELITY_SWEEP_STAMP_SQL = `UPDATE datasets
      '$.zarr_verify_unchecked', ?,
      '$.zarr_verify_mismatch_count', ?,
      '$.zarr_verify_examples_truncated', ?
+   )
+   WHERE dataset_id = ?`;
+
+/**
+ * Stamp that this run ATTEMPTED a dataset, whatever came of it -- exported so
+ * a test drives the exact SQL text.
+ *
+ * Written on every outcome, including the ones that produce no verdict, and it
+ * is the ONLY thing written on those: no `zarr_verify_status`, no
+ * `zarr_verified_at`, no `zarr_verified_commit`. A dataset the sweep could not
+ * reach must not end up claiming a verdict it never reached.
+ *
+ * It exists because the verdict stamps alone made the queue unfair to the point
+ * of being stuck. Candidacy is "no verdict for the current commit", and the
+ * batch was ordered by `dataset_id`, so ~25 alphabetically early datasets that
+ * error EVERY time (index unreachable, credentials rotated, their own fetch
+ * budget spent on a pathological store list) were re-selected on every run
+ * forever and nothing behind them was ever swept -- silently, since each run
+ * reported those as errors and looked like it was making progress. Ordering by
+ * this stamp (never-attempted first, then oldest attempt) means a permanently
+ * failing dataset costs the sweep one slot per cycle instead of all of them.
+ */
+export const ZARR_FIDELITY_SWEEP_ATTEMPT_SQL = `UPDATE datasets
+   SET sweep_stamps = json_set(
+     COALESCE(sweep_stamps, '{}'),
+     '${ZARR_VERIFY_ATTEMPTED_AT_PATH}', datetime('now')
    )
    WHERE dataset_id = ?`;
 
@@ -967,6 +1001,18 @@ export async function runZarrFidelitySweep(
       fetchSidecarImpl,
       sweepBudget,
     );
+
+    // Record the ATTEMPT before anything branches on its outcome. This is what
+    // stops a permanently erroring dataset from holding the front of the queue
+    // forever (see ZARR_FIDELITY_SWEEP_ATTEMPT_SQL). Best-effort: a failure to
+    // write it is logged and the run carries on, because the alternative --
+    // skipping the verdict below over a bookkeeping write -- would lose real
+    // work. The cost of losing it is one unfair cycle, not a wrong verdict.
+    try {
+      await env.DB.prepare(ZARR_FIDELITY_SWEEP_ATTEMPT_SQL).bind(dataset_id).run();
+    } catch (err) {
+      console.error(`[zarr-fidelity-sweep] attempt stamp failed for ${dataset_id}:`, err);
+    }
 
     if (outcome.status === null) {
       errors.push({ dataset_id, error: outcome.error ?? "zarr-fidelity-sweep: unknown error" });

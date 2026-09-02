@@ -27,7 +27,14 @@ import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { parseRecordingDuration } from "../src/services/channel-montage";
+import { buildDatasetFilterClauses } from "../src/services/dataset-filters";
 import {
+  ZARR_CATALOG_CANDIDATE_SQL,
+  type ZarrCatalogSourceRow,
+  buildZarrCatalog,
+} from "../src/services/zarr-catalog";
+import {
+  ZARR_FIDELITY_SWEEP_CANDIDATE_SQL,
   type ZarrFidelityGroupJson,
   bidsSidecarCandidates,
   createZarrFidelityMismatchAccumulator,
@@ -355,6 +362,16 @@ function row(id: string): Record<string, unknown> {
        FROM datasets WHERE dataset_id = ?`,
     )
     .get(id) as Record<string, unknown>;
+}
+
+/** The attempt stamp, read back off the REAL column the sweep wrote. */
+function attemptedAt(id: string): string | null {
+  const r = db
+    .query(
+      "SELECT json_extract(sweep_stamps, '$.zarr_verify_attempted_at') AS a FROM datasets WHERE dataset_id = ?",
+    )
+    .get(id) as { a: string | null } | null;
+  return r?.a ?? null;
 }
 
 function channelsTsv(n: number): string {
@@ -1393,5 +1410,161 @@ describe("runZarrFidelitySweep: a store with two groups of different modalities 
     expect(result.results[0].examples).toEqual([
       { path: "sub-01/ieeg/sub-01_task-x_ieeg.set", code: "rate_mismatch" },
     ]);
+  });
+});
+
+describe("an always-erroring dataset does not starve the rest of the catalog", () => {
+  /**
+   * The queue is "every converted dataset with no verdict for its current
+   * commit", and only a VERDICT clears candidacy. A dataset that errors every
+   * run therefore never leaves the queue -- correct, and by itself harmless.
+   * What was not harmless is the ORDER: `ORDER BY dataset_id` re-selected the
+   * same alphabetically-earliest candidates on every run, so a handful of
+   * permanently unreachable datasets occupied the whole 25-row batch forever
+   * and nothing behind them was ever swept. Each run still reported those as
+   * errors and looked like it was working.
+   *
+   * `zarr_verify_attempted_at` is stamped on every attempt, verdict or not, and
+   * the batch is ordered by it (never-attempted first, then oldest attempt), so
+   * the failing dataset costs one slot per cycle instead of all of them.
+   */
+  const A = "on800100"; // alphabetically first, and permanently unreachable
+  const B = "on800101"; // healthy, and behind it in the old ordering
+
+  function seedPair(): void {
+    seedDataset(A, A);
+    seedDataset(B, B);
+    indexStatusOverrides.set(A, 500); // every run, forever
+    indexFixtures.set(B, {
+      source_commit: COMMIT_A,
+      store_count: 1,
+      stores: [
+        {
+          path: "sub-01/eeg/sub-01_task-rest_eeg.set",
+          zarr: "z",
+          groups: [{ modality: "eeg", n_channels: 19, duration_s: 120, rate: 250 }],
+        },
+      ],
+    });
+    sidecarFixtures.set(
+      `${B}/${COMMIT_A}/sub-01/eeg/sub-01_task-rest_channels.tsv`,
+      channelsTsv(19),
+    );
+    sidecarFixtures.set(`${B}/${COMMIT_A}/sub-01/eeg/sub-01_task-rest_eeg.json`, eegJson(250, 120));
+  }
+
+  test("with a quota of one, run 1 takes the erroring dataset and run 2 takes the next", async () => {
+    seedPair();
+
+    const first = await runZarrFidelitySweep(env(), { ...runOpts(), limit: 1 });
+    expect(first.errors.map((e) => e.dataset_id)).toEqual([A]);
+    // Attempted, but with NO verdict: an unreachable dataset must never end up
+    // claiming one.
+    expect(attemptedAt(A)).not.toBeNull();
+    expect(row(A).zarr_verify_status).toBeNull();
+    expect(row(A).zarr_verified_at).toBeNull();
+    expect(attemptedAt(B)).toBeNull();
+
+    const second = await runZarrFidelitySweep(env(), { ...runOpts(), limit: 1 });
+    // The whole point: B is reached on the very next run, rather than never.
+    expect(second.results.map((r) => r.dataset_id)).toEqual([B]);
+    expect(row(B).zarr_verify_status).toBe("verified");
+    // And A is still a candidate -- the attempt stamp changes the ORDER, not
+    // who is eligible.
+    expect(row(A).zarr_verify_status).toBeNull();
+  });
+
+  test("the erroring dataset is retried once the rest of the batch has had a turn", async () => {
+    seedPair();
+    await runZarrFidelitySweep(env(), { ...runOpts(), limit: 1 }); // A errors
+    await runZarrFidelitySweep(env(), { ...runOpts(), limit: 1 }); // B verified
+
+    // B now has a verdict for its current commit, so it is no longer a
+    // candidate at all and A comes back around: a permanently failing dataset
+    // is retried forever, just never at the expense of everything behind it.
+    const third = await runZarrFidelitySweep(env(), { ...runOpts(), limit: 1 });
+    expect(third.errors.map((e) => e.dataset_id)).toEqual([A]);
+  });
+
+  test("a never-attempted dataset outranks one that was attempted", () => {
+    // Ordering is by the stamp, not by id: B sorts AFTER A by dataset_id, so if
+    // the never-attempted rule were missing, the REAL candidate query would
+    // hand back A again. Driven through the exported SQL rather than a copy of
+    // it (.rules/testing.md), so a change to the ordering has to change this.
+    seedPair();
+    db.query(
+      "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps,'{}'), '$.zarr_verify_attempted_at', '2026-01-01T00:00:00Z') WHERE dataset_id = ?",
+    ).run(A);
+    const rows = db.query(ZARR_FIDELITY_SWEEP_CANDIDATE_SQL).all(10) as { dataset_id: string }[];
+    expect(rows.map((r) => r.dataset_id)).toEqual([B, A]);
+  });
+});
+
+describe("the sweep's verdict reaches every reader of it", () => {
+  /**
+   * The seam nothing crossed. The verdict lives at ONE JSON path inside
+   * `sweep_stamps`, written here and read -- until this pass, spelled out by
+   * hand -- by three unrelated queries: the catalog projection, the zarr
+   * catalog document, and the `has_zarr_verified` filter. `json_extract` on a
+   * path that matches nothing returns NULL rather than erroring, so a typo in
+   * any one of them reads as "never swept" forever, silently, and every
+   * component's own tests still pass.
+   *
+   * This runs the REAL sweep against the real local upstream, then drives the
+   * REAL SQL of both readers over the same row -- no hand-copied predicate on
+   * either side (`.rules/testing.md`), which is what makes a divergence fail
+   * here.
+   */
+  const VERIFIED = "on800200";
+  const UNSWEPT = "on800201";
+
+  test("a stamped verdict is visible to the zarr catalog and to has_zarr_verified", async () => {
+    seedDataset(VERIFIED, VERIFIED);
+    seedDataset(UNSWEPT, UNSWEPT);
+    indexFixtures.set(VERIFIED, {
+      source_commit: COMMIT_A,
+      store_count: 1,
+      stores: [
+        {
+          path: "sub-01/eeg/sub-01_task-rest_eeg.set",
+          zarr: "z",
+          groups: [{ modality: "eeg", n_channels: 19, duration_s: 120, rate: 250 }],
+        },
+      ],
+    });
+    sidecarFixtures.set(
+      `${VERIFIED}/${COMMIT_A}/sub-01/eeg/sub-01_task-rest_channels.tsv`,
+      channelsTsv(19),
+    );
+    sidecarFixtures.set(
+      `${VERIFIED}/${COMMIT_A}/sub-01/eeg/sub-01_task-rest_eeg.json`,
+      eegJson(250, 120),
+    );
+    // The other dataset has no index fixture, so it stays unverified -- the
+    // negative half: a reader that matched everything would pass otherwise.
+    indexStatusOverrides.set(UNSWEPT, 500);
+
+    const result = await runZarrFidelitySweep(env(), runOpts());
+    expect(result.results.map((r) => r.dataset_id)).toEqual([VERIFIED]);
+
+    // Reader 1: the published zarr catalog document, through its own candidate
+    // SQL and the real builder.
+    const rows = db.query(ZARR_CATALOG_CANDIDATE_SQL).all() as ZarrCatalogSourceRow[];
+    const catalog = buildZarrCatalog(rows, {
+      contractBase: "https://zarr.nemar.org/",
+      generatedUtc: "2026-09-02T00:00:00Z",
+    });
+    const entry = catalog.datasets.find((d) => d.dataset_id === VERIFIED);
+    expect(entry?.zarr_verify_status).toBe("verified");
+    expect(entry?.zarr_verified_at).toBeTruthy();
+    expect(catalog.datasets.find((d) => d.dataset_id === UNSWEPT)?.zarr_verify_status).toBeNull();
+
+    // Reader 2: the has_zarr_verified filter, through the real clause builder.
+    const params: (string | number)[] = [];
+    const clauses = buildDatasetFilterClauses(params, { hasZarrVerified: true });
+    const filtered = db
+      .query(`SELECT d.dataset_id FROM datasets d WHERE 1=1${clauses} ORDER BY d.dataset_id`)
+      .all(...(params as never[])) as { dataset_id: string }[];
+    expect(filtered.map((r) => r.dataset_id)).toEqual([VERIFIED]);
   });
 });

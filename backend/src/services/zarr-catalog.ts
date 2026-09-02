@@ -31,6 +31,7 @@ import type { Bindings } from "../types/bindings.js";
 import { zarrCacheBaseUrl } from "./cloudflare.js";
 import { splitCsv } from "./data-router.js";
 import type { PresignedUrlOptions } from "./s3.js";
+import { ZARR_VERIFIED_AT_PATH, ZARR_VERIFY_STATUS_PATH } from "./sweep-stamps.js";
 
 const ZARR_CATALOG_FORMAT = "nemar-zarr-catalog" as const;
 const ZARR_CATALOG_FORMAT_VERSION = 1 as const;
@@ -133,8 +134,8 @@ export const ZARR_CATALOG_CANDIDATE_SQL = `SELECT
     d.subject_count, d.has_hed, d.hed_version, d.zarr_status, d.zarr_store_count,
     d.recording_count, d.recordings_unavailable, d.total_recording_duration,
     d.zarr_converted_at, d.zarr_source_commit, d.zarr_errors,
-    json_extract(d.sweep_stamps, '$.zarr_verify_status') AS zarr_verify_status,
-    json_extract(d.sweep_stamps, '$.zarr_verified_at') AS zarr_verified_at
+    json_extract(d.sweep_stamps, '${ZARR_VERIFY_STATUS_PATH}') AS zarr_verify_status,
+    json_extract(d.sweep_stamps, '${ZARR_VERIFIED_AT_PATH}') AS zarr_verified_at
   FROM datasets d
   WHERE d.status = 'active' AND d.visibility = 'public'
     AND d.zarr_status = 'ready' AND COALESCE(d.zarr_store_count, 0) > 0
