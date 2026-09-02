@@ -759,11 +759,17 @@ export default {
     // Daily (prod "0 3 * * *", dev/staging "0 4 * * *"):
     // Catalog sync runs via GitHub Action, not Worker cron.
     //
-    // ALLOWLIST, epic #923 Phase 7. The dev/staging worker's D1 is a partial
-    // PRODUCTION MIRROR (real nm* dataset rows, real user email addresses) and
-    // the dev worker holds a real RESEND_API_KEY, so a daily job that selects
-    // rows by generic predicates acts on real production records. Only jobs
-    // proven safe against that mirror run outside production.
+    // ALLOWLIST, epic #923 Phase 7. The dev/staging D1's dataset catalog is no
+    // longer a production mirror -- it was purged to the curated fixtures (the
+    // `xx0999NN` exemplars plus the private E2E dataset) and must stay that way.
+    // The reason for this allowlist survives that purge: the `users` table was
+    // NOT purged (it still holds ~609 real email addresses), the dev worker
+    // holds a real RESEND_API_KEY, and the nemarDatasets GitHub org is SHARED
+    // between prod and dev because the org name is hardcoded rather than
+    // environment-scoped. So a daily job that selects rows by generic predicates
+    // can still email real people or destroy a real repo. Only jobs proven safe
+    // against that run outside production. See AGENTS.md, "Dev D1 shares
+    // production users and the GitHub org".
     //
     // A NEW DAILY JOB IS PRODUCTION-ONLY BY DEFAULT. Before adding one to the
     // non-prod set below, confirm it cannot (a) email a real user, (b) dispatch
@@ -784,9 +790,10 @@ export default {
     if (prodOnlyJobs) {
       // #736 Phase 3: backstop re-dispatch of still-failed archive generations
       // whose webhook retry chain broke (e.g. a lost archive-ready callback).
-      // PROD-ONLY: the candidate query has no dataset-id prefix filter, so on a
-      // mirror D1 it would repository_dispatch real Actions runs against the
-      // shared nemarDatasets org for real datasets.
+      // PROD-ONLY: the candidate query has no dataset-id prefix filter, so
+      // outside production it would repository_dispatch real Actions runs
+      // against the SHARED nemarDatasets org for whatever rows the dev D1 holds
+      // -- the fixtures there (nm099999, the exemplars) are real repos in it.
       ctx.waitUntil(archiveRetrySweep(env));
       // #1130: heal published versions whose S3 manifest never landed (the
       // version-DOI callback swallows manifest failures by design, so without
