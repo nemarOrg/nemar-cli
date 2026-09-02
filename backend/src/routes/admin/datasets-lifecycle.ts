@@ -65,6 +65,42 @@ import { hasRole } from "../../types/bindings";
 import { getS3Config } from "./shared";
 import type { AdminRouter } from "./shared";
 
+/**
+ * Per-candidate stamp writes for the four inline route sweeps below
+ * (archive / zarr / channel-montage / hed), exported so tests can exercise
+ * the exact SQL text: each is only reachable end-to-end after a real
+ * S3 LIST/GET or GitHub tree walk, which tests cannot perform. The
+ * COALESCE in every one is load-bearing (#1183): json_set on a NULL
+ * sweep_stamps column returns NULL and silently discards the stamp,
+ * leaving the row a permanent re-sweep candidate -- the sweep would
+ * reprocess it every run, forever, under a green log.
+ */
+export const ARCHIVE_SWEEP_READY_SQL =
+  "UPDATE datasets SET archive_status = 'ready', archive_size = ?, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now')), archive_skip_reason = NULL WHERE dataset_id = ?";
+export const ARCHIVE_SWEEP_SKIP_SQL =
+  "UPDATE datasets SET archive_skip_reason = ?, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now')) WHERE dataset_id = ?";
+export const ARCHIVE_SWEEP_STAMP_ONLY_SQL =
+  "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now')) WHERE dataset_id = ?";
+export const ZARR_SWEEP_READY_SQL = `UPDATE datasets
+             SET zarr_status = 'ready',
+                 zarr_store_count = ?,
+                 zarr_index_etag = COALESCE(?, zarr_index_etag),
+                 zarr_source_commit = COALESCE(?, zarr_source_commit),
+                 sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.zarr_checked_at', datetime('now'))
+             WHERE dataset_id = ?`;
+export const ZARR_SWEEP_STAMP_ONLY_SQL =
+  "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.zarr_checked_at', datetime('now')) WHERE dataset_id = ?";
+export const CHANNEL_MONTAGE_SWEEP_WRITE_SQL = `UPDATE datasets
+           SET n_channels = ?, electrode_system = ?,
+               sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.channel_montage_checked_at', datetime('now'))
+           WHERE dataset_id = ?`;
+export const HED_SWEEP_WRITE_SQL = `UPDATE datasets
+             SET has_hed = ?, hed_version = ?,
+                 sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.hed_checked_at', datetime('now'))
+             WHERE dataset_id = ?`;
+export const HED_SWEEP_STAMP_ONLY_SQL =
+  "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.hed_checked_at', datetime('now')) WHERE dataset_id = ?";
+
 export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
   /**
    * POST /admin/datasets/archive-sweep?limit=N — one-time/periodic backfill that
@@ -134,13 +170,8 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       }
       try {
         if (size > 0) {
-          await db
-            .prepare(
-              // Clear any stale archive_skip_reason: a real zip exists (#752).
-              "UPDATE datasets SET archive_status = 'ready', archive_size = ?, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now')), archive_skip_reason = NULL WHERE dataset_id = ?",
-            )
-            .bind(size, dataset_id)
-            .run();
+          // Clear any stale archive_skip_reason: a real zip exists (#752).
+          await db.prepare(ARCHIVE_SWEEP_READY_SQL).bind(size, dataset_id).run();
           ready++;
         } else {
           // Checked, no archive on S3. If the dataset is over the size policy
@@ -150,19 +181,12 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
           const decision = shouldSkipArchive({ totalBytes: file_size, totalFiles: total_files });
           if (decision.skip) {
             await db
-              .prepare(
-                "UPDATE datasets SET archive_skip_reason = ?, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now')) WHERE dataset_id = ?",
-              )
+              .prepare(ARCHIVE_SWEEP_SKIP_SQL)
               .bind(decision.reason ?? "archive skipped (size policy)", dataset_id)
               .run();
             skipped++;
           } else {
-            await db
-              .prepare(
-                "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now')) WHERE dataset_id = ?",
-              )
-              .bind(dataset_id)
-              .run();
+            await db.prepare(ARCHIVE_SWEEP_STAMP_ONLY_SQL).bind(dataset_id).run();
             absent++;
           }
         }
@@ -284,27 +308,14 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
           // time and won't fabricate one); zarr_status='ready' is the truth signal
           // the dashboard reads. ETag + source_commit are seeded for free.
           await db
-            .prepare(
-              `UPDATE datasets
-             SET zarr_status = 'ready',
-                 zarr_store_count = ?,
-                 zarr_index_etag = COALESCE(?, zarr_index_etag),
-                 zarr_source_commit = COALESCE(?, zarr_source_commit),
-                 sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.zarr_checked_at', datetime('now'))
-             WHERE dataset_id = ?`,
-            )
+            .prepare(ZARR_SWEEP_READY_SQL)
             .bind(index.storeCount, index.etag, index.sourceCommit, dataset_id)
             .run();
           ready++;
         } else {
           // No index.json: stamp checked so the sweep won't rescan, but leave
           // zarr_status NULL (absence is not a 'failed' conversion).
-          await db
-            .prepare(
-              "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.zarr_checked_at', datetime('now')) WHERE dataset_id = ?",
-            )
-            .bind(dataset_id)
-            .run();
+          await db.prepare(ZARR_SWEEP_STAMP_ONLY_SQL).bind(dataset_id).run();
           absent++;
         }
       } catch (err) {
@@ -446,12 +457,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       // even on a probe miss/error, so a failed dataset is not retried forever.
       try {
         await db
-          .prepare(
-            `UPDATE datasets
-           SET n_channels = ?, electrode_system = ?,
-               sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.channel_montage_checked_at', datetime('now'))
-           WHERE dataset_id = ?`,
-          )
+          .prepare(CHANNEL_MONTAGE_SWEEP_WRITE_SQL)
           .bind(nChannels, electrodeSystem, dataset_id)
           .run();
       } catch (err) {
@@ -697,22 +703,9 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
         // has_hed without stamping hed_checked_at, so such a row is still a sweep
         // candidate; a transient probe miss here must not clobber that value to NULL.
         if (hasHedInt != null) {
-          await db
-            .prepare(
-              `UPDATE datasets
-             SET has_hed = ?, hed_version = ?,
-                 sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.hed_checked_at', datetime('now'))
-             WHERE dataset_id = ?`,
-            )
-            .bind(hasHedInt, hedVersion, dataset_id)
-            .run();
+          await db.prepare(HED_SWEEP_WRITE_SQL).bind(hasHedInt, hedVersion, dataset_id).run();
         } else {
-          await db
-            .prepare(
-              "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.hed_checked_at', datetime('now')) WHERE dataset_id = ?",
-            )
-            .bind(dataset_id)
-            .run();
+          await db.prepare(HED_SWEEP_STAMP_ONLY_SQL).bind(dataset_id).run();
         }
       } catch (err) {
         errors.push({

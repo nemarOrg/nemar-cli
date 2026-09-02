@@ -46,6 +46,16 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { SYSTEM_USER_ID } from "../src/lib/constants";
 import { adminRoutes } from "../src/routes/admin";
+import {
+  ARCHIVE_SWEEP_READY_SQL,
+  ARCHIVE_SWEEP_SKIP_SQL,
+  ARCHIVE_SWEEP_STAMP_ONLY_SQL,
+  CHANNEL_MONTAGE_SWEEP_WRITE_SQL,
+  HED_SWEEP_STAMP_ONLY_SQL,
+  HED_SWEEP_WRITE_SQL,
+  ZARR_SWEEP_READY_SQL,
+  ZARR_SWEEP_STAMP_ONLY_SQL,
+} from "../src/routes/admin/datasets-lifecycle";
 import { registerRecordsReadyRoutes } from "../src/routes/callbacks/records-ready";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
@@ -465,6 +475,52 @@ describe("POST /admin/datasets/data-integrity-sweep candidate selection and stam
       .get() as { data_complete: number | null; bytes_present: number | null };
     expect(r.data_complete).toBeNull();
     expect(r.bytes_present).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-candidate stamp writes (pinned exact SQL, imported not copied)
+// ---------------------------------------------------------------------------
+//
+// The four inline route sweeps' per-candidate writes run only after a real
+// S3 LIST/GET or GitHub tree walk, which tests cannot perform -- so the
+// exported SQL constants the routes execute are pinned here directly, each
+// against a row whose sweep_stamps is NULL: the shape on which a missing
+// COALESCE makes json_set return NULL, silently dropping the stamp and
+// leaving the row a permanent re-sweep candidate.
+
+describe("per-candidate stamp writes persist on a fresh row and end candidacy", () => {
+  const cases: [name: string, sql: string, key: string, binds: unknown[]][] = [
+    ["archive ready", ARCHIVE_SWEEP_READY_SQL, "archive_checked_at", [1024, "nm000060"]],
+    ["archive skip", ARCHIVE_SWEEP_SKIP_SQL, "archive_checked_at", ["too big", "nm000060"]],
+    ["archive stamp-only", ARCHIVE_SWEEP_STAMP_ONLY_SQL, "archive_checked_at", ["nm000060"]],
+    ["zarr ready", ZARR_SWEEP_READY_SQL, "zarr_checked_at", [3, "etag", "abc", "nm000060"]],
+    ["zarr stamp-only", ZARR_SWEEP_STAMP_ONLY_SQL, "zarr_checked_at", ["nm000060"]],
+    [
+      "channel-montage write",
+      CHANNEL_MONTAGE_SWEEP_WRITE_SQL,
+      "channel_montage_checked_at",
+      [64, "intl 10/20", "nm000060"],
+    ],
+    ["hed write", HED_SWEEP_WRITE_SQL, "hed_checked_at", [1, "8.3.0", "nm000060"]],
+    ["hed stamp-only", HED_SWEEP_STAMP_ONLY_SQL, "hed_checked_at", ["nm000060"]],
+  ];
+
+  for (const [name, sql, key, binds] of cases) {
+    test(`${name} stamps ${key} on a sweep_stamps=NULL row`, () => {
+      seedDataset("nm000060"); // sweep_stamps NULL
+      db.prepare(sql).run(...(binds as never[]));
+      expect(stamp("nm000060", key)).not.toBeNull();
+    });
+  }
+
+  test("a stamped row leaves the archive-sweep candidate set through the real route", async () => {
+    seedDataset("nm000061");
+    db.prepare(ARCHIVE_SWEEP_STAMP_ONLY_SQL).run("nm000061");
+    const res = await post("/admin/datasets/archive-sweep");
+    const body = (await res.json()) as { checked: number; remaining: number | null };
+    expect(body.checked).toBe(0);
+    expect(body.remaining).toBe(0);
   });
 });
 
