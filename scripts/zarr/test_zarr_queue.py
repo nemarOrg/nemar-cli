@@ -36,6 +36,7 @@ from zarr_queue import (  # type: ignore[import-not-found]  # noqa: E402
     ZARR_ENGINE_VERSION,
     _get_json_retrying,
     backoff_seconds,
+    build_parser,
     claim_next,
     classify_backfill,
     connect,
@@ -1225,8 +1226,8 @@ class EngineBumpGuardTest(unittest.TestCase):
         self.assertFalse(res["engine_requeue_blocked"])
         self.assertEqual(res["engine_requeued"], 10)
 
-    def test_the_DEFAULT_limit_of_25_is_what_the_cron_actually_runs(self):
-        """The boundary at the real default, with no override.
+    def test_the_DEFAULT_limit_of_25_is_the_boundary(self):
+        """The boundary AT the real default, rather than at an invented one.
 
         Every other test in this class passes `engine_requeue_limit=` explicitly,
         so `DEFAULT_ENGINE_REQUEUE_LIMIT` itself -- the value the CLI supplies and
@@ -1234,8 +1235,11 @@ class EngineBumpGuardTest(unittest.TestCase):
         Changing 25 to 2500 would have left this class green and the guard
         useless.
 
-        Exercised through the real CLI parser, since that is what applies the
-        default: `reconcile`'s own signature deliberately takes None (no guard).
+        This calls `reconcile()` directly, passing the constant: it pins the
+        <=/< boundary (25 requeues, 26 blocks). That the CLI actually SUPPLIES
+        that constant is a separate fact, pinned by
+        `test_the_cli_supplies_the_default_limit` below through the real parser --
+        together they cover "the number is right" and "the number arrives".
         """
         self.assertEqual(DEFAULT_ENGINE_REQUEUE_LIMIT, 25)
         for count, expect_blocked in ((25, False), (26, True)):
@@ -1260,11 +1264,32 @@ class EngineBumpGuardTest(unittest.TestCase):
                 conn.close()
 
     def test_the_cli_supplies_the_default_limit(self):
+        """The guard's floor as the CRON gets it: parsed, with no override.
+
+        `hallu-zarr.sh` passes `--engine-requeue-limit "$ENGINE_REQUEUE_LIMIT"`,
+        but the parser's default is what applies whenever anyone runs `reconcile`
+        by hand -- and it is the only place the constant becomes an argument.
+        Comparing the constant to itself would assert nothing; this drives the
+        real `argparse` parser and reads the value off the parsed namespace.
+        """
+        args = build_parser().parse_args(["--db", "/tmp/x.db", "reconcile"])
+        self.assertEqual(args.engine_requeue_limit, 25)
+        self.assertEqual(args.engine_requeue_limit, DEFAULT_ENGINE_REQUEUE_LIMIT)
         # `0` spells "no guard" on a CLI where None cannot be typed, so the
-        # default has to travel from the constant to `reconcile` intact.
-        parser_default = DEFAULT_ENGINE_REQUEUE_LIMIT
-        self.assertGreater(parser_default, 0)
-        self.assertEqual(parser_default or None, DEFAULT_ENGINE_REQUEUE_LIMIT)
+        # default must be a real, positive floor rather than the disabled value.
+        self.assertGreater(args.engine_requeue_limit, 0)
+        # And an explicit override still wins, which is how the cron passes it.
+        override = build_parser().parse_args(
+            ["--db", "/tmp/x.db", "reconcile", "--engine-requeue-limit", "3"]
+        )
+        self.assertEqual(override.engine_requeue_limit, 3)
+
+    def test_the_cli_defaults_the_pending_counts_to_zero(self):
+        # The same class of fact for `done`: a run that reports nothing
+        # outstanding must not accidentally arm a retry.
+        args = build_parser().parse_args(["--db", "/tmp/x.db", "done", "nm000001", "v1.0.0"])
+        self.assertEqual(args.pending_count, 0)
+        self.assertEqual(args.not_attempted_count, 0)
 
     def test_a_blocked_bump_does_not_stop_ordinary_work(self):
         """The guard is scoped to the stamp-only requeues, deliberately.

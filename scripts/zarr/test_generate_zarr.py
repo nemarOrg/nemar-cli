@@ -4010,13 +4010,34 @@ class TestDetailRedaction(unittest.TestCase):
         self.assertIn("HTTP 503", detail)
 
     def test_an_innocent_message_is_left_alone(self):
-        # A redactor that fired on ordinary text would destroy every diagnosis.
+        """A redactor that fired on ordinary text would destroy every diagnosis.
+
+        The false-positive risk is real and specific here: BIDS filenames and
+        column names routinely contain the very words the patterns key on, and
+        the words alone must never be enough -- only the `?name=value` and
+        `Header: value` SHAPES are. A redactor that ate `primary_key.csv` would
+        make a corrupt-file report unreadable while leaking nothing.
+        """
         for clean in (
             "Could not find measurement data",
             "channels.tsv declares 74 channels but the store has 1",
             "min/max envelope mismatch",
+            # "token"/"key" inside BIDS entities and filenames.
+            "sub-01_task-tokenTask_eeg.edf is not EDF(+) compliant",
+            "sub-02_task-keypress_run-1_eeg.vhdr: header missing",
+            "primary_key.csv could not be parsed",
+            "no key column found in participants.tsv",
+            "token count mismatch in the events sidecar",
+            # A bare `key=` with no query string around it is a log field, not a
+            # secret -- the patterns require the `?`/`&` that makes it a URL.
+            "reader reported key=value for channel E1",
+            # And the words as ordinary prose.
+            "the signature of read_raw_edf changed upstream",
+            "authorization to publish this dataset is pending",
         ):
-            self.assertNotIn("[redacted]", redact_secrets(clean))
+            with self.subTest(message=clean):
+                self.assertEqual(redact_secrets(clean), clean)
+                self.assertNotIn("[redacted]", failure_detail(RuntimeError(clean)))
 
     def test_redaction_survives_the_length_cap(self):
         # Cap applied AFTER redaction, so truncation can never expose a tail.

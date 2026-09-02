@@ -1133,12 +1133,18 @@ def source_tree_for(path: str) -> str:
     """Which BIDS tree a source recording lives in: "raw", or the excluded tree
     that contains it (`derivatives` / `sourcedata` / `code`).
 
-    Published per store as `source_tree` (#1064). Since ADR 0027 every store this
-    converter WRITES is "raw" by construction, so the field looks like a constant
-    -- it is computed rather than asserted because the answer is knowable from the
-    path, and because stores published under those trees BEFORE raw-only landed
-    are still served (their purge is separate, authorized work) and must describe
-    themselves honestly if they are ever carried into an index again.
+    Published per store as `source_tree` (#1064), where it is always "raw": ADR
+    0027 made discovery raw-only, and `merge_index` DROPS a carried-over store
+    whose path is excluded rather than republishing it -- those stores are being
+    deleted by `purge_non_raw_stores.py`, so an index that described them would
+    advertise bytes that are going away. The drop is reported (logged with the
+    tree, counted as `non_raw_dropped` on the callback), never published.
+
+    So this function's non-raw answers do not reach the index at all. They exist
+    because the drop has to be able to SAY why: `excluded_reason` names the cause
+    on each logged line, and "dropped a store" versus "dropped a store because it
+    is under `derivatives/`" are very different lines to find in a cron log when
+    an orphan-detection bug is the alternative explanation.
 
     Deliberately NOT the same question as the store entry's `derived`, which is
     about whether the SIGNAL was processed (ADR 0028 Signal-Space Separation). A

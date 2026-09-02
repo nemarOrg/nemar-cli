@@ -1361,7 +1361,17 @@ def sweep_dir_format_backfill(
 # --- CLI ----------------------------------------------------------------------
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI surface, built apart from `main` so a test can inspect what the
+    cron actually gets.
+
+    Every default here is a value no caller passes -- `hallu-zarr.sh` runs
+    `reconcile --api-base ... --engine-requeue-limit "$ENGINE_REQUEUE_LIMIT"`, but
+    the guard's own floor, the backoff bases and the attempt caps all arrive from
+    this parser. Asserting them through `reconcile()`'s keyword arguments proves
+    nothing about the number the cron runs with, because those tests pass the
+    value in themselves.
+    """
     ap = argparse.ArgumentParser(description="NEMAR zarr conversion queue (SQLite)")
     ap.add_argument("--db", required=True)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1485,7 +1495,11 @@ def main() -> int:
         " without it the sweep only reports",
     )
 
-    args = ap.parse_args()
+    return ap
+
+
+def main() -> int:
+    args = build_parser().parse_args()
     conn = connect(args.db)
 
     if args.cmd == "reconcile":
