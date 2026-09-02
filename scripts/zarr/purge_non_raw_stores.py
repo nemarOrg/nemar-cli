@@ -17,9 +17,12 @@ concurrent edit to that file cannot conflict with it), and it imports rather
 than re-derives the raw/non-raw distinction: `is_excluded_from_discovery`,
 `safe_store_prefix`, `_rm_recursive`, `s3_read_json`, and the S3
 listing helpers all come from `generate_zarr.py` so the two files cannot drift
-apart on what counts as "excluded" or how a store's S3 prefix is built. The
-index WRITE is this file's own (`write_index`), because it is conditional --
-`aws_cp` cannot carry an `--if-match`.
+apart on what counts as "excluded" or how a store's S3 prefix is built. So does
+the conditional index read/write pair (`read_index_with_etag`, `write_index`):
+it was defined here first, because `aws_cp` cannot carry an `--if-match` and the
+converter published unconditionally, but the converter now writes conditionally
+too and the two writers of this one object must agree on how the ETag is read
+and sent back or the condition protecting them from each other is decorative.
 
 Safety design
 -------------
@@ -93,7 +96,6 @@ Safety design
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import re
@@ -109,12 +111,15 @@ from generate_zarr import (  # type: ignore[import-not-found]  (sibling module v
     _AWS_OP_TIMEOUT,
     _AWS_TIMEOUTS,
     EXCLUDED_TREES,
+    IndexPreconditionFailed,
     _aws_env,
     _rm_recursive,
     _s3_child_prefixes,
     is_excluded_from_discovery,
+    read_index_with_etag,
     s3_read_json,
     safe_store_prefix,
+    write_index,
 )
 
 DEFAULT_BUCKET = "nemar"
@@ -607,118 +612,6 @@ def discover_excluded_stores(bucket: str, dataset_id: str) -> set[str]:
                 else:
                     stack.append(child)
     return found
-
-
-class IndexPreconditionFailed(Exception):
-    """The live `index.json` changed between the read this rewrite was computed
-    from and the write. The write is ABANDONED rather than retried or forced:
-    the other writer is a converter run publishing a whole new document, and
-    replaying a rewrite computed from the old one would silently roll it back.
-    """
-
-
-def read_index_with_etag(bucket: str, dataset_id: str) -> tuple[dict | None, str | None]:
-    """`(index, etag)` for a dataset's live `index.json`, or `(None, None)` when
-    there is none.
-
-    One `get-object` call for both, on purpose: the ETag has to be the one the
-    body that produced this rewrite actually had, and a separate `head-object`
-    could observe a different version. Raises for any failure that is not a
-    genuine absence -- the same rule `s3_read_json` follows, for the same reason
-    (treating a credentials or network error as "no index" would rewrite the
-    document from nothing).
-    """
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as fh:
-        tmp_path = fh.name
-    try:
-        res = subprocess.run(
-            [
-                "aws", "s3api", "get-object", "--bucket", bucket,
-                "--key", f"{dataset_id}/zarr/index.json", tmp_path,
-                "--query", "ETag", "--output", "text", *_AWS_TIMEOUTS,
-            ],
-            capture_output=True, text=True, timeout=_AWS_OP_TIMEOUT, env=_aws_env(),
-            check=False,  # the return code IS the answer: absent vs failed
-        )
-        if res.returncode != 0:
-            err = res.stderr.lower()
-            if "nosuchkey" in err or "404" in err or "not found" in err:
-                return None, None
-            raise RuntimeError(
-                f"read_index_with_etag: aws s3api get-object exited "
-                f"{res.returncode}: {res.stderr.strip()}"
-            )
-        with open(tmp_path, encoding="utf-8") as fh:
-            index = json.load(fh)
-        # `--output text` prints the quoted ETag; S3 wants it back verbatim on
-        # `--if-match`, so only the surrounding whitespace is stripped.
-        return index, res.stdout.strip()
-    finally:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_path)
-
-
-def write_index(bucket: str, dataset_id: str, index: dict, *, if_match: str | None) -> None:
-    """Write the rewritten `index.json` back to S3, CONDITIONALLY.
-
-    `index.json`'s destination is a single S3 object, so a single PUT is already
-    atomic there: a reader sees the previous full body or the new full body,
-    never a partial one. The "write to a sibling temp path, then swap" half of
-    the atomic-write pattern `generate_zarr.py`'s `fix_source_file_attr` uses
-    for a local file applies here to the LOCAL staging file this function builds
-    before that PUT -- the full document is written out completely before
-    anything is uploaded, so a crash mid-dump never touches the object.
-
-    Atomic is not the same as safe, though, and that is what `if_match` is for.
-    This tool reads the index, deletes objects (slowly -- a big prefix is
-    minutes), and only then writes the document back. A converter run that
-    publishes a NEW index in that window would be silently reverted by an
-    unconditional PUT, taking every store it had just added with it. So the
-    write carries `--if-match` with the ETag the rewrite was computed from and
-    S3 refuses it (412) if anything else has written since; the caller reports
-    the conflict for that dataset and leaves the newer document alone, because a
-    rewrite computed from a stale body cannot be salvaged by retrying it.
-
-    `if_match=None` is not "skip the check" -- there is no such mode. It means
-    the object did not exist at read time, and the write is then conditional on
-    it still not existing (`--if-none-match "*"`), so a converter that published
-    a first index in the meantime is not clobbered either.
-
-    Single attempt, deliberately: `_aws`'s retry loop would re-send a
-    conditional PUT whose first attempt may in fact have succeeded, turning a
-    lost response into a phantom conflict report.
-    """
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
-        json.dump(index, fh, separators=(",", ":"))
-        tmp_path = fh.name
-    condition = ["--if-match", if_match] if if_match else ["--if-none-match", "*"]
-    try:
-        res = subprocess.run(
-            [
-                "aws", "s3api", "put-object", "--bucket", bucket,
-                "--key", f"{dataset_id}/zarr/index.json", "--body", tmp_path,
-                "--content-type", "application/json",
-                "--cache-control", "public, max-age=60",
-                *condition, *_AWS_TIMEOUTS,
-            ],
-            capture_output=True, text=True, timeout=_AWS_OP_TIMEOUT, env=_aws_env(),
-            check=False,  # a 412 is a verdict to report, not an exception to raise
-        )
-    finally:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_path)
-    if res.returncode == 0:
-        return
-    err = res.stderr.lower()
-    if "preconditionfailed" in err or "412" in err or "conditionalrequestconflict" in err:
-        raise IndexPreconditionFailed(
-            f"index.json for {dataset_id} changed between this run's read and its "
-            f"write (if-match {if_match or '<absent>'}); the rewrite was NOT applied "
-            "and the newer document is untouched -- re-run to recompute it"
-        )
-    raise RuntimeError(
-        f"write_index: aws s3api put-object exited {res.returncode}: {res.stderr.strip()}"
-    )
 
 
 def write_audit_log(path: str, report: dict) -> None:
