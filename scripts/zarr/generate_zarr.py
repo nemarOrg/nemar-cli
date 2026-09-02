@@ -164,6 +164,24 @@ DEFAULT_API_BASE = "https://api.nemar.org"
 # `merge_index`, which refuses to build a document without one.
 COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
+# The store layout, published verbatim in every index. An MCP recipe (ADR 0025)
+# has to be computable from index.json plus ONE array-metadata fetch, with no
+# probing: the broker is stateless, so anything it cannot read from the index it
+# has to discover by request, and discovery-by-404 is what #1178 item 2 was about.
+# The index already carries `n_view_levels` and the geometry per group; these are
+# the path templates and the sample-value rule that turn those numbers into
+# actual reads. `const` in the schema, so a client may hardcode them after
+# checking `format_version` -- and so a change to the layout is a schema change
+# rather than a silent one.
+INDEX_LAYOUT = {
+    "level0": "<zarr>/<group>/0",
+    "view": "<zarr>/<group>/view/<L>",
+    "view_levels": "1..n_view_levels from the group attrs",
+    "scale_offset": (
+        "level-0 array attrs scale[] and offset[]; physical = digital * scale + offset"
+    ),
+}
+
 # Conversion attempts a `pending` recording gets before the producer stops
 # expecting it to convert and promotes it to a typed `retry_exhausted` failure.
 # Matches `zarr_queue.PENDING_MAX_ROUNDS`, which caps the queue side of the same
@@ -2203,6 +2221,7 @@ def merge_index(
     engine_version: str = ZARR_ENGINE_VERSION,
     biosigio_version: str | None = None,
     prior_pending: list[dict] | None = None,
+    dataset_row: dict | None = None,
 ) -> dict:
     """Fold this run's results into the prior index and return the v3 document. Pure.
 
@@ -2394,6 +2413,18 @@ def merge_index(
         "engine_version": engine_version,
         "biosigio_version": biosigio_version,
         "updated_utc": updated_utc,
+        # Dataset-level provenance, hoisted to the top level (#1064). Already
+        # fetched once per run for the store attrs, so publishing it here is
+        # free -- and it saves an MCP broker or a citation tool one request per
+        # dataset, which is the difference between "read the index" and "read the
+        # index and then the catalog" for every recipe. Nullable throughout: the
+        # catalog genuinely may not have a DOI yet.
+        "doi": (dataset_row or {}).get("concept_doi") or (dataset_row or {}).get("doi") or None,
+        "license": (dataset_row or {}).get("license") or None,
+        "citation": dataset_citation(dataset_row),
+        "hed_version": (dataset_row or {}).get("hed_version") or None,
+        # How to turn this index's numbers into reads, without probing.
+        "layout": dict(INDEX_LAYOUT),
         "discovered_count": (
             len(set(discovered))
             if discovered is not None
@@ -4877,6 +4908,7 @@ def main() -> int:
             region=args.region,
             biosigio_version=biosigio_version,
             prior_pending=prior_pending,
+            dataset_row=dataset_row,
         )
         check_index_invariant(index)
         # Validate what is about to be published, not a copy of it. A producer bug

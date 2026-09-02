@@ -26,11 +26,16 @@
     "pending_count",
     "stores",
     "failures",
-    "pending"
+    "pending",
+    "layout"
   ],
   "properties": {
-    "format": { "const": "nemar-zarr-index" },
-    "format_version": { "const": 3 },
+    "format": {
+      "const": "nemar-zarr-index"
+    },
+    "format_version": {
+      "const": 3
+    },
     "dataset_id": {
       "type": "string",
       "pattern": "^[a-z]{2}[0-9]{6}$",
@@ -38,17 +43,19 @@
     },
     "contract_base": {
       "type": "string",
-      "format": "uri",
-      "description": "The STABLE base URL for this dataset's serving copy (https://<zarr host>/<id>/zarr/). The only base a client may hardcode."
+      "description": "The STABLE base URL for this dataset's serving copy (https://<zarr host>/<id>/zarr/). The only base a client may hardcode.",
+      "pattern": "^https://"
     },
     "data_base": {
       "type": "string",
-      "format": "uri",
-      "description": "Where the bytes are served from TODAY, for an HTTP Zarr reader. May change; re-read it from this document rather than hardcoding it."
+      "description": "Where the bytes are served from TODAY, for an HTTP Zarr reader. May change; re-read it from this document rather than hardcoding it.",
+      "pattern": "^https://"
     },
     "data_base_kind": {
       "type": "string",
-      "enum": ["s3-public"],
+      "enum": [
+        "s3-public"
+      ],
       "description": "What kind of thing data_base points at, so a client knows which access pattern applies."
     },
     "s3_uri": {
@@ -56,7 +63,10 @@
       "pattern": "^s3://",
       "description": "The same location as an s3:// triple, for boto3 / s3fs / zarr, which want bucket+key rather than a URL to parse back apart."
     },
-    "s3_region": { "type": "string", "minLength": 1 },
+    "s3_region": {
+      "type": "string",
+      "minLength": 1
+    },
     "s3_anonymous": {
       "type": "boolean",
       "description": "True when s3_uri is readable with unsigned requests (no credentials needed)."
@@ -72,7 +82,10 @@
       "description": "The discovery/dispatch generation that produced this index (zarr_queue.ZARR_ENGINE_VERSION). Changes only when discovery widens; see ADR 0033."
     },
     "biosigio_version": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "The biosigIO release that wrote the stores, or null when it could not be determined."
     },
     "updated_utc": {
@@ -109,15 +122,88 @@
       "minimum": 0,
       "description": "Entries in pending[] -- recordings with no store yet that are still expected to convert on a later run."
     },
-    "stores": { "type": "array", "items": { "$ref": "#/$defs/store" } },
-    "failures": { "type": "array", "items": { "$ref": "#/$defs/failure" } },
-    "pending": { "type": "array", "items": { "$ref": "#/$defs/pending" } }
+    "stores": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/store"
+      }
+    },
+    "failures": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/failure"
+      }
+    },
+    "pending": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/pending"
+      }
+    },
+    "doi": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Concept DOI for the dataset (the version DOI is per release, not per serving copy). Null when the catalog has none yet. Hoisted from the store attrs so a citation tool needs only this document."
+    },
+    "license": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Dataset license as the catalog states it. Null when unknown -- not 'no license'."
+    },
+    "citation": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Ready-to-paste citation composed from the catalog row. Null when the row lacks the parts to make one honestly."
+    },
+    "hed_version": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "HED schema version the dataset's annotations use, or null."
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "level0",
+        "view",
+        "view_levels",
+        "scale_offset"
+      ],
+      "description": "How to turn this index's numbers into reads, so an MCP recipe (ADR 0025) is computable from index.json plus ONE array-metadata fetch, with no probing. Paths are relative to contract_base; <zarr> is a store's `zarr`, <group> a groups[].name, <L> a view level. const values: a client may hardcode them once it has checked format_version, and changing the layout is therefore a schema change rather than a silent one.",
+      "properties": {
+        "level0": {
+          "const": "<zarr>/<group>/0"
+        },
+        "view": {
+          "const": "<zarr>/<group>/view/<L>"
+        },
+        "view_levels": {
+          "const": "1..n_view_levels from the group attrs"
+        },
+        "scale_offset": {
+          "const": "level-0 array attrs scale[] and offset[]; physical = digital * scale + offset"
+        }
+      }
+    }
   },
   "$defs": {
     "store": {
       "type": "object",
       "description": "One converted recording. Read the bytes at <contract_base><zarr>/.",
-      "required": ["path", "zarr", "source_tree", "derived"],
+      "required": [
+        "path",
+        "zarr",
+        "source_tree",
+        "derived"
+      ],
       "properties": {
         "path": {
           "type": "string",
@@ -128,7 +214,9 @@
           "pattern": "\\.zarr$",
           "description": "The store's path relative to contract_base / data_base."
         },
-        "updated_utc": { "type": "string" },
+        "updated_utc": {
+          "type": "string"
+        },
         "source_tree": {
           "type": "string",
           "const": "raw",
@@ -138,10 +226,28 @@
           "type": "boolean",
           "description": "True when the served signal is PROCESSED rather than the source signal quantised and rate-capped. Today the only true case is an ADR 0028 Signal-Space Separation MEG store, which also carries `sss`. Deliberately distinct from source_tree, which is about BIDS layout."
         },
-        "modalities": { "type": "array", "items": { "type": "string" } },
-        "groups": { "type": "array", "items": { "$ref": "#/$defs/group" } },
-        "power_line_frequency": { "type": ["number", "null"] },
-        "event_description_count": { "type": "integer", "minimum": 0 },
+        "modalities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/group"
+          }
+        },
+        "power_line_frequency": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "event_description_count": {
+          "type": "integer",
+          "minimum": 0
+        },
         "n_events": {
           "type": "integer",
           "minimum": 0,
@@ -149,17 +255,31 @@
         },
         "trial_types": {
           "type": "object",
-          "additionalProperties": { "type": "integer", "minimum": 0 },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          },
           "description": "Counts per trial_type value in that same events.tsv, so a client can pick an epoching strategy without reading a signal byte. Absent when there is no events.tsv; an empty object means the file has no trial_type column."
         },
         "units_report": {
           "type": "object",
           "description": "biosigIO's per-file account of what the BIDS channels.tsv `units` column did (biosigio#125), republished so a unit that could NOT be adopted is visible without opening the store. Absent when no channels.tsv was applied to the recording -- either the dataset ships none that inherits to it, or the sidecar could not be read. Never means \"applied cleanly\". Both the in-memory and the streaming exporter apply it (biosigio>=1.2.7), so the two cannot disagree about a recording's units.",
           "properties": {
-            "converted": { "type": "integer", "minimum": 0 },
-            "relabelled": { "type": "integer", "minimum": 0 },
-            "kept_importer_unit": { "type": "integer", "minimum": 0 },
-            "units_column_present": { "type": "boolean" },
+            "converted": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "relabelled": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "kept_importer_unit": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "units_column_present": {
+              "type": "boolean"
+            },
             "sidecar": {
               "type": "string",
               "description": "Repository-relative path of the channels.tsv the converter resolved (BIDS inheritance: the most specific applicable sidecar, which may live in an ancestor directory)."
@@ -176,30 +296,64 @@
         },
         "split_members": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Every source path of a split FIF chain served by this one store, so a click on split-02 resolves here."
         },
         "sss": {
           "type": "object",
           "description": "ADR 0028 Signal-Space Separation parameters, present exactly when derived is true."
         }
-      }
+      },
+      "additionalProperties": false
     },
     "group": {
       "type": "object",
       "description": "One channel group inside a store (biosigIO names them <modality>_<rate>hz). Groups are concurrent streams of ONE recording: a store's duration is the max over its groups, never their sum.",
       "properties": {
-        "name": { "type": "string" },
-        "modality": { "type": ["string", "null"] },
+        "name": {
+          "type": "string"
+        },
+        "modality": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "rate": {
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "description": "The SERVING rate after the NEMAR modality cap, not the acquisition rate. The acquisition rate is source_rate_hz (and the BIDS sidecar's SamplingFrequency)."
         },
-        "n_channels": { "type": ["integer", "null"], "minimum": 0 },
-        "n_samples": { "type": ["integer", "null"], "minimum": 0 },
-        "duration_s": { "type": ["number", "null"], "minimum": 0 },
+        "n_channels": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "n_samples": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "duration_s": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
         "source_rate_hz": {
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "description": "The recording's own sampling rate before the cap (level-0 attr)."
         },
         "n_view_levels": {
@@ -212,17 +366,36 @@
           "minimum": 1,
           "description": "Columns per view chunk -- constant across levels since biosigio 1.2.6, so a viewport-sized read is 1-3 requests at any level (#1178 item 1)."
         },
-        "chunk_samples": { "type": "integer", "minimum": 1 },
-        "shard_samples": { "type": "integer", "minimum": 1 }
-      }
+        "chunk_samples": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "shard_samples": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
     },
     "failure": {
       "type": "object",
       "description": "A recording that has no store for a reason retrying will not change: a property of the data, or a converter gap someone has to close.",
-      "required": ["path", "code", "reason"],
+      "required": [
+        "path",
+        "code",
+        "reason"
+      ],
       "properties": {
-        "path": { "type": "string" },
-        "zarr": { "type": "string" },
+        "path": {
+          "type": "string"
+        },
+        "zarr": {
+          "type": "string",
+          "pattern": "\\.zarr$"
+        },
         "code": {
           "type": "string",
           "description": "Stable machine code (biosigIO's own, plus the NEMAR-side recording_too_large / channel_count_mismatch / maxshield_uncalibrated / retry_exhausted)."
@@ -232,22 +405,43 @@
           "description": "The sanitized, user-facing sentence the viewer shows. Never a raw exception."
         },
         "detail": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Operator-facing cause: the exception class plus the first line of its message, with local filesystem paths stripped. This is what makes an opaque file_read_error diagnosable from the public index (#1197)."
         },
-        "attempts": { "type": "integer", "minimum": 0 }
-      }
+        "attempts": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     },
     "pending": {
       "type": "object",
       "description": "A discovered recording with no store yet that is still expected to convert. Recorded rather than omitted so every raw recording is accounted for: before v3 these were silently absent from stores AND failures, which from outside is indistinguishable from 'still generating' forever (#1197).",
-      "required": ["path", "zarr", "reason", "attempts"],
+      "required": [
+        "path",
+        "zarr",
+        "reason",
+        "attempts"
+      ],
       "properties": {
-        "path": { "type": "string" },
-        "zarr": { "type": "string" },
+        "path": {
+          "type": "string"
+        },
+        "zarr": {
+          "type": "string",
+          "pattern": "\\.zarr$"
+        },
         "reason": {
           "type": "string",
-          "enum": ["infra_failure", "memory_budget", "not_attempted"],
+          "enum": [
+            "infra_failure",
+            "memory_budget",
+            "not_attempted"
+          ],
           "description": "infra_failure: an untyped error (crashed worker, transient S3). memory_budget: it did not fit the memory free on the node at the time, which is a condition, not a property of the recording. not_attempted: this run did not reach it."
         },
         "attempts": {
@@ -255,9 +449,21 @@
           "minimum": 0,
           "description": "Conversion attempts so far. At 5 the producer promotes the entry to a failures[] entry with code retry_exhausted, so a permanently failing recording stops consuming the queue."
         },
-        "last_error": { "type": ["string", "null"] },
-        "last_attempt_utc": { "type": ["string", "null"] }
-      }
+        "last_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_attempt_utc": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     }
-  }
+  },
+  "$comment": "STABILITY POLICY. This schema is CLOSED at format_version 3: every object is additionalProperties:false, so a document carrying a field this schema does not name is invalid and the producer refuses to publish it. Additive change within v3 ships as format_version 3 with NEW OPTIONAL fields only, declared here -- a client pinned to v3 keeps validating. A BREAKING change (a removed or retyped field, a narrowed enum) is format_version 4 at a NEW schema path (/schemas/zarr-index-v4.json); this path keeps serving v3 for as long as any dataset publishes it, because the index is the mandatory entry point and a client cannot fall back to anything else. Read format_version before anything else."
 }

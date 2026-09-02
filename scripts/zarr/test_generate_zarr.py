@@ -116,6 +116,7 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     check_index_invariant,
     dataset_citation,
     discover_primaries,
+    _failure_entry,
     events_summary,
     failure_detail,
     fetch_dataset_row,
@@ -4644,6 +4645,72 @@ class TestIndexSchemaSelfCheck(unittest.TestCase):
     def test_a_built_index_validates(self):
         validate_document(self.index(), INDEX_SCHEMA_PATH, "index")
 
+    def test_the_index_declares_its_stability_policy(self):
+        # A schema with no stated policy is one every client has to guess at.
+        with open(INDEX_SCHEMA_PATH) as fh:
+            schema = json.load(fh)
+        self.assertIn("format_version 3", schema["$comment"])
+        self.assertIn("additionalProperties", schema["$comment"])
+        self.assertIn("v4", schema["$comment"])
+        with open(MANIFEST_SCHEMA_PATH) as fh:
+            self.assertIn("format_version 1", json.load(fh)["$comment"])
+
+    def test_the_layout_recipe_is_published(self):
+        """An MCP recipe (ADR 0025) has to be computable from index.json plus ONE
+        array-metadata fetch. The broker is stateless, so anything absent from
+        the index it must discover by request -- and discovery-by-404 is what
+        #1178 item 2 removed. The numbers were already here; these are the path
+        templates and the sample-value rule that make them usable."""
+        layout = self.index()["layout"]
+        self.assertEqual(layout["level0"], "<zarr>/<group>/0")
+        self.assertEqual(layout["view"], "<zarr>/<group>/view/<L>")
+        self.assertIn("n_view_levels", layout["view_levels"])
+        self.assertIn("physical = digital * scale + offset", layout["scale_offset"])
+        # `const` in the schema, so a client may hardcode it after checking
+        # format_version -- and a layout change becomes a schema change.
+        with open(INDEX_SCHEMA_PATH) as fh:
+            props = json.load(fh)["properties"]["layout"]["properties"]
+        self.assertEqual(props["level0"]["const"], layout["level0"])
+
+    def test_dataset_provenance_is_hoisted_to_the_top_level(self):
+        index = merge_index(
+            None, "on007763", self.HEAD, [], [], "2026-09-02T00:00:00Z", [], [],
+            discovered=[],
+            dataset_row={"name": "N", "authors": "Doe J", "concept_doi": "10.82901/x",
+                         "license": "CC0", "hed_version": "8.2.0",
+                         "created_at": "2024-01-01"},
+        )
+        self.assertEqual(index["doi"], "10.82901/x")
+        self.assertEqual(index["license"], "CC0")
+        self.assertEqual(index["hed_version"], "8.2.0")
+        self.assertIn("Doe J", index["citation"])
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_dataset_provenance_is_null_without_a_row(self):
+        # Already fetched once per run, so publishing it is free -- but a catalog
+        # that has no DOI yet must yield null rather than an invented string.
+        index = merge_index(
+            None, "on007763", self.HEAD, [], [], "2026-09-02T00:00:00Z", [], [],
+            discovered=[],
+        )
+        for key in ("doi", "license", "citation", "hed_version"):
+            self.assertIsNone(index[key], key)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_zero_store_index_validates(self):
+        # A dataset whose every recording failed still publishes an index, and it
+        # is the shape most likely to be built by a path nobody exercised.
+        index = merge_index(
+            None, "on008083", self.HEAD, [], [], "2026-09-02T00:00:00Z",
+            [_failure_entry("sub-01/eeg/a_eeg.edf", "file_read_error", "OSError: x")],
+            [],
+            discovered=["sub-01/eeg/a_eeg.edf"],
+        )
+        self.assertEqual(index["store_count"], 0)
+        self.assertEqual(index["stores"], [])
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
     def test_a_mutated_index_is_rejected(self):
         import jsonschema
 
@@ -4656,6 +4723,27 @@ class TestIndexSchemaSelfCheck(unittest.TestCase):
             lambda d: d["pending"][0].__setitem__("reason", "because"),
             lambda d: d["stores"][0].pop("source_tree"),
             lambda d: d["failures"][0].pop("code"),
+            # The "no source_key in the index" rule (#1178 item 5) is now
+            # CHECKABLE rather than a convention: the store object is closed, so
+            # a producer that forgot to strip it cannot publish.
+            lambda d: d["stores"][0].__setitem__("source_key", "SHA256E-s1--a"),
+            # Every sub-object closed, so a typo'd key fails here rather than
+            # being served to clients that ignore it.
+            lambda d: d["stores"][0].__setitem__("stray", 1),
+            lambda d: d["stores"][0]["groups"][0].__setitem__("stray", 1),
+            lambda d: d["failures"][0].__setitem__("stray", 1),
+            lambda d: d["pending"][0].__setitem__("stray", 1),
+            # A group with no name cannot be addressed at all: the layout
+            # recipe's <group> has nothing to substitute.
+            lambda d: d["stores"][0]["groups"][0].pop("name"),
+            # http:// is not the contract: the data plane is HTTPS-only.
+            lambda d: d.__setitem__("contract_base", "http://zarr.nemar.org/x/zarr/"),
+            lambda d: d.__setitem__("data_base", "ftp://example.org/"),
+            # A failure or pending entry must name a STORE path.
+            lambda d: d["failures"][0].__setitem__("zarr", "sub-02/eeg/b_eeg.edf"),
+            lambda d: d["pending"][0].__setitem__("zarr", "nope"),
+            lambda d: d.pop("layout"),
+            lambda d: d["layout"].__setitem__("level0", "<zarr>/<group>/level0"),
         ):
             doc = json.loads(json.dumps(self.index()))
             mutate(doc)
