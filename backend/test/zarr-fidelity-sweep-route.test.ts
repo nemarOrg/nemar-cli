@@ -226,8 +226,21 @@ describe("POST /admin/datasets/zarr-fidelity-sweep: success against real S3/raw-
     };
     expect(body.processed).toBe(1);
     expect(body.verified).toBe(1);
+    expect((body as unknown as { ok: boolean }).ok).toBe(true);
     expect(body.results).toEqual([
-      { dataset_id: id, verdict: "verified", sampled: 1, checked: 1, examples: [] },
+      {
+        dataset_id: id,
+        verdict: "verified",
+        sampled: 1,
+        checked: 1,
+        checked_channels: 1,
+        checked_duration: 1,
+        checked_rate: 1,
+        unchecked: 0,
+        examples: [],
+        mismatch_count: 0,
+        examples_truncated: false,
+      },
     ]);
 
     const row = db
@@ -238,7 +251,7 @@ describe("POST /admin/datasets/zarr-fidelity-sweep: success against real S3/raw-
     expect(row.s).toBe("verified");
   });
 
-  test("an empty candidate set still returns a well-formed 200", async () => {
+  test("an empty candidate set still returns a well-formed 200 with ok:true", async () => {
     const app = newApp({
       sweep: (env, opts) =>
         runZarrFidelitySweep(env, {
@@ -253,9 +266,108 @@ describe("POST /admin/datasets/zarr-fidelity-sweep: success against real S3/raw-
       env(db),
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { processed: number; results: unknown[]; remaining: number };
+    const body = (await res.json()) as {
+      processed: number;
+      results: unknown[];
+      remaining: number;
+      ok: boolean;
+    };
     expect(body.processed).toBe(0);
     expect(body.results).toEqual([]);
     expect(body.remaining).toBe(0);
+    expect(body.ok).toBe(true);
+  });
+
+  // PR #1203 review, item 6: a call that reached D1 and processed at least
+  // one candidate, but every one of them errored (zero real verdicts),
+  // must not read as a clean 200 -- that would look like "ran fine,
+  // verified nothing", not "could not verify anything this run".
+  test("processed > 0 with every candidate erroring answers 502 with ok:false", async () => {
+    const id = "on810002";
+    db.query(
+      `INSERT INTO datasets
+         (dataset_id, owner_user_id, name, visibility, status, is_sandbox,
+          zarr_status, zarr_store_count, zarr_source_commit, github_repo)
+       VALUES (?, -1, ?, 'public', 'active', 0, 'ready', 1, ?, ?)`,
+    ).run(id, id, COMMIT_A, `${ORG_NAME}/${id}`);
+    // No indexFixtures entry -- index.json 404s, which is a real per-dataset
+    // error (not stamped), so this is the "processed=1, errors=1" shape.
+
+    const app = newApp({
+      sweep: (env, opts) =>
+        runZarrFidelitySweep(env, {
+          ...opts,
+          s3Options: { endpointUrl: `http://127.0.0.1:${server.port}` },
+          githubRawBase: `http://127.0.0.1:${server.port}`,
+        }),
+    });
+    const res = await app.request(
+      "/datasets/zarr-fidelity-sweep",
+      { method: "POST", headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+      env(db),
+    );
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as {
+      processed: number;
+      errors: { dataset_id: string; error: string }[];
+      ok: boolean;
+      error: string;
+    };
+    expect(body.processed).toBe(1);
+    expect(body.errors.length).toBe(1);
+    expect(body.ok).toBe(false);
+    expect(typeof body.error).toBe("string");
+  });
+
+  test("a MIX of verdicts and errors still answers 200 with ok:true (a partial sweep is not a total failure)", async () => {
+    const verifiedId = "on810003";
+    const erroredId = "on810004";
+    for (const id of [verifiedId, erroredId]) {
+      db.query(
+        `INSERT INTO datasets
+           (dataset_id, owner_user_id, name, visibility, status, is_sandbox,
+            zarr_status, zarr_store_count, zarr_source_commit, github_repo)
+         VALUES (?, -1, ?, 'public', 'active', 0, 'ready', 1, ?, ?)`,
+      ).run(id, id, COMMIT_A, `${ORG_NAME}/${id}`);
+    }
+    indexFixtures.set(verifiedId, {
+      source_commit: COMMIT_A,
+      store_count: 1,
+      stores: [
+        {
+          path: "sub-01/eeg/sub-01_task-rest_eeg.set",
+          zarr: "z",
+          groups: [{ modality: "eeg", n_channels: 19, duration_s: 120, rate: 250 }],
+        },
+      ],
+    });
+    sidecarFixtures.set(
+      `${verifiedId}/${COMMIT_A}/sub-01/eeg/sub-01_task-rest_channels.tsv`,
+      `name\ttype\n${Array.from({ length: 19 }, (_, i) => `Ch${i}\tEEG`).join("\n")}`,
+    );
+    sidecarFixtures.set(
+      `${verifiedId}/${COMMIT_A}/sub-01/eeg/sub-01_task-rest_eeg.json`,
+      JSON.stringify({ SamplingFrequency: 250, RecordingDuration: 120 }),
+    );
+    // erroredId has no index fixture -- it errors.
+
+    const app = newApp({
+      sweep: (env, opts) =>
+        runZarrFidelitySweep(env, {
+          ...opts,
+          s3Options: { endpointUrl: `http://127.0.0.1:${server.port}` },
+          githubRawBase: `http://127.0.0.1:${server.port}`,
+        }),
+    });
+    const res = await app.request(
+      "/datasets/zarr-fidelity-sweep",
+      { method: "POST", headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+      env(db),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { processed: number; verified: number; ok: boolean };
+    expect(body.processed).toBe(2);
+    expect(body.verified).toBe(1);
+    expect(body.ok).toBe(true);
   });
 });

@@ -40,6 +40,15 @@ export function registerZarrFidelitySweepRoutes(
    * 500 on a candidate-query error (e.g. migration 0073 not applied);
    * per-dataset failures are collected in the response body's `errors`
    * instead of throwing (see `runZarrFidelitySweep`'s doc comment).
+   *
+   * PR #1203 review, item 6: a candidate QUERY failure (thrown) is a 500 as
+   * before, but a call that reached D1 fine and processed at least one
+   * candidate, only to have EVERY one of them error out (zero real
+   * verdicts), answers 502 with `ok: false` -- a 200 there would read as
+   * "the sweep ran cleanly and verified nothing", which is not what
+   * happened. A partial result (some verdicts, some errors) is still a
+   * successful sweep and stays 200 `ok: true`; so does an empty candidate
+   * set (`processed: 0`) -- there was nothing to fail.
    */
   admin.post("/datasets/zarr-fidelity-sweep", async (c) => {
     const limitRaw = Number.parseInt(c.req.query("limit") || "", 10);
@@ -47,7 +56,18 @@ export function registerZarrFidelitySweepRoutes(
 
     try {
       const result = await sweep(c.env, { limit });
-      return c.json(result);
+      const totalFailure = result.processed > 0 && result.errors.length === result.processed;
+      if (totalFailure) {
+        return c.json(
+          {
+            ...result,
+            ok: false,
+            error: `All ${result.processed} processed candidate(s) errored; see errors[]`,
+          },
+          502,
+        );
+      }
+      return c.json({ ...result, ok: true });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[zarr-fidelity-sweep] candidate query failed:", msg);
