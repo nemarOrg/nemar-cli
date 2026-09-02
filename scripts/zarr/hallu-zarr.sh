@@ -71,6 +71,21 @@
 
 set -uo pipefail
 
+# --- Bash 4+ required (nemarOrg/nemar-cli#1180, epic #1181 phase 3) -----------
+# The --test guard rails' host check (_is_prod_api_host, further down) uses
+# ${var,,} lowercasing, a bash 4.0+ feature. Under bash 3.2 (macOS's stock
+# /bin/bash) that expansion is a "bad substitution": _is_prod_api_host errors
+# out and returns non-zero, so its `if _is_prod_api_host ...` caller reads
+# that as "not prod" and every host guard silently PASSES -- the exact
+# failure mode this script exists to close, just moved to a different layer.
+# Fail loud here instead, before anything else runs, rather than silently
+# degrading to "allow" on the wrong interpreter.
+if ((BASH_VERSINFO[0] < 4)); then
+  echo "FATAL: hallu-zarr.sh requires bash 4+ (the --test host guards use" \
+       "\${var,,} lowercasing); running under bash ${BASH_VERSION:-unknown}." >&2
+  exit 1
+fi
+
 # --- PATH bootstrap (Homebrew/Bun/uv installed under $HOME) -------------------
 for p in "$HOME/.local/homebrew/bin" "$HOME/.bun/bin" "$HOME/.local/bin"; do
   [[ -d "$p" ]] && PATH="$p:$PATH"

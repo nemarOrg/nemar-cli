@@ -46,6 +46,12 @@ a real Hallu deployment or the repo's own working tree. Covers:
 - An explicit override (ZARR_JOBS=2) still wins over the `--test` default.
 - `--print-config` (with or without `--test`) creates no files under
   ZARR_BASE -- it must exit before `mkdir -p "$WORK_DIR" "$STATE_DIR"`.
+- The script refuses to run under bash < 4 (asserted right after
+  `set -uo pipefail`): the host guards' `${var,,}` lowercasing is a bash
+  4.0+ expansion, and under bash 3.2 (macOS's stock /bin/bash) it is a "bad
+  substitution" that makes `_is_prod_api_host` return non-zero -- silently
+  turning every host guard into an "allow" rather than a "refuse". Skipped
+  unless /bin/bash itself reports major version 3.
 
 Run:
     cd scripts/zarr && uv run --with pytest pytest test_hallu_zarr_config.py
@@ -116,6 +122,30 @@ def tree_entries(root: Path) -> list[Path]:
     if not root.exists():
         return []
     return list(root.rglob("*"))
+
+
+def _bin_bash_major_version() -> int | None:
+    """The major version of /bin/bash, or None if it can't be determined
+    (missing, or output that doesn't parse as an integer). Used to gate the
+    bash-3.2 compatibility test below: it should actually run where
+    /bin/bash is old (stock macOS) and skip everywhere else, rather than
+    hardcoding a path-dependent assumption about what /bin/bash is.
+    """
+    bash_path = "/bin/bash"
+    if not Path(bash_path).exists():
+        return None
+    try:
+        proc = subprocess.run(
+            [bash_path, "-c", 'echo "${BASH_VERSINFO[0]}"'],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except OSError:
+        return None
+    value = proc.stdout.strip()
+    return int(value) if value.isdigit() else None
 
 
 @pytest.fixture
@@ -474,6 +504,36 @@ def test_flag_order_and_combinations_resolve_test_defaults(
         assert cfg["BACKFILL_DIR_FORMATS"] == "1"
     if "--preview-engine-bump" in args:
         assert cfg["PREVIEW_ENGINE_BUMP"] == "1"
+
+
+@pytest.mark.skipif(
+    _bin_bash_major_version() != 3,
+    reason="/bin/bash is not bash 3.x on this machine",
+)
+def test_fails_loud_under_bash_3(dirs: tuple[Path, Path]) -> None:
+    """The --test host guards (_is_prod_api_host) use ${var,,} lowercasing,
+    a bash 4.0+ expansion. Under bash 3.2 (macOS's stock /bin/bash) that is
+    a "bad substitution": the function errors and returns non-zero, so its
+    `if _is_prod_api_host ...` caller reads that as "not prod" and every
+    host guard would silently PASS -- the failure this whole PR exists to
+    close, just moved to a different layer. The version assertion right
+    after `set -uo pipefail` has to catch this before anything else runs,
+    invoked here via the real /bin/bash rather than whatever `bash` PATH
+    resolves to for the other tests in this file.
+    """
+    zarr_base, home = dirs
+    env = base_env(zarr_base, home)
+    proc = subprocess.run(
+        ["/bin/bash", str(SCRIPT), "--print-config"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert proc.returncode != 0
+    assert "requires bash 4+" in proc.stderr
 
 
 def test_print_config_creates_no_files_in_test_mode(dirs: tuple[Path, Path]) -> None:
