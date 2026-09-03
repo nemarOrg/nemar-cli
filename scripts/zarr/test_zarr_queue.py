@@ -197,6 +197,115 @@ class QueueTest(unittest.TestCase):
         self.assertEqual(claim_next(self.conn)["dataset_id"], "nm000001")
         self.assertEqual(claim_next(self.conn)["dataset_id"], "nm000002")
 
+    def test_claim_next_is_atomic_across_connections(self):
+        """#1142: the docstring claimed the read-then-write was atomic under
+        the connection's write lock, but a plain SELECT takes no SQLite lock
+        at all -- only the later UPDATE did, and only once Python's sqlite3
+        module decided to open its own implicit transaction. So two
+        connections could each read the SAME 'pending' row before either
+        one's UPDATE committed, and BOTH would return it: the same dataset
+        handed to two workers, converted twice.
+
+        Reproduced with two REAL connections to the same on-disk database
+        file (no mocks). Connection A is driven by hand through claim_next's
+        own two statements -- real SQL, the exact sequence the function
+        runs -- so this test can hold it PAUSED in the exact window the bug
+        lived in: past the read, short of the write. While it is paused,
+        connection B runs the real `claim_next()`. The old (buggy)
+        implementation's SELECT would succeed immediately in that window
+        (WAL readers are not blocked by a writer holding a reserved lock)
+        and read the still-'pending' row, so it would go on to update and
+        return it too -- a genuine double claim. The fixed implementation's
+        `BEGIN IMMEDIATE` instead blocks connection B's whole call until
+        connection A's transaction ends, so by the time B's SELECT actually
+        runs the row already reads 'inprogress' and B correctly gets None.
+
+        Connection B is opened and fully migrated BEFORE connection A takes
+        its lock, then parked: `connect()`'s own schema step
+        (`CREATE TABLE IF NOT EXISTS`) needs a write lock too, so building
+        connection B while A already holds one would deadlock this test
+        against its own fixture rather than exercising claim_next at all.
+        """
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+        self.conn.close()  # this test drives its own two connections
+
+        db_path = os.path.join(self._tmp.name, "q.db")
+        # sqlite3 connections are single-thread by default (check_same_thread),
+        # so each connection is opened INSIDE the thread that uses it, not
+        # shared across the thread boundary.
+        result_b = {}
+        conn_b_ready = threading.Event()
+        release_b = threading.Event()
+
+        def run_b():
+            conn_b = connect(db_path)  # built before conn_a ever locks anything
+            try:
+                conn_b_ready.set()
+                release_b.wait(timeout=5)
+                result_b["row"] = claim_next(conn_b)
+            finally:
+                conn_b.close()
+
+        t_b = threading.Thread(target=run_b)
+        t_b.start()
+        self.addCleanup(t_b.join, timeout=5)
+        self.assertTrue(
+            conn_b_ready.wait(timeout=5), "conn_b never finished connecting"
+        )
+
+        reached_pause = threading.Event()
+        release_a = threading.Event()
+
+        def run_a():
+            # The read half of claim_next, by hand, on conn_a -- real SQL
+            # against the real database, paused before the write half runs.
+            conn_a = connect(db_path)
+            try:
+                conn_a.execute("BEGIN IMMEDIATE")
+                row = conn_a.execute(
+                    "SELECT dataset_id, latest_version FROM jobs"
+                    " WHERE status='pending' AND next_retry_at <= ?"
+                    " ORDER BY enqueued_at ASC LIMIT 1",
+                    (int(time.time()),),
+                ).fetchone()
+                assert row["dataset_id"] == "nm000001"
+                reached_pause.set()
+                release_a.wait(timeout=5)
+                conn_a.execute(
+                    "UPDATE jobs SET status='inprogress', updated_at=? WHERE dataset_id=?",
+                    (int(time.time()), "nm000001"),
+                )
+                conn_a.commit()
+            finally:
+                conn_a.close()
+
+        t_a = threading.Thread(target=run_a)
+        t_a.start()
+        self.addCleanup(t_a.join, timeout=5)
+        self.assertTrue(reached_pause.wait(timeout=5), "conn_a never reached its pause")
+
+        # conn_a stays paused -- still holding its lock -- for as long as
+        # this test wants, so widening this window cannot change what the
+        # FIXED implementation does: its BEGIN IMMEDIATE blocks on conn_a's
+        # lock regardless of how long that lock is held. The sleep below
+        # exists only so the OLD, buggy implementation's race is not masked
+        # by conn_b's thread simply not having been scheduled yet -- it
+        # gives conn_b's SELECT (unmodified real claim_next code) a chance
+        # to actually run while conn_a's row is still 'pending'.
+        release_b.set()
+        time.sleep(0.05)
+
+        release_a.set()
+        t_a.join(timeout=5)
+        t_b.join(timeout=5)
+        self.assertFalse(t_b.is_alive(), "conn_b's claim_next never returned")
+        # The one assertion the fix is FOR: B must not also claim A's row.
+        self.assertIsNone(
+            result_b["row"],
+            "conn_b claimed nm000001 after conn_a already claimed it -- the "
+            "same row was handed to two callers",
+        )
+
     def test_fail_reschedules_with_backoff_then_terminal(self):
         reconcile(self.conn, [("nm000001", "1")], 3600)
         claim_next(self.conn)

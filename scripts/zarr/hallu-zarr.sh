@@ -171,6 +171,37 @@ unset _pretest_arg
 ZARR_BASE="${ZARR_BASE:-/mnt/local}"
 WORK_DIR="${ZARR_WORK_DIR:-${ZARR_BASE}/zarr-scratch}"
 STATE_DIR="${ZARR_STATE_DIR:-${ZARR_BASE}/zarr-state}"
+# --- Scratch-sweep deployment guard (nemarOrg/nemar-cli#1121) -----------------
+# sweep_orphaned_scratch() (below) deletes stray `tmp*` entries under WORK_DIR
+# on the theory that holding the single-instance lock -- which lives under
+# STATE_DIR -- proves nothing under WORK_DIR is owned by anyone else. That
+# holds only while WORK_DIR and STATE_DIR belong to the SAME deployment. A
+# second deployment that shares one of the two directories with this one
+# (e.g. it overrides WORK_DIR to point somewhere private but leaves
+# STATE_DIR at the shared default, or vice versa) is invisible to this
+# lock -- it holds a different lock file under its own STATE_DIR, so it can
+# be mid-conversion under a WORK_DIR this run is about to sweep. That is
+# exactly how an in-flight on007808 recording was destroyed.
+#
+# The simplest sound rule: only sweep when both directories were resolved
+# the SAME way -- both left at their ZARR_BASE-relative defaults, or both
+# explicitly overridden (as --test's pre-pass does, pointing both at a
+# dedicated *-test tree so its sweep stays safe and stays on). Exactly one
+# overridden means the other is a shared default this run does not own
+# alone, so skip. Checked here, right after ZARR_WORK_DIR/ZARR_STATE_DIR are
+# resolved into WORK_DIR/STATE_DIR (and after --test's pre-pass has had its
+# chance to set both), so the decision is available to --print-config too
+# (--print-config exits before sweep_orphaned_scratch is ever defined).
+SWEEP_SCRATCH=1
+_work_dir_overridden=""
+_state_dir_overridden=""
+[[ -n "${ZARR_WORK_DIR:-}" ]] && _work_dir_overridden=1
+[[ -n "${ZARR_STATE_DIR:-}" ]] && _state_dir_overridden=1
+if [[ -n "$_work_dir_overridden" && -z "$_state_dir_overridden" ]] || \
+   [[ -z "$_work_dir_overridden" && -n "$_state_dir_overridden" ]]; then
+  SWEEP_SCRATCH=""
+fi
+unset _work_dir_overridden _state_dir_overridden
 # Max parallel workers = the driver's ProcessPoolExecutor CPU cap. Default to all
 # cores: the driver's RAM-admission control (nemarDatasets/.github#67) dispatches a
 # recording only while the SUM of in-flight projected peaks fits usable RAM, so a
@@ -472,6 +503,7 @@ AWS_PROFILE=$AWS_PROFILE
 ZARR_BASE=$ZARR_BASE
 WORK_DIR=$WORK_DIR
 STATE_DIR=$STATE_DIR
+SWEEP_SCRATCH=${SWEEP_SCRATCH:-0}
 JOBS=$JOBS
 DRIVER_REPO=$DRIVER_REPO
 DRIVER_REF=$DRIVER_REF
@@ -812,6 +844,12 @@ fi
 # not started the driver, so nothing owns anything under WORK_DIR and every
 # `tmp*` entry is by definition from a dead run. Dataset-named scratch dirs are
 # left alone -- convert_dataset safe_rm's those itself before each clone.
+#
+# That safety argument depends on WORK_DIR and STATE_DIR (where the lock
+# lives) belonging to the same deployment -- see the SWEEP_SCRATCH guard set
+# above, right after both are resolved. When they disagree, this run's lock
+# proves nothing about who owns files under WORK_DIR, so skip rather than
+# risk deleting another deployment's in-flight scratch (nemarOrg/nemar-cli#1121).
 sweep_orphaned_scratch() {
   local n=0 kb=0 sz
   while IFS= read -r -d '' p; do
@@ -829,7 +867,15 @@ sweep_orphaned_scratch() {
   fi
   return 0
 }
-sweep_orphaned_scratch
+if [[ -n "$SWEEP_SCRATCH" ]]; then
+  sweep_orphaned_scratch
+else
+  log "WARNING: skipping orphaned-scratch sweep -- exactly one of" \
+      "ZARR_STATE_DIR/ZARR_WORK_DIR is overridden from its default, so" \
+      "WORK_DIR=$WORK_DIR may be shared with a deployment this run's lock" \
+      "(under STATE_DIR=$STATE_DIR) does not cover. Override both or" \
+      "neither to resume sweeping (nemarOrg/nemar-cli#1121)."
+fi
 
 setup
 if [[ ! -f "$DRIVER" || ! -f "$QUEUE" ]]; then

@@ -81,6 +81,7 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     count_infra_failures,
     RecordingMemoryExceeded,
     MaxShieldUncalibrated,
+    MaxShieldProbeFailed,
     maxshield_calibration_for,
     MAXSHIELD_MEM_FACTOR,
     RETRYABLE_CODES,
@@ -2326,6 +2327,20 @@ class TestMaxShieldVerdictAndProjection(unittest.TestCase):
         self.assertNotEqual(reason, reason_for_code("file_read_error"))
         self.assertIn("shielding", reason.lower())
 
+    def test_probe_failure_is_deterministic_not_retryable(self):
+        """#1139: the probe runs on a file this same attempt already fetched
+        successfully, so a header it cannot read is a property of that file's
+        content -- retrying cannot make a corrupt header become readable."""
+        self.assertNotIn(MaxShieldProbeFailed.code, RETRYABLE_CODES)
+        failures = [{"code": MaxShieldProbeFailed.code}]
+        self.assertEqual(count_infra_failures(failures, failures), 0)
+
+    def test_probe_failure_has_its_own_user_facing_reason(self):
+        reason = reason_for_code(MaxShieldProbeFailed.code)
+        self.assertNotEqual(reason, reason_for_code("file_read_error"))
+        self.assertNotEqual(reason, reason_for_code(MaxShieldUncalibrated.code))
+        self.assertIn("header", reason.lower())
+
     def test_projection_covers_the_filter_phase(self):
         """A streaming FIF is projected on the streaming bound, which for this
         dataset's largest recording exceeds the measured filter peak by under 5%.
@@ -3244,6 +3259,37 @@ class TestMaxShieldWiringInConvertOne(unittest.TestCase):
         res = self._run([self.REC], shielded=False)
         self.assertNotEqual(res.get("code"), self.gz.MaxShieldUncalibrated.code)
 
+    def test_probe_failure_is_classified_with_the_typed_code_and_detail(self):
+        # #1139: when the probe itself cannot read the file, convert_one must
+        # not fall through to a generic/uncoded file_read_error -- the raised
+        # MaxShieldProbeFailed is classified exactly like any other typed
+        # failure (`.code` picked up by the generic `except Exception`
+        # handler), and `detail` carries the exception class plus the first
+        # message line, the same construction every other coded failure uses.
+        def boom(_path):
+            raise self.gz.MaxShieldProbeFailed(
+                "could not read the FIF header to test for Internal Active "
+                "Shielding: OSError: [Errno 5] I/O error"
+            )
+
+        self.gz.is_maxshield_fif = boom
+        self.gz._CTX = {
+            "mem_budget": None,
+            "tmp": self._tmp.name,
+            "local": True,
+            "repo": self.repo,
+            "head_files": {self.REC},
+            "bucket": "b",
+            "dataset_id": "on000001",
+            "head": "0" * 40,
+        }
+        res = self.gz.convert_one(self.REC, 4 * 1024**3)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["code"], self.gz.MaxShieldProbeFailed.code)
+        self.assertIn("MaxShieldProbeFailed", res["detail"])
+        self.assertIn("Internal Active Shielding", res["detail"])
+        self.assertNotIn(res["code"], RETRYABLE_CODES)
+
 
 class TestIsMaxShieldFif(unittest.TestCase):
     """The MaxShield probe's own edges (#1126)."""
@@ -3253,22 +3299,24 @@ class TestIsMaxShieldFif(unittest.TestCase):
         # that make up most of the archive and never needs MNE.
         self.assertFalse(is_maxshield_fif("sub-01/eeg/sub-01_task-x_eeg.set"))
 
-    def test_an_unreadable_fif_warns_instead_of_failing_silently(self):
-        # A header probe that fails routes the recording down the normal path,
-        # where a genuinely shielded file yields an opaque file_read_error. That
-        # is a real regression risk (truncated download, missing split member),
-        # so it must leave a warning rather than pass silently.
+    def test_an_unreadable_fif_raises_the_typed_probe_failure(self):
+        # #1139: before this, a header probe that failed routed the recording
+        # down the normal path silently (a print, then `return False`), where
+        # a genuinely shielded file surfaced as an opaque file_read_error with
+        # no hint the probe was the thing that broke. It must instead raise a
+        # coded exception -- convert_one classifies it exactly like any other
+        # typed failure, via `.code` and `failure_detail`.
         with tempfile.TemporaryDirectory() as tmp:
             bad = os.path.join(tmp, "sub-01_task-x_meg.fif")
             with open(bad, "wb") as fh:
                 fh.write(b"not a fif")
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                result = is_maxshield_fif(bad)
-        self.assertFalse(result)
-        out = buf.getvalue()
-        self.assertIn("::warning::", out)
-        self.assertIn("Internal Active Shielding", out)
+            with self.assertRaises(MaxShieldProbeFailed) as cm:
+                is_maxshield_fif(bad)
+        self.assertEqual(cm.exception.code, "maxshield_probe_failed")
+        self.assertIn("Internal Active Shielding", str(cm.exception))
+        # The original read failure is chained, not swallowed -- a traceback
+        # still names the real cause.
+        self.assertIsNotNone(cm.exception.__cause__)
 
 
 class TestWorkerMemLimit(unittest.TestCase):
