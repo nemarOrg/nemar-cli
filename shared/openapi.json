@@ -1,0 +1,2271 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "NEMAR API",
+    "version": "1.0.0",
+    "description": "Public read surface of api.nemar.org's dataset catalog, generated from the shared wire contract (shared/contract/) rather than hand-written (issue #937). Covers the catalog list, detail, search, and facet-vocabulary endpoints only -- write routes, auth, admin, and sandbox endpoints are not documented here."
+  },
+  "servers": [
+    {
+      "url": "https://api.nemar.org",
+      "description": "Production"
+    },
+    {
+      "url": "https://api-test.nemar.org",
+      "description": "Staging"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Datasets",
+      "description": "Public dataset catalog reads."
+    }
+  ],
+  "components": {
+    "schemas": {
+      "VersionTag": {
+        "type": "string",
+        "pattern": "^v\\d+\\.\\d+\\.\\d+(?:-(?:rc|alpha|beta)\\d*)?$",
+        "description": "Canonical dataset-version tag as served on the wire: always the v-prefixed semver form (vX.Y.Z). See shared/contract/version.ts -- toVersionTag()/isVersionTag() are the single source of truth both the catalog and data planes route through.",
+        "example": "v1.2.0"
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "details": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "description": "Generic error envelope returned by these routes on a 4xx/5xx."
+      },
+      "DatasetListEnvelope": {
+        "type": "object",
+        "properties": {
+          "datasets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "dataset_id": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "status": {
+                  "type": "string"
+                },
+                "visibility": {
+                  "type": "string"
+                },
+                "concept_doi": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "doi": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "created_at": {
+                  "type": "string"
+                },
+                "updated_at": {
+                  "type": "string"
+                },
+                "owner_username": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "modalities": {
+                  "type": "string"
+                },
+                "participants": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "tasks": {
+                  "type": "string"
+                },
+                "authors": {
+                  "type": "string"
+                },
+                "license": {
+                  "type": "string"
+                },
+                "file_size": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "file_size_formatted": {
+                  "type": "string"
+                },
+                "total_files": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "num_citations": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "n_channels": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "electrode_system": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "has_hed": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    {
+                      "type": "number",
+                      "enum": [
+                        1
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "hed_version": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "data_complete": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    {
+                      "type": "number",
+                      "enum": [
+                        1
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "bytes_present": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "latest_version": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-(?:rc|alpha|beta)\\d*)?$"
+                },
+                "subject_count": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "file_size_bytes": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "sessions_count": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "age_min": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "age_max": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "bids_version": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "zarr_status": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "pending",
+                    "ready",
+                    "failed",
+                    null
+                  ]
+                },
+                "zarr_store_count": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "zarr_converted_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "zarr_source_commit": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "zarr_errors": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "zarr_failure_count": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "zarr_deterministic": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    {
+                      "type": "number",
+                      "enum": [
+                        1
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "zarr_failed_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "zarr_index_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "zarr_verify_status": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "verified",
+                    "failed",
+                    "unverifiable",
+                    null
+                  ]
+                },
+                "zarr_verified_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "total_recording_duration": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "recording_duration_min": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "recording_duration_max": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "recording_count": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "recordings_unavailable": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "channel_count_min": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "channel_count_max": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "sampling_frequency": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "power_line_frequency": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "eeg_reference": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "placement_scheme": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "dataset_id",
+                "name",
+                "status",
+                "visibility",
+                "created_at",
+                "participants",
+                "file_size"
+              ]
+            }
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "excluded_unknown": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "excluded_unknown_by_facet": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "required": [
+          "datasets",
+          "count"
+        ],
+        "description": "GET /datasets response envelope: a page of the public dataset catalog."
+      },
+      "DatasetDetailEnvelope": {
+        "type": "object",
+        "properties": {
+          "dataset": {
+            "type": "object",
+            "properties": {
+              "dataset_id": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "type": "string"
+              },
+              "visibility": {
+                "type": "string"
+              },
+              "concept_doi": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "doi": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "created_at": {
+                "type": "string"
+              },
+              "updated_at": {
+                "type": "string"
+              },
+              "owner_username": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "modalities": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "participants": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "tasks": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "authors": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "license": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "file_size": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "file_size_formatted": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "total_files": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "num_citations": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "n_channels": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "electrode_system": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "has_hed": {
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "enum": [
+                      0
+                    ]
+                  },
+                  {
+                    "type": "number",
+                    "enum": [
+                      1
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "hed_version": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "data_complete": {
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "enum": [
+                      0
+                    ]
+                  },
+                  {
+                    "type": "number",
+                    "enum": [
+                      1
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "bytes_present": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "latest_version": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-(?:rc|alpha|beta)\\d*)?$"
+              },
+              "subject_count": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "file_size_bytes": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "sessions_count": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "age_min": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "age_max": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "bids_version": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "zarr_status": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "pending",
+                  "ready",
+                  "failed",
+                  null
+                ]
+              },
+              "zarr_store_count": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "zarr_converted_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "zarr_source_commit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "zarr_errors": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "zarr_failure_count": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "zarr_deterministic": {
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "enum": [
+                      0
+                    ]
+                  },
+                  {
+                    "type": "number",
+                    "enum": [
+                      1
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "zarr_failed_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "zarr_index_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "zarr_verify_status": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "verified",
+                  "failed",
+                  "unverifiable",
+                  null
+                ]
+              },
+              "zarr_verified_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "total_recording_duration": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "recording_duration_min": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "recording_duration_max": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "recording_count": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "recordings_unavailable": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "channel_count_min": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "channel_count_max": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "sampling_frequency": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "power_line_frequency": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "eeg_reference": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "placement_scheme": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "owner_github": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "attestation_deposit_type": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "owner",
+                  "redistribution",
+                  null
+                ]
+              },
+              "attestation_key_status": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "destroyed",
+                  "retained",
+                  null
+                ]
+              },
+              "attestation_deidentified": {
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "enum": [
+                      0
+                    ]
+                  },
+                  {
+                    "type": "number",
+                    "enum": [
+                      1
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "attestation_no_duplicate": {
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "enum": [
+                      0
+                    ]
+                  },
+                  {
+                    "type": "number",
+                    "enum": [
+                      1
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "attestation_upstream_source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "attestation_accepted_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "zarr_data_failures": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "count": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "detail_ref": {
+                    "type": "string"
+                  },
+                  "compacted_by": {
+                    "type": "string"
+                  },
+                  "pending": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "discovered": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "events_upload_failed": {
+                    "type": "boolean",
+                    "enum": [
+                      true
+                    ]
+                  },
+                  "manifest_upload_failed": {
+                    "type": "boolean",
+                    "enum": [
+                      true
+                    ]
+                  }
+                },
+                "required": [
+                  "count",
+                  "detail_ref"
+                ]
+              }
+            },
+            "required": [
+              "dataset_id",
+              "name",
+              "status",
+              "visibility",
+              "created_at",
+              "participants",
+              "file_size"
+            ]
+          }
+        },
+        "required": [
+          "dataset"
+        ],
+        "description": "GET /datasets/{id} response envelope: one dataset's full detail record."
+      },
+      "DatasetSearchEnvelope": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "modalities": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "participants": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "doi": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "tasks": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "authors": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "has_hed": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    {
+                      "type": "number",
+                      "enum": [
+                        1
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "score": {
+                  "type": "number"
+                },
+                "snippet": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name"
+              ]
+            }
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "returned": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "candidate_ceiling": {
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "exact_id",
+              "text",
+              "text_fallback",
+              "semantic",
+              "unavailable"
+            ]
+          },
+          "min_score": {
+            "type": "number"
+          },
+          "warning": {
+            "type": "string"
+          },
+          "excluded_unknown": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "excluded_unknown_by_facet": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "required": [
+          "results",
+          "count"
+        ],
+        "description": "GET /datasets/search response envelope: hybrid search hits."
+      },
+      "DatasetFacetsEnvelope": {
+        "type": "object",
+        "properties": {
+          "electrode-system": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "value",
+                "count"
+              ]
+            }
+          },
+          "source": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "value",
+                "count"
+              ]
+            }
+          },
+          "zarr": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "value",
+                "count"
+              ]
+            }
+          },
+          "powerline": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "value",
+                "count"
+              ]
+            }
+          },
+          "bids-version": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "value",
+                "count"
+              ]
+            }
+          },
+          "hed-version": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "value",
+                "count"
+              ]
+            }
+          },
+          "license": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "value",
+                "count"
+              ]
+            }
+          },
+          "modality": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "value",
+                "count"
+              ]
+            }
+          },
+          "task": {
+            "type": "object",
+            "properties": {
+              "values": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "string"
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "count"
+                  ]
+                }
+              },
+              "distinct_total": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "values",
+              "distinct_total",
+              "truncated"
+            ]
+          },
+          "warning": {
+            "type": "string"
+          }
+        },
+        "description": "GET /datasets/facets response envelope: the declared facet vocabulary with counts."
+      }
+    },
+    "parameters": {}
+  },
+  "paths": {
+    "/datasets": {
+      "get": {
+        "summary": "List and filter the public dataset catalog",
+        "description": "Single-table read over the `datasets` catalog (public rows, plus the caller's own when `mine=true`). Supports the shared facet table (shared/facets.ts) plus nine legacy bespoke filters, all AND-ed together.",
+        "tags": [
+          "Datasets"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true"
+              ],
+              "description": "Only the authenticated caller's own managed datasets. Requires auth; ignores every other filter below except the shared ones."
+            },
+            "required": false,
+            "description": "Only the authenticated caller's own managed datasets. Requires auth; ignores every other filter below except the shared ones.",
+            "name": "mine",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Dataset status filter. Default \"active\"."
+            },
+            "required": false,
+            "description": "Dataset status filter. Default \"active\".",
+            "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "description": "Page size, 1-200. Default 50."
+            },
+            "required": false,
+            "description": "Page size, 1-200. Default 50.",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Pagination offset. Default 0."
+            },
+            "required": false,
+            "description": "Pagination offset. Default 0.",
+            "name": "offset",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by owner username."
+            },
+            "required": false,
+            "description": "Filter by owner username.",
+            "name": "owner",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "newest",
+                "oldest",
+                "name",
+                "participants",
+                "size",
+                "citations"
+              ],
+              "description": "Sort order. Default \"newest\"."
+            },
+            "required": false,
+            "description": "Sort order. Default \"newest\".",
+            "name": "sort",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Free-text search over name/description/tasks/authors (FTS5-backed)."
+            },
+            "required": false,
+            "description": "Free-text search over name/description/tasks/authors (FTS5-backed).",
+            "name": "search",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by modality name (exact match)."
+            },
+            "required": false,
+            "description": "Filter by modality name (exact match).",
+            "name": "modality",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by author name (substring match)."
+            },
+            "required": false,
+            "description": "Filter by author name (substring match).",
+            "name": "author",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by BIDS task name (substring match)."
+            },
+            "required": false,
+            "description": "Filter by BIDS task name (substring match).",
+            "name": "task",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true"
+              ],
+              "description": "Only datasets with a concept DOI. Any value other than the literal \"true\" is ignored (no filter applied)."
+            },
+            "required": false,
+            "description": "Only datasets with a concept DOI. Any value other than the literal \"true\" is ignored (no filter applied).",
+            "name": "has_doi",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "true"
+              ],
+              "description": "Only datasets with HED annotations. \"1\" or \"true\" enable the filter."
+            },
+            "required": false,
+            "description": "Only datasets with HED annotations. \"1\" or \"true\" enable the filter.",
+            "name": "has_hed",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "true"
+              ],
+              "description": "Only datasets with a ready Zarr conversion. \"1\" or \"true\" enable the filter."
+            },
+            "required": false,
+            "description": "Only datasets with a ready Zarr conversion. \"1\" or \"true\" enable the filter.",
+            "name": "has_zarr",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "true"
+              ],
+              "description": "Only datasets whose Zarr conversion also passed the standing fidelity sweep. \"1\" or \"true\" enable the filter."
+            },
+            "required": false,
+            "description": "Only datasets whose Zarr conversion also passed the standing fidelity sweep. \"1\" or \"true\" enable the filter.",
+            "name": "has_zarr_verified",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "true"
+              ],
+              "description": "Only datasets whose latest version has every manifest entry verified present in S3. \"1\" or \"true\" enable the filter."
+            },
+            "required": false,
+            "description": "Only datasets whose latest version has every manifest entry verified present in S3. \"1\" or \"true\" enable the filter.",
+            "name": "data_complete",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "description": "Only datasets created within the last N days."
+            },
+            "required": false,
+            "description": "Only datasets created within the last N days.",
+            "name": "recent",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated license tier tokens (OR semantics). Unrecognized tokens are dropped."
+            },
+            "required": false,
+            "description": "Comma-separated license tier tokens (OR semantics). Unrecognized tokens are dropped.",
+            "name": "license",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "true"
+              ],
+              "description": "Include rows unknown for the active facet filters instead of excluding them by default (ADR 0032). \"1\" or \"true\" enable it."
+            },
+            "required": false,
+            "description": "Include rows unknown for the active facet filters instead of excluding them by default (ADR 0032). \"1\" or \"true\" enable it.",
+            "name": "include_unknown",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Subject count (subjects). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "Subject count (subjects). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "subjects",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Channel count (channels). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "Channel count (channels). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "channels",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session count (sessions). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "Session count (sessions). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "sessions",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Dataset size. Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. A bare number is bytes; optional 1024-based unit suffixes b/kb/mb/gb/tb (e.g. \"1.5gb..\")."
+            },
+            "required": false,
+            "description": "Dataset size. Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. A bare number is bytes; optional 1024-based unit suffixes b/kb/mb/gb/tb (e.g. \"1.5gb..\").",
+            "name": "size",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "File count (files). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "File count (files). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "files",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Citation count (citations). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "Citation count (citations). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "citations",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Total recording duration. Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. A bare number is seconds; optional unit suffixes s/m/h/d (e.g. \"30m..2h\")."
+            },
+            "required": false,
+            "description": "Total recording duration. Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. A bare number is seconds; optional unit suffixes s/m/h/d (e.g. \"30m..2h\").",
+            "name": "duration",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Per-recording duration. Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. A bare number is seconds; optional unit suffixes s/m/h/d (e.g. \"30m..2h\")."
+            },
+            "required": false,
+            "description": "Per-recording duration. Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. A bare number is seconds; optional unit suffixes s/m/h/d (e.g. \"30m..2h\").",
+            "name": "recording_length",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Recording count (recordings). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "Recording count (recordings). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "recordings",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Unavailable recording count (recordings). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "Unavailable recording count (recordings). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "unavailable",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Participant age (years). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "Participant age (years). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "age",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Sampling rate (Hz). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "Sampling rate (Hz). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "rate",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "50",
+                "60"
+              ],
+              "description": "Power line frequency."
+            },
+            "required": false,
+            "description": "Power line frequency.",
+            "name": "powerline",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "EEG reference (substring match)."
+            },
+            "required": false,
+            "description": "EEG reference (substring match).",
+            "name": "reference",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Electrode placement scheme (substring match)."
+            },
+            "required": false,
+            "description": "Electrode placement scheme (substring match).",
+            "name": "placement",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "10-05",
+                "10-10",
+                "10-20",
+                "biosemi",
+                "egi-geodesic",
+                "other"
+              ],
+              "description": "Electrode system."
+            },
+            "required": false,
+            "description": "Electrode system.",
+            "name": "electrode_system",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "openneuro",
+                "nemar",
+                "gin",
+                "other"
+              ],
+              "description": "Source archive."
+            },
+            "required": false,
+            "description": "Source archive.",
+            "name": "source",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ready",
+                "pending",
+                "failed"
+              ],
+              "description": "Zarr conversion status."
+            },
+            "required": false,
+            "description": "Zarr conversion status.",
+            "name": "zarr",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "BIDS version, e.g. \"2.1.0\"."
+            },
+            "required": false,
+            "description": "BIDS version, e.g. \"2.1.0\".",
+            "name": "bids_version",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "HED version, e.g. \"2.1.0\"."
+            },
+            "required": false,
+            "description": "HED version, e.g. \"2.1.0\".",
+            "name": "hed_version",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of the catalog.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetListEnvelope"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An invalid facet range, enum value, or filter token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/datasets/search": {
+      "get": {
+        "summary": "Hybrid dataset search (exact id, semantic, full text)",
+        "description": "Combines exact dataset-id lookup, Vectorize semantic similarity (when configured), and D1 FTS5 text search. Shares the same filter table as GET /datasets, minus `search` (the free text here is `q` instead).",
+        "tags": [
+          "Datasets"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Search query. Required; drives exact dataset-id, semantic, and FTS5 tiers."
+            },
+            "required": true,
+            "description": "Search query. Required; drives exact dataset-id, semantic, and FTS5 tiers.",
+            "name": "q",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "description": "Page size, 1-100. Default 20."
+            },
+            "required": false,
+            "description": "Page size, 1-100. Default 20.",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Pagination offset. Default 0."
+            },
+            "required": false,
+            "description": "Pagination offset. Default 0.",
+            "name": "offset",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Minimum semantic similarity score, 0-1. Default 0.6."
+            },
+            "required": false,
+            "description": "Minimum semantic similarity score, 0-1. Default 0.6.",
+            "name": "min_score",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by modality name (exact match)."
+            },
+            "required": false,
+            "description": "Filter by modality name (exact match).",
+            "name": "modality",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by author name (substring match)."
+            },
+            "required": false,
+            "description": "Filter by author name (substring match).",
+            "name": "author",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter by BIDS task name (substring match)."
+            },
+            "required": false,
+            "description": "Filter by BIDS task name (substring match).",
+            "name": "task",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true"
+              ],
+              "description": "Only datasets with a concept DOI. Any value other than the literal \"true\" is ignored (no filter applied)."
+            },
+            "required": false,
+            "description": "Only datasets with a concept DOI. Any value other than the literal \"true\" is ignored (no filter applied).",
+            "name": "has_doi",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "true"
+              ],
+              "description": "Only datasets with HED annotations. \"1\" or \"true\" enable the filter."
+            },
+            "required": false,
+            "description": "Only datasets with HED annotations. \"1\" or \"true\" enable the filter.",
+            "name": "has_hed",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "true"
+              ],
+              "description": "Only datasets with a ready Zarr conversion. \"1\" or \"true\" enable the filter."
+            },
+            "required": false,
+            "description": "Only datasets with a ready Zarr conversion. \"1\" or \"true\" enable the filter.",
+            "name": "has_zarr",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "true"
+              ],
+              "description": "Only datasets whose Zarr conversion also passed the standing fidelity sweep. \"1\" or \"true\" enable the filter."
+            },
+            "required": false,
+            "description": "Only datasets whose Zarr conversion also passed the standing fidelity sweep. \"1\" or \"true\" enable the filter.",
+            "name": "has_zarr_verified",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "true"
+              ],
+              "description": "Only datasets whose latest version has every manifest entry verified present in S3. \"1\" or \"true\" enable the filter."
+            },
+            "required": false,
+            "description": "Only datasets whose latest version has every manifest entry verified present in S3. \"1\" or \"true\" enable the filter.",
+            "name": "data_complete",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "description": "Only datasets created within the last N days."
+            },
+            "required": false,
+            "description": "Only datasets created within the last N days.",
+            "name": "recent",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated license tier tokens (OR semantics). Unrecognized tokens are dropped."
+            },
+            "required": false,
+            "description": "Comma-separated license tier tokens (OR semantics). Unrecognized tokens are dropped.",
+            "name": "license",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "true"
+              ],
+              "description": "Include rows unknown for the active facet filters instead of excluding them by default (ADR 0032). \"1\" or \"true\" enable it."
+            },
+            "required": false,
+            "description": "Include rows unknown for the active facet filters instead of excluding them by default (ADR 0032). \"1\" or \"true\" enable it.",
+            "name": "include_unknown",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Subject count (subjects). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "Subject count (subjects). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "subjects",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Channel count (channels). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "Channel count (channels). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "channels",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Session count (sessions). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "Session count (sessions). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "sessions",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Dataset size. Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. A bare number is bytes; optional 1024-based unit suffixes b/kb/mb/gb/tb (e.g. \"1.5gb..\")."
+            },
+            "required": false,
+            "description": "Dataset size. Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. A bare number is bytes; optional 1024-based unit suffixes b/kb/mb/gb/tb (e.g. \"1.5gb..\").",
+            "name": "size",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "File count (files). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "File count (files). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "files",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Citation count (citations). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "Citation count (citations). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "citations",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Total recording duration. Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. A bare number is seconds; optional unit suffixes s/m/h/d (e.g. \"30m..2h\")."
+            },
+            "required": false,
+            "description": "Total recording duration. Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. A bare number is seconds; optional unit suffixes s/m/h/d (e.g. \"30m..2h\").",
+            "name": "duration",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Per-recording duration. Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. A bare number is seconds; optional unit suffixes s/m/h/d (e.g. \"30m..2h\")."
+            },
+            "required": false,
+            "description": "Per-recording duration. Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. A bare number is seconds; optional unit suffixes s/m/h/d (e.g. \"30m..2h\").",
+            "name": "recording_length",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Recording count (recordings). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "Recording count (recordings). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "recordings",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Unavailable recording count (recordings). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "Unavailable recording count (recordings). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "unavailable",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Participant age (years). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "Participant age (years). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "age",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Sampling rate (Hz). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix."
+            },
+            "required": false,
+            "description": "Sampling rate (Hz). Range filter (shared/range.ts): \"a..b\" (between, inclusive), \"a..\" (at least), \"..b\" (at most), or a bare \"a\" for an exact match. Plain numbers only, no unit suffix.",
+            "name": "rate",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "50",
+                "60"
+              ],
+              "description": "Power line frequency."
+            },
+            "required": false,
+            "description": "Power line frequency.",
+            "name": "powerline",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "EEG reference (substring match)."
+            },
+            "required": false,
+            "description": "EEG reference (substring match).",
+            "name": "reference",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Electrode placement scheme (substring match)."
+            },
+            "required": false,
+            "description": "Electrode placement scheme (substring match).",
+            "name": "placement",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "10-05",
+                "10-10",
+                "10-20",
+                "biosemi",
+                "egi-geodesic",
+                "other"
+              ],
+              "description": "Electrode system."
+            },
+            "required": false,
+            "description": "Electrode system.",
+            "name": "electrode_system",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "openneuro",
+                "nemar",
+                "gin",
+                "other"
+              ],
+              "description": "Source archive."
+            },
+            "required": false,
+            "description": "Source archive.",
+            "name": "source",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ready",
+                "pending",
+                "failed"
+              ],
+              "description": "Zarr conversion status."
+            },
+            "required": false,
+            "description": "Zarr conversion status.",
+            "name": "zarr",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "BIDS version, e.g. \"2.1.0\"."
+            },
+            "required": false,
+            "description": "BIDS version, e.g. \"2.1.0\".",
+            "name": "bids_version",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "HED version, e.g. \"2.1.0\"."
+            },
+            "required": false,
+            "description": "HED version, e.g. \"2.1.0\".",
+            "name": "hed_version",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search hits.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetSearchEnvelope"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing the required \"q\" parameter, or an invalid facet/range/enum filter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/datasets/facets": {
+      "get": {
+        "summary": "Facet vocabulary for the catalog (distinct values with counts)",
+        "description": "Lets a client validate/autocomplete a filter value (e.g. --task, --electrode-system) against what the catalog actually contains. No query parameters; the response is identical for every caller.",
+        "tags": [
+          "Datasets"
+        ],
+        "responses": {
+          "200": {
+            "description": "The facet vocabulary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetFacetsEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/datasets/{id}": {
+      "get": {
+        "summary": "Get one dataset's detail record",
+        "description": "Public datasets are visible to everyone; private datasets require the caller to be the owner, a collaborator, or an admin -- otherwise this 404s rather than 403s, so a private dataset's existence is not disclosed to an unauthorized caller.",
+        "tags": [
+          "Datasets"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "NEMAR dataset id, e.g. \"nm000123\" or a sandbox \"xx######\" id."
+            },
+            "required": true,
+            "description": "NEMAR dataset id, e.g. \"nm000123\" or a sandbox \"xx######\" id.",
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The dataset's detail record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetDetailEnvelope"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid dataset id format.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or private and the caller lacks access.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {}
+}
