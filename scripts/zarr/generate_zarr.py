@@ -71,7 +71,7 @@ from concurrent.futures import (
 )
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
-from typing import Literal, TypedDict
+from typing import Any, Literal, Protocol, TypedDict
 
 # The engine stamp lives in `zarr_queue`, whose column decides which already-done
 # datasets re-convert (ADR 0033). The index republishes it so a consumer can tell
@@ -2536,7 +2536,14 @@ def merge_index(
     converted: list[dict],
     removed_store_rels: list[str],
     updated_utc: str,
-    failures: list[dict] | None = None,
+    # `failures` is built exclusively by `_failure_entry`, so it carries the
+    # TypedDict. `converted`, `pending` and `prior_pending` deliberately do NOT:
+    # `converted` is a store entry assembled by the worker, and the other two are
+    # this function's INPUT -- `pending` carries only what a run observed (path,
+    # reason, last_error) and `prior_pending` comes verbatim out of a PUBLISHED
+    # index that this function does not re-validate. Claiming PendingEntry for
+    # either would assert a shape nothing checks.
+    failures: list[FailureEntry] | None = None,
     pending: list[dict] | None = None,
     *,
     discovered: list[str] | None = None,
@@ -2968,6 +2975,27 @@ class EventsStaging:
         return pickle.loads(self._fh.read(size))
 
 
+class ArrowTable(Protocol):
+    """The `pyarrow.Table` surface this module actually touches.
+
+    A structural Protocol rather than an import, because pyarrow is an OPTIONAL
+    dependency loaded lazily inside the functions that need it: a node without
+    it still converts, it just publishes no events file. There is therefore no
+    module-scope name to annotate with, and a `TYPE_CHECKING` import would still
+    make a checker's answer depend on whether the package happens to be
+    installed. Stating the three members used here says the same thing, costs
+    nothing at runtime, and turns `table["store_path"]` and `table.filter(mask)`
+    back into checked accesses instead of attribute lookups on `object`.
+    """
+
+    @property
+    def num_rows(self) -> int: ...
+
+    def __getitem__(self, key: str) -> Any: ...
+
+    def filter(self, mask: Any) -> ArrowTable: ...
+
+
 class PriorEventRows:
     """Random access by store into the events.parquet a previous run published.
 
@@ -2996,17 +3024,20 @@ class PriorEventRows:
             for rel in column.unique().to_pylist():
                 if rel is not None:
                     self._by_rel.setdefault(rel, []).append(i)
-        self._cached: tuple[int, object] | None = None
+        self._cached: tuple[int, ArrowTable] | None = None
 
     def __contains__(self, zarr_rel: object) -> bool:
         return zarr_rel in self._by_rel
 
-    def _row_group(self, i: int):
-        """The i-th row group as a `pyarrow.Table` (cached: consecutive stores
-        usually share one). Untyped because `pyarrow` is an optional import in
-        this module -- `self._pa` is the module object, so there is no name to
-        annotate with -- but every caller indexes it by column and filters it,
-        i.e. treats it as a Table, which is what it is.
+    def _row_group(self, i: int) -> ArrowTable:
+        """The i-th row group (cached: consecutive stores usually share one).
+
+        Typed as `ArrowTable`, the structural Protocol declared above, rather
+        than `object`: pyarrow is an optional dependency imported lazily inside
+        the methods that need it, so there is no importable name to annotate
+        with, and `object` made every `table[column]` and `table.filter(...)`
+        below an unchecked attribute access on a value the checker believed had
+        neither.
         """
         if self._cached is None or self._cached[0] != i:
             self._cached = (i, self._file.read_row_group(i))
@@ -3019,7 +3050,7 @@ class PriorEventRows:
         groups = self._by_rel.get(zarr_rel)
         if not groups:
             return None
-        parts = []
+        parts: list[ArrowTable] = []
         for i in groups:
             table = self._row_group(i)
             mask = pc.equal(table["store_path"].cast(self._pa.string()), zarr_rel)
@@ -5848,8 +5879,10 @@ def main() -> int:
     # recordings are now listed in `pending`, and the queue re-queues a `done`
     # dataset that has any (zarr_queue.reconcile), which re-runs it with --clean.
     # So publish the commit the stores were actually built from.
-    # `or head` is not dead code for a type checker's benefit: `is_commit_sha`
-    # narrows the value at runtime but not for the reader, and `head_commit` is
+    # The trailing `and prior_commit` in the condition is not redundant with
+    # `is_commit_sha`: that call narrows the value at runtime but not for a
+    # reader or a type checker, so the extra term is what makes the ternary's
+    # first branch visibly a `str` rather than `str | None`. `head_commit` is
     # published as the index's `source_commit`, where None would serialize as
     # JSON null -- the on008083 shape (#1197) that took an empty commit all the
     # way into a published document.

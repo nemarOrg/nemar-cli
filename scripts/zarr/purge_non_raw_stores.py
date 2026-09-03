@@ -960,7 +960,22 @@ def main(argv: list[str] | None = None) -> int:
     elif snapshot_dir:
         dataset_ids = snapshot_dataset_ids(snapshot_dir)
     else:
-        dataset_ids = list_dataset_ids(args.bucket)
+        try:
+            dataset_ids = list_dataset_ids(args.bucket)
+        except Exception as exc:  # noqa: BLE001 - report it, do not traceback at it
+            # `list_dataset_ids` now RAISES on a failed listing rather than
+            # returning [] (a failure and an empty bucket were the same answer,
+            # and the empty one reads as "all clean"). Raising is right; letting
+            # it out of `main` is not -- an operator running a purge would get a
+            # stack trace and exit 1, which is the exit code a per-dataset purge
+            # failure already uses. Same message and same 2 as the empty case
+            # below, because they call for the same next step: check the bucket
+            # name, the profile, and the credentials.
+            print(
+                f"[purge] ERROR: --all could not list s3://{args.bucket}/: {exc}",
+                flush=True,
+            )
+            return 2
     if args.all and not dataset_ids:
         # Non-zero, like the `--from-index-snapshot` directory check above.
         # "--all found nothing" is never a normal outcome: the bucket holds ~800

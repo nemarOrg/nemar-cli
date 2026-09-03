@@ -1266,6 +1266,26 @@ class ConditionalIndexWriteTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("no datasets", buf.getvalue())
 
+    def test_all_reports_a_failed_listing_instead_of_a_traceback(self):
+        """`list_dataset_ids` raising is right -- a failed listing must not read
+        as an empty bucket -- but the raise must not reach the operator as a
+        stack trace and exit 1, which is the code a per-dataset purge failure
+        already uses. Same message shape and same exit 2 as the empty case,
+        because both call for the same next step: check the bucket name, the
+        profile, the credentials."""
+        os.environ["PURGE_TEST_LIST_FAIL"] = "1"
+        self.addCleanup(os.environ.pop, "PURGE_TEST_LIST_FAIL", None)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = main(["--all", "--bucket", BUCKET, "--audit-log",
+                       os.path.join(self.dir, "audit.json")])
+        out = buf.getvalue()
+        self.assertEqual(rc, 2)
+        self.assertIn("could not list", out)
+        self.assertIn(BUCKET, out)
+        # The underlying cause travels with it, not just "something failed".
+        self.assertIn("AccessDenied", out)
+
     def test_a_missing_index_reads_as_absent(self):
         os.unlink(self.index_path())
         index, etag = read_index_with_etag(BUCKET, DATASET)
