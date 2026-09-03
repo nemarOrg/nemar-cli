@@ -618,7 +618,38 @@ def apply_worker_mem_limit(
 INMEM_MEM_FACTOR = float(os.environ.get("ZARR_INMEM_MEM_FACTOR", "6"))
 INMEM_MEM_FACTOR_BY_EXT = {
     ".vhdr": float(os.environ.get("ZARR_INMEM_MEM_FACTOR_VHDR", "12")),
+    # Same retention as on the streaming path (see STREAM_MEM_FACTOR_BY_EXT):
+    # a MEF3 recording small enough for the in-memory path still decompresses
+    # to float64 several times its RED-compressed on-disk size.
+    MEFD_EXT: float(os.environ.get("ZARR_INMEM_MEM_FACTOR_MEFD", "12")),
 }
+
+# Formats that take the STREAMING path but do not stay inside its flat bound.
+# MEF3 `.mefd` is read through `mne.io.read_raw_mef`, which does ask pymef for one
+# time window at a time -- and the worker's resident memory still climbs to the
+# whole recording decompressed at float64. Measured on the conversion node on
+# 2026-09-03 (on004696, 178-256 channels x 3.3M samples, ~1 GB on disk each):
+# VmHWM 7.5-10.3 GiB per worker, and every recording failed its 8 GiB RLIMIT_DATA
+# on a single-window allocation after many windows, which is the signature of
+# memory retained per window read rather than of one large read. Under the flat
+# 4 GiB projection admission packed eight of them and the kernel killed a worker,
+# which broke the pool. Until the retention is fixed at the reader, project MEF3
+# as an in-memory format: on-disk bytes times this factor (RED compression means
+# on-disk understates the float64 footprint several-fold). 12x covers the worst
+# measured point (10.3 GiB from ~1 GB) with a small margin and admits three at a
+# time against the node's ~46 GiB ceiling instead of eight. Env-overridable so
+# the next measurement (the `worst .mefd at Nx its projection` line in every
+# run's log) can tighten it without a deploy. #1111
+STREAM_MEM_FACTOR_BY_EXT = {
+    MEFD_EXT: float(os.environ.get("ZARR_STREAM_MEM_FACTOR_MEFD", "12")),
+}
+
+
+def stream_factor_for(primary_local: str) -> float:
+    """On-disk multiplier for a streamed recording whose format is known to retain
+    memory beyond the flat streaming bound; 0.0 for every other format, so the
+    flat bound stands alone."""
+    return STREAM_MEM_FACTOR_BY_EXT.get(lower_ext(primary_local), 0.0)
 
 # Signal-Space Separation (ADR 0028) runs BEFORE conversion and costs its own peak:
 # it needs a fully preloaded float64 `Raw`, which is the anonymous memory RLIMIT_DATA
@@ -896,11 +927,13 @@ def projected_peak_bytes(
     `Raw` is released between them, so the recording's peak is the LARGER of the two
     rather than their sum.
     """
-    conversion = (
-        streaming_peak_bytes(size_bytes, n_channels)
-        if should_stream(primary_local, size_bytes)
-        else int(size_bytes * inmem_factor_for(primary_local))
-    )
+    if should_stream(primary_local, size_bytes):
+        conversion = max(
+            streaming_peak_bytes(size_bytes, n_channels),
+            int(size_bytes * stream_factor_for(primary_local)),
+        )
+    else:
+        conversion = int(size_bytes * inmem_factor_for(primary_local))
     if not maxshield:
         return conversion
     return max(conversion, int(size_bytes * MAXSHIELD_MEM_FACTOR))

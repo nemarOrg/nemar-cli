@@ -56,6 +56,10 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     _next_admission,
     _drain_with_admission,
     worker_mem_limit_bytes,
+    stream_factor_for,
+    STREAM_MEM_FACTOR_BY_EXT,
+    INMEM_MEM_FACTOR_BY_EXT,
+    STREAM_MIN_BYTES,
     apply_worker_mem_limit,
     cap_blas_threads,
     data_segment_bytes,
@@ -1869,6 +1873,38 @@ class TestMemoryGuard(unittest.TestCase):
         self.assertEqual(
             projected_peak_bytes("sub-01_task-x_meg.fif", 50 * 1024**3), STREAM_PEAK_BYTES
         )
+
+    def test_mef3_projects_from_on_disk_bytes_on_the_streaming_path(self):
+        """MEF3 streams (MNE reads it a window at a time) but the worker still
+        climbs to the whole recording at float64: 7.5-10.3 GiB from ~1 GB on
+        disk on on004696 (2026-09-03). The flat bound admitted eight at once and
+        the kernel killed a worker. The projection must scale with size."""
+        size = 1024**3
+        self.assertTrue(should_stream("sub-01/ieeg/sub-01_ieeg.mefd", size))
+        self.assertEqual(
+            projected_peak_bytes("sub-01/ieeg/sub-01_ieeg.mefd", size, 256),
+            int(size * STREAM_MEM_FACTOR_BY_EXT[".mefd"]),
+        )
+        self.assertGreater(STREAM_MEM_FACTOR_BY_EXT[".mefd"], 10)
+        # Other streamed formats keep the flat bound: nothing measured says
+        # otherwise, and charging them 12x would serialise the archive.
+        self.assertEqual(projected_peak_bytes("sub-01/meg/sub-01_meg.fif", size, 306), STREAM_PEAK_BYTES)
+        self.assertEqual(projected_peak_bytes("sub-01/meg/sub-01_meg.ds", size, 275), STREAM_PEAK_BYTES)
+        self.assertEqual(stream_factor_for("sub-01/meg/sub-01_meg.fif"), 0.0)
+
+    def test_mef3_streaming_projection_never_drops_below_the_flat_bound(self):
+        # A tiny MEF3 above the stream threshold still gets the streaming floor.
+        size = STREAM_MIN_BYTES + 1
+        self.assertEqual(
+            projected_peak_bytes("x.mefd", size, 8),
+            max(STREAM_PEAK_BYTES, int(size * STREAM_MEM_FACTOR_BY_EXT[".mefd"])),
+        )
+
+    def test_mef3_in_memory_path_uses_the_same_retention_factor(self):
+        size = 100 * 1024**2
+        self.assertFalse(should_stream("x.mefd", size))
+        self.assertEqual(projected_peak_bytes("x.mefd", size), int(size * INMEM_MEM_FACTOR_BY_EXT[".mefd"]))
+        self.assertEqual(INMEM_MEM_FACTOR_BY_EXT[".mefd"], STREAM_MEM_FACTOR_BY_EXT[".mefd"])
 
     def test_projected_peak_inmemory_scales_with_size(self):
         # EEGLAB `.set` is in no STREAM_*_EXTS tuple, so it is always in-memory
