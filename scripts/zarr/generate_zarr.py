@@ -861,10 +861,36 @@ class MaxShieldUncalibrated(Exception):
     code = "maxshield_uncalibrated"
 
 
+class MaxShieldProbeFailed(Exception):
+    """`is_maxshield_fif`'s header-only probe could not read `path` at all.
+
+    Before #1139 the probe caught every exception itself, printed a
+    `::warning::`, and returned False -- which routed the recording down the
+    NORMAL conversion path. For a file the probe could not even open, that
+    path failed anyway, but as an uncoded (or differently-coded, biosigIO's
+    own) `file_read_error`: nothing on the public index distinguished "the
+    MaxShield probe itself could not read this FIF" from any other read
+    failure, so the operator lost the one clue that would have named the
+    actual failure surface.
+
+    The probe runs on `primary_local`, which `materialize_local` /
+    `materialize_recording` has already fetched successfully by the time
+    `convert_one` calls it -- so a header read failing here is a property of
+    what the file itself contains (truncated, corrupt, a missing split
+    member MNE could not resolve), not of this run. Same reasoning ADR 0028
+    already applies to `MaxShieldUncalibrated`: NOT in `RETRYABLE_CODES`,
+    because retrying cannot make a corrupt header become readable."""
+
+    code = "maxshield_probe_failed"
+
+
 # Coded failures that are nevertheless NOT a permanent property of the data, so a
 # run consisting entirely of them must stay retryable. See `deterministic` in main().
 # `maxshield_uncalibrated` is deliberately absent: the calibration pair is either
 # shipped with the dataset or it is not, and retrying cannot change that.
+# `maxshield_probe_failed` is absent for the same reason: the probe runs on a
+# local file this same attempt already fetched successfully, so a header it
+# cannot read is a property of that file's content, not of node conditions.
 RETRYABLE_CODES = frozenset({RecordingMemoryExceeded.code})
 
 
@@ -1116,6 +1142,14 @@ _FALLBACK_REASONS = {
         "the signal until it is corrected. Correcting it needs the site's "
         "fine-calibration and cross-talk files, which this dataset does not provide "
         "for this recording, so no viewer copy is offered."
+    ),
+    # NEMAR-side (not a biosigIO code): ADR 0028's probe (is_maxshield_fif) could
+    # not read this FIF's header at all, so it was never possible to tell whether
+    # it carries raw internal active shielding or needs some other correction.
+    "maxshield_probe_failed": (
+        "This recording's header could not be read, so it was not possible to "
+        "check whether it needs internal-active-shielding correction before "
+        "converting it, and no viewer copy is offered."
     ),
     # NEMAR-side (not a biosigIO code): the producer gave up retrying. A recording
     # that fails for an INFRA reason is listed in the index's `pending` with an
@@ -1392,8 +1426,16 @@ def is_maxshield_fif(path: str) -> bool:
     True -> False once Signal-Space Separation has run, so the same field serves as
     both the detector here and the verification afterwards.
 
-    Anything that is not a readable FIF is not our business: return False and let the
-    normal conversion path produce its own typed failure.
+    A non-FIF path is not our business: return False and let the normal
+    conversion path produce its own typed failure. A FIF whose header cannot
+    be read raises `MaxShieldProbeFailed` (#1139) rather than swallowing the
+    exception and returning False: doing that used to route the recording
+    down the NORMAL conversion path, which for a file this probe could not
+    even open failed anyway -- as an uncoded (or differently-coded)
+    `file_read_error`, with nothing on the public index distinguishing "the
+    MaxShield probe itself could not read this FIF" from any other read
+    failure. `convert_one` classifies the raised exception the same way it
+    classifies every other typed failure, via `.code` and `failure_detail`.
     """
     if lower_ext(path) != ".fif":
         return False
@@ -1404,20 +1446,11 @@ def is_maxshield_fif(path: str) -> bool:
             path, allow_maxshield="yes", preload=False, verbose="ERROR"
         ).info
         return bool(info.get("maxshield"))
-    except Exception as exc:  # noqa: BLE001 - never fail a recording on the probe
-        # Returning False here routes the recording down the NORMAL path, which for
-        # a genuinely MaxShield file is the pre-ADR-0028 behaviour: MNE refuses it
-        # and the operator gets an opaque `file_read_error` with no hint that the
-        # correction was skipped because a header probe failed. That is a real
-        # regression risk (a truncated download, a missing split member -- MNE reads
-        # every split header even at preload=False), so it must not be silent.
-        print(
-            f"::warning::{path!r}: could not read the FIF header to test for "
-            f"Internal Active Shielding ({type(exc).__name__}: {exc}); converting it "
-            "as an ordinary recording. If it IS shielded, expect a file_read_error.",
-            flush=True,
-        )
-        return False
+    except Exception as exc:  # reclassified as MaxShieldProbeFailed below
+        raise MaxShieldProbeFailed(
+            f"could not read the FIF header to test for Internal Active "
+            f"Shielding: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def apply_sss(raw_path: str, calibration: str, cross_talk: str, out_path: str) -> dict:
