@@ -7,7 +7,8 @@
 ## Context
 
 The offload audit (`.context/research-make-vs-take-audit.md`, candidate 2) found NEMAR's byte
-formatting hand-rolled six times across the CLI and backend, one of them (`services/s3.ts`)
+formatting hand-rolled six times across the CLI and backend (a seventh,
+`formatSize` in `src/commands/dataset.ts`, turned up during the work), one of them (`services/s3.ts`)
 disagreeing with the other five on unit base (decimal/1000 vs. binary/1024) — a bug a code
 comment already warned editors away from. The audit's proposed fix was to adopt `pretty-bytes`
 (sindresorhus, near-ubiquitous, zero deps) as a single replacement.
@@ -37,8 +38,8 @@ no dependency and a translation layer.
 Byte-size formatting stays bespoke. `pretty-bytes` (and, by the same reasoning, any other
 maintained formatting library probed against this contract) is declined as a replacement for
 NEMAR's byte formatters. The six existing implementations are consolidated into one module,
-`shared/bytes.ts`, with five surviving named functions (the sixth — the decimal/1000 outlier —
-is deleted outright, not preserved) and a shared private scaling helper so the `1024` base
+`shared/bytes.ts`, with five surviving named functions (the decimal/1000 outlier is deleted
+outright, not preserved, and the seventh was byte-identical to a survivor) and a shared private scaling helper so the `1024` base
 appears once. This is the audit's "replace" verdict overturned to "consolidate, keep bespoke,"
 per ADR 0037: a keep verdict, recorded, is as valuable as a replace verdict.
 
@@ -95,9 +96,13 @@ string.
 - Measured `pretty-bytes` 7.1.2 output cited above, from the phase 4 implementation brief on
   issue #1227 (epic #1225 phase 4): `prettyBytes(1536, {binary: true})` → `"1.5 KiB"`;
   `prettyBytes(24000000000, {binary: true})` → `"22.4 GiB"`; `prettyBytes(1536)` → `"1.54 kB"`.
-- This PR: the six-formatter consolidation into `shared/bytes.ts`, the golden tests pinning all
-  five surviving formats plus the deleted sixth's pre-deletion behavior, and the `s3.ts` decimal
-  formatter's deletion (`enrich-dataset.ts` switches its one call site to `formatFileSize`).
+- This PR: the formatter consolidation into `shared/bytes.ts`, the golden tests pinning all five
+  surviving formats, and the `s3.ts` decimal formatter's deletion (`enrich-dataset.ts` switches
+  its one call site to `formatFileSize`). The deleted decimal formatter's own output is NOT
+  pinned by a test: nothing calls it any more, so there is no surface to pin it through. Its
+  migrated call site is covered instead, by the `<sizes>` rows in `test/datacite.test.ts` --
+  `formatFileSize` returns null where the deleted one returned a string, and that call site now
+  omits the field rather than publishing a stringified null (#1225 review).
 - ADR 0037 (make versus take is decided explicitly, in both directions) — this ADR is exactly the
   "keep" half that ADR 0037's Decision section says must be recorded with equal weight to a
   "replace" verdict.

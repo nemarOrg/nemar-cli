@@ -64,7 +64,20 @@ function makeNativePresent(): void {
 }
 
 afterAll(() => {
-  subtle.timingSafeEqual = ORIGINAL_TIMING_SAFE_EQUAL;
+  // Reinstall rather than restore the load-time snapshot (#1225 review).
+  // Root `bun test` runs test/ and backend/test/ in ONE process, so if this
+  // file loads before any sibling that calls installWorkersTimingSafeEqual(),
+  // the snapshot is `undefined` and restoring it would strip the capability
+  // for the rest of the run -- silently pushing the six sibling suites that
+  // exist to exercise the NATIVE branch onto the portable one instead. Both
+  // branches are correct, so nothing would fail; the coverage would just
+  // quietly stop being what helpers/workers-crypto.ts says it is. The helper
+  // is idempotent, so this is safe however this file was reached.
+  if (ORIGINAL_TIMING_SAFE_EQUAL) {
+    subtle.timingSafeEqual = ORIGINAL_TIMING_SAFE_EQUAL;
+  } else {
+    installWorkersTimingSafeEqual();
+  }
 });
 
 const TOKEN = "constant-time-compare-webhook-token";

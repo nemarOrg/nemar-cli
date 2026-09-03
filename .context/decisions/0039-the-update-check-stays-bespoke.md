@@ -8,7 +8,7 @@
 
 The offload audit (`.context/research-make-vs-take-audit.md`, candidate 12) proposed replacing
 `src/lib/update-check.ts` (npm registry check, on-disk TTL cache, background refresh, env opt-out,
-about 180 lines) with `update-notifier`, the package most popular CLIs use for the same job.
+about 190 lines) with `update-notifier`, the package most popular CLIs use for the same job.
 The audit's stated side benefit, real semver precedence for `-devN` builds, had already landed
 through phase 6 of epic #1225 (`semver.gt`, issue #1228), so the remaining question was only
 whether the library is a better home for the behaviour.
@@ -43,7 +43,7 @@ inert in the first without raising an error.
 
 ## Consequences
 
-`update-check.ts` keeps its 180 lines and its four tests; no dependency is added. The
+`update-check.ts` keeps its ~190 lines and its nine tests; no dependency is added. The
 `NEMAR_NO_UPDATE_CHECK` opt-out and the `NEMAR_CONFIG_DIR`-relative cache are unchanged, so
 nothing in docs or the E2E harness moves. The next audit does not need to re-derive this: the
 probe recipe (bundle a caller with `bun build --target bun`, copy the output elsewhere, run

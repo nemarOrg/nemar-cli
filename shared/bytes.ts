@@ -1,9 +1,11 @@
 /**
  * Byte-size formatters (epic #1225 phase 4, issue #1227).
  *
- * NEMAR had six independent byte-formatting functions scattered across the
+ * NEMAR had seven independent byte-formatting functions scattered across the
  * CLI and backend, each hand-rolled and each drifting from the others in
- * its own way. This module consolidates them into one file. It does NOT
+ * its own way (the audit that prompted this counted six; a seventh,
+ * `formatSize` in src/commands/dataset.ts, turned up during the work and was
+ * byte-identical to `formatBytesCli` below the 1 PiB clamp). This module consolidates them into one file. It does NOT
  * consolidate them into one function: the five surviving formats are
  * genuinely different strings for the same byte count (see the table
  * below), each has at least one live consumer today, and the epic's
@@ -13,7 +15,7 @@
  * the options already chosen and named, rather than re-derived at each
  * call site.
  *
- * The sixth formatter -- `backend/src/services/s3.ts`'s decimal/1000
+ * The decimal outlier -- `backend/src/services/s3.ts`'s decimal/1000
  * `formatBytes`, the outlier this consolidation's audit named -- is
  * deleted outright, not moved here. Its one caller
  * (`enrich-dataset.ts`'s Stage 1a size seed) now calls `formatFileSize`,
@@ -73,8 +75,10 @@ function scaleByBase(value: number, maxIndex: number): { value: number; index: n
  * rather than folded into `scaleByBase`: the two approaches can disagree by
  * a floating-point rounding hair at an exact power-of-1024 boundary, and
  * unifying them risked silently shifting one of these two formatters off
- * its historical (and golden-tested) output. Both callers already used this
- * exact expression before this module existed.
+ * its historical (and golden-tested) output. `formatBytesCli` used this exact
+ * expression before this module existed; `formatBytesTrimmed`'s original had
+ * no `Math.min` clamp, so for that one the clamp is a deliberate fix rather
+ * than a faithful port -- see its own note below (#1225 review).
  */
 function logUnitIndex(bytes: number, maxIndex: number): number {
   return Math.min(Math.floor(Math.log(bytes) / Math.log(BASE)), maxIndex);

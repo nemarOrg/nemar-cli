@@ -4,7 +4,7 @@
  * Provides parsing, bumping, comparison, and validation for semantic versions.
  * Supports only stable versions (X.Y.Z) without pre-release or build metadata.
  *
- * Backed by the `semver` package. Two edge cases were measured against the
+ * Backed by the `semver` package. Edge cases were measured against the
  * hand-rolled regex this replaced (epic #1225 phase 6) and are handled
  * explicitly below: a leading-zero component (e.g. "01.2.3") is a narrowing
  * (the old regex accepted it; semver correctly rejects it as invalid semver),
@@ -71,6 +71,13 @@ export function isValidStableVersion(v: string): boolean {
 /**
  * Compare two version strings.
  * Returns negative if a < b, positive if a > b, 0 if equal.
+ *
+ * NOTE (#1225 phase 6): no production code calls this any more --
+ * `update-check.ts` was its last consumer and now uses `semver.gt` directly,
+ * so only `test/semver.test.ts` reaches it. Its return value also changed
+ * from a raw component difference to `semver.compare`'s -1/0/1; that is inert
+ * today because nothing reads the magnitude, but a new caller must not assume
+ * the old shape.
  */
 export function compareVersions(a: string, b: string): number {
   const pa = parseVersion(a);

@@ -38,16 +38,14 @@ const currentParsed = semver.parse(currentVersion);
 if (!currentParsed) {
   throw new Error(`test setup: package.json version "${currentVersion}" is not valid semver`);
 }
-if (currentParsed.prerelease.length === 0) {
-  // AGENTS.md: "dev always carries an X.Y.Z-devN suffix." The #1163 row
-  // below only exercises the bug when currentVersion actually has a
-  // prerelease suffix to strip -- fail loudly here rather than silently
-  // testing something else if that convention is ever violated.
-  throw new Error(
-    `test setup: expected a -devN prerelease version, got "${currentVersion}" ` +
-      "(AGENTS.md: dev always carries an X.Y.Z-devN suffix)",
-  );
-}
+// AGENTS.md: "dev always carries an X.Y.Z-devN suffix", so on dev this is
+// always true and the #1163 rows below exercise the real bug. It is NOT true
+// on main: auto-tag.yml strips the suffix and pushes that commit back without
+// [skip ci], so test.yml runs against a stable X.Y.Z there. Skipping those
+// rows is the only correct response -- an earlier version of this file threw
+// at module scope instead, which turned the whole required unit-pure tier red
+// on every release strip commit (#1225 review).
+const HAS_PRERELEASE = currentParsed.prerelease.length > 0;
 
 /** The stable release currentVersion is a prerelease of, e.g. "0.9.15-dev4" -> "0.9.15". */
 const CURRENT_STABLE = `${currentParsed.major}.${currentParsed.minor}.${currentParsed.patch}`;
@@ -91,18 +89,24 @@ describe("initUpdateCheck (entry point): precedence via a real cache file", () =
     }
   });
 
-  test(`#1163 regression: a released ${CURRENT_STABLE} IS an update over a running ${currentVersion}`, async () => {
-    // This is the bug this phase fixes, exercised end-to-end. The deleted
-    // normalizeVersion() stripped the ENTIRE prerelease suffix off
-    // currentVersion before comparing, so a cached latestVersion equal to
-    // the stable release the running -devN build is a prerelease OF
-    // compared as merely EQUAL -- no banner ever fired for a dev build user,
-    // even once the real release shipped.
-    dir = freshConfigDir();
-    process.env.NEMAR_CONFIG_DIR = dir;
-    writeFreshCache(dir, CURRENT_STABLE);
-    await expect(initUpdateCheck()).resolves.toBe(CURRENT_STABLE);
-  });
+  // Depends on the running version carrying a prerelease suffix (see
+  // HAS_PRERELEASE above): on main, after auto-tag strips it, there is no
+  // -devN build for a stable release to be newer than.
+  test.skipIf(!HAS_PRERELEASE)(
+    `#1163 regression: a released ${CURRENT_STABLE} IS an update over a running ${currentVersion}`,
+    async () => {
+      // This is the bug this phase fixes, exercised end-to-end. The deleted
+      // normalizeVersion() stripped the ENTIRE prerelease suffix off
+      // currentVersion before comparing, so a cached latestVersion equal to
+      // the stable release the running -devN build is a prerelease OF
+      // compared as merely EQUAL -- no banner ever fired for a dev build user,
+      // even once the real release shipped.
+      dir = freshConfigDir();
+      process.env.NEMAR_CONFIG_DIR = dir;
+      writeFreshCache(dir, CURRENT_STABLE);
+      await expect(initUpdateCheck()).resolves.toBe(CURRENT_STABLE);
+    },
+  );
 
   test("no update: cached latestVersion equals the running version", async () => {
     dir = freshConfigDir();
@@ -118,15 +122,21 @@ describe("initUpdateCheck (entry point): precedence via a real cache file", () =
     await expect(initUpdateCheck()).resolves.toBe(NEXT_PATCH);
   });
 
-  test(`update available: a prerelease of the same stable release (${RC_OF_CURRENT_STABLE})`, async () => {
-    // "rc1" sorts after "dev4" (or whatever the running -devN suffix is)
-    // under semver's prerelease identifier comparison, so this is still an
-    // update, not merely a lateral move.
-    dir = freshConfigDir();
-    process.env.NEMAR_CONFIG_DIR = dir;
-    writeFreshCache(dir, RC_OF_CURRENT_STABLE);
-    await expect(initUpdateCheck()).resolves.toBe(RC_OF_CURRENT_STABLE);
-  });
+  // Depends on the running version carrying a prerelease suffix (see
+  // HAS_PRERELEASE above): on main, after auto-tag strips it, there is no
+  // -devN build for a stable release to be newer than.
+  test.skipIf(!HAS_PRERELEASE)(
+    `update available: a prerelease of the same stable release (${RC_OF_CURRENT_STABLE})`,
+    async () => {
+      // "rc1" sorts after "dev4" (or whatever the running -devN suffix is)
+      // under semver's prerelease identifier comparison, so this is still an
+      // update, not merely a lateral move.
+      dir = freshConfigDir();
+      process.env.NEMAR_CONFIG_DIR = dir;
+      writeFreshCache(dir, RC_OF_CURRENT_STABLE);
+      await expect(initUpdateCheck()).resolves.toBe(RC_OF_CURRENT_STABLE);
+    },
+  );
 
   test(`no update: cached latestVersion (${DEFINITELY_OLDER}) is older than the running version`, async () => {
     dir = freshConfigDir();
@@ -151,9 +161,15 @@ describe("initUpdateCheck (entry point): precedence via a real cache file", () =
 });
 
 describe("isNewerVersion (direct: supplement to the initUpdateCheck entry-point tests above)", () => {
-  test(`the #1163 regression, at the comparator level: ${CURRENT_STABLE} is newer than ${currentVersion}`, () => {
-    expect(isNewerVersion(CURRENT_STABLE)).toBe(true);
-  });
+  // Depends on the running version carrying a prerelease suffix (see
+  // HAS_PRERELEASE above): on main, after auto-tag strips it, there is no
+  // -devN build for a stable release to be newer than.
+  test.skipIf(!HAS_PRERELEASE)(
+    `the #1163 regression, at the comparator level: ${CURRENT_STABLE} is newer than ${currentVersion}`,
+    () => {
+      expect(isNewerVersion(CURRENT_STABLE)).toBe(true);
+    },
+  );
 
   test("the running version is not newer than itself", () => {
     expect(isNewerVersion(currentVersion)).toBe(false);
