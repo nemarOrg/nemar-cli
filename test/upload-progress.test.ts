@@ -127,6 +127,88 @@ describe("readUploadProgress", () => {
 
     expect(readUploadProgress(testDir)).toBeNull();
   });
+
+  test("returns null when files is array-valued (deliberate narrowing)", () => {
+    // typeof [] === "object", so an array-valued `files` used to pass the
+    // old hand-rolled check and then silently resume with zero matching
+    // file paths (every lookup against an array by string path misses).
+    // z.record categorizes an array as ZodParsedType "array", never
+    // "object", so this is now rejected outright. See PR body.
+    const dir = join(testDir, ".nemar");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "upload-progress.json"),
+      JSON.stringify({
+        dataset_id: "nm000123",
+        started_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+        files: [],
+        completed_steps: [],
+      }),
+    );
+
+    expect(readUploadProgress(testDir)).toBeNull();
+  });
+
+  test("returns null when a file entry omits updated_at (deliberate narrowing)", () => {
+    // FileProgress declares updated_at as required and every writer in the
+    // module sets it (initUploadProgress, markFileUploaded, markFileFailed),
+    // but the old hand-rolled check never verified it -- so isValidProgress's
+    // `data is UploadProgress` predicate asserted a field nothing had checked.
+    // The schema now requires it. Unlike mtimeMs, which really is absent from
+    // pre-#884 files, no NEMAR-written progress file has ever lacked this.
+    const dir = join(testDir, ".nemar");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "upload-progress.json"),
+      JSON.stringify({
+        dataset_id: "nm000123",
+        started_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+        files: { "sub-01/eeg.edf": { status: "pending", size: 10 } },
+        completed_steps: [],
+      }),
+    );
+
+    expect(readUploadProgress(testDir)).toBeNull();
+  });
+
+  test("round-trips per-file error, unknown per-file key, and unknown top-level key", () => {
+    // readUploadProgress returns the raw JSON.parse result rather than a
+    // stripping `result.data`, so a resumed upload does not silently lose a
+    // per-file error message or any forward-compatibility field the next
+    // writeUploadProgress would otherwise drop.
+    const dir = join(testDir, ".nemar");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "upload-progress.json"),
+      JSON.stringify({
+        dataset_id: "nm000123",
+        started_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+        files: {
+          "sub-01/eeg.edf": {
+            status: "failed",
+            size: 10,
+            updated_at: "2026-01-01T00:00:00Z",
+            error: "Connection timeout",
+            futureFileField: "keep-me",
+          },
+        },
+        completed_steps: [],
+        futureTopLevelField: "keep-me-too",
+      }),
+    );
+
+    const read = readUploadProgress(testDir);
+    expect(read).not.toBeNull();
+    if (!read) return; // narrowing guard
+    expect(read.files["sub-01/eeg.edf"].error).toBe("Connection timeout");
+    expect((read.files["sub-01/eeg.edf"] as Record<string, unknown>).futureFileField).toBe(
+      "keep-me",
+    );
+    expect((read as unknown as Record<string, unknown>).futureTopLevelField).toBe("keep-me-too");
+  });
 });
 
 describe("writeUploadProgress", () => {

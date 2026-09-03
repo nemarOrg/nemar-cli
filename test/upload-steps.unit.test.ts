@@ -146,6 +146,47 @@ describe("prepareUploadProgress", () => {
     const filesToUpload = computeFilesToUpload(reconciled, dataFiles);
     expect(filesToUpload.map((f) => f.path)).toEqual(["sub-01/eeg/a.edf", "sub-01/eeg/b.edf"]);
   });
+
+  // Entry-point coverage for the zod-based isValidProgress replacement
+  // (issue #1230): prepareUploadProgress is the orchestration function the
+  // upload command actually reaches the resume path through, so these drive
+  // it directly rather than the schema (an isolated helper) in isolation.
+  test("valid resume: a well-formed progress file resumes with its dataset_id and files intact", () => {
+    const dir = scratchDir("nemar-prepare-valid-resume-");
+    const progress = initUploadProgress(dir, "nm000123", [
+      { path: "sub-01/eeg/a.edf", size: 100 },
+      { path: "sub-01/eeg/b.edf", size: 200 },
+    ]);
+    markFileUploaded(progress, "sub-01/eeg/a.edf");
+    writeUploadProgress(dir, progress);
+
+    const { uploadProgress } = prepareUploadProgress(dir, manifest, {});
+    expect(uploadProgress).not.toBeNull();
+    if (!uploadProgress) return; // narrowing guard
+    expect(uploadProgress.dataset_id).toBe("nm000123");
+    expect(uploadProgress.files["sub-01/eeg/a.edf"].status).toBe("uploaded");
+    expect(uploadProgress.files["sub-01/eeg/b.edf"].status).toBe("pending");
+  });
+
+  test("malformed progress file: an invalid status refuses the resume (uploadProgress is null)", () => {
+    const dir = scratchDir("nemar-prepare-malformed-");
+    mkdirSync(join(dir, ".nemar"), { recursive: true });
+    writeFileSync(
+      join(dir, ".nemar", "upload-progress.json"),
+      JSON.stringify({
+        dataset_id: "nm000123",
+        started_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+        files: {
+          "sub-01/eeg/a.edf": { status: "banana", size: 100 },
+        },
+        completed_steps: [],
+      }),
+    );
+
+    const { uploadProgress } = prepareUploadProgress(dir, manifest, {});
+    expect(uploadProgress).toBeNull();
+  });
 });
 
 describe("checkUploadPrerequisites", () => {
