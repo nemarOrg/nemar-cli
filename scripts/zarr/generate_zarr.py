@@ -103,6 +103,15 @@ COMPANION_EXTS = (".fdt", ".eeg", ".vmrk")
 # consulting `head_files`; contrast 4D/BTi below, which is directory-based too but
 # carries no extension and needs content-based detection instead.
 CTF_DS_EXT = ".ds"
+# api.nemar.org sits behind Cloudflare, which 403s the default Python-urllib
+# User-Agent as a bot (verified 2026-09-03: the same GET is 200 under any other
+# string). The first production run on engine 3 fetched provenance without one
+# and flagged every store `provenance_fetch_failed`, so this is load-bearing for
+# the whole conversion wave, not a courtesy header. `zarr_queue.USER_AGENT`
+# covers the catalog fetch for the same reason; the converter identifies itself
+# distinctly so the two are separable in access logs.
+USER_AGENT = f"nemar-zarr-converter/{ZARR_ENGINE_VERSION} (+https://github.com/nemarOrg/nemar-cli)"
+
 MEFD_EXT = ".mefd"
 DIR_RECORDING_EXTS = (CTF_DS_EXT, MEFD_EXT)
 
@@ -4371,7 +4380,9 @@ def fetch_dataset_row(api_base: str, dataset_id: str) -> tuple[dict | None, bool
     """
     url = f"{api_base.rstrip('/')}/datasets/{dataset_id}"
     try:
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        req = urllib.request.Request(
+            url, headers={"Accept": "application/json", "User-Agent": USER_AGENT}
+        )
         with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 - fixed https base
             body = json.loads(resp.read().decode("utf-8"))
     except Exception as exc:  # noqa: BLE001 - provenance is best-effort
