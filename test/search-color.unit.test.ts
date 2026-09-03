@@ -19,21 +19,12 @@
  * order and would make every "no colour" assertion below vacuously true
  * for the wrong reason if left set.
  *
- * TEST_API_URL is also explicitly cleared. `bun test` runs every file in
- * one process, and test/maintenance-client.test.ts's `afterAll` restores it
- * with `process.env.TEST_API_URL = previousTestApiUrl` -- unguarded, unlike
- * test/publish-progress.test.ts's equivalent restore. Node/Bun coerce
- * assigning `undefined` to a `process.env` key into the literal string
- * `"undefined"` rather than deleting it, so once that file has run in this
- * environment (no test/.env.test => TEST_API_URL was never set to begin
- * with), `process.env.TEST_API_URL` is left holding `"undefined"` for every
- * test that runs afterward in the same process -- a real, pre-existing
- * test-isolation bug (confirmed by a 2-file repro:
- * `bun test test/maintenance-client.test.ts test/search-color.unit.test.ts`
- * fails 5/12 with `getApiUrl()` returning the string "undefined"; this file
- * alone, or with test/api.test.ts + test/cli.test.ts instead, passes clean).
- * Clearing it here is a workaround for THIS file rather than a fix for that
- * one -- see the phase report for the recommended follow-up.
+ * TEST_API_URL is explicitly set to this file's own local stub server for
+ * every spawn, so a search subprocess never depends on whatever TEST_API_URL
+ * happens to be in the ambient/parent env. (It used to also work around a
+ * cross-file test-isolation bug in test/maintenance-client.test.ts's
+ * unguarded `afterAll` restore -- #1175 fixed that restore, so this is now
+ * just normal per-test isolation, not a workaround.)
  */
 
 import { describe, expect, test } from "bun:test";
@@ -73,8 +64,7 @@ async function runSearch(
     FORCE_COLOR: undefined,
     CLICOLOR_FORCE: undefined,
     NO_COLOR: undefined,
-    // See the file-level comment: neutralises a pre-existing cross-file
-    // test-isolation bug rather than depending on it not having run yet.
+    // Point at this test's own local stub server rather than the ambient env.
     TEST_API_URL: stub.url,
     NEMAR_NO_UPDATE_CHECK: "1",
     ...envOverrides,

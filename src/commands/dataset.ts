@@ -1391,7 +1391,8 @@ Examples:
 // Status command
 datasetCommand
   .command("status")
-  .description("Check status of a dataset")
+  .alias("view")
+  .description("Check status of a dataset (alias: view)")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
   .option("--json", "Output as JSON for scripting")
   .addHelpText(

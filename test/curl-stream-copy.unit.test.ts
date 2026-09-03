@@ -63,7 +63,12 @@ beforeAll(() => {
 
 afterAll(() => {
   server.stop(true);
-  process.env.PATH = previousPath;
+  // Guarded restore (#1175): assigning `undefined` to a process.env key
+  // coerces to the literal string "undefined" instead of deleting it, which
+  // would poison PATH for every test running later in the same `bun test`
+  // process (test/ + backend/test/ share one process at the root).
+  if (previousPath === undefined) delete process.env.PATH;
+  else process.env.PATH = previousPath;
   rmSync(binDir, { recursive: true, force: true });
 });
 

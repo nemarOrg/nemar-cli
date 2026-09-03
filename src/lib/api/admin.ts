@@ -801,6 +801,84 @@ export async function hedSweepReset(): Promise<HedSweepResetResponse> {
   );
 }
 
+/** One batch of the recording-stats backfill sweep (migration 0070, epic
+ *  #1144 Phase 2, issue #1146, `POST /admin/datasets/recording-stats-sweep`). */
+export interface RecordingStatsSweepBatchResponse {
+  processed: number;
+  /** Candidates whose zarr index yielded at least one measured recording. */
+  measured: number;
+  /** Candidates whose zarr index existed but had no measured recordings. */
+  unmeasured: number;
+  errors: { dataset_id: string; error: string }[];
+  /** Datasets still unswept; 0 when done, null if the count query failed. */
+  remaining: number | null;
+}
+
+/** Response of `?reset=1`: count of stamped rows cleared back to unswept. */
+export interface RecordingStatsSweepResetResponse {
+  reset: number;
+}
+
+/** Run one bounded recording-stats sweep batch (default 50, server-clamped to [1,200]). */
+export async function recordingStatsSweep(options?: {
+  limit?: number;
+}): Promise<RecordingStatsSweepBatchResponse> {
+  const limit = options?.limit ?? 50;
+  return request<RecordingStatsSweepBatchResponse>(
+    `/admin/datasets/recording-stats-sweep?limit=${encodeURIComponent(String(limit))}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+/** Clear every stamped recording-stats row so a corrected aggregator can re-sweep from scratch. */
+export async function recordingStatsSweepReset(): Promise<RecordingStatsSweepResetResponse> {
+  return request<RecordingStatsSweepResetResponse>(
+    "/admin/datasets/recording-stats-sweep?reset=1",
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+/** One batch of the signal-defaults backfill sweep (migrations 0072/0073, epic
+ *  #1144 Phase 2b, issue #1153, `POST /admin/datasets/signal-defaults-sweep`). */
+export interface SignalDefaultsSweepBatchResponse {
+  processed: number;
+  /** Candidates whose probe found at least one usable sidecar key and wrote it. */
+  populated: number;
+  /** Candidates whose probe completed but found nothing to write. */
+  noData: number;
+  errors: { dataset_id: string; error: string }[];
+  /** Datasets still unswept; 0 when done, null if the count query failed. */
+  remaining: number | null;
+}
+
+/** Response of `?reset=1`: count of stamped rows cleared back to unswept. */
+export interface SignalDefaultsSweepResetResponse {
+  reset: number;
+}
+
+/** Run one bounded signal-defaults sweep batch (default 15, server-clamped to [1,30]). */
+export async function signalDefaultsSweep(options?: {
+  limit?: number;
+}): Promise<SignalDefaultsSweepBatchResponse> {
+  const limit = options?.limit ?? 15;
+  return request<SignalDefaultsSweepBatchResponse>(
+    `/admin/datasets/signal-defaults-sweep?limit=${encodeURIComponent(String(limit))}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+/** Clear every stamped signal-defaults row so a corrected probe can re-sweep from scratch. */
+export async function signalDefaultsSweepReset(): Promise<SignalDefaultsSweepResetResponse> {
+  return request<SignalDefaultsSweepResetResponse>(
+    "/admin/datasets/signal-defaults-sweep?reset=1",
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
 /** One batch of the data-integrity sweep (epic #967 Phase 3, #970,
  *  `POST /admin/datasets/data-integrity-sweep`). */
 export interface DataIntegritySweepBatchResponse {
