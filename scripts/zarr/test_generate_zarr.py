@@ -57,6 +57,7 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     _drain_with_admission,
     worker_mem_limit_bytes,
     stream_factor_for,
+    projection_factor_hint,
     STREAM_MEM_FACTOR_BY_EXT,
     INMEM_MEM_FACTOR_BY_EXT,
     STREAM_MIN_BYTES,
@@ -2024,6 +2025,26 @@ class TestMemoryGuard(unittest.TestCase):
                     rec, None, os.path.join(d, "store"),
                     mem_budget_bytes=5, hard_ceiling_bytes=5,
                 )
+
+    def test_a_too_large_mef3_names_the_factor_behind_the_verdict(self):
+        # A MEF3 session is skipped because of the 12x retention factor, not
+        # because of its bytes on disk; the message must say which knob to
+        # revisit once the reader stops retaining. Small directory: in-memory path.
+        with tempfile.TemporaryDirectory() as d:
+            rec = os.path.join(d, "sub-01_task-x_ieeg.mefd")
+            os.makedirs(os.path.join(rec, "ch-1.timd"))
+            with open(os.path.join(rec, "ch-1.timd", "seg.tdat"), "wb") as fh:
+                fh.write(b"m" * 100_000)
+            with self.assertRaises(RecordingTooLarge) as cm:
+                convert_recording(
+                    rec, None, os.path.join(d, "store"),
+                    mem_budget_bytes=1, hard_ceiling_bytes=2,
+                )
+            self.assertIn(".mefd factor 12x (ZARR_INMEM_MEM_FACTOR_MEFD)", str(cm.exception))
+        self.assertEqual(projection_factor_hint("x.edf", streaming=True), "")
+        self.assertEqual(projection_factor_hint("x.fif", streaming=True), "")
+        self.assertIn("ZARR_STREAM_MEM_FACTOR_MEFD", projection_factor_hint("x.mefd", streaming=True))
+        self.assertIn("ZARR_INMEM_MEM_FACTOR_VHDR", projection_factor_hint("x.vhdr", streaming=False))
 
     def test_reason_for_code_too_large_is_user_facing(self):
         self.assertIn("too large", reason_for_code("recording_too_large").lower())

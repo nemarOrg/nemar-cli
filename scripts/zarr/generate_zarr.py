@@ -652,6 +652,20 @@ def stream_factor_for(primary_local: str) -> float:
     flat bound stands alone."""
     return STREAM_MEM_FACTOR_BY_EXT.get(lower_ext(primary_local), 0.0)
 
+
+def projection_factor_hint(primary_local: str, streaming: bool) -> str:
+    """Name the format-specific multiplier behind a projection, for the skip
+    message, when one applied. A MEF3 session skipped as too large is skipped
+    because of the 12x above, and the person reading the index should see which
+    knob (`ZARR_STREAM_MEM_FACTOR_MEFD` / `ZARR_INMEM_MEM_FACTOR_MEFD`) to revisit
+    once the reader's retention is fixed, rather than a bare "too large"."""
+    ext = lower_ext(primary_local)
+    table = STREAM_MEM_FACTOR_BY_EXT if streaming else INMEM_MEM_FACTOR_BY_EXT
+    if ext not in table or (streaming and table[ext] <= 0):
+        return ""
+    knob = f"ZARR_{'STREAM' if streaming else 'INMEM'}_MEM_FACTOR_{ext.lstrip('.').upper()}"
+    return f"; projected with the {ext} factor {table[ext]:g}x ({knob})"
+
 # Signal-Space Separation (ADR 0028) runs BEFORE conversion and costs its own peak:
 # it needs a fully preloaded float64 `Raw`, which is the anonymous memory RLIMIT_DATA
 # counts. The filtered copy then STREAMS, so conversion adds nothing to that peak.
@@ -4874,7 +4888,8 @@ def convert_recording(
                 f"projected peak ~{peak // 1024**3} GiB exceeds the "
                 f"~{mem_budget_bytes // 1024**3} GiB per-recording budget for this run "
                 f"(on-disk {size_bytes // 1024**3} GiB via the "
-                f"{'streaming' if streaming else 'in-memory'} path; "
+                f"{'streaming' if streaming else 'in-memory'} path"
+                f"{projection_factor_hint(primary_local, streaming)}; "
                 "the budget is the node's usable RAM and does NOT change with --jobs)"
             )
     def _convert_in_memory() -> None:
