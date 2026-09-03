@@ -341,6 +341,12 @@ export function buildOpenApiDocument(): OpenAPIObject {
         description: "An invalid facet range, enum value, or filter token.",
         content: { "application/json": { schema: ErrorResponse } },
       },
+      401: {
+        description:
+          "`mine=true` with no valid session: either no bearer token was sent, or one " +
+          "was sent but rejected (invalid, expired, or revoked).",
+        content: { "application/json": { schema: ErrorResponse } },
+      },
     },
   });
 
@@ -400,6 +406,13 @@ export function buildOpenApiDocument(): OpenAPIObject {
       },
       400: {
         description: "Invalid dataset id format.",
+        content: { "application/json": { schema: ErrorResponse } },
+      },
+      401: {
+        description:
+          "The dataset is private and the caller sent a bearer token that was rejected " +
+          "(invalid, expired, or revoked). A private dataset requested with no credentials " +
+          "at all still 404s, per the description above.",
         content: { "application/json": { schema: ErrorResponse } },
       },
       404: {
