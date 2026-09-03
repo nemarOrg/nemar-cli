@@ -24,27 +24,14 @@ import {
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+import { installWorkersTimingSafeEqual } from "./helpers/workers-crypto";
 
-/**
- * `crypto.subtle.timingSafeEqual` is a Cloudflare Workers extension to Web
- * Crypto that bun's runtime lacks, so the zarr-ready handler's token check
- * throws before reaching any behavior under test. Supplying the missing
- * PLATFORM primitive is not a mock of business logic -- the handler's own check
- * still runs against it. Same polyfill as zarr-index-v3.test.ts.
- */
-const subtle = crypto.subtle as SubtleCrypto & {
-  timingSafeEqual?: (a: ArrayBufferView, b: ArrayBufferView) => boolean;
-};
-if (typeof subtle.timingSafeEqual !== "function") {
-  subtle.timingSafeEqual = (a: ArrayBufferView, b: ArrayBufferView): boolean => {
-    const x = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
-    const y = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
-    if (x.length !== y.length) return false;
-    let diff = 0;
-    for (let i = 0; i < x.length; i++) diff |= (x[i] as number) ^ (y[i] as number);
-    return diff === 0;
-  };
-}
+// `crypto.subtle.timingSafeEqual` is a Cloudflare Workers extension to Web
+// Crypto that bun's runtime lacks, so the zarr-ready handler's token check
+// needs it. See helpers/workers-crypto.ts for why this isn't a mock and why
+// it's still installed now that lib/constant-time.ts feature-detects this
+// itself: it keeps this suite exercising the native branch.
+installWorkersTimingSafeEqual();
 
 type App = Hono<{ Bindings: Bindings; Variables: Variables }>;
 

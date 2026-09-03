@@ -60,23 +60,14 @@ import { registerRecordsReadyRoutes } from "../src/routes/callbacks/records-read
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+import { installWorkersTimingSafeEqual } from "./helpers/workers-crypto";
 
 // bun's runtime lacks `crypto.subtle.timingSafeEqual` (a Workers
-// extension); the webhook handler's token check needs it. Same real
-// constant-time comparison polyfill as recording-stats-callback.test.ts.
-const subtle = crypto.subtle as SubtleCrypto & {
-  timingSafeEqual?: (a: ArrayBufferView, b: ArrayBufferView) => boolean;
-};
-if (typeof subtle.timingSafeEqual !== "function") {
-  subtle.timingSafeEqual = (a: ArrayBufferView, b: ArrayBufferView): boolean => {
-    const x = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
-    const y = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
-    if (x.length !== y.length) return false;
-    let diff = 0;
-    for (let i = 0; i < x.length; i++) diff |= (x[i] as number) ^ (y[i] as number);
-    return diff === 0;
-  };
-}
+// extension); the webhook handler's token check needs it. See
+// helpers/workers-crypto.ts for why this isn't a mock and why it's still
+// installed now that lib/constant-time.ts feature-detects this itself: it
+// keeps this suite exercising the native branch.
+installWorkersTimingSafeEqual();
 
 const ADMIN_KEY = "stamp-sweeps-admin-key-0123456789abcdef01234567";
 const WEBHOOK_TOKEN = "stamp-sweeps-webhook-token";

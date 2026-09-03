@@ -31,28 +31,14 @@ import { registerZarrReadyRoutes } from "../src/routes/callbacks/zarr-ready";
 import type { DatasetVersionIntegrityResult } from "../src/services/import-integrity";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+import { installWorkersTimingSafeEqual } from "./helpers/workers-crypto";
 
-/**
- * Real constant-time comparison for the Workers-only
- * `crypto.subtle.timingSafeEqual` the zarr-ready handler's token check needs
- * (bun's runtime lacks it). Same non-mock platform shim as
- * zarr-pool-breaks.test.ts, guarded so whichever file loads first in the
- * shared bun test process installs it once; the wrong-token 401 there proves
- * the check stays live.
- */
-const subtle = crypto.subtle as SubtleCrypto & {
-  timingSafeEqual?: (a: ArrayBufferView, b: ArrayBufferView) => boolean;
-};
-if (typeof subtle.timingSafeEqual !== "function") {
-  subtle.timingSafeEqual = (a: ArrayBufferView, b: ArrayBufferView): boolean => {
-    const x = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
-    const y = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
-    if (x.length !== y.length) return false;
-    let diff = 0;
-    for (let i = 0; i < x.length; i++) diff |= (x[i] as number) ^ (y[i] as number);
-    return diff === 0;
-  };
-}
+// Real constant-time comparison for the Workers-only
+// `crypto.subtle.timingSafeEqual` the zarr-ready handler's token check needs
+// (bun's runtime lacks it). See helpers/workers-crypto.ts for why this isn't
+// a mock and why it's still installed now that lib/constant-time.ts feature-
+// detects this itself: it keeps this suite exercising the native branch.
+installWorkersTimingSafeEqual();
 
 const byteLength = (s: string) => new TextEncoder().encode(s).byteLength;
 

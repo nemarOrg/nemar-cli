@@ -8,6 +8,8 @@
  * intentional changes are import paths.
  */
 
+import { timingSafeEqual } from "../../lib/constant-time";
+
 // ============================================================================
 // Manifest callback HMAC tokens
 // ============================================================================
@@ -71,32 +73,11 @@ export async function signManifestCallbackToken(
 }
 
 /**
- * Constant-time byte-array compare. Cloudflare Workers exposes
- * `crypto.subtle.timingSafeEqual`; standard runtimes (Bun/Node test
- * harness) don't, so we fall back to a manual XOR-accumulate that runs
- * in time proportional to the (equal) length but doesn't short-circuit
- * on a mismatched byte. Both branches reject length mismatches up
- * front to keep the invariant simple.
- */
-function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.byteLength !== b.byteLength) return false;
-  const subtle = (crypto as { subtle: { timingSafeEqual?: typeof crypto.subtle.timingSafeEqual } })
-    .subtle;
-  if (typeof subtle.timingSafeEqual === "function") {
-    return subtle.timingSafeEqual(a, b);
-  }
-  let diff = 0;
-  for (let i = 0; i < a.byteLength; i++) {
-    diff |= a[i] ^ b[i];
-  }
-  return diff === 0;
-}
-
-/**
  * Verify a manifest callback token against a claimed payload.
- * Constant-time compare via `crypto.subtle.timingSafeEqual` (Workers)
- * or a portable XOR-accumulate (other runtimes) to defeat timing
- * oracles. Returns true iff the digest matches.
+ * Constant-time compare via `lib/constant-time.ts`'s `timingSafeEqual`
+ * (Workers' `crypto.subtle.timingSafeEqual`, or a portable XOR-accumulate
+ * on runtimes without it) to defeat timing oracles. Returns true iff the
+ * digest matches.
  */
 export async function verifyManifestCallbackToken(
   token: string,
@@ -108,8 +89,7 @@ export async function verifyManifestCallbackToken(
   // as 500 (via Hono's default error handler) not 401, so operators can
   // distinguish "broken secret on worker" from "wrong token from caller".
   const expected = await signManifestCallbackToken(payload, secret);
-  const encoder = new TextEncoder();
-  return constantTimeEqual(encoder.encode(token), encoder.encode(expected));
+  return timingSafeEqual(token, expected);
 }
 
 // ============================================================================
@@ -166,6 +146,5 @@ export async function verifyPrescreenCallbackToken(
 ): Promise<boolean> {
   if (!token || !secret) return false;
   const expected = await signPrescreenCallbackToken(payload, secret);
-  const encoder = new TextEncoder();
-  return constantTimeEqual(encoder.encode(token), encoder.encode(expected));
+  return timingSafeEqual(token, expected);
 }

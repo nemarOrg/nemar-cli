@@ -40,9 +40,9 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
 import { auditLogStatement } from "../db/audit-log";
+import { timingSafeEqual } from "../lib/constant-time";
 import { webSessionMiddleware } from "../middleware/webSession";
 import {
-  constantTimeEqualHex,
   generateAuthCode,
   hashAuthCode,
   maskEmail,
@@ -333,7 +333,7 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
     }
 
     const submittedHash = await hashAuthCode(code, c.env);
-    if (!constantTimeEqualHex(submittedHash, row.code_hash)) {
+    if (!timingSafeEqual(submittedHash, row.code_hash)) {
       const newAttempts = row.attempts + 1;
       if (newAttempts >= MAX_CODE_ATTEMPTS) {
         await db
@@ -964,7 +964,7 @@ authWebRoutes.post(
       }
 
       const submittedHash = await hashAuthCode(code, c.env);
-      if (!constantTimeEqualHex(submittedHash, row.code_hash)) {
+      if (!timingSafeEqual(submittedHash, row.code_hash)) {
         const newAttempts = row.attempts + 1;
         if (newAttempts >= MAX_CODE_ATTEMPTS) {
           await db

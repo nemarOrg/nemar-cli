@@ -8,9 +8,10 @@
  */
 
 import { z } from "zod";
+import { timingSafeEqual } from "../../lib/constant-time.js";
 import { purgeCacheUrls, zarrPurgeTargets } from "../../services/cloudflare.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
-import { type WebhookRouter, timingSafeEqual } from "../webhooks/shared.js";
+import type { WebhookRouter } from "../webhooks/shared.js";
 
 /**
  * POST /webhooks/zarr-ready — callback from `scripts/zarr/hallu-zarr.sh`, which
