@@ -773,6 +773,8 @@ if [[ -n "$BACKFILL_DIR_FORMATS" ]]; then
   [[ -n "$ONLY_DATASET" ]] && backfill_args+=(--dataset "$ONLY_DATASET")
   [[ "$LIMIT" -gt 0 ]] && backfill_args+=(--limit "$LIMIT")
   [[ -n "$EXECUTE" ]] && backfill_args+=(--execute)
+  # Same opt-in as reconcile's below: the staging catalog is the xx0999NN fleet.
+  [[ -n "$TEST_PREPASS_SEEN" ]] && backfill_args+=(--accept-exemplars)
   qpy "${backfill_args[@]}"
   exit $?
 fi
