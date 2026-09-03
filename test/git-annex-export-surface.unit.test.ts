@@ -39,6 +39,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "checkGitAnnexInstalled",
     "checkGitHubSSH",
     "checkPrerequisites",
+    "isVersionCompatible",
   ],
   init: [
     "ADD_CHUNK_MAX_BYTES",
@@ -139,6 +140,10 @@ const MODULE_EXPORTS: Record<string, string[]> = {
  *   (partial-retrieval classification); internal otherwise.
  * - chunkAddTargets / ADD_CHUNK_MAX_PATHS / ADD_CHUNK_MAX_BYTES: exported for
  *   #884 unit tests (argv chunking of targeted adds); internal otherwise.
+ * - isVersionCompatible: exported for epic #1225 phase 6 unit tests (the
+ *   git-annex version comparator, since checkGitAnnexInstalled() shells out
+ *   to the git-annex binary and can't be driven end-to-end offline);
+ *   internal otherwise.
  */
 const INTERNAL_WIRING = [
   "getGitHubToken",
@@ -150,6 +155,7 @@ const INTERNAL_WIRING = [
   "chunkAddTargets",
   "ADD_CHUNK_MAX_PATHS",
   "ADD_CHUNK_MAX_BYTES",
+  "isVersionCompatible",
   // policy.ts postdates the split (#1158). Its surface is consumed by sibling
   // git-annex modules and by import-openneuro, never by the CLI directly, so
   // none of it belongs to the pre-split monolith surface below.

@@ -5,6 +5,7 @@
  * verbatim.
  */
 
+import semver from "semver";
 import { getGitHubToken } from "./github.js";
 import { runCommand } from "./run-command.js";
 
@@ -32,29 +33,34 @@ export interface PrerequisitesResult {
 }
 
 /**
- * Parse version string like "10.20241202" or "0.19.6"
+ * Compare a git-annex version against a minimum requirement.
+ *
+ * git-annex versions are not semver: they're a two-component
+ * MAJOR.CalVer scheme (e.g. "10.20241202"), sometimes with a build suffix
+ * (e.g. "10.20241202-g1234abc"). semver.coerce() normalizes that into a
+ * MAJOR.MINOR.PATCH SemVer (the CalVer component becomes MINOR, PATCH is
+ * padded to 0) which semver.gte() can then compare directly.
+ *
+ * Exported for testing: checkGitAnnexInstalled() below shells out to the
+ * git-annex binary, so this comparator (not the full check) is what
+ * test/git-annex-prereq.test.ts drives directly in a sandbox with no
+ * git-annex installed. That file's table is the migration's equivalence
+ * proof against the hand-rolled comparator this replaced (epic #1225
+ * phase 6).
  */
-function parseVersion(versionStr: string): number[] {
-  return versionStr.split(".").map((part) => {
-    const num = Number.parseInt(part.replace(/[^0-9]/g, ""), 10);
-    return Number.isNaN(num) ? 0 : num;
-  });
-}
+export function isVersionCompatible(actual: string, required: string): boolean {
+  const actualCoerced = semver.coerce(actual);
+  const requiredCoerced = semver.coerce(required);
 
-/**
- * Compare versions: returns true if actual >= required
- */
-function isVersionCompatible(actual: string, required: string): boolean {
-  const actualParts = parseVersion(actual);
-  const requiredParts = parseVersion(required);
+  // semver.coerce() returns null for a string with no extractable version
+  // (e.g. an empty or non-numeric string). The old hand-rolled parser never
+  // returned null -- it silently fell back to [0] (i.e. "0.0.0") and let
+  // that compare as incompatible with any positive minimum. An uncoercible
+  // version, on either side, is treated the same way here: not compatible,
+  // explicitly, rather than letting a null flow into semver.gte() and throw.
+  if (!actualCoerced || !requiredCoerced) return false;
 
-  for (let i = 0; i < Math.max(actualParts.length, requiredParts.length); i++) {
-    const a = actualParts[i] || 0;
-    const r = requiredParts[i] || 0;
-    if (a > r) return true;
-    if (a < r) return false;
-  }
-  return true;
+  return semver.gte(actualCoerced, requiredCoerced);
 }
 
 /**
