@@ -63,6 +63,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+from collections.abc import MutableMapping
 from concurrent.futures import (
     FIRST_COMPLETED,
     ProcessPoolExecutor,
@@ -392,6 +393,59 @@ CEILING_FLOOR_BYTES = int(
 # measurement-based and can then tighten SLACK.
 MEM_LIMIT_SLACK = float(os.environ.get("ZARR_MEM_LIMIT_SLACK", "3.0"))
 MEM_LIMIT_FLOOR_BYTES = int(os.environ.get("ZARR_MEM_LIMIT_FLOOR_BYTES", str(4 * 1024**3)))
+
+# The limit is applied ON TOP of the worker's data segment as it stands when the
+# recording starts, not as an absolute number. RLIMIT_DATA counts every private
+# writable mapping, and the scientific stack reserves a great deal of those at
+# import without ever touching them: measured on the conversion node
+# (2026-09-03, 32 cores), `import numpy` + `import scipy` alone put VmData at
+# 2.6 GiB against 100 MB of RSS, because each bundled OpenBLAS pre-maps a buffer
+# pool sized for every core. Applied as an absolute cap, the 4 GiB floor left
+# ~1.3 GiB of real headroom, and a 4 MB EMG recording died on a 624 KiB
+# allocation with "exceeded its memory budget" -- the same message a genuine
+# runaway produces, so the failures read as data problems for days. The thread
+# caps below shrink that reservation to ~220 MB; adding the baseline makes the
+# backstop mean what its name says regardless of what the libraries reserve.
+BLAS_THREAD_VARS = (
+    "OPENBLAS_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
+
+
+def cap_blas_threads(env: MutableMapping[str, str] = os.environ) -> dict[str, str]:
+    """Pin BLAS/OpenMP thread pools to one thread unless the operator set them.
+
+    Must run before numpy is first imported in this process (the pools are sized
+    at import); this module imports numpy lazily, so calling it at module import
+    is early enough for the driver, and pool workers inherit the environment.
+    One thread is also simply correct here: the driver already runs up to
+    `--jobs` recordings in parallel, so per-recording BLAS threading only
+    oversubscribes the node (24 workers x 32 threads) and, per the numbers above,
+    costs ~2.4 GiB of RLIMIT_DATA headroom per worker for nothing.
+    Returns the values now in effect, for the log.
+    """
+    for var in BLAS_THREAD_VARS:
+        env.setdefault(var, "1")
+    return {var: env[var] for var in BLAS_THREAD_VARS}
+
+
+cap_blas_threads()
+
+
+def data_segment_bytes() -> int | None:
+    """This process's RLIMIT_DATA-accounted footprint right now (`VmData` from
+    /proc/self/status), or None where that file does not exist (macOS, Windows),
+    which is also where the backstop is not applied."""
+    try:
+        with open("/proc/self/status", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("VmData:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
 # One-shot latch: a box where setrlimit is refused (a seccomp profile, an odd
 # container runtime) would otherwise run with NO containment and say nothing,
 # leaving everyone believing #1110 shipped when it silently did not.
@@ -515,6 +569,12 @@ def apply_worker_mem_limit(
     try:
         import resource
 
+        # The reservation is headroom for THIS recording's allocations; what the
+        # process already holds (library buffer pools, the interpreter, a reused
+        # worker's retained heap) is measured and added, not charged against it.
+        # See the note above `BLAS_THREAD_VARS` for the 2.6 GiB that motivated this.
+        baseline = data_segment_bytes() or 0
+        limit += baseline
         # Only the hard limit is read: the soft one is what this call REPLACES.
         hard = resource.getrlimit(resource.RLIMIT_DATA)[1]
         # Keep the hard limit where it is so the next task can raise the soft

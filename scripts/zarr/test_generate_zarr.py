@@ -57,6 +57,9 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     _drain_with_admission,
     worker_mem_limit_bytes,
     apply_worker_mem_limit,
+    cap_blas_threads,
+    data_segment_bytes,
+    BLAS_THREAD_VARS,
     MEM_LIMIT_FLOOR_BYTES,
     MEM_LIMIT_SLACK,
     admission_reserve_bytes,
@@ -3251,6 +3254,63 @@ class TestWorkerMemLimit(unittest.TestCase):
     def test_setting_the_limit_never_raises(self):
         apply_worker_mem_limit(4 * 1024**3, 8 * 1024**3)
         apply_worker_mem_limit(None, None)
+
+    def test_the_limit_sits_on_top_of_the_data_segment_the_worker_already_holds(self):
+        """The reservation is headroom for the recording, not an absolute cap.
+
+        On the conversion node numpy+scipy reserve 2.6 GiB of RLIMIT_DATA at
+        import (OpenBLAS buffer pools) against 100 MB of RSS, so an absolute
+        4 GiB floor left ~1.3 GiB and a 4 MB EMG recording failed a 624 KiB
+        allocation as "exceeded its memory budget" (2026-09-03). Linux only:
+        that is the only platform the backstop is applied on.
+        """
+        if not sys.platform.startswith("linux"):
+            self.skipTest("RLIMIT_DATA backstop is Linux-only")
+        import resource
+
+        reserve = 4 * 1024**3
+        before = data_segment_bytes()
+        self.assertIsNotNone(before)
+        apply_worker_mem_limit(reserve, 64 * 1024**3, reserved=True)
+        after = data_segment_bytes()
+        soft = resource.getrlimit(resource.RLIMIT_DATA)[0]
+        # The baseline is read inside the call, between our two readings.
+        self.assertGreaterEqual(soft, before + reserve)
+        self.assertLessEqual(soft, after + reserve + 64 * 1024**2)
+
+    def test_data_segment_is_measured_where_the_backstop_applies(self):
+        value = data_segment_bytes()
+        if sys.platform.startswith("linux"):
+            self.assertIsInstance(value, int)
+            self.assertGreater(value, 0)
+        else:
+            self.assertIsNone(value)
+
+
+class TestBlasThreadCaps(unittest.TestCase):
+    """Per-recording BLAS threading oversubscribes the node and, on the
+    conversion node, costs each worker ~2.4 GiB of RLIMIT_DATA headroom in
+    pre-mapped OpenBLAS buffer pools (see the note above BLAS_THREAD_VARS)."""
+
+    def test_every_pool_is_pinned_to_one_thread_when_unset(self):
+        env: dict[str, str] = {}
+        effective = cap_blas_threads(env)
+        self.assertEqual(effective, {var: "1" for var in BLAS_THREAD_VARS})
+        self.assertEqual(env, effective)
+
+    def test_an_operator_value_is_respected(self):
+        env = {"OPENBLAS_NUM_THREADS": "4"}
+        effective = cap_blas_threads(env)
+        self.assertEqual(effective["OPENBLAS_NUM_THREADS"], "4")
+        for var in BLAS_THREAD_VARS:
+            if var != "OPENBLAS_NUM_THREADS":
+                self.assertEqual(effective[var], "1")
+
+    def test_importing_the_converter_pins_this_process(self):
+        # The module-level call is what protects the driver and, by inheritance,
+        # every pool worker; an operator override in the environment survives.
+        for var in BLAS_THREAD_VARS:
+            self.assertIn(var, os.environ)
 
 
 class TestPoolBreakRecovery(unittest.TestCase):
