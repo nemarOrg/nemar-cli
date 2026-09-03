@@ -1,21 +1,18 @@
 /**
- * Unit tests for the pure metadata helpers in
- * backend/src/services/dataset-metadata-columns.ts.
- *
- * Covers:
- *   - authorsFromEnrichment: extract a CSV author string from either the
- *     object-keyed form ({"Name": {orcid, ...}, ...}) the enrichment
- *     pipeline emits today, or the legacy array-of-objects form some older
- *     rows still carry.
- *   - formatFileSize: byte count -> human-readable string for the served
- *     file_size_formatted field (derived at read time since #1182).
+ * Unit tests for:
+ *   - authorsFromEnrichment (backend/src/services/dataset-metadata-columns.ts):
+ *     extract a CSV author string from either the object-keyed form
+ *     ({"Name": {orcid, ...}, ...}) the enrichment pipeline emits today, or
+ *     the legacy array-of-objects form some older rows still carry.
+ *   - formatFileSize (shared/bytes.ts, moved from dataset-metadata-columns.ts
+ *     in epic #1225 phase 4, issue #1227): byte count -> human-readable
+ *     string for the served file_size_formatted field (derived at read time
+ *     since #1182).
  */
 
 import { describe, expect, test } from "bun:test";
-import {
-  authorsFromEnrichment,
-  formatFileSize,
-} from "../backend/src/services/dataset-metadata-columns";
+import { authorsFromEnrichment } from "../backend/src/services/dataset-metadata-columns";
+import { formatFileSize } from "../shared/bytes";
 
 describe("authorsFromEnrichment", () => {
   test("returns null when input is missing", () => {

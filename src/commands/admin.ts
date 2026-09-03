@@ -27,6 +27,7 @@ import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
+import { formatBytesCli } from "../../shared/bytes.js";
 import {
   type AvailabilityReport,
   type AvailabilityReportResult,
@@ -137,7 +138,6 @@ import {
 } from "../lib/git-annex/clone-push.js";
 import { checkDownloadPrerequisites } from "../lib/git-annex/prereq.js";
 import { getVersionCommit, listDatasetVersions } from "../lib/git-annex/repo-state.js";
-import { formatBytes } from "../lib/progress.js";
 import {
   type RecoverDatasetEntry,
   loadRecoverDatasets,
@@ -1830,7 +1830,7 @@ doiCommand
       const statsSpinner = ora("Computing dataset sizes and formats...").start();
       try {
         const filesInfo = await getDatasetFiles(datasetId);
-        const totalSizeStr = formatBytes(filesInfo.total_size);
+        const totalSizeStr = formatBytesCli(filesInfo.total_size);
         enrichment.sizes = [`${totalSizeStr} (${filesInfo.file_count} files)`];
         enrichment.formats = filesInfo.extensions;
         statsSpinner.succeed(
@@ -3988,7 +3988,7 @@ recoverStatusCommand.action(async (ids: string[]) => {
           : chalk.dim("unaudited");
     const bytes =
       r.bytes_present != null && r.file_size != null
-        ? ` ${formatBytes(r.bytes_present)}/${formatBytes(r.file_size)}`
+        ? ` ${formatBytesCli(r.bytes_present)}/${formatBytesCli(r.file_size)}`
         : "";
     console.log(`  ${r.dataset_id.padEnd(10)} ${label}${bytes}`);
   }
@@ -4793,7 +4793,7 @@ const availabilityReportCommand = new Command("availability-report")
         console.log(
           `  Files:     ${report.completeness.files_present}/${report.completeness.files_declared} present`,
         );
-        const bytesLine = `${formatBytes(report.completeness.bytes_present)}/${formatBytes(report.completeness.bytes_declared)}`;
+        const bytesLine = `${formatBytesCli(report.completeness.bytes_present)}/${formatBytesCli(report.completeness.bytes_declared)}`;
         const pct =
           report.completeness.pct_bytes != null
             ? ` (${(report.completeness.pct_bytes * 100).toFixed(1)}%)`

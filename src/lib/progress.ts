@@ -6,6 +6,7 @@
  */
 
 import chalk from "chalk";
+import { formatBytesCli } from "../../shared/bytes.js";
 
 export interface DownloadProgress {
   filesCompleted: number;
@@ -64,21 +65,10 @@ export function parseGitAnnexProgressLine(line: string): GitAnnexProgressLine | 
 }
 
 /**
- * Format bytes to a human-readable string
- */
-export function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const value = bytes / 1024 ** i;
-  return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-}
-
-/**
  * Format speed (bytes/sec) to a human-readable string
  */
 function formatSpeed(bytesPerSec: number): string {
-  return `${formatBytes(bytesPerSec)}/s`;
+  return `${formatBytesCli(bytesPerSec)}/s`;
 }
 
 /**
@@ -282,8 +272,8 @@ export class DownloadProgressTracker {
     if (currentTotal > 0) {
       const bytesStr =
         this.bytesTotal > 0
-          ? `${formatBytes(currentTotal)}/${formatBytes(this.bytesTotal)}`
-          : formatBytes(currentTotal);
+          ? `${formatBytesCli(currentTotal)}/${formatBytesCli(this.bytesTotal)}`
+          : formatBytesCli(currentTotal);
       line += ` | ${bytesStr}`;
     }
     if (avgSpeed > 0) {
@@ -323,7 +313,7 @@ export class DownloadProgressTracker {
       const avgSpeed = elapsed > 0 ? `${formatSpeed(this.totalBytesTransferred / elapsed)}` : "";
       const summary = [
         `${filesDownloaded} file${filesDownloaded !== 1 ? "s" : ""} downloaded`,
-        this.totalBytesTransferred > 0 ? formatBytes(this.totalBytesTransferred) : "",
+        this.totalBytesTransferred > 0 ? formatBytesCli(this.totalBytesTransferred) : "",
         avgSpeed,
       ]
         .filter(Boolean)

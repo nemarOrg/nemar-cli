@@ -3,8 +3,10 @@
  * #1182 (migration 0071) and are now derived at read time: the six flat
  * attestation_* fields (exploded from the JSON `attestation` column),
  * `num_citations` (sum of the two stored addends), and `file_size_formatted`
- * (formatFileSize over file_size — binary/1024, NOT services/s3.ts's decimal
- * formatBytes).
+ * (`shared/bytes.ts`'s `formatFileSize` over `file_size` — binary/1024, the
+ * one contractual formatter of the five that module declares; the
+ * decimal/1000 outlier that used to live at services/s3.ts is deleted, epic
+ * #1225 phase 4, issue #1227).
  *
  * Entry point, not helpers (per .rules/testing.md): the dataset is created
  * THROUGH the real POST /datasets route (resume branch — its attestation

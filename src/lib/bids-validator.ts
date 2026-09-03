@@ -16,6 +16,7 @@ import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { formatBytesTrimmed } from "../../shared/bytes.js";
 import validatorPin from "../../validator-version.json" with { type: "json" };
 
 export const VALIDATOR_VERSION = validatorPin.version;
@@ -365,7 +366,7 @@ export function formatValidationResult(result: BidsValidationResult, color = tru
   // Summary
   lines.push("Summary:");
   lines.push(`  Files: ${result.summary.totalFiles}`);
-  lines.push(`  Size: ${formatBytes(result.summary.size)}`);
+  lines.push(`  Size: ${formatBytesTrimmed(result.summary.size)}`);
   if (result.summary.subjects.length > 0) {
     lines.push(`  Subjects: ${result.summary.subjects.length}`);
   }
@@ -387,15 +388,4 @@ export function formatValidationResult(result: BidsValidationResult, color = tru
   lines.push(`${result.errorCount} ${errStr}, ${result.warningCount} ${warnStr}`);
 
   return lines.join("\n");
-}
-
-/**
- * Format bytes to human readable string
- */
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${Number.parseFloat((bytes / k ** i).toFixed(2))} ${sizes[i]}`;
 }

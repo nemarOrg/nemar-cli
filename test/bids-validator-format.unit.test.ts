@@ -1,26 +1,35 @@
 /**
- * Golden coverage for src/lib/bids-validator.ts's private `formatBytes`
- * (epic #1225 phase 4, issue #1227).
+ * Golden coverage for `shared/bytes.ts`'s `formatBytesTrimmed` (moved from
+ * `src/lib/bids-validator.ts`'s module-private `formatBytes` in the epic
+ * #1225 phase 4 consolidation, issue #1227).
  *
- * `formatBytes` there is module-private, so per .rules/testing.md ("test the
- * entry point, not the piece") this drives it through the real consumer,
- * `formatValidationResult`, and reads the "Size:" line of the rendered
- * report exactly as `nemar dataset validate` prints it.
+ * `formatBytesTrimmed` has no dedicated CLI entry point of its own, so per
+ * .rules/testing.md ("test the entry point, not the piece") this drives it
+ * through the real consumer, `formatValidationResult`, and reads the
+ * "Size:" line of the rendered report exactly as `nemar dataset validate`
+ * prints it.
  *
  * The expected strings below were computed independently against a verbatim
- * copy of the CURRENT (pre-consolidation) formatter and cross-checked by
- * running the real function in this worktree before any implementation
- * change landed — see the phase 4 implementation brief on issue #1227 for
- * the full six-formatter table this is one column of.
+ * copy of the pre-consolidation formatter and cross-checked by running the
+ * real function in this worktree before any implementation change landed --
+ * see the phase 4 implementation brief on issue #1227 for the full
+ * six-formatter table this is one column of.
  *
- * The 1 PiB case pins a real bug: this formatter has no index clamp, so at
- * 1 PiB and above `sizes[i]` is `undefined` and the line reads
- * "Size: 1 undefined". That is intentionally pinned here in this phase's
- * first commit. The consolidation commit fixes the clamp in
- * `shared/bytes.ts`'s `formatBytesTrimmed`, and updates ONLY this one
- * expectation (to the clamped, correct value) as the sanctioned exception
- * called out by the implementation brief's step 3 -- every other value in
- * this file is unchanged by the fix.
+ * The 1 PiB case pins a real bug that this phase fixes (issue #1227 step
+ * 3): the pre-consolidation formatter had no index clamp, so at 1 PiB and
+ * above `sizes[i]` was `undefined` and the line read "Size: 1 undefined".
+ * This is a golden expectation this phase's consolidation commit is allowed
+ * to change (the sanctioned exception the implementation brief calls out)
+ * -- it now pins the FIXED, clamped value. Every value below 1 PiB is
+ * unaffected by the fix and unchanged from the first commit.
+ *
+ * The +Infinity bad-input case ALSO changes, as a side effect of the same
+ * clamp, and was not called out by the brief -- discovered by running this
+ * test after the fix landed. `Math.min(Infinity, maxIndex)` clamps to
+ * `maxIndex` (unlike `Math.min(NaN, maxIndex)`, which stays `NaN`), so
+ * +Infinity moves from "NaN undefined" to "Infinity TB", matching
+ * `formatBytesCli`'s (unchanged) +Infinity behavior. See the dedicated test
+ * below for the full explanation; reported in the PR body.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -55,7 +64,7 @@ function sizeLine(size: number): string {
   return line.replace("  Size: ", "");
 }
 
-describe("bids-validator formatBytes (via formatValidationResult)", () => {
+describe("formatBytesTrimmed (via formatValidationResult)", () => {
   test("golden vector — phase 4 pinned magnitudes (issue #1227)", () => {
     expect(sizeLine(0)).toBe("0 B");
     expect(sizeLine(1)).toBe("1 B");
@@ -70,17 +79,32 @@ describe("bids-validator formatBytes (via formatValidationResult)", () => {
     expect(sizeLine(1099511627776)).toBe("1 TB");
   });
 
-  test("1 PiB: no index clamp, sizes[i] is undefined (the latent bug)", () => {
-    // 1024**5. Fixed in the consolidation commit; this pins the CURRENT,
-    // buggy behavior of the pre-refactor formatter.
-    expect(sizeLine(1024 ** 5)).toBe("1 undefined");
+  test("1 PiB: index clamp fix (issue #1227 step 3)", () => {
+    // 1024**5. The pre-consolidation formatter had no clamp and produced
+    // "1 undefined" here (see git history / the phase 4 first commit).
+    // formatBytesTrimmed clamps like every other formatter in
+    // shared/bytes.ts, so this now matches formatFileSize's clamped 1 PiB
+    // value ("1024 TB").
+    expect(sizeLine(1024 ** 5)).toBe("1024 TB");
   });
 
-  test("bad inputs (current behavior, unaffected by the clamp fix)", () => {
+  test("+Infinity: also picks up the clamp, matching formatBytesCli", () => {
+    // A second, non-obvious consequence of the same clamp: Math.log(Infinity)
+    // is Infinity (not NaN), so Math.min(Infinity, maxIndex) clamps to
+    // maxIndex instead of staying Infinity. Pre-fix this produced
+    // "NaN undefined" (bytes / BASE**Infinity = Infinity / Infinity = NaN);
+    // post-fix bytes / BASE**4 stays a finite-looking Infinity, so the line
+    // now reads "Infinity TB" -- exactly what formatBytesCli already
+    // produced for +Infinity before this phase (it always had this same
+    // clamp). This was discovered by this golden test, not predicted by the
+    // implementation brief; called out explicitly in the PR body.
+    expect(sizeLine(Number.POSITIVE_INFINITY)).toBe("Infinity TB");
+  });
+
+  test("bad inputs (unaffected by the clamp fix)", () => {
     // Math.min(NaN, ...) is NaN, so the clamp added for the 1 PiB fix does
     // not touch these -- pinned here so a future change is visible.
     expect(sizeLine(-1)).toBe("NaN undefined");
     expect(sizeLine(Number.NaN)).toBe("NaN undefined");
-    expect(sizeLine(Number.POSITIVE_INFINITY)).toBe("NaN undefined");
   });
 });
