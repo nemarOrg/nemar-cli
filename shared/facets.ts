@@ -17,10 +17,15 @@
  * filterable" list): `recordings_measured`, `bytes_present` (bookkeeping
  * denominators, not user-facing facts) and the `*_at` sweep-state stamps.
  * Also not here: the pre-existing bespoke filters (`search`, `modality`,
- * `author`, `task`, `hasDoi`, `hasHed`, `dataComplete`, `recent`,
- * `licenseTiers`) -- their semantics (FTS routing, LIKE-joined lists) don't
- * fit this table and keep their existing home in
- * `backend/src/services/dataset-filters.ts`.
+ * `author`, `task`, `hasDoi`, `hasHed`, `hasZarr`, `hasZarrVerified`,
+ * `dataComplete`, `recent`, `licenseTiers`) -- their semantics (FTS routing,
+ * LIKE-joined lists, or -- for `hasZarr`, issue #1062 -- a derived "ready AND
+ * has stores" predicate distinct from the `zarr` ENUM facet declared below,
+ * which matches the raw `zarr_status` value instead) don't fit this table and
+ * keep their existing home in `backend/src/services/dataset-filters.ts`.
+ * `hasZarrVerified` (issue #1068) is the strictest of them: `hasZarr`'s
+ * predicate ANDed with a verdict read out of the `sweep_stamps` JSON column,
+ * which is neither a column of its own nor a facet value.
  *
  * Zero dependencies beyond `shared/contract`, so both `src/` (CLI, phase 4)
  * and `backend/` (SQL binding) import the SAME vocabulary.

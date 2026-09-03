@@ -29,6 +29,7 @@ import { authWebRoutes } from "./routes/auth-web";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
 import { sandboxRoutes } from "./routes/sandbox";
+import { schemaRoutes } from "./routes/schemas";
 import { userRoutes } from "./routes/users";
 import webhooks from "./routes/webhooks";
 import { zarrDataRoutes } from "./routes/zarr-data";
@@ -64,6 +65,8 @@ import {
   deletionDate,
   warningStageForDaysLeft,
 } from "./services/staleness";
+import { publishZarrCatalog } from "./services/zarr-catalog";
+import { runZarrFidelitySweep } from "./services/zarr-fidelity-sweep";
 import type { Bindings, Variables } from "./types/bindings";
 
 // Create the API app with all routes
@@ -122,6 +125,7 @@ api.get("/", (c) => {
       datasets: "/datasets/*",
       sandbox: "/sandbox/*",
       webhooks: "/webhooks/*",
+      schemas: "/schemas/*",
     },
   });
 });
@@ -151,6 +155,11 @@ api.route("/admin", adminRoutes);
 api.route("/datasets", datasetRoutes);
 api.route("/sandbox", sandboxRoutes);
 api.route("/webhooks", webhooks);
+// Public JSON Schema documents (issue #1059). Static, D1-free, cached: the
+// bytes are the repo's own shared/*.schema.json, the same files the Zarr
+// converter validates against before upload, so the served contract cannot
+// drift from the one the producer enforces.
+api.route("/schemas", schemaRoutes);
 // Path-based mount of the data sub-app so it's reachable on every hostname
 // (api.nemar.org, *.workers.dev dev fallback, etc.). The Worker also serves
 // the same handlers at the root path when the request hits data.nemar.org;
@@ -280,6 +289,29 @@ export const NON_PROD_SANDBOX_CLEANUP_QUERY = `SELECT dataset_id FROM datasets
 
 export const PROD_SANDBOX_CLEANUP_QUERY =
   "SELECT dataset_id FROM datasets WHERE dataset_id LIKE 'xx%' AND is_exemplar = 0 AND created_at < datetime('now', '-14 days') AND status = 'active' LIMIT ?";
+
+/**
+ * Daily-cron jobs INTENTIONALLY driven from OUTSIDE the `if (prodOnlyJobs)`
+ * block below, i.e. also on the dev/staging worker's tick, not just
+ * production's (PR #1201 review, item 6). This exists so that decision is a
+ * greppable, named declaration -- not only inferable from where a call site
+ * happens to sit in the file -- mirroring AGENTS.md's "a new daily job is
+ * production-only BY DEFAULT" default: a name only belongs in this list
+ * after confirming it cannot email a real user, dispatch GitHub work
+ * against the shared `nemarDatasets` org, or mutate a real DOI or the PROD
+ * bucket -- `publishZarrCatalog` (services/zarr-catalog.ts) qualifies
+ * because it only ever reads/writes the CALLING env's own D1 and S3 bucket.
+ * `runZarrFidelitySweep` (services/zarr-fidelity-sweep.ts, issue #1068,
+ * epic #1181 phase 8) qualifies for the same reason PLUS one more: its
+ * dataset-repo reads go through the public, credential-free
+ * `raw.githubusercontent.com` content host, never the GitHub API/App/PAT --
+ * see that module's doc comment for why that is a materially different,
+ * dev-safe exposure from `signal-defaults-sweep.ts`'s GitHub-API-based
+ * `getBidsTreeStats` (which IS prod-only, in the guarded block below).
+ * `backend/test/cron-sweep-wiring.test.ts` pins that every name here is
+ * both actually called and called outside the guarded block.
+ */
+export const DEV_CRON_ALLOWLIST = ["publishZarrCatalog", "runZarrFidelitySweep"] as const;
 
 async function scheduledCleanup(env: Bindings): Promise<void> {
   const db = env.DB;
@@ -727,11 +759,17 @@ export default {
     // Daily (prod "0 3 * * *", dev/staging "0 4 * * *"):
     // Catalog sync runs via GitHub Action, not Worker cron.
     //
-    // ALLOWLIST, epic #923 Phase 7. The dev/staging worker's D1 is a partial
-    // PRODUCTION MIRROR (real nm* dataset rows, real user email addresses) and
-    // the dev worker holds a real RESEND_API_KEY, so a daily job that selects
-    // rows by generic predicates acts on real production records. Only jobs
-    // proven safe against that mirror run outside production.
+    // ALLOWLIST, epic #923 Phase 7. The dev/staging D1's dataset catalog is no
+    // longer a production mirror -- it was purged to the curated fixtures (the
+    // `xx0999NN` exemplars plus the private E2E dataset) and must stay that way.
+    // The reason for this allowlist survives that purge: the `users` table was
+    // NOT purged (it still holds ~609 real email addresses), the dev worker
+    // holds a real RESEND_API_KEY, and the nemarDatasets GitHub org is SHARED
+    // between prod and dev because the org name is hardcoded rather than
+    // environment-scoped. So a daily job that selects rows by generic predicates
+    // can still email real people or destroy a real repo. Only jobs proven safe
+    // against that run outside production. See AGENTS.md, "Dev D1 shares
+    // production users and the GitHub org".
     //
     // A NEW DAILY JOB IS PRODUCTION-ONLY BY DEFAULT. Before adding one to the
     // non-prod set below, confirm it cannot (a) email a real user, (b) dispatch
@@ -752,9 +790,10 @@ export default {
     if (prodOnlyJobs) {
       // #736 Phase 3: backstop re-dispatch of still-failed archive generations
       // whose webhook retry chain broke (e.g. a lost archive-ready callback).
-      // PROD-ONLY: the candidate query has no dataset-id prefix filter, so on a
-      // mirror D1 it would repository_dispatch real Actions runs against the
-      // shared nemarDatasets org for real datasets.
+      // PROD-ONLY: the candidate query has no dataset-id prefix filter, so
+      // outside production it would repository_dispatch real Actions runs
+      // against the SHARED nemarDatasets org for whatever rows the dev D1 holds
+      // -- the fixtures there (nm099999, the exemplars) are real repos in it.
       ctx.waitUntil(archiveRetrySweep(env));
       // #1130: heal published versions whose S3 manifest never landed (the
       // version-DOI callback swallows manifest failures by design, so without
@@ -944,6 +983,49 @@ export default {
         .catch((err) =>
           console.error(
             "[citation-sync] failed:",
+            err instanceof Error ? (err.stack ?? err.message) : err,
+          ),
+        ),
+    );
+    // #1062 (epic #1181 phase 2): republish the top-level Zarr discovery
+    // catalog (zarr-catalog.json), after the sweeps above. ALLOWED ON THE
+    // NON-PROD CRON -- listed in DEV_CRON_ALLOWLIST above: it only reads
+    // this env's own D1 and writes this env's own S3 bucket (env.S3_BUCKET)
+    // -- no email, no GitHub dispatch against the shared nemarDatasets org,
+    // no DOI mutation -- so a dev-worker run can never touch the production
+    // catalog object or a real user/repo.
+    ctx.waitUntil(
+      publishZarrCatalog(env)
+        .then((r) => console.log(`[zarr-catalog] published count=${r.count} bytes=${r.bytes}`))
+        .catch((err) =>
+          console.error(
+            "[zarr-catalog] publish failed:",
+            err instanceof Error ? (err.stack ?? err.message) : err,
+          ),
+        ),
+    );
+    // Issue #1068 (epic #1181 phase 8): the standing Zarr fidelity
+    // verification sweep. ALLOWED ON THE NON-PROD CRON -- listed in
+    // DEV_CRON_ALLOWLIST above: it only reads this env's own S3 bucket plus
+    // the public, credential-free raw.githubusercontent.com content host,
+    // and writes only this env's own D1 -- no email, no GitHub App/PAT
+    // dispatch against the shared nemarDatasets org, no DOI mutation.
+    ctx.waitUntil(
+      runZarrFidelitySweep(env)
+        .then((r) => {
+          const failedIds = r.results
+            .filter((d) => d.verdict === "failed")
+            .map((d) => d.dataset_id);
+          console.log(
+            `[zarr-fidelity-sweep] processed=${r.processed} verified=${r.verified} failed=${r.failed} unverifiable=${r.unverifiable} errors=${r.errors.length} remaining=${r.remaining ?? "?"}${failedIds.length > 0 ? ` failedDatasets=${failedIds.join(",")}` : ""}`,
+          );
+          for (const e of r.errors) {
+            console.error(`[zarr-fidelity-sweep] ${e.dataset_id}: ${e.error}`);
+          }
+        })
+        .catch((err) =>
+          console.error(
+            "[zarr-fidelity-sweep] sweep failed:",
             err instanceof Error ? (err.stack ?? err.message) : err,
           ),
         ),

@@ -44,6 +44,7 @@ import {
   type ReindexOptions,
   type ReindexResponse,
   type SummaryVersionCoverage,
+  type ZarrFidelitySweepBatchResponse,
   addCi,
   approveUser,
   approveUserById,
@@ -74,6 +75,7 @@ import {
   hedSweepReset,
   listUsers,
   publishDataset,
+  publishZarrCatalog,
   reindexBulk,
   reindexDataset,
   remintExemplarDois,
@@ -89,6 +91,7 @@ import {
   validateCi,
   verifyImport,
   withdrawDataset,
+  zarrFidelitySweep,
 } from "../lib/api/admin.js";
 import { applyS3Lock, getDatasetFiles } from "../lib/api/data.js";
 import {
@@ -5225,6 +5228,80 @@ dataIntegritySweepCommand
 adminCommand.addCommand(dataIntegritySweepCommand);
 
 // ============================================================================
+// Zarr fidelity verification sweep (issue #1068, epic #1181 phase 8)
+// ============================================================================
+
+const zarrFidelitySweepCommand = new Command("zarr-fidelity-sweep").description(
+  "Re-verify published Zarr stores against their dataset's own BIDS metadata (#1068)",
+);
+
+zarrFidelitySweepCommand
+  .option("--limit <n>", "Datasets per batch (server clamps to [1,25])", "25")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { limit?: string; json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const limit = Number.parseInt(options.limit ?? "25", 10) || 25;
+    const spinner = ora("Verifying Zarr store fidelity...").start();
+
+    let res: ZarrFidelitySweepBatchResponse;
+    try {
+      res = await zarrFidelitySweep({ limit });
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Zarr fidelity sweep failed");
+      console.error(chalk.red(errorDetail(err)));
+      process.exit(1);
+      return;
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(res, null, 2));
+    } else {
+      console.log();
+      console.log(
+        chalk.cyan(
+          `processed=${res.processed} verified=${res.verified} failed=${res.failed} unverifiable=${res.unverifiable} errors=${res.errors.length} remaining=${res.remaining ?? "unknown"}${res.budget_exhausted ? " budget_exhausted=true" : ""}`,
+        ),
+      );
+      for (const r of res.results) {
+        const color =
+          r.verdict === "verified"
+            ? chalk.green
+            : r.verdict === "failed"
+              ? chalk.red
+              : chalk.yellow;
+        console.log(
+          `  ${color(r.verdict.padEnd(12))} ${r.dataset_id}  (sampled=${r.sampled} checked=${r.checked})`,
+        );
+        for (const ex of r.examples) {
+          console.log(`      ${chalk.red(ex.code)}: ${ex.path}`);
+        }
+        if (r.examples_truncated) {
+          console.log(
+            `      ${chalk.dim(`(${r.mismatch_count} mismatches total; showing first ${r.examples.length})`)}`,
+          );
+        }
+      }
+      for (const e of res.errors) {
+        console.log(`  ${chalk.red("error")}       ${e.dataset_id}: ${e.error}`);
+      }
+    }
+    // Non-zero exit on any per-dataset error, an indeterminate (null)
+    // remaining, OR a sweep-wide budget cutoff (this batch is partial --
+    // candidates past the cutoff were never even attempted), so a caller
+    // never reads a partial/uncertain sweep as success -- mirrors
+    // data-integrity-sweep/hed-sweep's convention. A 'failed' verdict is
+    // NOT itself a non-zero-exit condition: the sweep ran successfully and
+    // reported the truth, which is the whole point.
+    if (res.errors.length > 0 || res.remaining === null || res.budget_exhausted) {
+      process.exit(1);
+    }
+  });
+
+adminCommand.addCommand(zarrFidelitySweepCommand);
+
+// ============================================================================
 // Doctor: diagnostic checks + remediation (#1130)
 // ============================================================================
 
@@ -6063,3 +6140,34 @@ function recomputeTotals(rows: SummaryVersionCoverage[]) {
 }
 
 adminCommand.addCommand(summaryCommand);
+
+// ============================================================================
+// Zarr catalog (issue #1062, epic #1181 phase 2): on-demand refresh of the
+// top-level Zarr discovery document (zarr-catalog.json). The daily cron
+// publishes it automatically; this is for an operator who doesn't want to
+// wait for the next tick.
+// ============================================================================
+
+const zarrCatalogCommand = new Command("zarr-catalog").description(
+  "Top-level Zarr discovery catalog (zarr-catalog.json)",
+);
+
+zarrCatalogCommand
+  .command("publish")
+  .description("Rebuild and republish zarr-catalog.json to this environment's bucket")
+  .action(async () => {
+    if (!requireAuth()) return;
+
+    const spinner = ora("Publishing zarr-catalog.json...").start();
+    try {
+      const result = await publishZarrCatalog();
+      spinner.succeed(
+        `Published zarr-catalog.json: ${result.count} dataset(s), ${result.bytes} bytes`,
+      );
+    } catch (err) {
+      handleCommandError(err, spinner, "Failed to publish zarr catalog");
+      process.exit(1);
+    }
+  });
+
+adminCommand.addCommand(zarrCatalogCommand);

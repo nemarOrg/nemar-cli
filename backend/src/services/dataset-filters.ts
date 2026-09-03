@@ -24,6 +24,7 @@ import type { LicenseTier } from "../lib/license";
 import type { AuthUser } from "../types/bindings";
 import { hasRole } from "../types/bindings";
 import { type FacetFilterValues, buildFacetClauses } from "./dataset-facets";
+import { ZARR_VERIFY_STATUS_PATH } from "./sweep-stamps";
 
 /** Build an injection-safe FTS5 MATCH expression: tokenize to alphanumerics
  *  (dropping all FTS5 operator chars), quote each token and prefix-match it,
@@ -60,6 +61,25 @@ export interface DatasetFilterOptions {
   task?: string;
   hasDoi?: boolean;
   hasHed?: boolean;
+  /** Only datasets with a ready Zarr copy holding at least one store (issue
+   *  #1062, epic #1181 phase 2). Same nullable-safe bespoke-filter shape as
+   *  hasHed/dataComplete above -- not a facet-table entry, because the
+   *  underlying `zarr` facet (dataset-facets.ts) already exists as an ENUM
+   *  match on the raw `zarr_status` value; this is a distinct derived
+   *  predicate (ready AND store_count > 0). `hasZarr`'s meaning is STABLE:
+   *  phase 8 adds a SEPARATE `has_zarr_verified` filter for "converted AND
+   *  verified" rather than redefining this one out from under existing
+   *  callers (PR #1201 review, item 9). */
+  hasZarr?: boolean;
+  /** Only datasets whose Zarr copy has PASSED the standing fidelity
+   *  verification sweep (issue #1068, epic #1181 phase 8):
+   *  `has_zarr AND zarr_verify_status = 'verified'`. A strict narrowing of
+   *  `hasZarr` above, not a replacement for it -- a fresh conversion is
+   *  `has_zarr=true` with `zarr_verify_status` still null until the daily
+   *  sweep (services/zarr-fidelity-sweep.ts) reaches it; the viewer keeps
+   *  reading index.json regardless (ADR 0005). Same nullable-safe
+   *  bespoke-filter shape as `hasZarr`, not a facet-table entry. */
+  hasZarrVerified?: boolean;
   dataComplete?: boolean;
   recent?: number;
   licenseTiers?: LicenseTier[];
@@ -161,6 +181,21 @@ export function buildDatasetFilterClauses(
     // #869: has_hed is nullable (NULL = not classified yet), so `= 1` cleanly
     // excludes both 0 (checked, no HED) and NULL. Backed by idx_datasets_has_hed.
     clauses += " AND d.has_hed = 1";
+  }
+  if (opts.hasZarr) {
+    // #1062: zarr_status is nullable (NULL/'pending'/'failed' all excluded by
+    // `= 'ready'`); COALESCE'd store_count guards a 'ready' row whose count
+    // was never populated (an older converter run). Backed by the existing
+    // idx_datasets_zarr_status (migration 0035/0071) -- no new index needed.
+    clauses += " AND d.zarr_status = 'ready' AND COALESCE(d.zarr_store_count, 0) > 0";
+  }
+  if (opts.hasZarrVerified) {
+    // #1068: has_zarr's predicate ANDed with the sweep's stamped verdict.
+    // json_extract returns SQL NULL for a never-swept row (sweep_stamps NULL
+    // or the key absent/JSON-null -- ADR 0035), which never equals the
+    // string literal, so an unswept or non-'verified' row is excluded, same
+    // as has_hed/has_zarr's own NULL-excludes-by-default convention.
+    clauses += ` AND d.zarr_status = 'ready' AND COALESCE(d.zarr_store_count, 0) > 0 AND json_extract(d.sweep_stamps, '${ZARR_VERIFY_STATUS_PATH}') = 'verified'`;
   }
   if (opts.dataComplete) {
     // #970: same nullable-safe idiom as has_hed -- `= 1` excludes both 0

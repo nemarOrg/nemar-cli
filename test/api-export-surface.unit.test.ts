@@ -120,6 +120,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "listUsers",
     "publishDataset",
     "publishVersionDoi",
+    "publishZarrCatalog",
     "reindexBulk",
     "reindexDataset",
     "remintExemplarDois",
@@ -136,6 +137,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "validateCi",
     "verifyImport",
     "withdrawDataset",
+    "zarrFidelitySweep",
   ],
   notices: ["NOTICE_LEVELS", "createNotice", "deleteNotice", "getNotices", "listAdminNotices"],
 };
@@ -163,6 +165,8 @@ const POST_SPLIT_ADDITIONS = [
   "doctorFix", // #1130, CLI wrapper for POST /admin/doctor/fix
   "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
   "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion
+  "publishZarrCatalog", // #1062, epic #1181 phase 2: POST /admin/zarr-catalog/publish
+  "zarrFidelitySweep", // #1068, epic #1181 phase 8: POST /admin/datasets/zarr-fidelity-sweep
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */

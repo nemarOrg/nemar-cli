@@ -7,6 +7,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { buildEnrichmentCommitPayload } from "../backend/src/services/enrich-dataset";
 import { getWorkflowTemplates } from "../backend/src/services/github";
@@ -244,6 +245,57 @@ describe("CI workflow templates", () => {
           );
         }
       }
+    }
+  });
+});
+
+describe("the repo's own test workflow routes changes to jobs", () => {
+  /**
+   * `.github/workflows/test.yml` decides which jobs run from a
+   * `dorny/paths-filter` result, and a path matched by NO filter runs NOTHING:
+   * the PR goes green having been compiled by nothing at all. That is not a
+   * hypothetical -- `shared/**` (the wire contract, the facet vocabulary, the
+   * two published Zarr JSON Schemas) was imported by both `src/` and
+   * `backend/` and matched by neither filter, so a shared-only PR merged
+   * untested.
+   *
+   * Asserted here rather than left to review, because the failure is silent in
+   * exactly the direction nobody checks: a green PR with no jobs.
+   */
+  const workflow = parse(
+    readFileSync(new URL("../.github/workflows/test.yml", import.meta.url), "utf8"),
+  ) as {
+    jobs: Record<string, { if?: string; outputs?: Record<string, string>; steps?: unknown[] }>;
+  };
+
+  const filterNames = (): string[] => {
+    const steps = (workflow.jobs.changes.steps ?? []) as { with?: { filters?: string } }[];
+    const filters = steps.find((s) => s.with?.filters)?.with?.filters ?? "";
+    // Top-level keys of the filters block: `name:` at zero indentation.
+    return [...filters.matchAll(/^(\w+):/gm)].map((m) => m[1]);
+  };
+
+  test("every declared filter is exported as a job output", () => {
+    // A filter with no output is unreadable by every downstream `if:`, which
+    // evaluates to false and skips the job -- the same silent nothing.
+    const outputs = Object.keys(workflow.jobs.changes.outputs ?? {});
+    for (const name of filterNames()) {
+      expect(outputs).toContain(name);
+    }
+  });
+
+  test("shared/** has a filter, and gates the jobs that compile it", () => {
+    expect(filterNames()).toContain("shared");
+    for (const job of ["lint", "unit-pure", "integration-dev"]) {
+      expect(workflow.jobs[job]?.if ?? "").toContain("outputs.shared == 'true'");
+    }
+  });
+
+  test("the source trees the jobs build all have a filter", () => {
+    // If a new top-level source directory appears without one, it is invisible
+    // to CI. Keep this list in step with what the jobs actually compile.
+    for (const name of ["cli", "backend", "tests", "shared", "zarr"]) {
+      expect(filterNames()).toContain(name);
     }
   });
 });

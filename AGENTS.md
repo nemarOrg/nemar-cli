@@ -310,6 +310,27 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   EZID is the registrar (ADR 0007 — not Zenodo, whatever `.context/research.md` says).
   DOIs are permanent and require explicit confirmation.
 - **Zarr.** A derived, latest-only serving copy, not a source of truth.
+  `zarr.nemar.org` is the stable contract for it (issue #1061, epic #1181 phase 6):
+  `index.json` stays proxied, edge-cached, and D1-gated. Phase 2's `catalog.json` is a
+  SEPARATE route (no `<id>/zarr/` segment, so it can never match the redirect predicate
+  at all) that stays proxied and edge-cached too, but has no D1 gate of its own — its
+  source document only ever lists already-public datasets. A plain `GET` for a store
+  object with no allowlisted browser `Origin` — libraries, HPC jobs, agents — 302s
+  straight to the public S3 object instead of streaming through the Worker, so every
+  request is still counted without this Worker carrying the bytes (Cloudflare's terms
+  restrict proxying large files at this scale on a non-Enterprise plan). `HEAD` is
+  never redirected regardless of Origin: fsspec's `info()` and rclone's sync both probe
+  with HEAD, and rclone's HTTP backend does not follow HEAD redirects. The redirect
+  branch skips the D1 visibility gate entirely, and validates the dataset id itself
+  (`isValidDatasetId`) rather than trusting the path shape — the bucket's own
+  `NotResource` deny-list (`backend/src/services/bucket-policy.ts`) is the real
+  enforcement point, so a redirect that 403s at S3 for a private dataset leaks nothing
+  the proxied 404 does not. The rate limiter counts these hits toward the SAME shared
+  data-ip bucket a proxied request from that IP would be enforced against, without ever
+  blocking the redirect itself (`rateLimiter`'s `observeOnly` option,
+  `backend/src/middleware/rateLimit.ts`) — it logs at most one `console.warn` per
+  window, the first time the bucket crosses the point enforcement would have tripped,
+  never a per-request log.
   The converter is `scripts/zarr/` **in this repo** and runs on the SDSC Hallu
   cron (`scripts/zarr/hallu-zarr.sh`, hourly at `:30`), never in GitHub Actions —
   Actions cannot finish a large dataset inside the 120-minute cap (ADR 0029).
@@ -324,6 +345,11 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   deployment where they are the same file. A stale out-of-clone copy left at the
   old path is inert, not a fallback. Manual recovery for one dataset is
   `hallu-zarr.sh --dataset <id>`.
+  A second, independently-stated `--test` instance
+  (own state dir, own AWS profile, `api-test.nemar.org`/`nemar-dev`)
+  converts into `nemar-dev`'s S3 zarr prefix, served at `zarr-test.nemar.org`,
+  without touching any of this
+  — see [systems inventory](.context/systems-inventory.md) §3.4.
   "Every run" is load-bearing and used to be a lie during a backfill: a run holds
   the lock until the queue empties, so `setup()` never re-ran and the node sat two
   deploys behind for two days (#1129). The drain now re-checks `origin/$DRIVER_REF`
@@ -334,10 +360,81 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   and an embedded classic `.set` loads fully even with `preload=False`.
   Discovery and dispatch are raw-only (ADR 0027):
   nothing under `derivatives/`, `sourcedata/`, or `code/` becomes a *new* store.
-  Stores published under those trees before that landed are a separate,
-  explicitly authorized purge — some are still served until it completes,
-  so do not read the rule as a description of what is currently in the bucket.
+  Stores published under those trees before that landed are being deleted by
+  `scripts/zarr/purge_non_raw_stores.py`; index v3 stops republishing them at the
+  same time (see the coverage paragraph below), so the index describes what is
+  served rather than what the bucket still happens to hold mid-purge.
   A `--clean` rebuild reconciles rather than wiping first (ADR 0023).
+  **`index.json` is format v3 and is the mandatory entry point** — anonymous
+  in-prefix ListBucket is denied, so it is how a client learns what is served.
+  Schema: `shared/zarr-index.schema.json`, validated by the converter before
+  upload and served at `GET /schemas/zarr-index-v3.json`.
+  `contract_base` is the only URL a client may hardcode; `data_base` / `s3_uri`
+  say where the bytes are today and are per-dataset so one dataset can be
+  mirrored without rewriting anyone's client.
+  `source_commit` is always a 40-hex SHA — the converter refuses to publish an
+  index without one (on008083 shipped `""`).
+  **Coverage balances by construction:**
+  `discovered_count == store_count + failure_count + pending_count`.
+  A carried-over store under `derivatives/`/`sourcedata/`/`code/` is DROPPED from
+  the index rather than republished — those stores are being deleted by
+  `purge_non_raw_stores.py`, not served — and each drop is logged with its cause
+  and counted as `non_raw_dropped` on the callback, never in the index. So
+  `source_tree` is always `raw`.
+  `failures[]` is what will not convert without a change to the data or the
+  converter, and each entry now carries a `detail` (exception class plus first
+  message line, local paths stripped) so an opaque `file_read_error` is
+  diagnosable from the public index. `pending[]` is new and is the other half:
+  recordings with no store that are still expected to convert
+  (`infra_failure` / `memory_budget` / `not_attempted`), with an `attempts`
+  count. These used to be omitted "so they retry next run" and then never did,
+  because a run that converted anything is marked `done`; `zarr_queue` now
+  re-queues such a dataset on its own. **Only the ATTEMPTED pendings
+  (`infra_failure`, `memory_budget`) drive the backoff table (1 h, 6 h, 24 h,
+  then weekly) and the 5-round exhaustion cap, after which the recording becomes
+  a typed `retry_exhausted` failure. A `not_attempted` pending is re-queued at
+  the shortest delay (1 h) and does NOT advance `retry_round`** — nothing has
+  failed for it, so a dataset merely too large to finish in one run must not burn
+  its rounds on recordings nobody has tried yet. The converter reports the split
+  as `pending_count` and `not_attempted_count` on the callback.
+  Per-store `source_key` moved OUT of the index into a sibling `manifest.json`
+  (nothing on the website read it; it was 18 percent of nm000281's 12.8 MB index).
+  The index also publishes dataset-level `doi` / `license` / `citation` /
+  `hed_version` and a `layout` object of `const` path templates, so an MCP recipe
+  (ADR 0025) is computable from `index.json` plus one array-metadata fetch with no
+  probing.
+  **Events are a third document, `<id>/zarr/events.parquet`** (#1060): one row per
+  (event, channel group) across every store, with `sample_index` computed by the
+  converter as `math.floor(onset_s * rate + 0.5)` against the group's SERVING
+  rate — ties round UP, and it is deliberately not Python's `round()`, which
+  ties to even and so disagrees on every exact half-sample onset. The serving
+  rate is the only place the resampling relation is known exactly
+  (`resample_poly` is zero-phase, so there is no delay to subtract). It exists only when the index
+  names it (`events_parquet` / `events_row_count`); publishing it is best-effort
+  like the manifest, and the per-store `n_events` / `trial_types` come from the
+  same parse as its rows.
+  **The three dataset-level documents — `index.json`, `manifest.json`,
+  `events.parquet` — share one cache rule**: the short untokened TTL in
+  `cacheControlFor` and the zarr-ready purge list, both driven by
+  `ZARR_DATASET_DOCUMENTS` (`backend/src/services/cloudflare.ts`), because they
+  are rewritten together by every conversion. Only `index.json` is always
+  proxied; the other two redirect to S3 for non-browser clients like any store
+  object.
+  Stores also carry a structured `nemar` root attribute — dataset id, DOI,
+  license, citation, source commit, source tree, derived, HED version, engine
+  version, contract URL — read once per run from `GET /datasets/<id>`, so a
+  client that has the store has the attribution.
+  Served samples carry the unit the recording's `channels.tsv` declares, on
+  BOTH conversion paths (biosigio>=1.2.7). The sidecar is resolved by BIDS
+  inheritance — the same resolution the channel-count fidelity gate uses — and
+  passed EXPLICITLY as `bids_channels`, never biosigIO's `"auto"`: the file an
+  exporter is handed is a scratch materialisation, and on the MaxShield path it
+  is the filtered copy at `work/sss_<basename>`, so sibling detection is the
+  wrong question. `units_report` on a store entry is present exactly when a
+  sidecar was applied. **Index v3 is what `ZARR_ENGINE_VERSION = "3"` carries
+  to the back catalogue**, and the units change is why that bump needed the
+  1.2.7 floor: below it the streaming exporter could not apply the sidecar at
+  all, so the two paths would have disagreed.
   **A widening of discovery reaches the back catalog only through the engine
   stamp** (ADR 0033): `reconcile` re-queues on a version change, and an engine
   upgrade bumps no version, so `zarr_queue.py`'s `ZARR_ENGINE_VERSION` is what
@@ -353,6 +450,41 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   normally throughout. The cohort stranded before the stamp existed
   (directory-format datasets converted before 2026-08-22, #1172) is recovered by
   `hallu-zarr.sh --backfill-dir-formats`, dry-run by default.
+  **Verification is a standing sweep, not a conversion-time gate alone**
+  (issue #1068, epic #1181 phase 8): the converter's own
+  `channel_count_mismatch` check withholds an unfaithful store when it is
+  built, but `has_zarr` KEEPS ITS EXISTING MEANING (converted: `zarr_status
+  = 'ready'` with at least one store) so no caller of `?has_zarr=1` sees a
+  silently narrower result set. `has_zarr_verified` is the new, separate,
+  stricter filter: converted AND the fidelity sweep's last verdict was
+  `verified`. `backend/src/services/zarr-fidelity-sweep.ts`'s
+  `runZarrFidelitySweep` re-derives ground truth per sampled recording
+  (`channels.tsv` row count, sidecar `SamplingFrequency`/`RecordingDuration`)
+  from the dataset's own git-tracked BIDS metadata via the public,
+  credential-free `raw.githubusercontent.com` content host (never the
+  GitHub API/App/PAT, which is what makes it safe on the non-prod cron too
+  -- `DEV_CRON_ALLOWLIST` in index.ts) -- candidates are restricted to
+  `status='active' AND visibility='public'` for exactly that reason: a
+  private repo can't be read anonymously, so it would only ever produce
+  `unverifiable` noise. It FAILS OPEN ON THE ROW, never on the verdict: a
+  transient infra error (a non-2xx that isn't 404, a network throw, or
+  either fetch budget running out mid-dataset -- a sweep-wide 600 and a
+  per-dataset 90, both index plus sidecar fetches) aborts that one
+  dataset's verification for the run -- nothing is stamped, it lands in the
+  run's `errors`, and the row stays a candidate; only a clean 404 at every
+  nearest-first candidate path is real absence, and only a value that
+  actually parsed counts as checked. Stamps `zarr_verify_status`
+  (`verified` / `failed` / `unverifiable`) plus `zarr_verified_at` into
+  `sweep_stamps` (ADR 0034/0035 -- no new column); a re-conversion (a
+  changed `zarr_source_commit`) OR a stamped commit that is null (a fixed
+  fossilisation bug -- the write side now stamps `''`, never JSON `null`,
+  but the candidate predicate also re-arms on a null stamp so an
+  already-fossilised row un-sticks too) re-arms verification. A fresh
+  conversion shows `zarr_verify_status: null` until the daily sweep (plus
+  `POST /admin/datasets/zarr-fidelity-sweep`, `nemar admin
+  zarr-fidelity-sweep`) reaches it; the viewer keeps reading index.json
+  regardless (ADR 0005 -- verification is reported, never a precondition
+  for serving).
 
 ---
 
@@ -384,7 +516,7 @@ and what is historical. The entries worth knowing by name:
 | `nemar dataset publish` | request, status, resend |
 | `nemar dataset` (access) | request-access, access, invite, collaborators |
 | `nemar sandbox` | training run, status, reset — required before uploading |
-| `nemar admin` | users, approve, revoke, role, notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, doctor, summary, notice, email-preferences, e2e-test |
+| `nemar admin` | users, approve, revoke, role, notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, zarr-fidelity-sweep, doctor, summary, notice, email-preferences, e2e-test |
 | `nemar admin import*` | OpenNeuro import, status, rollback, retry, verify, recover (issue #754, epic #967) |
 | `nemar admin fleet` | drift, enforce, revalidate — governance across dataset repos (epic #713) |
 | `nemar admin exemplar` | create, status, remint-dois — the staging exemplar fleet |

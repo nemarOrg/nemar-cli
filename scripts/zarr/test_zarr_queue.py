@@ -30,9 +30,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from zarr_queue import (  # type: ignore[import-not-found]  # noqa: E402
+    DEFAULT_ENGINE_REQUEUE_LIMIT,
+    PENDING_BACKOFF_SECONDS,
+    PENDING_MAX_ROUNDS,
     ZARR_ENGINE_VERSION,
     _get_json_retrying,
     backoff_seconds,
+    build_parser,
     claim_next,
     classify_backfill,
     connect,
@@ -48,6 +52,7 @@ from zarr_queue import (  # type: ignore[import-not-found]  # noqa: E402
     migrate_schema,
     missing_dir_format_stores,
     partition_dir_format_recordings,
+    pending_backoff_seconds,
     reconcile,
     requeue,
     sweep_dir_format_backfill,
@@ -736,6 +741,307 @@ class EngineStampMigrationTest(unittest.TestCase):
         self.assertEqual(buf.getvalue(), "")
 
 
+class PendingRetryTest(unittest.TestCase):
+    """A `done` dataset that still owes recordings gets re-queued on its own
+    (nemarOrg/nemar-cli#1197).
+
+    Before this, a run that converted SOMETHING returned 0, the row went `done`,
+    and any recording that had failed for an infra reason was never looked at
+    again: on008083 lost five that way, and from outside they were
+    indistinguishable from "still generating" forever. The converter now lists
+    them in index.json's `pending` and reports the count; this is the half that
+    acts on it.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.conn = connect(os.path.join(self._tmp.name, "q.db"))
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+        claim_next(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+        self._tmp.cleanup()
+
+    def row(self):
+        return self.conn.execute(
+            "SELECT status, pending_count, retry_round, next_retry_at FROM jobs"
+            " WHERE dataset_id='nm000001'"
+        ).fetchone()
+
+    def due_now(self):
+        """Make the row's backoff elapsed, so reconcile's decision is about the
+        POLICY and not about waiting an hour in a test."""
+        self.conn.execute(
+            "UPDATE jobs SET next_retry_at=0 WHERE dataset_id='nm000001'"
+        )
+        self.conn.commit()
+
+    def test_a_clean_run_records_nothing_outstanding(self):
+        mark_done(self.conn, "nm000001", "1.0.0")
+        row = self.row()
+        self.assertEqual(row["status"], "done")
+        self.assertEqual(row["pending_count"], 0)
+        self.assertEqual(row["retry_round"], 0)
+        self.assertEqual(row["next_retry_at"], 0)
+        res = reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+        self.assertEqual(res["enqueued"], 0)
+        self.assertEqual(res["pending_outstanding"], 0)
+
+    def test_pending_recordings_stamp_a_round_and_a_backoff(self):
+        before = int(time.time())
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=5)
+        row = self.row()
+        self.assertEqual(row["status"], "done", "what converted is still served")
+        self.assertEqual(row["pending_count"], 5)
+        self.assertEqual(row["retry_round"], 1)
+        self.assertGreaterEqual(row["next_retry_at"], before + PENDING_BACKOFF_SECONDS[0])
+
+    def test_reconcile_waits_for_the_backoff(self):
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=5)
+        res = reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+        # Counted as outstanding, but NOT re-queued: the hour has not passed.
+        self.assertEqual(res["pending_outstanding"], 1)
+        self.assertEqual(res["pending_requeued"], 0)
+        self.assertEqual(self.row()["status"], "done")
+
+    def test_reconcile_requeues_once_the_backoff_elapses(self):
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=5)
+        self.due_now()
+        res = reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+        self.assertEqual(res["pending_requeued"], 1)
+        self.assertEqual(res["enqueued"], 1)
+        self.assertEqual(self.row()["status"], "pending")
+
+    def test_the_backoff_grows_with_the_round(self):
+        self.assertEqual(
+            [pending_backoff_seconds(n) for n in (1, 2, 3, 4)],
+            [3600, 6 * 3600, 24 * 3600, 7 * 86400],
+        )
+        # Past the table it holds at weekly rather than growing without bound.
+        self.assertEqual(pending_backoff_seconds(99), PENDING_BACKOFF_SECONDS[-1])
+        # And a round of 0 (never retried) still yields the first entry.
+        self.assertEqual(pending_backoff_seconds(0), PENDING_BACKOFF_SECONDS[0])
+
+    def test_rounds_accumulate_across_conversions(self):
+        for expected in (1, 2, 3):
+            mark_done(self.conn, "nm000001", "1.0.0", pending_count=1)
+            self.assertEqual(self.row()["retry_round"], expected)
+            self.due_now()
+            reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+            claim_next(self.conn)
+
+    def test_exhaustion_stops_consuming_the_queue(self):
+        for _ in range(PENDING_MAX_ROUNDS):
+            mark_done(self.conn, "nm000001", "1.0.0", pending_count=1)
+            self.due_now()
+            res = reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+            if self.row()["status"] == "pending":
+                claim_next(self.conn)
+        self.assertEqual(self.row()["retry_round"], PENDING_MAX_ROUNDS)
+        # The last reconcile of the loop already refused to requeue.
+        self.assertEqual(res["pending_requeued"], 0)
+        self.assertEqual(res["pending_exhausted"], 1)
+        self.assertEqual(self.row()["status"], "done")
+
+    def test_a_clean_run_resets_the_round(self):
+        # A dataset that succeeds after bad rounds must not be one round from
+        # exhaustion the next time something transient happens to it.
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=3)
+        self.assertEqual(self.row()["retry_round"], 1)
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=0)
+        self.assertEqual(self.row()["retry_round"], 0)
+        self.assertEqual(self.row()["pending_count"], 0)
+
+    def test_a_new_version_wins_over_the_pending_backoff(self):
+        # A newer snapshot re-converts everything anyway, so it must not be held
+        # back by a pending backoff from the previous one.
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=5)
+        res = reconcile(self.conn, [("nm000001", "1.1.0")], 3600)
+        self.assertEqual(res["enqueued"], 1)
+        self.assertEqual(res["pending_requeued"], 0)
+        self.assertEqual(self.row()["status"], "pending")
+
+    def test_the_engine_bump_guard_does_not_block_a_pending_requeue(self):
+        # A pending requeue is ordinary unfinished work on the CURRENT engine.
+        # Blocking it behind an unacknowledged engine bump would strand exactly
+        # the recordings this mechanism exists to recover.
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=2)
+        self.due_now()
+        res = reconcile(
+            self.conn,
+            [("nm000001", "1.0.0")],
+            3600,
+            engine_version="99",
+            engine_requeue_limit=0,
+        )
+        self.assertEqual(res["pending_requeued"], 1)
+        self.assertEqual(self.row()["status"], "pending")
+
+    def test_not_attempted_pendings_do_not_spend_a_round(self):
+        """A recording nothing has tried yet must not cost an exhaustion round.
+
+        A dataset too large to finish in one run reports pendings every time. If
+        those advanced `retry_round`, five runs would exhaust it and it would
+        look permanently broken while nothing had ever actually failed.
+        """
+        before = int(time.time())
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=4, not_attempted_count=4)
+        row = self.row()
+        self.assertEqual(row["pending_count"], 4)
+        self.assertEqual(row["retry_round"], 0, "no round spent")
+        # Re-queued at the SHORTEST delay rather than the round-1 backoff, which
+        # here happen to be the same number -- so assert the round, above, too.
+        self.assertGreaterEqual(row["next_retry_at"], before + PENDING_BACKOFF_SECONDS[0])
+
+    def test_not_attempted_pendings_never_exhaust(self):
+        for _ in range(PENDING_MAX_ROUNDS + 3):
+            mark_done(
+                self.conn, "nm000001", "1.0.0", pending_count=2, not_attempted_count=2
+            )
+            self.due_now()
+            res = reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+            self.assertEqual(res["pending_requeued"], 1)
+            self.assertEqual(res["pending_exhausted"], 0)
+            claim_next(self.conn)
+        self.assertEqual(self.row()["retry_round"], 0)
+
+    def test_a_mixed_batch_spends_a_round(self):
+        # One genuinely failing recording alongside three untried ones: something
+        # HAS failed, so the backoff applies.
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=4, not_attempted_count=3)
+        self.assertEqual(self.row()["retry_round"], 1)
+        self.assertEqual(self.row()["pending_count"], 4)
+
+    def test_only_attempted_pendings_drive_exhaustion(self):
+        for _ in range(PENDING_MAX_ROUNDS):
+            mark_done(
+                self.conn, "nm000001", "1.0.0", pending_count=3, not_attempted_count=2
+            )
+            self.due_now()
+            res = reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+            if self.row()["status"] == "pending":
+                claim_next(self.conn)
+        self.assertEqual(self.row()["retry_round"], PENDING_MAX_ROUNDS)
+        self.assertEqual(res["pending_exhausted"], 1)
+
+    def test_not_attempted_is_clamped_to_pending(self):
+        # A converter bug must not be able to make the attempted count negative,
+        # which would silently turn a failing dataset into a never-exhausting one.
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=2, not_attempted_count=9)
+        self.assertEqual(self.row()["pending_count"], 2)
+        self.assertEqual(self.row()["retry_round"], 0)
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=2, not_attempted_count=-5)
+        self.assertEqual(self.row()["retry_round"], 1, "negative reads as zero untried")
+
+    def test_a_clean_run_still_clears_a_not_attempted_backlog(self):
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=3, not_attempted_count=3)
+        self.assertEqual(self.row()["pending_count"], 3)
+        mark_done(self.conn, "nm000001", "1.0.0", pending_count=0)
+        self.assertEqual(self.row()["pending_count"], 0)
+        self.assertEqual(self.row()["next_retry_at"], 0)
+
+    def test_the_cli_passes_both_counts_through(self):
+        # hallu-zarr.sh forwards both; a flag the parser accepts but never threads
+        # would leave every other test in this class green.
+        db = os.path.join(self._tmp.name, "q.db")
+        argv = [
+            "zarr_queue.py", "--db", db, "done", "nm000001", "1.0.0",
+            "--pending-count", "5", "--not-attempted-count", "5",
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            self.assertEqual(main(), 0)
+        finally:
+            sys.argv = saved
+        self.assertEqual(self.row()["pending_count"], 5)
+        self.assertEqual(self.row()["retry_round"], 0, "all untried: no round spent")
+
+    def test_the_cli_passes_the_pending_count_through(self):
+        # `hallu-zarr.sh` reaches this via `qpy done <id> <ver> --pending-count N`,
+        # so drive the real argument parser: a flag the parser accepts but never
+        # threads to mark_done would leave every other test in this class green.
+        db = os.path.join(self._tmp.name, "q.db")
+        argv = [
+            "zarr_queue.py", "--db", db, "done", "nm000001", "1.0.0",
+            "--pending-count", "4",
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            rc = main()
+        finally:
+            sys.argv = saved
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.row()["pending_count"], 4)
+        self.assertEqual(self.row()["retry_round"], 1)
+
+
+class PendingColumnMigrationTest(unittest.TestCase):
+    """The pending columns land on a table that already exists in production, so
+    they arrive by ALTER, not by CREATE TABLE (same reason `engine_version` did).
+    A NULL-defaulting column would make every pre-existing `done` row look
+    outstanding on the first reconcile after deploy and re-queue the archive."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self._tmp.name, "old.db")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def legacy_db(self):
+        """A `jobs` table as it existed before #1197 -- with engine_version, since
+        that migration already shipped, but without the pending columns."""
+        conn = sqlite3.connect(self.path)
+        conn.executescript(
+            """
+            CREATE TABLE jobs (
+              dataset_id TEXT PRIMARY KEY, latest_version TEXT,
+              converted_version TEXT, status TEXT NOT NULL DEFAULT 'pending',
+              attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+              next_retry_at INTEGER NOT NULL DEFAULT 0, enqueued_at TEXT,
+              updated_at INTEGER NOT NULL DEFAULT 0, engine_version TEXT
+            );
+            INSERT INTO jobs(dataset_id, latest_version, converted_version, status,
+                             engine_version)
+            VALUES('nm000001', 'v1.0.0', 'v1.0.0', 'done', ?);
+            """.replace("?", f"'{ZARR_ENGINE_VERSION}'")
+        )
+        conn.commit()
+        conn.close()
+
+    def test_the_columns_are_added_and_default_to_zero(self):
+        self.legacy_db()
+        conn = connect(self.path)
+        try:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+            self.assertIn("pending_count", cols)
+            self.assertIn("retry_round", cols)
+            row = conn.execute(
+                "SELECT pending_count, retry_round FROM jobs WHERE dataset_id='nm000001'"
+            ).fetchone()
+            self.assertEqual((row["pending_count"], row["retry_round"]), (0, 0))
+        finally:
+            conn.close()
+
+    def test_a_migrated_row_is_not_requeued(self):
+        self.legacy_db()
+        conn = connect(self.path)
+        try:
+            res = reconcile(conn, [("nm000001", "v1.0.0")], 3600)
+            self.assertEqual(res["enqueued"], 0)
+            self.assertEqual(res["pending_outstanding"], 0)
+        finally:
+            conn.close()
+
+    def test_migration_is_idempotent(self):
+        self.legacy_db()
+        for _ in range(3):
+            conn = connect(self.path)
+            self.assertEqual(migrate_schema(conn), 0)
+            conn.close()
+
+
 class EngineStampRequeueTest(unittest.TestCase):
     """#1172: a widened engine reaches the back catalog through the stamp.
 
@@ -919,6 +1225,71 @@ class EngineBumpGuardTest(unittest.TestCase):
         res = reconcile(self.conn, self.catalog(), 3600)
         self.assertFalse(res["engine_requeue_blocked"])
         self.assertEqual(res["engine_requeued"], 10)
+
+    def test_the_DEFAULT_limit_of_25_is_the_boundary(self):
+        """The boundary AT the real default, rather than at an invented one.
+
+        Every other test in this class passes `engine_requeue_limit=` explicitly,
+        so `DEFAULT_ENGINE_REQUEUE_LIMIT` itself -- the value the CLI supplies and
+        therefore the only one the cron ever uses -- was asserted nowhere.
+        Changing 25 to 2500 would have left this class green and the guard
+        useless.
+
+        This calls `reconcile()` directly, passing the constant: it pins the
+        <=/< boundary (25 requeues, 26 blocks). That the CLI actually SUPPLIES
+        that constant is a separate fact, pinned by
+        `test_the_cli_supplies_the_default_limit` below through the real parser --
+        together they cover "the number is right" and "the number arrives".
+        """
+        self.assertEqual(DEFAULT_ENGINE_REQUEUE_LIMIT, 25)
+        for count, expect_blocked in ((25, False), (26, True)):
+            with self.subTest(stale=count):
+                tmp = tempfile.TemporaryDirectory()
+                self.addCleanup(tmp.cleanup)
+                conn = connect(os.path.join(tmp.name, "q.db"))
+                ids = [f"nm{n:06d}" for n in range(1, count + 1)]
+                reconcile(conn, [(i, "v1.0.0") for i in ids], 3600)
+                for dataset_id in ids:
+                    claim_next(conn)
+                    mark_done(conn, dataset_id, "v1.0.0", engine_version=self.OLD_ENGINE)
+                res = reconcile(
+                    conn,
+                    [(i, "v1.0.0") for i in ids],
+                    3600,
+                    engine_requeue_limit=DEFAULT_ENGINE_REQUEUE_LIMIT,
+                )
+                self.assertEqual(res["engine_stale"], count)
+                self.assertIs(res["engine_requeue_blocked"], expect_blocked)
+                self.assertEqual(res["engine_requeued"], 0 if expect_blocked else count)
+                conn.close()
+
+    def test_the_cli_supplies_the_default_limit(self):
+        """The guard's floor as the CRON gets it: parsed, with no override.
+
+        `hallu-zarr.sh` passes `--engine-requeue-limit "$ENGINE_REQUEUE_LIMIT"`,
+        but the parser's default is what applies whenever anyone runs `reconcile`
+        by hand -- and it is the only place the constant becomes an argument.
+        Comparing the constant to itself would assert nothing; this drives the
+        real `argparse` parser and reads the value off the parsed namespace.
+        """
+        args = build_parser().parse_args(["--db", "/tmp/x.db", "reconcile"])
+        self.assertEqual(args.engine_requeue_limit, 25)
+        self.assertEqual(args.engine_requeue_limit, DEFAULT_ENGINE_REQUEUE_LIMIT)
+        # `0` spells "no guard" on a CLI where None cannot be typed, so the
+        # default must be a real, positive floor rather than the disabled value.
+        self.assertGreater(args.engine_requeue_limit, 0)
+        # And an explicit override still wins, which is how the cron passes it.
+        override = build_parser().parse_args(
+            ["--db", "/tmp/x.db", "reconcile", "--engine-requeue-limit", "3"]
+        )
+        self.assertEqual(override.engine_requeue_limit, 3)
+
+    def test_the_cli_defaults_the_pending_counts_to_zero(self):
+        # The same class of fact for `done`: a run that reports nothing
+        # outstanding must not accidentally arm a retry.
+        args = build_parser().parse_args(["--db", "/tmp/x.db", "done", "nm000001", "v1.0.0"])
+        self.assertEqual(args.pending_count, 0)
+        self.assertEqual(args.not_attempted_count, 0)
 
     def test_a_blocked_bump_does_not_stop_ordinary_work(self):
         """The guard is scoped to the stamp-only requeues, deliberately.

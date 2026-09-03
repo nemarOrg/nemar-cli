@@ -14,9 +14,11 @@ Run with:
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,6 +29,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import generate_zarr
+from zarr_queue import ZARR_ENGINE_VERSION  # type: ignore[import-not-found]  # noqa: E402
+
 from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (sibling module via sys.path)
     _AWS_OP_TIMEOUT,
     _AWS_RM_TIMEOUT,
@@ -39,6 +43,7 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     annex_key_size,
     bids_suffix_modality,
     compute_clean_orphans,
+    convert_one,
     convert_recording,
     projected_peak_bytes,
     per_recording_ceiling_bytes,
@@ -67,7 +72,6 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     MaxShieldUncalibrated,
     maxshield_calibration_for,
     MAXSHIELD_MEM_FACTOR,
-    projected_peak_bytes,
     RETRYABLE_CODES,
     reason_for_code,
     should_stream,
@@ -108,7 +112,46 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     split_index,
     split_members_for,
     store_rel_for,
+    INDEX_SCHEMA_PATH,
+    MANIFEST_SCHEMA_PATH,
+    PENDING_MAX_ATTEMPTS,
+    channels_tsv_for,
+    check_index_invariant,
+    dataset_citation,
+    discover_primaries,
+    _failure_entry,
+    EVENTS_FIXED_COLUMNS,
+    EVENTS_PARQUET_NAME,
+    EventsStaging,
+    PriorEventRows,
+    conform_events_table,
+    event_rows_for_store,
+    events_schema,
+    events_row_alert,
+    events_summary,
+    events_summary_of,
+    parse_events_tsv,
+    sample_index_for,
+    write_events_parquet,
+    failure_detail,
+    fetch_dataset_row,
+    is_commit_sha,
+    merge_manifest,
+    nemar_store_attrs,
+    source_tree_for,
+    redact_secrets,
+    strip_local_paths,
+    validate_document,
 )
+
+
+# Real-shaped 40-hex commit SHAs. `merge_index` refuses anything else since index
+# v3: a published index that does not name the commit it was built from is
+# unreproducible and cannot seed the next incremental diff, and one was actually
+# published that way (on008083 carried `source_commit: ""`, #1197). A placeholder
+# like "sha" would now assert the wrong contract.
+SHA_OLD = "0" * 39 + "1"
+SHA_NEW = "0" * 39 + "2"
 
 
 def by_dir(primaries: list[str]) -> dict[str, list[str]]:
@@ -549,7 +592,7 @@ class TestSidecarRebuildsDirectoryRecordings(unittest.TestCase):
 class TestMergeIndex(unittest.TestCase):
     def test_upsert_remove_and_carry_over(self):
         prior = {
-            "source_commit": "old",
+            "source_commit": SHA_OLD,
             "stores": [
                 {"zarr": "sub-01/eeg/a_eeg.zarr", "store": "old-a"},
                 {"zarr": "sub-02/eeg/b_eeg.zarr", "store": "keep-b"},
@@ -557,23 +600,33 @@ class TestMergeIndex(unittest.TestCase):
         }
         converted = [{"zarr": "sub-01/eeg/a_eeg.zarr", "store": "new-a"}]
         index = merge_index(
-            prior, "nm000104", "newsha", converted, ["sub-02/eeg/b_eeg.zarr"], "2026-06-02T00:00:00Z"
+            prior, "nm000104", SHA_NEW, converted, ["sub-02/eeg/b_eeg.zarr"], "2026-06-02T00:00:00Z"
         )
-        self.assertEqual(index["source_commit"], "newsha")
+        self.assertEqual(index["source_commit"], SHA_NEW)
         self.assertEqual(index["store_count"], 1)
         self.assertEqual(index["format"], "nemar-zarr-index")
-        self.assertEqual(index["stores"], [{"zarr": "sub-01/eeg/a_eeg.zarr", "store": "new-a"}])
+        # v3 normalizes every published entry, this run's and the carried-over
+        # ones alike, so one index never mixes shapes (see _normalize_store_entry).
+        self.assertEqual(
+            index["stores"],
+            [{
+                "zarr": "sub-01/eeg/a_eeg.zarr",
+                "store": "new-a",
+                "source_tree": "raw",
+                "derived": False,
+            }],
+        )
 
     def test_no_prior_builds_fresh(self):
         index = merge_index(
-            None, "nm000104", "sha", [{"zarr": "x/y_eeg.zarr"}], [], "2026-06-02T00:00:00Z"
+            None, "nm000104", SHA_NEW, [{"zarr": "x/y_eeg.zarr"}], [], "2026-06-02T00:00:00Z"
         )
         self.assertEqual(index["store_count"], 1)
         self.assertEqual([s["zarr"] for s in index["stores"]], ["x/y_eeg.zarr"])
 
     def test_stores_sorted_by_zarr_path(self):
         converted = [{"zarr": "b.zarr"}, {"zarr": "a.zarr"}]
-        index = merge_index(None, "nm000104", "sha", converted, [], "2026-06-02T00:00:00Z")
+        index = merge_index(None, "nm000104", SHA_NEW, converted, [], "2026-06-02T00:00:00Z")
         self.assertEqual([s["zarr"] for s in index["stores"]], ["a.zarr", "b.zarr"])
 
 
@@ -2265,7 +2318,7 @@ class TestFailureReasons(unittest.TestCase):
 
     def test_merge_index_records_failures(self):
         index = merge_index(
-            None, "nm000104", "sha", [{"zarr": "a_eeg.zarr", "path": "a_eeg.set"}], [],
+            None, "nm000104", SHA_NEW, [{"zarr": "a_eeg.zarr", "path": "a_eeg.set"}], [],
             "2026-06-13T00:00:00Z",
             [{"path": "b-ave.fif", "zarr": "b-ave.zarr", "code": "not_continuous",
               "reason": "derivative"}],
@@ -2278,13 +2331,13 @@ class TestFailureReasons(unittest.TestCase):
     def test_merge_index_failure_clears_when_path_converts(self):
         # A path that failed before but converts now drops out of `failures`.
         prior = {
-            "source_commit": "old",
+            "source_commit": SHA_OLD,
             "stores": [],
             "failures": [{"path": "x_eeg.set", "zarr": "x_eeg.zarr",
                           "code": "corrupt_or_truncated", "reason": "..."}],
         }
         index = merge_index(
-            prior, "nm000104", "new", [{"zarr": "x_eeg.zarr", "path": "x_eeg.set"}], [],
+            prior, "nm000104", SHA_NEW, [{"zarr": "x_eeg.zarr", "path": "x_eeg.set"}], [],
             "2026-06-13T00:00:00Z", [],
         )
         self.assertEqual(index["failure_count"], 0)
@@ -2293,12 +2346,12 @@ class TestFailureReasons(unittest.TestCase):
     def test_merge_index_path_never_in_both_stores_and_failures(self):
         # A recording that newly fails drops its stale store entry.
         prior = {
-            "source_commit": "old",
+            "source_commit": SHA_OLD,
             "stores": [{"zarr": "x_eeg.zarr", "path": "x_eeg.set"}],
             "failures": [],
         }
         index = merge_index(
-            prior, "nm000104", "new", [], [], "2026-06-13T00:00:00Z",
+            prior, "nm000104", SHA_NEW, [], [], "2026-06-13T00:00:00Z",
             [{"path": "x_eeg.set", "zarr": "x_eeg.zarr", "code": "not_continuous",
               "reason": "..."}],
         )
@@ -2310,12 +2363,12 @@ class TestFailureReasons(unittest.TestCase):
 
     def test_merge_index_drops_failure_for_removed_store(self):
         prior = {
-            "source_commit": "old", "stores": [],
+            "source_commit": SHA_OLD, "stores": [],
             "failures": [{"path": "gone_eeg.set", "zarr": "gone_eeg.zarr",
                           "code": "not_continuous", "reason": "..."}],
         }
         index = merge_index(
-            prior, "nm000104", "new", [], ["gone_eeg.zarr"], "2026-06-13T00:00:00Z", [],
+            prior, "nm000104", SHA_NEW, [], ["gone_eeg.zarr"], "2026-06-13T00:00:00Z", [],
         )
         self.assertEqual(index["failure_count"], 0)
 
@@ -2326,7 +2379,7 @@ class TestFailureReasons(unittest.TestCase):
         # file we deliberately no longer serve. A genuine current failure for
         # a still-discoverable path must survive alongside it.
         prior = {
-            "source_commit": "old",
+            "source_commit": SHA_OLD,
             "stores": [],
             "failures": [
                 {"path": "derivatives/preprocessed/sub-01_task-x-epo.fif",
@@ -2338,7 +2391,7 @@ class TestFailureReasons(unittest.TestCase):
             ],
         }
         index = merge_index(
-            prior, "nm000104", "new", [], [], "2026-06-13T00:00:00Z", [],
+            prior, "nm000104", SHA_NEW, [], [], "2026-06-13T00:00:00Z", [],
         )
         self.assertEqual(index["failure_count"], 1)
         self.assertEqual(
@@ -2794,7 +2847,7 @@ class TestCleanOrphanSelection(unittest.TestCase):
         # --clean rewrites the index fresh (prior=None), so the derivatives
         # store -- never touched -- simply has no entry in the new index.
         index = merge_index(
-            None, "on005520", "sha", [], sorted(orphans),
+            None, "on005520", SHA_NEW, [], sorted(orphans),
             "2026-08-20T00:00:00Z",
             [{"path": head[1], "zarr": "sub-01/eeg/sub-01_task-rest_eeg.zarr",
               "code": "corrupt_or_truncated", "reason": "..."}],
@@ -3780,6 +3833,3354 @@ class TestStreamingPeakIsChannelAware(unittest.TestCase):
             projected_peak_bytes(name, 100 * 1024**2, 1),
             projected_peak_bytes(name, 100 * 1024**2, 66),
         )
+
+def build_real_edf(directory: str, stem: str, n_channels: int = 4,
+                   rate: int = 200, seconds: int = 60) -> str:
+    """Write a REAL, spec-compliant EDF+ with pyedflib and return its path.
+
+    Not a fixture file in the repo, and not a stub: `test/fixtures/bids-minimal`'s
+    `.edf` is a 1 KB placeholder that pyedflib refuses to open ("the label is
+    incorrect"), so it cannot exercise a conversion at all. This writes one with
+    the same library biosigIO's importer reads it back with, so everything
+    downstream -- the importer, the resampler, the Zarr writer, the attrs this
+    module then republishes -- is the real code on real samples. 60 s at 200 Hz is
+    the smallest size that still produces a multi-level view pyramid, which is
+    what the geometry assertions need.
+    """
+    import numpy as np
+    import pyedflib
+
+    path = os.path.join(directory, f"{stem}.edf")
+    writer = pyedflib.EdfWriter(path, n_channels, file_type=pyedflib.FILETYPE_EDFPLUS)
+    writer.setSignalHeaders([
+        {
+            "label": f"E{i + 1}",
+            "dimension": "uV",
+            "sample_frequency": rate,
+            "physical_max": 500.0,
+            "physical_min": -500.0,
+            "digital_max": 32767,
+            "digital_min": -32768,
+            "transducer": "",
+            "prefilter": "",
+        }
+        for i in range(n_channels)
+    ])
+    rng = np.random.default_rng(0)
+    writer.writeSamples([rng.normal(0, 20, rate * seconds) for _ in range(n_channels)])
+    writer.close()
+    return path
+
+
+# --- real recordings ----------------------------------------------------------
+# A handful of assertions can only be made against an actual archived recording:
+# the resampling relation `sample_index` rests on is a property of biosigIO plus
+# a real acquisition rate, and a hand-built fixture at the SERVING rate would
+# never exercise it (#1060 names nm000329 for exactly this reason).
+#
+# Downloads are cached OUTSIDE the repository -- nothing to commit, and one
+# download per host rather than one per worktree -- and every failure path skips
+# rather than fails: these tests need the network, and a flaky connection must
+# not turn a converter change red. Mirrors biosigio's own
+# `biosigio/tests/real_data.py`, with `unittest.SkipTest` in place of
+# `pytest.skip` so `python test_generate_zarr.py` behaves the same as pytest.
+REAL_DATA_CACHE_ENV = "NEMAR_ZARR_REAL_DATA_CACHE"
+REAL_DATA_SKIP_ENV = "NEMAR_ZARR_SKIP_REAL_DATA"
+_REAL_DATA_DEFAULT_CACHE = os.path.join(
+    os.path.expanduser("~"), ".cache", "nemar-zarr-tests", "real_data"
+)
+# data.nemar.org resets the connection for urllib's default `Python-urllib/x.y`
+# User-Agent (a generic anti-bot header check -- any other string clears it).
+_REAL_DATA_USER_AGENT = (
+    "nemar-cli-zarr-tests/1.0 (+https://github.com/nemarOrg/nemar-cli)"
+)
+
+
+def fetch_real_file(url: str, *, min_bytes: int = 1) -> str:
+    """Local path to `url`, downloading it into the shared cache on first use.
+
+    Raises `unittest.SkipTest` (never fails) when the download is unavailable or
+    opted out of. URLs must be VERSIONED (`/nm000329/v1.0.7/...`): the point of a
+    real-data assertion is that it is made against known bytes, and `latest`
+    would silently change what was verified.
+    """
+    if os.environ.get(REAL_DATA_SKIP_ENV):
+        raise unittest.SkipTest(
+            f"real-data test skipped: {REAL_DATA_SKIP_ENV} is set"
+        )
+    cache = os.environ.get(REAL_DATA_CACHE_ENV) or _REAL_DATA_DEFAULT_CACHE
+    os.makedirs(cache, exist_ok=True)
+    dest = os.path.join(cache, url.rsplit("/", 1)[-1])
+    if os.path.exists(dest) and os.path.getsize(dest) >= min_bytes:
+        return dest
+    import urllib.error
+    import urllib.request
+
+    part = dest + ".part"
+    try:
+        request = urllib.request.Request(
+            url, headers={"User-Agent": _REAL_DATA_USER_AGENT}
+        )
+        with urllib.request.urlopen(request, timeout=30) as resp, open(part, "wb") as fh:
+            shutil.copyfileobj(resp, fh, 4 * 1024 * 1024)
+        os.replace(part, dest)
+    except Exception as exc:  # noqa: BLE001 - offline is a skip, never a failure
+        with contextlib.suppress(OSError):
+            os.unlink(part)
+        raise unittest.SkipTest(f"real-data test skipped: could not fetch {url} ({exc})")
+    if os.path.getsize(dest) < min_bytes:
+        os.unlink(dest)
+        raise unittest.SkipTest(f"real-data test skipped: {url} looked truncated")
+    return dest
+
+
+class TestSampleIndexAgainstARealRateChange(unittest.TestCase):
+    """#1060's acceptance criterion: `sample_index` verified to within one sample
+    on a dataset that actually changes rate (nm000329, 1000 Hz -> 250 Hz).
+
+    A recording built at the serving rate cannot check this at all -- the whole
+    class of error the column exists to remove only appears when the source and
+    target rates differ. Three independent checks, none of which re-uses the
+    formula under test:
+
+    1. The store's own geometry: level-0 `n_samples` is `round(n_native *
+       target / native)`, i.e. the grid really is `t[n] = n / rate`.
+    2. No filter delay: the served signal correlates with the NATIVE samples
+       taken at the same absolute times, peaking at lag 0. `resample_poly` is
+       zero-phase, and this is what proves it for the exporter we ship.
+    3. The dataset's own `sample` column (onsets in native samples, written by
+       whoever curated it) scaled to the serving rate.
+    """
+
+    VERSION = "v1.0.7"
+    STEM = "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-calibration_run-0"
+    BASE = "https://data.nemar.org/nm000329"
+    NATIVE_RATE = 1000.0
+    SERVING_RATE = 250.0
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import numpy  # noqa: F401
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+        cls.recording = fetch_real_file(
+            f"{cls.BASE}/{cls.VERSION}/{cls.STEM}_eeg.bdf", min_bytes=100_000_000
+        )
+        cls.events = fetch_real_file(f"{cls.BASE}/{cls.VERSION}/{cls.STEM}_events.tsv")
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.store = os.path.join(cls._tmp.name, "real.zarr")
+        # The real converter entry point on the real bytes: same call
+        # `convert_one` makes.
+        convert_recording(cls.recording, cls.events, cls.store)
+        cls.meta = store_metadata(cls.store)
+        cls.group = cls.meta["groups"][0]
+        with open(cls.events, encoding="utf-8") as fh:
+            cls.parsed = parse_events_tsv(fh.read())
+        cls.rows = event_rows_for_store(
+            "sub-1/ses-0/eeg/x_eeg.zarr", f"{cls.STEM}_eeg.bdf",
+            cls.meta["groups"], cls.parsed,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        if hasattr(cls, "_tmp"):
+            cls._tmp.cleanup()
+
+    def native_samples(self):
+        """(labels, n_samples, first-channel signal) straight from the BDF."""
+        import pyedflib
+
+        reader = pyedflib.EdfReader(self.recording)
+        try:
+            labels = reader.getSignalLabels()
+            n = int(reader.getNSamples()[0])
+            return labels, n, reader
+        except Exception:
+            reader.close()
+            raise
+
+    def test_the_dataset_really_changes_rate(self):
+        # Guard the premise: if the archive ever re-published this at 250 Hz,
+        # every assertion below would pass while checking nothing.
+        self.assertEqual(self.group["source_rate_hz"], self.NATIVE_RATE)
+        self.assertEqual(self.group["rate"], self.SERVING_RATE)
+
+    def test_level_zero_is_the_nominal_grid_over_the_same_span(self):
+        _labels, n_native, reader = self.native_samples()
+        try:
+            self.assertGreater(n_native, 0)
+        finally:
+            reader.close()
+        expected = round(n_native * self.SERVING_RATE / self.NATIVE_RATE)
+        self.assertEqual(self.group["n_samples"], expected)
+        # ...so sample n is at t = n / rate, which is what the formula assumes.
+        self.assertAlmostEqual(
+            self.group["duration_s"], n_native / self.NATIVE_RATE, places=3
+        )
+
+    def test_the_served_signal_carries_no_filter_delay(self):
+        """If `resample_poly` left its FIR group delay in, every sample index
+        would be off by that delay and the column would be confidently wrong.
+
+        Compared against the NATIVE samples at the same absolute times
+        (1000 -> 250 is an exact 4, so `native[::4]` is the zero-phase reference
+        and no resampler is involved in the reference at all).
+        """
+        import numpy as np
+        import zarr
+
+        root = zarr.open_group(self.store, mode="r")
+        group = root[self.group["name"]]
+        label = dict(group.attrs)["channels"][0]["label"]
+        served = np.asarray(group["0"][0, :], dtype=np.float64)
+
+        labels, _n, reader = self.native_samples()
+        try:
+            self.assertIn(label, labels, "store channel is not a native channel")
+            native = reader.readSignal(labels.index(label)).astype(np.float64)
+        finally:
+            reader.close()
+
+        step = int(self.NATIVE_RATE // self.SERVING_RATE)
+        reference = native[::step]
+        n = min(len(served), len(reference)) - 20
+        a = served[10 : 10 + n] - served[10 : 10 + n].mean()
+        b = reference[10 : 10 + n] - reference[10 : 10 + n].mean()
+        lags = range(-8, 9)
+        scores = {
+            lag: float(np.dot(a, np.roll(b, lag)) / (np.linalg.norm(a) * np.linalg.norm(b)))
+            for lag in lags
+        }
+        best = max(scores, key=scores.get)
+        self.assertGreater(
+            scores[0], 0.9,
+            "the served channel does not track the native one at all -- the "
+            f"channel mapping is wrong, not the delay (r={scores[0]:.3f})",
+        )
+        self.assertEqual(
+            best, 0,
+            f"served level 0 lags the native grid by {best} sample(s); "
+            "sample_index would be off by the same amount",
+        )
+
+    def test_every_onset_lands_on_the_grid_within_one_sample(self):
+        """The acceptance criterion, checked against the grid itself rather than
+        against the formula: the level-0 timestamps are `n / rate`, and the
+        published index must be the nearest of them.
+
+        Measured on this recording: 72 events, worst disagreement 1 sample, and
+        every one of those is an exact TIE -- the onset sits exactly half a
+        sample (0.002 s at 250 Hz) between two level-0 samples, e.g. 39.302 s ->
+        9825.5. The published rule takes the later sample and `argmin` takes the
+        earlier; neither is more correct, and no rule can do better than one
+        sample there. On every event that is not a tie the two agree exactly,
+        which is the assertion that would break if the formula drifted.
+        """
+        import numpy as np
+
+        rate = self.group["rate"]
+        grid = np.arange(self.group["n_samples"], dtype=np.float64) / rate
+        self.assertGreater(len(self.rows["onset_s"]), 50, "fixture lost its events")
+        ties = 0
+        for onset, published in zip(self.rows["onset_s"], self.rows["sample_index"]):
+            nearest = int(np.argmin(np.abs(grid - onset)))
+            delta = abs(published - nearest)
+            self.assertLessEqual(
+                delta, 1, f"onset {onset} published {published}, grid says {nearest}"
+            )
+            if delta == 0:
+                continue
+            ties += 1
+            # The only licensed disagreement: equidistant from both samples.
+            self.assertAlmostEqual(
+                abs(grid[published] - onset), abs(grid[nearest] - onset), places=9,
+                msg=f"onset {onset} is off by a sample and is NOT a tie",
+            )
+        # The fixture has to contain some, or the tie branch above is untested
+        # and this test is weaker than it reads.
+        self.assertGreater(ties, 0)
+
+    def test_the_datasets_own_native_sample_column_agrees(self):
+        """nm000329's events.tsv carries a `sample` column in NATIVE samples,
+        written by whoever curated the dataset. It is the one ground truth here
+        that owes nothing to this converter -- and it agrees to within one
+        sample, disagreeing only on the same ties (a native sample number
+        divided by 4 lands on x.5 for exactly those events)."""
+        self.assertIn("sample", self.rows, "fixture lost its `sample` column")
+        ratio = self.SERVING_RATE / self.NATIVE_RATE
+        for native, published in zip(self.rows["sample"], self.rows["sample_index"]):
+            scaled = int(native) * ratio
+            self.assertLessEqual(
+                abs(published - round(scaled)), 1,
+                f"curated sample {native} -> {scaled}, published {published}",
+            )
+            if published != round(scaled):
+                self.assertAlmostEqual(scaled % 1, 0.5, places=9)
+
+
+class TestSampleIndexOnANonIntegerRateRatio(unittest.TestCase):
+    """512 Hz -> 250 Hz: the ratio is 125/256, so there is no whole-sample
+    relationship between the source and serving grids at all.
+
+    Synthetic on purpose, and the comment matters: nm000329 (the real-data check
+    above) is an exact 4, so it CANNOT distinguish a formula that quietly assumes
+    an integer decimation from one that does not. Nothing in the archive was
+    handy at a fractional ratio, so this fixture is the only thing standing
+    between that assumption and a silently mis-aligned file. The recording is a
+    real EDF written by pyedflib and converted by the real exporter -- only the
+    samples are synthetic.
+    """
+
+    RATE = 512
+    SERVING_RATE = 250.0
+    SECONDS = 20
+    ONSETS = [0.0, 0.001, 1.003, 7.777, 12.5, 19.999]
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import numpy  # noqa: F401
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+        cls._tmp = tempfile.TemporaryDirectory()
+        d = cls._tmp.name
+        cls.recording = build_real_edf(
+            d, "sub-01_task-x_eeg", n_channels=3, rate=cls.RATE, seconds=cls.SECONDS
+        )
+        cls.events = os.path.join(d, "sub-01_task-x_events.tsv")
+        with open(cls.events, "w") as fh:
+            fh.writelines(
+                ["onset\tduration\ttrial_type\n"]
+                + [f"{onset}\t0.1\tgo\n" for onset in cls.ONSETS]
+            )
+        cls.store = os.path.join(d, "out.zarr")
+        convert_recording(cls.recording, cls.events, cls.store)
+        cls.meta = store_metadata(cls.store)
+        cls.group = cls.meta["groups"][0]
+        with open(cls.events) as fh:
+            cls.rows = event_rows_for_store(
+                "sub-01/eeg/x_eeg.zarr", "sub-01/eeg/sub-01_task-x_eeg.edf",
+                cls.meta["groups"], parse_events_tsv(fh.read()),
+            )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_the_ratio_really_is_fractional(self):
+        self.assertEqual(self.group["source_rate_hz"], float(self.RATE))
+        self.assertEqual(self.group["rate"], self.SERVING_RATE)
+        self.assertNotEqual((self.RATE / self.SERVING_RATE) % 1, 0.0)
+
+    def test_level_zero_length_follows_the_rate_ratio(self):
+        n_native = self.RATE * self.SECONDS
+        self.assertEqual(
+            self.group["n_samples"], round(n_native * self.SERVING_RATE / self.RATE)
+        )
+
+    def test_every_onset_lands_on_the_grid_within_one_sample(self):
+        import numpy as np
+
+        grid = np.arange(self.group["n_samples"], dtype=np.float64) / self.group["rate"]
+        for onset, published in zip(self.rows["onset_s"], self.rows["sample_index"]):
+            nearest = int(np.argmin(np.abs(grid - onset)))
+            self.assertLessEqual(
+                abs(published - nearest), 1,
+                f"onset {onset} published as {published}, grid says {nearest}",
+            )
+
+    def test_the_acquisition_rate_is_the_wrong_rate_to_index_with(self):
+        """The error the column exists to remove. A client reading the BIDS
+        sidecar sees 512 Hz and computes `onset * 512`; level 0 is 250 Hz, so
+        that index is roughly twice as far along the array as the event -- and
+        for most of this recording it is off the end of it entirely. The index
+        publishes the SERVING rate per group precisely so that guess is never
+        needed."""
+        n_samples = self.group["n_samples"]
+        wrong = [round(onset * self.RATE) for onset in self.ONSETS]
+        published = list(self.rows["sample_index"])
+        self.assertNotEqual(wrong, published)
+        # ...and it is not a rounding-scale disagreement, it is a different array
+        # position: the last onset indexes past the end of level 0.
+        self.assertGreater(wrong[-1], n_samples)
+        self.assertLessEqual(published[-1], n_samples)
+
+    def test_deriving_the_index_from_the_native_sample_number_disagrees(self):
+        """The sub-sample error #1060 names. A client that rounds the onset to a
+        NATIVE sample first and scales that -- what the BIDS `sample` column
+        invites -- rounds twice, and on a fractional ratio the two roundings
+        disagree wherever the true position sits within a quarter sample of a
+        tie. It is bounded by one sample, which is exactly why nobody notices it
+        without a column to compare against."""
+        ratio = self.SERVING_RATE / self.RATE
+        onset = 0.086  # 21.5 level-0 samples: the tie band
+        published = sample_index_for(onset, self.SERVING_RATE)
+        two_step = round(round(onset * self.RATE) * ratio)
+        self.assertEqual(published, 22)
+        self.assertEqual(two_step, 21)
+
+
+class TestSourceTree(unittest.TestCase):
+    def test_raw_is_the_default(self):
+        self.assertEqual(source_tree_for("sub-01/eeg/sub-01_task-x_eeg.set"), "raw")
+
+    def test_names_the_excluded_tree_it_sits_under(self):
+        self.assertEqual(
+            source_tree_for("derivatives/prep/sub-01/eeg/sub-01_eeg.set"), "derivatives"
+        )
+        self.assertEqual(source_tree_for("sourcedata/sub-01/eeg/x_eeg.set"), "sourcedata")
+        self.assertEqual(source_tree_for("code/x_eeg.set"), "code")
+
+    def test_segment_boundary_is_respected(self):
+        # `mycode/` and `derivatives_old/` are ordinary directories, matching
+        # in_excluded_tree's own rule.
+        self.assertEqual(source_tree_for("mycode/sub-01_eeg.set"), "raw")
+        self.assertEqual(source_tree_for("derivatives_old/sub-01_eeg.set"), "raw")
+
+
+class TestFailureDetail(unittest.TestCase):
+    """`detail` is the field that makes an opaque `file_read_error` diagnosable
+    from the published index (#1197). It must name the exception and keep the
+    message while dropping the conversion node's scratch paths, which are a fresh
+    mkdtemp name every run."""
+
+    def test_names_the_exception_class_and_first_line(self):
+        detail = failure_detail(ValueError("could not find measurement data\nsecond line"))
+        self.assertEqual(detail, "ValueError: could not find measurement data")
+
+    def test_strips_absolute_paths(self):
+        exc = OSError(
+            "/mnt/local/zarr-scratch/tmpab12/work/sub-01_eeg.edf: the file is not "
+            "EDF(+) or BDF(+) compliant the label is incorrect"
+        )
+        detail = failure_detail(exc)
+        self.assertNotIn("/mnt/local", detail)
+        self.assertIn("<path>", detail)
+        # The diagnosis itself survives -- that is the whole point of the field.
+        self.assertIn("not EDF(+) or BDF(+) compliant", detail)
+
+    def test_leaves_non_path_slashes_alone(self):
+        self.assertEqual(strip_local_paths("min/max envelope"), "min/max envelope")
+
+    def test_accepts_a_bare_string_for_a_synthesized_failure(self):
+        # A worker killed while running alone has no exception to report.
+        self.assertEqual(failure_detail("killed its worker process"),
+                         "killed its worker process")
+
+    def test_length_capped(self):
+        self.assertLessEqual(len(failure_detail(ValueError("x" * 5000))), 300)
+
+    def test_strips_windows_paths(self):
+        # MNE formats paths out of a recording's own header, so a Windows path
+        # can reach a Linux conversion node's error message.
+        detail = failure_detail(
+            OSError(r"C:\Users\hallu\scratch\sub-01_eeg.edf is not EDF(+) compliant")
+        )
+        self.assertNotIn("Users", detail)
+        self.assertIn("<path>", detail)
+        self.assertIn("not EDF(+) compliant", detail)
+
+
+class TestDetailRedaction(unittest.TestCase):
+    """`detail` and `last_error` are published in index.json on a PUBLIC bucket,
+    and the driver shells out to `aws` and reads HTTP -- so an exception message
+    can quote a presigned URL, a request header, or a key id. Path stripping does
+    not cover any of that; none of them is a filesystem path.
+
+    Each case is a real message shape (AWS error text, a curl failure), and each
+    asserts BOTH halves: the secret is gone and the diagnosis survives. A
+    redactor that returned a constant would pass the first half alone.
+    """
+
+    def assert_redacted(self, message: str, secret: str, keep: str = ""):
+        detail = failure_detail(RuntimeError(message))
+        self.assertNotIn(secret, detail, f"secret survived in {detail!r}")
+        self.assertIn("[redacted]", detail)
+        if keep:
+            self.assertIn(keep, detail, f"diagnosis lost from {detail!r}")
+
+    def test_authorization_header(self):
+        self.assert_redacted(
+            "PUT failed with Authorization: AWS4-HMAC-SHA256 SignedHeaders=host",
+            "AWS4-HMAC-SHA256",
+            keep="PUT failed",
+        )
+
+    def test_bearer_token(self):
+        self.assert_redacted(
+            "callback rejected: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig",
+            "eyJhbGciOiJIUzI1NiJ9",
+            keep="callback rejected",
+        )
+
+    def test_x_amz_query_parameters(self):
+        # A presigned URL is the realistic leak: `aws s3 cp` quotes the whole
+        # request line on a 403.
+        self.assert_redacted(
+            "403 for https://nemar.s3.us-east-2.amazonaws.com/k?X-Amz-Signature=deadbeefcafe0123",
+            "deadbeefcafe0123",
+            keep="403",
+        )
+
+    def test_x_amz_credential_is_covered_by_the_prefix_rule(self):
+        self.assert_redacted(
+            "denied: https://h/k?X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20260902",
+            "AKIAIOSFODNN7EXAMPLE",
+            keep="denied",
+        )
+
+    def test_signature_field(self):
+        self.assert_redacted(
+            "SignatureDoesNotMatch signature: abc123def456+/=",
+            "abc123def456",
+            keep="SignatureDoesNotMatch",
+        )
+
+    def test_bare_access_key_id(self):
+        # AWS error text quotes the key id with no URL around it.
+        self.assert_redacted(
+            "The AWS Access Key Id AKIAIOSFODNN7EXAMPLE does not exist in our records",
+            "AKIAIOSFODNN7EXAMPLE",
+            keep="does not exist in our records",
+        )
+
+    def test_sts_session_key_id(self):
+        # ASIA is the form the Hallu profile's session credentials actually take.
+        self.assert_redacted(
+            "expired token for ASIAY34FZKBOKMUTVV7A",
+            "ASIAY34FZKBOKMUTVV7A",
+            keep="expired token",
+        )
+
+    def test_token_query_parameter(self):
+        self.assert_redacted(
+            "POST https://api.nemar.org/webhooks/zarr-ready?token=s3cr3tvalue -> 401",
+            "s3cr3tvalue",
+            keep="401",
+        )
+
+    def test_key_query_parameter(self):
+        self.assert_redacted("GET https://h/p?key=abc123secret", "abc123secret")
+
+    def test_a_url_shaped_message_keeps_its_diagnosis(self):
+        # #1197's whole point: an operator must still be able to tell WHAT failed.
+        detail = failure_detail(
+            RuntimeError("HTTP 503 from https://nemar.s3.us-east-2.amazonaws.com/a/b.edf")
+        )
+        self.assertIn("HTTP 503", detail)
+
+    def test_an_innocent_message_is_left_alone(self):
+        """A redactor that fired on ordinary text would destroy every diagnosis.
+
+        The false-positive risk is real and specific here: BIDS filenames and
+        column names routinely contain the very words the patterns key on, and
+        the words alone must never be enough -- only the `?name=value` and
+        `Header: value` SHAPES are. A redactor that ate `primary_key.csv` would
+        make a corrupt-file report unreadable while leaking nothing.
+        """
+        for clean in (
+            "Could not find measurement data",
+            "channels.tsv declares 74 channels but the store has 1",
+            "min/max envelope mismatch",
+            # "token"/"key" inside BIDS entities and filenames.
+            "sub-01_task-tokenTask_eeg.edf is not EDF(+) compliant",
+            "sub-02_task-keypress_run-1_eeg.vhdr: header missing",
+            "primary_key.csv could not be parsed",
+            "no key column found in participants.tsv",
+            "token count mismatch in the events sidecar",
+            # A bare `key=` with no query string around it is a log field, not a
+            # secret -- the patterns require the `?`/`&` that makes it a URL.
+            "reader reported key=value for channel E1",
+            # And the words as ordinary prose.
+            "the signature of read_raw_edf changed upstream",
+            "authorization to publish this dataset is pending",
+        ):
+            with self.subTest(message=clean):
+                self.assertEqual(redact_secrets(clean), clean)
+                self.assertNotIn("[redacted]", failure_detail(RuntimeError(clean)))
+
+    def test_redaction_survives_the_length_cap(self):
+        # Cap applied AFTER redaction, so truncation can never expose a tail.
+        detail = failure_detail(
+            RuntimeError("x" * 250 + " Bearer supersecrettokenvalue0123456789")
+        )
+        self.assertNotIn("supersecrettokenvalue", detail)
+        self.assertLessEqual(len(detail), 300)
+
+    def test_empty_is_none(self):
+        self.assertIsNone(failure_detail(None))
+
+
+class TestEventsSummary(unittest.TestCase):
+    """`n_events` / `trial_types` let a client judge a dataset, and pick an
+    epoching strategy, without reading a signal byte (#1059)."""
+
+    def test_counts_rows_and_trial_types(self):
+        text = (
+            "onset\tduration\ttrial_type\n"
+            "0.0\t0.5\tgo\n"
+            "1.0\t0.5\tstop\n"
+            "2.0\t0.5\tgo\n"
+        )
+        self.assertEqual(
+            events_summary(text), {"n_events": 3, "trial_types": {"go": 2, "stop": 1}}
+        )
+
+    def test_no_events_file_omits_both_keys(self):
+        # Absent keys mean "no events.tsv", which is not the same claim as
+        # "an events.tsv with no trial types".
+        self.assertEqual(events_summary(None), {})
+
+    def test_no_trial_type_column_is_an_empty_object(self):
+        self.assertEqual(
+            events_summary("onset\tduration\n0.0\t0.5\n"),
+            {"n_events": 1, "trial_types": {}},
+        )
+
+    def test_na_values_are_not_counted(self):
+        text = "onset\ttrial_type\n0.0\tn/a\n1.0\t\n2.0\tgo\n"
+        self.assertEqual(events_summary(text)["trial_types"], {"go": 1})
+        self.assertEqual(events_summary(text)["n_events"], 3)
+
+    def test_the_summary_and_the_rows_come_from_one_parse(self):
+        """#1060's last acceptance criterion. `n_events` in index.json and the
+        rows in events.parquet describe the same file, so they must not be able
+        to disagree: both are computed from a single `parse_events_tsv`."""
+        text = "onset\tduration\ttrial_type\n0.0\t0.5\tgo\n1.0\t0.5\tstop\n"
+        parsed = parse_events_tsv(text)
+        summary = events_summary_of(parsed)
+        rows = event_rows_for_store(
+            "sub-01/eeg/a_eeg.zarr", "sub-01/eeg/sub-01_task-x_eeg.edf",
+            [{"name": "eeg_250hz", "rate": 250.0}], parsed,
+        )
+        self.assertEqual(summary, events_summary(text))
+        # One group, so one row per event: the counts are the same number
+        # arrived at two ways.
+        self.assertEqual(len(rows["onset_s"]), summary["n_events"])
+
+
+class TestEventsParse(unittest.TestCase):
+    """The shared parse behind both the index summary and events.parquet."""
+
+    def test_a_utf8_bom_does_not_eat_the_onset_column(self):
+        """A spreadsheet-exported events.tsv starts with U+FEFF, so the first
+        header cell reads `﻿onset` -- every onset would be unparseable and
+        every sample_index null. nm000329 (the dataset #1060 names for the
+        one-sample check) ships exactly this file."""
+        parsed = parse_events_tsv("﻿onset\tduration\n1.5\t0.5\n")
+        self.assertEqual(parsed["columns"], ["onset", "duration"])
+        rows = event_rows_for_store(
+            "a.zarr", "sub-01/eeg/sub-01_task-x_eeg.edf",
+            [{"name": "eeg_250hz", "rate": 250.0}], parsed,
+        )
+        self.assertEqual(rows["onset_s"], [1.5])
+        self.assertEqual(rows["sample_index"], [375])
+
+    def test_no_file_and_an_empty_file_are_different(self):
+        self.assertIsNone(parse_events_tsv(None))
+        self.assertEqual(parse_events_tsv(""), {"columns": [], "rows": []})
+        self.assertEqual(events_summary_of(parse_events_tsv("")),
+                         {"n_events": 0, "trial_types": {}})
+
+    def test_blank_lines_are_not_events(self):
+        parsed = parse_events_tsv("onset\n0.0\n\n1.0\n\n")
+        self.assertEqual(len(parsed["rows"]), 2)
+
+
+class TestSampleIndexFormula(unittest.TestCase):
+    """`sample_index` is the reason the file exists (#1060): the converter knows
+    the exact resampling relation and every client re-deriving it gets a
+    sub-sample offset wrong wherever the ratio is not an integer."""
+
+    def test_it_is_the_onset_on_the_level_zero_grid(self):
+        self.assertEqual(sample_index_for(0.0, 250.0), 0)
+        self.assertEqual(sample_index_for(4.057, 250.0), 1014)
+        self.assertEqual(sample_index_for(10.0, 250.0), 2500)
+
+    def test_ties_round_up(self):
+        # 1014.5 -> 1015, not banker's 1014. One rule, stated, so a client that
+        # wants to reproduce it can.
+        self.assertEqual(sample_index_for(4.058, 250.0), 1015)
+        self.assertEqual(sample_index_for(0.002, 250.0), 1)
+
+    def test_a_non_integer_rate_ratio_lands_on_the_grid(self):
+        """The case the issue is about: 512 Hz capped to 250 Hz is 125/256, so
+        `round(onset * source_rate) / 4`-style reasoning is wrong. Checked
+        against the grid itself -- the times level 0 actually has, built from
+        the rate rather than from the formula under test."""
+        rate = 250.0
+        n_samples = 512 * 60 * 125 // 256  # what the exporter writes for 60 s
+        grid = [n / rate for n in range(n_samples)]
+        for onset in (0.0, 0.001, 1.0 / 512, 7.13, 33.3333, 59.9):
+            nearest = min(range(len(grid)), key=lambda i: abs(grid[i] - onset))
+            self.assertLessEqual(
+                abs(sample_index_for(onset, rate) - nearest), 1,
+                f"onset {onset} is more than a sample off the level-0 grid",
+            )
+
+    def test_it_is_not_clamped_to_the_recording(self):
+        # An onset past the end is a property of the data. Clamping would be
+        # indistinguishable from an event on the last sample.
+        self.assertEqual(sample_index_for(10_000.0, 250.0), 2_500_000)
+
+    def test_unknowables_are_null_not_zero(self):
+        for onset, rate in ((None, 250.0), (1.0, None), (1.0, 0), (1.0, -250.0),
+                            (float("nan"), 250.0), (float("inf"), 250.0)):
+            self.assertIsNone(sample_index_for(onset, rate), (onset, rate))
+
+
+class TestEventRowBuilder(unittest.TestCase):
+    """The rows of `<id>/zarr/events.parquet`, per store (#1060)."""
+
+    PATH = "sub-01/ses-02/eeg/sub-01_ses-02_task-rest_run-3_eeg.edf"
+    ZARR = "sub-01/ses-02/eeg/sub-01_ses-02_task-rest_run-3_eeg.zarr"
+    TEXT = (
+        "onset\tduration\ttrial_type\tvalue\tHED\tresponse_time\n"
+        "1.0\t0.5\tgo\t2\t(Def/Go)\t0.31\n"
+        "0.0\t0.25\tstop\tn/a\t\t\n"
+    )
+
+    UNSET = object()
+
+    def rows(self, text=UNSET, groups=None, path=None):
+        return event_rows_for_store(
+            self.ZARR, path or self.PATH,
+            [{"name": "eeg_250hz", "rate": 250.0}] if groups is None else groups,
+            parse_events_tsv(self.TEXT if text is self.UNSET else text),
+        )
+
+    def test_the_fixed_columns_come_first_and_in_order(self):
+        rows = self.rows()
+        self.assertEqual(list(rows)[: len(EVENTS_FIXED_COLUMNS)], list(EVENTS_FIXED_COLUMNS))
+
+    def test_entities_come_from_the_recording_path(self):
+        rows = self.rows()
+        self.assertEqual(set(rows["subject"]), {"01"})
+        self.assertEqual(set(rows["session"]), {"02"})
+        self.assertEqual(set(rows["task"]), {"rest"})
+        self.assertEqual(set(rows["run"]), {"3"})
+        self.assertEqual(set(rows["store_path"]), {self.ZARR})
+
+    def test_session_and_run_are_null_when_the_dataset_has_neither(self):
+        rows = self.rows(path="sub-01/eeg/sub-01_task-rest_eeg.edf")
+        self.assertEqual(rows["session"], [None, None])
+        self.assertEqual(rows["run"], [None, None])
+        self.assertEqual(set(rows["subject"]), {"01"})
+
+    def test_rows_are_ordered_by_onset(self):
+        # The file's own order is onset 1.0 then 0.0; published order is sorted,
+        # which is what makes `store_path, onset_s` true of the whole file
+        # without a global sort at write time.
+        self.assertEqual(self.rows()["onset_s"], [0.0, 1.0])
+        self.assertEqual(self.rows()["trial_type"], ["stop", "go"])
+
+    def test_na_and_blank_cells_are_null(self):
+        rows = self.rows()
+        self.assertEqual(rows["value"], [None, "2"])  # `n/a` on the stop row
+        self.assertEqual(rows["hed"], [None, "(Def/Go)"])
+        self.assertEqual(rows["response_time"], [None, "0.31"])
+
+    def test_the_hed_column_is_matched_case_insensitively(self):
+        # BIDS spells it `HED`; datasets in the archive use both cases, and a
+        # case-sensitive match would silently pass it through as an extra column
+        # instead of filling the declared `hed` one.
+        self.assertEqual(self.rows(text="onset\thed\n0.0\tX\n")["hed"], ["X"])
+        self.assertEqual(self.rows(text="onset\tHED\n0.0\tX\n")["hed"], ["X"])
+
+    def test_remaining_columns_pass_through_under_their_own_names(self):
+        rows = self.rows()
+        self.assertIn("response_time", rows)
+        self.assertNotIn("x_response_time", rows)
+
+    def test_a_column_named_like_a_fixed_one_is_prefixed(self):
+        rows = self.rows(text="onset\tsample_index\tsubject\n0.0\t7\tzz\n")
+        self.assertEqual(rows["x_sample_index"], ["7"])
+        self.assertEqual(rows["x_subject"], ["zz"])
+        # ...and the real columns keep their meaning.
+        self.assertEqual(rows["sample_index"], [0])
+        self.assertEqual(rows["subject"], ["01"])
+
+    def test_a_duplicated_header_keeps_both_columns(self):
+        # Malformed input, but dropping the second column's values silently is
+        # the worse answer.
+        rows = self.rows(text="onset\tstim\tstim\n0.0\ta\tb\n")
+        self.assertEqual(rows["stim"], ["a"])
+        self.assertEqual(rows["x_stim"], ["b"])
+
+    def test_one_row_per_event_and_group(self):
+        """A store's groups are concurrent streams at different rates, so one
+        onset has a different sample index in each -- and `group_name` is what
+        tells the rows apart. No dataset in the catalog has a multi-group store
+        today, so this fixture is the only thing standing between the rule and a
+        silently single-rate file."""
+        rows = self.rows(groups=[
+            {"name": "eeg_250hz", "rate": 250.0},
+            {"name": "misc_50hz", "rate": 50.0},
+        ])
+        self.assertEqual(len(rows["onset_s"]), 4)
+        self.assertEqual(rows["group_name"], ["eeg_250hz", "misc_50hz"] * 2)
+        self.assertEqual(rows["onset_s"], [0.0, 0.0, 1.0, 1.0])
+        self.assertEqual(rows["sample_index"], [0, 0, 250, 50])
+
+    def test_a_group_with_no_rate_yields_a_null_index_not_a_dropped_row(self):
+        rows = self.rows(groups=[{"name": "eeg_250hz", "rate": None}])
+        self.assertEqual(rows["sample_index"], [None, None])
+        self.assertEqual(rows["onset_s"], [0.0, 1.0])
+
+    def test_a_malformed_onset_keeps_the_row(self):
+        rows = self.rows(text="onset\ttrial_type\nn/a\tgo\n1.0\tstop\n")
+        # Unparseable onsets sort last, and say so with nulls rather than
+        # vanishing -- an event was declared, its position is unknown.
+        self.assertEqual(rows["onset_s"], [1.0, None])
+        self.assertEqual(rows["sample_index"], [250, None])
+        self.assertEqual(rows["trial_type"], ["stop", "go"])
+
+    def test_nothing_to_publish_returns_none(self):
+        self.assertIsNone(self.rows(text=None))          # no events.tsv
+        self.assertIsNone(self.rows(text="onset\n"))     # header only
+        self.assertIsNone(self.rows(groups=[]))          # store with no groups
+
+    def test_duplicate_onsets_keep_both_rows_in_file_order(self):
+        """Two events at the same instant are two events -- a simultaneous
+        stimulus and response, or two annotation streams merged into one file.
+        The sort is stable, so their file order survives; de-duplicating or
+        reordering them would silently drop or re-pair a client's trials."""
+        rows = self.rows(
+            text="onset\tduration\ttrial_type\n1.5\t0.1\tfirst\n1.5\t0.2\tsecond\n"
+        )
+        self.assertEqual(rows["onset_s"], [1.5, 1.5])
+        self.assertEqual(rows["trial_type"], ["first", "second"])
+        self.assertEqual(rows["duration_s"], [0.1, 0.2])
+        self.assertEqual(rows["sample_index"], [375, 375])
+
+
+class TestEventsRowAlert(unittest.TestCase):
+    """The two conditions that leave a client with events it cannot use, and
+    which the parquet cannot show on its own: a store that contributes no rows
+    at all, and rows whose sample index is null throughout."""
+
+    PARSED = parse_events_tsv("onset\ttrial_type\n0.0\tgo\n1.0\tstop\n")
+    PRIMARY = "sub-01/eeg/sub-01_task-x_eeg.edf"
+
+    def build(self, groups):
+        return event_rows_for_store("a.zarr", self.PRIMARY, groups, self.PARSED)
+
+    def test_a_healthy_store_is_silent(self):
+        rows = self.build([{"name": "eeg_250hz", "rate": 250.0}])
+        self.assertIsNone(events_row_alert(self.PRIMARY, self.PARSED, rows))
+
+    def test_events_but_no_channel_groups_is_named(self):
+        """Unreachable through `main` -- `convert_one` refuses to publish a
+        store with no channel groups -- so this is the only place the branch can
+        be exercised at all. It stays because the alternative is a store that
+        silently vanishes from events.parquet if that guard ever changes."""
+        alert = events_row_alert(self.PRIMARY, self.PARSED, self.build([]))
+        self.assertIsNotNone(alert)
+        self.assertIn("::warning::", alert)
+        self.assertIn(self.PRIMARY, alert)
+        self.assertIn("no channel groups", alert)
+        self.assertIn("2 event(s)", alert)
+
+    def test_no_events_at_all_is_silent(self):
+        # No events.tsv, or an empty one: not a defect, and not worth a line in
+        # a log where most datasets would print it.
+        self.assertIsNone(events_row_alert(self.PRIMARY, None, None))
+        self.assertIsNone(events_row_alert(self.PRIMARY, parse_events_tsv("onset\n"), None))
+
+    def test_every_sample_index_null_is_named(self):
+        rows = self.build([{"name": "eeg_250hz", "rate": None}])
+        alert = events_row_alert(self.PRIMARY, self.PARSED, rows)
+        self.assertIn("no usable sample index", alert)
+        self.assertIn("2 row(s)", alert)
+
+    def test_one_usable_index_is_enough_to_stay_silent(self):
+        parsed = parse_events_tsv("onset\ttrial_type\nn/a\tgo\n1.0\tstop\n")
+        rows = event_rows_for_store(
+            "a.zarr", self.PRIMARY, [{"name": "eeg_250hz", "rate": 250.0}], parsed
+        )
+        self.assertIsNone(events_row_alert(self.PRIMARY, parsed, rows))
+
+
+class TestEventsParquetFile(unittest.TestCase):
+    """The file itself: schema, order, and the bounded-memory write path.
+
+    `pyarrow` is a real dependency here (scripts/zarr/requirements.txt, and the
+    zarr-python-test CI job installs it) rather than an optional one, for the
+    same reason `jsonschema` is: without it these tests do not fail, they ERROR
+    on import, and the converter's own degradation path makes a missing writer
+    look like a dataset with no events.
+    """
+
+    def test_pyarrow_is_installed_so_this_class_can_fail(self):
+        import pyarrow  # noqa: F401 - presence IS the assertion
+
+    def build(self, n_stores=3, n_events=2, rate=250.0, extra=None, first=0):
+        staging = EventsStaging()
+        rels = []
+        for s in range(first, first + n_stores):
+            rel = f"sub-{s:03d}/eeg/sub-{s:03d}_task-x_eeg.zarr"
+            text = "onset\tduration\ttrial_type" + (f"\t{extra}" if extra else "") + "\n"
+            for i in range(n_events):
+                text += f"{i * 2.0}\t0.5\tgo" + (f"\t{i}" if extra else "") + "\n"
+            rows = event_rows_for_store(
+                rel, f"sub-{s:03d}/eeg/sub-{s:03d}_task-x_eeg.edf",
+                [{"name": "eeg_250hz", "rate": rate}], parse_events_tsv(text),
+            )
+            staging.add(rel, rows)
+            rels.append(rel)
+        return staging, rels
+
+    def write(self, staging, rels, prior=None):
+        out = os.path.join(tempfile.mkdtemp(), "events.parquet")
+        rows = write_events_parquet(out, rels, staging, prior)
+        return out, rows
+
+    def test_the_published_types_are_the_declared_ones(self):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        staging, rels = self.build()
+        out, rows = self.write(staging, rels)
+        self.assertEqual(rows, 6)
+        table = pq.read_table(out)
+        self.assertEqual(table.num_rows, 6)
+        label = pa.dictionary(pa.int32(), pa.string())
+        # Dictionary-encoded on the way out AND on the way back: a client reads
+        # categoricals, not 25k copies of the same store path (#1060).
+        for name in ("store_path", "subject", "task", "group_name", "trial_type"):
+            self.assertEqual(table.schema.field(name).type, label, name)
+        self.assertEqual(table.schema.field("onset_s").type, pa.float64())
+        self.assertEqual(table.schema.field("duration_s").type, pa.float32())
+        self.assertEqual(table.schema.field("sample_index").type, pa.int64())
+
+    def test_two_hundred_stores_write_one_file_without_holding_them(self):
+        """The shape that made this a streaming writer: nm000281 has ~25k stores,
+        and one pandas frame for the dataset is not an option (#1060). With the
+        row-group cap lowered, a build that buffered everything would produce ONE
+        row group; the flush is what makes it many."""
+        import pyarrow.parquet as pq
+
+        staging, rels = self.build(n_stores=200, n_events=5)
+        self.assertEqual(len(staging), 200)
+        self.assertEqual(staging.row_count, 1000)
+        saved = generate_zarr.EVENTS_ROW_GROUP_ROWS
+        try:
+            generate_zarr.EVENTS_ROW_GROUP_ROWS = 100
+            out, rows = self.write(staging, rels)
+        finally:
+            generate_zarr.EVENTS_ROW_GROUP_ROWS = saved
+        self.assertEqual(rows, 1000)
+        pf = pq.ParquetFile(out)
+        self.assertEqual(pf.metadata.num_rows, 1000)
+        self.assertEqual(pf.num_row_groups, 10)
+
+    def test_rows_are_ordered_by_store_then_onset(self):
+        import pyarrow.parquet as pq
+
+        staging, rels = self.build(n_stores=3, n_events=3)
+        # Stores are emitted in the order given (in production the index's, i.e.
+        # sorted by `zarr`) whatever order the pool finished them in -- so the
+        # published order is a property of the caller's list, not of arrival.
+        # Reversed here precisely so "sorted by accident" cannot pass.
+        asked = sorted(rels, reverse=True)
+        out, _ = self.write(staging, asked)
+        table = pq.read_table(out)
+        stores = table["store_path"].to_pylist()
+        onsets = table["onset_s"].to_pylist()
+        self.assertEqual(stores, [rel for rel in asked for _ in range(3)])
+        # ...and onsets ascend within each store.
+        self.assertEqual(onsets, [0.0, 2.0, 4.0] * 3)
+
+    def test_a_column_only_some_stores_have_is_null_for_the_others(self):
+        import pyarrow.parquet as pq
+
+        with_extra, rels_a = self.build(n_stores=1, extra="stim_file")
+        without, rels_b = self.build(n_stores=1)
+        # Same store id in both fixtures; rename so they are distinct stores.
+        rel_b = "sub-999/eeg/sub-999_task-x_eeg.zarr"
+        rows = without.get(rels_b[0])
+        rows["store_path"] = [rel_b] * len(rows["store_path"])
+        with_extra.add(rel_b, rows)
+        out, total = self.write(with_extra, sorted([*rels_a, rel_b]))
+        table = pq.read_table(out).to_pydict()
+        self.assertEqual(total, 4)
+        self.assertIn("stim_file", table)
+        by_store = dict(zip(table["store_path"], table["stim_file"]))
+        self.assertIsNone(by_store[rel_b])
+        self.assertIsNotNone(by_store[rels_a[0]])
+
+    def test_a_store_not_converted_this_run_keeps_its_prior_rows(self):
+        """The incremental path: an unchanged store carries its rows forward from
+        the published file exactly as its entry carries forward in the index. It
+        is not reconverted, so this is the only place its events exist."""
+        import pyarrow.parquet as pq
+
+        first, rels = self.build(n_stores=3, n_events=2)
+        prior_path, _ = self.write(first, rels)
+
+        # Second run: only the middle store reconverted, with different events.
+        second = EventsStaging()
+        changed = rels[1]
+        second.add(changed, event_rows_for_store(
+            changed, "sub-001/eeg/sub-001_task-x_eeg.edf",
+            [{"name": "eeg_250hz", "rate": 250.0}],
+            parse_events_tsv("onset\ttrial_type\n9.0\tnew\n"),
+        ))
+        out, total = self.write(second, rels, PriorEventRows(prior_path))
+        self.assertEqual(total, 5)  # 2 carried + 1 fresh + 2 carried
+        table = pq.read_table(out).to_pydict()
+        rows_for = {}
+        for rel, onset, trial in zip(
+            table["store_path"], table["onset_s"], table["trial_type"]
+        ):
+            rows_for.setdefault(rel, []).append((onset, trial))
+        self.assertEqual(rows_for[rels[0]], [(0.0, "go"), (2.0, "go")])
+        self.assertEqual(rows_for[changed], [(9.0, "new")])
+        self.assertEqual(rows_for[rels[2]], [(0.0, "go"), (2.0, "go")])
+
+    def test_a_reconverted_store_never_inherits_prior_rows(self):
+        """`reconverted` is not `staged`: a store rebuilt this run that produced
+        no rows (its events.tsv was deleted or emptied) must publish none, not
+        fall through to the prior file and resurrect the old ones."""
+        import pyarrow.parquet as pq
+
+        first, rels = self.build(n_stores=2, n_events=2)
+        prior_path, _ = self.write(first, rels)
+
+        # Second run rebuilt BOTH stores; only one still has events.
+        second = EventsStaging()
+        second.add(rels[0], event_rows_for_store(
+            rels[0], "sub-000/eeg/sub-000_task-x_eeg.edf",
+            [{"name": "eeg_250hz", "rate": 250.0}],
+            parse_events_tsv("onset\ttrial_type\n4.0\tkept\n"),
+        ))
+        out = os.path.join(tempfile.mkdtemp(), "events.parquet")
+        total = write_events_parquet(
+            out, rels, second, PriorEventRows(prior_path), set(rels)
+        )
+        self.assertEqual(total, 1)
+        table = pq.read_table(out).to_pydict()
+        self.assertEqual(table["store_path"], [rels[0]])
+        self.assertEqual(table["trial_type"], ["kept"])
+        # Without the `reconverted` argument the same call carries them forward,
+        # which is what an unchanged (untouched) store needs.
+        carried = write_events_parquet(
+            os.path.join(tempfile.mkdtemp(), "events.parquet"),
+            rels, second, PriorEventRows(prior_path),
+        )
+        self.assertEqual(carried, 3)
+
+    def test_a_store_dropped_from_the_index_loses_its_rows(self):
+        # The rel list is the index's store list, so a removed recording's rows
+        # are simply not carried: the two documents cannot disagree about which
+        # stores exist.
+        import pyarrow.parquet as pq
+
+        first, rels = self.build(n_stores=3, n_events=1)
+        prior_path, _ = self.write(first, rels)
+        out, total = self.write(EventsStaging(), rels[:2], PriorEventRows(prior_path))
+        self.assertEqual(total, 2)
+        self.assertNotIn(rels[2], set(pq.read_table(out)["store_path"].to_pylist()))
+
+    def test_a_prior_file_without_a_later_column_conforms(self):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        first, rels = self.build(n_stores=1, n_events=1)
+        prior_path, _ = self.write(first, rels)
+        prior = PriorEventRows(prior_path)
+        schema = events_schema(pa, {"stim_file"})
+        table = prior.table_for(rels[0], schema)
+        self.assertEqual(table.schema, schema)
+        self.assertEqual(table["stim_file"].to_pylist(), [None])
+        # And through the writer, alongside a fresh store that HAS the column.
+        fresh, rels_b = self.build(n_stores=1, n_events=2, extra="stim_file", first=1)
+        out, total = self.write(fresh, sorted([*rels, *rels_b]), prior)
+        self.assertEqual(total, 3)
+        self.assertIn("stim_file", pq.read_table(out).column_names)
+
+    def test_conform_fills_a_missing_column_with_nulls(self):
+        import pyarrow as pa
+
+        schema = events_schema(pa, {"a", "b"})
+        table = pa.Table.from_arrays(
+            [pa.array(["x"], type=pa.dictionary(pa.int32(), pa.string()))],
+            names=["store_path"],
+        )
+        conformed = conform_events_table(pa, table, schema)
+        self.assertEqual(conformed.schema, schema)
+        self.assertEqual(conformed["b"].to_pylist(), [None])
+
+
+class TestDatasetProvenanceAttrs(unittest.TestCase):
+    """The structured `nemar` root attribute (#1064). Prose provenance is useless
+    to the machines that are increasingly what reads these stores."""
+
+    ROW = {
+        "name": "Resting state EEG",
+        "authors": "Doe J, Roe R",
+        "concept_doi": "10.82901/nemar.on007763",
+        "license": "CC0",
+        "hed_version": "8.2.0",
+        "latest_version": "v1.0.2",
+        "created_at": "2024-05-01T00:00:00Z",
+    }
+
+    def attrs(self, row):
+        return nemar_store_attrs(
+            dataset_id="on007763",
+            source_commit="a" * 40,
+            source_tree="raw",
+            derived=False,
+            engine_version="2",
+            contract_url="https://zarr.nemar.org/on007763/zarr/sub-01/eeg/x_eeg.zarr/",
+            row=row,
+        )
+
+    def test_carries_the_catalog_fields(self):
+        a = self.attrs(self.ROW)
+        self.assertEqual(a["doi"], "10.82901/nemar.on007763")
+        self.assertEqual(a["license"], "CC0")
+        self.assertEqual(a["hed_version"], "8.2.0")
+        self.assertEqual(a["source_commit"], "a" * 40)
+        self.assertEqual(a["engine_version"], "2")
+        self.assertEqual(a["source_tree"], "raw")
+        self.assertIs(a["derived"], False)
+
+    def test_missing_catalog_row_leaves_fields_null_not_invented(self):
+        a = self.attrs(None)
+        for key in ("doi", "license", "citation", "hed_version"):
+            self.assertIsNone(a[key], key)
+        # The fields the converter knows by itself are still stated.
+        self.assertEqual(a["dataset_id"], "on007763")
+        self.assertEqual(a["source_commit"], "a" * 40)
+
+    def test_citation_composes_from_the_row(self):
+        citation = dataset_citation(self.ROW)
+        self.assertIn("Doe J, Roe R", citation)
+        self.assertIn("(2024)", citation)
+        self.assertIn("Resting state EEG (v1.0.2).", citation)
+        self.assertIn("https://doi.org/10.82901/nemar.on007763", citation)
+
+    def test_citation_needs_a_name(self):
+        self.assertIsNone(dataset_citation({"authors": "Doe J"}))
+        self.assertIsNone(dataset_citation(None))
+
+    def test_citation_omits_the_parts_the_row_lacks(self):
+        citation = dataset_citation({"name": "Untitled"})
+        self.assertEqual(citation, "Untitled. NEMAR.")
+
+
+class TestFetchDatasetRow(unittest.TestCase):
+    """`fetch_dataset_row` against a REAL HTTP server on a real socket -- the
+    provenance attrs depend on its parsing (two response shapes) and on it never
+    failing a conversion when the catalog is unreachable."""
+
+    def serve(self, handler_body: bytes | None, status: int = 200):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
+                if handler_body is None:
+                    self.send_error(500)
+                    return
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(handler_body)))
+                self.end_headers()
+                self.wfile.write(handler_body)
+
+            def log_message(self, *_args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_port}"
+
+    def test_reads_a_bare_row(self):
+        base = self.serve(json.dumps({"dataset_id": "on007763", "license": "CC0"}).encode())
+        row, failed = fetch_dataset_row(base, "on007763")
+        self.assertEqual(row["license"], "CC0")
+        self.assertIs(failed, False)
+
+    def test_reads_a_row_wrapped_in_dataset(self):
+        base = self.serve(json.dumps({"dataset": {"license": "CC-BY-4.0"}}).encode())
+        row, failed = fetch_dataset_row(base, "on007763")
+        self.assertEqual(row["license"], "CC-BY-4.0")
+        self.assertIs(failed, False)
+
+    def test_a_500_is_reported_as_a_FETCH_FAILURE_not_an_absent_field(self):
+        """The distinction the flag exists for.
+
+        A catalog outage and a dataset with no license both leave `doi`/`license`
+        null in every store's `nemar` attrs. One is a fact about the run, fixed
+        by re-converting; the other is a fact about the dataset. Without the flag
+        an outage silently publishes a whole conversion wave claiming to have no
+        license, and afterwards nothing distinguishes those stores from datasets
+        that genuinely have none.
+        """
+        base = self.serve(None)  # the handler send_error(500)s
+        row, failed = fetch_dataset_row(base, "on007763")
+        self.assertIsNone(row)
+        self.assertIs(failed, True)
+
+    def test_a_row_that_lacks_a_field_is_NOT_a_fetch_failure(self):
+        # The other half of the same distinction: a 200 with no license is data.
+        base = self.serve(json.dumps({"dataset_id": "on007763", "name": "N"}).encode())
+        row, failed = fetch_dataset_row(base, "on007763")
+        self.assertIs(failed, False)
+        self.assertIsNone(nemar_store_attrs(
+            dataset_id="on007763", source_commit="a" * 40, source_tree="raw",
+            derived=False, engine_version="3",
+            contract_url="https://zarr.nemar.org/on007763/zarr/x.zarr/",
+            row=row, provenance_fetch_failed=failed,
+        )["license"])
+
+    def test_a_non_object_body_is_a_fetch_failure(self):
+        # A 200 that is not an object is a broken catalog, not an absent field.
+        base = self.serve(json.dumps(["not", "an", "object"]).encode())
+        row, failed = fetch_dataset_row(base, "on007763")
+        self.assertIsNone(row)
+        self.assertIs(failed, True)
+
+    def test_the_flag_reaches_the_store_attrs(self):
+        attrs = nemar_store_attrs(
+            dataset_id="on007763", source_commit="a" * 40, source_tree="raw",
+            derived=False, engine_version="3",
+            contract_url="https://zarr.nemar.org/on007763/zarr/x.zarr/",
+            row=None, provenance_fetch_failed=True,
+        )
+        self.assertIs(attrs["provenance_fetch_failed"], True)
+        self.assertIsNone(attrs["doi"])
+        # Always present, so a consumer never has to ask whether the key exists
+        # to know whether a null is meaningful.
+        clean = nemar_store_attrs(
+            dataset_id="on007763", source_commit="a" * 40, source_tree="raw",
+            derived=False, engine_version="3",
+            contract_url="https://zarr.nemar.org/on007763/zarr/x.zarr/",
+            row={"name": "N", "license": "CC0"},
+        )
+        self.assertIs(clean["provenance_fetch_failed"], False)
+
+
+class TestIndexFormatV3(unittest.TestCase):
+    """The v3 envelope (#1059): where the bytes are, which engine made them, and
+    a `source_commit` that is always a real commit."""
+
+    HEAD = "b" * 40
+
+    def build(self, **kwargs):
+        base = {
+            "prior": None,
+            "dataset_id": "on007763",
+            "head_commit": self.HEAD,
+            "converted": [{"zarr": "sub-01/eeg/a_eeg.zarr", "path": "sub-01/eeg/a_eeg.edf"}],
+            "removed_store_rels": [],
+            "updated_utc": "2026-09-02T00:00:00Z",
+        }
+        base.update(kwargs)
+        return merge_index(
+            base.pop("prior"),
+            base.pop("dataset_id"),
+            base.pop("head_commit"),
+            base.pop("converted"),
+            base.pop("removed_store_rels"),
+            base.pop("updated_utc"),
+            **base,
+        )
+
+    def test_declares_the_data_plane(self):
+        index = self.build(bucket="nemar", region="us-east-2")
+        self.assertEqual(index["format"], "nemar-zarr-index")
+        self.assertEqual(index["format_version"], 3)
+        self.assertEqual(index["contract_base"], "https://zarr.nemar.org/on007763/zarr/")
+        self.assertEqual(
+            index["data_base"], "https://nemar.s3.us-east-2.amazonaws.com/on007763/zarr/"
+        )
+        self.assertEqual(index["data_base_kind"], "s3-public")
+        self.assertEqual(index["s3_uri"], "s3://nemar/on007763/zarr/")
+        self.assertEqual(index["s3_region"], "us-east-2")
+        self.assertIs(index["s3_anonymous"], True)
+        self.assertEqual(index["n_recordings"], index["store_count"])
+
+    def test_contract_base_is_not_derived_from_the_bucket(self):
+        # The test instance publishes its own host while writing to nemar-dev.
+        index = self.build(contract_base="https://zarr-test.nemar.org", bucket="nemar-dev")
+        self.assertEqual(index["contract_base"], "https://zarr-test.nemar.org/on007763/zarr/")
+        self.assertEqual(
+            index["data_base"], "https://nemar-dev.s3.us-east-2.amazonaws.com/on007763/zarr/"
+        )
+
+    def test_stamps_the_engine_and_the_library(self):
+        index = self.build(engine_version="7", biosigio_version="1.2.6")
+        self.assertEqual(index["engine_version"], "7")
+        self.assertEqual(index["biosigio_version"], "1.2.6")
+
+    def test_refuses_to_build_without_a_real_commit(self):
+        # on008083 published `source_commit: ""` while D1 held the real SHA.
+        for bad in ("", "abc123", None, "z" * 40, "A" * 40):
+            with self.subTest(commit=bad), self.assertRaises(ValueError):
+                self.build(head_commit=bad)
+
+    def test_is_commit_sha(self):
+        self.assertTrue(is_commit_sha("0123456789abcdef" + "0" * 24))
+        self.assertFalse(is_commit_sha("0123456789ABCDEF" + "0" * 24))  # upper-case
+        self.assertFalse(is_commit_sha("0" * 39))
+        self.assertFalse(is_commit_sha(None))
+
+    def test_source_key_is_not_published_in_the_index(self):
+        index = self.build(
+            converted=[{
+                "zarr": "sub-01/eeg/a_eeg.zarr",
+                "path": "sub-01/eeg/a_eeg.edf",
+                "source_key": "SHA256E-s100--abc.edf",
+            }],
+        )
+        self.assertNotIn("source_key", index["stores"][0])
+
+    def test_a_carried_over_v1_entry_is_normalized(self):
+        # An index built incrementally on top of a v1 one must not publish a
+        # half-v1 document: `source_key` goes, `source_tree`/`derived` appear.
+        prior = {
+            "source_commit": "a" * 40,
+            "stores": [{
+                "zarr": "sub-02/eeg/b_eeg.zarr",
+                "path": "sub-02/eeg/b_eeg.edf",
+                "source_key": "SHA256E-s200--old.edf",
+            }],
+        }
+        index = self.build(prior=prior)
+        carried = next(s for s in index["stores"] if s["zarr"] == "sub-02/eeg/b_eeg.zarr")
+        self.assertNotIn("source_key", carried)
+        self.assertEqual(carried["source_tree"], "raw")
+        self.assertIs(carried["derived"], False)
+
+    def test_manifest_carries_the_source_key(self):
+        manifest = merge_manifest(
+            None,
+            "on007763",
+            [{"zarr": "sub-01/eeg/a_eeg.zarr", "source_key": "SHA256E-s100--abc.edf",
+              "size_bytes": 100}],
+            ["sub-01/eeg/a_eeg.zarr"],
+            "2026-09-02T00:00:00Z",
+        )
+        self.assertEqual(manifest["format"], "nemar-zarr-manifest")
+        self.assertEqual(manifest["format_version"], 1)
+        self.assertEqual(manifest["stores"], [{
+            "zarr": "sub-01/eeg/a_eeg.zarr",
+            "source_key": "SHA256E-s100--abc.edf",
+            "size_bytes": 100,
+        }])
+
+    def test_manifest_tracks_the_index_store_set(self):
+        # A store the index no longer publishes must not linger in the manifest,
+        # or the two documents disagree about what exists.
+        prior = {"stores": [
+            {"zarr": "gone.zarr", "source_key": "k1", "size_bytes": 1},
+            {"zarr": "kept.zarr", "source_key": "k2", "size_bytes": 2},
+        ]}
+        manifest = merge_manifest(prior, "on007763", [], ["kept.zarr"], "2026-09-02T00:00:00Z")
+        self.assertEqual([s["zarr"] for s in manifest["stores"]], ["kept.zarr"])
+
+
+class TestCoverageInvariant(unittest.TestCase):
+    """#1197's acceptance criterion: every discovered raw recording is accounted
+    for exactly once, in the published document."""
+
+    HEAD = "c" * 40
+    A = "sub-01/eeg/a_eeg.edf"
+    B = "sub-02/eeg/b_eeg.edf"
+    C = "sub-03/eeg/c_eeg.edf"
+
+    def build(self, converted=(), failures=(), pending=(), discovered=None, **kw):
+        return merge_index(
+            kw.pop("prior", None),
+            "on008083",
+            self.HEAD,
+            list(converted),
+            [],
+            "2026-09-02T00:00:00Z",
+            list(failures),
+            list(pending),
+            discovered=discovered,
+            **kw,
+        )
+
+    def test_full_run_balances(self):
+        index = self.build(
+            converted=[{"zarr": store_rel_for(self.A), "path": self.A}],
+            failures=[{"path": self.B, "zarr": store_rel_for(self.B),
+                       "code": "corrupt_or_truncated", "reason": "...", "detail": "..."}],
+            pending=[{"path": self.C, "reason": "infra_failure", "last_error": "boom"}],
+            discovered=[self.A, self.B, self.C],
+        )
+        self.assertEqual(index["discovered_count"], 3)
+        self.assertEqual((index["store_count"], index["failure_count"],
+                          index["pending_count"]), (1, 1, 1))
+        check_index_invariant(index)
+
+    def test_partial_run_lists_the_untouched_recordings(self):
+        # The five recordings on008083 lost: discovered, not attempted, and
+        # before v3 present in neither list.
+        index = self.build(
+            converted=[{"zarr": store_rel_for(self.A), "path": self.A}],
+            discovered=[self.A, self.B, self.C],
+        )
+        check_index_invariant(index)
+        self.assertEqual(index["pending_count"], 2)
+        reasons = {p["path"]: p for p in index["pending"]}
+        self.assertEqual(reasons[self.B]["reason"], "not_attempted")
+        self.assertEqual(reasons[self.B]["attempts"], 0)
+        self.assertEqual(reasons[self.B]["zarr"], store_rel_for(self.B))
+
+    def test_entries_for_undiscovered_paths_are_dropped(self):
+        prior = {"source_commit": "a" * 40,
+                 "stores": [{"zarr": store_rel_for(self.C), "path": self.C}]}
+        index = self.build(
+            prior=prior,
+            converted=[{"zarr": store_rel_for(self.A), "path": self.A}],
+            discovered=[self.A],
+        )
+        check_index_invariant(index)
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+
+    def test_a_non_raw_store_is_dropped_and_counted(self):
+        """A carried-over store under `derivatives/` must NOT be republished.
+
+        ADR 0027 made discovery raw-only and `purge_non_raw_stores.py` is the
+        authorised deletion of what it stopped producing, so those stores are not
+        hosted -- an index that kept describing one would advertise bytes that are
+        being removed. The drop is deliberate, but it is LOUD: `merge_index` logs
+        each one with the tree that excluded it, and `main` reports the count as
+        `non_raw_dropped` on the callback, because "the index lost 92 stores"
+        needs a cause attached when an orphan-detection bug is the alternative
+        reading.
+        """
+        legacy = "derivatives/preprocessed/sub-09/eeg/sub-09_task-x_eeg.set"
+        prior = {
+            "source_commit": "a" * 40,
+            "stores": [
+                {"zarr": store_rel_for(legacy), "path": legacy,
+                 "source_key": "SHA256E-s9--legacy"},
+            ],
+        }
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            index = self.build(
+                prior=prior,
+                converted=[{"zarr": store_rel_for(self.A), "path": self.A}],
+                discovered=[self.A],
+            )
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        self.assertEqual(index["store_count"], 1)
+        self.assertNotIn("legacy_store_count", index)
+        # Named, with the reason, rather than vanishing.
+        log = buf.getvalue()
+        self.assertIn(legacy, log)
+        self.assertIn("derivatives", log)
+        self.assertEqual(index["discovered_count"], 1)
+        check_index_invariant(index)
+
+    def test_non_raw_store_paths_counts_from_the_prior_index(self):
+        """The callback's `non_raw_dropped` is read from the PRIOR PUBLISHED
+        index, not from the merge's filtering.
+
+        Production always runs `--clean`, which passes `prior=None` to the merge:
+        the entries never enter, so the filter never sees them -- yet they are
+        still gone from the index a client fetches next. Counting from the merge
+        would report 0 on exactly the path that matters.
+        """
+        prior = {"stores": [
+            {"path": "derivatives/prep/a_eeg.set", "zarr": "derivatives/prep/a_eeg.zarr"},
+            {"path": "sourcedata/b_eeg.set", "zarr": "sourcedata/b_eeg.zarr"},
+            {"path": "code/c_eeg.set", "zarr": "code/c_eeg.zarr"},
+            {"path": "sub-01/meg/sub-01_acq-crosstalk_meg.fif",
+             "zarr": "sub-01/meg/sub-01_acq-crosstalk_meg.zarr"},
+            {"path": self.A, "zarr": store_rel_for(self.A)},
+        ]}
+        dropped = generate_zarr.non_raw_store_paths(prior)
+        self.assertEqual(len(dropped), 4, dropped)
+        self.assertNotIn(self.A, dropped)
+        self.assertEqual(generate_zarr.non_raw_store_paths(None), [])
+        self.assertEqual(generate_zarr.non_raw_store_paths({}), [])
+
+    def test_excluded_reason_names_the_cause(self):
+        self.assertEqual(generate_zarr.excluded_reason("derivatives/x_eeg.set"), "derivatives")
+        self.assertEqual(generate_zarr.excluded_reason("sub-01/sourcedata/x_eeg.set"), "sourcedata")
+        self.assertEqual(generate_zarr.excluded_reason("code/x_eeg.set"), "code")
+        self.assertEqual(
+            generate_zarr.excluded_reason("sub-01/meg/sub-01_acq-crosstalk_meg.fif"),
+            "bids-calibration",
+        )
+        self.assertIsNone(generate_zarr.excluded_reason("sub-01/eeg/a_eeg.set"))
+
+    def test_a_non_raw_failure_or_pending_entry_cannot_survive(self):
+        # The same rule on the other two lists: a non-raw path has no business in
+        # any of them, and the carry-forward already refused one.
+        prior = {
+            "source_commit": "a" * 40,
+            "stores": [],
+            "failures": [{"path": "derivatives/prep/x-epo.fif", "zarr": "derivatives/prep/x-epo.zarr",
+                          "code": "not_continuous", "reason": "..."}],
+            "pending": [{"path": "code/y_eeg.set", "reason": "infra_failure", "attempts": 2}],
+        }
+        index = merge_index(
+            prior, "on008083", self.HEAD, [], [], "2026-09-02T00:00:00Z", [], [],
+            discovered=[self.A], prior_pending=prior["pending"],
+        )
+        self.assertEqual(index["failure_count"], 0)
+        self.assertEqual([p["path"] for p in index["pending"]], [self.A])
+        check_index_invariant(index)
+
+    def test_errors_counts_this_runs_failures_typed_and_not(self):
+        index = self.build(
+            converted=[{"zarr": store_rel_for(self.A), "path": self.A}],
+            failures=[{"path": self.B, "zarr": store_rel_for(self.B),
+                       "code": "not_continuous", "reason": "..."}],
+            pending=[{"path": self.C, "reason": "infra_failure"}],
+            discovered=[self.A, self.B, self.C],
+            errors=2,
+        )
+        self.assertEqual(index["errors"], 2)
+
+    def test_discovered_primaries_match_the_worklist(self):
+        # The coverage denominator has to be the set the converter would attempt,
+        # not a second walk that could drift from it.
+        head = [
+            "sub-01/eeg/sub-01_task-x_eeg.set",
+            "sub-01/eeg/sub-01_task-x_eeg.fdt",
+            "derivatives/prep/sub-01/eeg/sub-01_task-x_eeg.set",
+            "sub-02/meg/sub-02_task-x_acq-crosstalk_meg.fif",
+            "dataset_description.json",
+        ]
+        convert, _remove = compute_worklist(head, [], full=True)
+        self.assertEqual(discover_primaries(head), convert)
+        self.assertEqual(discover_primaries(head), ["sub-01/eeg/sub-01_task-x_eeg.set"])
+
+
+class TestPendingRetries(unittest.TestCase):
+    """Pending entries age, and stop aging (#1197). An infra failure that will
+    never succeed must not promise forever that it is about to."""
+
+    HEAD = "d" * 40
+    PATH = "sub-01/eeg/a_eeg.edf"
+
+    def run_round(self, prior_pending, reason="infra_failure", last_error="boom"):
+        return merge_index(
+            None, "on008083", self.HEAD, [], [], "2026-09-02T00:00:00Z", [],
+            [{"path": self.PATH, "reason": reason, "last_error": last_error}],
+            discovered=[self.PATH],
+            prior_pending=prior_pending,
+        )
+
+    def test_attempts_start_at_one_and_accumulate(self):
+        index = self.run_round(None)
+        self.assertEqual(index["pending"][0]["attempts"], 1)
+        self.assertEqual(index["pending"][0]["reason"], "infra_failure")
+        self.assertEqual(index["pending"][0]["last_error"], "boom")
+        self.assertEqual(index["pending"][0]["last_attempt_utc"], "2026-09-02T00:00:00Z")
+
+        index = self.run_round(index["pending"])
+        self.assertEqual(index["pending"][0]["attempts"], 2)
+
+    def test_exhaustion_promotes_to_a_typed_failure(self):
+        pending = None
+        for round_n in range(1, PENDING_MAX_ATTEMPTS):
+            index = self.run_round(pending)
+            self.assertEqual(index["pending_count"], 1, f"round {round_n}")
+            pending = index["pending"]
+        # The round that reaches the cap moves it out of `pending` for good.
+        index = self.run_round(pending)
+        self.assertEqual(index["pending_count"], 0)
+        self.assertEqual(index["failure_count"], 1)
+        failure = index["failures"][0]
+        self.assertEqual(failure["code"], "retry_exhausted")
+        self.assertEqual(failure["detail"], "boom")
+        self.assertEqual(failure["attempts"], PENDING_MAX_ATTEMPTS)
+        self.assertTrue(failure["reason"])
+        check_index_invariant(index)
+
+    def test_a_memory_budget_pending_is_reason_tagged(self):
+        index = self.run_round(None, reason="memory_budget")
+        self.assertEqual(index["pending"][0]["reason"], "memory_budget")
+
+    def test_converting_clears_the_pending_entry(self):
+        first = self.run_round(None)
+        index = merge_index(
+            None, "on008083", self.HEAD,
+            [{"zarr": store_rel_for(self.PATH), "path": self.PATH}],
+            [], "2026-09-02T01:00:00Z", [], [],
+            discovered=[self.PATH],
+            prior_pending=first["pending"],
+        )
+        self.assertEqual(index["pending_count"], 0)
+        self.assertEqual(index["store_count"], 1)
+        check_index_invariant(index)
+
+    def test_a_path_is_never_in_two_lists(self):
+        index = merge_index(
+            None, "on008083", self.HEAD,
+            [{"zarr": store_rel_for(self.PATH), "path": self.PATH}],
+            [], "2026-09-02T00:00:00Z", [],
+            [{"path": self.PATH, "reason": "infra_failure"}],
+            discovered=[self.PATH],
+        )
+        self.assertEqual(index["store_count"], 0)
+        self.assertEqual(index["pending_count"], 1)
+        check_index_invariant(index)
+
+    def test_not_attempted_never_ages_toward_exhaustion(self):
+        # A recording a `--limit`ed run never reached has not failed at anything.
+        pending = None
+        for _ in range(PENDING_MAX_ATTEMPTS + 2):
+            index = merge_index(
+                None, "on008083", self.HEAD, [], [], "2026-09-02T00:00:00Z", [], [],
+                discovered=[self.PATH], prior_pending=pending,
+            )
+            pending = index["pending"]
+        self.assertEqual(index["pending_count"], 1)
+        self.assertEqual(index["pending"][0]["reason"], "not_attempted")
+        self.assertEqual(index["pending"][0]["attempts"], 0)
+
+
+class TestIndexSchemaSelfCheck(unittest.TestCase):
+    """The converter validates the document it is about to publish. index.json is
+    the mandatory entry point (in-prefix ListBucket is denied), so a malformed one
+    has no fallback for any consumer."""
+
+    HEAD = "e" * 40
+
+    def index(self):
+        return merge_index(
+            None, "on007763", self.HEAD,
+            [{"zarr": "sub-01/eeg/a_eeg.zarr", "path": "sub-01/eeg/a_eeg.edf",
+              "updated_utc": "2026-09-02T00:00:00Z", "source_tree": "raw",
+              "derived": False, "modalities": ["eeg"],
+              "groups": [{"name": "eeg_200hz", "modality": "EEG", "rate": 200.0,
+                          "n_channels": 4, "n_samples": 12000, "duration_s": 60.0,
+                          "n_view_levels": 3, "view_chunk_columns": 1024,
+                          "source_rate_hz": 200.0, "chunk_samples": 800,
+                          "shard_samples": 12000}],
+              "n_events": 3, "trial_types": {"go": 2, "stop": 1},
+              "units_report": {"converted": 1, "relabelled": 0,
+                               "kept_importer_unit": 0, "units_column_present": True}}],
+            [], "2026-09-02T00:00:00Z",
+            [{"path": "sub-02/eeg/b_eeg.edf", "zarr": "sub-02/eeg/b_eeg.zarr",
+              "code": "file_read_error", "reason": "...", "detail": "OSError: ..."}],
+            [{"path": "sub-03/eeg/c_eeg.edf", "reason": "infra_failure",
+              "last_error": "boom"}],
+            discovered=["sub-01/eeg/a_eeg.edf", "sub-02/eeg/b_eeg.edf",
+                        "sub-03/eeg/c_eeg.edf"],
+            biosigio_version="1.2.6",
+        )
+
+    def test_the_validator_is_installed_so_this_class_can_fail(self):
+        """Without `jsonschema` every other test here is vacuous.
+
+        `validate_document` degrades to a loud warning when the validator is
+        missing -- deliberately, so an old venv on the conversion node still
+        converts rather than refusing to publish over a lint dependency. The
+        cost is that the positive cases below then pass without validating
+        anything, and the negative cases ERROR on their own import. Both read
+        like a green schema gate.
+
+        This is the tripwire: it fails, by name, in exactly the environment
+        where the rest of the class stops meaning anything. CI installs the
+        validator for this job (`.github/workflows/test.yml`), and so does
+        `scripts/zarr/requirements.txt`; if either drops it, this is what says
+        so.
+        """
+        import jsonschema  # noqa: F401 - presence IS the assertion
+
+    def index_with_events(self):
+        """The index as `main` publishes it for a dataset that HAS events: the
+        two fields are set there, after the parquet is uploaded, so the document
+        never names a file that was not written."""
+        index = self.index()
+        index["events_parquet"] = f"{index['data_base']}{EVENTS_PARQUET_NAME}"
+        index["events_row_count"] = 3
+        return index
+
+    def test_a_built_index_validates(self):
+        validate_document(self.index(), INDEX_SCHEMA_PATH, "index")
+
+    def test_an_index_with_events_validates(self):
+        validate_document(self.index_with_events(), INDEX_SCHEMA_PATH, "index")
+
+    def test_the_events_fields_are_optional(self):
+        """A dataset with no events.tsv anywhere publishes neither field, and a
+        v3 index written before they existed carries neither. Both must keep
+        validating -- that is what "additive within v3" means."""
+        index = self.index()
+        self.assertNotIn("events_parquet", index)
+        self.assertNotIn("events_row_count", index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_the_events_file_is_in_the_layout_recipe(self):
+        # Same reason as the rest of the layout block: an MCP recipe (ADR 0025)
+        # is computable from index.json alone. Whether the file EXISTS is said by
+        # `events_parquet`, not by this template.
+        self.assertEqual(self.index()["layout"]["events"], "<data_base>events.parquet")
+        with open(INDEX_SCHEMA_PATH) as fh:
+            props = json.load(fh)["properties"]["layout"]
+        self.assertEqual(props["properties"]["events"]["const"], "<data_base>events.parquet")
+        # Optional in `required`, so an index published by the previous producer
+        # (which had no such key) still validates against this schema.
+        self.assertNotIn("events", props["required"])
+
+    def test_the_index_declares_its_stability_policy(self):
+        # A schema with no stated policy is one every client has to guess at.
+        with open(INDEX_SCHEMA_PATH) as fh:
+            schema = json.load(fh)
+        self.assertIn("format_version 3", schema["$comment"])
+        self.assertIn("additionalProperties", schema["$comment"])
+        self.assertIn("v4", schema["$comment"])
+        with open(MANIFEST_SCHEMA_PATH) as fh:
+            self.assertIn("format_version 1", json.load(fh)["$comment"])
+
+    def test_the_layout_recipe_is_published(self):
+        """An MCP recipe (ADR 0025) has to be computable from index.json plus ONE
+        array-metadata fetch. The broker is stateless, so anything absent from
+        the index it must discover by request -- and discovery-by-404 is what
+        #1178 item 2 removed. The numbers were already here; these are the path
+        templates and the sample-value rule that make them usable."""
+        layout = self.index()["layout"]
+        self.assertEqual(layout["level0"], "<zarr>/<group>/0")
+        self.assertEqual(layout["view"], "<zarr>/<group>/view/<L>")
+        self.assertIn("n_view_levels", layout["view_levels"])
+        self.assertIn("physical = digital * scale + offset", layout["scale_offset"])
+        # `const` in the schema, so a client may hardcode it after checking
+        # format_version -- and a layout change becomes a schema change.
+        with open(INDEX_SCHEMA_PATH) as fh:
+            props = json.load(fh)["properties"]["layout"]["properties"]
+        self.assertEqual(props["level0"]["const"], layout["level0"])
+
+    def test_dataset_provenance_is_hoisted_to_the_top_level(self):
+        index = merge_index(
+            None, "on007763", self.HEAD, [], [], "2026-09-02T00:00:00Z", [], [],
+            discovered=[],
+            dataset_row={"name": "N", "authors": "Doe J", "concept_doi": "10.82901/x",
+                         "license": "CC0", "hed_version": "8.2.0",
+                         "created_at": "2024-01-01"},
+        )
+        self.assertEqual(index["doi"], "10.82901/x")
+        self.assertEqual(index["license"], "CC0")
+        self.assertEqual(index["hed_version"], "8.2.0")
+        self.assertIn("Doe J", index["citation"])
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_dataset_provenance_is_null_without_a_row(self):
+        # Already fetched once per run, so publishing it is free -- but a catalog
+        # that has no DOI yet must yield null rather than an invented string.
+        index = merge_index(
+            None, "on007763", self.HEAD, [], [], "2026-09-02T00:00:00Z", [], [],
+            discovered=[],
+        )
+        for key in ("doi", "license", "citation", "hed_version"):
+            self.assertIsNone(index[key], key)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_zero_store_index_validates(self):
+        # A dataset whose every recording failed still publishes an index, and it
+        # is the shape most likely to be built by a path nobody exercised.
+        index = merge_index(
+            None, "on008083", self.HEAD, [], [], "2026-09-02T00:00:00Z",
+            [_failure_entry("sub-01/eeg/a_eeg.edf", "file_read_error", "OSError: x")],
+            [],
+            discovered=["sub-01/eeg/a_eeg.edf"],
+        )
+        self.assertEqual(index["store_count"], 0)
+        self.assertEqual(index["stores"], [])
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_mutated_index_is_rejected(self):
+        import jsonschema
+
+        for mutate in (
+            lambda d: d.__setitem__("source_commit", ""),
+            lambda d: d.__setitem__("format_version", 1),
+            lambda d: d.__setitem__("store_count", -1),
+            lambda d: d.__setitem__("data_base_kind", "gopher"),
+            lambda d: d.__setitem__("stray_key", 1),
+            lambda d: d["pending"][0].__setitem__("reason", "because"),
+            lambda d: d["stores"][0].pop("source_tree"),
+            lambda d: d["failures"][0].pop("code"),
+            # The "no source_key in the index" rule (#1178 item 5) is now
+            # CHECKABLE rather than a convention: the store object is closed, so
+            # a producer that forgot to strip it cannot publish.
+            lambda d: d["stores"][0].__setitem__("source_key", "SHA256E-s1--a"),
+            # Every sub-object closed, so a typo'd key fails here rather than
+            # being served to clients that ignore it.
+            lambda d: d["stores"][0].__setitem__("stray", 1),
+            lambda d: d["stores"][0]["groups"][0].__setitem__("stray", 1),
+            lambda d: d["failures"][0].__setitem__("stray", 1),
+            lambda d: d["pending"][0].__setitem__("stray", 1),
+            # A group with no name cannot be addressed at all: the layout
+            # recipe's <group> has nothing to substitute.
+            lambda d: d["stores"][0]["groups"][0].pop("name"),
+            # http:// is not the contract: the data plane is HTTPS-only.
+            lambda d: d.__setitem__("contract_base", "http://zarr.nemar.org/x/zarr/"),
+            lambda d: d.__setitem__("data_base", "ftp://example.org/"),
+            # A failure or pending entry must name a STORE path.
+            lambda d: d["failures"][0].__setitem__("zarr", "sub-02/eeg/b_eeg.edf"),
+            lambda d: d["pending"][0].__setitem__("zarr", "nope"),
+            lambda d: d.pop("layout"),
+            lambda d: d["layout"].__setitem__("level0", "<zarr>/<group>/level0"),
+            lambda d: d["layout"].__setitem__("events", "<data_base>events.pq"),
+            # The events file is fetched over the same HTTPS data plane as the
+            # stores; an s3:// URI here would not be fetchable by a browser
+            # client at all.
+            lambda d: d.__setitem__("events_parquet", "s3://nemar/x/zarr/events.parquet"),
+            lambda d: d.__setitem__("events_row_count", -1),
+            lambda d: d.__setitem__("events_row_count", "3"),
+        ):
+            doc = json.loads(json.dumps(self.index_with_events()))
+            mutate(doc)
+            with self.subTest(mutation=str(mutate)), self.assertRaises(
+                jsonschema.ValidationError
+            ):
+                validate_document(doc, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_built_manifest_validates(self):
+        manifest = merge_manifest(
+            None, "on007763",
+            [{"zarr": "sub-01/eeg/a_eeg.zarr", "source_key": "SHA256E-s100--a.edf",
+              "size_bytes": 100}],
+            ["sub-01/eeg/a_eeg.zarr"], "2026-09-02T00:00:00Z",
+        )
+        validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_a_mutated_manifest_is_rejected(self):
+        import jsonschema
+
+        manifest = merge_manifest(
+            None, "on007763",
+            [{"zarr": "sub-01/eeg/a_eeg.zarr", "source_key": "k", "size_bytes": 1}],
+            ["sub-01/eeg/a_eeg.zarr"], "2026-09-02T00:00:00Z",
+        )
+        manifest["stores"][0]["zarr"] = "sub-01/eeg/a_eeg.set"  # not a store path
+        with self.assertRaises(jsonschema.ValidationError):
+            validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_the_manifest_records_the_published_events_file(self):
+        manifest = merge_manifest(
+            None, "on007763", [], [], "2026-09-02T00:00:00Z",
+            events_file={"name": EVENTS_PARQUET_NAME, "size_bytes": 4096, "row_count": 3},
+        )
+        self.assertEqual(manifest["files"][0]["size_bytes"], 4096)
+        validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+        # No file published, no claim about one: the previous run's object may
+        # still be on S3, and this document must not describe it.
+        bare = merge_manifest(None, "on007763", [], [], "2026-09-02T00:00:00Z")
+        self.assertNotIn("files", bare)
+        validate_document(bare, MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_a_mutated_manifest_file_entry_is_rejected(self):
+        import jsonschema
+
+        for mutate in (
+            # The enum is what stops this list from quietly becoming a
+            # free-form file inventory nobody validates.
+            lambda d: d["files"][0].__setitem__("name", "events.pq"),
+            lambda d: d["files"][0].__setitem__("size_bytes", -1),
+            lambda d: d["files"][0].__setitem__("row_count", -1),
+            lambda d: d["files"][0].pop("size_bytes"),
+            lambda d: d["files"][0].__setitem__("stray", 1),
+        ):
+            manifest = merge_manifest(
+                None, "on007763", [], [], "2026-09-02T00:00:00Z",
+                events_file={"name": EVENTS_PARQUET_NAME, "size_bytes": 1, "row_count": 1},
+            )
+            with self.subTest(mutation=str(mutate)), self.assertRaises(
+                jsonschema.ValidationError
+            ):
+                mutate(manifest)
+                validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
+
+class TestRealRecordingV3Fields(unittest.TestCase):
+    """End-to-end over the STORE-LEVEL functions on a real recording.
+
+    Not `convert_one`: that uploads with `aws s3 sync`, so a whole-run test would
+    need S3 credentials and a bucket. Everything between the file and the upload
+    is exercised here on real bytes -- biosigIO reads a real EDF, writes a real
+    Zarr v3 store, and `store_metadata` reads back the very attrs the index
+    republishes. That is the half where a biosigIO attr rename would silently
+    empty the new fields.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+        cls._tmp = tempfile.TemporaryDirectory()
+        d = cls._tmp.name
+        cls.recording = build_real_edf(d, "sub-01_task-rest_eeg")
+        cls.channels = os.path.join(d, "sub-01_task-rest_channels.tsv")
+        with open(cls.channels, "w") as fh:
+            fh.writelines(
+                ["name\ttype\tunits\n"] + [f"E{i + 1}\tEEG\tV\n" for i in range(4)]
+            )
+        cls.events = os.path.join(d, "sub-01_task-rest_events.tsv")
+        with open(cls.events, "w") as fh:
+            fh.writelines(
+                ["onset\tduration\ttrial_type\n"]
+                + [
+                    f"{i * 5.0}\t0.5\t{'go' if i % 2 == 0 else 'stop'}\n"
+                    for i in range(6)
+                ]
+            )
+        cls.store = os.path.join(d, "sub-01_task-rest_eeg.zarr")
+        convert_recording(
+            cls.recording, cls.events, cls.store, channels_local=cls.channels
+        )
+        cls.meta = store_metadata(cls.store)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_view_geometry_is_republished_from_the_store(self):
+        group = self.meta["groups"][0]
+        # Without n_view_levels the website reader probes view/1, view/2, ...
+        # until a 404 (#1178 item 2).
+        self.assertGreaterEqual(group["n_view_levels"], 1)
+        # Constant COLUMNS per view chunk is what turns a zoomed-out read from
+        # 594 requests into 3 (#1178 item 1, biosigio 1.2.6).
+        self.assertEqual(group["view_chunk_columns"], 1024)
+
+    def test_source_rate_is_the_acquisition_rate_not_the_serving_cap(self):
+        group = self.meta["groups"][0]
+        self.assertEqual(group["source_rate_hz"], 200.0)
+        self.assertGreater(group["chunk_samples"], 0)
+        self.assertGreater(group["shard_samples"], 0)
+
+    def test_units_report_is_published_when_channels_tsv_was_applied(self):
+        report = self.meta["units_report"]
+        self.assertIs(report["units_column_present"], True)
+        for key in ("converted", "relabelled", "kept_importer_unit"):
+            self.assertIsInstance(report[key], int)
+
+    def test_no_units_report_when_no_channels_tsv_applies(self):
+        # Absence means "not applied", never "applied cleanly" -- the distinction
+        # a consumer needs while the streaming path still cannot apply it.
+        with tempfile.TemporaryDirectory() as d:
+            store = os.path.join(d, "plain_eeg.zarr")
+            convert_recording(self.recording, None, store)
+            self.assertNotIn("units_report", store_metadata(store))
+
+    def test_events_summary_matches_the_applied_events_tsv(self):
+        with open(self.events) as fh:
+            summary = events_summary(fh.read())
+        self.assertEqual(summary["n_events"], 6)
+        self.assertEqual(summary["trial_types"], {"go": 3, "stop": 3})
+
+    def test_provenance_attrs_land_in_the_store_root(self):
+        import zarr
+
+        embed_root_attr(
+            self.store,
+            "nemar",
+            nemar_store_attrs(
+                dataset_id="on007763",
+                source_commit="f" * 40,
+                source_tree=source_tree_for("sub-01/eeg/sub-01_task-rest_eeg.edf"),
+                derived=False,
+                engine_version="2",
+                contract_url="https://zarr.nemar.org/on007763/zarr/x.zarr/",
+                row={"name": "N", "license": "CC0"},
+            ),
+        )
+        attrs = dict(zarr.open_group(self.store, mode="r").attrs)
+        self.assertEqual(attrs["nemar"]["license"], "CC0")
+        self.assertEqual(attrs["nemar"]["source_tree"], "raw")
+        # biosigIO's own attributes are untouched.
+        self.assertEqual(attrs["format"], "biosigio-zarr")
+        self.assertIn("channel_groups", attrs)
+
+    def test_sidecar_applies_to_a_recording_with_no_sidecar_beside_it(self):
+        """The ADR 0028 MaxShield shape, without needing a MaxShield recording.
+
+        On that path `primary_local` is the Signal-Space-Separated copy at
+        `work/sss_<basename>` -- a real file at a path where no channels.tsv is
+        adjacent. biosigIO's own `bids_channels="auto"` resolves the sidecar as a
+        SIBLING, so it would find nothing there and silently serve importer units
+        and MNE-inferred types. This reproduces exactly that geometry with a real
+        EDF at a renamed path in an empty directory, and asserts the sidecar still
+        reaches the conversion.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            filtered = os.path.join(d, "sss_sub-01_task-rest_eeg.edf")
+            shutil.copyfile(self.recording, filtered)
+            self.assertEqual(
+                [f for f in os.listdir(d) if f.endswith("_channels.tsv")], [],
+                "the fixture must have NO sidecar beside the recording",
+            )
+            store = os.path.join(d, "out.zarr")
+            convert_recording(filtered, None, store, channels_local=self.channels)
+            report = store_metadata(store)["units_report"]
+            self.assertIs(report["units_column_present"], True)
+
+    def test_sibling_auto_detection_is_not_what_applies_the_sidecar(self):
+        """A sidecar sitting beside the recording but NOT the one this driver
+        resolved must not be picked up: with no sidecar resolved the driver
+        passes `bids_channels="off"`, so the only sidecar that can ever shape a
+        store is one this driver chose.
+
+        Without this, the SSS test above could pass for the wrong reason on some
+        future release whose auto-detection searches more widely -- and a staged
+        sidecar would be at risk of being applied twice, which matters because
+        adopting a unit CONVERTS samples rather than relabelling them.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            recording = os.path.join(d, "sub-01_task-rest_eeg.edf")
+            shutil.copyfile(self.recording, recording)
+            # A sibling naming channels the recording does not have: applied, it
+            # would report nothing changed; ignored, there is no report at all.
+            with open(os.path.join(d, "sub-01_task-rest_channels.tsv"), "w") as fh:
+                fh.write("name\ttype\tunits\nNOPE\tEEG\tV\n")
+            store = os.path.join(d, "out.zarr")
+            convert_recording(recording, None, store)
+            self.assertNotIn("units_report", store_metadata(store))
+
+    def test_bids_channels_arg_is_the_path_or_off_never_auto(self):
+        """"auto" is biosigIO's default and is always wrong here: it resolves the
+        sidecar as a SIBLING of the file the exporter was handed, which is a
+        scratch materialisation (and, on the MaxShield path, a filtered copy).
+        The driver therefore passes the resolved path, or "off" when no sidecar
+        applies -- an explicit "there is none" rather than a guess."""
+        self.assertEqual(generate_zarr.bids_channels_arg(self.channels), self.channels)
+        self.assertEqual(generate_zarr.bids_channels_arg(None), "off")
+        self.assertEqual(generate_zarr.bids_channels_arg(""), "off")
+        # Staged but missing (a failed sidecar read) is "off", not a path the
+        # exporter would raise on.
+        self.assertEqual(
+            generate_zarr.bids_channels_arg("/no/such/_channels.tsv"), "off"
+        )
+
+    def test_the_streaming_exporter_applies_the_sidecar_too(self):
+        """The two exporters must not disagree about a recording's units.
+
+        This is the assertion that was impossible on biosigio 1.2.6, whose
+        `stream_to_zarr` had no `bids_channels` parameter at all: a dataset's
+        small recordings carried the sidecar's units and its large ones carried
+        the importer's, which is exactly why the engine bump waited for
+        biosigio#128. Now it is an observable property of a real streamed store,
+        so a regression on either path fails here rather than being inferred from
+        a missing index field.
+        """
+        if not generate_zarr._EDF_STREAMABLE:
+            self.skipTest("installed biosigio does not stream EDF")
+        with tempfile.TemporaryDirectory() as d:
+            store = os.path.join(d, "streamed.zarr")
+            saved = generate_zarr.STREAM_EDF_MIN_BYTES
+            try:
+                # Force the streaming branch for a small real EDF, so this runs
+                # the same exporter a multi-GB recording would.
+                generate_zarr.STREAM_EDF_MIN_BYTES = 1
+                self.assertTrue(
+                    generate_zarr.should_stream(self.recording, os.path.getsize(self.recording))
+                )
+                convert_recording(
+                    self.recording, None, store, channels_local=self.channels
+                )
+            finally:
+                generate_zarr.STREAM_EDF_MIN_BYTES = saved
+            report = store_metadata(store)["units_report"]
+            self.assertIs(report["units_column_present"], True)
+
+    def test_a_streamed_recording_with_no_sidecar_beside_it(self):
+        """The MaxShield geometry on the STREAMING path: the exporter is handed a
+        filtered copy in a directory with no channels.tsv, and must still apply
+        the sidecar the driver resolved. Sibling auto-detection would find
+        nothing here."""
+        if not generate_zarr._EDF_STREAMABLE:
+            self.skipTest("installed biosigio does not stream EDF")
+        with tempfile.TemporaryDirectory() as d:
+            filtered = os.path.join(d, "sss_sub-01_task-rest_eeg.edf")
+            shutil.copyfile(self.recording, filtered)
+            self.assertEqual(
+                [f for f in os.listdir(d) if f.endswith("_channels.tsv")], [],
+                "the fixture must have NO sidecar beside the recording",
+            )
+            store = os.path.join(d, "out.zarr")
+            saved = generate_zarr.STREAM_EDF_MIN_BYTES
+            try:
+                generate_zarr.STREAM_EDF_MIN_BYTES = 1
+                convert_recording(filtered, None, store, channels_local=self.channels)
+            finally:
+                generate_zarr.STREAM_EDF_MIN_BYTES = saved
+            self.assertIs(
+                store_metadata(store)["units_report"]["units_column_present"], True
+            )
+
+    def test_channels_tsv_resolution_is_shared_with_the_fidelity_gate(self):
+        head = {
+            "sub-01/eeg/sub-01_task-rest_eeg.edf",
+            "sub-01/eeg/sub-01_task-rest_channels.tsv",
+            "sub-01/sub-01_channels.tsv",
+        }
+        self.assertEqual(
+            channels_tsv_for("sub-01/eeg/sub-01_task-rest_eeg.edf", head),
+            "sub-01/eeg/sub-01_task-rest_channels.tsv",
+        )
+
+
+class TestMainRefusesToPublish(unittest.TestCase):
+    """The refuse-to-publish guards must still write a `failed` callback.
+
+    `hallu-zarr.sh` POSTs whatever the callback file contains. A failure path
+    that writes NO file posts nothing, so the `converting` signal the driver sent
+    when it started the dataset is never superseded and D1 sits at
+    `zarr_status='pending'` forever -- the dashboard shows a conversion in flight
+    with nothing running. #774 fixed exactly that for the total-failure branch;
+    the two schema guards were added later and returned 1 directly, reopening it.
+
+    Drives `main()` end to end: a real git repo, a real (stub) `aws` executable
+    on PATH, real argument parsing, real callback file. Only the SCHEMA is
+    swapped -- for one that rejects every document -- because a producer bug is
+    otherwise not reachable from outside.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        os.makedirs(self.repo)
+        def run(*args):
+            subprocess.run(args, cwd=self.repo, check=True, capture_output=True)
+
+        run("git", "init", "-q", "-b", "main")
+        run("git", "config", "user.email", "t@example.org")
+        run("git", "config", "user.name", "t")
+        # A dataset with NO recordings: `convert` is empty, so nothing is
+        # downloaded or converted and the guard is the only thing under test.
+        with open(os.path.join(self.repo, "dataset_description.json"), "w") as fh:
+            json.dump({"Name": "guard fixture", "BIDSVersion": "1.8.0"}, fh)
+        run("git", "add", "-A")
+        run("git", "commit", "-q", "-m", "init")
+
+        # A real executable standing in for `aws`, reporting NoSuchKey so the
+        # prior index/manifest reads take their legitimate first-run path. Same
+        # approach as TestAwsRunner, which stands python3 in for aws.
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        self.aws = os.path.join(bindir, "aws")
+        with open(self.aws, "w") as fh:
+            fh.write("#!/bin/sh\necho 'NoSuchKey' >&2\nexit 1\n")
+        os.chmod(self.aws, 0o755)
+        self._path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + self._path
+
+        self.callback = os.path.join(self.dir, "cb.json")
+        self._schemas = (generate_zarr.INDEX_SCHEMA_PATH, generate_zarr.MANIFEST_SCHEMA_PATH)
+
+    def tearDown(self):
+        os.environ["PATH"] = self._path
+        (generate_zarr.INDEX_SCHEMA_PATH, generate_zarr.MANIFEST_SCHEMA_PATH) = self._schemas
+        self._tmp.cleanup()
+
+    def reject_everything(self) -> str:
+        """A valid draft 2020-12 schema that no instance satisfies."""
+        path = os.path.join(self.dir, "reject.schema.json")
+        with open(path, "w") as fh:
+            json.dump({"$schema": "https://json-schema.org/draft/2020-12/schema",
+                       "not": {}}, fh)
+        return path
+
+    def run_main(self) -> int:
+        argv = [
+            "generate_zarr.py",
+            "--dataset-id", "on008083",
+            "--repo-dir", self.repo,
+            "--bucket", "nemar-test",
+            "--callback-out", self.callback,
+            "--clean",
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                return generate_zarr.main()
+        finally:
+            sys.argv = saved
+
+    def read_callback(self) -> dict:
+        self.assertTrue(
+            os.path.exists(self.callback),
+            "no callback file: the driver would POST nothing and D1 would stay "
+            "at zarr_status='pending' forever",
+        )
+        with open(self.callback) as fh:
+            return json.load(fh)
+
+    def assert_failed_shape(self, body: dict):
+        self.assertEqual(body["status"], "failed")
+        self.assertEqual(body["dataset_id"], "on008083")
+        # Same shape as the total-failure branch, so the backend's one handler
+        # reads all three exits identically.
+        for key in (
+            "store_count", "commit", "converted", "removed", "errors", "failed",
+            "failure_count", "data_failures", "deterministic", "pool_breaks",
+            "pending_count", "discovered_count", "not_attempted_count",
+            "provenance_fetch_failed",
+        ):
+            self.assertIn(key, body, key)
+        self.assertRegex(body["commit"], r"^[0-9a-f]{40}$")
+
+    def test_a_refused_index_writes_a_failed_callback(self):
+        generate_zarr.INDEX_SCHEMA_PATH = self.reject_everything()
+        rc = self.run_main()
+        self.assertEqual(rc, 1)
+        body = self.read_callback()
+        self.assert_failed_shape(body)
+        # And it names the cause: a schema violation has no per-recording failure
+        # to point at, so without this the callback says "failed" and no more.
+        self.assertIn("index refused", body["error"])
+
+    def test_a_refused_manifest_writes_a_failed_callback(self):
+        generate_zarr.MANIFEST_SCHEMA_PATH = self.reject_everything()
+        rc = self.run_main()
+        self.assertEqual(rc, 1)
+        body = self.read_callback()
+        self.assert_failed_shape(body)
+        self.assertIn("manifest refused", body["error"])
+
+    def test_a_clean_run_with_nothing_to_convert_publishes(self):
+        """The control: with both schemas intact this run reaches the upload.
+
+        Without it the two tests above could pass because `main` failed for some
+        unrelated reason -- a missing git object, the stub `aws` -- rather than at
+        the guard. Here the stub `aws` fails the UPLOAD, and the callback names a
+        DIFFERENT cause from either guard, which is what proves the guards were
+        what produced the other two.
+
+        The upload failure used to escape as an uncaught RuntimeError, which is
+        the very shape #774 removed everywhere else: the process exits non-zero
+        having written no callback file, so `hallu-zarr.sh` POSTs nothing, the
+        `converting` signal is never superseded, and D1 sits at
+        `zarr_status='pending'` with nothing running. It now goes through
+        `write_failed_callback` like every other exit that returns 1.
+        """
+        rc = self.run_main()
+        self.assertEqual(rc, 1)
+        body = self.read_callback()
+        self.assert_failed_shape(body)
+        self.assertIn("index publish failed", body["error"])
+        # Not a schema guard: those are the other two tests' cause.
+        self.assertNotIn("refused", body["error"])
+
+
+# A real `aws` stand-in for the converter's main()-level tests: a real
+# executable over local files, so `s3_read_json`, `s3_download_file`, `aws_cp`
+# and the conditional index read/write pair all run for real, subprocess argv
+# included.
+#
+# `s3api get-object`/`put-object` carry GENUINE ETag semantics -- an object's
+# ETag is the md5 of its bytes, and put-object honours `--if-match` /
+# `--if-none-match` the way S3 does (412 on a mismatch). That is the same
+# stand-in test_purge_non_raw_stores.py uses, and it has to be: the two scripts
+# now share one conditional write (`generate_zarr.write_index`), so a stub that
+# accepted any condition would let a broken one pass in both suites.
+STUB_AWS = r"""#!/usr/bin/env python3
+import hashlib
+import json
+import os
+import shutil
+import sys
+
+ROOT = os.environ["ZARR_TEST_S3_ROOT"]
+
+FLAGS_WITH_VALUES = ("--bucket", "--key", "--body", "--content-type",
+                     "--cache-control", "--if-match", "--if-none-match",
+                     "--query", "--output")
+
+
+def local(uri):
+    return os.path.join(ROOT, uri.split("/", 3)[3].replace("/", "_"))
+
+
+def local_key(key):
+    return os.path.join(ROOT, key.replace("/", "_"))
+
+
+def etag(path):
+    with open(path, "rb") as fh:
+        return chr(34) + hashlib.md5(fh.read()).hexdigest() + chr(34)
+
+
+def opt(args, name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+
+args = [a for a in sys.argv[1:] if not a.startswith("--cli-")]
+args = [a for a in args if a not in ("--only-show-errors",)]
+# Every invocation, in order, so a test can assert on what the converter did
+# NOT do -- "it never fetched the prior events file" is otherwise unobservable.
+log = os.environ.get("ZARR_TEST_S3_LOG")
+if log:
+    with open(log, "a") as fh:
+        fh.write(" ".join(args) + "\n")
+# One key made to fail, the way a bucket policy or a transient S3 error would,
+# so the converter's own non-fatal handling runs for real.
+fail_key = os.environ.get("ZARR_TEST_S3_FAIL_KEY")
+if fail_key and any(fail_key in a for a in args):
+    sys.stderr.write("An error occurred (InternalError) when calling PutObject\n")
+    sys.exit(1)
+if args[:2] == ["s3", "cp"]:
+    src, dst = args[2], args[3]
+    if src.startswith("s3://"):
+        path = local(src)
+        if not os.path.exists(path):
+            sys.stderr.write("NoSuchKey\n")
+            sys.exit(1)
+        # `-` is a read-to-stdout (s3_read_json); anything else is a real
+        # download to a path, and it must stay BYTE-exact -- events.parquet is
+        # binary, and a text round-trip through stdout would corrupt it.
+        if dst == "-":
+            with open(path, "rb") as fh:
+                sys.stdout.buffer.write(fh.read())
+        else:
+            shutil.copyfile(path, dst)
+    else:
+        shutil.copyfile(src, local(dst))
+    sys.exit(0)
+if args[:2] == ["s3api", "get-object"]:
+    path = local_key(opt(args, "--key"))
+    positional = [
+        a for i, a in enumerate(args[2:], start=2)
+        if not a.startswith("--") and args[i - 1] not in FLAGS_WITH_VALUES
+    ]
+    if not os.path.exists(path):
+        sys.stderr.write("An error occurred (NoSuchKey) when calling GetObject\n")
+        sys.exit(1)
+    shutil.copyfile(path, positional[0])
+    print(etag(path))
+    sys.exit(0)
+if args[:2] == ["s3api", "put-object"]:
+    path = local_key(opt(args, "--key"))
+    if "--if-match" in args:
+        have = etag(path) if os.path.exists(path) else None
+        if have != opt(args, "--if-match"):
+            sys.stderr.write(
+                "An error occurred (PreconditionFailed) when calling PutObject\n"
+            )
+            sys.exit(1)
+    if "--if-none-match" in args and os.path.exists(path):
+        sys.stderr.write(
+            "An error occurred (PreconditionFailed) when calling PutObject\n"
+        )
+        sys.exit(1)
+    shutil.copyfile(opt(args, "--body"), path)
+    print(json.dumps({"ETag": etag(path)}))
+    sys.exit(0)
+if args[:2] == ["s3api", "head-object"]:
+    print('"deadbeef"')
+    sys.exit(0)
+sys.exit(0)
+"""
+
+
+class TestMainCleanRunAgainstPriorIndexes(unittest.TestCase):
+    """A `--clean` run over a REAL prior index, v1 and v3, through `main()`.
+
+    This is the production path (hallu-zarr.sh always passes `--clean`) and no
+    test reached it: every prior-index behaviour was exercised through
+    `merge_index` directly, which `--clean` hands `prior=None` -- so the facts
+    that must survive a clean rebuild travel a route nothing covered. They come
+    from the PUBLISHED document rather than from what the merge is given:
+    the `pending` attempt counts (reset every run, and a recording could never
+    reach the exhaustion cap on the only path production runs), and the count of
+    non-raw stores the run drops from the index.
+
+    The stub `aws` is a real executable backed by local files, so `s3_read_json`,
+    `aws_cp` and the ETag read all execute.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.s3 = os.path.join(self.dir, "s3")
+        os.makedirs(self.repo)
+        os.makedirs(self.s3)
+
+        def run(*args):
+            subprocess.run(args, cwd=self.repo, check=True, capture_output=True)
+
+        run("git", "init", "-q", "-b", "main")
+        run("git", "config", "user.email", "t@example.org")
+        run("git", "config", "user.name", "t")
+        with open(os.path.join(self.repo, "dataset_description.json"), "w") as fh:
+            json.dump({"Name": "clean fixture", "BIDSVersion": "1.8.0"}, fh)
+        run("git", "add", "-A")
+        run("git", "commit", "-q", "-m", "init")
+        self.head = subprocess.run(
+            ["git", "-C", self.repo, "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+        # A real `aws` stand-in over local files: `cp s3://... -` reads,
+        # `cp <file> s3://...` writes, `s3api head-object` answers the ETag read.
+        # The root arrives by environment rather than being baked in, so the
+        # script is a fixed file with no interpolation.
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        script = os.path.join(bindir, "aws")
+        with open(script, "w") as fh:
+            fh.write(STUB_AWS)
+        os.chmod(script, 0o755)
+        self._env = (os.environ.get("PATH"), os.environ.get("ZARR_TEST_S3_ROOT"))
+        os.environ["PATH"] = bindir + os.pathsep + (self._env[0] or "")
+        os.environ["ZARR_TEST_S3_ROOT"] = self.s3
+        self.callback = os.path.join(self.dir, "cb.json")
+        self.log = ""
+
+    def tearDown(self):
+        path, root = self._env
+        if path is not None:
+            os.environ["PATH"] = path
+        if root is None:
+            os.environ.pop("ZARR_TEST_S3_ROOT", None)
+        else:
+            os.environ["ZARR_TEST_S3_ROOT"] = root
+        self._tmp.cleanup()
+
+    def put(self, key, doc):
+        with open(os.path.join(self.s3, "on008083_zarr_" + key), "w") as fh:
+            json.dump(doc, fh)
+
+    def published(self, key):
+        path = os.path.join(self.s3, "on008083_zarr_" + key)
+        self.assertTrue(os.path.exists(path), key + " was not published")
+        with open(path) as fh:
+            return json.load(fh)
+
+    def prior_v3(self, **overrides):
+        doc = {
+            "dataset_id": "on008083", "format": "nemar-zarr-index",
+            "format_version": 3, "source_commit": "a" * 40,
+            "store_count": 0, "stores": [], "failure_count": 0, "failures": [],
+            "pending_count": 0, "pending": [],
+        }
+        doc.update(overrides)
+        return doc
+
+    def run_main(self):
+        argv = [
+            "generate_zarr.py",
+            "--dataset-id", "on008083",
+            "--repo-dir", self.repo,
+            "--bucket", "nemar-test",
+            "--callback-out", self.callback,
+            "--clean",
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = generate_zarr.main()
+            self.log = out.getvalue()
+            return rc
+        finally:
+            sys.argv = saved
+
+    def callback_body(self):
+        with open(self.callback) as fh:
+            return json.load(fh)
+
+    def test_a_clean_run_over_a_v1_prior_index(self):
+        # The realistic first re-conversion: what is on S3 today is v1.
+        self.put("index.json", {
+            "dataset_id": "on008083", "format": "nemar-zarr-index",
+            "format_version": 1, "source_commit": "a" * 40, "store_count": 1,
+            "stores": [{"path": "sub-01/eeg/a_eeg.edf",
+                        "zarr": "sub-01/eeg/a_eeg.zarr",
+                        "source_key": "SHA256E-s1--a"}],
+            "failure_count": 0, "failures": [],
+        })
+        self.assertEqual(self.run_main(), 0)
+        index = self.published("index.json")
+        self.assertEqual(index["format_version"], 3)
+        self.assertEqual(index["source_commit"], self.head)
+        # The v1 entry's recording is not at HEAD, so it does not carry -- and
+        # its `source_key` is nowhere in the v3 document.
+        self.assertEqual(index["store_count"], 0)
+        self.assertNotIn("source_key", json.dumps(index))
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+        validate_document(self.published("manifest.json"), MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_a_clean_run_over_a_v3_prior_index(self):
+        self.put("index.json", self.prior_v3())
+        self.assertEqual(self.run_main(), 0)
+        index = self.published("index.json")
+        self.assertEqual(index["format_version"], 3)
+        self.assertEqual(index["engine_version"], ZARR_ENGINE_VERSION)
+        self.assertEqual(index["layout"]["level0"], "<zarr>/<group>/0")
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_the_manifest_is_published_alongside_the_index(self):
+        self.put("index.json", self.prior_v3())
+        self.put("manifest.json", {
+            "format": "nemar-zarr-manifest", "format_version": 1,
+            "dataset_id": "on008083", "updated_utc": "2026-09-01T00:00:00Z",
+            "stores": [{"zarr": "sub-01/eeg/a_eeg.zarr",
+                        "source_key": "SHA256E-s1--a", "size_bytes": 1}],
+        })
+        self.assertEqual(self.run_main(), 0)
+        manifest = self.published("manifest.json")
+        # Restricted to the rels the index publishes, so the two documents can
+        # never disagree about which stores exist. Nothing is served here, so
+        # the stale entry goes.
+        self.assertEqual(manifest["stores"], [])
+        self.assertEqual(manifest["dataset_id"], "on008083")
+        validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_pending_attempts_are_read_from_the_published_index(self):
+        """The fact `--clean` would otherwise reset on every run.
+
+        `main` sources `prior_pending` from the document it read, not from what
+        it hands the merge -- which under `--clean` is `None`. Without that, a
+        recording failing for an infra reason would restart at attempt 1 forever
+        and `retry_exhausted` would be unreachable in production.
+        """
+        path = "sub-01/eeg/a_eeg.edf"
+        self.put("index.json", self.prior_v3(
+            pending_count=1,
+            pending=[{"path": path, "zarr": store_rel_for(path),
+                      "reason": "infra_failure", "attempts": 4,
+                      "last_error": "RuntimeError: boom",
+                      "last_attempt_utc": "2026-09-01T00:00:00Z"}],
+        ))
+        self.assertEqual(self.run_main(), 0)
+        # The recording is not at HEAD any more, so the entry drops rather than
+        # ageing -- what is asserted here is that `main` READ it: the attempt
+        # history reached the merge, which is the wiring `--clean` breaks.
+        self.assertEqual(self.published("index.json")["pending_count"], 0)
+        # And the merge does age it when the recording IS still discovered,
+        # through the same argument main passes.
+        index = merge_index(
+            None, "on008083", self.head, [], [], "2026-09-02T00:00:00Z", [],
+            [{"path": path, "reason": "infra_failure", "last_error": "boom"}],
+            discovered=[path],
+            prior_pending=self.prior_v3(
+                pending=[{"path": path, "reason": "infra_failure", "attempts": 4}]
+            )["pending"],
+        )
+        # 4 + 1 == PENDING_MAX_ATTEMPTS, so this is the round that promotes it.
+        self.assertEqual(index["pending_count"], 0)
+        self.assertEqual(index["failures"][0]["code"], "retry_exhausted")
+        self.assertEqual(index["failures"][0]["attempts"], PENDING_MAX_ATTEMPTS)
+
+    def test_non_raw_stores_are_dropped_reported_and_logged(self):
+        self.put("index.json", self.prior_v3(
+            store_count=2,
+            stores=[
+                {"path": "derivatives/prep/a_eeg.set",
+                 "zarr": "derivatives/prep/a_eeg.zarr",
+                 "source_tree": "raw", "derived": False},
+                {"path": "sourcedata/b_eeg.set", "zarr": "sourcedata/b_eeg.zarr",
+                 "source_tree": "raw", "derived": False},
+            ],
+        ))
+        self.assertEqual(self.run_main(), 0)
+        body = self.callback_body()
+        self.assertEqual(body["non_raw_dropped"], 2)
+        # Named in the log, with the tree, so the count has a cause attached.
+        self.assertIn("derivatives/prep/a_eeg.set", self.log)
+        self.assertIn("sourcedata", self.log)
+        index = self.published("index.json")
+        self.assertEqual(index["stores"], [])
+        self.assertNotIn("legacy_store_count", index)
+
+    def test_the_callback_reports_every_new_field(self):
+        self.put("index.json", self.prior_v3())
+        self.assertEqual(self.run_main(), 0)
+        body = self.callback_body()
+        for key in (
+            "pending_count", "discovered_count", "not_attempted_count",
+            "non_raw_dropped", "provenance_fetch_failed", "manifest_upload_failed",
+        ):
+            self.assertIn(key, body, key)
+        self.assertEqual(body["status"], "ready")
+        self.assertIs(body["manifest_upload_failed"], False)
+        # Nothing to convert, so the catalog was never read: not a failure.
+        self.assertIs(body["provenance_fetch_failed"], False)
+
+    def test_a_missing_prior_index_is_the_first_run_path(self):
+        # No document at all: the stub reports NoSuchKey, which must read as
+        # "first run" rather than raising.
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.published("index.json")["store_count"], 0)
+        self.assertEqual(self.callback_body()["non_raw_dropped"], 0)
+
+    # --- The index publish is a conditional write ------------------------
+    #
+    # Two processes write `<id>/zarr/index.json`: a converter run and
+    # `purge_non_raw_stores.py`. Both read it, work for minutes to hours, then
+    # write back what they merged from that read, so an unconditional PUT from
+    # either silently reverts the other -- restoring the 4,721 non-raw stores a
+    # purge had just dropped, or losing a conversion's new stores while their
+    # chunks sit on S3 unreferenced. Both exit 0; nothing anywhere says so.
+    #
+    # The stub `aws` carries real ETag semantics (md5 of the bytes, 412 on a
+    # mismatch), so these drive the actual condition rather than a flag.
+
+    def object_etag(self, key="index.json"):
+        """The ETag the stub reports for a published object: md5 of its bytes,
+        the same rule the stub's `put-object` and `get-object` use."""
+        with open(os.path.join(self.s3, "on008083_zarr_" + key), "rb") as fh:
+            return hashlib.md5(fh.read()).hexdigest()
+
+    def log_aws_calls(self):
+        """Capture every `aws` argv, in order -- the only way to see that the
+        retry actually RE-READ the document rather than resending the same body.
+        """
+        path = os.path.join(self.dir, "aws.log")
+        os.environ["ZARR_TEST_S3_LOG"] = path
+        self.addCleanup(lambda: os.environ.pop("ZARR_TEST_S3_LOG", None))
+        return lambda: [
+            line.strip() for line in open(path) if os.path.exists(path)
+        ] if os.path.exists(path) else []
+
+    def publish_competitor_before(self, reads):
+        """Publish a DIFFERENT document immediately after the run's first
+        `reads` index reads, the way a concurrent purge would.
+
+        Wrapping the real `read_index_with_etag` is the only way to open the
+        window deterministically: the ETag the run holds is invalidated after it
+        was read and before it is used, which is exactly the race. Nothing in the
+        conditional write itself is replaced -- the stub `aws` decides the 412.
+        """
+        original = generate_zarr.read_index_with_etag
+        seen = {"reads": 0}
+
+        def read_then_publish(bucket, dataset_id):
+            index, etag = original(bucket, dataset_id)
+            seen["reads"] += 1
+            if seen["reads"] <= reads:
+                # A DIFFERENT body each time (the ETag is the md5 of the bytes),
+                # so a second competing write really does invalidate the ETag the
+                # retry just read -- republishing identical bytes would leave the
+                # ETag unchanged and quietly turn the two-conflict case into the
+                # one-conflict case.
+                self.put("index.json", self.prior_v3(
+                    source_commit="c" * 40, competitor_round=seen["reads"],
+                ))
+            return index, etag
+
+        generate_zarr.read_index_with_etag = read_then_publish
+        self.addCleanup(setattr, generate_zarr, "read_index_with_etag", original)
+        return seen
+
+    def test_the_index_publish_is_conditional_on_the_etag_it_read(self):
+        self.put("index.json", self.prior_v3())
+        calls = self.log_aws_calls()
+        self.assertEqual(self.run_main(), 0)
+        puts = [c for c in calls() if c.startswith("s3api put-object") and "index.json" in c]
+        self.assertEqual(len(puts), 1)
+        # The read's ETag, sent back verbatim: an unconditional PUT is what this
+        # replaces, and `--if-none-match "*"` here would 412 on every run over an
+        # existing document.
+        self.assertIn("--if-match", puts[0])
+        self.assertNotIn("--if-none-match", puts[0])
+        # The callback reports the ETag the PUT itself returned, so it names the
+        # version this run wrote rather than whatever a follow-up read would see.
+        self.assertEqual(self.callback_body()["index_etag"], self.object_etag())
+
+    def test_a_first_publish_is_conditional_on_there_being_no_document(self):
+        calls = self.log_aws_calls()
+        self.assertEqual(self.run_main(), 0)
+        puts = [c for c in calls() if c.startswith("s3api put-object") and "index.json" in c]
+        self.assertEqual(len(puts), 1)
+        # `if_match=None` is not "skip the check": it means the object was absent
+        # at read time, so a first index published in the meantime is not
+        # clobbered either.
+        self.assertIn("--if-none-match", puts[0])
+        self.assertEqual(self.callback_body()["index_etag"], self.object_etag())
+
+    def test_a_lost_race_is_re_read_re_merged_and_published(self):
+        self.put("index.json", self.prior_v3())
+        calls = self.log_aws_calls()
+        seen = self.publish_competitor_before(reads=1)
+        self.assertEqual(self.run_main(), 0)
+        # Two reads and two writes: the first write 412'd, and the retry read the
+        # NEWER document before recomputing. One read would mean it resent the
+        # same body against a fresh ETag, which is the silent clobber wearing a
+        # condition.
+        self.assertEqual(seen["reads"], 2)
+        gets = [c for c in calls() if c.startswith("s3api get-object") and "index.json" in c]
+        puts = [c for c in calls() if c.startswith("s3api put-object") and "index.json" in c]
+        self.assertEqual(len(gets), 2)
+        self.assertEqual(len(puts), 2)
+        self.assertIn("re-reading and re-merging once", self.log)
+        # This run's document is what ends up published, and the callback names
+        # the ETag of the retry's write.
+        published = self.published("index.json")
+        self.assertEqual(published["source_commit"], self.head)
+        self.assertEqual(self.callback_body()["index_etag"], self.object_etag())
+        self.assertEqual(self.callback_body()["status"], "ready")
+        check_index_invariant(published)
+        validate_document(published, INDEX_SCHEMA_PATH, "index")
+        # The manifest rides the same publish, so it is not left describing the
+        # first attempt's store set.
+        validate_document(self.published("manifest.json"), MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_losing_the_race_twice_fails_loudly_and_publishes_nothing(self):
+        self.put("index.json", self.prior_v3())
+        seen = self.publish_competitor_before(reads=2)
+        self.assertEqual(self.run_main(), 1)
+        self.assertEqual(seen["reads"], 2)
+        # The other writer's LATEST document is what survives: a third attempt
+        # has no reason to win, and overwriting from a body that is already stale
+        # again is the rollback this whole mechanism exists to prevent.
+        survivor = self.published("index.json")
+        self.assertEqual(survivor["source_commit"], "c" * 40)
+        self.assertEqual(survivor["competitor_round"], 2)
+        # And it is LOUD: the driver POSTs this file, so a run that published
+        # nothing must not leave D1 at `converting` forever (#774).
+        body = self.callback_body()
+        self.assertEqual(body["status"], "failed")
+        self.assertIn("index publish conflict", body["error"])
+        self.assertIn("::error::", self.log)
+        # The manifest is not published either -- it would describe stores the
+        # surviving index does not list.
+        self.assertFalse(
+            os.path.exists(os.path.join(self.s3, "on008083_zarr_manifest.json")),
+            "a run that published no index must not publish its manifest",
+        )
+
+
+class TestMainPublishesEventsParquet(unittest.TestCase):
+    """`main()` over a real recording, through to `<id>/zarr/events.parquet`.
+
+    The entry point, not the writer: everything the file depends on is derived by
+    code the unit tests do not reach -- the worker parses the events.tsv, `record`
+    turns it into rows against the entry's OWN groups, `main` orders them by the
+    index's store list, uploads, and only then names the file in index.json. A
+    writer test cannot catch a `record` that stages nothing.
+
+    Same shape as TestMainCleanRunAgainstPriorIndexes: a real git repo, a real
+    stub `aws` over local files, real argument parsing. `--local` reads the
+    working tree, so no annex download is needed.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyarrow  # noqa: F401
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.s3 = os.path.join(self.dir, "s3")
+        eeg = os.path.join(self.repo, "sub-01", "ses-1", "eeg")
+        os.makedirs(eeg)
+        os.makedirs(self.s3)
+        self.primary = "sub-01/ses-1/eeg/sub-01_ses-1_task-rest_run-2_eeg.edf"
+        build_real_edf(eeg, "sub-01_ses-1_task-rest_run-2_eeg", seconds=30)
+        self.onsets = [i * 3.0 + 0.111 for i in range(5)]
+        with open(os.path.join(eeg, "sub-01_ses-1_task-rest_run-2_events.tsv"), "w") as fh:
+            fh.writelines(
+                ["onset\tduration\ttrial_type\tstim_file\n"]
+                + [
+                    f"{onset}\t0.5\t{'go' if i % 2 == 0 else 'stop'}\tim{i}.png\n"
+                    for i, onset in enumerate(self.onsets)
+                ]
+            )
+
+        def run(*args):
+            subprocess.run(args, cwd=self.repo, check=True, capture_output=True)
+
+        run("git", "init", "-q", "-b", "main")
+        run("git", "config", "user.email", "t@example.org")
+        run("git", "config", "user.name", "t")
+        run("git", "add", "-A")
+        run("git", "commit", "-q", "-m", "init")
+
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        script = os.path.join(bindir, "aws")
+        with open(script, "w") as fh:
+            fh.write(STUB_AWS)
+        os.chmod(script, 0o755)
+        self._env = (os.environ.get("PATH"), os.environ.get("ZARR_TEST_S3_ROOT"))
+        os.environ["PATH"] = bindir + os.pathsep + (self._env[0] or "")
+        os.environ["ZARR_TEST_S3_ROOT"] = self.s3
+        # Every `aws` invocation, in order: the only way to assert that a run
+        # did NOT fetch the prior events file.
+        self.aws_log = os.path.join(self.dir, "aws.log")
+        os.environ["ZARR_TEST_S3_LOG"] = self.aws_log
+        self.callback = os.path.join(self.dir, "cb.json")
+
+    def tearDown(self):
+        path, root = self._env
+        if path is not None:
+            os.environ["PATH"] = path
+        if root is None:
+            os.environ.pop("ZARR_TEST_S3_ROOT", None)
+        else:
+            os.environ["ZARR_TEST_S3_ROOT"] = root
+        os.environ.pop("ZARR_TEST_S3_LOG", None)
+        os.environ.pop("ZARR_TEST_S3_FAIL_KEY", None)
+        self._tmp.cleanup()
+
+    def aws_calls(self) -> list[str]:
+        if not os.path.exists(self.aws_log):
+            return []
+        with open(self.aws_log) as fh:
+            return [ln for ln in fh.read().splitlines() if ln.strip()]
+
+    def downloads_of(self, name: str) -> list[str]:
+        """Calls that READ `name` from S3 (`cp s3://... <dest>`), not writes."""
+        return [
+            call
+            for call in self.aws_calls()
+            if call.startswith("s3 cp s3://") and name in call.split()[2]
+        ]
+
+    def add_store(self, sub: str, onsets: list[float] | None) -> str:
+        """A second/third recording in the same repo, with or without events.
+        Returns its repo-relative primary path (uncommitted -- the caller
+        commits, so a test controls which run sees it)."""
+        eeg = os.path.join(self.repo, sub, "eeg")
+        os.makedirs(eeg, exist_ok=True)
+        stem = f"{sub}_task-rest_eeg"
+        build_real_edf(eeg, stem, seconds=10)
+        if onsets is not None:
+            with open(os.path.join(eeg, f"{sub}_task-rest_events.tsv"), "w") as fh:
+                fh.writelines(
+                    ["onset\tduration\ttrial_type\n"]
+                    + [f"{onset}\t0.2\tgo\n" for onset in onsets]
+                )
+        return f"{sub}/eeg/{stem}.edf"
+
+    def commit(self, message: str) -> None:
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", message], cwd=self.repo, check=True,
+            capture_output=True,
+        )
+
+    def run_main(self, *extra):
+        argv = [
+            "generate_zarr.py",
+            "--dataset-id", "on007763",
+            "--repo-dir", self.repo,
+            "--bucket", "nemar-test",
+            "--callback-out", self.callback,
+            "--local",
+            # Nothing is listening there, so the catalog read fails fast instead
+            # of reaching the real api.nemar.org from a unit test.
+            "--api-base", "http://127.0.0.1:1",
+            *extra,
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = generate_zarr.main()
+            self.log = out.getvalue()
+            return rc
+        finally:
+            sys.argv = saved
+
+    def published(self, key):
+        path = os.path.join(self.s3, "on007763_zarr_" + key)
+        self.assertTrue(os.path.exists(path), key + " was not published")
+        return path
+
+    def index(self):
+        with open(self.published("index.json")) as fh:
+            return json.load(fh)
+
+    def callback_body(self):
+        with open(self.callback) as fh:
+            return json.load(fh)
+
+    def events_table(self):
+        import pyarrow.parquet as pq
+
+        return pq.read_table(self.published(EVENTS_PARQUET_NAME)).to_pydict()
+
+    def test_a_clean_run_publishes_the_file_and_names_it_in_the_index(self):
+        self.assertEqual(self.run_main("--clean"), 0)
+        index = self.index()
+        rel = store_rel_for(self.primary)
+        self.assertEqual(index["store_count"], 1)
+        # The index names the file only because it was uploaded first, so the
+        # pointer can never precede the object.
+        self.assertEqual(index["events_parquet"], index["data_base"] + EVENTS_PARQUET_NAME)
+        self.assertEqual(index["events_row_count"], 5)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+        table = self.events_table()
+        self.assertEqual(table["store_path"], [rel] * 5)
+        # Joins to stores[].zarr, which is the whole point of the column.
+        self.assertEqual({index["stores"][0]["zarr"]}, set(table["store_path"]))
+        rate = index["stores"][0]["groups"][0]["rate"]
+        self.assertEqual(
+            table["sample_index"], [sample_index_for(o, rate) for o in self.onsets]
+        )
+        self.assertEqual(set(table["group_name"]), {index["stores"][0]["groups"][0]["name"]})
+        self.assertEqual(table["subject"], ["01"] * 5)
+        self.assertEqual(table["session"], ["1"] * 5)
+        self.assertEqual(table["run"], ["2"] * 5)
+        # A pass-through column keeps its own name.
+        self.assertEqual(table["stim_file"], [f"im{i}.png" for i in range(5)])
+        # And the per-store summary agrees with the rows, because one parse made
+        # both (#1060's last acceptance criterion).
+        self.assertEqual(index["stores"][0]["n_events"], 5)
+        self.assertEqual(index["stores"][0]["trial_types"], {"go": 3, "stop": 2})
+
+    def test_the_callback_reports_the_row_count(self):
+        self.assertEqual(self.run_main("--clean"), 0)
+        body = self.callback_body()
+        self.assertEqual(body["events_row_count"], 5)
+        self.assertIs(body["events_upload_failed"], False)
+
+    def test_the_manifest_records_the_bytes_the_run_wrote(self):
+        """The index says the file exists and how many rows it has; the producer
+        manifest says how many BYTES this run uploaded, so "the object on S3 is
+        the one this conversion wrote" is a HEAD away rather than a download."""
+        self.assertEqual(self.run_main("--clean"), 0)
+        with open(self.published("manifest.json")) as fh:
+            manifest = json.load(fh)
+        self.assertEqual(len(manifest["files"]), 1)
+        entry = manifest["files"][0]
+        self.assertEqual(entry["name"], EVENTS_PARQUET_NAME)
+        self.assertEqual(entry["row_count"], 5)
+        self.assertEqual(
+            entry["size_bytes"], os.path.getsize(self.published(EVENTS_PARQUET_NAME))
+        )
+        validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_a_run_that_publishes_no_file_claims_no_bytes(self):
+        # The previous run's file may still be on S3; the manifest must not
+        # inherit its size and read as though this run wrote it.
+        self.assertEqual(self.run_main("--clean"), 0)
+        published = self.published(EVENTS_PARQUET_NAME)
+        with open(published, "wb") as fh:
+            fh.write(b"not a parquet file")
+        self.assertEqual(self.run_main(), 0)
+        with open(self.published("manifest.json")) as fh:
+            manifest = json.load(fh)
+        self.assertNotIn("files", manifest)
+        validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_an_incremental_run_carries_the_rows_forward(self):
+        """The store is not reconverted, so the published file is the only place
+        its events exist -- exactly like its entry in the index."""
+        self.assertEqual(self.run_main("--clean"), 0)
+        first = os.path.getmtime(self.published(EVENTS_PARQUET_NAME))
+        # Second run at the same commit: nothing to convert, everything carried.
+        time.sleep(0.01)
+        self.assertEqual(self.run_main(), 0)
+        index = self.index()
+        self.assertEqual(index["store_count"], 1)
+        self.assertEqual(index["events_row_count"], 5)
+        self.assertGreater(os.path.getmtime(self.published(EVENTS_PARQUET_NAME)), first)
+        table = self.events_table()
+        self.assertEqual(table["onset_s"], self.onsets)
+        self.assertEqual(table["stim_file"], [f"im{i}.png" for i in range(5)])
+        self.assertNotIn("contribute no rows", self.log)
+
+    def test_a_dataset_with_no_events_publishes_no_file(self):
+        """Absent means absent: a client must not fetch a file to learn there are
+        no events, and `events_parquet` is what says whether to fetch at all."""
+        os.remove(os.path.join(
+            self.repo, "sub-01/ses-1/eeg/sub-01_ses-1_task-rest_run-2_events.tsv"
+        ))
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "drop events"],
+                       cwd=self.repo, check=True, capture_output=True)
+        self.assertEqual(self.run_main("--clean"), 0)
+        index = self.index()
+        self.assertNotIn("events_parquet", index)
+        self.assertNotIn("events_row_count", index)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.s3, "on007763_zarr_" + EVENTS_PARQUET_NAME)
+        ))
+        self.assertIsNone(self.callback_body()["events_row_count"])
+        self.assertIs(self.callback_body()["events_upload_failed"], False)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_reconverted_store_that_lost_its_events_publishes_no_rows(self):
+        """The carry-forward defect. "Carried over" has to mean "this run did
+        not rebuild it", not "this run produced no rows for it": a store whose
+        events.tsv was deleted IS rebuilt, produces nothing, and must not have
+        its old rows resurrected from the published file forever."""
+        keeper = self.add_store("sub-02", [1.0, 2.0])
+        self.commit("add a second store with events")
+        self.assertEqual(self.run_main("--clean"), 0)
+        rel = store_rel_for(self.primary)
+        self.assertEqual(len(set(self.events_table()["store_path"])), 2)
+
+        os.remove(os.path.join(
+            self.repo, "sub-01/ses-1/eeg/sub-01_ses-1_task-rest_run-2_events.tsv"
+        ))
+        self.commit("drop the first store's events")
+        self.assertEqual(self.run_main("--clean"), 0)
+        table = self.events_table()
+        # The reconverted store is gone from the file; the untouched one is not.
+        self.assertNotIn(rel, set(table["store_path"]))
+        self.assertEqual(set(table["store_path"]), {store_rel_for(keeper)})
+        self.assertEqual(self.index()["events_row_count"], 2)
+        # ...and it is not reported as an unrecoverable carry-over, because it
+        # was not carried over at all.
+        self.assertNotIn("contribute no rows", self.log)
+
+    def test_a_first_clean_run_never_fetches_a_prior_for_event_less_stores(self):
+        """A store with no events.tsv is reconverted like any other, so it is
+        not "carried over" and there is nothing to carry: a first run must not
+        fetch a prior file (there is none) or warn about stores it just built."""
+        self.add_store("sub-03", None)  # no events.tsv at all
+        self.commit("add an event-less store")
+        self.assertEqual(self.run_main("--clean"), 0)
+        self.assertEqual(self.index()["store_count"], 2)
+        self.assertEqual(self.index()["events_row_count"], 5)
+        self.assertNotIn("contribute no rows", self.log)
+        self.assertEqual(self.downloads_of(EVENTS_PARQUET_NAME), [])
+
+    def test_an_onset_past_the_end_is_published_unclamped(self):
+        """A client bound-checks against groups[].n_samples; a clamped index
+        would be indistinguishable from an event on the last sample."""
+        with open(os.path.join(
+            self.repo, "sub-01/ses-1/eeg/sub-01_ses-1_task-rest_run-2_events.tsv"
+        ), "a") as fh:
+            fh.write("999.0\t0.5\tlate\tim9.png\n")  # the recording is 30 s
+        self.commit("add an event past the end")
+        self.assertEqual(self.run_main("--clean"), 0)
+        index = self.index()
+        group = index["stores"][0]["groups"][0]
+        table = self.events_table()
+        late = table["sample_index"][table["trial_type"].index("late")]
+        self.assertEqual(late, sample_index_for(999.0, group["rate"]))
+        self.assertGreater(late, group["n_samples"])
+
+    def test_a_store_whose_onsets_all_fail_to_parse_is_warned_and_counted(self):
+        """Rows with nothing but null sample indices are events a client cannot
+        epoch, and the row count alone cannot show it."""
+        with open(os.path.join(
+            self.repo, "sub-01/ses-1/eeg/sub-01_ses-1_task-rest_run-2_events.tsv"
+        ), "w") as fh:
+            fh.write("onset\tduration\ttrial_type\n")
+            fh.writelines(["n/a\t0.5\tgo\n", "later\t0.5\tstop\n"])
+        self.commit("break every onset")
+        self.assertEqual(self.run_main("--clean"), 0)
+        self.assertIn("no usable sample index for any event", self.log)
+        self.assertEqual(self.callback_body()["events_stores_without_rows"], 1)
+        table = self.events_table()
+        self.assertEqual(table["sample_index"], [None, None])
+
+    def test_a_healthy_run_counts_no_store_without_rows(self):
+        # The control: the counter is 0 on the ordinary path, so the assertion
+        # above is about the condition and not about the field always being 1.
+        self.assertEqual(self.run_main("--clean"), 0)
+        self.assertEqual(self.callback_body()["events_stores_without_rows"], 0)
+
+    def test_a_refused_index_uploads_no_events_file(self):
+        """Schema first, uploads second. A refused index means this run
+        publishes NOTHING -- and events.parquet is a destructive overwrite of a
+        file the live index still describes, so it must not already be gone by
+        the time the index is rejected."""
+        self.assertEqual(self.run_main("--clean"), 0)
+        published = self.published(EVENTS_PARQUET_NAME)
+        with open(published, "rb") as fh:
+            before = fh.read()
+        with open(os.path.join(
+            self.repo, "sub-01/ses-1/eeg/sub-01_ses-1_task-rest_run-2_events.tsv"
+        ), "a") as fh:
+            fh.write("29.0\t0.5\textra\tim9.png\n")  # would change the bytes
+        self.commit("add an event")
+        reject = os.path.join(self.dir, "reject.schema.json")
+        with open(reject, "w") as fh:
+            json.dump({"$schema": "https://json-schema.org/draft/2020-12/schema",
+                       "not": {}}, fh)
+        saved = generate_zarr.INDEX_SCHEMA_PATH
+        try:
+            generate_zarr.INDEX_SCHEMA_PATH = reject
+            self.assertEqual(self.run_main("--clean"), 1)
+        finally:
+            generate_zarr.INDEX_SCHEMA_PATH = saved
+        body = self.callback_body()
+        self.assertEqual(body["status"], "failed")
+        self.assertIn("index refused", body["error"])
+        self.assertIsNone(body["events_row_count"])
+        self.assertIs(body["events_upload_failed"], False)
+        # The object on S3 is untouched: same bytes as the good run left.
+        with open(published, "rb") as fh:
+            self.assertEqual(fh.read(), before)
+
+    def test_an_upload_that_precedes_a_rejection_is_reported_on_the_callback(self):
+        """The interleaving that CAN still overwrite: a document that passes the
+        pre-flight (row count 0) and fails on the real count. The file is
+        replaced and the index is refused, so the callback is the only place
+        that can say an object was rewritten by a run that published nothing."""
+        schema = os.path.join(self.dir, "row-count-zero.schema.json")
+        with open(schema, "w") as fh:
+            json.dump({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {"events_row_count": {"const": 0}},
+            }, fh)
+        saved = generate_zarr.INDEX_SCHEMA_PATH
+        try:
+            generate_zarr.INDEX_SCHEMA_PATH = schema
+            self.assertEqual(self.run_main("--clean"), 1)
+        finally:
+            generate_zarr.INDEX_SCHEMA_PATH = saved
+        body = self.callback_body()
+        self.assertEqual(body["status"], "failed")
+        self.assertIn("index refused", body["error"])
+        # The upload DID happen before the refusal, and the callback says so.
+        self.assertEqual(body["events_row_count"], 5)
+        self.assertIs(body["events_upload_failed"], False)
+        self.assertTrue(os.path.exists(
+            os.path.join(self.s3, "on007763_zarr_" + EVENTS_PARQUET_NAME)
+        ))
+        # ...and no index was published at all.
+        self.assertFalse(os.path.exists(os.path.join(self.s3, "on007763_zarr_index.json")))
+
+    def test_a_failed_events_upload_leaves_no_pointer_and_does_not_fail_the_run(self):
+        """ADR 0005: the stores and index.json are the serving copy. A failed
+        events upload is reported, the index names no file (the object on S3 is
+        the older one), and the run still publishes."""
+        os.environ["ZARR_TEST_S3_FAIL_KEY"] = EVENTS_PARQUET_NAME
+        # aws_cp retries with backoff; one attempt is enough here and keeps the
+        # test from sleeping through 14 seconds of real backoff.
+        saved = generate_zarr._aws.__kwdefaults__["retries"]
+        try:
+            generate_zarr._aws.__kwdefaults__["retries"] = 1
+            self.assertEqual(self.run_main("--clean"), 0)
+        finally:
+            generate_zarr._aws.__kwdefaults__["retries"] = saved
+            os.environ.pop("ZARR_TEST_S3_FAIL_KEY", None)
+        index = self.index()
+        self.assertEqual(index["store_count"], 1)
+        self.assertNotIn("events_parquet", index)
+        self.assertNotIn("events_row_count", index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+        body = self.callback_body()
+        self.assertEqual(body["status"], "ready")
+        self.assertIs(body["events_upload_failed"], True)
+        self.assertIsNone(body["events_row_count"])
+        self.assertIn("events.parquet was not published", self.log)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.s3, "on007763_zarr_" + EVENTS_PARQUET_NAME)
+        ))
+
+    def test_without_pyarrow_the_run_succeeds_and_publishes_no_events(self):
+        """The Hallu fallback install (biosigio only, no requirements.txt) has
+        no pyarrow. That must cost the events file and nothing else -- not the
+        conversion, and not a `failed` flag, since nothing was attempted."""
+        saved = sys.modules.get("pyarrow", "absent")
+        try:
+            # A real import failure, in the import system, not a patched
+            # function: `None` in sys.modules is what CPython raises ImportError
+            # for, which is exactly what a venv without the package does.
+            sys.modules["pyarrow"] = None  # type: ignore[assignment]
+            self.assertEqual(self.run_main("--clean"), 0)
+        finally:
+            if saved == "absent":
+                sys.modules.pop("pyarrow", None)
+            else:
+                sys.modules["pyarrow"] = saved
+        index = self.index()
+        self.assertEqual(index["store_count"], 1)
+        self.assertNotIn("events_parquet", index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+        body = self.callback_body()
+        self.assertEqual(body["status"], "ready")
+        self.assertIsNone(body["events_row_count"])
+        self.assertIs(body["events_upload_failed"], False)
+        self.assertIn("pyarrow is not installed", self.log)
+
+    def test_an_unreadable_prior_file_is_reported_not_fatal(self):
+        """ADR 0005: the stores and index.json are the serving copy, so a failure
+        to produce this one is reported and the run still publishes.
+
+        The index then names NO file -- deliberately. The object on S3 is the
+        older one, and pointing at it from a new index would claim rows for
+        stores this run's index may not describe. A `--clean` run rebuilds it
+        from scratch, which is the recovery.
+        """
+        self.assertEqual(self.run_main("--clean"), 0)
+        published = self.published(EVENTS_PARQUET_NAME)
+        with open(published, "wb") as fh:
+            fh.write(b"not a parquet file")
+        self.assertEqual(self.run_main(), 0)  # incremental: every store carried
+        index = self.index()
+        self.assertEqual(index["store_count"], 1)
+        self.assertNotIn("events_parquet", index)
+        self.assertNotIn("events_row_count", index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+        body = self.callback_body()
+        self.assertEqual(body["status"], "ready")
+        self.assertIsNone(body["events_row_count"])
+        # The flag is what separates "this dataset has no events" from "we could
+        # not say what its events are".
+        self.assertIs(body["events_upload_failed"], True)
+        self.assertIn("events.parquet was not published", self.log)
+        # The unreadable object is left exactly as it was rather than being
+        # overwritten with a half-built file.
+        with open(published, "rb") as fh:
+            self.assertEqual(fh.read(), b"not a parquet file")
+
+
+class TestConvertOneEndToEnd(unittest.TestCase):
+    """`convert_one` in LOCAL mode over a real recording, up to the upload.
+
+    The store entry is assembled here -- `store_metadata`'s spread, the events
+    summary, the `units_report` annotation, the SSS flags -- and every test of
+    those pieces called them individually. So the assembly itself, which is
+    where a key gets mis-set or dropped, was covered by nothing.
+
+    `--local` reads the working tree directly (the Hallu path after `nemar
+    dataset download`), so no S3 is needed until the `aws s3 sync`, which the
+    stub below absorbs. Everything before it is the real code on real bytes.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.eeg = os.path.join(self.repo, "sub-01", "eeg")
+        os.makedirs(self.eeg)
+        self.primary = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+        build_real_edf(self.eeg, "sub-01_task-rest_eeg", seconds=30)
+        with open(os.path.join(self.eeg, "sub-01_task-rest_channels.tsv"), "w") as fh:
+            fh.writelines(
+                ["name\ttype\tunits\n"] + [f"E{i + 1}\tEEG\tV\n" for i in range(4)]
+            )
+        with open(os.path.join(self.eeg, "sub-01_task-rest_events.tsv"), "w") as fh:
+            fh.writelines(
+                ["onset\tduration\ttrial_type\n"]
+                + [f"{i * 2.0}\t0.5\t{'go' if i % 2 == 0 else 'stop'}\n"
+                   for i in range(8)]
+            )
+        # `aws s3 sync` is the only external call convert_one makes in local
+        # mode; a real no-op executable absorbs it.
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        self._path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + self._path
+        self._work = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        os.environ["PATH"] = self._path
+        self._work.cleanup()
+        self._tmp.cleanup()
+
+    def convert(self, head_files=None, dataset_row=None, provenance_failed=False):
+        files = head_files if head_files is not None else {
+            self.primary,
+            "sub-01/eeg/sub-01_task-rest_channels.tsv",
+            "sub-01/eeg/sub-01_task-rest_events.tsv",
+        }
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on007763",
+            "head": "b" * 40, "head_files": files, "local": True,
+            "tmp": self._work.name, "updated": "2026-09-02T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org",
+            "engine_version": "3",
+            "dataset_row": dataset_row,
+            "provenance_fetch_failed": provenance_failed,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+        })
+        return convert_one(self.primary)
+
+    def test_the_entry_carries_the_sidecar_annotation(self):
+        result = self.convert()
+        self.assertTrue(result["ok"], result.get("error"))
+        entry = result["entry"]
+        report = entry["units_report"]
+        # Which sidecar shaped the store, and that the CONVERTER chose it rather
+        # than the exporter stumbling on a sibling -- two separate claims, both
+        # of which matter on the MaxShield path where sibling detection finds
+        # nothing.
+        self.assertIs(report["sidecar_supplied"], True)
+        self.assertEqual(report["sidecar"], "sub-01/eeg/sub-01_task-rest_channels.tsv")
+        self.assertIs(report["units_column_present"], True)
+        self.assertNotIn("channels_tsv_read_error", entry)
+
+    def test_the_entry_is_a_complete_v3_store_entry(self):
+        entry = self.convert()["entry"]
+        self.assertEqual(entry["path"], self.primary)
+        self.assertEqual(entry["zarr"], store_rel_for(self.primary))
+        self.assertEqual(entry["source_tree"], "raw")
+        self.assertIs(entry["derived"], False)
+        self.assertEqual(entry["n_events"], 8)
+        self.assertEqual(entry["trial_types"], {"go": 4, "stop": 4})
+        self.assertEqual(entry["modalities"], ["eeg"])
+        self.assertGreaterEqual(entry["groups"][0]["n_view_levels"], 1)
+        # And `source_key` is NOT here: it moved to the manifest (#1178 item 5).
+        self.assertNotIn("source_key", entry)
+        self.assertIn("source_key", self.convert()["manifest"])
+
+    def test_the_entry_validates_inside_a_real_index(self):
+        # The assembled entry has to satisfy the closed store schema, which is
+        # what the producer enforces before publishing.
+        entry = self.convert()["entry"]
+        index = merge_index(
+            None, "on007763", "b" * 40, [entry], [], "2026-09-02T00:00:00Z",
+            [], [], discovered=[self.primary],
+        )
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_an_unreadable_sidecar_is_recorded_not_collapsed(self):
+        """A channels.tsv that APPLIES but cannot be read must not look like a
+        dataset that ships none: both leave `units_report` absent, and only one
+        of them means the store is serving importer units unintentionally."""
+        # Declared at HEAD, absent from the working tree and from git: the read
+        # fails the way a pack/tree desync would.
+        files = {self.primary, "sub-01/sub-01_channels.tsv"}
+        entry = self.convert(head_files=files)["entry"]
+        self.assertIs(entry["channels_tsv_read_error"], True)
+        self.assertNotIn("units_report", entry)
+
+    def test_it_converts_with_a_failed_provenance_fetch(self):
+        """A catalog outage must not cost a conversion.
+
+        The store's `nemar` attrs then carry nulls plus
+        `provenance_fetch_failed: true`; that the flag lands in the ATTRS is
+        asserted in TestRealRecordingV3Fields (the store is deleted by
+        `convert_one`'s `finally`, so it cannot be read back from here). What
+        this covers is the path itself: the flag threads through the worker
+        context without breaking the conversion.
+        """
+        result = self.convert(dataset_row=None, provenance_failed=True)
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertEqual(result["entry"]["path"], self.primary)
+
 
 if __name__ == "__main__":
     unittest.main()

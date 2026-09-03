@@ -53,16 +53,34 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
+import pickle
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
+import urllib.request
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    wait,
+)
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
+from typing import Any, Literal, Protocol, TypedDict
+
+# The engine stamp lives in `zarr_queue`, whose column decides which already-done
+# datasets re-convert (ADR 0033). The index republishes it so a consumer can tell
+# WHICH generation of the discovery rules produced a store without reading the
+# queue, and so an operator can spot a node running a stale driver. Imported
+# rather than copied: two constants would drift the moment one was bumped. This is
+# a sibling module in the same directory, which is on sys.path both when this file
+# is run as a script and when the test suite imports it.
+from zarr_queue import ZARR_ENGINE_VERSION
 
 # --- Path classification -------------------------------------------------
 
@@ -116,7 +134,66 @@ EXCLUDED_TREES = ("derivatives", "sourcedata", "code")
 _BIDS_CALIBRATION_SUFFIXES = ("_acq-crosstalk_meg.fif", "_acq-calibration_meg.dat")
 
 INDEX_FORMAT = "nemar-zarr-index"
-INDEX_FORMAT_VERSION = 1
+# v3 (nemarOrg/nemar-cli#1059, #1197, #1178 item 5). Additive over v1 for every
+# field a consumer already read, with ONE removal: per-store `source_key` moved to
+# the sibling producer manifest (see MANIFEST_FORMAT), because nothing on the
+# website read it and it was 18 percent of nm000281's 12.8 MB index. v2 was never
+# published; the number is skipped so "v3" means one thing everywhere.
+INDEX_FORMAT_VERSION = 3
+MANIFEST_FORMAT = "nemar-zarr-manifest"
+MANIFEST_FORMAT_VERSION = 1
+
+# JSON Schemas the published documents are validated against before upload. They
+# live in the repo (`shared/`) rather than beside this file so the backend can
+# serve the same bytes at GET /schemas/zarr-index-v3.json.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+INDEX_SCHEMA_PATH = os.path.join(_REPO_ROOT, "shared", "zarr-index.schema.json")
+MANIFEST_SCHEMA_PATH = os.path.join(_REPO_ROOT, "shared", "zarr-manifest.schema.json")
+
+# The STABLE base a client may hardcode. `data_base`/`s3_uri` say where the bytes
+# happen to live today and are derived from --bucket/--region; this one is
+# declared, because the whole point of publishing it is that it can stay put while
+# the storage behind it moves. `--contract-base` overrides it (hallu-zarr.sh
+# passes the test host in --test mode).
+DEFAULT_CONTRACT_BASE = "https://zarr.nemar.org"
+# Catalog the per-dataset provenance (DOI, license, HED version) is read from once
+# per run for the stores' `nemar` root attribute (#1064).
+DEFAULT_API_BASE = "https://api.nemar.org"
+
+# A published index MUST name the commit it was built from. on008083 published
+# `source_commit: ""` while D1 held the real SHA, which makes the index
+# unreproducible and the incremental diff impossible (#1197). Enforced in
+# `merge_index`, which refuses to build a document without one.
+COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+# The store layout, published verbatim in every index. An MCP recipe (ADR 0025)
+# has to be computable from index.json plus ONE array-metadata fetch, with no
+# probing: the broker is stateless, so anything it cannot read from the index it
+# has to discover by request, and discovery-by-404 is what #1178 item 2 was about.
+# The index already carries `n_view_levels` and the geometry per group; these are
+# the path templates and the sample-value rule that turn those numbers into
+# actual reads. `const` in the schema, so a client may hardcode them after
+# checking `format_version` -- and so a change to the layout is a schema change
+# rather than a silent one.
+INDEX_LAYOUT = {
+    "level0": "<zarr>/<group>/0",
+    "view": "<zarr>/<group>/view/<L>",
+    "view_levels": "1..n_view_levels from the group attrs",
+    "scale_offset": (
+        "level-0 array attrs scale[] and offset[]; physical = digital * scale + offset"
+    ),
+    # Stated against data_base rather than contract_base because it is one object,
+    # not a store path. Whether it EXISTS is said by the top-level
+    # `events_parquet` field, which is absent for a dataset with no events (#1060)
+    # -- the template here is how to read it, not a promise that it is there.
+    "events": "<data_base>events.parquet",
+}
+
+# Conversion attempts a `pending` recording gets before the producer stops
+# expecting it to convert and promotes it to a typed `retry_exhausted` failure.
+# Matches `zarr_queue.PENDING_MAX_ROUNDS`, which caps the queue side of the same
+# loop: a recording that will never convert must stop consuming the queue.
+PENDING_MAX_ATTEMPTS = 5
 
 # Per-modality canonical rate caps (Hz) passed to to_zarr. Keys are biosigIO's
 # uppercase modality names; the defaults already match, set explicitly so the
@@ -429,7 +506,8 @@ def apply_worker_mem_limit(
     try:
         import resource
 
-        _soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
+        # Only the hard limit is read: the soft one is what this call REPLACES.
+        hard = resource.getrlimit(resource.RLIMIT_DATA)[1]
         # Keep the hard limit where it is so the next task can raise the soft
         # one back up; a task needing MORE than the previous one must not be
         # capped by it.
@@ -653,6 +731,7 @@ def memory_failure_result(
         "primary": primary,
         "error": f"exceeded its memory budget while converting: {exc}",
         "code": RecordingMemoryExceeded.code,
+        "detail": failure_detail(exc),
         "peak_rss": peak_rss,
     }
 
@@ -666,6 +745,13 @@ def count_infra_failures(failures: list, failure_entries: list) -> int:
     normally is not -- except the codes in ``RETRYABLE_CODES``, which are surfaced
     to the viewer but still depend on conditions rather than on the recording, so
     they must not let one bad hour bury a dataset permanently. #1110.
+
+    Since index v3 both of those land in the index's ``pending`` list rather than
+    in ``failure_entries``, so the subtraction already counts them and the
+    ``retryable_coded`` term is normally zero. It stays because the term is what
+    makes the rule TRUE rather than incidentally right: if a retryable code is
+    ever surfaced as a typed failure again, the verdict must not silently flip to
+    terminal. This number equals ``len(pending)`` for a run, by construction.
     """
     retryable_coded = sum(1 for e in failure_entries if e.get("code") in RETRYABLE_CODES)
     return len(failures) - len(failure_entries) + retryable_coded
@@ -876,8 +962,127 @@ _FALLBACK_REASONS = {
         "fine-calibration and cross-talk files, which this dataset does not provide "
         "for this recording, so no viewer copy is offered."
     ),
+    # NEMAR-side (not a biosigIO code): the producer gave up retrying. A recording
+    # that fails for an INFRA reason is listed in the index's `pending` with an
+    # attempt count instead of a failure; after PENDING_MAX_ATTEMPTS rounds it is
+    # promoted here, so a permanently failing recording stops consuming the queue
+    # and stops claiming it is about to appear. Its `detail` carries the last
+    # error, which is the thing an operator actually needs. #1197
+    "retry_exhausted": (
+        "This recording could not be prepared for viewing after several attempts, "
+        "so it is no longer being retried automatically."
+    ),
 }
 _GENERIC_REASON = _FALLBACK_REASONS["file_read_error"]
+
+# Longest `detail` / `last_error` string published per entry. These ride in a
+# document fetched by every dataset-page visit, and #1178 item 5 is about that
+# document's weight -- one pathological exception message must not undo it.
+_DETAIL_MAX_CHARS = 300
+
+# An absolute filesystem path inside an error message. `(?<![\w.])` is what keeps
+# it from matching the tail of "min/max" or a URL's path; the alternation excludes
+# the punctuation that normally ENDS a path in prose, so
+# "corrupt file (/scratch/x.edf): ..." loses the path and keeps the sentence.
+_LOCAL_PATH_RE = re.compile(r"(?<![\w.])(?:/[^\s'\"()\[\]{},;:]+)+")
+# A Windows-style path, which reaches us through a library that formats one even
+# on Linux (MNE embeds paths from a recording's own header) and through anyone
+# running the converter on Windows. Same treatment as a POSIX path.
+_WINDOWS_PATH_RE = re.compile(r"(?<![\w.])[A-Za-z]:[\\/][^\s'\"()\[\]{},;:]*")
+
+# --- credential redaction ----------------------------------------------------
+# The driver shells out to `aws` and reads HTTP, so an exception message can
+# quote a presigned URL, a request header, or a key id -- and `detail` /
+# `last_error` are PUBLISHED in index.json, on a public bucket, fetched by every
+# dataset-page visit. Path stripping alone does not cover that: it was written
+# for scratch directories, and a presigned S3 URL is not a filesystem path.
+#
+# Redaction is by VALUE, not by whole-message suppression: the diagnosis is the
+# reason these fields exist (#1197), so "SignatureDoesNotMatch" has to survive
+# while the signature does not.
+_REDACTED = "[redacted]"
+_SECRET_PATTERNS = (
+    # `Authorization: AWS4-HMAC-SHA256 Credential=...` / `Bearer <token>`.
+    re.compile(r"(?i)\b(authorization\s*[:=]\s*)\S+"),
+    re.compile(r"(?i)\bbearer\s+[\w.\-+/=]+"),
+    # Every AWS SigV4 query parameter, signature and credential included. Kept as
+    # one alternation so a new X-Amz-* parameter is covered by the prefix rule.
+    re.compile(r"(?i)([?&]x-amz-[\w-]+=)[^\s&'\"]*"),
+    re.compile(r"(?i)\b(signature\s*[:=]\s*)[\w+/=%]+"),
+    # Bare access-key ids, which appear in AWS error text without a URL around
+    # them ("The AWS Access Key Id AKIA... does not exist"). ASIA is the STS
+    # session form the Hallu profile actually uses.
+    re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    # Any query parameter whose NAME says it is a secret, wherever it appears.
+    re.compile(r"(?i)([?&](?:token|key|secret|password|passwd|sig|signature)=)[^\s&'\"]*"),
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Replace credential-shaped substrings in `text` with `[redacted]`.
+
+    Applied to everything the converter publishes as `detail` or `last_error`.
+    The failure mode this closes is narrow but real: a presigned-URL or
+    credential error from `aws s3 cp` becomes an uncoded failure, whose message
+    is then written verbatim into a world-readable index.json. Nothing else in
+    the pipeline was going to catch that, because the message is not a path and
+    not a secret the driver ever held in a variable.
+    """
+    for pattern in _SECRET_PATTERNS:
+        # A capture group means "keep the label, drop the value"; no group means
+        # the whole match is the secret.
+        text = pattern.sub(
+            lambda m: (m.group(1) + _REDACTED) if m.groups() else _REDACTED, text
+        )
+    return text
+
+
+def strip_local_paths(text: str) -> str:
+    """Replace absolute filesystem paths in `text` with `<path>`, POSIX and
+    Windows alike.
+
+    The conversion host's scratch directory is a fresh `mkdtemp` name every run,
+    so a raw exception message publishes a directory that does not exist by the
+    time anyone reads it, and makes two identical failures look different. The
+    entry already carries the recording's BIDS `path`, so nothing is lost.
+
+    Runs AFTER `redact_secrets` in `failure_detail`, deliberately: a presigned
+    URL's path component would otherwise be collapsed to `<path>` first, taking
+    the `X-Amz-Signature` query string with it in some messages and leaving it in
+    others depending on punctuation. Redacting first makes the outcome the same
+    either way.
+    """
+    return _WINDOWS_PATH_RE.sub("<path>", _LOCAL_PATH_RE.sub("<path>", text))
+
+
+def failure_detail(exc: BaseException | str | None) -> str | None:
+    """Operator-facing cause for a failed recording: the exception class plus the
+    FIRST line of its message, local paths stripped, length-capped.
+
+    This is the field that makes `file_read_error` diagnosable. on008083 published
+    36 of them, every one reading "This recording could not be prepared for
+    viewing" -- true, sanitized, and useless: it cannot distinguish a corrupt EDF
+    from an importer gap without SSH access to the conversion node. The sanitized
+    `reason` stays exactly as it was for the viewer; this rides alongside it for
+    the human. #1197
+
+    Published on a public bucket, so it is redacted (`redact_secrets`) as well as
+    path-stripped: an `aws` or HTTP failure can quote a presigned URL, an
+    Authorization header, or an access-key id, and none of those are paths.
+    """
+    if exc is None:
+        return None
+    if isinstance(exc, str):
+        text, prefix = exc, ""
+    else:
+        text, prefix = str(exc), f"{type(exc).__name__}: "
+    first = next((ln for ln in text.splitlines() if ln.strip()), "")
+    # Redact BEFORE stripping paths -- see `strip_local_paths` for why the order
+    # is load-bearing.
+    detail = (prefix + strip_local_paths(redact_secrets(first))).strip()
+    if not detail:
+        return None
+    return detail[:_DETAIL_MAX_CHARS]
 
 
 def reason_for_code(code: str | None) -> str:
@@ -930,6 +1135,34 @@ def in_excluded_tree(path: str) -> bool:
     return any(
         path.startswith(f"{tree}/") or f"/{tree}/" in path for tree in EXCLUDED_TREES
     )
+
+
+def source_tree_for(path: str) -> str:
+    """Which BIDS tree a source recording lives in: "raw", or the excluded tree
+    that contains it (`derivatives` / `sourcedata` / `code`).
+
+    Published per store as `source_tree` (#1064), where it is always "raw": ADR
+    0027 made discovery raw-only, and `merge_index` DROPS a carried-over store
+    whose path is excluded rather than republishing it -- those stores are being
+    deleted by `purge_non_raw_stores.py`, so an index that described them would
+    advertise bytes that are going away. The drop is reported (logged with the
+    tree, counted as `non_raw_dropped` on the callback), never published.
+
+    So this function's non-raw answers do not reach the index at all. They exist
+    because the drop has to be able to SAY why: `excluded_reason` names the cause
+    on each logged line, and "dropped a store" versus "dropped a store because it
+    is under `derivatives/`" are very different lines to find in a cron log when
+    an orphan-detection bug is the alternative explanation.
+
+    Deliberately NOT the same question as the store entry's `derived`, which is
+    about whether the SIGNAL was processed (ADR 0028 Signal-Space Separation). A
+    recording can sit in `derivatives/` and be served unprocessed, and an
+    SSS-filtered MEG store is derived while its source is raw.
+    """
+    for tree in EXCLUDED_TREES:
+        if path.startswith(f"{tree}/") or f"/{tree}/" in path:
+            return tree
+    return "raw"
 
 
 def is_bids_calibration_file(path: str) -> bool:
@@ -1103,6 +1336,41 @@ def is_excluded_from_discovery(path: str) -> bool:
     consistent across every entry point.
     """
     return in_excluded_tree(path) or is_bids_calibration_file(path)
+
+
+def excluded_reason(path: str) -> str | None:
+    """WHY `is_excluded_from_discovery` rejects `path`, or None if it does not:
+    the excluded tree's name, or `bids-calibration`.
+
+    Exists so a drop can be logged with its cause. "Dropped a store" and
+    "dropped a store because it is under `derivatives/`" are very different
+    lines to find in a cron log when a real orphan bug is the alternative
+    explanation.
+    """
+    for tree in EXCLUDED_TREES:
+        if path.startswith(f"{tree}/") or f"/{tree}/" in path:
+            return tree
+    if is_bids_calibration_file(path):
+        return "bids-calibration"
+    return None
+
+
+def non_raw_store_paths(prior: dict | None) -> list[str]:
+    """Paths in a prior index's `stores` that discovery no longer walks.
+
+    The count `main` reports as `non_raw_dropped`. Read from the PRIOR PUBLISHED
+    index rather than from `merge_index`'s filtering, because the production path
+    is `--clean`: there `prior` is not passed to the merge at all, so the entries
+    never enter and the filter never sees them -- yet they are still gone from
+    the index a client will fetch next, which is the thing worth reporting.
+    """
+    return sorted(
+        str(e.get("path"))
+        for e in (prior or {}).get("stores", [])
+        if isinstance(e, dict)
+        and isinstance(e.get("path"), str)
+        and is_excluded_from_discovery(e["path"])
+    )
 
 
 def is_primary(path: str) -> bool:
@@ -1464,6 +1732,374 @@ def store_total_channels(meta: dict) -> int:
     return sum(int(g.get("n_channels") or 0) for g in meta.get("groups", []))
 
 
+def channels_tsv_for(primary_path: str, head_files) -> str | None:
+    """Repo-relative path of the `_channels.tsv` that applies to a recording, or
+    None when none does.
+
+    BIDS inheritance, closest-file-wins: among the sidecars in the recording's
+    directory or an ancestor whose entities are a subset of the recording's, the
+    most specific one wins. Unlike the JSON sidecars there is no per-field merge
+    across levels -- a TSV is adopted whole.
+
+    Two callers, deliberately the same resolution: the fidelity gate reads it for
+    the ground-truth channel count, and the converter hands it to biosigIO's
+    `bids.apply_channels_tsv` so the served samples are in the unit the sidecar
+    declares. They must agree about WHICH file applies, or the gate would be
+    checking a different sidecar than the one that shaped the store.
+    """
+    stem = filename_stem(primary_path)
+    rec_dir = os.path.dirname(primary_path)
+    rec_ents = _bids_entities(stem)
+    candidates: list[tuple[int, int, str]] = []
+    for f in head_files:
+        if not f.endswith("_channels.tsv"):
+            continue
+        cdir = os.path.dirname(f)
+        if cdir and rec_dir != cdir and not rec_dir.startswith(cdir + "/"):
+            continue
+        cents = _bids_entities(filename_stem(f))
+        if any(rec_ents.get(k) != v for k, v in cents.items()):
+            continue
+        depth = cdir.count("/") + (1 if cdir else 0)
+        candidates.append((depth, len(cents), f))
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[-1][2]  # most specific
+
+
+# --- events -------------------------------------------------------------------
+# ONE parse of the events.tsv a store was built from feeds BOTH the per-store
+# `n_events`/`trial_types` in index.json (#1059) and the rows of
+# `<id>/zarr/events.parquet` (#1060). Two parsers would eventually disagree, and
+# a summary that contradicts the file a client can download is worse than no
+# summary: the summary is what a client uses to decide whether to fetch at all.
+
+# The published columns, in order (#1060). Every string one is dictionary-encoded
+# in the parquet; `onset_s` is float64, `duration_s` float32, `sample_index`
+# int64. A remaining events.tsv column passes through under its own name -- with
+# `x_` prefixed only when that name would collide with one of these.
+EVENTS_FIXED_COLUMNS = (
+    "store_path",
+    "subject",
+    "session",
+    "task",
+    "run",
+    "onset_s",
+    "duration_s",
+    "sample_index",
+    "group_name",
+    "trial_type",
+    "value",
+    "hed",
+)
+# events.tsv column (lower-cased) -> the fixed column it feeds. BIDS spells the
+# HED column `HED`, and real datasets use both cases, so the match is
+# case-insensitive; a second column that lower-cases to the same name passes
+# through instead of overwriting the first.
+EVENTS_SOURCE_COLUMNS = {
+    "onset": "onset_s",
+    "duration": "duration_s",
+    "trial_type": "trial_type",
+    "value": "value",
+    "hed": "hed",
+}
+EVENTS_PASSTHROUGH_PREFIX = "x_"
+# BIDS's null. A cell carrying it becomes a real null rather than three literal
+# characters a client would have to know to filter out.
+EVENTS_NA = "n/a"
+
+
+class ParsedEvents(TypedDict):
+    """A BIDS events.tsv exactly as read: the header, and the cells of each data
+    row. Values stay strings here -- typing them is the row builder's job, and
+    the summary needs only to count."""
+
+    columns: list[str]
+    rows: list[list[str]]
+
+
+def parse_events_tsv(events_text: str | None) -> ParsedEvents | None:
+    """Parse the text of the events.tsv the converter applied. `None` in, `None`
+    out -- "no events.tsv applies", which is not the same as an empty one.
+
+    Deliberately minimal (header row, tab-separated, no quoting rules), which is
+    what BIDS specifies. The one non-obvious rule is the UTF-8 BOM: a
+    spreadsheet-exported events.tsv starts with U+FEFF, which would otherwise
+    make the first column "\\ufeffonset" -- silently costing every row its onset,
+    and therefore its sample index. nm000329 ships exactly that file.
+
+    Blank lines are dropped anywhere, so a trailing newline is not an event.
+    """
+    if events_text is None:
+        return None
+    lines = [ln for ln in events_text.lstrip("\ufeff").splitlines() if ln.strip()]
+    if not lines:
+        return {"columns": [], "rows": []}
+    return {
+        "columns": [c.strip() for c in lines[0].split("\t")],
+        "rows": [ln.split("\t") for ln in lines[1:]],
+    }
+
+
+def events_summary_of(parsed: ParsedEvents | None) -> dict:
+    """`{n_events, trial_types}` for a parsed events.tsv, or `{}` when none
+    applies.
+
+    Published per store so a client can judge whether a dataset is worth opening,
+    and which epoching strategy fits, without reading a signal byte (#1059). The
+    counts describe the SAME file the parquet rows are built from and the SAME
+    file biosigIO was handed -- one parse, one set of numbers.
+
+    An empty `trial_types` means the file has no `trial_type` column (or every
+    row is `n/a`); the absence of both keys means there was no events.tsv at all.
+    The distinction matters to a consumer deciding whether "no trial types" is a
+    property of the data or of the pipeline.
+    """
+    if parsed is None:
+        return {}
+    try:
+        col = [c.lower() for c in parsed["columns"]].index("trial_type")
+    except ValueError:
+        col = -1
+    counts: dict[str, int] = {}
+    if col >= 0:
+        for fields in parsed["rows"]:
+            if col >= len(fields):
+                continue
+            value = fields[col].strip()
+            if not value or value.lower() == EVENTS_NA:
+                continue
+            counts[value] = counts.get(value, 0) + 1
+    return {"n_events": len(parsed["rows"]), "trial_types": dict(sorted(counts.items()))}
+
+
+def events_summary(events_text: str | None) -> dict:
+    """`{n_events, trial_types}` straight from the events.tsv text. The parse the
+    parquet rows come from, so the two can never disagree."""
+    return events_summary_of(parse_events_tsv(events_text))
+
+
+def _event_cell(fields: list[str], col: int) -> str | None:
+    """One cell as a published string: `None` for missing, blank, or `n/a`."""
+    if col < 0 or col >= len(fields):
+        return None
+    value = fields[col].strip()
+    return None if not value or value.lower() == EVENTS_NA else value
+
+
+def _event_number(fields: list[str], col: int) -> float | None:
+    """One cell as a float, or `None` when it is absent or not a number. A
+    malformed onset yields a null onset and a null `sample_index` rather than a
+    dropped row: the row still says an event was declared, and a client can see
+    that its position is unknown instead of silently getting one fewer event."""
+    raw = _event_cell(fields, col)
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def sample_index_for(onset_s: float | None, rate: float | None) -> int | None:
+    """The level-0 sample an onset falls on, or `None` when it cannot be computed.
+
+    ``math.floor(onset_s * rate + 0.5)``, where `rate` is the group's SERVING
+    rate (the level-0 `rate` attr the index republishes). Written out rather than
+    called ``round()`` because the two DIFFER: Python's ``round()`` is
+    banker's rounding, which breaks an exact .5 tie toward the even integer
+    (``round(0.5) == 0``, ``round(1.5) == 2``), while this ties UP everywhere
+    (``0.5 -> 1``, ``1.5 -> 2``). A tie is not exotic here -- an onset of 0.5 s
+    at 1 Hz, or any onset landing on a half sample at the serving rate, hits it
+    -- and a client that reimplements the column with ``round()`` would disagree
+    with the published value on exactly those rows, which is the failure the
+    column exists to prevent.
+
+    That is the whole formula, and the reason it is this simple is worth writing
+    down once, because the point of publishing the column at all is that a client
+    should not have to re-derive it (#1060):
+
+    * biosigIO resamples level 0 to ``target_rate = min(native_rate, cap)`` with
+      ``scipy.signal.resample_poly(x, up, down)``, ``up/down =
+      Fraction(round(target), round(native))``, and trims/pads the result to
+      ``n_out = round(n_native * target / native)``. So level 0 is exactly the
+      grid ``t[n] = n / target_rate`` over the same span as the source -- both
+      exporters, in-memory and streaming, share ``_resample_channel``.
+    * ``resample_poly`` is ZERO-PHASE: it compensates the polyphase FIR's group
+      delay internally, so output sample ``n`` is at absolute time ``n / rate``
+      with no delay term to subtract. This is verified against a real
+      1000 Hz -> 250 Hz recording in the test suite (nm000329) by correlating the
+      served level-0 signal against the native samples taken at the same absolute
+      times; a filter delay would show up there as a non-zero lag.
+
+    The index is thus the only place the relation is known exactly -- a client
+    that guesses `rate` from the acquisition rate, or that subtracts a delay it
+    assumes is there, is wrong by a fraction of a sample everywhere the ratio is
+    not an integer.
+
+    NOT clamped to the group's length. An onset past the end of the recording is
+    a property of the data, and a clamped index would be indistinguishable from
+    an event that genuinely lands on the last sample; clients bound-check against
+    `groups[].n_samples`, which the index publishes beside this.
+    """
+    if onset_s is None or rate is None:
+        return None
+    try:
+        rate = float(rate)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(rate) or rate <= 0 or not math.isfinite(onset_s):
+        return None
+    return math.floor(onset_s * rate + 0.5)
+
+
+def _passthrough_column_names(columns: list[str]) -> dict[int, str]:
+    """Source-column index -> published column name, for the events.tsv columns
+    that are not one of the five the fixed columns consume.
+
+    `x_` is prefixed only on a collision -- with a fixed column name, or with a
+    name already taken (a duplicate header). Prefixing until free rather than
+    dropping: a duplicated or awkwardly-named column is malformed input, and
+    losing its values silently is the worse failure."""
+    taken = set(EVENTS_FIXED_COLUMNS)
+    consumed: set[str] = set()
+    out: dict[int, str] = {}
+    for i, raw in enumerate(columns):
+        name = raw.strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in EVENTS_SOURCE_COLUMNS and key not in consumed:
+            consumed.add(key)
+            continue
+        while name in taken:
+            name = EVENTS_PASSTHROUGH_PREFIX + name
+        taken.add(name)
+        out[i] = name
+    return out
+
+
+def event_rows_for_store(
+    zarr_rel: str,
+    primary_path: str,
+    groups: list[dict] | None,
+    parsed: ParsedEvents | None,
+) -> dict[str, list] | None:
+    """The `events.parquet` rows for one store, as a column -> values mapping, or
+    `None` when the store contributes none.
+
+    ONE ROW PER (EVENT, CHANNEL GROUP). A store's groups are concurrent streams
+    of one recording at different rates (biosigIO names them
+    `<modality>_<rate>hz`), so a single onset has a different sample index in
+    each; `group_name` is what tells the rows apart, and joining on it plus
+    `store_path` is how a client gets the index that matches the array it is
+    about to read. Rows are ordered by onset, then group name.
+
+    `subject`/`session`/`task`/`run` come from the recording's BIDS entities so
+    the file can be filtered without a join back to the index; `session` and
+    `run` are null for a dataset that uses neither.
+    """
+    if parsed is None or not parsed["rows"]:
+        return None
+    named = sorted(
+        (g for g in (groups or []) if isinstance(g, dict) and g.get("name")),
+        key=lambda g: str(g["name"]),
+    )
+    if not named:
+        return None
+
+    lower = [c.lower() for c in parsed["columns"]]
+
+    def source(name: str) -> int:
+        return lower.index(name) if name in lower else -1
+
+    onset_col = source("onset")
+    duration_col = source("duration")
+    trial_col = source("trial_type")
+    value_col = source("value")
+    hed_col = source("hed")
+    passthrough = _passthrough_column_names(parsed["columns"])
+
+    ents = _bids_entities(filename_stem(primary_path))
+    subject = ents.get("sub")
+    session = ents.get("ses")
+    task = ents.get("task")
+    run = ents.get("run")
+
+    cols: dict[str, list] = {name: [] for name in EVENTS_FIXED_COLUMNS}
+    for name in passthrough.values():
+        cols[name] = []
+
+    rows = parsed["rows"]
+    onsets = [_event_number(f, onset_col) for f in rows]
+    durations = [_event_number(f, duration_col) for f in rows]
+    # Onset order, with unparseable onsets last and file order preserved within
+    # a tie -- so the published order is deterministic for a given file.
+    order = sorted(
+        range(len(rows)),
+        key=lambda i: (onsets[i] is None, onsets[i] if onsets[i] is not None else 0.0, i),
+    )
+    for i in order:
+        fields = rows[i]
+        for group in named:
+            cols["store_path"].append(zarr_rel)
+            cols["subject"].append(subject)
+            cols["session"].append(session)
+            cols["task"].append(task)
+            cols["run"].append(run)
+            cols["onset_s"].append(onsets[i])
+            cols["duration_s"].append(durations[i])
+            cols["sample_index"].append(sample_index_for(onsets[i], group.get("rate")))
+            cols["group_name"].append(str(group["name"]))
+            cols["trial_type"].append(_event_cell(fields, trial_col))
+            cols["value"].append(_event_cell(fields, value_col))
+            cols["hed"].append(_event_cell(fields, hed_col))
+            for col, name in passthrough.items():
+                cols[name].append(_event_cell(fields, col))
+    return cols
+
+
+def events_row_alert(
+    primary_path: str,
+    parsed: ParsedEvents | None,
+    rows: dict[str, list] | None,
+) -> str | None:
+    """The `::warning::` a store's events deserve, or None when they are fine.
+
+    Two conditions, both invisible from the outside otherwise -- the parquet
+    either does not mention the store at all, or mentions it with a column of
+    nulls, and neither is distinguishable from "this recording has no events":
+
+    * The recording HAS events and the store has no named channel group, so
+      there is nothing to attach a rate (and therefore a sample index) to and
+      the store contributes no rows at all.
+    * Every published row has a null `sample_index`: either no onset cell parsed
+      as a number, or the group carries no rate. A client gets events it cannot
+      epoch.
+
+    Pure, and separate from the caller, because the first condition cannot be
+    reached through a real conversion (`convert_one` refuses to publish a store
+    with no channel groups) -- so a test can only reach that branch here.
+    """
+    if rows is None:
+        if parsed and parsed["rows"]:
+            return (
+                f"::warning::{primary_path} has {len(parsed['rows'])} event(s) but "
+                "the store has no channel groups, so it contributes no rows to "
+                "events.parquet"
+            )
+        return None
+    if rows["sample_index"] and all(v is None for v in rows["sample_index"]):
+        return (
+            f"::warning::no usable sample index for any event in {primary_path}: "
+            f"{len(rows['sample_index'])} row(s) published with sample_index null "
+            "(unparseable onsets, or a group with no rate)"
+        )
+    return None
+
+
 def expected_channel_count_for(
     repo_dir: str, primary_path: str, head_files: set[str], head: str
 ) -> int | None:
@@ -1485,25 +2121,9 @@ def expected_channel_count_for(
     None and the gate is silently OFF for the recording -- fail-open by
     design: no ground truth, nothing to check against.
     """
-    stem = filename_stem(primary_path)
-    rec_dir = os.path.dirname(primary_path)
-    rec_ents = _bids_entities(stem)
-    candidates: list[tuple[int, int, str]] = []
-    for f in head_files:
-        if not f.endswith("_channels.tsv"):
-            continue
-        cdir = os.path.dirname(f)
-        if cdir and rec_dir != cdir and not rec_dir.startswith(cdir + "/"):
-            continue
-        cents = _bids_entities(filename_stem(f))
-        if any(rec_ents.get(k) != v for k, v in cents.items()):
-            continue
-        depth = cdir.count("/") + (1 if cdir else 0)
-        candidates.append((depth, len(cents), f))
-    if not candidates:
+    best = channels_tsv_for(primary_path, head_files)
+    if best is None:
         return None
-    candidates.sort()
-    best = candidates[-1][2]  # most specific
     text = _read_repo_text(repo_dir, head, best)
     if text is None:
         # NOT the same as "no channels.tsv exists". Ground truth is present at
@@ -1563,6 +2183,44 @@ def affected_primaries(
     return set()
 
 
+def _buildable_primaries(
+    head_files,
+) -> tuple[list[str], dict[str, str], set[str], set[str], set[str]]:
+    """Every recording discovery can build at HEAD, plus the bookkeeping the
+    incremental path needs.
+
+    Returns `(all_primaries, member_to_head, heads, dirrec_dirs, bti_dirs)`.
+    Factored out of `compute_worklist` so `discover_primaries` and the worklist
+    answer "what recordings exist" through the SAME code: the index's coverage
+    denominator has to be the set the converter would actually attempt, not a
+    second, subtly different walk of the tree.
+    """
+    primaries = [p for p in head_files if is_primary(p)]
+    # Directory-keyed recordings are derived from the files under them, not
+    # tracked paths of their own, so they are buildable primaries alongside the
+    # file primaries. CTF `.ds`/MEF3 `.mefd` are extension-derived; 4D/BTi is
+    # content-derived (see the two sections near the top of this file).
+    dirrec_dirs = dir_recordings(head_files)
+    bti_dirs = bti_recordings(head_files)
+    # Collapse FIF split groups to their chain head: only the head builds a store,
+    # and a change to any split routes to that head (member_to_head).
+    heads, member_to_head = split_heads_and_members(primaries)
+    return sorted([*heads, *dirrec_dirs, *bti_dirs]), member_to_head, heads, dirrec_dirs, bti_dirs
+
+
+def discover_primaries(head_files) -> list[str]:
+    """Every raw recording at HEAD, after the ADR 0027 exclusions.
+
+    This is the index's `discovered_count` -- the denominator of coverage and the
+    left-hand side of the invariant `discovered_count == store_count +
+    failure_count + pending_count`. Publishing it is what lets a consumer check
+    completeness without cloning the repository: on008083 served 2 stores and 36
+    failures out of 43 raw recordings, and the missing five were visible nowhere
+    (#1197).
+    """
+    return _buildable_primaries(head_files)[0]
+
+
 def compute_worklist(
     head_files: list[str],
     diff_entries: list[tuple[str, str]],
@@ -1576,17 +2234,9 @@ def compute_worklist(
     converts every primary at HEAD.
     """
     head_set = set(head_files)
-    primaries = [p for p in head_files if is_primary(p)]
-    # Directory-keyed recordings are derived from the files under them, not
-    # tracked paths of their own, so they are buildable primaries alongside the
-    # file primaries. CTF `.ds`/MEF3 `.mefd` are extension-derived; 4D/BTi is
-    # content-derived (see the two sections above).
-    dirrec_dirs = dir_recordings(head_files)
-    bti_dirs = bti_recordings(head_files)
-    # Collapse FIF split groups to their chain head: only the head builds a store,
-    # and a change to any split routes to that head (member_to_head).
-    heads, member_to_head = split_heads_and_members(primaries)
-    all_primaries = sorted([*heads, *dirrec_dirs, *bti_dirs])
+    all_primaries, member_to_head, heads, dirrec_dirs, bti_dirs = _buildable_primaries(
+        head_files
+    )
     # Keyed on ALL buildable primaries, not just the file heads. A directory
     # recording sits in the same parent directory as its sidecars -- CTF
     # `sub-01/meg/..._meg.ds` next to `sub-01/meg/..._events.tsv` -- so omitting
@@ -1714,6 +2364,171 @@ def compute_clean_orphans(prior_index: dict | None, convert: list[str]) -> set[s
     }
 
 
+def is_commit_sha(value: object) -> bool:
+    """True for a full 40-hex git commit SHA."""
+    return isinstance(value, str) and bool(COMMIT_SHA_RE.match(value))
+
+
+def installed_biosigio_version() -> str | None:
+    """The installed biosigIO release, or None when it cannot be determined.
+
+    Published as the index's `biosigio_version` so a store's geometry and unit
+    handling can be attributed to a specific library release -- the engine stamp
+    says which DISCOVERY generation ran, not which exporter wrote the bytes, and
+    the two move independently. Null rather than a guess: an unattributable store
+    must not claim a version.
+    """
+    try:
+        from importlib.metadata import version
+
+        return version("biosigio")
+    except Exception as exc:  # noqa: BLE001 - absent/odd metadata is not fatal
+        print(
+            f"::warning::could not determine the installed biosigio version ({exc}); "
+            "publishing biosigio_version: null",
+            flush=True,
+        )
+        return None
+
+
+class StoreEntry(TypedDict, total=False):
+    """One published `stores[]` entry. `total=False` throughout, because the
+    schema's `required` set is the contract and most keys are conditional --
+    `sss` only on an ADR 0028 store, `n_events`/`trial_types` only when an
+    events.tsv applies, `units_report` only when a channels.tsv did.
+
+    Declared for the reader, not the type checker: these dicts are assembled
+    from several sources (`store_metadata`'s spread, `events_summary`'s update,
+    the SSS path) and a mistyped key would otherwise only be caught by the
+    pre-upload schema self-check, at the end of a conversion.
+    """
+
+    path: str
+    zarr: str
+    updated_utc: str
+    source_tree: str
+    derived: bool
+    modalities: list[str]
+    groups: list[dict]
+    power_line_frequency: float | None
+    event_description_count: int
+    n_events: int
+    trial_types: dict[str, int]
+    units_report: dict
+    channels_tsv_read_error: bool
+    split_members: list[str]
+    sss: dict
+
+
+class FailureEntry(TypedDict):
+    """One published `failures[]` entry: a recording that will not convert
+    without a change to the data or the converter. `reason` is the sanitized
+    sentence a viewer shows; `detail` is the operator-facing cause."""
+
+    path: str
+    zarr: str
+    code: str
+    reason: str
+    detail: str | None
+    attempts: int
+
+
+# The three reasons a discovered recording can be `pending`, spelled exactly as
+# `zarr-index.schema.json`'s `$defs.pending.reason` enum spells them. A CLOSED
+# set, unlike `FailureEntry.code`: the schema rejects a fourth value, so a typo
+# or a newly-invented reason has to fail here, at the call site, rather than at
+# `validate_document` after a full conversion has already run.
+PendingReason = Literal["infra_failure", "memory_budget", "not_attempted"]
+
+
+class PendingEntry(TypedDict):
+    """One published `pending[]` entry: a discovered recording with no store
+    that is still expected to convert."""
+
+    path: str
+    zarr: str
+    reason: PendingReason
+    attempts: int
+    last_error: str | None
+    last_attempt_utc: str | None
+
+
+def _normalize_store_entry(entry: dict) -> StoreEntry:
+    """Bring a store entry up to the v3 shape without inventing facts.
+
+    Applied to CARRIED-OVER entries as well as this run's, so one index never
+    mixes shapes: an entry written by the v1 producer carries `source_key` (which
+    v3 moved to the manifest, #1178 item 5) and carries neither `source_tree` nor
+    `derived`. The defaults are the only honest ones available from the entry
+    alone -- a store that exists was built from a discoverable raw recording, and
+    `derived` is stated by the SSS path, which also writes `sss`, so its absence
+    is evidence rather than a guess.
+
+    Every entry this reaches is raw by construction: `merge_index` drops a
+    carried-over store whose path is excluded from discovery (they are being
+    purged, not served), so `source_tree` is the only value the schema allows.
+    """
+    out: StoreEntry = {k: v for k, v in entry.items() if k != "source_key"}  # type: ignore[assignment]
+    out.setdefault("source_tree", source_tree_for(str(out.get("path", ""))))
+    out.setdefault("derived", bool(out.get("sss")))
+    return out
+
+
+def _pending_reason(value: object) -> PendingReason:
+    """Coerce a `reason` read off a PUBLISHED index into the closed set.
+
+    Carried-forward pending entries come from a document written by an earlier
+    run (or hand-edited), so the value is data, not a literal. An unrecognized
+    one becomes `infra_failure` -- the reading that says "no store, cause not
+    established, try again" -- rather than being republished as-is, which would
+    fail `validate_document` at the very END of a run, after every recording had
+    already been converted, and refuse to publish the whole index over it.
+    """
+    return value if value in ("infra_failure", "memory_budget", "not_attempted") else "infra_failure"  # type: ignore[return-value]
+
+
+def _pending_entry(
+    path: str,
+    reason: PendingReason,
+    attempts: int,
+    last_error: str | None = None,
+    last_attempt_utc: str | None = None,
+) -> PendingEntry:
+    return {
+        "path": path,
+        "zarr": store_rel_for(path),
+        "reason": reason,
+        "attempts": attempts,
+        "last_error": last_error,
+        "last_attempt_utc": last_attempt_utc,
+    }
+
+
+def _failure_entry(
+    path: str,
+    code: str,
+    detail: str | None = None,
+    attempts: int = 0,
+) -> FailureEntry:
+    """A `failures[]` entry, built in ONE place.
+
+    Mirrors `_pending_entry` for the same reason: the `zarr` rel-path and the
+    user-facing `reason` are DERIVED (`store_rel_for`, `reason_for_code`), and
+    three call sites were each deriving them again -- `record` in main, the
+    exhaustion promotion in `merge_index`, and the retry-exhausted path. A fourth
+    would have been written the same way, and a hand-built entry that skipped
+    `reason_for_code` would publish a code with no explanation for the viewer.
+    """
+    return {
+        "path": path,
+        "zarr": store_rel_for(path),
+        "code": code,
+        "reason": reason_for_code(code),
+        "detail": detail,
+        "attempts": attempts,
+    }
+
+
 def merge_index(
     prior: dict | None,
     dataset_id: str,
@@ -1721,22 +2536,71 @@ def merge_index(
     converted: list[dict],
     removed_store_rels: list[str],
     updated_utc: str,
-    failures: list[dict] | None = None,
+    # `failures` is built exclusively by `_failure_entry`, so it carries the
+    # TypedDict. `converted`, `pending` and `prior_pending` deliberately do NOT:
+    # `converted` is a store entry assembled by the worker, and the other two are
+    # this function's INPUT -- `pending` carries only what a run observed (path,
+    # reason, last_error) and `prior_pending` comes verbatim out of a PUBLISHED
+    # index that this function does not re-validate. Claiming PendingEntry for
+    # either would assert a shape nothing checks.
+    failures: list[FailureEntry] | None = None,
+    pending: list[dict] | None = None,
+    *,
+    discovered: list[str] | None = None,
+    errors: int | None = None,
+    contract_base: str = DEFAULT_CONTRACT_BASE,
+    bucket: str = "nemar",
+    region: str = "us-east-2",
+    engine_version: str = ZARR_ENGINE_VERSION,
+    biosigio_version: str | None = None,
+    prior_pending: list[dict] | None = None,
+    dataset_row: dict | None = None,
 ) -> dict:
-    """Fold this run's results into the prior index. Pure.
+    """Fold this run's results into the prior index and return the v3 document. Pure.
 
     `converted` is a list of store entries (each carries a `zarr` rel-path key);
     `removed_store_rels` are `*.zarr` rels to drop. Entries for unchanged stores
-    are carried over from `prior` verbatim.
+    are carried over from `prior`, normalized to the v3 shape.
 
-    `failures` is this run's typed data failures ({path, zarr, code, reason}) --
-    recordings that could not be converted for a reason the viewer should show.
-    They are merged like stores: prior failures carry over, a path that converted
-    (or whose store was removed) this run drops out, and this run's failures
-    overlay. A path is never in both `stores` and `failures`.
+    `failures` is this run's typed data failures ({path, zarr, code, reason,
+    detail}) -- recordings that will not convert without a change to the data or
+    the converter. They are merged like stores: prior failures carry over, a path
+    that converted (or whose store was removed) this run drops out, and this run's
+    failures overlay.
+
+    `pending` is this run's INFRA failures ({path, zarr, reason, last_error,
+    last_attempt_utc}) -- recordings that have no store yet but are still expected
+    to convert. Before v3 these were simply omitted, which is why on008083's five
+    silently-lost recordings were indistinguishable from "still generating"
+    forever (#1197). `attempts` is not supplied by the caller: it is a property of
+    the recording's HISTORY, so it is carried from `prior_pending` and
+    incremented here. At `PENDING_MAX_ATTEMPTS` the entry is promoted to a typed
+    `retry_exhausted` failure carrying its last error as `detail`, which is what
+    stops a permanently failing recording from consuming the queue forever.
+
+    `discovered` (every raw recording at HEAD) makes the coverage invariant hold
+    BY CONSTRUCTION rather than by hope: entries for paths that are not discovered
+    are dropped, and discovered paths in none of the three lists become
+    `not_attempted` pending entries. A partial run therefore still balances.
+
+    A path is never in more than one of `stores`, `failures`, `pending`.
+
+    Raises ValueError when `head_commit` is not a 40-hex SHA: an index that does
+    not name the commit it was built from is unreproducible and cannot seed the
+    next incremental diff, and one was published (on008083, #1197). Refusing here
+    means the run fails loudly instead of overwriting a good index with a broken
+    one.
     """
+    if not is_commit_sha(head_commit):
+        raise ValueError(
+            f"refusing to build an index for {dataset_id} with source_commit "
+            f"{head_commit!r}: a published index must name the 40-hex commit it "
+            "was built from (#1197)"
+        )
     failures = failures or []
+    pending = pending or []
     new_fail_paths = {f["path"] for f in failures if f.get("path")}
+    new_pending_paths = {p["path"] for p in pending if p.get("path")}
 
     stores: dict[str, dict] = {}
     if prior and isinstance(prior.get("stores"), list):
@@ -1747,10 +2611,18 @@ def merge_index(
         stores.pop(rel, None)
     for entry in converted:
         stores[entry["zarr"]] = entry
-    # A recording that newly FAILED must not keep a stale store entry.
-    stores = {z: e for z, e in stores.items() if e.get("path") not in new_fail_paths}
-    ordered = [stores[k] for k in sorted(stores)]
+    # A recording that newly FAILED (or is newly pending) must not keep a stale
+    # store entry claiming it is served.
+    stores = {
+        z: e
+        for z, e in stores.items()
+        if e.get("path") not in new_fail_paths and e.get("path") not in new_pending_paths
+    }
 
+    # Deliberately NOT dict[str, FailureEntry]: the values below are a mix of
+    # `_failure_entry` results and entries read verbatim out of a PUBLISHED
+    # index, which this function does not re-validate. Claiming the TypedDict
+    # here would assert a shape for a document written by an earlier engine.
     fails: dict[str, dict] = {}
     if prior and isinstance(prior.get("failures"), list):
         for f in prior["failures"]:
@@ -1767,27 +2639,536 @@ def merge_index(
                 fails[f["path"]] = f
     converted_paths = {e["path"] for e in converted if e.get("path")}
     removed_set = set(removed_store_rels)
-    # Drop prior failures that converted this run or whose recording was removed.
+    # Drop prior failures that converted this run, whose recording was removed, or
+    # that are now pending a retry instead.
     fails = {
         p: f
         for p, f in fails.items()
-        if p not in converted_paths and f.get("zarr") not in removed_set
+        if p not in converted_paths
+        and p not in new_pending_paths
+        and f.get("zarr") not in removed_set
     }
     for f in failures:
         fails[f["path"]] = f
-    ordered_fails = [fails[k] for k in sorted(fails)]
 
+    # --- pending -------------------------------------------------------------
+    prior_attempts: dict[str, int] = {}
+    for e in prior_pending or []:
+        if isinstance(e, dict) and isinstance(e.get("path"), str):
+            n = e.get("attempts")
+            prior_attempts[e["path"]] = int(n) if isinstance(n, int) and n > 0 else 0
+    # Every value here comes from `_pending_entry`, so the container carries the
+    # TypedDict rather than a bare dict: a hand-built entry missing `zarr` or
+    # `attempts` is then a type error at the call site instead of a schema
+    # violation at the end of the run.
+    pends: dict[str, PendingEntry] = {}
+    for e in prior_pending or []:
+        # Carry forward a recording this run never touched (an incremental run
+        # converts only what changed), minus anything now resolved or excluded.
+        if not (isinstance(e, dict) and isinstance(e.get("path"), str)):
+            continue
+        p = e["path"]
+        if p in converted_paths or p in fails or is_excluded_from_discovery(p):
+            continue
+        pends[p] = _pending_entry(
+            p,
+            _pending_reason(e.get("reason")),
+            prior_attempts.get(p, 0),
+            e.get("last_error"),
+            e.get("last_attempt_utc"),
+        )
+    for e in pending:
+        p = e["path"]
+        pends[p] = _pending_entry(
+            p,
+            _pending_reason(e.get("reason")),
+            prior_attempts.get(p, 0) + 1,
+            e.get("last_error"),
+            e.get("last_attempt_utc") or updated_utc,
+        )
+
+    if discovered is not None:
+        wanted = set(discovered)
+        # A carried-over store whose path is EXCLUDED from discovery goes, and
+        # goes NOISILY. ADR 0027 made discovery raw-only and
+        # `purge_non_raw_stores.py` is the authorised deletion of what it stopped
+        # producing, so a non-raw store is not something the archive serves -- an
+        # index that kept describing one would advertise bytes that are being
+        # removed. But dropping a store silently is how a real orphan bug would
+        # hide, so each one is named with the reason it was excluded.
+        dropped_non_raw = sorted(
+            (str(e.get("path") or ""), excluded_reason(str(e.get("path") or "")))
+            for e in stores.values()
+            if e.get("path") not in wanted
+            and is_excluded_from_discovery(str(e.get("path") or ""))
+        )
+        for path, reason in dropped_non_raw:
+            print(
+                f"[zarr] dropping non-raw store from the index: {path} ({reason})",
+                flush=True,
+            )
+        stores = {z: e for z, e in stores.items() if e.get("path") in wanted}
+        # Failures and pending entries are filtered the same way, and the
+        # carry-forward above already refuses a now-excluded path, so neither
+        # list can carry a non-raw recording either.
+        fails = {p: f for p, f in fails.items() if p in wanted}
+        pends = {p: e for p, e in pends.items() if p in wanted}
+        accounted = {e.get("path") for e in stores.values()} | set(fails) | set(pends)
+        for p in wanted - accounted:
+            # Discovered, attempted by nobody this run: a `--limit`ed or
+            # short-circuited run, or a recording the worklist never reached.
+            # Recorded with attempts 0 so it neither ages toward exhaustion nor
+            # disappears from the accounting.
+            pends[p] = _pending_entry(p, "not_attempted", 0)
+
+    # Exhaustion: stop promising a recording that has had its rounds. Done AFTER
+    # the discovered reconciliation so a promoted entry is one that is still at
+    # HEAD, and `not_attempted` is exempt because it has not been tried at all.
+    for p, e in list(pends.items()):
+        if e["reason"] == "not_attempted" or e["attempts"] < PENDING_MAX_ATTEMPTS:
+            continue
+        del pends[p]
+        fails[p] = _failure_entry(
+            p, "retry_exhausted", e.get("last_error"), e["attempts"]
+        )
+
+    ordered = [_normalize_store_entry(stores[k]) for k in sorted(stores)]
+    ordered_fails = [fails[k] for k in sorted(fails)]
+    ordered_pending = [pends[k] for k in sorted(pends)]
+
+    prefix = f"{dataset_id}/zarr/"
     return {
-        "dataset_id": dataset_id,
         "format": INDEX_FORMAT,
         "format_version": INDEX_FORMAT_VERSION,
+        "dataset_id": dataset_id,
+        # The stable base, and the two forms of "where the bytes are today".
+        # Per-dataset rather than global so a single dataset can be mirrored or
+        # migrated without rewriting anyone's client (#1059).
+        "contract_base": f"{contract_base.rstrip('/')}/{prefix}",
+        "data_base": f"https://{bucket}.s3.{region}.amazonaws.com/{prefix}",
+        "data_base_kind": "s3-public",
+        "s3_uri": f"s3://{bucket}/{prefix}",
+        "s3_region": region,
+        "s3_anonymous": True,
         "source_commit": head_commit,
+        "engine_version": engine_version,
+        "biosigio_version": biosigio_version,
         "updated_utc": updated_utc,
+        # Dataset-level provenance, hoisted to the top level (#1064). Already
+        # fetched once per run for the store attrs, so publishing it here is
+        # free -- and it saves an MCP broker or a citation tool one request per
+        # dataset, which is the difference between "read the index" and "read the
+        # index and then the catalog" for every recipe. Nullable throughout: the
+        # catalog genuinely may not have a DOI yet.
+        "doi": (dataset_row or {}).get("concept_doi") or (dataset_row or {}).get("doi") or None,
+        "license": (dataset_row or {}).get("license") or None,
+        "citation": dataset_citation(dataset_row),
+        "hed_version": (dataset_row or {}).get("hed_version") or None,
+        # How to turn this index's numbers into reads, without probing.
+        "layout": dict(INDEX_LAYOUT),
+        "discovered_count": (
+            len(set(discovered))
+            if discovered is not None
+            else len(ordered) + len(ordered_fails) + len(ordered_pending)
+        ),
         "store_count": len(ordered),
-        "stores": ordered,
+        # #1059 asked for `n_recordings`; it is the store count under another
+        # name. The discovered total is `discovered_count`, deliberately a
+        # different word, because conflating the two is how coverage went
+        # unnoticed in the first place.
+        "n_recordings": len(ordered),
+        "errors": len(failures) + len(pending) if errors is None else errors,
         "failure_count": len(ordered_fails),
+        "pending_count": len(ordered_pending),
+        "stores": ordered,
         "failures": ordered_fails,
+        "pending": ordered_pending,
     }
+
+
+def check_index_invariant(index: dict) -> None:
+    """Raise unless every discovered recording is accounted for exactly once.
+
+    `discovered_count == store_count + failure_count + pending_count` is the whole
+    of #1197's acceptance criterion, and `merge_index` makes it true by
+    construction -- which is exactly why it is worth asserting separately. The
+    construction is the thing that could regress, and a silently unbalanced index
+    is the failure mode being fixed: it looks complete and is not.
+
+    There is no exemption for the pre-ADR-0027 non-raw stores. They are being
+    deleted, not served (`purge_non_raw_stores.py`), so a carried-over entry for
+    one is dropped by `merge_index` and reported as `non_raw_dropped` on the
+    callback -- it never reaches `store_count`, and the equation stays a plain
+    sum.
+    """
+    discovered = index.get("discovered_count")
+    parts = (
+        index.get("store_count"),
+        index.get("failure_count"),
+        index.get("pending_count"),
+    )
+    if not isinstance(discovered, int) or any(not isinstance(n, int) for n in parts):
+        raise ValueError(
+            "index coverage counts are missing or non-integer: "
+            f"discovered={discovered!r} store/failure/pending={parts!r}"
+        )
+    if discovered != sum(parts):  # type: ignore[arg-type]
+        raise ValueError(
+            f"index coverage does not balance for {index.get('dataset_id')}: "
+            f"discovered_count={discovered} but store_count+failure_count+"
+            f"pending_count={sum(parts)} "  # type: ignore[arg-type]
+            f"({parts[0]}+{parts[1]}+{parts[2]})"
+        )
+
+
+def merge_manifest(
+    prior: dict | None,
+    dataset_id: str,
+    entries: list[dict],
+    store_rels: list[str],
+    updated_utc: str,
+    events_file: ManifestFileEntry | None = None,
+) -> dict:
+    """Build the producer manifest (`<id>/zarr/manifest.json`). Pure.
+
+    Carries the git-annex `source_key` (and its declared size) per store. This
+    used to ride in index.json, where it was 2.3 MB of nm000281's 12.8 MB and read
+    by nothing: index.json is fetched on every dataset-page visit, the manifest by
+    no one but us (#1178 item 5).
+
+    Restricted to `store_rels` -- the rels the index actually publishes -- so the
+    two documents can never disagree about which stores exist.
+
+    `events_file` is `{name, size_bytes, row_count}` for the events.parquet THIS
+    run uploaded, or None when it published none. Recorded rather than inferred:
+    the index says the file exists and how many rows it has, and this says how
+    many bytes the producer actually wrote -- which is what makes "the object on
+    S3 is the one this run wrote" checkable with a HEAD instead of a download.
+    Not carried over from `prior`: a run that published no file must not claim
+    the previous run's bytes.
+    """
+    by_rel: dict[str, dict] = {}
+    if prior and isinstance(prior.get("stores"), list):
+        for e in prior["stores"]:
+            if isinstance(e, dict) and isinstance(e.get("zarr"), str):
+                by_rel[e["zarr"]] = e
+    for e in entries:
+        by_rel[e["zarr"]] = e
+    keep = set(store_rels)
+    return {
+        "format": MANIFEST_FORMAT,
+        "format_version": MANIFEST_FORMAT_VERSION,
+        "dataset_id": dataset_id,
+        "updated_utc": updated_utc,
+        **({"files": [events_file]} if events_file else {}),
+        "stores": [
+            {
+                "zarr": rel,
+                "source_key": by_rel[rel].get("source_key"),
+                "size_bytes": by_rel[rel].get("size_bytes"),
+            }
+            for rel in sorted(keep & set(by_rel))
+        ],
+    }
+
+
+def validate_document(doc: dict, schema_path: str, label: str) -> None:
+    """Validate a document against its JSON Schema before it is uploaded.
+
+    A producer bug caught here costs one failed run; the same bug caught by a
+    consumer costs every consumer. Degrades to a loud warning rather than a
+    failure when `jsonschema` or the schema file is unavailable, so a node whose
+    venv predates the pin still converts -- the check is a guard rail, not a
+    dependency of serving.
+    """
+    try:
+        import jsonschema  # type: ignore[import-not-found]
+    except ImportError:
+        print(
+            f"::warning::jsonschema is not installed; the {label} was NOT validated "
+            "against its schema before upload (add it: scripts/zarr/requirements.txt)",
+            flush=True,
+        )
+        return
+    try:
+        with open(schema_path, encoding="utf-8") as fh:
+            schema = json.load(fh)
+    except OSError as exc:
+        print(
+            f"::warning::could not read {schema_path} ({exc}); the {label} was NOT "
+            "validated against its schema before upload",
+            flush=True,
+        )
+        return
+    jsonschema.validate(doc, schema)
+
+
+# --- events.parquet -----------------------------------------------------------
+# One columnar file per dataset, at `<id>/zarr/events.parquet`, so a client can
+# plan epochs and shards with zero signal bytes read and the MCP (ADR 0025) has a
+# `get_events` source. The converter is the only party that knows the exact
+# resampling relation, so `sample_index` is computed HERE rather than re-derived
+# (differently, and wrong on non-integer rate ratios) by every client.
+#
+# Memory is the constraint that shapes the code below: nm000281 has ~25k stores,
+# and a dataset's rows do not fit in one table. So rows are staged per store on
+# disk as they arrive, and the file is written store by store into a
+# ParquetWriter -- never one giant frame.
+
+# Rows buffered before a row group is flushed. Big enough that a 25k-store
+# dataset does not end up with 25k row groups (each carries per-column
+# statistics in the footer), small enough that the buffer stays bounded.
+EVENTS_ROW_GROUP_ROWS = int(os.environ.get("ZARR_EVENTS_ROW_GROUP_ROWS", "65536"))
+EVENTS_PARQUET_NAME = "events.parquet"
+# IANA-registered media type for Apache Parquet.
+EVENTS_CONTENT_TYPE = "application/vnd.apache.parquet"
+
+
+class EventsStaging:
+    """This run's event rows, held on disk keyed by store, not in memory.
+
+    A pool worker returns one store's rows as they are converted and `main` hands
+    them straight to `add`, which serializes them and forgets them; `get` reads
+    one store back at write time. What stays resident is the offset table (one
+    entry per store) and the set of pass-through column names -- both proportional
+    to the STORE count, not the event count.
+
+    The backing file is an anonymous `tempfile.TemporaryFile`: it has no name in
+    the filesystem, so it cannot be left behind by a crash the way a
+    `delete=False` temp file was (#1068).
+    """
+
+    def __init__(self) -> None:
+        # Deliberately long-lived and deliberately anonymous: it is written
+        # to across a whole run and read at the end, and an unnamed temp file
+        # cannot be left behind on the node's scratch (#1068).
+        self._fh = tempfile.TemporaryFile()  # noqa: SIM115 - closed by GC/process exit
+        self._index: dict[str, tuple[int, int]] = {}
+        self._extras: set[str] = set()
+        self.row_count = 0
+
+    def add(self, zarr_rel: str, columns: dict[str, list]) -> None:
+        blob = pickle.dumps(columns, protocol=pickle.HIGHEST_PROTOCOL)
+        self._fh.seek(0, os.SEEK_END)
+        offset = self._fh.tell()
+        self._fh.write(blob)
+        self._index[zarr_rel] = (offset, len(blob))
+        self._extras.update(k for k in columns if k not in EVENTS_FIXED_COLUMNS)
+        self.row_count += len(columns.get("store_path", ()))
+
+    def __contains__(self, zarr_rel: object) -> bool:
+        return zarr_rel in self._index
+
+    def __len__(self) -> int:
+        return len(self._index)
+
+    @property
+    def extras(self) -> set[str]:
+        return set(self._extras)
+
+    def get(self, zarr_rel: str) -> dict[str, list] | None:
+        entry = self._index.get(zarr_rel)
+        if entry is None:
+            return None
+        offset, size = entry
+        self._fh.seek(offset)
+        return pickle.loads(self._fh.read(size))
+
+
+class ArrowTable(Protocol):
+    """The `pyarrow.Table` surface this module actually touches.
+
+    A structural Protocol rather than an import, because pyarrow is an OPTIONAL
+    dependency loaded lazily inside the functions that need it: a node without
+    it still converts, it just publishes no events file. There is therefore no
+    module-scope name to annotate with, and a `TYPE_CHECKING` import would still
+    make a checker's answer depend on whether the package happens to be
+    installed. Stating the three members used here says the same thing, costs
+    nothing at runtime, and turns `table["store_path"]` and `table.filter(mask)`
+    back into checked accesses instead of attribute lookups on `object`.
+    """
+
+    @property
+    def num_rows(self) -> int: ...
+
+    def __getitem__(self, key: str) -> Any: ...
+
+    def filter(self, mask: Any) -> ArrowTable: ...
+
+
+class PriorEventRows:
+    """Random access by store into the events.parquet a previous run published.
+
+    An incremental run converts only what changed, so the stores it did NOT touch
+    keep the rows they already had -- exactly how the index carries a store entry
+    forward. Row groups are indexed by the stores they contain (reading one
+    column, not the file), so carrying a store forward reads its rows and nothing
+    else; the last row group read is cached because the caller walks stores in
+    sorted order and the file is written in that same order.
+    """
+
+    def __init__(self, path: str) -> None:
+        import pyarrow as pa  # type: ignore[import-not-found]  # lazy: optional dep
+        import pyarrow.parquet as pq  # type: ignore[import-not-found]
+
+        self._pa = pa
+        self._file = pq.ParquetFile(path)
+        self.extras = {
+            name
+            for name in self._file.schema_arrow.names
+            if name not in EVENTS_FIXED_COLUMNS
+        }
+        self._by_rel: dict[str, list[int]] = {}
+        for i in range(self._file.num_row_groups):
+            column = self._file.read_row_group(i, columns=["store_path"])["store_path"]
+            for rel in column.unique().to_pylist():
+                if rel is not None:
+                    self._by_rel.setdefault(rel, []).append(i)
+        self._cached: tuple[int, ArrowTable] | None = None
+
+    def __contains__(self, zarr_rel: object) -> bool:
+        return zarr_rel in self._by_rel
+
+    def _row_group(self, i: int) -> ArrowTable:
+        """The i-th row group (cached: consecutive stores usually share one).
+
+        Typed as `ArrowTable`, the structural Protocol declared above, rather
+        than `object`: pyarrow is an optional dependency imported lazily inside
+        the methods that need it, so there is no importable name to annotate
+        with, and `object` made every `table[column]` and `table.filter(...)`
+        below an unchecked attribute access on a value the checker believed had
+        neither.
+        """
+        if self._cached is None or self._cached[0] != i:
+            self._cached = (i, self._file.read_row_group(i))
+        return self._cached[1]
+
+    def table_for(self, zarr_rel: str, schema):
+        """The prior rows for one store, conformed to `schema`, or None."""
+        import pyarrow.compute as pc  # type: ignore[import-not-found]
+
+        groups = self._by_rel.get(zarr_rel)
+        if not groups:
+            return None
+        parts: list[ArrowTable] = []
+        for i in groups:
+            table = self._row_group(i)
+            mask = pc.equal(table["store_path"].cast(self._pa.string()), zarr_rel)
+            part = table.filter(mask)
+            if part.num_rows:
+                parts.append(part)
+        if not parts:
+            return None
+        table = parts[0] if len(parts) == 1 else self._pa.concat_tables(parts)
+        return conform_events_table(self._pa, table, schema)
+
+
+def events_schema(pa, extras):
+    """The parquet schema: the fixed columns (#1060) then the pass-through ones.
+
+    Extras are sorted rather than kept in first-seen order on purpose: workers
+    finish in arbitrary order, and a column order that depended on which
+    recording converted first would make two runs over the same commit produce
+    different files.
+    """
+    label = pa.dictionary(pa.int32(), pa.string())
+    fields = [
+        ("store_path", label),
+        ("subject", label),
+        ("session", label),
+        ("task", label),
+        ("run", label),
+        ("onset_s", pa.float64()),
+        ("duration_s", pa.float32()),
+        ("sample_index", pa.int64()),
+        ("group_name", label),
+        ("trial_type", label),
+        ("value", label),
+        ("hed", label),
+    ]
+    fields += [(name, label) for name in sorted(extras)]
+    return pa.schema(fields)
+
+
+def events_table_from_columns(pa, schema, columns: dict[str, list]):
+    """One store's staged columns as a table in the dataset-wide schema. A column
+    this store's events.tsv did not have is all-null, not absent: the file has one
+    schema, and a client must not have to ask which stores contributed which
+    columns."""
+    n = len(columns.get("store_path", ()))
+    arrays = [
+        pa.array(columns.get(field.name, [None] * n), type=field.type)
+        for field in schema
+    ]
+    return pa.Table.from_arrays(arrays, schema=schema)
+
+
+def conform_events_table(pa, table, schema):
+    """Bring a table read back from a prior file into `schema` -- filling a column
+    that file did not have with nulls, since a later run may have added one."""
+    n = table.num_rows
+    arrays = []
+    for field in schema:
+        if field.name in table.column_names:
+            column = table[field.name]
+            arrays.append(column if column.type == field.type else column.cast(field.type))
+        else:
+            arrays.append(pa.chunked_array([pa.nulls(n, field.type)]))
+    return pa.Table.from_arrays(arrays, schema=schema)
+
+
+def write_events_parquet(
+    out_path: str,
+    ordered_rels: list[str],
+    staged: EventsStaging,
+    prior: PriorEventRows | None = None,
+    reconverted: set[str] | None = None,
+) -> int:
+    """Write `<id>/zarr/events.parquet` and return the row count.
+
+    Stores are visited in the order given (the index's, i.e. sorted by `zarr`),
+    and each store's rows are already ordered by onset, so the file is sorted by
+    `store_path, onset_s` by construction -- no global sort, and therefore no
+    point at which the whole dataset is in memory. Rows accumulate only until
+    `EVENTS_ROW_GROUP_ROWS`, then become a row group.
+
+    A store with rows from THIS run uses them. A store this run did NOT reconvert
+    keeps the rows the prior file has for it. `reconverted` is what separates the
+    two, and it is not `staged`: a store that WAS reconverted and produced no
+    rows (its events.tsv was deleted, or emptied) must publish no rows, not
+    silently inherit the ones the prior file still has for it. Passing None means
+    "nothing was reconverted", the read-only shape the pure writer tests use.
+    """
+    import pyarrow as pa  # type: ignore[import-not-found]  # lazy: optional dep
+    import pyarrow.parquet as pq  # type: ignore[import-not-found]
+
+    schema = events_schema(pa, staged.extras | (prior.extras if prior else set()))
+    total = 0
+    buffered: list = []
+    buffered_rows = 0
+    writer = pq.ParquetWriter(out_path, schema, compression="zstd")
+    try:
+        for rel in ordered_rels:
+            columns = staged.get(rel)
+            if columns is not None:
+                table = events_table_from_columns(pa, schema, columns)
+            elif prior is not None and not (reconverted and rel in reconverted):
+                table = prior.table_for(rel, schema)
+            else:
+                table = None
+            if table is None or not table.num_rows:
+                continue
+            buffered.append(table)
+            buffered_rows += table.num_rows
+            total += table.num_rows
+            if buffered_rows >= EVENTS_ROW_GROUP_ROWS:
+                writer.write_table(pa.concat_tables(buffered))
+                buffered, buffered_rows = [], 0
+        if buffered:
+            writer.write_table(pa.concat_tables(buffered))
+    finally:
+        writer.close()
+    return total
 
 
 def parse_annex_key(blob_text: str) -> str | None:
@@ -1980,24 +3361,36 @@ _AWS_RM_SHARDS = int(os.environ.get("ZARR_AWS_RM_SHARDS", "8"))
 def _s3_child_prefixes(url: str) -> list[str]:
     """Immediate child prefixes of an ``s3://bucket/prefix/`` URL (delimited LIST).
 
-    Used to shard a recursive delete. Returns [] on any error or when the prefix
-    has no subdirectories, so the caller falls back to one unsharded rm.
+    ``[]`` means the prefix genuinely HAS no subdirectories. A failed listing
+    RAISES: the empty list and the failure used to be the same answer, which is
+    only harmless for the caller this was written for. ``_rm_recursive`` reads
+    ``[]`` as "nothing to shard" and falls back to one unsharded delete, so it is
+    correct either way -- but ``purge_non_raw_stores.list_dataset_ids`` reads the
+    same ``[]`` as "this bucket holds no datasets" and ``discover_excluded_stores``
+    as "this tree has no stranded stores", and both then report a clean, empty
+    result for a run that could not see the bucket at all.
+
+    Same rule as ``s3_read_json`` and ``s3_download_file``, for the same reason:
+    an absence is an answer, an error is not.
     """
     rest = url[len("s3://") :]
     bucket, _, prefix = rest.partition("/")
-    try:
-        res = subprocess.run(
-            [
-                "aws", "s3api", "list-objects-v2", "--bucket", bucket,
-                "--prefix", prefix, "--delimiter", "/",
-                "--query", "CommonPrefixes[].Prefix", "--output", "text",
-                *_AWS_TIMEOUTS,
-            ],
-            capture_output=True, text=True, timeout=_AWS_OP_TIMEOUT, env=_aws_env(),
+    res = subprocess.run(
+        [
+            "aws", "s3api", "list-objects-v2", "--bucket", bucket,
+            "--prefix", prefix, "--delimiter", "/",
+            "--query", "CommonPrefixes[].Prefix", "--output", "text",
+            *_AWS_TIMEOUTS,
+        ],
+        capture_output=True, text=True, timeout=_AWS_OP_TIMEOUT, env=_aws_env(),
+        check=False,  # the return code is inspected below rather than raised on
+    )
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"_s3_child_prefixes: aws s3api list-objects-v2 {url} exited "
+            f"{res.returncode}: {res.stderr.strip()}"
         )
-    except (subprocess.SubprocessError, OSError):
-        return []
-    if res.returncode != 0 or res.stdout.strip() in ("", "None"):
+    if res.stdout.strip() in ("", "None"):
         return []
     return [f"s3://{bucket}/{p}" for p in res.stdout.split() if p and p != "None"]
 
@@ -2012,7 +3405,20 @@ def _rm_recursive(url: str) -> None:
     finishes with an unsharded sweep so any key directly under `url` -- which no
     child prefix covers -- is deleted too.
     """
-    children = _s3_child_prefixes(url) if _AWS_RM_SHARDS > 1 else []
+    # A failed LIST is not fatal HERE, and only here: the unsharded delete below
+    # removes the whole prefix on its own, so sharding is a speed-up whose
+    # failure costs time, not correctness. Every other caller of
+    # `_s3_child_prefixes` reads its result as a fact about the bucket and must
+    # see the error, which is why the tolerance lives at this call site rather
+    # than inside the helper.
+    try:
+        children = _s3_child_prefixes(url) if _AWS_RM_SHARDS > 1 else []
+    except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
+        print(
+            f"::warning::could not list shards for {url} ({exc}); deleting unsharded",
+            flush=True,
+        )
+        children = []
     if children:
         print(f"[zarr] deleting {url} across {len(children)} shard(s)", flush=True)
         errors: list[BaseException] = []
@@ -2177,6 +3583,286 @@ def s3_read_json(bucket: str, key: str) -> dict | None:
         return json.loads(res.stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"corrupt JSON at s3://{bucket}/{key}: {exc}") from exc
+
+
+class IndexPreconditionFailed(Exception):
+    """The live `index.json` changed between the read a rewrite was computed from
+    and the write. The write is REFUSED rather than forced: the other writer
+    published a whole document, and replaying a merge computed from the old one
+    would silently roll it back.
+    """
+
+
+def read_index_with_etag(bucket: str, dataset_id: str) -> tuple[dict | None, str | None]:
+    """`(index, etag)` for a dataset's live `index.json`, or `(None, None)` when
+    there is none.
+
+    One `get-object` call for both, on purpose: the ETag has to be the one the
+    body that produced this merge actually had, and a separate `head-object`
+    could observe a different version. Raises for any failure that is not a
+    genuine absence -- the same rule `s3_read_json` follows, for the same reason
+    (treating a credentials or network error as "no index" would rewrite the
+    document from nothing).
+
+    Shared with `purge_non_raw_stores.py`, which imports it: both writers of this
+    one object have to agree on how the ETag is read and sent back, or the
+    conditional write protecting them from each other is decorative.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as fh:
+        tmp_path = fh.name
+    try:
+        res = subprocess.run(
+            [
+                "aws", "s3api", "get-object", "--bucket", bucket,
+                "--key", f"{dataset_id}/zarr/index.json", tmp_path,
+                "--query", "ETag", "--output", "text", *_AWS_TIMEOUTS,
+            ],
+            capture_output=True, text=True, timeout=_AWS_OP_TIMEOUT, env=_aws_env(),
+            check=False,  # the return code IS the answer: absent vs failed
+        )
+        if res.returncode != 0:
+            err = res.stderr.lower()
+            if "nosuchkey" in err or "404" in err or "not found" in err:
+                return None, None
+            raise RuntimeError(
+                f"read_index_with_etag: aws s3api get-object exited "
+                f"{res.returncode}: {res.stderr.strip()}"
+            )
+        with open(tmp_path, encoding="utf-8") as fh:
+            index = json.load(fh)
+        # `--output text` prints the quoted ETag; S3 wants it back verbatim on
+        # `--if-match`, so only the surrounding whitespace is stripped.
+        return index, res.stdout.strip()
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+
+
+def write_index(bucket: str, dataset_id: str, index: dict, *, if_match: str | None) -> str | None:
+    """Write `index.json` to S3 CONDITIONALLY. Returns the new object's ETag as
+    the PUT reports it (quoted, as S3 spells it), or None when the response
+    carried none.
+
+    `index.json`'s destination is a single S3 object, so a single PUT is already
+    atomic there: a reader sees the previous full body or the new full body,
+    never a partial one. Atomic is not the same as safe, though, and that is what
+    `if_match` is for. Two processes write this document -- a converter run
+    (`generate_zarr.main`) and the non-raw purge (`purge_non_raw_stores.py`) --
+    and both read it, work for minutes to hours, then write it back. An
+    unconditional PUT from either silently reverts whatever the other published
+    in that window, taking every store it added (or every store it deleted) with
+    it. So the write carries `--if-match` with the ETag the document was computed
+    from and S3 refuses it (412) if anything else has written since.
+
+    `if_match=None` is not "skip the check" -- there is no such mode. It means
+    the object did not exist at read time, and the write is then conditional on
+    it still not existing (`--if-none-match "*"`), so a first index published in
+    the meantime is not clobbered either.
+
+    Single attempt, deliberately: `_aws`'s retry loop would re-send a conditional
+    PUT whose first attempt may in fact have succeeded, turning a lost response
+    into a phantom conflict. The CALLER decides what a conflict means -- the
+    purge abandons its rewrite, the converter re-reads and re-merges once.
+    """
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump(index, fh, separators=(",", ":"))
+        tmp_path = fh.name
+    condition = ["--if-match", if_match] if if_match else ["--if-none-match", "*"]
+    try:
+        res = subprocess.run(
+            [
+                "aws", "s3api", "put-object", "--bucket", bucket,
+                "--key", f"{dataset_id}/zarr/index.json", "--body", tmp_path,
+                "--content-type", "application/json",
+                "--cache-control", "public, max-age=60",
+                *condition, *_AWS_TIMEOUTS,
+            ],
+            capture_output=True, text=True, timeout=_AWS_OP_TIMEOUT, env=_aws_env(),
+            check=False,  # a 412 is a verdict to report, not an exception to raise
+        )
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+    if res.returncode == 0:
+        # The PUT's own response names the version THIS call wrote. A follow-up
+        # `head-object` would not: it can observe a newer writer's document,
+        # which is precisely the race the conditional write exists to expose.
+        try:
+            etag = json.loads(res.stdout or "{}").get("ETag")
+        except json.JSONDecodeError:
+            etag = None
+        return etag if isinstance(etag, str) else None
+    err = res.stderr.lower()
+    if "preconditionfailed" in err or "412" in err or "conditionalrequestconflict" in err:
+        raise IndexPreconditionFailed(
+            f"index.json for {dataset_id} changed between this run's read and its "
+            f"write (if-match {if_match or '<absent>'}); the write was NOT applied "
+            "and the newer document is untouched"
+        )
+    raise RuntimeError(
+        f"write_index: aws s3api put-object exited {res.returncode}: {res.stderr.strip()}"
+    )
+
+
+def s3_download_file(bucket: str, key: str, dest: str) -> bool:
+    """Download an S3 object to `dest`. False for a genuine 404, True on success.
+
+    Same rule as `s3_read_json`, for the same reason: "the object is not there"
+    is a legitimate first-run answer, and every OTHER failure (credentials,
+    network, wrong bucket) raises rather than being flattened into it. The caller
+    of this one carries rows forward from the object, so a swallowed error would
+    silently republish a file with those rows missing.
+    """
+    res = subprocess.run(
+        ["aws", "s3", "cp", f"s3://{bucket}/{key}", dest, "--only-show-errors", *_AWS_TIMEOUTS],
+        capture_output=True,
+        text=True,
+        timeout=_AWS_OP_TIMEOUT,
+        env=_aws_env(),
+    )
+    if res.returncode == 0:
+        return True
+    err = res.stderr.lower()
+    if "nosuchkey" in err or "404" in err or "not found" in err:
+        return False
+    raise RuntimeError(
+        f"s3_download_file: aws s3 cp s3://{bucket}/{key} exited {res.returncode}: "
+        f"{res.stderr.strip()}"
+    )
+
+
+class ManifestFileEntry(TypedDict):
+    """One entry of the manifest's `files[]`: a dataset-level object this run
+    published beside index.json, with the size it wrote.
+
+    Mirrors `zarr-manifest.schema.json`'s `files[]` items exactly, including the
+    single-member `name` enum -- index.json and manifest.json describe
+    themselves, so the events file is the only object that needs describing
+    (#1060). Named as a type because both readers of it index it by key
+    (`merge_manifest` embeds the whole entry; `main` reads `row_count` onto the
+    index and the callback), and a bare `dict` let a renamed key typecheck
+    everywhere and fail schema validation at the end of a conversion instead.
+    """
+
+    name: str
+    size_bytes: int
+    row_count: int
+
+
+class EventsPublication(TypedDict):
+    """What a run did about `<id>/zarr/events.parquet`.
+
+    `file` is None whenever nothing was published, and the index must then point
+    at nothing. `failed` separates the reason: "this dataset has no events" and
+    "we could not say what its events are" must not look the same from outside.
+    """
+
+    file: ManifestFileEntry | None
+    failed: bool
+
+
+def publish_events_parquet(
+    staged: EventsStaging,
+    ordered_rels: list[str],
+    *,
+    bucket: str,
+    dataset_id: str,
+    reconverted: set[str],
+) -> EventsPublication:
+    """Build and upload `<id>/zarr/events.parquet`.
+
+    Publishes nothing when the dataset has no events at all, `pyarrow` is
+    missing, or this run could not write/upload the file -- the last of which
+    sets `failed` and is reported on the callback.
+
+    `reconverted` is every store this run rebuilt, INCLUDING the ones that
+    produced no rows, and it is the thing "carried over" is defined against.
+    Defining it against the staged rows instead is wrong twice over: a
+    reconverted store whose events.tsv was deleted would keep republishing its
+    old rows from the prior file forever, and on a first `--clean` run every
+    event-less store would be reported as an unrecoverable carry-over it is not.
+
+    Best-effort throughout, exactly like manifest.json: the stores and index.json
+    are the serving copy, and ADR 0005 says partial data still serves. A failure
+    here leaves the PREVIOUS file in place on S3, unreferenced by the new index
+    until a later run republishes it.
+    """
+    carried = [rel for rel in ordered_rels if rel not in reconverted]
+    if not staged.row_count and not carried:
+        return {"file": None, "failed": False}
+    try:
+        import pyarrow  # type: ignore[import-not-found]  # noqa: F401 - probe only
+    except ImportError:
+        print(
+            "::warning::pyarrow is not installed; "
+            f"{dataset_id}/zarr/events.parquet was NOT written and the index will "
+            "not advertise one (add it: scripts/zarr/requirements.txt)",
+            flush=True,
+        )
+        return {"file": None, "failed": False}
+
+    prior: PriorEventRows | None = None
+    prior_local: str | None = None
+    local: str | None = None
+    try:
+        if carried:
+            # Only an INCREMENTAL run reaches this: `--clean` (the Hallu path)
+            # rebuilds every store, so nothing is carried and nothing is fetched.
+            with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as fh:
+                prior_local = fh.name
+            if s3_download_file(bucket, f"{dataset_id}/zarr/{EVENTS_PARQUET_NAME}", prior_local):
+                prior = PriorEventRows(prior_local)
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as fh:
+            local = fh.name
+        rows = write_events_parquet(local, ordered_rels, staged, prior, reconverted)
+        if not rows:
+            # Every store's events.tsv was absent or empty. Publishing an empty
+            # file would tell a client "no events" no more clearly than the
+            # absent `events_parquet` field does, and costs a fetch to learn it.
+            return {"file": None, "failed": False}
+        aws_cp(
+            local,
+            f"s3://{bucket}/{dataset_id}/zarr/{EVENTS_PARQUET_NAME}",
+            extra=["--content-type", EVENTS_CONTENT_TYPE,
+                   "--cache-control", "public, max-age=60"],
+        )
+        missing = [rel for rel in carried if prior is None or rel not in prior]
+        if missing:
+            # Stores this run did NOT reconvert whose rows are in no prior file
+            # either: the first incremental run after this shipped, or a prior
+            # file that predates them. Their events are simply absent from the
+            # file until the store is reconverted, and a client joining on
+            # `store_path` cannot tell that from "this recording has no
+            # events.tsv" -- so say it here, where an operator can see how many
+            # and re-run with --clean. A store this run DID reconvert is never
+            # in this list, however few rows it produced: nothing is missing
+            # about a store whose events were just re-read.
+            print(
+                f"::warning::{len(missing)} carried-over store(s) contribute no rows "
+                f"to {dataset_id}/zarr/events.parquet (no prior rows to carry); "
+                "a --clean run rebuilds them",
+                flush=True,
+            )
+        return {
+            "file": {
+                "name": EVENTS_PARQUET_NAME,
+                "size_bytes": os.path.getsize(local),
+                "row_count": rows,
+            },
+            "failed": False,
+        }
+    except Exception as exc:  # noqa: BLE001 - never fail a good conversion over this
+        print(
+            f"::warning::{dataset_id}/zarr/{EVENTS_PARQUET_NAME} was not published: "
+            f"{redact_secrets(str(exc))}",
+            flush=True,
+        )
+        return {"file": None, "failed": True}
+    finally:
+        for path in (local, prior_local):
+            if path:
+                with contextlib.suppress(OSError):
+                    os.unlink(path)
 
 
 def _fetch_blob(
@@ -2409,16 +4095,33 @@ def store_metadata(store_path: str) -> dict:
             mod = ga.get("modality")
             if mod:
                 modalities.add(str(mod).lower())
-            groups.append(
-                {
-                    "name": gname,
-                    "modality": mod,
-                    "rate": rate,
-                    "n_channels": ga.get("n_channels"),
-                    "n_samples": nsamp,
-                    "duration_s": (nsamp / rate) if rate and nsamp else None,
-                }
-            )
+            group = {
+                "name": gname,
+                "modality": mod,
+                "rate": rate,
+                "n_channels": ga.get("n_channels"),
+                "n_samples": nsamp,
+                "duration_s": (nsamp / rate) if rate and nsamp else None,
+            }
+            # Serving GEOMETRY, republished from the store's own attrs
+            # (biosigio>=1.2.6, biosigio#126). A reader that has the index has
+            # then already paid for the store's shape: `n_view_levels` removes
+            # the probe-until-404 walk over view/1..N, and `view_chunk_columns`
+            # says how many requests a viewport-sized read costs at any level
+            # (#1178 items 1-2). `source_rate_hz` is the ACQUISITION rate, the
+            # thing `rate` above is not -- `rate` is the NEMAR modality cap.
+            # Copied only when present, so an older store simply omits them.
+            for key in ("n_view_levels", "view_chunk_columns"):
+                if key in ga:
+                    group[key] = ga[key]
+            try:
+                la = dict(root[gname]["0"].attrs)
+            except Exception:  # noqa: BLE001 - level 0 absent/unreadable: omit
+                la = {}
+            for key in ("source_rate_hz", "chunk_samples", "shard_samples"):
+                if key in la:
+                    group[key] = la[key]
+            groups.append(group)
         # Count event descriptions when the events group exists and carries them.
         event_description_count: int | None = None
         if "events" in root:
@@ -2432,6 +4135,29 @@ def store_metadata(store_path: str) -> dict:
         }
         if event_description_count is not None:
             result["event_description_count"] = event_description_count
+        # biosigIO's own account of what the BIDS channels.tsv `units` column did
+        # (biosigio#125), which it records in the recording metadata and `to_zarr`
+        # serializes into the store root. Republished so a unit that could NOT be
+        # adopted is visible on the PUBLIC surface: a store whose report says
+        # `kept_importer_unit` is serving numbers the sidecar disagrees with, and
+        # before this that was only discoverable by reading the conversion log.
+        # Absence means "no channels.tsv applied to this recording" -- either the
+        # dataset ships none that inherits to it, or the read failed and the
+        # driver said so. It never means "applied cleanly".
+        #
+        # Two locations, on purpose. The in-memory path records it in the
+        # recording metadata, which `to_zarr` serializes into
+        # `recording_metadata`; the streaming exporter never builds a Recording,
+        # so biosigio#128 writes it as a ROOT attr instead. Root wins when both
+        # exist -- it is the exporter-level statement, made after any importer's.
+        rec_meta = ra.get("recording_metadata")
+        for candidate in (
+            ra.get("channels_tsv_units"),
+            rec_meta.get("channels_tsv_units") if isinstance(rec_meta, dict) else None,
+        ):
+            if isinstance(candidate, dict):
+                result["units_report"] = candidate
+                break
         return result
     except Exception as exc:  # noqa: BLE001 - best-effort metadata, never fatal
         print(f"::warning::store_metadata failed for {store_path}: {exc}", flush=True)
@@ -2532,6 +4258,142 @@ def fix_source_file_attr(store_path: str, bids_relpath: str) -> None:
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+
+# Matches `publisher` in backend/src/services/datacite.ts, shortened to the form a
+# reference list actually carries.
+_CITATION_PUBLISHER = "NEMAR"
+
+
+def dataset_citation(row: dict | None) -> str | None:
+    """A ready-to-paste citation string for a dataset, or None when the catalog
+    row does not carry enough to make one honestly.
+
+    #1064's point: a client that reads the data has the citation at the moment it
+    needs it, rather than reconstructing it later or not at all -- which has a
+    disproportionate effect on whether NEMAR gets cited correctly. Composed here
+    rather than fetched because the catalog has no citation column; every part
+    comes from the public row, and a missing part omits its segment instead of
+    printing an empty one.
+    """
+    if not isinstance(row, dict):
+        return None
+    name = str(row.get("name") or "").strip()
+    if not name:
+        return None
+    authors = str(row.get("authors") or "").strip()
+    doi = str(row.get("concept_doi") or row.get("doi") or "").strip()
+    version = str(row.get("latest_version") or "").strip()
+    year = str(row.get("created_at") or "")[:4]
+    parts: list[str] = []
+    if authors:
+        parts.append(authors)
+    if year.isdigit():
+        parts.append(f"({year})")
+    parts.append(f"{name}{f' ({version})' if version else ''}.")
+    parts.append(f"{_CITATION_PUBLISHER}.")
+    if doi:
+        parts.append(f"https://doi.org/{doi.removeprefix('doi:')}")
+    return " ".join(parts)
+
+
+def nemar_store_attrs(
+    dataset_id: str,
+    source_commit: str,
+    source_tree: str,
+    derived: bool,
+    engine_version: str,
+    contract_url: str,
+    row: dict | None = None,
+    provenance_fetch_failed: bool = False,
+) -> dict:
+    """The `nemar` root attribute written on every store (#1064). Pure.
+
+    Store attributes carried provenance as PROSE -- a free-text `note` saying the
+    copy is derived and the BIDS source is authoritative. That is fine for a human
+    reading the JSON and useless to a client deciding whether the data is suitable,
+    and the population reading these stores is increasingly machine. This is the
+    structured half; biosigIO's own attributes (including that note) are left
+    exactly as they are.
+
+    DOI, license and citation especially: a store that carries its own attribution
+    can be cited by whoever opens it. `row` is the public catalog row (GET
+    /datasets/<id>); a field the catalog does not have stays None rather than
+    being invented, so "unknown license" is distinguishable from "no license".
+    `provenance_fetch_failed` carries the third case: the nulls are there because
+    the catalog could not be read at all, which is a property of the RUN and is
+    fixed by re-converting rather than by editing the dataset.
+    """
+    row = row if isinstance(row, dict) else {}
+    doi = row.get("concept_doi") or row.get("doi")
+    return {
+        "dataset_id": dataset_id,
+        "doi": doi or None,
+        "license": row.get("license") or None,
+        "citation": dataset_citation(row),
+        "source_commit": source_commit,
+        # Which BIDS tree the source sits in, vs whether the SIGNAL was
+        # processed. #1064 flagged that "derivative" collides semantically
+        # between the two senses; carrying both, named apart, is the fix.
+        "source_tree": source_tree,
+        "derived": derived,
+        "hed_version": row.get("hed_version") or None,
+        "engine_version": engine_version,
+        # The stable URL for THIS store, so a copy of the store that has been
+        # moved or vendored can still say where it came from.
+        "contract_url": contract_url,
+        # True when the catalog read FAILED, so the nulls above are a property of
+        # this run rather than of the dataset. Present either way: a consumer
+        # that has to check `"provenance_fetch_failed" in attrs` to know whether
+        # an absence is meaningful is back where it started.
+        "provenance_fetch_failed": provenance_fetch_failed,
+    }
+
+
+def fetch_dataset_row(api_base: str, dataset_id: str) -> tuple[dict | None, bool]:
+    """`(row, fetch_failed)` for `GET <api_base>/datasets/<id>`.
+
+    Read ONCE per run in `main` and passed to the workers, not fetched per
+    recording: a dataset with 25k recordings would otherwise make 25k identical
+    requests to the catalog. Best-effort by design -- the provenance attrs are
+    written either way, with the catalog-sourced fields left None, because a
+    catalog blip must not cost a conversion.
+
+    The second element is why this returns a tuple rather than an optional row.
+    "The catalog has no DOI for this dataset" and "we could not reach the
+    catalog" both produce `doi: null` in the store attrs, and they mean opposite
+    things: the first is a fact about the dataset, the second is a fact about the
+    run, fixed by re-converting. Without the flag, a catalog outage silently
+    publishes a whole conversion wave's worth of stores that claim to have no
+    license -- afterwards indistinguishable from datasets that genuinely have
+    none. `fetch_failed` is True ONLY for a transport/parse failure, never for a
+    row that simply lacks a field.
+    """
+    url = f"{api_base.rstrip('/')}/datasets/{dataset_id}"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 - fixed https base
+            body = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001 - provenance is best-effort
+        print(
+            f"::warning::could not read {url} ({exc}); store provenance attrs will "
+            "omit doi/license/citation/hed_version and are flagged "
+            "provenance_fetch_failed",
+            flush=True,
+        )
+        return None, True
+    # The route wraps the row in `{dataset: {...}}` on some paths and returns it
+    # bare on others; accept either rather than coupling to one shape.
+    if isinstance(body, dict):
+        inner = body.get("dataset")
+        return (inner if isinstance(inner, dict) else body), False
+    # A 200 whose body is not an object is a broken catalog, not an absent field.
+    print(
+        f"::warning::{url} returned a non-object body; store provenance attrs are "
+        "flagged provenance_fetch_failed",
+        flush=True,
+    )
+    return None, True
 
 
 def electrode_positions_for(
@@ -2788,6 +4650,36 @@ def _recording_size_bytes(primary_local: str) -> int:
     return total
 
 
+def bids_channels_arg(channels_local: str | None) -> str:
+    """The `bids_channels` value for both biosigIO exporters: the resolved sidecar
+    path, or "off".
+
+    Never "auto" (biosigIO's default), and that is the whole point. "auto" looks
+    for a SIBLING `_channels.tsv` next to the file it was handed, which is the
+    wrong question twice over:
+
+    * The file this driver hands the exporter is not the recording's own path. It
+      is a scratch materialisation in `work/`, and on the ADR 0028 MaxShield path
+      it is the Signal-Space-Separated copy at `work/sss_<basename>`. Sibling
+      detection there finds whatever this driver happened to stage, or nothing.
+    * BIDS inheritance is not siblinghood. The sidecar that applies to
+      `sub-01/eeg/..._eeg.edf` may live in `sub-01/` or at the dataset root; the
+      resolution that finds it is `channels_tsv_for`, which is also what the
+      channel-count fidelity gate consults. The gate and the conversion must
+      agree about WHICH sidecar applies, or the gate is checking a different file
+      than the one that shaped the store.
+
+    So the path is always resolved from the ORIGINAL BIDS `primary` and passed
+    explicitly, and "off" says "there is no applicable sidecar" rather than
+    leaving the exporter to guess. biosigio>=1.2.7 accepts the path form on
+    `Recording.from_file` AND `stream_to_zarr` and acts on it (biosigio#128,
+    closing #127); on 1.2.6 the streaming exporter had no such parameter and
+    `from_file` accepted a path and silently ignored it, which is why the pin is
+    a floor and not a preference.
+    """
+    return channels_local if channels_local and os.path.exists(channels_local) else "off"
+
+
 def convert_recording(
     primary_local: str,
     events_local: str | None,
@@ -2798,6 +4690,7 @@ def convert_recording(
     mem_budget_bytes: int | None = None,
     hard_ceiling_bytes: int | None = None,
     projected_peak: int | None = None,
+    channels_local: str | None = None,
 ) -> None:
     modality = bids_suffix_modality(primary_local)
     size_bytes = _recording_size_bytes(primary_local)
@@ -2862,7 +4755,18 @@ def convert_recording(
         # the fastest channel's grid rather than failing the conversion. biosigIO
         # defaults to "error" everywhere else so no one gets resampled data unknowingly
         # (requires biosigio>=1.1.4; ignored for non-EDF formats). See nemar-cli#737.
-        rec = Recording.from_file(primary_local, mixed_rate="resample")
+        # `bids_channels` is the resolved sidecar path or "off", never "auto" --
+        # see `bids_channels_arg` for why sibling auto-detection is the wrong
+        # question for a scratch materialisation. The importer applies it before
+        # the suffix override below, which deliberately has the last word on
+        # modality (see its comment), and records what the `units` column did in
+        # `rec.metadata["channels_tsv_units"]` -> the store's `recording_metadata`
+        # -> the index entry's `units_report`.
+        rec = Recording.from_file(
+            primary_local,
+            mixed_rate="resample",
+            bids_channels=bids_channels_arg(channels_local),
+        )
         if events_local and os.path.exists(events_local):
             bids.apply_events_tsv(rec, events_local)
         # Suffix-driven modality: group + resample the whole recording by its BIDS
@@ -2898,6 +4802,11 @@ def convert_recording(
                 # Keep the temp channel-major memmap on the same (fast) scratch volume as
                 # the store; it is a sibling temp dir, not synced to S3.
                 scratch_dir=os.path.dirname(store_path) or None,
+                # The same explicit sidecar the in-memory path uses, so the two
+                # exporters cannot disagree about a recording's units -- the
+                # disagreement that held the engine bump back until biosigio#128
+                # gave `stream_to_zarr` this parameter. See `bids_channels_arg`.
+                bids_channels=bids_channels_arg(channels_local),
             )
         except MixedSamplingRateError:
             # A mixed per-channel-rate EDF can't stream on a single grid; the
@@ -3055,11 +4964,39 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         plf = power_line_frequency_for(c["repo"], primary, c["head_files"], c["head"])
         descs = event_descriptions_for(c["repo"], primary, c["head_files"], c["head"])
         elec = electrode_positions_for(c["repo"], primary, c["head_files"], c["head"])
+        # channels.tsv is git-tracked TEXT (never annexed), so it is read from the
+        # repo and staged beside the recording rather than fetched from S3. It is
+        # handed to biosigIO so the served samples carry the sidecar's units
+        # (biosigio#125); the same resolution already feeds the fidelity gate.
+        channels_local = None
+        channels_read_failed = False
+        channels_rel = channels_tsv_for(primary, c["head_files"])
+        if channels_rel:
+            channels_text = _read_repo_text(c["repo"], c["head"], channels_rel)
+            if channels_text is None:
+                # NOT the same as "this dataset ships no channels.tsv". A sidecar
+                # that applies is present at HEAD and we failed to read it, so the
+                # store is served with importer units and NOTHING on the public
+                # surface would say why -- `units_report` is simply absent, which
+                # is the same shape as a dataset that has no sidecar at all. The
+                # fidelity gate makes the same distinction and warns for the same
+                # reason (`expected_channel_count_for`). Recorded on the entry.
+                channels_read_failed = True
+                print(
+                    f"::warning::could not read {channels_rel}; channels.tsv units "
+                    f"are NOT applied to {primary}",
+                    flush=True,
+                )
+            else:
+                channels_local = os.path.join(work, os.path.basename(channels_rel))
+                with open(channels_local, "w", encoding="utf-8") as fh:
+                    fh.write(channels_text)
         convert_recording(
             primary_local, events_local, store_local, plf, descs or None, elec,
             mem_budget_bytes=c.get("mem_budget"),
             hard_ceiling_bytes=c.get("hard_ceiling"),
             projected_peak=(c.get("projections") or {}).get(primary),
+            channels_local=channels_local,
         )
         # biosigIO stamped recording_metadata.source_file with the scratch path
         # it was handed (this run's tmpdir); overwrite it with the stable,
@@ -3071,6 +5008,24 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             # directly (the ML streaming path) must not have to fetch index.json to
             # learn that this signal is a processed derivative.
             embed_root_attr(store_local, "sss", sss_meta)
+        # Structured provenance, in the store rather than only in the index
+        # (#1064). The population reading these stores is increasingly machine,
+        # and a client that has the store has the DOI, license and citation at the
+        # moment it needs them. biosigIO's own attributes are untouched.
+        embed_root_attr(
+            store_local,
+            "nemar",
+            nemar_store_attrs(
+                dataset_id=c["dataset_id"],
+                source_commit=c["head"],
+                source_tree=source_tree_for(primary),
+                derived=bool(sss_meta),
+                engine_version=c["engine_version"],
+                contract_url=f"{c['contract_base'].rstrip('/')}/{c['dataset_id']}/zarr/{rel_store}/",
+                row=c.get("dataset_row"),
+                provenance_fetch_failed=bool(c.get("provenance_fetch_failed")),
+            ),
+        )
         # Guard the --delete sync: an empty/partial store would otherwise wipe a
         # previously-valid one. zarr.json => v3 root.
         validate_store(store_local)
@@ -3117,14 +5072,52 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             "--delete", "--only-show-errors",
             "--cache-control", "public, max-age=86400",
         ])
+        # `source_key` is deliberately NOT here any more: it moved to the sibling
+        # producer manifest in v3 (#1178 item 5). It was ~90 bytes per store that
+        # no consumer read -- 2.3 MB of nm000281's 12.8 MB index, fetched on every
+        # dataset-page visit.
         entry = {
             "path": primary,
             "zarr": rel_store,
-            "source_key": primary_key,
             "updated_utc": c["updated"],
+            "source_tree": source_tree_for(primary),
+            "derived": bool(sss_meta),
             # `_`-prefixed keys are diagnostics, never published.
             **{k: v for k, v in meta.items() if not k.startswith("_")},
         }
+        # Counted from the SAME events.tsv biosigIO was handed, so the numbers
+        # describe what is actually in the store (#1059).
+        events_text = None
+        if events_local and os.path.exists(events_local):
+            try:
+                with open(events_local, encoding="utf-8", errors="replace") as fh:
+                    events_text = fh.read()
+            except OSError as exc:
+                print(
+                    f"::warning::could not re-read {events_local} for the event "
+                    f"summary of {primary}: {exc}",
+                    flush=True,
+                )
+        # ONE parse, feeding both the per-store summary published in the index
+        # and the rows `main` stages for events.parquet (#1060). The parsed rows
+        # travel back with the result rather than being re-read there: the events
+        # sidecar may be annexed, and this worker is the only place it is
+        # materialised.
+        parsed_events = parse_events_tsv(events_text)
+        entry.update(events_summary_of(parsed_events))
+        # Which channels.tsv shaped this store, and that the converter chose it
+        # rather than the exporter stumbling on a sibling. On the MaxShield path
+        # the exporter is handed `work/sss_<basename>`, where sibling detection
+        # finds nothing, so "a report is present" and "the right sidecar was
+        # used" are separate claims and both belong on the public surface.
+        if channels_rel and isinstance(entry.get("units_report"), dict):
+            entry["units_report"] = {
+                **entry["units_report"],
+                "sidecar": channels_rel,
+                "sidecar_supplied": True,
+            }
+        if channels_read_failed:
+            entry["channels_tsv_read_error"] = True
         # For a split FIF, record all member source paths so the browser can map any
         # split file (e.g. a click on split-02) to this single head store.
         members = split_members_for(primary, c["head_files"])
@@ -3143,6 +5136,18 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             "ok": True,
             "primary": primary,
             "entry": entry,
+            # The events.tsv this store was built from, parsed once. `main` turns
+            # it into the store's events.parquet rows using the same `groups` it
+            # publishes in the entry, so the rates behind `sample_index` are the
+            # rates the index states.
+            "events": parsed_events,
+            # The producer-only half of the entry: which annex blob this store was
+            # built from. Published in manifest.json, never in the index.
+            "manifest": {
+                "zarr": rel_store,
+                "source_key": primary_key,
+                "size_bytes": annex_key_size(primary_key),
+            },
             "peak_rss": peak_rss_bytes() if rss_trusted else None,
         }
     except MemoryError as exc:
@@ -3185,6 +5190,10 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             "primary": primary,
             "error": str(exc),
             "code": getattr(exc, "code", None),
+            # Published on the entry (typed) or as `last_error` (pending), which
+            # is the only way an uncoded failure says anything at all from
+            # outside the conversion node. #1197
+            "detail": failure_detail(exc),
         }
     finally:
         # Parallel workers share the NVMe scratch; reclaim each recording's copy
@@ -3303,7 +5312,12 @@ def _drain_with_admission(
                             broken.append(p)
                             continue
                         except Exception as exc:  # noqa: BLE001 - this worker died
-                            r = {"ok": False, "primary": p, "error": f"worker crashed: {exc}"}
+                            r = {
+                                "ok": False,
+                                "primary": p,
+                                "error": f"worker crashed: {exc}",
+                                "detail": failure_detail(exc),
+                            }
                         report(r)
                     admit()
         except BrokenProcessPool:
@@ -3334,11 +5348,13 @@ def _drain_with_admission(
         culprits = drain_once(suspects, 1)
         # cap=1, so at most one recording was in flight: it died running alone.
         for p in culprits:
+            killed = ("killed its worker process while running alone "
+                      "(out of memory, or a native crash in the reader)")
             report({
                 "ok": False,
                 "primary": p,
-                "error": "killed its worker process while running alone "
-                         "(out of memory, or a native crash in the reader)",
+                "error": killed,
+                "detail": failure_detail(killed),
             })
 
     if pool_breaks:
@@ -3385,6 +5401,22 @@ def main() -> int:
         "e.g. on Hallu after `nemar dataset download`) instead of downloading the "
         "annex blobs from S3",
     )
+    ap.add_argument(
+        "--contract-base",
+        default=DEFAULT_CONTRACT_BASE,
+        help="the STABLE base URL clients may hardcode, published as the index's "
+        "`contract_base` (<base>/<id>/zarr/) and as each store's `contract_url`. "
+        f"Default {DEFAULT_CONTRACT_BASE}; the --test Hallu instance passes its own "
+        "host so a test index never advertises the production one.",
+    )
+    ap.add_argument(
+        "--api-base",
+        default=DEFAULT_API_BASE,
+        help="catalog to read this dataset's DOI / license / HED version from, "
+        "once per run, for the stores' structured `nemar` provenance attribute "
+        f"(#1064). Default {DEFAULT_API_BASE}. Best-effort: an unreachable catalog "
+        "warns and leaves those fields null.",
+    )
     ap.add_argument("--callback-out", required=True, help="write the zarr-ready body here")
     ap.add_argument(
         "--jobs",
@@ -3406,14 +5438,28 @@ def main() -> int:
     # rewritten fresh (no carry-forward of stale entries) rather than merged.
     # The prior index is still READ -- purely to find orphaned stores below, not
     # to seed the merge or the diff.
+    #
+    # Read ONCE, with the ETag, whichever branch wants the document: that ETag is
+    # what the publish below writes back under `--if-match`, so it has to belong
+    # to the exact body this run merged from. `--clean` needs it too -- the merge
+    # is handed `prior=None`, but the OBJECT still exists on S3, and a
+    # `--if-none-match "*"` write derived from "the merge had no prior" would 412
+    # on every clean run.
+    live_index, live_index_etag = read_index_with_etag(bucket, dataset_id)
     prior_for_orphans: dict | None = None
     if args.clean:
         prior, prior_commit, full = None, None, True
-        prior_for_orphans = s3_read_json(bucket, f"{dataset_id}/zarr/index.json")
+        prior_for_orphans = live_index
     else:
-        prior = s3_read_json(bucket, f"{dataset_id}/zarr/index.json")
+        prior = live_index
         prior_commit = (prior or {}).get("source_commit")
         full = args.full or not prior_commit or not is_ancestor(repo, prior_commit, head)
+    # The producer manifest tracks exactly the index's store set, so it is merged
+    # on the same terms: carried on the incremental path, rebuilt from this run
+    # under --clean (which reconverts every recording anyway).
+    prior_manifest = (
+        None if args.clean else s3_read_json(bucket, f"{dataset_id}/zarr/manifest.json")
+    )
 
     head_files = git_ls_files(repo, head)
     if full:
@@ -3422,6 +5468,36 @@ def main() -> int:
         assert prior_commit  # full is False only when prior_commit is a real ancestor SHA
         diff = git_diff_name_status(repo, prior_commit, head)
     convert, remove = compute_worklist(head_files, diff, full)
+    # Coverage denominator: every raw recording at HEAD, whether or not this run
+    # touches it. Publishing it is what lets a consumer check completeness without
+    # cloning the repo (#1197).
+    discovered = discover_primaries(head_files)
+    # `pending` attempt counts are a property of the RECORDING's history, not of
+    # this run, so they are carried even under --clean -- which otherwise rebuilds
+    # the index from nothing. Without this a recording would reset to attempt 1
+    # every run on the Hallu path (which always passes --clean) and could never
+    # reach the exhaustion cap.
+    # The prior index as PUBLISHED, whichever branch read it. `--clean` passes
+    # `prior=None` to the merge (the index is rewritten fresh) but still reads the
+    # document for orphan detection, and two facts have to come from what was
+    # actually published rather than from what the merge is given: the pending
+    # attempt counts, and how many non-raw stores this run removes from the index.
+    prior_index_doc = prior if prior is not None else prior_for_orphans
+    prior_pending = (prior_index_doc or {}).get("pending")
+    dropped_non_raw_paths = non_raw_store_paths(prior_index_doc)
+    non_raw_dropped = len(dropped_non_raw_paths)
+    if dropped_non_raw_paths:
+        # Named individually, at most a handful of lines for the datasets that
+        # have them, because "the index lost 92 stores" needs a cause attached
+        # when the alternative reading is an orphan-detection bug (#1095/#1097;
+        # the deletion itself is purge_non_raw_stores.py's job, not this run's).
+        print(
+            f"[zarr] {non_raw_dropped} non-raw store(s) from the prior index will "
+            "not be republished (ADR 0027 raw-only; see purge_non_raw_stores.py):",
+            flush=True,
+        )
+        for path in dropped_non_raw_paths:
+            print(f"[zarr]   - {path} ({excluded_reason(path)})", flush=True)
 
     # --clean no longer wipes the serving prefix up front.
     #
@@ -3473,12 +5549,30 @@ def main() -> int:
 
     head_set = set(head_files)
     converted_entries: list[dict] = []
+    manifest_entries: list[dict] = []
     failures: list[str] = []
-    failure_entries: list[dict] = []
+    failure_entries: list[FailureEntry] = []
+    # NOT PendingEntry: these are the merge's INPUT, carrying only what this run
+    # observed (path, reason, last_error, last_attempt_utc). `merge_index` is
+    # what derives `zarr` and the attempt count and produces the published
+    # entries -- see `_pending_entry`.
+    pending_entries: list[dict] = []
+    # Event rows go to disk as each recording finishes, never into a list that
+    # grows with the dataset: nm000281 is ~25k stores (#1060).
+    events_staging = EventsStaging()
+    # Every store this run rebuilt, whether or not it produced event rows. This
+    # -- not the set of stores WITH rows -- is what "carried over from the prior
+    # events file" is defined against.
+    reconverted_rels: set[str] = set()
+    # Stores whose events could not be turned into usable rows: no channel
+    # groups to attach them to, or no usable sample index on any row. Counted
+    # for the callback so the condition is visible off-node.
+    events_stores_without_rows = 0
 
     n = len(convert)
 
     def record(r: dict, i: int) -> None:
+        nonlocal events_stores_without_rows
         # Log each recording as it finishes (live progress over a long backfill),
         # not all at once at the end.
         # Under-projection is the defect that caused the 2026-08-22 OOMs, and it is
@@ -3497,20 +5591,50 @@ def main() -> int:
             )
         if r["ok"]:
             converted_entries.append(r["entry"])
+            if r.get("manifest"):
+                manifest_entries.append(r["manifest"])
+            # Staged here rather than in the worker so the rows are built from the
+            # entry's OWN groups -- the same rates the index publishes are the
+            # rates `sample_index` is computed against.
+            rel_store = r["entry"]["zarr"]
+            reconverted_rels.add(rel_store)
+            parsed = r.get("events")
+            rows = event_rows_for_store(
+                rel_store, r["primary"], r["entry"].get("groups"), parsed
+            )
+            if rows:
+                events_staging.add(rel_store, rows)
+            alert = events_row_alert(r["primary"], parsed, rows)
+            if alert:
+                events_stores_without_rows += 1
+                print(alert, flush=True)
             print(f"[zarr] [{i}/{n}] converted {r['primary']} -> {r['entry']['zarr']}", flush=True)
         else:
             failures.append(r["primary"])
-            # A typed biosigIO failure (it carries a .code) is a property of the
-            # DATA -- record WHY in the index so the viewer can explain it. An infra
-            # failure (no code: crashed worker, transient S3) is omitted so it
-            # retries on the next run rather than being shown as a data problem.
+            # Two destinations, and which one is the whole of #1197.
+            #
+            # A typed, non-retryable biosigIO/NEMAR failure is a property of the
+            # DATA (or a converter gap): it goes to `failures` with the code, the
+            # user-facing reason, AND the importer's own first line as `detail`,
+            # so an opaque `file_read_error` is diagnosable from the public index.
+            #
+            # Everything else -- an uncoded failure (crashed worker, transient S3)
+            # or a RETRYABLE code (the memory budget, which is a condition on a
+            # shared node, not a property of the recording) -- goes to `pending`.
+            # These used to be dropped on the floor so they would "retry next
+            # run", but a run where anything converted is marked `done`, so they
+            # never did: on008083 lost five recordings that appeared in neither
+            # list and were indistinguishable from "still generating" forever.
             code = r.get("code")
-            if code:
-                failure_entries.append({
+            detail = r.get("detail") or failure_detail(r.get("error"))
+            if code and code not in RETRYABLE_CODES:
+                failure_entries.append(_failure_entry(r["primary"], code, detail))
+            else:
+                pending_entries.append({
                     "path": r["primary"],
-                    "zarr": store_rel_for(r["primary"]),
-                    "code": code,
-                    "reason": reason_for_code(code),
+                    "reason": "memory_budget" if code else "infra_failure",
+                    "last_error": detail,
+                    "last_attempt_utc": updated,
                 })
             print(f"::warning::[{i}/{n}] conversion failed for {r['primary']}: {r['error']}", flush=True)
 
@@ -3602,10 +5726,20 @@ def main() -> int:
         f"skipped (#909)",
         flush=True,
     )
+    # Per-dataset provenance for the stores' `nemar` root attribute (#1064).
+    # Skipped when there is nothing to convert, so a no-op run makes no request.
+    dataset_row, provenance_fetch_failed = (
+        fetch_dataset_row(args.api_base, dataset_id) if convert else (None, False)
+    )
     with tempfile.TemporaryDirectory() as tmp:
         ctx = {
             "repo": repo, "bucket": bucket, "dataset_id": dataset_id, "head": head,
             "head_files": head_set, "local": args.local, "tmp": tmp, "updated": updated,
+            "contract_base": args.contract_base,
+            "engine_version": ZARR_ENGINE_VERSION,
+            # Read ONCE per run, not per recording: nm000281 has 25k of them.
+            "dataset_row": dataset_row,
+            "provenance_fetch_failed": provenance_fetch_failed,
             "mem_budget": ram_ceiling,
             # Computed once here rather than re-derived per worker from a second,
             # independent /proc/meminfo read, which could disagree with this one.
@@ -3656,14 +5790,28 @@ def main() -> int:
     retryable_failures = infra_failures
     deterministic = bool(failures) and infra_failures == 0
 
-    # Hard fail: every attempted conversion errored and nothing was removed. Do
-    # NOT advance the checkpoint or rewrite the index (that would strand the
-    # failed recordings); return non-zero. Still write the callback (status
-    # "failed") so the driver can classify data-vs-infra and the backend records
-    # WHAT failed even on a total failure (#774 — previously no callback was
-    # written here, so total failures were invisible).
-    if convert and not converted_entries and not remove:
-        print(f"::error::all {len(convert)} conversion(s) failed; index left untouched", flush=True)
+    # Set by the events.parquet step below. Bound HERE, before
+    # `write_failed_callback` closes over them, because the total-failure exit
+    # calls that callback before the events step has run -- and a name that only
+    # exists on the happy path would raise NameError inside the very handler
+    # whose job is to make a failure visible.
+    events_file: ManifestFileEntry | None = None
+    events_upload_failed = False
+
+    def write_failed_callback(error: str | None = None) -> None:
+        """Write the `status: "failed"` callback body for a run that publishes
+        nothing.
+
+        Every exit that returns 1 goes through here, and that is the point. The
+        driver POSTs whatever this file contains; if a failure path writes NO
+        file, `hallu-zarr.sh` posts nothing, the `converting` signal it sent at
+        the start is never superseded, and D1 sits at `zarr_status='pending'`
+        forever -- the dataset reads as "still converting" on the dashboard with
+        nothing running. That is exactly the invisible-failure shape #774 fixed
+        for the total-failure branch, and the two refuse-to-publish guards below
+        (a bad index, a bad manifest) reintroduced it: they were added later and
+        returned 1 directly.
+        """
         with open(args.callback_out, "w") as fh:
             json.dump(
                 {
@@ -3679,43 +5827,273 @@ def main() -> int:
                     "data_failures": failure_entries,
                     "deterministic": deterministic,
                     "pool_breaks": pool_breaks,
+                    # Coverage (#1197). Reported even here, where the index was
+                    # NOT rewritten: the queue's pending-driven requeue needs to
+                    # know a total failure left recordings outstanding, and
+                    # `discovered_count` is what makes "2 of 43" sayable at all.
+                    "pending_count": len(pending_entries),
+                    "discovered_count": len(discovered),
+                    "not_attempted_count": sum(
+                        1 for e in pending_entries if e.get("reason") == "not_attempted"
+                    ),
+                    "provenance_fetch_failed": provenance_fetch_failed,
+                    # The events file, on the failure path too (#1060). A refused
+                    # index can still have been preceded by a successful
+                    # events.parquet upload, and an operator reading only the
+                    # callback would otherwise have no idea an object on S3 was
+                    # replaced by a run that then published nothing.
+                    "events_row_count": events_file["row_count"] if events_file else None,
+                    "events_upload_failed": events_upload_failed,
+                    "events_stores_without_rows": events_stores_without_rows,
+                    # What went wrong, when it was the PRODUCER rather than the
+                    # recordings: a schema violation or an unbalanced index has no
+                    # per-recording failure to point at, so without this the
+                    # callback would say "failed" and name no cause.
+                    **({"error": error} if error else {}),
                 },
                 fh,
             )
+
+    # Hard fail: every attempted conversion errored and nothing was removed. Do
+    # NOT advance the checkpoint or rewrite the index (that would strand the
+    # failed recordings); return non-zero. Still write the callback (status
+    # "failed") so the driver can classify data-vs-infra and the backend records
+    # WHAT failed even on a total failure (#774 — previously no callback was
+    # written here, so total failures were invisible).
+    if convert and not converted_entries and not remove:
+        print(f"::error::all {len(convert)} conversion(s) failed; index left untouched", flush=True)
+        write_failed_callback()
         return 1
 
     # Advance source_commit to HEAD unless there are INFRA failures to retry. A
     # typed data failure (a derivative, a corrupt file) is permanent -- retrying it
     # never helps and would pin the checkpoint forever on a derivative-heavy
     # dataset -- so it does not hold the commit back; it's recorded in the index's
-    # `failures` instead. An infra failure (no code: crashed worker, transient S3)
-    # keeps the prior commit ("" -> next run goes full) so it is re-diffed + retried.
+    # `failures` instead. An infra failure keeps the prior commit so the next run
+    # re-diffs and retries it.
     # (`infra_failures` / `deterministic` computed above, before the total-fail path.)
-    index_commit = head if not infra_failures else (prior_commit or "")
-    index = merge_index(
-        prior, dataset_id, index_commit, converted_entries, remove, updated, failure_entries
+    #
+    # The old fallback for "infra failures but no usable prior commit" was `""`,
+    # which is how on008083 came to publish an EMPTY source_commit while D1 held
+    # the real SHA (#1197). There is no longer anything to fall back FOR: those
+    # recordings are now listed in `pending`, and the queue re-queues a `done`
+    # dataset that has any (zarr_queue.reconcile), which re-runs it with --clean.
+    # So publish the commit the stores were actually built from.
+    # The trailing `and prior_commit` in the condition is not redundant with
+    # `is_commit_sha`: that call narrows the value at runtime but not for a
+    # reader or a type checker, so the extra term is what makes the ternary's
+    # first branch visibly a `str` rather than `str | None`. `head_commit` is
+    # published as the index's `source_commit`, where None would serialize as
+    # JSON null -- the on008083 shape (#1197) that took an empty commit all the
+    # way into a published document.
+    index_commit = (
+        prior_commit if (infra_failures and is_commit_sha(prior_commit) and prior_commit) else head
     )
-    # `delete=False` is deliberate -- aws_cp reads the file back by path after the
-    # handle closes -- but it left the upload as the file's only reader and nothing
-    # as its owner, so every dataset conversion leaked one temp file into TMPDIR
-    # (= the Hallu NVMe scratch); 544 strays had piled up by 2026-08-12. Unlink in
-    # a `finally` so a failed upload leaks nothing either. nemarOrg/nemar-cli#1068.
+    biosigio_version = installed_biosigio_version()
+
+    def build_index(merge_prior: dict | None, merge_pending: list | None) -> dict:
+        """Merge this run's results onto a prior document and check the coverage
+        invariant. A function rather than a straight line because the publish
+        below re-runs it against a NEWER live document when the conditional write
+        loses a race -- re-merging is the only way to keep both writers' work.
+        """
+        merged = merge_index(
+            merge_prior,
+            dataset_id,
+            index_commit,
+            converted_entries,
+            remove,
+            updated,
+            failure_entries,
+            pending_entries,
+            discovered=discovered,
+            errors=len(failures),
+            contract_base=args.contract_base,
+            bucket=bucket,
+            region=args.region,
+            biosigio_version=biosigio_version,
+            prior_pending=merge_pending,
+            dataset_row=dataset_row,
+        )
+        check_index_invariant(merged)
+        return merged
+
+    try:
+        index = build_index(prior, prior_pending)
+        # SCHEMA FIRST, UPLOADS SECOND. A refused index means this run publishes
+        # nothing -- and "nothing" has to include events.parquet, which is a
+        # destructive overwrite of a file the LIVE index still describes. So the
+        # document is validated here, before anything is uploaded, in the exact
+        # shape it will take: the events pair is filled in with the values this
+        # run would use (the URL is deterministic; the row count is a
+        # placeholder, and `minimum: 0` makes 0 the strictest stand-in). A bug in
+        # either field therefore aborts BEFORE the overwrite rather than after
+        # it.
+        events_url = f"{index['data_base']}{EVENTS_PARQUET_NAME}"
+        validate_document(
+            {**index, "events_parquet": events_url, "events_row_count": 0},
+            INDEX_SCHEMA_PATH,
+            "index",
+        )
+        # events.parquet then goes up BEFORE index.json, so `events_parquet`
+        # never names a file that is not there. It is best-effort and cannot fail
+        # the run; when it does not publish, the two fields stay absent and a
+        # client reads that as "this dataset has no events file", which is
+        # exactly what is true of the new index.
+        published_events = publish_events_parquet(
+            events_staging,
+            [e["zarr"] for e in index["stores"]],
+            bucket=bucket,
+            dataset_id=dataset_id,
+            reconverted=reconverted_rels,
+        )
+        events_file = published_events["file"]
+        events_upload_failed = published_events["failed"]
+        if events_file:
+            index["events_parquet"] = events_url
+            index["events_row_count"] = events_file["row_count"]
+        # Validate what is about to be published, not a copy of it. The pre-flight
+        # above checked the same document with a stand-in row count; this checks
+        # the real one, so nothing reaches S3 unvalidated.
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+    except Exception as exc:  # noqa: BLE001 - refuse to publish a bad index
+        print(
+            f"::error::refusing to publish {dataset_id}/zarr/index.json: {exc}",
+            flush=True,
+        )
+        write_failed_callback(f"index refused: {exc}")
+        return 1
+
+    def build_manifest(index_doc: dict) -> dict:
+        """The producer manifest tracks EXACTLY the index's store set, so it is
+        derived from the document that is actually published -- including the
+        re-merged one a conditional-write retry produces, whose store list can
+        differ from the first attempt's. Validated here so a bad manifest still
+        refuses the publish rather than being uploaded.
+        """
+        doc = merge_manifest(
+            prior_manifest,
+            dataset_id,
+            manifest_entries,
+            [e["zarr"] for e in index_doc["stores"]],
+            updated,
+            events_file=events_file,
+        )
+        validate_document(doc, MANIFEST_SCHEMA_PATH, "manifest")
+        return doc
+
+    try:
+        manifest = build_manifest(index)
+    except Exception as exc:  # noqa: BLE001 - refuse to publish a bad manifest
+        print(
+            f"::error::refusing to publish {dataset_id}/zarr/manifest.json: {exc}",
+            flush=True,
+        )
+        write_failed_callback(f"manifest refused: {exc}")
+        return 1
+
+    # The index publish is a CONDITIONAL write, and its own temp-file handling
+    # lives in `write_index` (shared with purge_non_raw_stores.py).
+    #
+    # It used to be an unconditional `aws_cp` followed by a `head-object` for the
+    # ETag. Two processes write this object -- a converter run and the non-raw
+    # purge -- and both read it, work for minutes to hours, then write back what
+    # they merged from that read. Whichever finished second silently reverted the
+    # other: a purge that had just deleted 92 non-raw stores would be undone, or a
+    # conversion's newly added stores would vanish from the document while their
+    # chunks sat on S3 unreferenced. Nothing anywhere reported it -- both runs
+    # exited 0 and both callbacks said "ready".
+    #
+    # So the PUT carries `--if-match` with the ETag read at the top of this run
+    # (or `--if-none-match "*"` when there was no document then). A 412 means the
+    # premise changed, and it is recoverable exactly once: re-read, re-merge this
+    # run's results onto the NEWER document, and write again against its ETag.
+    # The re-merge covers the document only -- the objects this run uploaded and
+    # deleted are already on S3 and are not redone. A second 412 is abandoned
+    # loudly through `write_failed_callback`: a third attempt has no reason to
+    # win, and publishing an index computed from a body that is already stale
+    # again is exactly the silent rollback this replaces.
+    def publish_index() -> tuple[dict, dict, str | None]:
+        try:
+            return index, manifest, write_index(
+                bucket, dataset_id, index, if_match=live_index_etag
+            )
+        except IndexPreconditionFailed as first:
+            print(
+                f"::warning::{dataset_id}/zarr/index.json changed under this run "
+                f"({first}); re-reading and re-merging once",
+                flush=True,
+            )
+        newer, newer_etag = read_index_with_etag(bucket, dataset_id)
+        # `--clean` hands the merge no prior (the document is rebuilt from this
+        # run), exactly as the first attempt did; the pending attempt history
+        # still comes from the published document, newer one included.
+        remerged = build_index(None if args.clean else newer, (newer or {}).get("pending"))
+        if events_file:
+            remerged["events_parquet"] = f"{remerged['data_base']}{EVENTS_PARQUET_NAME}"
+            remerged["events_row_count"] = events_file["row_count"]
+        # Re-validated, not assumed: the retry publishes a document built from a
+        # body this run has not otherwise inspected. The manifest follows the
+        # re-merged store set for the same reason -- it is defined as exactly the
+        # index's stores, and pairing a retried index with the first attempt's
+        # manifest would publish the disagreement `manifest_upload_failed` exists
+        # to report.
+        validate_document(remerged, INDEX_SCHEMA_PATH, "index")
+        try:
+            remerged_manifest = build_manifest(remerged)
+        except Exception as exc:  # noqa: BLE001 - abandon the publish, do not skip it
+            raise RuntimeError(f"manifest refused after index re-merge: {exc}") from exc
+        return remerged, remerged_manifest, write_index(
+            bucket, dataset_id, remerged, if_match=newer_etag
+        )
+
+    try:
+        index, manifest, put_etag = publish_index()
+    except IndexPreconditionFailed as exc:
+        print(
+            f"::error::refusing to publish {dataset_id}/zarr/index.json: {exc}",
+            flush=True,
+        )
+        write_failed_callback(f"index publish conflict: {exc}")
+        return 1
+    except Exception as exc:  # noqa: BLE001 - the run has nothing to serve without this
+        # Includes an `aws` too old to know `--if-match` on put-object (S3 gained
+        # conditional writes in Nov 2024): that is a node-provisioning failure,
+        # and it has to read as a loud failed run rather than a silent one.
+        print(
+            f"::error::publishing {dataset_id}/zarr/index.json failed: {exc}",
+            flush=True,
+        )
+        write_failed_callback(f"index publish failed: {exc}")
+        return 1
+    # The ETag the PUT itself reported, not a follow-up read: a `head-object`
+    # here could hand the backend a version this run did not write.
+    etag = (put_etag or "").strip().strip('"') or None
+
+    # The manifest is producer-only bookkeeping, so it is uploaded AFTER the index
+    # and a failure here does not fail the run: the serving copy and its entry
+    # point are already correct, and ADR 0005 says partial data still serves. The
+    # next run rewrites it.
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
-        json.dump(index, fh, separators=(",", ":"))
-        index_local = fh.name
+        json.dump(manifest, fh, separators=(",", ":"))
+        manifest_local = fh.name
+    manifest_upload_failed = False
     try:
         aws_cp(
-            index_local,
-            f"s3://{bucket}/{dataset_id}/zarr/index.json",
+            manifest_local,
+            f"s3://{bucket}/{dataset_id}/zarr/manifest.json",
             extra=["--content-type", "application/json", "--cache-control", "public, max-age=60"],
         )
-        etag = _run(
-            ["aws", "s3api", "head-object", "--bucket", bucket, "--key",
-             f"{dataset_id}/zarr/index.json", "--query", "ETag", "--output", "text"]
-        ).strip().strip('"')
+    except Exception as exc:  # noqa: BLE001 - never fail a good conversion over this
+        # Non-fatal by design (the index and the stores are already correct), but
+        # reported: the manifest is where `source_key` lives now, so a silent
+        # failure leaves the producer unable to say which blob a store came from,
+        # and a warning in a multi-megabyte cron log is not a signal anyone sees.
+        manifest_upload_failed = True
+        print(f"::warning::manifest.json upload failed for {dataset_id}: {exc}", flush=True)
     finally:
         with contextlib.suppress(OSError):
-            os.unlink(index_local)
+            os.unlink(manifest_local)
 
     # status stays "ready": the stores that converted + the index are on S3, so
     # the latest-only state is real and worth recording even on a partial run.
@@ -3752,6 +6130,46 @@ def main() -> int:
         # run is still marked `done` by the queue, so these need an explicit
         # requeue; they are reported here so that is visible. #1113
         "retryable_failures": retryable_failures,
+        # Coverage (#1197). These are what the queue turns into an AUTOMATIC
+        # re-queue of a `done` dataset (see zarr_queue.mark_done / reconcile), so
+        # #1113's "needs an explicit requeue" above is no longer the whole story;
+        # and what the backend records alongside the failure summary so a
+        # dashboard can rank datasets by coverage without reading every index.
+        "pending_count": index["pending_count"],
+        "discovered_count": index["discovered_count"],
+        # The subset of `pending_count` that was never ATTEMPTED, as opposed to
+        # attempted and failed. They need a re-queue, not a backoff: nothing has
+        # gone wrong with them yet, so they must not consume the retry rounds a
+        # genuinely failing recording gets (see zarr_queue's pending policy).
+        "not_attempted_count": sum(
+            1 for e in index["pending"] if e.get("reason") == "not_attempted"
+        ),
+        # Carried-over stores dropped because their source sits in a tree
+        # discovery no longer walks (ADR 0027 raw-only) or is a BIDS calibration
+        # file. Reported rather than published: the index describes what IS
+        # served, and these are being deleted by `purge_non_raw_stores.py`, so
+        # the only place the number belongs is the operational record.
+        "non_raw_dropped": non_raw_dropped,
+        # True when the catalog could not be read, so this wave's stores carry
+        # null doi/license/citation/hed_version because of the RUN, not the data.
+        "provenance_fetch_failed": provenance_fetch_failed,
+        # True when index.json is published but manifest.json is not, so the two
+        # documents disagree about which stores exist until the next run.
+        "manifest_upload_failed": manifest_upload_failed,
+        # Rows in the events.parquet this run published, or null when it
+        # published none (#1060). Null covers three different things -- the
+        # dataset has no events, pyarrow is absent from the node's venv, or the
+        # build/upload failed -- so `events_upload_failed` separates the last one:
+        # "no events" and "we could not say what the events are" must not read
+        # the same from outside.
+        "events_row_count": events_file["row_count"] if events_file else None,
+        "events_upload_failed": events_upload_failed,
+        # Stores whose events could not be turned into usable rows: no channel
+        # group to attach them to, or no usable sample index on any row. Zero is
+        # the healthy value. Each one is warned about by name as it happens, but
+        # a warning in a multi-megabyte cron log is not a signal anyone sees, so
+        # the count rides here as well (the same argument as `pool_breaks`).
+        "events_stores_without_rows": events_stores_without_rows,
     }
     with open(args.callback_out, "w") as fh:
         json.dump(callback, fh)
