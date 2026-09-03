@@ -126,7 +126,17 @@ export function getInstallInstruction(
   return tool.installInstructions[platform];
 }
 
-/** Best-effort version extraction from a `--version` style output. */
+/**
+ * Best-effort version extraction from a `--version` style output.
+ *
+ * KEEP, not a semver conversion (epic #1225 phase 6 audit): the result is
+ * only ever displayed by `nemar doctor` (ToolStatus.version, printed as-is
+ * in src/commands/doctor.ts), never parsed further or compared against
+ * anything. Converting to `semver.coerce()` would normalize a two-component
+ * version like "1.40" to "1.40.0" and change what `nemar doctor` prints, for
+ * no comparison it would ever feed. Verified: no caller of `checkAllTools()`,
+ * `probeTool()`, or `ToolStatus.version` does anything but display it.
+ */
 export function parseVersion(output: string): string | undefined {
   const match = output.match(/(\d+\.\d+(?:\.\d+)?)/);
   return match ? match[1] : undefined;

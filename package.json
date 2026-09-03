@@ -55,6 +55,7 @@
     "conf": "^13.0.1",
     "inquirer": "^9.2.15",
     "ora": "^8.0.1",
+    "semver": "^7.8.5",
     "zod": "^3.23.8"
   },
   "lint-staged": {
@@ -69,6 +70,7 @@
     "@biomejs/biome": "1.9.4",
     "@types/bun": "latest",
     "@types/inquirer": "^9.0.7",
+    "@types/semver": "^7.8.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "bcryptjs": "^3.0.3",

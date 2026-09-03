@@ -39,6 +39,26 @@ describe("parseVersion", () => {
   test("returns null for non-numeric", () => {
     expect(parseVersion("a.b.c")).toBeNull();
   });
+
+  // Two edge cases measured against the hand-rolled regex this module used
+  // to have, migrating to the `semver` package (epic #1225 phase 6). Both
+  // are deliberate, declared in the PR body, not accidents of the library.
+  test("rejects a leading-zero component (narrowing: the old regex accepted it)", () => {
+    // The old `^(\d+)` regex + parseInt("01", 10) === 1 accepted "01.2.3".
+    // semver correctly treats a leading zero as invalid semver and rejects
+    // it. This is a fix, not a regression: bumpVersion() is the only
+    // producer of dataset versions and it only ever emits canonical output,
+    // so no real leading-zero version should exist to be narrowed away.
+    expect(parseVersion("01.2.3")).toBeNull();
+  });
+
+  test("rejects surrounding whitespace (semver's parser would widen: it trims and accepts)", () => {
+    // semver.parse(" 1.2.3 ") trims and returns a valid parse -- confirmed
+    // directly against the library before writing this module. That widening
+    // must NOT be kept: a whitespace-padded version would flow into a git
+    // tag name, and the old strict regex never accepted it either.
+    expect(parseVersion(" 1.2.3 ")).toBeNull();
+  });
 });
 
 describe("bumpVersion", () => {
