@@ -75,6 +75,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0034](0034-datasets-stays-one-table-under-a-column-budget.md) - `datasets` stays one table, under an enforced column budget
 - [ADR 0035](0035-sweep-stamps-live-in-one-json-column.md) - Sweep bookkeeping stamps live in one JSON column
 - [ADR 0036](0036-operational-rows-carry-counts-and-pointers-not-per-file-lists.md) - Operational rows carry counts and pointers, not per-file lists
+- [ADR 0037](0037-make-versus-take-is-decided-explicitly-in-both-directions.md) - Make versus take is decided explicitly, in both directions
 
 ## Backfill note (2026-07-31)
 
