@@ -19,6 +19,7 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -83,6 +84,72 @@ class QueueTest(unittest.TestCase):
         reconcile(self.conn, [("nm099999", "1"), ("bad", "1"), ("nm000001", "1.0.0")], 3600)
         ids = [r["dataset_id"] for r in self.conn.execute("SELECT dataset_id FROM jobs").fetchall()]
         self.assertEqual(ids, ["nm000001"])
+
+    def test_reconcile_rejects_exemplars_by_default_and_names_them(self):
+        res = reconcile(
+            self.conn,
+            [("xx099900", "1.0.0"), ("xx099905", "1.0.1"), ("nm000001", "1.0.0")],
+            3600,
+        )
+        self.assertEqual(res["rejected"], 2)
+        self.assertEqual(res["rejected_sample"], ["xx099900", "xx099905"])
+        ids = [r["dataset_id"] for r in self.conn.execute("SELECT dataset_id FROM jobs").fetchall()]
+        self.assertEqual(ids, ["nm000001"])
+
+    def test_reconcile_accept_exemplars_admits_only_the_fleet_band(self):
+        res = reconcile(
+            self.conn,
+            [
+                ("xx099900", "1.0.0"),  # exemplar fleet: accepted
+                ("xx099999", "1.0.0"),  # top of the band: accepted
+                ("xx000001", "1.0.0"),  # prod sandbox band: still rejected
+                ("xx090001", "1.0.0"),  # dev ephemeral band: still rejected
+                ("nm000001", "1.0.0"),
+            ],
+            3600,
+            accept_exemplars=True,
+        )
+        self.assertEqual(res["enqueued"], 3)
+        self.assertEqual(res["rejected"], 2)
+        self.assertEqual(res["rejected_sample"], ["xx000001", "xx090001"])
+        self.assertEqual(self.status("xx099900"), "pending")
+        self.assertEqual(self.status("xx099999"), "pending")
+        self.assertIsNone(self.status("xx000001"))
+        self.assertIsNone(self.status("xx090001"))
+
+    def test_cli_refuses_accept_exemplars_against_production_api(self):
+        # Guarded before any catalog fetch, for every subcommand that carries
+        # the flag: the process must exit non-zero on the flag alone, with no
+        # network reached (the temp db stays empty).
+        db = os.path.join(self._tmp.name, "cli.db")
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "zarr_queue.py")
+        for subcommand in ("reconcile", "backfill-dir-formats"):
+            with self.subTest(subcommand=subcommand):
+                proc = subprocess.run(
+                    [
+                        sys.executable,
+                        script,
+                        "--db",
+                        db,
+                        subcommand,
+                        "--api-base",
+                        "https://api.nemar.org",
+                        "--accept-exemplars",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn(
+                    "refusing --accept-exemplars against the production API", proc.stderr
+                )
+
+    def test_reconcile_rejected_sample_is_capped_but_count_is_not(self):
+        res = reconcile(self.conn, [(f"bad{i:02d}", "1") for i in range(8)], 3600)
+        self.assertEqual(res["rejected"], 8)
+        self.assertEqual(res["rejected_sample"], [f"bad{i:02d}" for i in range(5)])
 
     def test_done_then_reconcile_skips_same_version(self):
         reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
@@ -1772,6 +1839,40 @@ class SweepOrchestrationTest(unittest.TestCase):
         for dataset_id in ids:
             claim_next(self.conn)
             mark_done(self.conn, dataset_id, "v1.0.0")
+
+    def test_exemplar_ids_are_counted_and_named_not_silently_dropped(self):
+        # The staging catalog is the xx0999NN fleet. Without the opt-in the sweep
+        # must say it refused them by id, not report candidates=0 as if the
+        # archive were clean.
+        routes = {**self.catalog("xx099905", "on000001"), "/on000001/zarr/index.json": (404, None)}
+        out = io.StringIO()
+        with _CannedHTTPServer(routes) as srv, contextlib.redirect_stdout(out):
+            res = sweep_dir_format_backfill(self.conn, srv.base, srv.base, srv.base, sleep_seconds=0)
+        self.assertEqual(res["candidates"], 1)
+        self.assertEqual(res["id_rejected"], 1)
+        self.assertEqual(res["id_rejected_sample"], ["xx099905"])
+        self.assertIn("id_rejected=1 (xx099905)", out.getvalue())
+
+    def test_accept_exemplars_admits_the_fleet_to_the_sweep(self):
+        # Same catalog, opted in: the exemplar is examined like any nm/on row
+        # (its index 404s, so it is affected) and nothing is refused by id.
+        self._seed_done("on000001")
+        reconcile(self.conn, [("xx099905", "v1.0.0")], 3600, accept_exemplars=True)
+        claim_next(self.conn)
+        mark_done(self.conn, "xx099905", "v1.0.0")
+        routes = {
+            **self.catalog("xx099905", "on000001"),
+            "/xx099905/zarr/index.json": (404, None),
+            "/on000001/zarr/index.json": (404, None),
+        }
+        with _CannedHTTPServer(routes) as srv, contextlib.redirect_stdout(io.StringIO()):
+            res = sweep_dir_format_backfill(
+                self.conn, srv.base, srv.base, srv.base, sleep_seconds=0, execute=True,
+                accept_exemplars=True,
+            )
+        self.assertEqual(res["id_rejected"], 0)
+        self.assertEqual(sorted(f["dataset_id"] for f in res["affected"]), ["on000001", "xx099905"])
+        self.assertEqual(self.status("xx099905"), "pending")
 
     def test_a_failing_dataset_is_recorded_and_the_sweep_continues(self):
         # on000001's index 404s (affected: nothing was ever published);

@@ -77,6 +77,7 @@ import sqlite3
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -109,6 +110,33 @@ _ADDED_COLUMNS = (
 )
 
 DATASET_ID_RE = re.compile(r"^(nm|on)[0-9]{6}$")
+# The dev exemplar fleet, `xx099900`-`xx099999` (AGENTS.md, "Dataset ID bands"):
+# curated copies of real public datasets that the staging instance converts into
+# `nemar-dev`. Production never accepts an `xx` id (that is the sandbox band
+# there), so the staging profile opts in with `reconcile --accept-exemplars`,
+# and even then only this band -- prod-sandbox and dev-ephemeral `xx` ids stay
+# rejected. Discovered the hard way: the staging cron ran for a day reporting
+# `rejected=7` and converting nothing, because the count alone did not say which
+# ids it was refusing.
+EXEMPLAR_ID_RE = re.compile(r"^xx0999[0-9]{2}$")
+# How many rejected ids a summary line names alongside the count.
+REJECTED_SAMPLE_SIZE = 5
+
+
+def dataset_id_admitted(dataset_id: str, accept_exemplars: bool = False) -> bool:
+    """The one id filter every catalog-driven entry point shares.
+
+    Production admits `nm`/`on` ids only; the staging profile adds the exemplar
+    fleet band with `accept_exemplars`. Every walk over the catalog (`reconcile`,
+    the directory-format backfill) goes through here, so the band the fleet
+    lives in cannot be admitted by one entry point and silently dropped by
+    another -- which is exactly how the backfill sweep was left behind when
+    reconcile alone was fixed.
+    """
+    return bool(
+        DATASET_ID_RE.match(dataset_id)
+        or (accept_exemplars and EXEMPLAR_ID_RE.match(dataset_id))
+    )
 
 # The generation of DISCOVERY/DISPATCH rules a `done` row was converted under.
 #
@@ -358,10 +386,14 @@ def reconcile(
     engine_version: str = ZARR_ENGINE_VERSION,
     engine_requeue_limit: int | None = None,
     engine_requeue_ack: bool = False,
+    accept_exemplars: bool = False,
 ) -> dict:
     """Enqueue datasets needing (re)conversion + recover stale inprogress rows.
 
-    `datasets` is a list of (dataset_id, latest_version). A dataset is enqueued
+    `datasets` is a list of (dataset_id, latest_version). Ids are admitted by
+    `dataset_id_admitted`: `nm`/`on` always, the `xx0999NN` exemplar fleet only
+    with `accept_exemplars` (the staging profile). Everything else is counted in
+    `rejected` and sampled in `rejected_sample`. A dataset is enqueued
     `pending` when it is new or its latest_version differs from the version we
     last converted. A row already `done`/`failed` at the same latest_version is
     left alone (a new version flips it back to pending). `inprogress` rows whose
@@ -417,13 +449,15 @@ def reconcile(
     """
     now_iso, now = _now_iso(), _now()
     enq = 0
-    # IDs the queue refuses, kept as a COUNT rather than dropped on the floor.
-    # `seen` counts every row the catalog returned and nothing else did, so a
-    # dataset rejected here simply never appeared -- indistinguishable in the log
-    # from a healthy steady state where most rows are already `done`. A catalog
-    # that starts emitting an unexpected ID shape would go unconverted forever
-    # with no line saying so.
+    # IDs the queue refuses, kept as a COUNT plus a short SAMPLE rather than
+    # dropped on the floor. `seen` counts every row the catalog returned and
+    # nothing else did, so a dataset rejected here simply never appeared --
+    # indistinguishable in the log from a healthy steady state where most rows
+    # are already `done`. A catalog that starts emitting an unexpected ID shape
+    # would go unconverted forever with no line saying so; the sample is what
+    # turns "rejected=7" into "rejected=7 (xx099900, ...)", which is readable.
     rejected = 0
+    rejected_sample: list[str] = []
     engine_stale = 0
     # Coverage bookkeeping (#1197): how many `done` datasets still owe recordings,
     # how many were re-queued for that this run, and how many have spent their
@@ -442,8 +476,10 @@ def reconcile(
         # an expected skip, not an anomaly, so it is not counted as rejected.
         if dataset_id == "nm099999":
             continue
-        if not DATASET_ID_RE.match(dataset_id):
+        if not dataset_id_admitted(dataset_id, accept_exemplars):
             rejected += 1
+            if len(rejected_sample) < REJECTED_SAMPLE_SIZE:
+                rejected_sample.append(dataset_id)
             continue
         row = conn.execute(
             "SELECT status, converted_version, latest_version, engine_version,"
@@ -598,6 +634,7 @@ def reconcile(
         "recovered_stale": recovered,
         "unlisted": unlisted,
         "rejected": rejected,
+        "rejected_sample": rejected_sample,
         "engine_stale": engine_stale,
         "engine_requeued": engine_requeued,
         "engine_pending": len(stamp_only) if engine_requeue_blocked else 0,
@@ -1215,8 +1252,13 @@ def sweep_dir_format_backfill(
     sleep_seconds: float = 0.5,
     probe: bool = True,
     execute: bool = False,
+    accept_exemplars: bool = False,
 ) -> dict:
     """Enumerate (and optionally requeue) the stranded directory-format cohort.
+
+    Ids are admitted by `dataset_id_admitted`, the same filter `reconcile` uses,
+    so the staging profile's `accept_exemplars` reaches this sweep too; rows it
+    refuses are counted as `id_rejected` and named in the summary line.
 
     Sequential with a pause between datasets: this is a one-off recovery, not a
     hot path, and the archive it reads is the one serving live traffic.
@@ -1226,10 +1268,15 @@ def sweep_dir_format_backfill(
     idempotent -- re-running it re-examines the datasets that errored.
     """
     rows, complete = fetch_public_catalog_rows(api_base)
+    id_rejected = [
+        str(r.get("dataset_id", ""))
+        for r in rows
+        if not dataset_id_admitted(str(r.get("dataset_id", "")), accept_exemplars)
+    ]
     candidates = [
         r
         for r in rows
-        if DATASET_ID_RE.match(str(r.get("dataset_id", "")))
+        if dataset_id_admitted(str(r.get("dataset_id", "")), accept_exemplars)
         and may_carry_dir_formats(r.get("modalities"))
         and (dataset is None or r.get("dataset_id") == dataset)
     ]
@@ -1237,8 +1284,9 @@ def sweep_dir_format_backfill(
         # Silence here would read as "checked, nothing wrong". Say which of the
         # two filters rejected it instead.
         print(
-            f"{dataset} is not a candidate: it is not a public nm/on dataset, or its"
-            " modalities carry no directory format (MEG/iEEG)"
+            f"{dataset} is not a candidate: its id is not admitted (nm/on, or the"
+            " xx0999NN exemplar band with --accept-exemplars), or its modalities"
+            " carry no directory format (MEG/iEEG)"
         )
     findings: list[dict] = []
     errors: list[tuple[str, str]] = []
@@ -1337,16 +1385,25 @@ def sweep_dir_format_backfill(
     # store, and without this number that reads as a clean bill of health rather
     # than as a check that was never made.
     not_probed = [f for f in findings if f["reason"] == "not_probed"]
+    # `id_rejected` is on the line for the reason reconcile names its rejects:
+    # a catalog made entirely of ids this filter refuses (the staging exemplar
+    # fleet without --accept-exemplars) would otherwise read as candidates=0,
+    # a clean bill of health, rather than as a sweep that examined nothing.
+    id_rejected_note = f" id_rejected={len(id_rejected)}"
+    if id_rejected:
+        id_rejected_note += f" ({', '.join(id_rejected[:REJECTED_SAMPLE_SIZE])})"
     print(
         f"backfill-dir-formats: candidates={len(candidates)} examined={examined}"
         f" affected={len(affected)} not_probed={len(not_probed)} errors={len(errors)}"
-        f" requeued={len(requeued)} not_requeued={len(skipped)}"
+        f" requeued={len(requeued)} not_requeued={len(skipped)}{id_rejected_note}"
         + ("" if complete else " (PARTIAL catalog read; some datasets were not examined)")
     )
     if affected and not execute:
         print("re-run with --execute to requeue the affected datasets")
     return {
         "candidates": len(candidates),
+        "id_rejected": len(id_rejected),
+        "id_rejected_sample": id_rejected[:REJECTED_SAMPLE_SIZE],
         "examined": examined,
         "findings": findings,
         "affected": affected,
@@ -1399,6 +1456,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--engine-requeue-ack",
         action="store_true",
         help="acknowledge a bump above --engine-requeue-limit and apply it",
+    )
+    p.add_argument(
+        "--accept-exemplars",
+        action="store_true",
+        help="also enqueue the dev exemplar fleet (xx099900-xx099999); the staging"
+        " profile's flag, refused against api.nemar.org",
     )
 
     sub.add_parser("next")
@@ -1494,8 +1557,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="actually requeue the affected datasets (`done` -> `pending`);"
         " without it the sweep only reports",
     )
+    p.add_argument(
+        "--accept-exemplars",
+        action="store_true",
+        help="also examine the dev exemplar fleet (xx099900-xx099999); the staging"
+        " profile's flag, refused against api.nemar.org",
+    )
 
     return ap
+
+
+def refuse_exemplars_against_production(args: argparse.Namespace) -> None:
+    """Fail before any catalog fetch when --accept-exemplars targets production.
+
+    Guarded here, once, for every subcommand that carries the flag: a
+    misconfigured production run must never admit a sandbox id, however the
+    catalog answers.
+    """
+    api_host = urllib.parse.urlsplit(args.api_base).hostname or ""
+    if getattr(args, "accept_exemplars", False) and api_host == "api.nemar.org":
+        raise SystemExit(
+            "refusing --accept-exemplars against the production API: the xx band"
+            " is the sandbox there, not the exemplar fleet"
+        )
 
 
 def main() -> int:
@@ -1503,6 +1587,7 @@ def main() -> int:
     conn = connect(args.db)
 
     if args.cmd == "reconcile":
+        refuse_exemplars_against_production(args)
         datasets, complete = fetch_public_datasets(args.api_base)
         res = reconcile(
             conn,
@@ -1513,7 +1598,11 @@ def main() -> int:
             # 0 spells "no guard" on a CLI where None cannot be typed.
             engine_requeue_limit=args.engine_requeue_limit or None,
             engine_requeue_ack=args.engine_requeue_ack,
+            accept_exemplars=args.accept_exemplars,
         )
+        rejected_note = f"rejected={res['rejected']}"
+        if res["rejected_sample"]:
+            rejected_note += f" ({', '.join(res['rejected_sample'])})"
         # `engine_stale` is printed on every run, not only when it is non-zero:
         # an engine bump is the one reconcile outcome that can requeue hundreds
         # of datasets at once, and a steady `engine_stale=0` in the cron log is
@@ -1521,7 +1610,7 @@ def main() -> int:
         print(
             f"reconcile: seen={len(datasets)} enqueued={res['enqueued']} "
             f"recovered_stale={res['recovered_stale']} unlisted={res['unlisted']} "
-            f"rejected={res['rejected']} engine={ZARR_ENGINE_VERSION} "
+            f"{rejected_note} engine={ZARR_ENGINE_VERSION} "
             f"engine_stale={res['engine_stale']} engine_requeued={res['engine_requeued']} "
             # Coverage (#1197), on every run for the same reason engine_stale is:
             # a steady zero is what makes the run that says otherwise legible.
@@ -1607,6 +1696,7 @@ def main() -> int:
         return 0
 
     if args.cmd == "backfill-dir-formats":
+        refuse_exemplars_against_production(args)
         res = sweep_dir_format_backfill(
             conn,
             api_base=args.api_base,
@@ -1617,6 +1707,7 @@ def main() -> int:
             sleep_seconds=args.sleep,
             probe=not args.no_probe,
             execute=args.execute,
+            accept_exemplars=args.accept_exemplars,
         )
         # A sweep that could not read some datasets did not answer the question
         # for them. Exit non-zero so a scripted run cannot record "no datasets

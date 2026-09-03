@@ -24,6 +24,8 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -55,6 +57,9 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     _drain_with_admission,
     worker_mem_limit_bytes,
     apply_worker_mem_limit,
+    cap_blas_threads,
+    data_segment_bytes,
+    BLAS_THREAD_VARS,
     MEM_LIMIT_FLOOR_BYTES,
     MEM_LIMIT_SLACK,
     admission_reserve_bytes,
@@ -3250,6 +3255,79 @@ class TestWorkerMemLimit(unittest.TestCase):
         apply_worker_mem_limit(4 * 1024**3, 8 * 1024**3)
         apply_worker_mem_limit(None, None)
 
+    def test_the_limit_sits_on_top_of_the_data_segment_the_worker_already_holds(self):
+        """The reservation is headroom for the recording, not an absolute cap.
+
+        On the conversion node numpy+scipy reserve 2.6 GiB of RLIMIT_DATA at
+        import (OpenBLAS buffer pools) against 100 MB of RSS, so an absolute
+        4 GiB floor left ~1.3 GiB and a 4 MB EMG recording failed a 624 KiB
+        allocation as "exceeded its memory budget" (2026-09-03). Linux only:
+        that is the only platform the backstop is applied on.
+        """
+        if not sys.platform.startswith("linux"):
+            self.skipTest("RLIMIT_DATA backstop is Linux-only")
+        import resource
+
+        reserve = 4 * 1024**3
+        before = data_segment_bytes()
+        self.assertIsNotNone(before)
+        apply_worker_mem_limit(reserve, 64 * 1024**3, reserved=True)
+        after = data_segment_bytes()
+        soft = resource.getrlimit(resource.RLIMIT_DATA)[0]
+        # The baseline is read inside the call, between our two readings.
+        self.assertGreaterEqual(soft, before + reserve)
+        self.assertLessEqual(soft, after + reserve + 64 * 1024**2)
+
+    def test_the_ceiling_caps_the_reserve_not_the_sum_with_the_baseline(self):
+        """A recording admitted AT the ceiling must still get the whole ceiling
+        for its own allocations. Clamping the sum would leave it `baseline`
+        short of what admission charged -- the original bug at smaller scale."""
+        if not sys.platform.startswith("linux"):
+            self.skipTest("RLIMIT_DATA backstop is Linux-only")
+        import resource
+
+        ceiling = 2 * 1024**3
+        before = data_segment_bytes()
+        apply_worker_mem_limit(8 * 1024**3, ceiling, reserved=True)
+        after = data_segment_bytes()
+        soft = resource.getrlimit(resource.RLIMIT_DATA)[0]
+        self.assertGreaterEqual(soft, before + ceiling)
+        self.assertLessEqual(soft, after + ceiling + 64 * 1024**2)
+
+    def test_data_segment_is_measured_where_the_backstop_applies(self):
+        value = data_segment_bytes()
+        if sys.platform.startswith("linux"):
+            self.assertIsInstance(value, int)
+            self.assertGreater(value, 0)
+        else:
+            self.assertIsNone(value)
+
+
+class TestBlasThreadCaps(unittest.TestCase):
+    """Per-recording BLAS threading oversubscribes the node and, on the
+    conversion node, costs each worker ~2.4 GiB of RLIMIT_DATA headroom in
+    pre-mapped OpenBLAS buffer pools (see the note above BLAS_THREAD_VARS)."""
+
+    def test_every_pool_is_pinned_to_one_thread_when_unset(self):
+        env: dict[str, str] = {}
+        effective = cap_blas_threads(env)
+        self.assertEqual(effective, {var: "1" for var in BLAS_THREAD_VARS})
+        self.assertEqual(env, effective)
+
+    def test_an_operator_value_is_respected(self):
+        env = {"OPENBLAS_NUM_THREADS": "4"}
+        effective = cap_blas_threads(env)
+        self.assertEqual(effective["OPENBLAS_NUM_THREADS"], "4")
+        for var in BLAS_THREAD_VARS:
+            if var != "OPENBLAS_NUM_THREADS":
+                self.assertEqual(effective[var], "1")
+
+    def test_importing_the_converter_pins_this_process(self):
+        # The module-level call is what protects the driver and, by inheritance,
+        # every pool worker; an operator override in the environment survives.
+        for var in BLAS_THREAD_VARS:
+            self.assertIn(var, os.environ)
+
 
 class TestPoolBreakRecovery(unittest.TestCase):
     """#1110: a killed worker must cost one recording, not the whole queue."""
@@ -4981,12 +5059,30 @@ class TestFetchDatasetRow(unittest.TestCase):
     provenance attrs depend on its parsing (two response shapes) and on it never
     failing a conversion when the catalog is unreachable."""
 
-    def serve(self, handler_body: bytes | None, status: int = 200):
+    def serve(
+        self,
+        handler_body: bytes | None,
+        status: int = 200,
+        refuse_user_agent_prefix: str | None = None,
+        seen_user_agents: list[str] | None = None,
+    ):
+        """A real server on a real socket. `refuse_user_agent_prefix` makes it
+        play the Cloudflare edge in front of api.nemar.org, which 403s the
+        default Python-urllib User-Agent; `seen_user_agents` records what each
+        request sent so a test can assert on the header itself."""
         import threading
         from http.server import BaseHTTPRequestHandler, HTTPServer
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
+                ua = self.headers.get("User-Agent", "")
+                if seen_user_agents is not None:
+                    seen_user_agents.append(ua)
+                if refuse_user_agent_prefix is not None and (
+                    not ua or ua.startswith(refuse_user_agent_prefix)
+                ):
+                    self.send_error(403, "error code: 1010")
+                    return
                 if handler_body is None:
                     self.send_error(500)
                     return
@@ -5002,6 +5098,7 @@ class TestFetchDatasetRow(unittest.TestCase):
         server = HTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
+        self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         return f"http://127.0.0.1:{server.server_port}"
 
@@ -5016,6 +5113,36 @@ class TestFetchDatasetRow(unittest.TestCase):
         row, failed = fetch_dataset_row(base, "on007763")
         self.assertEqual(row["license"], "CC-BY-4.0")
         self.assertIs(failed, False)
+
+    def test_identifies_itself_so_the_cloudflare_edge_does_not_403_it(self):
+        """Cloudflare 403s the default Python-urllib User-Agent on api.nemar.org.
+
+        The first engine-3 production run (on004696, 2026-09-03) fetched with no
+        User-Agent and flagged every store `provenance_fetch_failed`; this pins
+        the header so the fetch cannot quietly regress to the blocked default.
+        """
+        seen: list[str] = []
+        base = self.serve(
+            json.dumps({"dataset": {"id": "on000001", "doi": "10.1/x"}}).encode(),
+            refuse_user_agent_prefix="Python-urllib",
+            seen_user_agents=seen,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            row, failed = fetch_dataset_row(base, "on000001")
+        self.assertIs(failed, False)
+        self.assertEqual(row, {"id": "on000001", "doi": "10.1/x"})
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0].startswith("nemar-zarr-converter/"), seen)
+        self.assertIn(ZARR_ENGINE_VERSION, seen[0])
+
+    def test_the_refusing_server_does_refuse_the_bare_urllib_default(self):
+        # The fixture must actually discriminate, or the test above proves
+        # nothing: a bare urllib request against the same server is a 403.
+        base = self.serve(b"{}", refuse_user_agent_prefix="Python-urllib")
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(f"{base}/datasets/on000001", timeout=5)
+        self.assertEqual(ctx.exception.code, 403)
+        ctx.exception.close()
 
     def test_a_500_is_reported_as_a_FETCH_FAILURE_not_an_absent_field(self):
         """The distinction the flag exists for.

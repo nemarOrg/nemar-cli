@@ -169,6 +169,10 @@ def test_test_mode_print_config_defaults(dirs: tuple[Path, Path]) -> None:
     work_dir = f"{zarr_base}/zarr-scratch-test"
 
     assert cfg["TEST_MODE"] == "1"
+    # The staging catalog is the xx0999NN exemplar fleet, which reconcile's
+    # production id filter rejects; --test must pass --accept-exemplars or the
+    # nightly run reports `rejected=7` and converts nothing (seen 2026-09-03).
+    assert cfg["ACCEPT_EXEMPLARS"] == "1"
     assert cfg["API_BASE"] == "https://api-test.nemar.org"
     # The `nemar` CLI (shelled out to for the metadata clone) resolves its own
     # API base independently of API_BASE -- see the pre-pass comment in
@@ -697,6 +701,7 @@ def ack_run(tmp_path: Path):
     def run(
         reconcile_out: str = "queued=0 parked=0",
         extra_env: dict[str, str] | None = None,
+        args: list[str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = base_env(zarr_base, home)
         env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
@@ -712,7 +717,7 @@ def ack_run(tmp_path: Path):
         if extra_env:
             env.update(extra_env)
         return subprocess.run(
-            ["bash", str(SCRIPT)],
+            ["bash", str(SCRIPT), *(args or [])],
             env=env,
             capture_output=True,
             text=True,
@@ -785,3 +790,57 @@ def test_the_env_var_form_arms_a_run_without_touching_the_file(ack_run) -> None:
     assert "ZARR_ENGINE_BUMP_ACK" in result.stdout + result.stderr
     # No file was created, and none was needed.
     assert not ack_file.exists()
+
+
+def _calls_for(qpy_calls, subcommand: str) -> list[str]:
+    # A recorded call is `<zarr_queue.py> --db <path> <subcommand> ...`.
+    return [c for c in qpy_calls() if subcommand in c.split()]
+
+
+def test_test_mode_passes_accept_exemplars_to_reconcile(ack_run) -> None:
+    """The staging catalog is the xx0999NN exemplar fleet, which reconcile's
+    production id filter rejects. `--test` has to hand reconcile
+    `--accept-exemplars` or the nightly run reports `rejected=7` and converts
+    nothing -- which is what it did for a day (2026-09-03). Asserted on the
+    argv the real script builds, not on --print-config, so a later edit that
+    drops the flag from `reconcile_args` fails here."""
+    run, qpy_calls, _ack_file, _log = ack_run
+    proc = run(args=["--test"])
+    assert proc.returncode == 0, proc.stderr
+    calls = _calls_for(qpy_calls, "reconcile")
+    assert len(calls) == 1, qpy_calls()
+    assert "--accept-exemplars" in calls[0].split()
+    assert "--api-base https://api-test.nemar.org" in calls[0]
+
+
+def test_plain_run_never_passes_accept_exemplars(ack_run) -> None:
+    """Production reconcile must not admit the xx band: no flag without --test."""
+    run, qpy_calls, _ack_file, _log = ack_run
+    proc = run()
+    assert proc.returncode == 0, proc.stderr
+    calls = _calls_for(qpy_calls, "reconcile")
+    assert len(calls) == 1, qpy_calls()
+    assert "--accept-exemplars" not in calls[0].split()
+
+
+def test_backfill_sweep_gets_accept_exemplars_only_under_test(ack_run) -> None:
+    """`--backfill-dir-formats` walks the catalog with the same id filter as
+    reconcile, so the staging profile has to opt it in the same way. This is
+    the exact class of gap the review of #1211 found (the flag reaching one
+    catalog walk and not the other), asserted on the recorded argv for both
+    the --test and the plain invocation."""
+    run, qpy_calls, _ack_file, _log = ack_run
+    proc = run(args=["--test", "--backfill-dir-formats"])
+    assert proc.returncode == 0, proc.stderr
+    calls = _calls_for(qpy_calls, "backfill-dir-formats")
+    assert len(calls) == 1, qpy_calls()
+    assert "--accept-exemplars" in calls[0].split()
+    assert "--api-base https://api-test.nemar.org" in calls[0]
+
+    proc = run(args=["--backfill-dir-formats"])
+    assert proc.returncode == 0, proc.stderr
+    calls = _calls_for(qpy_calls, "backfill-dir-formats")
+    assert len(calls) == 2, qpy_calls()
+    assert "--accept-exemplars" not in calls[1].split()
+    assert "--api-base https://api.nemar.org" in calls[1]
+
