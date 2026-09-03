@@ -97,4 +97,26 @@ describe("formatFileSize", () => {
     expect(formatFileSize(100 * 1024 * 1024 * 1024)).toBe("100 GB");
     expect(formatFileSize(99.5 * 1024 * 1024 * 1024)).toBe("99.50 GB");
   });
+
+  // Golden coverage (epic #1225 phase 4, issue #1227). The expected strings
+  // were computed independently against a verbatim copy of the current
+  // formatter and cross-checked by running the real function in this
+  // worktree before any implementation change landed -- see the phase 4
+  // implementation brief on issue #1227 for the full six-formatter table
+  // this is one column of. This is the canonical served formatter (moves
+  // verbatim to shared/bytes.ts in the consolidation commit that follows);
+  // dataset-detail-contract.test.ts pins the same contract through the real
+  // catalog route.
+  test("golden vector — phase 4 pinned magnitudes (issue #1227)", () => {
+    expect(formatFileSize(1)).toBe("1 B");
+    expect(formatFileSize(1023)).toBe("1023 B");
+    expect(formatFileSize(1024)).toBe("1.00 KB");
+    expect(formatFileSize(1536)).toBe("1.50 KB");
+    expect(formatFileSize(1048576)).toBe("1.00 MB");
+    expect(formatFileSize(1073741824)).toBe("1.00 GB");
+    expect(formatFileSize(4628000000)).toBe("4.31 GB");
+    expect(formatFileSize(24000000000)).toBe("22.35 GB");
+    expect(formatFileSize(1099511627776)).toBe("1.00 TB");
+    expect(formatFileSize(1024 ** 5)).toBe("1024 TB"); // 1 PiB, clamps correctly (no bug here)
+  });
 });

@@ -544,6 +544,21 @@ describe("humanSize", () => {
     // Petabyte tier is the top unit; values above stay in P.
     expect(humanSize(1024 ** 5)).toBe("1.0P");
   });
+
+  // Golden coverage (epic #1225 phase 4, issue #1227). The expected strings
+  // were computed independently against a verbatim copy of the current
+  // formatter and cross-checked by running the real function in this
+  // worktree before any implementation change landed -- see the phase 4
+  // implementation brief on issue #1227 for the full six-formatter table
+  // this is one column of.
+  test("golden vector — phase 4 pinned magnitudes (issue #1227)", () => {
+    expect(humanSize(1)).toBe("1");
+    expect(humanSize(1023)).toBe("1023");
+    expect(humanSize(1536)).toBe("1.5K");
+    expect(humanSize(4628000000)).toBe("4.3G");
+    expect(humanSize(24000000000)).toBe("22G");
+    expect(humanSize(1099511627776)).toBe("1.0T");
+  });
 });
 
 describe("renderIndexHtml", () => {
@@ -598,6 +613,21 @@ describe("renderIndexHtml", () => {
       entries: [{ kind: "file", name: "a&b?c#d.txt", size: 1 }],
     });
     expect(html).toContain('href="a%26b%3Fc%23d.txt"');
+  });
+
+  // Golden coverage (epic #1225 phase 4, issue #1227): pins humanSize's
+  // compact format (no space between number and unit) as it actually
+  // renders in the served directory-listing HTML, not just as a standalone
+  // function result -- this is the "served HTML" assertion the phase 4
+  // brief's mutation-verification step targets for formatBytesCompact.
+  test("size column renders humanSize's compact form with no separating space", () => {
+    const html = renderIndexHtml({
+      datasetId: "nm099999",
+      version: "v1.0.0",
+      path: "",
+      entries: [{ kind: "file", name: "big.edf", size: 1536 }],
+    });
+    expect(html).toContain('<td class="size">1.5K</td>');
   });
 });
 
@@ -664,6 +694,25 @@ describe("formatBytes", () => {
     expect(formatBytes(-1)).toBeNull();
     expect(formatBytes(Number.NaN)).toBeNull();
     expect(formatBytes(Number.POSITIVE_INFINITY)).toBeNull();
+  });
+
+  // Golden coverage (epic #1225 phase 4, issue #1227). The expected strings
+  // were computed independently against a verbatim copy of the current
+  // formatter and cross-checked by running the real function in this
+  // worktree before any implementation change landed -- see the phase 4
+  // implementation brief on issue #1227 for the full six-formatter table
+  // this is one column of. `data_summary.size_human` below (two existing
+  // "latestManifest:null falls back..." style assertions further down this
+  // file) already drives this formatter through the real
+  // buildDatasetMetadata consumer.
+  test("golden vector — phase 4 pinned magnitudes (issue #1227)", () => {
+    expect(formatBytes(1)).toBe("1 B");
+    expect(formatBytes(1023)).toBe("1023 B");
+    expect(formatBytes(1536)).toBe("1.50 KB");
+    expect(formatBytes(4628000000)).toBe("4.31 GB");
+    expect(formatBytes(24000000000)).toBe("22.4 GB");
+    expect(formatBytes(1099511627776)).toBe("1.00 TB");
+    expect(formatBytes(1024 ** 5)).toBe("1.00 PB"); // 1 PiB
   });
 });
 
