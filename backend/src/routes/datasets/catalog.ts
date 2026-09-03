@@ -217,10 +217,12 @@ export function deriveZarrIndexUrl(
  * summary specifically so a dataset could say "2 of 43", and the detail route
  * silently served neither. `events_upload_failed`/`manifest_upload_failed` are
  * the same shape (a sibling document the converter could not publish). The
- * contract in `shared/contract/dataset.ts` declares the object CLOSED, so a new
- * key needs three edits -- writer, this projection, contract -- and the
- * round-trip test in `backend/test/catalog-has-zarr.test.ts` fails when one is
- * missing.
+ * contract in `shared/contract/dataset.ts` declares the object `.passthrough()`,
+ * so an undeclared key it receives survives rather than being stripped -- but
+ * that is a backstop, not the mechanism: a key this projection never reads is
+ * never in the object to begin with. A new key still needs three edits --
+ * writer, this projection, contract -- and the round-trip test in
+ * `backend/test/catalog-has-zarr.test.ts` fails when one is missing.
  */
 export function parseZarrDataFailures(
   raw: unknown,

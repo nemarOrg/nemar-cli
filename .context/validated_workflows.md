@@ -1248,7 +1248,13 @@ curl -s https://zarr-test.nemar.org/xx099905/zarr/index.json |
 #    It re-queues nothing yet -- the guard below holds it, because ~800 rows is
 #    far over ENGINE_REQUEUE_LIMIT.
 
-# 3. Preview the cost before paying it. Read-only, no network, no writes.
+# 3. Preview the cost before paying it. No network, and it changes no job's
+#    STATE -- it only counts what a bump would re-queue. Not literally
+#    read-only: zarr_queue.py's main() connects for every subcommand, and
+#    connect runs migrate_schema, whose additive ALTER and engine_version seed
+#    are idempotent and re-run on every connect. On a node that has never run
+#    the current queue schema the preview writes those, exactly as the next
+#    reconcile would. Nothing is enqueued, parked, or reset.
 ssh hallu '/mnt/local/zarr-state/nemar-cli/scripts/zarr/hallu-zarr.sh --preview-engine-bump'
 #    Expect: engine-preview: current=3 ... stale=<~800>, i.e. the whole catalogue.
 
