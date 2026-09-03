@@ -444,6 +444,21 @@ export function parseFilterQuery(
   return filters;
 }
 
+/**
+ * Issue #1152: `GET /datasets`, `GET /datasets/search`, and `GET
+ * /datasets/resolve/:id` require no auth, so a raw `Error#message` returned
+ * as `details` on their failure paths -- table/column names, query shape,
+ * occasionally file-path fragments -- reaches any anonymous caller. The full
+ * message is still logged server-side via `console.error`/`console.warn`
+ * immediately before each of these is returned; this constant only changes
+ * what crosses the wire. Deliberately scoped to these three endpoints
+ * (`catalog.ts`) per the issue -- other route files with the same `details:
+ * msg` idiom are authenticated/admin contexts where the detail is actionable
+ * rather than a disclosure risk, and are the issue's own stated follow-up,
+ * not this fix.
+ */
+const ANONYMOUS_ERROR_DETAILS = "An internal error occurred while processing this request.";
+
 function buildSortClause(sort: string): string {
   switch (sort) {
     case "oldest":
@@ -659,12 +674,20 @@ async function executeAndReturn(
       } catch (fallbackErr) {
         const fallbackMsg =
           fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
-        return c.json({ error: "Failed to retrieve datasets", details: fallbackMsg }, 500);
+        // #1152: this catch had no console.error before -- the raw message was
+        // only ever visible in the (also-raw) `details` field being removed here.
+        console.error("Failed to query datasets (fallback):", fallbackMsg);
+        return c.json(
+          { error: "Failed to retrieve datasets", details: ANONYMOUS_ERROR_DETAILS },
+          500,
+        );
       }
     }
 
     console.error("Failed to query datasets:", msg);
-    return c.json({ error: "Failed to retrieve datasets", details: msg }, 500);
+    // #1152: anonymous callers get a generic, stable string; the real message
+    // is already logged above.
+    return c.json({ error: "Failed to retrieve datasets", details: ANONYMOUS_ERROR_DETAILS }, 500);
   }
 }
 
@@ -1030,7 +1053,9 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("Dataset search failed:", msg);
-      return c.json({ error: "Search failed", details: msg }, 500);
+      // #1152: anonymous callers get a generic, stable string; the real
+      // message is already logged above.
+      return c.json({ error: "Search failed", details: ANONYMOUS_ERROR_DETAILS }, 500);
     }
   });
 
@@ -1147,7 +1172,9 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[resolve] Failed to resolve source_id ${sourceId}:`, msg);
-      return c.json({ error: "Failed to resolve dataset", details: msg }, 500);
+      // #1152: anonymous callers get a generic, stable string; the real
+      // message is already logged above.
+      return c.json({ error: "Failed to resolve dataset", details: ANONYMOUS_ERROR_DETAILS }, 500);
     }
   });
 
