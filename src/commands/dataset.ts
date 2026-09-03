@@ -4713,7 +4713,7 @@ Examples:
           if (annexed.length > 0) {
             console.log(chalk.bold(`  Annexed files (${annexed.length}):`));
             for (const [path, file] of annexed) {
-              const sizeStr = formatSize(file.size);
+              const sizeStr = formatBytesCli(file.size);
               console.log(`    ${path} ${chalk.dim(`(${sizeStr})`)}`);
             }
           }
@@ -4722,7 +4722,7 @@ Examples:
             console.log();
             console.log(chalk.bold(`  Metadata files (${gitFiles.length}):`));
             for (const [path, file] of gitFiles) {
-              const sizeStr = formatSize(file.size);
+              const sizeStr = formatBytesCli(file.size);
               console.log(`    ${path} ${chalk.dim(`(${sizeStr})`)}`);
             }
           }
@@ -4740,11 +4740,3 @@ Examples:
       process.exit(1);
     }
   });
-
-function formatSize(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  const size = bytes / 1024 ** i;
-  return `${size.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
-}
