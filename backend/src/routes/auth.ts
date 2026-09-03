@@ -309,6 +309,7 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
         fromEmail,
         replyTo,
         isDev,
+        c.env,
       );
       emailSent = true;
     } catch (emailError) {
@@ -495,6 +496,7 @@ authRoutes.get("/verify", async (c) => {
         fromEmail,
         replyTo,
         isDev,
+        c.env,
       );
     }
   } catch (emailError) {
@@ -690,6 +692,7 @@ authRoutes.post("/resend-verification", zValidator("json", resendSchema), async 
     fromEmail,
     replyTo,
     isDev,
+    c.env,
   );
 
   return c.json({ message: "Verification email sent" });
@@ -881,6 +884,7 @@ authRoutes.post("/request-key-regeneration", zValidator("json", regenRequestSche
       fromEmail,
       replyTo,
       isDev,
+      c.env,
     );
   } catch (emailError) {
     console.error("Failed to send key regeneration email:", emailError);

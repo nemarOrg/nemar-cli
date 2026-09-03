@@ -287,9 +287,21 @@ describe("sendBroadcast RESEND_API_KEY precondition", () => {
   });
 
   test("valid key proceeds to call Resend and returns broadcast_id", async () => {
-    // The DB stub returns id: 1 from the RETURNING clause.
+    // The DB stub returns id: 1 from the RETURNING clause. ENVIRONMENT:
+    // "production" opts this call out of the #957 non-production delivery
+    // fence (services/email.ts's isEmailDeliveryAllowed) -- this test is
+    // about the RESEND_API_KEY precondition, not the fence, and fetch is
+    // already fully redirected to the local fake server above either way.
     const db = makeD1Stub();
-    const result = await sendBroadcast(db, "re_valid_key_abc123", "from@nemar.org", baseParams);
+    const result = await sendBroadcast(
+      db,
+      "re_valid_key_abc123",
+      "from@nemar.org",
+      baseParams,
+      undefined,
+      undefined,
+      { ENVIRONMENT: "production" },
+    );
 
     expect(result.error).toBeUndefined();
     expect(result.broadcast_id).toBe(1);

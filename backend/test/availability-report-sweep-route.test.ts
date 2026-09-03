@@ -108,24 +108,29 @@ function post(path: string): Promise<Response> {
 
 /** Seed a dataset row. `stamped` sets the availability_report_at stamp in
  *  sweep_stamps (#1183) so it is excluded; otherwise sweep_stamps stays NULL,
- *  the fresh post-0073 row shape the sweep must treat as never-stamped. */
+ *  the fresh post-0073 row shape the sweep must treat as never-stamped.
+ *  `isExemplar` sets `is_exemplar` (issue #1168's carve-out target -- the
+ *  curated fleet is inserted `is_sandbox = 1`, so it only stays a candidate
+ *  when both are set). */
 function seedDataset(
   id: string,
   opts: {
     githubRepo?: string | null;
     isSandbox?: 0 | 1;
+    isExemplar?: 0 | 1;
     stamped?: boolean;
     dataComplete?: 0 | 1 | null;
   } = {},
 ): void {
   db.prepare(
-    `INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo, is_sandbox, sweep_stamps, data_complete)
-     VALUES (?, ?, 1, ?, ?, ?, ?)`,
+    `INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo, is_sandbox, is_exemplar, sweep_stamps, data_complete)
+     VALUES (?, ?, 1, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     id,
     opts.githubRepo === undefined ? `nemarDatasets/${id}` : opts.githubRepo,
     opts.isSandbox ?? 0,
+    opts.isExemplar ?? 0,
     opts.stamped ? '{"availability_report_at":"2026-07-01 00:00:00"}' : null,
     opts.dataComplete ?? null,
   );
@@ -281,6 +286,16 @@ describe("availability-report-sweep candidate SQL (pinned, no route dispatch)", 
     seedDataset("nm000305", { stamped: true }); // excluded: already stamped
 
     expect(candidates(false)).toEqual(["nm000300", "on000301"]);
+  });
+
+  // Issue #1168: the curated exemplar fleet is inserted `is_sandbox = 1`
+  // (AGENTS.md's dataset ID bands) but is permanent, not churning -- the
+  // base WHERE's exemplarOrFragment() carve-out must still admit it.
+  test("an is_exemplar=1 sandbox-band row is a candidate, unlike a plain sandbox row (#1168)", () => {
+    seedDataset("xx090001", { isSandbox: 1 }); // excluded: plain sandbox
+    seedDataset("xx099901", { isSandbox: 1, isExemplar: 1 }); // included: exemplar carve-out
+
+    expect(candidates(false)).toEqual(["xx099901"]);
   });
 
   test("?missing-only candidate query selects only data_complete=0 among otherwise-qualifying rows", () => {
