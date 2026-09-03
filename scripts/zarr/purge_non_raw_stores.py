@@ -2,7 +2,8 @@
 """Purge already-published non-raw Zarr stores (nemarOrg/nemar-cli#1095,
 tracked by nemarOrg/nemar-cli#1097).
 
-PR #98 made `generate_zarr.py` raw-only: `derivatives/`, `sourcedata/`, and
+nemarDatasets/.github#98 made `generate_zarr.py` raw-only (the converter
+lived in that repo at the time; ADR 0029 later repatriated it here): `derivatives/`, `sourcedata/`, and
 `code/` are no longer walked for NEW recordings. It deliberately left the
 stores that earlier, tree-walking runs had already published under those
 trees alone -- `compute_clean_orphans` in that file explicitly protects an
@@ -562,7 +563,8 @@ def _execute_target_step(bucket: str, dataset_id: str, step: dict, *, execute: b
     decisions it defers to -- whether an object count means "already gone"
     versus "delete this" (`decide_target_action`) and what a finished batch
     of these outcomes means for the index (`summarize_target_outcomes`) --
-    are pure and are.
+    are pure, and those ARE covered, directly, in
+    `test_purge_non_raw_stores.py`.
 
     Returns one outcome dict for `summarize_target_outcomes`, carrying
     `rel_store`, `path`, `key_prefix`, `state`, `object_count`, `bytes`, and

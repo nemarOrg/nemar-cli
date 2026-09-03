@@ -8,6 +8,11 @@ Architecture Decision Records (ADRs) capture significant decisions that shape th
 - `0000-template.md` is the template; copy it to start a new ADR. Do not edit `0000-template.md` itself.
 - Number sequentially. The next ADR after `0007-...` is `0008-...`.
 - Status flows `proposed` -> `accepted` -> (later) `superseded by ADR-NNNN`. Never delete an ADR; supersede it.
+- An `Amendment YYYY-MM-DD:` block inside an accepted ADR is for a CLARIFICATION that leaves the
+  verdict standing -- naming a mechanism the decision always implied, correcting a stale file path,
+  recording what the decision turned out to cost. Anything that changes what was decided is a new
+  ADR that supersedes this one, not an amendment: an amended verdict is invisible to anyone who
+  read the ADR before, and the whole point of the `Status` line is that the verdict is findable.
 - Keep each ADR short. If it grows past two screens, you are probably writing a design doc, not a decision.
 
 ## When to write an ADR

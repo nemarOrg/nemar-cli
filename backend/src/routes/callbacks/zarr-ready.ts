@@ -166,9 +166,9 @@ export function zarrFailureColumns(body: {
   const eventsUploadFailed = body.events_upload_failed === true;
   const manifestUploadFailed = body.manifest_upload_failed === true;
   // The summary is written when there is anything to say -- a failure list, OR
-  // pending recordings with no failures at all, which is precisely the on008083
-  // shape (#1197) that used to leave the column NULL and the recordings
-  // invisible. `count` alone kept that case silent. An unpublished sibling is
+  // pending recordings with no failures at all, which is precisely the
+  // pending-with-no-failures shape (#1197) that used to leave the column NULL
+  // and the recordings invisible. `count` alone kept that case silent. An unpublished sibling is
   // also something to say: a run with no failures and no pending recordings that
   // published index.json without its manifest is not a clean run.
   const hasSummary =
@@ -477,14 +477,18 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
       }
     }
 
-    // `not_attempted` and `non_raw_dropped` are persisted nowhere: the first is a
-    // subset of `pending` that the bounded summary does not break out, the second
-    // is a per-run operational fact about carried-over stores (ADR 0027) that no
-    // column owns. Logging them here is the only place either is visible to
-    // anyone not tailing the conversion node's cron log -- which is the same
-    // reason `pending`/`discovered` are on this line.
+    // `not_attempted`, `non_raw_dropped` and `provenance_fetch_failed` are
+    // persisted nowhere: the first is a subset of `pending` that the bounded
+    // summary does not break out, the second is a per-run operational fact about
+    // carried-over stores (ADR 0027), and the third says this wave's stores carry
+    // null doi/license/citation/hed_version because the CATALOG READ failed, not
+    // because the data lacks them -- which is the difference between "nothing to
+    // publish" and "we could not find out". None has a column, so logging them
+    // here is the only place any of them is visible to anyone not tailing the
+    // conversion node's cron log -- the same reason `pending`/`discovered` are on
+    // this line.
     console.log(
-      `[zarr-ready] dataset=${body.dataset_id} status=${status} stores=${body.store_count ?? "?"} converted=${body.converted?.length ?? 0} removed=${body.removed?.length ?? 0} purged=${purge?.submitted ?? 0} pool_breaks=${body.pool_breaks ?? "?"} pending=${body.pending_count ?? "?"} discovered=${body.discovered_count ?? "?"} not_attempted=${body.not_attempted_count ?? "?"} non_raw_dropped=${body.non_raw_dropped ?? "?"} events_rows=${body.events_row_count ?? "none"} events_upload_failed=${body.events_upload_failed ?? false} manifest_upload_failed=${body.manifest_upload_failed ?? false} events_stores_without_rows=${body.events_stores_without_rows ?? "?"}`,
+      `[zarr-ready] dataset=${body.dataset_id} status=${status} stores=${body.store_count ?? "?"} converted=${body.converted?.length ?? 0} removed=${body.removed?.length ?? 0} purged=${purge?.submitted ?? 0} pool_breaks=${body.pool_breaks ?? "?"} pending=${body.pending_count ?? "?"} discovered=${body.discovered_count ?? "?"} not_attempted=${body.not_attempted_count ?? "?"} non_raw_dropped=${body.non_raw_dropped ?? "?"} provenance_fetch_failed=${body.provenance_fetch_failed ?? "?"} events_rows=${body.events_row_count ?? "none"} events_upload_failed=${body.events_upload_failed ?? false} manifest_upload_failed=${body.manifest_upload_failed ?? false} events_stores_without_rows=${body.events_stores_without_rows ?? "?"}`,
     );
 
     // A store that has an events.tsv but contributed no rows is data the

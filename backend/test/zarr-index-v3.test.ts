@@ -370,10 +370,11 @@ describe("POST /webhooks/zarr-ready persists the coverage counts", () => {
     }
     const summaries = lines.filter((l) => l.includes("[zarr-ready] dataset="));
     expect(summaries[0]).toContain("events_rows=5120");
-    // Validated and then never read is the same as not validated: these two have
-    // no column and no other consumer, so the log line is where they exist.
+    // Validated and then never read is the same as not validated: these three
+    // have no column and no other consumer, so the log line is where they exist.
     expect(summaries[0]).toContain("not_attempted=?");
     expect(summaries[0]).toContain("non_raw_dropped=?");
+    expect(summaries[0]).toContain("provenance_fetch_failed=?");
     expect(summaries[0]).toContain("events_upload_failed=false");
     expect(summaries[0]).toContain("manifest_upload_failed=false");
     expect(summaries[0]).toContain("events_stores_without_rows=0");
@@ -392,10 +393,11 @@ describe("POST /webhooks/zarr-ready persists the coverage counts", () => {
   });
 
   test("the operational counts with no column reach the summary log", async () => {
-    // `not_attempted_count` and `non_raw_dropped` are validated by the schema and
-    // persisted by nothing: the first is a subset of `pending` the bounded
-    // summary does not break out, the second is a per-run fact about carried-over
-    // stores (ADR 0027). If they are not on this line they are nowhere off-node.
+    // `not_attempted_count`, `non_raw_dropped` and `provenance_fetch_failed` are
+    // validated by the schema and persisted by nothing: a subset of `pending`
+    // the bounded summary does not break out, a per-run fact about carried-over
+    // stores (ADR 0027), and the reason this wave's provenance fields are null.
+    // If they are not on this line they are nowhere off-node.
     const lines: string[] = [];
     const realLog = console.log;
     console.log = (...args: unknown[]) => lines.push(args.join(" "));
@@ -408,6 +410,7 @@ describe("POST /webhooks/zarr-ready persists the coverage counts", () => {
         discovered_count: 43,
         not_attempted_count: 3,
         non_raw_dropped: 92,
+        provenance_fetch_failed: true,
       });
     } finally {
       console.log = realLog;
@@ -415,6 +418,11 @@ describe("POST /webhooks/zarr-ready persists the coverage counts", () => {
     const summary = lines.find((l) => l.includes("[zarr-ready] dataset="));
     expect(summary).toContain("not_attempted=3");
     expect(summary).toContain("non_raw_dropped=92");
+    // The stores in this wave carry null doi/license/citation/hed_version
+    // because the CATALOG READ failed, not because the data lacks them. Without
+    // this on the line, "nothing to publish" and "we could not find out" are
+    // the same row to anyone off the node.
+    expect(summary).toContain("provenance_fetch_failed=true");
   });
 
   test("a fractional store_count is dropped, never bound into D1", async () => {
