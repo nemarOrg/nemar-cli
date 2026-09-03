@@ -647,21 +647,50 @@ def reconcile(
 
 def claim_next(conn: sqlite3.Connection) -> sqlite3.Row | None:
     """Claim the oldest eligible pending job (respecting next_retry_at) and mark
-    it inprogress. Atomic under the connection's write lock."""
-    row = conn.execute(
-        "SELECT dataset_id, latest_version FROM jobs"
-        " WHERE status='pending' AND next_retry_at <= ?"
-        " ORDER BY enqueued_at ASC LIMIT 1",
-        (_now(),),
-    ).fetchone()
-    if row is None:
-        return None
-    conn.execute(
-        "UPDATE jobs SET status='inprogress', updated_at=? WHERE dataset_id=?",
-        (_now(), row["dataset_id"]),
-    )
-    conn.commit()
-    return row
+    it inprogress.
+
+    Genuinely atomic across CONCURRENT CONNECTIONS to this database file
+    (nemarOrg/nemar-cli#1142): wrapped in `BEGIN IMMEDIATE`, which takes
+    SQLite's RESERVED lock before the SELECT runs. A plain SELECT does not
+    take SQLite's write lock, and Python's sqlite3 module (default
+    isolation_level) only opens its own implicit transaction before a DML
+    statement -- so without this, two connections could each SELECT the same
+    pending row before either one's UPDATE committed, and both would return
+    it: the same dataset claimed and converted by two workers at once. Once
+    this connection holds the RESERVED lock, a second connection's own `BEGIN
+    IMMEDIATE` blocks (per `busy_timeout`, set in `connect()`) until this one
+    commits or rolls back, by which point the row it reads is no longer
+    `pending`.
+
+    This makes ONE claim atomic between connections to the SAME database
+    file -- it is not a lock against every other way this queue could be
+    driven. It still relies on the CALLER's single-instance flock (held by
+    hallu-zarr.sh around the whole run) to keep two independent DRIVER
+    PROCESSES from running against the same database at all; this function
+    only closes the gap between two connections that are legitimately both
+    open at once (a `next` CLI invocation racing the long-running drain's own
+    connection, for instance), not a substitute for that flock.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT dataset_id, latest_version FROM jobs"
+            " WHERE status='pending' AND next_retry_at <= ?"
+            " ORDER BY enqueued_at ASC LIMIT 1",
+            (_now(),),
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            return None
+        conn.execute(
+            "UPDATE jobs SET status='inprogress', updated_at=? WHERE dataset_id=?",
+            (_now(), row["dataset_id"]),
+        )
+        conn.commit()
+        return row
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def mark_done(
