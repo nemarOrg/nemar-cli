@@ -16,8 +16,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import io
-import urllib.error
-import urllib.request
 import json
 import os
 import shutil
@@ -26,6 +24,8 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -4983,12 +4983,30 @@ class TestFetchDatasetRow(unittest.TestCase):
     provenance attrs depend on its parsing (two response shapes) and on it never
     failing a conversion when the catalog is unreachable."""
 
-    def serve(self, handler_body: bytes | None, status: int = 200):
+    def serve(
+        self,
+        handler_body: bytes | None,
+        status: int = 200,
+        refuse_user_agent_prefix: str | None = None,
+        seen_user_agents: list[str] | None = None,
+    ):
+        """A real server on a real socket. `refuse_user_agent_prefix` makes it
+        play the Cloudflare edge in front of api.nemar.org, which 403s the
+        default Python-urllib User-Agent; `seen_user_agents` records what each
+        request sent so a test can assert on the header itself."""
         import threading
         from http.server import BaseHTTPRequestHandler, HTTPServer
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
+                ua = self.headers.get("User-Agent", "")
+                if seen_user_agents is not None:
+                    seen_user_agents.append(ua)
+                if refuse_user_agent_prefix is not None and (
+                    not ua or ua.startswith(refuse_user_agent_prefix)
+                ):
+                    self.send_error(403, "error code: 1010")
+                    return
                 if handler_body is None:
                     self.send_error(500)
                     return
@@ -5004,6 +5022,7 @@ class TestFetchDatasetRow(unittest.TestCase):
         server = HTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
+        self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         return f"http://127.0.0.1:{server.server_port}"
 
@@ -5018,6 +5037,36 @@ class TestFetchDatasetRow(unittest.TestCase):
         row, failed = fetch_dataset_row(base, "on007763")
         self.assertEqual(row["license"], "CC-BY-4.0")
         self.assertIs(failed, False)
+
+    def test_identifies_itself_so_the_cloudflare_edge_does_not_403_it(self):
+        """Cloudflare 403s the default Python-urllib User-Agent on api.nemar.org.
+
+        The first engine-3 production run (on004696, 2026-09-03) fetched with no
+        User-Agent and flagged every store `provenance_fetch_failed`; this pins
+        the header so the fetch cannot quietly regress to the blocked default.
+        """
+        seen: list[str] = []
+        base = self.serve(
+            json.dumps({"dataset": {"id": "on000001", "doi": "10.1/x"}}).encode(),
+            refuse_user_agent_prefix="Python-urllib",
+            seen_user_agents=seen,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            row, failed = fetch_dataset_row(base, "on000001")
+        self.assertIs(failed, False)
+        self.assertEqual(row, {"id": "on000001", "doi": "10.1/x"})
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0].startswith("nemar-zarr-converter/"), seen)
+        self.assertIn(ZARR_ENGINE_VERSION, seen[0])
+
+    def test_the_refusing_server_does_refuse_the_bare_urllib_default(self):
+        # The fixture must actually discriminate, or the test above proves
+        # nothing: a bare urllib request against the same server is a 403.
+        base = self.serve(b"{}", refuse_user_agent_prefix="Python-urllib")
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(f"{base}/datasets/on000001", timeout=5)
+        self.assertEqual(ctx.exception.code, 403)
+        ctx.exception.close()
 
     def test_a_500_is_reported_as_a_FETCH_FAILURE_not_an_absent_field(self):
         """The distinction the flag exists for.
@@ -7182,76 +7231,6 @@ class TestConvertOneEndToEnd(unittest.TestCase):
         result = self.convert(dataset_row=None, provenance_failed=True)
         self.assertTrue(result["ok"], result.get("error"))
         self.assertEqual(result["entry"]["path"], self.primary)
-
-
-class ProvenanceFetchUserAgentTest(unittest.TestCase):
-    """Cloudflare 403s the default Python-urllib User-Agent on api.nemar.org.
-
-    A real local HTTP server plays that edge: it refuses any request whose
-    User-Agent starts with `Python-urllib` and answers the catalog row otherwise.
-    The first engine-3 production run (on004696, 2026-09-03) hit exactly this
-    and flagged every store `provenance_fetch_failed`; this pins the header so
-    the fetch cannot quietly regress to the blocked default again.
-    """
-
-    def _serve(self):
-        import http.server
-        import threading
-
-        seen: list[str] = []
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):  # noqa: N802 - http.server API
-                ua = self.headers.get("User-Agent", "")
-                seen.append(ua)
-                if ua.startswith("Python-urllib") or not ua:
-                    self.send_response(403)
-                    self.send_header("Content-Type", "text/plain")
-                    self.end_headers()
-                    self.wfile.write(b"error code: 1010")
-                    return
-                body = json.dumps({"dataset": {"id": "on000001", "doi": "10.1/x"}}).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, *_args):  # quiet
-                pass
-
-        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-        thread.start()
-        return httpd, seen
-
-    def test_fetch_identifies_itself_and_is_not_blocked(self):
-        httpd, seen = self._serve()
-        try:
-            base = f"http://127.0.0.1:{httpd.server_port}"
-            with contextlib.redirect_stdout(io.StringIO()):
-                row, failed = fetch_dataset_row(base, "on000001")
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
-        self.assertFalse(failed)
-        self.assertEqual(row, {"id": "on000001", "doi": "10.1/x"})
-        self.assertEqual(len(seen), 1)
-        self.assertTrue(seen[0].startswith("nemar-zarr-converter/"), seen)
-        self.assertIn(ZARR_ENGINE_VERSION, seen[0])
-
-    def test_the_blocked_default_header_is_what_the_server_refuses(self):
-        # The fixture must actually discriminate, or the test above proves
-        # nothing: a bare urllib request against the same server is refused.
-        httpd, _seen = self._serve()
-        try:
-            base = f"http://127.0.0.1:{httpd.server_port}"
-            with self.assertRaises(urllib.error.HTTPError) as ctx:
-                urllib.request.urlopen(f"{base}/datasets/on000001", timeout=5)
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
-        self.assertEqual(ctx.exception.code, 403)
 
 
 if __name__ == "__main__":
