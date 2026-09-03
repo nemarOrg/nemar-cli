@@ -32,9 +32,11 @@ const CACHE_CONTROL = "public, max-age=86400";
 export const openApiRoutes = new Hono<{ Bindings: Bindings }>();
 
 openApiRoutes.get("/", (c) => {
-  // `application/openapi+json` is the media type an OpenAPI-aware client
-  // (Swagger UI, Redoc, codegen tooling) content-sniffs for; it is a strict
-  // subtype of application/json, so a plain JSON client is unaffected.
+  // `application/openapi+json` has no IANA/RFC registration (unlike
+  // schemas.ts's `application/schema+json`, RFC 9358) -- it is a de facto
+  // convention OpenAPI tooling (Swagger UI, Redoc, codegen) has settled on
+  // and content-sniffs for. It is still a strict subtype of application/json,
+  // so a plain JSON client is unaffected.
   return new Response(JSON.stringify(openApiDocument), {
     headers: {
       "Content-Type": "application/openapi+json; charset=utf-8",
