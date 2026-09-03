@@ -12,6 +12,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
+import { formatBytesCli } from "../../../shared/bytes.js";
 import {
   checkDenoInstalled,
   formatValidationResult,
@@ -22,7 +23,6 @@ import type { Config } from "../config.js";
 import { verifyGitHubAuth } from "../git-annex/github.js";
 import { checkPrerequisites } from "../git-annex/prereq.js";
 import { runCommand } from "../git-annex/run-command.js";
-import { formatBytes } from "../progress.js";
 import { FAIL, type Step, ok } from "./types.js";
 
 /**
@@ -85,7 +85,7 @@ export async function checkUploadPrerequisites(): Promise<Step> {
   const vmemLimit = await detectVirtualMemoryLimit();
   if (typeof vmemLimit === "number" && vmemLimit < LOW_VMEM_WARN_BYTES) {
     console.log(
-      chalk.yellow(`  Warning: virtual memory limit is ${formatBytes(vmemLimit)} (ulimit -v).`),
+      chalk.yellow(`  Warning: virtual memory limit is ${formatBytesCli(vmemLimit)} (ulimit -v).`),
     );
     console.log(
       chalk.yellow(

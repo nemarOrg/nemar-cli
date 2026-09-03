@@ -8,6 +8,7 @@
  */
 
 import type { z } from "zod";
+import { formatFileSize } from "../../../../shared/bytes.js";
 import {
   datasetDetailEnvelopeSchema,
   datasetListEnvelopeSchema,
@@ -32,7 +33,6 @@ import {
   buildPublicCatalogBase,
   escapeLikePattern,
 } from "../../services/dataset-filters";
-import { formatFileSize } from "../../services/dataset-metadata-columns";
 import { DEFAULT_MIN_SCORE, executeDatasetSearch } from "../../services/dataset-search";
 import { isValidDatasetId } from "../../services/datasetId";
 import { ZARR_VERIFIED_AT_PATH, ZARR_VERIFY_STATUS_PATH } from "../../services/sweep-stamps";
@@ -126,11 +126,14 @@ export function withCanonicalLatestVersion<T extends Record<string, unknown>>(ro
 /**
  * `file_size_formatted` is a contract field (shared/contract/dataset.ts) but
  * no longer a stored column (#1182): derive it from the row's `file_size` at
- * read time. MUST use `formatFileSize` (binary/1024, the formatter the old
- * write path used) — `formatBytes` from services/s3.ts is decimal/1000 and
- * would silently shift every displayed size. formatFileSize returns null for
- * null/0/non-finite input, mirroring the old writer's "nothing to display".
- * Exported for unit testing.
+ * read time. MUST use `formatFileSize` from `shared/bytes.ts` -- it is the
+ * one CONTRACTUAL formatter of the five that module declares (binary/1024,
+ * the formatter the old write path used). The decimal/1000 outlier that
+ * used to live at services/s3.ts and would silently shift every displayed
+ * size is gone (epic #1225 phase 4, issue #1227): do not reintroduce a
+ * second byte formatter here, add to `shared/bytes.ts` instead.
+ * formatFileSize returns null for null/0/non-finite input, mirroring the
+ * old writer's "nothing to display". Exported for unit testing.
  */
 export function deriveFileSizeFormatted(fileSize: unknown): string | null {
   return typeof fileSize === "number" ? formatFileSize(fileSize) : null;

@@ -10,6 +10,7 @@
 import chalk from "chalk";
 import { Command } from "commander";
 import ora from "ora";
+import { formatBytesCli } from "../../shared/bytes.js";
 import { completeSandbox, getSandboxStatus, resetSandbox } from "../lib/api/auth.js";
 import { requestUploadCredentials } from "../lib/api/data.js";
 import { createDataset, finalizeDataset } from "../lib/api/datasets.js";
@@ -38,7 +39,6 @@ import {
   toS3Credentials,
 } from "../lib/git-annex/s3-remote.js";
 import { copyToAnnexRemote } from "../lib/git-annex/transfer.js";
-import { formatBytes } from "../lib/progress.js";
 import {
   cleanupSandboxDataset,
   generateSandboxDataset,
@@ -169,7 +169,7 @@ async function sandboxAction(options: { verbose?: boolean } = {}): Promise<void>
     const paths = generateSandboxDataset();
     datasetPath = paths.root;
     const size = getSandboxDatasetSize(paths);
-    genSpinner.succeed(`Test dataset created (${formatBytes(size)})`);
+    genSpinner.succeed(`Test dataset created (${formatBytesCli(size)})`);
     console.log(chalk.dim(`  Location: ${datasetPath}`));
   } catch (error) {
     genSpinner.fail("Failed to generate test dataset");
