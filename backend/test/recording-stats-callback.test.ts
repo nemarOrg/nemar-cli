@@ -24,25 +24,16 @@ import { Hono } from "hono";
 import { registerZarrReadyRoutes } from "../src/routes/callbacks/zarr-ready";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+import { installWorkersTimingSafeEqual } from "./helpers/workers-crypto";
 
 // bun's runtime lacks `crypto.subtle.timingSafeEqual` (a Workers extension);
-// the handler's token check throws before reaching the behavior under test
-// without it. Real constant-time comparison, not a stand-in for business
-// logic -- the handler's own auth check still runs against it (see "rejects
-// a wrong token" below for proof it is live).
-const subtle = crypto.subtle as SubtleCrypto & {
-  timingSafeEqual?: (a: ArrayBufferView, b: ArrayBufferView) => boolean;
-};
-if (typeof subtle.timingSafeEqual !== "function") {
-  subtle.timingSafeEqual = (a: ArrayBufferView, b: ArrayBufferView): boolean => {
-    const x = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
-    const y = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
-    if (x.length !== y.length) return false;
-    let diff = 0;
-    for (let i = 0; i < x.length; i++) diff |= (x[i] as number) ^ (y[i] as number);
-    return diff === 0;
-  };
-}
+// the handler's token check needs it. Real constant-time comparison, not a
+// stand-in for business logic -- the handler's own auth check still runs
+// against it (see "rejects a wrong token" below for proof it is live). See
+// helpers/workers-crypto.ts for why this is still installed now that
+// lib/constant-time.ts feature-detects this itself: it keeps this suite
+// exercising the native branch.
+installWorkersTimingSafeEqual();
 
 const TOKEN = "recording-stats-callback-webhook-token";
 const DATASET = "on007700";
