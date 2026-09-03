@@ -6,6 +6,7 @@
  * Uses fetch directly for Cloudflare Workers compatibility.
  */
 
+import { escapeHtml } from "../lib/escape";
 import { STALENESS_LIMIT_DAYS } from "./staleness";
 
 /** Fallback sender when FROM_EMAIL env var is unset. Mirrors the FROM_EMAIL set
@@ -74,6 +75,89 @@ export function applyDevWrap(
     subject: `[DEV] ${subject}`,
     html: wrappedHtml === html ? `${DEV_BANNER_HTML}${html}` : wrappedHtml,
   };
+}
+
+/**
+ * Env fields the delivery fence below needs (issue #957). Structurally
+ * typed, not `Bindings`, matching resolveEmailConfig's own loose env
+ * parameter -- this module stays decoupled from the full binding surface.
+ */
+export interface EmailDeliveryEnv {
+  ENVIRONMENT?: string;
+  DEV_EMAIL_ALLOWLIST?: string;
+}
+
+/**
+ * Thrown by sendEmail (and, via isEmailDeliveryAllowed, sendBroadcast in
+ * services/broadcast.ts) when a non-production worker refuses to deliver to
+ * a recipient that is not on DEV_EMAIL_ALLOWLIST (issue #957). Mirrors
+ * ProdRepoFenceError (services/deletion.ts): a named, catchable fence error
+ * rather than a bare throw, so a caller that wants to distinguish "email
+ * service down" from "delivery fenced" can. The recipient is deliberately
+ * never in the message -- dev D1 holds roughly 609 real addresses and the
+ * dev worker holds a live RESEND_API_KEY, so this error must be safe to log
+ * verbatim wherever an existing call site's catch block already does.
+ */
+export class DevEmailFenceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DevEmailFenceError";
+  }
+}
+
+/**
+ * Parse DEV_EMAIL_ALLOWLIST -- comma-separated exact addresses and/or
+ * `@domain` suffixes -- and test `to` against it, case-insensitively.
+ * Exported so a test drives this exact parsing/matching instead of a
+ * hand-copied re-implementation (`.rules/testing.md`).  An empty/unset
+ * allowlist matches nothing (fail-closed): unset means "no one is
+ * allow-listed," not "everyone is."
+ */
+export function isRecipientAllowlisted(to: string, allowlist: string | undefined): boolean {
+  const entries = (allowlist ?? "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+  if (entries.length === 0) return false;
+
+  const recipient = to.trim().toLowerCase();
+  const at = recipient.lastIndexOf("@");
+  const domain = at >= 0 ? recipient.slice(at) : ""; // includes the leading "@"
+
+  return entries.some((entry) => (entry.startsWith("@") ? domain === entry : recipient === entry));
+}
+
+/**
+ * True when `to` may actually be delivered to, given `env` (issue #957).
+ * Production always allows; every other (or unset/unrecognized) ENVIRONMENT
+ * requires an exact DEV_EMAIL_ALLOWLIST match. This is the ONE predicate
+ * both sendEmail below (single recipient) and services/broadcast.ts's
+ * sendBroadcast (per-recipient, batched) gate on, so the two delivery paths
+ * can never drift apart on what "fenced" means.
+ *
+ * Deliberately the STRICT opposite of services/environment.ts's
+ * isNonProductionEnv, which treats an unknown ENVIRONMENT as production so
+ * a misconfigured prod-only fence does not accidentally restrict real
+ * production traffic. Here the risk is inverted: an unrecognized
+ * ENVIRONMENT on a worker with a live RESEND_API_KEY must fail toward
+ * REFUSING delivery, not toward allowing it -- so only the literal string
+ * "production" bypasses the allow-list.
+ */
+export function isEmailDeliveryAllowed(to: string, env: EmailDeliveryEnv | undefined): boolean {
+  const environment = (env?.ENVIRONMENT ?? "").trim().toLowerCase();
+  if (environment === "production") return true;
+  return isRecipientAllowlisted(to, env?.DEV_EMAIL_ALLOWLIST);
+}
+
+/**
+ * Redact a recipient for logging: first character of the local part plus
+ * the domain (e.g. "a***@example.org"). The suppressed-send log below must
+ * never carry a full address -- see DevEmailFenceError's doc comment.
+ */
+export function redactRecipient(to: string): string {
+  const at = to.indexOf("@");
+  if (at <= 0) return "***";
+  return `${to[0]}***${to.slice(at)}`;
 }
 
 export interface EmailPreferences {
@@ -153,7 +237,17 @@ export async function getAdminEmailsForCategory(
 }
 
 /**
- * Send email via Resend API
+ * Send email via Resend API.
+ *
+ * `deliveryEnv` (issue #957) is the delivery-level fence: when set and not
+ * production, a recipient not on DEV_EMAIL_ALLOWLIST is refused BEFORE the
+ * Resend fetch ever fires -- see isEmailDeliveryAllowed's doc comment for
+ * why an unset/unrecognized ENVIRONMENT fails toward refusing, not
+ * allowing. `deliveryEnv` is optional only so this function's own type
+ * signature doesn't force every caller to thread it through in one commit;
+ * every exported wrapper below does pass it, and an OMITTED deliveryEnv
+ * still fails closed (isEmailDeliveryAllowed treats undefined ENVIRONMENT
+ * as non-production with an empty allow-list, i.e. refuses).
  */
 async function sendEmail(
   to: string,
@@ -163,7 +257,17 @@ async function sendEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
+  if (!isEmailDeliveryAllowed(to, deliveryEnv)) {
+    console.warn(
+      `[email] suppressed send to ${redactRecipient(to)} (subject: "${subject}"): ENVIRONMENT=${deliveryEnv?.ENVIRONMENT ?? "unset"} is not production and the recipient is not on DEV_EMAIL_ALLOWLIST`,
+    );
+    throw new DevEmailFenceError(
+      `Refusing to deliver to a non-allow-listed recipient from a non-production worker (ENVIRONMENT=${deliveryEnv?.ENVIRONMENT ?? "unset"}). Add the recipient (or its @domain) to DEV_EMAIL_ALLOWLIST to permit this send.`,
+    );
+  }
+
   const wrapped = applyDevWrap(subject, html, isDev);
   const body: Record<string, unknown> = {
     from: fromEmail,
@@ -200,6 +304,7 @@ export async function sendVerificationEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -245,7 +350,16 @@ export async function sendVerificationEmail(
 </html>
   `;
 
-  await sendEmail(to, "Verify your NEMAR account", html, resendApiKey, fromEmail, replyTo, isDev);
+  await sendEmail(
+    to,
+    "Verify your NEMAR account",
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+    deliveryEnv,
+  );
 }
 
 /**
@@ -259,6 +373,7 @@ export async function sendKeyReadyEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -309,6 +424,7 @@ nemar auth login
     fromEmail,
     replyTo,
     isDev,
+    deliveryEnv,
   );
 }
 
@@ -324,6 +440,7 @@ export async function sendWebApprovalEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -365,6 +482,7 @@ export async function sendWebApprovalEmail(
     fromEmail,
     replyTo,
     isDev,
+    deliveryEnv,
   );
 }
 
@@ -379,6 +497,7 @@ export async function sendKeyRegenerationVerificationEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -421,7 +540,16 @@ export async function sendKeyRegenerationVerificationEmail(
 </html>
   `;
 
-  await sendEmail(to, "NEMAR API Key Regeneration", html, resendApiKey, fromEmail, replyTo, isDev);
+  await sendEmail(
+    to,
+    "NEMAR API Key Regeneration",
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+    deliveryEnv,
+  );
 }
 
 /**
@@ -440,6 +568,7 @@ export async function sendAdminNotificationEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -507,6 +636,7 @@ export async function sendAdminNotificationEmail(
         fromEmail,
         replyTo,
         isDev,
+        deliveryEnv,
       );
     } catch (error) {
       console.error(`Failed to send admin notification to ${adminEmail}:`, error);
@@ -534,6 +664,7 @@ export async function sendImportQuarantineEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
   const runRow = details.workflowRunUrl
     ? `<tr><td style="padding:8px 12px;border:1px solid #e5e7eb;background:#f9fafb;font-weight:bold;">Workflow run</td><td style="padding:8px 12px;border:1px solid #e5e7eb;"><a href="${escapeHtml(details.workflowRunUrl)}" style="color:#2563eb;">${escapeHtml(details.workflowRunUrl)}</a></td></tr>`
@@ -564,6 +695,7 @@ export async function sendImportQuarantineEmail(
         fromEmail,
         replyTo,
         isDev,
+        deliveryEnv,
       );
     } catch (error) {
       console.error(`Failed to send import-quarantine alert to ${adminEmail}:`, error);
@@ -592,6 +724,7 @@ export async function sendOpenNeuroMaintainerReport(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
   const rows = datasets
     .map(
@@ -621,6 +754,7 @@ export async function sendOpenNeuroMaintainerReport(
     fromEmail,
     replyTo,
     isDev,
+    deliveryEnv,
   );
 }
 
@@ -634,6 +768,7 @@ export async function sendRevocationEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -668,19 +803,8 @@ export async function sendRevocationEmail(
     fromEmail,
     replyTo,
     isDev,
+    deliveryEnv,
   );
-}
-
-/**
- * Escape HTML special characters to prevent XSS in email templates
- */
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
 }
 
 /**
@@ -694,6 +818,7 @@ export async function sendPublicationRequestEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -738,6 +863,7 @@ export async function sendPublicationRequestEmail(
         fromEmail,
         replyTo,
         isDev,
+        deliveryEnv,
       );
     } catch (error) {
       console.error(`Failed to send publication request email to ${adminEmail}:`, error);
@@ -758,6 +884,7 @@ export async function sendAccessRequestEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -800,6 +927,7 @@ export async function sendAccessRequestEmail(
     fromEmail,
     replyTo,
     isDev,
+    deliveryEnv,
   );
 }
 
@@ -815,6 +943,7 @@ export async function sendPublicationDeniedEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -856,6 +985,7 @@ export async function sendPublicationDeniedEmail(
     fromEmail,
     replyTo,
     isDev,
+    deliveryEnv,
   );
 }
 
@@ -875,6 +1005,7 @@ export async function sendPublicationBlockedEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
   const reasonItems =
     reasons.length > 0
@@ -930,6 +1061,7 @@ export async function sendPublicationBlockedEmail(
     fromEmail,
     replyTo,
     isDev,
+    deliveryEnv,
   );
 }
 
@@ -945,6 +1077,7 @@ export async function sendPublicationApprovedEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
   const safeDoi = doi ? escapeHtml(doi) : "";
   const doiSection = doi
@@ -992,6 +1125,7 @@ export async function sendPublicationApprovedEmail(
     fromEmail,
     replyTo,
     isDev,
+    deliveryEnv,
   );
 }
 
@@ -1009,6 +1143,7 @@ export async function sendPasswordlessCodeEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -1043,7 +1178,16 @@ export async function sendPasswordlessCodeEmail(
   // Generic subject — keeping the code out of the subject line means
   // it doesn't get echoed into provider-side / client-side mail logs
   // that often retain subjects long after the body is purged.
-  await sendEmail(to, "Your NEMAR sign-in code", html, resendApiKey, fromEmail, replyTo, isDev);
+  await sendEmail(
+    to,
+    "Your NEMAR sign-in code",
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+    deliveryEnv,
+  );
 }
 
 /**
@@ -1058,6 +1202,7 @@ export async function sendEmailChangeCodeEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
   const html = `
 <!DOCTYPE html>
@@ -1097,6 +1242,7 @@ export async function sendEmailChangeCodeEmail(
     fromEmail,
     replyTo,
     isDev,
+    deliveryEnv,
   );
 }
 
@@ -1116,6 +1262,7 @@ export async function sendStalenessWarningEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
   const isFinal = daysLeft <= 1;
   const accent = isFinal ? "#dc2626" : "#f59e0b";
@@ -1165,6 +1312,7 @@ export async function sendStalenessWarningEmail(
     fromEmail,
     replyTo,
     isDev,
+    deliveryEnv,
   );
 }
 
@@ -1187,6 +1335,7 @@ export async function sendStalenessAdminReviewEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<number> {
   const warningSummary =
     warnStageReached !== null
@@ -1238,6 +1387,7 @@ export async function sendStalenessAdminReviewEmail(
         fromEmail,
         replyTo,
         isDev,
+        deliveryEnv,
       );
       delivered++;
     } catch (error) {
@@ -1262,6 +1412,7 @@ export async function sendExemplarInvariantAlertEmail(
   fromEmail: string,
   replyTo?: string,
   isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
 ): Promise<number> {
   const html = `
 <!DOCTYPE html>
@@ -1296,6 +1447,7 @@ export async function sendExemplarInvariantAlertEmail(
         fromEmail,
         replyTo,
         isDev,
+        deliveryEnv,
       );
       delivered++;
     } catch (error) {

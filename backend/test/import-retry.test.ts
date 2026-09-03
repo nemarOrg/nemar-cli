@@ -408,6 +408,21 @@ describe("BLOCKLIST_RECHECK_QUERY", () => {
   });
 });
 
+/** Minimal `datasets` row insert -- only the columns RECLASSIFY_CANDIDATES_QUERY's
+ *  withdrawn-dataset NOT EXISTS clause reads. Foreign keys are unenforced on
+ *  this in-memory bun:sqlite (no PRAGMA foreign_keys=ON in any migration), so
+ *  owner_user_id=1 needs no matching users row, matching the pattern other
+ *  suites in this package use for a bare datasets insert. */
+function insertDataset(
+  db: Database,
+  d: { dataset_id: string; withdrawn_at?: string | null },
+): void {
+  db.prepare(
+    `INSERT INTO datasets (dataset_id, name, owner_user_id, withdrawn_at)
+     VALUES (?, ?, 1, ?)`,
+  ).run(d.dataset_id, d.dataset_id, d.withdrawn_at ?? null);
+}
+
 describe("RECLASSIFY_CANDIDATES_QUERY", () => {
   test("only complete rows never integrity-checked, batch-bounded", () => {
     const db = freshDb();
@@ -429,6 +444,37 @@ describe("RECLASSIFY_CANDIDATES_QUERY", () => {
       db.prepare(RECLASSIFY_CANDIDATES_QUERY).all(1) as { dataset_id: string }[]
     ).map((r) => r.dataset_id);
     expect(bounded.length).toBe(1);
+  });
+
+  // Issue #1141: a withdrawn dataset's import_jobs row must never be
+  // reclassified back to `incomplete` -- withdrawal (migration 0060) is a
+  // deliberate terminal call on a dataset whose content is not recoverable,
+  // and re-arming the retry sweep against it would fight that decision.
+  test("excludes a row whose dataset is withdrawn (#1141)", () => {
+    const db = freshDb();
+    insertDataset(db, { dataset_id: "on000005", withdrawn_at: "2026-08-01 00:00:00" });
+    insertJob(db, { dataset_id: "on000005", status: "complete", integrity_checked_at: null });
+    insertDataset(db, { dataset_id: "on000006", withdrawn_at: null });
+    insertJob(db, { dataset_id: "on000006", status: "complete", integrity_checked_at: null });
+
+    const all = (db.prepare(RECLASSIFY_CANDIDATES_QUERY).all(25) as { dataset_id: string }[]).map(
+      (r) => r.dataset_id,
+    );
+    expect(all).toEqual(["on000006"]);
+  });
+
+  // An import_jobs row deliberately outlives its datasets row (deleted /
+  // rolled-back dataset, 0044's module doc) -- such a row must stay a
+  // reclassify candidate exactly as before, not silently dropped by the new
+  // NOT EXISTS clause.
+  test("still includes a row whose dataset was deleted (no matching datasets row)", () => {
+    const db = freshDb();
+    insertJob(db, { dataset_id: "on000007", status: "complete", integrity_checked_at: null });
+
+    const all = (db.prepare(RECLASSIFY_CANDIDATES_QUERY).all(25) as { dataset_id: string }[]).map(
+      (r) => r.dataset_id,
+    );
+    expect(all).toEqual(["on000007"]);
   });
 });
 

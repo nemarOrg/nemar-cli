@@ -6,7 +6,14 @@
  */
 
 import { z } from "zod";
-import { applyDevWrap, parseEmailPreferences } from "./email";
+import { escapeHtml } from "../lib/escape";
+import {
+  type EmailDeliveryEnv,
+  applyDevWrap,
+  isEmailDeliveryAllowed,
+  parseEmailPreferences,
+  redactRecipient,
+} from "./email";
 
 export type RecipientGroup = "all" | "admins" | "members";
 
@@ -48,6 +55,10 @@ export interface BroadcastResult {
   recipient_count: number;
   failure_count: number;
   failed_recipients: string[];
+  /** Recipients withheld by the non-production delivery fence (issue #957) --
+   *  never attempted, distinct from a real Resend failure in failure_count.
+   *  0 in production, where the fence never engages. */
+  suppressed_count: number;
   /** Set when the send was aborted before reaching Resend (e.g. missing key). */
   error?: string;
 }
@@ -217,15 +228,6 @@ function inlineMarkdown(text: string): string {
   return result;
 }
 
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-
 /**
  * Wrap converted markdown HTML in the standard NEMAR email template.
  */
@@ -268,6 +270,16 @@ interface ResendBatchResponseItem {
 /**
  * Send broadcast emails via Resend batch API in chunks of 100.
  * Records result in the broadcast_emails audit table.
+ *
+ * `env` (issue #957) is the SAME delivery-level fence services/email.ts's
+ * sendEmail applies, reused here via isEmailDeliveryAllowed rather than a
+ * second hand-copied check -- `nemar admin notify` is the highest-blast-
+ * radius manual email flow (a whole recipient group, up to all ~609 real
+ * dev-D1 addresses, in one call), so this is exactly the path #957 named.
+ * Fenced recipients are filtered out BEFORE any batch is built or any
+ * fetch fires; they land in the `suppressed_count` return field, never in
+ * `failed_recipients` (that field means "Resend rejected this one", not
+ * "never attempted") and never logged with a full address.
  */
 export async function sendBroadcast(
   db: D1Database,
@@ -282,6 +294,7 @@ export async function sendBroadcast(
   },
   replyTo?: string,
   isDev?: boolean,
+  env?: EmailDeliveryEnv,
 ): Promise<BroadcastResult> {
   // Guard: Resend key must be non-empty before iterating recipients.
   // A missing or blank key would silently record every recipient as a
@@ -297,8 +310,20 @@ export async function sendBroadcast(
       recipient_count: 0,
       failure_count: 0,
       failed_recipients: [],
+      suppressed_count: 0,
       error: "email_service_unconfigured",
     };
+  }
+
+  const allowedRecipients = params.recipients.filter((to) => isEmailDeliveryAllowed(to, env));
+  const suppressedRecipients = params.recipients.filter((to) => !isEmailDeliveryAllowed(to, env));
+  if (suppressedRecipients.length > 0) {
+    console.warn(
+      `[broadcast] suppressed ${suppressedRecipients.length} of ${params.recipients.length} ` +
+        `recipient(s) for group "${params.group}" (subject: "${params.subject}"): ` +
+        `ENVIRONMENT=${env?.ENVIRONMENT ?? "unset"} is not production and they are not on ` +
+        `DEV_EMAIL_ALLOWLIST. Sample: ${suppressedRecipients.slice(0, 3).map(redactRecipient).join(", ")}`,
+    );
   }
 
   const bodyHtml = markdownToEmailHtml(params.bodyMarkdown);
@@ -307,9 +332,9 @@ export async function sendBroadcast(
   const failedRecipients: string[] = [];
   let totalSent = 0;
 
-  // Send in chunks of BATCH_SIZE
-  for (let i = 0; i < params.recipients.length; i += BATCH_SIZE) {
-    const chunk = params.recipients.slice(i, i + BATCH_SIZE);
+  // Send in chunks of BATCH_SIZE -- only the allow-listed subset.
+  for (let i = 0; i < allowedRecipients.length; i += BATCH_SIZE) {
+    const chunk = allowedRecipients.slice(i, i + BATCH_SIZE);
     const batch: ResendBatchItem[] = chunk.map((email) => ({
       from: fromEmail,
       to: [email],
@@ -389,5 +414,6 @@ export async function sendBroadcast(
     recipient_count: totalSent,
     failure_count: failedRecipients.length,
     failed_recipients: failedRecipients,
+    suppressed_count: suppressedRecipients.length,
   };
 }

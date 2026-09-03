@@ -15,6 +15,7 @@
  * structured EnrichmentRunResult without re-implementing the matrix.
  */
 
+import { formatFileSize } from "../../../shared/bytes.js";
 import { type NemarMetadataV2, datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import type { Bindings } from "../types/bindings.js";
 import { countSessionDirs } from "./bids-tree.js";
@@ -63,7 +64,7 @@ import {
 import { recordLlmUsage } from "./llm-metrics.js";
 import { ensureParticipantsTsv } from "./participants-tsv.js";
 import { errorMessage, extractRepoName } from "./repo-metadata.js";
-import { extractExtensions, formatBytes, getDatasetS3Stats } from "./s3.js";
+import { extractExtensions, getDatasetS3Stats } from "./s3.js";
 
 export interface EnrichmentOpts {
   datasetId: string;
@@ -573,16 +574,25 @@ export async function enrichDataset(
         datasetId,
       );
 
-      const sizeStr = formatBytes(s3Stats.totalSize);
+      // formatFileSize returns null for a non-positive total (shared/bytes.ts),
+      // which getDatasetS3Stats does report: totalSize starts at 0 and stays
+      // there for a metadata-only dataset, or when enrichment runs before the
+      // S3 objects land. The formatter this replaced returned a string for
+      // every input, so interpolating unguarded would seed the literal
+      // "null (0 files)" into `sizes` -- and that field reaches the minted
+      // DataCite <sizes> element (services/datacite.ts). Omit the field
+      // instead: an absent size is honest, a stringified null is not (#1225
+      // review).
+      const sizeStr = formatFileSize(s3Stats.totalSize);
       const countLabel =
         s3Stats.objectCount !== undefined ? `${s3Stats.objectCount} files` : "files";
-      seeded.sizes = [`${sizeStr} (${countLabel})`];
+      if (sizeStr) seeded.sizes = [`${sizeStr} (${countLabel})`];
 
       const extensions = extractExtensions(treePaths);
       if (extensions.length > 0) seeded.formats = extensions;
 
       console.log(
-        `[llm-enrich] Stage 1a (sizes): ${datasetId} - ${sizeStr} (${countLabel}), ${extensions.length} formats`,
+        `[llm-enrich] Stage 1a (sizes): ${datasetId} - ${sizeStr ?? "size unavailable"} (${countLabel}), ${extensions.length} formats`,
       );
     } catch (sizeErr) {
       console.warn(

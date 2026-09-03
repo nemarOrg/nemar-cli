@@ -13,6 +13,8 @@
  * the inbound-event direction.
  */
 
+import { timingSafeEqual } from "../lib/constant-time";
+
 /**
  * Verify a GitHub webhook signature.
  *
@@ -45,7 +47,7 @@ export async function verifyGitHubWebhookSignature(
   } catch {
     return false;
   }
-  return timingSafeEqualHex(expectedHex, providedHex);
+  return timingSafeEqual(expectedHex, providedHex);
 }
 
 async function hmacSha256Hex(secret: string, message: string): Promise<string> {
@@ -67,22 +69,4 @@ async function hmacSha256Hex(secret: string, message: string): Promise<string> {
     out += (b < 16 ? "0" : "") + b.toString(16);
   }
   return out;
-}
-
-/**
- * Constant-time equality for two equal-length hex strings.
- *
- * `crypto.timingSafeEqual` would be ideal but it's not exposed in the
- * Workers runtime; we re-implement the XOR-accumulate pattern over the
- * char codes. Both inputs must already be the same length (the caller
- * enforces this), but we still bail loud on a length mismatch so a future
- * caller can't accidentally short-circuit on a long-vs-short compare.
- */
-function timingSafeEqualHex(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let mismatch = 0;
-  for (let i = 0; i < a.length; i++) {
-    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return mismatch === 0;
 }

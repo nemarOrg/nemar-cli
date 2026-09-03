@@ -437,6 +437,34 @@ describe("runSignalDefaultsSweep: entry-point invariants", () => {
     });
     expect(result.processed).toBe(0);
   });
+
+  test("a plain sandbox dataset (is_sandbox=1, not an exemplar) is not a candidate", async () => {
+    db.prepare(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, github_repo, is_sandbox)
+       VALUES ('xx090001', 'xx090001', 1, 'active', 'public', 'nemarDatasets/xx090001', 1)`,
+    ).run();
+    const result = await runSignalDefaultsSweep(env(), {
+      pat: "fake-pat",
+      fetchStats: async () => emptyStats({ samplingFrequency: 250 }),
+    });
+    expect(result.processed).toBe(0);
+  });
+
+  // Issue #1168: the curated exemplar fleet is inserted `is_sandbox = 1`
+  // (AGENTS.md's dataset ID bands) but is permanent, not churning -- the
+  // candidate SQL's exemplarOrFragment() carve-out must still admit it.
+  test("an is_exemplar=1 sandbox-band row IS a candidate (#1168)", async () => {
+    db.prepare(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, github_repo, is_sandbox, is_exemplar)
+       VALUES ('xx099901', 'xx099901', 1, 'active', 'public', 'nemarDatasets/xx099901', 1, 1)`,
+    ).run();
+    const result = await runSignalDefaultsSweep(env(), {
+      pat: "fake-pat",
+      fetchStats: async () => emptyStats({ samplingFrequency: 250 }),
+    });
+    expect(result.processed).toBe(1);
+    expect(result.populated).toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------------------

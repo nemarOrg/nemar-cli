@@ -26,7 +26,8 @@ import { join } from "node:path";
 import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
-import ora from "ora";
+import ora, { type Ora } from "ora";
+import { formatBytesCli } from "../../shared/bytes.js";
 import {
   type AvailabilityReport,
   type AvailabilityReportResult,
@@ -38,11 +39,13 @@ import {
   type DoctorScanResponse,
   type EmailPreferences,
   type HedSweepBatchResponse,
+  type RecordingStatsSweepBatchResponse,
   type ReindexBulkOptions,
   type ReindexBulkResponse,
   type ReindexFilter,
   type ReindexOptions,
   type ReindexResponse,
+  type SignalDefaultsSweepBatchResponse,
   type SummaryVersionCoverage,
   type ZarrFidelitySweepBatchResponse,
   addCi,
@@ -76,6 +79,8 @@ import {
   listUsers,
   publishDataset,
   publishZarrCatalog,
+  recordingStatsSweep,
+  recordingStatsSweepReset,
   reindexBulk,
   reindexDataset,
   remintExemplarDois,
@@ -85,6 +90,8 @@ import {
   revokeUser,
   rollbackImport,
   sendBroadcast,
+  signalDefaultsSweep,
+  signalDefaultsSweepReset,
   syncCi,
   updateDoi,
   updateEmailPreferences,
@@ -137,7 +144,6 @@ import {
 } from "../lib/git-annex/clone-push.js";
 import { checkDownloadPrerequisites } from "../lib/git-annex/prereq.js";
 import { getVersionCommit, listDatasetVersions } from "../lib/git-annex/repo-state.js";
-import { formatBytes } from "../lib/progress.js";
 import {
   type RecoverDatasetEntry,
   loadRecoverDatasets,
@@ -1830,7 +1836,7 @@ doiCommand
       const statsSpinner = ora("Computing dataset sizes and formats...").start();
       try {
         const filesInfo = await getDatasetFiles(datasetId);
-        const totalSizeStr = formatBytes(filesInfo.total_size);
+        const totalSizeStr = formatBytesCli(filesInfo.total_size);
         enrichment.sizes = [`${totalSizeStr} (${filesInfo.file_count} files)`];
         enrichment.formats = filesInfo.extensions;
         statsSpinner.succeed(
@@ -2874,9 +2880,14 @@ adminCommand
 
 /** Default location of the checked-in withdrawal target list, resolved
  *  relative to this source file rather than cwd (mirrors
- *  defaultExemplarFleetPath below). */
+ *  defaultExemplarFleetPath below). Shipped to npm (package.json "files"),
+ *  same as defaultRecoverDatasetsPath below -- see that function's comment
+ *  for why a single hardcoded depth breaks between a source checkout and
+ *  the published, single-file dist/index.js bundle (#1049 review). */
 function defaultWithdrawnDatasetsPath(): string {
-  return join(import.meta.dir, "..", "..", "scripts", "withdrawn-datasets.json");
+  const fromSourceTree = join(import.meta.dir, "..", "..", "scripts", "withdrawn-datasets.json");
+  if (existsSync(fromSourceTree)) return fromSourceTree;
+  return join(import.meta.dir, "..", "scripts", "withdrawn-datasets.json");
 }
 
 function printTransitionResult(
@@ -3616,9 +3627,23 @@ adminCommand.addCommand(importCommand);
 
 /** Default location of the checked-in recovery target list, resolved
  *  relative to this source file rather than cwd (mirrors
- *  defaultWithdrawnDatasetsPath). */
+ *  defaultWithdrawnDatasetsPath, which shares this same shape). Shipped
+ *  to npm (package.json "files") so `nemar admin recover` works from an
+ *  installed build, not just a repo checkout -- the two layouts put this
+ *  file at different depths from `import.meta.dir` (#1049):
+ *   - source (`bun run src/index.ts`): this code lives at src/commands/, so
+ *     the repo-root scripts/ dir is two levels up.
+ *   - published (`dist/index.js`, a single-file bundle from `bun build`):
+ *     this code lives at dist/, so the package's scripts/ dir is only ONE
+ *     level up -- a hardcoded "two levels up" instead resolved to a path
+ *     outside the installed package entirely and 404'd on every real run.
+ *  Try the source-tree depth first (existsSync), then fall back to the
+ *  bundled depth; a repo checkout always has the former, an npm install
+ *  always has the latter, and only ever one of the two exists on disk. */
 function defaultRecoverDatasetsPath(): string {
-  return join(import.meta.dir, "..", "..", "scripts", "recover-datasets.json");
+  const fromSourceTree = join(import.meta.dir, "..", "..", "scripts", "recover-datasets.json");
+  if (existsSync(fromSourceTree)) return fromSourceTree;
+  return join(import.meta.dir, "..", "scripts", "recover-datasets.json");
 }
 
 const recoverCommand = new Command("recover").description(
@@ -3988,7 +4013,7 @@ recoverStatusCommand.action(async (ids: string[]) => {
           : chalk.dim("unaudited");
     const bytes =
       r.bytes_present != null && r.file_size != null
-        ? ` ${formatBytes(r.bytes_present)}/${formatBytes(r.file_size)}`
+        ? ` ${formatBytesCli(r.bytes_present)}/${formatBytesCli(r.file_size)}`
         : "";
     console.log(`  ${r.dataset_id.padEnd(10)} ${label}${bytes}`);
   }
@@ -4793,7 +4818,7 @@ const availabilityReportCommand = new Command("availability-report")
         console.log(
           `  Files:     ${report.completeness.files_present}/${report.completeness.files_declared} present`,
         );
-        const bytesLine = `${formatBytes(report.completeness.bytes_present)}/${formatBytes(report.completeness.bytes_declared)}`;
+        const bytesLine = `${formatBytesCli(report.completeness.bytes_present)}/${formatBytesCli(report.completeness.bytes_declared)}`;
         const pct =
           report.completeness.pct_bytes != null
             ? ` (${(report.completeness.pct_bytes * 100).toFixed(1)}%)`
@@ -4902,6 +4927,58 @@ const availabilityReportCommand = new Command("availability-report")
 
 adminCommand.addCommand(availabilityReportCommand);
 
+/** Batch response shape every `nemar admin *-sweep` command shares (PR
+ *  #1223 review, suggestion 5). */
+interface SweepBatchLike {
+  remaining: number | null;
+  errors: { dataset_id: string; error: string }[];
+}
+
+/**
+ * Shared do-while loop for hed-sweep / recording-stats-sweep /
+ * signal-defaults-sweep: calls `runBatch()` until `remaining` reaches 0,
+ * paces GitHub-heavy batches, and bails with a warning if `remaining`
+ * stops strictly decreasing (persistent write errors leave rows
+ * unstamped). `onBatch` owns everything sweep-specific -- totals
+ * accumulation and the verbose/spinner text -- so this extraction changes
+ * no command's actual output. A `runBatch` throw is caught here exactly
+ * as each call site did before: `spinner.fail(failLabel)` + the error
+ * detail + `process.exit(1)`.
+ */
+async function runSweepBatchLoop<R extends SweepBatchLike>(
+  spinner: Ora,
+  failLabel: string,
+  runBatch: () => Promise<R>,
+  onBatch: (res: R, batch: number, remaining: number | null) => void,
+): Promise<{ batches: number; remaining: number | null }> {
+  let batch = 0;
+  let remaining: number | null = null;
+  let prevRemaining: number | null = null;
+  try {
+    let res: R;
+    do {
+      res = await runBatch();
+      batch++;
+      remaining = res.remaining;
+      onBatch(res, batch, remaining);
+
+      if (remaining != null && prevRemaining != null && remaining >= prevRemaining) {
+        spinner.warn(`No progress (remaining stuck at ${remaining}); stopping - see errors`);
+        break;
+      }
+      prevRemaining = remaining;
+
+      if ((remaining ?? 0) > 0) await sleep(1000); // pace the GitHub-heavy batches
+    } while ((remaining ?? 0) > 0);
+    spinner.stop();
+  } catch (err) {
+    spinner.fail(failLabel);
+    console.error(chalk.red(errorDetail(err)));
+    process.exit(1);
+  }
+  return { batches: batch, remaining };
+}
+
 const hedSweepCommand = new Command("hed-sweep").description(
   "Backfill HED detection (has_hed / hed_version) for existing datasets (#869)",
 );
@@ -4935,50 +5012,29 @@ hedSweepCommand
       const totals = { processed: 0, withHed: 0, withoutHed: 0, unknown: 0, errors: 0 };
       const spinner = ora("Sweeping datasets for HED...").start();
 
-      let batch = 0;
-      let remaining: number | null = null;
-      let prevRemaining: number | null = null;
-      try {
-        let res: HedSweepBatchResponse;
-        do {
-          res = await hedSweep({ limit });
-          batch++;
+      const { batches: batch, remaining } = await runSweepBatchLoop<HedSweepBatchResponse>(
+        spinner,
+        "HED sweep failed",
+        () => hedSweep({ limit }),
+        (res, batchNum, rem) => {
           totals.processed += res.processed;
           totals.withHed += res.withHed;
           totals.withoutHed += res.withoutHed;
           totals.unknown += res.unknown;
           totals.errors += res.errors.length;
-          remaining = res.remaining;
 
           if (options.verbose) {
             spinner.stop();
             console.log(
-              `  [batch ${batch}] processed=${res.processed} hed=${res.withHed} no-hed=${res.withoutHed} unknown=${res.unknown} errors=${res.errors.length} remaining=${remaining ?? "?"}`,
+              `  [batch ${batchNum}] processed=${res.processed} hed=${res.withHed} no-hed=${res.withoutHed} unknown=${res.unknown} errors=${res.errors.length} remaining=${rem ?? "?"}`,
             );
             for (const e of res.errors) console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
             spinner.start("Sweeping datasets for HED...");
           } else {
-            spinner.text = `Sweeping datasets for HED... ${totals.processed} processed, ${remaining ?? "?"} remaining`;
+            spinner.text = `Sweeping datasets for HED... ${totals.processed} processed, ${rem ?? "?"} remaining`;
           }
-
-          // Progress guard: hed_checked_at is stamped for every processed row, so
-          // `remaining` must strictly decrease. If it doesn't (e.g. persistent D1
-          // write errors leave rows unstamped), bail instead of looping forever.
-          if (remaining != null && prevRemaining != null && remaining >= prevRemaining) {
-            spinner.warn(`No progress (remaining stuck at ${remaining}); stopping - see errors`);
-            break;
-          }
-          prevRemaining = remaining;
-
-          if ((remaining ?? 0) > 0) await sleep(1000); // pace the GitHub-heavy batches
-        } while ((remaining ?? 0) > 0);
-
-        spinner.stop();
-      } catch (err) {
-        spinner.fail("HED sweep failed");
-        console.error(chalk.red(errorDetail(err)));
-        process.exit(1);
-      }
+        },
+      );
 
       if (options.json) {
         console.log(JSON.stringify({ ...totals, batches: batch, remaining }, null, 2));
@@ -5004,6 +5060,170 @@ hedSweepCommand
   );
 
 adminCommand.addCommand(hedSweepCommand);
+
+const recordingStatsSweepCommand = new Command("recording-stats-sweep").description(
+  "Backfill dataset-level recording duration/count/channel-range stats from each dataset's zarr index (migration 0070, #1146)",
+);
+
+recordingStatsSweepCommand
+  .option("--limit <n>", "Datasets per batch (server clamps to [1,200])", "50")
+  .option("--reset", "Clear every stamped recording-stats row so it re-sweeps from scratch")
+  .option("--verbose", "Print per-batch progress")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(
+    async (options: { limit?: string; reset?: boolean; verbose?: boolean; json?: boolean }) => {
+      if (!requireAuth()) return;
+
+      if (options.reset) {
+        const spinner = ora("Resetting recording-stats sweep state...").start();
+        try {
+          const r = await recordingStatsSweepReset();
+          spinner.succeed(
+            `Cleared ${r.reset} stamped recording-stats row(s); eligible datasets are candidates again`,
+          );
+          if (options.json) console.log(JSON.stringify(r, null, 2));
+        } catch (err) {
+          spinner.fail("Reset failed");
+          console.error(chalk.red(errorDetail(err)));
+          process.exit(1);
+        }
+        return;
+      }
+
+      const limit = Number.parseInt(options.limit ?? "50", 10) || 50;
+      const totals = { processed: 0, measured: 0, unmeasured: 0, errors: 0 };
+      const spinner = ora("Sweeping datasets for recording stats...").start();
+
+      const { batches: batch, remaining } =
+        await runSweepBatchLoop<RecordingStatsSweepBatchResponse>(
+          spinner,
+          "Recording-stats sweep failed",
+          () => recordingStatsSweep({ limit }),
+          (res, batchNum, rem) => {
+            totals.processed += res.processed;
+            totals.measured += res.measured;
+            totals.unmeasured += res.unmeasured;
+            totals.errors += res.errors.length;
+
+            if (options.verbose) {
+              spinner.stop();
+              console.log(
+                `  [batch ${batchNum}] processed=${res.processed} measured=${res.measured} unmeasured=${res.unmeasured} errors=${res.errors.length} remaining=${rem ?? "?"}`,
+              );
+              for (const e of res.errors) console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
+              spinner.start("Sweeping datasets for recording stats...");
+            } else {
+              spinner.text = `Sweeping datasets for recording stats... ${totals.processed} processed, ${rem ?? "?"} remaining`;
+            }
+          },
+        );
+
+      if (options.json) {
+        console.log(JSON.stringify({ ...totals, batches: batch, remaining }, null, 2));
+      } else {
+        console.log();
+        if (remaining === null) {
+          console.log(
+            chalk.yellow(
+              "Warning: backend returned a null remaining count; the sweep may be incomplete - check server logs.",
+            ),
+          );
+        }
+        console.log(
+          chalk.cyan(
+            `Done in ${batch} batch(es): processed=${totals.processed} measured=${totals.measured} unmeasured=${totals.unmeasured} errors=${totals.errors} remaining=${remaining ?? "unknown"}`,
+          ),
+        );
+      }
+      // Non-zero exit on errors OR an indeterminate (null) remaining, so a caller
+      // never reads a partial/uncertain sweep as success.
+      if (totals.errors > 0 || remaining === null) process.exit(1);
+    },
+  );
+
+adminCommand.addCommand(recordingStatsSweepCommand);
+
+const signalDefaultsSweepCommand = new Command("signal-defaults-sweep").description(
+  "Backfill BIDS signal defaults (sampling frequency, power line frequency, EEG reference, placement scheme) from each dataset's exemplar sidecar (migrations 0072/0073, #1153)",
+);
+
+signalDefaultsSweepCommand
+  .option("--limit <n>", "Datasets per batch (server clamps to [1,30])", "15")
+  .option("--reset", "Clear every stamped signal-defaults row so it re-sweeps from scratch")
+  .option("--verbose", "Print per-batch progress")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(
+    async (options: { limit?: string; reset?: boolean; verbose?: boolean; json?: boolean }) => {
+      if (!requireAuth()) return;
+
+      if (options.reset) {
+        const spinner = ora("Resetting signal-defaults sweep state...").start();
+        try {
+          const r = await signalDefaultsSweepReset();
+          spinner.succeed(
+            `Cleared ${r.reset} stamped signal-defaults row(s); eligible datasets are candidates again`,
+          );
+          if (options.json) console.log(JSON.stringify(r, null, 2));
+        } catch (err) {
+          spinner.fail("Reset failed");
+          console.error(chalk.red(errorDetail(err)));
+          process.exit(1);
+        }
+        return;
+      }
+
+      const limit = Number.parseInt(options.limit ?? "15", 10) || 15;
+      const totals = { processed: 0, populated: 0, noData: 0, errors: 0 };
+      const spinner = ora("Sweeping datasets for signal defaults...").start();
+
+      const { batches: batch, remaining } =
+        await runSweepBatchLoop<SignalDefaultsSweepBatchResponse>(
+          spinner,
+          "Signal-defaults sweep failed",
+          () => signalDefaultsSweep({ limit }),
+          (res, batchNum, rem) => {
+            totals.processed += res.processed;
+            totals.populated += res.populated;
+            totals.noData += res.noData;
+            totals.errors += res.errors.length;
+
+            if (options.verbose) {
+              spinner.stop();
+              console.log(
+                `  [batch ${batchNum}] processed=${res.processed} populated=${res.populated} no-data=${res.noData} errors=${res.errors.length} remaining=${rem ?? "?"}`,
+              );
+              for (const e of res.errors) console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
+              spinner.start("Sweeping datasets for signal defaults...");
+            } else {
+              spinner.text = `Sweeping datasets for signal defaults... ${totals.processed} processed, ${rem ?? "?"} remaining`;
+            }
+          },
+        );
+
+      if (options.json) {
+        console.log(JSON.stringify({ ...totals, batches: batch, remaining }, null, 2));
+      } else {
+        console.log();
+        if (remaining === null) {
+          console.log(
+            chalk.yellow(
+              "Warning: backend returned a null remaining count; the sweep may be incomplete - check server logs.",
+            ),
+          );
+        }
+        console.log(
+          chalk.cyan(
+            `Done in ${batch} batch(es): processed=${totals.processed} populated=${totals.populated} no-data=${totals.noData} errors=${totals.errors} remaining=${remaining ?? "unknown"}`,
+          ),
+        );
+      }
+      // Non-zero exit on errors OR an indeterminate (null) remaining, so a caller
+      // never reads a partial/uncertain sweep as success.
+      if (totals.errors > 0 || remaining === null) process.exit(1);
+    },
+  );
+
+adminCommand.addCommand(signalDefaultsSweepCommand);
 
 /** One data-integrity-sweep batch, as consumed by {@link runReauditLoop}. */
 export interface ReauditBatchResult {

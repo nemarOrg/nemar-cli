@@ -18,6 +18,15 @@ import {
 
 const RESEND_EMAILS_URL = "https://api.resend.com/emails";
 
+// This suite tests the request SHAPE (recipient, subject, body), not the
+// #957 non-production delivery fence (services/email.ts's sendEmail) --
+// fetch is already fully captured/redirected here, so nothing is ever
+// really delivered either way. Declaring ENVIRONMENT="production" as the
+// deliveryEnv on every call below opts these calls out of the fence
+// (production always bypasses it) so an unfenced send still exercises the
+// same code path it always has.
+const PROD_ENV = { ENVIRONMENT: "production" };
+
 describe("staleness emails write the right request to Resend", () => {
   const realFetch = globalThis.fetch;
   let captured: Array<{ url: string; body: Record<string, unknown> }>;
@@ -48,6 +57,9 @@ describe("staleness emails write the right request to Resend", () => {
       "2026-04-01",
       "test-key",
       "NEMAR <nemar@nemar.org>",
+      undefined,
+      undefined,
+      PROD_ENV,
     );
 
     expect(captured).toHaveLength(1);
@@ -70,6 +82,9 @@ describe("staleness emails write the right request to Resend", () => {
       "2026-04-01",
       "test-key",
       "NEMAR <nemar@nemar.org>",
+      undefined,
+      undefined,
+      PROD_ENV,
     );
     expect(String(captured[0].body.subject)).toContain("Final notice");
     expect(String(captured[0].body.subject)).toContain("1 day");
@@ -84,6 +99,9 @@ describe("staleness emails write the right request to Resend", () => {
       1,
       "test-key",
       "NEMAR <nemar@nemar.org>",
+      undefined,
+      undefined,
+      PROD_ENV,
     );
 
     expect(delivered).toBe(2);
@@ -108,6 +126,9 @@ describe("staleness emails write the right request to Resend", () => {
       null,
       "test-key",
       "NEMAR <nemar@nemar.org>",
+      undefined,
+      undefined,
+      PROD_ENV,
     );
     expect(delivered).toBe(0);
   });

@@ -119,6 +119,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
           fromEmail,
           replyTo,
           isDev,
+          c.env,
         );
       }
     } catch (emailError) {

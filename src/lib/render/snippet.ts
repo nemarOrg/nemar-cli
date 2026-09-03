@@ -12,6 +12,18 @@
  *   character-by-character (sanitised), not dropped whole: it is a display
  *   extra, and losing one bad byte should not blank out an otherwise
  *   readable line.
+ *
+ *   The snippet line itself is now opt-in, not always-on (owner decision
+ *   2026-09-03, superseding #1150 D2's default): `renderSearchResultLines`
+ *   in `src/commands/dataset.ts` only calls `renderSnippetLine` when the
+ *   `search` command's `--verbose` flag is set (no `-v` short alias -- the
+ *   root command already binds `-v` to `--version`, see
+ *   `searchVerboseRequested`'s doc comment in `dataset.ts` for the full
+ *   Commander-parsing explanation), because a snippet under every row made
+ *   the compact table slower for a human to scan and noisier for an agent
+ *   caller. The sanitisation rationale below is unchanged by that -- it
+ *   still applies in full every time a snippet line is rendered, `--verbose`
+ *   or not.
  * - D3: the comma-joined token list (`modalities`) that a
  *   fixed-width column used to cut mid-token (`.substring(0, modWidth)`
  *   rendered `anat,eeg,fmap` as `anat,eeg,f`).

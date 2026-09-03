@@ -8,8 +8,9 @@
  * - hashAuthCode(): HMAC-SHA256 keyed with ENCRYPTION_KEY. Keying with
  *   an out-of-band secret means an exfiltrated DB alone cannot brute
  *   the 1M-combo space; a stolen DB plus the worker secret is required.
- * - constantTimeEqualHex(): hex-string compare in time independent of
- *   the first mismatched byte. Web Crypto has no helper for this.
+ *   Compare the result with lib/constant-time.ts's timingSafeEqual, not
+ *   `===` — a hash equality check is exactly the kind of secret compare
+ *   a timing oracle can defeat.
  * - maskEmail(): "y***@ieee.org" formatting for the
  *   /auth/code/request response. The masking matches the issue spec
  *   exactly; we never leak whether the email already existed.
@@ -87,20 +88,6 @@ export async function hashAuthCode(code: string, env: Bindings): Promise<string>
   const key = await getHmacKey(secret);
   const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(code));
   return bytesToHex(signature);
-}
-
-/**
- * Constant-time hex-string equality. Returns false on length mismatch
- * without short-circuiting — but the length itself is non-secret so
- * that branch is fine to expose.
- */
-export function constantTimeEqualHex(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return diff === 0;
 }
 
 /**

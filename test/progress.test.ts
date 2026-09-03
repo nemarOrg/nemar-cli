@@ -7,6 +7,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { formatBytesCli } from "../shared/bytes";
 import { DownloadProgressTracker, parseGitAnnexProgressLine } from "../src/lib/progress";
 
 /**
@@ -308,5 +309,42 @@ describe("DownloadProgressTracker", () => {
     } finally {
       restore();
     }
+  });
+});
+
+/**
+ * Golden coverage for `formatBytesCli` (epic #1225 phase 4, issue #1227).
+ * `formatBytesCli` is exported directly and consumed across the CLI (progress
+ * bar, `formatSpeed`, upload plan/preflight, dataset/admin/sandbox commands)
+ * -- those consumers need live git-annex/S3/network state to drive end to
+ * end, so per .rules/testing.md this supplements that coverage by pinning
+ * the exported function's own contract directly.
+ *
+ * The expected strings were computed independently against a verbatim copy
+ * of the current formatter and cross-checked by running the real function
+ * in this worktree before any implementation change landed -- see the phase
+ * 4 implementation brief on issue #1227 for the full six-formatter table
+ * this is one column of.
+ */
+describe("formatBytesCli", () => {
+  test("golden vector — phase 4 pinned magnitudes (issue #1227)", () => {
+    expect(formatBytesCli(0)).toBe("0 B");
+    expect(formatBytesCli(1)).toBe("1 B");
+    expect(formatBytesCli(512)).toBe("512 B");
+    expect(formatBytesCli(1023)).toBe("1023 B");
+    expect(formatBytesCli(1024)).toBe("1.0 KB");
+    expect(formatBytesCli(1536)).toBe("1.5 KB");
+    expect(formatBytesCli(1048576)).toBe("1.0 MB");
+    expect(formatBytesCli(1073741824)).toBe("1.0 GB");
+    expect(formatBytesCli(4628000000)).toBe("4.3 GB");
+    expect(formatBytesCli(24000000000)).toBe("22.4 GB");
+    expect(formatBytesCli(1099511627776)).toBe("1.0 TB");
+    expect(formatBytesCli(1024 ** 5)).toBe("1024.0 TB"); // 1 PiB, no index clamp above TB
+  });
+
+  test("bad inputs (current behavior, no guards on this formatter)", () => {
+    expect(formatBytesCli(-1)).toBe("NaN undefined");
+    expect(formatBytesCli(Number.NaN)).toBe("NaN undefined");
+    expect(formatBytesCli(Number.POSITIVE_INFINITY)).toBe("Infinity TB");
   });
 });

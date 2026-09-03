@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
-import { compareVersions } from "./semver.js";
+import semver from "semver";
 import { version as currentVersion } from "./version.js";
 
 // Resolve the config dir lazily on each call so tests that set
@@ -40,16 +40,28 @@ interface UpdateCache {
 }
 
 /**
- * Strip pre-release suffix (e.g. "0.7.17-dev" -> "0.7.17")
- * so compareVersions() can parse it as stable semver.
+ * Is `latest` actually newer than the running version?
+ *
+ * Compares with semver.gt() against the full current version, prerelease
+ * suffix included. The comparator this replaced stripped the ENTIRE
+ * prerelease suffix off the current version before comparing, so a stable
+ * "0.9.15" release compared as merely EQUAL to a running "0.9.15-dev4" and
+ * the update banner never fired for anyone on a -devN build -- a real
+ * release is newer than a prerelease of the same X.Y.Z under semver
+ * ordering, so that comparison should have come out true (#1163).
+ * semver.gt() gets prerelease precedence right without any stripping.
+ *
+ * `latest` is guarded with semver.valid() because it can come from a cached
+ * file on disk (readCache() only checks it's a string, not that it parses);
+ * an invalid cached value degrades to "no update available" here rather than
+ * throwing out of initUpdateCheck().
+ *
+ * Exported for direct unit testing as a supplement to the initUpdateCheck()
+ * entry-point tests below (test/update-check.test.ts).
  */
-function normalizeVersion(v: string): string {
-  return v.replace(/-.*$/, "");
-}
-
-function isNewerVersion(latest: string): boolean {
-  const normalized = normalizeVersion(currentVersion);
-  return compareVersions(latest, normalized) > 0;
+export function isNewerVersion(latest: string): boolean {
+  if (!semver.valid(latest)) return false;
+  return semver.gt(latest, currentVersion);
 }
 
 function readCache(): UpdateCache | null {

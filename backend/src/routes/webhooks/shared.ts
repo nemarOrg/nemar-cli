@@ -13,12 +13,3 @@ import type { Bindings } from "../../types/bindings.js";
 export type WebhookRouter = Hono<{ Bindings: Bindings }>;
 
 export type WebhookContext = Context<{ Bindings: Bindings }>;
-
-/** Constant-time string comparison to prevent timing attacks on secret tokens. */
-export function timingSafeEqual(a: string, b: string): boolean {
-  const encoder = new TextEncoder();
-  const bufA = encoder.encode(a);
-  const bufB = encoder.encode(b);
-  if (bufA.byteLength !== bufB.byteLength) return false;
-  return crypto.subtle.timingSafeEqual(bufA, bufB);
-}

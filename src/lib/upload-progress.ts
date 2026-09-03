@@ -7,10 +7,9 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { z } from "zod";
 
 export type FileStatus = "pending" | "uploaded" | "failed";
-
-const VALID_STATUSES = new Set<string>(["pending", "uploaded", "failed"]);
 
 export type UploadStep =
   | "tracking"
@@ -20,16 +19,6 @@ export type UploadStep =
   | "dataset_save"
   | "github_push"
   | "ci_deploy";
-
-const VALID_STEPS = new Set<string>([
-  "tracking",
-  "s3_upload",
-  "url_registration",
-  "metadata_write",
-  "dataset_save",
-  "github_push",
-  "ci_deploy",
-]);
 
 export interface FileProgress {
   status: FileStatus;
@@ -301,39 +290,62 @@ export function getProgressSummary(progress: UploadProgress): {
   };
 }
 
+const fileStatusSchema = z.enum(["pending", "uploaded", "failed"]) satisfies z.ZodType<FileStatus>;
+
+const uploadStepSchema = z.enum([
+  "tracking",
+  "s3_upload",
+  "url_registration",
+  "metadata_write",
+  "dataset_save",
+  "github_push",
+  "ci_deploy",
+]) satisfies z.ZodType<UploadStep>;
+
+// `mtimeMs` is optional because it is genuinely absent from pre-#884 progress
+// files; `updated_at` is NOT, and is required here, because every writer in
+// this module (initUploadProgress, markFileUploaded, markFileFailed) has always
+// set it. The old hand-rolled check skipped it, which left the `data is
+// UploadProgress` predicate below asserting a field nothing had verified.
+// `error` and any other per-file key are intentionally left undeclared: this
+// schema is used only as a type guard (see isValidProgress), never to derive
+// the returned value, so unknown keys are neither validated nor stripped from
+// what the caller gets back.
+const fileProgressSchema = z.object({
+  status: fileStatusSchema,
+  size: z.number().nonnegative(),
+  mtimeMs: z.number().nonnegative().optional(),
+  updated_at: z.string(),
+});
+
+// started_at/updated_at are validated only as strings -- real progress files
+// carry values a stricter z.string().datetime() would reject, so none is
+// applied here.
+//
+// `files` is intentionally neither `.optional()` nor `.nullable()`: null or a
+// non-object fails the same way the old `typeof !== "object"` check did. It is
+// also where the one deliberate narrowing lives. Zod's ZodParsedType
+// categorizes an array as "array", never "object", so z.record rejects an
+// array-valued `files` -- unlike `typeof [] === "object"`, which let the old
+// check treat an array as a valid (empty-keyed) files map and then silently
+// resume with zero matching file paths, since every lookup of a string path
+// against an array misses. See the PR body.
+const uploadProgressSchema = z.object({
+  dataset_id: z.string().min(1),
+  started_at: z.string(),
+  updated_at: z.string(),
+  files: z.record(fileProgressSchema),
+  completed_steps: z.array(uploadStepSchema),
+});
+
 /**
  * Validates the structure of a parsed progress file, including individual
  * file entries and step values.
+ *
+ * Used purely as a type guard: `readUploadProgress` returns the raw parsed
+ * value (not `result.data`) so unknown top-level keys, unknown per-file
+ * keys, and the `error` field survive the read unchanged.
  */
 function isValidProgress(data: unknown): data is UploadProgress {
-  if (!data || typeof data !== "object") return false;
-  const d = data as Record<string, unknown>;
-  if (
-    typeof d.dataset_id !== "string" ||
-    d.dataset_id.length === 0 ||
-    typeof d.started_at !== "string" ||
-    typeof d.updated_at !== "string" ||
-    typeof d.files !== "object" ||
-    d.files === null ||
-    !Array.isArray(d.completed_steps)
-  ) {
-    return false;
-  }
-
-  // Validate individual file entries
-  for (const entry of Object.values(d.files as Record<string, unknown>)) {
-    if (!entry || typeof entry !== "object") return false;
-    const e = entry as Record<string, unknown>;
-    if (typeof e.status !== "string" || !VALID_STATUSES.has(e.status)) return false;
-    if (typeof e.size !== "number" || e.size < 0) return false;
-    // mtimeMs is optional (absent in pre-#884 progress files)
-    if (e.mtimeMs !== undefined && (typeof e.mtimeMs !== "number" || e.mtimeMs < 0)) return false;
-  }
-
-  // Validate step values
-  for (const step of d.completed_steps as unknown[]) {
-    if (typeof step !== "string" || !VALID_STEPS.has(step)) return false;
-  }
-
-  return true;
+  return uploadProgressSchema.safeParse(data).success;
 }

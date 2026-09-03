@@ -101,6 +101,31 @@ export const HED_SWEEP_WRITE_SQL = `UPDATE datasets
 export const HED_SWEEP_STAMP_ONLY_SQL =
   "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.hed_checked_at', datetime('now')) WHERE dataset_id = ?";
 
+/**
+ * Bound on how many findings an UN-NARROWED `POST /admin/doctor/fix` call
+ * (no `dataset_id`) applies in one Worker invocation (issue #1135). The
+ * 2026-08-23 nm000225 incident (see AGENTS.md's manifest-healing note and
+ * the memory it left behind) hit this exact shape: the missing-manifest
+ * check's remediation calls GitHub REST + S3 per finding, and a
+ * catalog-wide call re-scans (up to ~800 GETs) AND fixes everything in one
+ * request, which starves under GitHub App rate limits and the Worker's
+ * subrequest budget well before it finishes.
+ *
+ * Default 25, clamped to a max of 100 (mirrors the hed-sweep /
+ * data-integrity-sweep clamp pattern below, `Math.min(Math.max(n, 1), MAX)`)
+ * -- a caller can request more per call via `limit` in the body, but never
+ * an unbounded one. 100 findings at missing-manifest's ~3 subrequests each
+ * (S3 head-check, GitHub generateManifest, S3 upload) stays a small
+ * fraction of the Workers Paid plan's 1,000-subrequest cap.
+ *
+ * A dataset_id-narrowed call is UNAFFECTED (no cap, no `remaining`): its
+ * findings are already scoped to one dataset and stay small -- this is
+ * exactly the `nemar admin doctor fix` per-dataset shape the incident
+ * write-up says to prefer.
+ */
+export const DOCTOR_FIX_DEFAULT_LIMIT = 25;
+export const DOCTOR_FIX_MAX_LIMIT = 100;
+
 export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
   /**
    * POST /admin/datasets/archive-sweep?limit=N — one-time/periodic backfill that
@@ -1196,12 +1221,22 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
    *   - check (required): name of the check
    *   - dataset_id (optional): narrow to one dataset
    *   - dry_run (optional, default false): list findings without writing
+   *   - limit (optional, un-narrowed calls only): cap findings fixed this
+   *     call, default DOCTOR_FIX_DEFAULT_LIMIT, clamped to
+   *     DOCTOR_FIX_MAX_LIMIT (issue #1135)
    *
    * Returns per-dataset fix results. Fixes are serial to bound worker memory
    * and respect downstream rate limits (GitHub, S3, EZID).
+   *
+   * Un-narrowed (no dataset_id) calls are BOUNDED: only up to `limit`
+   * findings are fixed this invocation, and `remaining` reports how many
+   * were left for the caller to pick up on a subsequent call (repeat until
+   * it reaches 0, same convergence contract as hed-sweep / data-integrity-
+   * sweep). A dataset_id-narrowed call is NOT capped -- its findings are
+   * already scoped to one dataset -- and always reports `remaining: 0`.
    */
   admin.post("/doctor/fix", async (c) => {
-    type FixBody = { check?: string; dataset_id?: string; dry_run?: boolean };
+    type FixBody = { check?: string; dataset_id?: string; dry_run?: boolean; limit?: number };
     const body = (await c.req.json<FixBody>().catch(() => ({}))) as FixBody;
 
     if (!body.check) {
@@ -1229,6 +1264,14 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       });
     }
 
+    // Cap only applies to un-narrowed calls; a dataset_id-narrowed call's
+    // findings are already scoped to one dataset and stay small.
+    const requestedLimit = Number.isFinite(body.limit)
+      ? Math.trunc(Number(body.limit))
+      : DOCTOR_FIX_DEFAULT_LIMIT;
+    const limit = Math.min(Math.max(requestedLimit, 1), DOCTOR_FIX_MAX_LIMIT);
+    const toFix = body.dataset_id ? findings : findings.slice(0, limit);
+
     const results: Array<{
       dataset_id: string;
       version?: string;
@@ -1236,7 +1279,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       message?: string;
       details?: Record<string, unknown>;
     }> = [];
-    for (const finding of findings) {
+    for (const finding of toFix) {
       const result = await check.fix(ctx, finding);
       results.push({
         dataset_id: finding.dataset_id,
@@ -1252,6 +1295,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       skipped: results.filter((r) => r.status === "skipped").length,
       failed: results.filter((r) => r.status === "failed").length,
       results,
+      remaining: body.dataset_id ? 0 : findings.length - toFix.length,
     });
   });
 

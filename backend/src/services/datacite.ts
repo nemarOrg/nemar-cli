@@ -18,6 +18,7 @@ import {
   isValidPipelineStage,
   isValidRelationType,
 } from "../../../shared/datacite-constants.js";
+import { escapeXml } from "../lib/escape.js";
 
 export {
   type NemarMetadata,
@@ -742,15 +743,6 @@ function nemarMetadataV2ToEnrichment(
 // ---------------------------------------------------------------------------
 // XML building
 // ---------------------------------------------------------------------------
-
-function escapeXml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
 
 function buildCreatorXml(creator: DataCiteCreator): string {
   const nameType = creator.nameType || "Personal";

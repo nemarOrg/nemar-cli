@@ -121,6 +121,8 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "publishDataset",
     "publishVersionDoi",
     "publishZarrCatalog",
+    "recordingStatsSweep",
+    "recordingStatsSweepReset",
     "reindexBulk",
     "reindexDataset",
     "remintExemplarDois",
@@ -131,6 +133,8 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "revokeUser",
     "rollbackImport",
     "sendBroadcast",
+    "signalDefaultsSweep",
+    "signalDefaultsSweepReset",
     "syncCi",
     "updateDoi",
     "updateEmailPreferences",
@@ -166,6 +170,10 @@ const POST_SPLIT_ADDITIONS = [
   "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
   "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion
   "publishZarrCatalog", // #1062, epic #1181 phase 2: POST /admin/zarr-catalog/publish
+  "recordingStatsSweep", // #1194, CLI wrapper for POST /admin/datasets/recording-stats-sweep
+  "recordingStatsSweepReset", // #1194, CLI wrapper for the recording-stats sweep reset
+  "signalDefaultsSweep", // #1194, CLI wrapper for POST /admin/datasets/signal-defaults-sweep
+  "signalDefaultsSweepReset", // #1194, CLI wrapper for the signal-defaults sweep reset
   "zarrFidelitySweep", // #1068, epic #1181 phase 8: POST /admin/datasets/zarr-fidelity-sweep
 ];
 

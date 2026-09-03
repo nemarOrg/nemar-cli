@@ -11,6 +11,16 @@
  * already-independently-tested `sanitizeSnippetText` as a normalizer -- this
  * file is about parsing/sanitisation correctness, not about whether chalk
  * decided to colour a given run.
+ *
+ * These sanitisation and truncation guarantees hold regardless of WHETHER a
+ * snippet line ever reaches the table: whether `renderSnippetLine` is called
+ * at all is now the `search` command's `--verbose` opt-in (owner
+ * decision 2026-09-03, superseding #1150 D2's always-on default), decided in
+ * `renderSearchResultLines` in `src/commands/dataset.ts`. That default/opt-in
+ * behaviour is covered in test/search-column-width.unit.test.ts, next to the
+ * rest of `renderSearchResultLines`'s coverage -- every test in this file
+ * still exercises `renderSnippetLine`/`sanitizeSnippetText`/`truncateTokenList`
+ * directly, unaffected by that flag.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";

@@ -7,6 +7,12 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
+import type { z } from "zod";
+import { formatFileSize } from "../../../../shared/bytes.js";
+import {
+  datasetDetailEnvelopeSchema,
+  datasetListEnvelopeSchema,
+} from "../../../../shared/contract/dataset.js";
 import { toVersionTag } from "../../../../shared/contract/index.js";
 import type { FacetKey } from "../../../../shared/facets.js";
 import { RangeParseError } from "../../../../shared/range.js";
@@ -27,7 +33,6 @@ import {
   buildPublicCatalogBase,
   escapeLikePattern,
 } from "../../services/dataset-filters";
-import { formatFileSize } from "../../services/dataset-metadata-columns";
 import { DEFAULT_MIN_SCORE, executeDatasetSearch } from "../../services/dataset-search";
 import { isValidDatasetId } from "../../services/datasetId";
 import { ZARR_VERIFIED_AT_PATH, ZARR_VERIFY_STATUS_PATH } from "../../services/sweep-stamps";
@@ -121,11 +126,14 @@ export function withCanonicalLatestVersion<T extends Record<string, unknown>>(ro
 /**
  * `file_size_formatted` is a contract field (shared/contract/dataset.ts) but
  * no longer a stored column (#1182): derive it from the row's `file_size` at
- * read time. MUST use `formatFileSize` (binary/1024, the formatter the old
- * write path used) — `formatBytes` from services/s3.ts is decimal/1000 and
- * would silently shift every displayed size. formatFileSize returns null for
- * null/0/non-finite input, mirroring the old writer's "nothing to display".
- * Exported for unit testing.
+ * read time. MUST use `formatFileSize` from `shared/bytes.ts` -- it is the
+ * one CONTRACTUAL formatter of the five that module declares (binary/1024,
+ * the formatter the old write path used). The decimal/1000 outlier that
+ * used to live at services/s3.ts and would silently shift every displayed
+ * size is gone (epic #1225 phase 4, issue #1227): do not reintroduce a
+ * second byte formatter here, add to `shared/bytes.ts` instead.
+ * formatFileSize returns null for null/0/non-finite input, mirroring the
+ * old writer's "nothing to display". Exported for unit testing.
  */
 export function deriveFileSizeFormatted(fileSize: unknown): string | null {
   return typeof fileSize === "number" ? formatFileSize(fileSize) : null;
@@ -444,6 +452,26 @@ export function parseFilterQuery(
   return filters;
 }
 
+/**
+ * Issue #1152: `GET /datasets`, `GET /datasets/search`, and `GET
+ * /datasets/resolve/:id` require no auth, so a raw `Error#message` returned
+ * as `details` on their failure paths -- table/column names, query shape,
+ * occasionally file-path fragments -- reaches any anonymous caller. The full
+ * message is still logged server-side via `console.error`/`console.warn`
+ * immediately before each of these is returned; this constant only changes
+ * what crosses the wire. Deliberately scoped to these three endpoints
+ * (`catalog.ts`) per the issue -- other route files with the same `details:
+ * msg` idiom are authenticated/admin contexts where the detail is actionable
+ * rather than a disclosure risk, and are the issue's own stated follow-up,
+ * not this fix.
+ *
+ * Exported so tests import the real string (backend/test/catalog-anonymous-
+ * error-details.test.ts) instead of hand-copying it -- a copy would keep
+ * passing if this wording ever changed underneath it.
+ */
+export const ANONYMOUS_ERROR_DETAILS =
+  "An internal error occurred while processing this request. Please try again; if it persists, contact support.";
+
 function buildSortClause(sort: string): string {
   switch (sort) {
     case "oldest":
@@ -464,8 +492,123 @@ function buildSortClause(sort: string): string {
   }
 }
 
+/**
+ * Issue #1207: nothing parses a live catalog/detail response against the
+ * shared contract schemas (`shared/contract/dataset.ts`), so a production
+ * regression in a derive path ships data the contract calls invalid and
+ * only surfaces when some consumer's own parse throws -- the #1206 review
+ * found exactly this (`SELECT d.*` serving a numeric `id` where the schema
+ * declared a string; fixed at the source in the detail route below, but
+ * still the motivating example for why this hook exists). `logContractViolation`
+ * is log-not-throw: a malformed response still reaches the caller unchanged
+ * (ADR 0005 -- reporting is never a precondition for serving).
+ *
+ * Cost gate: development/test validates every response -- there, a
+ * violation is a real bug worth failing loudly and immediately, and traffic
+ * is low enough that the extra `safeParse` is free. Production instead
+ * samples at `CONTRACT_VALIDATION_SAMPLE_RATE`: `GET /datasets` can return
+ * up to 200 rows per page, so validating every production response would
+ * add non-negligible CPU cost at catalog traffic volume. One sampling rate
+ * applied uniformly to both routes (rather than, say, always validating the
+ * single-row detail route) keeps the cost/coverage tradeoff the same for
+ * both rather than special-casing one endpoint as "always cheap enough" --
+ * a random check per request avoids needing shared mutable counter state
+ * across Worker isolates.
+ *
+ * #1224 review: what is actually guaranteed is response-latency isolation,
+ * not zero cost -- `shouldValidateContract`/`safeParse`/`logContractViolation`
+ * is still real CPU work, just moved off the response's critical path via
+ * `deferContractCheck` (below), which schedules it on `executionCtx.waitUntil`
+ * the same way `afterResponse()` (routes/auth-orcid.ts) defers a best-effort
+ * post-response fetch. The response is built and returned first; the check
+ * runs after, and Cloudflare keeps the isolate alive just long enough for it
+ * to finish. It still costs Worker CPU time (billed under `waitUntil`, per
+ * Cloudflare's usual model) -- the sampling above is what keeps THAT bounded
+ * in production, not the deferral, which only protects response latency.
+ */
+const CONTRACT_VALIDATION_SAMPLE_RATE = 0.02; // ~1 in 50 production responses
+
+function shouldValidateContract(env: Bindings): boolean {
+  if (env.ENVIRONMENT === "development" || env.ENVIRONMENT === "test") return true;
+  return Math.random() < CONTRACT_VALIDATION_SAMPLE_RATE;
+}
+
+/** One bounded console.error per violating response: the route label, the
+ *  dataset id(s) involved, and the first few zod issues -- enough to act on
+ *  without risking an unbounded log line for a badly-shaped response. */
+function logContractViolation(route: string, datasetIds: unknown, issues: z.ZodIssue[]): void {
+  console.error(`[contract] ${route} response violates the shared contract`, {
+    dataset_id: datasetIds,
+    issues: issues
+      .slice(0, 5)
+      .map((issue) => ({ path: issue.path.join("."), message: issue.message })),
+  });
+}
+
+/**
+ * #1224 review (suggestion 4): a violation on `GET /datasets` used to log
+ * every row's dataset_id on the page (up to 200), regardless of how many
+ * actually failed -- noisy, and it buries "which row" in a wall of ids that
+ * mostly validated fine. `datasetListEnvelopeSchema`'s zod issues for a row
+ * problem always path through `datasets.<index>.<field...>`, so the row
+ * index is `issue.path[1]` whenever `issue.path[0] === "datasets"`; map
+ * those indices back to the row's own `dataset_id`, dedup (one bad row can
+ * fail more than one field), and cap at `limit` so a badly-shaped page
+ * can't blow up the log line the way the uncapped array could.
+ */
+function failedListRowIds(
+  datasets: { dataset_id?: unknown }[],
+  issues: z.ZodIssue[],
+  limit = 5,
+): unknown[] {
+  const ids: unknown[] = [];
+  const seen = new Set<unknown>();
+  for (const issue of issues) {
+    const [collection, index] = issue.path;
+    if (collection !== "datasets" || typeof index !== "number") continue;
+    const id = datasets[index]?.dataset_id;
+    if (id === undefined || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+    if (ids.length >= limit) break;
+  }
+  return ids;
+}
+
+/**
+ * #1224 review: defers `check` off the response's critical path via
+ * `executionCtx.waitUntil`, mirroring `afterResponse()` (routes/auth-orcid.ts)
+ * -- accessing `c.executionCtx` THROWS when no ExecutionContext was provided
+ * (Hono's own documented behavior for `Context#executionCtx`), which is why
+ * this needs a try/catch rather than plain optional chaining: `c.executionCtx?.`
+ * would still evaluate (and throw on) the getter before the `?.` ever
+ * short-circuits. `p` is created unconditionally, before the try/catch, so
+ * the SAME fire-and-forget microtask runs `check` even when there is no
+ * ExecutionContext to hand it to (e.g. bun:test's `app.request()` called
+ * without an explicit fourth `ctx` argument) -- that is what lets a test
+ * still observe the log without needing one. Tests that need this
+ * deterministically (rather than racing Hono's own internal await chain)
+ * should instead pass an explicit `ctx` and await `Promise.allSettled` over
+ * what it collected, the way `backend/test/zarr-data-cache.test.ts`'s
+ * `requestWith` already does for cache-put work deferred the same way.
+ */
+function deferContractCheck(
+  c: { executionCtx?: { waitUntil(p: Promise<unknown>): void } },
+  check: () => void,
+): void {
+  const p = Promise.resolve().then(check);
+  try {
+    c.executionCtx?.waitUntil(p);
+  } catch {
+    void p;
+  }
+}
+
 async function executeAndReturn(
-  c: { json: (data: unknown, status?: number) => Response },
+  c: {
+    json: (data: unknown, status?: number) => Response;
+    executionCtx?: { waitUntil(p: Promise<unknown>): void };
+  },
   db: D1Database,
   env: Bindings,
   baseQuery: string,
@@ -593,7 +736,7 @@ async function executeAndReturn(
       }
     }
 
-    return c.json({
+    const responseBody = {
       datasets: result.results.map((row) => toListRow(row, zarrBaseUrl)),
       count: result.results.length,
       total_count: totalCount,
@@ -603,7 +746,26 @@ async function executeAndReturn(
       ...(excludedUnknownByFacet !== undefined
         ? { excluded_unknown_by_facet: excludedUnknownByFacet }
         : {}),
+    };
+
+    // Issue #1207 / #1224 review: log-not-throw contract check, deferred via
+    // deferContractCheck (see its doc comment) so it runs after this
+    // response is already on its way out, not before. Skipped on the
+    // degraded/fallback shape below (a different, known "catalog
+    // unavailable" projection the contract was never meant to describe).
+    deferContractCheck(c, () => {
+      if (!shouldValidateContract(env)) return;
+      const parsed = datasetListEnvelopeSchema.safeParse(responseBody);
+      if (!parsed.success) {
+        logContractViolation(
+          "GET /datasets",
+          failedListRowIds(responseBody.datasets, parsed.error.issues),
+          parsed.error.issues,
+        );
+      }
     });
+
+    return c.json(responseBody);
   } catch (dbError) {
     const msg = dbError instanceof Error ? dbError.message : String(dbError);
 
@@ -659,12 +821,20 @@ async function executeAndReturn(
       } catch (fallbackErr) {
         const fallbackMsg =
           fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
-        return c.json({ error: "Failed to retrieve datasets", details: fallbackMsg }, 500);
+        // #1152: this catch had no console.error before -- the raw message was
+        // only ever visible in the (also-raw) `details` field being removed here.
+        console.error("Failed to query datasets (fallback):", fallbackMsg);
+        return c.json(
+          { error: "Failed to retrieve datasets", details: ANONYMOUS_ERROR_DETAILS },
+          500,
+        );
       }
     }
 
     console.error("Failed to query datasets:", msg);
-    return c.json({ error: "Failed to retrieve datasets", details: msg }, 500);
+    // #1152: anonymous callers get a generic, stable string; the real message
+    // is already logged above.
+    return c.json({ error: "Failed to retrieve datasets", details: ANONYMOUS_ERROR_DETAILS }, 500);
   }
 }
 
@@ -1030,7 +1200,9 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("Dataset search failed:", msg);
-      return c.json({ error: "Search failed", details: msg }, 500);
+      // #1152: anonymous callers get a generic, stable string; the real
+      // message is already logged above.
+      return c.json({ error: "Search failed", details: ANONYMOUS_ERROR_DETAILS }, 500);
     }
   });
 
@@ -1147,7 +1319,9 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[resolve] Failed to resolve source_id ${sourceId}:`, msg);
-      return c.json({ error: "Failed to resolve dataset", details: msg }, 500);
+      // #1152: anonymous callers get a generic, stable string; the real
+      // message is already logged above.
+      return c.json({ error: "Failed to resolve dataset", details: ANONYMOUS_ERROR_DETAILS }, 500);
     }
   });
 
@@ -1266,6 +1440,16 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     } = withCanonicalLatestVersion(dataset as Record<string, unknown>);
     const detail = {
       ...rest,
+      // #1207 review: `SELECT d.*` serves the raw numeric primary key here,
+      // but the contract (shared/contract/dataset.ts) declares `id: string`
+      // -- the list route's `id` is `d.dataset_id AS id`, already a string
+      // (see catalogItemObjectSchema's comment on the two `id` shapes).
+      // Stringify at the source rather than leaving every consumer --
+      // including this route's own contract-validation hook below -- to
+      // special-case the detail route's `id`. `rest.id` is always present
+      // (the NOT NULL integer primary key); String(undefined) is never
+      // reachable here.
+      id: String((rest as Record<string, unknown>).id),
       file_size_formatted: deriveFileSizeFormatted(dataset.file_size),
       zarr_data_failures: parseZarrDataFailures(zarrDataFailuresRaw, dataset.dataset_id as string),
       // #1062: derived from the raw zarr_status this SELECT d.* already
@@ -1277,6 +1461,18 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       ),
       ...explodeAttestationFields(attestationRaw),
     };
+
+    // Issue #1207 / #1224 review: same log-not-throw contract check as GET
+    // /datasets, deferred via deferContractCheck (see its doc comment) so
+    // it runs after this response is already on its way out.
+    deferContractCheck(c, () => {
+      if (!shouldValidateContract(c.env)) return;
+      const parsed = datasetDetailEnvelopeSchema.safeParse({ dataset: detail });
+      if (!parsed.success) {
+        logContractViolation("GET /datasets/:id", datasetId, parsed.error.issues);
+      }
+    });
+
     return c.json({ dataset: detail });
   });
 }

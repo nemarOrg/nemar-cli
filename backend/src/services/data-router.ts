@@ -11,6 +11,7 @@
 // Single source of truth for the version canonicalizer + neuroschema version
 // (epic #896, #898). toVersionTag is re-exported below so existing importers
 // (routes/data.ts) keep working.
+import { formatBytesCompact, formatBytesDetailed } from "../../../shared/bytes.js";
 import { NEUROSCHEMA_VERSION, toVersionTag } from "../../../shared/contract/index.js";
 import type {
   ContributorEntry,
@@ -23,6 +24,7 @@ import type {
   StructuredDate,
   StructuredKeyword,
 } from "../../../shared/datacite-constants.js";
+import { escapeHtml } from "../lib/escape";
 import { isValidDatasetId } from "./datasetId";
 import type { ManifestFile, VersionManifest } from "./manifest";
 import {
@@ -449,31 +451,6 @@ export function qaListingToDirectory(args: {
   };
 }
 
-const HTML_ESCAPES: Record<string, string> = {
-  "&": "&amp;",
-  "<": "&lt;",
-  ">": "&gt;",
-  '"': "&quot;",
-  "'": "&#39;",
-};
-
-export function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
-}
-
-export function humanSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) return "?";
-  if (bytes < 1024) return `${bytes}`;
-  const units = ["K", "M", "G", "T", "P"];
-  let value = bytes / 1024;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit++;
-  }
-  return `${value.toFixed(value < 10 ? 1 : 0)}${units[unit]}`;
-}
-
 /**
  * Format an ISO 8601 timestamp as an RFC 1123 / RFC 7231 HTTP-date.
  *
@@ -759,34 +736,6 @@ export interface DatasetVersionRow {
   version: string;
   doi: string;
   created_at: string;
-}
-
-/**
- * Format bytes as a neuroschema-style `size_human` string. Distinct from
- * `humanSize` which is a compact form used by the HTML directory index.
- * Precision tiers, chosen to keep the human-readable string short while
- * preserving useful resolution in the small-number tier:
- *
- *   value < 10   -> 2 decimals  ("1.15 GB",  "9.87 MB")
- *   value < 100  -> 1 decimal   ("99.5 GB",  "12.3 MB")
- *   value >= 100 -> 0 decimals  ("450 MB",   "150 GB")
- *
- * Null in, null out. Negative or non-finite input also returns null --
- * callers receive an absent field rather than a noisy "0 B" placeholder.
- */
-export function formatBytes(bytes: number | null): string | null {
-  if (bytes === null) return null;
-  if (!Number.isFinite(bytes) || bytes < 0) return null;
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KB", "MB", "GB", "TB", "PB"];
-  let value = bytes / 1024;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit++;
-  }
-  const decimals = value >= 100 ? 0 : value >= 10 ? 1 : 2;
-  return `${value.toFixed(decimals)} ${units[unit]}`;
 }
 
 // Exported (#1062, epic #1181 phase 2) so zarr-catalog.ts's document builder
@@ -1105,7 +1054,7 @@ export function buildDatasetMetadata(input: {
         ? {
             total_files: totalFiles,
             size_bytes: sizeBytes,
-            size_human: formatBytes(sizeBytes),
+            size_human: formatBytesDetailed(sizeBytes),
             recording_count: row.recording_count,
             recordings_unavailable: row.recordings_unavailable,
             total_recording_duration: row.total_recording_duration,
@@ -1216,7 +1165,7 @@ export function renderIndexHtml(args: {
   for (const e of entries) {
     const href = `${encodeURIComponent(e.name)}${e.kind === "dir" ? "/" : ""}`;
     const label = `${escapeHtml(e.name)}${e.kind === "dir" ? "/" : ""}`;
-    const size = e.kind === "dir" ? "-" : humanSize(e.size);
+    const size = e.kind === "dir" ? "-" : formatBytesCompact(e.size);
     rows.push(`<tr><td><a href="${href}">${label}</a></td><td class="size">${size}</td></tr>`);
   }
 

@@ -7,11 +7,12 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
+import { timingSafeEqual } from "../../lib/constant-time.js";
 import { MAX_ARCHIVE_RETRIES, decideArchiveRetry } from "../../services/archive-retry.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
 import { triggerArchiveGeneration } from "../../services/github.js";
-import { type WebhookRouter, timingSafeEqual } from "../webhooks/shared.js";
+import type { WebhookRouter } from "../webhooks/shared.js";
 
 /**
  * POST /webhooks/archive-ready — callback from nemarDatasets/.github

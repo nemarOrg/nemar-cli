@@ -28,6 +28,7 @@ import { authOrcidRoutes } from "./routes/auth-orcid";
 import { authWebRoutes } from "./routes/auth-web";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
+import { openApiRoutes } from "./routes/openapi";
 import { sandboxRoutes } from "./routes/sandbox";
 import { schemaRoutes } from "./routes/schemas";
 import { userRoutes } from "./routes/users";
@@ -126,6 +127,7 @@ api.get("/", (c) => {
       sandbox: "/sandbox/*",
       webhooks: "/webhooks/*",
       schemas: "/schemas/*",
+      openapi: "/openapi.json",
     },
   });
 });
@@ -160,6 +162,17 @@ api.route("/webhooks", webhooks);
 // converter validates against before upload, so the served contract cannot
 // drift from the one the producer enforces.
 api.route("/schemas", schemaRoutes);
+// Public OpenAPI 3.1 document (issue #937 item 2, phase 5 of epic
+// nemarOrg/website#284). Same static/D1-free precedent as /schemas above:
+// the bytes are shared/openapi.json, generated at build time from the Zod
+// schemas in shared/contract/ by scripts/generate-openapi.ts -- see
+// routes/openapi.ts for the drift-guard test that keeps it from silently
+// going stale. Mounted at the exact "/openapi.json" path (not a directory
+// of documents), matching the sub-app trailing-slash behavior noted below
+// for /data: openApiRoutes.get("/") mounted at this prefix matches only
+// "/openapi.json", which is exactly the single fixed URL this document
+// lives at.
+api.route("/openapi.json", openApiRoutes);
 // Path-based mount of the data sub-app so it's reachable on every hostname
 // (api.nemar.org, *.workers.dev dev fallback, etc.). The Worker also serves
 // the same handlers at the root path when the request hits data.nemar.org;
@@ -360,6 +373,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
                 emailCfg.fromEmail,
                 emailCfg.replyTo,
                 emailCfg.isDev,
+                env,
               );
             }
           } catch (emailErr) {
@@ -539,6 +553,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
                     emailCfg.fromEmail,
                     emailCfg.replyTo,
                     emailCfg.isDev,
+                    env,
                   );
                   handled = delivered > 0;
                 }
@@ -579,6 +594,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
                     emailCfg.fromEmail,
                     emailCfg.replyTo,
                     emailCfg.isDev,
+                    env,
                   );
                   handled = true;
                 } catch (err) {

@@ -7,6 +7,7 @@
  */
 
 import { AwsClient } from "aws4fetch";
+import { escapeXml, unescapeXml } from "../lib/escape.js";
 import {
   type BucketPolicy,
   MAX_BUCKET_POLICY_BYTES,
@@ -415,13 +416,6 @@ export async function listObjectSizes(
 // ---------------------------------------------------------------------------
 // Shared utilities
 // ---------------------------------------------------------------------------
-
-export function formatBytes(bytes: number): string {
-  if (bytes >= 1e12) return `${(bytes / 1e12).toFixed(1)} TB`;
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
-  return `${(bytes / 1e3).toFixed(1)} KB`;
-}
 
 export function extractExtensions(paths: string[]): string[] {
   const exts = new Set<string>();
@@ -1540,6 +1534,75 @@ async function computeMd5Base64(data: Uint8Array): Promise<string> {
 }
 
 /**
+ * Parse one batch's `<DeleteResult>` XML response from the S3 Multi-Object
+ * Delete API into a deletion count and structured failures. Extracted as a
+ * pure function -- mirroring `mergeObjectSizesPage` and
+ * `firstObjectKeyFromListXml` above -- so it is testable directly against
+ * synthetic XML without a live bucket; `deleteObjects` builds its URL from a
+ * literal `<bucket>.s3.<region>.amazonaws.com` host with no override seam.
+ *
+ * `deleteObjects` escapes every key with `escapeXml` before sending the
+ * request, so S3 echoes escaped bytes back in `<Key>` (and `<Message>`, when
+ * it quotes the key). Those are decoded with `unescapeXml` here so a caller
+ * inspecting `failed[].key` sees the real key, not `me&amp;you.txt` for a
+ * key that is actually `me&you.txt` -- the value an operator would act on.
+ * `<Code>` is left alone: S3 error codes are alphanumeric
+ * (e.g. `AccessDenied`), so no code ever contains an XML entity in
+ * practice, and decoding it would be a no-op either way.
+ */
+export function parseDeleteObjectsResponse(
+  xml: string,
+  batch: string[],
+  batchStartIndex: number,
+): Pick<DeleteResult, "deleted" | "failed"> {
+  const failed: DeleteResult["failed"] = [];
+
+  // Verify this is a valid DeleteResult response
+  if (!xml.includes("<DeleteResult")) {
+    for (const key of batch) {
+      failed.push({ key, error: "Unexpected S3 response: missing DeleteResult" });
+    }
+    return { deleted: 0, failed };
+  }
+
+  // Count successful deletions
+  let deleted = 0;
+  const deletedMatches = xml.matchAll(/<Deleted>\s*<Key>([^<]+)<\/Key>/g);
+  for (const _ of deletedMatches) {
+    deleted++;
+  }
+
+  // Collect failures (handle any element order within <Error>)
+  let batchFailed = 0;
+  const errorBlocks = xml.matchAll(/<Error>([\s\S]*?)<\/Error>/g);
+  for (const block of errorBlocks) {
+    const inner = block[1];
+    const keyMatch = inner.match(/<Key>([^<]+)<\/Key>/);
+    const codeMatch = inner.match(/<Code>([^<]+)<\/Code>/);
+    const msgMatch = inner.match(/<Message>([^<]*)<\/Message>/);
+    const key = keyMatch ? unescapeXml(keyMatch[1]) : "unknown";
+    const message = msgMatch ? unescapeXml(msgMatch[1]) : "";
+    failed.push({
+      key,
+      error: `${codeMatch?.[1] ?? "UnknownError"}: ${message}`,
+    });
+    batchFailed++;
+  }
+
+  // Validate that parsed results account for all keys in batch
+  const accounted = deleted + batchFailed;
+  if (accounted < batch.length) {
+    const missing = batch.length - accounted;
+    failed.push({
+      key: `(${missing} unaccounted keys in batch starting at index ${batchStartIndex})`,
+      error: "XML parsing gap: S3 response did not account for all keys",
+    });
+  }
+
+  return { deleted, failed };
+}
+
+/**
  * Delete multiple S3 objects in a single request using the Multi-Object
  * Delete API (POST /?delete). Accepts up to 1000 keys per call.
  *
@@ -1599,48 +1662,9 @@ export async function deleteObjects(
       }
 
       const xml = await res.text();
-
-      // Verify this is a valid DeleteResult response
-      if (!xml.includes("<DeleteResult")) {
-        for (const key of batch) {
-          result.failed.push({ key, error: "Unexpected S3 response: missing DeleteResult" });
-        }
-        continue;
-      }
-
-      // Count successful deletions
-      let batchDeleted = 0;
-      const deletedMatches = xml.matchAll(/<Deleted>\s*<Key>([^<]+)<\/Key>/g);
-      for (const _ of deletedMatches) {
-        batchDeleted++;
-      }
-
-      // Collect failures (handle any element order within <Error>)
-      let batchFailed = 0;
-      const errorBlocks = xml.matchAll(/<Error>([\s\S]*?)<\/Error>/g);
-      for (const block of errorBlocks) {
-        const inner = block[1];
-        const keyMatch = inner.match(/<Key>([^<]+)<\/Key>/);
-        const codeMatch = inner.match(/<Code>([^<]+)<\/Code>/);
-        const msgMatch = inner.match(/<Message>([^<]*)<\/Message>/);
-        result.failed.push({
-          key: keyMatch?.[1] ?? "unknown",
-          error: `${codeMatch?.[1] ?? "UnknownError"}: ${msgMatch?.[1] ?? ""}`,
-        });
-        batchFailed++;
-      }
-
-      // Validate that parsed results account for all keys in batch
-      const accounted = batchDeleted + batchFailed;
-      if (accounted < batch.length) {
-        const missing = batch.length - accounted;
-        result.failed.push({
-          key: `(${missing} unaccounted keys in batch starting at index ${i})`,
-          error: "XML parsing gap: S3 response did not account for all keys",
-        });
-      }
-
-      result.deleted += batchDeleted;
+      const parsed = parseDeleteObjectsResponse(xml, batch, i);
+      result.deleted += parsed.deleted;
+      result.failed.push(...parsed.failed);
     } catch (err) {
       for (const key of batch) {
         result.failed.push({ key, error: err instanceof Error ? err.message : String(err) });
@@ -1701,16 +1725,4 @@ export async function deleteStagingObjects(
   }
 
   return deleteObjects(options, keys);
-}
-
-/**
- * Escape special XML characters in a string.
- */
-function escapeXml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
 }
