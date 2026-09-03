@@ -1115,7 +1115,7 @@ curl -s -o /dev/null -w '%{http_code}\n' https://api.nemar.org/datasets/xx099905
 6. **After the first real run, invoke the CLONE's copy, not the bootstrap copy.**
    Step 1 above hand-places the script at `/mnt/local/zarr-state-test/hallu-zarr.sh`
    only to get `setup()` running for the first time;
-   every run after that (cron included, once installed)
+   every run after that (the installed nightly cron included)
    should invoke `/mnt/local/zarr-state-test/nemar-cli/scripts/zarr/hallu-zarr.sh` instead,
    the same self-deploying clone copy the prod cron already uses
    (see systems-inventory.md §3.3's "Deploying a converter change")
@@ -1181,7 +1181,11 @@ Merging this into the epic branch is enough to exercise the whole bump on the
 
 - Production tracks `main` (`ZARR_DRIVER_REF=main`), so it does not run this code
   until the release.
-- The staging instance tracks the epic branch nightly and its queue holds only the
+- The staging instance tracks the epic branch nightly — the installed crontab line
+  is `15 3 * * * mkdir -p /mnt/local/zarr-state-test && ZARR_DRIVER_REF=feature/issue-1181-epic-zarr-serving /mnt/local/zarr-state-test/nemar-cli/scripts/zarr/hallu-zarr.sh --test >> /mnt/local/zarr-state-test/.nm-zarr-cron.log 2>&1`,
+  which overrides `--test`'s own `dev` default and must be flipped back to `dev`
+  once the epic merges (systems-inventory.md §3.4 holds the same line and says why)
+  — and its queue holds only the
   7 curated `xx0999NN` exemplars. That is under `ENGINE_REQUEUE_LIMIT` (25), so
   `reconcile` requeues them WITHOUT an ack and the fleet re-converts through
   engine 3 on its own -- eeg / ieeg / emg / meg / multi-modal / HED coverage,
@@ -1244,7 +1248,13 @@ curl -s https://zarr-test.nemar.org/xx099905/zarr/index.json |
 #    It re-queues nothing yet -- the guard below holds it, because ~800 rows is
 #    far over ENGINE_REQUEUE_LIMIT.
 
-# 3. Preview the cost before paying it. Read-only, no network, no writes.
+# 3. Preview the cost before paying it. No network, and it changes no job's
+#    STATE -- it only counts what a bump would re-queue. Not literally
+#    read-only: zarr_queue.py's main() connects for every subcommand, and
+#    connect runs migrate_schema, whose additive ALTER and engine_version seed
+#    are idempotent and re-run on every connect. On a node that has never run
+#    the current queue schema the preview writes those, exactly as the next
+#    reconcile would. Nothing is enqueued, parked, or reset.
 ssh hallu '/mnt/local/zarr-state/nemar-cli/scripts/zarr/hallu-zarr.sh --preview-engine-bump'
 #    Expect: engine-preview: current=3 ... stale=<~800>, i.e. the whole catalogue.
 

@@ -24,6 +24,7 @@ import type { LicenseTier } from "../lib/license";
 import type { AuthUser } from "../types/bindings";
 import { hasRole } from "../types/bindings";
 import { type FacetFilterValues, buildFacetClauses } from "./dataset-facets";
+import { ZARR_VERIFY_STATUS_PATH } from "./sweep-stamps";
 
 /** Build an injection-safe FTS5 MATCH expression: tokenize to alphanumerics
  *  (dropping all FTS5 operator chars), quote each token and prefix-match it,
@@ -194,9 +195,7 @@ export function buildDatasetFilterClauses(
     // or the key absent/JSON-null -- ADR 0035), which never equals the
     // string literal, so an unswept or non-'verified' row is excluded, same
     // as has_hed/has_zarr's own NULL-excludes-by-default convention.
-    clauses +=
-      " AND d.zarr_status = 'ready' AND COALESCE(d.zarr_store_count, 0) > 0" +
-      " AND json_extract(d.sweep_stamps, '$.zarr_verify_status') = 'verified'";
+    clauses += ` AND d.zarr_status = 'ready' AND COALESCE(d.zarr_store_count, 0) > 0 AND json_extract(d.sweep_stamps, '${ZARR_VERIFY_STATUS_PATH}') = 'verified'`;
   }
   if (opts.dataComplete) {
     // #970: same nullable-safe idiom as has_hed -- `= 1` excludes both 0

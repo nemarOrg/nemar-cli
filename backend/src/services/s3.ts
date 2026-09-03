@@ -725,6 +725,15 @@ export interface ZarrIndexStoreJson {
  * versions parse through the same optional fields rather than a discriminated
  * union -- there is no branch to take, and a `format_version` switch here would
  * be a second thing to update for every future additive field.
+ *
+ * TRUST BOUNDARY: every field is `unknown` because this document is fetched from
+ * the serving bucket, not constructed here -- the writer is a cron on another
+ * host. The coverage equation `discovered == store + failure + pending` is
+ * enforced by that producer (`check_index_invariant` in
+ * `scripts/zarr/generate_zarr.py`) before publish; this type asserts nothing
+ * about it, and `aggregateRecordingStats` re-derives the sum rather than
+ * trusting `discovered_count`, precisely because a type cannot carry a
+ * producer's invariant across the wire.
  */
 export interface ZarrIndexJson {
   store_count?: unknown;

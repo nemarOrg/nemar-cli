@@ -519,6 +519,12 @@ async function serve(c: Context<{ Bindings: Bindings }>, isHead: boolean, deps: 
       // own, so the dashboard can tell a redirected chunk apart from a
       // proxied one without a schema change.
       detail: "chunk-redirect",
+      // ESTIMATED, and recorded BEFORE the 302 is even sent: the client fetches
+      // the object from S3 directly, so this Worker never learns whether it did,
+      // or how many bytes it actually got. `bytes` here is what the Range header
+      // ASKED for (0 when there is none, i.e. a full object of unknown size).
+      // "chunk-redirect" rows are therefore intent, not delivery -- do not sum
+      // them with proxied rows to get bytes served.
       bytes: bytesFromRangeHeader(c.req.header("range") ?? null),
     });
     return new Response(null, {
@@ -831,6 +837,15 @@ export function createZarrDataRoutes(
       c.req.path,
       c.req.header("origin") ?? null,
     );
+    // SAFETY: `c` is a Hono context typed `{ Bindings }` only; rateLimiter takes
+    // `Context<{ Bindings; Variables }>`. The double cast adds a Variables map to
+    // the STATIC type of the same runtime object -- every Hono context carries
+    // the same store regardless of the generic -- and rateLimiter reads no
+    // Variable at all: only `c.env` (ENVIRONMENT, TEST_BYPASS_TOKEN, the KV
+    // binding), `c.req` (path + headers) and `c.json` for its 429. Nothing it
+    // touches can be absent here. If it ever starts reading a Variable set by the
+    // api middleware stack -- which this host fork bypasses (#901) -- the cast
+    // stops being sound and this middleware has to supply that value explicitly.
     const res = await rateLimiter(
       c as unknown as Parameters<typeof rateLimiter>[0],
       next,

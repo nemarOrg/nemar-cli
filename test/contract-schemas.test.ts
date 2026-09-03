@@ -278,6 +278,60 @@ describe("detail schema: zarr_data_failures (#1191, fixes #1188)", () => {
     expect(parsed.zarr_data_failures).toBeNull();
   });
 
+  test("KEEPS the coverage counts and the unpublished-sibling flags", () => {
+    // Every one of these is written into the same stored object by
+    // `zarrFailureColumns` and projected by `parseZarrDataFailures`. Undeclared,
+    // the closed object silently STRIPPED them here -- which is how #1197's
+    // "2 of 43" reached D1 and never reached a consumer.
+    const parsed = datasetDetailSchema.parse({
+      ...detailRow,
+      zarr_data_failures: {
+        count: 36,
+        detail_ref: "zarr/index.json",
+        pending: 5,
+        discovered: 43,
+        events_upload_failed: true,
+        manifest_upload_failed: true,
+      },
+    });
+    expect(parsed.zarr_data_failures).toEqual({
+      count: 36,
+      detail_ref: "zarr/index.json",
+      pending: 5,
+      discovered: 43,
+      events_upload_failed: true,
+      manifest_upload_failed: true,
+    });
+  });
+
+  test("the sibling flags are true-only: false is not a shape the writer produces", () => {
+    // `zarrFailureColumns` omits the key rather than writing false, so absence
+    // IS the negative. Accepting false as well would give the same condition two
+    // spellings and let a consumer read one of them wrong.
+    expect(() =>
+      datasetDetailSchema.parse({
+        ...detailRow,
+        zarr_data_failures: {
+          count: 0,
+          detail_ref: "zarr/index.json",
+          manifest_upload_failed: false,
+        },
+      }),
+    ).toThrow();
+  });
+
+  test("an undeclared key passes THROUGH rather than being stripped", () => {
+    // The module's rule for every other object here: the contract is a lower
+    // bound. This nested object was the one exception, and stripping is exactly
+    // what made #1197's counts invisible -- a newer backend's next additive key
+    // must reach the caller, not vanish on the way out.
+    const parsed = datasetDetailSchema.parse({
+      ...detailRow,
+      zarr_data_failures: { count: 1, detail_ref: "zarr/index.json", not_yet_declared: 7 },
+    });
+    expect((parsed.zarr_data_failures as Record<string, unknown>).not_yet_declared).toBe(7);
+  });
+
   test("zarr_data_failures is optional (older backends omit it entirely)", () => {
     expect(() => datasetDetailSchema.parse(detailRow)).not.toThrow();
   });

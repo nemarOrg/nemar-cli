@@ -71,7 +71,7 @@ from concurrent.futures import (
 )
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
-from typing import TypedDict
+from typing import Any, Literal, Protocol, TypedDict
 
 # The engine stamp lives in `zarr_queue`, whose column decides which already-done
 # datasets re-convert (ADR 0033). The index republishes it so a consumer can tell
@@ -506,7 +506,8 @@ def apply_worker_mem_limit(
     try:
         import resource
 
-        _soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
+        # Only the hard limit is read: the soft one is what this call REPLACES.
+        hard = resource.getrlimit(resource.RLIMIT_DATA)[1]
         # Keep the hard limit where it is so the next task can raise the soft
         # one back up; a task needing MORE than the previous one must not be
         # capped by it.
@@ -1905,11 +1906,20 @@ def _event_number(fields: list[str], col: int) -> float | None:
 def sample_index_for(onset_s: float | None, rate: float | None) -> int | None:
     """The level-0 sample an onset falls on, or `None` when it cannot be computed.
 
-    ``round(onset_s * rate)``, where `rate` is the group's SERVING rate (the
-    level-0 `rate` attr the index republishes), ties going up. That is the whole
-    formula, and the reason it is this simple is worth writing down once, because
-    the point of publishing the column at all is that a client should not have to
-    re-derive it (#1060):
+    ``math.floor(onset_s * rate + 0.5)``, where `rate` is the group's SERVING
+    rate (the level-0 `rate` attr the index republishes). Written out rather than
+    called ``round()`` because the two DIFFER: Python's ``round()`` is
+    banker's rounding, which breaks an exact .5 tie toward the even integer
+    (``round(0.5) == 0``, ``round(1.5) == 2``), while this ties UP everywhere
+    (``0.5 -> 1``, ``1.5 -> 2``). A tie is not exotic here -- an onset of 0.5 s
+    at 1 Hz, or any onset landing on a half sample at the serving rate, hits it
+    -- and a client that reimplements the column with ``round()`` would disagree
+    with the published value on exactly those rows, which is the failure the
+    column exists to prevent.
+
+    That is the whole formula, and the reason it is this simple is worth writing
+    down once, because the point of publishing the column at all is that a client
+    should not have to re-derive it (#1060):
 
     * biosigIO resamples level 0 to ``target_rate = min(native_rate, cap)`` with
       ``scipy.signal.resample_poly(x, up, down)``, ``up/down =
@@ -2423,13 +2433,21 @@ class FailureEntry(TypedDict):
     attempts: int
 
 
+# The three reasons a discovered recording can be `pending`, spelled exactly as
+# `zarr-index.schema.json`'s `$defs.pending.reason` enum spells them. A CLOSED
+# set, unlike `FailureEntry.code`: the schema rejects a fourth value, so a typo
+# or a newly-invented reason has to fail here, at the call site, rather than at
+# `validate_document` after a full conversion has already run.
+PendingReason = Literal["infra_failure", "memory_budget", "not_attempted"]
+
+
 class PendingEntry(TypedDict):
     """One published `pending[]` entry: a discovered recording with no store
     that is still expected to convert."""
 
     path: str
     zarr: str
-    reason: str
+    reason: PendingReason
     attempts: int
     last_error: str | None
     last_attempt_utc: str | None
@@ -2456,9 +2474,22 @@ def _normalize_store_entry(entry: dict) -> StoreEntry:
     return out
 
 
+def _pending_reason(value: object) -> PendingReason:
+    """Coerce a `reason` read off a PUBLISHED index into the closed set.
+
+    Carried-forward pending entries come from a document written by an earlier
+    run (or hand-edited), so the value is data, not a literal. An unrecognized
+    one becomes `infra_failure` -- the reading that says "no store, cause not
+    established, try again" -- rather than being republished as-is, which would
+    fail `validate_document` at the very END of a run, after every recording had
+    already been converted, and refuse to publish the whole index over it.
+    """
+    return value if value in ("infra_failure", "memory_budget", "not_attempted") else "infra_failure"  # type: ignore[return-value]
+
+
 def _pending_entry(
     path: str,
-    reason: str,
+    reason: PendingReason,
     attempts: int,
     last_error: str | None = None,
     last_attempt_utc: str | None = None,
@@ -2505,7 +2536,14 @@ def merge_index(
     converted: list[dict],
     removed_store_rels: list[str],
     updated_utc: str,
-    failures: list[dict] | None = None,
+    # `failures` is built exclusively by `_failure_entry`, so it carries the
+    # TypedDict. `converted`, `pending` and `prior_pending` deliberately do NOT:
+    # `converted` is a store entry assembled by the worker, and the other two are
+    # this function's INPUT -- `pending` carries only what a run observed (path,
+    # reason, last_error) and `prior_pending` comes verbatim out of a PUBLISHED
+    # index that this function does not re-validate. Claiming PendingEntry for
+    # either would assert a shape nothing checks.
+    failures: list[FailureEntry] | None = None,
     pending: list[dict] | None = None,
     *,
     discovered: list[str] | None = None,
@@ -2581,6 +2619,10 @@ def merge_index(
         if e.get("path") not in new_fail_paths and e.get("path") not in new_pending_paths
     }
 
+    # Deliberately NOT dict[str, FailureEntry]: the values below are a mix of
+    # `_failure_entry` results and entries read verbatim out of a PUBLISHED
+    # index, which this function does not re-validate. Claiming the TypedDict
+    # here would assert a shape for a document written by an earlier engine.
     fails: dict[str, dict] = {}
     if prior and isinstance(prior.get("failures"), list):
         for f in prior["failures"]:
@@ -2615,7 +2657,11 @@ def merge_index(
         if isinstance(e, dict) and isinstance(e.get("path"), str):
             n = e.get("attempts")
             prior_attempts[e["path"]] = int(n) if isinstance(n, int) and n > 0 else 0
-    pends: dict[str, dict] = {}
+    # Every value here comes from `_pending_entry`, so the container carries the
+    # TypedDict rather than a bare dict: a hand-built entry missing `zarr` or
+    # `attempts` is then a type error at the call site instead of a schema
+    # violation at the end of the run.
+    pends: dict[str, PendingEntry] = {}
     for e in prior_pending or []:
         # Carry forward a recording this run never touched (an incremental run
         # converts only what changed), minus anything now resolved or excluded.
@@ -2626,7 +2672,7 @@ def merge_index(
             continue
         pends[p] = _pending_entry(
             p,
-            str(e.get("reason") or "infra_failure"),
+            _pending_reason(e.get("reason")),
             prior_attempts.get(p, 0),
             e.get("last_error"),
             e.get("last_attempt_utc"),
@@ -2635,7 +2681,7 @@ def merge_index(
         p = e["path"]
         pends[p] = _pending_entry(
             p,
-            str(e.get("reason") or "infra_failure"),
+            _pending_reason(e.get("reason")),
             prior_attempts.get(p, 0) + 1,
             e.get("last_error"),
             e.get("last_attempt_utc") or updated_utc,
@@ -2781,7 +2827,7 @@ def merge_manifest(
     entries: list[dict],
     store_rels: list[str],
     updated_utc: str,
-    events_file: dict | None = None,
+    events_file: ManifestFileEntry | None = None,
 ) -> dict:
     """Build the producer manifest (`<id>/zarr/manifest.json`). Pure.
 
@@ -2929,6 +2975,27 @@ class EventsStaging:
         return pickle.loads(self._fh.read(size))
 
 
+class ArrowTable(Protocol):
+    """The `pyarrow.Table` surface this module actually touches.
+
+    A structural Protocol rather than an import, because pyarrow is an OPTIONAL
+    dependency loaded lazily inside the functions that need it: a node without
+    it still converts, it just publishes no events file. There is therefore no
+    module-scope name to annotate with, and a `TYPE_CHECKING` import would still
+    make a checker's answer depend on whether the package happens to be
+    installed. Stating the three members used here says the same thing, costs
+    nothing at runtime, and turns `table["store_path"]` and `table.filter(mask)`
+    back into checked accesses instead of attribute lookups on `object`.
+    """
+
+    @property
+    def num_rows(self) -> int: ...
+
+    def __getitem__(self, key: str) -> Any: ...
+
+    def filter(self, mask: Any) -> ArrowTable: ...
+
+
 class PriorEventRows:
     """Random access by store into the events.parquet a previous run published.
 
@@ -2957,12 +3024,21 @@ class PriorEventRows:
             for rel in column.unique().to_pylist():
                 if rel is not None:
                     self._by_rel.setdefault(rel, []).append(i)
-        self._cached: tuple[int, object] | None = None
+        self._cached: tuple[int, ArrowTable] | None = None
 
     def __contains__(self, zarr_rel: object) -> bool:
         return zarr_rel in self._by_rel
 
-    def _row_group(self, i: int):
+    def _row_group(self, i: int) -> ArrowTable:
+        """The i-th row group (cached: consecutive stores usually share one).
+
+        Typed as `ArrowTable`, the structural Protocol declared above, rather
+        than `object`: pyarrow is an optional dependency imported lazily inside
+        the methods that need it, so there is no importable name to annotate
+        with, and `object` made every `table[column]` and `table.filter(...)`
+        below an unchecked attribute access on a value the checker believed had
+        neither.
+        """
         if self._cached is None or self._cached[0] != i:
             self._cached = (i, self._file.read_row_group(i))
         return self._cached[1]
@@ -2974,7 +3050,7 @@ class PriorEventRows:
         groups = self._by_rel.get(zarr_rel)
         if not groups:
             return None
-        parts = []
+        parts: list[ArrowTable] = []
         for i in groups:
             table = self._row_group(i)
             mask = pc.equal(table["store_path"].cast(self._pa.string()), zarr_rel)
@@ -3285,24 +3361,36 @@ _AWS_RM_SHARDS = int(os.environ.get("ZARR_AWS_RM_SHARDS", "8"))
 def _s3_child_prefixes(url: str) -> list[str]:
     """Immediate child prefixes of an ``s3://bucket/prefix/`` URL (delimited LIST).
 
-    Used to shard a recursive delete. Returns [] on any error or when the prefix
-    has no subdirectories, so the caller falls back to one unsharded rm.
+    ``[]`` means the prefix genuinely HAS no subdirectories. A failed listing
+    RAISES: the empty list and the failure used to be the same answer, which is
+    only harmless for the caller this was written for. ``_rm_recursive`` reads
+    ``[]`` as "nothing to shard" and falls back to one unsharded delete, so it is
+    correct either way -- but ``purge_non_raw_stores.list_dataset_ids`` reads the
+    same ``[]`` as "this bucket holds no datasets" and ``discover_excluded_stores``
+    as "this tree has no stranded stores", and both then report a clean, empty
+    result for a run that could not see the bucket at all.
+
+    Same rule as ``s3_read_json`` and ``s3_download_file``, for the same reason:
+    an absence is an answer, an error is not.
     """
     rest = url[len("s3://") :]
     bucket, _, prefix = rest.partition("/")
-    try:
-        res = subprocess.run(
-            [
-                "aws", "s3api", "list-objects-v2", "--bucket", bucket,
-                "--prefix", prefix, "--delimiter", "/",
-                "--query", "CommonPrefixes[].Prefix", "--output", "text",
-                *_AWS_TIMEOUTS,
-            ],
-            capture_output=True, text=True, timeout=_AWS_OP_TIMEOUT, env=_aws_env(),
+    res = subprocess.run(
+        [
+            "aws", "s3api", "list-objects-v2", "--bucket", bucket,
+            "--prefix", prefix, "--delimiter", "/",
+            "--query", "CommonPrefixes[].Prefix", "--output", "text",
+            *_AWS_TIMEOUTS,
+        ],
+        capture_output=True, text=True, timeout=_AWS_OP_TIMEOUT, env=_aws_env(),
+        check=False,  # the return code is inspected below rather than raised on
+    )
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"_s3_child_prefixes: aws s3api list-objects-v2 {url} exited "
+            f"{res.returncode}: {res.stderr.strip()}"
         )
-    except (subprocess.SubprocessError, OSError):
-        return []
-    if res.returncode != 0 or res.stdout.strip() in ("", "None"):
+    if res.stdout.strip() in ("", "None"):
         return []
     return [f"s3://{bucket}/{p}" for p in res.stdout.split() if p and p != "None"]
 
@@ -3317,7 +3405,20 @@ def _rm_recursive(url: str) -> None:
     finishes with an unsharded sweep so any key directly under `url` -- which no
     child prefix covers -- is deleted too.
     """
-    children = _s3_child_prefixes(url) if _AWS_RM_SHARDS > 1 else []
+    # A failed LIST is not fatal HERE, and only here: the unsharded delete below
+    # removes the whole prefix on its own, so sharding is a speed-up whose
+    # failure costs time, not correctness. Every other caller of
+    # `_s3_child_prefixes` reads its result as a fact about the bucket and must
+    # see the error, which is why the tolerance lives at this call site rather
+    # than inside the helper.
+    try:
+        children = _s3_child_prefixes(url) if _AWS_RM_SHARDS > 1 else []
+    except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
+        print(
+            f"::warning::could not list shards for {url} ({exc}); deleting unsharded",
+            flush=True,
+        )
+        children = []
     if children:
         print(f"[zarr] deleting {url} across {len(children)} shard(s)", flush=True)
         errors: list[BaseException] = []
@@ -3484,6 +3585,125 @@ def s3_read_json(bucket: str, key: str) -> dict | None:
         raise RuntimeError(f"corrupt JSON at s3://{bucket}/{key}: {exc}") from exc
 
 
+class IndexPreconditionFailed(Exception):
+    """The live `index.json` changed between the read a rewrite was computed from
+    and the write. The write is REFUSED rather than forced: the other writer
+    published a whole document, and replaying a merge computed from the old one
+    would silently roll it back.
+    """
+
+
+def read_index_with_etag(bucket: str, dataset_id: str) -> tuple[dict | None, str | None]:
+    """`(index, etag)` for a dataset's live `index.json`, or `(None, None)` when
+    there is none.
+
+    One `get-object` call for both, on purpose: the ETag has to be the one the
+    body that produced this merge actually had, and a separate `head-object`
+    could observe a different version. Raises for any failure that is not a
+    genuine absence -- the same rule `s3_read_json` follows, for the same reason
+    (treating a credentials or network error as "no index" would rewrite the
+    document from nothing).
+
+    Shared with `purge_non_raw_stores.py`, which imports it: both writers of this
+    one object have to agree on how the ETag is read and sent back, or the
+    conditional write protecting them from each other is decorative.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as fh:
+        tmp_path = fh.name
+    try:
+        res = subprocess.run(
+            [
+                "aws", "s3api", "get-object", "--bucket", bucket,
+                "--key", f"{dataset_id}/zarr/index.json", tmp_path,
+                "--query", "ETag", "--output", "text", *_AWS_TIMEOUTS,
+            ],
+            capture_output=True, text=True, timeout=_AWS_OP_TIMEOUT, env=_aws_env(),
+            check=False,  # the return code IS the answer: absent vs failed
+        )
+        if res.returncode != 0:
+            err = res.stderr.lower()
+            if "nosuchkey" in err or "404" in err or "not found" in err:
+                return None, None
+            raise RuntimeError(
+                f"read_index_with_etag: aws s3api get-object exited "
+                f"{res.returncode}: {res.stderr.strip()}"
+            )
+        with open(tmp_path, encoding="utf-8") as fh:
+            index = json.load(fh)
+        # `--output text` prints the quoted ETag; S3 wants it back verbatim on
+        # `--if-match`, so only the surrounding whitespace is stripped.
+        return index, res.stdout.strip()
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+
+
+def write_index(bucket: str, dataset_id: str, index: dict, *, if_match: str | None) -> str | None:
+    """Write `index.json` to S3 CONDITIONALLY. Returns the new object's ETag as
+    the PUT reports it (quoted, as S3 spells it), or None when the response
+    carried none.
+
+    `index.json`'s destination is a single S3 object, so a single PUT is already
+    atomic there: a reader sees the previous full body or the new full body,
+    never a partial one. Atomic is not the same as safe, though, and that is what
+    `if_match` is for. Two processes write this document -- a converter run
+    (`generate_zarr.main`) and the non-raw purge (`purge_non_raw_stores.py`) --
+    and both read it, work for minutes to hours, then write it back. An
+    unconditional PUT from either silently reverts whatever the other published
+    in that window, taking every store it added (or every store it deleted) with
+    it. So the write carries `--if-match` with the ETag the document was computed
+    from and S3 refuses it (412) if anything else has written since.
+
+    `if_match=None` is not "skip the check" -- there is no such mode. It means
+    the object did not exist at read time, and the write is then conditional on
+    it still not existing (`--if-none-match "*"`), so a first index published in
+    the meantime is not clobbered either.
+
+    Single attempt, deliberately: `_aws`'s retry loop would re-send a conditional
+    PUT whose first attempt may in fact have succeeded, turning a lost response
+    into a phantom conflict. The CALLER decides what a conflict means -- the
+    purge abandons its rewrite, the converter re-reads and re-merges once.
+    """
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump(index, fh, separators=(",", ":"))
+        tmp_path = fh.name
+    condition = ["--if-match", if_match] if if_match else ["--if-none-match", "*"]
+    try:
+        res = subprocess.run(
+            [
+                "aws", "s3api", "put-object", "--bucket", bucket,
+                "--key", f"{dataset_id}/zarr/index.json", "--body", tmp_path,
+                "--content-type", "application/json",
+                "--cache-control", "public, max-age=60",
+                *condition, *_AWS_TIMEOUTS,
+            ],
+            capture_output=True, text=True, timeout=_AWS_OP_TIMEOUT, env=_aws_env(),
+            check=False,  # a 412 is a verdict to report, not an exception to raise
+        )
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+    if res.returncode == 0:
+        # The PUT's own response names the version THIS call wrote. A follow-up
+        # `head-object` would not: it can observe a newer writer's document,
+        # which is precisely the race the conditional write exists to expose.
+        try:
+            etag = json.loads(res.stdout or "{}").get("ETag")
+        except json.JSONDecodeError:
+            etag = None
+        return etag if isinstance(etag, str) else None
+    err = res.stderr.lower()
+    if "preconditionfailed" in err or "412" in err or "conditionalrequestconflict" in err:
+        raise IndexPreconditionFailed(
+            f"index.json for {dataset_id} changed between this run's read and its "
+            f"write (if-match {if_match or '<absent>'}); the write was NOT applied "
+            "and the newer document is untouched"
+        )
+    raise RuntimeError(
+        f"write_index: aws s3api put-object exited {res.returncode}: {res.stderr.strip()}"
+    )
+
+
 def s3_download_file(bucket: str, key: str, dest: str) -> bool:
     """Download an S3 object to `dest`. False for a genuine 404, True on success.
 
@@ -3511,6 +3731,24 @@ def s3_download_file(bucket: str, key: str, dest: str) -> bool:
     )
 
 
+class ManifestFileEntry(TypedDict):
+    """One entry of the manifest's `files[]`: a dataset-level object this run
+    published beside index.json, with the size it wrote.
+
+    Mirrors `zarr-manifest.schema.json`'s `files[]` items exactly, including the
+    single-member `name` enum -- index.json and manifest.json describe
+    themselves, so the events file is the only object that needs describing
+    (#1060). Named as a type because both readers of it index it by key
+    (`merge_manifest` embeds the whole entry; `main` reads `row_count` onto the
+    index and the callback), and a bare `dict` let a renamed key typecheck
+    everywhere and fail schema validation at the end of a conversion instead.
+    """
+
+    name: str
+    size_bytes: int
+    row_count: int
+
+
 class EventsPublication(TypedDict):
     """What a run did about `<id>/zarr/events.parquet`.
 
@@ -3519,7 +3757,7 @@ class EventsPublication(TypedDict):
     "we could not say what its events are" must not look the same from outside.
     """
 
-    file: dict | None
+    file: ManifestFileEntry | None
     failed: bool
 
 
@@ -5200,12 +5438,20 @@ def main() -> int:
     # rewritten fresh (no carry-forward of stale entries) rather than merged.
     # The prior index is still READ -- purely to find orphaned stores below, not
     # to seed the merge or the diff.
+    #
+    # Read ONCE, with the ETag, whichever branch wants the document: that ETag is
+    # what the publish below writes back under `--if-match`, so it has to belong
+    # to the exact body this run merged from. `--clean` needs it too -- the merge
+    # is handed `prior=None`, but the OBJECT still exists on S3, and a
+    # `--if-none-match "*"` write derived from "the merge had no prior" would 412
+    # on every clean run.
+    live_index, live_index_etag = read_index_with_etag(bucket, dataset_id)
     prior_for_orphans: dict | None = None
     if args.clean:
         prior, prior_commit, full = None, None, True
-        prior_for_orphans = s3_read_json(bucket, f"{dataset_id}/zarr/index.json")
+        prior_for_orphans = live_index
     else:
-        prior = s3_read_json(bucket, f"{dataset_id}/zarr/index.json")
+        prior = live_index
         prior_commit = (prior or {}).get("source_commit")
         full = args.full or not prior_commit or not is_ancestor(repo, prior_commit, head)
     # The producer manifest tracks exactly the index's store set, so it is merged
@@ -5305,7 +5551,11 @@ def main() -> int:
     converted_entries: list[dict] = []
     manifest_entries: list[dict] = []
     failures: list[str] = []
-    failure_entries: list[dict] = []
+    failure_entries: list[FailureEntry] = []
+    # NOT PendingEntry: these are the merge's INPUT, carrying only what this run
+    # observed (path, reason, last_error, last_attempt_utc). `merge_index` is
+    # what derives `zarr` and the attempt count and produces the published
+    # entries -- see `_pending_entry`.
     pending_entries: list[dict] = []
     # Event rows go to disk as each recording finishes, never into a list that
     # grows with the dataset: nm000281 is ~25k stores (#1060).
@@ -5545,7 +5795,7 @@ def main() -> int:
     # calls that callback before the events step has run -- and a name that only
     # exists on the happy path would raise NameError inside the very handler
     # whose job is to make a failure visible.
-    events_file: dict | None = None
+    events_file: ManifestFileEntry | None = None
     events_upload_failed = False
 
     def write_failed_callback(error: str | None = None) -> None:
@@ -5629,11 +5879,26 @@ def main() -> int:
     # recordings are now listed in `pending`, and the queue re-queues a `done`
     # dataset that has any (zarr_queue.reconcile), which re-runs it with --clean.
     # So publish the commit the stores were actually built from.
-    index_commit = prior_commit if (infra_failures and is_commit_sha(prior_commit)) else head
+    # The trailing `and prior_commit` in the condition is not redundant with
+    # `is_commit_sha`: that call narrows the value at runtime but not for a
+    # reader or a type checker, so the extra term is what makes the ternary's
+    # first branch visibly a `str` rather than `str | None`. `head_commit` is
+    # published as the index's `source_commit`, where None would serialize as
+    # JSON null -- the on008083 shape (#1197) that took an empty commit all the
+    # way into a published document.
+    index_commit = (
+        prior_commit if (infra_failures and is_commit_sha(prior_commit) and prior_commit) else head
+    )
     biosigio_version = installed_biosigio_version()
-    try:
-        index = merge_index(
-            prior,
+
+    def build_index(merge_prior: dict | None, merge_pending: list | None) -> dict:
+        """Merge this run's results onto a prior document and check the coverage
+        invariant. A function rather than a straight line because the publish
+        below re-runs it against a NEWER live document when the conditional write
+        loses a race -- re-merging is the only way to keep both writers' work.
+        """
+        merged = merge_index(
+            merge_prior,
             dataset_id,
             index_commit,
             converted_entries,
@@ -5647,10 +5912,14 @@ def main() -> int:
             bucket=bucket,
             region=args.region,
             biosigio_version=biosigio_version,
-            prior_pending=prior_pending,
+            prior_pending=merge_pending,
             dataset_row=dataset_row,
         )
-        check_index_invariant(index)
+        check_index_invariant(merged)
+        return merged
+
+    try:
+        index = build_index(prior, prior_pending)
         # SCHEMA FIRST, UPLOADS SECOND. A refused index means this run publishes
         # nothing -- and "nothing" has to include events.parquet, which is a
         # destructive overwrite of a file the LIVE index still describes. So the
@@ -5695,16 +5964,26 @@ def main() -> int:
         write_failed_callback(f"index refused: {exc}")
         return 1
 
-    manifest = merge_manifest(
-        prior_manifest,
-        dataset_id,
-        manifest_entries,
-        [e["zarr"] for e in index["stores"]],
-        updated,
-        events_file=events_file,
-    )
+    def build_manifest(index_doc: dict) -> dict:
+        """The producer manifest tracks EXACTLY the index's store set, so it is
+        derived from the document that is actually published -- including the
+        re-merged one a conditional-write retry produces, whose store list can
+        differ from the first attempt's. Validated here so a bad manifest still
+        refuses the publish rather than being uploaded.
+        """
+        doc = merge_manifest(
+            prior_manifest,
+            dataset_id,
+            manifest_entries,
+            [e["zarr"] for e in index_doc["stores"]],
+            updated,
+            events_file=events_file,
+        )
+        validate_document(doc, MANIFEST_SCHEMA_PATH, "manifest")
+        return doc
+
     try:
-        validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+        manifest = build_manifest(index)
     except Exception as exc:  # noqa: BLE001 - refuse to publish a bad manifest
         print(
             f"::error::refusing to publish {dataset_id}/zarr/manifest.json: {exc}",
@@ -5713,27 +5992,83 @@ def main() -> int:
         write_failed_callback(f"manifest refused: {exc}")
         return 1
 
-    # `delete=False` is deliberate -- aws_cp reads the file back by path after the
-    # handle closes -- but it left the upload as the file's only reader and nothing
-    # as its owner, so every dataset conversion leaked one temp file into TMPDIR
-    # (= the Hallu NVMe scratch); 544 strays had piled up by 2026-08-12. Unlink in
-    # a `finally` so a failed upload leaks nothing either. nemarOrg/nemar-cli#1068.
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
-        json.dump(index, fh, separators=(",", ":"))
-        index_local = fh.name
-    try:
-        aws_cp(
-            index_local,
-            f"s3://{bucket}/{dataset_id}/zarr/index.json",
-            extra=["--content-type", "application/json", "--cache-control", "public, max-age=60"],
+    # The index publish is a CONDITIONAL write, and its own temp-file handling
+    # lives in `write_index` (shared with purge_non_raw_stores.py).
+    #
+    # It used to be an unconditional `aws_cp` followed by a `head-object` for the
+    # ETag. Two processes write this object -- a converter run and the non-raw
+    # purge -- and both read it, work for minutes to hours, then write back what
+    # they merged from that read. Whichever finished second silently reverted the
+    # other: a purge that had just deleted 92 non-raw stores would be undone, or a
+    # conversion's newly added stores would vanish from the document while their
+    # chunks sat on S3 unreferenced. Nothing anywhere reported it -- both runs
+    # exited 0 and both callbacks said "ready".
+    #
+    # So the PUT carries `--if-match` with the ETag read at the top of this run
+    # (or `--if-none-match "*"` when there was no document then). A 412 means the
+    # premise changed, and it is recoverable exactly once: re-read, re-merge this
+    # run's results onto the NEWER document, and write again against its ETag.
+    # The re-merge covers the document only -- the objects this run uploaded and
+    # deleted are already on S3 and are not redone. A second 412 is abandoned
+    # loudly through `write_failed_callback`: a third attempt has no reason to
+    # win, and publishing an index computed from a body that is already stale
+    # again is exactly the silent rollback this replaces.
+    def publish_index() -> tuple[dict, dict, str | None]:
+        try:
+            return index, manifest, write_index(
+                bucket, dataset_id, index, if_match=live_index_etag
+            )
+        except IndexPreconditionFailed as first:
+            print(
+                f"::warning::{dataset_id}/zarr/index.json changed under this run "
+                f"({first}); re-reading and re-merging once",
+                flush=True,
+            )
+        newer, newer_etag = read_index_with_etag(bucket, dataset_id)
+        # `--clean` hands the merge no prior (the document is rebuilt from this
+        # run), exactly as the first attempt did; the pending attempt history
+        # still comes from the published document, newer one included.
+        remerged = build_index(None if args.clean else newer, (newer or {}).get("pending"))
+        if events_file:
+            remerged["events_parquet"] = f"{remerged['data_base']}{EVENTS_PARQUET_NAME}"
+            remerged["events_row_count"] = events_file["row_count"]
+        # Re-validated, not assumed: the retry publishes a document built from a
+        # body this run has not otherwise inspected. The manifest follows the
+        # re-merged store set for the same reason -- it is defined as exactly the
+        # index's stores, and pairing a retried index with the first attempt's
+        # manifest would publish the disagreement `manifest_upload_failed` exists
+        # to report.
+        validate_document(remerged, INDEX_SCHEMA_PATH, "index")
+        try:
+            remerged_manifest = build_manifest(remerged)
+        except Exception as exc:  # noqa: BLE001 - abandon the publish, do not skip it
+            raise RuntimeError(f"manifest refused after index re-merge: {exc}") from exc
+        return remerged, remerged_manifest, write_index(
+            bucket, dataset_id, remerged, if_match=newer_etag
         )
-        etag = _run(
-            ["aws", "s3api", "head-object", "--bucket", bucket, "--key",
-             f"{dataset_id}/zarr/index.json", "--query", "ETag", "--output", "text"]
-        ).strip().strip('"')
-    finally:
-        with contextlib.suppress(OSError):
-            os.unlink(index_local)
+
+    try:
+        index, manifest, put_etag = publish_index()
+    except IndexPreconditionFailed as exc:
+        print(
+            f"::error::refusing to publish {dataset_id}/zarr/index.json: {exc}",
+            flush=True,
+        )
+        write_failed_callback(f"index publish conflict: {exc}")
+        return 1
+    except Exception as exc:  # noqa: BLE001 - the run has nothing to serve without this
+        # Includes an `aws` too old to know `--if-match` on put-object (S3 gained
+        # conditional writes in Nov 2024): that is a node-provisioning failure,
+        # and it has to read as a loud failed run rather than a silent one.
+        print(
+            f"::error::publishing {dataset_id}/zarr/index.json failed: {exc}",
+            flush=True,
+        )
+        write_failed_callback(f"index publish failed: {exc}")
+        return 1
+    # The ETag the PUT itself reported, not a follow-up read: a `head-object`
+    # here could hand the backend a version this run did not write.
+    etag = (put_etag or "").strip().strip('"') or None
 
     # The manifest is producer-only bookkeeping, so it is uploaded AFTER the index
     # and a failure here does not fail the run: the serving copy and its entry

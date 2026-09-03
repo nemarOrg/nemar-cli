@@ -233,12 +233,39 @@ export const datasetDetailSchema = catalogItemObjectSchema
     // rejected here defensively) never a bare array of per-file entries.
     // detail_ref points at the published Zarr index's `failures` list,
     // which is where the full per-recording detail now lives.
+    //
+    // `.passthrough()` like every other object here, and for the reason the
+    // module doc gives: the contract is a LOWER bound, so an additive backend
+    // field never breaks an older client. It was previously the one nested
+    // object without it AND without the fields, which is the worst of both --
+    // `pending`/`discovered` were written into this object by #1197, and
+    // `datasetDetailSchema.parse()` silently stripped them back out, so the
+    // counts existed in D1 and reached no consumer.
+    //
+    // Declaring them is what fixes that; passthrough only stops the next one
+    // from being invisible in the same way. Every key below is written by
+    // `zarrFailureColumns` (routes/callbacks/zarr-ready.ts) and projected by
+    // `parseZarrDataFailures` (routes/datasets/catalog.ts) -- a new key means
+    // editing all three, and the round-trip test in
+    // backend/test/catalog-has-zarr.test.ts fails when one is missed.
     zarr_data_failures: z
       .object({
         count: z.number().int().nonnegative(),
         detail_ref: z.string(),
         compacted_by: z.string().optional(),
+        /** Recordings with no store the converter still expects to convert (#1197). */
+        pending: z.number().int().nonnegative().optional(),
+        /** Raw recordings the walker found: the coverage denominator (#1197). */
+        discovered: z.number().int().nonnegative().optional(),
+        /**
+         * index.json was published without its sibling. Present only when true;
+         * absence reads as "not reported as failed", so a later clean run clears
+         * the claim by writing a summary without the key.
+         */
+        events_upload_failed: z.literal(true).optional(),
+        manifest_upload_failed: z.literal(true).optional(),
       })
+      .passthrough()
       .nullable()
       .optional(),
   })

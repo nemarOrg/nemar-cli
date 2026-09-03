@@ -34,6 +34,7 @@ jobs:
       tests: ${{ steps.filter.outputs.tests }}
       email: ${{ steps.filter.outputs.email }}
       zarr: ${{ steps.filter.outputs.zarr }}
+      shared: ${{ steps.filter.outputs.shared }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -48,6 +49,14 @@ jobs:
               - 'backend/**'
             tests:
               - 'test/**'
+            # shared/ is imported by BOTH src/ and backend/ but matched by
+            # neither filter, so a PR touching only shared/** -- the wire
+            # contract, the facet vocabulary, the two published Zarr JSON
+            # Schemas -- ran zero test jobs and merged green having been
+            # compiled by nothing. Wired into lint, unit-pure and the
+            # backend-facing jobs below.
+            shared:
+              - 'shared/**'
             # Email + passwordless auth surface (#569 / #572 / #595).
             # Gates the passwordless-auth-test job below — that suite
             # triggers real Resend API calls and burns the daily quota,
@@ -161,11 +170,18 @@ jobs:
       - name: Hallu zarr --test config tests
         run: cd scripts/zarr && uv run --with pytest pytest test_hallu_zarr_config.py -v
 
-  # Tier-2 duration backfill (scripts/patch_duration.py), moved here from
-  # nemarDatasets/.github with the converter it imports (#1109). Unlike the
-  # zarr helper tests above this one needs REAL dependencies: it generates an
-  # EDF with pyedflib and reads it back through biosigIO, and self-skips
-  # without them -- so the install is what makes this job worth running.
+  # The FULL converter suite, plus the tier-2 duration backfill
+  # (scripts/patch_duration.py) it was originally created for (#1109).
+  #
+  # The job name is kept for the required-check configuration; its scope is
+  # deliberately wider than the name. `zarr-python-test` above is the fast
+  # pure-Python tier and installs only jsonschema + pyarrow, so five test
+  # classes -- 43 tests covering real-recording conversion, events.parquet
+  # publication end to end, convert_one, and the sample-index rate-ratio
+  # cases -- raised SkipTest on EVERY CI run and were reported as
+  # "skipped=9" in a green job. This job already installs the real stack
+  # (biosigIO + pyedflib) for the duration tests, so running the converter
+  # suite here is what actually executes them.
   patch-duration-test:
     runs-on: ubuntu-latest
     # The pool-recovery tests drive real subprocesses; if the executor ever
@@ -185,8 +201,10 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
 
-      - name: Install biosigIO + pyedflib
-        run: uv pip install --system -r scripts/zarr/requirements.txt pyedflib
+      - name: Install biosigIO + pyedflib + the schema/parquet validators
+        run: |
+          uv pip install --system -r scripts/zarr/requirements.txt pyedflib \
+            "jsonschema>=4.21" "pyarrow>=15.0" pytest
 
       # test_patch_duration.py wraps every case in
       # `unittest.skipUnless(HAVE_PYEDFLIB and HAVE_BIOSIGIO)`, and unittest exits
@@ -205,13 +223,47 @@ jobs:
       - name: Tier-2 duration tests
         run: python scripts/test_patch_duration.py
 
+      # The converter suite with the dependencies actually installed, under
+      # pytest so the skip COUNT is machine-readable (unittest's own runner
+      # reports it only in prose).
+      - name: Converter suite (full, real dependencies)
+        run: |
+          cd scripts/zarr
+          pytest -q -rs --junit-xml=/tmp/zarr-tests.xml \
+            test_generate_zarr.py test_zarr_queue.py \
+            test_purge_non_raw_stores.py test_hallu_zarr_config.py
+
+      # A skip is invisible in a green job, and that is exactly how 43 tests
+      # went unrun for the life of this epic. TWO are expected here and no
+      # more: the real-data download test (opted out of, or unreachable) and
+      # the bash-3.2 guard-rail test (this runner has bash 5). Anything above
+      # that is a dependency that did not install -- the failure mode the
+      # threshold exists to make loud.
+      - name: Fail if more than two tests skipped
+        run: |
+          python - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse("/tmp/zarr-tests.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          skipped = int(suite.get("skipped", "0"))
+          tests = int(suite.get("tests", "0"))
+          print(f"{tests} tests, {skipped} skipped")
+          if skipped > 2:
+              print(
+                  "::error::%d tests skipped (expected at most 2: the real-data "
+                  "download test and the bash-3.2 test). A dependency probably "
+                  "did not install -- the suite passed without asserting." % skipped
+              )
+              sys.exit(1)
+          PY
+
   # Type check and lint - always runs on code changes
   lint:
     runs-on: ubuntu-latest
     needs: changes
     # Matches unit-pure's trigger so that, as a required check, lint never
     # "skips" on a backend-only PR (a skipped required check blocks merges).
-    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true'
+    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true' || needs.changes.outputs.shared == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -239,7 +291,7 @@ jobs:
   unit-pure:
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true'
+    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true' || needs.changes.outputs.shared == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -297,7 +349,7 @@ jobs:
   integration-dev:
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true'
+    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.shared == 'true'
     env:
       TEST_API_URL: https://nemar-api-dev.sccn-org.workers.dev
       TEST_ADMIN_API_KEY: ${{ secrets.TEST_ADMIN_API_KEY }}

@@ -29,12 +29,6 @@ import { type WebhookRouter, timingSafeEqual } from "../webhooks/shared.js";
  * the same URLs (both harmless). Always 200 on a valid token + body so the
  * workflow's fire-and-forget POST doesn't see a retryable error.
  */
-interface ZarrDataFailure {
-  path?: string;
-  code?: string;
-  reason?: string;
-}
-
 interface ZarrReadyBody {
   dataset_id: string;
   // 'converting' is the live in-progress signal the Hallu driver POSTs when it
@@ -53,7 +47,13 @@ interface ZarrReadyBody {
   errors?: number; // recordings that failed this run (0 = clean)
   failed?: string[]; // their source paths
   failure_count?: number; // subset that are TYPED data failures
-  data_failures?: ZarrDataFailure[]; // typed failures [{path, code, reason}]
+  // Entries are `{path, code, reason}` as the converter writes them, but nothing
+  // here reads a field off one: only the LENGTH is used (the per-entry detail
+  // lives in the published index, see `zarrFailureColumns`). Typed as `unknown[]`
+  // to match the validator, which checks the array and not the element shape --
+  // an element interface here would be a compile-time claim about a cron's JSON
+  // that nothing validates and nothing needs.
+  data_failures?: unknown[];
   deterministic?: boolean; // all failures are typed data failures (won't retry)
   // Memory-robustness telemetry (epic #1108). Declared here because an
   // undeclared field is silently dropped by this handler's typed read -- the
@@ -130,6 +130,8 @@ export function zarrFailureColumns(body: {
   data_failures?: unknown;
   pending_count?: number;
   discovered_count?: number;
+  events_upload_failed?: boolean;
+  manifest_upload_failed?: boolean;
 }): {
   errors: number;
   failureCount: number;
@@ -153,11 +155,25 @@ export function zarrFailureColumns(body: {
     typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : null;
   const pending = nonNegative(body.pending_count);
   const discovered = nonNegative(body.discovered_count);
+  // A sibling document the converter could not publish leaves the serving copy
+  // internally inconsistent until the next run, and until now the ONLY trace of
+  // that off-node was a console.warn in the Worker log -- unqueryable, and gone
+  // with the log. These are the same additive-key treatment as pending/
+  // discovered (ADR 0034: no new column for a fact the bounded summary can
+  // carry), and they are written ONLY when true: a later run that publishes both
+  // siblings reports them false, the keys are then absent, and the row stops
+  // claiming a condition that has cleared.
+  const eventsUploadFailed = body.events_upload_failed === true;
+  const manifestUploadFailed = body.manifest_upload_failed === true;
   // The summary is written when there is anything to say -- a failure list, OR
-  // pending recordings with no failures at all, which is precisely the on008083
-  // shape (#1197) that used to leave the column NULL and the recordings
-  // invisible. `count` alone kept that case silent.
-  const hasSummary = dataFailures.length > 0 || (pending ?? 0) > 0;
+  // pending recordings with no failures at all, which is precisely the
+  // pending-with-no-failures shape of on008083 (#1197) that used to leave the
+  // column NULL and the recordings invisible. `count` alone kept that case
+  // silent. An unpublished sibling is also something to say: a run with no
+  // failures and no pending recordings that published index.json without its
+  // manifest is not a clean run.
+  const hasSummary =
+    dataFailures.length > 0 || (pending ?? 0) > 0 || eventsUploadFailed || manifestUploadFailed;
   return {
     errors,
     failureCount,
@@ -178,6 +194,8 @@ export function zarrFailureColumns(body: {
           detail_ref: "zarr/index.json",
           ...(pending === null ? {} : { pending }),
           ...(discovered === null ? {} : { discovered }),
+          ...(eventsUploadFailed ? { events_upload_failed: true } : {}),
+          ...(manifestUploadFailed ? { manifest_upload_failed: true } : {}),
         })
       : null,
     hadErrors: errors > 0,
@@ -201,37 +219,48 @@ export function zarrFailureColumns(body: {
  * out of the way rather than rejecting them, so a newer converter that sends a
  * field this backend has not learned yet still gets its known fields persisted.
  */
-const numeric = z.number().finite().nonnegative();
+/**
+ * Every number in this body is a COUNT -- of stores, recordings, failures, event
+ * rows -- so `.int()` is part of the type, not a nicety. Without it a fractional
+ * `store_count` validated cleanly and was bound straight into D1, where the
+ * column is declared INTEGER (`shared/contract/dataset.ts` says `.int()` too):
+ * SQLite stores the REAL as given and every consumer that reads "2.7 stores"
+ * inherits a number no counting could have produced. `.catch(undefined)` then
+ * makes a fractional value behave like any other malformed field -- dropped,
+ * logged by `parseZarrReadyBody`, and the rest of the body still persisted --
+ * rather than silently truncated to a value the producer never sent.
+ */
+const count = z.number().int().finite().nonnegative();
 const zarrReadyBodySchema = z
   .object({
     dataset_id: z.string(),
     status: z.enum(["ready", "failed", "converting"]).optional().catch(undefined),
-    store_count: numeric.optional().catch(undefined),
+    store_count: count.optional().catch(undefined),
     index_etag: z.string().optional().catch(undefined),
     commit: z.string().optional().catch(undefined),
     converted: z.array(z.string()).optional().catch(undefined),
     removed: z.array(z.string()).optional().catch(undefined),
     error: z.string().optional().catch(undefined),
-    errors: numeric.optional().catch(undefined),
+    errors: count.optional().catch(undefined),
     failed: z.array(z.string()).optional().catch(undefined),
-    failure_count: numeric.optional().catch(undefined),
+    failure_count: count.optional().catch(undefined),
     data_failures: z.array(z.unknown()).optional().catch(undefined),
     deterministic: z.boolean().optional().catch(undefined),
-    pool_breaks: numeric.optional().catch(undefined),
-    measured_count: numeric.optional().catch(undefined),
+    pool_breaks: count.optional().catch(undefined),
+    measured_count: count.optional().catch(undefined),
     calibration: z.array(z.unknown()).optional().catch(undefined),
-    pending_count: numeric.optional().catch(undefined),
-    discovered_count: numeric.optional().catch(undefined),
-    not_attempted_count: numeric.optional().catch(undefined),
-    non_raw_dropped: numeric.optional().catch(undefined),
+    pending_count: count.optional().catch(undefined),
+    discovered_count: count.optional().catch(undefined),
+    not_attempted_count: count.optional().catch(undefined),
+    non_raw_dropped: count.optional().catch(undefined),
     provenance_fetch_failed: z.boolean().optional().catch(undefined),
     manifest_upload_failed: z.boolean().optional().catch(undefined),
     // `nullable` rather than optional-only: the converter sends null when it
     // published no events file, and the reason it published none is what
     // `events_upload_failed` separates (issue #1060).
-    events_row_count: numeric.nullable().optional().catch(undefined),
+    events_row_count: count.nullable().optional().catch(undefined),
     events_upload_failed: z.boolean().optional().catch(undefined),
-    events_stores_without_rows: numeric.optional().catch(undefined),
+    events_stores_without_rows: count.optional().catch(undefined),
   })
   .passthrough();
 
@@ -449,8 +478,18 @@ export function registerZarrReadyRoutes(webhooks: WebhookRouter): void {
       }
     }
 
+    // `not_attempted`, `non_raw_dropped` and `provenance_fetch_failed` are
+    // persisted nowhere: the first is a subset of `pending` that the bounded
+    // summary does not break out, the second is a per-run operational fact about
+    // carried-over stores (ADR 0027), and the third says this wave's stores carry
+    // null doi/license/citation/hed_version because the CATALOG READ failed, not
+    // because the data lacks them -- which is the difference between "nothing to
+    // publish" and "we could not find out". None has a column, so logging them
+    // here is the only place any of them is visible to anyone not tailing the
+    // conversion node's cron log -- the same reason `pending`/`discovered` are on
+    // this line.
     console.log(
-      `[zarr-ready] dataset=${body.dataset_id} status=${status} stores=${body.store_count ?? "?"} converted=${body.converted?.length ?? 0} removed=${body.removed?.length ?? 0} purged=${purge?.submitted ?? 0} pool_breaks=${body.pool_breaks ?? "?"} pending=${body.pending_count ?? "?"} discovered=${body.discovered_count ?? "?"} events_rows=${body.events_row_count ?? "none"} events_upload_failed=${body.events_upload_failed ?? false} manifest_upload_failed=${body.manifest_upload_failed ?? false} events_stores_without_rows=${body.events_stores_without_rows ?? "?"}`,
+      `[zarr-ready] dataset=${body.dataset_id} status=${status} stores=${body.store_count ?? "?"} converted=${body.converted?.length ?? 0} removed=${body.removed?.length ?? 0} purged=${purge?.submitted ?? 0} pool_breaks=${body.pool_breaks ?? "?"} pending=${body.pending_count ?? "?"} discovered=${body.discovered_count ?? "?"} not_attempted=${body.not_attempted_count ?? "?"} non_raw_dropped=${body.non_raw_dropped ?? "?"} provenance_fetch_failed=${body.provenance_fetch_failed ?? "?"} events_rows=${body.events_row_count ?? "none"} events_upload_failed=${body.events_upload_failed ?? false} manifest_upload_failed=${body.manifest_upload_failed ?? false} events_stores_without_rows=${body.events_stores_without_rows ?? "?"}`,
     );
 
     // A store that has an events.tsv but contributed no rows is data the

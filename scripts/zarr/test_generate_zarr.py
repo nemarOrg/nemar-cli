@@ -14,6 +14,7 @@ Run with:
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -71,7 +72,6 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     MaxShieldUncalibrated,
     maxshield_calibration_for,
     MAXSHIELD_MEM_FACTOR,
-    projected_peak_bytes,
     RETRYABLE_CODES,
     reason_for_code,
     should_stream,
@@ -6062,26 +6062,66 @@ class TestMainRefusesToPublish(unittest.TestCase):
 
         Without it the two tests above could pass because `main` failed for some
         unrelated reason -- a missing git object, the stub `aws` -- rather than at
-        the guard. Here the stub `aws` fails the UPLOAD, so `main` raises rather
-        than returning 1, which proves the guards were what returned 1 above.
+        the guard. Here the stub `aws` fails the UPLOAD, and the callback names a
+        DIFFERENT cause from either guard, which is what proves the guards were
+        what produced the other two.
+
+        The upload failure used to escape as an uncaught RuntimeError, which is
+        the very shape #774 removed everywhere else: the process exits non-zero
+        having written no callback file, so `hallu-zarr.sh` POSTs nothing, the
+        `converting` signal is never superseded, and D1 sits at
+        `zarr_status='pending'` with nothing running. It now goes through
+        `write_failed_callback` like every other exit that returns 1.
         """
-        with self.assertRaises(RuntimeError):
-            self.run_main()
+        rc = self.run_main()
+        self.assertEqual(rc, 1)
+        body = self.read_callback()
+        self.assert_failed_shape(body)
+        self.assertIn("index publish failed", body["error"])
+        # Not a schema guard: those are the other two tests' cause.
+        self.assertNotIn("refused", body["error"])
 
 
-STUB_AWS = """#!/usr/bin/env python3
-\"\"\"Minimal `aws` stand-in for the converter's main()-level tests: a real
-executable over local files, so s3_read_json / s3_download_file / aws_cp and
-head-object all run.\"\"\"
+# A real `aws` stand-in for the converter's main()-level tests: a real
+# executable over local files, so `s3_read_json`, `s3_download_file`, `aws_cp`
+# and the conditional index read/write pair all run for real, subprocess argv
+# included.
+#
+# `s3api get-object`/`put-object` carry GENUINE ETag semantics -- an object's
+# ETag is the md5 of its bytes, and put-object honours `--if-match` /
+# `--if-none-match` the way S3 does (412 on a mismatch). That is the same
+# stand-in test_purge_non_raw_stores.py uses, and it has to be: the two scripts
+# now share one conditional write (`generate_zarr.write_index`), so a stub that
+# accepted any condition would let a broken one pass in both suites.
+STUB_AWS = r"""#!/usr/bin/env python3
+import hashlib
+import json
 import os
 import shutil
 import sys
 
 ROOT = os.environ["ZARR_TEST_S3_ROOT"]
 
+FLAGS_WITH_VALUES = ("--bucket", "--key", "--body", "--content-type",
+                     "--cache-control", "--if-match", "--if-none-match",
+                     "--query", "--output")
+
 
 def local(uri):
     return os.path.join(ROOT, uri.split("/", 3)[3].replace("/", "_"))
+
+
+def local_key(key):
+    return os.path.join(ROOT, key.replace("/", "_"))
+
+
+def etag(path):
+    with open(path, "rb") as fh:
+        return chr(34) + hashlib.md5(fh.read()).hexdigest() + chr(34)
+
+
+def opt(args, name, default=None):
+    return args[args.index(name) + 1] if name in args else default
 
 
 args = [a for a in sys.argv[1:] if not a.startswith("--cli-")]
@@ -6091,19 +6131,19 @@ args = [a for a in args if a not in ("--only-show-errors",)]
 log = os.environ.get("ZARR_TEST_S3_LOG")
 if log:
     with open(log, "a") as fh:
-        fh.write(" ".join(args) + "\\n")
+        fh.write(" ".join(args) + "\n")
 # One key made to fail, the way a bucket policy or a transient S3 error would,
 # so the converter's own non-fatal handling runs for real.
 fail_key = os.environ.get("ZARR_TEST_S3_FAIL_KEY")
 if fail_key and any(fail_key in a for a in args):
-    sys.stderr.write("An error occurred (InternalError) when calling PutObject\\n")
+    sys.stderr.write("An error occurred (InternalError) when calling PutObject\n")
     sys.exit(1)
 if args[:2] == ["s3", "cp"]:
     src, dst = args[2], args[3]
     if src.startswith("s3://"):
         path = local(src)
         if not os.path.exists(path):
-            sys.stderr.write("NoSuchKey\\n")
+            sys.stderr.write("NoSuchKey\n")
             sys.exit(1)
         # `-` is a read-to-stdout (s3_read_json); anything else is a real
         # download to a path, and it must stay BYTE-exact -- events.parquet is
@@ -6115,6 +6155,35 @@ if args[:2] == ["s3", "cp"]:
             shutil.copyfile(path, dst)
     else:
         shutil.copyfile(src, local(dst))
+    sys.exit(0)
+if args[:2] == ["s3api", "get-object"]:
+    path = local_key(opt(args, "--key"))
+    positional = [
+        a for i, a in enumerate(args[2:], start=2)
+        if not a.startswith("--") and args[i - 1] not in FLAGS_WITH_VALUES
+    ]
+    if not os.path.exists(path):
+        sys.stderr.write("An error occurred (NoSuchKey) when calling GetObject\n")
+        sys.exit(1)
+    shutil.copyfile(path, positional[0])
+    print(etag(path))
+    sys.exit(0)
+if args[:2] == ["s3api", "put-object"]:
+    path = local_key(opt(args, "--key"))
+    if "--if-match" in args:
+        have = etag(path) if os.path.exists(path) else None
+        if have != opt(args, "--if-match"):
+            sys.stderr.write(
+                "An error occurred (PreconditionFailed) when calling PutObject\n"
+            )
+            sys.exit(1)
+    if "--if-none-match" in args and os.path.exists(path):
+        sys.stderr.write(
+            "An error occurred (PreconditionFailed) when calling PutObject\n"
+        )
+        sys.exit(1)
+    shutil.copyfile(opt(args, "--body"), path)
+    print(json.dumps({"ETag": etag(path)}))
     sys.exit(0)
 if args[:2] == ["s3api", "head-object"]:
     print('"deadbeef"')
@@ -6356,6 +6425,142 @@ class TestMainCleanRunAgainstPriorIndexes(unittest.TestCase):
         self.assertEqual(self.run_main(), 0)
         self.assertEqual(self.published("index.json")["store_count"], 0)
         self.assertEqual(self.callback_body()["non_raw_dropped"], 0)
+
+    # --- The index publish is a conditional write ------------------------
+    #
+    # Two processes write `<id>/zarr/index.json`: a converter run and
+    # `purge_non_raw_stores.py`. Both read it, work for minutes to hours, then
+    # write back what they merged from that read, so an unconditional PUT from
+    # either silently reverts the other -- restoring the 4,721 non-raw stores a
+    # purge had just dropped, or losing a conversion's new stores while their
+    # chunks sit on S3 unreferenced. Both exit 0; nothing anywhere says so.
+    #
+    # The stub `aws` carries real ETag semantics (md5 of the bytes, 412 on a
+    # mismatch), so these drive the actual condition rather than a flag.
+
+    def object_etag(self, key="index.json"):
+        """The ETag the stub reports for a published object: md5 of its bytes,
+        the same rule the stub's `put-object` and `get-object` use."""
+        with open(os.path.join(self.s3, "on008083_zarr_" + key), "rb") as fh:
+            return hashlib.md5(fh.read()).hexdigest()
+
+    def log_aws_calls(self):
+        """Capture every `aws` argv, in order -- the only way to see that the
+        retry actually RE-READ the document rather than resending the same body.
+        """
+        path = os.path.join(self.dir, "aws.log")
+        os.environ["ZARR_TEST_S3_LOG"] = path
+        self.addCleanup(lambda: os.environ.pop("ZARR_TEST_S3_LOG", None))
+        return lambda: [
+            line.strip() for line in open(path) if os.path.exists(path)
+        ] if os.path.exists(path) else []
+
+    def publish_competitor_before(self, reads):
+        """Publish a DIFFERENT document immediately after the run's first
+        `reads` index reads, the way a concurrent purge would.
+
+        Wrapping the real `read_index_with_etag` is the only way to open the
+        window deterministically: the ETag the run holds is invalidated after it
+        was read and before it is used, which is exactly the race. Nothing in the
+        conditional write itself is replaced -- the stub `aws` decides the 412.
+        """
+        original = generate_zarr.read_index_with_etag
+        seen = {"reads": 0}
+
+        def read_then_publish(bucket, dataset_id):
+            index, etag = original(bucket, dataset_id)
+            seen["reads"] += 1
+            if seen["reads"] <= reads:
+                # A DIFFERENT body each time (the ETag is the md5 of the bytes),
+                # so a second competing write really does invalidate the ETag the
+                # retry just read -- republishing identical bytes would leave the
+                # ETag unchanged and quietly turn the two-conflict case into the
+                # one-conflict case.
+                self.put("index.json", self.prior_v3(
+                    source_commit="c" * 40, competitor_round=seen["reads"],
+                ))
+            return index, etag
+
+        generate_zarr.read_index_with_etag = read_then_publish
+        self.addCleanup(setattr, generate_zarr, "read_index_with_etag", original)
+        return seen
+
+    def test_the_index_publish_is_conditional_on_the_etag_it_read(self):
+        self.put("index.json", self.prior_v3())
+        calls = self.log_aws_calls()
+        self.assertEqual(self.run_main(), 0)
+        puts = [c for c in calls() if c.startswith("s3api put-object") and "index.json" in c]
+        self.assertEqual(len(puts), 1)
+        # The read's ETag, sent back verbatim: an unconditional PUT is what this
+        # replaces, and `--if-none-match "*"` here would 412 on every run over an
+        # existing document.
+        self.assertIn("--if-match", puts[0])
+        self.assertNotIn("--if-none-match", puts[0])
+        # The callback reports the ETag the PUT itself returned, so it names the
+        # version this run wrote rather than whatever a follow-up read would see.
+        self.assertEqual(self.callback_body()["index_etag"], self.object_etag())
+
+    def test_a_first_publish_is_conditional_on_there_being_no_document(self):
+        calls = self.log_aws_calls()
+        self.assertEqual(self.run_main(), 0)
+        puts = [c for c in calls() if c.startswith("s3api put-object") and "index.json" in c]
+        self.assertEqual(len(puts), 1)
+        # `if_match=None` is not "skip the check": it means the object was absent
+        # at read time, so a first index published in the meantime is not
+        # clobbered either.
+        self.assertIn("--if-none-match", puts[0])
+        self.assertEqual(self.callback_body()["index_etag"], self.object_etag())
+
+    def test_a_lost_race_is_re_read_re_merged_and_published(self):
+        self.put("index.json", self.prior_v3())
+        calls = self.log_aws_calls()
+        seen = self.publish_competitor_before(reads=1)
+        self.assertEqual(self.run_main(), 0)
+        # Two reads and two writes: the first write 412'd, and the retry read the
+        # NEWER document before recomputing. One read would mean it resent the
+        # same body against a fresh ETag, which is the silent clobber wearing a
+        # condition.
+        self.assertEqual(seen["reads"], 2)
+        gets = [c for c in calls() if c.startswith("s3api get-object") and "index.json" in c]
+        puts = [c for c in calls() if c.startswith("s3api put-object") and "index.json" in c]
+        self.assertEqual(len(gets), 2)
+        self.assertEqual(len(puts), 2)
+        self.assertIn("re-reading and re-merging once", self.log)
+        # This run's document is what ends up published, and the callback names
+        # the ETag of the retry's write.
+        published = self.published("index.json")
+        self.assertEqual(published["source_commit"], self.head)
+        self.assertEqual(self.callback_body()["index_etag"], self.object_etag())
+        self.assertEqual(self.callback_body()["status"], "ready")
+        check_index_invariant(published)
+        validate_document(published, INDEX_SCHEMA_PATH, "index")
+        # The manifest rides the same publish, so it is not left describing the
+        # first attempt's store set.
+        validate_document(self.published("manifest.json"), MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_losing_the_race_twice_fails_loudly_and_publishes_nothing(self):
+        self.put("index.json", self.prior_v3())
+        seen = self.publish_competitor_before(reads=2)
+        self.assertEqual(self.run_main(), 1)
+        self.assertEqual(seen["reads"], 2)
+        # The other writer's LATEST document is what survives: a third attempt
+        # has no reason to win, and overwriting from a body that is already stale
+        # again is the rollback this whole mechanism exists to prevent.
+        survivor = self.published("index.json")
+        self.assertEqual(survivor["source_commit"], "c" * 40)
+        self.assertEqual(survivor["competitor_round"], 2)
+        # And it is LOUD: the driver POSTs this file, so a run that published
+        # nothing must not leave D1 at `converting` forever (#774).
+        body = self.callback_body()
+        self.assertEqual(body["status"], "failed")
+        self.assertIn("index publish conflict", body["error"])
+        self.assertIn("::error::", self.log)
+        # The manifest is not published either -- it would describe stores the
+        # surviving index does not list.
+        self.assertFalse(
+            os.path.exists(os.path.join(self.s3, "on008083_zarr_manifest.json")),
+            "a run that published no index must not publish its manifest",
+        )
 
 
 class TestMainPublishesEventsParquet(unittest.TestCase):

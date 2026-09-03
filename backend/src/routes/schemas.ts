@@ -43,10 +43,10 @@ schemaRoutes.get("/:name", (c) => {
   if (!schema) {
     return c.json({ error: "Unknown schema", available: Object.keys(SCHEMAS).sort() }, 404);
   }
-  // `application/schema+json` is the registered media type for a JSON Schema
-  // document (RFC draft), and it is what a schema-aware client content-sniffs
-  // for. It is a strict subtype of application/json, so a plain JSON client is
-  // unaffected.
+  // `application/schema+json` is the media type registered for a JSON Schema
+  // document by RFC 9358 (published, not a draft), and it is what a
+  // schema-aware client content-sniffs for. It is a strict subtype of
+  // application/json, so a plain JSON client is unaffected.
   return new Response(JSON.stringify(schema), {
     headers: {
       "Content-Type": "application/schema+json; charset=utf-8",

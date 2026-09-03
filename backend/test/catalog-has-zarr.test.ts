@@ -14,6 +14,8 @@
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
+import { datasetDetailSchema } from "../../shared/contract/dataset";
+import { registerZarrReadyRoutes } from "../src/routes/callbacks/zarr-ready";
 import {
   deriveZarrIndexUrl,
   parseZarrDataFailures,
@@ -22,6 +24,27 @@ import {
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+
+/**
+ * `crypto.subtle.timingSafeEqual` is a Cloudflare Workers extension to Web
+ * Crypto that bun's runtime lacks, so the zarr-ready handler's token check
+ * throws before reaching any behavior under test. Supplying the missing
+ * PLATFORM primitive is not a mock of business logic -- the handler's own check
+ * still runs against it. Same polyfill as zarr-index-v3.test.ts.
+ */
+const subtle = crypto.subtle as SubtleCrypto & {
+  timingSafeEqual?: (a: ArrayBufferView, b: ArrayBufferView) => boolean;
+};
+if (typeof subtle.timingSafeEqual !== "function") {
+  subtle.timingSafeEqual = (a: ArrayBufferView, b: ArrayBufferView): boolean => {
+    const x = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+    const y = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+    if (x.length !== y.length) return false;
+    let diff = 0;
+    for (let i = 0; i < x.length; i++) diff |= (x[i] as number) ^ (y[i] as number);
+    return diff === 0;
+  };
+}
 
 type App = Hono<{ Bindings: Bindings; Variables: Variables }>;
 
@@ -602,6 +625,131 @@ describe("zarr_data_failures is a parsed object on GET /datasets/:id, never a ra
     expect(res.status).toBe(200);
     const body = (await res.json()) as { dataset: { zarr_data_failures: unknown } };
     expect(body.dataset.zarr_data_failures).toBeNull();
+  });
+});
+
+describe("the zarr summary survives callback -> D1 -> GET /datasets/:id -> the contract", () => {
+  /**
+   * The seam three separate reviews found broken, driven end to end rather than
+   * per layer. `zarrFailureColumns` wrote `pending`/`discovered` into the stored
+   * object (#1197), `parseZarrDataFailures` projected neither, and the contract
+   * stripped what it did not declare -- so counts that existed in D1 reached no
+   * consumer, and every layer's own tests passed. Only a test that runs the REAL
+   * callback route against a real D1 and then the REAL detail route over the
+   * same row, and finally parses the response with the shipped contract, can
+   * fail when one of the three is missed.
+   */
+  let db: Database;
+  let catalog: App;
+  let callbacks: Hono<{ Bindings: Bindings }>;
+  const TOKEN = "round-trip-webhook-token";
+  const DATASET = "nm044100";
+
+  const post = (body: Record<string, unknown>) =>
+    callbacks.request(
+      "/zarr-ready",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Webhook-Token": TOKEN },
+        body: JSON.stringify(body),
+      },
+      { DB: realD1(db), NEMAR_WEBHOOK_TOKEN: TOKEN, ENVIRONMENT: "test" } as Bindings,
+    );
+
+  /** GET /datasets/:id, parsed by the SHIPPED contract, not by hand. */
+  const detail = async () => {
+    const res = await catalog.request(`/${DATASET}`, {}, env(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { dataset: Record<string, unknown> };
+    // The detail route serves `SELECT d.*`, so `id` arrives as the numeric
+    // primary key while the contract declares it a string. That mismatch is
+    // pre-existing and real (no live response is parsed against these schemas
+    // today -- filed as #1207); it is stringified HERE so this test fails for
+    // its own subject, the zarr summary, rather than for a known unrelated gap.
+    return datasetDetailSchema.parse({ ...body.dataset, id: String(body.dataset.id) });
+  };
+
+  beforeEach(() => {
+    db = freshDb();
+    catalog = newApp();
+    callbacks = new Hono<{ Bindings: Bindings }>();
+    registerZarrReadyRoutes(callbacks);
+    // `file_size` is set because the SHIPPED contract requires the derived
+    // `file_size_formatted` to be a string; the list/detail shaping derives it
+    // from this column, and parsing the response with the real contract is the
+    // point of this block.
+    insertDataset(db, DATASET, { name: "Round trip", file_size: 123456 });
+  });
+
+  test("the coverage counts reach the response the converter reported them for", async () => {
+    expect(
+      (
+        await post({
+          dataset_id: DATASET,
+          status: "ready",
+          store_count: 2,
+          errors: 41,
+          failure_count: 36,
+          data_failures: [{ path: "sub-03/eeg/c_eeg.edf", code: "file_read_error" }],
+          pending_count: 5,
+          discovered_count: 43,
+        })
+      ).status,
+    ).toBe(200);
+
+    const summary = (await detail()).zarr_data_failures;
+    expect(summary?.count).toBe(1);
+    expect(summary?.pending).toBe(5);
+    expect(summary?.discovered).toBe(43);
+    expect(summary?.detail_ref).toBe("zarr/index.json");
+  });
+
+  test("an unpublished sibling document is visible, and clears when it publishes", async () => {
+    // Until now this condition existed only as a console.warn in the Worker log:
+    // unqueryable, and gone with the log. index.json and manifest.json then
+    // disagree about which stores exist, and nothing off-node could say so.
+    await post({
+      dataset_id: DATASET,
+      status: "ready",
+      store_count: 2,
+      errors: 0,
+      events_upload_failed: true,
+      manifest_upload_failed: true,
+    });
+    const failed = (await detail()).zarr_data_failures;
+    expect(failed?.events_upload_failed).toBe(true);
+    expect(failed?.manifest_upload_failed).toBe(true);
+    // A run with no failures and no pending recordings is not "clean" while a
+    // sibling is missing, so the summary is written at all.
+    expect(failed?.count).toBe(0);
+
+    // The next run publishes both, reports them false, and the claim goes away
+    // rather than sticking to the row forever.
+    await post({
+      dataset_id: DATASET,
+      status: "ready",
+      store_count: 2,
+      errors: 0,
+      events_upload_failed: false,
+      manifest_upload_failed: false,
+    });
+    expect((await detail()).zarr_data_failures).toBeNull();
+  });
+
+  test("a converter that reports none of them still round-trips", async () => {
+    // The pre-#1197 body shape: the summary must stay exactly the #1191 object.
+    await post({
+      dataset_id: DATASET,
+      status: "ready",
+      store_count: 2,
+      errors: 1,
+      failure_count: 1,
+      data_failures: [{ path: "a" }],
+    });
+    expect((await detail()).zarr_data_failures).toEqual({
+      count: 1,
+      detail_ref: "zarr/index.json",
+    });
   });
 });
 
