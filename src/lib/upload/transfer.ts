@@ -399,30 +399,46 @@ export async function uploadDataToS3(
     writeUploadProgress(absolutePath, progress);
   }
 
-  if (!isStepCompleted(progress, "s3_upload")) {
-    // Reconcile against ACTUAL git state, not just the progress file: the
-    // progress file can survive while .git does not match it (#884 review).
-    // Cheap index read; no content access.
-    let trackedPaths: Set<string>;
-    try {
-      trackedPaths = await listTrackedPaths(absolutePath);
-    } catch (indexError) {
-      console.log(chalk.red(`Failed to read the git index: ${errorDetail(indexError)}`));
-      console.log(chalk.dim("  Re-run the command to retry."));
-      return FAIL;
-    }
-    const addTargets = computeAddTargets(filesToUpload, dataFiles, trackedPaths);
-    const untrackedCount = addTargets.length - filesToUpload.length;
-    if (untrackedCount > 0 && isStepCompleted(progress, "tracking")) {
-      clearStepCompleted(progress, "tracking");
-      writeUploadProgress(absolutePath, progress);
-      console.log(
-        chalk.yellow(
-          `  ${untrackedCount} data files are missing from git despite recorded progress; re-tracking them`,
-        ),
-      );
-    }
+  // Reconcile against ACTUAL git state, not just the progress file: the
+  // progress file can survive while .git does not match it (#884 review).
+  // Cheap index read; no content access -- runs even when "s3_upload" is
+  // already marked complete (#1070). A prior run's completion stamp must
+  // not hide data files added to the dataset since then: filesToUpload
+  // (computed by the caller from the current file list) can be non-empty
+  // even though "s3_upload" is stamped, and computeAddTargets can also
+  // surface git-untracked files the stamp knows nothing about. Either way,
+  // reopening the gate below is what lets a resumed upload actually pick
+  // those files up instead of silently skipping them forever.
+  let trackedPaths: Set<string>;
+  try {
+    trackedPaths = await listTrackedPaths(absolutePath);
+  } catch (indexError) {
+    console.log(chalk.red(`Failed to read the git index: ${errorDetail(indexError)}`));
+    console.log(chalk.dim("  Re-run the command to retry."));
+    return FAIL;
+  }
+  const addTargets = computeAddTargets(filesToUpload, dataFiles, trackedPaths);
+  const untrackedCount = addTargets.length - filesToUpload.length;
+  if (untrackedCount > 0 && isStepCompleted(progress, "tracking")) {
+    clearStepCompleted(progress, "tracking");
+    writeUploadProgress(absolutePath, progress);
+    console.log(
+      chalk.yellow(
+        `  ${untrackedCount} data files are missing from git despite recorded progress; re-tracking them`,
+      ),
+    );
+  }
+  if (addTargets.length > 0 && isStepCompleted(progress, "s3_upload")) {
+    clearStepCompleted(progress, "s3_upload");
+    writeUploadProgress(absolutePath, progress);
+    console.log(
+      chalk.yellow(
+        `  ${addTargets.length} data file(s) still need upload despite a completed s3_upload step; resuming`,
+      ),
+    );
+  }
 
+  if (!isStepCompleted(progress, "s3_upload")) {
     if (addTargets.length > 0) {
       // Track data files with git-annex before anything else: the add can
       // take hours on multi-TB datasets, so it must not eat into the 2h STS
