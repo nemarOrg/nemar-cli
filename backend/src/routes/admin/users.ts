@@ -640,11 +640,17 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     // If IAM revocation failed, mark as revoked_iam_pending for manual cleanup
     const finalStatus = iamRevoked || !user.aws_iam_username ? "revoked" : "revoked_iam_pending";
 
+    // service_access (migration 0062) gates real (non-sandbox) uploads and
+    // compute independently of `status` -- clearing it here closes issue
+    // #1069 (a revoked user kept the grant and could still pass
+    // realDatasetServiceGate if `status` were ever restored without an
+    // explicit re-grant).
     await db
       .prepare(
         `
     UPDATE users
     SET status = ?,
+        service_access = 0,
         revoked_at = datetime('now'),
         updated_at = datetime('now')
     WHERE id = ?
