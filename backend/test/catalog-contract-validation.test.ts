@@ -18,6 +18,18 @@
  * issue's own near-miss did. Asserts the log-not-throw hook fires while the
  * response still serves the (invalid) data unmodified -- ADR 0005: reporting
  * is never a precondition for serving.
+ *
+ * #1224 review: the hook itself is now deferred off the response's critical
+ * path via `deferContractCheck`'s `executionCtx.waitUntil` (catalog.ts),
+ * mirroring `afterResponse()` in routes/auth-orcid.ts. Every request in this
+ * file goes through `requestFlushed`, which supplies an explicit test
+ * `ExecutionContext` and awaits everything handed to its `waitUntil` before
+ * returning -- the same deterministic pattern
+ * `backend/test/zarr-data-cache.test.ts`'s `requestWith` already uses for
+ * cache-put work deferred the same way -- rather than relying on the
+ * fallback fire-and-forget microtask (used when no ExecutionContext is
+ * available at all, e.g. a real anonymous `app.request()` call) to have
+ * settled by the time `await` resolves.
  */
 
 import type { Database } from "bun:sqlite";
@@ -37,6 +49,33 @@ function newApp(): App {
 
 function env(db: Database, environment: Bindings["ENVIRONMENT"] = "development"): Bindings {
   return { DB: realD1(db), ENVIRONMENT: environment } as Bindings;
+}
+
+/**
+ * Drives one request through `app` with an explicit `ExecutionContext` whose
+ * `waitUntil` collects every promise `deferContractCheck` hands it, then
+ * awaits `Promise.allSettled` over them before returning -- so the contract
+ * check has definitely run by the time the caller inspects
+ * `consoleErrorCalls`, mirroring the real Workers runtime keeping the
+ * isolate alive until `waitUntil` promises settle (same pattern as
+ * `backend/test/zarr-data-cache.test.ts`'s `requestWith`).
+ */
+async function requestFlushed(
+  targetApp: App,
+  path: string,
+  init: RequestInit,
+  reqEnv: Bindings,
+): Promise<Response> {
+  const waited: Promise<unknown>[] = [];
+  const ctx = {
+    waitUntil: (p: Promise<unknown>) => {
+      waited.push(p);
+    },
+    passThroughOnException: () => {},
+  } as unknown as ExecutionContext;
+  const res = await targetApp.request(path, init, reqEnv, ctx);
+  await Promise.allSettled(waited);
+  return res;
 }
 
 /** Mirrors facet-filters-route.test.ts's insertDataset: every column not
@@ -111,7 +150,7 @@ describe("GET /datasets: contract validation hook (issue #1207)", () => {
       sweep_stamps: JSON.stringify({ zarr_verify_status: "not_a_real_status" }),
     });
 
-    const res = await app.request("/", {}, env(db));
+    const res = await requestFlushed(app, "/", {}, env(db));
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       datasets: { dataset_id: string; zarr_verify_status: string }[];
@@ -132,7 +171,7 @@ describe("GET /datasets: contract validation hook (issue #1207)", () => {
   test("an all-well-formed catalog logs no contract violation", async () => {
     insertDataset(db, "nm090002", { file_size: 100, subject_count: 5 });
 
-    const res = await app.request("/", {}, env(db));
+    const res = await requestFlushed(app, "/", {}, env(db));
     expect(res.status).toBe(200);
     expect(contractViolationCalls("GET /datasets").length).toBe(0);
   });
@@ -144,7 +183,7 @@ describe("GET /datasets/:id: contract validation hook (issue #1207)", () => {
       sweep_stamps: JSON.stringify({ zarr_verify_status: "not_a_real_status" }),
     });
 
-    const res = await app.request("/nm090003", {}, env(db));
+    const res = await requestFlushed(app, "/nm090003", {}, env(db));
     expect(res.status).toBe(200);
     const body = (await res.json()) as { dataset: { zarr_verify_status: string } };
     expect(body.dataset.zarr_verify_status).toBe("not_a_real_status");
@@ -169,7 +208,7 @@ describe("GET /datasets/:id: contract validation hook (issue #1207)", () => {
   test("an all-well-formed row logs no contract violation", async () => {
     insertDataset(db, "nm090007", { name: "Well Formed Detail Fixture" });
 
-    const res = await app.request("/nm090007", {}, env(db));
+    const res = await requestFlushed(app, "/nm090007", {}, env(db));
     expect(res.status).toBe(200);
     expect(contractViolationCalls("GET /datasets/:id").length).toBe(0);
   });
@@ -182,7 +221,7 @@ describe("Contract validation cost gate: production samples instead of validatin
     });
     const ITERATIONS = 1000;
     for (let i = 0; i < ITERATIONS; i++) {
-      const res = await app.request("/", {}, env(db, "production"));
+      const res = await requestFlushed(app, "/", {}, env(db, "production"));
       expect(res.status).toBe(200);
     }
     const violationCount = contractViolationCalls("GET /datasets").length;

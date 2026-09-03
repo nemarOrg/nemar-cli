@@ -490,24 +490,33 @@ function buildSortClause(sort: string): string {
  * regression in a derive path ships data the contract calls invalid and
  * only surfaces when some consumer's own parse throws -- the #1206 review
  * found exactly this (`SELECT d.*` serving a numeric `id` where the schema
- * declares a string; see the comment on `datasetDetailSchema` usage in
- * backend/test/catalog-has-zarr.test.ts). `logContractViolation` is
- * log-not-throw: a malformed response still reaches the caller unchanged
- * (ADR 0005 -- reporting is never a precondition for serving), so it must
- * never be allowed to turn a good response into a 500 or observably add
- * latency.
+ * declared a string; fixed at the source in the detail route below, but
+ * still the motivating example for why this hook exists). `logContractViolation`
+ * is log-not-throw: a malformed response still reaches the caller unchanged
+ * (ADR 0005 -- reporting is never a precondition for serving).
  *
  * Cost gate: development/test validates every response -- there, a
  * violation is a real bug worth failing loudly and immediately, and traffic
  * is low enough that the extra `safeParse` is free. Production instead
  * samples at `CONTRACT_VALIDATION_SAMPLE_RATE`: `GET /datasets` can return
  * up to 200 rows per page, so validating every production response would
- * add non-negligible latency at catalog traffic volume. One sampling rate
+ * add non-negligible CPU cost at catalog traffic volume. One sampling rate
  * applied uniformly to both routes (rather than, say, always validating the
  * single-row detail route) keeps the cost/coverage tradeoff the same for
  * both rather than special-casing one endpoint as "always cheap enough" --
  * a random check per request avoids needing shared mutable counter state
  * across Worker isolates.
+ *
+ * #1224 review: what is actually guaranteed is response-latency isolation,
+ * not zero cost -- `shouldValidateContract`/`safeParse`/`logContractViolation`
+ * is still real CPU work, just moved off the response's critical path via
+ * `deferContractCheck` (below), which schedules it on `executionCtx.waitUntil`
+ * the same way `afterResponse()` (routes/auth-orcid.ts) defers a best-effort
+ * post-response fetch. The response is built and returned first; the check
+ * runs after, and Cloudflare keeps the isolate alive just long enough for it
+ * to finish. It still costs Worker CPU time (billed under `waitUntil`, per
+ * Cloudflare's usual model) -- the sampling above is what keeps THAT bounded
+ * in production, not the deferral, which only protects response latency.
  */
 const CONTRACT_VALIDATION_SAMPLE_RATE = 0.02; // ~1 in 50 production responses
 
@@ -528,8 +537,40 @@ function logContractViolation(route: string, datasetIds: unknown, issues: z.ZodI
   });
 }
 
+/**
+ * #1224 review: defers `check` off the response's critical path via
+ * `executionCtx.waitUntil`, mirroring `afterResponse()` (routes/auth-orcid.ts)
+ * -- accessing `c.executionCtx` THROWS when no ExecutionContext was provided
+ * (Hono's own documented behavior for `Context#executionCtx`), which is why
+ * this needs a try/catch rather than plain optional chaining: `c.executionCtx?.`
+ * would still evaluate (and throw on) the getter before the `?.` ever
+ * short-circuits. `p` is created unconditionally, before the try/catch, so
+ * the SAME fire-and-forget microtask runs `check` even when there is no
+ * ExecutionContext to hand it to (e.g. bun:test's `app.request()` called
+ * without an explicit fourth `ctx` argument) -- that is what lets a test
+ * still observe the log without needing one. Tests that need this
+ * deterministically (rather than racing Hono's own internal await chain)
+ * should instead pass an explicit `ctx` and await `Promise.allSettled` over
+ * what it collected, the way `backend/test/zarr-data-cache.test.ts`'s
+ * `requestWith` already does for cache-put work deferred the same way.
+ */
+function deferContractCheck(
+  c: { executionCtx?: { waitUntil(p: Promise<unknown>): void } },
+  check: () => void,
+): void {
+  const p = Promise.resolve().then(check);
+  try {
+    c.executionCtx?.waitUntil(p);
+  } catch {
+    void p;
+  }
+}
+
 async function executeAndReturn(
-  c: { json: (data: unknown, status?: number) => Response },
+  c: {
+    json: (data: unknown, status?: number) => Response;
+    executionCtx?: { waitUntil(p: Promise<unknown>): void };
+  },
   db: D1Database,
   env: Bindings,
   baseQuery: string,
@@ -669,10 +710,13 @@ async function executeAndReturn(
         : {}),
     };
 
-    // Issue #1207: log-not-throw contract check, gated by shouldValidateContract
-    // above. Skipped on the degraded/fallback shape below (a different, known
-    // "catalog unavailable" projection the contract was never meant to describe).
-    if (shouldValidateContract(env)) {
+    // Issue #1207 / #1224 review: log-not-throw contract check, deferred via
+    // deferContractCheck (see its doc comment) so it runs after this
+    // response is already on its way out, not before. Skipped on the
+    // degraded/fallback shape below (a different, known "catalog
+    // unavailable" projection the contract was never meant to describe).
+    deferContractCheck(c, () => {
+      if (!shouldValidateContract(env)) return;
       const parsed = datasetListEnvelopeSchema.safeParse(responseBody);
       if (!parsed.success) {
         logContractViolation(
@@ -681,7 +725,7 @@ async function executeAndReturn(
           parsed.error.issues,
         );
       }
-    }
+    });
 
     return c.json(responseBody);
   } catch (dbError) {
@@ -1380,14 +1424,16 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       ...explodeAttestationFields(attestationRaw),
     };
 
-    // Issue #1207: same log-not-throw contract check as GET /datasets, gated
-    // by the same shouldValidateContract policy (see its doc comment).
-    if (shouldValidateContract(c.env)) {
+    // Issue #1207 / #1224 review: same log-not-throw contract check as GET
+    // /datasets, deferred via deferContractCheck (see its doc comment) so
+    // it runs after this response is already on its way out.
+    deferContractCheck(c, () => {
+      if (!shouldValidateContract(c.env)) return;
       const parsed = datasetDetailEnvelopeSchema.safeParse({ dataset: detail });
       if (!parsed.success) {
         logContractViolation("GET /datasets/:id", datasetId, parsed.error.issues);
       }
-    }
+    });
 
     return c.json({ dataset: detail });
   });
