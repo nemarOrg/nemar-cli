@@ -77,6 +77,7 @@ import sqlite3
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -109,6 +110,17 @@ _ADDED_COLUMNS = (
 )
 
 DATASET_ID_RE = re.compile(r"^(nm|on)[0-9]{6}$")
+# The dev exemplar fleet, `xx099900`-`xx099999` (AGENTS.md, "Dataset ID bands"):
+# curated copies of real public datasets that the staging instance converts into
+# `nemar-dev`. Production never accepts an `xx` id (that is the sandbox band
+# there), so the staging profile opts in with `reconcile --accept-exemplars`,
+# and even then only this band -- prod-sandbox and dev-ephemeral `xx` ids stay
+# rejected. Discovered the hard way: the staging cron ran for a day reporting
+# `rejected=7` and converting nothing, because the count alone did not say which
+# ids it was refusing.
+EXEMPLAR_ID_RE = re.compile(r"^xx0999[0-9]{2}$")
+# How many rejected ids the reconcile summary names alongside the count.
+REJECTED_SAMPLE_SIZE = 5
 
 # The generation of DISCOVERY/DISPATCH rules a `done` row was converted under.
 #
@@ -358,6 +370,7 @@ def reconcile(
     engine_version: str = ZARR_ENGINE_VERSION,
     engine_requeue_limit: int | None = None,
     engine_requeue_ack: bool = False,
+    accept_exemplars: bool = False,
 ) -> dict:
     """Enqueue datasets needing (re)conversion + recover stale inprogress rows.
 
@@ -417,13 +430,15 @@ def reconcile(
     """
     now_iso, now = _now_iso(), _now()
     enq = 0
-    # IDs the queue refuses, kept as a COUNT rather than dropped on the floor.
-    # `seen` counts every row the catalog returned and nothing else did, so a
-    # dataset rejected here simply never appeared -- indistinguishable in the log
-    # from a healthy steady state where most rows are already `done`. A catalog
-    # that starts emitting an unexpected ID shape would go unconverted forever
-    # with no line saying so.
+    # IDs the queue refuses, kept as a COUNT plus a short SAMPLE rather than
+    # dropped on the floor. `seen` counts every row the catalog returned and
+    # nothing else did, so a dataset rejected here simply never appeared --
+    # indistinguishable in the log from a healthy steady state where most rows
+    # are already `done`. A catalog that starts emitting an unexpected ID shape
+    # would go unconverted forever with no line saying so; the sample is what
+    # turns "rejected=7" into "rejected=7 (xx099900, ...)", which is readable.
     rejected = 0
+    rejected_sample: list[str] = []
     engine_stale = 0
     # Coverage bookkeeping (#1197): how many `done` datasets still owe recordings,
     # how many were re-queued for that this run, and how many have spent their
@@ -442,8 +457,13 @@ def reconcile(
         # an expected skip, not an anomaly, so it is not counted as rejected.
         if dataset_id == "nm099999":
             continue
-        if not DATASET_ID_RE.match(dataset_id):
+        if not (
+            DATASET_ID_RE.match(dataset_id)
+            or (accept_exemplars and EXEMPLAR_ID_RE.match(dataset_id))
+        ):
             rejected += 1
+            if len(rejected_sample) < REJECTED_SAMPLE_SIZE:
+                rejected_sample.append(dataset_id)
             continue
         row = conn.execute(
             "SELECT status, converted_version, latest_version, engine_version,"
@@ -598,6 +618,7 @@ def reconcile(
         "recovered_stale": recovered,
         "unlisted": unlisted,
         "rejected": rejected,
+        "rejected_sample": rejected_sample,
         "engine_stale": engine_stale,
         "engine_requeued": engine_requeued,
         "engine_pending": len(stamp_only) if engine_requeue_blocked else 0,
@@ -1400,6 +1421,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="acknowledge a bump above --engine-requeue-limit and apply it",
     )
+    p.add_argument(
+        "--accept-exemplars",
+        action="store_true",
+        help="also enqueue the dev exemplar fleet (xx099900-xx099999); the staging"
+        " profile's flag, refused against api.nemar.org",
+    )
 
     sub.add_parser("next")
 
@@ -1503,6 +1530,14 @@ def main() -> int:
     conn = connect(args.db)
 
     if args.cmd == "reconcile":
+        # Guarded before the catalog fetch so a misconfigured production run
+        # never enqueues a sandbox id, however the catalog answers.
+        api_host = (urllib.parse.urlsplit(args.api_base).hostname or "").lower()
+        if args.accept_exemplars and api_host == "api.nemar.org":
+            raise SystemExit(
+                "refusing --accept-exemplars against the production API: the xx band"
+                " is the sandbox there, not the exemplar fleet"
+            )
         datasets, complete = fetch_public_datasets(args.api_base)
         res = reconcile(
             conn,
@@ -1513,7 +1548,11 @@ def main() -> int:
             # 0 spells "no guard" on a CLI where None cannot be typed.
             engine_requeue_limit=args.engine_requeue_limit or None,
             engine_requeue_ack=args.engine_requeue_ack,
+            accept_exemplars=args.accept_exemplars,
         )
+        rejected_note = f"rejected={res['rejected']}"
+        if res["rejected_sample"]:
+            rejected_note += f" ({', '.join(res['rejected_sample'])})"
         # `engine_stale` is printed on every run, not only when it is non-zero:
         # an engine bump is the one reconcile outcome that can requeue hundreds
         # of datasets at once, and a steady `engine_stale=0` in the cron log is
@@ -1521,7 +1560,7 @@ def main() -> int:
         print(
             f"reconcile: seen={len(datasets)} enqueued={res['enqueued']} "
             f"recovered_stale={res['recovered_stale']} unlisted={res['unlisted']} "
-            f"rejected={res['rejected']} engine={ZARR_ENGINE_VERSION} "
+            f"{rejected_note} engine={ZARR_ENGINE_VERSION} "
             f"engine_stale={res['engine_stale']} engine_requeued={res['engine_requeued']} "
             # Coverage (#1197), on every run for the same reason engine_stale is:
             # a steady zero is what makes the run that says otherwise legible.

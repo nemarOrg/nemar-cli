@@ -169,6 +169,10 @@ def test_test_mode_print_config_defaults(dirs: tuple[Path, Path]) -> None:
     work_dir = f"{zarr_base}/zarr-scratch-test"
 
     assert cfg["TEST_MODE"] == "1"
+    # The staging catalog is the xx0999NN exemplar fleet, which reconcile's
+    # production id filter rejects; --test must pass --accept-exemplars or the
+    # nightly run reports `rejected=7` and converts nothing (seen 2026-09-03).
+    assert cfg["ACCEPT_EXEMPLARS"] == "1"
     assert cfg["API_BASE"] == "https://api-test.nemar.org"
     # The `nemar` CLI (shelled out to for the metadata clone) resolves its own
     # API base independently of API_BASE -- see the pre-pass comment in

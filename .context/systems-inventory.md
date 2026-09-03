@@ -242,10 +242,14 @@ which cross-bucket-copies bytes prod already produced
 and cannot exercise a converter change at all.
 
 **What it converts.**
-`reconcile --api-base https://api-test.nemar.org` enqueues exactly what `nemar-db-dev` marks
+`reconcile --api-base https://api-test.nemar.org --accept-exemplars` enqueues exactly what `nemar-db-dev` marks
 public — today that is the seven `xx0999NN` exemplar-fleet datasets
 (`scripts/exemplar-fleet.json`) plus any dev-range (`xx09*`) upload.
 No separate allowlist.
+The `--accept-exemplars` flag is what admits the `xx0999NN` fleet band: reconcile's production id filter
+accepts only `nm`/`on` ids, so without it the nightly run reports `rejected=7` and converts nothing
+(the 2026-09-03 finding; the summary now names the rejected ids). `--test` adds the flag itself,
+and `zarr_queue.py` refuses it against `api.nemar.org`.
 
 **Verified live, 2026-09-02:**
 `hallu-zarr.sh --test --dataset xx099905` (branch `feature/issue-1180-phase3-staging-pipeline`)

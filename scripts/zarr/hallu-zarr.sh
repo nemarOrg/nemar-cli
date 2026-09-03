@@ -455,6 +455,7 @@ if [[ -n "$PRINT_CONFIG" ]]; then
   fi
   cat <<EOF
 TEST_MODE=${TEST_MODE:-0}
+ACCEPT_EXEMPLARS=${TEST_PREPASS_SEEN:-0}
 ONLY_DATASET=$ONLY_DATASET
 LIMIT=$LIMIT
 REQUEUE=$REQUEUE
@@ -919,6 +920,13 @@ fi
 # safe direction to fail -- the operator re-touches it, versus a mass requeue
 # nobody asked for twice.
 reconcile_args=(reconcile --api-base "$API_BASE" --engine-requeue-limit "$ENGINE_REQUEUE_LIMIT")
+# The staging catalog is the exemplar fleet (xx0999NN), which reconcile's
+# production id filter rejects; --test opts the fleet band in. Keyed on the
+# pre-pass record rather than TEST_MODE for the reason the pre-pass comment
+# gives: it is the one --test signal a permissive parser cannot swallow.
+if [[ -n "$TEST_PREPASS_SEEN" ]]; then
+  reconcile_args+=(--accept-exemplars)
+fi
 if [[ -n "${ZARR_ENGINE_BUMP_ACK:-}" ]]; then
   log "engine bump acknowledged via ZARR_ENGINE_BUMP_ACK"
   reconcile_args+=(--engine-requeue-ack)
