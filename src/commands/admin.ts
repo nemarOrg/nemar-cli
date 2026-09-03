@@ -3622,9 +3622,23 @@ adminCommand.addCommand(importCommand);
 
 /** Default location of the checked-in recovery target list, resolved
  *  relative to this source file rather than cwd (mirrors
- *  defaultWithdrawnDatasetsPath). */
+ *  defaultWithdrawnDatasetsPath). Unlike that sibling, this one is shipped
+ *  to npm (package.json "files") so `nemar admin recover` works from an
+ *  installed build, not just a repo checkout -- and the two layouts put
+ *  this file at different depths from `import.meta.dir` (#1049):
+ *   - source (`bun run src/index.ts`): this code lives at src/commands/, so
+ *     the repo-root scripts/ dir is two levels up.
+ *   - published (`dist/index.js`, a single-file bundle from `bun build`):
+ *     this code lives at dist/, so the package's scripts/ dir is only ONE
+ *     level up -- a hardcoded "two levels up" instead resolved to a path
+ *     outside the installed package entirely and 404'd on every real run.
+ *  Try the source-tree depth first (existsSync), then fall back to the
+ *  bundled depth; a repo checkout always has the former, an npm install
+ *  always has the latter, and only ever one of the two exists on disk. */
 function defaultRecoverDatasetsPath(): string {
-  return join(import.meta.dir, "..", "..", "scripts", "recover-datasets.json");
+  const fromSourceTree = join(import.meta.dir, "..", "..", "scripts", "recover-datasets.json");
+  if (existsSync(fromSourceTree)) return fromSourceTree;
+  return join(import.meta.dir, "..", "scripts", "recover-datasets.json");
 }
 
 const recoverCommand = new Command("recover").description(

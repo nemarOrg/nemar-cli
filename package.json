@@ -46,6 +46,7 @@
   "files": [
     "dist",
     "scripts/postinstall-check.mjs",
+    "scripts/recover-datasets.json",
     "README.md",
     "LICENSE"
   ],
