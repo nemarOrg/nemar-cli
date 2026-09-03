@@ -214,6 +214,18 @@ export type CatalogItem = z.infer<typeof catalogItemObjectSchema>;
 export const datasetDetailSchema = catalogItemObjectSchema
   .extend({
     file_size: z.number().nonnegative().nullable(),
+    // #1224 review: the detail route deliberately keeps the old raw-column
+    // shape here -- a string when file_size is measured and positive, null
+    // otherwise -- while the list route's toListRow coalesces the same
+    // derivation to '' (see catalog.ts's comment on that divergence, right
+    // above where `detail` is built). That split predates this contract and
+    // the website depends on the detail route's null meaning "unmeasured";
+    // widening the contract to describe it is the non-breaking fix, versus
+    // changing the detail route's runtime behavior to match the list route,
+    // which would be a breaking change for existing consumers. The base
+    // object's `z.string().optional()` (no `.nullable()`) stays correct for
+    // the list route, which never emits null for this field.
+    file_size_formatted: z.string().nullable().optional(),
     modalities: z.string().nullable().optional(),
     tasks: z.string().nullable().optional(),
     authors: z.string().nullable().optional(),
