@@ -88,7 +88,13 @@ function stats(overrides: Partial<RecordingStats> = {}): RecordingStats {
 }
 
 function fakeIndex(recordingStats: RecordingStats): ZarrIndexInfo {
-  return { storeCount: 1, sourceCommit: "abc123", etag: "etag1", recordingStats };
+  return {
+    storeCount: 1,
+    sourceCommit: "abc123",
+    engineVersion: "3",
+    etag: "etag1",
+    recordingStats,
+  };
 }
 
 beforeEach(() => {

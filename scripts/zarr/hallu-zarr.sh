@@ -40,6 +40,9 @@
 #   ./hallu-zarr.sh --backfill-dir-formats            # dry-run: the #1172 sweep
 #   ./hallu-zarr.sh --backfill-dir-formats --execute  # requeue what it found
 #   ./hallu-zarr.sh --preview-engine-bump             # what an engine bump costs
+#   ./hallu-zarr.sh --test                     # against api-test.nemar.org / nemar-dev
+#   ./hallu-zarr.sh --test --print-config      # resolved --test config, no side effects
+#   ./hallu-zarr.sh --print-config             # resolved prod config, no side effects
 #
 # --requeue exists because the retry budget for `failed` was spent on OOM-killed
 # workers taking whole datasets down (#1110), and `data_failed` was reachable by
@@ -68,11 +71,87 @@
 
 set -uo pipefail
 
+# --- Bash 4+ required (nemarOrg/nemar-cli#1180, epic #1181 phase 3) -----------
+# The --test guard rails' host check (_is_prod_api_host, further down) uses
+# ${var,,} lowercasing, a bash 4.0+ feature. Under bash 3.2 (macOS's stock
+# /bin/bash) that expansion is a "bad substitution": _is_prod_api_host errors
+# out and returns non-zero, so its `if _is_prod_api_host ...` caller reads
+# that as "not prod" and every host guard silently PASSES -- the exact
+# failure mode this script exists to close, just moved to a different layer.
+# Fail loud here instead, before anything else runs, rather than silently
+# degrading to "allow" on the wrong interpreter.
+if ((BASH_VERSINFO[0] < 4)); then
+  echo "FATAL: hallu-zarr.sh requires bash 4+ (the --test host guards use" \
+       "\${var,,} lowercasing); running under bash ${BASH_VERSION:-unknown}." >&2
+  exit 1
+fi
+
 # --- PATH bootstrap (Homebrew/Bun/uv installed under $HOME) -------------------
 for p in "$HOME/.local/homebrew/bin" "$HOME/.bun/bin" "$HOME/.local/bin"; do
   [[ -d "$p" ]] && PATH="$p:$PATH"
 done
 export PATH
+
+# --- Test-mode pre-pass (nemarOrg/nemar-cli#1180, epic #1181 phase 3) ---------
+# A second, independently-stated Hallu invocation against zarr-test.nemar.org /
+# nemar-dev, not a code fork: --test is a scan over "$@" that runs BEFORE the
+# Config block below and exports a default for each variable ONLY when it is
+# still unset, so Config's existing "${VAR:-default}" everywhere just resolves
+# to the test value instead of the prod one. This has to be a separate pre-pass
+# rather than a case arm in the real parser further down, because the real
+# parser runs AFTER Config has already read its defaults -- too late to steer
+# them. --test is deliberately left in "$@": the real parser (below) still
+# consumes it, to record TEST_MODE=1 for the "[test]" log prefix, without a
+# second parse of the arguments.
+#
+# TEST_PREPASS_SEEN is the one variable this pre-pass sets that nothing else
+# derives or overrides: a raw record of "--test was literally present in the
+# original argv", independent of whatever the real parser below does with it.
+# The guard rails further down key off THIS, not off the real parser's
+# TEST_MODE, because a value-taking flag with a permissive parser can consume
+# the following token as ITS OWN value -- `--dataset --test` used to leave
+# `--test` swallowed as a dataset id, so TEST_MODE stayed unset and the guard
+# block (which checked TEST_MODE) never ran at all, even though this pre-pass
+# had already applied test defaults on top of whatever prod values were
+# ambient. `--dataset`/`--limit` now refuse a value starting with "--" (see
+# the arg parser below), which closes that specific hole, but the guard
+# rails no longer trust TEST_MODE to agree with reality regardless: as long
+# as this pre-pass's own scan saw "--test" anywhere in argv, the guards run.
+#
+# ZARR_JOBS defaults to 4, not nproc like the prod default: a test instance
+# runs on the SAME Hallu box as the prod backfill and must not contend with it
+# for cores.
+#
+# TEST_API_URL is NOT part of issue #1180's env-var inventory -- that
+# inventory covers this script and the Python driver/queue, both of which
+# already take API_BASE/--api-base. It missed that convert_dataset() also
+# shells out to the separate `nemar` CLI binary (`nemar dataset download`),
+# whose own API base resolution (src/lib/api/client.ts getApiUrl()) is
+# entirely independent of API_BASE: it reads TEST_API_URL first, then a
+# stored account config, then defaults to api.nemar.org. Without this, the
+# metadata clone step in --test mode looks up the dataset against PROD and
+# fails "Dataset not found" for a dev-only xx0999NN exemplar, discovered live
+# against xx099905 during this phase's verification. TEST_API_URL is existing
+# CLI plumbing (already used for staging e2e tests, AGENTS.md's "isolated
+# NEMAR_CONFIG_DIR" pattern), not a new mechanism -- this just wires --test
+# into the hook that was already there.
+TEST_PREPASS_SEEN=""
+for _pretest_arg in "$@"; do
+  if [[ "$_pretest_arg" == "--test" ]]; then
+    TEST_PREPASS_SEEN=1
+    export API_BASE="${API_BASE:-https://api-test.nemar.org}"
+    export TEST_API_URL="${TEST_API_URL:-https://api-test.nemar.org}"
+    export S3_BUCKET="${S3_BUCKET:-nemar-dev}"
+    export ZARR_AWS_PROFILE="${ZARR_AWS_PROFILE:-nemar-zarr-dev}"
+    export ZARR_CONTRACT_BASE="${ZARR_CONTRACT_BASE:-https://zarr-test.nemar.org}"
+    export ZARR_STATE_DIR="${ZARR_STATE_DIR:-${ZARR_BASE:-/mnt/local}/zarr-state-test}"
+    export ZARR_WORK_DIR="${ZARR_WORK_DIR:-${ZARR_BASE:-/mnt/local}/zarr-scratch-test}"
+    export ZARR_DRIVER_REF="${ZARR_DRIVER_REF:-dev}"
+    export ZARR_JOBS="${ZARR_JOBS:-4}"
+    break
+  fi
+done
+unset _pretest_arg
 
 # --- Config (environment-overridable) ----------------------------------------
 # ZARR_BASE is the SINGLE local drive this pipeline lives on. Both the hot
@@ -109,15 +188,28 @@ DRIVER_REPO="${ZARR_DRIVER_REPO:-${STATE_DIR}/nemar-cli}"   # clone of nemarOrg/
 DRIVER_REF="${ZARR_DRIVER_REF:-main}"
 VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 # Fallback only (used when the clone predates scripts/zarr/requirements.txt, which
-# is the real pin). Floor is 1.2.4, not 1.2.3: 1.2.3 added MEF3 .mefd / 4D-BTi
-# import (so a run below that floor would discover a .mefd/BTi recording via
-# generate_zarr.py's dir_recording_of/bti_recordings and then fail to convert it),
-# and 1.2.4 additionally reads MATLAB v7.3 (HDF5) EEGLAB `.set` and recovers three
-# false EDF/BDF rejections. Extras are not optional here: [mef3] carries pymef and
-# [hdf5] carries h5py, and without either the matching recordings raise ImportError
-# at convert time even though discovery finds them.
-BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.4}"
+# is the real pin). Floor is 1.2.6: 1.2.3 added MEF3 .mefd / 4D-BTi import (so a
+# run below it would discover a .mefd/BTi recording via generate_zarr.py's
+# dir_recording_of/bti_recordings and then fail to convert it), 1.2.4 added MATLAB
+# v7.3 (HDF5) EEGLAB `.set` plus three recovered EDF/BDF rejections, 1.2.5 fixed
+# CTF `.hc` coil naming, 1.2.6 is what index format v3 reads (constant-column view
+# chunking with the geometry declared in attrs, channels.tsv units CONVERTING
+# samples with a per-file report, resource exhaustion propagating as MemoryError),
+# and 1.2.7 gives `stream_to_zarr` the same `bids_channels` parameter as
+# `Recording.from_file` -- which is what makes engine "3" safe, since below that
+# floor the streaming and in-memory paths disagree about a recording's units.
+# Extras are not optional here: [mef3] carries pymef and [hdf5] carries h5py, and
+# without either the matching recordings raise ImportError at convert time even
+# though discovery finds them.
+BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.7}"
 API_BASE="${API_BASE:-https://api.nemar.org}"
+# The STABLE base published in each index as `contract_base` and in each store's
+# `nemar.contract_url` (#1059/#1064). Distinct from S3_BUCKET/AWS_REGION, which
+# say where the bytes physically are today: this is the URL clients are told they
+# may hardcode, so it must NOT be derived from the bucket. The --test pre-pass
+# above defaults it to zarr-test.nemar.org, so a test-instance index never
+# advertises the production host.
+CONTRACT_BASE="${ZARR_CONTRACT_BASE:-https://zarr.nemar.org}"
 CALLBACK_URL="${ZARR_CALLBACK_URL:-${API_BASE}/webhooks/zarr-ready}"
 S3_BUCKET="${S3_BUCKET:-nemar}"
 AWS_REGION="${AWS_DEFAULT_REGION:-us-east-2}"
@@ -156,10 +248,35 @@ PREVIEW_ENGINE_BUMP=""
 # write only when this is set, so one spelling of "yes, actually do it" serves
 # both recoveries.
 EXECUTE=""
+# TEST_MODE is set below once this parser actually consumes a bare --test
+# token (the pre-pass's TEST_PREPASS_SEEN is the raw, can't-be-swallowed
+# record used by the guard rails; TEST_MODE here only drives log()/err()'s
+# "[test]" prefix and --print-config's own display of it).
+TEST_MODE=""
+PRINT_CONFIG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dataset) ONLY_DATASET="$2"; shift 2 ;;
-    --limit) LIMIT="$2"; shift 2 ;;
+    # A value starting with "--" is refused rather than silently consumed as
+    # the dataset id / limit: `--dataset --test` used to swallow the --test
+    # token this way, which is exactly the hole TEST_PREPASS_SEEN (pre-pass,
+    # above) exists to not depend on -- but refusing it here is still the
+    # right UX rather than quietly treating "--test" as a dataset id.
+    --dataset)
+      if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
+        ONLY_DATASET="$2"; shift 2
+      else
+        echo "Error: --dataset requires a value" >&2
+        exit 1
+      fi
+      ;;
+    --limit)
+      if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
+        LIMIT="$2"; shift 2
+      else
+        echo "Error: --limit requires a value" >&2
+        exit 1
+      fi
+      ;;
     --stats) STATS_ONLY=1; shift ;;
     --backfill-dir-formats) BACKFILL_DIR_FORMATS=1; shift ;;
     --preview-engine-bump) PREVIEW_ENGINE_BUMP=1; shift ;;
@@ -174,16 +291,200 @@ while [[ $# -gt 0 ]]; do
       fi
       ;;
     --execute) EXECUTE=1; shift ;;
+    --test) TEST_MODE=1; shift ;;
+    --print-config) PRINT_CONFIG=1; shift ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
-log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" | tee -a "$LOG_FILE"; }
-err() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] ERROR: $*" | tee -a "$LOG_FILE" >&2; }
+log() {
+  local prefix=""
+  [[ -n "$TEST_MODE" ]] && prefix="[test] "
+  echo "${prefix}[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] $*" | tee -a "$LOG_FILE"
+}
+err() {
+  local prefix=""
+  [[ -n "$TEST_MODE" ]] && prefix="[test] "
+  echo "${prefix}[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] ERROR: $*" | tee -a "$LOG_FILE" >&2
+}
 
 # git-annex marks object files (and their dirs) read-only, so a plain `rm -rf`
 # fails with EPERM. Make the tree writable first, then remove.
 safe_rm() { [[ -n "${1:-}" && -e "$1" ]] || return 0; chmod -R u+w "$1" 2>/dev/null; rm -rf "$1"; }
+
+# --- Guard-rail path/host normalization ---------------------------------------
+# Shared by the guard rails below. A path is collapsed to a canonical form
+# before comparing against a hardcoded prod default: repeated "/" anywhere
+# (not just trailing) is squashed to one, then a trailing "/" is stripped, so
+# "/mnt/local/zarr-state/" and "/mnt/local//zarr-state" both compare equal to
+# "/mnt/local/zarr-state". When the directory already exists, resolve it with
+# `realpath` too, so a symlink or a relative component collapses to the same
+# canonical form as the hardcoded constant. It usually WON'T exist yet here --
+# these guards run before `mkdir -p "$WORK_DIR" "$STATE_DIR"` -- so the
+# string-normalized form is what most comparisons actually run on; `realpath`
+# only firms it up further on a real Hallu box where the prod dirs are long-lived.
+_normalize_guard_path() {
+  local p="$1"
+  while [[ "$p" == *//* ]]; do p="${p//\/\//\/}"; done
+  while [[ "$p" == */ && "$p" != "/" ]]; do p="${p%/}"; done
+  if [[ -d "$p" ]]; then
+    p="$(realpath "$p" 2>/dev/null || echo "$p")"
+  fi
+  echo "$p"
+}
+
+# True if $1 names the production API host (api.nemar.org), independent of
+# case, scheme, port, trailing slash, path, or a trailing DNS root dot:
+# lowercase, strip a leading "scheme://", strip everything from the first
+# "/" or "?" onward, strip a trailing ":port", strip trailing "."s.
+# "https://API.NEMAR.ORG/foo", "http://api.nemar.org:8443", bare
+# "api.nemar.org", and "https://api.nemar.org./" (the trailing dot marks an
+# absolute FQDN in DNS -- resolvers treat it identically to the same name
+# without one, so a naive comparison would let it slip past as a different
+# string while it resolves to the same production host) all match;
+# "api-test.nemar.org" does not, because the comparison is exact-host, not
+# substring -- a plain `*api.nemar.org*` match would also (harmlessly, but
+# wrongly) flag "api-test.nemar.org" itself as prod, since "-test" sits
+# BEFORE the dot, not inside the substring being searched for.
+_is_prod_api_host() {
+  local url="${1,,}"
+  url="${url#*://}"
+  url="${url%%/*}"
+  url="${url%%\?*}"
+  url="${url%%:*}"
+  while [[ "$url" == *. ]]; do url="${url%.}"; done
+  [[ "$url" == "api.nemar.org" ]]
+}
+
+# --- Test-mode guard rails / prod TEST_API_URL leak guard ----------------------
+# --test picks safe defaults (above), but an operator can still export a PROD
+# value alongside --test (e.g. a stale `S3_BUCKET=nemar` left in their shell).
+# Catch that here and fail loud rather than silently converting against prod
+# with the safety flag on. Deliberately NOT using err()/log(): both tee to
+# $LOG_FILE, and one of the very things being guarded against is STATE_DIR
+# resolving to the prod state dir -- mkdir'ing (or writing under) that path
+# just to report the guard failure would defeat the guard. Plain stderr only;
+# nothing under $STATE_DIR exists yet at this point in the script.
+#
+# This keys off TEST_PREPASS_SEEN (set by the raw argv scan at the top of the
+# file), NOT off TEST_MODE (set by the arg parser just above). They agree in
+# every case this parser can produce today, but TEST_PREPASS_SEEN is the one
+# that cannot be made to disagree by a future value-taking flag with a
+# permissive parser -- see the pre-pass comment for the `--dataset --test`
+# history here.
+if [[ -n "$TEST_PREPASS_SEEN" ]]; then
+  guard_failed=""
+  guard_err() { echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] ERROR: $*" >&2; }
+  if [[ "$S3_BUCKET" == "nemar" ]]; then
+    guard_err "--test refuses S3_BUCKET=nemar (the production bucket)."
+    guard_failed=1
+  fi
+  if _is_prod_api_host "$API_BASE"; then
+    guard_err "--test refuses API_BASE=$API_BASE (the production catalog)."
+    guard_failed=1
+  fi
+  # TEST_API_URL is the `nemar` CLI's own API-base override (see the pre-pass
+  # comment above) -- checked separately from API_BASE because they are read
+  # by two different programs and could disagree.
+  if [[ -n "${TEST_API_URL:-}" ]] && _is_prod_api_host "$TEST_API_URL"; then
+    guard_err "--test refuses TEST_API_URL=$TEST_API_URL (the production catalog)."
+    guard_failed=1
+  fi
+  if [[ "$AWS_PROFILE" == "nemar-zarr" ]]; then
+    guard_err "--test refuses AWS_PROFILE=nemar-zarr (the production credential)."
+    guard_failed=1
+  fi
+  if [[ "$(_normalize_guard_path "$STATE_DIR")" == "$(_normalize_guard_path /mnt/local/zarr-state)" ]]; then
+    guard_err "--test refuses STATE_DIR=$STATE_DIR (the production state dir)."
+    guard_failed=1
+  fi
+  if [[ "$(_normalize_guard_path "$WORK_DIR")" == "$(_normalize_guard_path /mnt/local/zarr-scratch)" ]]; then
+    guard_err "--test refuses WORK_DIR=$WORK_DIR (the production scratch dir)."
+    guard_failed=1
+  fi
+  if [[ -n "$guard_failed" ]]; then
+    guard_err "--test is a safety boundary: a prod value exported alongside it stops"
+    guard_err "the run rather than silently pointing it at prod. Unset the offending"
+    guard_err "variable(s) or point them at their nemar-dev/api-test equivalents."
+    exit 1
+  fi
+  unset guard_failed
+else
+  # The complementary leak in the other direction: TEST_API_URL left exported
+  # in the shell from an earlier --test session must not silently steer a
+  # PLAIN prod run's `nemar` CLI invocation at api-test.nemar.org. Unset it
+  # rather than trusting that nobody left it exported; log one line (plain
+  # stderr, same reasoning as the guards above -- no LOG_FILE write here)
+  # only when there was actually something to unset.
+  if [[ -n "${TEST_API_URL:-}" ]]; then
+    echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] unsetting stale TEST_API_URL=$TEST_API_URL for this prod run" >&2
+    unset TEST_API_URL
+  fi
+fi
+
+# --- --print-config -------------------------------------------------------------
+# The ops sanity check and the test seam: print every resolved config value and
+# exit before touching the filesystem, network, or lock. Placed ahead of the
+# `mkdir` below deliberately -- unlike --stats/--preview-engine-bump/--requeue
+# further down (which already accept `mkdir` as a side effect of getting this
+# far), --print-config's whole purpose is to be inspectable with zero side
+# effects, from a temp HOME/ZARR_BASE in a test as much as from a real one.
+if [[ -n "$PRINT_CONFIG" ]]; then
+  # Token presence only -- never the value. Resolved the same three-tier way
+  # load_secrets() (below) resolves it, but read-only and in a subshell: this
+  # must not source into the current process (that WOULD partly duplicate
+  # load_secrets()'s job) and must not tee an ERROR line to $LOG_FILE on a
+  # miss, since a miss is the common case (no secrets file yet) and
+  # --print-config promises no filesystem writes either way.
+  pc_secrets_file=""
+  if [[ -n "${ZARR_SECRETS_FILE:-}" && -f "${ZARR_SECRETS_FILE:-}" ]]; then
+    pc_secrets_file="$ZARR_SECRETS_FILE"
+  elif [[ -f "${STATE_DIR}/.zarr-secrets.env" ]]; then
+    pc_secrets_file="${STATE_DIR}/.zarr-secrets.env"
+  elif [[ -f "${BASH_SOURCE%/*}/.zarr-secrets.env" ]]; then
+    pc_secrets_file="${BASH_SOURCE%/*}/.zarr-secrets.env"
+  fi
+  pc_token="absent"
+  if [[ -n "$pc_secrets_file" ]]; then
+    # shellcheck source=/dev/null  # deployment-local, chmod-600, never in the repo
+    if [[ -n "$(source "$pc_secrets_file" 2>/dev/null; echo "${NEMAR_WEBHOOK_TOKEN:-}")" ]]; then
+      pc_token="present"
+    fi
+  elif [[ -n "${NEMAR_WEBHOOK_TOKEN:-}" ]]; then
+    pc_token="present"
+  fi
+  cat <<EOF
+TEST_MODE=${TEST_MODE:-0}
+ONLY_DATASET=$ONLY_DATASET
+LIMIT=$LIMIT
+REQUEUE=$REQUEUE
+BACKFILL_DIR_FORMATS=${BACKFILL_DIR_FORMATS:-0}
+PREVIEW_ENGINE_BUMP=${PREVIEW_ENGINE_BUMP:-0}
+EXECUTE=${EXECUTE:-0}
+API_BASE=$API_BASE
+TEST_API_URL=${TEST_API_URL:-}
+CALLBACK_URL=$CALLBACK_URL
+CONTRACT_BASE=$CONTRACT_BASE
+S3_BUCKET=$S3_BUCKET
+AWS_REGION=$AWS_REGION
+AWS_PROFILE=$AWS_PROFILE
+ZARR_BASE=$ZARR_BASE
+WORK_DIR=$WORK_DIR
+STATE_DIR=$STATE_DIR
+JOBS=$JOBS
+DRIVER_REPO=$DRIVER_REPO
+DRIVER_REF=$DRIVER_REF
+VENV_DIR=$VENV_DIR
+BIOSIGIO_SPEC=$BIOSIGIO_SPEC
+QUEUE_DB=$QUEUE_DB
+LOG_FILE=$LOG_FILE
+LOCK_FILE=$LOCK_FILE
+ENGINE_REQUEUE_LIMIT=$ENGINE_REQUEUE_LIMIT
+ENGINE_ACK_FILE=$ENGINE_ACK_FILE
+NEMAR_WEBHOOK_TOKEN=$pc_token
+EOF
+  exit 0
+fi
 
 mkdir -p "$WORK_DIR" "$STATE_DIR"
 # The driver's tempfile.TemporaryDirectory() (per-recording materialize + store)
@@ -334,6 +635,11 @@ convert_dataset() {
   # the previous dataset's `deterministic` and get mis-marked terminal. Set from
   # the callback further down on a real conversion run.
   LAST_DETERMINISTIC=false
+  # Same reasoning as LAST_DETERMINISTIC: reset per dataset so a run that writes
+  # no callback cannot inherit the previous dataset's pending count and put this
+  # row into a retry loop it never earned.
+  LAST_PENDING_COUNT=0
+  LAST_NOT_ATTEMPTED=0
   log "[$id] start (version=${version:-?})"
 
   # In-progress signal so the observability dashboard's "Processing" tile reflects
@@ -369,6 +675,7 @@ convert_dataset() {
   VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" "$DRIVER" \
     --dataset-id "$id" --repo-dir "$dir" \
     --bucket "$S3_BUCKET" --region "$AWS_REGION" --clean \
+    --contract-base "$CONTRACT_BASE" --api-base "$API_BASE" \
     --jobs "$JOBS" --callback-out "$cb" >>"$LOG_FILE" 2>&1 || rc=$?
 
   # Read the driver's classification BEFORE the scratch is reclaimed. The
@@ -378,13 +685,21 @@ convert_dataset() {
   # partial success returns rc=0 -> `done` regardless of this value (#774).
   if [[ -f "$cb" ]]; then
     LAST_DETERMINISTIC="$(jq -r '.deterministic // false' "$cb" 2>/dev/null || echo false)"
-    # A run where ANYTHING converted returns rc=0 and is marked `done` below, so
-    # recordings that failed for a retryable reason are not re-attempted by the
-    # queue on their own. That is a real gap (#1113); until the queue tracks
-    # per-recording state, make it loud and actionable instead of silent.
+    # Recordings the index lists as `pending` (#1197). Handed to `qpy done` so the
+    # row carries a backoff and reconcile re-queues it on its own -- which is what
+    # #1113's "until the queue tracks per-recording state" was waiting for. The
+    # manual recovery below stays for an operator who does not want to wait an
+    # hour, and for the case where the rounds have run out.
+    LAST_PENDING_COUNT="$(jq -r '.pending_count // 0' "$cb" 2>/dev/null || echo 0)"
+    [[ "$LAST_PENDING_COUNT" =~ ^[0-9]+$ ]] || LAST_PENDING_COUNT=0
+    # The subset never attempted. Forwarded separately because the queue treats
+    # it differently: re-queued at the shortest delay, without spending a retry
+    # round, since nothing has actually failed for those recordings.
+    LAST_NOT_ATTEMPTED="$(jq -r '.not_attempted_count // 0' "$cb" 2>/dev/null || echo 0)"
+    [[ "$LAST_NOT_ATTEMPTED" =~ ^[0-9]+$ ]] || LAST_NOT_ATTEMPTED=0
     retryable="$(jq -r '.retryable_failures // 0' "$cb" 2>/dev/null || echo 0)"
     if [[ "$retryable" =~ ^[0-9]+$ && "$retryable" -gt 0 ]]; then
-      err "[$id] $retryable recording(s) failed for a RETRYABLE reason but the dataset will be marked done; recover with: $0 --dataset $id --requeue done --execute"
+      err "[$id] $retryable recording(s) failed for a RETRYABLE reason; they are listed as pending in index.json and the dataset will be re-queued automatically after a backoff. To retry now: $0 --dataset $id --requeue done --execute"
     fi
     # POST on every outcome (not just rc==0) so the backend records failures too.
     if [[ -n "$NEMAR_WEBHOOK_TOKEN" ]]; then
@@ -411,9 +726,15 @@ convert_dataset() {
 # the concurrent write, which is a single fast UPDATE.
 # `--preview-engine-bump` answers "what would a bump cost" BEFORE one lands, and
 # is the reason ADR 0033 can claim a bump is visible rather than merely loud
-# after the fact. It runs `engine-preview`, which reads the queue and nothing
-# else -- no network, no writes -- so it is safe here, ahead of the lock and of
-# setup(), exactly like --requeue and for the same reasons.
+# after the fact. It runs `engine-preview`, which touches no network and changes
+# no job's STATE -- it only counts what a bump would re-queue. It is not
+# literally read-only: `zarr_queue.py`'s `main()` connects for every subcommand,
+# and `connect` runs `migrate_schema`, whose additive ALTER and `engine_version`
+# seed are by design idempotent and re-run on every connect. So a preview on a
+# node that has never run the current queue schema does write those, exactly as
+# the next reconcile would. That is safe ahead of the lock and of setup(), like
+# --requeue and for the same reasons: SQLite's own locking covers it, and it is
+# the same statements a concurrent drain has already run.
 #
 # Note this deliberately does NOT run a real reconcile with --no-engine-requeue.
 # That would be a preview with side effects: reconcile enqueues new datasets,
@@ -640,7 +961,8 @@ while :; do
   # is attributable, not worth abandoning a backfill mid-queue.
   if convert_dataset "$id" "$version"; then
     # shellcheck disable=SC1010  # `done` is the queue subcommand, not the keyword
-    qpy done "$id" "$version" ||
+    qpy done "$id" "$version" --pending-count "${LAST_PENDING_COUNT:-0}" \
+      --not-attempted-count "${LAST_NOT_ATTEMPTED:-0}" ||
       err "[$id] converted, but marking it done FAILED; the row stays inprogress until the stale sweep reclaims it (~6h) and it will be converted again"
   elif [[ "$LAST_DETERMINISTIC" == "true" ]]; then
     # Every recording is an unreadable DATA failure -- terminal, no retry (#774).

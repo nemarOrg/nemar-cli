@@ -26,9 +26,11 @@
  *
  * `buildFacetClauses` is called from `dataset-filters.ts#buildDatasetFilterClauses`
  * as a generic walk over this table -- the existing bespoke filters (search,
- * modality, author, task, hasDoi, hasHed, dataComplete, recent, licenseTiers)
- * are NOT migrated here; their semantics don't fit a declared table and
- * migrating them was out of scope (see the plan's D2).
+ * modality, author, task, hasDoi, hasHed, hasZarr, dataComplete, recent,
+ * licenseTiers) are NOT migrated here; their semantics don't fit a declared
+ * table and migrating them was out of scope (see the plan's D2). `hasZarr`
+ * (issue #1062) in particular is a distinct derived predicate from the
+ * `zarr` ENUM facet this file DOES declare below.
  */
 
 import type { FacetKey } from "../../../shared/facets.js";

@@ -1,0 +1,25 @@
+{
+  "format": "nemar-zarr-manifest",
+  "format_version": 1,
+  "dataset_id": "on008083",
+  "updated_utc": "2026-09-02T00:00:00Z",
+  "files": [
+    {
+      "name": "events.parquet",
+      "size_bytes": 20480,
+      "row_count": 5120
+    }
+  ],
+  "stores": [
+    {
+      "zarr": "sub-01/eeg/a_eeg.zarr",
+      "source_key": "SHA256E-s154185620--92c2dc2efde9a811b4b5e458bc20f184493fc8af58077f509e1220407c1ddef7.edf",
+      "size_bytes": 154185620
+    },
+    {
+      "zarr": "sub-02/eeg/b_eeg.zarr",
+      "source_key": null,
+      "size_bytes": null
+    }
+  ]
+}

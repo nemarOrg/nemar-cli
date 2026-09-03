@@ -1284,3 +1284,86 @@ export async function doctorFix(options: {
     true,
   );
 }
+
+// ============================================================================
+// Zarr catalog (issue #1062, epic #1181 phase 2)
+// ============================================================================
+
+export interface PublishZarrCatalogResponse {
+  count: number;
+  bytes: number;
+}
+
+/**
+ * Rebuild and republish the top-level Zarr discovery catalog
+ * (`zarr-catalog.json`) to this environment's own S3 bucket. The daily cron
+ * does this automatically; this is the on-demand escape hatch for an
+ * operator who doesn't want to wait for the next tick.
+ */
+export async function publishZarrCatalog(): Promise<PublishZarrCatalogResponse> {
+  return request<PublishZarrCatalogResponse>(
+    "/admin/zarr-catalog/publish",
+    { method: "POST" },
+    true,
+  );
+}
+
+// ============================================================================
+// Zarr fidelity verification sweep (issue #1068, epic #1181 phase 8)
+// ============================================================================
+
+/** One {path, code} mismatch example, bounded to 20 entries / 4 KB server-side. */
+export interface ZarrFidelityMismatchExample {
+  path: string;
+  code: "channel_count_mismatch" | "duration_mismatch" | "rate_mismatch";
+}
+
+/** Per-dataset outcome for every candidate the sweep reached a verdict for. */
+export interface ZarrFidelityDatasetResult {
+  dataset_id: string;
+  verdict: "verified" | "failed" | "unverifiable";
+  sampled: number;
+  checked: number;
+  checked_channels: number;
+  checked_duration: number;
+  checked_rate: number;
+  unchecked: number;
+  examples: ZarrFidelityMismatchExample[];
+  mismatch_count: number;
+  examples_truncated: boolean;
+}
+
+/** One batch of the zarr fidelity sweep
+ *  (`POST /admin/datasets/zarr-fidelity-sweep`). `ok` is false (with a 502
+ *  status) only when every processed candidate errored -- a partial mix of
+ *  verdicts and errors, or an empty candidate set, is still `ok: true`
+ *  (#1203 review, item 6). */
+export interface ZarrFidelitySweepBatchResponse {
+  processed: number;
+  verified: number;
+  failed: number;
+  unverifiable: number;
+  results: ZarrFidelityDatasetResult[];
+  errors: { dataset_id: string; error: string }[];
+  /** Candidates still unverified after this run; null if the count query failed. */
+  remaining: number | null;
+  /** True when the sweep-wide fetch budget ran out before every requested
+   *  candidate could be attempted; datasets past this point were never
+   *  touched at all (#1203 review, item 3). */
+  budget_exhausted: boolean;
+  ok: boolean;
+}
+
+/** Run one bounded zarr fidelity sweep batch (server default and max: 25). */
+export async function zarrFidelitySweep(options?: {
+  limit?: number;
+}): Promise<ZarrFidelitySweepBatchResponse> {
+  const params = new URLSearchParams();
+  if (options?.limit != null) params.set("limit", String(options.limit));
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return request<ZarrFidelitySweepBatchResponse>(
+    `/admin/datasets/zarr-fidelity-sweep${query}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}

@@ -410,6 +410,8 @@ export function hasActiveFilters(filters: DatasetFilterOptions): boolean {
       filters.task ||
       filters.hasDoi ||
       filters.hasHed ||
+      filters.hasZarr ||
+      filters.hasZarrVerified ||
       filters.dataComplete ||
       (filters.recent && filters.recent > 0) ||
       (filters.licenseTiers && filters.licenseTiers.length > 0) ||

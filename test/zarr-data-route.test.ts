@@ -3,7 +3,9 @@
  *
  * The serve() handler does D1/S3/Cache I/O (exercised E2E against the live host,
  * per the no-mock policy); these unit-test the pure pieces that encode the
- * security boundary (restricted-origin CORS) and the cache-TTL split.
+ * security boundary (restricted-origin CORS) and the cache-TTL split, including
+ * the tokened-vs-untokened split added in #1178 phase 1 (see epic #1181's
+ * backend/test/zarr-data-cache.test.ts for the full route-level cache behavior).
  */
 
 import { describe, expect, test } from "bun:test";
@@ -60,19 +62,51 @@ describe("corsHeaders", () => {
 });
 
 describe("cacheControlFor", () => {
-  test("short TTL for the freshness-sensitive metadata", () => {
-    expect(cacheControlFor("nm000132/zarr/index.json")).toContain("max-age=60");
-    expect(cacheControlFor("nm000132/zarr/sub-01/eeg/x_eeg.zarr/zarr.json")).toContain(
-      "max-age=60",
+  // #1178 phase 1: untokened index.json moved from max-age=60 to 300 (the
+  // zarr-ready callback purges it on rebuild, so a moderate TTL is safe --
+  // see the function's own docstring for why). zarr.json stays at 60
+  // untokened since it isn't purged as reliably (only changed stores are).
+  test("untokened index.json gets a moderate TTL (auto-purged on rebuild)", () => {
+    expect(cacheControlFor("nm000132/zarr/index.json", { tokened: false })).toContain(
+      "max-age=300",
     );
   });
 
-  test("long TTL for bulk chunk objects", () => {
-    expect(cacheControlFor("nm000132/zarr/sub-01/eeg/x_eeg.zarr/eeg_250hz/0/c/0/0")).toContain(
+  test("untokened zarr.json (freshness-sensitive metadata) gets a short TTL", () => {
+    expect(
+      cacheControlFor("nm000132/zarr/sub-01/eeg/x_eeg.zarr/zarr.json", { tokened: false }),
+    ).toContain("max-age=60");
+  });
+
+  // A `?v=` tokened URL is immutable by construction (a re-conversion mints
+  // a new v), so both metadata files get the same full-day TTL as chunks.
+  test("tokened metadata (index.json and zarr.json) gets a full day", () => {
+    expect(cacheControlFor("nm000132/zarr/index.json", { tokened: true })).toContain(
       "max-age=86400",
     );
     expect(
-      cacheControlFor("nm000132/zarr/sub-01/eeg/x_eeg.zarr/eeg_250hz/view/1/c/0/0/0"),
+      cacheControlFor("nm000132/zarr/sub-01/eeg/x_eeg.zarr/zarr.json", { tokened: true }),
+    ).toContain("max-age=86400");
+  });
+
+  test("long TTL for bulk chunk objects", () => {
+    expect(
+      cacheControlFor("nm000132/zarr/sub-01/eeg/x_eeg.zarr/eeg_250hz/0/c/0/0", {
+        tokened: false,
+      }),
+    ).toContain("max-age=86400");
+    expect(
+      cacheControlFor("nm000132/zarr/sub-01/eeg/x_eeg.zarr/eeg_250hz/view/1/c/0/0/0", {
+        tokened: false,
+      }),
+    ).toContain("max-age=86400");
+  });
+
+  test("chunks stay at max-age=86400 whether tokened or not", () => {
+    expect(
+      cacheControlFor("nm000132/zarr/sub-01/eeg/x_eeg.zarr/eeg_250hz/0/c/0/0", {
+        tokened: true,
+      }),
     ).toContain("max-age=86400");
   });
 });
