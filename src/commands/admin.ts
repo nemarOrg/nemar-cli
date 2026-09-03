@@ -38,11 +38,13 @@ import {
   type DoctorScanResponse,
   type EmailPreferences,
   type HedSweepBatchResponse,
+  type RecordingStatsSweepBatchResponse,
   type ReindexBulkOptions,
   type ReindexBulkResponse,
   type ReindexFilter,
   type ReindexOptions,
   type ReindexResponse,
+  type SignalDefaultsSweepBatchResponse,
   type SummaryVersionCoverage,
   type ZarrFidelitySweepBatchResponse,
   addCi,
@@ -76,6 +78,8 @@ import {
   listUsers,
   publishDataset,
   publishZarrCatalog,
+  recordingStatsSweep,
+  recordingStatsSweepReset,
   reindexBulk,
   reindexDataset,
   remintExemplarDois,
@@ -85,6 +89,8 @@ import {
   revokeUser,
   rollbackImport,
   sendBroadcast,
+  signalDefaultsSweep,
+  signalDefaultsSweepReset,
   syncCi,
   updateDoi,
   updateEmailPreferences,
@@ -5004,6 +5010,210 @@ hedSweepCommand
   );
 
 adminCommand.addCommand(hedSweepCommand);
+
+const recordingStatsSweepCommand = new Command("recording-stats-sweep").description(
+  "Backfill dataset-level recording duration/count/channel-range stats from each dataset's zarr index (migration 0070, #1146)",
+);
+
+recordingStatsSweepCommand
+  .option("--limit <n>", "Datasets per batch (server clamps to [1,200])", "50")
+  .option("--reset", "Clear every stamped recording-stats row so it re-sweeps from scratch")
+  .option("--verbose", "Print per-batch progress")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(
+    async (options: { limit?: string; reset?: boolean; verbose?: boolean; json?: boolean }) => {
+      if (!requireAuth()) return;
+
+      if (options.reset) {
+        const spinner = ora("Resetting recording-stats sweep state...").start();
+        try {
+          const r = await recordingStatsSweepReset();
+          spinner.succeed(
+            `Cleared ${r.reset} stamped recording-stats row(s); eligible datasets are candidates again`,
+          );
+          if (options.json) console.log(JSON.stringify(r, null, 2));
+        } catch (err) {
+          spinner.fail("Reset failed");
+          console.error(chalk.red(errorDetail(err)));
+          process.exit(1);
+        }
+        return;
+      }
+
+      const limit = Number.parseInt(options.limit ?? "50", 10) || 50;
+      const totals = { processed: 0, measured: 0, unmeasured: 0, errors: 0 };
+      const spinner = ora("Sweeping datasets for recording stats...").start();
+
+      let batch = 0;
+      let remaining: number | null = null;
+      let prevRemaining: number | null = null;
+      try {
+        let res: RecordingStatsSweepBatchResponse;
+        do {
+          res = await recordingStatsSweep({ limit });
+          batch++;
+          totals.processed += res.processed;
+          totals.measured += res.measured;
+          totals.unmeasured += res.unmeasured;
+          totals.errors += res.errors.length;
+          remaining = res.remaining;
+
+          if (options.verbose) {
+            spinner.stop();
+            console.log(
+              `  [batch ${batch}] processed=${res.processed} measured=${res.measured} unmeasured=${res.unmeasured} errors=${res.errors.length} remaining=${remaining ?? "?"}`,
+            );
+            for (const e of res.errors) console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
+            spinner.start("Sweeping datasets for recording stats...");
+          } else {
+            spinner.text = `Sweeping datasets for recording stats... ${totals.processed} processed, ${remaining ?? "?"} remaining`;
+          }
+
+          // Progress guard: recording_stats_checked_at is stamped for every
+          // processed row, so `remaining` must strictly decrease. If it
+          // doesn't (e.g. persistent D1 write errors leave rows unstamped),
+          // bail instead of looping forever.
+          if (remaining != null && prevRemaining != null && remaining >= prevRemaining) {
+            spinner.warn(`No progress (remaining stuck at ${remaining}); stopping - see errors`);
+            break;
+          }
+          prevRemaining = remaining;
+
+          if ((remaining ?? 0) > 0) await sleep(1000);
+        } while ((remaining ?? 0) > 0);
+
+        spinner.stop();
+      } catch (err) {
+        spinner.fail("Recording-stats sweep failed");
+        console.error(chalk.red(errorDetail(err)));
+        process.exit(1);
+      }
+
+      if (options.json) {
+        console.log(JSON.stringify({ ...totals, batches: batch, remaining }, null, 2));
+      } else {
+        console.log();
+        if (remaining === null) {
+          console.log(
+            chalk.yellow(
+              "Warning: backend returned a null remaining count; the sweep may be incomplete - check server logs.",
+            ),
+          );
+        }
+        console.log(
+          chalk.cyan(
+            `Done in ${batch} batch(es): processed=${totals.processed} measured=${totals.measured} unmeasured=${totals.unmeasured} errors=${totals.errors} remaining=${remaining ?? "unknown"}`,
+          ),
+        );
+      }
+      // Non-zero exit on errors OR an indeterminate (null) remaining, so a caller
+      // never reads a partial/uncertain sweep as success.
+      if (totals.errors > 0 || remaining === null) process.exit(1);
+    },
+  );
+
+adminCommand.addCommand(recordingStatsSweepCommand);
+
+const signalDefaultsSweepCommand = new Command("signal-defaults-sweep").description(
+  "Backfill BIDS signal defaults (sampling frequency, power line frequency, EEG reference, placement scheme) from each dataset's exemplar sidecar (migrations 0072/0073, #1153)",
+);
+
+signalDefaultsSweepCommand
+  .option("--limit <n>", "Datasets per batch (server clamps to [1,30])", "15")
+  .option("--reset", "Clear every stamped signal-defaults row so it re-sweeps from scratch")
+  .option("--verbose", "Print per-batch progress")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(
+    async (options: { limit?: string; reset?: boolean; verbose?: boolean; json?: boolean }) => {
+      if (!requireAuth()) return;
+
+      if (options.reset) {
+        const spinner = ora("Resetting signal-defaults sweep state...").start();
+        try {
+          const r = await signalDefaultsSweepReset();
+          spinner.succeed(
+            `Cleared ${r.reset} stamped signal-defaults row(s); eligible datasets are candidates again`,
+          );
+          if (options.json) console.log(JSON.stringify(r, null, 2));
+        } catch (err) {
+          spinner.fail("Reset failed");
+          console.error(chalk.red(errorDetail(err)));
+          process.exit(1);
+        }
+        return;
+      }
+
+      const limit = Number.parseInt(options.limit ?? "15", 10) || 15;
+      const totals = { processed: 0, populated: 0, noData: 0, errors: 0 };
+      const spinner = ora("Sweeping datasets for signal defaults...").start();
+
+      let batch = 0;
+      let remaining: number | null = null;
+      let prevRemaining: number | null = null;
+      try {
+        let res: SignalDefaultsSweepBatchResponse;
+        do {
+          res = await signalDefaultsSweep({ limit });
+          batch++;
+          totals.processed += res.processed;
+          totals.populated += res.populated;
+          totals.noData += res.noData;
+          totals.errors += res.errors.length;
+          remaining = res.remaining;
+
+          if (options.verbose) {
+            spinner.stop();
+            console.log(
+              `  [batch ${batch}] processed=${res.processed} populated=${res.populated} no-data=${res.noData} errors=${res.errors.length} remaining=${remaining ?? "?"}`,
+            );
+            for (const e of res.errors) console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
+            spinner.start("Sweeping datasets for signal defaults...");
+          } else {
+            spinner.text = `Sweeping datasets for signal defaults... ${totals.processed} processed, ${remaining ?? "?"} remaining`;
+          }
+
+          // Progress guard: mirrors hed-sweep/recording-stats-sweep -- every
+          // processed row is stamped, so `remaining` must strictly decrease.
+          if (remaining != null && prevRemaining != null && remaining >= prevRemaining) {
+            spinner.warn(`No progress (remaining stuck at ${remaining}); stopping - see errors`);
+            break;
+          }
+          prevRemaining = remaining;
+
+          if ((remaining ?? 0) > 0) await sleep(1000); // pace the GitHub-heavy batches
+        } while ((remaining ?? 0) > 0);
+
+        spinner.stop();
+      } catch (err) {
+        spinner.fail("Signal-defaults sweep failed");
+        console.error(chalk.red(errorDetail(err)));
+        process.exit(1);
+      }
+
+      if (options.json) {
+        console.log(JSON.stringify({ ...totals, batches: batch, remaining }, null, 2));
+      } else {
+        console.log();
+        if (remaining === null) {
+          console.log(
+            chalk.yellow(
+              "Warning: backend returned a null remaining count; the sweep may be incomplete - check server logs.",
+            ),
+          );
+        }
+        console.log(
+          chalk.cyan(
+            `Done in ${batch} batch(es): processed=${totals.processed} populated=${totals.populated} no-data=${totals.noData} errors=${totals.errors} remaining=${remaining ?? "unknown"}`,
+          ),
+        );
+      }
+      // Non-zero exit on errors OR an indeterminate (null) remaining, so a caller
+      // never reads a partial/uncertain sweep as success.
+      if (totals.errors > 0 || remaining === null) process.exit(1);
+    },
+  );
+
+adminCommand.addCommand(signalDefaultsSweepCommand);
 
 /** One data-integrity-sweep batch, as consumed by {@link runReauditLoop}. */
 export interface ReauditBatchResult {
