@@ -204,6 +204,14 @@ file short of covering the actual duplication it set out to fix.
 
 ### 12. `update-check.ts` reimplements `update-notifier`
 
+**Outcome (epic #1225 phase 7, issue #1231, 2026-09-03): `update-notifier` declined, kept bespoke.
+See [ADR 0039](decisions/0039-the-update-check-stays-bespoke.md).** The library spawns its
+background refresh on a helper file it locates beside its own module; `nemar-cli` ships as one
+bundled file with no `node_modules`, so in an installed copy that helper does not exist and the
+update cache never populates (measured, both shapes). Its config root, its opt-out variable, and
+its TTY gating also differ from what the CLI documents. The semver-precedence bug this section
+counted as a side benefit had already been fixed in phase 6 (#1242).
+
 182 lines doing what `update-notifier` (the standard tool most popular CLIs use for this)
 provides directly: npm-registry version check, on-disk TTL cache, background refresh, env-var
 opt-out. The only NEMAR-specific behavior to preserve is the `NEMAR_NO_UPDATE_CHECK` env var
