@@ -313,6 +313,29 @@ describe("buildDataCiteXml", () => {
     expect(xml).toContain("Test &quot;Quoted&quot; Name");
   });
 
+  // Phase 3 of epic #1225 (issue #1226): buildDataCiteXml now routes through
+  // the shared escapeXml in backend/src/lib/escape.ts. A single creator name
+  // carrying all five special characters exercises every branch of that
+  // helper through this real entry point, with &apos; -- not &#39; -- for
+  // the apostrophe, matching escapeXml's contract (escapeHtml is the one
+  // that uses &#39;; the two are deliberately different functions).
+  test("a creator name with all five special characters escapes each one, &apos; for the apostrophe", () => {
+    const metadata: DataCiteMetadata = {
+      identifier: "10.82901/NEMAR.ALLFIVE",
+      creators: [{ name: `O'Brien & Sons <Ltd> "Data"` }],
+      titles: ["Test"],
+      publisher: "NEMAR",
+      publicationYear: 2026,
+      resourceTypeGeneral: "Dataset",
+    };
+
+    const xml = buildDataCiteXml(metadata);
+    expect(xml).toContain(
+      '<creatorName nameType="Personal">O&apos;Brien &amp; Sons &lt;Ltd&gt; &quot;Data&quot;</creatorName>',
+    );
+    expect(xml).not.toContain("&#39;");
+  });
+
   test("throws on missing identifier", () => {
     expect(() =>
       buildDataCiteXml({
