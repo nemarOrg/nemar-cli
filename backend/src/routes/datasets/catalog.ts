@@ -7,6 +7,11 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
+import type { z } from "zod";
+import {
+  datasetDetailEnvelopeSchema,
+  datasetListEnvelopeSchema,
+} from "../../../../shared/contract/dataset.js";
 import { toVersionTag } from "../../../../shared/contract/index.js";
 import type { FacetKey } from "../../../../shared/facets.js";
 import { RangeParseError } from "../../../../shared/range.js";
@@ -479,6 +484,50 @@ function buildSortClause(sort: string): string {
   }
 }
 
+/**
+ * Issue #1207: nothing parses a live catalog/detail response against the
+ * shared contract schemas (`shared/contract/dataset.ts`), so a production
+ * regression in a derive path ships data the contract calls invalid and
+ * only surfaces when some consumer's own parse throws -- the #1206 review
+ * found exactly this (`SELECT d.*` serving a numeric `id` where the schema
+ * declares a string; see the comment on `datasetDetailSchema` usage in
+ * backend/test/catalog-has-zarr.test.ts). `logContractViolation` is
+ * log-not-throw: a malformed response still reaches the caller unchanged
+ * (ADR 0005 -- reporting is never a precondition for serving), so it must
+ * never be allowed to turn a good response into a 500 or observably add
+ * latency.
+ *
+ * Cost gate: development/test validates every response -- there, a
+ * violation is a real bug worth failing loudly and immediately, and traffic
+ * is low enough that the extra `safeParse` is free. Production instead
+ * samples at `CONTRACT_VALIDATION_SAMPLE_RATE`: `GET /datasets` can return
+ * up to 200 rows per page, so validating every production response would
+ * add non-negligible latency at catalog traffic volume. One sampling rate
+ * applied uniformly to both routes (rather than, say, always validating the
+ * single-row detail route) keeps the cost/coverage tradeoff the same for
+ * both rather than special-casing one endpoint as "always cheap enough" --
+ * a random check per request avoids needing shared mutable counter state
+ * across Worker isolates.
+ */
+const CONTRACT_VALIDATION_SAMPLE_RATE = 0.02; // ~1 in 50 production responses
+
+function shouldValidateContract(env: Bindings): boolean {
+  if (env.ENVIRONMENT === "development" || env.ENVIRONMENT === "test") return true;
+  return Math.random() < CONTRACT_VALIDATION_SAMPLE_RATE;
+}
+
+/** One bounded console.error per violating response: the route label, the
+ *  dataset id(s) involved, and the first few zod issues -- enough to act on
+ *  without risking an unbounded log line for a badly-shaped response. */
+function logContractViolation(route: string, datasetIds: unknown, issues: z.ZodIssue[]): void {
+  console.error(`[contract] ${route} response violates the shared contract`, {
+    dataset_id: datasetIds,
+    issues: issues
+      .slice(0, 5)
+      .map((issue) => ({ path: issue.path.join("."), message: issue.message })),
+  });
+}
+
 async function executeAndReturn(
   c: { json: (data: unknown, status?: number) => Response },
   db: D1Database,
@@ -608,7 +657,7 @@ async function executeAndReturn(
       }
     }
 
-    return c.json({
+    const responseBody = {
       datasets: result.results.map((row) => toListRow(row, zarrBaseUrl)),
       count: result.results.length,
       total_count: totalCount,
@@ -618,7 +667,23 @@ async function executeAndReturn(
       ...(excludedUnknownByFacet !== undefined
         ? { excluded_unknown_by_facet: excludedUnknownByFacet }
         : {}),
-    });
+    };
+
+    // Issue #1207: log-not-throw contract check, gated by shouldValidateContract
+    // above. Skipped on the degraded/fallback shape below (a different, known
+    // "catalog unavailable" projection the contract was never meant to describe).
+    if (shouldValidateContract(env)) {
+      const parsed = datasetListEnvelopeSchema.safeParse(responseBody);
+      if (!parsed.success) {
+        logContractViolation(
+          "GET /datasets",
+          responseBody.datasets.map((row) => (row as Record<string, unknown>).dataset_id),
+          parsed.error.issues,
+        );
+      }
+    }
+
+    return c.json(responseBody);
   } catch (dbError) {
     const msg = dbError instanceof Error ? dbError.message : String(dbError);
 
@@ -1304,6 +1369,16 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       ),
       ...explodeAttestationFields(attestationRaw),
     };
+
+    // Issue #1207: same log-not-throw contract check as GET /datasets, gated
+    // by the same shouldValidateContract policy (see its doc comment).
+    if (shouldValidateContract(c.env)) {
+      const parsed = datasetDetailEnvelopeSchema.safeParse({ dataset: detail });
+      if (!parsed.success) {
+        logContractViolation("GET /datasets/:id", datasetId, parsed.error.issues);
+      }
+    }
+
     return c.json({ dataset: detail });
   });
 }
