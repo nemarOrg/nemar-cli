@@ -405,9 +405,11 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   probing.
   **Events are a third document, `<id>/zarr/events.parquet`** (#1060): one row per
   (event, channel group) across every store, with `sample_index` computed by the
-  converter — `round(onset_s * rate)` against the group's SERVING rate, which is
-  the only place the resampling relation is known exactly (`resample_poly` is
-  zero-phase, so there is no delay to subtract). It exists only when the index
+  converter as `math.floor(onset_s * rate + 0.5)` against the group's SERVING
+  rate — ties round UP, and it is deliberately not Python's `round()`, which
+  ties to even and so disagrees on every exact half-sample onset. The serving
+  rate is the only place the resampling relation is known exactly
+  (`resample_poly` is zero-phase, so there is no delay to subtract). It exists only when the index
   names it (`events_parquet` / `events_row_count`); publishing it is best-effort
   like the manifest, and the per-store `n_events` / `trial_types` come from the
   same parse as its rows.

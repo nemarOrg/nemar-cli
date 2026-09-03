@@ -1906,11 +1906,20 @@ def _event_number(fields: list[str], col: int) -> float | None:
 def sample_index_for(onset_s: float | None, rate: float | None) -> int | None:
     """The level-0 sample an onset falls on, or `None` when it cannot be computed.
 
-    ``round(onset_s * rate)``, where `rate` is the group's SERVING rate (the
-    level-0 `rate` attr the index republishes), ties going up. That is the whole
-    formula, and the reason it is this simple is worth writing down once, because
-    the point of publishing the column at all is that a client should not have to
-    re-derive it (#1060):
+    ``math.floor(onset_s * rate + 0.5)``, where `rate` is the group's SERVING
+    rate (the level-0 `rate` attr the index republishes). Written out rather than
+    called ``round()`` because the two DIFFER: Python's ``round()`` is
+    banker's rounding, which breaks an exact .5 tie toward the even integer
+    (``round(0.5) == 0``, ``round(1.5) == 2``), while this ties UP everywhere
+    (``0.5 -> 1``, ``1.5 -> 2``). A tie is not exotic here -- an onset of 0.5 s
+    at 1 Hz, or any onset landing on a half sample at the serving rate, hits it
+    -- and a client that reimplements the column with ``round()`` would disagree
+    with the published value on exactly those rows, which is the failure the
+    column exists to prevent.
+
+    That is the whole formula, and the reason it is this simple is worth writing
+    down once, because the point of publishing the column at all is that a client
+    should not have to re-derive it (#1060):
 
     * biosigIO resamples level 0 to ``target_rate = min(native_rate, cap)`` with
       ``scipy.signal.resample_poly(x, up, down)``, ``up/down =
