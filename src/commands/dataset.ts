@@ -2140,10 +2140,7 @@ const searchCommand = datasetCommand
   // `admin`); this flag does not repeat it. See `searchVerboseRequested`
   // below for why `--verbose` (long form only) also can't be read the normal
   // way here.
-  .option(
-    "--verbose",
-    "Show a README snippet under each result (owner decision 2026-09-03; off by default)",
-  )
+  .option("--verbose", "Show a README snippet under each result (off by default)")
   .option("--json", "Output as JSON for scripting")
   .option("--limit <n>", "Limit results (default: 20)", "20");
 
