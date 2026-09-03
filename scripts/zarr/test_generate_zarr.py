@@ -14,6 +14,7 @@ Run with:
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import io
 import json
@@ -3117,8 +3118,6 @@ class TestMemoryErrorBeforePeakResetIsTyped(unittest.TestCase):
         self.assertEqual(res["code"], gz.RecordingMemoryExceeded.code)
 
     def test_enomem_at_the_limit_is_typed_as_memory(self):
-        import errno
-
         gz = self._inject(OSError(errno.ENOMEM, "Cannot allocate memory"))
         res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
         self.assertEqual(res["code"], gz.RecordingMemoryExceeded.code)

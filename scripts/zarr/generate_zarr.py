@@ -655,10 +655,16 @@ def stream_factor_for(primary_local: str) -> float:
 
 def projection_factor_hint(primary_local: str, streaming: bool) -> str:
     """Name the format-specific multiplier behind a projection, for the skip
-    message, when one applied. A MEF3 session skipped as too large is skipped
-    because of the 12x above, and the person reading the index should see which
-    knob (`ZARR_STREAM_MEM_FACTOR_MEFD` / `ZARR_INMEM_MEM_FACTOR_MEFD`) to revisit
-    once the reader's retention is fixed, rather than a bare "too large"."""
+    message, when one applied. A recording skipped as too large under a
+    per-format factor is skipped because of that factor as much as because of
+    its bytes on disk, so the person reading the index should see which knob
+    produced the number rather than a bare "too large". For MEF3 that knob is
+    what to retune once the reader stops retaining; for BrainVision the 12x is
+    a measured cost (#1111) and the hint is simply where the number came from.
+
+    The knob name is derived by convention (`ZARR_<STREAM|INMEM>_MEM_FACTOR_<EXT>`);
+    every per-extension factor above follows it, and a new one must too or the
+    hint names a variable that does not exist."""
     ext = lower_ext(primary_local)
     table = STREAM_MEM_FACTOR_BY_EXT if streaming else INMEM_MEM_FACTOR_BY_EXT
     if ext not in table or (streaming and table[ext] <= 0):
@@ -809,6 +815,12 @@ def is_memory_exhaustion(exc: BaseException) -> bool:
     """
     if isinstance(exc, MemoryError):
         return True
+    # CPython raises this one fixed string for ANY pthread_create failure and
+    # attaches no errno, so EAGAIN (a thread-count limit such as RLIMIT_NPROC)
+    # is indistinguishable here from ENOMEM. Nothing in this driver tightens a
+    # thread limit, only RLIMIT_DATA, so at the limit this is the backstop; if it
+    # ever recurs on a node where memory is NOT the story, this is the line that
+    # turned a novel infra failure into a retryable memory verdict.
     if isinstance(exc, RuntimeError) and "can't start new thread" in str(exc):
         return True
     return isinstance(exc, OSError) and exc.errno == errno.ENOMEM
