@@ -14,6 +14,7 @@ Run with:
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import io
 import json
@@ -56,6 +57,11 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     _next_admission,
     _drain_with_admission,
     worker_mem_limit_bytes,
+    stream_factor_for,
+    projection_factor_hint,
+    STREAM_MEM_FACTOR_BY_EXT,
+    INMEM_MEM_FACTOR_BY_EXT,
+    STREAM_MIN_BYTES,
     apply_worker_mem_limit,
     cap_blas_threads,
     data_segment_bytes,
@@ -1870,6 +1876,38 @@ class TestMemoryGuard(unittest.TestCase):
             projected_peak_bytes("sub-01_task-x_meg.fif", 50 * 1024**3), STREAM_PEAK_BYTES
         )
 
+    def test_mef3_projects_from_on_disk_bytes_on_the_streaming_path(self):
+        """MEF3 streams (MNE reads it a window at a time) but the worker still
+        climbs to the whole recording at float64: 7.5-10.3 GiB from ~1 GB on
+        disk on on004696 (2026-09-03). The flat bound admitted eight at once and
+        the kernel killed a worker. The projection must scale with size."""
+        size = 1024**3
+        self.assertTrue(should_stream("sub-01/ieeg/sub-01_ieeg.mefd", size))
+        self.assertEqual(
+            projected_peak_bytes("sub-01/ieeg/sub-01_ieeg.mefd", size, 256),
+            int(size * STREAM_MEM_FACTOR_BY_EXT[".mefd"]),
+        )
+        self.assertGreater(STREAM_MEM_FACTOR_BY_EXT[".mefd"], 10)
+        # Other streamed formats keep the flat bound: nothing measured says
+        # otherwise, and charging them 12x would serialise the archive.
+        self.assertEqual(projected_peak_bytes("sub-01/meg/sub-01_meg.fif", size, 306), STREAM_PEAK_BYTES)
+        self.assertEqual(projected_peak_bytes("sub-01/meg/sub-01_meg.ds", size, 275), STREAM_PEAK_BYTES)
+        self.assertEqual(stream_factor_for("sub-01/meg/sub-01_meg.fif"), 0.0)
+
+    def test_mef3_streaming_projection_never_drops_below_the_flat_bound(self):
+        # A tiny MEF3 above the stream threshold still gets the streaming floor.
+        size = STREAM_MIN_BYTES + 1
+        self.assertEqual(
+            projected_peak_bytes("x.mefd", size, 8),
+            max(STREAM_PEAK_BYTES, int(size * STREAM_MEM_FACTOR_BY_EXT[".mefd"])),
+        )
+
+    def test_mef3_in_memory_path_uses_the_same_retention_factor(self):
+        size = 100 * 1024**2
+        self.assertFalse(should_stream("x.mefd", size))
+        self.assertEqual(projected_peak_bytes("x.mefd", size), int(size * INMEM_MEM_FACTOR_BY_EXT[".mefd"]))
+        self.assertEqual(INMEM_MEM_FACTOR_BY_EXT[".mefd"], STREAM_MEM_FACTOR_BY_EXT[".mefd"])
+
     def test_projected_peak_inmemory_scales_with_size(self):
         # EEGLAB `.set` is in no STREAM_*_EXTS tuple, so it is always in-memory
         # and the float64 blow-up scales with size.
@@ -1988,6 +2026,26 @@ class TestMemoryGuard(unittest.TestCase):
                     rec, None, os.path.join(d, "store"),
                     mem_budget_bytes=5, hard_ceiling_bytes=5,
                 )
+
+    def test_a_too_large_mef3_names_the_factor_behind_the_verdict(self):
+        # A MEF3 session is skipped because of the 12x retention factor, not
+        # because of its bytes on disk; the message must say which knob to
+        # revisit once the reader stops retaining. Small directory: in-memory path.
+        with tempfile.TemporaryDirectory() as d:
+            rec = os.path.join(d, "sub-01_task-x_ieeg.mefd")
+            os.makedirs(os.path.join(rec, "ch-1.timd"))
+            with open(os.path.join(rec, "ch-1.timd", "seg.tdat"), "wb") as fh:
+                fh.write(b"m" * 100_000)
+            with self.assertRaises(RecordingTooLarge) as cm:
+                convert_recording(
+                    rec, None, os.path.join(d, "store"),
+                    mem_budget_bytes=1, hard_ceiling_bytes=2,
+                )
+            self.assertIn(".mefd factor 12x (ZARR_INMEM_MEM_FACTOR_MEFD)", str(cm.exception))
+        self.assertEqual(projection_factor_hint("x.edf", streaming=True), "")
+        self.assertEqual(projection_factor_hint("x.fif", streaming=True), "")
+        self.assertIn("ZARR_STREAM_MEM_FACTOR_MEFD", projection_factor_hint("x.mefd", streaming=True))
+        self.assertIn("ZARR_INMEM_MEM_FACTOR_VHDR", projection_factor_hint("x.vhdr", streaming=False))
 
     def test_reason_for_code_too_large_is_user_facing(self):
         self.assertIn("too large", reason_for_code("recording_too_large").lower())
@@ -3049,6 +3107,24 @@ class TestMemoryErrorBeforePeakResetIsTyped(unittest.TestCase):
         # Unmeasurable, not zero: the reset never completed, so any reading would
         # be the worker's lifetime peak rather than this recording's.
         self.assertIsNone(res["peak_rss"])
+
+    def test_thread_exhaustion_at_the_limit_is_typed_as_memory(self):
+        # zarr's codec pipeline dies with this exact RuntimeError when a thread
+        # stack cannot be mapped at the RLIMIT_DATA limit (on004696, 2026-09-03).
+        # Uncoded it broke the pool; typed it is the same verdict as MemoryError.
+        gz = self._inject(RuntimeError("can't start new thread"))
+        res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["code"], gz.RecordingMemoryExceeded.code)
+
+    def test_enomem_at_the_limit_is_typed_as_memory(self):
+        gz = self._inject(OSError(errno.ENOMEM, "Cannot allocate memory"))
+        res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        self.assertEqual(res["code"], gz.RecordingMemoryExceeded.code)
+        # Any other OSError stays what it is: a read error, not a memory verdict.
+        gz = self._inject(OSError(errno.EIO, "I/O error"))
+        res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        self.assertNotEqual(res.get("code"), gz.RecordingMemoryExceeded.code)
 
     def test_non_memory_error_before_reset_is_still_uncoded_infra(self):
         # The generic handler never touched rss_trusted, so it was already fine;
