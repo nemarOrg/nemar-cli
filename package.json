@@ -15,6 +15,7 @@
     "lint:fix": "biome check --fix src/",
     "format": "biome format --write src/",
     "typecheck": "tsc --noEmit && tsc --noEmit -p backend",
+    "generate-openapi": "bun run scripts/generate-openapi.ts",
     "prepublishOnly": "bun run build",
     "prepare": "husky",
     "postinstall": "bun scripts/postinstall-check.mjs",
@@ -69,6 +70,7 @@
     ]
   },
   "devDependencies": {
+    "@asteasolutions/zod-to-openapi": "^7.3.4",
     "@biomejs/biome": "1.9.4",
     "@types/bcryptjs": "^3.0.0",
     "@types/bun": "latest",
