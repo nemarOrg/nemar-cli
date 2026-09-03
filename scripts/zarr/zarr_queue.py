@@ -668,8 +668,10 @@ def claim_next(conn: sqlite3.Connection) -> sqlite3.Row | None:
     hallu-zarr.sh around the whole run) to keep two independent DRIVER
     PROCESSES from running against the same database at all; this function
     only closes the gap between two connections that are legitimately both
-    open at once (a `next` CLI invocation racing the long-running drain's own
-    connection, for instance), not a substitute for that flock.
+    open at once, not a substitute for that flock. Every claim is its own
+    one-shot `zarr_queue.py next` subprocess with a fresh connection, so the
+    realistic race is an operator's manual `next` run (which bypasses the
+    flock) against the cron drain's own per-dataset `next`.
     """
     conn.execute("BEGIN IMMEDIATE")
     try:
