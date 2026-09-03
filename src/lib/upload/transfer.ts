@@ -419,18 +419,39 @@ export async function uploadDataToS3(
   }
   const addTargets = computeAddTargets(filesToUpload, dataFiles, trackedPaths);
   const untrackedCount = addTargets.length - filesToUpload.length;
-  if (untrackedCount > 0 && isStepCompleted(progress, "tracking")) {
+  const reopenTracking = untrackedCount > 0 && isStepCompleted(progress, "tracking");
+  const reopenUpload = addTargets.length > 0 && isStepCompleted(progress, "s3_upload");
+  if (reopenTracking) {
     clearStepCompleted(progress, "tracking");
+  }
+  if (reopenUpload) {
+    clearStepCompleted(progress, "s3_upload");
+    // Reopening s3_upload for new content must also reopen the finalize
+    // steps that depend on it (Step 11 saveDatasetStep / Step 12
+    // pushMetadata in commands/dataset.ts, upload/finalize.ts). Both are
+    // gated by their own persisted step and stay stamped complete from
+    // the PRIOR run, so without this a new file's git-annex pointer would
+    // reach S3 here but never be committed or pushed -- and
+    // printUploadSuccess still clears progress and reports "Upload
+    // complete!" with that pointer sitting only in the working tree
+    // (review finding, critical: a run interrupted between pushMetadata
+    // and printUploadSuccess -- e.g. mid deployCiStep -- leaves both
+    // stamped true on disk with progress never cleared).
+    clearStepCompleted(progress, "dataset_save");
+    clearStepCompleted(progress, "github_push");
+  }
+  // One combined write instead of one per reopened step.
+  if (reopenTracking || reopenUpload) {
     writeUploadProgress(absolutePath, progress);
+  }
+  if (reopenTracking) {
     console.log(
       chalk.yellow(
         `  ${untrackedCount} data files are missing from git despite recorded progress; re-tracking them`,
       ),
     );
   }
-  if (addTargets.length > 0 && isStepCompleted(progress, "s3_upload")) {
-    clearStepCompleted(progress, "s3_upload");
-    writeUploadProgress(absolutePath, progress);
+  if (reopenUpload) {
     console.log(
       chalk.yellow(
         `  ${addTargets.length} data file(s) still need upload despite a completed s3_upload step; resuming`,

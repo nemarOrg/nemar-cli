@@ -51,6 +51,7 @@ import {
   markStepCompleted,
   readUploadProgress,
 } from "../src/lib/upload-progress";
+import { saveDatasetStep } from "../src/lib/upload/finalize";
 import { type UploadFileEntry, uploadDataToS3 } from "../src/lib/upload/transfer";
 import type { DatasetInfo } from "../src/lib/upload/types";
 
@@ -236,6 +237,87 @@ describe("uploadDataToS3 resume when s3_upload is already stamped complete (#107
     const onDisk = readUploadProgress(dir);
     expect(onDisk).not.toBeNull();
     expect(isStepCompleted(onDisk as UploadProgress, "s3_upload")).toBe(false);
+
+    clearUploadProgress(dir);
+  });
+
+  test("dataset_save and github_push are also reopened, so the new file's pointer actually gets committed (review finding, critical)", async () => {
+    const dir = await newDatasetRepo("resume-s3-finalize");
+    const oldFile: UploadFileEntry = { path: "sub-01/eeg/a.edf", size: 4096, type: "data" };
+    const newFile: UploadFileEntry = { path: "sub-02/eeg/b.edf", size: 4096, type: "data" };
+    writeDataFile(dir, oldFile.path, "a".repeat(oldFile.size));
+    const author = { name: "Test", email: "test@test.com" };
+
+    // --- Simulate a run that got all the way through pushMetadata (dataset.ts
+    // Step 12) but was interrupted before printUploadSuccess ever cleared
+    // progress (e.g. mid deployCiStep's network call, Step 12b): tracking,
+    // s3_upload, dataset_save AND github_push all stamped complete, and
+    // oldFile's pointer genuinely committed via the real saveDatasetStep.
+    expect((await gitAnnexAdd(dir, [oldFile.path])).success).toBe(true);
+    const progress: UploadProgress = initUploadProgress(dir, "nm000902", [oldFile]);
+    markStepCompleted(progress, "tracking");
+    markFileUploaded(progress, oldFile.path, { size: oldFile.size });
+    markStepCompleted(progress, "s3_upload");
+    expect((await saveDatasetStep(dir, author, progress)).status).toBe("ok");
+    expect(isStepCompleted(progress, "dataset_save")).toBe(true);
+    // No real GitHub remote in this harness; stamp github_push directly to
+    // reach the exact "both finalize steps already complete" prior state.
+    markStepCompleted(progress, "github_push");
+    const commitsBefore = (await runCmd(["git", "log", "--oneline"], dir)).stdout
+      .trim()
+      .split("\n").length;
+
+    // --- A second data file lands in the working tree after that point --
+    // e.g. the user added it and re-ran `nemar dataset upload`.
+    writeDataFile(dir, newFile.path, "b".repeat(newFile.size));
+    const dataFiles = [oldFile, newFile];
+    const filesToUpload = [newFile];
+
+    const credServer = startFailingCredentialsServer();
+    process.env.TEST_API_URL = credServer.url;
+    let result: Awaited<ReturnType<typeof uploadDataToS3>>;
+    try {
+      result = await uploadDataToS3(
+        dir,
+        { jobs: "3" },
+        dataFiles,
+        filesToUpload,
+        progress,
+        fakeDatasetInfo("nm000902"),
+      );
+    } finally {
+      credServer.stop();
+    }
+    // Credentials still fail deterministically; this is not asserting a
+    // full S3 round-trip (see the file-level comment).
+    expect(result.status).toBe("fail");
+
+    // THE FIX: dataset_save and github_push must be reopened alongside
+    // s3_upload/tracking. Before it, a resumed upload that picked up new
+    // content would eventually re-complete s3_upload but dataset.ts's Step
+    // 11/12 (saveDatasetStep/pushMetadata) would see dataset_save/
+    // github_push still stamped true from the PRIOR run and skip entirely
+    // -- the new file's git-annex pointer would reach S3 but never be
+    // committed or pushed, and printUploadSuccess would still clear
+    // progress and report "Upload complete!".
+    expect(isStepCompleted(progress, "dataset_save")).toBe(false);
+    expect(isStepCompleted(progress, "github_push")).toBe(false);
+    const onDisk = readUploadProgress(dir);
+    expect(onDisk).not.toBeNull();
+    expect(isStepCompleted(onDisk as UploadProgress, "dataset_save")).toBe(false);
+    expect(isStepCompleted(onDisk as UploadProgress, "github_push")).toBe(false);
+
+    // --- Drive the REAL saveDatasetStep (dataset.ts Step 11) now that
+    // dataset_save is reopened, proving the new file's pointer actually
+    // gets committed rather than silently skipped.
+    expect((await saveDatasetStep(dir, author, progress)).status).toBe("ok");
+    expect(isStepCompleted(progress, "dataset_save")).toBe(true);
+    const committed = await runCmd(["git", "show", "--stat", "HEAD"], dir);
+    expect(committed.stdout).toContain(newFile.path);
+    const commitsAfter = (await runCmd(["git", "log", "--oneline"], dir)).stdout
+      .trim()
+      .split("\n").length;
+    expect(commitsAfter).toBeGreaterThan(commitsBefore);
 
     clearUploadProgress(dir);
   });
