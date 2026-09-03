@@ -23,6 +23,7 @@
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
+import v3Fixture from "../../test/fixtures/zarr-index-v3.json";
 import {
   parseZarrReadyBody,
   registerZarrReadyRoutes,
@@ -100,39 +101,20 @@ const v1Index = (): ZarrIndexJson =>
     failures: [{ path: "sub-03/eeg/c_eeg.edf", code: "file_read_error", reason: "..." }],
   }) as unknown as ZarrIndexJson;
 
-/** The same dataset in v3: the five silent recordings are now `pending`. */
+/**
+ * The same dataset in v3: the five silent recordings are now `pending`.
+ *
+ * Read from the CHECKED-IN fixture rather than written inline, because the
+ * inline one was not a document the producer could ever have published: it
+ * inherited v1's per-store `source_key` (removed in v3) and carried neither
+ * `layout` nor `updated_utc`, both of which the schema requires. Every
+ * assertion below about what a consumer derives from "a v3 index" was
+ * therefore made against a shape that would have been refused at upload.
+ * `test/zarr-schema-contract.test.ts` validates this exact file against
+ * `shared/zarr-index.schema.json`, so it cannot drift back out of contract.
+ */
 const v3Index = (overrides: Partial<Record<string, unknown>> = {}): ZarrIndexJson =>
-  ({
-    ...v1Index(),
-    format_version: 3,
-    contract_base: `https://zarr.nemar.org/${DATASET}/zarr/`,
-    data_base: `https://nemar.s3.us-east-2.amazonaws.com/${DATASET}/zarr/`,
-    data_base_kind: "s3-public",
-    s3_uri: `s3://nemar/${DATASET}/zarr/`,
-    s3_region: "us-east-2",
-    s3_anonymous: true,
-    engine_version: "2",
-    biosigio_version: "1.2.6",
-    discovered_count: 5,
-    n_recordings: 2,
-    errors: 3,
-    pending_count: 2,
-    pending: [
-      {
-        path: "sub-04/eeg/d_eeg.edf",
-        zarr: "sub-04/eeg/d_eeg.zarr",
-        reason: "infra_failure",
-        attempts: 2,
-      },
-      {
-        path: "sub-05/eeg/e_eeg.edf",
-        zarr: "sub-05/eeg/e_eeg.zarr",
-        reason: "not_attempted",
-        attempts: 0,
-      },
-    ],
-    ...overrides,
-  }) as unknown as ZarrIndexJson;
+  ({ ...v3Fixture, ...overrides }) as unknown as ZarrIndexJson;
 
 describe("aggregateRecordingStats spans index v1 and v3", () => {
   test("a v1 index yields exactly what it always did", () => {
