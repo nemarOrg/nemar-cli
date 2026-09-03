@@ -708,6 +708,19 @@ describe("CLI Dataset List", () => {
     expect(stdout).toContain("--modality");
   });
 
+  // Owner decision 2026-09-03 (partially supersedes #1150 D2): the README
+  // snippet line is opt-in, not always-on, via --verbose on `search`. No
+  // `-v` short alias here: the root command already binds `-v` to
+  // `--version` (`.version(version, "-v, --version", ...)` in
+  // src/index.ts), so a local `-v` on this subcommand would silently print
+  // the CLI version and exit instead of running the search -- see
+  // `searchVerboseRequested`'s doc comment in src/commands/dataset.ts.
+  test("nemar dataset search --help lists --verbose for snippet output", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "search", "--help"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("--verbose");
+  });
+
   test("nemar dataset list shows datasets", async () => {
     const { stdout, stderr, exitCode } = await runCli(["dataset", "list"]);
 
