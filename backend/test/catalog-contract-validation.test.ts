@@ -175,6 +175,23 @@ describe("GET /datasets: contract validation hook (issue #1207)", () => {
     expect(res.status).toBe(200);
     expect(contractViolationCalls("GET /datasets").length).toBe(0);
   });
+
+  // #1224 review, suggestion 4: the violation log used to carry every row's
+  // dataset_id on the page regardless of how many actually failed. Two rows,
+  // only one invalid, proves the log names just the bad one.
+  test("a mixed page logs only the failing row's id, not the whole page", async () => {
+    insertDataset(db, "nm090005", { file_size: 100, subject_count: 5 }); // well-formed
+    insertDataset(db, "nm090006", {
+      sweep_stamps: JSON.stringify({ zarr_verify_status: "not_a_real_status" }),
+    }); // deliberately invalid
+
+    const res = await requestFlushed(app, "/", {}, env(db));
+    expect(res.status).toBe(200);
+
+    const violations = contractViolationCalls("GET /datasets");
+    expect(violations.length).toBe(1);
+    expect(violations[0].dataset_id).toEqual(["nm090006"]);
+  });
 });
 
 describe("GET /datasets/:id: contract validation hook (issue #1207)", () => {

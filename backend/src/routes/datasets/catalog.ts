@@ -538,6 +538,36 @@ function logContractViolation(route: string, datasetIds: unknown, issues: z.ZodI
 }
 
 /**
+ * #1224 review (suggestion 4): a violation on `GET /datasets` used to log
+ * every row's dataset_id on the page (up to 200), regardless of how many
+ * actually failed -- noisy, and it buries "which row" in a wall of ids that
+ * mostly validated fine. `datasetListEnvelopeSchema`'s zod issues for a row
+ * problem always path through `datasets.<index>.<field...>`, so the row
+ * index is `issue.path[1]` whenever `issue.path[0] === "datasets"`; map
+ * those indices back to the row's own `dataset_id`, dedup (one bad row can
+ * fail more than one field), and cap at `limit` so a badly-shaped page
+ * can't blow up the log line the way the uncapped array could.
+ */
+function failedListRowIds(
+  datasets: { dataset_id?: unknown }[],
+  issues: z.ZodIssue[],
+  limit = 5,
+): unknown[] {
+  const ids: unknown[] = [];
+  const seen = new Set<unknown>();
+  for (const issue of issues) {
+    const [collection, index] = issue.path;
+    if (collection !== "datasets" || typeof index !== "number") continue;
+    const id = datasets[index]?.dataset_id;
+    if (id === undefined || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+    if (ids.length >= limit) break;
+  }
+  return ids;
+}
+
+/**
  * #1224 review: defers `check` off the response's critical path via
  * `executionCtx.waitUntil`, mirroring `afterResponse()` (routes/auth-orcid.ts)
  * -- accessing `c.executionCtx` THROWS when no ExecutionContext was provided
@@ -721,7 +751,7 @@ async function executeAndReturn(
       if (!parsed.success) {
         logContractViolation(
           "GET /datasets",
-          responseBody.datasets.map((row) => (row as Record<string, unknown>).dataset_id),
+          failedListRowIds(responseBody.datasets, parsed.error.issues),
           parsed.error.issues,
         );
       }
