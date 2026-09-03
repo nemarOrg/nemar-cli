@@ -1,21 +1,18 @@
 /**
- * Unit tests for the pure metadata helpers in
- * backend/src/services/dataset-metadata-columns.ts.
- *
- * Covers:
- *   - authorsFromEnrichment: extract a CSV author string from either the
- *     object-keyed form ({"Name": {orcid, ...}, ...}) the enrichment
- *     pipeline emits today, or the legacy array-of-objects form some older
- *     rows still carry.
- *   - formatFileSize: byte count -> human-readable string for the served
- *     file_size_formatted field (derived at read time since #1182).
+ * Unit tests for:
+ *   - authorsFromEnrichment (backend/src/services/dataset-metadata-columns.ts):
+ *     extract a CSV author string from either the object-keyed form
+ *     ({"Name": {orcid, ...}, ...}) the enrichment pipeline emits today, or
+ *     the legacy array-of-objects form some older rows still carry.
+ *   - formatFileSize (shared/bytes.ts, moved from dataset-metadata-columns.ts
+ *     in epic #1225 phase 4, issue #1227): byte count -> human-readable
+ *     string for the served file_size_formatted field (derived at read time
+ *     since #1182).
  */
 
 import { describe, expect, test } from "bun:test";
-import {
-  authorsFromEnrichment,
-  formatFileSize,
-} from "../backend/src/services/dataset-metadata-columns";
+import { authorsFromEnrichment } from "../backend/src/services/dataset-metadata-columns";
+import { formatFileSize } from "../shared/bytes";
 
 describe("authorsFromEnrichment", () => {
   test("returns null when input is missing", () => {
@@ -96,5 +93,27 @@ describe("formatFileSize", () => {
     // displayed precision on values that sit on the line.
     expect(formatFileSize(100 * 1024 * 1024 * 1024)).toBe("100 GB");
     expect(formatFileSize(99.5 * 1024 * 1024 * 1024)).toBe("99.50 GB");
+  });
+
+  // Golden coverage (epic #1225 phase 4, issue #1227). The expected strings
+  // were computed independently against a verbatim copy of the current
+  // formatter and cross-checked by running the real function in this
+  // worktree before any implementation change landed -- see the phase 4
+  // implementation brief on issue #1227 for the full six-formatter table
+  // this is one column of. This is the canonical served formatter (moves
+  // verbatim to shared/bytes.ts in the consolidation commit that follows);
+  // dataset-detail-contract.test.ts pins the same contract through the real
+  // catalog route.
+  test("golden vector — phase 4 pinned magnitudes (issue #1227)", () => {
+    expect(formatFileSize(1)).toBe("1 B");
+    expect(formatFileSize(1023)).toBe("1023 B");
+    expect(formatFileSize(1024)).toBe("1.00 KB");
+    expect(formatFileSize(1536)).toBe("1.50 KB");
+    expect(formatFileSize(1048576)).toBe("1.00 MB");
+    expect(formatFileSize(1073741824)).toBe("1.00 GB");
+    expect(formatFileSize(4628000000)).toBe("4.31 GB");
+    expect(formatFileSize(24000000000)).toBe("22.35 GB");
+    expect(formatFileSize(1099511627776)).toBe("1.00 TB");
+    expect(formatFileSize(1024 ** 5)).toBe("1024 TB"); // 1 PiB, clamps correctly (no bug here)
   });
 });

@@ -72,6 +72,20 @@ silently shift every displayed size" — this already caused a real bug. `pretty
 explicit option) replaces all six with one call and makes the unit choice visible instead of
 implicit. Effort S, low risk — presentation-only, independently testable per call site.
 
+**Outcome (epic #1225 phase 4, issue #1227, 2026-09-03): `pretty-bytes` declined, kept bespoke
+and consolidated instead. See [ADR 0038](decisions/0038-byte-size-formatting-stays-bespoke.md).**
+Probing `pretty-bytes` 7.1.2 against NEMAR's actual served format found it reproduces none of
+the six: its binary mode emits IEC labels (`"22.4 GiB"` where NEMAR serves `"22.35 GB"` over the
+same 1024 base) and its decimal mode emits a lowercase `kB` over base 1000; it has no option for
+the magnitude-dependent fraction-digit policy `formatFileSize` uses. `formatFileSize`'s output is
+the served `file_size_formatted` catalog field and is pinned by golden tests, so this is a
+contract, not a presentation-only surface — the "independently testable per call site" premise
+above held for the CLI/HTML-only formatters but not for this one. The six copies were still
+worth consolidating: they are now one module, `shared/bytes.ts`, with the decimal/1000 outlier
+(the bug this section names) deleted rather than kept. Five formats remain because their outputs
+genuinely differ and the epic forbade changing any of them; that is a product question for a
+future phase, not something this consolidation could settle.
+
 ### 3. Hand-rolled GitHub API client — the biggest surface, pilot it
 
 `backend/src/services/github/*.ts` (10 files, ~4,400 lines: `transport.ts` with its own

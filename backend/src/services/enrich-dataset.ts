@@ -15,6 +15,7 @@
  * structured EnrichmentRunResult without re-implementing the matrix.
  */
 
+import { formatFileSize } from "../../../shared/bytes.js";
 import { type NemarMetadataV2, datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import type { Bindings } from "../types/bindings.js";
 import { countSessionDirs } from "./bids-tree.js";
@@ -63,7 +64,7 @@ import {
 import { recordLlmUsage } from "./llm-metrics.js";
 import { ensureParticipantsTsv } from "./participants-tsv.js";
 import { errorMessage, extractRepoName } from "./repo-metadata.js";
-import { extractExtensions, formatBytes, getDatasetS3Stats } from "./s3.js";
+import { extractExtensions, getDatasetS3Stats } from "./s3.js";
 
 export interface EnrichmentOpts {
   datasetId: string;
@@ -573,7 +574,7 @@ export async function enrichDataset(
         datasetId,
       );
 
-      const sizeStr = formatBytes(s3Stats.totalSize);
+      const sizeStr = formatFileSize(s3Stats.totalSize);
       const countLabel =
         s3Stats.objectCount !== undefined ? `${s3Stats.objectCount} files` : "files";
       seeded.sizes = [`${sizeStr} (${countLabel})`];

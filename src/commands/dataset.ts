@@ -25,6 +25,7 @@ import chalk from "chalk";
 import { Command, Option } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
+import { formatBytesCli } from "../../shared/bytes.js";
 import { LICENSE_TIERS } from "../../shared/license-tiers.js";
 import { RangeParseError } from "../../shared/range.js";
 import { addCi } from "../lib/api/admin.js";
@@ -153,7 +154,7 @@ import {
   openNeuroDatasetExists,
 } from "../lib/openneuro.js";
 import { checkPrerequisitesForCommand } from "../lib/prerequisites.js";
-import { DownloadProgressTracker, formatBytes } from "../lib/progress.js";
+import { DownloadProgressTracker } from "../lib/progress.js";
 import { promptForProvenance } from "../lib/provenance.js";
 import { renderSnippetLine, truncateTokenList } from "../lib/render/snippet.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
@@ -699,7 +700,7 @@ function formatProgressBar(
   const width = 20;
   const filled = Math.round((percent / 100) * width);
   const bar = `[${"=".repeat(filled)}${" ".repeat(width - filled)}]`;
-  return `${bar} ${percent}% | ${filesDown}/${filesTotal} files | ${formatBytes(bytesDown)} / ${formatBytes(bytesTotal)}`;
+  return `${bar} ${percent}% | ${filesDown}/${filesTotal} files | ${formatBytesCli(bytesDown)} / ${formatBytesCli(bytesTotal)}`;
 }
 
 /**
@@ -839,13 +840,13 @@ async function handleOpenNeuroDownload(
     }
 
     const totalBytes = objects.reduce((sum, o) => sum + o.size, 0);
-    listSpinner.succeed(`${objects.length} files (${formatBytes(totalBytes)})`);
+    listSpinner.succeed(`${objects.length} files (${formatBytesCli(totalBytes)})`);
 
     console.log(chalk.bold("Download Plan:"));
     console.log(`  Dataset: ${datasetId} (OpenNeuro)`);
     console.log(`  Output:  ${absoluteOutput}`);
     console.log("  Method:  HTTPS (direct download)");
-    console.log(`  Files:   ${objects.length} (${formatBytes(totalBytes)})`);
+    console.log(`  Files:   ${objects.length} (${formatBytesCli(totalBytes)})`);
     console.log();
 
     console.log(chalk.bold("Downloading data files..."));
@@ -876,7 +877,9 @@ async function handleOpenNeuroDownload(
     }
 
     console.log(
-      chalk.green(`Downloaded ${result.filesDownloaded} files (${formatBytes(result.totalBytes)})`),
+      chalk.green(
+        `Downloaded ${result.filesDownloaded} files (${formatBytesCli(result.totalBytes)})`,
+      ),
     );
   }
 
@@ -4080,8 +4083,8 @@ Examples:
     }
 
     const desc = paths
-      ? `Getting ${paths.length} path(s)${pending ? ` (${pending.fileCount} files, ${formatBytes(pending.totalBytes)})` : ""}...`
-      : `Getting all data files${pending ? ` (${pending.fileCount} files, ${formatBytes(pending.totalBytes)})` : ""}...`;
+      ? `Getting ${paths.length} path(s)${pending ? ` (${pending.fileCount} files, ${formatBytesCli(pending.totalBytes)})` : ""}...`
+      : `Getting all data files${pending ? ` (${pending.fileCount} files, ${formatBytesCli(pending.totalBytes)})` : ""}...`;
     console.log(chalk.bold(desc));
 
     const tracker = new DownloadProgressTracker(pending?.fileCount ?? 0, pending?.totalBytes ?? 0);
@@ -4710,7 +4713,7 @@ Examples:
           if (annexed.length > 0) {
             console.log(chalk.bold(`  Annexed files (${annexed.length}):`));
             for (const [path, file] of annexed) {
-              const sizeStr = formatSize(file.size);
+              const sizeStr = formatBytesCli(file.size);
               console.log(`    ${path} ${chalk.dim(`(${sizeStr})`)}`);
             }
           }
@@ -4719,7 +4722,7 @@ Examples:
             console.log();
             console.log(chalk.bold(`  Metadata files (${gitFiles.length}):`));
             for (const [path, file] of gitFiles) {
-              const sizeStr = formatSize(file.size);
+              const sizeStr = formatBytesCli(file.size);
               console.log(`    ${path} ${chalk.dim(`(${sizeStr})`)}`);
             }
           }
@@ -4737,11 +4740,3 @@ Examples:
       process.exit(1);
     }
   });
-
-function formatSize(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  const size = bytes / 1024 ** i;
-  return `${size.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
-}

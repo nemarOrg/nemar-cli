@@ -76,6 +76,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0035](0035-sweep-stamps-live-in-one-json-column.md) - Sweep bookkeeping stamps live in one JSON column
 - [ADR 0036](0036-operational-rows-carry-counts-and-pointers-not-per-file-lists.md) - Operational rows carry counts and pointers, not per-file lists
 - [ADR 0037](0037-make-versus-take-is-decided-explicitly-in-both-directions.md) - Make versus take is decided explicitly, in both directions
+- [ADR 0038](0038-byte-size-formatting-stays-bespoke.md) - Byte-size formatting stays bespoke; pretty-bytes is declined
 
 ## Backfill note (2026-07-31)
 

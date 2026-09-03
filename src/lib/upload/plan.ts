@@ -8,8 +8,8 @@
  */
 
 import chalk from "chalk";
+import { formatBytesCli } from "../../../shared/bytes.js";
 import { type LocalDatasetConfig, readLocalConfig } from "../dataset-config.js";
-import { formatBytes } from "../progress.js";
 import {
   type UploadProgress,
   clearUploadProgress,
@@ -65,7 +65,7 @@ export function showUploadPlan(
   console.log(`  Name: ${datasetName}`);
   console.log(`  Path: ${absolutePath}`);
   console.log(`  Files: ${manifest.files.length}`);
-  console.log(`  Size: ${formatBytes(manifest.totalSize)}`);
+  console.log(`  Size: ${formatBytesCli(manifest.totalSize)}`);
   console.log(`  Data files: ${manifest.dataFiles} (will be uploaded to S3)`);
   console.log(`  Metadata files: ${manifest.metadataFiles} (will be stored in git)`);
   console.log(`  Parallel jobs: ${options.jobs}`);
