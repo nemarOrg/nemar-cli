@@ -167,10 +167,11 @@ export function zarrFailureColumns(body: {
   const manifestUploadFailed = body.manifest_upload_failed === true;
   // The summary is written when there is anything to say -- a failure list, OR
   // pending recordings with no failures at all, which is precisely the
-  // pending-with-no-failures shape (#1197) that used to leave the column NULL
-  // and the recordings invisible. `count` alone kept that case silent. An unpublished sibling is
-  // also something to say: a run with no failures and no pending recordings that
-  // published index.json without its manifest is not a clean run.
+  // pending-with-no-failures shape of on008083 (#1197) that used to leave the
+  // column NULL and the recordings invisible. `count` alone kept that case
+  // silent. An unpublished sibling is also something to say: a run with no
+  // failures and no pending recordings that published index.json without its
+  // manifest is not a clean run.
   const hasSummary =
     dataFailures.length > 0 || (pending ?? 0) > 0 || eventsUploadFailed || manifestUploadFailed;
   return {
