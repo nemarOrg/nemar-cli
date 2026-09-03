@@ -42,6 +42,7 @@
 
 import type { Bindings } from "../types/bindings";
 import { isNonProductionEnv } from "./environment";
+import { exemplarOrFragment } from "./exemplar";
 import { getBidsTreeStats } from "./github";
 import { getDatasetsToken } from "./github-auth";
 
@@ -55,8 +56,12 @@ import { getDatasetsToken } from "./github-auth";
  * subject subtrees + up to 2 blobs) against a tight 15/30 budget --
  * burning that budget on rows that will be deleted before anyone reads
  * their signal_defaults is wasted work recording-stats-sweep's own
- * documented exception doesn't have to worry about. No modality filter
- * (unlike channel-montage-sweep, which restricts to `modalities LIKE
+ * documented exception doesn't have to worry about. The curated exemplar
+ * fleet (`is_exemplar = 1`) is the one `is_sandbox = 1` cohort that does NOT
+ * churn -- it is permanent (AGENTS.md's dataset ID bands, "never" cleaned)
+ * -- so `exemplarOrFragment()` carves it back in (issue #1168), matching the
+ * visibility predicates in dataset-search.ts / catalog.ts. No modality
+ * filter (unlike channel-montage-sweep, which restricts to `modalities LIKE
  * '%eeg%'`): getBidsTreeStats's `*_eeg.json` probe is itself the modality
  * gate -- a non-EEG dataset simply yields no sidecar and is stamped via the
  * no-sidecar branch, exactly like hed-sweep's no-modality-filter reasoning.
@@ -64,7 +69,7 @@ import { getDatasetsToken } from "./github-auth";
 export const SIGNAL_DEFAULTS_SWEEP_CANDIDATE_SQL = `SELECT dataset_id, github_repo FROM datasets
    WHERE status = 'active'
      AND github_repo IS NOT NULL
-     AND (is_sandbox = 0 OR is_sandbox IS NULL)
+     AND (is_sandbox = 0 OR is_sandbox IS NULL OR ${exemplarOrFragment("")})
      AND json_extract(sweep_stamps, '$.signal_defaults_at') IS NULL
    ORDER BY dataset_id
    LIMIT ?`;
@@ -72,7 +77,7 @@ export const SIGNAL_DEFAULTS_SWEEP_CANDIDATE_SQL = `SELECT dataset_id, github_re
 export const SIGNAL_DEFAULTS_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n FROM datasets
    WHERE status = 'active'
      AND github_repo IS NOT NULL
-     AND (is_sandbox = 0 OR is_sandbox IS NULL)
+     AND (is_sandbox = 0 OR is_sandbox IS NULL OR ${exemplarOrFragment("")})
      AND json_extract(sweep_stamps, '$.signal_defaults_at') IS NULL`;
 
 /**
@@ -327,14 +332,13 @@ export async function runSignalDefaultsSweep(
  * Cron-only wrapper (issue #1166, Option 2). `runSignalDefaultsSweep` itself
  * stays UNGUARDED on purpose: `POST /admin/datasets/signal-defaults-sweep`
  * calls it directly and is not environment-gated, so an operator can still
- * drive a backfill outside production. Note the fleet is NOT what that
- * reaches: this sweep's candidate SQL filters `is_sandbox` without the
- * `is_exemplar = 1` carve-out (issue #1168), and exemplars are inserted
- * `is_sandbox = 1`, so on staging the only candidate is `nm099999`.
- * Only the recurring daily-cron caller needs
- * the production fence, so the guard lives here instead of inside the sweep
- * -- guarding the sweep itself would quietly take the admin route down
- * outside production too.
+ * drive a backfill outside production. On staging the candidate SQL's
+ * `exemplarOrFragment()` carve-out (issue #1168) reaches the exemplar fleet
+ * in addition to `nm099999`, since the fleet is inserted `is_sandbox = 1`
+ * but is exempted from the sandbox exclusion via `is_exemplar = 1`. Only the
+ * recurring daily-cron caller needs the production fence, so the guard
+ * lives here instead of inside the sweep -- guarding the sweep itself would
+ * quietly take the admin route down outside production too.
  *
  * Returns `null` when skipped so the `scheduled()` call site can tell "ran
  * with nothing to do" (a real result with `processed: 0`) apart from "did not

@@ -686,6 +686,36 @@ describe("CLI Dataset Status", () => {
     expect(result.dataset_id).toBe("nm099999");
     expect(result.name).toBeDefined();
   });
+
+  test("nemar dataset view is an alias for dataset status", async () => {
+    const { stdout: viewHelp, exitCode: viewExit } = await runCli(["dataset", "view", "--help"]);
+    const { stdout: statusHelp, exitCode: statusExit } = await runCli([
+      "dataset",
+      "status",
+      "--help",
+    ]);
+
+    expect(viewExit).toBe(0);
+    expect(statusExit).toBe(0);
+    // Both resolve to the same command implementation, so their help text
+    // (description, options, examples) is byte-identical.
+    expect(viewHelp).toContain("Check status of a dataset");
+    expect(viewHelp).toContain("--json");
+    expect(viewHelp).toBe(statusHelp);
+  });
+
+  test("nemar dataset --help lists view as an alias of status", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "--help"]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("status|view");
+  });
+
+  test("nemar dataset view with non-existent dataset behaves like status", async () => {
+    const { stdout, exitCode } = await runCli(["dataset", "view", "nm099998"]);
+
+    expect(stdout).toContain("not found");
+  });
 });
 
 describe("CLI Dataset List", () => {

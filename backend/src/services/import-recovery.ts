@@ -173,6 +173,7 @@ async function alertAdmins(
       fromEmail,
       replyTo,
       isDev,
+      env,
     );
   } catch (err) {
     console.error(`[import-recovery] admin alert failed for ${datasetId}:`, err);

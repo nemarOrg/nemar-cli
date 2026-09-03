@@ -1671,6 +1671,7 @@ async function stepNotifyUser(c: ApproveStepContext): Promise<RespondOutcome | u
         fromEmail,
         replyTo,
         isDev,
+        c.env,
       );
 
       await updateProgress("notify_user");

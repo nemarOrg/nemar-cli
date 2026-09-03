@@ -512,11 +512,11 @@ and what is historical. The entries worth knowing by name:
 | Group | Covers |
 |---|---|
 | `nemar auth` | login, signup, status/whoami, switch, logout, verification, SSH setup, key retrieval and regeneration |
-| `nemar dataset` | validate, upload, download, status, list, search, release, update, clone, get, commit, push, drop, ci, manifest |
+| `nemar dataset` | validate, upload, download, status (alias: view), list, search, release, update, clone, get, commit, push, drop, ci, manifest |
 | `nemar dataset publish` | request, status, resend |
 | `nemar dataset` (access) | request-access, access, invite, collaborators |
 | `nemar sandbox` | training run, status, reset — required before uploading |
-| `nemar admin` | users, approve, revoke, role, notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, zarr-fidelity-sweep, doctor, summary, notice, email-preferences, e2e-test |
+| `nemar admin` | users, approve, revoke, role, notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, recording-stats-sweep, signal-defaults-sweep, zarr-fidelity-sweep, doctor, summary, notice, email-preferences, e2e-test |
 | `nemar admin import*` | OpenNeuro import, status, rollback, retry, verify, recover (issue #754, epic #967) |
 | `nemar admin fleet` | drift, enforce, revalidate — governance across dataset repos (epic #713) |
 | `nemar admin exemplar` | create, status, remint-dois — the staging exemplar fleet |

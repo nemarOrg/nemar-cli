@@ -254,34 +254,55 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
       .bind(email, newCodeId)
       .run();
 
-    // Email send. A failure here means the user has no way to receive
-    // the code — returning 200 would silently strand them. Roll the
-    // auth_codes row back so the per-minute cap doesn't punish the
-    // retry, and surface 503 so the frontend can retry / show a
-    // useful error rather than wait for a code that never arrives.
-    try {
-      const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
-      await sendPasswordlessCodeEmail(email, code, c.env.RESEND_API_KEY, fromEmail, replyTo, isDev);
-    } catch (emailError) {
-      console.error("[auth-web] failed to send passwordless code email", emailError);
-      await db
-        .prepare("DELETE FROM auth_codes WHERE id = ?")
-        .bind(newCodeId)
-        .run()
-        .catch((cleanupErr) =>
-          console.error("[auth-web] failed to roll back auth_codes row", cleanupErr),
+    // #1008 + #957: echo-eligible non-production recipients (the shared QA
+    // account, and every @nemar.test fixture scripts/seed-dev-db.sql and the
+    // live passwordless suite create) skip the real send entirely. dev_code
+    // below IS their delivery channel, and `.test` is a non-routable
+    // IANA-reserved TLD (RFC 2606) a real send could never usefully reach
+    // anyway. This also means these flows never depend on
+    // DEV_EMAIL_ALLOWLIST (services/email.ts's separate, generic
+    // non-production delivery fence) -- belt-and-suspenders so an allowlist
+    // gap can never turn a dev/test sign-in the echo would have served into
+    // a 503. Admins/owners passed the allowlist above via role, not email,
+    // so they are NOT echo-eligible here and still get a real send: the
+    // response body is readable by whoever sent the request.
+    const echoOnly = isDevOrTest(c.env) && nonProdCodeEchoAllowed(email);
+
+    if (!echoOnly) {
+      // Email send. A failure here means the user has no way to receive
+      // the code — returning 200 would silently strand them. Roll the
+      // auth_codes row back so the per-minute cap doesn't punish the
+      // retry, and surface 503 so the frontend can retry / show a
+      // useful error rather than wait for a code that never arrives.
+      try {
+        const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
+        await sendPasswordlessCodeEmail(
+          email,
+          code,
+          c.env.RESEND_API_KEY,
+          fromEmail,
+          replyTo,
+          isDev,
+          c.env,
         );
-      return c.json({ error: "Could not deliver sign-in code; try again shortly." }, 503);
+      } catch (emailError) {
+        console.error("[auth-web] failed to send passwordless code email", emailError);
+        await db
+          .prepare("DELETE FROM auth_codes WHERE id = ?")
+          .bind(newCodeId)
+          .run()
+          .catch((cleanupErr) =>
+            console.error("[auth-web] failed to roll back auth_codes row", cleanupErr),
+          );
+        return c.json({ error: "Could not deliver sign-in code; try again shortly." }, 503);
+      }
     }
 
     const body: Record<string, unknown> = {
       ok: true,
       masked_email: maskEmail(email),
     };
-    // #1008: echo only for synthetic accounts. Admins/owners passed the
-    // allowlist above but must read their code from the actual email —
-    // the response body is readable by whoever sent the request.
-    if (isDevOrTest(c.env) && nonProdCodeEchoAllowed(email)) body.dev_code = code;
+    if (echoOnly) body.dev_code = code;
 
     // Final belt-and-braces: never leak the code in production. If
     // ENVIRONMENT is misconfigured at deploy time, this assertion
@@ -876,30 +897,42 @@ authWebRoutes.post(
         .bind(email, webUser.id, newCodeId)
         .run();
 
-      try {
-        const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
-        await sendEmailChangeCodeEmail(
-          email,
-          code,
-          c.env.RESEND_API_KEY,
-          fromEmail,
-          replyTo,
-          isDev,
-        );
-      } catch (emailError) {
-        console.error("[auth-web] failed to send email-change code email", emailError);
-        await db
-          .prepare("DELETE FROM auth_codes WHERE id = ?")
-          .bind(newCodeId)
-          .run()
-          .catch((cleanupErr) =>
-            console.error("[auth-web] failed to roll back auth_codes row", cleanupErr),
+      // #1008 + #957: same echo-skips-the-send reasoning as /code/request
+      // above. Every non-production target that reaches this point is
+      // already echo-eligible (the early return above admits nothing
+      // else), so this is unconditional here -- kept as an explicit check
+      // rather than an assumption so this route can never silently start
+      // depending on send succeeding for a target the early return widens
+      // to admit in the future.
+      const echoOnly = isDevOrTest(c.env) && nonProdCodeEchoAllowed(email);
+
+      if (!echoOnly) {
+        try {
+          const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
+          await sendEmailChangeCodeEmail(
+            email,
+            code,
+            c.env.RESEND_API_KEY,
+            fromEmail,
+            replyTo,
+            isDev,
+            c.env,
           );
-        return c.json({ error: "Could not deliver the code; try again shortly." }, 503);
+        } catch (emailError) {
+          console.error("[auth-web] failed to send email-change code email", emailError);
+          await db
+            .prepare("DELETE FROM auth_codes WHERE id = ?")
+            .bind(newCodeId)
+            .run()
+            .catch((cleanupErr) =>
+              console.error("[auth-web] failed to roll back auth_codes row", cleanupErr),
+            );
+          return c.json({ error: "Could not deliver the code; try again shortly." }, 503);
+        }
       }
 
       const body: Record<string, unknown> = { ok: true, masked_email: maskEmail(email) };
-      if (isDevOrTest(c.env) && nonProdCodeEchoAllowed(email)) body.dev_code = code;
+      if (echoOnly) body.dev_code = code;
 
       // Same belt-and-braces as /code/request: never ship a code in a
       // production response body.

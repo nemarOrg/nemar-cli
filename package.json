@@ -1,6 +1,6 @@
 {
   "name": "nemar-cli",
-  "version": "0.9.15-dev4",
+  "version": "0.9.15-dev8",
   "description": "CLI for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource) dataset management",
   "type": "module",
   "main": "dist/index.js",
@@ -15,6 +15,7 @@
     "lint:fix": "biome check --fix src/",
     "format": "biome format --write src/",
     "typecheck": "tsc --noEmit && tsc --noEmit -p backend",
+    "generate-openapi": "bun run scripts/generate-openapi.ts",
     "prepublishOnly": "bun run build",
     "prepare": "husky",
     "postinstall": "bun scripts/postinstall-check.mjs",
@@ -46,6 +47,8 @@
   "files": [
     "dist",
     "scripts/postinstall-check.mjs",
+    "scripts/recover-datasets.json",
+    "scripts/withdrawn-datasets.json",
     "README.md",
     "LICENSE"
   ],
@@ -67,6 +70,7 @@
     ]
   },
   "devDependencies": {
+    "@asteasolutions/zod-to-openapi": "^7.3.4",
     "@biomejs/biome": "1.9.4",
     "@types/bun": "latest",
     "@types/inquirer": "^9.0.7",
