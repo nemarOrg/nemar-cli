@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import json
 import math
 import os
@@ -618,7 +619,58 @@ def apply_worker_mem_limit(
 INMEM_MEM_FACTOR = float(os.environ.get("ZARR_INMEM_MEM_FACTOR", "6"))
 INMEM_MEM_FACTOR_BY_EXT = {
     ".vhdr": float(os.environ.get("ZARR_INMEM_MEM_FACTOR_VHDR", "12")),
+    # Same retention as on the streaming path (see STREAM_MEM_FACTOR_BY_EXT):
+    # a MEF3 recording small enough for the in-memory path still decompresses
+    # to float64 several times its RED-compressed on-disk size.
+    MEFD_EXT: float(os.environ.get("ZARR_INMEM_MEM_FACTOR_MEFD", "12")),
 }
+
+# Formats that take the STREAMING path but do not stay inside its flat bound.
+# MEF3 `.mefd` is read through `mne.io.read_raw_mef`, which does ask pymef for one
+# time window at a time -- and the worker's resident memory still climbs to the
+# whole recording decompressed at float64. Measured on the conversion node on
+# 2026-09-03 (on004696, 178-256 channels x 3.3M samples, ~1 GB on disk each):
+# VmHWM 7.5-10.3 GiB per worker, and every recording failed its 8 GiB RLIMIT_DATA
+# on a single-window allocation after many windows, which is the signature of
+# memory retained per window read rather than of one large read. Under the flat
+# 4 GiB projection admission packed eight of them and the kernel killed a worker,
+# which broke the pool. Until the retention is fixed at the reader, project MEF3
+# as an in-memory format: on-disk bytes times this factor (RED compression means
+# on-disk understates the float64 footprint several-fold). 12x covers the worst
+# measured point (10.3 GiB from ~1 GB) with a small margin and admits three at a
+# time against the node's ~46 GiB ceiling instead of eight. Env-overridable so
+# the next measurement (the `worst .mefd at Nx its projection` line in every
+# run's log) can tighten it without a deploy. #1111
+STREAM_MEM_FACTOR_BY_EXT = {
+    MEFD_EXT: float(os.environ.get("ZARR_STREAM_MEM_FACTOR_MEFD", "12")),
+}
+
+
+def stream_factor_for(primary_local: str) -> float:
+    """On-disk multiplier for a streamed recording whose format is known to retain
+    memory beyond the flat streaming bound; 0.0 for every other format, so the
+    flat bound stands alone."""
+    return STREAM_MEM_FACTOR_BY_EXT.get(lower_ext(primary_local), 0.0)
+
+
+def projection_factor_hint(primary_local: str, streaming: bool) -> str:
+    """Name the format-specific multiplier behind a projection, for the skip
+    message, when one applied. A recording skipped as too large under a
+    per-format factor is skipped because of that factor as much as because of
+    its bytes on disk, so the person reading the index should see which knob
+    produced the number rather than a bare "too large". For MEF3 that knob is
+    what to retune once the reader stops retaining; for BrainVision the 12x is
+    a measured cost (#1111) and the hint is simply where the number came from.
+
+    The knob name is derived by convention (`ZARR_<STREAM|INMEM>_MEM_FACTOR_<EXT>`);
+    every per-extension factor above follows it, and a new one must too or the
+    hint names a variable that does not exist."""
+    ext = lower_ext(primary_local)
+    table = STREAM_MEM_FACTOR_BY_EXT if streaming else INMEM_MEM_FACTOR_BY_EXT
+    if ext not in table or (streaming and table[ext] <= 0):
+        return ""
+    knob = f"ZARR_{'STREAM' if streaming else 'INMEM'}_MEM_FACTOR_{ext.lstrip('.').upper()}"
+    return f"; projected with the {ext} factor {table[ext]:g}x ({knob})"
 
 # Signal-Space Separation (ADR 0028) runs BEFORE conversion and costs its own peak:
 # it needs a fully preloaded float64 `Raw`, which is the anonymous memory RLIMIT_DATA
@@ -749,6 +801,29 @@ class RecordingTooLarge(Exception):
     failure -- instead of OOM-crashing the worker. #909"""
 
     code = "recording_too_large"
+
+
+def is_memory_exhaustion(exc: BaseException) -> bool:
+    """Whether `exc` is the RLIMIT_DATA backstop (or the allocator) saying no.
+
+    `MemoryError` is the obvious shape. Two others come from the same cause and
+    used to fall through as uncoded infra failures, which breaks the worker pool
+    and re-runs the recording one at a time to "find the culprit": a thread
+    stack is a private writable mapping, so at the limit zarr's codec pipeline
+    dies with `RuntimeError: can't start new thread` (on004696, 2026-09-03), and
+    an `mmap` refused at the limit raises `OSError(ENOMEM)`.
+    """
+    if isinstance(exc, MemoryError):
+        return True
+    # CPython raises this one fixed string for ANY pthread_create failure and
+    # attaches no errno, so EAGAIN (a thread-count limit such as RLIMIT_NPROC)
+    # is indistinguishable here from ENOMEM. Nothing in this driver tightens a
+    # thread limit, only RLIMIT_DATA, so at the limit this is the backstop; if it
+    # ever recurs on a node where memory is NOT the story, this is the line that
+    # turned a novel infra failure into a retryable memory verdict.
+    if isinstance(exc, RuntimeError) and "can't start new thread" in str(exc):
+        return True
+    return isinstance(exc, OSError) and exc.errno == errno.ENOMEM
 
 
 class RecordingMemoryExceeded(Exception):
@@ -896,11 +971,13 @@ def projected_peak_bytes(
     `Raw` is released between them, so the recording's peak is the LARGER of the two
     rather than their sum.
     """
-    conversion = (
-        streaming_peak_bytes(size_bytes, n_channels)
-        if should_stream(primary_local, size_bytes)
-        else int(size_bytes * inmem_factor_for(primary_local))
-    )
+    if should_stream(primary_local, size_bytes):
+        conversion = max(
+            streaming_peak_bytes(size_bytes, n_channels),
+            int(size_bytes * stream_factor_for(primary_local)),
+        )
+    else:
+        conversion = int(size_bytes * inmem_factor_for(primary_local))
     if not maxshield:
         return conversion
     return max(conversion, int(size_bytes * MAXSHIELD_MEM_FACTOR))
@@ -4823,7 +4900,8 @@ def convert_recording(
                 f"projected peak ~{peak // 1024**3} GiB exceeds the "
                 f"~{mem_budget_bytes // 1024**3} GiB per-recording budget for this run "
                 f"(on-disk {size_bytes // 1024**3} GiB via the "
-                f"{'streaming' if streaming else 'in-memory'} path; "
+                f"{'streaming' if streaming else 'in-memory'} path"
+                f"{projection_factor_hint(primary_local, streaming)}; "
                 "the budget is the node's usable RAM and does NOT change with --jobs)"
             )
     def _convert_in_memory() -> None:
@@ -5244,6 +5322,12 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             primary, exc, peak_rss_bytes() if rss_trusted else None
         )
     except Exception as exc:  # noqa: BLE001 - isolate one bad recording
+        # The backstop does not always surface as MemoryError: see
+        # `is_memory_exhaustion`. Same verdict, same code, same measurement.
+        if is_memory_exhaustion(exc):
+            return memory_failure_result(
+                primary, exc, peak_rss_bytes() if rss_trusted else None
+            )
         # biosigIO read failures carry a stable `.code` (not_continuous,
         # corrupt_or_truncated, ...) so the index can tell the viewer WHY a
         # recording has no store. Infra failures (a plain RuntimeError, a crashed
