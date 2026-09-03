@@ -214,12 +214,31 @@ export const BLOCKLIST_RECHECK_QUERY = `
 /** Bounded, resumable reclassification candidates: `complete` rows never
  *  re-verified. Once every complete row has been checked once,
  *  integrity_checked_at IS NULL drains to empty and the sweep is a no-op
- *  fast query until new imports finalize. */
+ *  fast query until new imports finalize.
+ *
+ *  Excludes rows whose dataset was withdrawn (migration 0060,
+ *  `datasets.withdrawn_at`, issue #1141): withdrawal is a deliberate,
+ *  terminal call on a dataset whose content could not be recovered (see
+ *  0060's module doc) -- reclassifying its import_jobs row back to
+ *  `incomplete` would re-arm the retry sweep against a dataset NEMAR has
+ *  already declared undeliverable, dispatching GitHub work for nothing and
+ *  fighting the withdrawal instead of respecting it. NOT EXISTS, not a JOIN
+ *  or `dataset_id NOT IN (...)`: import_jobs deliberately outlives its
+ *  datasets row (0044's module doc -- deleteDatasetCascade drops `datasets`
+ *  but never `import_jobs`, so a rolled-back/deleted import's row has no
+ *  match here at all), and NOT EXISTS keeps such a row a candidate exactly
+ *  as before, only excluding a row whose dataset ROW EXISTS AND is
+ *  withdrawn. */
 export const RECLASSIFY_CANDIDATES_QUERY = `
   SELECT dataset_id
     FROM import_jobs
    WHERE status = 'complete'
      AND integrity_checked_at IS NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM datasets d
+        WHERE d.dataset_id = import_jobs.dataset_id
+          AND d.withdrawn_at IS NOT NULL
+     )
    ORDER BY updated_at ASC
    LIMIT ?`;
 
