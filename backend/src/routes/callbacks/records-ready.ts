@@ -6,8 +6,9 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
+import { timingSafeEqual } from "../../lib/constant-time.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
-import { type WebhookRouter, timingSafeEqual } from "../webhooks/shared.js";
+import type { WebhookRouter } from "../webhooks/shared.js";
 
 /**
  * POST /webhooks/records-ready — callback from nemarDatasets/.github
