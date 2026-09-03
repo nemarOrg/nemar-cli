@@ -322,10 +322,20 @@ REPLY_TO = "info@nemar.org"
 # both refuse to deliver here unless the recipient matches an entry (comma-
 # separated exact addresses or "@domain" suffixes). "@nemar.org" covers the
 # three seeded fixture accounts (testOwner@/testAdmin@/test@nemar.org, see
-# scripts/seed-dev-db.sql) without allow-listing any real external user.
-# Widen with a real tester's address (never a "@domain" for an external
+# scripts/seed-dev-db.sql). "@nemar.test" is the OTHER non-production
+# population routes/auth-web.ts's passwordless code flow depends on --
+# scripts/seed-dev-db.sql's test-user/test-pending/test-verified/test-revoked
+# fixtures and every `pl-<label>-<ts>@nemar.test` address the live
+# test/auth-passwordless.test.ts suite generates. Neither entry allow-lists
+# any real external user: `.test` is a non-routable IANA-reserved TLD (RFC
+# 2606), and routes/auth-web.ts additionally never even attempts a real send
+# to an @nemar.test / test@nemar.org recipient in a non-production
+# environment -- services/auth-code.ts's nonProdCodeEchoAllowed() echoes
+# dev_code in the response instead, so this allowlist entry is belt-and-
+# suspenders there, not the only thing standing between those fixtures and a
+# 503. Widen with a real tester's address (never a "@domain" for an external
 # provider) only for the duration of a manual test that needs delivery.
-DEV_EMAIL_ALLOWLIST = "@nemar.org"
+DEV_EMAIL_ALLOWLIST = "@nemar.org,@nemar.test"
 # Staging zarr cache host (epic #923). URL-scoped purges of zarr-test.* can't
 # touch prod cache entries; purge stays inert until CLOUDFLARE_ZONE_ID + a purge
 # token are provisioned on dev (/webhooks/zarr-ready logs "purge skipped").
