@@ -296,7 +296,7 @@ which lowercases and strips scheme, path, query, port and a trailing DNS dot;
 | `ZARR_AWS_PROFILE` | `nemar-zarr-dev` | IAM user `nemar-hallu-zarr-dev`, `s3:Get/Put/Delete` on `nemar-dev/*/zarr/*` + `GetObject` on `nemar-dev/*/objects/*` + `ListBucket`; cannot write to the prod bucket — per the IAM policy as provisioned 2026-09-02 (inline policy `zarr-rw-dev` on user `nemar-hallu-zarr-dev`, no IaC in this repo) |
 | `ZARR_STATE_DIR` | `${ZARR_BASE:-/mnt/local}/zarr-state-test` | |
 | `ZARR_WORK_DIR` | `${ZARR_BASE:-/mnt/local}/zarr-scratch-test` | |
-| `ZARR_DRIVER_REF` | `dev` | tracks the same unreleased branch the rest of staging tracks — but the installed cron line below overrides it with the epic branch while epic #1181 is open |
+| `ZARR_DRIVER_REF` | `dev` | tracks the same unreleased branch the rest of staging tracks; the installed cron line below sets it explicitly to `dev` (it pinned the epic branch while epic #1181 was open, flipped back 2026-09-03) |
 | `ZARR_JOBS` | `4` | deliberately low — a test instance shares Hallu's cores with the prod backfill and must not contend with it |
 
 **Ops sanity check, no side effects:**
@@ -335,7 +335,7 @@ so `setup()`'s self-deploy keeps it current
 **Cron — INSTALLED. The line on Hallu, verbatim:**
 
 ```
-15 3 * * * mkdir -p /mnt/local/zarr-state-test && ZARR_DRIVER_REF=feature/issue-1181-epic-zarr-serving /mnt/local/zarr-state-test/nemar-cli/scripts/zarr/hallu-zarr.sh --test >> /mnt/local/zarr-state-test/.nm-zarr-cron.log 2>&1
+15 3 * * * mkdir -p /mnt/local/zarr-state-test && ZARR_DRIVER_REF=dev /mnt/local/zarr-state-test/nemar-cli/scripts/zarr/hallu-zarr.sh --test >> /mnt/local/zarr-state-test/.nm-zarr-cron.log 2>&1
 ```
 
 Nightly at 03:15 UTC and off the prod cron's `:30` hourly tick
@@ -347,12 +347,16 @@ Two parts of that line are not decoration:
 - `mkdir -p` runs first so the redirect target's directory exists on a node where
   the state dir has been wiped; `>>` would otherwise fail before the script ran,
   and cron's only trace of it is mail nobody reads.
-- **`ZARR_DRIVER_REF` is set EXPLICITLY, overriding `--test`'s `dev` default**,
-  because staging's job while epic #1181 is open is to prove the epic branch
-  before `dev` has it. **Flip it to `dev` (or drop the override) once the epic
-  merges** — left pointing at the epic branch it would pin staging to a ref that
-  stops moving, and `setup()`'s self-deploy would keep resetting the clone to a
-  stale commit while looking perfectly healthy.
+- **`ZARR_DRIVER_REF` is set EXPLICITLY** even though it matches `--test`'s `dev`
+  default, so the ref staging runs is visible in `crontab -l` rather than buried
+  in the script. While epic #1181 was open it pinned the epic branch, because
+  staging's job then was to prove the epic before `dev` had it; it was flipped
+  back to `dev` on 2026-09-03 once the epic merged. **Never leave it on a merged
+  branch** — GitHub deletes the branch on merge, `setup()` then FATALs on the
+  unresolvable ref, and before that it would pin staging to a commit that stops
+  moving while looking perfectly healthy. Edit the crontab by writing the edited
+  copy to a file and installing it with `crontab <file>`, never by piping into
+  `crontab -` (a failed `sed` in the pipe installs an empty crontab).
 
 **What is NOT shared with prod:**
 state directory, lock, queue db, venv, driver clone,

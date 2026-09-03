@@ -1181,10 +1181,11 @@ Merging this into the epic branch is enough to exercise the whole bump on the
 
 - Production tracks `main` (`ZARR_DRIVER_REF=main`), so it does not run this code
   until the release.
-- The staging instance tracks the epic branch nightly — the installed crontab line
-  is `15 3 * * * mkdir -p /mnt/local/zarr-state-test && ZARR_DRIVER_REF=feature/issue-1181-epic-zarr-serving /mnt/local/zarr-state-test/nemar-cli/scripts/zarr/hallu-zarr.sh --test >> /mnt/local/zarr-state-test/.nm-zarr-cron.log 2>&1`,
-  which overrides `--test`'s own `dev` default and must be flipped back to `dev`
-  once the epic merges (systems-inventory.md §3.4 holds the same line and says why)
+- The staging instance tracks `dev` nightly — the installed crontab line
+  is `15 3 * * * mkdir -p /mnt/local/zarr-state-test && ZARR_DRIVER_REF=dev /mnt/local/zarr-state-test/nemar-cli/scripts/zarr/hallu-zarr.sh --test >> /mnt/local/zarr-state-test/.nm-zarr-cron.log 2>&1`.
+  While epic #1181 was open it pinned the epic branch instead, and was flipped back
+  to `dev` on 2026-09-03 after the merge (systems-inventory.md §3.4 holds the same line);
+  flip it to a feature branch again only while staging needs code that is not on `dev`
   — and its queue holds only the
   7 curated `xx0999NN` exemplars. That is under `ENGINE_REQUEUE_LIMIT` (25), so
   `reconcile` requeues them WITHOUT an ack and the fleet re-converts through
