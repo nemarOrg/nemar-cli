@@ -661,12 +661,10 @@ describe("the zarr summary survives callback -> D1 -> GET /datasets/:id -> the c
     const res = await catalog.request(`/${DATASET}`, {}, env(db));
     expect(res.status).toBe(200);
     const body = (await res.json()) as { dataset: Record<string, unknown> };
-    // The detail route serves `SELECT d.*`, so `id` arrives as the numeric
-    // primary key while the contract declares it a string. That mismatch is
-    // pre-existing and real (no live response is parsed against these schemas
-    // today -- filed as #1207); it is stringified HERE so this test fails for
-    // its own subject, the zarr summary, rather than for a known unrelated gap.
-    return datasetDetailSchema.parse({ ...body.dataset, id: String(body.dataset.id) });
+    // #1224 review: the detail route now stringifies `id` at the source
+    // (catalog.ts), so this no longer needs a hand stringification
+    // workaround -- parse the response exactly as served.
+    return datasetDetailSchema.parse(body.dataset);
   };
 
   beforeEach(() => {

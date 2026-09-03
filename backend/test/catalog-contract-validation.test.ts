@@ -156,6 +156,23 @@ describe("GET /datasets/:id: contract validation hook (issue #1207)", () => {
       true,
     );
   });
+
+  // #1224 review, item 1: the detail route used to be saturated from day
+  // one -- `SELECT d.*`'s raw numeric `id` and a null `file_size_formatted`
+  // both violated the contract on EVERY well-formed row, so this positive
+  // control could never have passed before catalog.ts stringified `id` at
+  // the source and shared/contract/dataset.ts's datasetDetailSchema was
+  // widened to describe the detail route's genuinely nullable
+  // file_size_formatted (see that schema's comment for why nullable is the
+  // truthful fix here rather than changing the detail route's runtime
+  // behavior to match the list route's `''` coalesce).
+  test("an all-well-formed row logs no contract violation", async () => {
+    insertDataset(db, "nm090007", { name: "Well Formed Detail Fixture" });
+
+    const res = await app.request("/nm090007", {}, env(db));
+    expect(res.status).toBe(200);
+    expect(contractViolationCalls("GET /datasets/:id").length).toBe(0);
+  });
 });
 
 describe("Contract validation cost gate: production samples instead of validating every response", () => {

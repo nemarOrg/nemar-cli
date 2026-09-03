@@ -1358,6 +1358,16 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     } = withCanonicalLatestVersion(dataset as Record<string, unknown>);
     const detail = {
       ...rest,
+      // #1207 review: `SELECT d.*` serves the raw numeric primary key here,
+      // but the contract (shared/contract/dataset.ts) declares `id: string`
+      // -- the list route's `id` is `d.dataset_id AS id`, already a string
+      // (see catalogItemObjectSchema's comment on the two `id` shapes).
+      // Stringify at the source rather than leaving every consumer --
+      // including this route's own contract-validation hook below -- to
+      // special-case the detail route's `id`. `rest.id` is always present
+      // (the NOT NULL integer primary key); String(undefined) is never
+      // reachable here.
+      id: String((rest as Record<string, unknown>).id),
       file_size_formatted: deriveFileSizeFormatted(dataset.file_size),
       zarr_data_failures: parseZarrDataFailures(zarrDataFailuresRaw, dataset.dataset_id as string),
       // #1062: derived from the raw zarr_status this SELECT d.* already
