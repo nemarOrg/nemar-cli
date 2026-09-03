@@ -21,31 +21,14 @@ import { Hono } from "hono";
 import { registerZarrReadyRoutes } from "../src/routes/callbacks/zarr-ready";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+import { installWorkersTimingSafeEqual } from "./helpers/workers-crypto";
 
-/**
- * `crypto.subtle.timingSafeEqual` is a Cloudflare Workers extension to Web
- * Crypto; bun's runtime does not have it, so the handler's token check throws
- * before reaching any of the behavior under test.
- *
- * This supplies a REAL constant-time comparison for that missing platform
- * primitive. It is not a mock in the sense .rules/testing.md forbids: no
- * business logic is replaced or bypassed, the handler's own auth check still
- * executes against it, and `rejects a wrong token` below proves the check is
- * live rather than short-circuited.
- */
-const subtle = crypto.subtle as SubtleCrypto & {
-  timingSafeEqual?: (a: ArrayBufferView, b: ArrayBufferView) => boolean;
-};
-if (typeof subtle.timingSafeEqual !== "function") {
-  subtle.timingSafeEqual = (a: ArrayBufferView, b: ArrayBufferView): boolean => {
-    const x = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
-    const y = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
-    if (x.length !== y.length) return false;
-    let diff = 0;
-    for (let i = 0; i < x.length; i++) diff |= (x[i] as number) ^ (y[i] as number);
-    return diff === 0;
-  };
-}
+// Real constant-time comparison for the Workers-only
+// `crypto.subtle.timingSafeEqual` the zarr-ready handler's token check needs
+// (bun's runtime lacks it). See helpers/workers-crypto.ts for why this isn't
+// a mock and why it's still installed now that lib/constant-time.ts feature-
+// detects this itself: it keeps this suite exercising the native branch.
+installWorkersTimingSafeEqual();
 
 const TOKEN = "zarr-pool-breaks-webhook-token";
 const DATASET = "on007523";

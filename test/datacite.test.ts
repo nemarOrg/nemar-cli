@@ -313,6 +313,29 @@ describe("buildDataCiteXml", () => {
     expect(xml).toContain("Test &quot;Quoted&quot; Name");
   });
 
+  // Phase 3 of epic #1225 (issue #1226): buildDataCiteXml now routes through
+  // the shared escapeXml in backend/src/lib/escape.ts. A single creator name
+  // carrying all five special characters exercises every branch of that
+  // helper through this real entry point, with &apos; -- not &#39; -- for
+  // the apostrophe, matching escapeXml's contract (escapeHtml is the one
+  // that uses &#39;; the two are deliberately different functions).
+  test("a creator name with all five special characters escapes each one, &apos; for the apostrophe", () => {
+    const metadata: DataCiteMetadata = {
+      identifier: "10.82901/NEMAR.ALLFIVE",
+      creators: [{ name: `O'Brien & Sons <Ltd> "Data"` }],
+      titles: ["Test"],
+      publisher: "NEMAR",
+      publicationYear: 2026,
+      resourceTypeGeneral: "Dataset",
+    };
+
+    const xml = buildDataCiteXml(metadata);
+    expect(xml).toContain(
+      '<creatorName nameType="Personal">O&apos;Brien &amp; Sons &lt;Ltd&gt; &quot;Data&quot;</creatorName>',
+    );
+    expect(xml).not.toContain("&#39;");
+  });
+
   test("throws on missing identifier", () => {
     expect(() =>
       buildDataCiteXml({
@@ -1810,5 +1833,41 @@ describe("seedFromBids SourceDatasets URL fallback", () => {
       (r) => r.relation_type === "IsDerivedFrom",
     );
     expect(derived).toHaveLength(0);
+  });
+});
+
+describe("buildDataCiteXml sizes (#1225 review)", () => {
+  /**
+   * `sizes` is seeded by enrich-dataset's Stage 1a from
+   * `formatFileSize(s3Stats.totalSize)`, which returns null for a
+   * non-positive total (a metadata-only dataset, or enrichment running
+   * before the S3 objects land). The formatter it replaced returned a string
+   * for every input, so an unguarded interpolation put the literal
+   * "null (0 files)" into a MINTED DOI record. The call site now omits the
+   * field instead. These rows pin the publishing layer's half: an absent
+   * `sizes` produces no element at all, so omitting is safe. The other half
+   * (`formatFileSize(0)` is null) is pinned in
+   * test/catalog-sync-from-enrichment.unit.test.ts; the guard between them is
+   * a one-line `if` with no S3-and-D1 harness to drive it end to end.
+   */
+  const base = (): DataCiteMetadata => ({
+    identifier: "10.82901/NEMAR.SIZES",
+    creators: [{ name: "Shirazi, Yahya" }],
+    titles: ["Sizes fixture"],
+    publisher: "NEMAR",
+    publicationYear: 2026,
+    resourceTypeGeneral: "Dataset",
+  });
+
+  test("a real size is emitted", () => {
+    const xml = buildDataCiteXml({ ...base(), sizes: ["4.31 GB (12 files)"] });
+    expect(xml).toContain("<sizes>");
+    expect(xml).toContain("<size>4.31 GB (12 files)</size>");
+  });
+
+  test("an omitted size emits no sizes element, and never a stringified null", () => {
+    const xml = buildDataCiteXml(base());
+    expect(xml).not.toContain("<sizes>");
+    expect(xml).not.toContain("null (");
   });
 });

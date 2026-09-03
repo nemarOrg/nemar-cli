@@ -9,6 +9,7 @@
  * The mint/dispatch machinery lives in services/central-manifest.ts.
  */
 
+import { timingSafeEqual } from "../../lib/constant-time.js";
 import {
   type EzidVersionDoiDataset,
   dispatchCentralManifestJob,
@@ -25,7 +26,7 @@ import { errorMessage, extractRepoName, readRepoMetadata } from "../../services/
 import { uploadManifest } from "../../services/s3.js";
 import * as zenodo from "../../services/zenodo.js";
 import type { Bindings } from "../../types/bindings.js";
-import { type WebhookContext, type WebhookRouter, timingSafeEqual } from "../webhooks/shared.js";
+import type { WebhookContext, WebhookRouter } from "../webhooks/shared.js";
 
 export function registerVersionDoiRoutes(webhooks: WebhookRouter): void {
   /**

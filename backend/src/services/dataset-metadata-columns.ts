@@ -591,26 +591,6 @@ export async function writeDatasetCatalogFields(
 }
 
 /**
- * Format a byte count as a short human-readable string (`"23.2 GB"`,
- * `"4.31 GB"`). Binary units (1024) — distinct from the decimal
- * `formatBytes` in services/s3.ts. This is the canonical formatter for the
- * served `file_size_formatted` field, which is derived at read time from
- * `file_size` (#1182; the stored column is gone).
- */
-export function formatFileSize(bytes: number | null | undefined): string | null {
-  if (bytes == null || !Number.isFinite(bytes) || bytes <= 0) return null;
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let i = 0;
-  let n = bytes;
-  while (n >= 1024 && i < units.length - 1) {
-    n /= 1024;
-    i++;
-  }
-  const fixed = i === 0 ? `${n}` : n >= 100 ? n.toFixed(0) : n.toFixed(2);
-  return `${fixed} ${units[i]}`;
-}
-
-/**
  * Extract a comma-joined author string from an enrichment_json blob.
  * The enrichment pipeline stores authors as `{ "First Last": { ... }, ... }`
  * (object form, ORCID/affiliation as the value) for most datasets and an

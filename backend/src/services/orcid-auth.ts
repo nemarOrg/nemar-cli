@@ -21,8 +21,8 @@
  * independently of the HTTP plumbing in routes/auth-orcid.ts.
  */
 
+import { timingSafeEqual } from "../lib/constant-time";
 import type { Bindings } from "../types/bindings";
-import { constantTimeEqualHex } from "./auth-code";
 
 export const ORCID_SCOPE = "/authenticate";
 export const STATE_COOKIE_NAME = "nemar_oauth_state";
@@ -401,7 +401,7 @@ export async function verifyPending(
   const payload = token.slice(0, dot);
   const sig = token.slice(dot + 1);
   const expected = await hmacHex(secret, payload);
-  if (!constantTimeEqualHex(sig, expected)) return null;
+  if (!timingSafeEqual(sig, expected)) return null;
   try {
     const p = JSON.parse(b64urlDecode(payload)) as Partial<PendingOrcid>;
     if (!isValidOrcidId(p.orcid) || typeof p.exp !== "number") return null;

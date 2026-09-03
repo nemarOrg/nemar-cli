@@ -3,7 +3,17 @@
  *
  * Provides parsing, bumping, comparison, and validation for semantic versions.
  * Supports only stable versions (X.Y.Z) without pre-release or build metadata.
+ *
+ * Backed by the `semver` package. Edge cases were measured against the
+ * hand-rolled regex this replaced (epic #1225 phase 6) and are handled
+ * explicitly below: a leading-zero component (e.g. "01.2.3") is a narrowing
+ * (the old regex accepted it; semver correctly rejects it as invalid semver),
+ * and surrounding whitespace (e.g. " 1.2.3 ") is a widening semver's parser
+ * would otherwise introduce (it trims and accepts) that this module refuses
+ * to keep, since a whitespace-padded version would flow into a git tag name.
  */
+
+import semver from "semver";
 
 export interface ParsedVersion {
   major: number;
@@ -17,13 +27,20 @@ export interface ParsedVersion {
  * Returns null if the string is not a valid stable semver.
  */
 export function parseVersion(v: string): ParsedVersion | null {
-  const match = v.replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)$/);
-  if (!match) return null;
-  return {
-    major: Number.parseInt(match[1], 10),
-    minor: Number.parseInt(match[2], 10),
-    patch: Number.parseInt(match[3], 10),
-  };
+  // Reject whitespace-padded input explicitly: semver's parser trims
+  // surrounding whitespace and would accept " 1.2.3 ", but this module must
+  // not widen what the old strict regex accepted, since the result flows
+  // into a git tag name.
+  if (v !== v.trim()) return null;
+
+  const parsed = semver.parse(v);
+  if (!parsed) return null;
+
+  // Stable dataset versions only: semver.parse() happily returns a parsed
+  // object for "1.2.3-dev0" or "1.2.3+build"; this module must not.
+  if (parsed.prerelease.length > 0 || parsed.build.length > 0) return null;
+
+  return { major: parsed.major, minor: parsed.minor, patch: parsed.patch };
 }
 
 /**
@@ -36,14 +53,11 @@ export function bumpVersion(current: string, type: "patch" | "minor" | "major"):
     throw new Error(`Invalid version: ${current}`);
   }
 
-  switch (type) {
-    case "patch":
-      return `${parsed.major}.${parsed.minor}.${parsed.patch + 1}`;
-    case "minor":
-      return `${parsed.major}.${parsed.minor + 1}.0`;
-    case "major":
-      return `${parsed.major + 1}.0.0`;
+  const bumped = semver.inc(`${parsed.major}.${parsed.minor}.${parsed.patch}`, type);
+  if (!bumped) {
+    throw new Error(`Invalid version: ${current}`);
   }
+  return bumped;
 }
 
 /**
@@ -57,6 +71,13 @@ export function isValidStableVersion(v: string): boolean {
 /**
  * Compare two version strings.
  * Returns negative if a < b, positive if a > b, 0 if equal.
+ *
+ * NOTE (#1225 phase 6): no production code calls this any more --
+ * `update-check.ts` was its last consumer and now uses `semver.gt` directly,
+ * so only `test/semver.test.ts` reaches it. Its return value also changed
+ * from a raw component difference to `semver.compare`'s -1/0/1; that is inert
+ * today because nothing reads the magnitude, but a new caller must not assume
+ * the old shape.
  */
 export function compareVersions(a: string, b: string): number {
   const pa = parseVersion(a);
@@ -65,7 +86,8 @@ export function compareVersions(a: string, b: string): number {
     throw new Error(`Invalid version(s): ${a}, ${b}`);
   }
 
-  if (pa.major !== pb.major) return pa.major - pb.major;
-  if (pa.minor !== pb.minor) return pa.minor - pb.minor;
-  return pa.patch - pb.patch;
+  return semver.compare(
+    `${pa.major}.${pa.minor}.${pa.patch}`,
+    `${pb.major}.${pb.minor}.${pb.patch}`,
+  );
 }

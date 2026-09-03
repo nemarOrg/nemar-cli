@@ -3,8 +3,10 @@
  * #1182 (migration 0071) and are now derived at read time: the six flat
  * attestation_* fields (exploded from the JSON `attestation` column),
  * `num_citations` (sum of the two stored addends), and `file_size_formatted`
- * (formatFileSize over file_size — binary/1024, NOT services/s3.ts's decimal
- * formatBytes).
+ * (`shared/bytes.ts`'s `formatFileSize` over `file_size` — binary/1024, the
+ * one contractual formatter of the five that module declares; the
+ * decimal/1000 outlier that used to live at services/s3.ts is deleted, epic
+ * #1225 phase 4, issue #1227).
  *
  * Entry point, not helpers (per .rules/testing.md): the dataset is created
  * THROUGH the real POST /datasets route (resume branch — its attestation
@@ -146,6 +148,22 @@ describe("GET /datasets/:id detail contract", () => {
     // decimal formatBytes would say "850.5 KB" — this literal is the tripwire
     // against swapping formatters.
     expect(d.file_size_formatted).toBe("831 KB");
+  });
+
+  // Golden coverage (epic #1225 phase 4, issue #1227): a second magnitude
+  // from the phase 4 six-formatter golden table, driven through the same
+  // real route rather than only the exported formatFileSize function (per
+  // .rules/testing.md). Reuses the fixture row created by createThroughRoute
+  // and overwrites file_size directly, the same way the sweep-written
+  // citation addends are arranged above.
+  test("a second golden magnitude renders correctly through the same route", async () => {
+    db.query("UPDATE datasets SET file_size = ? WHERE dataset_id = ?").run(4628000000, DATASET_ID);
+    const res = await app.request(`/datasets/${DATASET_ID}`, { headers: authHeaders() }, env());
+    expect(res.status).toBe(200);
+    const raw = (await res.json()) as { dataset: Record<string, unknown> };
+    const { id: _rawIntegerId, ...detailWire } = raw.dataset;
+    const body = datasetDetailEnvelopeSchema.parse({ ...raw, dataset: detailWire });
+    expect(body.dataset.file_size_formatted).toBe("4.31 GB");
   });
 });
 

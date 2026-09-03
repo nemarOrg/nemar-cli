@@ -34,8 +34,8 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
 import { auditLogStatement } from "../db/audit-log";
+import { timingSafeEqual } from "../lib/constant-time";
 import { webSessionMiddleware } from "../middleware/webSession";
-import { constantTimeEqualHex } from "../services/auth-code";
 import {
   type OauthMode,
   PENDING_COOKIE_NAME,
@@ -336,7 +336,7 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
 
   const state = decodeState(parseCookieHeader(c.req.header("Cookie"), STATE_COOKIE_NAME));
   const stateParam = url.searchParams.get("state");
-  if (!state || !stateParam || !constantTimeEqualHex(stateParam, state.csrf)) {
+  if (!state || !stateParam || !timingSafeEqual(stateParam, state.csrf)) {
     return fail("orcid_state");
   }
   const code = url.searchParams.get("code");

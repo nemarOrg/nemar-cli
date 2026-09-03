@@ -7,8 +7,9 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
+import { timingSafeEqual } from "../../lib/constant-time.js";
 import { enrichDataset } from "../../services/enrich-dataset.js";
-import { type WebhookRouter, timingSafeEqual } from "../webhooks/shared.js";
+import type { WebhookRouter } from "../webhooks/shared.js";
 
 /**
  * Validate a `ref` value supplied to the /webhooks/llm-enrich endpoint.

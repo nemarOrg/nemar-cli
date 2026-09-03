@@ -6,6 +6,7 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
+import { timingSafeEqual } from "../../lib/constant-time.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
 import { fileImportFailureIssueIfNeeded } from "../../services/import-failure-issue.js";
 import {
@@ -14,7 +15,7 @@ import {
   OPENNEURO_UPSTREAM_MARKER,
   runImportRecovery,
 } from "../../services/import-recovery.js";
-import { type WebhookRouter, timingSafeEqual } from "../webhooks/shared.js";
+import type { WebhookRouter } from "../webhooks/shared.js";
 
 // ============================================================================
 // Import state callback (issue #754)

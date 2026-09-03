@@ -7,6 +7,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
+import { escapeHtml } from "../lib/escape";
 import {
   getAdminEmailsForCategory,
   resolveEmailConfig,
@@ -26,16 +27,6 @@ import {
   hashApiKey,
 } from "../services/token";
 import type { Bindings, Variables } from "../types/bindings";
-
-/** Escape HTML special characters to prevent XSS in inline HTML responses */
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
 
 export const authRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
