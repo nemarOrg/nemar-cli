@@ -3086,6 +3086,26 @@ class TestMemoryErrorBeforePeakResetIsTyped(unittest.TestCase):
         # be the worker's lifetime peak rather than this recording's.
         self.assertIsNone(res["peak_rss"])
 
+    def test_thread_exhaustion_at_the_limit_is_typed_as_memory(self):
+        # zarr's codec pipeline dies with this exact RuntimeError when a thread
+        # stack cannot be mapped at the RLIMIT_DATA limit (on004696, 2026-09-03).
+        # Uncoded it broke the pool; typed it is the same verdict as MemoryError.
+        gz = self._inject(RuntimeError("can't start new thread"))
+        res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["code"], gz.RecordingMemoryExceeded.code)
+
+    def test_enomem_at_the_limit_is_typed_as_memory(self):
+        import errno
+
+        gz = self._inject(OSError(errno.ENOMEM, "Cannot allocate memory"))
+        res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        self.assertEqual(res["code"], gz.RecordingMemoryExceeded.code)
+        # Any other OSError stays what it is: a read error, not a memory verdict.
+        gz = self._inject(OSError(errno.EIO, "I/O error"))
+        res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        self.assertNotEqual(res.get("code"), gz.RecordingMemoryExceeded.code)
+
     def test_non_memory_error_before_reset_is_still_uncoded_infra(self):
         # The generic handler never touched rss_trusted, so it was already fine;
         # assert it stays that way rather than being swept into the typed branch.

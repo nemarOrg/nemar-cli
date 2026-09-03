@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import json
 import math
 import os
@@ -780,6 +781,23 @@ class RecordingTooLarge(Exception):
     failure -- instead of OOM-crashing the worker. #909"""
 
     code = "recording_too_large"
+
+
+def is_memory_exhaustion(exc: BaseException) -> bool:
+    """Whether `exc` is the RLIMIT_DATA backstop (or the allocator) saying no.
+
+    `MemoryError` is the obvious shape. Two others come from the same cause and
+    used to fall through as uncoded infra failures, which breaks the worker pool
+    and re-runs the recording one at a time to "find the culprit": a thread
+    stack is a private writable mapping, so at the limit zarr's codec pipeline
+    dies with `RuntimeError: can't start new thread` (on004696, 2026-09-03), and
+    an `mmap` refused at the limit raises `OSError(ENOMEM)`.
+    """
+    if isinstance(exc, MemoryError):
+        return True
+    if isinstance(exc, RuntimeError) and "can't start new thread" in str(exc):
+        return True
+    return isinstance(exc, OSError) and exc.errno == errno.ENOMEM
 
 
 class RecordingMemoryExceeded(Exception):
@@ -5277,6 +5295,12 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             primary, exc, peak_rss_bytes() if rss_trusted else None
         )
     except Exception as exc:  # noqa: BLE001 - isolate one bad recording
+        # The backstop does not always surface as MemoryError: see
+        # `is_memory_exhaustion`. Same verdict, same code, same measurement.
+        if is_memory_exhaustion(exc):
+            return memory_failure_result(
+                primary, exc, peak_rss_bytes() if rss_trusted else None
+            )
         # biosigIO read failures carry a stable `.code` (not_continuous,
         # corrupt_or_truncated, ...) so the index can tell the viewer WHY a
         # recording has no store. Infra failures (a plain RuntimeError, a crashed
