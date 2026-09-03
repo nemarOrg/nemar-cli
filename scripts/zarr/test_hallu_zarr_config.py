@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -591,3 +592,196 @@ def test_print_config_creates_no_files_in_prod_mode(dirs: tuple[Path, Path]) -> 
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# Engine-bump ack file lifecycle (#1172, ADR 0033)
+# ---------------------------------------------------------------------------
+
+FAKE_PY = """#!/usr/bin/env python3
+# Stands in for the venv's python. Records the argv of every `qpy` call so a
+# test can assert which flags reconcile was given, and answers the two probes
+# `setup()` makes. It stands in for the INTERPRETER, never for hallu-zarr.sh's
+# own logic: the ack file is found, consumed and re-armed by the real script.
+import os
+import sys
+
+argv = sys.argv[1:]
+if argv[:1] == ["-c"]:
+    # setup()'s biosigio import guard and version print.
+    if "print" in (argv[1] if len(argv) > 1 else ""):
+        print("[setup] biosigio 9.9.9")
+    sys.exit(0)
+
+with open(os.environ["QPY_LOG"], "a") as fh:
+    fh.write(" ".join(argv) + chr(10))
+
+if "reconcile" in argv:
+    print(os.environ.get("QPY_RECONCILE_OUT", "queued=0 parked=0"))
+# `next` prints nothing: an empty line ends the drain immediately.
+sys.exit(0)
+"""
+
+FAKE_UV = """#!/bin/sh
+# hallu-zarr.sh installs biosigIO with `uv pip install ... || true`. The fake
+# python above answers the import guard, so the install has nothing to do --
+# and a real uv here would reach the network on every case.
+exit 0
+"""
+
+FAKE_FLOCK = """#!/bin/sh
+# util-linux flock, absent on macOS. The single-instance lock is not what these
+# cases are about, and each runs against its own temp state dir.
+exit 0
+"""
+
+
+def _write_exec(path: Path, body: str) -> None:
+    path.write_text(body)
+    path.chmod(0o755)
+
+
+@pytest.fixture
+def ack_run(tmp_path: Path):
+    """A runnable hallu-zarr.sh whose queue calls are recorded.
+
+    Everything the script itself decides runs for real: setup() resets a REAL
+    git clone (of a local path whose URL satisfies the nemarOrg/nemar-cli
+    check), the drift guard compares real files, the lock is taken, and the ack
+    file is found and consumed by the script. Only the two things this test has
+    no business running are stood in for -- the interpreter that would import
+    biosigIO and execute zarr_queue.py, and the installer.
+    """
+    zarr_base = tmp_path / "zarr-base"
+    home = tmp_path / "home"
+    state = zarr_base / "zarr-state"
+    zarr_base.mkdir()
+    home.mkdir()
+
+    # A local "remote" whose path contains nemarOrg/nemar-cli, because setup()
+    # refuses a clone whose origin URL does not.
+    upstream = tmp_path / "nemarOrg" / "nemar-cli"
+    (upstream / "scripts" / "zarr").mkdir(parents=True)
+    for name in ("generate_zarr.py", "zarr_queue.py"):
+        (upstream / "scripts" / "zarr" / name).write_text("# stub\n")
+    # The clone's copy of THIS script, byte-identical, so the drift guard is the
+    # no-op it is in the real deployment rather than noise on stderr.
+    (upstream / "scripts" / "zarr" / "hallu-zarr.sh").write_text(SCRIPT.read_text())
+    git = ["git", "-C", str(upstream)]
+    subprocess.run([*git[:1], "init", "-q", "-b", "main", str(upstream)], check=True)
+    subprocess.run([*git, "config", "user.email", "t@example.org"], check=True)
+    subprocess.run([*git, "config", "user.name", "t"], check=True)
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "stub driver"], check=True)
+
+    driver_repo = state / "nemar-cli"
+    driver_repo.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "clone", "-q", "--branch", "main", str(upstream), str(driver_repo)],
+        check=True,
+    )
+
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    _write_exec(venv_bin / "python", FAKE_PY)
+
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    _write_exec(fake_bin / "uv", FAKE_UV)
+    if shutil.which("flock") is None:
+        _write_exec(fake_bin / "flock", FAKE_FLOCK)
+
+    qpy_log = tmp_path / "qpy.log"
+    ack_file = state / ".zarr-engine-bump-ack"
+
+    def run(
+        reconcile_out: str = "queued=0 parked=0",
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        env = base_env(zarr_base, home)
+        env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+        env.update(
+            {
+                "ZARR_DRIVER_REF": "main",
+                "ZARR_DRIVER_REPO": str(driver_repo),
+                "ZARR_VENV_DIR": str(venv_bin.parent),
+                "QPY_LOG": str(qpy_log),
+                "QPY_RECONCILE_OUT": reconcile_out,
+            }
+        )
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            ["bash", str(SCRIPT)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+
+    def qpy_calls() -> list[str]:
+        return qpy_log.read_text().splitlines() if qpy_log.exists() else []
+
+    return run, qpy_calls, ack_file, qpy_log
+
+
+def test_ack_file_is_consumed_by_exactly_one_run(ack_run) -> None:
+    """The two-step engine bump (AGENTS.md, ADR 0033): merging a bump deploys
+    it, so a bump over the requeue limit re-queues NOTHING until an operator
+    touches the ack file -- and that file arms exactly ONE run.
+
+    Untested in bash until now, and the failure modes are both bad and silent:
+    an ack that is not consumed re-queues the whole back catalogue on every
+    hourly tick, and one consumed without being passed on leaves an operator
+    who did the two-step procedure with nothing to show for it.
+    """
+    run, qpy_calls, ack_file, _ = ack_run
+
+    ack_file.parent.mkdir(parents=True, exist_ok=True)
+    ack_file.touch()
+    first = run()
+    assert first.returncode == 0, first.stderr
+    reconciles = [c for c in qpy_calls() if "reconcile" in c]
+    assert len(reconciles) == 1, qpy_calls()
+    assert "--engine-requeue-ack" in reconciles[0]
+    # Consumed BEFORE the run, so a crash mid-reconcile cannot leave it armed.
+    assert not ack_file.exists()
+    assert "consumed" in first.stdout + first.stderr
+
+    second = run()
+    assert second.returncode == 0, second.stderr
+    reconciles = [c for c in qpy_calls() if "reconcile" in c]
+    assert len(reconciles) == 2, qpy_calls()
+    assert "--engine-requeue-ack" not in reconciles[1]
+
+
+def test_a_pending_bump_is_re_raised_as_its_own_error_line(ack_run) -> None:
+    """reconcile's output is captured by a command substitution, so its
+    pending-ack notice would otherwise reach the log only as part of one
+    summary line. A bump waiting on a human must not be something you find by
+    reading to the end of it."""
+    run, qpy_calls, ack_file, _ = ack_run
+
+    result = run(reconcile_out="queued=0 ENGINE BUMP PENDING ACK (312 rows)")
+    assert result.returncode == 0, result.stderr
+    assert "--engine-requeue-ack" not in " ".join(qpy_calls())
+    assert "waiting for acknowledgement" in result.stderr
+    # And it names both halves of the procedure.
+    assert "--preview-engine-bump" in result.stderr
+    assert str(ack_file) in result.stderr
+
+
+def test_the_env_var_form_arms_a_run_without_touching_the_file(ack_run) -> None:
+    """ZARR_ENGINE_BUMP_ACK is the one-off form. It must not create or consume
+    the file: an operator using it once should not silently disarm a pending
+    file-based ack, or leave one behind that arms the next cron tick."""
+    run, qpy_calls, ack_file, _ = ack_run
+
+    result = run(extra_env={"ZARR_ENGINE_BUMP_ACK": "1"})
+    assert result.returncode == 0, result.stderr
+    reconciles = [c for c in qpy_calls() if "reconcile" in c]
+    assert "--engine-requeue-ack" in reconciles[0]
+    assert "ZARR_ENGINE_BUMP_ACK" in result.stdout + result.stderr
+    # No file was created, and none was needed.
+    assert not ack_file.exists()
