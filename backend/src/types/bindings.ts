@@ -65,6 +65,15 @@ export interface Bindings {
   /** Reply-To address (e.g. "info@nemar.org") when FROM is a no-reply mailbox.
    *  Omitted when unset/empty. */
   REPLY_TO?: string;
+  /** Delivery allow-list for non-production workers (issue #957): comma-
+   *  separated exact addresses and/or `@domain` suffixes. Dev D1 is not
+   *  purged of the `users` table (roughly 609 real emails, see AGENTS.md)
+   *  and the dev worker holds a live RESEND_API_KEY, so every send in a
+   *  non-production ENVIRONMENT is refused unless the recipient matches an
+   *  entry here (services/email.ts's sendEmail / services/broadcast.ts's
+   *  sendBroadcast). Unset means nothing is allow-listed -- every
+   *  non-production send is refused, fail-closed. Ignored in production. */
+  DEV_EMAIL_ALLOWLIST?: string;
   /** Domain attribute for the web-dashboard session cookie (#569).
    *  Set to "app.nemar.org" in production and left empty in dev so
    *  the cookie is host-only for *.workers.dev. The dashboard moves

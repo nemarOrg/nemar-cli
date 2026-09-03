@@ -360,6 +360,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
                 emailCfg.fromEmail,
                 emailCfg.replyTo,
                 emailCfg.isDev,
+                env,
               );
             }
           } catch (emailErr) {
@@ -539,6 +540,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
                     emailCfg.fromEmail,
                     emailCfg.replyTo,
                     emailCfg.isDev,
+                    env,
                   );
                   handled = delivered > 0;
                 }
@@ -579,6 +581,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
                     emailCfg.fromEmail,
                     emailCfg.replyTo,
                     emailCfg.isDev,
+                    env,
                   );
                   handled = true;
                 } catch (err) {

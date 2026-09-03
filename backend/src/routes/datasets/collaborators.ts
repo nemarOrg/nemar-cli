@@ -331,6 +331,7 @@ export function registerCollaboratorRoutes(datasetRoutes: DatasetsRouter): void 
           fromEmail,
           replyTo,
           isDev,
+          c.env,
         );
       }
     } catch (emailError) {

@@ -347,6 +347,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
           fromEmail,
           replyTo,
           isDev,
+          c.env,
         );
       }
     } catch (emailError) {
@@ -541,6 +542,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
           fromEmail,
           replyTo,
           isDev,
+          c.env,
         );
       }
     } catch (emailError) {

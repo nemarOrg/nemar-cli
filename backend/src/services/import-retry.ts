@@ -700,6 +700,7 @@ export async function sendMaintainerReportIfDue(
       fromEmail,
       replyTo,
       isDev,
+      env,
     );
     await stampMaintainerNotified(
       env.DB,

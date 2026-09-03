@@ -124,9 +124,17 @@ async function finalizeApproval(
           fromEmail,
           replyTo,
           isDev,
+          c.env,
         );
       } else {
-        await sendWebApprovalEmail(user.email, c.env.RESEND_API_KEY, fromEmail, replyTo, isDev);
+        await sendWebApprovalEmail(
+          user.email,
+          c.env.RESEND_API_KEY,
+          fromEmail,
+          replyTo,
+          isDev,
+          c.env,
+        );
       }
       emailSent = true;
     } else {
@@ -707,6 +715,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
         fromEmail,
         replyTo,
         isDev,
+        c.env,
       );
       emailSent = true;
     } catch (error) {
@@ -1252,6 +1261,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
         },
         replyTo,
         isDev,
+        c.env,
       );
 
       if (result.error === "email_service_unconfigured") {
@@ -1291,6 +1301,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       },
       replyTo,
       isDev,
+      c.env,
     );
 
     if (result.error === "email_service_unconfigured") {

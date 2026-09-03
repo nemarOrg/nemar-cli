@@ -121,6 +121,9 @@ SANDBOX_ID_CEILING = "89999"
 # 403 and resolveEmailConfig logs once but does not propagate the failure.
 FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
 REPLY_TO = "info@nemar.org"
+# DEV_EMAIL_ALLOWLIST (issue #957) is not set here: the delivery fence in
+# services/email.ts / services/broadcast.ts only engages outside
+# ENVIRONMENT="production", so production sends are never restricted by it.
 # Web-dashboard session cookie Domain attribute (#569). Pinned to
 # app.nemar.org because nemarOrg/website#46 moves the authenticated
 # dashboard to that subdomain. Until cutover the dashboard lives at
@@ -312,6 +315,17 @@ S3_BUCKET = "nemar-dev"
 SANDBOX_ID_FLOOR = "90001"
 FROM_EMAIL = "NEMAR Archive <noreply@nemar.org>"
 REPLY_TO = "info@nemar.org"
+# Delivery-level fence for non-production sends (issue #957): this D1 is a
+# partial production mirror (real user email addresses, see the daily-cron
+# comment below) and this worker holds a live RESEND_API_KEY, so
+# services/email.ts's sendEmail and services/broadcast.ts's sendBroadcast
+# both refuse to deliver here unless the recipient matches an entry (comma-
+# separated exact addresses or "@domain" suffixes). "@nemar.org" covers the
+# three seeded fixture accounts (testOwner@/testAdmin@/test@nemar.org, see
+# scripts/seed-dev-db.sql) without allow-listing any real external user.
+# Widen with a real tester's address (never a "@domain" for an external
+# provider) only for the duration of a manual test that needs delivery.
+DEV_EMAIL_ALLOWLIST = "@nemar.org"
 # Staging zarr cache host (epic #923). URL-scoped purges of zarr-test.* can't
 # touch prod cache entries; purge stays inert until CLOUDFLARE_ZONE_ID + a purge
 # token are provisioned on dev (/webhooks/zarr-ready logs "purge skipped").

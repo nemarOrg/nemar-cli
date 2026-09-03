@@ -261,7 +261,15 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
     // useful error rather than wait for a code that never arrives.
     try {
       const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
-      await sendPasswordlessCodeEmail(email, code, c.env.RESEND_API_KEY, fromEmail, replyTo, isDev);
+      await sendPasswordlessCodeEmail(
+        email,
+        code,
+        c.env.RESEND_API_KEY,
+        fromEmail,
+        replyTo,
+        isDev,
+        c.env,
+      );
     } catch (emailError) {
       console.error("[auth-web] failed to send passwordless code email", emailError);
       await db
@@ -885,6 +893,7 @@ authWebRoutes.post(
           fromEmail,
           replyTo,
           isDev,
+          c.env,
         );
       } catch (emailError) {
         console.error("[auth-web] failed to send email-change code email", emailError);
