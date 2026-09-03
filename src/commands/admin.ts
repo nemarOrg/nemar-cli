@@ -2880,9 +2880,14 @@ adminCommand
 
 /** Default location of the checked-in withdrawal target list, resolved
  *  relative to this source file rather than cwd (mirrors
- *  defaultExemplarFleetPath below). */
+ *  defaultExemplarFleetPath below). Shipped to npm (package.json "files"),
+ *  same as defaultRecoverDatasetsPath below -- see that function's comment
+ *  for why a single hardcoded depth breaks between a source checkout and
+ *  the published, single-file dist/index.js bundle (#1049 review). */
 function defaultWithdrawnDatasetsPath(): string {
-  return join(import.meta.dir, "..", "..", "scripts", "withdrawn-datasets.json");
+  const fromSourceTree = join(import.meta.dir, "..", "..", "scripts", "withdrawn-datasets.json");
+  if (existsSync(fromSourceTree)) return fromSourceTree;
+  return join(import.meta.dir, "..", "scripts", "withdrawn-datasets.json");
 }
 
 function printTransitionResult(
@@ -3622,10 +3627,10 @@ adminCommand.addCommand(importCommand);
 
 /** Default location of the checked-in recovery target list, resolved
  *  relative to this source file rather than cwd (mirrors
- *  defaultWithdrawnDatasetsPath). Unlike that sibling, this one is shipped
+ *  defaultWithdrawnDatasetsPath, which shares this same shape). Shipped
  *  to npm (package.json "files") so `nemar admin recover` works from an
- *  installed build, not just a repo checkout -- and the two layouts put
- *  this file at different depths from `import.meta.dir` (#1049):
+ *  installed build, not just a repo checkout -- the two layouts put this
+ *  file at different depths from `import.meta.dir` (#1049):
  *   - source (`bun run src/index.ts`): this code lives at src/commands/, so
  *     the repo-root scripts/ dir is two levels up.
  *   - published (`dist/index.js`, a single-file bundle from `bun build`):

@@ -47,6 +47,7 @@
     "dist",
     "scripts/postinstall-check.mjs",
     "scripts/recover-datasets.json",
+    "scripts/withdrawn-datasets.json",
     "README.md",
     "LICENSE"
   ],
