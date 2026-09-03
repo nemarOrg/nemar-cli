@@ -6,6 +6,7 @@
  * Uses fetch directly for Cloudflare Workers compatibility.
  */
 
+import { escapeHtml } from "../lib/escape";
 import { STALENESS_LIMIT_DAYS } from "./staleness";
 
 /** Fallback sender when FROM_EMAIL env var is unset. Mirrors the FROM_EMAIL set
@@ -669,18 +670,6 @@ export async function sendRevocationEmail(
     replyTo,
     isDev,
   );
-}
-
-/**
- * Escape HTML special characters to prevent XSS in email templates
- */
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
 }
 
 /**

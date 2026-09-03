@@ -23,6 +23,7 @@ import type {
   StructuredDate,
   StructuredKeyword,
 } from "../../../shared/datacite-constants.js";
+import { escapeHtml } from "../lib/escape";
 import { isValidDatasetId } from "./datasetId";
 import type { ManifestFile, VersionManifest } from "./manifest";
 import {
@@ -447,18 +448,6 @@ export function qaListingToDirectory(args: {
     children,
     truncated: listing.truncated,
   };
-}
-
-const HTML_ESCAPES: Record<string, string> = {
-  "&": "&amp;",
-  "<": "&lt;",
-  ">": "&gt;",
-  '"': "&quot;",
-  "'": "&#39;",
-};
-
-export function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
 }
 
 export function humanSize(bytes: number): string {
