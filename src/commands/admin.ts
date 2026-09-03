@@ -26,7 +26,7 @@ import { join } from "node:path";
 import chalk from "chalk";
 import { Command } from "commander";
 import inquirer from "inquirer";
-import ora from "ora";
+import ora, { type Ora } from "ora";
 import {
   type AvailabilityReport,
   type AvailabilityReportResult,
@@ -4927,6 +4927,58 @@ const availabilityReportCommand = new Command("availability-report")
 
 adminCommand.addCommand(availabilityReportCommand);
 
+/** Batch response shape every `nemar admin *-sweep` command shares (PR
+ *  #1223 review, suggestion 5). */
+interface SweepBatchLike {
+  remaining: number | null;
+  errors: { dataset_id: string; error: string }[];
+}
+
+/**
+ * Shared do-while loop for hed-sweep / recording-stats-sweep /
+ * signal-defaults-sweep: calls `runBatch()` until `remaining` reaches 0,
+ * paces GitHub-heavy batches, and bails with a warning if `remaining`
+ * stops strictly decreasing (persistent write errors leave rows
+ * unstamped). `onBatch` owns everything sweep-specific -- totals
+ * accumulation and the verbose/spinner text -- so this extraction changes
+ * no command's actual output. A `runBatch` throw is caught here exactly
+ * as each call site did before: `spinner.fail(failLabel)` + the error
+ * detail + `process.exit(1)`.
+ */
+async function runSweepBatchLoop<R extends SweepBatchLike>(
+  spinner: Ora,
+  failLabel: string,
+  runBatch: () => Promise<R>,
+  onBatch: (res: R, batch: number, remaining: number | null) => void,
+): Promise<{ batches: number; remaining: number | null }> {
+  let batch = 0;
+  let remaining: number | null = null;
+  let prevRemaining: number | null = null;
+  try {
+    let res: R;
+    do {
+      res = await runBatch();
+      batch++;
+      remaining = res.remaining;
+      onBatch(res, batch, remaining);
+
+      if (remaining != null && prevRemaining != null && remaining >= prevRemaining) {
+        spinner.warn(`No progress (remaining stuck at ${remaining}); stopping - see errors`);
+        break;
+      }
+      prevRemaining = remaining;
+
+      if ((remaining ?? 0) > 0) await sleep(1000); // pace the GitHub-heavy batches
+    } while ((remaining ?? 0) > 0);
+    spinner.stop();
+  } catch (err) {
+    spinner.fail(failLabel);
+    console.error(chalk.red(errorDetail(err)));
+    process.exit(1);
+  }
+  return { batches: batch, remaining };
+}
+
 const hedSweepCommand = new Command("hed-sweep").description(
   "Backfill HED detection (has_hed / hed_version) for existing datasets (#869)",
 );
@@ -4960,50 +5012,29 @@ hedSweepCommand
       const totals = { processed: 0, withHed: 0, withoutHed: 0, unknown: 0, errors: 0 };
       const spinner = ora("Sweeping datasets for HED...").start();
 
-      let batch = 0;
-      let remaining: number | null = null;
-      let prevRemaining: number | null = null;
-      try {
-        let res: HedSweepBatchResponse;
-        do {
-          res = await hedSweep({ limit });
-          batch++;
+      const { batches: batch, remaining } = await runSweepBatchLoop<HedSweepBatchResponse>(
+        spinner,
+        "HED sweep failed",
+        () => hedSweep({ limit }),
+        (res, batchNum, rem) => {
           totals.processed += res.processed;
           totals.withHed += res.withHed;
           totals.withoutHed += res.withoutHed;
           totals.unknown += res.unknown;
           totals.errors += res.errors.length;
-          remaining = res.remaining;
 
           if (options.verbose) {
             spinner.stop();
             console.log(
-              `  [batch ${batch}] processed=${res.processed} hed=${res.withHed} no-hed=${res.withoutHed} unknown=${res.unknown} errors=${res.errors.length} remaining=${remaining ?? "?"}`,
+              `  [batch ${batchNum}] processed=${res.processed} hed=${res.withHed} no-hed=${res.withoutHed} unknown=${res.unknown} errors=${res.errors.length} remaining=${rem ?? "?"}`,
             );
             for (const e of res.errors) console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
             spinner.start("Sweeping datasets for HED...");
           } else {
-            spinner.text = `Sweeping datasets for HED... ${totals.processed} processed, ${remaining ?? "?"} remaining`;
+            spinner.text = `Sweeping datasets for HED... ${totals.processed} processed, ${rem ?? "?"} remaining`;
           }
-
-          // Progress guard: hed_checked_at is stamped for every processed row, so
-          // `remaining` must strictly decrease. If it doesn't (e.g. persistent D1
-          // write errors leave rows unstamped), bail instead of looping forever.
-          if (remaining != null && prevRemaining != null && remaining >= prevRemaining) {
-            spinner.warn(`No progress (remaining stuck at ${remaining}); stopping - see errors`);
-            break;
-          }
-          prevRemaining = remaining;
-
-          if ((remaining ?? 0) > 0) await sleep(1000); // pace the GitHub-heavy batches
-        } while ((remaining ?? 0) > 0);
-
-        spinner.stop();
-      } catch (err) {
-        spinner.fail("HED sweep failed");
-        console.error(chalk.red(errorDetail(err)));
-        process.exit(1);
-      }
+        },
+      );
 
       if (options.json) {
         console.log(JSON.stringify({ ...totals, batches: batch, remaining }, null, 2));
@@ -5063,50 +5094,29 @@ recordingStatsSweepCommand
       const totals = { processed: 0, measured: 0, unmeasured: 0, errors: 0 };
       const spinner = ora("Sweeping datasets for recording stats...").start();
 
-      let batch = 0;
-      let remaining: number | null = null;
-      let prevRemaining: number | null = null;
-      try {
-        let res: RecordingStatsSweepBatchResponse;
-        do {
-          res = await recordingStatsSweep({ limit });
-          batch++;
-          totals.processed += res.processed;
-          totals.measured += res.measured;
-          totals.unmeasured += res.unmeasured;
-          totals.errors += res.errors.length;
-          remaining = res.remaining;
+      const { batches: batch, remaining } =
+        await runSweepBatchLoop<RecordingStatsSweepBatchResponse>(
+          spinner,
+          "Recording-stats sweep failed",
+          () => recordingStatsSweep({ limit }),
+          (res, batchNum, rem) => {
+            totals.processed += res.processed;
+            totals.measured += res.measured;
+            totals.unmeasured += res.unmeasured;
+            totals.errors += res.errors.length;
 
-          if (options.verbose) {
-            spinner.stop();
-            console.log(
-              `  [batch ${batch}] processed=${res.processed} measured=${res.measured} unmeasured=${res.unmeasured} errors=${res.errors.length} remaining=${remaining ?? "?"}`,
-            );
-            for (const e of res.errors) console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
-            spinner.start("Sweeping datasets for recording stats...");
-          } else {
-            spinner.text = `Sweeping datasets for recording stats... ${totals.processed} processed, ${remaining ?? "?"} remaining`;
-          }
-
-          // Progress guard: recording_stats_checked_at is stamped for every
-          // processed row, so `remaining` must strictly decrease. If it
-          // doesn't (e.g. persistent D1 write errors leave rows unstamped),
-          // bail instead of looping forever.
-          if (remaining != null && prevRemaining != null && remaining >= prevRemaining) {
-            spinner.warn(`No progress (remaining stuck at ${remaining}); stopping - see errors`);
-            break;
-          }
-          prevRemaining = remaining;
-
-          if ((remaining ?? 0) > 0) await sleep(1000);
-        } while ((remaining ?? 0) > 0);
-
-        spinner.stop();
-      } catch (err) {
-        spinner.fail("Recording-stats sweep failed");
-        console.error(chalk.red(errorDetail(err)));
-        process.exit(1);
-      }
+            if (options.verbose) {
+              spinner.stop();
+              console.log(
+                `  [batch ${batchNum}] processed=${res.processed} measured=${res.measured} unmeasured=${res.unmeasured} errors=${res.errors.length} remaining=${rem ?? "?"}`,
+              );
+              for (const e of res.errors) console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
+              spinner.start("Sweeping datasets for recording stats...");
+            } else {
+              spinner.text = `Sweeping datasets for recording stats... ${totals.processed} processed, ${rem ?? "?"} remaining`;
+            }
+          },
+        );
 
       if (options.json) {
         console.log(JSON.stringify({ ...totals, batches: batch, remaining }, null, 2));
@@ -5166,48 +5176,29 @@ signalDefaultsSweepCommand
       const totals = { processed: 0, populated: 0, noData: 0, errors: 0 };
       const spinner = ora("Sweeping datasets for signal defaults...").start();
 
-      let batch = 0;
-      let remaining: number | null = null;
-      let prevRemaining: number | null = null;
-      try {
-        let res: SignalDefaultsSweepBatchResponse;
-        do {
-          res = await signalDefaultsSweep({ limit });
-          batch++;
-          totals.processed += res.processed;
-          totals.populated += res.populated;
-          totals.noData += res.noData;
-          totals.errors += res.errors.length;
-          remaining = res.remaining;
+      const { batches: batch, remaining } =
+        await runSweepBatchLoop<SignalDefaultsSweepBatchResponse>(
+          spinner,
+          "Signal-defaults sweep failed",
+          () => signalDefaultsSweep({ limit }),
+          (res, batchNum, rem) => {
+            totals.processed += res.processed;
+            totals.populated += res.populated;
+            totals.noData += res.noData;
+            totals.errors += res.errors.length;
 
-          if (options.verbose) {
-            spinner.stop();
-            console.log(
-              `  [batch ${batch}] processed=${res.processed} populated=${res.populated} no-data=${res.noData} errors=${res.errors.length} remaining=${remaining ?? "?"}`,
-            );
-            for (const e of res.errors) console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
-            spinner.start("Sweeping datasets for signal defaults...");
-          } else {
-            spinner.text = `Sweeping datasets for signal defaults... ${totals.processed} processed, ${remaining ?? "?"} remaining`;
-          }
-
-          // Progress guard: mirrors hed-sweep/recording-stats-sweep -- every
-          // processed row is stamped, so `remaining` must strictly decrease.
-          if (remaining != null && prevRemaining != null && remaining >= prevRemaining) {
-            spinner.warn(`No progress (remaining stuck at ${remaining}); stopping - see errors`);
-            break;
-          }
-          prevRemaining = remaining;
-
-          if ((remaining ?? 0) > 0) await sleep(1000); // pace the GitHub-heavy batches
-        } while ((remaining ?? 0) > 0);
-
-        spinner.stop();
-      } catch (err) {
-        spinner.fail("Signal-defaults sweep failed");
-        console.error(chalk.red(errorDetail(err)));
-        process.exit(1);
-      }
+            if (options.verbose) {
+              spinner.stop();
+              console.log(
+                `  [batch ${batchNum}] processed=${res.processed} populated=${res.populated} no-data=${res.noData} errors=${res.errors.length} remaining=${rem ?? "?"}`,
+              );
+              for (const e of res.errors) console.log(`    ${chalk.red(e.dataset_id)}: ${e.error}`);
+              spinner.start("Sweeping datasets for signal defaults...");
+            } else {
+              spinner.text = `Sweeping datasets for signal defaults... ${totals.processed} processed, ${rem ?? "?"} remaining`;
+            }
+          },
+        );
 
       if (options.json) {
         console.log(JSON.stringify({ ...totals, batches: batch, remaining }, null, 2));
