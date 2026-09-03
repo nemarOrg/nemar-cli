@@ -385,8 +385,9 @@ CEILING_FLOOR_BYTES = int(
 # a clean, catchable MemoryError.
 #
 # The limit is deliberately loose: `peak * SLACK`, floored so a small recording
-# still gets room for the interpreter plus numpy/MNE, and capped at the node
-# ceiling so nothing may exceed what #909 already forbids. It is a backstop
+# still gets a minimum reservation of its own (the interpreter and library
+# footprint are measured and added separately; see `data_segment_bytes`), and
+# capped at the node ceiling so nothing may exceed what #909 already forbids. It is a backstop
 # against a runaway, NOT a tight budget -- projections are still the guessed
 # `INMEM_MEM_FACTOR` and run ~2x low for BrainVision, so a tight limit here would
 # fail recordings that convert fine today. #1111 makes projections
@@ -532,10 +533,12 @@ def peak_rss_bytes() -> int | None:
 def worker_mem_limit_bytes(peak_bytes: int | None, ceiling_bytes: int | None) -> int | None:
     """Soft RLIMIT_DATA for one recording, or None to leave the limit alone.
 
-    The floor is deliberately NOT charged to admission. It exists so a small
-    recording's worker still has room for the interpreter plus numpy/MNE, which is
-    per-process baseline rather than signal data, and charging it would stop small
-    EEG recordings packing many-wide for no real benefit. The residual overcommit
+    The floor is deliberately NOT charged to admission. It is the minimum
+    reservation a small recording's own allocations get; the interpreter and
+    library footprint is per-process baseline rather than signal data, measured
+    and added on top by `apply_worker_mem_limit` rather than covered here, and
+    charging either to admission would stop small EEG recordings packing
+    many-wide for no real benefit. The residual overcommit
     is therefore bounded by `jobs * MEM_LIMIT_FLOOR_BYTES` of baseline, not by
     anything that scales with recording size.
     """
@@ -573,6 +576,12 @@ def apply_worker_mem_limit(
         # process already holds (library buffer pools, the interpreter, a reused
         # worker's retained heap) is measured and added, not charged against it.
         # See the note above `BLAS_THREAD_VARS` for the 2.6 GiB that motivated this.
+        # Deliberately NOT re-clamped to `ceiling_bytes` after this addition: the
+        # ceiling is stated in resident memory (what admission charges against the
+        # node), while the baseline is address space the libraries have mapped
+        # and mostly never touch. Clamping the SUM would hand a recording admitted
+        # at the ceiling exactly `baseline` less than it was charged -- the bug in
+        # miniature. The reserve is what the ceiling caps, and it already was.
         baseline = data_segment_bytes() or 0
         limit += baseline
         # Only the hard limit is read: the soft one is what this call REPLACES.

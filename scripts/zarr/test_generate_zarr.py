@@ -3278,6 +3278,22 @@ class TestWorkerMemLimit(unittest.TestCase):
         self.assertGreaterEqual(soft, before + reserve)
         self.assertLessEqual(soft, after + reserve + 64 * 1024**2)
 
+    def test_the_ceiling_caps_the_reserve_not_the_sum_with_the_baseline(self):
+        """A recording admitted AT the ceiling must still get the whole ceiling
+        for its own allocations. Clamping the sum would leave it `baseline`
+        short of what admission charged -- the original bug at smaller scale."""
+        if not sys.platform.startswith("linux"):
+            self.skipTest("RLIMIT_DATA backstop is Linux-only")
+        import resource
+
+        ceiling = 2 * 1024**3
+        before = data_segment_bytes()
+        apply_worker_mem_limit(8 * 1024**3, ceiling, reserved=True)
+        after = data_segment_bytes()
+        soft = resource.getrlimit(resource.RLIMIT_DATA)[0]
+        self.assertGreaterEqual(soft, before + ceiling)
+        self.assertLessEqual(soft, after + ceiling + 64 * 1024**2)
+
     def test_data_segment_is_measured_where_the_backstop_applies(self):
         value = data_segment_bytes()
         if sys.platform.startswith("linux"):
