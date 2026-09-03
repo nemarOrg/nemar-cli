@@ -150,6 +150,29 @@ describe("readUploadProgress", () => {
     expect(readUploadProgress(testDir)).toBeNull();
   });
 
+  test("returns null when a file entry omits updated_at (deliberate narrowing)", () => {
+    // FileProgress declares updated_at as required and every writer in the
+    // module sets it (initUploadProgress, markFileUploaded, markFileFailed),
+    // but the old hand-rolled check never verified it -- so isValidProgress's
+    // `data is UploadProgress` predicate asserted a field nothing had checked.
+    // The schema now requires it. Unlike mtimeMs, which really is absent from
+    // pre-#884 files, no NEMAR-written progress file has ever lacked this.
+    const dir = join(testDir, ".nemar");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "upload-progress.json"),
+      JSON.stringify({
+        dataset_id: "nm000123",
+        started_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+        files: { "sub-01/eeg.edf": { status: "pending", size: 10 } },
+        completed_steps: [],
+      }),
+    );
+
+    expect(readUploadProgress(testDir)).toBeNull();
+  });
+
   test("round-trips per-file error, unknown per-file key, and unknown top-level key", () => {
     // readUploadProgress returns the raw JSON.parse result rather than a
     // stripping `result.data`, so a resumed upload does not silently lose a
