@@ -461,8 +461,13 @@ export function parseFilterQuery(
  * msg` idiom are authenticated/admin contexts where the detail is actionable
  * rather than a disclosure risk, and are the issue's own stated follow-up,
  * not this fix.
+ *
+ * Exported so tests import the real string (backend/test/catalog-anonymous-
+ * error-details.test.ts) instead of hand-copying it -- a copy would keep
+ * passing if this wording ever changed underneath it.
  */
-const ANONYMOUS_ERROR_DETAILS = "An internal error occurred while processing this request.";
+export const ANONYMOUS_ERROR_DETAILS =
+  "An internal error occurred while processing this request. Please try again; if it persists, contact support.";
 
 function buildSortClause(sort: string): string {
   switch (sort) {

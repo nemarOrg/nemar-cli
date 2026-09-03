@@ -18,13 +18,15 @@
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
-import { registerCatalogRoutes } from "../src/routes/datasets/catalog";
+import { ANONYMOUS_ERROR_DETAILS, registerCatalogRoutes } from "../src/routes/datasets/catalog";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
 type App = Hono<{ Bindings: Bindings; Variables: Variables }>;
 
-const GENERIC_DETAILS = "An internal error occurred while processing this request.";
+// #1224 review: import the real constant rather than hand-copying its
+// string -- a copy keeps passing if the production wording ever changes.
+const GENERIC_DETAILS = ANONYMOUS_ERROR_DETAILS;
 
 function newApp(): App {
   const app: App = new Hono();
