@@ -49,6 +49,7 @@ Measurements and investigations. Accurate as of their date; re-verify before rel
 | [openneuro-support-403-report.md](openneuro-support-403-report.md) | Objects inaccessible upstream, for reporting. |
 | [security-fix-dataset-visibility.md](security-fix-dataset-visibility.md) | The 2026-01 private-dataset leak (-> ADR 0017). |
 | [plan-multi-archive-importer.md](plan-multi-archive-importer.md) | Architecture RFC for multi-archive import (-> ADR 0013, **proposed**). |
+| [research-make-vs-take-audit.md](research-make-vs-take-audit.md) | 2026-09-03 audit of bespoke code an established library or platform feature already covers, with replace / wrap / keep verdicts (-> ADR 0037). |
 
 ## Historical — completed work
 
