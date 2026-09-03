@@ -12,6 +12,7 @@
 
 import type { Bindings } from "../types/bindings.js";
 import { isNonProductionEnv } from "./environment.js";
+import { exemplarOrFragment } from "./exemplar.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { createOrUpdateFile } from "./github/contents.js";
 import {
@@ -270,9 +271,13 @@ export async function writeAvailabilityReport(
 // clause that could drift apart.
 
 /** Base candidacy predicate: every managed dataset (github_repo IS NOT NULL;
- *  catalog ds* rows have none), not sandbox, not yet stamped. */
+ *  catalog ds* rows have none), not sandbox, not yet stamped. The curated
+ *  exemplar fleet (`is_exemplar = 1`) is inserted `is_sandbox = 1` but is
+ *  permanent, not churning (AGENTS.md's dataset ID bands, "never" cleaned),
+ *  so `exemplarOrFragment()` carves it back into candidacy (issue #1168),
+ *  matching the visibility predicates in dataset-search.ts / catalog.ts. */
 const AVAILABILITY_REPORT_SWEEP_BASE_WHERE = `github_repo IS NOT NULL
-     AND (is_sandbox = 0 OR is_sandbox IS NULL)
+     AND (is_sandbox = 0 OR is_sandbox IS NULL OR ${exemplarOrFragment("")})
      AND json_extract(sweep_stamps, '$.availability_report_at') IS NULL`;
 
 /** Appended to the base predicate when `?missing-only=1` narrows candidacy to
@@ -390,10 +395,10 @@ export async function runAvailabilityReportSweep(
  * itself stays UNGUARDED on purpose: `POST
  * /admin/datasets/availability-report-sweep` calls it directly and is not
  * environment-gated, so an operator can still drive a backfill outside
- * production. Note the exemplar fleet is NOT what that reaches:
- * AVAILABILITY_REPORT_SWEEP_BASE_WHERE filters `is_sandbox` without the
- * `is_exemplar = 1` carve-out (issue #1168), and exemplars are inserted
- * `is_sandbox = 1`, so on staging the only candidate is `nm099999`. Only
+ * production. On staging AVAILABILITY_REPORT_SWEEP_BASE_WHERE's
+ * `exemplarOrFragment()` carve-out (issue #1168) reaches the exemplar fleet
+ * in addition to `nm099999`, since the fleet is inserted `is_sandbox = 1`
+ * but is exempted from the sandbox exclusion via `is_exemplar = 1`. Only
  * the recurring daily-cron caller needs the production fence, so the guard
  * lives here instead of inside the sweep -- guarding the sweep itself would
  * quietly take the admin route down outside production too.

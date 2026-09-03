@@ -7,10 +7,12 @@
  * publish / DOI / reindex / visibility paths is relaxed to "block unless
  * exemplar-allowed" via isExemplarPublishAllowed(); the visibility predicates
  * admit exemplars with an `is_exemplar = 1` SQL fragment — canonicalized as
- * exemplarOrFragment() (used by the programmatic reindex-filter query; the inline
- * catalog/search/data predicates write the literal for readability). Note the
- * `nemar admin summary` coverage query (manifest-coverage.ts) is the one xx
- * filter deliberately left broad; it is an internal report, not a gate.
+ * exemplarOrFragment() (used by the programmatic reindex-filter query and by
+ * the signal-defaults-sweep / availability-report backfill sweeps, issue
+ * #1168; the inline catalog/search/data predicates write the literal for
+ * readability). Note the `nemar admin summary` coverage query
+ * (manifest-coverage.ts) is the one xx filter deliberately left broad; it is
+ * an internal report, not a gate.
  *
  * Safety invariant (migration 0057): is_exemplar=1 rows never exist in
  * production. Today that holds because nothing writes the column; once Phase 5's
@@ -47,9 +49,11 @@ export function isExemplarPublishAllowed(
  * `(d.is_sandbox = 0 OR d.is_sandbox IS NULL OR ${exemplarOrFragment("d")})`.
  * Returns `<alias>.is_exemplar = 1` (or bare `is_exemplar = 1` when alias is "").
  * Safe on production because no is_exemplar=1 rows exist there. Canonical form used
- * by the programmatically-built reindex-filter SQL (buildReindexFilterQuery); the
- * inline visibility predicates in the catalog/search/data routes mirror
- * `<alias>.is_exemplar = 1` literally for SQL readability.
+ * by the programmatically-built reindex-filter SQL (buildReindexFilterQuery) and by
+ * the signal-defaults-sweep / availability-report candidate+remaining queries
+ * (both unaliased, so called with alias=""); the inline visibility predicates
+ * in the catalog/search/data routes mirror `<alias>.is_exemplar = 1` literally
+ * for SQL readability.
  */
 export function exemplarOrFragment(alias = "d"): string {
   const col = alias ? `${alias}.is_exemplar` : "is_exemplar";
