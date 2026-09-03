@@ -1736,9 +1736,19 @@ export function planSearchColumns(
  * Render `nemar dataset search`'s human-readable result table as an array
  * of lines (epic #1144 phase 6, issue #1150). No `Score` column (D1: RRF
  * score is a ranking artefact on a scale the CLI's old 0.8/0.5 thresholds
- * never matched -- row order already encodes relevance, and the freed width
- * goes to the snippet). A snippet line follows its row only when one comes
- * back from the API (D2); a row without one leaves no blank line behind.
+ * never matched -- row order already encodes relevance).
+ *
+ * The README snippet line is opt-in via `options.snippets` (owner decision
+ * 2026-09-03, superseding #1150 D2's default): it was always-on under
+ * #1150/#1174, but a dim snippet under every row made the table slower to
+ * scan for a human and noisier for an agent caller, so the compact
+ * id/name/modality/subj/hed row is the default again and `--verbose` on the
+ * `search` command turns snippets back on (no `-v` short alias -- see
+ * `searchVerboseRequested`'s doc comment for why). This does not touch D1
+ * (Score stays dropped) or the sanitisation in `src/lib/render/snippet.ts`,
+ * which still applies whenever a snippet line is rendered. When enabled, a
+ * snippet line follows its row only when one comes back from the API; a row
+ * without one leaves no blank line behind.
  *
  * Row CONTENT rendering is fault-isolated (#1150 D7): a malformed
  * `modalities` or `snippet` on one result degrades that row to its plainest
@@ -1754,7 +1764,12 @@ export function planSearchColumns(
  * fails, which is D7's actual guarantee -- but in that case every row loses
  * its full rendering, not just the offending one.
  */
-export function renderSearchResultLines(results: DatasetSearchResult[], columns: number): string[] {
+export function renderSearchResultLines(
+  results: DatasetSearchResult[],
+  columns: number,
+  options: { snippets?: boolean } = {},
+): string[] {
+  const { snippets = false } = options;
   const plan = planSearchColumns(results, columns);
   const lines: string[] = [];
 
@@ -1789,23 +1804,29 @@ export function renderSearchResultLines(results: DatasetSearchResult[], columns:
       }
       lines.push(rowParts.join("  "));
 
-      // Defence-in-depth beyond renderSnippetLine's own guard (#1150 D7):
-      // a snippet that fails to render costs this row its garnish, never
-      // the row itself, never the rest of the table.
-      //
-      // This layer is DOUBLY masked and no test can see it (#1174 review):
-      // renderSnippetLine already cannot throw for any input reachable here,
-      // and if it somehow did, the per-row catch below would handle it with
-      // the same visible outcome. Kept because the cost is a try/catch and
-      // the failure it guards against is a search silently losing rows, but
-      // do not mistake the passing suite for proof that it does anything.
-      let snippetLine: string | null = null;
-      try {
-        snippetLine = renderSnippetLine(result.snippet);
-      } catch {
-        snippetLine = null;
+      // Opt-in only (owner decision 2026-09-03): the snippet line is skipped
+      // entirely unless the caller asked for it via `--verbose`, which maps
+      // to `options.snippets`. See the function doc comment above.
+      if (snippets) {
+        // Defence-in-depth beyond renderSnippetLine's own guard (#1150 D7):
+        // a snippet that fails to render costs this row its garnish, never
+        // the row itself, never the rest of the table.
+        //
+        // This layer is DOUBLY masked and no test can see it (#1174 review):
+        // renderSnippetLine already cannot throw for any input reachable
+        // here, and if it somehow did, the per-row catch below would handle
+        // it with the same visible outcome. Kept because the cost is a
+        // try/catch and the failure it guards against is a search silently
+        // losing rows, but do not mistake the passing suite for proof that
+        // it does anything.
+        let snippetLine: string | null = null;
+        try {
+          snippetLine = renderSnippetLine(result.snippet);
+        } catch {
+          snippetLine = null;
+        }
+        if (snippetLine) lines.push(`    ${snippetLine}`);
       }
-      if (snippetLine) lines.push(`    ${snippetLine}`);
     } catch {
       // A single malformed row must not take down the rest of the table
       // (#1150 D7) -- fall back to the two fields that matter most: the id
@@ -2109,8 +2130,51 @@ const searchCommand = datasetCommand
     "--include-unknown",
     "Include datasets with an unknown value for the active facet filter(s)",
   )
+  // No `-v` alias (#1174-class review finding, discovered implementing this
+  // flag): the root program binds `-v` to `--version` (`src/index.ts`,
+  // `.version(version, "-v, --version", ...)`, a deliberate deviation from
+  // Commander's own `-V` default), so `-v` ANYWHERE in argv unconditionally
+  // prints the version and exits before this subcommand ever runs -- proven
+  // by running `nemar dataset search foo -v`. That already silently breaks
+  // every OTHER `-v, --verbose` in this file (`validate` above, `sandbox`,
+  // `admin`); this flag does not repeat it. See `searchVerboseRequested`
+  // below for why `--verbose` (long form only) also can't be read the normal
+  // way here.
+  .option(
+    "--verbose",
+    "Show a README snippet under each result (owner decision 2026-09-03; off by default)",
+  )
   .option("--json", "Output as JSON for scripting")
   .option("--limit <n>", "Limit results (default: 20)", "20");
+
+/**
+ * Whether `--verbose` was passed to `nemar dataset search`, read the ONLY way
+ * that actually works for this command.
+ *
+ * `searchCommand`'s own `--verbose` above exists purely so `dataset search
+ * --help` documents it -- the resulting value is never usable as
+ * `options.verbose` inside the action below. Commander's root command
+ * (`src/index.ts`) already declares a program-wide `--verbose` (one of its
+ * four documented global options), and `Command.parseOptions` resolves EVERY
+ * token in the full argv against the CURRENTLY-PARSING command's own options
+ * top-down, before any subcommand dispatch happens at all -- so root's
+ * `_findOption("--verbose")` always matches and consumes the token first,
+ * regardless of where in argv it appears (before or after `search`).
+ * `searchCommand`'s local option therefore never receives a value through
+ * the normal per-command `options` object; it stays `undefined` even when
+ * `--verbose` was typed (confirmed by tracing `options` inside this action
+ * with `--verbose` passed: `Object.keys(options)` never contains `verbose`).
+ * The value IS captured correctly, just one level up, on the root command.
+ * `optsWithGlobals()` walks `searchCommand -> datasetCommand -> program` and
+ * merges with ancestor (root) values winning on a key collision, which is
+ * exactly root's own documented behaviour for `optsWithGlobals()` ("globals
+ * overwrite locals") -- so this is the supported Commander mechanism for
+ * reading a value an ancestor command captured, not a workaround bolted on
+ * top of it.
+ */
+function searchVerboseRequested(): boolean {
+  return !!searchCommand.optsWithGlobals().verbose;
+}
 // Epic #1144 phase 4 (#1148), D1/D6: same declared facet table `list` uses,
 // so a facet or legacy filter fixed on the backend is reachable from search
 // too instead of drifting behind list's flag set.
@@ -2135,7 +2199,8 @@ Examples:
   $ nemar dataset search "motor imagery EEG"
   $ nemar dataset search "resting state" --modality eeg
   $ nemar dataset search "sleep spindles" --json
-  $ nemar dataset search "motor imagery" --license public --subjects 10..`,
+  $ nemar dataset search "motor imagery" --license public --subjects 10..
+  $ nemar dataset search "P300 oddball" --verbose      # Show README snippets`,
   )
   .action(async (query: string, options) => {
     validateLicenseTiersOrExit(options.license);
@@ -2222,7 +2287,9 @@ Examples:
       }
 
       try {
-        for (const line of renderSearchResultLines(response.results, columns)) {
+        for (const line of renderSearchResultLines(response.results, columns, {
+          snippets: searchVerboseRequested(),
+        })) {
           console.log(line);
         }
       } catch (renderErr) {
