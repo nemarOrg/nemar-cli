@@ -6,6 +6,7 @@
  */
 
 import { z } from "zod";
+import { escapeHtml } from "../lib/escape";
 import { applyDevWrap, parseEmailPreferences } from "./email";
 
 export type RecipientGroup = "all" | "admins" | "members";
@@ -215,15 +216,6 @@ function inlineMarkdown(text: string): string {
     return `<a href="${href}" style="color: #2563eb;">${label}</a>`;
   });
   return result;
-}
-
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
 }
 
 /**

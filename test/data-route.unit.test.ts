@@ -9,6 +9,7 @@
 import { describe, expect, test } from "bun:test";
 import "./setup";
 
+import { escapeHtml } from "../backend/src/lib/escape";
 import {
   type CatalogIndexRow,
   type DatasetRowForMetadata,
@@ -24,7 +25,6 @@ import {
   buildRedirectUrl,
   deriveSessions,
   diffRemovedSince,
-  escapeHtml,
   findLastSeenVersion,
   formatBytes,
   humanSize,
