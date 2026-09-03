@@ -27,7 +27,12 @@ beforeAll(() => {
 
 afterAll(() => {
   server?.stop(true);
-  process.env.TEST_API_URL = previousTestApiUrl;
+  // Guarded restore (#1175): assigning `undefined` to a process.env key
+  // coerces to the literal string "undefined" instead of deleting it, which
+  // poisoned TEST_API_URL for every test running later in the same `bun
+  // test` process (test/ + backend/test/ share one process at the root).
+  if (previousTestApiUrl === undefined) delete process.env.TEST_API_URL;
+  else process.env.TEST_API_URL = previousTestApiUrl;
 });
 
 function setResponse(status: number, body: Record<string, unknown>): void {
