@@ -25,6 +25,14 @@
  * D7: a non-finite or non-positive `columns` value (a terminal-capability
  * probe gone wrong) must degrade to the default rather than crashing or
  * producing a zero-width column.
+ *
+ * The final describe block below covers a later, separate decision (owner
+ * decision 2026-09-03, superseding #1150 D2's default): the README snippet
+ * line is opt-in via `renderSearchResultLines`'s third `options.snippets`
+ * argument, wired to the `search` command's `--verbose` flag (no `-v` short
+ * alias -- see `searchVerboseRequested` in `src/commands/dataset.ts`), not
+ * always-on. That is layout scope adjacent to D4's column planning, not a
+ * D4 change itself -- D4's width/column-dropping behaviour is untouched.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -34,6 +42,13 @@ import {
   renderSearchResultLines,
 } from "../src/commands/dataset";
 import type { DatasetSearchResult } from "../src/lib/api/datasets";
+// Strips ANSI so snippet-content assertions don't depend on whether this
+// process's ambient environment happens to have colour forced on (same
+// approach as test/search-snippet.unit.test.ts's `plain()` helper) --
+// theme.match/theme.muted wrap the marked term and the surrounding prose in
+// SEPARATE colour sequences, which would otherwise split a contiguous
+// "P300 expected" substring check.
+import { sanitizeSnippetText } from "../src/lib/render/snippet";
 
 function makeResult(overrides: Partial<DatasetSearchResult> = {}): DatasetSearchResult {
   return {
@@ -174,5 +189,46 @@ describe("renderSearchResultLines (#1150 D4/D7)", () => {
     }).not.toThrow();
     expect(lines.some((line) => line.includes("nm000001"))).toBe(true);
     expect(lines.some((line) => line.includes("nm000002"))).toBe(true);
+  });
+});
+
+describe("renderSearchResultLines: snippet is opt-in (owner decision 2026-09-03)", () => {
+  // Supersedes #1150 D2's always-on default: a snippet line under every row
+  // made the compact table slower to scan for a human and noisier for an
+  // agent caller. Score (D1) stays dropped either way -- unaffected by this
+  // change.
+  const SNIPPET_TEXT = "Target (<mark>P300</mark> expected) and Non-Target";
+
+  test("with no options, a result carrying a snippet renders no snippet line", () => {
+    const results = [makeResult({ snippet: SNIPPET_TEXT })];
+    const lines = renderSearchResultLines(results, SEARCH_DEFAULT_COLUMNS);
+    // Header + separator + exactly one row -- no extra line for the snippet.
+    expect(lines.length).toBe(3);
+    expect(lines.some((line) => line.includes("P300 expected"))).toBe(false);
+  });
+
+  test("{ snippets: false } explicitly renders no snippet line either", () => {
+    const results = [makeResult({ snippet: SNIPPET_TEXT })];
+    const lines = renderSearchResultLines(results, SEARCH_DEFAULT_COLUMNS, { snippets: false });
+    expect(lines.length).toBe(3);
+    expect(lines.some((line) => line.includes("P300 expected"))).toBe(false);
+  });
+
+  test("{ snippets: true } renders the snippet line under its row, as before", () => {
+    const results = [makeResult({ snippet: SNIPPET_TEXT })];
+    const lines = renderSearchResultLines(results, SEARCH_DEFAULT_COLUMNS, { snippets: true });
+    // Header + separator + row + snippet line.
+    expect(lines.length).toBe(4);
+    // Normalised (ANSI stripped): theme.match/theme.muted wrap the marked
+    // term and surrounding prose in separate colour sequences, so an
+    // un-normalised contiguous substring check would fail whenever this
+    // process's ambient environment has colour forced on.
+    expect(lines.some((line) => sanitizeSnippetText(line).includes("P300 expected"))).toBe(true);
+  });
+
+  test("{ snippets: true } on a result with no snippet still renders no extra line", () => {
+    const results = [makeResult({ snippet: undefined })];
+    const lines = renderSearchResultLines(results, SEARCH_DEFAULT_COLUMNS, { snippets: true });
+    expect(lines.length).toBe(3);
   });
 });
