@@ -195,6 +195,11 @@ def test_test_mode_print_config_defaults(dirs: tuple[Path, Path]) -> None:
     assert cfg["AWS_PROFILE"] == "nemar-zarr-dev"
     assert cfg["STATE_DIR"] == state_dir
     assert cfg["WORK_DIR"] == work_dir
+    # --test's pre-pass defaults BOTH ZARR_STATE_DIR and ZARR_WORK_DIR onto a
+    # dedicated *-test tree, so they are overridden together -- the sweep
+    # guard (#1121) must keep sweeping here, not just at the untouched
+    # production defaults.
+    assert cfg["SWEEP_SCRATCH"] == "1"
     assert cfg["DRIVER_REF"] == "dev"
     assert cfg["JOBS"] == "4"
     assert cfg["DRIVER_REPO"] == f"{state_dir}/nemar-cli"
@@ -257,6 +262,10 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
     assert cfg["AWS_PROFILE"] == "nemar-zarr"
     assert cfg["STATE_DIR"] == f"{zarr_base}/zarr-state"
     assert cfg["WORK_DIR"] == f"{zarr_base}/zarr-scratch"
+    # Neither ZARR_STATE_DIR nor ZARR_WORK_DIR is overridden here -- both sit
+    # at their ZARR_BASE-relative defaults, so the #1121 sweep guard must
+    # leave sweeping on.
+    assert cfg["SWEEP_SCRATCH"] == "1"
     assert cfg["DRIVER_REF"] == "main"
     # JOBS falls back to `nproc`, which varies by runner; just confirm it
     # resolved to a positive integer rather than being empty/non-numeric.
@@ -267,6 +276,53 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
     assert cfg["BACKFILL_DIR_FORMATS"] == "0"
     assert cfg["PREVIEW_ENGINE_BUMP"] == "0"
     assert cfg["EXECUTE"] == "0"
+
+
+def test_sweep_scratch_off_when_only_state_dir_overridden(
+    dirs: tuple[Path, Path],
+) -> None:
+    """#1121: a second deployment that overrides ZARR_STATE_DIR but leaves
+    ZARR_WORK_DIR at the shared default holds its own lock (under its own
+    STATE_DIR) while sharing WORK_DIR with whatever else uses the default --
+    so that lock proves nothing about who owns files under WORK_DIR. The
+    sweep must refuse rather than delete another deployment's in-flight
+    scratch.
+    """
+    zarr_base, home = dirs
+    proc = run_script(
+        ["--print-config"],
+        zarr_base,
+        home,
+        extra_env={"ZARR_STATE_DIR": str(zarr_base / "custom-state")},
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    cfg = parse_config(proc.stdout)
+    assert cfg["STATE_DIR"] == str(zarr_base / "custom-state")
+    assert cfg["WORK_DIR"] == f"{zarr_base}/zarr-scratch"
+    assert cfg["SWEEP_SCRATCH"] == "0"
+
+
+def test_sweep_scratch_off_when_only_work_dir_overridden(
+    dirs: tuple[Path, Path],
+) -> None:
+    """Symmetric case: ZARR_WORK_DIR overridden alone, ZARR_STATE_DIR (and
+    therefore the lock) left at the shared default -- the mirror image of
+    the deployment shape that destroyed an in-flight on007808 recording.
+    """
+    zarr_base, home = dirs
+    proc = run_script(
+        ["--print-config"],
+        zarr_base,
+        home,
+        extra_env={"ZARR_WORK_DIR": str(zarr_base / "custom-scratch")},
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    cfg = parse_config(proc.stdout)
+    assert cfg["WORK_DIR"] == str(zarr_base / "custom-scratch")
+    assert cfg["STATE_DIR"] == f"{zarr_base}/zarr-state"
+    assert cfg["SWEEP_SCRATCH"] == "0"
 
 
 @pytest.mark.parametrize(
