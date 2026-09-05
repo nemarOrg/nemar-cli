@@ -223,6 +223,78 @@ describe("--debug log content is redacted (real request, real failure)", () => {
   });
 });
 
+describe("--debug redacts attached-value flag spellings (#1257 item 24)", () => {
+  // CRITICAL, reviewer-reproduced: redactArgv/stripSecretFlagValues matched
+  // SECRET_FLAGS by exact token equality, so the two attached-value
+  // spellings Commander itself accepts for `-k`/`--key` slipped through
+  // untouched and put the raw key in the "Command:" line (the filename was
+  // never at risk from these two spellings -- see item 20's test for why).
+  function makeLoginOkServer() {
+    return Bun.serve({
+      port: 0,
+      fetch() {
+        return new Response(
+          JSON.stringify({
+            valid: true,
+            user: {
+              username: "carol",
+              email: "carol@example.com",
+              github_username: "carol-gh",
+              role: "member",
+              sandbox_completed: true,
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+  }
+
+  test("--key=<value> never appears, in the log content or the filename", async () => {
+    const configDir = makeConfigDir();
+    const server = makeLoginOkServer();
+    const apiUrl = `http://localhost:${server.port}`;
+    const fakeApiKey = "sk-fake-eq-spelling-secret-0123456789";
+
+    const result = await runCli(["--debug", "login", `--key=${fakeApiKey}`], configDir, apiUrl);
+    server.stop(true);
+
+    expect(result.exitCode).toBe(0);
+    const logsDir = join(configDir, "logs");
+    const logFiles = readdirSync(logsDir);
+    expect(logFiles.length).toBe(1);
+    expect(logFiles[0]).not.toContain(fakeApiKey);
+
+    const content = readFileSync(join(logsDir, logFiles[0]), "utf8");
+    expect(content).not.toContain(fakeApiKey);
+    expect(content).toContain("Command: nemar --debug login --key=[REDACTED]");
+
+    rmSync(configDir, { recursive: true, force: true });
+  });
+
+  test("-k<value> (no separator) never appears, in the log content or the filename", async () => {
+    const configDir = makeConfigDir();
+    const server = makeLoginOkServer();
+    const apiUrl = `http://localhost:${server.port}`;
+    const fakeApiKey = "sk-fake-attached-spelling-secret-0123456789";
+
+    const result = await runCli(["--debug", "login", `-k${fakeApiKey}`], configDir, apiUrl);
+    server.stop(true);
+
+    expect(result.exitCode).toBe(0);
+    const logsDir = join(configDir, "logs");
+    const logFiles = readdirSync(logsDir);
+    expect(logFiles.length).toBe(1);
+    expect(logFiles[0]).not.toContain(fakeApiKey);
+
+    const content = readFileSync(join(logsDir, logFiles[0]), "utf8");
+    expect(content).not.toContain(fakeApiKey);
+    expect(content).toContain("Command: nemar --debug login -k[REDACTED]");
+
+    rmSync(configDir, { recursive: true, force: true });
+  });
+});
+
 describe("nemar doctor --report", () => {
   test("prints the environment section with no HTTP trace", async () => {
     const configDir = makeConfigDir();
@@ -307,7 +379,9 @@ describe("unwritable log directory (#1257 item D12)", () => {
     // -- both in the final hint line and as its own [debug] line naming the
     // exact path that couldn't be created.
     expect(result.stderr).toMatch(/Debug log could not be written \(.+\)/);
-    expect(result.stderr).toContain(`[debug] could not create log directory ${join(configDir, "logs")}`);
+    expect(result.stderr).toContain(
+      `[debug] could not create log directory ${join(configDir, "logs")}`,
+    );
   });
 });
 
@@ -372,7 +446,11 @@ describe("a failed login exits non-zero (#1257 item 23)", () => {
     const server = makeInvalidKeyServer();
     const apiUrl = `http://localhost:${server.port}`;
 
-    const result = await runCli(["login", "-k", "sk-fake-bad-key-0000000000000000"], configDir, apiUrl);
+    const result = await runCli(
+      ["login", "-k", "sk-fake-bad-key-0000000000000000"],
+      configDir,
+      apiUrl,
+    );
     server.stop(true);
     rmSync(configDir, { recursive: true, force: true });
 

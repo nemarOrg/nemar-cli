@@ -396,20 +396,68 @@ export async function primeEnvironmentSnapshot(): Promise<void> {
 // Command line (for the log filename and the "Command:" line)
 // ============================================================================
 
-/** Flags immediately followed by a secret value on the command line. */
+/** Flags that take a secret value on the command line. */
 const SECRET_FLAGS = new Set(["-k", "--key", "--password", "--api-key"]);
 
+/**
+ * How a secret flag showed up in one argv token. `kind` is undefined for a
+ * bare flag token (`--key`, `-k`) whose value is a SEPARATE following
+ * token; `"long-eq"` for `--flag=value` (one token, split on `=`);
+ * `"short-attached"` for `-fvalue` (one token, a one-letter short flag
+ * with no separator at all -- only `-k` today).
+ */
+interface SecretFlagMatch {
+  flag: string;
+  kind?: "long-eq" | "short-attached";
+}
+
+/**
+ * Recognize a secret-bearing flag in any of the three spellings Commander
+ * accepts for an option that takes a value. CRITICAL FIX (review finding,
+ * PR #1257, reproduced): matching only the bare flag token by exact string
+ * equality missed the two attached spellings entirely, so `nemar --debug
+ * login --key=sk-...` and `nemar --debug login -ksk-...` both wrote the raw
+ * key into the debug log's "Command:" line (the filename was never at risk
+ * from these two spellings specifically: a token starting with "-" is
+ * already excluded from buildCommandLabel's scan below regardless of this
+ * function).
+ */
+function matchSecretFlag(token: string): SecretFlagMatch | null {
+  if (SECRET_FLAGS.has(token)) return { flag: token };
+  for (const flag of SECRET_FLAGS) {
+    if (!token.startsWith(flag) || token.length <= flag.length) continue;
+    // A one-letter short flag ("-k") takes its value concatenated directly,
+    // with no separator: "-ksecret". A long flag ("--key") never does --
+    // its only attached spelling uses "=", checked below.
+    if (flag.length === 2) return { flag, kind: "short-attached" };
+    if (token[flag.length] === "=") return { flag, kind: "long-eq" };
+  }
+  return null;
+}
+
 /** Redact secret-bearing flags/values before a command line is ever logged
- * (used for the human-readable "Command:" line; the value survives as a
- * "[REDACTED]" TOKEN, which is fine there but must never reach
- * buildCommandLabel below -- see stripSecretFlagValues). */
+ * (used for the human-readable "Command:" line; a bare flag's value
+ * survives as a "[REDACTED]" TOKEN, which is fine there but must never
+ * reach buildCommandLabel below -- see stripSecretFlagValues). */
 export function redactArgv(argv: string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < argv.length; i++) {
-    out.push(argv[i]);
-    if (SECRET_FLAGS.has(argv[i]) && i + 1 < argv.length) {
-      out.push("[REDACTED]");
-      i++;
+    const token = argv[i];
+    const match = matchSecretFlag(token);
+    if (!match) {
+      out.push(token);
+      continue;
+    }
+    if (match.kind === "long-eq") {
+      out.push(`${match.flag}=[REDACTED]`);
+    } else if (match.kind === "short-attached") {
+      out.push(`${match.flag}[REDACTED]`);
+    } else {
+      out.push(token);
+      if (i + 1 < argv.length) {
+        out.push("[REDACTED]");
+        i++;
+      }
     }
   }
   return out;
@@ -432,11 +480,17 @@ export function redactArgv(argv: string[]): string[] {
 function stripSecretFlagValues(argv: string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < argv.length; i++) {
-    if (SECRET_FLAGS.has(argv[i]) && i + 1 < argv.length) {
-      i++; // also skip the value that follows
+    const token = argv[i];
+    const match = matchSecretFlag(token);
+    if (!match) {
+      out.push(token);
       continue;
     }
-    out.push(argv[i]);
+    // A bare flag token's value is the NEXT array element; skip it too.
+    // An attached-value token (kind set) already starts with "-" and is
+    // dropped by buildCommandLabel's own scan regardless, but dropping it
+    // here too keeps this function's contract consistent on its own terms.
+    if (!match.kind && i + 1 < argv.length) i++;
   }
   return out;
 }

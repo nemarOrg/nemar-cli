@@ -22,6 +22,7 @@ import {
   buildCommandLabel,
   maskEmail,
   pruneLogsDir,
+  redactArgv,
   redactBody,
   redactHeaders,
   redactUrl,
@@ -241,6 +242,56 @@ describe("buildCommandLabel (#1257 item D13)", () => {
     expect(buildCommandLabel(["login", "-k", "sk-live-THE-ACTUAL-SECRET-KEY"])).toBe("login");
     expect(buildCommandLabel(["login", "--key", "sk-live-THE-ACTUAL-SECRET-KEY"])).toBe("login");
     expect(buildCommandLabel(["auth", "login", "-k", "sk-live-ANOTHER-SECRET"])).toBe("auth-login");
+  });
+
+  // Item 24 (CRITICAL, reviewer-reproduced): the filename was never
+  // actually at risk from the attached spellings (a token starting with
+  // "-" is already excluded from buildCommandLabel's scan regardless), but
+  // pinning it here alongside item 20's cases documents that both
+  // vulnerability classes are covered from the filename's side too.
+  test("an attached-value secret flag never reaches the label either", () => {
+    expect(buildCommandLabel(["login", "--key=sk-live-THE-ACTUAL-SECRET-KEY"])).toBe("login");
+    expect(buildCommandLabel(["login", "-ksk-live-THE-ACTUAL-SECRET-KEY"])).toBe("login");
+  });
+});
+
+describe("redactArgv (#1257 item 24)", () => {
+  // CRITICAL, reviewer-reproduced: redactArgv matched SECRET_FLAGS by exact
+  // token equality, so the two attached-value spellings Commander accepts
+  // for an option with a required argument -- "--flag=value" and, for a
+  // one-letter short flag, "-fvalue" with no separator at all -- slipped
+  // through untouched and put the raw key in the debug log's "Command:"
+  // line. `nemar --debug login --key=sk-... ` and `nemar --debug login
+  // -ksk-...` both reproduced the leak before this fix.
+  test("redacts the value out of a --flag=value token, keeping the flag visible", () => {
+    const out = redactArgv(["login", "--key=sk-live-THE-ACTUAL-SECRET-KEY"]);
+    expect(out).toEqual(["login", "--key=[REDACTED]"]);
+    expect(out.join(" ")).not.toContain("sk-live-THE-ACTUAL-SECRET-KEY");
+  });
+
+  test("redacts the value out of a one-letter short flag with no separator (-kVALUE)", () => {
+    const out = redactArgv(["login", "-ksk-live-THE-ACTUAL-SECRET-KEY"]);
+    expect(out).toEqual(["login", "-k[REDACTED]"]);
+    expect(out.join(" ")).not.toContain("sk-live-THE-ACTUAL-SECRET-KEY");
+  });
+
+  test("still redacts the original bare-flag spelling (separate value token)", () => {
+    const out = redactArgv(["login", "-k", "sk-live-THE-ACTUAL-SECRET-KEY"]);
+    expect(out).toEqual(["login", "-k", "[REDACTED]"]);
+  });
+
+  test("covers every flag in SECRET_FLAGS in attached form", () => {
+    expect(redactArgv(["--password=hunter2"])).toEqual(["--password=[REDACTED]"]);
+    expect(redactArgv(["--api-key=sk-live-abc"])).toEqual(["--api-key=[REDACTED]"]);
+  });
+
+  test("leaves an unrelated flag/token untouched", () => {
+    expect(redactArgv(["dataset", "manifest", "-d", "nm000104"])).toEqual([
+      "dataset",
+      "manifest",
+      "-d",
+      "nm000104",
+    ]);
   });
 });
 
