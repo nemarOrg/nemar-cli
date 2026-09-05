@@ -121,7 +121,15 @@ export async function request<T>(
         error: readError instanceof Error ? readError.message : String(readError),
       });
     }
-    throw new ApiError(response.status, "Failed to read response body", {
+    // statusCode 0, not response.status: a stream dying mid-body is a
+    // network-layer drop regardless of what status line the server sent,
+    // and 0 is this codebase's convention for exactly that (review finding,
+    // PR #1257) -- see the network-error branch above, and
+    // isRetryablePublishError, which treats statusCode 0 as retryable. The
+    // status line the server DID send is preserved in `details` for anyone
+    // reading the error, not lost.
+    throw new ApiError(0, "Failed to read response body", {
+      httpStatus: response.status,
       originalError: readError instanceof Error ? readError.message : String(readError),
     });
   }
