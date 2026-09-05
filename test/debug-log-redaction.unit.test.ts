@@ -15,7 +15,18 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { maskEmail, redactBody, redactHeaders } from "../src/lib/debug-log";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  buildCommandLabel,
+  maskEmail,
+  pruneLogsDir,
+  redactBody,
+  redactHeaders,
+  redactUrl,
+  shouldEnableDebug,
+} from "../src/lib/debug-log";
 
 describe("redactHeaders", () => {
   test("redacts Authorization, Cookie, X-Api-Key regardless of case", () => {
@@ -109,5 +120,172 @@ describe("redactBody", () => {
 
   test("passes through undefined unchanged", () => {
     expect(redactBody(undefined)).toBeUndefined();
+  });
+
+  // Review finding (PR #1257, item A1): a presigned S3 URL carries its
+  // credential in the query string, not the body -- a naive redaction pass
+  // that only knows about JSON key names or Bearer tokens misses it
+  // entirely when it's embedded as a string VALUE (an upload_url/
+  // download_url field), not a top-level field of its own.
+  test("masks presigned-S3 query params embedded in an upload_url/download_url field", () => {
+    const raw = JSON.stringify({
+      upload_url:
+        "https://nemar-dev.s3.amazonaws.com/objects/abc123" +
+        "?X-Amz-Algorithm=AWS4-HMAC-SHA256" +
+        "&X-Amz-Credential=AKIAABCDEFGHIJKLMNOP%2F20260101%2Fus-east-1%2Fs3%2Faws4_request" +
+        "&X-Amz-Security-Token=FwoGZXIvYXdzEXAMPLETOKENVALUEHERE" +
+        "&X-Amz-Signature=abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567",
+      download_url:
+        "https://example.com/f?Signature=deadbeefdeadbeefdeadbeef&AWSAccessKeyId=AKIAZZZZZZZZZZZZZZZZ",
+    });
+    const out = redactBody(raw) as string;
+    expect(out).not.toContain("AKIAABCDEFGHIJKLMNOP%2F20260101");
+    expect(out).not.toContain("FwoGZXIvYXdzEXAMPLETOKENVALUEHERE");
+    expect(out).not.toContain("abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567");
+    expect(out).not.toContain("deadbeefdeadbeefdeadbeef");
+    expect(out).not.toContain("AKIAZZZZZZZZZZZZZZZZ");
+    // Separator chars survive the replace so the URL still reads sensibly.
+    expect(out).toContain("X-Amz-Credential=[REDACTED]");
+    expect(out).toContain("&X-Amz-Security-Token=[REDACTED]");
+    expect(out).toContain("&X-Amz-Signature=[REDACTED]");
+    expect(out).toContain("?Signature=[REDACTED]");
+    expect(out).toContain("&AWSAccessKeyId=[REDACTED]");
+    // The non-secret host/path is left alone.
+    expect(out).toContain("nemar-dev.s3.amazonaws.com/objects/abc123");
+  });
+
+  test("does not throw and caps recursion on a pathologically deep body", () => {
+    // 5000 levels is well past any realistic API payload and, pre-fix,
+    // overflowed the call stack (RangeError) inside redactJsonValue.
+    let deep: unknown = "bottom";
+    for (let i = 0; i < 5000; i++) {
+      deep = { child: deep };
+    }
+    const raw = JSON.stringify({ top: deep });
+    let out: string | undefined;
+    expect(() => {
+      out = redactBody(raw);
+    }).not.toThrow();
+    expect(out).toContain("[REDACTED: depth]");
+  });
+});
+
+describe("redactUrl (#1257)", () => {
+  test("masks presigned-S3 params in the request URL itself", () => {
+    const url =
+      "https://nemar.s3.amazonaws.com/objects/xyz" +
+      "?X-Amz-Signature=0123456789abcdef0123456789abcdef0123456789abcdef" +
+      "&X-Amz-Security-Token=SECURITYTOKENVALUE";
+    const out = redactUrl(url);
+    expect(out).not.toContain("0123456789abcdef0123456789abcdef0123456789abcdef");
+    expect(out).not.toContain("SECURITYTOKENVALUE");
+    expect(out).toContain("?X-Amz-Signature=[REDACTED]");
+    expect(out).toContain("&X-Amz-Security-Token=[REDACTED]");
+  });
+
+  test("masks an email embedded in a query string (e.g. admin email-preference routes)", () => {
+    const url = "https://api.nemar.org/admin/email-preferences?user=alice@example.com";
+    const out = redactUrl(url);
+    expect(out).not.toContain("alice@example.com");
+    expect(out).toContain("user=a***@example.com");
+  });
+
+  test("leaves a plain URL with no secrets untouched", () => {
+    const url = "https://api.nemar.org/datasets/nm000104";
+    expect(redactUrl(url)).toBe(url);
+  });
+});
+
+describe("shouldEnableDebug (#1257 item D9)", () => {
+  test("NEMAR_DEBUG=1 enables debug mode with no --debug flag", () => {
+    expect(shouldEnableDebug([], { NEMAR_DEBUG: "1" })).toBe(true);
+  });
+
+  test("no flag and no env var: disabled", () => {
+    expect(shouldEnableDebug([], {})).toBe(false);
+  });
+
+  test("NEMAR_DEBUG=0 does not enable debug mode", () => {
+    expect(shouldEnableDebug([], { NEMAR_DEBUG: "0" })).toBe(false);
+  });
+
+  test("--debug flag alone enables debug mode with no env var", () => {
+    expect(shouldEnableDebug(["--debug"], {})).toBe(true);
+  });
+});
+
+describe("buildCommandLabel (#1257 item D13)", () => {
+  test("caps at the first two non-flag tokens", () => {
+    expect(buildCommandLabel(["dataset", "upload", "./my-dataset", "-n", "My EEG Dataset"])).toBe(
+      "dataset-upload",
+    );
+  });
+
+  test("a positional path never reaches the filename", () => {
+    expect(buildCommandLabel(["dataset", "validate", "/Users/alice/secret-project-name"])).toBe(
+      "dataset-validate",
+    );
+  });
+
+  test("a single-word command with no second token labels as itself", () => {
+    expect(buildCommandLabel(["doctor"])).toBe("doctor");
+  });
+
+  test("empty argv falls back to a fixed label", () => {
+    expect(buildCommandLabel([])).toBe("nemar");
+  });
+
+  // Item 20 (CRITICAL, reviewer-reproduced): a secret flag's value used to
+  // land in the label because it was the second RAW non-flag token.
+  test("a secret flag's value is never part of the label, even as the second token", () => {
+    expect(buildCommandLabel(["login", "-k", "sk-live-THE-ACTUAL-SECRET-KEY"])).toBe("login");
+    expect(buildCommandLabel(["login", "--key", "sk-live-THE-ACTUAL-SECRET-KEY"])).toBe("login");
+    expect(buildCommandLabel(["auth", "login", "-k", "sk-live-ANOTHER-SECRET"])).toBe("auth-login");
+  });
+});
+
+describe("pruneLogsDir (#1257 item D10)", () => {
+  test("removes exactly the oldest logs down to `keep`; non-log files are untouched", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nemar-prune-"));
+    try {
+      for (let i = 0; i < 12; i++) {
+        const ms = String(i).padStart(3, "0");
+        writeFileSync(join(dir, `nemar-2020-01-01T00-00-00-${ms}Z-fake.log`), "x");
+      }
+      writeFileSync(join(dir, "config.json"), "{}");
+      writeFileSync(join(dir, "notes.txt"), "not a log");
+
+      pruneLogsDir(dir, 10);
+
+      const remaining = readdirSync(dir);
+      const logs = remaining
+        .filter((name) => name.startsWith("nemar-") && name.endsWith(".log"))
+        .sort();
+      expect(logs.length).toBe(10);
+      // The two OLDEST (lowest-numbered) logs are the ones removed.
+      expect(logs).not.toContain("nemar-2020-01-01T00-00-00-000Z-fake.log");
+      expect(logs).not.toContain("nemar-2020-01-01T00-00-00-001Z-fake.log");
+      expect(logs).toContain("nemar-2020-01-01T00-00-00-002Z-fake.log");
+      expect(logs).toContain("nemar-2020-01-01T00-00-00-011Z-fake.log");
+      expect(remaining).toContain("config.json");
+      expect(remaining).toContain("notes.txt");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("keep greater than the file count is a no-op", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nemar-prune-noop-"));
+    try {
+      writeFileSync(join(dir, "nemar-2020-01-01T00-00-00-000Z-fake.log"), "x");
+      pruneLogsDir(dir, 100);
+      expect(readdirSync(dir).length).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a nonexistent directory does not throw", () => {
+    expect(() => pruneLogsDir(join(tmpdir(), "nemar-does-not-exist-xyz"), 10)).not.toThrow();
   });
 });

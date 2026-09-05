@@ -43,6 +43,7 @@ async function runCli(
   args: string[],
   configDir: string,
   testApiUrl: string | undefined,
+  extraEnv: Record<string, string> = {},
 ): Promise<RunResult> {
   const proc = spawn({
     cmd: ["bun", "run", CLI_ENTRY, ...args],
@@ -53,6 +54,7 @@ async function runCli(
       TEST_API_URL: testApiUrl ?? "",
       NEMAR_NO_UPDATE_CHECK: "1",
       NO_COLOR: "1",
+      ...extraEnv,
     },
     stdin: "ignore",
     stdout: "pipe",
@@ -102,6 +104,19 @@ describe("failure hint (#1256)", () => {
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("error:");
     expect(result.stderr).not.toContain(HINT_URL);
+  });
+
+  test("NEMAR_DEBUG=1 (no --debug flag) also prints the log path", async () => {
+    const configDir = makeConfigDir();
+    writeConfig(configDir, { apiKey: "fake-key", apiUrl: UNREACHABLE, username: "test" });
+    const result = await runCli(["dataset", "manifest", "-d", "nm000104"], configDir, UNREACHABLE, {
+      NEMAR_DEBUG: "1",
+    });
+    rmSync(configDir, { recursive: true, force: true });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).not.toContain(HINT_URL);
+    expect(result.stderr).toContain("Debug log:");
   });
 
   test("--debug prints the log path instead of the generic hint", async () => {
@@ -165,6 +180,16 @@ describe("--debug log content is redacted (real request, real failure)", () => {
     const logsDir = join(configDir, "logs");
     const logFiles = readdirSync(logsDir);
     expect(logFiles.length).toBe(1);
+
+    // Item 20 (CRITICAL, reviewer-reproduced): the FILENAME itself used to
+    // leak the key, since `nemar login -k <key>` is only one word before
+    // the flag and the key became buildCommandLabel's second "non-flag
+    // token" -- and this is the exact file the issue form tells users to
+    // drag onto GitHub. Must never appear in the filename, on ANY exit
+    // (this one is a successful login, exit 0).
+    expect(logFiles[0]).not.toContain(fakeApiKey);
+    expect(logFiles[0]).toContain("-login.log");
+
     const content = readFileSync(join(logsDir, logFiles[0]), "utf8");
 
     // Command line: the -k value must never appear in the clear.
@@ -198,6 +223,113 @@ describe("nemar doctor --report", () => {
     expect(result.stdout).toContain("CLI version:");
     expect(result.stdout).toContain("External tools:");
     expect(result.stdout).not.toContain("HTTP requests:");
+  });
+
+  // Item D11: an authenticated account's username/role show up, and the
+  // key never does -- this is the whole point of the "no credential" rule.
+  //
+  // Written directly in the nested `accounts` shape storeAccount() itself
+  // produces (rather than the flat legacy shape migrateConfig() upgrades),
+  // since `role` is new in this phase and was never part of that legacy
+  // flat shape -- there is nothing for a migration path to carry over.
+  test("authenticated: shows username and role, never the API key", async () => {
+    const configDir = makeConfigDir();
+    const fakeApiKey = "sk-fake-doctor-report-secret-999";
+    writeConfig(configDir, {
+      activeAccount: "alice",
+      accounts: {
+        alice: {
+          apiKey: fakeApiKey,
+          apiUrl: "https://example.invalid",
+          username: "alice",
+          role: "admin",
+        },
+      },
+    });
+    const result = await runCli(["doctor", "--report"], configDir, undefined);
+    rmSync(configDir, { recursive: true, force: true });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Username: alice");
+    expect(result.stdout).toContain("Role: admin");
+    expect(result.stdout).not.toContain(fakeApiKey);
+  });
+
+  // Item 22: a config predating the `role` field (this phase's own addition)
+  // must still load without crashing, and simply omit the Role line.
+  test("a pre-existing config without `role` loads fine and omits the Role line", async () => {
+    const configDir = makeConfigDir();
+    writeConfig(configDir, {
+      apiKey: "fake-key",
+      apiUrl: "https://example.invalid",
+      username: "legacy-user",
+      // no `role` field -- this is the shape every account had before #1257
+    });
+    const result = await runCli(["doctor", "--report"], configDir, undefined);
+    rmSync(configDir, { recursive: true, force: true });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Username: legacy-user");
+    expect(result.stdout).not.toContain("Role:");
+  });
+});
+
+describe("unwritable log directory (#1257 item D12)", () => {
+  test("a failing command still exits with its own code; write failure is reported, not a crash", async () => {
+    const configDir = makeConfigDir();
+    // Create a FILE named "logs" so mkdirSync({recursive:true}) fails with
+    // ENOTDIR/EEXIST rather than the log directory ever existing.
+    writeFileSync(join(configDir, "logs"), "not a directory");
+    writeConfig(configDir, { apiKey: "fake-key", apiUrl: UNREACHABLE, username: "test" });
+
+    const result = await runCli(
+      ["--debug", "dataset", "manifest", "-d", "nm000104"],
+      configDir,
+      UNREACHABLE,
+    );
+    rmSync(configDir, { recursive: true, force: true });
+
+    // The wrapped command's own exit code is unaffected by the diagnostic
+    // machinery failing to write its own log.
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).not.toContain(HINT_URL);
+    // Item 6: the failure reason is surfaced, not swallowed by a bare catch
+    // -- both in the final hint line and as its own [debug] line naming the
+    // exact path that couldn't be created.
+    expect(result.stderr).toMatch(/Debug log could not be written \(.+\)/);
+    expect(result.stderr).toContain(`[debug] could not create log directory ${join(configDir, "logs")}`);
+  });
+});
+
+describe("role persistence (#1257 item 22)", () => {
+  test("nemar login writes the account's role into config.json", async () => {
+    const configDir = makeConfigDir();
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return new Response(
+          JSON.stringify({
+            valid: true,
+            user: {
+              username: "bob",
+              email: "bob@example.com",
+              github_username: "bob-gh",
+              role: "owner",
+              sandbox_completed: true,
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+    const apiUrl = `http://localhost:${server.port}`;
+
+    const result = await runCli(["login", "-k", "sk-fake-role-test-key"], configDir, apiUrl);
+    server.stop(true);
+
+    expect(result.exitCode).toBe(0);
+    const config = JSON.parse(readFileSync(join(configDir, "config.json"), "utf8"));
+    expect(config.accounts.bob.role).toBe("owner");
   });
 });
 

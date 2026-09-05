@@ -6,9 +6,14 @@
  * and the failing step. This module lets a user hand over one file instead.
  *
  * Design constraints that shaped this:
- * - `src/lib/api/client.ts`'s `request()` is the ONLY place every HTTP call
+ * - `src/lib/api/client.ts`'s `request()` is the ONLY place a NEMAR API call
  *   goes through, so it is the one place HTTP entries are recorded. Nothing
- *   here talks to the network itself.
+ *   here talks to the network itself. This does NOT cover every fetch() in
+ *   the CLI: lib/update-check.ts (npm registry), lib/openneuro.ts, and
+ *   lib/import-openneuro.ts call fetch() directly against OpenNeuro/npm, not
+ *   the NEMAR API, and are not captured here (review finding, PR #1257;
+ *   tracked in the follow-up issue referenced from recordStep's docstring
+ *   below).
  * - The debug log must never contain a credential. Headers and bodies are
  *   redacted at record time (before they are ever held in memory here), not
  *   at write time, so there is no path that skips it.
@@ -23,6 +28,7 @@
 
 import { mkdirSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { errorDetail } from "./api/errors.js";
 import { getConfig, getConfigDir } from "./config.js";
 import { checkAllTools } from "./prerequisites.js";
 import { version } from "./version.js";
@@ -53,9 +59,18 @@ export function shouldEnableDebug(argv: string[], env: NodeJS.ProcessEnv = proce
 }
 
 /**
- * Mark the current step (e.g. a spinner's label right before it failed).
- * Wired into `printStepFailure` (lib/cli-output.ts), which already centralizes
- * most step-failure reporting across the CLI -- see that file's docstring.
+ * Records the TITLE string passed to `printStepFailure` (lib/cli-output.ts)
+ * -- not a spinner's running/in-progress text, which this module never reads.
+ *
+ * Coverage is narrow (review finding, PR #1257): `printStepFailure` has 8
+ * call sites, all in the dataset-upload flow (lib/upload/{preflight,
+ * transfer,finalize}.ts). Roughly 220 other `spinner.fail(...)` call sites
+ * elsewhere in the CLI (admin, sandbox, auth, and non-upload dataset
+ * commands) do not route through it and so never call this function -- a
+ * failure there leaves the debug log's "Failing step" line at its default,
+ * `(none recorded)`, rather than a fabricated guess. Widening this is
+ * tracked in https://github.com/nemarOrg/nemar-cli/issues/1259.
+ *
  * Cheap enough to call unconditionally; it is a no-op string assignment
  * when debug mode is off.
  */
@@ -86,6 +101,11 @@ export function dlog(message: string): void {
 // Redaction
 // ============================================================================
 
+// "set-cookie" is a RESPONSE header; nothing here captures response headers
+// today (only `entry.requestHeaders` exists on HttpLogEntryInput). It's kept
+// in this set so redaction is correct by construction the day a caller does
+// start passing response headers through, rather than something someone has
+// to remember to add then.
 const REDACT_HEADER_NAMES = new Set(["authorization", "cookie", "set-cookie", "x-api-key"]);
 
 /** Redact sensitive header values. Exported for direct unit testing. */
@@ -110,12 +130,25 @@ export function maskEmail(email: string): string {
   return `${email[0]}***${email.slice(at)}`;
 }
 
-function redactJsonValue(key: string, value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((v) => redactJsonValue(key, v));
+/**
+ * Recursion cap for `redactJsonValue` (review finding, PR #1257): with no
+ * bound, a pathologically deep body threw a raw `RangeError` (stack
+ * overflow) out of `recordHttpExchange`, which -- unlike a normal API
+ * error -- would have failed an otherwise-successful `request()` call just
+ * because debug mode happened to be on. Anything nested deeper than this is
+ * replaced outright rather than descended into; `recordHttpExchange` below
+ * is still wrapped in try/catch as a second line of defense for whatever
+ * this cap doesn't anticipate.
+ */
+const MAX_REDACT_DEPTH = 32;
+
+function redactJsonValue(key: string, value: unknown, depth = 0): unknown {
+  if (depth > MAX_REDACT_DEPTH) return "[REDACTED: depth]";
+  if (Array.isArray(value)) return value.map((v) => redactJsonValue(key, v, depth + 1));
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = redactJsonValue(k, v);
+      out[k] = redactJsonValue(k, v, depth + 1);
     }
     return out;
   }
@@ -133,20 +166,46 @@ const AWS_ACCESS_KEY_RE = /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g;
 // field name that carries one (JSON, form, or query-string style).
 const AWS_SECRET_ASSIGN_RE =
   /((?:aws_)?secret_access_key["']?\s*[:=]\s*["']?)[A-Za-z0-9/+=]{20,}/gi;
+// Presigned S3 URLs (upload_url / download_url fields, and the request URL
+// itself for a direct-to-S3 PUT) carry the credential in the query string,
+// not the body (review finding, PR #1257). Captures the separator char in a
+// group of its own so it survives the replace -- dropping it would merge
+// the previous param's value into this one with no "&"/"?" between them.
+const PRESIGNED_PARAM_RE =
+  /([?&])(X-Amz-Signature|X-Amz-Security-Token|X-Amz-Credential|Signature|AWSAccessKeyId)=[^&\s"']+/gi;
 
-/** Regex-only secret scrubbing, usable on JSON or arbitrary text. */
+/** Regex-only secret scrubbing, usable on JSON, a URL, or arbitrary text. */
 function scrubSecretPatterns(text: string): string {
   return text
     .replace(BEARER_RE, "Bearer [REDACTED]")
     .replace(AWS_ACCESS_KEY_RE, "[REDACTED_AWS_KEY]")
     .replace(AWS_SECRET_ASSIGN_RE, "$1[REDACTED]")
+    .replace(PRESIGNED_PARAM_RE, "$1$2=[REDACTED]")
     .replace(EMAIL_RE, maskEmail);
 }
 
 /**
- * Redact a request/response body: API keys, Bearer tokens, AWS keys/secrets,
- * and email addresses are masked; the result is truncated to `maxBytes`.
- * Exported for direct unit testing.
+ * Redact a URL: presigned-S3 query params (`X-Amz-Signature` and friends)
+ * and any embedded email (e.g. an admin email-preference route's `?user=`)
+ * are masked. Exported for direct unit testing.
+ */
+export function redactUrl(url: string): string {
+  return scrubSecretPatterns(url);
+}
+
+/**
+ * Redact a request/response body. Masked, regardless of nesting depth (see
+ * MAX_REDACT_DEPTH above): values under a key that is itself always a
+ * secret (`api_key`, `password`, `token`/`session_token`, `secret`,
+ * `ssh_key`/`private_key`, `access_key`/`access_key_id`,
+ * `secret_access_key`, `authorization`) are replaced outright regardless of
+ * their content; independently of key name, every string value is scanned
+ * for an email address, a `Bearer ...` token, an AWS access key ID
+ * (`AKIA`/`ASIA` + 16 chars), an `aws_secret_access_key` assignment (which
+ * does not match the key-name allowlist above verbatim, so needs its own
+ * pattern), and a presigned-S3 URL's signature/credential/security-token
+ * query params (e.g. inside an `upload_url` field). The result is
+ * truncated to `maxBytes`. Exported for direct unit testing.
  */
 export function redactBody(raw: string | undefined, maxBytes = MAX_BODY_BYTES): string | undefined {
   if (raw === undefined) return undefined;
@@ -176,10 +235,14 @@ export interface HttpLogEntryInput {
   /** null when the request never got a response (network error). */
   status: number | null;
   durationMs: number;
-  requestHeaders: Record<string, string>;
+  /** Absent on the placeholder entry recordHttpExchange pushes when
+   * redaction itself throws -- see `note` below. */
+  requestHeaders?: Record<string, string>;
   requestBody?: string;
   responseBody?: string;
   error?: string;
+  /** Set instead of the body fields when redacting this entry itself failed. */
+  note?: string;
 }
 
 /** Same shape as the input; kept as a distinct alias for readability at call sites. */
@@ -189,17 +252,41 @@ export type HttpLogEntry = HttpLogEntryInput;
  * Record one HTTP exchange made through `lib/api/client.ts`'s `request()`.
  * Redaction happens here, at record time, so a plaintext secret is never
  * held anywhere in this module's state.
+ *
+ * The URL is redacted (`redactUrl`) OUTSIDE the try block, before anything
+ * that recurses over the body: it's simple, non-recursive regex work that
+ * realistically can't throw, so it's always safe to include in the
+ * placeholder entry pushed from the catch branch below (review finding, PR
+ * #1257) -- unlike `redactBody`, which recurses into arbitrary caller-
+ * supplied JSON and is exactly the thing that catch branch exists for.
  */
 export function recordHttpExchange(entry: HttpLogEntryInput): void {
   if (!debugEnabled) return;
-  const redacted: HttpLogEntry = {
-    ...entry,
-    requestHeaders: redactHeaders(entry.requestHeaders),
-    requestBody: redactBody(entry.requestBody),
-    responseBody: redactBody(entry.responseBody),
-  };
-  httpEntries.push(redacted);
-  dlog(`${entry.method} ${entry.url} -> ${entry.status ?? "ERROR"} (${entry.durationMs}ms)`);
+  const url = redactUrl(entry.url);
+  try {
+    const redacted: HttpLogEntry = {
+      ...entry,
+      url,
+      requestHeaders: entry.requestHeaders ? redactHeaders(entry.requestHeaders) : undefined,
+      requestBody: redactBody(entry.requestBody),
+      responseBody: redactBody(entry.responseBody),
+    };
+    httpEntries.push(redacted);
+    dlog(`${entry.method} ${url} -> ${entry.status ?? "ERROR"} (${entry.durationMs}ms)`);
+  } catch (err) {
+    // A body that defeats redaction (see MAX_REDACT_DEPTH) must not fail an
+    // otherwise-successful request() call just because --debug is on: drop
+    // the body fields rather than let the exception escape recordHttpExchange.
+    const message = errorDetail(err);
+    httpEntries.push({
+      method: entry.method,
+      url,
+      status: entry.status,
+      durationMs: entry.durationMs,
+      note: `redaction failed: ${message}`,
+    });
+    dlog(`redaction failed for ${entry.method} ${url}: ${message}`);
+  }
 }
 
 /** Read-only snapshot of recorded HTTP entries. For tests. */
@@ -217,32 +304,59 @@ export function getRecordedHttpEntries(): readonly HttpLogEntry[] {
  * `role` is populated at login/`auth status --refresh` (see commands/auth.ts).
  * A future account-tiers field (upload access / tier) belongs here once it
  * exists in `Config` -- there is nothing to report yet on this branch.
+ *
+ * Each section is isolated in its own try/catch (review finding, PR #1257):
+ * `getConfig()` throws on a corrupt config.json (conf's `clearInvalidConfig`
+ * defaults to false), which used to take the whole report down with it --
+ * `nemar doctor --debug` failed where plain `nemar doctor` succeeded (it
+ * never touches config), and `nemar doctor --report` printed nothing at
+ * all. Now a broken section says so and the rest of the report still prints.
  */
 async function buildEnvironmentLines(): Promise<string[]> {
   const lines: string[] = [];
-  const runtime = process.versions.bun ? `Bun ${process.versions.bun}` : `Node ${process.version}`;
-  lines.push(`CLI version: ${version}`);
-  lines.push(`OS/Arch: ${process.platform}/${process.arch}`);
-  lines.push(`Runtime: ${runtime}`);
+  try {
+    const runtime = process.versions.bun
+      ? `Bun ${process.versions.bun}`
+      : `Node ${process.version}`;
+    lines.push(`CLI version: ${version}`);
+    lines.push(`OS/Arch: ${process.platform}/${process.arch}`);
+    lines.push(`Runtime: ${runtime}`);
+  } catch (err) {
+    lines.push(`(could not read CLI/OS/runtime info: ${errorDetail(err)})`);
+  }
+
   lines.push("");
   lines.push("Active account:");
-  const cfg = getConfig();
-  if (cfg.apiKey) {
-    if (cfg.username) lines.push(`  Username: ${cfg.username}`);
-    lines.push(`  API URL: ${cfg.apiUrl}`);
-    if (cfg.role) lines.push(`  Role: ${cfg.role}`);
-    lines.push(`  Sandbox completed: ${!!cfg.sandboxCompleted}`);
-  } else {
-    lines.push("  (not authenticated)");
+  try {
+    const cfg = getConfig();
+    if (cfg.apiKey) {
+      if (cfg.username) lines.push(`  Username: ${cfg.username}`);
+      lines.push(`  API URL: ${cfg.apiUrl}`);
+      if (cfg.role) lines.push(`  Role: ${cfg.role}`);
+      lines.push(`  Sandbox completed: ${!!cfg.sandboxCompleted}`);
+    } else {
+      lines.push("  (not authenticated)");
+    }
+  } catch (err) {
+    lines.push(`  (could not read account config: ${errorDetail(err)})`);
   }
+
   lines.push("");
   lines.push("External tools:");
-  const tools = await checkAllTools();
-  for (const tool of tools) {
-    lines.push(
-      `  ${tool.name}: ${tool.available ? (tool.version ?? "installed") : "not installed"}`,
-    );
+  try {
+    const tools = await checkAllTools();
+    for (const tool of tools) {
+      const status = tool.available
+        ? (tool.version ?? "installed")
+        : tool.timedOut
+          ? "(timed out)"
+          : "not installed";
+      lines.push(`  ${tool.name}: ${status}`);
+    }
+  } catch (err) {
+    lines.push(`  (could not probe external tools: ${errorDetail(err)})`);
   }
+
   return lines;
 }
 
@@ -259,10 +373,23 @@ export async function getEnvironmentReport(): Promise<string> {
 /**
  * Capture the environment section once, up front, so the synchronous exit
  * handler never has to await anything. No-op when debug mode is off.
+ *
+ * `buildEnvironmentLines` already isolates each of its sections in its own
+ * try/catch, so this outer one is a second line of defense (review finding,
+ * PR #1257) -- without it, any surprise here would still propagate out of
+ * `main()`'s `await primeEnvironmentSnapshot()` and fail the whole command
+ * before it even started, which is exactly the failure mode this feature
+ * exists to help diagnose, not cause.
  */
 export async function primeEnvironmentSnapshot(): Promise<void> {
   if (!debugEnabled || cachedEnvironmentSection !== undefined) return;
-  cachedEnvironmentSection = await getEnvironmentReport();
+  try {
+    cachedEnvironmentSection = await getEnvironmentReport();
+  } catch (err) {
+    const message = errorDetail(err);
+    cachedEnvironmentSection = `(could not build environment report: ${message})`;
+    dlog(`environment snapshot failed: ${message}`);
+  }
 }
 
 // ============================================================================
@@ -272,7 +399,10 @@ export async function primeEnvironmentSnapshot(): Promise<void> {
 /** Flags immediately followed by a secret value on the command line. */
 const SECRET_FLAGS = new Set(["-k", "--key", "--password", "--api-key"]);
 
-/** Redact secret-bearing flags/values before a command line is ever logged. */
+/** Redact secret-bearing flags/values before a command line is ever logged
+ * (used for the human-readable "Command:" line; the value survives as a
+ * "[REDACTED]" TOKEN, which is fine there but must never reach
+ * buildCommandLabel below -- see stripSecretFlagValues). */
 export function redactArgv(argv: string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -286,14 +416,41 @@ export function redactArgv(argv: string[]): string[] {
 }
 
 /**
+ * Drop a secret flag AND its value entirely, rather than masking the value
+ * in place (contrast `redactArgv`). CRITICAL FIX (review finding, PR #1257,
+ * reported reproducible): `buildCommandLabel` used to scan the RAW argv for
+ * its first two non-flag tokens, so `nemar login -k <key>` -- a single word
+ * before the flag -- put the key itself in the SECOND slot and the log was
+ * written as `nemar-<ts>-login-<THE-KEY>.log`, on every exit including
+ * success, which is the exact file the issue form tells users to attach.
+ * Masking in place (a "[REDACTED]" token, like redactArgv does) would have
+ * only swapped the leaked key for a still-wrong `login-REDACTED` label;
+ * dropping the flag and its value lets the real next token (if any) fall
+ * into that slot instead, so `nemar login -k <key>` labels correctly as
+ * `login`.
+ */
+function stripSecretFlagValues(argv: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (SECRET_FLAGS.has(argv[i]) && i + 1 < argv.length) {
+      i++; // also skip the value that follows
+      continue;
+    }
+    out.push(argv[i]);
+  }
+  return out;
+}
+
+/**
  * A filesystem-safe label for the log filename: up to the first two
- * non-flag tokens (e.g. `dataset upload ./my-dataset` -> "dataset-upload"),
- * capped at two so a positional argument (dataset path, username, ...)
- * never ends up in the filename.
+ * non-flag tokens of the command line with any secret flag's value removed
+ * first (e.g. `dataset upload ./my-dataset` -> "dataset-upload"), capped at
+ * two so a positional argument (dataset path, username, ...) never ends up
+ * in the filename.
  */
 export function buildCommandLabel(argv: string[]): string {
   const parts: string[] = [];
-  for (const token of argv) {
+  for (const token of stripSecretFlagValues(argv)) {
     if (token.startsWith("-")) continue;
     parts.push(token);
     if (parts.length === 2) break;
@@ -323,7 +480,10 @@ function buildLogContent(argv: string[], exitCode: number): string {
         `  [${index + 1}] ${entry.method} ${entry.url} -> ${entry.status ?? "ERROR"} (${entry.durationMs}ms)`,
       );
       if (entry.error) lines.push(`      Error: ${entry.error}`);
-      lines.push(`      Request headers: ${JSON.stringify(entry.requestHeaders)}`);
+      if (entry.note) lines.push(`      Note: ${entry.note}`);
+      if (entry.requestHeaders) {
+        lines.push(`      Request headers: ${JSON.stringify(entry.requestHeaders)}`);
+      }
       if (entry.requestBody) lines.push(`      Request body: ${entry.requestBody}`);
       if (entry.responseBody) lines.push(`      Response body: ${entry.responseBody}`);
     });
@@ -336,12 +496,22 @@ function buildLogContent(argv: string[], exitCode: number): string {
 
 /** Remove all but the `keep` most recent `nemar-*.log` files in `dir`. Names
  * are ISO-timestamp-prefixed, so lexicographic sort is chronological.
- * Exported for direct unit testing of the rotation policy. */
+ * Exported for direct unit testing of the rotation policy.
+ *
+ * A missing directory (ENOENT) is expected and silent -- nothing has ever
+ * written a log there yet, or another process's own prune already removed
+ * it. Anything else (EACCES, EPERM, ...) is dlog'd rather than swallowed
+ * bare (review finding, PR #1257), on both the readdir and the per-file
+ * unlink, so a permissions problem shows up in `[debug]` output instead of
+ * silently leaving the window over MAX_DEBUG_LOGS. */
 export function pruneLogsDir(dir: string, keep: number): void {
   let entries: string[];
   try {
     entries = readdirSync(dir).filter((name) => name.startsWith("nemar-") && name.endsWith(".log"));
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      dlog(`could not list ${dir} for log rotation: ${errorDetail(err)}`);
+    }
     return;
   }
   entries.sort();
@@ -349,24 +519,43 @@ export function pruneLogsDir(dir: string, keep: number): void {
   for (let i = 0; i < excess; i++) {
     try {
       unlinkSync(join(dir, entries[i]));
-    } catch {
-      // Best effort: a log another process already removed isn't an error.
+    } catch (err) {
+      // ENOENT: a log another process already removed isn't an error.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        dlog(`could not remove old log ${entries[i]}: ${errorDetail(err)}`);
+      }
     }
   }
+}
+
+/** The reason the most recent `writeDebugLogSync` call returned null while
+ * debug mode was on (as opposed to returning null because debug mode was
+ * off, which callers already distinguish via `isDebugEnabled()`). Read by
+ * src/index.ts to print a specific "could not be written" message instead
+ * of the generic failure hint, which would otherwise tell the user to
+ * re-run with the exact flag they just ran with. */
+let lastWriteFailureReason: string | undefined;
+
+export function getLastWriteFailureReason(): string | undefined {
+  return lastWriteFailureReason;
 }
 
 /**
  * Write the debug log for this run and prune to the 10 most recent. Fully
  * synchronous so it can run from a `process.on("exit", ...)` handler, which
  * cannot await anything. No-op (returns null) when debug mode is off, or if
- * the log directory can't be written to.
+ * the log directory can't be created or written to -- both failures are
+ * dlog'd (review finding, PR #1257: these used to be a bare `catch {}`) and
+ * the reason is recorded for `getLastWriteFailureReason()`.
  */
 export function writeDebugLogSync(argv: string[], exitCode: number): string | null {
   if (!debugEnabled) return null;
   const dir = join(getConfigDir(), "logs");
   try {
     mkdirSync(dir, { recursive: true });
-  } catch {
+  } catch (err) {
+    lastWriteFailureReason = errorDetail(err);
+    dlog(`could not create log directory ${dir}: ${lastWriteFailureReason}`);
     return null;
   }
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -374,7 +563,9 @@ export function writeDebugLogSync(argv: string[], exitCode: number): string | nu
   const filePath = join(dir, fileName);
   try {
     writeFileSync(filePath, buildLogContent(argv, exitCode), "utf8");
-  } catch {
+  } catch (err) {
+    lastWriteFailureReason = errorDetail(err);
+    dlog(`could not write log file ${filePath}: ${lastWriteFailureReason}`);
     return null;
   }
   pruneLogsDir(dir, MAX_DEBUG_LOGS);
@@ -387,5 +578,6 @@ export function resetDebugStateForTesting(): void {
   usageExit = false;
   lastStep = undefined;
   cachedEnvironmentSection = undefined;
+  lastWriteFailureReason = undefined;
   httpEntries.length = 0;
 }
