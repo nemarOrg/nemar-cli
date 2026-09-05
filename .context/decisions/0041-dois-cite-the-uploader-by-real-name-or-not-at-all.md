@@ -52,9 +52,26 @@ for a half-filled name. There is no username fallback anywhere.
   strictly better than the old whole-string match, but it is a behaviour change:
   a dataset whose author list names a same-family-name colleague no longer
   suppresses the curator entry.
-- Accounts created before signup read ORCID need filling. That is what
-  `nemar admin backfill-names` is for; accounts whose ORCID record hides its name
-  must supply it themselves.
+- **The back catalogue does not fix itself.** Accounts created before signup
+  read ORCID have no name, and nothing fills them automatically: an admin must
+  run `nemar admin backfill-names --apply` against production (dry run first)
+  before those owners can publish. There is no cron and no lazy backfill on
+  read, deliberately -- a job that rewrites researcher names unattended is not
+  something to schedule without someone watching the first run.
+- **An owner whose ORCID record hides their name has no self-service fix
+  today.** `PATCH /auth/profile` rejects `given_name`/`family_name` on purpose
+  (ORCID is canonical, #835), so the only route is to make the name public on
+  ORCID and sign in again. Phase 3 (#1253) adds name entry at onboarding; every
+  message this ADR governs must be revisited then, because they currently say
+  "make it public on ORCID" and that will stop being the only answer.
+- **The owner-facing dashboard cannot explain this yet.** It maps every
+  `blocked` request to one badge and never renders `block_reason` or `message`,
+  so a blocked owner sees "validation failed" with no mention of a name
+  (nemarOrg/website#304). The CLI and the admin queue do show it.
+- **Version DOIs are still unattributed at mint time** (#1261): only the
+  concept mint threads an identity, so a per-version DOI carries no
+  `DataCurator` until a metadata refresh adds one. Pre-existing, out of scope
+  here, and now written down.
 
 ## Alternatives considered
 
@@ -73,7 +90,11 @@ for a half-filled name. There is no username fallback anywhere.
 
 ## Receipts
 
-- Issue #1255, epic #1250 (phase 5).
+- Issue #1255, epic #1250 (phase 5). Follow-ups: #1261 (version DOIs carry no
+  curator), #1253 (Phase 3 profile name entry), nemarOrg/website#304 (the owner
+  dashboard does not render a block reason).
 - Migration `0051_user_real_name.sql` -- the columns, and ORCID as their source.
-- ADR 0007 (EZID is the registrar; DOIs are permanent).
+- ADR 0007 (EZID is the sole registrar). DOI permanence itself is a standing
+  core principle in AGENTS.md ("DOIs are permanent and require explicit
+  confirmation"), not something ADR 0007 states.
 - ADR 0026 (the precedent for a typed, itemised publish-block reason).
