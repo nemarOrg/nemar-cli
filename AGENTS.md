@@ -183,9 +183,15 @@ s3://nemar/staging/pr-{n}/{datasetId}/objects/   # PR staging area
 
 ### User flow
 
-1. Sign up (username, email, password) → email verification → admin approval
-2. Admin approves → system generates API token, S3 credentials, GitHub PAT
-3. User uploads → BIDS validation → private GitHub repo + S3 upload
+Four statuses, fixed meanings, one writer for upload access (**ADR 0040**):
+`pending` (email unverified) → `verified` (the base tier, no admin needed) →
+`approved` (an admin granted upload) → `revoked`.
+
+1. Sign up (CLI: username, email, password; web: ORCID + an email) → verify the email → `verified`
+2. `verified` needs no admin: browse, dashboard, settings, `nemar auth retrieve-key`,
+   `nemar sandbox`, and requesting upload access
+3. Admin approves the one-time upload request → `service_access` → user uploads
+   → BIDS validation → private GitHub repo + S3 upload
 4. Admin creates concept DOI → user can version with new DOIs
 
 ### Web dashboard auth (#569)
