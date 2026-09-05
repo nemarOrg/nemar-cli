@@ -25,6 +25,7 @@ Four names, fixed meanings, and one writer.
 - **`pending`** — the account exists and its email is not verified. CLI and web alike.
 - **`verified`** — the email is verified. This is the base tier and needs no admin:
   browse, dashboard, settings, CLI API key, sandbox training, and requesting upload access.
+  (The CLI key, sandbox and request paths are Phase 2 work; see Phasing below.)
 - **`approved`** — an admin approved the one-time upload request.
 - **`revoked`** — unchanged.
 
@@ -44,6 +45,28 @@ That is not a formality in this catalog:
 every one of the 19 affected rows is ORCID-verified and exactly one is email-verified,
 so 18 real accounts drop to `pending` with an inbox left to confirm.
 
+## Phasing
+
+The decision above is whole; the code arrives in two phases of epic #1250,
+which merges to `dev` only as a complete epic branch.
+Read the split before assuming a behaviour described here is live.
+
+- **Phase 1 (#1251, this change):** the status vocabulary and its meanings;
+  migration 0075; approval as the single writer of `service_access`
+  (both approve routes, revoke as the eraser, both audited);
+  the upload gate's message; admin visibility of the tier in `GET /admin/users`
+  and `nemar admin users`; `Upload access` in `nemar auth status`.
+- **Phase 2 (#1252):** everything that makes `verified` *usable* as the base tier —
+  `authMiddleware`, `POST /auth/login`, `POST /auth/retrieve-key` and the sandbox routes
+  accepting `verified` where they require `status='approved'` today;
+  the `pending` → `verified` transition for web accounts
+  (a verify endpoint, and the email-code login writing the status, not just `email_verified`);
+  `userStatusForDashboard` mapping `verified` to active;
+  and ORCID finalize no longer auto-approving.
+
+So while Phase 1 stands alone, migration 0075 must not be *applied* alone —
+its rule (b) moves web accounts into a tier nothing has been taught to honour yet.
+
 ## Consequences
 
 - An admin's one action now means what it says, and the audit row records the grant
@@ -55,7 +78,8 @@ so 18 real accounts drop to `pending` with an inbox left to confirm.
   It moves every auto-approved web row out of `approved`,
   and until the middleware and `userStatusForDashboard` learn that `verified` is active,
   those users see a dashboard that reports them as pending with nothing to act on.
-- 18 web users must verify an email address they have never been asked to verify.
+- 18 web users must verify an email address they have never been asked to verify,
+  once Phase 2 ships the verify step that lets them.
   That is the cost of making `verified` mean what it says, and it is paid once.
 - Until phase 3 ships the request endpoint, there is no self-service path:
   the 403 tells people to reach an admin through the support page.
@@ -64,6 +88,17 @@ so 18 real accounts drop to `pending` with an inbox left to confirm.
 - ORCID finalize still auto-approves new web sign-ups (phase 2 changes it),
   so the invariant is established by 0075 and then re-broken by every new web sign-up
   until that lands. The approve routes repair such a row instead of 409ing it.
+- One legacy shape sits outside the invariant and is deliberately left alone:
+  0062 grandfathered `role IN ('owner','admin')` regardless of status,
+  so an owner or admin at `verified` could hold the grant without being `approved`.
+  It should be an empty set, and both mechanical repairs are wrong
+  (promoting approves someone no admin approved; clearing locks a working admin out),
+  so such a row is resolved by an explicit approve or revoke. See 0075's header.
+- Upload access is now reported as three states, not two, everywhere it is displayed:
+  granted, not granted, and unknown.
+  A CLI talking to a backend that predates this change gets `undefined`, not `false`,
+  and saying "not granted" to someone who holds the grant is the one wrong answer here
+  — it sends them to an admin to ask for something they already have.
 
 ## Alternatives considered
 

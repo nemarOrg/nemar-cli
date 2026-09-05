@@ -18,6 +18,34 @@
 -- applied by hand on 2026-09-05 (the interim step recorded on #1250), and this
 -- migration must not re-stamp those rows with a later grant timestamp.
 --
+-- NOT ONE TRANSACTION, and it does not need to be. `wrangler d1 migrations
+-- apply` reads this file, appends its own `INSERT INTO d1_migrations`, and hands
+-- the whole string to executeSql (wrangler-dist/cli.js, the `unappliedMigrations`
+-- loop). With --local that is split into statements and run through
+-- `db.batch()`, which IS one transaction; against the remote database it is a
+-- single POST to the D1 `/query` endpoint whose transactional scope wrangler
+-- does not guarantee -- and wrangler's own result handling assumes it may not
+-- be, walking each statement's `success` and marking the migration failed if any
+-- of them did not land. So a partial application is possible on the remote path,
+-- and idempotency, not atomicity, is what makes that safe here:
+--   * the two statements touch disjoint populations (signup_source 'cli' vs
+--     'web'), so neither can half-apply the other's work;
+--   * each narrows its own predicate by succeeding -- (a) leaves rows at
+--     service_access = 1, (b) leaves them out of 'approved' -- so re-running
+--     after a partial application finishes the remainder and touches nothing
+--     that already landed.
+-- Re-run the migration on failure; do not hand-repair.
+--
+-- ONE SHAPE THIS DOES NOT REACH: 0062 also grandfathered `role IN ('owner',
+-- 'admin')` regardless of status, so an owner or admin sitting at 'verified' or
+-- 'pending' would hold service_access = 1 without being 'approved'. Every
+-- owner/admin is approved in practice, so this is expected to be an empty set,
+-- and neither available repair is right for it (promoting the status would
+-- approve someone no admin approved; clearing the grant would lock a working
+-- admin out of upload). If such a row exists, resolve it deliberately with
+-- `nemar admin approve` or `nemar admin revoke`, either of which restores the
+-- invariant for that row.
+--
 -- DEPLOY ORDER: apply this only alongside epic #1250 phase 2, which teaches the
 -- auth middleware and the website that 'verified' is active and gives a
 -- 'pending' web user a verify-your-email step. Applied on its own, rule (b)

@@ -502,7 +502,7 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
     // New web account: username/github_username/password_hash stay NULL
     // (allowed since 0026); name lives on the identity row.
     //
-    // Tiered access (ADR 0010, #1013): ORCID sign-in auto-approves to BASE
+    // Tiered access (website ADR 0010, #1013): ORCID sign-in auto-approves to BASE
     // access (status='approved') -- view/dashboard only. This is safe because
     // 'approved' no longer implies upload: uploading additionally requires
     // `service_access` (granted 0 here), so a base user cannot consume compute
@@ -561,7 +561,7 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
     // Canonical name from ORCID, after the response (best-effort; never blocks signup).
     afterResponse(c, refreshUserName(c.env, userId, pending.orcid));
     // status "active" mirrors userStatusForDashboard('approved') used by
-    // /auth/me — the account has base access immediately (ADR 0010).
+    // /auth/me — the account has base access immediately (website ADR 0010).
     return c.json({
       user: { id: userId, email, role: "member", status: "active" },
     });

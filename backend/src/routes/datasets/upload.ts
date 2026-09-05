@@ -254,7 +254,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       }
 
       // Non-sandbox (real) dataset creation is gated on service access then
-      // sandbox training (ADR 0010, #1013). See services/upload-gate.ts.
+      // sandbox training (website ADR 0010, #1013). See services/upload-gate.ts.
       if (!sandbox) {
         const userStatus = await db
           .prepare("SELECT service_access, sandbox_completed FROM users WHERE id = ?")
@@ -680,7 +680,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           );
         }
 
-        // Pushing bytes to a real dataset requires service access (ADR 0010,
+        // Pushing bytes to a real dataset requires service access (website ADR 0010,
         // #1013), even for collaborators: a collaborator keeps download but
         // cannot upload without passing export-control review. Sandbox datasets
         // are exempt (capped training playground).
@@ -784,7 +784,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           );
         }
 
-        // Real-dataset uploads require service access (ADR 0010, #1013).
+        // Real-dataset uploads require service access (website ADR 0010, #1013).
         // Collaborators keep download but cannot push bytes without passing
         // export-control review. Sandbox datasets are exempt.
         if (!dataset.is_sandbox) {

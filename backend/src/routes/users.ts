@@ -79,7 +79,7 @@ userRoutes.get("/me", async (c) => {
       sandbox_completed: !!userDetails?.sandbox_completed,
       sandbox_completed_at: userDetails?.sandbox_completed_at,
       sandbox_dataset_id: userDetails?.sandbox_dataset_id,
-      // Tiered access (ADR 0010): admin-granted permission to upload/compute.
+      // Tiered access (website ADR 0010): admin-granted permission to upload/compute.
       service_access: !!userDetails?.service_access,
     },
     token: tokenInfo
