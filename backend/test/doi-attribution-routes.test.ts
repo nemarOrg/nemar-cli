@@ -12,10 +12,23 @@
  *
  * Real engine throughout: bun:sqlite behind realD1 with every migration, the
  * real admin router with real auth middleware and hashed tokens, and two
- * local `Bun.serve()` upstreams standing in for GitHub (via the existing
- * NEMAR_GITHUB_API_URL override) and EZID (via NEMAR_EZID_API_URL, added for
- * this). Both speak the real wire formats -- GitHub's git/trees + blobs JSON,
- * EZID's ANVL -- so the production request/parse path runs end to end.
+ * local `Bun.serve()` upstreams standing in for GitHub and EZID (the latter
+ * via NEMAR_EZID_API_URL, added for this). Both speak the real wire formats
+ * -- GitHub's git/trees + blobs JSON, EZID's ANVL -- so the production
+ * request/parse path runs end to end.
+ *
+ * ONE COVERAGE GAP, and it is not fixable from here: the metadata refresh's
+ * happy path needs a REAL `getTreeAtRef`, and
+ * backend/test/manifest-small-root-files.test.ts installs a process-wide
+ * `mock.module("../src/services/github", ...)` whose `getTreeAtRef` returns
+ * an empty array. `mock.module` is permanent for the process (neither
+ * `mock.restore()` nor re-registering the real namespace undoes it) and
+ * `test/` + `backend/test/` share one, so every later file sees an empty
+ * tree. A refresh test asserting on the rebuilt XML therefore passes alone
+ * and fails in a full run. The equivalent assertion -- real name in, username
+ * nowhere -- is made instead on the two paths that do NOT need a tree: the
+ * concept mint and the exemplar re-mint. The refresh's own SKIP behaviour,
+ * which is the new logic, needs no tree and is asserted directly below.
  */
 
 import type { Database } from "bun:sqlite";
@@ -99,13 +112,44 @@ beforeAll(() => {
   servers = [gh, ezid];
   ghBase = `http://localhost:${gh.port}`;
   ezidBase = `http://localhost:${ezid.port}`;
-  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = ghBase;
-  (globalThis as { NEMAR_EZID_API_URL?: string }).NEMAR_EZID_API_URL = ezidBase;
 });
 
+/**
+ * GitHub is intercepted by PATCHING `globalThis.fetch` for the duration of a
+ * call, not by the NEMAR_GITHUB_API_URL global.
+ *
+ * `test/` and `backend/test/` share one bun process, and several files patch
+ * `globalThis.fetch` themselves. A leftover patch from an earlier file
+ * answers `api.github.com` before the URL override is ever consulted, which
+ * showed up as this file passing alone and failing in a full-suite run with
+ * "dataset_description.json not found" while our fixture server logged zero
+ * hits. Patching per call puts us at the FRONT of that chain -- we capture
+ * whatever `fetch` currently is, intercept only GitHub, delegate the rest,
+ * and restore in `finally` so we do not become the next file's problem.
+ *
+ * EZID keeps the NEMAR_EZID_API_URL seam: nothing else in the suite touches
+ * that host.
+ */
+async function withFakeGithub<T>(fn: () => Promise<T>): Promise<T> {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const req = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(req.url);
+    if (url.hostname === "api.github.com") {
+      const local = new URL(url.pathname + url.search, ghBase);
+      return previousFetch(new Request(local, req));
+    }
+    return previousFetch(input as RequestInfo, init);
+  }) as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+}
+
 afterAll(() => {
-  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
-  (globalThis as { NEMAR_EZID_API_URL?: string }).NEMAR_EZID_API_URL = undefined;
+  delete (globalThis as { NEMAR_EZID_API_URL?: string }).NEMAR_EZID_API_URL;
   for (const s of servers) s.stop(true);
 });
 
@@ -139,12 +183,17 @@ function seedOwner(given: string | null, family: string | null) {
 
 function seedDataset(
   id: string,
-  opts: { conceptDoi?: string | null; isExemplar?: number; isSandbox?: number } = {},
+  opts: {
+    conceptDoi?: string | null;
+    isExemplar?: number;
+    isSandbox?: number;
+    source?: string | null;
+  } = {},
 ) {
   db.query(
     `INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo, is_sandbox, visibility,
-                           status, concept_doi, is_exemplar, ezid_status)
-     VALUES (?, 'Attribution Fixture Dataset', ?, ?, ?, 'public', 'active', ?, ?, 'reserved')`,
+                           status, concept_doi, is_exemplar, source, ezid_status)
+     VALUES (?, 'Attribution Fixture Dataset', ?, ?, ?, 'public', 'active', ?, ?, ?, 'reserved')`,
   ).run(
     id,
     ownerId,
@@ -152,6 +201,7 @@ function seedDataset(
     opts.isSandbox ?? 0,
     opts.conceptDoi ?? null,
     opts.isExemplar ?? 0,
+    opts.source ?? null,
   );
 }
 
@@ -175,18 +225,22 @@ function env(): Bindings {
 }
 
 function post(path: string, body: unknown): Promise<Response> {
-  return app.request(
-    path,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
-    env(),
+  return withFakeGithub(() =>
+    app.request(
+      path,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      env(),
+    ),
   );
 }
 
 beforeEach(async () => {
+  // Claimed per test: another file's afterAll may have cleared it.
+  (globalThis as { NEMAR_EZID_API_URL?: string }).NEMAR_EZID_API_URL = ezidBase;
   db = freshDb();
   ezidWrites = [];
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -194,24 +248,44 @@ beforeEach(async () => {
   await seedAdmin();
 });
 
-describe("POST /admin/datasets/:id/doi/update (metadata refresh)", () => {
-  test("a named owner is cited by real name, and the username never ships", async () => {
+describe("POST /admin/datasets/:id/doi/concept (the mint)", () => {
+  test("cites the owner by real name, and the username never reaches EZID", async () => {
     seedOwner("Jane", "Doe");
-    seedDataset(DATASET_ID, { conceptDoi: "10.82901/NEMAR.NM000282" });
+    seedDataset(DATASET_ID);
 
-    const res = await post(`/admin/datasets/${DATASET_ID}/doi/update`, {
-      refresh_metadata: true,
+    const res = await post(`/admin/datasets/${DATASET_ID}/doi/concept`, {
+      sandbox: true,
+      skip_enrichment_check: true,
     });
     expect(res.status).toBe(200);
 
     const xml = lastDataciteXml();
-    expect(xml).toContain("DataCurator");
+    expect(xml).toContain('<contributor contributorType="DataCurator">');
     expect(xml).toContain("Doe, Jane");
     expect(xml).toContain("<givenName>Jane</givenName>");
+    expect(xml).toContain("<familyName>Doe</familyName>");
     expect(xml).toContain(ORCID);
     expect(xml).not.toContain(OWNER_USERNAME);
   });
 
+  test("an exempt deposit with a nameless owner mints unattributed, not by username", async () => {
+    seedOwner(null, null);
+    seedDataset(DATASET_ID, { source: "openneuro" });
+
+    const res = await post(`/admin/datasets/${DATASET_ID}/doi/concept`, {
+      sandbox: true,
+      skip_enrichment_check: true,
+    });
+    expect(res.status).toBe(200);
+
+    const xml = lastDataciteXml();
+    expect(xml).not.toContain("DataCurator");
+    expect(xml).not.toContain(OWNER_USERNAME);
+    expect(xml).toContain("HostingInstitution");
+  });
+});
+
+describe("POST /admin/datasets/:id/doi/update (metadata refresh)", () => {
   test("a nameless owner SKIPS the refresh instead of stripping the curator", async () => {
     // The regression this test exists for: rebuilding from a nameless owner
     // produces a record with no DataCurator, and pushing it deletes the
