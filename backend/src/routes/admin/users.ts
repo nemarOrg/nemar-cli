@@ -11,6 +11,7 @@
 import { zValidator } from "@hono/zod-validator";
 import type { Context } from "hono";
 import { z } from "zod";
+import { orcidIdSchema } from "../../../../shared/contract/publication.js";
 import { ownerMiddleware } from "../../middleware/auth";
 
 import { auditLogStatement } from "../../db/audit-log";
@@ -1471,7 +1472,10 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       .object({
         given_name: z.string().max(200).optional(),
         family_name: z.string().max(200).optional(),
-        orcid: z.string().max(19).optional(),
+        // Shared iD validator, not a bare length check: `max(19)` accepted
+        // any 19-character string as an ORCID, which is how a fixture row
+        // could carry an iD the rest of the system would never accept.
+        orcid: orcidIdSchema.optional(),
         orcid_verified: z.boolean().optional(),
         github_username: z.string().max(39).optional(),
         city: z.string().max(200).optional(),

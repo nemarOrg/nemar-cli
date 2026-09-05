@@ -9,6 +9,7 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
+import type { PublicationBlockReason } from "../../../../shared/contract/publication.js";
 import { authMiddleware } from "../../middleware/auth";
 import { isValidDatasetId } from "../../services/datasetId";
 import {
@@ -44,8 +45,16 @@ import { hasRole } from "../../types/bindings";
 import { extractRepoName } from "./shared";
 import type { DatasetsRouter } from "./shared";
 
-// User-facing messages for each publication block reason
-const BLOCK_MESSAGES: Record<string, string> = {
+/**
+ * User-facing message for each publication block reason.
+ *
+ * Keyed by the shared vocabulary (`PublicationBlockReason`) so a reason added
+ * to the contract without a message here is a type error, not a silent
+ * fallback to the generic sentence. Reads go through `blockMessage`, which
+ * takes the free-TEXT column value (legacy rows exist) and degrades to a
+ * generic sentence for anything it does not recognise.
+ */
+const BLOCK_MESSAGES: Record<PublicationBlockReason, string> = {
   bids_validation_failed:
     "BIDS validation is failing on your dataset. Please check the repository CI and fix validation errors, then re-request publication.",
   bids_validation_pending:
@@ -66,6 +75,12 @@ const BLOCK_MESSAGES: Record<string, string> = {
   // one place a user is told how to supply it, so it lives with the reason.
   [OWNER_NAME_MISSING_REASON]: OWNER_NAME_MISSING_MESSAGE,
 };
+
+/** Message for a stored block_reason, or a generic one for an unknown value. */
+function blockMessage(reason: string | null | undefined): string {
+  const known = (BLOCK_MESSAGES as Record<string, string>)[reason ?? ""];
+  return known ?? "Publication request blocked.";
+}
 
 export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
   // ============================================================================
@@ -299,7 +314,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         {
           status: "blocked",
           block_reason: blockReason,
-          message: BLOCK_MESSAGES[blockReason || ""] || "Publication request blocked.",
+          message: blockMessage(blockReason),
           dataset_id: datasetId,
           ci_url: ciUrl,
           // Specific, user-facing failures from the minimums check, mirrored
@@ -501,10 +516,17 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       denied_at: request.denied_at,
       denied_reason: request.denied_reason,
       block_reason: request.block_reason,
-      ...(request.status === "blocked" && repoName
+      // The explanation is gated on the STATUS only. It used to also require
+      // a repo, which is right for the CI-shaped reasons that link to a
+      // workflow run but wrong for a reason that has nothing to do with the
+      // repository: owner_name_missing is a property of the ACCOUNT, and
+      // withholding its message left the user a bare reason code with no way
+      // to act on it (#1255 review item 24). `ci_url` stays repo-gated,
+      // because without a repo there is no run to link.
+      ...(request.status === "blocked"
         ? {
-            message: BLOCK_MESSAGES[request.block_reason || ""] || "Publication request blocked.",
-            ci_url: `https://github.com/nemarDatasets/${repoName}/actions`,
+            message: blockMessage(request.block_reason),
+            ...(repoName ? { ci_url: `https://github.com/nemarDatasets/${repoName}/actions` } : {}),
           }
         : {}),
       ...(minReasons?.length ? { reasons: minReasons, policy_url: SUBMISSION_POLICY_URL } : {}),

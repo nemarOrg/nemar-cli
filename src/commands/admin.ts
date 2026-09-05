@@ -159,6 +159,17 @@ import {
   resolveWithdrawTargets,
 } from "../lib/withdrawn-datasets.js";
 
+/**
+ * Hints keyed on a publication `block_reason`, which outrank the status-code
+ * hint: a 422 from the publish paths is not always a CI problem, and telling
+ * an admin to "fix the CI issues" when the real problem is a missing
+ * researcher name sends them to the wrong place entirely (#1255).
+ */
+const BLOCK_REASON_HINTS: Record<string, string> = {
+  owner_name_missing:
+    "Run `nemar admin backfill-names --apply` if the owner's ORCID record publishes their name; otherwise the owner must make it public on ORCID and sign in again (name entry on nemar.org arrives with #1253).",
+};
+
 /** Handle common error patterns in admin CLI commands */
 function handleCommandError(
   error: unknown,
@@ -168,7 +179,8 @@ function handleCommandError(
 ): void {
   if (error instanceof ApiError) {
     spinner.fail(error.message);
-    const hint = hints?.[error.statusCode];
+    const reasonHint = error.blockReason ? BLOCK_REASON_HINTS[error.blockReason] : undefined;
+    const hint = reasonHint ?? hints?.[error.statusCode];
     if (hint) {
       console.log(chalk.dim(`  ${hint}`));
     } else if (error.statusCode === 403) {
@@ -6545,7 +6557,7 @@ backfillNamesCommand
         `scanned=${res.scanned} ${res.apply ? "filled" : "would_fill"}=${
           res.apply ? res.filled : res.would_fill
         } no_public_name=${res.no_public_name} lookup_failed=${res.lookup_failed} remaining=${
-          res.remaining
+          res.remaining ?? "unknown"
         }`,
       ),
     );
@@ -6566,7 +6578,7 @@ backfillNamesCommand
       console.log();
       console.log(
         chalk.dim(
-          "Accounts with no public ORCID name must set it themselves (Settings on nemar.org) or make it public on ORCID.",
+          "These accounts must make their name public on their ORCID record and sign in again; NEMAR cannot type a name in for them (ORCID is canonical until #1253 lands profile editing).",
         ),
       );
     }

@@ -18,6 +18,12 @@ export function errorDetail(error: unknown): string {
  * responses (publish-approve, etc.), where the failing pipeline step is
  * surfaced separately from `details`. It is optional because most endpoints
  * don't use this field.
+ *
+ * `blockReason` carries the top-level `block_reason` from a publication
+ * refusal, so a caller can key an actionable hint on WHY it was refused
+ * rather than on the status code alone (#1255): a 422 from the publish paths
+ * used to always print the CI hint, which is the wrong advice for a missing
+ * researcher name.
  */
 export class ApiError extends Error {
   constructor(
@@ -25,6 +31,7 @@ export class ApiError extends Error {
     message: string,
     public details?: unknown,
     public step?: string,
+    public blockReason?: string,
   ) {
     super(message);
     this.name = "ApiError";

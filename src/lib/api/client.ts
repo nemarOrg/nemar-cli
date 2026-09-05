@@ -164,11 +164,20 @@ export async function request<T>(
       printMaintenanceBanner(maintErr);
       throw maintErr;
     }
+    // `message` wins when the body carries a block_reason: those refusals put
+    // the short label in `error` and the ACTIONABLE text in `message`, and
+    // preferring `error` showed the user "Owner has no researcher name on
+    // file" with no hint about how to fix it (#1255).
+    const hasBlockReason = typeof data.block_reason === "string";
+    const primary = hasBlockReason
+      ? (data.message as string) || (data.error as string)
+      : (data.error as string) || (data.message as string);
     throw new ApiError(
       response.status,
-      (data.error as string) || (data.message as string) || "Request failed",
+      primary || "Request failed",
       data.details,
       typeof data.step === "string" ? data.step : undefined,
+      hasBlockReason ? (data.block_reason as string) : undefined,
     );
   }
 

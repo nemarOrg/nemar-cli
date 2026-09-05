@@ -7,6 +7,11 @@
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
+import {
+  ORCID_ID_PATTERN,
+  type OrcidNameLookupStatus,
+  orcidIdSchema,
+} from "../../../shared/contract/publication.js";
 import { escapeHtml } from "../lib/escape";
 import {
   getAdminEmailsForCategory,
@@ -117,9 +122,10 @@ authRoutes.get("/check-github", async (c) => {
  * prompts. This is idempotent, costs one public ORCID read, and mirrors the
  * two pre-signup checks that already exist.
  *
- * `found: false` is also what a transport failure returns: the caller's next
- * move (ask the user to type it) is the same either way, and the signup
- * insert re-reads ORCID server-side regardless.
+ * The three outcomes are reported separately (`found` / `no_public_name` /
+ * `lookup_failed`): the caller prompts for a name in the last two, but the
+ * sentence it shows the user differs, and blaming a private record for an
+ * ORCID outage is the kind of small lie that costs a support round-trip.
  */
 authRoutes.get("/orcid-name", async (c) => {
   const orcid = c.req.query("orcid")?.trim();
@@ -127,21 +133,25 @@ authRoutes.get("/orcid-name", async (c) => {
   if (!orcid) {
     return c.json({ error: "ORCID iD required" }, 400);
   }
-  if (!/^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/.test(orcid)) {
+  if (!ORCID_ID_PATTERN.test(orcid)) {
     return c.json({ error: "ORCID must be in format 0000-0000-0000-000X" }, 400);
   }
 
   try {
     const name = await fetchOrcidName(orcid, orcidPubBase(c.env));
-    const found = !!(name.given && name.family);
-    return c.json({
-      found,
-      given_name: name.given,
-      family_name: name.family,
-    });
+    // Half a name is not citable, so it is not "found".
+    const status: OrcidNameLookupStatus = name.given && name.family ? "found" : "no_public_name";
+    return c.json({ status, given_name: name.given, family_name: name.family });
   } catch (err) {
+    // Distinct from no_public_name on purpose (#1255 review item 10): the
+    // caller must be able to say "ORCID is unreachable right now" rather than
+    // accusing the user's record of hiding a name it may well publish.
     console.warn(`[orcid-name] lookup failed for ${orcid}:`, err);
-    return c.json({ found: false, given_name: null, family_name: null });
+    return c.json({
+      status: "lookup_failed" satisfies OrcidNameLookupStatus,
+      given_name: null,
+      family_name: null,
+    });
   }
 });
 
@@ -173,9 +183,7 @@ const signupSchema = z.object({
     )
     .max(500, "Description must be at most 500 characters"),
   // ORCID is now required: it's the canonical source for the user's name (#835).
-  orcid: z
-    .string()
-    .regex(/^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/, "ORCID must be in format 0000-0000-0000-000X"),
+  orcid: orcidIdSchema,
   // Supplied only when the ORCID record hides its name (#1255): the server
   // still reads ORCID first, so these are a fallback, never an override.
   given_name: z.string().trim().min(1).max(100).optional(),
@@ -302,8 +310,11 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     //
     // The name is what DOIs cite (#1255) and publishing is blocked without
     // it, so landing an account with NULL names is a real cost -- but not one
-    // worth failing a registration over: `nemar admin backfill-names` and the
-    // Settings page both close the gap later.
+    // worth failing a registration over. The gap closes when the record is
+    // made public and `nemar admin backfill-names` (or the next ORCID link)
+    // reads it; there is no self-service name field yet, because
+    // PATCH /auth/profile rejects given_name/family_name on purpose until
+    // Phase 3 (#1253).
     let givenName: string | null = null;
     let familyName: string | null = null;
     try {
@@ -386,10 +397,18 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
       console.error("Failed to write signup audit log for user:", username, auditError);
     }
 
+    // Whether the account actually landed with a citable name (#1255 review
+    // item 4). The client's own pre-flight can say "found" and this insert's
+    // lookup can still fail transiently a moment later, and the account is
+    // created either way -- so the account-creating call is the one that has
+    // to report the truth, or the user learns about it at publish time.
+    const researcherName = givenName && familyName ? "recorded" : "missing";
+
     return c.json(
       {
         message: "Registration successful",
         email_sent: emailSent,
+        researcher_name: researcherName,
         next_steps: [
           emailSent
             ? "Check your email for a verification link"
@@ -397,6 +416,11 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
           ...(emailSent ? ["Click the link to verify your email address"] : []),
           "Wait for admin approval",
           "Once approved, run 'nemar auth retrieve-key' to get your API key",
+          ...(researcherName === "missing"
+            ? [
+                "No researcher name is on file; DOIs cannot cite you until your ORCID record shows your name publicly",
+              ]
+            : []),
         ],
       },
       201,

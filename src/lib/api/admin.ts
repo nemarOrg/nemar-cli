@@ -11,6 +11,7 @@ import {
   type AdminUsersListResponse,
   adminUsersListResponseSchema,
 } from "../../../shared/contract/index.js";
+import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
 import { request } from "./client.js";
 
 // ============================================================================
@@ -1468,8 +1469,6 @@ export async function zarrFidelitySweep(options?: {
 // Researcher-name backfill (#1255, epic #1250)
 // ============================================================================
 
-export type BackfillNameOutcome = "filled" | "would_fill" | "no_public_name" | "lookup_failed";
-
 export interface BackfillNameResult {
   id: number;
   username: string | null;
@@ -1488,8 +1487,11 @@ export interface BackfillNamesResponse {
   would_fill: number;
   no_public_name: number;
   lookup_failed: number;
-  /** Candidates still missing a name after this batch. */
-  remaining: number;
+  /** Candidates still missing a name after this batch; `null` when the count
+   *  query itself failed (never confuse that with "nothing left"). */
+  remaining: number | null;
+  /** Set when a non-fatal part of the batch failed, e.g. the remaining count. */
+  warning?: string;
   results: BackfillNameResult[];
 }
 

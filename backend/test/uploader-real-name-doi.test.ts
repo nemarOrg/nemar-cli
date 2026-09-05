@@ -206,7 +206,10 @@ describe("POST /datasets/:id/publish/request name precondition", () => {
     const body = (await res.json()) as { block_reason: string; message: string };
     expect(body.block_reason).toBe(OWNER_NAME_MISSING_REASON);
     expect(body.message).toContain("ORCID");
-    expect(body.message).toContain("Settings");
+    // The advice must name a route that exists today: PATCH /auth/profile
+    // rejects name edits until #1253, so "type it into Settings" would be a
+    // dead end (#1255 review item 18).
+    expect(body.message).not.toMatch(/Add a given name and family name in Settings/);
 
     // Persisted, so GET /publish/status later says the same thing.
     const row = db

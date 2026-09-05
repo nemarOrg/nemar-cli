@@ -145,13 +145,34 @@ describe("POST /auth/signup name sourcing", () => {
     expect(storedName()).toEqual({ given_name: "Ada", family_name: "Lovelace" });
   });
 
-  test("a hidden record with no supplied name still creates the account", async () => {
+  test("a hidden record with no supplied name still creates the account, and SAYS SO", async () => {
     // Registration is not failed over a missing name: publishing is blocked
-    // later, and backfill/Settings can close the gap.
+    // later, and the backfill can close the gap. But the response has to
+    // report it, or the user first learns at publish time (#1255 item 4).
     orcidRecord = PRIVATE_RECORD;
     const res = await signup({});
     expect(res.status).toBe(201);
     expect(storedName()).toEqual({ given_name: null, family_name: null });
+
+    const body = (await res.json()) as { researcher_name: string; next_steps: string[] };
+    expect(body.researcher_name).toBe("missing");
+    expect(body.next_steps.join(" ")).toContain("No researcher name is on file");
+  });
+
+  test("reports researcher_name 'recorded' when the name landed", async () => {
+    const res = await signup({});
+    const body = (await res.json()) as { researcher_name: string; next_steps: string[] };
+    expect(body.researcher_name).toBe("recorded");
+    expect(body.next_steps.join(" ")).not.toContain("No researcher name");
+  });
+
+  test("reports 'missing' when the pre-flight would have said found but the insert's lookup fails", async () => {
+    // The exact race item 4 names: the CLI's pre-flight saw a name, then this
+    // request's own read failed, and the account landed nameless anyway.
+    orcidRecord = { status: 503, body: {} };
+    const res = await signup({});
+    expect(res.status).toBe(201);
+    expect((await res.json()).researcher_name).toBe("missing");
   });
 
   test("an ORCID lookup failure falls back to the supplied name", async () => {
@@ -178,28 +199,34 @@ describe("GET /auth/orcid-name", () => {
     return app.request(`/auth/orcid-name${query}`, {}, env());
   }
 
-  test("returns the record's name with found: true", async () => {
+  test("status 'found' with the record's name", async () => {
     const res = await lookup(`?orcid=${ORCID}`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
-      found: true,
+      status: "found",
       given_name: "Ada",
       family_name: "Lovelace",
     });
   });
 
-  test("found: false when the record hides its name", async () => {
+  test("status 'no_public_name' when the record hides its name", async () => {
     orcidRecord = PRIVATE_RECORD;
     const res = await lookup(`?orcid=${ORCID}`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ found: false, given_name: null, family_name: null });
+    expect(await res.json()).toEqual({
+      status: "no_public_name",
+      given_name: null,
+      family_name: null,
+    });
   });
 
-  test("found: false (not an error) when ORCID is unreachable", async () => {
+  test("status 'lookup_failed' (not an error, and NOT no_public_name) when ORCID is down", async () => {
+    // The distinction the CLI's wording depends on: an outage must not be
+    // reported to the user as "your record hides your name".
     orcidRecord = { status: 500, body: {} };
     const res = await lookup(`?orcid=${ORCID}`);
     expect(res.status).toBe(200);
-    expect((await res.json()).found).toBe(false);
+    expect((await res.json()).status).toBe("lookup_failed");
   });
 
   test("400 on a malformed iD, without calling ORCID", async () => {
@@ -212,13 +239,18 @@ describe("GET /auth/orcid-name", () => {
     expect(res.status).toBe(400);
   });
 
-  test("found: false when only one name part is published", async () => {
-    // Half a name is not citable, so it is not a name the CLI can accept.
+  test("status 'no_public_name' when only one name part is published", async () => {
+    // Half a name is not citable, so it is not a name the CLI can accept --
+    // but the half that IS public is still reported.
     orcidRecord = {
       status: 200,
       body: { name: { "given-names": { value: "Ada" }, "family-name": null } },
     };
     const res = await lookup(`?orcid=${ORCID}`);
-    expect(await res.json()).toEqual({ found: false, given_name: "Ada", family_name: null });
+    expect(await res.json()).toEqual({
+      status: "no_public_name",
+      given_name: "Ada",
+      family_name: null,
+    });
   });
 });

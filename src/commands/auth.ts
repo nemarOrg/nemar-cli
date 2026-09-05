@@ -324,7 +324,9 @@ async function lookupOrcidName(orcid: string): Promise<OrcidNameResponse> {
   try {
     return await checkOrcidName(orcid);
   } catch {
-    return { found: false, given_name: null, family_name: null };
+    // An unreachable backend is a lookup failure, not evidence about the
+    // user's record -- same distinction the endpoint itself draws.
+    return { status: "lookup_failed", given_name: null, family_name: null };
   }
 }
 
@@ -339,13 +341,24 @@ async function collectResearcherName(
 ): Promise<{ given_name?: string; family_name?: string }> {
   const spinner = ora("Reading your name from ORCID...").start();
   const record = await lookupOrcidName(orcid);
-  if (record.found) {
+  if (record.status === "found") {
     spinner.succeed(`Name from your ORCID record: ${record.given_name} ${record.family_name}`);
     // Deliberately not sent: the backend reads the same record itself, and
     // the record is the authority on how this person is cited.
     return {};
   }
-  spinner.info("Your ORCID record does not publish a name; NEMAR needs it for DOI citations.");
+
+  // Both remaining cases prompt, but they are different situations and the
+  // sentence says which (#1255): telling someone their record hides their
+  // name when ORCID is simply down sends them to fix nothing.
+  if (record.status === "lookup_failed") {
+    spinner.warn(
+      "ORCID is unreachable right now, so NEMAR could not read your name. Please enter it; " +
+        "if your ORCID record publishes a name, that name wins.",
+    );
+  } else {
+    spinner.info("Your ORCID record does not publish a name; NEMAR needs it for DOI citations.");
+  }
 
   const answers = await inquirer.prompt([
     {
@@ -559,6 +572,22 @@ export async function signupAction(): Promise<void> {
     result.next_steps.forEach((step, i) => {
       console.log(`  ${i + 1}. ${step}`);
     });
+    // The server is the only party that knows whether the name actually
+    // landed on the row; say so loudly rather than leaving it to publish time.
+    if (result.researcher_name === "missing") {
+      console.log();
+      console.log(
+        chalk.yellow(
+          "No researcher name is on file for this account. DOIs cite depositors by name, " +
+            "never by username, so publishing stays blocked until one is recorded.",
+        ),
+      );
+      console.log(
+        chalk.dim(
+          "  Make your name public on your ORCID record, then sign in again so NEMAR can read it.",
+        ),
+      );
+    }
     console.log();
     console.log(chalk.dim("Once approved, use 'nemar auth retrieve-key' to get your API key"));
   } catch (error) {
