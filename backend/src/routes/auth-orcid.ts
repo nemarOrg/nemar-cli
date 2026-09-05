@@ -578,11 +578,17 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
 
     // status "pending" mirrors userStatusForDashboard('pending') used by
     // /auth/me: the dashboard renders its verify-your-email step from it
-    // (ADR 0040). It becomes "active" when the code below is redeemed.
+    // (ADR 0040). It becomes "active" once that code is redeemed.
+    //
+    // `code_sent` is false when the non-production fence skipped the send, not
+    // just when one failed -- a dev sign-up that reports "check your inbox"
+    // for mail that was deliberately never sent is the same dead end as one
+    // that reports it for mail that bounced.
     const body: Record<string, unknown> = {
       user: { id: userId, email, role: "member", status: "pending" },
-      code_sent: issued.ok,
+      code_sent: issued.ok && !issued.skipped,
     };
+    if (issued.ok && issued.skipped) body.dev_skip = "not_allowlisted";
     if (issued.ok && issued.devCode) body.dev_code = issued.devCode;
     // Same belt-and-braces as the auth-web code routes: a misconfigured
     // ENVIRONMENT must turn a leak into a 500, not ship the code.

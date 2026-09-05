@@ -24,7 +24,7 @@
  *     a corresponding test enforces the boundary.
  *   - Web accounts are created by the ORCID flow (auth-orcid.ts) and land
  *     at `status='pending'` with `email_verified=0` (ADR 0040 phase 2;
- *     the auto-approval migration 0062 shipped is gone). They reach
+ *     the auto-approval that migration 0062 shipped is gone). They reach
  *     `verified` — the base tier — by redeeming an emailed code, either
  *     through /auth/email/verify or through a /auth/code/verify sign-in,
  *     which proves the same inbox by the same means. Upload access is a
@@ -34,8 +34,9 @@
  *     address it. The dashboard renders its verify-your-email step while
  *     `status` is `'pending'`.
  *   - Rate limits are enforced inline by counting `auth_codes` rows
- *     in the relevant window: per-email buckets on both request
- *     endpoints, plus a per-account bucket on /email/change/request
+ *     in the relevant window: per-email buckets on every request
+ *     endpoint, plus a per-account bucket on the two that are
+ *     session-bound, /email/change/request and /email/verify/request
  *     (keyed on the 0066 user_id column). No KV / new table —
  *     `idx_auth_codes_email_active` covers the email lookups; the
  *     user_id count is unindexed, which is fine at auth_codes' size.
