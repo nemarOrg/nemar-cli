@@ -138,6 +138,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "syncCi",
     "updateDoi",
     "updateEmailPreferences",
+    "uploadTierOf",
     "validateCi",
     "verifyImport",
     "withdrawDataset",
@@ -174,6 +175,7 @@ const POST_SPLIT_ADDITIONS = [
   "recordingStatsSweepReset", // #1194, CLI wrapper for the recording-stats sweep reset
   "signalDefaultsSweep", // #1194, CLI wrapper for POST /admin/datasets/signal-defaults-sweep
   "signalDefaultsSweepReset", // #1194, CLI wrapper for the signal-defaults sweep reset
+  "uploadTierOf", // #1251, ADR 0040: upload / browse / unknown from a listed row
   "zarrFidelitySweep", // #1068, epic #1181 phase 8: POST /admin/datasets/zarr-fidelity-sweep
 ];
 

@@ -131,6 +131,61 @@ const VERIFIED_BUT_GRANTED = {
   service_access: 1,
 };
 
+/**
+ * A row from a backend that predates #1251: the `service_access` KEY IS ABSENT
+ * from the JSON, not present-and-zero.
+ *
+ * Written out in full rather than spread-and-deleted from CLI_BROWSER, because
+ * the absence IS the fixture: a spread would silently reacquire the key the day
+ * someone adds it to the base object, and this would go on reading like the
+ * legacy case while testing the "browse" path instead. `assertNoTierKey` below
+ * makes that a failure rather than a silent drift.
+ */
+const LEGACY_NO_TIER = {
+  id: 11,
+  username: "pemberly",
+  email: "pemberly@example.org",
+  github_username: "pemberly-gh",
+  status: "verified",
+  email_verified: 1,
+  role: "member",
+  created_at: "2026-04-01T00:00:00Z",
+  approved_at: null,
+  revoked_at: null,
+  signup_source: "cli",
+  given_name: "Nils",
+  family_name: "Pemberly",
+  orcid: null,
+};
+
+/** Guards the fixture's whole point: the key must not be there at all. */
+function assertNoTierKey(): void {
+  expect(Object.keys(LEGACY_NO_TIER)).not.toContain("service_access");
+  expect(JSON.stringify(LEGACY_NO_TIER)).not.toContain("service_access");
+}
+
+/** Names absent entirely — a row that never went through onboarding. */
+const NO_NAMES = {
+  ...CLI_BROWSER,
+  id: 12,
+  username: "wrenfield",
+  email: "wrenfield@example.org",
+  github_username: "wrenfield-gh",
+  given_name: null,
+  family_name: null,
+};
+
+/** Only a family name: the join must not leave a leading space. */
+const FAMILY_NAME_ONLY = {
+  ...CLI_BROWSER,
+  id: 13,
+  username: "okonkwo",
+  email: "okonkwo@example.org",
+  github_username: "okonkwo-gh",
+  given_name: null,
+  family_name: "Okonkwo",
+};
+
 let configDir: string;
 
 function seedAuthenticatedConfig(): void {
@@ -151,16 +206,21 @@ afterEach(() => {
   rmSync(configDir, { recursive: true, force: true });
 });
 
-/** One user's entry: from the line carrying `marker` to the blank line that
- *  ends the entry. Throws rather than returning "" so a marker that stopped
- *  appearing fails as a missing entry instead of a silently empty match. */
+/**
+ * The WHOLE entry containing `marker`, blank line to blank line — not the
+ * remainder of the entry from `marker` onward. That distinction matters: the
+ * Name line is printed ABOVE the Email line, so slicing forward from an email
+ * silently excludes exactly the field some of these tests assert on.
+ *
+ * Throws rather than returning "" so a marker that stopped appearing fails as a
+ * missing entry instead of a vacuously passing `not.toContain`.
+ */
 function entryContaining(stdout: string, marker: string): string {
-  const lines = stdout.split("\n");
-  const start = lines.findIndex((l) => l.includes(marker));
-  if (start === -1) throw new Error(`no listing entry contains ${marker}`);
-  const rest = lines.slice(start);
-  const end = rest.findIndex((l, i) => i > 0 && l.trim() === "");
-  return (end === -1 ? rest : rest.slice(0, end)).join("\n");
+  const entries = stdout.split(/\n\s*\n/).filter((e) => e.trim() !== "");
+  const matches = entries.filter((e) => e.includes(marker));
+  if (matches.length === 0) throw new Error(`no listing entry contains ${marker}`);
+  if (matches.length > 1) throw new Error(`${marker} is not unique to one listing entry`);
+  return matches[0];
 }
 
 async function runCli(
@@ -232,6 +292,88 @@ describe("nemar admin users: null fields", () => {
   });
 });
 
+describe("nemar admin users: wire contract", () => {
+  test("a drifted row fails loudly instead of rendering coerced junk", async () => {
+    // The listing is validated against adminUsersListResponseSchema, not cast.
+    // Without that, `id: "seven"` would sail through and reappear in the
+    // "(no username, id seven)" hint — the getCurrentUser class of bug (#899),
+    // where every field read was undefined at runtime and nothing said so.
+    seedAuthenticatedConfig();
+    const server = startUsersServer([{ ...CLI_UPLOADER, id: "seven" }]);
+    try {
+      const result = await runCli(["admin", "users"], server.url);
+      expect(`${result.stdout}${result.stderr}`).toContain(
+        "did not match the expected NEMAR contract",
+      );
+      // Nothing is rendered from a response that failed validation.
+      expect(result.stdout).not.toContain("Tier:");
+      expect(result.stdout).not.toContain("riverstone");
+      // Exit code stays 0: handleCommandError is shared by every admin command
+      // and does not exit, which is pre-existing and out of scope here.
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("an unknown extra field is passed through, not rejected", async () => {
+    // .passthrough(): the backend must stay free to add columns without
+    // breaking every deployed CLI.
+    seedAuthenticatedConfig();
+    const server = startUsersServer([{ ...CLI_UPLOADER, some_future_column: "hello" }]);
+    try {
+      const result = await runCli(["admin", "users"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Tier:    upload");
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("nemar admin users: the Name line", () => {
+  test("shows both names, joined with a single space", async () => {
+    seedAuthenticatedConfig();
+    const server = startUsersServer([CLI_UPLOADER]);
+    try {
+      const result = await runCli(["admin", "users"], server.url);
+      expect(entryContaining(result.stdout, "riverstone@example.org")).toContain(
+        "Name:    Ada Riverstone",
+      );
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("is omitted entirely when both names are null", async () => {
+    seedAuthenticatedConfig();
+    const server = startUsersServer([NO_NAMES]);
+    try {
+      const result = await runCli(["admin", "users"], server.url);
+      expect(result.stdout).toContain("wrenfield");
+      expect(result.stdout).not.toContain("Name:");
+      // An empty label would be worse than none; make sure that is not what
+      // "omitted" means here.
+      expect(result.stdout).not.toContain("Name:    \n");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("with only one name, prints it with no stray separator space", async () => {
+    seedAuthenticatedConfig();
+    const server = startUsersServer([FAMILY_NAME_ONLY]);
+    try {
+      const result = await runCli(["admin", "users"], server.url);
+      const entry = entryContaining(result.stdout, "okonkwo@example.org");
+      expect(entry).toContain("Name:    Okonkwo");
+      // filter(Boolean).join(" ") on [null, "Okonkwo"] must not yield " Okonkwo".
+      expect(entry).not.toContain("Name:     Okonkwo");
+    } finally {
+      server.stop();
+    }
+  });
+});
+
 describe("nemar admin users: tier column", () => {
   test("service_access renders as upload, its absence as browse", async () => {
     seedAuthenticatedConfig();
@@ -243,6 +385,46 @@ describe("nemar admin users: tier column", () => {
       // users' tiers from being read off each other's block.
       expect(entryContaining(result.stdout, "riverstone@example.org")).toContain("Tier:    upload");
       expect(entryContaining(result.stdout, "quillon@example.org")).toContain("Tier:    browse");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a row with NO service_access key renders unknown, not browse", async () => {
+    assertNoTierKey();
+    seedAuthenticatedConfig();
+    const server = startUsersServer([LEGACY_NO_TIER]);
+    try {
+      const result = await runCli(["admin", "users"], server.url);
+      expect(result.exitCode).toBe(0);
+      const entry = entryContaining(result.stdout, "pemberly@example.org");
+      expect(entry).toContain("Tier:    unknown");
+      // The failure this guards: folding "not reported" into "browse" tells an
+      // admin an uploader has no upload access (ADR 0040).
+      expect(entry).not.toContain("Tier:    browse");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a footer counts the rows that reported no tier", async () => {
+    assertNoTierKey();
+    seedAuthenticatedConfig();
+    const server = startUsersServer([CLI_UPLOADER, LEGACY_NO_TIER, CLI_BROWSER]);
+    try {
+      const result = await runCli(["admin", "users"], server.url);
+      expect(result.stdout).toContain("1 account(s) reported no upload tier");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("no footer when every row reported a tier", async () => {
+    seedAuthenticatedConfig();
+    const server = startUsersServer([CLI_UPLOADER, CLI_BROWSER]);
+    try {
+      const result = await runCli(["admin", "users"], server.url);
+      expect(result.stdout).not.toContain("reported no upload tier");
     } finally {
       server.stop();
     }
@@ -309,6 +491,38 @@ describe("nemar admin users: tier filters", () => {
       const result = await runCli(["admin", "users", "--no-upload-access"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("No users found (filter: no-upload-access)");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("--no-upload-access excludes a row that reported no tier at all", async () => {
+    assertNoTierKey();
+    seedAuthenticatedConfig();
+    const server = startUsersServer([CLI_BROWSER, LEGACY_NO_TIER]);
+    try {
+      const result = await runCli(["admin", "users", "--no-upload-access"], server.url);
+      expect(result.exitCode).toBe(0);
+      // An explicit 0 is in; an absent field is not an answer, so it is out.
+      expect(result.stdout).toContain("tolliver");
+      expect(result.stdout).not.toContain("pemberly");
+      expect(result.stdout).toContain("(1 total, filter: no-upload-access)");
+      // Still counted and reported, so the exclusion is visible rather than silent.
+      expect(result.stdout).toContain("1 account(s) reported no upload tier");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("--awaiting-approval also excludes a row that reported no tier", async () => {
+    assertNoTierKey();
+    seedAuthenticatedConfig();
+    const server = startUsersServer([CLI_BROWSER, LEGACY_NO_TIER]);
+    try {
+      const result = await runCli(["admin", "users", "--awaiting-approval"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("tolliver");
+      expect(result.stdout).not.toContain("pemberly");
     } finally {
       server.stop();
     }

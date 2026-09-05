@@ -54,6 +54,21 @@ function startMeServer(serviceAccess: boolean | undefined) {
   return { url: `http://localhost:${server.port}`, stop: () => server.stop(true) };
 }
 
+/** A backend that is up but broken: /users/me 500s. Neither 401 nor 403, so it
+ *  takes the fall-through path where the cached account is displayed. */
+function startBrokenMeServer() {
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/notices") return Response.json({ notices: [] });
+      if (url.pathname === "/datasets/facets") return Response.json({});
+      return Response.json({ error: "Database is having a moment" }, { status: 500 });
+    },
+  });
+  return { url: `http://localhost:${server.port}`, stop: () => server.stop(true) };
+}
+
 let configDir: string;
 
 function seedAuthenticatedConfig(extra: Record<string, unknown> = {}): void {
@@ -151,6 +166,60 @@ describe("nemar auth status: upload access", () => {
     expect(result.stdout).toContain("Upload access: unknown");
     expect(result.stdout).toContain("--refresh");
     expect(result.stdout).not.toContain("not granted");
+  });
+
+  test("a 5xx refresh reports unknown instead of a stale granted", async () => {
+    // The cache says granted; the refresh the user explicitly asked for did not
+    // land. Printing "granted" here presents a claim about the past as the
+    // present answer, and the grant may have been revoked in between.
+    seedAuthenticatedConfig({ serviceAccess: true });
+    const server = startBrokenMeServer();
+    try {
+      const result = await runCli(["auth", "status", "--refresh"], server.url);
+      expect(result.stdout).toContain(
+        "Upload access: unknown (refresh failed; showing cached account)",
+      );
+      expect(result.stdout).not.toContain("Upload access: granted");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("an offline refresh reports unknown too, and names the reason", async () => {
+    seedAuthenticatedConfig({ serviceAccess: true });
+    const result = await runCli(["auth", "status", "--refresh"], "http://127.0.0.1:1");
+    expect(result.stdout).not.toContain("Upload access: granted");
+    expect(result.stdout).toContain("Upload access: unknown (refresh failed");
+    // The reason belongs on the failure line, not scrolled past as a bare
+    // "Could not refresh user info".
+    expect(`${result.stdout}${result.stderr}`).toContain("Could not refresh user info:");
+  });
+
+  test("a failed refresh does not overwrite the cached value", async () => {
+    // Unknown is what THIS run reports; the cache is still the last known good
+    // answer, so a later successful (or offline, unrefreshed) run still has it.
+    seedAuthenticatedConfig({ serviceAccess: true });
+    const server = startBrokenMeServer();
+    try {
+      await runCli(["auth", "status", "--refresh"], server.url);
+      expect(storedAccount().serviceAccess).toBe(true);
+    } finally {
+      server.stop();
+    }
+    const later = await runCli(["auth", "status"], "http://127.0.0.1:1");
+    expect(later.stdout).toContain("Upload access: granted");
+  });
+
+  test("a 5xx refresh does not claim 'not granted' either", async () => {
+    seedAuthenticatedConfig({ serviceAccess: false });
+    const server = startBrokenMeServer();
+    try {
+      const result = await runCli(["auth", "status", "--refresh"], server.url);
+      expect(result.stdout).toContain("Upload access: unknown (refresh failed");
+      expect(result.stdout).not.toContain("not granted");
+    } finally {
+      server.stop();
+    }
   });
 
   test("a backend that omits the field leaves the cache untouched", async () => {
