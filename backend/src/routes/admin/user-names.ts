@@ -23,20 +23,19 @@
 
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
+import type { BackfillNameOutcome } from "../../../../shared/contract/publication.js";
 import { auditLogStatement } from "../../db/audit-log";
 import { fetchOrcidName, orcidPubBase } from "../../services/orcid-auth";
 import type { AdminRouter } from "./shared";
-
-/** Per-user result. `error` never aborts the batch: one unreadable record
- *  must not stop the other 600 from being filled. */
-export type BackfillOutcome = "filled" | "would_fill" | "no_public_name" | "lookup_failed";
 
 export interface BackfillUserResult {
   id: number;
   username: string | null;
   email: string;
   orcid: string;
-  outcome: BackfillOutcome;
+  /** Shared vocabulary; `lookup_failed` never aborts the batch, so one
+   *  unreadable record cannot stop the other 600 from being filled. */
+  outcome: BackfillNameOutcome;
   given_name?: string | null;
   family_name?: string | null;
   error?: string;
@@ -175,7 +174,21 @@ export function registerUserNameRoutes(admin: AdminRouter): void {
       }
     }
 
-    const remaining = await db.prepare(REMAINING_SQL).first<{ n: number }>();
+    // Counted AFTER the writes, and deliberately non-fatal: an --apply batch
+    // that filled 25 names and then failed to COUNT the rest is a success
+    // with an unknown remainder, not a failure. Throwing here would report
+    // the whole batch as failed and invite a re-run of work already done.
+    let remaining: number | null = null;
+    let remainingWarning: string | undefined;
+    try {
+      const row = await db.prepare(REMAINING_SQL).first<{ n: number }>();
+      remaining = row?.n ?? 0;
+    } catch (countErr) {
+      remainingWarning = `Could not count remaining candidates: ${
+        countErr instanceof Error ? countErr.message : String(countErr)
+      }`;
+      console.error("[backfill-names] remaining count failed:", countErr);
+    }
 
     return c.json({
       apply,
@@ -184,9 +197,11 @@ export function registerUserNameRoutes(admin: AdminRouter): void {
       would_fill: results.filter((r) => r.outcome === "would_fill").length,
       no_public_name: results.filter((r) => r.outcome === "no_public_name").length,
       lookup_failed: results.filter((r) => r.outcome === "lookup_failed").length,
-      // Counted AFTER the writes, so an apply run's value is what is left to
-      // do; a dry run's value includes everything it just listed.
-      remaining: remaining?.n ?? 0,
+      // What is left to do after this batch; a dry run's value includes
+      // everything it just listed. `null` means the count itself failed --
+      // never confuse that with "nothing left".
+      remaining,
+      ...(remainingWarning ? { warning: remainingWarning } : {}),
       results,
     });
   });

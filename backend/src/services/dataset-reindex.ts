@@ -425,6 +425,19 @@ export function extractEnrichmentSubErrors(body: unknown): string[] {
     const v = record[field];
     if (typeof v === "string" && v.length > 0) out.push(`${field}: ${v}`);
   }
+  // A DELIBERATE skip is not an *_error field, but the operator running a
+  // bulk reindex needs it in the same place for the same reason: a sub-step
+  // that did not happen (#1255). Typed object, so status and reason cannot
+  // drift apart the way two parallel string fields would.
+  const sync = record.doi_sync;
+  if (sync && typeof sync === "object") {
+    const s = sync as { status?: unknown; reason?: unknown; message?: unknown };
+    if (s.status === "skipped") {
+      const reason = typeof s.reason === "string" ? s.reason : "unknown";
+      const message = typeof s.message === "string" ? s.message : "";
+      out.push(`doi_sync: skipped (${reason})${message ? ` — ${message}` : ""}`);
+    }
+  }
   return out;
 }
 

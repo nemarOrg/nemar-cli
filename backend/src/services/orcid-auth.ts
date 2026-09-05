@@ -338,6 +338,12 @@ export async function fetchOrcidName(
 ): Promise<OrcidName> {
   const res = await fetchFn(`${pubBase}/v3.0/${orcid}/personal-details`, {
     headers: { Accept: "application/json" },
+    // Bounded like the other ORCID reads (doi-orcid-discovery.ts). Load
+    // bearing since #1255: the name backfill loops this up to 100 times in a
+    // single Worker invocation, so one hung connection must not consume the
+    // whole request budget. A timeout throws, which callers already treat as
+    // "no name from the record" / lookup_failed.
+    signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) {
     throw new Error(`ORCID personal-details ${orcid} -> HTTP ${res.status}`);

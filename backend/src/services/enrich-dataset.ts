@@ -65,7 +65,11 @@ import { recordLlmUsage } from "./llm-metrics.js";
 import { ensureParticipantsTsv } from "./participants-tsv.js";
 import { errorMessage, extractRepoName } from "./repo-metadata.js";
 import { extractExtensions, getDatasetS3Stats } from "./s3.js";
-import { resolveOwnerIdentity } from "./uploader-identity.js";
+import {
+  OWNER_NAME_MISSING_REASON,
+  refreshWouldStripAttribution,
+  resolveOwnerIdentity,
+} from "./uploader-identity.js";
 
 export interface EnrichmentOpts {
   datasetId: string;
@@ -129,12 +133,24 @@ export interface EnrichmentSuccessBody {
   metadata_columns_error?: string;
   issue_creation_error?: string;
   doi_sync_error?: string;
+  /** Present when the DOI metadata sync was deliberately NOT performed
+   *  (#1255): rebuilding the record from a nameless owner would have deleted
+   *  an existing DataCurator from a permanent DOI. */
+  doi_sync?: DoiSyncOutcome;
   /** Token usage across this run's LLM calls, with an estimated USD cost
    *  at claude-sonnet-5 standard rates. */
   llm_usage?: LlmUsageTotals;
   /** DOIs removed by the unsourced-DOI guard this run (see
    *  pruneUnsourcedDois). Surfaced so silent metadata loss is impossible. */
   pruned_dois?: string[];
+}
+
+/** Why a DOI metadata sync did not run. One typed object rather than a
+ *  parallel pair of string fields, so status and reason cannot disagree. */
+export interface DoiSyncOutcome {
+  status: "skipped";
+  reason: typeof OWNER_NAME_MISSING_REASON;
+  message: string;
 }
 
 export interface EnrichmentSkippedBody {
@@ -296,6 +312,11 @@ export async function enrichDataset(
     enrichment_json: string | null;
     concept_doi: string | null;
     is_sandbox: number | null;
+    // source + is_exemplar decide whether an owner name is REQUIRED here
+    // (requiresUploaderName); without them the attribution guard below cannot
+    // tell a researcher deposit from an OpenNeuro import.
+    source: string | null;
+    is_exemplar: number | null;
     owner_username: string | null;
     owner_orcid: string | null;
     owner_given_name: string | null;
@@ -304,7 +325,7 @@ export async function enrichDataset(
   try {
     dataset = await env.DB.prepare(
       `SELECT d.dataset_id, d.name, d.github_repo, d.enrichment_json,
-              d.concept_doi, d.is_sandbox,
+              d.concept_doi, d.is_sandbox, d.source, d.is_exemplar,
               u.username AS owner_username, u.orcid AS owner_orcid,
               u.given_name AS owner_given_name, u.family_name AS owner_family_name
        FROM datasets d
@@ -319,6 +340,8 @@ export async function enrichDataset(
         enrichment_json: string | null;
         concept_doi: string | null;
         is_sandbox: number | null;
+        source: string | null;
+        is_exemplar: number | null;
         owner_username: string | null;
         owner_orcid: string | null;
         owner_given_name: string | null;
@@ -1056,7 +1079,23 @@ export async function enrichDataset(
     // Sync DOI metadata after enrichment if dataset has an EZID DOI.
     // Covers title, description, keywords, related identifiers, etc.
     let doiSyncError: string | undefined;
-    if (dataset.concept_doi) {
+    let doiSyncOutcome: DoiSyncOutcome | undefined;
+    const doiUploader = resolveOwnerIdentity(dataset);
+    if (dataset.concept_doi && refreshWouldStripAttribution(dataset, doiUploader)) {
+      // DO NOT SYNC (#1255). This path runs automatically from the
+      // README/dataset_description webhook and from `nemar admin reindex
+      // --bulk`, and it rebuilds the DataCite document from live DB state.
+      // For a published dataset whose owner has no researcher name on file
+      // -- most of the catalogue until `nemar admin backfill-names --apply`
+      // has been run -- the rebuilt document has NO DataCurator, and pushing
+      // it would delete the curator from a permanent record while logging
+      // success. Skipping leaves the existing record intact; the metadata
+      // this run would have refreshed is re-synced by the next enrichment
+      // after the name lands.
+      const message = `DOI metadata sync skipped for ${datasetId}: the owner has no researcher name on file, so the rebuilt record would drop the existing DataCurator. Run \`nemar admin backfill-names --apply\`, then re-run enrichment.`;
+      console.error(`[llm-enrich] ATTRIBUTION SKIP ${message}`);
+      doiSyncOutcome = { status: "skipped", reason: OWNER_NAME_MISSING_REASON, message };
+    } else if (dataset.concept_doi) {
       try {
         const ezidAuth = resolveEzidAuth(
           {
@@ -1070,7 +1109,7 @@ export async function enrichDataset(
 
         const conceptIdentifier = conceptEzidIdentifier(dataset.concept_doi);
         const doi = extractDoi(conceptIdentifier);
-        let doiEnrichment = buildOrcidEnrichment(bidsDescription, resolveOwnerIdentity(dataset));
+        let doiEnrichment = buildOrcidEnrichment(bidsDescription, doiUploader);
         const committedMeta = parseNemarMetadata(finalMetadata);
         if (committedMeta) {
           doiEnrichment = nemarMetadataToEnrichment(committedMeta, doiEnrichment);
@@ -1140,6 +1179,7 @@ export async function enrichDataset(
         ...(metadataColumnsError && { metadata_columns_error: metadataColumnsError }),
         ...(issueCreationError && { issue_creation_error: issueCreationError }),
         ...(doiSyncError && { doi_sync_error: doiSyncError }),
+        ...(doiSyncOutcome && { doi_sync: doiSyncOutcome }),
       },
     };
   } catch (error) {

@@ -848,7 +848,11 @@ async function stepDoiCreate(c: ApproveStepContext): Promise<RespondOutcome | un
               githubRepo: dataset.github_repo,
               bidsDescription: bidsDesc,
               enrichment,
+              // The approval entry point already refused a required-but-missing
+              // identity; passing the flag makes doi.ts enforce it too, so a
+              // future caller of this step cannot skip the rule (#1255).
               uploader: resolveOwnerIdentity(dataset),
+              uploaderRequired: requiresUploaderName(dataset),
               sandbox,
             },
             {
@@ -1877,15 +1881,26 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // name. Every other early return here fails on something only an admin can
   // fix; this one fails on something the OWNER fixes and then retries.
   if (requiresUploaderName(dataset) && !resolveOwnerIdentity(dataset)) {
-    await db
-      .prepare(
-        "UPDATE publication_requests SET status = 'blocked', block_reason = ?, updated_at = datetime('now') WHERE id = ?",
-      )
-      .bind(OWNER_NAME_MISSING_REASON, request.id)
-      .run();
+    // The walk-back is best-effort and MUST NOT replace the 422 with a 500:
+    // an unguarded throw here would strand the row at 'approving', which is
+    // precisely the unreachable state this code exists to prevent. If it
+    // fails, the operator still gets the reason and the marker below tells
+    // them the row needs unsticking by hand.
+    try {
+      await db
+        .prepare(
+          "UPDATE publication_requests SET status = 'blocked', block_reason = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(OWNER_NAME_MISSING_REASON, request.id)
+        .run();
+    } catch (walkBackErr) {
+      console.error(
+        `[publish] BLOCK WALKBACK FAILED for ${datasetId} (request ${request.id}): the row is still 'approving' and the owner cannot re-request until it is set to 'blocked':`,
+        walkBackErr,
+      );
+    }
     return c.json(
       {
-        error: "Owner has no researcher name on file",
         status: "blocked",
         block_reason: OWNER_NAME_MISSING_REASON,
         message: OWNER_NAME_MISSING_MESSAGE,
