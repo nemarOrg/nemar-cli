@@ -22,6 +22,7 @@
  */
 
 import type { Context, Next } from "hono";
+import { ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "../services/account-tier";
 import { hashApiKey } from "../services/token";
 import { hashIp } from "../services/web-session";
 import type { Bindings, Variables } from "../types/bindings";
@@ -215,12 +216,17 @@ async function isPrivilegedToken(env: Bindings, hashedApiKey: string): Promise<b
       const data = (await cached.json()) as { admin: boolean };
       return data.admin === true;
     }
+    // Same status set authMiddleware accepts (ADR 0040 phase 2): the quota a
+    // token gets must be decided over the same population that token can
+    // authenticate as, or an admin sitting at `verified` would authenticate
+    // fine and then be throttled as an anonymous stranger. The privilege
+    // itself still comes from `role`, which this widening does not touch.
     const row = await env.DB.prepare(
       `SELECT u.role FROM tokens t JOIN users u ON t.user_id = u.id
        WHERE t.api_key_hash = ?
          AND t.revoked_at IS NULL
          AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))
-         AND u.status = 'approved'
+         AND u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}
          AND u.deleted_at IS NULL`,
     )
       .bind(hashedApiKey)

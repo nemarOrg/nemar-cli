@@ -12,6 +12,11 @@
  */
 
 import type { Context, Next } from "hono";
+import {
+  ACTIVE_ACCOUNT_STATUS_SQL_LIST,
+  inactiveAccountBody,
+  isActiveAccountStatus,
+} from "../services/account-tier";
 import { hashApiKey } from "../services/token";
 import { COOKIE_NAME, hashCookieId, parseCookieHeader } from "../services/web-session";
 import {
@@ -28,15 +33,17 @@ type AuthContext = Context<{ Bindings: Bindings; Variables: Variables }>;
  * Resolve a `nemar_session` cookie to a full AuthUser row.
  *
  * Returns null when the cookie is absent, the session row is missing /
- * revoked / expired, the user is not 'approved', or the role column is
+ * revoked / expired, the account is not active, or the role column is
  * unrecognised. The shape mirrors the bearer-token lookup so downstream
  * routes can `c.get("user")` without caring which auth path succeeded.
  *
- * `pending`/`verified` cookie holders are deliberately rejected here:
- * the rest of the API requires an approved account (the CLI middleware
- * already enforces this), and the dashboard uses `/auth/me` — not these
- * routes — to render the onboarding state. Accepting a pending cookie on
- * /datasets would let half-onboarded users mutate state.
+ * `verified` is accepted as of ADR 0040 phase 2: it is the base tier, and
+ * the dashboard's own routes (dataset list, /users/me) are part of it. What
+ * a base-tier account still cannot do is upload — every real-upload entry
+ * point routes through services/upload-gate.ts, which reads `service_access`
+ * and never `status`, so widening this does not widen upload. `pending` is
+ * still rejected: an unverified inbox has proved nothing, and the dashboard
+ * renders its verify-your-email step from `/auth/me`, not from these routes.
  */
 async function resolveCookieUser(c: AuthContext): Promise<AuthUser | null> {
   const cookieHeader = c.req.header("Cookie");
@@ -73,7 +80,7 @@ async function resolveCookieUser(c: AuthContext): Promise<AuthUser | null> {
         status: string;
       }>();
     if (!row) return null;
-    if (row.status !== "approved") return null;
+    if (!isActiveAccountStatus(row.status)) return null;
 
     const role = parseRole(row.role, row.username ?? row.email);
     if (role === null) return null;
@@ -166,18 +173,11 @@ export async function authMiddleware(c: AuthContext, next: Next) {
       return c.json({ error: "Invalid or expired API key" }, 401);
     }
 
-    if (result.status !== "approved") {
-      return c.json(
-        {
-          error: "Account not approved",
-          status: result.status,
-          message:
-            result.status === "verified"
-              ? "Your account is awaiting admin approval"
-              : "Your account access has been revoked",
-        },
-        403,
-      );
+    // ADR 0040 phase 2: `verified` is the base tier and holds a usable API
+    // key, so the token is accepted here and the upload gate — not this
+    // middleware — is what a base-tier account runs into.
+    if (!isActiveAccountStatus(result.status)) {
+      return c.json(inactiveAccountBody(result.status), 403);
     }
 
     // Validate role from DB
@@ -268,8 +268,8 @@ export async function ownerMiddleware(c: AuthContext, next: Next) {
  * Optional auth middleware - sets user if authenticated, but doesn't require it.
  *
  * When an Authorization: Bearer header is provided but the token cannot be
- * resolved to an approved user (revoked, expired, malformed, account not yet
- * approved, etc.), the middleware sets `authAttempted=true` so downstream
+ * resolved to an active user (revoked, expired, malformed, email not yet
+ * verified, etc.), the middleware sets `authAttempted=true` so downstream
  * routes that require auth on a flag (e.g., `GET /datasets?mine=true`) can
  * return a token-specific 401 instead of a generic "Authentication required"
  * — which is indistinguishable from "no header sent" to a confused CLI user
@@ -324,7 +324,7 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
     JOIN users u ON t.user_id = u.id
     WHERE t.api_key_hash = ?
       AND t.revoked_at IS NULL
-      AND u.status = 'approved'
+      AND u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}
       AND u.deleted_at IS NULL
   `,
   )

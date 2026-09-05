@@ -28,9 +28,9 @@ import {
 import {
   parseEmailPreferences,
   resolveEmailConfig,
-  sendKeyReadyEmail,
   sendRevocationEmail,
-  sendWebApprovalEmail,
+  sendUploadAccessGrantedEmail,
+  sendWebUploadAccessGrantedEmail,
 } from "../../services/email";
 import { decrypt } from "../../services/encryption";
 import { isNonProductionEnv } from "../../services/environment";
@@ -166,9 +166,9 @@ async function regrantUploadAccess(
  * not upload.
  *
  * Web/ORCID accounts have `username = NULL`, so anything username-shaped is
- * conditional: they get a dashboard-flavored approval email instead of the
- * CLI retrieve-key one, and the audit resource id falls back to the stable
- * numeric id. Nothing GitHub- or IAM-side happens for either kind of
+ * conditional: they get a dashboard-flavored upload-access email instead of
+ * the CLI one, and the audit resource id falls back to the stable numeric id.
+ * Nothing GitHub- or IAM-side happens for either kind of
  * account — approval has been a pure status transition since per-user IAM
  * and auto-collaborator adds were removed.
  */
@@ -195,18 +195,22 @@ async function finalizeApproval(
     .bind(adminUser.id, user.id)
     .run();
 
-  // Note: API token is NOT created here. CLI users retrieve it via
-  // `nemar auth retrieve-key`, which generates the token on first call;
-  // web users sign in with an email code and never hold an API key.
+  // Note: API token is NOT created here, and no longer needs to be announced
+  // here either. A CLI account has been able to retrieve one since it
+  // verified its email (ADR 0040 phase 2, `nemar auth retrieve-key`), and web
+  // users sign in with an email code and never hold an API key.
 
-  // Send approval notification email. Skipped (not failed) when the email
-  // service is unconfigured, so approval still completes in dev/test.
+  // Send the upload-access notification. This used to be the key-ready mail,
+  // which now fires at email verification instead: what an admin grants here
+  // is upload access, so that is what the mail announces. Skipped (not
+  // failed) when the email service is unconfigured, so approval still
+  // completes in dev/test.
   let emailSent = false;
   try {
     if (c.env.RESEND_API_KEY) {
       const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
       if (user.username) {
-        await sendKeyReadyEmail(
+        await sendUploadAccessGrantedEmail(
           user.email,
           user.username,
           c.env.RESEND_API_KEY,
@@ -216,7 +220,7 @@ async function finalizeApproval(
           c.env,
         );
       } else {
-        await sendWebApprovalEmail(
+        await sendWebUploadAccessGrantedEmail(
           user.email,
           c.env.RESEND_API_KEY,
           fromEmail,
@@ -227,10 +231,10 @@ async function finalizeApproval(
       }
       emailSent = true;
     } else {
-      console.error(`RESEND_API_KEY unset; approval email not sent for user id=${user.id}`);
+      console.error(`RESEND_API_KEY unset; upload-access email not sent for user id=${user.id}`);
     }
   } catch (error) {
-    console.error("Failed to send approval email:", error);
+    console.error("Failed to send upload-access email:", error);
   }
 
   // Audit log. resource_id is the username where one exists (unchanged for
@@ -578,10 +582,10 @@ export function registerUsersRoutes(admin: AdminRouter): void {
    * `revoked` always, plus `pending` for ORCID-verified web signups (ORCID
    * is the identity proof; the collected email is deliberately unverified).
    *
-   * Most ORCID signups never need this: they auto-approve to base access on
-   * sign-up (migration 0062, epic #1013). This route covers the rows that
-   * don't — re-approving a revoked web account, and any web row that landed
-   * `pending` outside the auto-approve path.
+   * Since ADR 0040 phase 2 an ORCID sign-up lands at `pending` and reaches
+   * `verified` by confirming its email — nothing auto-approves any more — so
+   * this route is how EVERY web account gets upload access, not the exception
+   * it was under migration 0062's auto-approval.
    */
   admin.post("/approve/by-id/:id", async (c) => {
     const db = c.env.DB;
@@ -1460,9 +1464,10 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       .max(320)
       .transform((e) => e.trim().toLowerCase()),
     // Optional. Defaults to 'pending' to mirror what the legacy
-    // INSERT-OR-IGNORE produced. The cookie-auth tests (#572) seed
-    // directly as 'approved' because the cookie path in authMiddleware
-    // gates on status='approved'.
+    // INSERT-OR-IGNORE produced. The cookie-auth tests (#572) seed a
+    // signed-in tier directly; since ADR 0040 phase 2 the cookie path in
+    // authMiddleware accepts 'verified' as well as 'approved', so either
+    // works for a fixture that only needs to authenticate.
     status: z.enum(["pending", "verified", "approved", "revoked"]).optional(),
     // Optional profile columns (#910) so the passwordless suite can
     // assert a populated /auth/me payload, not just the all-null
