@@ -106,6 +106,12 @@ const AUTH_PATHS = [
   "/auth/profile",
   "/auth/email/change/request",
   "/auth/email/change/verify",
+  // Email verification (ADR 0040 phase 2): the request endpoint mails a
+  // code and the verify endpoint guesses at one, so both belong in the
+  // stricter bucket. One entry covers both -- the matcher below treats an
+  // entry as a prefix, so "/auth/email/verify" also matches
+  // "/auth/email/verify/request".
+  "/auth/email/verify",
 ];
 
 type RateLimitContext = Context<{ Bindings: Bindings; Variables: Variables }>;

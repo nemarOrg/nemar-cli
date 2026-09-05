@@ -131,6 +131,19 @@ describe("__selectBucket", () => {
     expect(sel.maxRequests).toBe(__limits.AUTH_MAX_REQUESTS);
   });
 
+  test("the email-verification endpoints are in the auth bucket, request path included", () => {
+    // One AUTH_PATHS entry covers both because the matcher treats entries as
+    // prefixes. Asserted on the SUB-PATH as well as the entry itself: if that
+    // prefix behaviour ever changes, /auth/email/verify/request silently
+    // falls to the 500/min IP bucket and a code-mailing endpoint loses its
+    // floor.
+    for (const path of ["/auth/email/verify", "/auth/email/verify/request"]) {
+      const sel = __selectBucket(path, null, "10.0.0.1");
+      expect(sel.keyKind).toBe("auth-ip");
+      expect(sel.maxRequests).toBe(__limits.AUTH_MAX_REQUESTS);
+    }
+  });
+
   test("authenticated non-auth requests bucket on token with higher cap", () => {
     const sel = __selectBucket(
       "/admin/publish/nm000110/approve",
