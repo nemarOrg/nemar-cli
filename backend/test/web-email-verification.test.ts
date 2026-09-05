@@ -20,7 +20,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { authOrcidRoutes } from "../src/routes/auth-orcid";
 import { authWebRoutes } from "../src/routes/auth-web";
-import { hashAuthCode } from "../src/services/auth-code";
+import { MAX_CODE_ATTEMPTS, hashAuthCode } from "../src/services/auth-code";
 import { PENDING_COOKIE_NAME, signPending } from "../src/services/orcid-auth";
 import { issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
@@ -126,13 +126,21 @@ function post(path: string, cookie: string, body?: unknown): Promise<Response> {
   );
 }
 
-/** Insert a live code for (email, userId) and return the plaintext, using the
- *  production hasher so the route's compare is the real one. */
-async function plantCode(email: string, userId: number | null, code: string): Promise<void> {
+/** Insert a code for (email, userId), using the production hasher so the
+ *  route's compare is the real one. `expiresIn` is an SQLite datetime
+ *  modifier so a test can plant an EXPIRED code (nothing else in the suite
+ *  does, and the TTL is otherwise unfalsifiable); `attempts` pre-loads the
+ *  guess counter. */
+async function plantCode(
+  email: string,
+  userId: number | null,
+  code: string,
+  { expiresIn = "+10 minutes", attempts = 0 }: { expiresIn?: string; attempts?: number } = {},
+): Promise<void> {
   db.run(
-    `INSERT INTO auth_codes (email, code_hash, expires_at, user_id)
-     VALUES (?, ?, datetime('now', '+10 minutes'), ?)`,
-    [email, await hashAuthCode(code, env()), userId],
+    `INSERT INTO auth_codes (email, code_hash, expires_at, user_id, attempts)
+     VALUES (?, ?, datetime('now', ?), ?, ?)`,
+    [email, await hashAuthCode(code, env()), expiresIn, userId, attempts],
   );
 }
 
@@ -327,6 +335,44 @@ describe("POST /auth/email/verify", () => {
     expect(userRow(mine).status).toBe("pending");
   });
 
+  test("an EXPIRED code is refused and the account stays pending", async () => {
+    // The TTL is enforced in the lookup SQL (`expires_at > datetime('now')`).
+    // Without a code planted in the past, dropping that clause changes
+    // nothing anywhere in the suite.
+    const id = seedWebUser(USER_EMAIL);
+    const cookie = await sessionCookie(id);
+    await plantCode(USER_EMAIL, id, "123456", { expiresIn: "-1 minute" });
+
+    const res = await post("/auth/email/verify", cookie, { code: "123456" });
+    expect(res.status).toBe(401);
+    // Expired is reported as gone, not as mistyped: the user needs a new
+    // code, not another look at the digits.
+    expect((await res.json()).error).toBe("code_expired");
+    expect(userRow(id).status).toBe("pending");
+    expect(userRow(id).email_verified).toBe(0);
+  });
+
+  test("after MAX_CODE_ATTEMPTS wrong guesses the CORRECT code no longer works", async () => {
+    const id = seedWebUser(USER_EMAIL);
+    const cookie = await sessionCookie(id);
+    await plantCode(USER_EMAIL, id, "123456");
+
+    for (let i = 1; i <= MAX_CODE_ATTEMPTS; i++) {
+      const res = await post("/auth/email/verify", cookie, { code: "000000" });
+      expect(res.status).toBe(401);
+      const body = await res.json();
+      expect(body.error).toBe("code_incorrect");
+      // The count is part of the answer on a session-bound route, and it
+      // reaches 0 on the guess that burns the code.
+      expect(body.attempts_remaining).toBe(MAX_CODE_ATTEMPTS - i);
+    }
+
+    const res = await post("/auth/email/verify", cookie, { code: "123456" });
+    expect(res.status).toBe(401);
+    expect((await res.json()).error).toBe("code_expired");
+    expect(userRow(id).status).toBe("pending");
+  });
+
   test("no session is a 401, not a verification", async () => {
     const id = seedWebUser(USER_EMAIL);
     await plantCode(USER_EMAIL, id, "123456");
@@ -365,6 +411,14 @@ describe("POST /auth/email/verify/request", () => {
     expect(liveCodes(USER_EMAIL)).toBe(0);
   });
 
+  test("without a session it is a 401, and no code is issued", async () => {
+    const id = seedWebUser(USER_EMAIL);
+    const res = await post("/auth/email/verify/request", "");
+    expect(res.status).toBe(401);
+    expect(liveCodes(USER_EMAIL)).toBe(0);
+    expect(userRow(id).status).toBe("pending");
+  });
+
   test("the per-minute bucket refuses a second request", async () => {
     const id = seedWebUser(USER_EMAIL);
     const cookie = await sessionCookie(id);
@@ -384,8 +438,9 @@ describe("POST /auth/code/verify (the sign-in road to verified)", () => {
     // from the account-bound verification and email-change codes.
     await plantCode(USER_EMAIL, null, "222222");
 
+    let signIn!: Response;
     const calls = await withFakeResend(async (calls) => {
-      const res = await app.request(
+      signIn = await app.request(
         "/auth/code/verify",
         {
           method: "POST",
@@ -394,8 +449,8 @@ describe("POST /auth/code/verify (the sign-in road to verified)", () => {
         },
         env(),
       );
-      expect(res.status).toBe(200);
-      expect((await res.json()).user.status).toBe("active");
+      expect(signIn.status).toBe(200);
+      expect((await signIn.clone().json()).user.status).toBe("active");
       return calls;
     });
 
@@ -403,6 +458,18 @@ describe("POST /auth/code/verify (the sign-in road to verified)", () => {
     expect(row.status).toBe("verified");
     expect(row.email_verified).toBe(1);
     expect(sendsTo(calls, ADMIN_EMAIL).length).toBe(1);
+    // The session row rides in the SAME transaction as the promotion, so the
+    // cookie the response set must actually resolve. A batch that silently
+    // dropped the session INSERT would still return 200 with a Set-Cookie
+    // for a session that does not exist.
+    const setCookie = signIn.headers.getSetCookie().find((c) => c.startsWith("nemar_session="));
+    expect(setCookie).toBeDefined();
+    const me = await app.request(
+      "/auth/me",
+      { headers: { Cookie: (setCookie ?? "").split(";")[0] } },
+      env(),
+    );
+    expect((await me.json()).user?.status).toBe("active");
     expect(
       db
         .query<{ details: string }, [string]>(
@@ -410,6 +477,35 @@ describe("POST /auth/code/verify (the sign-in road to verified)", () => {
         )
         .get(String(id))?.details,
     ).toContain("code_signin");
+  });
+
+  test("a revoked account is refused, and nothing about it is touched", async () => {
+    // The revoked check sits between the code compare and the write, so a
+    // reordering that moved the promotion above it would silently re-activate
+    // an account an admin had revoked.
+    const id = seedWebUser(USER_EMAIL, "revoked");
+    await plantCode(USER_EMAIL, null, "444444");
+
+    const res = await app.request(
+      "/auth/code/verify",
+      {
+        method: "POST",
+        headers: { Origin: ORIGIN, "content-type": "application/json" },
+        body: JSON.stringify({ email: USER_EMAIL, code: "444444", remember: false }),
+      },
+      env(),
+    );
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe("Account revoked");
+
+    const row = userRow(id);
+    expect(row.status).toBe("revoked");
+    expect(row.email_verified).toBe(0);
+    // No session was issued either -- a revoked account must not end the
+    // request holding a cookie.
+    expect(
+      db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM web_sessions").get()?.n,
+    ).toBe(0);
   });
 
   test("an approved account signing in keeps its tier and re-notifies nobody", async () => {
