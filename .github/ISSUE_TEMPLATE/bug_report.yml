@@ -8,7 +8,8 @@ body:
         Thanks for taking the time to report a bug. Running the failing command again
         with `--debug` (or `NEMAR_DEBUG=1`) and attaching the log it writes saves a lot
         of back-and-forth (see #1249) -- it has the CLI version, OS, tool versions, and
-        every request the CLI made, with credentials and emails already redacted.
+        every NEMAR API request the CLI made, with credentials and emails already
+        redacted.
   - type: textarea
     id: what-happened
     attributes:
@@ -54,7 +55,10 @@ body:
         Re-run the failing command with `--debug` added (or set `NEMAR_DEBUG=1`), then
         paste the log contents below, or drag the file onto this box. The log is at
         `<config dir>/logs/nemar-<timestamp>-<command>.log` (`~/.config/nemar/logs/`
-        by default; `nemar --debug <command> ...` prints the exact path on failure).
+        by default). `nemar --debug <command> ...` prints the exact path on failure --
+        except with `--json`, which suppresses that line along with every other status
+        line. With `--json`, or if you can't find the printed path, the newest file in
+        that `logs/` folder is the one to attach.
       placeholder: Paste the log contents here, or drop the log file onto this box.
     validations:
       required: true
