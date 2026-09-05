@@ -48,28 +48,46 @@ interface ApprovableUserRow {
   email: string;
   status: string;
   signup_source: string | null;
+  email_verified: number;
   orcid_verified: number;
   service_access: number;
 }
 
 const APPROVABLE_USER_COLUMNS =
-  "id, username, email, status, signup_source, orcid_verified, service_access";
+  "id, username, email, status, signup_source, email_verified, orcid_verified, service_access";
 
 /**
- * Approval eligibility (#1012). `verified` and `revoked` are approvable as
- * before. `pending` is additionally approvable for ORCID-verified web
- * signups: ORCID is the identity proof there (email is collected, not
- * verified, by design) and admin review is the gate. CLI signups stay
- * blocked at `pending` until they verify their email — there is no ORCID
- * proof backing those rows.
+ * Approval eligibility (#1012, narrowed by ADR 0040 phase 2).
+ *
+ * **A verified email is required, whatever the signup source.** #1012 let an
+ * admin approve a `pending` ORCID-verified web row on the reasoning that
+ * ORCID was its identity proof and the collected email was unverified by
+ * design. ADR 0040 settles the other half: ORCID proves the PERSON, the email
+ * code proves the INBOX, and the base tier needs both — every notification,
+ * the sign-in code and the upload-request thread go to that address. Approval
+ * sits ABOVE the base tier, so it cannot be the thing that skips it.
+ *
+ * The practical effect is that `pending` is no longer approvable at all (both
+ * roads out of `pending` set `email_verified`), and a `revoked` row whose
+ * email was never confirmed has to confirm it before it can be re-approved.
+ * The web branch is kept rather than deleted because ORCID verification is
+ * still a real requirement for a web row — it is now the second condition,
+ * not a substitute for the first.
  */
 function isApprovable(user: ApprovableUserRow): boolean {
+  if (user.email_verified !== 1) return false;
   if (user.status === "verified" || user.status === "revoked") return true;
   return user.status === "pending" && user.signup_source === "web" && user.orcid_verified === 1;
 }
 
 /** The 400 body both approve routes return for an ineligible status. */
 function ineligibilityMessage(user: ApprovableUserRow): string {
+  // Checked first because it is the one an admin can act on: tell them to ask
+  // the user to verify, rather than reporting a status the user can fix
+  // themselves in a minute.
+  if (user.email_verified !== 1) {
+    return "User must verify their email address first; approval cannot skip the inbox check";
+  }
   if (user.status !== "pending") return "User status is not eligible for approval";
   return user.signup_source === "web"
     ? "Web signup is not ORCID-verified; not eligible for approval"
