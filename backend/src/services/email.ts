@@ -338,8 +338,15 @@ export async function sendVerificationEmail(
 
   <p style="color: #666; font-size: 14px;">
     <strong>What happens next?</strong><br>
-    After verifying your email, an administrator will review your account.
-    Once approved, you'll receive your API key and can start uploading datasets.
+    Verifying your email activates your account: you can browse and download
+    datasets, and <code style="background:#f4f4f5;padding:2px 6px;border-radius:4px;">nemar auth retrieve-key</code>
+    will give you your API key right away.
+  </p>
+
+  <p style="color: #666; font-size: 14px;">
+    Uploading your own datasets needs one more thing — upload access, a
+    one-time approval you request from an administrator once your account is
+    active.
   </p>
 
   <p style="color: #999; font-size: 12px; margin-top: 30px;">

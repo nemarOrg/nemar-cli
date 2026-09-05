@@ -22,6 +22,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { adminRoutes } from "../src/routes/admin";
 import { authRoutes } from "../src/routes/auth";
+import { sendVerificationEmail } from "../src/services/email";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -153,6 +154,43 @@ describe("GET /auth/verify (the CLI verification link)", () => {
     // The admin's action is the upload grant, so that is the command the
     // mail names.
     expect(toAdmin[0].html).toContain("nemar admin approve");
+  });
+});
+
+describe("the signup verification email (the first one anyone gets)", () => {
+  test("says the account is active after verifying, not that an admin will review it", async () => {
+    // Driven through the real exported wrapper at its real boundary (the
+    // same shape email-delivery-fence.test.ts uses), because this template is
+    // what sets a new user's expectations before any other copy reaches them:
+    // it used to promise "an administrator will review your account. Once
+    // approved, you'll receive your API key", which is now two wrong claims.
+    const captured = await withFakeResend(async (calls) => {
+      await sendVerificationEmail(
+        USER_EMAIL,
+        "newcli",
+        "https://api.test/auth/verify?token=x",
+        "fake-resend-key",
+        "NEMAR <noreply@nemar.org>",
+        undefined,
+        false,
+        { ENVIRONMENT: "test", DEV_EMAIL_ALLOWLIST: "@nemar.test" },
+      );
+      return sendsTo(calls, USER_EMAIL);
+    });
+
+    expect(captured.length).toBe(1);
+    expect(captured[0].html).toContain("nemar auth retrieve-key");
+    expect(captured[0].html).not.toContain("an administrator will review your account");
+    expect(captured[0].html).not.toContain("Once approved, you'll receive your API key");
+    // Not just the two old sentences: ANY sentence that ties the key to an
+    // approval is the same wrong claim rephrased, in either word order.
+    // Bounded to one sentence (no "." and no tag between) so the separate
+    // upload-access paragraph below does not trip it.
+    expect(captured[0].html).not.toMatch(/approv[a-z]*[^.<]{0,80}API key/i);
+    expect(captured[0].html).not.toMatch(/API key[^.<]{0,80}approv/i);
+    // Upload access is still named -- dropping the false claim must not drop
+    // the true one, that uploading needs a separate approval.
+    expect(captured[0].html).toContain("upload access");
   });
 });
 
