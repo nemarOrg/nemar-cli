@@ -28,7 +28,11 @@ import {
   generateUploadPolicy,
   getFederationToken,
 } from "../../services/sts";
-import { realDatasetCreateGate, realDatasetServiceGate } from "../../services/upload-gate";
+import {
+  realDatasetCreateGate,
+  realDatasetServiceGate,
+  uploadChannelForAuthMethod,
+} from "../../services/upload-gate";
 import { type Bindings, hasRole } from "../../types/bindings";
 import type { DatasetsRouter } from "./shared";
 
@@ -253,18 +257,24 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         );
       }
 
-      // Non-sandbox (real) dataset creation is gated on service access then
-      // sandbox training (website ADR 0010, #1013). See services/upload-gate.ts.
+      // Non-sandbox (real) dataset creation is gated on service access, then
+      // — on the CLI channel — sandbox training (website ADR 0010, #1013;
+      // ADR 0040 phase 2 for the channel). The channel comes from the
+      // credential that authenticated this request, never from the request
+      // body. See services/upload-gate.ts.
       if (!sandbox) {
         const userStatus = await db
           .prepare("SELECT service_access, sandbox_completed FROM users WHERE id = ?")
           .bind(user.id)
           .first<{ service_access: number; sandbox_completed: number }>();
 
-        const gate = realDatasetCreateGate({
-          service_access: userStatus?.service_access ?? 0,
-          sandbox_completed: userStatus?.sandbox_completed ?? 0,
-        });
+        const gate = realDatasetCreateGate(
+          {
+            service_access: userStatus?.service_access ?? 0,
+            sandbox_completed: userStatus?.sandbox_completed ?? 0,
+          },
+          uploadChannelForAuthMethod(c.get("authMethod")),
+        );
         if (gate) return c.json(gate, 403);
       }
 
