@@ -96,8 +96,8 @@ function post(path: string, key = ADMIN_KEY): Promise<Response> {
 
 function userRow(id: number) {
   return db
-    .query<{ status: string; approved_at: string | null }, [number]>(
-      "SELECT status, approved_at FROM users WHERE id = ?",
+    .query<{ status: string; approved_at: string | null; service_access: number }, [number]>(
+      "SELECT status, approved_at, service_access FROM users WHERE id = ?",
     )
     .get(id);
 }
@@ -156,6 +156,10 @@ describe("POST /admin/approve/by-id/:id (#1012)", () => {
     const body = await res.json();
     expect(body.message).toContain("not ORCID-verified");
     expect(userRow(id)?.status).toBe("pending");
+    // A refused approval must not have granted upload access on the way out.
+    // The grant write sits after this check today; asserting it here is what
+    // stops a refactor from hoisting it above the eligibility gate (ADR 0040).
+    expect(userRow(id)?.service_access).toBe(0);
   });
 
   test("refuses a pending CLI signup (email still unverified), even by id", async () => {
@@ -165,6 +169,7 @@ describe("POST /admin/approve/by-id/:id (#1012)", () => {
     const body = await res.json();
     expect(body.message).toContain("verify their email");
     expect(userRow(id)?.status).toBe("pending");
+    expect(userRow(id)?.service_access).toBe(0);
   });
 
   test("approves a verified CLI signup by id (id path is not web-only)", async () => {
@@ -191,6 +196,12 @@ describe("POST /admin/approve/by-id/:id (#1012)", () => {
     expect((await post("/admin/approve/by-id/-1")).status).toBe(400);
   });
 
+  test("the eligibility 400 leaves the grant alone on the username route too", async () => {
+    const { id } = seedCliUser("cliuser5", "pending", 0);
+    expect((await post("/admin/approve/cliuser5")).status).toBe(400);
+    expect(userRow(id)?.service_access).toBe(0);
+  });
+
   test("non-admin token is refused", async () => {
     const { id: memberId } = seedCliUser("plainmember", "approved", 1);
     const memberKey = "approve-member-key-0123456789abcdef0123456789abcdef";
@@ -203,6 +214,7 @@ describe("POST /admin/approve/by-id/:id (#1012)", () => {
     const res = await post(`/admin/approve/by-id/${id}`, memberKey);
     expect(res.status).toBe(403);
     expect(userRow(id)?.status).toBe("pending");
+    expect(userRow(id)?.service_access).toBe(0);
   });
 });
 

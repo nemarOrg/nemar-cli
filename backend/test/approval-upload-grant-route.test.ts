@@ -153,6 +153,24 @@ describe("POST /admin/approve/:username grants upload access (#1249)", () => {
     expect(res.status).toBe(200);
     expect(grantState(id).service_access).toBe(1);
   });
+
+  test("an audit failure does not 500 an approval that already committed", async () => {
+    // The opposite trade-off from the repair path, for a reason: here the
+    // status flip and grant are committed BEFORE the notification email is
+    // attempted (never tell a user they are approved before the row says so),
+    // so the audit insert cannot be batched with them. Once they are committed
+    // there is nothing to roll back, and a 500 would tell the admin their
+    // completed approval failed and send them into a retry that now 409s.
+    const { id } = seedCliUser("grantee4");
+    db.run("DROP TABLE audit_log");
+
+    const res = await post("/admin/approve/grantee4");
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).user.service_access).toBe(true);
+    expect(grantState(id).status).toBe("approved");
+    expect(grantState(id).service_access).toBe(1);
+  });
 });
 
 describe("POST /admin/approve/by-id/:id grants upload access", () => {
@@ -182,18 +200,48 @@ describe("the approved-but-ungranted repair path (ADR 0040)", () => {
     expect(row.status).toBe("approved");
     expect(row.service_access).toBe(1);
     expect(row.service_access_granted_by).toBe(adminId);
+    // The repair stamps WHEN as well as WHO: a grant with no timestamp is
+    // indistinguishable from the migration's system grant in the listing.
+    expect(row.service_access_granted_at).not.toBeNull();
   });
 
-  test("the repair is audited under its own action", async () => {
+  test("the repair is audited under its own action, naming the cause and the admin", async () => {
     seedCliUser("stuck2", { status: "approved", serviceAccess: 0 });
     await post("/admin/approve/stuck2");
 
     const audit = db
-      .query<{ resource_id: string }, []>(
-        "SELECT resource_id FROM audit_log WHERE action = 'user_upload_access_granted'",
+      .query<{ resource_id: string; details: string }, []>(
+        "SELECT resource_id, details FROM audit_log WHERE action = 'user_upload_access_granted'",
       )
       .get();
     expect(audit?.resource_id).toBe("stuck2");
+
+    // The repair is rare and unexpected, so its row has to explain itself
+    // months later: WHY it fired, and WHO fired it.
+    const details = JSON.parse(audit?.details ?? "{}");
+    expect(details.repair).toContain("service_access=0");
+    expect(details.granted_by_id).toBe(adminId);
+    expect(details.granted_by).toBe("grantadmin");
+  });
+
+  test("an audit failure leaves no orphaned grant, and says so", async () => {
+    // Fault injection against the real engine, not a mock: the audit table is
+    // genuinely gone, so the production code runs against a database that
+    // really cannot record the repair.
+    //
+    // Unbatched, the UPDATE would commit and the audit insert would then throw
+    // into Hono's default 500 — the admin sees "unexpected error", the grant IS
+    // live, and their retry 409s "already approved". Batched, the grant never
+    // lands and the error tells the truth, so the retry works.
+    const { id } = seedCliUser("stuck4", { status: "approved", serviceAccess: 0 });
+    db.run("DROP TABLE audit_log");
+
+    const res = await post("/admin/approve/stuck4");
+
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toContain("NOT granted");
+    expect(grantState(id).service_access).toBe(0);
+    expect(grantState(id).service_access_granted_by).toBeNull();
   });
 
   test("by-id takes the same repair path", async () => {
@@ -240,6 +288,21 @@ describe("POST /admin/revoke/:username clears the grant and its stamps", () => {
       .get();
     expect(JSON.parse(audit?.details ?? "{}").service_access_cleared).toBe(true);
   });
+
+  test("an audit failure does not 500 a revocation that already happened", async () => {
+    // By the time the audit row is written, tokens, IAM credentials, GitHub
+    // collaborations, S3 permissions, `status` and `service_access` have all
+    // been changed and cannot be undone. A 500 here would read as "the user
+    // still has access" — the one wrong answer for a revocation.
+    const { id } = seedCliUser("revokee3", { status: "approved", serviceAccess: 1 });
+    db.run("DROP TABLE audit_log");
+
+    const res = await post("/admin/revoke/revokee3");
+
+    expect(res.status).toBe(200);
+    expect(grantState(id).status).toBe("revoked");
+    expect(grantState(id).service_access).toBe(0);
+  });
 });
 
 describe("GET /admin/users reports the tier", () => {
@@ -267,18 +330,21 @@ describe("GET /admin/users reports the tier", () => {
     expect(web.orcid).toBe("0000-0002-1825-0097");
   });
 
-  test("an approval flips the listed tier for that user", async () => {
+  test("an approval flips the listed tier and publishes the grant timestamp", async () => {
     seedCliUser("listed2");
     const before = await (await get("/admin/users?status=verified")).json();
-    expect(
-      before.users.find((u: { username: string }) => u.username === "listed2").service_access,
-    ).toBe(0);
+    const beforeRow = before.users.find((u: { username: string }) => u.username === "listed2");
+    expect(beforeRow.service_access).toBe(0);
+    expect(beforeRow.service_access_granted_at).toBeNull();
 
     await post("/admin/approve/listed2");
 
     const after = await (await get("/admin/users?status=approved")).json();
-    expect(
-      after.users.find((u: { username: string }) => u.username === "listed2").service_access,
-    ).toBe(1);
+    const afterRow = after.users.find((u: { username: string }) => u.username === "listed2");
+    expect(afterRow.service_access).toBe(1);
+    // The column is selected AND populated: an admin reviewing the listing can
+    // see when the grant was made, not just that it exists.
+    expect(afterRow.service_access_granted_at).not.toBeNull();
+    expect(typeof afterRow.service_access_granted_at).toBe("string");
   });
 });
