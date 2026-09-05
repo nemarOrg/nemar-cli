@@ -265,16 +265,23 @@ adminCommand
   .command("users")
   .description("List NEMAR users")
   .option("--pending", "Show only pending approval")
-  .option("--verified", "Show only verified (awaiting approval)")
+  .option("--verified", "Show only verified (base tier: browse, no upload access)")
   .option("--approved", "Show only approved users")
   .option("--revoked", "Show only revoked users")
+  .option("--no-upload-access", "Show only accounts without upload access")
+  .option("--awaiting-approval", "Show verified accounts that hold no upload access yet")
   .option("--role <role>", "Filter by role: owner, admin, or member")
   .addHelpText(
     "after",
     `
+Tiers (ADR 0040):
+  browse   verified account: browse, dashboard, settings, CLI key, sandbox
+  upload   an admin granted upload access; 'nemar admin approve' is the grant
+
 Examples:
   $ nemar admin users                    # List all users
-  $ nemar admin users --verified         # Users awaiting approval
+  $ nemar admin users --awaiting-approval # Verified, no upload access yet
+  $ nemar admin users --no-upload-access # Every browse-only account
   $ nemar admin users --role admin       # List all admins
   $ nemar admin users --role owner       # List all owners
   $ nemar admin users --approved --role member  # Approved regular users`,
@@ -282,12 +289,32 @@ Examples:
   .action(async (options) => {
     if (!requireAuth()) return;
 
+    // Commander turns `--no-upload-access` into `uploadAccess`, defaulting to
+    // true and set false when the flag is passed.
+    const noUploadAccess = options.uploadAccess === false;
+    // --awaiting-approval is "verified, no upload grant". Phase 3 (#1253)
+    // narrows it to accounts with an OPEN upload request; until that table
+    // exists this is the whole population an admin could act on.
+    const awaitingApproval = options.awaitingApproval === true;
+
     // Determine status filter
     let status: string | undefined;
     if (options.pending) status = "pending";
     else if (options.verified) status = "verified";
     else if (options.approved) status = "approved";
     else if (options.revoked) status = "revoked";
+
+    if (awaitingApproval) {
+      if (status && status !== "verified") {
+        console.error(
+          chalk.red(
+            `--awaiting-approval implies --verified; it cannot be combined with --${status}`,
+          ),
+        );
+        process.exit(1);
+      }
+      status = "verified";
+    }
 
     // Validate role filter
     const role: string | undefined = options.role;
@@ -302,19 +329,34 @@ Examples:
       const result = await listUsers(status, role);
       spinner.stop();
 
-      if (result.users.length === 0) {
-        const filters = [status, role].filter(Boolean).join(", ");
-        console.log(chalk.yellow(`No users found${filters ? ` (filter: ${filters})` : ""}`));
+      // The tier filters are applied here rather than server-side: the listing
+      // is unpaginated, so there is nothing to gain from a new query param.
+      const users =
+        noUploadAccess || awaitingApproval
+          ? result.users.filter((u) => !u.service_access)
+          : result.users;
+
+      const filterLabel = [
+        status,
+        role ? `role=${role}` : "",
+        awaitingApproval ? "awaiting-approval" : noUploadAccess ? "no-upload-access" : "",
+      ]
+        .filter(Boolean)
+        .join(", ");
+
+      if (users.length === 0) {
+        console.log(
+          chalk.yellow(`No users found${filterLabel ? ` (filter: ${filterLabel})` : ""}`),
+        );
         return;
       }
 
-      const filterLabel = [status, role ? `role=${role}` : ""].filter(Boolean).join(", ");
       console.log(
-        `\n${chalk.cyan("NEMAR Users")} (${result.count} total${filterLabel ? `, filter: ${filterLabel}` : ""})\n`,
+        `\n${chalk.cyan("NEMAR Users")} (${users.length} total${filterLabel ? `, filter: ${filterLabel}` : ""})\n`,
       );
 
       // Display users in a clean format
-      for (const user of result.users) {
+      for (const user of users) {
         const statusColor =
           {
             pending: chalk.dim,
@@ -332,10 +374,21 @@ Examples:
               : chalk.dim(" [member]");
         const verifiedBadge = user.email_verified ? "" : chalk.dim(" (unverified)");
 
-        console.log(`  ${chalk.cyan(user.username)}${roleBadge}`);
+        // Web/ORCID accounts have username = NULL by design (#1012), so the
+        // heading falls back to the email and carries the numeric id — the
+        // only key `nemar admin approve --id` can address them by. Printing
+        // the raw field would put the literal "null" in the listing.
+        const heading = user.username ?? user.email;
+        const idHint = user.username ? "" : chalk.dim(` (no username, id ${user.id})`);
+        const realName = [user.given_name, user.family_name].filter(Boolean).join(" ");
+        const tier = user.service_access ? chalk.green("upload") : chalk.dim("browse");
+
+        console.log(`  ${chalk.cyan(heading)}${roleBadge}${idHint}`);
+        if (realName) console.log(`    Name:    ${realName}`);
         console.log(`    Email:   ${user.email}${verifiedBadge}`);
-        console.log(`    GitHub:  @${user.github_username}`);
+        console.log(`    GitHub:  ${user.github_username ? `@${user.github_username}` : "-"}`);
         console.log(`    Status:  ${statusColor(user.status)}`);
+        console.log(`    Tier:    ${tier}`);
         console.log(`    Created: ${new Date(user.created_at).toLocaleDateString()}`);
         console.log();
       }
@@ -387,7 +440,7 @@ adminCommand
     // Confirmation
     console.log(chalk.cyan(`\nApproving user: ${label}\n`));
     console.log("This will:");
-    console.log("  1. Mark the account approved");
+    console.log("  1. Mark the account approved and grant upload access");
     if (username) {
       console.log("  2. Notify them to retrieve their API key via CLI");
     } else {
@@ -409,6 +462,10 @@ adminCommand
       console.log();
       console.log(`  Email: ${result.user.email}`);
       console.log(`  Status: ${chalk.green(result.user.status)}`);
+      // Approval is the single writer of upload access (ADR 0040) — say so,
+      // because #1249 was exactly an admin assuming it and being wrong.
+      console.log(`  Tier: ${chalk.green("upload")}`);
+      if (result.note) console.log(chalk.dim(`  ${result.note}`));
 
       console.log();
       if (result.email_sent) {

@@ -529,6 +529,10 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
       setConfig("username", user.username ?? undefined);
       setConfig("email", user.email);
       setConfig("githubUsername", user.github_username ?? undefined);
+      // Only cache a value the server actually sent: an older backend omits
+      // the field, and writing `false` there would report "not granted" to
+      // someone who has it (ADR 0040).
+      if (user.service_access !== undefined) setConfig("serviceAccess", user.service_access);
       userRole = user.role;
       spinner.stop();
     } catch (error) {
@@ -574,6 +578,20 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
           ? chalk.magenta("Admin")
           : chalk.white("Member");
     console.log(`  Role:     ${roleDisplay}`);
+  }
+  // Upload access is the one-time admin approval (ADR 0040); `status` no
+  // longer implies it, which is why it gets its own line. `undefined` means
+  // this account has never been refreshed against a backend that reports it.
+  if (cfg.serviceAccess === true) {
+    console.log(`  Upload access: ${chalk.green("granted")}`);
+  } else if (cfg.serviceAccess === false) {
+    console.log(
+      `  Upload access: ${chalk.yellow("not granted")} ${chalk.dim(
+        "(one-time admin approval; see https://nemar.org/support)",
+      )}`,
+    );
+  } else {
+    console.log(`  Upload access: ${chalk.dim("unknown (run 'nemar auth status --refresh')")}`);
   }
   console.log(`  Config:   ${chalk.dim(getConfigPath())}`);
 

@@ -87,6 +87,13 @@ const accountSchema = z.object({
   sandboxCompleted: z.boolean().optional(),
   sandboxDatasetId: z.string().optional(),
   dismissedNoticeIds: z.array(z.number()).optional(),
+  /**
+   * Upload access as of the last `auth status --refresh` (ADR 0040). Cached
+   * rather than fetched on every `auth status` so the command stays usable
+   * offline; absent means "never refreshed", which the status output reports
+   * as unknown rather than guessing "not granted".
+   */
+  serviceAccess: z.boolean().optional(),
 });
 
 export type Config = z.infer<typeof accountSchema>;

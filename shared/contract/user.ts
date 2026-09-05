@@ -26,6 +26,11 @@ export const userSchema = z
     sandbox_completed: z.boolean().optional(),
     sandbox_completed_at: z.string().nullable().optional(),
     sandbox_dataset_id: z.string().nullable().optional(),
+    /**
+     * Upload access: the one-time admin approval (ADR 0040). Optional because
+     * an older backend does not send it; `undefined` is "unknown", not "no".
+     */
+    service_access: z.boolean().optional(),
   })
   .passthrough();
 export type ContractUser = z.infer<typeof userSchema>;

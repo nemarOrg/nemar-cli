@@ -14,15 +14,25 @@ import { request } from "./client.js";
 
 export interface UserListItem {
   id: number;
-  username: string;
+  /** NULL for web/ORCID accounts, which have no username by design (#1012). */
+  username: string | null;
   email: string;
-  github_username: string;
+  /** NULL until onboarding collects it (web accounts) or for older rows. */
+  github_username: string | null;
   status: string;
   email_verified: number;
   role: string;
   created_at: string;
   approved_at: string | null;
   revoked_at: string | null;
+  /** 'cli' | 'web' (migration 0026). */
+  signup_source: string | null;
+  /** 1 once an admin granted upload access; the tier column reads this. */
+  service_access: number;
+  service_access_granted_at: string | null;
+  given_name: string | null;
+  family_name: string | null;
+  orcid: string | null;
 }
 
 export interface UsersListResponse {
@@ -43,12 +53,19 @@ export async function listUsers(status?: string, role?: string): Promise<UsersLi
 
 export interface ApproveResponse {
   message: string;
+  /**
+   * Present only on the repair path: the account was already `approved` but
+   * carried no upload grant, so only the grant was written (ADR 0040).
+   */
+  note?: string;
   user: {
     id: number;
     // NULL for web/ORCID accounts (they have no username by design).
     username: string | null;
     email: string;
     status: string;
+    /** Approval grants upload access; always true on a 200 (ADR 0040). */
+    service_access?: boolean;
   };
   email_sent: boolean;
 }
