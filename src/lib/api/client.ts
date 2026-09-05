@@ -13,6 +13,7 @@
 
 import type { ZodType } from "zod";
 import { getConfig } from "../config.js";
+import { isDebugEnabled, recordHttpExchange } from "../debug-log.js";
 import { printMaintenanceBanner } from "../maintenance-banner.js";
 import { version } from "../version.js";
 import { ApiError, MaintenanceError } from "./errors.js";
@@ -67,6 +68,10 @@ export async function request<T>(
     }
   }
 
+  const method = options.method || "GET";
+  const requestBody = typeof options.body === "string" ? options.body : undefined;
+  const startedAt = Date.now();
+
   let response: Response;
   try {
     response = await fetch(url, {
@@ -75,14 +80,41 @@ export async function request<T>(
     });
   } catch (fetchError) {
     // Network error - DNS resolution, connection refused, etc.
+    if (isDebugEnabled()) {
+      recordHttpExchange({
+        method,
+        url,
+        status: null,
+        durationMs: Date.now() - startedAt,
+        requestHeaders: headers,
+        requestBody,
+        error: fetchError instanceof Error ? fetchError.message : String(fetchError),
+      });
+    }
     throw new ApiError(0, `Network error: Could not connect to ${getApiUrl()}`, {
       originalError: fetchError instanceof Error ? fetchError.message : String(fetchError),
     });
   }
 
+  // Read the body as text once (a Response body can only be consumed once)
+  // so it's available both for parsing below and for the debug log entry,
+  // including the "invalid JSON" failure case.
+  const rawBody = await response.text();
+  if (isDebugEnabled()) {
+    recordHttpExchange({
+      method,
+      url,
+      status: response.status,
+      durationMs: Date.now() - startedAt,
+      requestHeaders: headers,
+      requestBody,
+      responseBody: rawBody,
+    });
+  }
+
   let data: Record<string, unknown>;
   try {
-    data = (await response.json()) as Record<string, unknown>;
+    data = JSON.parse(rawBody) as Record<string, unknown>;
   } catch {
     // Response wasn't valid JSON
     throw new ApiError(response.status, `Invalid response from server (status ${response.status})`);
