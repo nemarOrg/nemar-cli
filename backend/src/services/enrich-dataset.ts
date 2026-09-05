@@ -65,6 +65,7 @@ import { recordLlmUsage } from "./llm-metrics.js";
 import { ensureParticipantsTsv } from "./participants-tsv.js";
 import { errorMessage, extractRepoName } from "./repo-metadata.js";
 import { extractExtensions, getDatasetS3Stats } from "./s3.js";
+import { resolveOwnerIdentity } from "./uploader-identity.js";
 
 export interface EnrichmentOpts {
   datasetId: string;
@@ -297,12 +298,15 @@ export async function enrichDataset(
     is_sandbox: number | null;
     owner_username: string | null;
     owner_orcid: string | null;
+    owner_given_name: string | null;
+    owner_family_name: string | null;
   } | null;
   try {
     dataset = await env.DB.prepare(
       `SELECT d.dataset_id, d.name, d.github_repo, d.enrichment_json,
               d.concept_doi, d.is_sandbox,
-              u.username AS owner_username, u.orcid AS owner_orcid
+              u.username AS owner_username, u.orcid AS owner_orcid,
+              u.given_name AS owner_given_name, u.family_name AS owner_family_name
        FROM datasets d
        LEFT JOIN users u ON d.owner_user_id = u.id
        WHERE d.dataset_id = ?`,
@@ -317,6 +321,8 @@ export async function enrichDataset(
         is_sandbox: number | null;
         owner_username: string | null;
         owner_orcid: string | null;
+        owner_given_name: string | null;
+        owner_family_name: string | null;
       }>();
   } catch (err) {
     return {
@@ -1064,11 +1070,7 @@ export async function enrichDataset(
 
         const conceptIdentifier = conceptEzidIdentifier(dataset.concept_doi);
         const doi = extractDoi(conceptIdentifier);
-        let doiEnrichment = buildOrcidEnrichment(
-          bidsDescription,
-          dataset.owner_username || undefined,
-          dataset.owner_orcid || undefined,
-        );
+        let doiEnrichment = buildOrcidEnrichment(bidsDescription, resolveOwnerIdentity(dataset));
         const committedMeta = parseNemarMetadata(finalMetadata);
         if (committedMeta) {
           doiEnrichment = nemarMetadataToEnrichment(committedMeta, doiEnrichment);

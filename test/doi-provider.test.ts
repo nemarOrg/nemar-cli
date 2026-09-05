@@ -23,6 +23,25 @@ import {
 // The CLI-side llm-enrich fork was deleted (dead code since enrichment moved
 // to the central workflow); these tests pin the backend implementation.
 import { validateLlmResultV2 as validateLlmResult } from "../backend/src/services/llm-enrich";
+import {
+  type UploaderIdentity,
+  resolveUploaderIdentity,
+} from "../backend/src/services/uploader-identity";
+
+const ORCID = "0000-0002-1825-0097";
+
+/** A complete uploader identity, built the way production builds it (from the
+ *  owner row) rather than by hand, so these tests exercise the real
+ *  given/family -> "Family, Given" derivation. */
+function identity(given: string, family: string, orcid?: string): UploaderIdentity {
+  const resolved = resolveUploaderIdentity({
+    given_name: given,
+    family_name: family,
+    orcid: orcid ?? null,
+  });
+  if (!resolved) throw new Error("test setup: identity should resolve");
+  return resolved;
+}
 
 describe("ORCID validation", () => {
   const orcidRegex = /^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/;
@@ -53,11 +72,12 @@ describe("ORCID validation", () => {
 });
 
 describe("buildOrcidEnrichment", () => {
-  test("matches author by case-insensitive substring", () => {
+  const yahya = identity("Yahya", "Shirazi", "0000-0002-1825-0097");
+
+  test("matches a BIDS author by both real-name parts", () => {
     const enrichment = buildOrcidEnrichment(
       { Name: "Test", Authors: ["Shirazi, Yahya", "Smith, John"] },
-      "yahya",
-      "0000-0002-1825-0097",
+      yahya,
     );
 
     expect(enrichment.authors).toBeDefined();
@@ -66,62 +86,109 @@ describe("buildOrcidEnrichment", () => {
     expect(enrichment.authors?.["Smith, John"]).toBeUndefined();
   });
 
-  test("returns enrichment with uploaderName but no authors when no ORCID provided", () => {
-    const enrichment = buildOrcidEnrichment({ Name: "Test", Authors: ["Doe, Jane"] }, "jane");
+  test("matches an author written given-name-first", () => {
+    // BIDS Authors is free-form; "Yahya Shirazi" is as common as the comma
+    // form, and a whole-string match on "Shirazi, Yahya" would miss it.
+    const enrichment = buildOrcidEnrichment(
+      { Name: "Test", Authors: ["Yahya Shirazi", "John Smith"] },
+      yahya,
+    );
 
-    expect(enrichment).toEqual({ uploaderName: "jane" });
+    expect(enrichment.authors?.["Yahya Shirazi"]?.orcid).toBe("0000-0002-1825-0097");
+  });
+
+  test("matches an author carrying a middle initial", () => {
+    const enrichment = buildOrcidEnrichment(
+      { Name: "Test", Authors: ["Shirazi, Yahya M."] },
+      yahya,
+    );
+
+    expect(enrichment.authors?.["Shirazi, Yahya M."]?.orcid).toBe("0000-0002-1825-0097");
+  });
+
+  test("carries the real name but no authors map when the account has no ORCID", () => {
+    const enrichment = buildOrcidEnrichment(
+      { Name: "Test", Authors: ["Doe, Jane"] },
+      identity("Jane", "Doe"),
+    );
+
+    expect(enrichment).toEqual({
+      uploaderName: "Doe, Jane",
+      uploaderGivenName: "Jane",
+      uploaderFamilyName: "Doe",
+    });
     expect(enrichment.authors).toBeUndefined();
   });
 
   test("returns enrichment with uploader fields when no BIDS description", () => {
-    const enrichment = buildOrcidEnrichment(undefined, "jane", "0000-0002-1825-0097");
+    const enrichment = buildOrcidEnrichment(undefined, identity("Jane", "Doe", ORCID));
 
-    expect(enrichment).toEqual({ uploaderName: "jane", uploaderOrcid: "0000-0002-1825-0097" });
+    expect(enrichment).toEqual({
+      uploaderName: "Doe, Jane",
+      uploaderGivenName: "Jane",
+      uploaderFamilyName: "Doe",
+      uploaderOrcid: ORCID,
+    });
     expect(enrichment.authors).toBeUndefined();
   });
 
-  test("returns enrichment with uploaderOrcid when no uploaderName", () => {
+  test("returns an EMPTY enrichment when the account has no real name", () => {
+    // The username is not a fallback (#1255): with no given/family name there
+    // is nothing citable, so nothing at all is emitted -- not the ORCID
+    // either, since we cannot tell which author it belongs to.
     const enrichment = buildOrcidEnrichment(
       { Name: "Test", Authors: ["Doe, Jane"] },
-      undefined,
-      "0000-0002-1825-0097",
+      resolveUploaderIdentity({ given_name: null, family_name: "Doe", orcid: ORCID }),
     );
 
-    expect(enrichment).toEqual({ uploaderOrcid: "0000-0002-1825-0097" });
-    expect(enrichment.authors).toBeUndefined();
+    expect(enrichment).toEqual({});
   });
 
   test("returns enrichment with uploader fields when no authors in BIDS", () => {
-    const enrichment = buildOrcidEnrichment({ Name: "Test" }, "jane", "0000-0002-1825-0097");
+    const enrichment = buildOrcidEnrichment({ Name: "Test" }, identity("Jane", "Doe", ORCID));
 
-    expect(enrichment).toEqual({ uploaderName: "jane", uploaderOrcid: "0000-0002-1825-0097" });
+    expect(enrichment).toEqual({
+      uploaderName: "Doe, Jane",
+      uploaderGivenName: "Jane",
+      uploaderFamilyName: "Doe",
+      uploaderOrcid: ORCID,
+    });
     expect(enrichment.authors).toBeUndefined();
   });
 
-  test("returns enrichment with uploader fields when uploader name does not match any author", () => {
+  test("returns enrichment with uploader fields when the name matches no author", () => {
     const enrichment = buildOrcidEnrichment(
       { Name: "Test", Authors: ["Doe, Jane", "Smith, John"] },
-      "nobody",
-      "0000-0002-1825-0097",
+      identity("Nemo", "Nobody", ORCID),
     );
 
     // No match found, so authors map should not be set but uploader fields preserved
     expect(enrichment.authors).toBeUndefined();
-    expect(enrichment.uploaderName).toBe("nobody");
-    expect(enrichment.uploaderOrcid).toBe("0000-0002-1825-0097");
+    expect(enrichment.uploaderName).toBe("Nobody, Nemo");
+    expect(enrichment.uploaderOrcid).toBe(ORCID);
   });
 
   test("matches first matching author only", () => {
     const enrichment = buildOrcidEnrichment(
-      { Name: "Test", Authors: ["Smith, Jane", "Smith, John"] },
-      "smith",
-      "0000-0002-1825-0097",
+      { Name: "Test", Authors: ["Smith, Jane", "Smith, Jane R."] },
+      identity("Jane", "Smith", ORCID),
     );
 
     expect(enrichment.authors).toBeDefined();
-    // Should match only the first "Smith" entry
-    expect(enrichment.authors?.["Smith, Jane"]?.orcid).toBe("0000-0002-1825-0097");
-    expect(enrichment.authors?.["Smith, John"]).toBeUndefined();
+    // Should match only the first "Smith, Jane" entry
+    expect(enrichment.authors?.["Smith, Jane"]?.orcid).toBe(ORCID);
+    expect(enrichment.authors?.["Smith, Jane R."]).toBeUndefined();
+  });
+
+  test("does NOT match a same-family-name colleague", () => {
+    // The pre-#1255 matcher took the whole uploader string, so a username of
+    // "smith" attached the uploader's ORCID to any Smith in the author list.
+    const enrichment = buildOrcidEnrichment(
+      { Name: "Test", Authors: ["Smith, John"] },
+      identity("Jane", "Smith", ORCID),
+    );
+
+    expect(enrichment.authors).toBeUndefined();
   });
 });
 
@@ -182,7 +249,7 @@ describe("DOI provider dispatch functions", () => {
           provider: "ezid",
           datasetId: "nm099999",
           datasetName: "Test",
-          uploaderName: "testuser",
+          uploader: identity("Test", "Uploader"),
         },
         {
           EZID_USERNAME: "",
@@ -200,7 +267,7 @@ describe("DOI provider dispatch functions", () => {
           provider: "zenodo",
           datasetId: "nm099999",
           datasetName: "Test",
-          uploaderName: "testuser",
+          uploader: identity("Test", "Uploader"),
         },
         {
           EZID_USERNAME: "",
@@ -234,7 +301,7 @@ describe("DOI provider dispatch functions", () => {
           provider: "ezid",
           datasetId: "nm099999",
           datasetName: "Test",
-          uploaderName: "testuser",
+          uploader: identity("Test", "Uploader"),
           sandbox: true,
         },
         {
@@ -255,7 +322,7 @@ describe("DOI provider dispatch functions", () => {
           provider: "ezid",
           datasetId: "nm099999",
           datasetName: "Test",
-          uploaderName: "testuser",
+          uploader: identity("Test", "Uploader"),
           sandbox: true,
         },
         {
@@ -274,7 +341,7 @@ describe("DOI provider dispatch functions", () => {
           provider: "ezid",
           datasetId: "nm099999",
           datasetName: "Test",
-          uploaderName: "testuser",
+          uploader: identity("Test", "Uploader"),
           sandbox: true,
         },
         {
@@ -293,7 +360,7 @@ describe("DOI provider dispatch functions", () => {
           provider: "zenodo",
           datasetId: "nm099999",
           datasetName: "Test",
-          uploaderName: "testuser",
+          uploader: identity("Test", "Uploader"),
           sandbox: true,
         },
         {

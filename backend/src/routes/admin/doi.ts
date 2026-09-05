@@ -44,6 +44,12 @@ import {
 import { getDatasetsToken } from "../../services/github-auth";
 import { errorMessage, extractRepoName, readRepoMetadata } from "../../services/repo-metadata";
 import {
+  OWNER_NAME_MISSING_MESSAGE,
+  OWNER_NAME_MISSING_REASON,
+  requiresUploaderName,
+  resolveOwnerIdentity,
+} from "../../services/uploader-identity";
+import {
   type ZenodoDeposition,
   createNewVersion,
   deleteDeposition,
@@ -93,7 +99,8 @@ export function registerDoiRoutes(admin: AdminRouter): void {
     const dataset = await db
       .prepare(
         `
-    SELECT d.*, u.username as owner_username, u.orcid as owner_orcid
+    SELECT d.*, u.username as owner_username, u.orcid as owner_orcid,
+           u.given_name as owner_given_name, u.family_name as owner_family_name
     FROM datasets d
     JOIN users u ON d.owner_user_id = u.id
     WHERE d.dataset_id = ?
@@ -111,6 +118,9 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         ezid_status: string | null;
         owner_username: string;
         owner_orcid: string | null;
+        owner_given_name: string | null;
+        owner_family_name: string | null;
+        source: string | null;
         is_sandbox: number | null;
         is_exemplar: number | null;
         enrichment_json: string | null;
@@ -148,6 +158,24 @@ export function registerDoiRoutes(admin: AdminRouter): void {
           dataset_id: dataset.dataset_id,
         },
         400,
+      );
+    }
+
+    // Real-name precondition (#1255). A concept DOI is permanent, and the
+    // uploader is cited on it as DataCurator by real name; minting for an
+    // account with no name would silently drop that attribution. Refuse
+    // instead, and name the two ways the owner can supply it. OpenNeuro
+    // imports and exemplars are exempt (see requiresUploaderName).
+    if (requiresUploaderName(dataset) && !resolveOwnerIdentity(dataset)) {
+      return c.json(
+        {
+          error: "Owner has no researcher name on file",
+          block_reason: OWNER_NAME_MISSING_REASON,
+          message: OWNER_NAME_MISSING_MESSAGE,
+          dataset_id: dataset.dataset_id,
+          owner_username: dataset.owner_username,
+        },
+        422,
       );
     }
 
@@ -260,11 +288,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
     if (dataset.github_repo) {
       const repoName = extractRepoName(dataset.github_repo);
       if (repoName) {
-        const baseEnrichment = buildOrcidEnrichment(
-          undefined,
-          dataset.owner_username,
-          dataset.owner_orcid || undefined,
-        );
+        const baseEnrichment = buildOrcidEnrichment(undefined, resolveOwnerIdentity(dataset));
         const repoMeta = await readRepoMetadata(
           repoName,
           await getDatasetsToken(c.env),
@@ -292,8 +316,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
           githubRepo: dataset.github_repo,
           bidsDescription,
           enrichment: repoEnrichment,
-          uploaderOrcid: dataset.owner_orcid || undefined,
-          uploaderName: dataset.owner_username,
+          uploader: resolveOwnerIdentity(dataset),
           sandbox: body.sandbox,
         },
         {
@@ -628,7 +651,8 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         `
       SELECT d.dataset_id, d.concept_doi, d.ezid_status,
              d.github_repo, d.name, d.is_sandbox,
-             u.username as owner_username, u.orcid as owner_orcid
+             u.username as owner_username, u.orcid as owner_orcid,
+             u.given_name as owner_given_name, u.family_name as owner_family_name
       FROM datasets d
       JOIN users u ON d.owner_user_id = u.id
       WHERE d.dataset_id = ?
@@ -644,6 +668,8 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         is_sandbox: number | null;
         owner_username: string;
         owner_orcid: string | null;
+        owner_given_name: string | null;
+        owner_family_name: string | null;
       }>();
 
     if (!dataset) {
@@ -716,11 +742,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         }
         const bidsDesc = parsed as Record<string, unknown>;
         const doi = extractDoi(conceptIdentifier);
-        let enrichment = buildOrcidEnrichment(
-          bidsDesc,
-          dataset.owner_username,
-          dataset.owner_orcid || undefined,
-        );
+        let enrichment = buildOrcidEnrichment(bidsDesc, resolveOwnerIdentity(dataset));
 
         // Read enrichment metadata (.nemar/metadata.json first, fall back to nemar_metadata.json)
         const nemarMetaFile =
@@ -807,11 +829,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
             const content = await getBlobContent(repoName, descFile.sha, pat);
             const bidsDesc = JSON.parse(content) as Record<string, unknown>;
 
-            let vEnrichment = buildOrcidEnrichment(
-              bidsDesc,
-              dataset.owner_username,
-              dataset.owner_orcid || undefined,
-            );
+            let vEnrichment = buildOrcidEnrichment(bidsDesc, resolveOwnerIdentity(dataset));
             const nemarMetaFile =
               tree.find((f) => f.path === ".nemar/metadata.json") ||
               tree.find((f) => f.path === "nemar_metadata.json");

@@ -34,6 +34,12 @@ import {
   SUBMISSION_POLICY_URL,
   evaluateSubmissionMinimums,
 } from "../../services/submission-minimums";
+import {
+  OWNER_NAME_MISSING_MESSAGE,
+  OWNER_NAME_MISSING_REASON,
+  requiresUploaderName,
+  resolveOwnerIdentity,
+} from "../../services/uploader-identity";
 import { hasRole } from "../../types/bindings";
 import { extractRepoName } from "./shared";
 import type { DatasetsRouter } from "./shared";
@@ -55,6 +61,10 @@ const BLOCK_MESSAGES: Record<string, string> = {
   // and the CLI renders it once, alongside the itemized reasons.
   min_requirements_failed:
     "The dataset does not meet the minimum submission requirements. Fix the stated items and re-request publication.",
+  // #1255: DOIs cite the uploader by real name, so an owner with no
+  // given_name/family_name cannot be attributed at all. The message is the
+  // one place a user is told how to supply it, so it lives with the reason.
+  [OWNER_NAME_MISSING_REASON]: OWNER_NAME_MISSING_MESSAGE,
 };
 
 export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
@@ -70,9 +80,18 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     const currentUser = c.get("user");
     const db = c.env.DB;
 
+    // The owner's name columns ride along on the dataset lookup: publication
+    // mints a DOI that cites the uploader by real name (#1255), so "does this
+    // account have a citable name" is a precondition of the request, not a
+    // detail discovered later at mint time.
     const dataset = await db
       .prepare(
-        "SELECT id, dataset_id, owner_user_id, is_sandbox, is_exemplar, github_repo, visibility, source FROM datasets WHERE dataset_id = ?",
+        `SELECT d.id, d.dataset_id, d.owner_user_id, d.is_sandbox, d.is_exemplar,
+                d.github_repo, d.visibility, d.source,
+                u.given_name as owner_given_name, u.family_name as owner_family_name
+         FROM datasets d
+         JOIN users u ON d.owner_user_id = u.id
+         WHERE d.dataset_id = ?`,
       )
       .bind(datasetId)
       .first<{
@@ -84,6 +103,8 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         github_repo: string | null;
         visibility: string | null;
         source: string | null;
+        owner_given_name: string | null;
+        owner_family_name: string | null;
       }>();
 
     if (!dataset) {
@@ -137,11 +158,22 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     let blockReason: string | null = null;
     const ciUrl = repoName ? `https://github.com/nemarDatasets/${repoName}/actions` : undefined;
 
+    // Uploader-name precondition (#1255), checked FIRST: it is a property of
+    // the account rather than of the dataset, it is the cheapest check here,
+    // and reporting it before spending GitHub calls tells the user the one
+    // thing they must fix in their profile before any dataset work matters.
+    // OpenNeuro imports and exemplars are exempt (see requiresUploaderName),
+    // the same pair the submission-minimums check below exempts.
+    if (requiresUploaderName(dataset) && !resolveOwnerIdentity(dataset)) {
+      blocked = true;
+      blockReason = OWNER_NAME_MISSING_REASON;
+    }
+
     // Resolve auth inside the try so a missing or unconfigured token blocks
     // the request the same way other CI infrastructure failures do, rather
     // than 500-ing the request before we've even recorded a row.
     let pat: string | null = null;
-    if (repoName) {
+    if (repoName && !blocked) {
       try {
         pat = await getDatasetsToken(c.env);
         // Deploy CI workflows if missing
@@ -182,7 +214,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         blocked = true;
         blockReason = "bids_validation_pending";
       }
-    } else {
+    } else if (!repoName) {
       console.warn(`[publish-request] Skipping CI checks for ${datasetId}: no GitHub repo`);
     }
 

@@ -548,21 +548,55 @@ describe("bidsToDataCite", () => {
     expect(metadata.contributors?.[0]?.name).toContain("NEMAR");
   });
 
-  test("adds uploader as DataCurator when not in BIDS Authors", () => {
+  test("adds uploader as DataCurator, cited by real name", () => {
     const bids = { Name: "Test", Authors: ["Smith, John"] };
     const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
-      uploaderName: "jane",
+      uploaderName: "Doe, Jane",
+      uploaderGivenName: "Jane",
+      uploaderFamilyName: "Doe",
     });
     const curator = metadata.contributors?.find((c) => c.contributorType === "DataCurator");
     expect(curator).toBeDefined();
-    expect(curator?.name).toBe("jane");
+    expect(curator?.name).toBe("Doe, Jane");
     expect(curator?.nameType).toBe("Personal");
+    expect(curator?.givenName).toBe("Jane");
+    expect(curator?.familyName).toBe("Doe");
+  });
+
+  test("DataCurator XML carries contributorName plus given/family children", () => {
+    const bids = { Name: "Test", Authors: ["Smith, John"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploaderName: "Doe, Jane",
+      uploaderGivenName: "Jane",
+      uploaderFamilyName: "Doe",
+    });
+    const xml = buildDataCiteXml(metadata);
+    expect(xml).toContain('<contributor contributorType="DataCurator">');
+    expect(xml).toContain('<contributorName nameType="Personal">Doe, Jane</contributorName>');
+    expect(xml).toContain("<givenName>Jane</givenName>");
+    expect(xml).toContain("<familyName>Doe</familyName>");
+    // Kernel-4 sequence: contributorName, then givenName, then familyName.
+    expect(xml.indexOf("<contributorName")).toBeLessThan(xml.indexOf("<givenName>Jane"));
+    expect(xml.indexOf("<givenName>Jane")).toBeLessThan(xml.indexOf("<familyName>Doe"));
   });
 
   test("does NOT add DataCurator when uploader IS a BIDS author", () => {
     const bids = { Name: "Test", Authors: ["Doe, Jane"] };
     const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
-      uploaderName: "jane",
+      uploaderName: "Doe, Jane",
+      uploaderGivenName: "Jane",
+      uploaderFamilyName: "Doe",
+    });
+    const curators = metadata.contributors?.filter((c) => c.contributorType === "DataCurator");
+    expect(curators).toHaveLength(0);
+  });
+
+  test("does NOT add DataCurator when the author is spelled given-name-first", () => {
+    const bids = { Name: "Test", Authors: ["Jane Doe"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploaderName: "Doe, Jane",
+      uploaderGivenName: "Jane",
+      uploaderFamilyName: "Doe",
     });
     const curators = metadata.contributors?.filter((c) => c.contributorType === "DataCurator");
     expect(curators).toHaveLength(0);
@@ -578,7 +612,9 @@ describe("bidsToDataCite", () => {
   test("DataCurator includes ORCID when uploaderOrcid is set", () => {
     const bids = { Name: "Test", Authors: ["Smith, John"] };
     const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
-      uploaderName: "jane",
+      uploaderName: "Doe, Jane",
+      uploaderGivenName: "Jane",
+      uploaderFamilyName: "Doe",
       uploaderOrcid: "0000-0002-1825-0097",
     });
     const curator = metadata.contributors?.find((c) => c.contributorType === "DataCurator");
@@ -588,38 +624,44 @@ describe("bidsToDataCite", () => {
     expect(xml).toContain('nameIdentifierScheme="ORCID"');
   });
 
-  test("DataCurator appears in generated DataCite XML", () => {
+  test("DataCurator without an ORCID emits no nameIdentifier", () => {
     const bids = { Name: "Test", Authors: ["Smith, John"] };
     const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
-      uploaderName: "jane",
-    });
-    const xml = buildDataCiteXml(metadata);
-    expect(xml).toContain("DataCurator");
-    expect(xml).toContain("jane");
-  });
-
-  test("DataCurator uses word-boundary matching to avoid false positives", () => {
-    const bids = { Name: "Test", Authors: ["Elizabeth, Chen"] };
-    // "li" is a substring of "Elizabeth" but should NOT match on word boundary
-    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
-      uploaderName: "li",
+      uploaderName: "Doe, Jane",
+      uploaderGivenName: "Jane",
+      uploaderFamilyName: "Doe",
     });
     const curator = metadata.contributors?.find((c) => c.contributorType === "DataCurator");
-    expect(curator).toBeDefined();
-    expect(curator?.name).toBe("li");
+    expect(curator?.orcid).toBeUndefined();
+    expect(buildDataCiteXml(metadata)).not.toContain("nameIdentifier");
+  });
+
+  test("family-name overlap alone does not suppress the DataCurator", () => {
+    // Both parts must match: a same-family-name colleague in the author list
+    // is not the uploader, so the uploader is still credited as curator.
+    const bids = { Name: "Test", Authors: ["Doe, John"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploaderName: "Doe, Jane",
+      uploaderGivenName: "Jane",
+      uploaderFamilyName: "Doe",
+    });
+    const curator = metadata.contributors?.find((c) => c.contributorType === "DataCurator");
+    expect(curator?.name).toBe("Doe, Jane");
   });
 
   test("DataCurator name is trimmed when uploaderName has surrounding whitespace", () => {
     const bids = { Name: "Test", Authors: ["Smith, John"] };
     const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
-      uploaderName: "  yahya  ",
+      uploaderName: "  Doe, Jane  ",
+      uploaderGivenName: "  Jane  ",
+      uploaderFamilyName: "  Doe  ",
     });
     const curator = metadata.contributors?.find((c) => c.contributorType === "DataCurator");
     expect(curator).toBeDefined();
-    expect(curator?.name).toBe("yahya");
+    expect(curator?.name).toBe("Doe, Jane");
     const xml = buildDataCiteXml(metadata);
-    expect(xml).not.toContain("  yahya  ");
-    expect(xml).toContain("yahya");
+    expect(xml).not.toContain("  Doe, Jane  ");
+    expect(xml).toContain("<givenName>Jane</givenName>");
   });
 
   test("adds BIDS and neuroscience as default subjects", () => {

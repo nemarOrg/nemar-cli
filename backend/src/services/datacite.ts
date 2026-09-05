@@ -136,6 +136,11 @@ export interface DataCiteContributor {
   name: string;
   contributorType: ContributorType;
   nameType?: "Personal" | "Organizational";
+  /** Structured name parts; DataCite kernel-4 accepts them on a contributor
+   *  exactly as it does on a creator. Set for a Personal contributor whose
+   *  name is known in parts (#1255). */
+  givenName?: string;
+  familyName?: string;
   orcid?: string;
   affiliation?: string;
 }
@@ -251,8 +256,21 @@ export interface DataCiteEnrichment {
   geoLocation?: string;
   sizes?: string[];
   formats?: string[];
-  /** Uploader username; added as DataCurator contributor when not in BIDS Authors. */
+  /**
+   * Uploader's REAL name in DataCite form ("Family, Given"), added as a
+   * DataCurator contributor when they are not already a BIDS author.
+   *
+   * Never a NEMAR username (#1255): usernames are login handles, not
+   * citable names. Built by `resolveUploaderIdentity` from
+   * `users.given_name`/`users.family_name`, and absent when the account has
+   * no real name — in which case no DataCurator contributor is emitted at
+   * all rather than a username standing in for a person.
+   */
   uploaderName?: string;
+  /** Uploader's given name; emitted as the contributor's `<givenName>`. */
+  uploaderGivenName?: string;
+  /** Uploader's family name; emitted as the contributor's `<familyName>`. */
+  uploaderFamilyName?: string;
   /** Uploader ORCID; attached to contributor entry if present. */
   uploaderOrcid?: string;
 }
@@ -773,6 +791,14 @@ function buildContributorXml(contributor: DataCiteContributor): string {
   const nameType = contributor.nameType || "Personal";
   let xml = `    <contributor contributorType="${escapeXml(contributor.contributorType)}">\n`;
   xml += `      <contributorName nameType="${nameType}">${escapeXml(contributor.name)}</contributorName>\n`;
+  // Same child order as buildCreatorXml, which is the order kernel-4's
+  // sequence requires: name, givenName, familyName, nameIdentifier, affiliation.
+  if (contributor.givenName) {
+    xml += `      <givenName>${escapeXml(contributor.givenName)}</givenName>\n`;
+  }
+  if (contributor.familyName) {
+    xml += `      <familyName>${escapeXml(contributor.familyName)}</familyName>\n`;
+  }
   if (contributor.orcid) {
     xml += `      <nameIdentifier nameIdentifierScheme="ORCID" schemeURI="https://orcid.org">${escapeXml(contributor.orcid)}</nameIdentifier>\n`;
   }
@@ -1170,6 +1196,38 @@ export function parseAuthorName(author: string): {
   return { name: author };
 }
 
+/** Case-insensitive whole-word containment. Word boundaries stop "li" from
+ *  matching inside "Elizabeth", the false positive that motivated the
+ *  original matcher. */
+function containsWord(haystack: string, word: string): boolean {
+  const escaped = word.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!escaped) return false;
+  return new RegExp(`\\b${escaped}\\b`, "i").test(haystack);
+}
+
+/**
+ * Does this BIDS author string name the uploader?
+ *
+ * With a real name (#1255) the two parts are matched independently, so the
+ * author entry may be written in any of the conventional orders BIDS allows:
+ * "Doe, Jane", "Jane Doe", "Jane A. Doe", "Doe, Jane M.". Matching the
+ * assembled "Doe, Jane" as one literal would only ever hit the comma form,
+ * and would silently add the uploader a second time as a DataCurator on every
+ * dataset that spells its authors "Given Family".
+ *
+ * Falls back to whole-name matching when the parts are unknown (an enrichment
+ * file that carried only `uploaderName`).
+ */
+export function authorMatchesUploader(
+  author: string,
+  uploader: { name?: string; givenName?: string; familyName?: string },
+): boolean {
+  if (uploader.givenName && uploader.familyName) {
+    return containsWord(author, uploader.givenName) && containsWord(author, uploader.familyName);
+  }
+  return uploader.name ? containsWord(author, uploader.name) : false;
+}
+
 /**
  * Map a BIDS license string to DataCite rights.
  */
@@ -1491,25 +1549,32 @@ export function bidsToDataCite(
     },
   ];
 
-  // Add uploader as DataCurator if not already listed as an author.
-  // uploaderName is a NEMAR username (not a formal name), so we use it as-is.
+  // Add the uploader as DataCurator if not already listed as an author.
+  //
+  // uploaderName is the uploader's REAL name in "Family, Given" form (#1255),
+  // never a NEMAR username. When the account has no real name the enrichment
+  // carries no uploaderName and no contributor is emitted: an unattributed
+  // DOI is correct, a DOI citing a login handle is not. The mint paths block
+  // that case up front (OWNER_NAME_MISSING_REASON) so a live dataset does not
+  // reach here nameless in the first place.
+  //
   // Issue #459 defense: only attach the contributor when the name is
   // non-empty; otherwise the XML builder would emit `<contributorName/>`
   // and EZID would reject the document.
   if (enrichment?.uploaderName && enrichment.uploaderName.trim().length > 0) {
-    const trimmedUploaderName = enrichment.uploaderName.trim();
-    const uploaderLower = trimmedUploaderName.toLowerCase();
-    // Word-boundary match to avoid false positives (e.g., "li" matching "Elizabeth")
-    const boundary = new RegExp(
-      `\\b${uploaderLower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
-      "i",
-    );
-    const isAuthor = creators.some((c) => boundary.test(c.name));
+    const uploader = {
+      name: enrichment.uploaderName.trim(),
+      givenName: enrichment.uploaderGivenName?.trim() || undefined,
+      familyName: enrichment.uploaderFamilyName?.trim() || undefined,
+    };
+    const isAuthor = creators.some((c) => authorMatchesUploader(c.name, uploader));
     if (!isAuthor) {
       contributors.push({
-        name: trimmedUploaderName,
+        name: uploader.name,
         contributorType: "DataCurator",
         nameType: "Personal",
+        ...(uploader.givenName && { givenName: uploader.givenName }),
+        ...(uploader.familyName && { familyName: uploader.familyName }),
         ...(enrichment.uploaderOrcid && { orcid: enrichment.uploaderOrcid }),
       });
     }

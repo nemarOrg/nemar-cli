@@ -11,7 +11,7 @@
 
 import { datasetLandingUrl, datasetVersionLandingUrl } from "../../../shared/datacite-constants.js";
 import type { BidsDatasetDescription, DataCiteEnrichment } from "./datacite";
-import { bidsToDataCite, buildDataCiteXml } from "./datacite";
+import { authorMatchesUploader, bidsToDataCite, buildDataCiteXml } from "./datacite";
 import { resolveDatasetLandingBase } from "./environment.js";
 import {
   type EzidAuth,
@@ -25,6 +25,7 @@ import {
   makePublic,
   updateIdentifier,
 } from "./ezid";
+import type { UploaderIdentity } from "./uploader-identity";
 import { type ZenodoMetadata, createDeposition, getPrereservedDoi } from "./zenodo";
 
 export type DoiProvider = "ezid" | "zenodo";
@@ -50,10 +51,15 @@ export interface CreateConceptDoiOptions {
   bidsDescription?: BidsDatasetDescription | Record<string, unknown>;
   /** Pre-built enrichment from .nemar/metadata.json (if available) */
   enrichment?: DataCiteEnrichment;
-  /** Uploader's ORCID for auto-injection into creators */
-  uploaderOrcid?: string;
-  /** Uploader's name (used for ORCID matching against BIDS authors, and as Zenodo creator) */
-  uploaderName: string;
+  /**
+   * The uploader's citable identity: real name (for the DataCurator
+   * contributor, the ORCID-vs-BIDS-Authors match, and the Zenodo creator)
+   * plus their ORCID. `null`/absent when the account has no real name — the
+   * DOI is then minted with no uploader attribution at all rather than with a
+   * username (#1255). Callers that mint for a real submission block on this
+   * being null before they get here.
+   */
+  uploader?: UploaderIdentity | null;
   sandbox?: boolean;
 }
 
@@ -75,21 +81,28 @@ export interface ZenodoEnv {
 }
 
 /**
- * Build DataCite enrichment with ORCID matched to a BIDS author entry.
- * Matches the uploader name against the BIDS Authors list (case-insensitive substring).
- * Always passes uploaderName/uploaderOrcid through so bidsToDataCite can add
- * the uploader as a DataCurator contributor when they are not a BIDS author.
+ * Build DataCite enrichment with the uploader's ORCID matched to a BIDS
+ * author entry.
+ *
+ * Always passes the uploader's real name and ORCID through so bidsToDataCite
+ * can add them as a DataCurator contributor when they are not a BIDS author.
+ * A null identity (the account has no `given_name`/`family_name`) yields an
+ * empty enrichment: no username substitute, and no ORCID attached to an
+ * author we cannot confidently identify.
  */
 export function buildOrcidEnrichment(
   bidsDescription?: BidsDatasetDescription | Record<string, unknown>,
-  uploaderName?: string,
-  uploaderOrcid?: string,
+  uploader?: UploaderIdentity | null,
 ): DataCiteEnrichment {
   const enrichment: DataCiteEnrichment = {};
-  if (uploaderName) enrichment.uploaderName = uploaderName;
-  if (uploaderOrcid) enrichment.uploaderOrcid = uploaderOrcid;
+  if (!uploader) return enrichment;
 
-  if (!uploaderOrcid || !bidsDescription || !uploaderName) {
+  enrichment.uploaderName = uploader.name;
+  enrichment.uploaderGivenName = uploader.givenName;
+  enrichment.uploaderFamilyName = uploader.familyName;
+  if (uploader.orcid) enrichment.uploaderOrcid = uploader.orcid;
+
+  if (!uploader.orcid || !bidsDescription) {
     return enrichment;
   }
 
@@ -97,14 +110,10 @@ export function buildOrcidEnrichment(
   if (!Array.isArray(authors)) return enrichment;
 
   const authorList = authors.filter((a): a is string => typeof a === "string");
-  const uploaderLower = uploaderName.toLowerCase();
-
-  // Use word-boundary matching to avoid false positives (e.g., "li" matching "Elizabeth")
-  const boundary = new RegExp(`\\b${uploaderLower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
-  const matched = authorList.find((a) => boundary.test(a));
+  const matched = authorList.find((a) => authorMatchesUploader(a, uploader));
   if (!matched) return enrichment;
 
-  enrichment.authors = { [matched]: { orcid: uploaderOrcid } };
+  enrichment.authors = { [matched]: { orcid: uploader.orcid } };
   return enrichment;
 }
 
@@ -170,7 +179,7 @@ async function createEzidConceptDoi(
   // otherwise fall back to minimal ORCID-only enrichment
   const enrichment: DataCiteEnrichment = options.enrichment
     ? { ...options.enrichment }
-    : buildOrcidEnrichment(options.bidsDescription, options.uploaderName, options.uploaderOrcid);
+    : buildOrcidEnrichment(options.bidsDescription, options.uploader);
 
   // Use enriched description if available, otherwise fall back to request/database
   if (!enrichment.description && options.datasetDescription) {
@@ -223,10 +232,20 @@ async function createZenodoConceptDoi(
     );
   }
 
+  // The Zenodo creator is the uploader, cited by real name like every other
+  // provider (#1255). Refuse rather than deposit a record whose sole creator
+  // is a login handle or an empty string; the caller blocks this case before
+  // minting, so reaching here means a caller skipped the precondition.
+  if (!options.uploader) {
+    throw new Error(
+      "Cannot create a Zenodo deposition: the uploader has no researcher name on file",
+    );
+  }
+
   const metadata: ZenodoMetadata = {
     title: `${options.datasetName} - BIDS Dataset`,
     description: options.datasetDescription || `BIDS-formatted dataset: ${options.datasetName}`,
-    creators: [{ name: options.uploaderName }],
+    creators: [{ name: options.uploader.name }],
     keywords: ["BIDS", "neuroscience", "neuroimaging", "NEMAR"],
     license: "cc-by-nc-4.0",
     related_identifiers: options.githubRepo
