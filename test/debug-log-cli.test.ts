@@ -343,6 +343,67 @@ describe("role persistence (#1257 item 22)", () => {
   });
 });
 
+describe("a failed login exits non-zero (#1257 item 23)", () => {
+  // Before this fix, `spinner.fail(...); return;` (three separate places in
+  // loginAction) left the default exit code (0) in place -- a failed login,
+  // for the very command a brand-new user runs first, looked like a success
+  // to the debug bundle (`Exit code: 0`, `Failing step: (none recorded)`)
+  // and never triggered the failure hint at all.
+  //
+  // TEST_API_URL (not a "NEMAR_API_URL" -- no such env var exists; apiUrl
+  // only ever comes from the active account's config or DEFAULT_API_URL) is
+  // enough here because there is no pre-existing account for a fresh `login`
+  // to read an apiUrl from in the first place -- the same fake-server
+  // pattern the role-persistence test above already uses.
+  function makeInvalidKeyServer() {
+    return Bun.serve({
+      port: 0,
+      fetch() {
+        return new Response(JSON.stringify({ error: "Invalid API key" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+  }
+
+  test("a 401 from /auth/login exits 1 and prints the failure hint", async () => {
+    const configDir = makeConfigDir();
+    const server = makeInvalidKeyServer();
+    const apiUrl = `http://localhost:${server.port}`;
+
+    const result = await runCli(["login", "-k", "sk-fake-bad-key-0000000000000000"], configDir, apiUrl);
+    server.stop(true);
+    rmSync(configDir, { recursive: true, force: true });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(HINT_URL);
+  });
+
+  test("--debug records the failing step and the real exit code", async () => {
+    const configDir = makeConfigDir();
+    const server = makeInvalidKeyServer();
+    const apiUrl = `http://localhost:${server.port}`;
+
+    const result = await runCli(
+      ["--debug", "login", "-k", "sk-fake-bad-key-0000000000000000"],
+      configDir,
+      apiUrl,
+    );
+    server.stop(true);
+
+    expect(result.exitCode).toBe(1);
+    const logsDir = join(configDir, "logs");
+    const logFiles = readdirSync(logsDir);
+    expect(logFiles.length).toBe(1);
+    const content = readFileSync(join(logsDir, logFiles[0]), "utf8");
+    expect(content).toContain("Exit code: 1");
+    expect(content).toContain("Failing step: Invalid API key");
+
+    rmSync(configDir, { recursive: true, force: true });
+  });
+});
+
 describe("log rotation (#1256)", () => {
   test("keeps only the 10 most recent debug logs", async () => {
     const configDir = makeConfigDir();
