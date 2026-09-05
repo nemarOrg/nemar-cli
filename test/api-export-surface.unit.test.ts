@@ -34,6 +34,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   client: ["IS_DEV_BUILD", "checkHealth", "request"],
   auth: [
     "checkGitHubUsername",
+    "checkOrcidName",
     "checkSSHKeyStatus",
     "checkUsername",
     "completeSandbox",
@@ -167,6 +168,7 @@ const INTERNAL_WIRING = ["request"];
 const POST_SPLIT_ADDITIONS = [
   "NOTICE_LEVELS", // #1025, notice level vocabulary
   "approveUserById", // #1012, id-keyed approve for web/ORCID accounts
+  "checkOrcidName", // #1255, epic #1250: GET /auth/orcid-name pre-signup lookup
   "doctorFix", // #1130, CLI wrapper for POST /admin/doctor/fix
   "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
   "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion

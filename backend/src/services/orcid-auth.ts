@@ -311,6 +311,11 @@ export function decideVerifiedFlag(
 /** Public ORCID API host for reading a record. No auth required. Mirrors the
  *  sandbox/prod split of the OAuth base. */
 export function orcidPubBase(env: Bindings): string {
+  // Explicit override wins: the derivation below can only ever produce one of
+  // ORCID's two public hosts, so a mirror -- or a local server standing in for
+  // ORCID in a test -- has no other way in.
+  const explicit = env.ORCID_PUB_API_BASE?.trim();
+  if (explicit) return explicit.replace(/\/+$/, "");
   const base =
     env.ORCID_API_BASE?.trim() ||
     (env.ENVIRONMENT === "production" ? "https://orcid.org" : "https://sandbox.orcid.org");

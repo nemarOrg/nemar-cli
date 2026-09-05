@@ -127,6 +127,11 @@ export interface Bindings {
   // Base host for ORCID OAuth, no trailing slash. Defaults to
   // https://orcid.org in production and https://sandbox.orcid.org elsewhere.
   ORCID_API_BASE?: string;
+  // Base host for the ORCID PUBLIC record API (personal-details reads), no
+  // trailing slash. Normally derived from ORCID_API_BASE
+  // (pub.orcid.org / pub.sandbox.orcid.org); set explicitly only to point the
+  // reads at a mirror, or at a local server in tests (#1255).
+  ORCID_PUB_API_BASE?: string;
 
   // GitHub App credentials. Optional during the migration (#432); the
   // Worker falls back to GITHUB_ADMIN_PAT when any of these are unset.

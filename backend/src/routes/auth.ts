@@ -102,6 +102,49 @@ authRoutes.get("/check-github", async (c) => {
   return c.json({ valid: !!githubUser, username: githubUser?.login, registered });
 });
 
+/**
+ * GET /auth/orcid-name - Read the given/family name on a public ORCID record
+ *
+ * Pre-signup lookup, alongside check-username and check-github (#1255). ORCID
+ * is required at signup and is the canonical source of the researcher name
+ * that DOIs cite, but a record may hide its name. The CLI calls this right
+ * after the ORCID prompt so it can ask for the name ONLY in that case,
+ * instead of asking everyone for something we usually already know.
+ *
+ * A pre-flight GET rather than a flag on the signup response: signup is the
+ * call that creates the account, so discovering "we need a name" from its
+ * response would mean failing a submitted registration and re-driving the
+ * prompts. This is idempotent, costs one public ORCID read, and mirrors the
+ * two pre-signup checks that already exist.
+ *
+ * `found: false` is also what a transport failure returns: the caller's next
+ * move (ask the user to type it) is the same either way, and the signup
+ * insert re-reads ORCID server-side regardless.
+ */
+authRoutes.get("/orcid-name", async (c) => {
+  const orcid = c.req.query("orcid")?.trim();
+
+  if (!orcid) {
+    return c.json({ error: "ORCID iD required" }, 400);
+  }
+  if (!/^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/.test(orcid)) {
+    return c.json({ error: "ORCID must be in format 0000-0000-0000-000X" }, 400);
+  }
+
+  try {
+    const name = await fetchOrcidName(orcid, orcidPubBase(c.env));
+    const found = !!(name.given && name.family);
+    return c.json({
+      found,
+      given_name: name.given,
+      family_name: name.family,
+    });
+  } catch (err) {
+    console.warn(`[orcid-name] lookup failed for ${orcid}:`, err);
+    return c.json({ found: false, given_name: null, family_name: null });
+  }
+});
+
 // Signup request schema
 const signupSchema = z.object({
   username: z
@@ -133,6 +176,10 @@ const signupSchema = z.object({
   orcid: z
     .string()
     .regex(/^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/, "ORCID must be in format 0000-0000-0000-000X"),
+  // Supplied only when the ORCID record hides its name (#1255): the server
+  // still reads ORCID first, so these are a fallback, never an override.
+  given_name: z.string().trim().min(1).max(100).optional(),
+  family_name: z.string().trim().min(1).max(100).optional(),
   affiliation: z.string().max(200, "Affiliation must be at most 200 characters").optional(),
   // city/country required for US export-control / sanctions screening (#835).
   city: z.string().min(1, "City is required").max(120, "City must be at most 120 characters"),
@@ -153,6 +200,8 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     github_username,
     description,
     orcid,
+    given_name: suppliedGivenName,
+    family_name: suppliedFamilyName,
     affiliation,
     city,
     country,
@@ -245,9 +294,16 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     const verificationToken = generateVerificationToken();
     const verificationExpires = generateExpirationTimestamp(24); // 24 hours
 
-    // ORCID is canonical for the name: pull given/family from the public record
-    // rather than asking the user to type it. Best-effort — a hidden-name record
-    // or transient failure just leaves the name null for later backfill.
+    // ORCID is canonical for the name: pull given/family from the public
+    // record rather than asking the user to type it. The record wins whenever
+    // it has a name; the client-supplied pair is the fallback for a record
+    // that hides its name (or a transient lookup failure), which the CLI
+    // collects after GET /auth/orcid-name reports found: false.
+    //
+    // The name is what DOIs cite (#1255) and publishing is blocked without
+    // it, so landing an account with NULL names is a real cost -- but not one
+    // worth failing a registration over: `nemar admin backfill-names` and the
+    // Settings page both close the gap later.
     let givenName: string | null = null;
     let familyName: string | null = null;
     try {
@@ -256,6 +312,15 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
       familyName = n.family;
     } catch (nameErr) {
       console.warn(`[signup] ORCID name fetch failed for ${orcid}`, nameErr);
+    }
+    // Both halves come from the same source: mixing a record given name with
+    // a typed family name would produce a name neither party stated. A
+    // partial from the record is kept rather than discarded when the client
+    // supplied nothing usable -- it is not citable on its own, but it is a
+    // head start for the backfill.
+    if ((!givenName || !familyName) && suppliedGivenName && suppliedFamilyName) {
+      givenName = suppliedGivenName;
+      familyName = suppliedFamilyName;
     }
 
     // Insert user
