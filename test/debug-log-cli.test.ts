@@ -14,11 +14,21 @@
  * in-process (see MEMORY: bun-test-shared-process-root-and-backend).
  */
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+
+// Every test here spawns a real `nemar` subprocess, several of which (the
+// `doctor`/`--report`/`--debug` ones) themselves spawn five MORE subprocesses
+// to probe external tools. Under the full suite's parallel load this can
+// blow past bun:test's 5s default even though each spawn is fast in
+// isolation -- test/cli.test.ts sets the same 30s budget for the same reason
+// (a `doctor --report` run was observed to take just over 5s under full-suite
+// contention and get killed mid-test, which showed up as both a failed test
+// and an "Unhandled error between tests" from the orphaned subprocess).
+setDefaultTimeout(30000);
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
