@@ -6574,6 +6574,11 @@ backfillNamesCommand
         console.log(`  ${chalk.red("error   ")} ${who}: ${r.error}`);
       }
     }
+    // `remaining=unknown` above means the count query itself failed; say what
+    // failed rather than leaving the operator to guess (#1255 review item 28).
+    if (res.warning) {
+      console.log(chalk.yellow(`  Warning: ${res.warning}`));
+    }
     if (res.no_public_name > 0) {
       console.log();
       console.log(
@@ -6582,9 +6587,10 @@ backfillNamesCommand
         ),
       );
     }
-    // A lookup failure leaves the row a candidate for the next run, so it is
-    // not a hard failure -- but the caller should know the batch was partial.
-    if (res.lookup_failed > 0) process.exitCode = 1;
+    // A lookup failure leaves the row a candidate for the next run, and an
+    // unknown remainder means the batch's own bookkeeping failed. Neither is
+    // fatal, but a caller must not read either as a clean sweep.
+    if (res.lookup_failed > 0 || res.remaining === null) process.exitCode = 1;
   });
 
 adminCommand.addCommand(backfillNamesCommand);

@@ -129,37 +129,28 @@ describe("extractEnrichmentSubErrors", () => {
   // a list of "<field>: <message>" strings; runEnrichmentForDataset uses
   // it to decide ok vs failed.
 
-  test("surfaces a deliberate doi_sync skip, not just *_error fields", () => {
-    // #1255: an already-published dataset whose owner has no researcher name
-    // has its DOI metadata sync SKIPPED rather than pushed (pushing would
-    // delete the existing DataCurator from a permanent record). That is not
-    // an error, but a bulk-reindex operator has to see it in the same place,
-    // or the run looks like a clean sweep that silently did less.
-    const out = extractEnrichmentSubErrors({
-      doi_sync: {
-        status: "skipped",
-        reason: "owner_name_missing",
-        message: "DOI metadata sync skipped for nm000282: the owner has no researcher name.",
-      },
-    });
-    expect(out).toHaveLength(1);
-    expect(out[0]).toContain("doi_sync: skipped (owner_name_missing)");
-    expect(out[0]).toContain("nm000282");
+  test("a deliberate doi_sync skip is NOT a sub-error", () => {
+    // #1255 review item 26: it used to be, and runEnrichmentForDataset treats
+    // a non-empty sub-error list as ok:false -- so every reindex of a
+    // nameless-owner dataset reported "failed". Skips travel as warnings now
+    // (extractEnrichmentSkips); see backend/test/enrich-doi-sync-skip.test.ts.
+    expect(
+      extractEnrichmentSubErrors({
+        doi_sync: {
+          status: "skipped",
+          reason: "owner_name_missing",
+          message: "DOI metadata sync skipped for nm000282.",
+        },
+      }),
+    ).toEqual([]);
   });
 
-  test("ignores a doi_sync object that is not a skip", () => {
-    expect(extractEnrichmentSubErrors({ doi_sync: { status: "ok" } })).toEqual([]);
-    expect(extractEnrichmentSubErrors({ doi_sync: "nonsense" })).toEqual([]);
-  });
-
-  test("reports a skip alongside a real sub-error", () => {
+  test("a real sub-error alongside a skip still reports the sub-error alone", () => {
     const out = extractEnrichmentSubErrors({
       commit_error: "push rejected",
       doi_sync: { status: "skipped", reason: "owner_name_missing", message: "m" },
     });
-    expect(out).toHaveLength(2);
-    expect(out.join(" ")).toContain("commit_error: push rejected");
-    expect(out.join(" ")).toContain("doi_sync: skipped");
+    expect(out).toEqual(["commit_error: push rejected"]);
   });
 
   test("returns empty for a clean body", () => {
