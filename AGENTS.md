@@ -189,7 +189,8 @@ Four statuses, fixed meanings, one writer for upload access (**ADR 0040**):
 
 1. Sign up (CLI: username, email, password; web: ORCID + an email) → verify the email → `verified`
 2. `verified` needs no admin: browse, dashboard, settings, `nemar auth retrieve-key`,
-   `nemar sandbox`, and requesting upload access
+   `nemar sandbox`. Upload access is requested out-of-band (nemar.org/support)
+   until Phase 3 adds the self-service request endpoint
 3. Admin approves the one-time upload request → `service_access` → user uploads
    → BIDS validation → private GitHub repo + S3 upload
 4. Admin creates concept DOI → user can version with new DOIs

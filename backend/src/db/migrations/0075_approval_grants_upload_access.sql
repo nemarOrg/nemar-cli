@@ -46,12 +46,15 @@
 -- `nemar admin approve` or `nemar admin revoke`, either of which restores the
 -- invariant for that row.
 --
--- DEPLOY ORDER: apply this only alongside epic #1250 phase 2, which teaches the
--- auth middleware and the website that 'verified' is active and gives a
--- 'pending' web user a verify-your-email step. Applied on its own, rule (b)
--- moves every live web account out of 'approved', and
--- `userStatusForDashboard` (backend/src/routes/auth-web.ts) reports both
--- landing tiers as "pending" with nothing on the page to act on.
+-- DEPLOY ORDER: this must land TOGETHER WITH epic #1250 phase 2 (#1252), which
+-- is now on this branch: phase 2 teaches the auth middleware and the website
+-- that 'verified' is active and gives a 'pending' web user a
+-- verify-your-email step. The constraint is on applying this migration to a
+-- deployment whose code predates phase 2 -- there, rule (b) moves every live
+-- web account out of 'approved' while `userStatusForDashboard`
+-- (backend/src/routes/auth-web.ts) still reports both landing tiers as
+-- "pending" with nothing on the page to act on, and every authenticated path
+-- still requires 'approved'.
 
 -- (a) CLI signups an admin actually approved. The approval WAS the upload
 -- decision under the pre-0062 world, and #1249 is exactly the complaint that it

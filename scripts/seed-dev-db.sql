@@ -15,6 +15,12 @@
 -- middleware. It deliberately holds no token row -- the CLI path to one is
 -- `nemar auth retrieve-key`, which since ADR 0040 phase 2 works from
 -- 'verified' and is itself worth exercising.
+--
+-- INSERT OR IGNORE means a re-run is a no-op for rows that already exist, so
+-- adding the column here does NOT backfill an existing dev row: migration
+-- 0075 rule (a) is what grants service_access to the approved rows already in
+-- the database. This is for a database seeded fresh AFTER 0075 ran, where
+-- nothing else would.
 INSERT OR IGNORE INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at, service_access)
 VALUES ('test-owner', 'testOwner@nemar.org', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-owner-gh', 'approved', 'owner', 1, datetime('now'), NULL, 1);
 
