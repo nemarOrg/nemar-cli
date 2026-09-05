@@ -45,13 +45,17 @@ function env(): Bindings {
   return { DB: realD1(db), ENVIRONMENT: "production" } as Bindings;
 }
 
-async function seedUser(serviceAccess: 0 | 1, sandboxCompleted: 0 | 1): Promise<number> {
+async function seedUser(
+  serviceAccess: 0 | 1,
+  sandboxCompleted: 0 | 1,
+  status = "approved",
+): Promise<number> {
   db.run(
     `INSERT INTO users (username, email, password_hash, github_username, status, role,
                         signup_source, email_verified, service_access, sandbox_completed)
-     VALUES ('channeluser', 'channeluser@example.org', 'x', 'channeluser-gh', 'approved',
+     VALUES ('channeluser', 'channeluser@example.org', 'x', 'channeluser-gh', ?,
              'member', 'cli', 1, ?, ?)`,
-    [serviceAccess, sandboxCompleted],
+    [status, serviceAccess, sandboxCompleted],
   );
   const row = db
     .query<{ id: number }, []>("SELECT id FROM users WHERE username = 'channeluser'")
@@ -126,6 +130,17 @@ describe("POST /datasets: the channel comes from the credential", () => {
     userId = await seedUser(1, 1);
     const res = await createReal(cliHeaders(), "cli-trained");
     expect(res.status).not.toBe(403);
+  });
+
+  test("a base-tier web session reaches the gate at all, and is answered by it", async () => {
+    // The cookie path used to require status='approved', so a `verified`
+    // account would have been refused by the MIDDLEWARE with a bare 401 --
+    // no explanation, and indistinguishable from an expired session. It now
+    // authenticates and gets the gate's 403, which names what is missing.
+    userId = await seedUser(0, 0, "verified");
+    const res = await createReal(await webHeaders(userId), "web-base-tier");
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ ...SERVICE_ACCESS_ERROR });
   });
 
   test("a bearer token stays the CLI channel even when a web cookie rides along", async () => {

@@ -17,6 +17,7 @@ import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { authRoutes } from "../src/routes/auth";
+import { datasetRoutes } from "../src/routes/datasets";
 import { sandboxRoutes } from "../src/routes/sandbox";
 import { userRoutes } from "../src/routes/users";
 import { hashPassword } from "../src/services/password";
@@ -104,6 +105,7 @@ beforeEach(() => {
   app.route("/auth", authRoutes);
   app.route("/users", userRoutes);
   app.route("/sandbox", sandboxRoutes);
+  app.route("/datasets", datasetRoutes);
 });
 
 describe("the bearer-token middleware", () => {
@@ -228,6 +230,27 @@ describe("the sandbox routes", () => {
   test("a `pending` account cannot", async () => {
     const user = await seedUser("sandboxpending", "pending");
     expect((await authed("/sandbox/status", user.apiKey)).status).toBe(403);
+  });
+});
+
+describe("the optional-auth middleware (GET /datasets?mine=true)", () => {
+  test("resolves a `verified` token instead of falling through to anonymous", async () => {
+    // A separate SQL predicate from authMiddleware's, so it can be (and was)
+    // left behind: a token that resolves here returns the user's datasets,
+    // and one that does not gets the 401 below instead.
+    const user = await seedUser("optionalverified", "verified");
+    const res = await authed("/datasets?mine=true", user.apiKey);
+    expect(res.status).toBe(200);
+    expect((await res.json()).datasets).toEqual([]);
+  });
+
+  test("does not resolve a `pending` token", async () => {
+    const user = await seedUser("optionalpending", "pending");
+    const res = await authed("/datasets?mine=true", user.apiKey);
+    expect(res.status).toBe(401);
+    // authAttempted is still set, so the caller is told the KEY was
+    // rejected rather than that they sent no header.
+    expect((await res.json()).error).toContain("API key was rejected");
   });
 });
 
