@@ -149,7 +149,7 @@ export interface WebSessionUser {
   city: string | null;
   country: string | null;
   affiliation: string | null;
-  /** Tiered access (ADR 0010, #1013): true once an admin grants service
+  /** Tiered access (website ADR 0010, #1013): true once an admin grants service
    *  access (upload + compute). Base-access accounts are false. Converted
    *  from the 0/1 D1 column at the read boundary like `orcid_verified`. */
   service_access: boolean;

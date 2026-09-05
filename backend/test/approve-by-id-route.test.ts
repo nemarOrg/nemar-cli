@@ -53,14 +53,19 @@ async function seedAdmin(): Promise<void> {
 interface WebUserSeed {
   status?: string;
   orcidVerified?: 0 | 1;
+  /** ADR 0040: an `approved` row 409s only when it already holds the grant. */
+  serviceAccess?: 0 | 1;
 }
 
 /** Web/ORCID-style row: username NULL, signup_source 'web'. */
-function seedWebUser(email: string, { status = "pending", orcidVerified = 1 }: WebUserSeed = {}) {
+function seedWebUser(
+  email: string,
+  { status = "pending", orcidVerified = 1, serviceAccess = 0 }: WebUserSeed = {},
+) {
   db.run(
-    `INSERT INTO users (email, status, signup_source, email_verified, orcid, orcid_verified)
-     VALUES (?, ?, 'web', 0, ?, ?)`,
-    [email, status, orcidVerified ? "0000-0002-1825-0097" : null, orcidVerified],
+    `INSERT INTO users (email, status, signup_source, email_verified, orcid, orcid_verified, service_access)
+     VALUES (?, ?, 'web', 0, ?, ?, ?)`,
+    [email, status, orcidVerified ? "0000-0002-1825-0097" : null, orcidVerified, serviceAccess],
   );
   const row = db.query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?").get(email);
   if (!row) throw new Error(`seed failed for ${email}`);
@@ -91,8 +96,8 @@ function post(path: string, key = ADMIN_KEY): Promise<Response> {
 
 function userRow(id: number) {
   return db
-    .query<{ status: string; approved_at: string | null }, [number]>(
-      "SELECT status, approved_at FROM users WHERE id = ?",
+    .query<{ status: string; approved_at: string | null; service_access: number }, [number]>(
+      "SELECT status, approved_at, service_access FROM users WHERE id = ?",
     )
     .get(id);
 }
@@ -115,6 +120,8 @@ describe("POST /admin/approve/by-id/:id (#1012)", () => {
       username: null,
       email: "orcid-pending@example.org",
       status: "approved",
+      // Approval grants upload access in the same write (ADR 0040, #1251).
+      service_access: true,
     });
     expect(body.email_sent).toBe(false); // RESEND_API_KEY unset in tests
 
@@ -149,6 +156,10 @@ describe("POST /admin/approve/by-id/:id (#1012)", () => {
     const body = await res.json();
     expect(body.message).toContain("not ORCID-verified");
     expect(userRow(id)?.status).toBe("pending");
+    // A refused approval must not have granted upload access on the way out.
+    // The grant write sits after this check today; asserting it here is what
+    // stops a refactor from hoisting it above the eligibility gate (ADR 0040).
+    expect(userRow(id)?.service_access).toBe(0);
   });
 
   test("refuses a pending CLI signup (email still unverified), even by id", async () => {
@@ -158,6 +169,7 @@ describe("POST /admin/approve/by-id/:id (#1012)", () => {
     const body = await res.json();
     expect(body.message).toContain("verify their email");
     expect(userRow(id)?.status).toBe("pending");
+    expect(userRow(id)?.service_access).toBe(0);
   });
 
   test("approves a verified CLI signup by id (id path is not web-only)", async () => {
@@ -169,8 +181,11 @@ describe("POST /admin/approve/by-id/:id (#1012)", () => {
     expect(userRow(id)?.status).toBe("approved");
   });
 
-  test("409 on an already-approved account", async () => {
-    const { id } = seedWebUser("orcid-approved@example.org", { status: "approved" });
+  test("409 on an account that is approved AND already holds upload access", async () => {
+    const { id } = seedWebUser("orcid-approved@example.org", {
+      status: "approved",
+      serviceAccess: 1,
+    });
     const res = await post(`/admin/approve/by-id/${id}`);
     expect(res.status).toBe(409);
   });
@@ -179,6 +194,12 @@ describe("POST /admin/approve/by-id/:id (#1012)", () => {
     expect((await post("/admin/approve/by-id/99999")).status).toBe(404);
     expect((await post("/admin/approve/by-id/nope")).status).toBe(400);
     expect((await post("/admin/approve/by-id/-1")).status).toBe(400);
+  });
+
+  test("the eligibility 400 leaves the grant alone on the username route too", async () => {
+    const { id } = seedCliUser("cliuser5", "pending", 0);
+    expect((await post("/admin/approve/cliuser5")).status).toBe(400);
+    expect(userRow(id)?.service_access).toBe(0);
   });
 
   test("non-admin token is refused", async () => {
@@ -193,6 +214,7 @@ describe("POST /admin/approve/by-id/:id (#1012)", () => {
     const res = await post(`/admin/approve/by-id/${id}`, memberKey);
     expect(res.status).toBe(403);
     expect(userRow(id)?.status).toBe("pending");
+    expect(userRow(id)?.service_access).toBe(0);
   });
 });
 

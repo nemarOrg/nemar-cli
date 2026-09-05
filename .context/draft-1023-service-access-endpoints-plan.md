@@ -1,5 +1,11 @@
 # Implementation plan — nemar-cli#1023: admin endpoints for service-access grant/revoke
 
+> **STATUS: HISTORICAL.** Scoping draft for #1023, superseded by ADR 0040: approve/revoke carry
+> the grant. The separate `POST /admin/users/:id/service-access` grant and revoke endpoints proposed
+> below were deliberately not built — a second step is the one an admin already forgot to take
+> (#1249), so `nemar admin approve` writes `service_access` itself and `nemar admin revoke` clears it.
+> The survey of what exists in section 1 remains accurate for its date and is why the draft is kept.
+
 **Status:** scoping draft for human review, prepared 2026-08-10. No code changed; nothing posted to GitHub.
 All file:line citations verified against the working trees on this date.
 

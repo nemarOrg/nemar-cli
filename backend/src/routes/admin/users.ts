@@ -48,9 +48,11 @@ interface ApprovableUserRow {
   status: string;
   signup_source: string | null;
   orcid_verified: number;
+  service_access: number;
 }
 
-const APPROVABLE_USER_COLUMNS = "id, username, email, status, signup_source, orcid_verified";
+const APPROVABLE_USER_COLUMNS =
+  "id, username, email, status, signup_source, orcid_verified, service_access";
 
 /**
  * Approval eligibility (#1012). `verified` and `revoked` are approvable as
@@ -74,10 +76,93 @@ function ineligibilityMessage(user: ApprovableUserRow): string {
 }
 
 /**
+ * The upload grant, on its own, for an account that is already `approved` but
+ * carries no `service_access` (ADR 0040). Migration 0075 removed that
+ * combination from the catalog, and the approve routes below are the only
+ * thing that can create it again, so reaching this is a repair, not a normal
+ * path — but a 409 here would leave an admin with no way to fix a row whose
+ * status says "approved" while the upload gate says no.
+ */
+async function regrantUploadAccess(
+  c: Context<{ Bindings: Bindings; Variables: Variables }>,
+  user: ApprovableUserRow,
+): Promise<Response> {
+  const db = c.env.DB;
+  const adminUser = c.get("user");
+
+  // Grant + audit in one db.batch(): D1 wraps a batch in a single implicit
+  // transaction (same reasoning as the tombstone batch further down), so the
+  // repair cannot commit without its audit row. Unbatched, a throwing audit
+  // insert would 500 an admin whose grant HAD landed, and the retry would then
+  // 409 "already approved" — a dead end for an operation that succeeded.
+  // Nothing here talks to the network, so there is no ordering constraint
+  // forcing the two apart, unlike finalizeApproval's email step.
+  try {
+    await db.batch([
+      db
+        .prepare(
+          `
+    UPDATE users
+    SET service_access = 1,
+        service_access_granted_at = datetime('now'),
+        service_access_granted_by = ?,
+        updated_at = datetime('now')
+    WHERE id = ?
+  `,
+        )
+        .bind(adminUser.id, user.id),
+      auditLogStatement(db, {
+        userId: adminUser.id,
+        action: "user_upload_access_granted",
+        resourceType: "user",
+        resourceId: user.username ?? String(user.id),
+        details: JSON.stringify({
+          granted_by: adminUser.username,
+          granted_by_id: adminUser.id,
+          repair: "status was already approved with service_access=0",
+        }),
+      }),
+    ]);
+  } catch (error) {
+    // The batch rolled back atomically, so nothing was granted: report the
+    // failure rather than a success the caller cannot verify. Retrying is safe
+    // (the row is still approved-without-grant, so it lands here again).
+    console.error(`[approve] upload-access repair batch failed for id=${user.id}:`, error);
+    return c.json(
+      {
+        error: "Upload access was NOT granted; the grant transaction failed. Retry.",
+        detail: errorMessage(error),
+      },
+      500,
+    );
+  }
+
+  const label = user.username ?? `id ${user.id}`;
+  return c.json({
+    message: `User ${label} already had status 'approved'; upload access granted`,
+    note: "Only the upload grant was written — the account was already approved, so no status change or approval email was needed.",
+    user: {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      status: "approved",
+      service_access: true,
+    },
+    email_sent: false,
+  });
+}
+
+/**
  * Shared approval finalizer for POST /admin/approve/:username and
- * POST /admin/approve/by-id/:id (#1012): status flip, notification email,
- * audit row, response. Callers have already 404'd on a missing row, 409'd
- * on `approved`, and 400'd on ineligible statuses.
+ * POST /admin/approve/by-id/:id (#1012): status flip, upload grant,
+ * notification email, audit row, response. Callers have already 404'd on a
+ * missing row, 409'd on an `approved` row that already holds the grant, and
+ * 400'd on ineligible statuses.
+ *
+ * The status flip and `service_access` move together (ADR 0040): approval IS
+ * the upload decision, and this is the single writer of `service_access = 1`.
+ * Splitting them is what #1249 was — an admin approving a user who then could
+ * not upload.
  *
  * Web/ORCID accounts have `username = NULL`, so anything username-shaped is
  * conditional: they get a dashboard-flavored approval email instead of the
@@ -99,11 +184,14 @@ async function finalizeApproval(
     UPDATE users
     SET status = 'approved',
         approved_at = datetime('now'),
+        service_access = 1,
+        service_access_granted_at = datetime('now'),
+        service_access_granted_by = ?,
         updated_at = datetime('now')
     WHERE id = ?
   `,
     )
-    .bind(user.id)
+    .bind(adminUser.id, user.id)
     .run();
 
   // Note: API token is NOT created here. CLI users retrieve it via
@@ -146,16 +234,34 @@ async function finalizeApproval(
 
   // Audit log. resource_id is the username where one exists (unchanged for
   // CLI accounts) and the stable numeric id otherwise (web/ORCID accounts).
-  await auditLogStatement(db, {
-    userId: adminUser.id,
-    action: "user_approved",
-    resourceType: "user",
-    resourceId: user.username ?? String(user.id),
-    details: JSON.stringify({
-      approved_by: adminUser.username,
-      email_sent: emailSent,
-    }),
-  }).run();
+  //
+  // NOT batched with the UPDATE above, unlike regrantUploadAccess: `email_sent`
+  // is only known after the notification attempt, and that attempt must follow
+  // the commit (never tell a user they are approved before the row says so).
+  // So this is the role-change route's shape instead — a failed audit write is
+  // logged, never propagated. The approval and its grant have already
+  // committed, and 500ing here would tell the admin their completed action
+  // failed and send them into a retry that now 409s.
+  try {
+    await auditLogStatement(db, {
+      userId: adminUser.id,
+      action: "user_approved",
+      resourceType: "user",
+      resourceId: user.username ?? String(user.id),
+      details: JSON.stringify({
+        approved_by: adminUser.username,
+        email_sent: emailSent,
+        // ADR 0040: the grant is part of the approval, so the audit row says so
+        // rather than leaving upload access to be inferred from the status.
+        service_access_granted: true,
+      }),
+    }).run();
+  } catch (error) {
+    console.error(
+      `AUDIT GAP: user_approved row not written for id=${user.id} (approval and upload grant DID commit):`,
+      error,
+    );
+  }
 
   const label = user.username ?? `id ${user.id}`;
   return c.json({
@@ -165,6 +271,7 @@ async function finalizeApproval(
       username: user.username,
       email: user.email,
       status: "approved",
+      service_access: true,
     },
     email_sent: emailSent,
   });
@@ -206,10 +313,16 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     const role = c.req.query("role"); // owner, admin, member
     const db = c.env.DB;
 
+    // service_access is what separates an uploader from a browse-only account
+    // now that they no longer track `status` one-for-one (ADR 0040); the
+    // identity columns are here because a web/ORCID row has username = NULL
+    // and is otherwise unidentifiable in the listing (#1251).
     let query = `
     SELECT
       id, username, email, github_username, status,
-      email_verified, role, created_at, approved_at, revoked_at
+      email_verified, role, created_at, approved_at, revoked_at,
+      signup_source, service_access, service_access_granted_at,
+      given_name, family_name, orcid
     FROM users
   `;
     const conditions: string[] = [];
@@ -429,6 +542,9 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     }
 
     if (user.status === "approved") {
+      // An approved row that never got the grant is the #1249 shape; repair it
+      // instead of 409ing an admin into a dead end (ADR 0040).
+      if (!user.service_access) return regrantUploadAccess(c, user);
       return c.json({ error: "User already approved" }, 409);
     }
 
@@ -484,6 +600,8 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     }
 
     if (user.status === "approved") {
+      // Same repair path as the username route above (ADR 0040).
+      if (!user.service_access) return regrantUploadAccess(c, user);
       return c.json({ error: "User already approved" }, 409);
     }
 
@@ -652,13 +770,17 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     // compute independently of `status` -- clearing it here closes issue
     // #1069 (a revoked user kept the grant and could still pass
     // realDatasetServiceGate if `status` were ever restored without an
-    // explicit re-grant).
+    // explicit re-grant). The two grant stamps go with it (ADR 0040): revoke
+    // is the eraser of what approval wrote, so a later listing cannot show a
+    // revoked account still carrying "granted by X on Y".
     await db
       .prepare(
         `
     UPDATE users
     SET status = ?,
         service_access = 0,
+        service_access_granted_at = NULL,
+        service_access_granted_by = NULL,
         revoked_at = datetime('now'),
         updated_at = datetime('now')
     WHERE id = ?
@@ -725,20 +847,36 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     // Clear S3 permissions
     await db.prepare("DELETE FROM user_s3_permissions WHERE user_id = ?").bind(user.id).run();
 
-    // Audit log
-    await auditLogStatement(db, {
-      userId: adminUser.id,
-      action: "user_revoked",
-      resourceType: "user",
-      resourceId: user.username,
-      details: JSON.stringify({
-        revoked_by: adminUser.username,
-        repos_removed: reposRemoved,
-        failed_removals: failedRemovals,
-        email_sent: emailSent,
-        iam_revoked: iamRevoked,
-      }),
-    }).run();
+    // Audit log (non-blocking). By this point tokens, IAM credentials, GitHub
+    // collaborations, S3 permissions, `status` and `service_access` have all
+    // already been changed and cannot be rolled back — a throwing audit insert
+    // must not turn that completed revocation into a 500 that reads as "the
+    // user still has access". Log the gap loudly instead: an unaudited
+    // revocation is a record-keeping problem, a falsely-reported one is a
+    // security problem.
+    try {
+      await auditLogStatement(db, {
+        userId: adminUser.id,
+        action: "user_revoked",
+        resourceType: "user",
+        resourceId: user.username,
+        details: JSON.stringify({
+          revoked_by: adminUser.username,
+          repos_removed: reposRemoved,
+          failed_removals: failedRemovals,
+          email_sent: emailSent,
+          iam_revoked: iamRevoked,
+          // Mirrors the approval audit row: upload access is a thing that was
+          // taken away here, not something to infer from the status (ADR 0040).
+          service_access_cleared: true,
+        }),
+      }).run();
+    } catch (error) {
+      console.error(
+        `AUDIT GAP: user_revoked row not written for ${user.username} (the revocation DID complete):`,
+        error,
+      );
+    }
 
     // If IAM revocation had errors, return warning with detailed steps
     if (iamRevocationError) {

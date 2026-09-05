@@ -26,6 +26,11 @@ export const userSchema = z
     sandbox_completed: z.boolean().optional(),
     sandbox_completed_at: z.string().nullable().optional(),
     sandbox_dataset_id: z.string().nullable().optional(),
+    /**
+     * Upload access: the one-time admin approval (ADR 0040). Optional because
+     * an older backend does not send it; `undefined` is "unknown", not "no".
+     */
+    service_access: z.boolean().optional(),
   })
   .passthrough();
 export type ContractUser = z.infer<typeof userSchema>;
@@ -48,3 +53,47 @@ export const userMeResponseSchema = z
   })
   .passthrough();
 export type UserMeResponse = z.infer<typeof userMeResponseSchema>;
+
+/**
+ * One row of GET /admin/users (ADR 0040, #1251).
+ *
+ * Every field a web/ORCID account can legitimately lack is `.nullable()` here
+ * rather than assumed present — `username` and `github_username` are NULL by
+ * design on those rows (#1012), and reading them as strings is what put the
+ * literal "null" in the admin listing.
+ *
+ * `service_access` is `.optional()` on purpose and MUST NOT be given a default:
+ * a CLI talking to a backend deployed before #1251 (or mid-rollout) receives no
+ * such key, and coercing that absence to 0 would report an uploader as
+ * browse-only. Absent means unknown; the caller renders a third state.
+ */
+export const adminUserListItemSchema = z
+  .object({
+    id: z.number().int(),
+    username: z.string().nullable(),
+    email: z.string(),
+    github_username: z.string().nullable(),
+    status: z.string(),
+    email_verified: z.number().int().nullable().optional(),
+    role: z.string().nullable(),
+    created_at: z.string(),
+    approved_at: z.string().nullable().optional(),
+    revoked_at: z.string().nullable().optional(),
+    signup_source: z.string().nullable().optional(),
+    service_access: z.number().int().nullable().optional(),
+    service_access_granted_at: z.string().nullable().optional(),
+    given_name: z.string().nullable().optional(),
+    family_name: z.string().nullable().optional(),
+    orcid: z.string().nullable().optional(),
+  })
+  .passthrough();
+export type AdminUserListItem = z.infer<typeof adminUserListItemSchema>;
+
+/** GET /admin/users — the listing envelope. */
+export const adminUsersListResponseSchema = z
+  .object({
+    users: z.array(adminUserListItemSchema),
+    count: z.number().int(),
+  })
+  .passthrough();
+export type AdminUsersListResponse = z.infer<typeof adminUsersListResponseSchema>;

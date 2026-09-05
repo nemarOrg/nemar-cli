@@ -6,28 +6,39 @@
  * verbatim.
  */
 
+import {
+  type AdminUserListItem,
+  type AdminUsersListResponse,
+  adminUsersListResponseSchema,
+} from "../../../shared/contract/index.js";
 import { request } from "./client.js";
 
 // ============================================================================
 // Admin
 // ============================================================================
 
-export interface UserListItem {
-  id: number;
-  username: string;
-  email: string;
-  github_username: string;
-  status: string;
-  email_verified: number;
-  role: string;
-  created_at: string;
-  approved_at: string | null;
-  revoked_at: string | null;
-}
+/**
+ * Wire shapes for GET /admin/users live in shared/contract/user.ts and are
+ * VALIDATED on the way in (below), not merely asserted with a cast. The
+ * hand-written interface these replaced declared `service_access: number` and
+ * `username: string`, neither of which the endpoint guarantees — a cast makes
+ * both drifts invisible, which is the getCurrentUser bug (#899) in a new place.
+ */
+export type UserListItem = AdminUserListItem;
+export type UsersListResponse = AdminUsersListResponse;
 
-export interface UsersListResponse {
-  users: UserListItem[];
-  count: number;
+/**
+ * The upload tier of a listed account (ADR 0040). Three states, not two:
+ * `unknown` is a backend that did not report `service_access` at all (deployed
+ * before #1251, or a rolling deploy mid-flight), and must not be shown or
+ * filtered as "browse" — telling an uploader they have no upload access sends
+ * them to an admin to ask for something they already hold.
+ */
+export type UploadTier = "upload" | "browse" | "unknown";
+
+export function uploadTierOf(user: Pick<UserListItem, "service_access">): UploadTier {
+  if (user.service_access === undefined || user.service_access === null) return "unknown";
+  return user.service_access ? "upload" : "browse";
 }
 
 /**
@@ -38,17 +49,24 @@ export async function listUsers(status?: string, role?: string): Promise<UsersLi
   if (status) params.set("status", status);
   if (role) params.set("role", role);
   const query = params.toString() ? `?${params.toString()}` : "";
-  return request<UsersListResponse>(`/admin/users${query}`, {}, true);
+  return request(`/admin/users${query}`, {}, true, adminUsersListResponseSchema);
 }
 
 export interface ApproveResponse {
   message: string;
+  /**
+   * Present only on the repair path: the account was already `approved` but
+   * carried no upload grant, so only the grant was written (ADR 0040).
+   */
+  note?: string;
   user: {
     id: number;
     // NULL for web/ORCID accounts (they have no username by design).
     username: string | null;
     email: string;
     status: string;
+    /** Approval grants upload access; always true on a 200 (ADR 0040). */
+    service_access?: boolean;
   };
   email_sent: boolean;
 }

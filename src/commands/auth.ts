@@ -520,6 +520,11 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
 
   // If refresh requested, fetch latest from server
   let userRole: string | undefined;
+  // Set when a requested refresh did not complete for a reason that is neither
+  // 401 nor 403 (offline, 5xx, a shape drift). Everything printed below then
+  // comes from the config cache, and the upload-access line in particular must
+  // not present a stale `true` as the current answer (ADR 0040).
+  let refreshFailure: string | undefined;
   if (options.refresh) {
     const spinner = ora("Fetching user info...").start();
     try {
@@ -529,10 +534,19 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
       setConfig("username", user.username ?? undefined);
       setConfig("email", user.email);
       setConfig("githubUsername", user.github_username ?? undefined);
+      // Only cache a value the server actually sent: an older backend omits
+      // the field, and writing `false` there would report "not granted" to
+      // someone who has it (ADR 0040).
+      if (user.service_access !== undefined) setConfig("serviceAccess", user.service_access);
       userRole = user.role;
       spinner.stop();
     } catch (error) {
-      spinner.fail("Could not refresh user info");
+      // Put the reason ON the failure line. It used to scroll past as a bare
+      // "Could not refresh user info" and the cached values below then read as
+      // if they had just been fetched.
+      const reason = error instanceof Error ? error.message : String(error);
+      spinner.fail(`Could not refresh user info: ${reason}`);
+      refreshFailure = reason;
       if (error instanceof ApiError && error.statusCode === 401) {
         // The stored key is dead — don't fall through to a green "Authenticated"
         // banner that contradicts the failed refresh (#851).
@@ -574,6 +588,29 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
           ? chalk.magenta("Admin")
           : chalk.white("Member");
     console.log(`  Role:     ${roleDisplay}`);
+  }
+  // Upload access is the one-time admin approval (ADR 0040); `status` no
+  // longer implies it, which is why it gets its own line. `undefined` means
+  // this account has never been refreshed against a backend that reports it.
+  //
+  // A refresh that was asked for and failed makes the cached value a claim
+  // about the past, not the present — the grant may have been revoked in
+  // between, and "granted" is the answer that would send someone to attempt an
+  // upload that then 403s. Report unknown and say why.
+  if (refreshFailure) {
+    console.log(
+      `  Upload access: ${chalk.dim("unknown (refresh failed; showing cached account)")}`,
+    );
+  } else if (cfg.serviceAccess === true) {
+    console.log(`  Upload access: ${chalk.green("granted")}`);
+  } else if (cfg.serviceAccess === false) {
+    console.log(
+      `  Upload access: ${chalk.yellow("not granted")} ${chalk.dim(
+        "(one-time admin approval; see https://nemar.org/support)",
+      )}`,
+    );
+  } else {
+    console.log(`  Upload access: ${chalk.dim("unknown (run 'nemar auth status --refresh')")}`);
   }
   console.log(`  Config:   ${chalk.dim(getConfigPath())}`);
 
