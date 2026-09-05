@@ -17,6 +17,8 @@
  * the username.
  */
 
+import type { DatasetSource } from "../../../shared/contract/dataset.js";
+
 /** The owner columns every DOI-minting query must select. */
 export interface OwnerNameColumns {
   given_name?: string | null;
@@ -90,10 +92,35 @@ export function resolveOwnerIdentity(row: OwnerNameAliases): UploaderIdentity | 
  * would strand imports with no in-product way to clear it.
  */
 export function requiresUploaderName(dataset: {
-  source?: string | null;
+  /** `datasets.source`, which is nullable in D1 and free text at rest. */
+  source?: DatasetSource | string | null;
   is_exemplar?: number | null;
 }): boolean {
-  return dataset.source !== "openneuro" && !dataset.is_exemplar;
+  // `satisfies` ties the literal to the shared source vocabulary: renaming
+  // the enum member breaks the build here instead of silently turning this
+  // exemption off.
+  return dataset.source !== ("openneuro" satisfies DatasetSource) && !dataset.is_exemplar;
+}
+
+/**
+ * Would refreshing this dataset's DOI metadata STRIP an attribution that is
+ * already on the record?
+ *
+ * A refresh rebuilds the whole DataCite document from live DB state, so an
+ * owner whose name is missing today produces a document with no DataCurator
+ * at all -- and pushing that to EZID silently deletes the curator from a
+ * permanent record. The mint guard cannot help: the DOI already exists.
+ *
+ * Callers must SKIP the refresh (loudly) rather than push, and report the
+ * skip. Same expression as the mint guard, deliberately named separately
+ * because the required response is different: a mint refuses, a refresh
+ * declines to make things worse.
+ */
+export function refreshWouldStripAttribution(
+  dataset: { source?: DatasetSource | string | null; is_exemplar?: number | null },
+  uploader: UploaderIdentity | null,
+): boolean {
+  return requiresUploaderName(dataset) && !uploader;
 }
 
 /**
@@ -110,12 +137,19 @@ export const OWNER_NAME_MISSING_REASON = "owner_name_missing";
 /**
  * User-facing explanation for {@link OWNER_NAME_MISSING_REASON}.
  *
- * Names the two ways a user can actually fix it. ORCID is listed first
- * because it is canonical: a public name on the ORCID record flows in through
+ * Describes the ONE route that exists today. It deliberately does not offer
+ * "type your name into Settings": `PATCH /auth/profile` rejects
+ * given_name/family_name on purpose (auth-web.ts, "Name is ORCID-canonical
+ * (#835) and not editable here"), so that advice would send a blocked user to
+ * a form that cannot help them. Phase 3 (#1253) adds profile-side name entry;
+ * this message must be revisited then.
+ *
+ * ORCID is canonical either way: a public name on the record flows in through
  * the signup lookup, the OAuth link refresh, and `nemar admin backfill-names`.
  */
 export const OWNER_NAME_MISSING_MESSAGE =
   "DOIs cite the person who deposited the dataset by name, and this account has no " +
-  "researcher name on file. Add a given name and family name in Settings on nemar.org, " +
-  "or make your name public on your ORCID record and re-link ORCID, then re-request " +
-  "publication. NEMAR will not cite you by your username.";
+  "researcher name on file. Make your name public on your ORCID record " +
+  "(orcid.org > Names > visibility Everyone), then sign in again on nemar.org — or " +
+  "re-link ORCID from Settings — so NEMAR can read it, and re-request publication. " +
+  "NEMAR will not cite you by your username.";

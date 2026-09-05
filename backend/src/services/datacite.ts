@@ -19,6 +19,7 @@ import {
   isValidRelationType,
 } from "../../../shared/datacite-constants.js";
 import { escapeXml } from "../lib/escape.js";
+import type { UploaderIdentity } from "./uploader-identity.js";
 
 export {
   type NemarMetadata,
@@ -257,22 +258,23 @@ export interface DataCiteEnrichment {
   sizes?: string[];
   formats?: string[];
   /**
-   * Uploader's REAL name in DataCite form ("Family, Given"), added as a
-   * DataCurator contributor when they are not already a BIDS author.
+   * Who deposited this dataset, added as a DataCurator contributor when they
+   * are not already a BIDS author.
    *
-   * Never a NEMAR username (#1255): usernames are login handles, not
-   * citable names. Built by `resolveUploaderIdentity` from
-   * `users.given_name`/`users.family_name`, and absent when the account has
-   * no real name — in which case no DataCurator contributor is emitted at
-   * all rather than a username standing in for a person.
+   * ONE field, not a flattened name/given/family/orcid quartet (#1255 review
+   * item 7): `UploaderIdentity` can only be built by
+   * `resolveUploaderIdentity`, so "the display name is derived from the two
+   * parts" holds all the way down to the XML builder instead of being
+   * re-derived (and re-trimmed, and possibly disagreed with) here.
+   *
+   * Never a NEMAR username: usernames are login handles, not citable names.
+   * `null`/absent means the account has no citable name, and then NO
+   * DataCurator is emitted at all rather than a handle standing in for a
+   * person. The mint paths refuse that case up front
+   * (OWNER_NAME_MISSING_REASON), so a live dataset should not reach here
+   * nameless.
    */
-  uploaderName?: string;
-  /** Uploader's given name; emitted as the contributor's `<givenName>`. */
-  uploaderGivenName?: string;
-  /** Uploader's family name; emitted as the contributor's `<familyName>`. */
-  uploaderFamilyName?: string;
-  /** Uploader ORCID; attached to contributor entry if present. */
-  uploaderOrcid?: string;
+  uploader?: UploaderIdentity | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1208,24 +1210,23 @@ function containsWord(haystack: string, word: string): boolean {
 /**
  * Does this BIDS author string name the uploader?
  *
- * With a real name (#1255) the two parts are matched independently, so the
- * author entry may be written in any of the conventional orders BIDS allows:
- * "Doe, Jane", "Jane Doe", "Jane A. Doe", "Doe, Jane M.". Matching the
- * assembled "Doe, Jane" as one literal would only ever hit the comma form,
- * and would silently add the uploader a second time as a DataCurator on every
- * dataset that spells its authors "Given Family".
+ * The two name parts are matched INDEPENDENTLY (#1255), so the author entry
+ * may be written in any of the conventional orders BIDS allows: "Doe, Jane",
+ * "Jane Doe", "Jane A. Doe", "Doe, Jane M.". Matching the assembled
+ * "Doe, Jane" as one literal would only ever hit the comma form, and would
+ * add the uploader a second time as a DataCurator on every dataset that
+ * spells its authors "Given Family".
  *
- * Falls back to whole-name matching when the parts are unknown (an enrichment
- * file that carried only `uploaderName`).
+ * Both parts are required to match, so a same-family-name colleague is not
+ * mistaken for the uploader. `null` never matches: with no citable identity
+ * there is nobody to recognise.
  */
 export function authorMatchesUploader(
   author: string,
-  uploader: { name?: string; givenName?: string; familyName?: string },
+  uploader: UploaderIdentity | null | undefined,
 ): boolean {
-  if (uploader.givenName && uploader.familyName) {
-    return containsWord(author, uploader.givenName) && containsWord(author, uploader.familyName);
-  }
-  return uploader.name ? containsWord(author, uploader.name) : false;
+  if (!uploader) return false;
+  return containsWord(author, uploader.givenName) && containsWord(author, uploader.familyName);
 }
 
 /**
@@ -1551,33 +1552,26 @@ export function bidsToDataCite(
 
   // Add the uploader as DataCurator if not already listed as an author.
   //
-  // uploaderName is the uploader's REAL name in "Family, Given" form (#1255),
-  // never a NEMAR username. When the account has no real name the enrichment
-  // carries no uploaderName and no contributor is emitted: an unattributed
-  // DOI is correct, a DOI citing a login handle is not. The mint paths block
-  // that case up front (OWNER_NAME_MISSING_REASON) so a live dataset does not
-  // reach here nameless in the first place.
+  // `enrichment.uploader` is the uploader's REAL name (#1255), never a NEMAR
+  // username. When the account has no citable name the enrichment carries no
+  // uploader and no contributor is emitted: an unattributed DOI is correct, a
+  // DOI citing a login handle is not. The mint paths block that case up front
+  // (OWNER_NAME_MISSING_REASON) so a live dataset does not reach here
+  // nameless in the first place.
   //
-  // Issue #459 defense: only attach the contributor when the name is
-  // non-empty; otherwise the XML builder would emit `<contributorName/>`
-  // and EZID would reject the document.
-  if (enrichment?.uploaderName && enrichment.uploaderName.trim().length > 0) {
-    const uploader = {
-      name: enrichment.uploaderName.trim(),
-      givenName: enrichment.uploaderGivenName?.trim() || undefined,
-      familyName: enrichment.uploaderFamilyName?.trim() || undefined,
-    };
-    const isAuthor = creators.some((c) => authorMatchesUploader(c.name, uploader));
-    if (!isAuthor) {
-      contributors.push({
-        name: uploader.name,
-        contributorType: "DataCurator",
-        nameType: "Personal",
-        ...(uploader.givenName && { givenName: uploader.givenName }),
-        ...(uploader.familyName && { familyName: uploader.familyName }),
-        ...(enrichment.uploaderOrcid && { orcid: enrichment.uploaderOrcid }),
-      });
-    }
+  // No re-derivation or re-trimming here: `resolveUploaderIdentity` already
+  // guaranteed non-empty, trimmed parts and a `name` derived from them, which
+  // is also the issue #459 defense against emitting `<contributorName/>`.
+  const uploader = enrichment?.uploader;
+  if (uploader && !creators.some((c) => authorMatchesUploader(c.name, uploader))) {
+    contributors.push({
+      name: uploader.name,
+      contributorType: "DataCurator",
+      nameType: "Personal",
+      givenName: uploader.givenName,
+      familyName: uploader.familyName,
+      ...(uploader.orcid && { orcid: uploader.orcid }),
+    });
   }
 
   // Alternate identifiers

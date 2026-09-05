@@ -112,47 +112,34 @@ describe("buildOrcidEnrichment", () => {
       identity("Jane", "Doe"),
     );
 
-    expect(enrichment).toEqual({
-      uploaderName: "Doe, Jane",
-      uploaderGivenName: "Jane",
-      uploaderFamilyName: "Doe",
-    });
+    expect(enrichment).toEqual({ uploader: identity("Jane", "Doe") });
     expect(enrichment.authors).toBeUndefined();
   });
 
   test("returns enrichment with uploader fields when no BIDS description", () => {
     const enrichment = buildOrcidEnrichment(undefined, identity("Jane", "Doe", ORCID));
 
-    expect(enrichment).toEqual({
-      uploaderName: "Doe, Jane",
-      uploaderGivenName: "Jane",
-      uploaderFamilyName: "Doe",
-      uploaderOrcid: ORCID,
-    });
+    expect(enrichment).toEqual({ uploader: identity("Jane", "Doe", ORCID) });
     expect(enrichment.authors).toBeUndefined();
   });
 
-  test("returns an EMPTY enrichment when the account has no real name", () => {
+  test("carries a NULL uploader when the account has no real name", () => {
     // The username is not a fallback (#1255): with no given/family name there
     // is nothing citable, so nothing at all is emitted -- not the ORCID
-    // either, since we cannot tell which author it belongs to.
+    // either, since we cannot tell which author it belongs to. `null` rather
+    // than absent so a downstream merge cannot resurrect a stale uploader.
     const enrichment = buildOrcidEnrichment(
       { Name: "Test", Authors: ["Doe, Jane"] },
       resolveUploaderIdentity({ given_name: null, family_name: "Doe", orcid: ORCID }),
     );
 
-    expect(enrichment).toEqual({});
+    expect(enrichment).toEqual({ uploader: null });
   });
 
   test("returns enrichment with uploader fields when no authors in BIDS", () => {
     const enrichment = buildOrcidEnrichment({ Name: "Test" }, identity("Jane", "Doe", ORCID));
 
-    expect(enrichment).toEqual({
-      uploaderName: "Doe, Jane",
-      uploaderGivenName: "Jane",
-      uploaderFamilyName: "Doe",
-      uploaderOrcid: ORCID,
-    });
+    expect(enrichment).toEqual({ uploader: identity("Jane", "Doe", ORCID) });
     expect(enrichment.authors).toBeUndefined();
   });
 
@@ -162,10 +149,10 @@ describe("buildOrcidEnrichment", () => {
       identity("Nemo", "Nobody", ORCID),
     );
 
-    // No match found, so authors map should not be set but uploader fields preserved
+    // No match found, so authors map should not be set but the uploader is preserved
     expect(enrichment.authors).toBeUndefined();
-    expect(enrichment.uploaderName).toBe("Nobody, Nemo");
-    expect(enrichment.uploaderOrcid).toBe(ORCID);
+    expect(enrichment.uploader?.name).toBe("Nobody, Nemo");
+    expect(enrichment.uploader?.orcid).toBe(ORCID);
   });
 
   test("matches first matching author only", () => {
