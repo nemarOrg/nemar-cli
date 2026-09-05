@@ -6,8 +6,11 @@
  *   - the atomic INSERT guard enforces all three buckets: per-target 1/min,
  *     per-target 5/hour, and per-account 5/hour across ALL targets
  *
- * Runs the production SQL — imported from auth-web.ts, not copied, so the
- * test cannot drift from what the routes execute — against real in-memory
+ * Runs the production SQL — imported from services/auth-code.ts (the
+ * account-bound insert/lookup, shared since ADR 0040 phase 2 with the
+ * email-verification flow) and auth-web.ts (the sign-in lookup), never
+ * copied, so the test cannot drift from what the routes execute — against
+ * real in-memory
  * SQLite via the shared freshDb helper. No mocks. Complements the live-worker
  * E2E in test/auth-passwordless.test.ts, which proves the HTTP-level guards
  * but deliberately avoids driving the shared dev worker into a rate-limit
@@ -16,20 +19,20 @@
 
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
+import { SIGNIN_CODE_LOOKUP_SQL } from "../src/routes/auth-web.js";
 import {
-  EMAIL_CHANGE_CODE_INSERT_SQL,
-  EMAIL_CHANGE_CODE_LOOKUP_SQL,
   PER_HOUR_LIMIT,
   PER_MINUTE_LIMIT,
-  SIGNIN_CODE_LOOKUP_SQL,
-} from "../src/routes/auth-web.js";
+  USER_BOUND_CODE_INSERT_SQL,
+  USER_BOUND_CODE_LOOKUP_SQL,
+} from "../src/services/auth-code.js";
 import { freshDb } from "./helpers/d1.js";
 
 /** Run the production guarded INSERT for an email-change code; returns rows
  *  changed (0 = a bucket refused it). */
 function guardedInsert(db: Database, email: string, userId: number): number {
   return db
-    .prepare(EMAIL_CHANGE_CODE_INSERT_SQL)
+    .prepare(USER_BOUND_CODE_INSERT_SQL)
     .run(
       email,
       "hash",
@@ -82,7 +85,7 @@ describe("migration 0066: auth_codes.user_id", () => {
 
   test("a sign-in code is invisible to the change-verify lookup", () => {
     insertCode(db, { email: "shared@lab.org", userId: null });
-    expect(db.prepare(EMAIL_CHANGE_CODE_LOOKUP_SQL).get("shared@lab.org", 7)).toBeFalsy();
+    expect(db.prepare(USER_BOUND_CODE_LOOKUP_SQL).get("shared@lab.org", 7)).toBeFalsy();
   });
 
   test("each lookup sees exactly its own kind for the same address", () => {
@@ -91,7 +94,7 @@ describe("migration 0066: auth_codes.user_id", () => {
     insertCode(db, { email: "shared@lab.org", userId: null });
     insertCode(db, { email: "shared@lab.org", userId: 7 });
     const signin = db.prepare(SIGNIN_CODE_LOOKUP_SQL).get("shared@lab.org") as { id: number };
-    const change = db.prepare(EMAIL_CHANGE_CODE_LOOKUP_SQL).get("shared@lab.org", 7) as {
+    const change = db.prepare(USER_BOUND_CODE_LOOKUP_SQL).get("shared@lab.org", 7) as {
       id: number;
     };
     expect(signin).toBeTruthy();
@@ -101,7 +104,7 @@ describe("migration 0066: auth_codes.user_id", () => {
 
   test("another signed-in user cannot see someone else's change code", () => {
     insertCode(db, { email: "shared@lab.org", userId: 7 });
-    expect(db.prepare(EMAIL_CHANGE_CODE_LOOKUP_SQL).get("shared@lab.org", 8)).toBeFalsy();
+    expect(db.prepare(USER_BOUND_CODE_LOOKUP_SQL).get("shared@lab.org", 8)).toBeFalsy();
   });
 });
 

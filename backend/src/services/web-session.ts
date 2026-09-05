@@ -136,6 +136,11 @@ export interface WebSessionUser {
    *  role rather than guess. */
   role: UserRole | null;
   status: string;
+  /** Whether the account has proved control of `email` (ADR 0040 phase 2).
+   *  Surfaced on /auth/me so the dashboard can render its verify-your-email
+   *  step, and read by /auth/email/verify to answer idempotently when there
+   *  is nothing left to verify. Converted from the 0/1 D1 column here. */
+  email_verified: boolean;
   /** Profile fields surfaced on /auth/me for the website Settings page
    *  (#910). All nullable in D1 (migrations 0051/0052); `null` here means
    *  the column is unset, and the website renders its fallback state. */
@@ -170,7 +175,7 @@ export async function findSessionByCookieId(
   // lands.
   const row = await env.DB.prepare(
     `SELECT ws.id, ws.user_id, ws.remember, ws.expires_at, ws.last_used_at,
-            u.email, u.role, u.status,
+            u.email, u.role, u.status, u.email_verified,
             u.given_name, u.family_name, u.orcid, u.orcid_verified,
             u.github_username, u.city, u.country, u.affiliation, u.service_access
        FROM web_sessions ws
@@ -192,6 +197,8 @@ export async function findSessionByCookieId(
       email: string;
       role: string | null;
       status: string;
+      // NOT NULL DEFAULT 0 in D1 (0001), so plain number.
+      email_verified: number;
       given_name: string | null;
       family_name: string | null;
       orcid: string | null;
@@ -227,6 +234,7 @@ export async function findSessionByCookieId(
       email: row.email,
       role: parseRole(row.role, row.email),
       status: row.status,
+      email_verified: row.email_verified === 1,
       given_name: row.given_name,
       family_name: row.family_name,
       orcid: row.orcid,
