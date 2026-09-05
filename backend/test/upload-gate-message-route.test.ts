@@ -3,7 +3,7 @@
  * (ADR 0040, #1251), read off the real route rather than the constant.
  *
  * The message used to say "Request upload access from your account settings",
- * pointing at a settings feature that has never existed (ADR 0010's phase 2 was
+ * pointing at a settings feature that has never existed (website ADR 0010's phase 2 was
  * never built, #1249) -- so the one place the product ever explains the gate
  * sent people to a page with nothing on it. This pins the replacement text at
  * the boundary, and pins that `error` did NOT change: the CLI matches on it.

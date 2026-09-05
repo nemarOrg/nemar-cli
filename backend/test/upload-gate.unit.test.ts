@@ -1,5 +1,5 @@
 /**
- * Unit tests for the service-access upload gate (ADR 0010, #1013).
+ * Unit tests for the service-access upload gate (website ADR 0010, #1013).
  * Pure decision logic shared by every real-upload entry point
  * (POST /datasets, /:id/upload-urls, /:id/upload-credentials).
  */
