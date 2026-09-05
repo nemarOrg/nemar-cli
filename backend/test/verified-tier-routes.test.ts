@@ -22,6 +22,7 @@ import { sandboxRoutes } from "../src/routes/sandbox";
 import { userRoutes } from "../src/routes/users";
 import { hashPassword } from "../src/services/password";
 import { hashApiKey } from "../src/services/token";
+import { issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
@@ -140,6 +141,51 @@ describe("the bearer-token middleware", () => {
     const res = await authed("/users/me", user.apiKey);
     expect(res.status).toBe(403);
     expect((await res.json()).message).toContain("revoked");
+  });
+});
+
+describe("the cookie path of the same middleware", () => {
+  async function cookieFor(userId: number): Promise<string> {
+    const { cookieIdRaw } = await issueSession(env(), userId, false, null, null, "email_code");
+    return `nemar_session=${cookieIdRaw}`;
+  }
+
+  function withCookie(path: string, cookie: string): Promise<Response> {
+    return app.request(path, { headers: { Cookie: cookie } }, env());
+  }
+
+  test("accepts a `verified` session", async () => {
+    const user = await seedUser("cookieverified", "verified", { withToken: false });
+    const res = await withCookie("/users/me", await cookieFor(user.id));
+    expect(res.status).toBe(200);
+    expect((await res.json()).user.email).toBe(user.email);
+  });
+
+  test("refuses a `pending` session with the actionable 403, not a 401", async () => {
+    // The bug this pins: a bare `null` from the cookie lookup fell through to
+    // "Missing Authorization header" -- a 401 telling a signed-in browser it
+    // sent no credentials, with nothing to act on.
+    const user = await seedUser("cookiepending", "pending", { withToken: false });
+    const res = await withCookie("/users/me", await cookieFor(user.id));
+
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.status).toBe("pending");
+    expect(body.message).toContain("Verify your email");
+    expect(body.error).not.toContain("Missing Authorization");
+  });
+
+  test("refuses a `revoked` session the same way", async () => {
+    const user = await seedUser("cookierevoked", "revoked", { withToken: false });
+    const res = await withCookie("/users/me", await cookieFor(user.id));
+    expect(res.status).toBe(403);
+    expect((await res.json()).message).toContain("revoked");
+  });
+
+  test("no cookie at all is still the 401 it always was", async () => {
+    const res = await app.request("/users/me", {}, env());
+    expect(res.status).toBe(401);
+    expect((await res.json()).error).toContain("Missing Authorization");
   });
 });
 
