@@ -185,6 +185,30 @@ describe("migration 0075_approval_grants_upload_access", () => {
     }
   });
 
+  test("(b) leaves a soft-deleted web row alone", () => {
+    // Rule (a) has this case; (b) needs its own because invariantViolations()
+    // deliberately excludes deleted rows, so nothing else would notice a
+    // tombstone being pulled back into a live tier.
+    const db = dbBeforeTarget();
+    seed(db, [
+      {
+        email: "web-deleted@x.test",
+        status: "approved",
+        signupSource: "web",
+        orcidVerified: 1,
+        emailVerified: 1,
+        approvedAt: "2026-08-01 00:00:00",
+        deleted: true,
+      },
+    ]);
+    applyTarget(db);
+
+    const row = state(db, "web-deleted@x.test");
+    expect(row.status).toBe("approved");
+    expect(row.approved_at).toBe("2026-08-01 00:00:00");
+    expect(row.service_access).toBe(0);
+  });
+
   test("(b) does not touch a web row that already holds upload access", () => {
     const db = dbBeforeTarget();
     seed(db, [
