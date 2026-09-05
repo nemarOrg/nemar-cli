@@ -1,0 +1,70 @@
+name: Bug Report
+description: Report something that isn't working
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Running the failing command again
+        with `--debug` (or `NEMAR_DEBUG=1`) and attaching the log it writes saves a lot
+        of back-and-forth (see #1249) -- it has the CLI version, OS, tool versions, and
+        every request the CLI made, with credentials and emails already redacted.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: nemar --version output
+      placeholder: "0.9.16"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "e.g. macOS 26.5.1, Ubuntu 24.04, Windows 11"
+    validations:
+      required: true
+  - type: textarea
+    id: debug-log
+    attributes:
+      label: Debug log
+      description: |
+        Re-run the failing command with `--debug` added (or set `NEMAR_DEBUG=1`), then
+        paste the log contents below, or drag the file onto this box. The log is at
+        `<config dir>/logs/nemar-<timestamp>-<command>.log` (`~/.config/nemar/logs/`
+        by default; `nemar --debug <command> ...` prints the exact path on failure).
+      placeholder: Paste the log contents here, or drop the log file onto this box.
+    validations:
+      required: true
+  - type: checkboxes
+    id: reviewed
+    attributes:
+      label: Privacy check
+      options:
+        - label: >-
+            I reviewed the debug log before pasting it. NEMAR redacts API keys, Bearer
+            tokens, AWS credentials, and email addresses automatically, but I checked
+            for anything else I don't want to share (e.g. local file paths).
+          required: true
