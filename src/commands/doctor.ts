@@ -7,9 +7,22 @@
  */
 import chalk from "chalk";
 import { Command } from "commander";
+import { getEnvironmentReport } from "../lib/debug-log.js";
 import { checkAllTools } from "../lib/prerequisites.js";
 
-export async function doctorAction(): Promise<void> {
+export interface DoctorOptions {
+  report?: boolean;
+}
+
+export async function doctorAction(options: DoctorOptions = {}): Promise<void> {
+  if (options.report) {
+    // The environment section of the --debug diagnostic bundle (#1256),
+    // without the HTTP trace -- plain text so it pastes cleanly into an
+    // issue's Debug log field.
+    console.log(await getEnvironmentReport());
+    return;
+  }
+
   const tools = await checkAllTools();
 
   console.log(chalk.bold("\nNEMAR environment check\n"));
@@ -49,4 +62,5 @@ export async function doctorAction(): Promise<void> {
 
 export const doctorCommand = new Command("doctor")
   .description("Check that required tools (git, git-annex, gh, aws, deno) are installed")
+  .option("--report", "Print a shareable environment report (no HTTP data) for bug reports")
   .action(doctorAction);
