@@ -11,9 +11,12 @@
  * These drive the REAL client (`request()` from src/lib/api/client.ts) against
  * a local `Bun.serve()` returning the REAL response bodies the three paths
  * emit, and assert on the ApiError a command would render. The config
- * directory is redirected to a temp dir (NEMAR_CONFIG_DIR) rather than setting
- * TEST_API_URL, deliberately: a file mentioning TEST_API_URL is excluded from
- * CI's offline tier by name, and this behaviour belongs in the required tier.
+ * directory is redirected to a temp dir (NEMAR_CONFIG_DIR), and the client's
+ * URL override (TEST_API_URL) is pinned to the local server too: CI sorts any
+ * file that names that variable into the live-backend tier, where the variable
+ * points at staging and takes precedence over the config file, so without the
+ * pin these tests silently ran against a backend that does not have the
+ * routes yet (epic #1250 phase 5 follow-up).
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -30,6 +33,7 @@ import { ApiError } from "../src/lib/api/errors";
 let server: ReturnType<typeof Bun.serve>;
 let configDir: string;
 let previousConfigDir: string | undefined;
+let previousApiUrl: string | undefined;
 let next: { status: number; body: Record<string, unknown> };
 
 beforeAll(() => {
@@ -53,6 +57,8 @@ beforeAll(() => {
   );
   previousConfigDir = process.env.NEMAR_CONFIG_DIR;
   process.env.NEMAR_CONFIG_DIR = configDir;
+  previousApiUrl = process.env.TEST_API_URL;
+  process.env.TEST_API_URL = `http://localhost:${server.port}`;
 });
 
 afterAll(() => {
@@ -60,6 +66,8 @@ afterAll(() => {
   // and poisons the var for every later test in this shared process.
   if (previousConfigDir === undefined) delete process.env.NEMAR_CONFIG_DIR;
   else process.env.NEMAR_CONFIG_DIR = previousConfigDir;
+  if (previousApiUrl === undefined) delete process.env.TEST_API_URL;
+  else process.env.TEST_API_URL = previousApiUrl;
   rmSync(configDir, { recursive: true, force: true });
   server.stop(true);
 });
