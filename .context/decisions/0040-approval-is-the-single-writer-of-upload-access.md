@@ -46,6 +46,17 @@ That is not a formality in this catalog:
 every one of the 19 affected rows is ORCID-verified and exactly one is email-verified,
 so 18 real accounts drop to `pending` with an inbox left to confirm.
 
+**Approval cannot skip the inbox check either** (decided in phase 2's review).
+#1012 let an admin approve a `pending` ORCID-verified web row on the reasoning that
+ORCID was that row's identity proof and its collected email was unverified by design.
+That reasoning survives for identity and dies here for delivery:
+approval sits *above* the base tier, so it cannot be the step that skips the tier's
+other half.
+`isApprovable` therefore refuses any row with `email_verified = 0`, whatever the
+signup source, and says so in the 400 —
+which also means `pending` is no longer approvable at all,
+since both roads out of `pending` set the flag.
+
 ## Phasing
 
 The decision above is whole; the code arrives in two phases of epic #1250,
@@ -88,6 +99,10 @@ its rule (b) moves web accounts into a tier nothing has been taught to honour ye
 - 18 web users must verify an email address they have never been asked to verify,
   once Phase 2 ships the verify step that lets them.
   That is the cost of making `verified` mean what it says, and it is paid once.
+- An admin can no longer unblock a web sign-up that has not confirmed its email;
+  the user has to redeem a code first (they can ask for one from the dashboard).
+  That is the cost of the rule above and it falls on the 18 rows 0075 moved,
+  who have to confirm an inbox once either way.
 - Until phase 3 ships the request endpoint, there is no self-service path:
   the 403 tells people to reach an admin through the support page.
   `nemar admin users --awaiting-approval` is correspondingly approximate —
