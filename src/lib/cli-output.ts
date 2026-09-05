@@ -14,6 +14,7 @@ import chalk from "chalk";
 import type { Ora } from "ora";
 import { errorDetail } from "./api/errors.js";
 import { isAuthenticated } from "./config.js";
+import { recordStep } from "./debug-log.js";
 import type { GetDataResult } from "./git-annex/transfer.js";
 
 /**
@@ -39,6 +40,9 @@ export function requireAuth(): void {
 export function printStepFailure(spinner: Ora, title: string, detail: unknown): void {
   spinner.fail(title);
   console.log(chalk.red(`  ${errorDetail(detail)}`));
+  // Feeds the "failing step" line of the --debug diagnostic bundle (#1256).
+  // No-op when --debug is off.
+  recordStep(title);
 }
 
 /**

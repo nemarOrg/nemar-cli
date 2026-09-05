@@ -30,6 +30,7 @@ import {
   signup,
 } from "../lib/api/auth.js";
 import { ApiError, MaintenanceError } from "../lib/api/errors.js";
+import { printStepFailure } from "../lib/cli-output.js";
 import {
   DEFAULT_API_URL,
   clearAllConfig,
@@ -50,6 +51,7 @@ import {
   YES_OPTION,
   confirm,
 } from "../lib/confirm.js";
+import { recordStep } from "../lib/debug-log.js";
 import { addVerboseHelp } from "../lib/help.js";
 import { warnMissingPrerequisites } from "../lib/prerequisites.js";
 import {
@@ -214,6 +216,11 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
   // Validate with backend
   if (!apiKey) {
     console.log(chalk.red("No API key provided"));
+    // A failed login is a failed command (#1257 review item 23): this used
+    // to `return` with the default exit code (0), so the debug bundle's
+    // exit-code line and failure hint both lied about the run having
+    // succeeded -- for the very command a brand-new user runs first.
+    process.exitCode = 1;
     return;
   }
 
@@ -223,7 +230,11 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
     const result = await login(apiKey);
 
     if (!result.valid) {
-      spinner.fail("Invalid API key");
+      // Routed through printStepFailure (rather than a bare spinner.fail)
+      // so this feeds the debug bundle's "Failing step" line -- see #1257
+      // review item 23.
+      printStepFailure(spinner, "Invalid API key", "Check that your API key is correct");
+      process.exitCode = 1;
       return;
     }
 
@@ -235,6 +246,7 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
       email: result.user.email,
       githubUsername: result.user.github_username,
       sandboxCompleted: result.user.sandbox_completed,
+      role: result.user.role,
       ...(result.user.sandbox_dataset_id
         ? { sandboxDatasetId: result.user.sandbox_dataset_id }
         : {}),
@@ -256,8 +268,13 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
       console.log(chalk.dim("  Run 'nemar sandbox' to complete training"));
     }
   } catch (error) {
+    // Same defect as the two branches above, same fix: this catch has
+    // always been reachable on a genuine failure (a real 401/403/5xx, or a
+    // network error) and never set an exit code either.
+    process.exitCode = 1;
     if (error instanceof ApiError) {
       spinner.fail(error.message);
+      recordStep(error.message);
       if (error.statusCode === 401) {
         console.log(chalk.dim("  Check that your API key is correct"));
       } else if (error.statusCode === 403) {
@@ -265,6 +282,7 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
       }
     } else {
       spinner.fail("Connection failed");
+      recordStep("Connection failed");
       console.log(chalk.dim("  Check your internet connection"));
     }
   }
@@ -538,6 +556,7 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
       // the field, and writing `false` there would report "not granted" to
       // someone who has it (ADR 0040).
       if (user.service_access !== undefined) setConfig("serviceAccess", user.service_access);
+      setConfig("role", user.role);
       userRole = user.role;
       spinner.stop();
     } catch (error) {

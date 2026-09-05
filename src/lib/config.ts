@@ -73,7 +73,7 @@ function normalizeApiUrl(raw: string): string {
  *
  * Standardized default: ~/.config/nemar/ on all platforms.
  */
-function getConfigDir(): string {
+export function getConfigDir(): string {
   return process.env.NEMAR_CONFIG_DIR || join(homedir(), ".config", "nemar");
 }
 
@@ -94,6 +94,13 @@ const accountSchema = z.object({
    * as unknown rather than guessing "not granted".
    */
   serviceAccess: z.boolean().optional(),
+  /**
+   * Cached from `/auth/login` and `auth status --refresh` (#1256). Not
+   * authoritative -- always re-check with the backend for anything
+   * access-control-sensitive -- but lets the `--debug` diagnostic bundle
+   * report a role without an extra network call.
+   */
+  role: z.string().optional(),
 });
 
 export type Config = z.infer<typeof accountSchema>;

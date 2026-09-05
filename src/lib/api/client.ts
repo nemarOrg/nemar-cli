@@ -13,6 +13,7 @@
 
 import type { ZodType } from "zod";
 import { getConfig } from "../config.js";
+import { isDebugEnabled, recordHttpExchange } from "../debug-log.js";
 import { printMaintenanceBanner } from "../maintenance-banner.js";
 import { version } from "../version.js";
 import { ApiError, MaintenanceError } from "./errors.js";
@@ -67,6 +68,10 @@ export async function request<T>(
     }
   }
 
+  const method = options.method || "GET";
+  const requestBody = typeof options.body === "string" ? options.body : undefined;
+  const startedAt = Date.now();
+
   let response: Response;
   try {
     response = await fetch(url, {
@@ -75,14 +80,74 @@ export async function request<T>(
     });
   } catch (fetchError) {
     // Network error - DNS resolution, connection refused, etc.
+    if (isDebugEnabled()) {
+      recordHttpExchange({
+        method,
+        url,
+        status: null,
+        durationMs: Date.now() - startedAt,
+        requestHeaders: headers,
+        requestBody,
+        error: fetchError instanceof Error ? fetchError.message : String(fetchError),
+      });
+    }
     throw new ApiError(0, `Network error: Could not connect to ${getApiUrl()}`, {
       originalError: fetchError instanceof Error ? fetchError.message : String(fetchError),
     });
   }
 
+  // Read the body as text once (a Response body can only be consumed once)
+  // so it's available both for parsing below and for the debug log entry,
+  // including the "invalid JSON" failure case.
+  //
+  // Wrapped in its own try/catch (review finding, PR #1257): this used to
+  // run unguarded for EVERY caller, debug on or off, so a body-stream
+  // failure (connection dropped mid-response, etc.) escaped as a raw
+  // TypeError instead of an ApiError -- breaking the `instanceof ApiError`
+  // checks roughly 20 call sites rely on (e.g. publish's isRetryable
+  // classifier), regardless of whether --debug was ever involved.
+  let rawBody: string;
+  try {
+    rawBody = await response.text();
+  } catch (readError) {
+    if (isDebugEnabled()) {
+      recordHttpExchange({
+        method,
+        url,
+        status: response.status,
+        durationMs: Date.now() - startedAt,
+        requestHeaders: headers,
+        requestBody,
+        error: readError instanceof Error ? readError.message : String(readError),
+      });
+    }
+    // statusCode 0, not response.status: a stream dying mid-body is a
+    // network-layer drop regardless of what status line the server sent,
+    // and 0 is this codebase's convention for exactly that (review finding,
+    // PR #1257) -- see the network-error branch above, and
+    // isRetryablePublishError, which treats statusCode 0 as retryable. The
+    // status line the server DID send is preserved in `details` for anyone
+    // reading the error, not lost.
+    throw new ApiError(0, "Failed to read response body", {
+      httpStatus: response.status,
+      originalError: readError instanceof Error ? readError.message : String(readError),
+    });
+  }
+  if (isDebugEnabled()) {
+    recordHttpExchange({
+      method,
+      url,
+      status: response.status,
+      durationMs: Date.now() - startedAt,
+      requestHeaders: headers,
+      requestBody,
+      responseBody: rawBody,
+    });
+  }
+
   let data: Record<string, unknown>;
   try {
-    data = (await response.json()) as Record<string, unknown>;
+    data = JSON.parse(rawBody) as Record<string, unknown>;
   } catch {
     // Response wasn't valid JSON
     throw new ApiError(response.status, `Invalid response from server (status ${response.status})`);

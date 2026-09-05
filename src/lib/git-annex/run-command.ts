@@ -38,7 +38,7 @@ export async function runCommand(
     /** Kill the process after this many milliseconds */
     timeout?: number;
   } = {},
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }> {
   const childEnv: Record<string, string | undefined> = {
     ...process.env,
     GIT_TERMINAL_PROMPT: "0",
@@ -91,8 +91,9 @@ export async function runCommand(
       stderr:
         stderr || `Command timed out after ${Math.round((options.timeout as number) / 1000)}s`,
       exitCode: exitCode ?? 1,
+      timedOut: true,
     };
   }
 
-  return { stdout, stderr, exitCode };
+  return { stdout, stderr, exitCode, timedOut: false };
 }
