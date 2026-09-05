@@ -1,10 +1,11 @@
 /**
- * Service-access upload gate (ADR 0010, #1013).
+ * Service-access upload gate (website ADR 0010, #1013; ADR 0040, #1250).
  *
  * Real (non-sandbox) uploads are gated on `service_access` — the admin-granted
  * permission to consume compute/storage, issued only after export-control review
- * of the person's GitHub + location/affiliation. Base-access accounts
- * (auto-approved ORCID sign-ins) never have it. Sandbox uploads are exempt (they
+ * of the person's GitHub + location/affiliation. ADR 0040 made admin approval
+ * the single writer of it, so an account at the base tier (`verified`) never
+ * holds it and `status='approved'` always does. Sandbox uploads are exempt (they
  * are the capped training playground).
  *
  * Pure so the decision (and its ordering) is unit-testable without a live
@@ -12,10 +13,18 @@
  * gate can't be added to one endpoint and forgotten on another.
  */
 
+/**
+ * `error` is the stable machine-readable half and must not change — the CLI
+ * matches on it. `message` is the human half: it used to point at a
+ * "request upload access from your account settings" flow that has never
+ * existed (ADR 0010 phase 2 was never built, #1249), so it sent people to a
+ * settings page with nothing on it. It now names the path that actually works
+ * today and says which one is coming.
+ */
 export const SERVICE_ACCESS_ERROR = {
   error: "Service access required",
   message:
-    "Uploading requires service access. Request upload access from your account settings; an admin reviews it before granting.",
+    "Uploading requires upload access, a one-time admin approval. Ask an admin via https://nemar.org/support; the request flow is coming to Settings and the CLI.",
 } as const;
 
 export const SANDBOX_TRAINING_ERROR = {

@@ -53,14 +53,19 @@ async function seedAdmin(): Promise<void> {
 interface WebUserSeed {
   status?: string;
   orcidVerified?: 0 | 1;
+  /** ADR 0040: an `approved` row 409s only when it already holds the grant. */
+  serviceAccess?: 0 | 1;
 }
 
 /** Web/ORCID-style row: username NULL, signup_source 'web'. */
-function seedWebUser(email: string, { status = "pending", orcidVerified = 1 }: WebUserSeed = {}) {
+function seedWebUser(
+  email: string,
+  { status = "pending", orcidVerified = 1, serviceAccess = 0 }: WebUserSeed = {},
+) {
   db.run(
-    `INSERT INTO users (email, status, signup_source, email_verified, orcid, orcid_verified)
-     VALUES (?, ?, 'web', 0, ?, ?)`,
-    [email, status, orcidVerified ? "0000-0002-1825-0097" : null, orcidVerified],
+    `INSERT INTO users (email, status, signup_source, email_verified, orcid, orcid_verified, service_access)
+     VALUES (?, ?, 'web', 0, ?, ?, ?)`,
+    [email, status, orcidVerified ? "0000-0002-1825-0097" : null, orcidVerified, serviceAccess],
   );
   const row = db.query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?").get(email);
   if (!row) throw new Error(`seed failed for ${email}`);
@@ -115,6 +120,8 @@ describe("POST /admin/approve/by-id/:id (#1012)", () => {
       username: null,
       email: "orcid-pending@example.org",
       status: "approved",
+      // Approval grants upload access in the same write (ADR 0040, #1251).
+      service_access: true,
     });
     expect(body.email_sent).toBe(false); // RESEND_API_KEY unset in tests
 
@@ -169,8 +176,11 @@ describe("POST /admin/approve/by-id/:id (#1012)", () => {
     expect(userRow(id)?.status).toBe("approved");
   });
 
-  test("409 on an already-approved account", async () => {
-    const { id } = seedWebUser("orcid-approved@example.org", { status: "approved" });
+  test("409 on an account that is approved AND already holds upload access", async () => {
+    const { id } = seedWebUser("orcid-approved@example.org", {
+      status: "approved",
+      serviceAccess: 1,
+    });
     const res = await post(`/admin/approve/by-id/${id}`);
     expect(res.status).toBe(409);
   });
