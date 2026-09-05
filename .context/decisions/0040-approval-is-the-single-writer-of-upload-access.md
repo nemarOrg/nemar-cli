@@ -25,7 +25,8 @@ Four names, fixed meanings, and one writer.
 - **`pending`** — the account exists and its email is not verified. CLI and web alike.
 - **`verified`** — the email is verified. This is the base tier and needs no admin:
   browse, dashboard, settings, CLI API key, sandbox training, and requesting upload access.
-  (The CLI key, sandbox and request paths are Phase 2 work; see Phasing below.)
+  (The CLI key and sandbox paths landed in Phase 2; the request endpoint is Phase 3.
+  See Phasing below.)
 - **`approved`** — an admin approved the one-time upload request.
 - **`revoked`** — unchanged.
 
@@ -56,13 +57,17 @@ Read the split before assuming a behaviour described here is live.
   (both approve routes, revoke as the eraser, both audited);
   the upload gate's message; admin visibility of the tier in `GET /admin/users`
   and `nemar admin users`; `Upload access` in `nemar auth status`.
-- **Phase 2 (#1252):** everything that makes `verified` *usable* as the base tier —
-  `authMiddleware`, `POST /auth/login`, `POST /auth/retrieve-key` and the sandbox routes
-  accepting `verified` where they require `status='approved'` today;
+- **Phase 2 (#1252, landed):** everything that makes `verified` *usable* as the base tier —
+  `authMiddleware` (both credential paths), `optionalAuthMiddleware`, `POST /auth/login`,
+  `POST /auth/retrieve-key`, the key-regeneration pair and the sandbox routes
+  accepting `verified` where they required `status='approved'`;
   the `pending` → `verified` transition for web accounts
-  (a verify endpoint, and the email-code login writing the status, not just `email_verified`);
-  `userStatusForDashboard` mapping `verified` to active;
-  and ORCID finalize no longer auto-approving.
+  (`POST /auth/email/verify{,/request}`, and the email-code login writing the status,
+  not just `email_verified`); `userStatusForDashboard` mapping `verified` to active
+  and `/auth/me` exposing `email_verified`; the key-ready email moving to email
+  verification and a new upload-access-granted email taking its place at approval;
+  the create gate taking the channel (sandbox training is CLI-only);
+  and ORCID finalize landing at `pending` and mailing a verification code.
 
 So while Phase 1 stands alone, migration 0075 must not be *applied* alone —
 its rule (b) moves web accounts into a tier nothing has been taught to honour yet.
@@ -78,6 +83,8 @@ its rule (b) moves web accounts into a tier nothing has been taught to honour ye
   It moves every auto-approved web row out of `approved`,
   and until the middleware and `userStatusForDashboard` learn that `verified` is active,
   those users see a dashboard that reports them as pending with nothing to act on.
+  Phase 2 has landed on the epic branch, so the two ship together as intended;
+  the constraint is on applying 0075 to a deployment that predates it.
 - 18 web users must verify an email address they have never been asked to verify,
   once Phase 2 ships the verify step that lets them.
   That is the cost of making `verified` mean what it says, and it is paid once.
@@ -85,9 +92,10 @@ its rule (b) moves web accounts into a tier nothing has been taught to honour ye
   the 403 tells people to reach an admin through the support page.
   `nemar admin users --awaiting-approval` is correspondingly approximate —
   "verified with no grant", not "asked for one" — until there is a request to read.
-- ORCID finalize still auto-approves new web sign-ups (phase 2 changes it),
-  so the invariant is established by 0075 and then re-broken by every new web sign-up
-  until that lands. The approve routes repair such a row instead of 409ing it.
+- ORCID finalize auto-approved new web sign-ups between phase 1 and phase 2,
+  so the invariant was established by 0075 and then re-broken by every new web sign-up
+  until phase 2 landed. The approve routes repair such a row instead of 409ing it,
+  which is also what recovers any row created in that window.
 - One legacy shape sits outside the invariant and is deliberately left alone:
   0062 grandfathered `role IN ('owner','admin')` regardless of status,
   so an owner or admin at `verified` could hold the grant without being `approved`.
