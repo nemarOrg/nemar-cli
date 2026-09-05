@@ -1,0 +1,246 @@
+/**
+ * Real route tests for the `verified` base tier (ADR 0040 phase 2, #1252).
+ *
+ * Before this change every authenticated path required `status='approved'`,
+ * so migration 0075 — which moves auto-approved web accounts down to
+ * `verified`/`pending` — would have locked those accounts out of the tier they
+ * now hold. These pin the widening at the boundary: which statuses can
+ * authenticate, which cannot, and what a refused one is told to do.
+ *
+ * Real engine throughout: bun:sqlite behind realD1 with every migration
+ * applied, real Hono dispatch through authMiddleware, real hashed API keys and
+ * real bcrypt-free password verification via the production hashPassword. No
+ * mocks. RESEND_API_KEY is unset so no route here attempts a send.
+ */
+
+import type { Database } from "bun:sqlite";
+import { beforeEach, describe, expect, test } from "bun:test";
+import { Hono } from "hono";
+import { authRoutes } from "../src/routes/auth";
+import { sandboxRoutes } from "../src/routes/sandbox";
+import { userRoutes } from "../src/routes/users";
+import { hashPassword } from "../src/services/password";
+import { hashApiKey } from "../src/services/token";
+import type { Bindings, Variables } from "../src/types/bindings";
+import { freshDb, realD1 } from "./helpers/d1";
+
+const PASSWORD = "correct horse battery staple";
+const KEY_PREFIX = "tierkey-0123456789abcdef0123456789abcdef-";
+
+let db: Database;
+let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
+
+function env(): Bindings {
+  return { DB: realD1(db), ENVIRONMENT: "test", API_BASE_URL: "https://api.test" } as Bindings;
+}
+
+interface Seeded {
+  id: number;
+  username: string;
+  email: string;
+  apiKey: string;
+}
+
+/**
+ * A CLI-shaped account at `status`, with a real password hash and (unless
+ * `withToken` is false) a real hashed API key.
+ */
+async function seedUser(
+  username: string,
+  status: string,
+  opts: { withToken?: boolean; serviceAccess?: 0 | 1; sandbox?: 0 | 1 } = {},
+): Promise<Seeded> {
+  const { withToken = true, serviceAccess = 0, sandbox = 0 } = opts;
+  const email = `${username}@example.org`;
+  db.run(
+    `INSERT INTO users (username, email, password_hash, github_username, status, role,
+                        signup_source, email_verified, service_access, sandbox_completed)
+     VALUES (?, ?, ?, ?, ?, 'member', 'cli', ?, ?, ?)`,
+    [
+      username,
+      email,
+      await hashPassword(PASSWORD),
+      `${username}-gh`,
+      status,
+      status === "pending" ? 0 : 1,
+      serviceAccess,
+      sandbox,
+    ],
+  );
+  const row = db
+    .query<{ id: number }, [string]>("SELECT id FROM users WHERE username = ?")
+    .get(username);
+  if (!row) throw new Error(`seed failed for ${username}`);
+  const apiKey = `${KEY_PREFIX}${username}`;
+  if (withToken) {
+    db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
+      row.id,
+      await hashApiKey(apiKey),
+      apiKey.slice(0, 8),
+    );
+  }
+  return { id: row.id, username, email, apiKey };
+}
+
+function authed(path: string, apiKey: string, init: RequestInit = {}): Promise<Response> {
+  return app.request(
+    path,
+    { ...init, headers: { Authorization: `Bearer ${apiKey}`, ...(init.headers ?? {}) } },
+    env(),
+  );
+}
+
+function postJson(path: string, body: unknown): Promise<Response> {
+  return app.request(
+    path,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+    env(),
+  );
+}
+
+beforeEach(() => {
+  db = freshDb();
+  app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+  app.route("/auth", authRoutes);
+  app.route("/users", userRoutes);
+  app.route("/sandbox", sandboxRoutes);
+});
+
+describe("the bearer-token middleware", () => {
+  test("accepts a token held by a `verified` account", async () => {
+    const user = await seedUser("tierverified", "verified");
+    const res = await authed("/users/me", user.apiKey);
+    expect(res.status).toBe(200);
+    expect((await res.json()).user.username).toBe("tierverified");
+  });
+
+  test("still accepts a token held by an `approved` account", async () => {
+    const user = await seedUser("tierapproved", "approved", { serviceAccess: 1 });
+    expect((await authed("/users/me", user.apiKey)).status).toBe(200);
+  });
+
+  test("refuses a `pending` token, and tells it to verify the email", async () => {
+    const user = await seedUser("tierpending", "pending");
+    const res = await authed("/users/me", user.apiKey);
+
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.status).toBe("pending");
+    expect(body.message).toContain("Verify your email");
+    // The instruction this replaced. Asserted negatively because it is the
+    // specific wrong answer: nothing an admin does unblocks a pending
+    // account, so telling it to wait for one is a dead end.
+    expect(body.message).not.toContain("awaiting admin approval");
+  });
+
+  test("refuses a `revoked` token", async () => {
+    const user = await seedUser("tierrevoked", "revoked");
+    const res = await authed("/users/me", user.apiKey);
+    expect(res.status).toBe(403);
+    expect((await res.json()).message).toContain("revoked");
+  });
+});
+
+describe("POST /auth/login", () => {
+  test("a `verified` account can log in with its key", async () => {
+    const user = await seedUser("loginverified", "verified");
+    const res = await postJson("/auth/login", { api_key: user.apiKey });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.valid).toBe(true);
+    expect(body.user.username).toBe("loginverified");
+  });
+
+  test("a `pending` account cannot, and is told why", async () => {
+    const user = await seedUser("loginpending", "pending");
+    const res = await postJson("/auth/login", { api_key: user.apiKey });
+    expect(res.status).toBe(403);
+    expect((await res.json()).message).toContain("Verify your email");
+  });
+});
+
+describe("POST /auth/retrieve-key", () => {
+  test("mints the first API key for a `verified` account", async () => {
+    const user = await seedUser("keyverified", "verified", { withToken: false });
+
+    const res = await postJson("/auth/retrieve-key", { email: user.email, password: PASSWORD });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(typeof body.api_key).toBe("string");
+
+    // The key is real: it resolves through the production hash to the row
+    // that was just written, which is what the CLI will send next.
+    const stored = db
+      .query<{ user_id: number }, [string]>("SELECT user_id FROM tokens WHERE api_key_hash = ?")
+      .get(await hashApiKey(body.api_key));
+    expect(stored?.user_id).toBe(user.id);
+  });
+
+  test("a `pending` account is refused and told to verify first", async () => {
+    const user = await seedUser("keypending", "pending", { withToken: false });
+    const res = await postJson("/auth/retrieve-key", { email: user.email, password: PASSWORD });
+    expect(res.status).toBe(403);
+    expect((await res.json()).message).toContain("Verify your email");
+    expect(db.query("SELECT COUNT(*) AS n FROM tokens").get()).toEqual({ n: 0 });
+  });
+
+  test("a `verified` account that already holds a key gets the 409, not a second key", async () => {
+    const user = await seedUser("keyverified2", "verified");
+    const res = await postJson("/auth/retrieve-key", { email: user.email, password: PASSWORD });
+    expect(res.status).toBe(409);
+    expect((await res.json()).details.api_key_prefix).toBe(user.apiKey.slice(0, 8));
+  });
+});
+
+describe("the sandbox routes", () => {
+  test("a `verified` account can read its training status", async () => {
+    const user = await seedUser("sandboxverified", "verified");
+    const res = await authed("/sandbox/status", user.apiKey);
+    expect(res.status).toBe(200);
+    expect((await res.json()).sandbox_completed).toBe(false);
+  });
+
+  test("a `verified` account can complete training — no admin involved", async () => {
+    // Sandbox training is the step a user takes BEFORE asking for upload
+    // access, so requiring the upload grant to reach it would be circular.
+    const user = await seedUser("sandboxrunner", "verified");
+    db.run(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, is_sandbox, visibility, status)
+       VALUES ('xx090001', 'Training run', ?, 1, 'private', 'active')`,
+      [user.id],
+    );
+
+    const res = await authed("/sandbox/complete", user.apiKey, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ dataset_id: "xx090001" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).sandbox_completed).toBe(true);
+    expect(
+      db.query<{ sandbox_completed: number }, [number]>(
+        "SELECT sandbox_completed FROM users WHERE id = ?",
+      ).get(user.id)?.sandbox_completed,
+    ).toBe(1);
+  });
+
+  test("a `pending` account cannot", async () => {
+    const user = await seedUser("sandboxpending", "pending");
+    expect((await authed("/sandbox/status", user.apiKey)).status).toBe(403);
+  });
+});
+
+describe("GET /users/me", () => {
+  test("reports the upload grant separately from the tier", async () => {
+    // The whole point of ADR 0040: an active account and an upload-capable
+    // account are different things, and the CLI reads them off two fields.
+    const base = await seedUser("mebase", "verified");
+    const granted = await seedUser("megranted", "approved", { serviceAccess: 1 });
+
+    expect((await (await authed("/users/me", base.apiKey)).json()).user.service_access).toBe(false);
+    expect((await (await authed("/users/me", granted.apiKey)).json()).user.service_access).toBe(
+      true,
+    );
+  });
+});

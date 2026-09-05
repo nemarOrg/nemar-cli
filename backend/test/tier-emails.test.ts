@@ -1,0 +1,204 @@
+/**
+ * Which email fires at which moment, now that the tiers moved (ADR 0040
+ * phase 2, #1252).
+ *
+ * The key-ready mail used to be sent at admin approval, because that was when
+ * the API key became retrievable. It is retrievable at email verification now,
+ * so the mail that explains how to retrieve it has to arrive then — and what
+ * approval announces is the thing approval actually grants, upload access. Get
+ * this pairing wrong in either direction and the product lies to someone:
+ * "your account is approved, fetch your key" to a user who has had one for
+ * weeks, or nothing at all to a user who could already be working.
+ *
+ * Real engine: bun:sqlite behind realD1 with every migration applied, real
+ * Hono dispatch, the real services/email.ts building real HTML and issuing a
+ * real fetch. Only the DESTINATION moves — helpers/resend.ts redirects
+ * api.resend.com to a local server — so these assert on what would genuinely
+ * have been mailed. No mocks.
+ */
+
+import type { Database } from "bun:sqlite";
+import { beforeEach, describe, expect, test } from "bun:test";
+import { Hono } from "hono";
+import { adminRoutes } from "../src/routes/admin";
+import { authRoutes } from "../src/routes/auth";
+import { hashApiKey } from "../src/services/token";
+import type { Bindings, Variables } from "../src/types/bindings";
+import { freshDb, realD1 } from "./helpers/d1";
+import { sendsTo, withFakeResend } from "./helpers/resend";
+
+const ADMIN_KEY = "tiermail-admin-key-0123456789abcdef0123456789";
+const ADMIN_EMAIL = "mailadmin@nemar.test";
+const USER_EMAIL = "newcli@nemar.test";
+const WEB_EMAIL = "newweb@nemar.test";
+const VERIFY_TOKEN = "verify-token-for-the-tier-email-test";
+
+let db: Database;
+let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
+
+function env(): Bindings {
+  return {
+    DB: realD1(db),
+    ENVIRONMENT: "test",
+    // The delivery fence admits these recipients, so the sends reach the
+    // local stand-in rather than being refused before the fetch.
+    DEV_EMAIL_ALLOWLIST: "@nemar.test",
+    RESEND_API_KEY: "fake-resend-key",
+    FROM_EMAIL: "NEMAR <noreply@nemar.org>",
+    API_BASE_URL: "https://api.test",
+  } as unknown as Bindings;
+}
+
+async function seedAdmin(): Promise<void> {
+  db.run(
+    `INSERT INTO users (username, email, password_hash, github_username, status, role,
+                        email_verified, service_access)
+     VALUES ('mailadmin', ?, 'x', 'mailadmin-gh', 'approved', 'admin', 1, 1)`,
+    [ADMIN_EMAIL],
+  );
+  const row = db
+    .query<{ id: number }, []>("SELECT id FROM users WHERE username = 'mailadmin'")
+    .get();
+  if (!row) throw new Error("admin seed failed");
+  db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
+    row.id,
+    await hashApiKey(ADMIN_KEY),
+    ADMIN_KEY.slice(0, 8),
+  );
+}
+
+/** A CLI signup mid-flow: pending, holding a live verification token. */
+function seedUnverifiedCliUser(): void {
+  db.run(
+    `INSERT INTO users (username, email, password_hash, github_username, description, status,
+                        signup_source, email_verified, verification_token,
+                        verification_expires_at, service_access)
+     VALUES ('newcli', ?, 'x', 'newcli-gh', 'Studying auditory oddball responses', 'pending',
+             'cli', 0, ?, datetime('now', '+1 day'), 0)`,
+    [USER_EMAIL, VERIFY_TOKEN],
+  );
+}
+
+/** A verified CLI account awaiting the upload decision. */
+function seedVerifiedCliUser(): void {
+  db.run(
+    `INSERT INTO users (username, email, password_hash, github_username, status, signup_source,
+                        email_verified, service_access)
+     VALUES ('waiting', ?, 'x', 'waiting-gh', 'verified', 'cli', 1, 0)`,
+    ["waiting@nemar.test"],
+  );
+}
+
+/** A verified web account (username NULL) awaiting the upload decision. */
+function seedVerifiedWebUser(): number {
+  db.run(
+    `INSERT INTO users (email, status, signup_source, email_verified, orcid, orcid_verified,
+                        service_access)
+     VALUES (?, 'verified', 'web', 1, '0000-0002-1825-0097', 1, 0)`,
+    [WEB_EMAIL],
+  );
+  const row = db.query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?").get(
+    WEB_EMAIL,
+  );
+  if (!row) throw new Error("web seed failed");
+  return row.id;
+}
+
+beforeEach(async () => {
+  db = freshDb();
+  app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+  app.route("/auth", authRoutes);
+  app.route("/admin", adminRoutes);
+  await seedAdmin();
+});
+
+describe("GET /auth/verify (the CLI verification link)", () => {
+  test("mails the key-ready instructions to the user, at the moment the key becomes retrievable", async () => {
+    seedUnverifiedCliUser();
+
+    const calls = await withFakeResend(async (calls) => {
+      const res = await app.request(`/auth/verify?token=${VERIFY_TOKEN}`, {}, env());
+      expect(res.status).toBe(200);
+      return calls;
+    });
+
+    const toUser = sendsTo(calls, USER_EMAIL);
+    expect(toUser.length).toBe(1);
+    expect(toUser[0].subject).toBe("Your NEMAR API key is ready");
+    expect(toUser[0].html).toContain("nemar auth retrieve-key");
+    // The claim it must NOT make: verification is not approval, and this
+    // account cannot upload anything yet.
+    expect(toUser[0].html).not.toContain("account has been approved");
+
+    const row = db
+      .query<{ status: string; service_access: number }, [string]>(
+        "SELECT status, service_access FROM users WHERE email = ?",
+      )
+      .get(USER_EMAIL);
+    expect(row?.status).toBe("verified");
+    expect(row?.service_access).toBe(0);
+  });
+
+  test("notifies the admins that a new account is verified", async () => {
+    seedUnverifiedCliUser();
+
+    const calls = await withFakeResend(async (calls) => {
+      await app.request(`/auth/verify?token=${VERIFY_TOKEN}`, {}, env());
+      return calls;
+    });
+
+    const toAdmin = sendsTo(calls, ADMIN_EMAIL);
+    expect(toAdmin.length).toBe(1);
+    expect(toAdmin[0].subject).toContain("New verified account");
+    // The admin's action is the upload grant, so that is the command the
+    // mail names.
+    expect(toAdmin[0].html).toContain("nemar admin approve");
+  });
+});
+
+describe("POST /admin/approve/:username", () => {
+  test("mails upload-access-granted, not the key-ready instructions", async () => {
+    seedVerifiedCliUser();
+
+    const calls = await withFakeResend(async (calls) => {
+      const res = await app.request(
+        "/admin/approve/waiting",
+        { method: "POST", headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+        env(),
+      );
+      expect(res.status).toBe(200);
+      expect((await res.json()).email_sent).toBe(true);
+      return calls;
+    });
+
+    const toUser = sendsTo(calls, "waiting@nemar.test");
+    expect(toUser.length).toBe(1);
+    expect(toUser[0].subject).toBe("Upload access granted on NEMAR");
+    expect(toUser[0].html).toContain("nemar sandbox");
+    // Re-sending retrieve-key instructions to someone who has had a key since
+    // they verified reads as "your old key stopped working".
+    expect(toUser[0].html).not.toContain("nemar auth retrieve-key");
+  });
+
+  test("a web account gets the dashboard-flavoured variant", async () => {
+    const id = seedVerifiedWebUser();
+
+    const calls = await withFakeResend(async (calls) => {
+      const res = await app.request(
+        `/admin/approve/by-id/${id}`,
+        { method: "POST", headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+        env(),
+      );
+      expect(res.status).toBe(200);
+      return calls;
+    });
+
+    const toUser = sendsTo(calls, WEB_EMAIL);
+    expect(toUser.length).toBe(1);
+    expect(toUser[0].subject).toBe("Upload access granted on NEMAR");
+    // No username, no password, no API key: CLI instructions would be dead
+    // ends, so this variant points at the dashboard.
+    expect(toUser[0].html).toContain("nemar.org/upload");
+    expect(toUser[0].html).not.toContain("nemar auth");
+  });
+});
