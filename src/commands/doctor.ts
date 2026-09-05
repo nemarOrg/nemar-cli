@@ -32,7 +32,9 @@ export async function doctorAction(options: DoctorOptions = {}): Promise<void> {
   let ready = 0;
   for (const t of tools) {
     const mark = t.available ? chalk.green("✓") : chalk.red("✗");
-    const status = t.available ? (t.version ?? "ok") : chalk.red("missing");
+    const status = t.available
+      ? (t.version ?? "ok")
+      : chalk.red(t.timedOut ? "timed out" : "missing");
     console.log(
       `  ${mark} ${t.name.padEnd(16)} ${String(status).padEnd(12)} ${chalk.dim(t.purpose)}`,
     );

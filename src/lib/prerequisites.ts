@@ -142,9 +142,24 @@ export function parseVersion(output: string): string | undefined {
   return match ? match[1] : undefined;
 }
 
-async function probeTool(toolCheck: ToolCheck): Promise<{ available: boolean; version?: string }> {
+/**
+ * Cap on a single `--version` probe. Review finding (#1257): before this,
+ * `checkAllTools()` had no timeout and now runs before every `--debug`
+ * command (see `primeEnvironmentSnapshot` in lib/debug-log.ts) as well as
+ * `nemar doctor` itself, so a hung `aws --version` (a wedged credential
+ * helper, a broken PATH shim) hung the whole CLI rather than just failing
+ * one command's prerequisite check.
+ */
+const PROBE_TIMEOUT_MS = 4000;
+
+async function probeTool(
+  toolCheck: ToolCheck,
+): Promise<{ available: boolean; version?: string; timedOut?: boolean }> {
   try {
-    const { exitCode, stdout } = await runCommand(toolCheck.cmd);
+    const { exitCode, stdout, timedOut } = await runCommand(toolCheck.cmd, {
+      timeout: PROBE_TIMEOUT_MS,
+    });
+    if (timedOut) return { available: false, timedOut: true };
     if (exitCode !== 0) return { available: false };
     return { available: true, version: parseVersion(stdout) };
   } catch (err) {
@@ -163,6 +178,8 @@ export interface ToolStatus {
   required: boolean;
   available: boolean;
   version?: string;
+  /** The probe hit PROBE_TIMEOUT_MS rather than confirming absence. */
+  timedOut?: boolean;
   installInstruction: string;
 }
 
@@ -174,7 +191,7 @@ export async function checkAllTools(): Promise<ToolStatus[]> {
   const entries = Object.entries(TOOL_CHECKS);
   return Promise.all(
     entries.map(async ([key, check]) => {
-      const { available, version } = await probeTool(check);
+      const { available, version, timedOut } = await probeTool(check);
       return {
         key,
         name: check.name,
@@ -182,6 +199,7 @@ export async function checkAllTools(): Promise<ToolStatus[]> {
         required: check.required,
         available,
         version,
+        timedOut,
         installInstruction: getInstallInstruction(check),
       };
     }),
@@ -210,6 +228,7 @@ export async function warnMissingPrerequisites(): Promise<ToolStatus[]> {
 export interface PrerequisiteFailure {
   tool: string;
   installInstruction: string;
+  timedOut?: boolean;
 }
 
 /**
@@ -221,10 +240,10 @@ export async function checkPrerequisitesForCommand(command: NemarCommand): Promi
   const checks = toolKeys.map((key) => TOOL_CHECKS[key]).filter(Boolean);
 
   const results = await Promise.all(
-    checks.map(async (check) => ({
-      check,
-      available: (await probeTool(check)).available,
-    })),
+    checks.map(async (check) => {
+      const probe = await probeTool(check);
+      return { check, available: probe.available, timedOut: probe.timedOut };
+    }),
   );
 
   const failures: PrerequisiteFailure[] = results
@@ -232,13 +251,16 @@ export async function checkPrerequisitesForCommand(command: NemarCommand): Promi
     .map((r) => ({
       tool: r.check.name,
       installInstruction: getInstallInstruction(r.check),
+      timedOut: r.timedOut,
     }));
 
   if (failures.length === 0) return;
 
   const lines = ["\nMissing required tools:"];
   for (const failure of failures) {
-    lines.push(`  ${failure.tool} not installed`);
+    lines.push(
+      `  ${failure.tool} ${failure.timedOut ? "timed out while checking" : "not installed"}`,
+    );
     lines.push(`    Install: ${failure.installInstruction}`);
   }
   throw new Error(lines.join("\n"));
