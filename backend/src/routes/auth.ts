@@ -577,6 +577,13 @@ authRoutes.get("/verify", async (c) => {
   // which is no longer when the key becomes available. Best-effort: a mail
   // failure must not undo a verification that has already committed, and the
   // user can still run `nemar auth retrieve-key` without ever seeing it.
+  //
+  // Whether it actually went is tracked, because the success page below is
+  // the ONLY other place this user is told how to get their key. Promising
+  // an email that was never sent (delivery fenced in dev, RESEND_API_KEY
+  // unset, Resend refusing) leaves them waiting on an inbox instead of
+  // running one command.
+  let keyEmailSent = false;
   try {
     if (c.env.RESEND_API_KEY) {
       const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
@@ -589,6 +596,7 @@ authRoutes.get("/verify", async (c) => {
         isDev,
         c.env,
       );
+      keyEmailSent = true;
     } else {
       console.error(`RESEND_API_KEY unset; key-ready email not sent for user id=${user.id}`);
     }
@@ -657,7 +665,11 @@ authRoutes.get("/verify", async (c) => {
   </div>
 
   <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">
-    You can close this page. Your account is active; we've emailed you the steps to retrieve your API key.
+    You can close this page. Your account is active${
+      keyEmailSent
+        ? "; we've emailed you the steps to retrieve your API key."
+        : " — run <code>nemar auth retrieve-key</code> to get your API key."
+    }
   </p>
 
   <p style="color: #9ca3af; font-size: 12px; margin-top: 40px;">

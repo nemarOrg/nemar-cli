@@ -156,6 +156,45 @@ describe("GET /auth/verify (the CLI verification link)", () => {
   });
 });
 
+describe("GET /auth/verify when the mail does not go", () => {
+  test("the page tells the user to run retrieve-key, and promises no email", async () => {
+    // RESEND_API_KEY unset is the dev/test shape, and the delivery fence and
+    // a Resend outage land in the same place: the page is then the ONLY
+    // remaining channel telling this user how to get their key, so it must
+    // not point at an inbox nothing was sent to.
+    seedUnverifiedCliUser();
+    const noMailEnv = { ...env(), RESEND_API_KEY: undefined } as unknown as Bindings;
+
+    const calls = await withFakeResend(async (calls) => {
+      const res = await app.request(`/auth/verify?token=${VERIFY_TOKEN}`, {}, noMailEnv);
+      expect(res.status).toBe(200);
+      const html = await res.text();
+      expect(html).toContain("nemar auth retrieve-key");
+      expect(html).not.toContain("we've emailed you");
+      return calls;
+    });
+
+    // Nothing was mailed to the USER, so the page's claim and the behaviour
+    // agree. (The admin notification is a separate, pre-existing path that
+    // does not gate on RESEND_API_KEY; it is not what this page promises.)
+    expect(sendsTo(calls, USER_EMAIL).length).toBe(0);
+    // The verification itself still committed; only the mail is missing.
+    expect(
+      db
+        .query<{ status: string }, [string]>("SELECT status FROM users WHERE email = ?")
+        .get(USER_EMAIL)?.status,
+    ).toBe("verified");
+  });
+
+  test("the page promises the email only when one was actually sent", async () => {
+    seedUnverifiedCliUser();
+    await withFakeResend(async () => {
+      const res = await app.request(`/auth/verify?token=${VERIFY_TOKEN}`, {}, env());
+      expect(await res.text()).toContain("we've emailed you");
+    });
+  });
+});
+
 describe("POST /admin/approve/:username", () => {
   test("mails upload-access-granted, not the key-ready instructions", async () => {
     seedVerifiedCliUser();
