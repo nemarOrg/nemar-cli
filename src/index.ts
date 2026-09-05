@@ -36,6 +36,7 @@ import { runComplete } from "./lib/completion/run.js";
 import { NO_DESCRIPTION, NO_OPTION, YES_DESCRIPTION, YES_OPTION } from "./lib/confirm.js";
 import {
   enableDebug,
+  getLastWriteFailureReason,
   isDebugEnabled,
   markUsageExit,
   primeEnvironmentSnapshot,
@@ -47,6 +48,36 @@ import { printMaintenanceBanner } from "./lib/maintenance-banner.js";
 import { fetchAndDisplayNotices } from "./lib/notices.js";
 import { initUpdateCheck, printUpdateBanner } from "./lib/update-check.js";
 import { version } from "./lib/version.js";
+
+/**
+ * Index into `argv` (already `process.argv.slice(2)`) of the `__complete`
+ * token, or null if this is not a completion invocation. `argv[2]` alone is
+ * not reliable: a global flag typed before the subcommand (`nemar --verbose
+ * __complete -- ...`) shifts `__complete` to a later position, and checking
+ * position 2 positionally missed it entirely (#1173 review) -- the guard
+ * below never fired, so the request fell through to `initUpdateCheck()` and
+ * paid a real blocking fetch before Commander finally rejected it as an
+ * unknown command.
+ *
+ * Every global option this program declares (`--no-color`, `--verbose`,
+ * `--help-all`, `--debug`, `-v`/`--version`) is boolean, so "the first token
+ * that is not itself a flag" is unambiguous here: it is either `__complete` or the
+ * name of a subcommand. `nemar dataset get __complete` must NOT dispatch --
+ * `dataset` is that first non-flag token, and `__complete` there is just an
+ * (unusual) positional argument to `dataset get`.
+ *
+ * Defined here (moved up from further down the file) so the `--debug` exit
+ * handler below can use it too: a shell asking for completion candidates on
+ * every keystroke, combined with a `NEMAR_DEBUG=1` a user forgot was set in
+ * their shell rc, must not write a log per keystroke (see isCompletionRequest).
+ */
+function findCompletionArgsStart(argv: string[]): number | null {
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i].startsWith("-")) continue;
+    return argv[i] === "__complete" ? i : null;
+  }
+  return null;
+}
 
 // ============================================================================
 // --debug / NEMAR_DEBUG=1 diagnostic bundle (issue #1256, epic #1250 phase 6)
@@ -61,13 +92,21 @@ if (shouldEnableDebug(rawArgs)) {
   enableDebug();
 }
 
+// A persistent NEMAR_DEBUG=1 (set in a shell rc, say) combined with shell-tab
+// completion would otherwise write one log per completion request -- these
+// fire on every keystroke -- and evict real logs from the MAX_DEBUG_LOGS
+// window well before a user gets to attach one (review finding, PR #1257).
+const isCompletionRequest = findCompletionArgsStart(rawArgs) !== null;
+
 /**
  * Print the standard "how to help us help you" hint on any non-zero exit --
  * unless the command asked for machine-readable output (`--json`) or the
  * exit came from Commander itself (help/version/a usage error): those are
- * self-explanatory and don't need a bug-report nudge. If --debug was on,
- * the log path replaces the generic hint (the log already IS the artifact
- * the hint would have asked for).
+ * self-explanatory and don't need a bug-report nudge. If --debug was on and
+ * the log was written, its path replaces the generic hint (the log already
+ * IS the artifact the hint would have asked for); if --debug was on but the
+ * log could NOT be written (see getLastWriteFailureReason), the hint says so
+ * instead of telling the user to re-run with the flag they just used.
  *
  * Registered as a `process.on("exit", ...)` handler -- not tied to any one
  * of the ~270 `process.exit()` call sites across the CLI -- because that is
@@ -78,10 +117,15 @@ if (shouldEnableDebug(rawArgs)) {
  */
 process.on("exit", (code) => {
   const exitCode = code ?? 0;
-  const logPath = writeDebugLogSync(rawArgs, exitCode);
+  const logPath = isCompletionRequest ? null : writeDebugLogSync(rawArgs, exitCode);
   if (exitCode === 0 || rawArgs.includes("--json") || wasUsageExit()) return;
   if (logPath) {
     process.stderr.write(`Debug log: ${logPath}\n`);
+  } else if (isDebugEnabled()) {
+    const reason = getLastWriteFailureReason();
+    process.stderr.write(
+      `Debug log could not be written${reason ? ` (${reason})` : ""}; attach the [debug] lines above to the issue\n`,
+    );
   } else {
     process.stderr.write(
       "Run again with --debug and attach the log to a new issue: " +
@@ -213,31 +257,6 @@ if (IS_DEV_BUILD) {
   );
 }
 
-/**
- * Index into `argv` (already `process.argv.slice(2)`) of the `__complete`
- * token, or null if this is not a completion invocation. `argv[2]` alone is
- * not reliable: a global flag typed before the subcommand (`nemar --verbose
- * __complete -- ...`) shifts `__complete` to a later position, and checking
- * position 2 positionally missed it entirely (#1173 review) -- the guard
- * below never fired, so the request fell through to `initUpdateCheck()` and
- * paid a real blocking fetch before Commander finally rejected it as an
- * unknown command.
- *
- * Every global option this program declares (`--no-color`, `--verbose`,
- * `--help-all`, `--debug`, `-v`/`--version`) is boolean, so "the first token
- * that is not itself a flag" is unambiguous here: it is either `__complete` or the
- * name of a subcommand. `nemar dataset get __complete` must NOT dispatch --
- * `dataset` is that first non-flag token, and `__complete` there is just an
- * (unusual) positional argument to `dataset get`.
- */
-function findCompletionArgsStart(argv: string[]): number | null {
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i].startsWith("-")) continue;
-    return argv[i] === "__complete" ? i : null;
-  }
-  return null;
-}
-
 // Initialize update check before parsing (may block up to 5s on first run)
 async function main() {
   // Shell completion (epic #1144 phase 5b, #1149, D1). This guard does two
@@ -263,9 +282,9 @@ async function main() {
   // The budget is ~100ms and __complete must touch the network zero times --
   // not even with a timeout, since a timeout still pays DNS and connect on
   // exactly the networks where someone is offline pressing TAB.
-  const completionArgsStart = findCompletionArgsStart(process.argv.slice(2));
+  const completionArgsStart = findCompletionArgsStart(rawArgs);
   if (completionArgsStart !== null) {
-    await runComplete(program, process.argv.slice(2 + completionArgsStart + 1));
+    await runComplete(program, rawArgs.slice(completionArgsStart + 1));
     return;
   }
 
