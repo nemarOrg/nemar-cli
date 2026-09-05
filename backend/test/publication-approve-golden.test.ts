@@ -41,9 +41,16 @@ async function seed(
 ): Promise<void> {
   const datasetId = opts.datasetId ?? DATASET;
   const githubRepo = opts.githubRepo === undefined ? `nemarDatasets/${datasetId}` : opts.githubRepo;
+  // given_name/family_name are load-bearing since #1255: approval mints a DOI
+  // that cites the owner by real name, and an owner without one is refused
+  // before the step loop. This fixture is about the step machinery, so it
+  // gives the owner a name and leaves the name gate to
+  // backend/test/uploader-real-name-doi.test.ts.
   db.run(
-    `INSERT INTO users (username, email, password_hash, status, role, email_verified)
-     VALUES ('goldadmin', 'goldadmin@example.org', 'x', 'approved', 'admin', 1)`,
+    `INSERT INTO users (username, email, password_hash, status, role, email_verified,
+                        given_name, family_name)
+     VALUES ('goldadmin', 'goldadmin@example.org', 'x', 'approved', 'admin', 1,
+             'Gold', 'Admin')`,
   );
   const userId = db
     .query<{ id: number }, []>("SELECT id FROM users WHERE username='goldadmin'")

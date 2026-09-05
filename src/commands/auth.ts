@@ -20,7 +20,9 @@ import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
 import {
+  type OrcidNameResponse,
   checkGitHubUsername,
+  checkOrcidName,
   checkUsername,
   getCurrentUser,
   login,
@@ -312,6 +314,74 @@ Examples:
 // Signup
 // ============================================================================
 
+/**
+ * Look up the name on a public ORCID record, treating any failure as "no
+ * name" (#1255): the caller's next move -- ask the user to type it -- is the
+ * same for a hidden name, an unreachable backend, and a 4xx, and the backend
+ * re-reads ORCID itself when the account is created.
+ */
+async function lookupOrcidName(orcid: string): Promise<OrcidNameResponse> {
+  try {
+    return await checkOrcidName(orcid);
+  } catch {
+    // An unreachable backend is a lookup failure, not evidence about the
+    // user's record -- same distinction the endpoint itself draws.
+    return { status: "lookup_failed", given_name: null, family_name: null };
+  }
+}
+
+/**
+ * Collect the researcher's name, asking for it ONLY when ORCID does not
+ * publish one. NEMAR needs a real name because DOIs cite the uploader by name
+ * and never by username (#1255); when the record has one, nobody is asked to
+ * retype it.
+ */
+async function collectResearcherName(
+  orcid: string,
+): Promise<{ given_name?: string; family_name?: string }> {
+  const spinner = ora("Reading your name from ORCID...").start();
+  const record = await lookupOrcidName(orcid);
+  if (record.status === "found") {
+    spinner.succeed(`Name from your ORCID record: ${record.given_name} ${record.family_name}`);
+    // Deliberately not sent: the backend reads the same record itself, and
+    // the record is the authority on how this person is cited.
+    return {};
+  }
+
+  // Both remaining cases prompt, but they are different situations and the
+  // sentence says which (#1255): telling someone their record hides their
+  // name when ORCID is simply down sends them to fix nothing.
+  if (record.status === "lookup_failed") {
+    spinner.warn(
+      "ORCID is unreachable right now, so NEMAR could not read your name. Please enter it; " +
+        "if your ORCID record publishes a name, that name wins.",
+    );
+  } else {
+    spinner.info("Your ORCID record does not publish a name; NEMAR needs it for DOI citations.");
+  }
+
+  const answers = await inquirer.prompt([
+    {
+      type: "input",
+      name: "given_name",
+      message: "Given (first) name:",
+      validate: (input: string) =>
+        input?.trim() ? true : "A given name is required: DOIs cite you by name, not by username",
+    },
+    {
+      type: "input",
+      name: "family_name",
+      message: "Family (last) name:",
+      validate: (input: string) =>
+        input?.trim() ? true : "A family name is required: DOIs cite you by name, not by username",
+    },
+  ]);
+  return {
+    given_name: answers.given_name.trim(),
+    family_name: answers.family_name.trim(),
+  };
+}
+
 /** Exported signup action handler for use in root-level shortcuts */
 export async function signupAction(): Promise<void> {
   console.log(chalk.cyan("NEMAR Account Registration"));
@@ -435,6 +505,12 @@ export async function signupAction(): Promise<void> {
         return true;
       },
     },
+  ]);
+
+  // Right after the ORCID prompt, because ORCID is where the name comes from.
+  const researcherName = await collectResearcherName(answers.orcid.trim());
+
+  const rest = await inquirer.prompt([
     {
       type: "input",
       name: "affiliation",
@@ -480,11 +556,12 @@ export async function signupAction(): Promise<void> {
       email: answers.email,
       password: answers.password,
       github_username: answers.github_username,
-      description: answers.description.trim(),
+      description: rest.description.trim(),
       orcid: answers.orcid.trim(),
-      affiliation: answers.affiliation?.trim() || undefined,
-      city: answers.city.trim(),
-      country: answers.country.trim(),
+      ...researcherName,
+      affiliation: rest.affiliation?.trim() || undefined,
+      city: rest.city.trim(),
+      country: rest.country.trim(),
     });
 
     spinner.succeed("Account created");
@@ -495,6 +572,22 @@ export async function signupAction(): Promise<void> {
     result.next_steps.forEach((step, i) => {
       console.log(`  ${i + 1}. ${step}`);
     });
+    // The server is the only party that knows whether the name actually
+    // landed on the row; say so loudly rather than leaving it to publish time.
+    if (result.researcher_name === "missing") {
+      console.log();
+      console.log(
+        chalk.yellow(
+          "No researcher name is on file for this account. DOIs cite depositors by name, " +
+            "never by username, so publishing stays blocked until one is recorded.",
+        ),
+      );
+      console.log(
+        chalk.dim(
+          "  Make your name public on your ORCID record, then sign in again so NEMAR can read it.",
+        ),
+      );
+    }
     console.log();
     console.log(chalk.dim("Once approved, use 'nemar auth retrieve-key' to get your API key"));
   } catch (error) {

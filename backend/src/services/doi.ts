@@ -11,7 +11,7 @@
 
 import { datasetLandingUrl, datasetVersionLandingUrl } from "../../../shared/datacite-constants.js";
 import type { BidsDatasetDescription, DataCiteEnrichment } from "./datacite";
-import { bidsToDataCite, buildDataCiteXml } from "./datacite";
+import { authorMatchesUploader, bidsToDataCite, buildDataCiteXml } from "./datacite";
 import { resolveDatasetLandingBase } from "./environment.js";
 import {
   type EzidAuth,
@@ -25,6 +25,7 @@ import {
   makePublic,
   updateIdentifier,
 } from "./ezid";
+import type { UploaderIdentity } from "./uploader-identity";
 import { type ZenodoMetadata, createDeposition, getPrereservedDoi } from "./zenodo";
 
 export type DoiProvider = "ezid" | "zenodo";
@@ -50,10 +51,24 @@ export interface CreateConceptDoiOptions {
   bidsDescription?: BidsDatasetDescription | Record<string, unknown>;
   /** Pre-built enrichment from .nemar/metadata.json (if available) */
   enrichment?: DataCiteEnrichment;
-  /** Uploader's ORCID for auto-injection into creators */
-  uploaderOrcid?: string;
-  /** Uploader's name (used for ORCID matching against BIDS authors, and as Zenodo creator) */
-  uploaderName: string;
+  /**
+   * The uploader's citable identity: real name (for the DataCurator
+   * contributor, the ORCID-vs-BIDS-Authors match, and the Zenodo creator)
+   * plus their ORCID. `null`/absent when the account has no real name (#1255).
+   */
+  uploader?: UploaderIdentity | null;
+  /**
+   * Whether this mint MUST carry an uploader identity.
+   *
+   * Derived by the caller from `requiresUploaderName(dataset)` — true for a
+   * researcher deposit, false for an OpenNeuro import or an exemplar, whose
+   * owner row is a service account. When true and `uploader` is null this
+   * function THROWS rather than minting an unattributed permanent record
+   * (#1255 review item 8): the route guards exist to give the operator a
+   * readable 422, but the rule is enforced here so a fourth caller cannot
+   * forget it.
+   */
+  uploaderRequired?: boolean;
   sandbox?: boolean;
 }
 
@@ -75,21 +90,21 @@ export interface ZenodoEnv {
 }
 
 /**
- * Build DataCite enrichment with ORCID matched to a BIDS author entry.
- * Matches the uploader name against the BIDS Authors list (case-insensitive substring).
- * Always passes uploaderName/uploaderOrcid through so bidsToDataCite can add
- * the uploader as a DataCurator contributor when they are not a BIDS author.
+ * Build DataCite enrichment with the uploader's ORCID matched to a BIDS
+ * author entry.
+ *
+ * Always passes the uploader's real name and ORCID through so bidsToDataCite
+ * can add them as a DataCurator contributor when they are not a BIDS author.
+ * A null identity (the account has no `given_name`/`family_name`) yields an
+ * empty enrichment: no username substitute, and no ORCID attached to an
+ * author we cannot confidently identify.
  */
 export function buildOrcidEnrichment(
   bidsDescription?: BidsDatasetDescription | Record<string, unknown>,
-  uploaderName?: string,
-  uploaderOrcid?: string,
+  uploader?: UploaderIdentity | null,
 ): DataCiteEnrichment {
-  const enrichment: DataCiteEnrichment = {};
-  if (uploaderName) enrichment.uploaderName = uploaderName;
-  if (uploaderOrcid) enrichment.uploaderOrcid = uploaderOrcid;
-
-  if (!uploaderOrcid || !bidsDescription || !uploaderName) {
+  const enrichment: DataCiteEnrichment = { uploader: uploader ?? null };
+  if (!uploader?.orcid || !bidsDescription) {
     return enrichment;
   }
 
@@ -97,14 +112,10 @@ export function buildOrcidEnrichment(
   if (!Array.isArray(authors)) return enrichment;
 
   const authorList = authors.filter((a): a is string => typeof a === "string");
-  const uploaderLower = uploaderName.toLowerCase();
-
-  // Use word-boundary matching to avoid false positives (e.g., "li" matching "Elizabeth")
-  const boundary = new RegExp(`\\b${uploaderLower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
-  const matched = authorList.find((a) => boundary.test(a));
+  const matched = authorList.find((a) => authorMatchesUploader(a, uploader));
   if (!matched) return enrichment;
 
-  enrichment.authors = { [matched]: { orcid: uploaderOrcid } };
+  enrichment.authors = { [matched]: { orcid: uploader.orcid } };
   return enrichment;
 }
 
@@ -160,17 +171,35 @@ export function buildVersionIdentifier(
   return `${resolveShoulder(sandbox)}${datasetId.toUpperCase()}.V${version.toUpperCase()}`;
 }
 
+/**
+ * Refuse to mint when the caller said an uploader identity is required and
+ * none was resolved. Shared by both provider branches so the rule cannot hold
+ * on one and not the other.
+ */
+function assertUploaderPresent(options: CreateConceptDoiOptions, provider: string): void {
+  if (options.uploaderRequired && !options.uploader) {
+    throw new Error(
+      `Refusing to mint a ${provider} DOI for ${options.datasetId}: the uploader has no researcher name on file, and a DOI must not cite a username (#1255).`,
+    );
+  }
+}
+
 async function createEzidConceptDoi(
   options: CreateConceptDoiOptions,
   env: EzidEnv,
 ): Promise<DoiResult> {
+  assertUploaderPresent(options, "EZID");
   const auth = resolveEzidAuth(env, options.sandbox);
 
-  // Use pre-built enrichment from .nemar/metadata.json when available,
-  // otherwise fall back to minimal ORCID-only enrichment
+  // Enrichment from .nemar/metadata.json when available, else the minimal
+  // ORCID-matching enrichment. Either way the UPLOADER comes from
+  // `options.uploader` and nowhere else: an enrichment file is user-supplied
+  // repo content and must not be able to name the depositor (before #1255
+  // review item 7 a pre-built enrichment silently won over the resolved
+  // identity, so a stale file could keep citing an old name).
   const enrichment: DataCiteEnrichment = options.enrichment
-    ? { ...options.enrichment }
-    : buildOrcidEnrichment(options.bidsDescription, options.uploaderName, options.uploaderOrcid);
+    ? { ...options.enrichment, uploader: options.uploader ?? null }
+    : buildOrcidEnrichment(options.bidsDescription, options.uploader);
 
   // Use enriched description if available, otherwise fall back to request/database
   if (!enrichment.description && options.datasetDescription) {
@@ -223,10 +252,22 @@ async function createZenodoConceptDoi(
     );
   }
 
+  // The Zenodo creator is the uploader, cited by real name like every other
+  // provider (#1255). Refuse rather than deposit a record whose sole creator
+  // is a login handle or an empty string. Unlike EZID this is unconditional:
+  // the creator is a MANDATORY Zenodo field, so there is no "mint it
+  // unattributed" option to fall back to even for an exempt deposit.
+  assertUploaderPresent(options, "Zenodo");
+  if (!options.uploader) {
+    throw new Error(
+      "Cannot create a Zenodo deposition: the uploader has no researcher name on file",
+    );
+  }
+
   const metadata: ZenodoMetadata = {
     title: `${options.datasetName} - BIDS Dataset`,
     description: options.datasetDescription || `BIDS-formatted dataset: ${options.datasetName}`,
-    creators: [{ name: options.uploaderName }],
+    creators: [{ name: options.uploader.name }],
     keywords: ["BIDS", "neuroscience", "neuroimaging", "NEMAR"],
     license: "cc-by-nc-4.0",
     related_identifiers: options.githubRepo

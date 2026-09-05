@@ -25,7 +25,24 @@ import {
   seedFromBids,
   validateLlmResultV2,
 } from "../backend/src/services/llm-enrich";
+import {
+  type UploaderIdentity,
+  resolveUploaderIdentity,
+} from "../backend/src/services/uploader-identity";
 import type { NemarMetadataV2 } from "../shared/datacite-constants";
+
+/** Built the way production builds it (from the owner row), so these tests
+ *  exercise the real given/family -> "Family, Given" derivation and its
+ *  trimming rather than a hand-assembled object. */
+function identity(given: string, family: string, orcid?: string): UploaderIdentity {
+  const resolved = resolveUploaderIdentity({
+    given_name: given,
+    family_name: family,
+    orcid: orcid ?? null,
+  });
+  if (!resolved) throw new Error("test setup: identity should resolve");
+  return resolved;
+}
 
 describe("parseAuthorName", () => {
   test("parses Last, First format", () => {
@@ -548,38 +565,90 @@ describe("bidsToDataCite", () => {
     expect(metadata.contributors?.[0]?.name).toContain("NEMAR");
   });
 
-  test("adds uploader as DataCurator when not in BIDS Authors", () => {
+  test("adds uploader as DataCurator, cited by real name", () => {
     const bids = { Name: "Test", Authors: ["Smith, John"] };
     const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
-      uploaderName: "jane",
+      uploader: identity("Jane", "Doe"),
     });
     const curator = metadata.contributors?.find((c) => c.contributorType === "DataCurator");
     expect(curator).toBeDefined();
-    expect(curator?.name).toBe("jane");
+    expect(curator?.name).toBe("Doe, Jane");
     expect(curator?.nameType).toBe("Personal");
+    expect(curator?.givenName).toBe("Jane");
+    expect(curator?.familyName).toBe("Doe");
+  });
+
+  test("DataCurator XML carries contributorName plus given/family children", () => {
+    const bids = { Name: "Test", Authors: ["Smith, John"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploader: identity("Jane", "Doe"),
+    });
+    const xml = buildDataCiteXml(metadata);
+    expect(xml).toContain('<contributor contributorType="DataCurator">');
+    expect(xml).toContain('<contributorName nameType="Personal">Doe, Jane</contributorName>');
+    expect(xml).toContain("<givenName>Jane</givenName>");
+    expect(xml).toContain("<familyName>Doe</familyName>");
+    // Kernel-4 sequence: contributorName, then givenName, then familyName.
+    expect(xml.indexOf("<contributorName")).toBeLessThan(xml.indexOf("<givenName>Jane"));
+    expect(xml.indexOf("<givenName>Jane")).toBeLessThan(xml.indexOf("<familyName>Doe"));
+  });
+
+  test("DataCurator name parts are XML-escaped", () => {
+    // A DataCite document with a raw & or < in a name is not well-formed XML
+    // and EZID rejects the whole identifier. Apostrophes are legal in text
+    // content and must survive readably rather than being mangled.
+    const bids = { Name: "Test", Authors: ["Smith, John"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploader: identity("A<n & Co", "O'Brien"),
+    });
+    const xml = buildDataCiteXml(metadata);
+
+    expect(xml).toContain("<givenName>A&lt;n &amp; Co</givenName>");
+    expect(xml).toContain("<familyName>O&apos;Brien</familyName>");
+    expect(xml).toContain(
+      '<contributorName nameType="Personal">O&apos;Brien, A&lt;n &amp; Co</contributorName>',
+    );
+    // No raw markup-significant characters escaped into existence anywhere.
+    expect(xml).not.toContain("A<n & Co");
   });
 
   test("does NOT add DataCurator when uploader IS a BIDS author", () => {
     const bids = { Name: "Test", Authors: ["Doe, Jane"] };
     const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
-      uploaderName: "jane",
+      uploader: identity("Jane", "Doe"),
     });
     const curators = metadata.contributors?.filter((c) => c.contributorType === "DataCurator");
     expect(curators).toHaveLength(0);
   });
 
-  test("does NOT add DataCurator when uploaderName is absent", () => {
+  test("does NOT add DataCurator when the author is spelled given-name-first", () => {
+    const bids = { Name: "Test", Authors: ["Jane Doe"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploader: identity("Jane", "Doe"),
+    });
+    const curators = metadata.contributors?.filter((c) => c.contributorType === "DataCurator");
+    expect(curators).toHaveLength(0);
+  });
+
+  test("does NOT add DataCurator when the enrichment has no uploader", () => {
     const bids = { Name: "Test", Authors: ["Doe, Jane"] };
     const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {});
     const curators = metadata.contributors?.filter((c) => c.contributorType === "DataCurator");
     expect(curators).toHaveLength(0);
   });
 
-  test("DataCurator includes ORCID when uploaderOrcid is set", () => {
+  test("does NOT add DataCurator when the uploader is explicitly null", () => {
+    // The shape an account with no citable name produces.
+    const bids = { Name: "Test", Authors: ["Doe, Jane"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, { uploader: null });
+    const curators = metadata.contributors?.filter((c) => c.contributorType === "DataCurator");
+    expect(curators).toHaveLength(0);
+  });
+
+  test("DataCurator includes ORCID when the identity carries one", () => {
     const bids = { Name: "Test", Authors: ["Smith, John"] };
     const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
-      uploaderName: "jane",
-      uploaderOrcid: "0000-0002-1825-0097",
+      uploader: identity("Jane", "Doe", "0000-0002-1825-0097"),
     });
     const curator = metadata.contributors?.find((c) => c.contributorType === "DataCurator");
     expect(curator?.orcid).toBe("0000-0002-1825-0097");
@@ -588,38 +657,62 @@ describe("bidsToDataCite", () => {
     expect(xml).toContain('nameIdentifierScheme="ORCID"');
   });
 
-  test("DataCurator appears in generated DataCite XML", () => {
+  test("DataCurator without an ORCID emits no nameIdentifier", () => {
     const bids = { Name: "Test", Authors: ["Smith, John"] };
     const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
-      uploaderName: "jane",
-    });
-    const xml = buildDataCiteXml(metadata);
-    expect(xml).toContain("DataCurator");
-    expect(xml).toContain("jane");
-  });
-
-  test("DataCurator uses word-boundary matching to avoid false positives", () => {
-    const bids = { Name: "Test", Authors: ["Elizabeth, Chen"] };
-    // "li" is a substring of "Elizabeth" but should NOT match on word boundary
-    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
-      uploaderName: "li",
+      uploader: identity("Jane", "Doe"),
     });
     const curator = metadata.contributors?.find((c) => c.contributorType === "DataCurator");
-    expect(curator).toBeDefined();
-    expect(curator?.name).toBe("li");
+    expect(curator?.orcid).toBeUndefined();
+    expect(buildDataCiteXml(metadata)).not.toContain("nameIdentifier");
   });
 
-  test("DataCurator name is trimmed when uploaderName has surrounding whitespace", () => {
+  test("family-name overlap alone does not suppress the DataCurator", () => {
+    // Both parts must match: a same-family-name colleague in the author list
+    // is not the uploader, so the uploader is still credited as curator.
+    const bids = { Name: "Test", Authors: ["Doe, John"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploader: identity("Jane", "Doe"),
+    });
+    const curator = metadata.contributors?.find((c) => c.contributorType === "DataCurator");
+    expect(curator?.name).toBe("Doe, Jane");
+  });
+
+  test("a short name part does not match inside a longer word", () => {
+    // The word-boundary case that predates #1255 and survives the two-part
+    // matcher: "Li" occurs inside "Elizabeth" and "Wang" inside "Wangler",
+    // but neither is this person, so the curator is still added.
+    const bids = { Name: "Test", Authors: ["Elizabeth Wangler"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploader: identity("Li", "Wang"),
+    });
+    const curator = metadata.contributors?.find((c) => c.contributorType === "DataCurator");
+    expect(curator?.name).toBe("Wang, Li");
+  });
+
+  test("a short name part DOES match when it stands as its own word", () => {
+    // The other half of the boundary rule: the same identity against an
+    // author who really is that person must suppress the curator.
+    const bids = { Name: "Test", Authors: ["Wang, Li"] };
+    const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
+      uploader: identity("Li", "Wang"),
+    });
+    const curators = metadata.contributors?.filter((c) => c.contributorType === "DataCurator");
+    expect(curators).toHaveLength(0);
+  });
+
+  test("surrounding whitespace on the owner columns never reaches the XML", () => {
+    // Trimming is resolveUploaderIdentity's job now, so this drives it from
+    // the padded column values a D1 row could really hold.
     const bids = { Name: "Test", Authors: ["Smith, John"] };
     const metadata = bidsToDataCite("nm000104", "10.82901/NEMAR.test", bids, {
-      uploaderName: "  yahya  ",
+      uploader: identity("  Jane  ", "  Doe  "),
     });
     const curator = metadata.contributors?.find((c) => c.contributorType === "DataCurator");
-    expect(curator).toBeDefined();
-    expect(curator?.name).toBe("yahya");
+    expect(curator?.name).toBe("Doe, Jane");
     const xml = buildDataCiteXml(metadata);
-    expect(xml).not.toContain("  yahya  ");
-    expect(xml).toContain("yahya");
+    expect(xml).not.toContain("  Jane  ");
+    expect(xml).toContain("<givenName>Jane</givenName>");
   });
 
   test("adds BIDS and neuroscience as default subjects", () => {

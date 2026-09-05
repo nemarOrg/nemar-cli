@@ -44,6 +44,13 @@ import {
 import { getDatasetsToken } from "../../services/github-auth";
 import { errorMessage, extractRepoName, readRepoMetadata } from "../../services/repo-metadata";
 import {
+  OWNER_NAME_MISSING_MESSAGE,
+  OWNER_NAME_MISSING_REASON,
+  refreshWouldStripAttribution,
+  requiresUploaderName,
+  resolveOwnerIdentity,
+} from "../../services/uploader-identity";
+import {
   type ZenodoDeposition,
   createNewVersion,
   deleteDeposition,
@@ -93,7 +100,8 @@ export function registerDoiRoutes(admin: AdminRouter): void {
     const dataset = await db
       .prepare(
         `
-    SELECT d.*, u.username as owner_username, u.orcid as owner_orcid
+    SELECT d.*, u.username as owner_username, u.orcid as owner_orcid,
+           u.given_name as owner_given_name, u.family_name as owner_family_name
     FROM datasets d
     JOIN users u ON d.owner_user_id = u.id
     WHERE d.dataset_id = ?
@@ -111,6 +119,9 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         ezid_status: string | null;
         owner_username: string;
         owner_orcid: string | null;
+        owner_given_name: string | null;
+        owner_family_name: string | null;
+        source: string | null;
         is_sandbox: number | null;
         is_exemplar: number | null;
         enrichment_json: string | null;
@@ -151,6 +162,12 @@ export function registerDoiRoutes(admin: AdminRouter): void {
       );
     }
 
+    // Resolved ONCE per request and threaded from here (#1255 review item 7):
+    // the guard below, the enrichment, and the mint options all read the same
+    // value, so they cannot disagree about who the uploader is.
+    const uploader = resolveOwnerIdentity(dataset);
+    const nameRequired = requiresUploaderName(dataset);
+
     // Check if dataset already has a DOI (before environment checks for clearer errors)
     if (dataset.concept_doi) {
       return c.json(
@@ -162,6 +179,28 @@ export function registerDoiRoutes(admin: AdminRouter): void {
             : null,
         },
         400,
+      );
+    }
+
+    // Real-name precondition (#1255). A concept DOI is permanent, and the
+    // uploader is cited on it as DataCurator by real name; minting for an
+    // account with no name would silently drop that attribution. Refuse
+    // instead, and name the way the owner can supply it. OpenNeuro imports
+    // and exemplars are exempt (see requiresUploaderName).
+    //
+    // Deliberately AFTER the already-has-a-DOI check: re-invoking on a minted
+    // dataset is a no-op, and reporting a name problem there would send an
+    // admin off to fix something that changes nothing (review item 23).
+    if (nameRequired && !uploader) {
+      return c.json(
+        {
+          error: "Owner has no researcher name on file",
+          block_reason: OWNER_NAME_MISSING_REASON,
+          message: OWNER_NAME_MISSING_MESSAGE,
+          dataset_id: dataset.dataset_id,
+          owner_username: dataset.owner_username,
+        },
+        422,
       );
     }
 
@@ -260,11 +299,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
     if (dataset.github_repo) {
       const repoName = extractRepoName(dataset.github_repo);
       if (repoName) {
-        const baseEnrichment = buildOrcidEnrichment(
-          undefined,
-          dataset.owner_username,
-          dataset.owner_orcid || undefined,
-        );
+        const baseEnrichment = buildOrcidEnrichment(undefined, uploader);
         const repoMeta = await readRepoMetadata(
           repoName,
           await getDatasetsToken(c.env),
@@ -292,8 +327,8 @@ export function registerDoiRoutes(admin: AdminRouter): void {
           githubRepo: dataset.github_repo,
           bidsDescription,
           enrichment: repoEnrichment,
-          uploaderOrcid: dataset.owner_orcid || undefined,
-          uploaderName: dataset.owner_username,
+          uploader,
+          uploaderRequired: nameRequired,
           sandbox: body.sandbox,
         },
         {
@@ -627,8 +662,9 @@ export function registerDoiRoutes(admin: AdminRouter): void {
       .prepare(
         `
       SELECT d.dataset_id, d.concept_doi, d.ezid_status,
-             d.github_repo, d.name, d.is_sandbox,
-             u.username as owner_username, u.orcid as owner_orcid
+             d.github_repo, d.name, d.is_sandbox, d.source, d.is_exemplar,
+             u.username as owner_username, u.orcid as owner_orcid,
+             u.given_name as owner_given_name, u.family_name as owner_family_name
       FROM datasets d
       JOIN users u ON d.owner_user_id = u.id
       WHERE d.dataset_id = ?
@@ -642,8 +678,12 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         github_repo: string | null;
         name: string;
         is_sandbox: number | null;
+        source: string | null;
+        is_exemplar: number | null;
         owner_username: string;
         owner_orcid: string | null;
+        owner_given_name: string | null;
+        owner_family_name: string | null;
       }>();
 
     if (!dataset) {
@@ -683,8 +723,38 @@ export function registerDoiRoutes(admin: AdminRouter): void {
       let metadataRefreshed = false;
       const warnings: string[] = [];
 
+      // A refresh rebuilds the WHOLE DataCite document from live state, so an
+      // owner with no researcher name would produce one with no DataCurator
+      // and silently delete the curator from a permanent record (#1255).
+      // Decline the refresh rather than push that; a status-only change is
+      // unaffected and still proceeds.
+      const refreshUploader = resolveOwnerIdentity(dataset);
+      const attributionSkip =
+        body.refresh_metadata && refreshWouldStripAttribution(dataset, refreshUploader);
+      if (attributionSkip) {
+        console.error(
+          `[doi/update] ATTRIBUTION SKIP ${datasetId}: refusing to refresh DOI metadata; the owner has no researcher name on file, so the rebuilt record would drop the existing DataCurator. Run \`nemar admin backfill-names --apply\` first.`,
+        );
+        if (!body.status) {
+          // Nothing left to do: refusing the refresh IS the whole outcome, so
+          // report it as a refusal rather than a no-op success.
+          return c.json(
+            {
+              error: "Refusing to refresh DOI metadata without an uploader name",
+              metadata_refresh: {
+                status: "skipped" as const,
+                reason: OWNER_NAME_MISSING_REASON,
+              },
+              message: OWNER_NAME_MISSING_MESSAGE,
+              dataset_id: datasetId,
+            },
+            422,
+          );
+        }
+      }
+
       // Refresh metadata from BIDS
-      if (body.refresh_metadata) {
+      if (body.refresh_metadata && !attributionSkip) {
         if (!dataset.github_repo) {
           return c.json(
             { error: "Cannot refresh metadata: dataset has no GitHub repository" },
@@ -716,11 +786,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         }
         const bidsDesc = parsed as Record<string, unknown>;
         const doi = extractDoi(conceptIdentifier);
-        let enrichment = buildOrcidEnrichment(
-          bidsDesc,
-          dataset.owner_username,
-          dataset.owner_orcid || undefined,
-        );
+        let enrichment = buildOrcidEnrichment(bidsDesc, refreshUploader);
 
         // Read enrichment metadata (.nemar/metadata.json first, fall back to nemar_metadata.json)
         const nemarMetaFile =
@@ -782,7 +848,12 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         .bind(updated.status, datasetId)
         .run();
 
-      // Also refresh version DOIs if metadata was refreshed
+      // Also refresh version DOIs if metadata was refreshed.
+      //
+      // `metadataRefreshed` is only ever set inside the refresh branch above,
+      // which the attribution guard skips wholesale, so a nameless owner can
+      // never reach the per-version rebuild either (#1255 review item 2). The
+      // version DOIs keep the curator their last good refresh gave them.
       let versionDoiUpdated = 0;
       if (metadataRefreshed) {
         const versions = await db
@@ -807,11 +878,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
             const content = await getBlobContent(repoName, descFile.sha, pat);
             const bidsDesc = JSON.parse(content) as Record<string, unknown>;
 
-            let vEnrichment = buildOrcidEnrichment(
-              bidsDesc,
-              dataset.owner_username,
-              dataset.owner_orcid || undefined,
-            );
+            let vEnrichment = buildOrcidEnrichment(bidsDesc, refreshUploader);
             const nemarMetaFile =
               tree.find((f) => f.path === ".nemar/metadata.json") ||
               tree.find((f) => f.path === "nemar_metadata.json");
@@ -851,6 +918,17 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         status: updated.status,
         doi_url: `https://doi.org/${extractDoi(conceptIdentifier)}`,
         metadata_refreshed: metadataRefreshed,
+        // Typed, so a caller that asked for a refresh and got a status-only
+        // update can tell WHY the metadata is unchanged (#1255).
+        ...(attributionSkip
+          ? {
+              metadata_refresh: {
+                status: "skipped" as const,
+                reason: OWNER_NAME_MISSING_REASON,
+                message: OWNER_NAME_MISSING_MESSAGE,
+              },
+            }
+          : {}),
         version_dois_updated: versionDoiUpdated,
         ...(warnings.length > 0 ? { warnings } : {}),
       });

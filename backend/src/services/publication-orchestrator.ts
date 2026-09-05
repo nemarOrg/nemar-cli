@@ -57,6 +57,12 @@ import {
   uploadManifest,
   waitForPublicPropagation,
 } from "./s3";
+import {
+  OWNER_NAME_MISSING_MESSAGE,
+  OWNER_NAME_MISSING_REASON,
+  requiresUploaderName,
+  resolveOwnerIdentity,
+} from "./uploader-identity";
 
 export { PUBLICATION_STEPS };
 export type { PublicationStep };
@@ -235,9 +241,14 @@ export interface ApproveDataset {
   zenodo_concept_id: string | null;
   ezid_status: string | null;
   is_sandbox: number | null;
+  is_exemplar: number | null;
+  source: string | null;
   owner_username: string;
   owner_email: string;
   owner_orcid: string | null;
+  /** Real name for DOI attribution (#1255); the username is never cited. */
+  owner_given_name: string | null;
+  owner_family_name: string | null;
 }
 
 interface ApproveHelpers {
@@ -837,8 +848,11 @@ async function stepDoiCreate(c: ApproveStepContext): Promise<RespondOutcome | un
               githubRepo: dataset.github_repo,
               bidsDescription: bidsDesc,
               enrichment,
-              uploaderOrcid: dataset.owner_orcid || undefined,
-              uploaderName: dataset.owner_username,
+              // The approval entry point already refused a required-but-missing
+              // identity; passing the flag makes doi.ts enforce it too, so a
+              // future caller of this step cannot skip the rule (#1255).
+              uploader: resolveOwnerIdentity(dataset),
+              uploaderRequired: requiresUploaderName(dataset),
               sandbox,
             },
             {
@@ -1812,7 +1826,8 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // Get dataset info
   const dataset = await db
     .prepare(
-      `SELECT d.*, u.username as owner_username, u.email as owner_email, u.orcid as owner_orcid
+      `SELECT d.*, u.username as owner_username, u.email as owner_email, u.orcid as owner_orcid,
+            u.given_name as owner_given_name, u.family_name as owner_family_name
      FROM datasets d
      JOIN users u ON d.owner_user_id = u.id
      WHERE d.dataset_id = ?`,
@@ -1829,9 +1844,12 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
       ezid_status: string | null;
       is_sandbox: number | null;
       is_exemplar: number | null;
+      source: string | null;
       owner_username: string;
       owner_email: string;
       owner_orcid: string | null;
+      owner_given_name: string | null;
+      owner_family_name: string | null;
     }>();
 
   if (!dataset) {
@@ -1847,6 +1865,48 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
         dataset_id: datasetId,
       },
       400,
+    );
+  }
+
+  // Real-name precondition (#1255). Publishing mints a concept DOI, and a DOI
+  // is permanent: once EZID has the record, an unattributed or wrongly
+  // attributed curator cannot be recalled, only updated. So the check happens
+  // here, before the first step runs, rather than at doi_create in the middle
+  // of a 16-step run that has already flipped visibility.
+  //
+  // The request row is walked back to 'blocked' with the reason: this
+  // function set it to 'approving' a few lines up, and a row left there is
+  // unreachable for the user (POST /publish/request 409s on a non-blocked
+  // active request), so the owner could not re-request after fixing their
+  // name. Every other early return here fails on something only an admin can
+  // fix; this one fails on something the OWNER fixes and then retries.
+  if (requiresUploaderName(dataset) && !resolveOwnerIdentity(dataset)) {
+    // The walk-back is best-effort and MUST NOT replace the 422 with a 500:
+    // an unguarded throw here would strand the row at 'approving', which is
+    // precisely the unreachable state this code exists to prevent. If it
+    // fails, the operator still gets the reason and the marker below tells
+    // them the row needs unsticking by hand.
+    try {
+      await db
+        .prepare(
+          "UPDATE publication_requests SET status = 'blocked', block_reason = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(OWNER_NAME_MISSING_REASON, request.id)
+        .run();
+    } catch (walkBackErr) {
+      console.error(
+        `[publish] BLOCK WALKBACK FAILED for ${datasetId} (request ${request.id}): the row is still 'approving' and the owner cannot re-request until it is set to 'blocked':`,
+        walkBackErr,
+      );
+    }
+    return c.json(
+      {
+        status: "blocked",
+        block_reason: OWNER_NAME_MISSING_REASON,
+        message: OWNER_NAME_MISSING_MESSAGE,
+        dataset_id: datasetId,
+      },
+      422,
     );
   }
 

@@ -32,6 +32,7 @@ import {
   type AvailabilityReport,
   type AvailabilityReportResult,
   type AvailabilityReportSweepBatchResponse,
+  type BackfillNamesResponse,
   type DataIntegritySweepBatchResponse,
   type DatasetTransitionResponse,
   type DoctorFixLiveResponse,
@@ -54,6 +55,7 @@ import {
   availabilityReport,
   availabilityReportSweep,
   availabilityReportSweepReset,
+  backfillUserNames,
   bulkDeleteDatasets,
   changeUserRole,
   changeVisibility,
@@ -157,6 +159,17 @@ import {
   resolveWithdrawTargets,
 } from "../lib/withdrawn-datasets.js";
 
+/**
+ * Hints keyed on a publication `block_reason`, which outrank the status-code
+ * hint: a 422 from the publish paths is not always a CI problem, and telling
+ * an admin to "fix the CI issues" when the real problem is a missing
+ * researcher name sends them to the wrong place entirely (#1255).
+ */
+const BLOCK_REASON_HINTS: Record<string, string> = {
+  owner_name_missing:
+    "Run `nemar admin backfill-names --apply` if the owner's ORCID record publishes their name; otherwise the owner must make it public on ORCID and sign in again (name entry on nemar.org arrives with #1253).",
+};
+
 /** Handle common error patterns in admin CLI commands */
 function handleCommandError(
   error: unknown,
@@ -166,7 +179,8 @@ function handleCommandError(
 ): void {
   if (error instanceof ApiError) {
     spinner.fail(error.message);
-    const hint = hints?.[error.statusCode];
+    const reasonHint = error.blockReason ? BLOCK_REASON_HINTS[error.blockReason] : undefined;
+    const hint = reasonHint ?? hints?.[error.statusCode];
     if (hint) {
       console.log(chalk.dim(`  ${hint}`));
     } else if (error.statusCode === 403) {
@@ -6492,3 +6506,91 @@ zarrCatalogCommand
   });
 
 adminCommand.addCommand(zarrCatalogCommand);
+
+// ============================================================================
+// Researcher-name backfill (#1255, epic #1250)
+//
+// DOIs cite the uploader by real name and publishing is blocked without one,
+// but most accounts predate the signup-time ORCID name lookup. This fills the
+// gap from each account's own public ORCID record.
+// ============================================================================
+
+const backfillNamesCommand = new Command("backfill-names").description(
+  "Fill missing researcher names from users' public ORCID records (dry run by default)",
+);
+
+backfillNamesCommand
+  .option("--apply", "Write the names (without this flag, only report what would change)")
+  .option("--limit <n>", "Users per batch (server clamps to [1,100])", "25")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { apply?: boolean; limit?: string; json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const limit = Number.parseInt(options.limit ?? "25", 10) || 25;
+    const apply = options.apply === true;
+    const spinner = ora(
+      apply ? "Backfilling names from ORCID..." : "Checking ORCID for missing names...",
+    ).start();
+
+    let res: BackfillNamesResponse;
+    try {
+      res = await backfillUserNames({ apply, limit });
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Name backfill failed");
+      console.error(chalk.red(errorDetail(err)));
+      process.exit(1);
+      return;
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    console.log();
+    if (!res.apply) {
+      console.log(chalk.yellow("DRY RUN — nothing was written. Re-run with --apply."));
+    }
+    console.log(
+      chalk.cyan(
+        `scanned=${res.scanned} ${res.apply ? "filled" : "would_fill"}=${
+          res.apply ? res.filled : res.would_fill
+        } no_public_name=${res.no_public_name} lookup_failed=${res.lookup_failed} remaining=${
+          res.remaining ?? "unknown"
+        }`,
+      ),
+    );
+    for (const r of res.results) {
+      const who = r.username ?? `id ${r.id} <${r.email}>`;
+      if (r.outcome === "filled" || r.outcome === "would_fill") {
+        const verb = r.outcome === "filled" ? chalk.green("filled  ") : chalk.cyan("would fill");
+        console.log(`  ${verb} ${who}: ${r.given_name} ${r.family_name}  (${r.orcid})`);
+      } else if (r.outcome === "no_public_name") {
+        console.log(
+          `  ${chalk.yellow("no name ")} ${who}: ORCID ${r.orcid} does not publish a full name`,
+        );
+      } else {
+        console.log(`  ${chalk.red("error   ")} ${who}: ${r.error}`);
+      }
+    }
+    // `remaining=unknown` above means the count query itself failed; say what
+    // failed rather than leaving the operator to guess (#1255 review item 28).
+    if (res.warning) {
+      console.log(chalk.yellow(`  Warning: ${res.warning}`));
+    }
+    if (res.no_public_name > 0) {
+      console.log();
+      console.log(
+        chalk.dim(
+          "These accounts must make their name public on their ORCID record and sign in again; NEMAR cannot type a name in for them (ORCID is canonical until #1253 lands profile editing).",
+        ),
+      );
+    }
+    // A lookup failure leaves the row a candidate for the next run, and an
+    // unknown remainder means the batch's own bookkeeping failed. Neither is
+    // fatal, but a caller must not read either as a clean sweep.
+    if (res.lookup_failed > 0 || res.remaining === null) process.exitCode = 1;
+  });
+
+adminCommand.addCommand(backfillNamesCommand);

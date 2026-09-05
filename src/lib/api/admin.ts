@@ -11,6 +11,7 @@ import {
   type AdminUsersListResponse,
   adminUsersListResponseSchema,
 } from "../../../shared/contract/index.js";
+import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
 import { request } from "./client.js";
 
 // ============================================================================
@@ -1460,6 +1461,56 @@ export async function zarrFidelitySweep(options?: {
   return request<ZarrFidelitySweepBatchResponse>(
     `/admin/datasets/zarr-fidelity-sweep${query}`,
     { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+// ============================================================================
+// Researcher-name backfill (#1255, epic #1250)
+// ============================================================================
+
+export interface BackfillNameResult {
+  id: number;
+  username: string | null;
+  email: string;
+  orcid: string;
+  outcome: BackfillNameOutcome;
+  given_name?: string | null;
+  family_name?: string | null;
+  error?: string;
+}
+
+export interface BackfillNamesResponse {
+  apply: boolean;
+  scanned: number;
+  filled: number;
+  would_fill: number;
+  no_public_name: number;
+  lookup_failed: number;
+  /** Candidates still missing a name after this batch; `null` when the count
+   *  query itself failed (never confuse that with "nothing left"). */
+  remaining: number | null;
+  /** Set when a non-fatal part of the batch failed, e.g. the remaining count. */
+  warning?: string;
+  results: BackfillNameResult[];
+}
+
+/** Fill NULL researcher names from the public ORCID record. Dry run unless
+ *  `apply` is true. */
+export async function backfillUserNames(options?: {
+  apply?: boolean;
+  limit?: number;
+}): Promise<BackfillNamesResponse> {
+  return request<BackfillNamesResponse>(
+    "/admin/users/backfill-names",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        apply: options?.apply ?? false,
+        ...(options?.limit != null ? { limit: options.limit } : {}),
+      }),
+    },
     true,
   );
 }

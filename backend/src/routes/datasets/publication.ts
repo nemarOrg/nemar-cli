@@ -9,6 +9,7 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
+import type { PublicationBlockReason } from "../../../../shared/contract/publication.js";
 import { authMiddleware } from "../../middleware/auth";
 import { isValidDatasetId } from "../../services/datasetId";
 import {
@@ -34,12 +35,26 @@ import {
   SUBMISSION_POLICY_URL,
   evaluateSubmissionMinimums,
 } from "../../services/submission-minimums";
+import {
+  OWNER_NAME_MISSING_MESSAGE,
+  OWNER_NAME_MISSING_REASON,
+  requiresUploaderName,
+  resolveOwnerIdentity,
+} from "../../services/uploader-identity";
 import { hasRole } from "../../types/bindings";
 import { extractRepoName } from "./shared";
 import type { DatasetsRouter } from "./shared";
 
-// User-facing messages for each publication block reason
-const BLOCK_MESSAGES: Record<string, string> = {
+/**
+ * User-facing message for each publication block reason.
+ *
+ * Keyed by the shared vocabulary (`PublicationBlockReason`) so a reason added
+ * to the contract without a message here is a type error, not a silent
+ * fallback to the generic sentence. Reads go through `blockMessage`, which
+ * takes the free-TEXT column value (legacy rows exist) and degrades to a
+ * generic sentence for anything it does not recognise.
+ */
+const BLOCK_MESSAGES: Record<PublicationBlockReason, string> = {
   bids_validation_failed:
     "BIDS validation is failing on your dataset. Please check the repository CI and fix validation errors, then re-request publication.",
   bids_validation_pending:
@@ -55,7 +70,17 @@ const BLOCK_MESSAGES: Record<string, string> = {
   // and the CLI renders it once, alongside the itemized reasons.
   min_requirements_failed:
     "The dataset does not meet the minimum submission requirements. Fix the stated items and re-request publication.",
+  // #1255: DOIs cite the uploader by real name, so an owner with no
+  // given_name/family_name cannot be attributed at all. The message is the
+  // one place a user is told how to supply it, so it lives with the reason.
+  [OWNER_NAME_MISSING_REASON]: OWNER_NAME_MISSING_MESSAGE,
 };
+
+/** Message for a stored block_reason, or a generic one for an unknown value. */
+function blockMessage(reason: string | null | undefined): string {
+  const known = (BLOCK_MESSAGES as Record<string, string>)[reason ?? ""];
+  return known ?? "Publication request blocked.";
+}
 
 export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
   // ============================================================================
@@ -70,9 +95,18 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     const currentUser = c.get("user");
     const db = c.env.DB;
 
+    // The owner's name columns ride along on the dataset lookup: publication
+    // mints a DOI that cites the uploader by real name (#1255), so "does this
+    // account have a citable name" is a precondition of the request, not a
+    // detail discovered later at mint time.
     const dataset = await db
       .prepare(
-        "SELECT id, dataset_id, owner_user_id, is_sandbox, is_exemplar, github_repo, visibility, source FROM datasets WHERE dataset_id = ?",
+        `SELECT d.id, d.dataset_id, d.owner_user_id, d.is_sandbox, d.is_exemplar,
+                d.github_repo, d.visibility, d.source,
+                u.given_name as owner_given_name, u.family_name as owner_family_name
+         FROM datasets d
+         JOIN users u ON d.owner_user_id = u.id
+         WHERE d.dataset_id = ?`,
       )
       .bind(datasetId)
       .first<{
@@ -84,6 +118,8 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         github_repo: string | null;
         visibility: string | null;
         source: string | null;
+        owner_given_name: string | null;
+        owner_family_name: string | null;
       }>();
 
     if (!dataset) {
@@ -137,11 +173,22 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     let blockReason: string | null = null;
     const ciUrl = repoName ? `https://github.com/nemarDatasets/${repoName}/actions` : undefined;
 
+    // Uploader-name precondition (#1255), checked FIRST: it is a property of
+    // the account rather than of the dataset, it is the cheapest check here,
+    // and reporting it before spending GitHub calls tells the user the one
+    // thing they must fix in their profile before any dataset work matters.
+    // OpenNeuro imports and exemplars are exempt (see requiresUploaderName),
+    // the same pair the submission-minimums check below exempts.
+    if (requiresUploaderName(dataset) && !resolveOwnerIdentity(dataset)) {
+      blocked = true;
+      blockReason = OWNER_NAME_MISSING_REASON;
+    }
+
     // Resolve auth inside the try so a missing or unconfigured token blocks
     // the request the same way other CI infrastructure failures do, rather
     // than 500-ing the request before we've even recorded a row.
     let pat: string | null = null;
-    if (repoName) {
+    if (repoName && !blocked) {
       try {
         pat = await getDatasetsToken(c.env);
         // Deploy CI workflows if missing
@@ -182,7 +229,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         blocked = true;
         blockReason = "bids_validation_pending";
       }
-    } else {
+    } else if (!repoName) {
       console.warn(`[publish-request] Skipping CI checks for ${datasetId}: no GitHub repo`);
     }
 
@@ -267,7 +314,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         {
           status: "blocked",
           block_reason: blockReason,
-          message: BLOCK_MESSAGES[blockReason || ""] || "Publication request blocked.",
+          message: blockMessage(blockReason),
           dataset_id: datasetId,
           ci_url: ciUrl,
           // Specific, user-facing failures from the minimums check, mirrored
@@ -469,10 +516,17 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       denied_at: request.denied_at,
       denied_reason: request.denied_reason,
       block_reason: request.block_reason,
-      ...(request.status === "blocked" && repoName
+      // The explanation is gated on the STATUS only. It used to also require
+      // a repo, which is right for the CI-shaped reasons that link to a
+      // workflow run but wrong for a reason that has nothing to do with the
+      // repository: owner_name_missing is a property of the ACCOUNT, and
+      // withholding its message left the user a bare reason code with no way
+      // to act on it (#1255 review item 24). `ci_url` stays repo-gated,
+      // because without a repo there is no run to link.
+      ...(request.status === "blocked"
         ? {
-            message: BLOCK_MESSAGES[request.block_reason || ""] || "Publication request blocked.",
-            ci_url: `https://github.com/nemarDatasets/${repoName}/actions`,
+            message: blockMessage(request.block_reason),
+            ...(repoName ? { ci_url: `https://github.com/nemarDatasets/${repoName}/actions` } : {}),
           }
         : {}),
       ...(minReasons?.length ? { reasons: minReasons, policy_url: SUBMISSION_POLICY_URL } : {}),

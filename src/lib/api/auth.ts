@@ -6,6 +6,7 @@
  */
 
 import { type ContractUser, userMeResponseSchema } from "../../../shared/contract/index.js";
+import type { OrcidNameLookupStatus } from "../../../shared/contract/publication.js";
 import { request } from "./client.js";
 
 // ============================================================================
@@ -45,6 +46,21 @@ export async function checkGitHubUsername(username: string): Promise<CheckGitHub
   );
 }
 
+export interface OrcidNameResponse {
+  /** `found` only when the record yielded BOTH name parts; the other two are
+   *  kept apart so the caller can say WHY it is asking (#1255). */
+  status: OrcidNameLookupStatus;
+  given_name: string | null;
+  family_name: string | null;
+}
+
+/**
+ * Look up the given/family name on a public ORCID record before signing up.
+ */
+export async function checkOrcidName(orcid: string): Promise<OrcidNameResponse> {
+  return request<OrcidNameResponse>(`/auth/orcid-name?orcid=${encodeURIComponent(orcid)}`);
+}
+
 export interface SignupRequest {
   username: string;
   email: string;
@@ -53,6 +69,9 @@ export interface SignupRequest {
   description: string;
   /** Required (#835): canonical source for the user's name. */
   orcid: string;
+  /** Only when the ORCID record hides its name (#1255); ORCID still wins. */
+  given_name?: string;
+  family_name?: string;
   affiliation?: string;
   /** Required for export-control screening (#835). */
   city: string;
@@ -62,6 +81,9 @@ export interface SignupRequest {
 export interface SignupResponse {
   message: string;
   email_sent: boolean;
+  /** Whether the created account has a citable researcher name (#1255). The
+   *  pre-flight lookup can disagree with this: only the insert knows. */
+  researcher_name?: "recorded" | "missing";
   next_steps: string[];
 }
 
