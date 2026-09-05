@@ -235,6 +235,7 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
       email: result.user.email,
       githubUsername: result.user.github_username,
       sandboxCompleted: result.user.sandbox_completed,
+      role: result.user.role,
       ...(result.user.sandbox_dataset_id
         ? { sandboxDatasetId: result.user.sandbox_dataset_id }
         : {}),
@@ -538,6 +539,7 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
       // the field, and writing `false` there would report "not granted" to
       // someone who has it (ADR 0040).
       if (user.service_access !== undefined) setConfig("serviceAccess", user.service_access);
+      setConfig("role", user.role);
       userRole = user.role;
       spinner.stop();
     } catch (error) {
