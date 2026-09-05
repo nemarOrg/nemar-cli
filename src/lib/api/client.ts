@@ -99,7 +99,32 @@ export async function request<T>(
   // Read the body as text once (a Response body can only be consumed once)
   // so it's available both for parsing below and for the debug log entry,
   // including the "invalid JSON" failure case.
-  const rawBody = await response.text();
+  //
+  // Wrapped in its own try/catch (review finding, PR #1257): this used to
+  // run unguarded for EVERY caller, debug on or off, so a body-stream
+  // failure (connection dropped mid-response, etc.) escaped as a raw
+  // TypeError instead of an ApiError -- breaking the `instanceof ApiError`
+  // checks roughly 20 call sites rely on (e.g. publish's isRetryable
+  // classifier), regardless of whether --debug was ever involved.
+  let rawBody: string;
+  try {
+    rawBody = await response.text();
+  } catch (readError) {
+    if (isDebugEnabled()) {
+      recordHttpExchange({
+        method,
+        url,
+        status: response.status,
+        durationMs: Date.now() - startedAt,
+        requestHeaders: headers,
+        requestBody,
+        error: readError instanceof Error ? readError.message : String(readError),
+      });
+    }
+    throw new ApiError(response.status, "Failed to read response body", {
+      originalError: readError instanceof Error ? readError.message : String(readError),
+    });
+  }
   if (isDebugEnabled()) {
     recordHttpExchange({
       method,
