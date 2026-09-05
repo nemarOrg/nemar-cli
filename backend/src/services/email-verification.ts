@@ -150,66 +150,81 @@ export async function issueEmailVerificationCode(
 export type EmailVerificationRoute = "verify_endpoint" | "code_signin";
 
 /**
- * Record that an account proved its inbox, and promote it out of `pending`.
+ * Record that an account proved its inbox, promote it out of `pending`, and
+ * land any statements the CALLER must not outlive that promotion (the sign-in
+ * path passes its web_sessions INSERT) — all in ONE `db.batch`, which D1
+ * executes as a single implicit transaction.
  *
- * Two statements rather than one CASE expression, because the CALLER needs to
+ * Two statements rather than one CASE expression, because the caller needs to
  * know whether the tier actually moved: the admin notification belongs to the
- * transition, not to every re-proof of an inbox. The conditional UPDATE is
- * what makes that answer race-free and idempotent — only one of two
- * concurrent verifications can match `status = 'pending'`.
+ * transition, not to every re-proof of an inbox. The first is conditional on
+ * `status = 'pending'`, which is what makes that answer race-free and
+ * idempotent — only one of two concurrent verifications can match it — and
+ * `changes` on its result is the answer. The second stamps `email_verified`
+ * for a row that was already past `pending`; inside the same transaction the
+ * first statement's write is visible, so it matches nothing when the
+ * promotion just happened.
  *
  * `approved` and `revoked` rows are never re-tiered; they only ever gain the
  * `email_verified` stamp, which is a fact about the inbox and true regardless
  * of tier.
  *
+ * THROWS if the batch fails, and then nothing landed — no promotion, no
+ * session, no stamp. Callers that have already consumed a single-use code by
+ * the time they get here must catch that and say so; see the two verify
+ * routes.
+ *
  * The audit row is written here rather than by the callers so a new road to
- * `verified` cannot arrive without one. It is best-effort: the transition has
- * already committed by then, and failing the request would tell a user their
- * completed verification did not happen.
+ * `verified` cannot arrive without one. It is deliberately NOT in the batch:
+ * by then the transition has committed, and rolling a verified account back
+ * because an audit insert failed would be the worse outcome (that trade-off
+ * is the same one finalizeApproval makes, for the same reason).
  */
-export async function markEmailVerified(
+export async function applyEmailVerification(
   db: D1Database,
   userId: number,
   via: EmailVerificationRoute,
+  alsoInTransaction: D1PreparedStatement[] = [],
 ): Promise<{ promoted: boolean }> {
-  const promote = await db
-    .prepare(
-      `UPDATE users
-          SET status = 'verified',
-              email_verified = 1,
-              updated_at = datetime('now')
-        WHERE id = ? AND status = 'pending' AND deleted_at IS NULL`,
-    )
-    .bind(userId)
-    .run();
-  if ((promote.meta?.changes ?? 0) > 0) {
-    try {
-      await auditLogStatement(db, {
-        userId,
-        action: "email_verified",
-        resourceType: "user",
-        resourceId: String(userId),
-        details: JSON.stringify({ via, status: "verified" }),
-      }).run();
-    } catch (err) {
-      console.error(
-        `AUDIT GAP: email_verified row not written for id=${userId} (the promotion DID commit):`,
-        err,
-      );
-    }
-    return { promoted: true };
-  }
+  const results = await db.batch([
+    db
+      .prepare(
+        `UPDATE users
+            SET status = 'verified',
+                email_verified = 1,
+                updated_at = datetime('now')
+          WHERE id = ? AND status = 'pending' AND deleted_at IS NULL`,
+      )
+      .bind(userId),
+    db
+      .prepare(
+        `UPDATE users
+            SET email_verified = 1,
+                updated_at = datetime('now')
+          WHERE id = ? AND email_verified = 0 AND deleted_at IS NULL`,
+      )
+      .bind(userId),
+    ...alsoInTransaction,
+  ]);
 
-  await db
-    .prepare(
-      `UPDATE users
-          SET email_verified = 1,
-              updated_at = datetime('now')
-        WHERE id = ? AND email_verified = 0 AND deleted_at IS NULL`,
-    )
-    .bind(userId)
-    .run();
-  return { promoted: false };
+  const promoted = ((results[0] as { meta?: { changes?: number } })?.meta?.changes ?? 0) > 0;
+  if (!promoted) return { promoted: false };
+
+  try {
+    await auditLogStatement(db, {
+      userId,
+      action: "email_verified",
+      resourceType: "user",
+      resourceId: String(userId),
+      details: JSON.stringify({ via, status: "verified" }),
+    }).run();
+  } catch (err) {
+    console.error(
+      `AUDIT GAP: email_verified row not written for id=${userId} (the promotion DID commit):`,
+      err,
+    );
+  }
+  return { promoted: true };
 }
 
 /**

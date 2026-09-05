@@ -67,8 +67,8 @@ import {
   sendPasswordlessCodeEmail,
 } from "../services/email";
 import {
+  applyEmailVerification,
   issueEmailVerificationCode,
-  markEmailVerified,
   notifyAdminsOfVerifiedAccount,
 } from "../services/email-verification";
 import { validateGitHubUsername } from "../services/github";
@@ -82,8 +82,8 @@ import {
   buildClearedSessionCookie,
   buildSessionCookie,
   isAllowedOrigin,
-  issueSession,
   maybeSlideExpiry,
+  prepareSessionInsert,
   revokeSession,
 } from "../services/web-session";
 import { type Bindings, type UserRole, type Variables, parseRole } from "../types/bindings";
@@ -370,6 +370,11 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
   const db = c.env.DB;
 
   try {
+    // This route is UNAUTHENTICATED, so "no such code" and "wrong digits"
+    // stay collapsed into one answer: telling an anonymous caller which one
+    // it was reveals whether a code is outstanding for that address. The
+    // session-bound verify routes distinguish them (see CODE_EXPIRED_BODY),
+    // because there the caller already holds the account.
     const row = await db
       .prepare(SIGNIN_CODE_LOOKUP_SQL)
       .bind(email)
@@ -380,18 +385,9 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
 
     const submittedHash = await hashAuthCode(code, c.env);
     if (!timingSafeEqual(submittedHash, row.code_hash)) {
-      const newAttempts = row.attempts + 1;
-      if (newAttempts >= MAX_CODE_ATTEMPTS) {
-        await db
-          .prepare(`UPDATE auth_codes SET attempts = ?, used_at = datetime('now') WHERE id = ?`)
-          .bind(newAttempts, row.id)
-          .run();
-      } else {
-        await db
-          .prepare("UPDATE auth_codes SET attempts = ? WHERE id = ?")
-          .bind(newAttempts, row.id)
-          .run();
-      }
+      // Same bookkeeping as the session-bound routes; the count it returns is
+      // deliberately not reported here.
+      await recordFailedAttempt(db, row);
       return c.json({ error: "Invalid or expired code" }, 401);
     }
 
@@ -448,6 +444,12 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
     if (userRow.status === "revoked") {
       return c.json({ error: "Account revoked" }, 403);
     }
+    const userAgent = c.req.header("User-Agent") ?? null;
+    const ip =
+      c.req.header("CF-Connecting-IP") ||
+      c.req.header("X-Forwarded-For")?.split(",")[0]?.trim() ||
+      null;
+
     // Mark the email verified AND, if the account was still `pending`, move
     // it to `verified` — the user just proved they control the inbox by
     // repeating a code that was emailed to them, which is the whole content
@@ -455,7 +457,44 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
     // road to the base tier, and the dedicated /auth/email/verify endpoint is
     // the first; whichever a user reaches first, the other becomes a no-op.
     // `approved` and `revoked` rows are never re-tiered by this.
-    const { promoted } = await markEmailVerified(db, userRow.id, "code_signin");
+    //
+    // The session row goes in the SAME transaction: the code was consumed
+    // above and cannot be replayed, so a session INSERT that failed on its
+    // own would leave a burned code, a possibly-promoted account, and no way
+    // in — and the retry would read "Invalid or expired code". Either the
+    // whole sign-in lands or none of it does. The session cookie is minted
+    // before the write and only sent once the batch has committed.
+    const prepared = await prepareSessionInsert(
+      c.env,
+      userRow.id,
+      remember,
+      userAgent,
+      ip,
+      "email_code",
+    );
+    let promoted: boolean;
+    try {
+      ({ promoted } = await applyEmailVerification(db, userRow.id, "code_signin", [
+        prepared.statement,
+      ]));
+    } catch (writeErr) {
+      // Distinct from the generic 500 below, and distinct in the log: the
+      // caller's one-time code is already spent, so "try again" is wrong
+      // advice and the operator needs the account id to see what state it is
+      // in. Nothing in the batch landed, so the account is exactly as it was.
+      console.error(
+        `[auth-web] /code/verify: sign-in transaction failed AFTER the code was consumed (user id=${userRow.id}); the code is spent and nothing was written`,
+        writeErr,
+      );
+      return c.json(
+        {
+          error: "sign_in_incomplete",
+          message:
+            "Your code was accepted but the sign-in could not be completed, so nothing was changed. Request a new code and try again.",
+        },
+        500,
+      );
+    }
 
     const user = {
       id: userRow.id,
@@ -486,24 +525,9 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       });
     }
 
-    const userAgent = c.req.header("User-Agent") ?? null;
-    const ip =
-      c.req.header("CF-Connecting-IP") ||
-      c.req.header("X-Forwarded-For")?.split(",")[0]?.trim() ||
-      null;
-
-    const { cookieIdRaw, maxAgeSeconds } = await issueSession(
-      c.env,
-      user.id,
-      remember,
-      userAgent,
-      ip,
-      "email_code",
-    );
-
-    const cookie = buildSessionCookie(cookieIdRaw, {
+    const cookie = buildSessionCookie(prepared.cookieIdRaw, {
       domain: c.env.WEB_SESSION_COOKIE_DOMAIN || undefined,
-      maxAgeSeconds,
+      maxAgeSeconds: prepared.maxAgeSeconds,
     });
     c.header("Set-Cookie", cookie);
 
@@ -760,6 +784,51 @@ const emailChangeVerifySchema = z.object({
   code: z.string().regex(/^\d{6}$/, "code must be 6 digits"),
 });
 
+/**
+ * Burn one guess against an active code and report how many are left.
+ *
+ * Extracted because the two session-bound verify routes ran identical
+ * bookkeeping, and because the count is now part of their answer: a signed-in
+ * user checking a code sent to their own address gains nothing from the
+ * enumeration-safe vagueness the unauthenticated sign-in path needs. The
+ * fifth wrong guess also consumes the code, so `0` remaining means "request a
+ * new one", not "one more try".
+ */
+async function recordFailedAttempt(
+  db: D1Database,
+  row: { id: number; attempts: number },
+): Promise<number> {
+  const newAttempts = row.attempts + 1;
+  if (newAttempts >= MAX_CODE_ATTEMPTS) {
+    await db
+      .prepare(`UPDATE auth_codes SET attempts = ?, used_at = datetime('now') WHERE id = ?`)
+      .bind(newAttempts, row.id)
+      .run();
+  } else {
+    await db
+      .prepare("UPDATE auth_codes SET attempts = ? WHERE id = ?")
+      .bind(newAttempts, row.id)
+      .run();
+  }
+  return Math.max(0, MAX_CODE_ATTEMPTS - newAttempts);
+}
+
+/**
+ * The 401 body for a code that is gone — expired, already used, burned by
+ * five wrong guesses, or never issued.
+ *
+ * Deliberately DIFFERENT from the wrong-digits answer on the session-bound
+ * routes (#1252 review): collapsing the two told a user re-checking their own
+ * inbox to look harder at digits that could never work again. There is no
+ * enumeration to protect here — the caller already holds a session for the
+ * account the code belongs to. `POST /auth/code/verify`, which is
+ * unauthenticated, keeps its single collapsed answer for exactly that reason.
+ */
+const CODE_EXPIRED_BODY = {
+  error: "code_expired",
+  message: "That code has expired or has already been used. Request a new one.",
+} as const;
+
 /** Re-read a user by id and shape the dashboard payload (same SELECT the
  *  /code/verify path runs by email). Null when the row is gone/tombstoned. */
 async function fetchPublicUserById(
@@ -1006,24 +1075,23 @@ authWebRoutes.post(
         .bind(email, webUser.id)
         .first<{ id: number; code_hash: string; attempts: number }>();
       if (!row) {
-        return c.json({ error: "code_incorrect" }, 401);
+        return c.json(CODE_EXPIRED_BODY, 401);
       }
 
       const submittedHash = await hashAuthCode(code, c.env);
       if (!timingSafeEqual(submittedHash, row.code_hash)) {
-        const newAttempts = row.attempts + 1;
-        if (newAttempts >= MAX_CODE_ATTEMPTS) {
-          await db
-            .prepare(`UPDATE auth_codes SET attempts = ?, used_at = datetime('now') WHERE id = ?`)
-            .bind(newAttempts, row.id)
-            .run();
-        } else {
-          await db
-            .prepare("UPDATE auth_codes SET attempts = ? WHERE id = ?")
-            .bind(newAttempts, row.id)
-            .run();
-        }
-        return c.json({ error: "code_incorrect" }, 401);
+        const attemptsRemaining = await recordFailedAttempt(db, row);
+        return c.json(
+          {
+            error: "code_incorrect",
+            message:
+              attemptsRemaining > 0
+                ? `That code did not match. ${attemptsRemaining} attempt${attemptsRemaining === 1 ? "" : "s"} left before it is invalidated.`
+                : "That code did not match and has now been invalidated. Request a new one.",
+            attempts_remaining: attemptsRemaining,
+          },
+          401,
+        );
       }
 
       // Consume-once, same conditional UPDATE as /code/verify.
@@ -1032,7 +1100,9 @@ authWebRoutes.post(
         .bind(row.id)
         .run();
       if ((consumeResult.meta?.changes ?? 0) === 0) {
-        return c.json({ error: "code_incorrect" }, 401);
+        // Lost the race to a concurrent redemption: the code is gone, not
+        // wrong.
+        return c.json(CODE_EXPIRED_BODY, 401);
       }
 
       // The change + its audit row in one batch. email_verified=1: the user
@@ -1151,7 +1221,8 @@ authWebRoutes.post("/email/verify/request", webSessionMiddleware, async (c) => {
  * because a code is single-use and the honest answer to "verify me" when the
  * account is verified is "done", not "invalid code". That also means the
  * admin notification fires exactly once — it is gated on the transition
- * itself (markEmailVerified's conditional UPDATE), not on reaching this line.
+ * itself (applyEmailVerification's conditional UPDATE), not on reaching this
+ * line.
  */
 authWebRoutes.post(
   "/email/verify",
@@ -1182,24 +1253,23 @@ authWebRoutes.post(
         .bind(email, webUser.id)
         .first<{ id: number; code_hash: string; attempts: number }>();
       if (!row) {
-        return c.json({ error: "code_incorrect" }, 401);
+        return c.json(CODE_EXPIRED_BODY, 401);
       }
 
       const submittedHash = await hashAuthCode(code, c.env);
       if (!timingSafeEqual(submittedHash, row.code_hash)) {
-        const newAttempts = row.attempts + 1;
-        if (newAttempts >= MAX_CODE_ATTEMPTS) {
-          await db
-            .prepare(`UPDATE auth_codes SET attempts = ?, used_at = datetime('now') WHERE id = ?`)
-            .bind(newAttempts, row.id)
-            .run();
-        } else {
-          await db
-            .prepare("UPDATE auth_codes SET attempts = ? WHERE id = ?")
-            .bind(newAttempts, row.id)
-            .run();
-        }
-        return c.json({ error: "code_incorrect" }, 401);
+        const attemptsRemaining = await recordFailedAttempt(db, row);
+        return c.json(
+          {
+            error: "code_incorrect",
+            message:
+              attemptsRemaining > 0
+                ? `That code did not match. ${attemptsRemaining} attempt${attemptsRemaining === 1 ? "" : "s"} left before it is invalidated.`
+                : "That code did not match and has now been invalidated. Request a new one.",
+            attempts_remaining: attemptsRemaining,
+          },
+          401,
+        );
       }
 
       // Consume-once, same conditional UPDATE as /code/verify: two parallel
@@ -1209,10 +1279,32 @@ authWebRoutes.post(
         .bind(row.id)
         .run();
       if ((consumeResult.meta?.changes ?? 0) === 0) {
-        return c.json({ error: "code_incorrect" }, 401);
+        // Lost the race to a concurrent redemption: gone, not wrong.
+        return c.json(CODE_EXPIRED_BODY, 401);
       }
 
-      const { promoted } = await markEmailVerified(db, webUser.id, "verify_endpoint");
+      // Past this point the code is spent. If the write fails, say so
+      // precisely: the generic 500 below would send the caller back to a
+      // code that can never work again, and the retry would read
+      // "code_incorrect" as though they had mistyped it.
+      let promoted: boolean;
+      try {
+        ({ promoted } = await applyEmailVerification(db, webUser.id, "verify_endpoint"));
+      } catch (writeErr) {
+        console.error(
+          `[auth-web] /email/verify: verification write failed AFTER the code was consumed (user id=${webUser.id}); the code is spent and nothing was written`,
+          writeErr,
+        );
+        return c.json(
+          {
+            error: "verification_incomplete",
+            message:
+              "Your code was accepted but the change could not be saved, so nothing was changed. Request a new code and try again.",
+          },
+          500,
+        );
+      }
+
       if (promoted) {
         await notifyAdminsOfVerifiedAccount(c.env, {
           id: webUser.id,
