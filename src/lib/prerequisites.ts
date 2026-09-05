@@ -150,14 +150,28 @@ export function parseVersion(output: string): string | undefined {
  * helper, a broken PATH shim) hung the whole CLI rather than just failing
  * one command's prerequisite check.
  */
-const PROBE_TIMEOUT_MS = 4000;
+const DEFAULT_PROBE_TIMEOUT_MS = 4000;
+
+/**
+ * Read fresh on every probe (not a module-level constant) so a test can
+ * override it via `TEST_PROBE_TIMEOUT_MS` without racing this
+ * module's own import-time caching -- `bun test` runs test/ and
+ * backend/test in one shared process (see MEMORY:
+ * bun-test-shared-process-root-and-backend), so a module-level const set
+ * once at import would already be frozen by the time a later test tried to
+ * override it.
+ */
+function getProbeTimeoutMs(): number {
+  const override = Number(process.env.TEST_PROBE_TIMEOUT_MS);
+  return Number.isFinite(override) && override > 0 ? override : DEFAULT_PROBE_TIMEOUT_MS;
+}
 
 async function probeTool(
   toolCheck: ToolCheck,
 ): Promise<{ available: boolean; version?: string; timedOut?: boolean }> {
   try {
     const { exitCode, stdout, timedOut } = await runCommand(toolCheck.cmd, {
-      timeout: PROBE_TIMEOUT_MS,
+      timeout: getProbeTimeoutMs(),
     });
     if (timedOut) return { available: false, timedOut: true };
     if (exitCode !== 0) return { available: false };
@@ -178,7 +192,7 @@ export interface ToolStatus {
   required: boolean;
   available: boolean;
   version?: string;
-  /** The probe hit PROBE_TIMEOUT_MS rather than confirming absence. */
+  /** The probe hit the timeout rather than confirming absence. */
   timedOut?: boolean;
   installInstruction: string;
 }
@@ -228,12 +242,25 @@ export async function warnMissingPrerequisites(): Promise<ToolStatus[]> {
 export interface PrerequisiteFailure {
   tool: string;
   installInstruction: string;
-  timedOut?: boolean;
 }
 
 /**
  * Check prerequisites for a given command. Throws (with install guidance) if any
- * required tool is missing. Runs all checks in parallel for speed.
+ * required tool is CONFIRMED missing (ran and failed, or ENOENT). Runs all
+ * checks in parallel for speed.
+ *
+ * A timed-out probe is deliberately NOT treated as a confirmed absence
+ * (review finding, PR #1257): `probeTool`'s PROBE_TIMEOUT_MS exists to keep
+ * `nemar doctor`/the `--debug` snapshot from hanging on a wedged `--version`
+ * call, but reusing that same signal here to hard-fail
+ * upload/download/clone/push/publish/update/release would fail a command
+ * for a tool that is actually installed and just slow to answer once (a
+ * cold antivirus scan on first exec, a credential helper doing a network
+ * round-trip, a slow network home directory) -- worse than the thing this
+ * gate exists to prevent. A timed-out tool gets one warning line instead,
+ * and the real command proceeds; if the tool genuinely isn't there, ITS
+ * OWN invocation fails naturally and with a much more specific error than
+ * this pre-flight gate could produce anyway.
  */
 export async function checkPrerequisitesForCommand(command: NemarCommand): Promise<void> {
   const toolKeys = COMMAND_TOOLS[command];
@@ -246,21 +273,26 @@ export async function checkPrerequisitesForCommand(command: NemarCommand): Promi
     }),
   );
 
+  for (const r of results) {
+    if (r.timedOut && r.check.required) {
+      console.warn(
+        `Warning: ${r.check.name} did not respond to a version check in time; continuing anyway.`,
+      );
+    }
+  }
+
   const failures: PrerequisiteFailure[] = results
-    .filter((r) => !r.available && r.check.required)
+    .filter((r) => !r.available && !r.timedOut && r.check.required)
     .map((r) => ({
       tool: r.check.name,
       installInstruction: getInstallInstruction(r.check),
-      timedOut: r.timedOut,
     }));
 
   if (failures.length === 0) return;
 
   const lines = ["\nMissing required tools:"];
   for (const failure of failures) {
-    lines.push(
-      `  ${failure.tool} ${failure.timedOut ? "timed out while checking" : "not installed"}`,
-    );
+    lines.push(`  ${failure.tool} not installed`);
     lines.push(`    Install: ${failure.installInstruction}`);
   }
   throw new Error(lines.join("\n"));
