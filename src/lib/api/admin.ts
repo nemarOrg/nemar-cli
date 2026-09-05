@@ -1463,3 +1463,52 @@ export async function zarrFidelitySweep(options?: {
     true,
   );
 }
+
+// ============================================================================
+// Researcher-name backfill (#1255, epic #1250)
+// ============================================================================
+
+export type BackfillNameOutcome = "filled" | "would_fill" | "no_public_name" | "lookup_failed";
+
+export interface BackfillNameResult {
+  id: number;
+  username: string | null;
+  email: string;
+  orcid: string;
+  outcome: BackfillNameOutcome;
+  given_name?: string | null;
+  family_name?: string | null;
+  error?: string;
+}
+
+export interface BackfillNamesResponse {
+  apply: boolean;
+  scanned: number;
+  filled: number;
+  would_fill: number;
+  no_public_name: number;
+  lookup_failed: number;
+  /** Candidates still missing a name after this batch. */
+  remaining: number;
+  results: BackfillNameResult[];
+}
+
+/** Fill NULL researcher names from the public ORCID record. Dry run unless
+ *  `apply` is true. */
+export async function backfillUserNames(options?: {
+  apply?: boolean;
+  limit?: number;
+}): Promise<BackfillNamesResponse> {
+  return request<BackfillNamesResponse>(
+    "/admin/users/backfill-names",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        apply: options?.apply ?? false,
+        ...(options?.limit != null ? { limit: options.limit } : {}),
+      }),
+    },
+    true,
+  );
+}

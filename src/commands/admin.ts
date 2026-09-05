@@ -32,6 +32,7 @@ import {
   type AvailabilityReport,
   type AvailabilityReportResult,
   type AvailabilityReportSweepBatchResponse,
+  type BackfillNamesResponse,
   type DataIntegritySweepBatchResponse,
   type DatasetTransitionResponse,
   type DoctorFixLiveResponse,
@@ -54,6 +55,7 @@ import {
   availabilityReport,
   availabilityReportSweep,
   availabilityReportSweepReset,
+  backfillUserNames,
   bulkDeleteDatasets,
   changeUserRole,
   changeVisibility,
@@ -6492,3 +6494,85 @@ zarrCatalogCommand
   });
 
 adminCommand.addCommand(zarrCatalogCommand);
+
+// ============================================================================
+// Researcher-name backfill (#1255, epic #1250)
+//
+// DOIs cite the uploader by real name and publishing is blocked without one,
+// but most accounts predate the signup-time ORCID name lookup. This fills the
+// gap from each account's own public ORCID record.
+// ============================================================================
+
+const backfillNamesCommand = new Command("backfill-names").description(
+  "Fill missing researcher names from users' public ORCID records (dry run by default)",
+);
+
+backfillNamesCommand
+  .option("--apply", "Write the names (without this flag, only report what would change)")
+  .option("--limit <n>", "Users per batch (server clamps to [1,100])", "25")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { apply?: boolean; limit?: string; json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const limit = Number.parseInt(options.limit ?? "25", 10) || 25;
+    const apply = options.apply === true;
+    const spinner = ora(
+      apply ? "Backfilling names from ORCID..." : "Checking ORCID for missing names...",
+    ).start();
+
+    let res: BackfillNamesResponse;
+    try {
+      res = await backfillUserNames({ apply, limit });
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Name backfill failed");
+      console.error(chalk.red(errorDetail(err)));
+      process.exit(1);
+      return;
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    console.log();
+    if (!res.apply) {
+      console.log(chalk.yellow("DRY RUN — nothing was written. Re-run with --apply."));
+    }
+    console.log(
+      chalk.cyan(
+        `scanned=${res.scanned} ${res.apply ? "filled" : "would_fill"}=${
+          res.apply ? res.filled : res.would_fill
+        } no_public_name=${res.no_public_name} lookup_failed=${res.lookup_failed} remaining=${
+          res.remaining
+        }`,
+      ),
+    );
+    for (const r of res.results) {
+      const who = r.username ?? `id ${r.id} <${r.email}>`;
+      if (r.outcome === "filled" || r.outcome === "would_fill") {
+        const verb = r.outcome === "filled" ? chalk.green("filled  ") : chalk.cyan("would fill");
+        console.log(`  ${verb} ${who}: ${r.given_name} ${r.family_name}  (${r.orcid})`);
+      } else if (r.outcome === "no_public_name") {
+        console.log(
+          `  ${chalk.yellow("no name ")} ${who}: ORCID ${r.orcid} does not publish a full name`,
+        );
+      } else {
+        console.log(`  ${chalk.red("error   ")} ${who}: ${r.error}`);
+      }
+    }
+    if (res.no_public_name > 0) {
+      console.log();
+      console.log(
+        chalk.dim(
+          "Accounts with no public ORCID name must set it themselves (Settings on nemar.org) or make it public on ORCID.",
+        ),
+      );
+    }
+    // A lookup failure leaves the row a candidate for the next run, so it is
+    // not a hard failure -- but the caller should know the batch was partial.
+    if (res.lookup_failed > 0) process.exitCode = 1;
+  });
+
+adminCommand.addCommand(backfillNamesCommand);
