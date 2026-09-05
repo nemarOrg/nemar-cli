@@ -179,6 +179,56 @@ describe("buildOrcidEnrichment", () => {
   });
 });
 
+describe("createConceptDoi uploader enforcement (#1255)", () => {
+  // The rule lives in doi.ts, not only in the three route guards: a fourth
+  // caller must not be able to mint an unattributed permanent record by
+  // forgetting to check. Both branches refuse BEFORE any network call, so
+  // these run offline.
+  const base = { datasetId: "nm099999", datasetName: "Test", sandbox: true } as const;
+
+  test("EZID refuses when an uploader is required and missing", async () => {
+    await expect(
+      createConceptDoi(
+        { provider: "ezid", ...base, uploader: null, uploaderRequired: true },
+        {
+          EZID_USERNAME: "u",
+          EZID_PASSWORD: "p",
+          EZID_SANDBOX_USERNAME: "u",
+          EZID_SANDBOX_PASSWORD: "p",
+          ZENODO_API_KEY: "z",
+        },
+      ),
+    ).rejects.toThrow(/must not cite a username/);
+  });
+
+  test("EZID proceeds when the uploader is not required (import, exemplar)", async () => {
+    // Gets past the rule and fails at credential resolution instead, which is
+    // the proof that the rule did not fire.
+    await expect(
+      createConceptDoi(
+        { provider: "ezid", ...base, uploader: null, uploaderRequired: false },
+        { EZID_USERNAME: "", EZID_PASSWORD: "", ZENODO_API_KEY: "z" },
+      ),
+    ).rejects.not.toThrow(/must not cite a username/);
+  });
+
+  test("Zenodo refuses a null uploader unconditionally", async () => {
+    // The creator is a mandatory Zenodo field, so there is no unattributed
+    // deposit to fall back to even for an exempt dataset.
+    await expect(
+      createConceptDoi(
+        { provider: "zenodo", ...base, uploader: null, uploaderRequired: false },
+        {
+          EZID_USERNAME: "u",
+          EZID_PASSWORD: "p",
+          ZENODO_API_KEY: "z",
+          ZENODO_SANDBOX_API_KEY: "z",
+        },
+      ),
+    ).rejects.toThrow(/no researcher name on file/);
+  });
+});
+
 describe("ORCID auto-injection into DataCite creators", () => {
   test("injects ORCID when author matches enrichment", () => {
     const metadata = bidsToDataCite(

@@ -34,7 +34,12 @@ import { datasetRoutes } from "../src/routes/datasets";
 import { bidsToDataCite, buildDataCiteXml } from "../src/services/datacite";
 import { buildOrcidEnrichment } from "../src/services/doi";
 import { hashApiKey } from "../src/services/token";
-import { OWNER_NAME_MISSING_REASON, resolveOwnerIdentity } from "../src/services/uploader-identity";
+import {
+  OWNER_NAME_MISSING_REASON,
+  refreshWouldStripAttribution,
+  requiresUploaderName,
+  resolveOwnerIdentity,
+} from "../src/services/uploader-identity";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
@@ -269,6 +274,68 @@ describe("POST /datasets/:id/publish/request name precondition", () => {
   });
 });
 
+describe("refreshWouldStripAttribution (the enrichment DOI sync's guard)", () => {
+  // The enrichment pipeline's DOI sync (services/enrich-dataset.ts) evaluates
+  // this one line above its updateIdentifier call, and it is what stops an
+  // automatic re-sync from deleting a DataCurator off a permanent record.
+  //
+  // WHY NOT THE FULL enrichDataset ENTRY POINT: that function begins with a
+  // Claude API call, so driving it offline would mean standing up the whole
+  // multi-stage LLM pipeline as a fixture -- and the identical rule IS driven
+  // through a real route, with the EZID payload captured, in
+  // doi-attribution-routes.test.ts ("a nameless owner SKIPS the refresh").
+  // These fill in the enrichment path's own inputs, read from real rows.
+  test("blocks the sync for a published dataset whose owner has no name", async () => {
+    await seedOwner({ given: null });
+    seedDataset();
+    const row = ownerRow();
+    expect(
+      refreshWouldStripAttribution({ source: null, is_exemplar: 0 }, resolveOwnerIdentity(row)),
+    ).toBe(true);
+  });
+
+  test("allows the sync once the owner has a citable name", async () => {
+    await seedOwner();
+    seedDataset();
+    expect(
+      refreshWouldStripAttribution(
+        { source: null, is_exemplar: 0 },
+        resolveOwnerIdentity(ownerRow()),
+      ),
+    ).toBe(false);
+  });
+
+  test("allows it for an exempt deposit even with no name", async () => {
+    await seedOwner({ given: null, family: null });
+    seedDataset({ source: "openneuro" });
+    expect(
+      refreshWouldStripAttribution(
+        { source: "openneuro", is_exemplar: 0 },
+        resolveOwnerIdentity(ownerRow()),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("requiresUploaderName", () => {
+  // The exemption is a policy statement, and it decides whether a permanent
+  // DOI may be minted unattributed, so it gets an assertion of its own rather
+  // than only being observed through two routes.
+  test("a researcher deposit requires a name", () => {
+    expect(requiresUploaderName({ source: "nemar", is_exemplar: 0 })).toBe(true);
+    expect(requiresUploaderName({ source: null, is_exemplar: null })).toBe(true);
+  });
+
+  test("an OpenNeuro import does not", () => {
+    expect(requiresUploaderName({ source: "openneuro", is_exemplar: 0 })).toBe(false);
+  });
+
+  test("an exemplar does not, whatever its source", () => {
+    expect(requiresUploaderName({ source: "nemar", is_exemplar: 1 })).toBe(false);
+    expect(requiresUploaderName({ source: "openneuro", is_exemplar: 1 })).toBe(false);
+  });
+});
+
 describe("POST /admin/publish/:id/approve name precondition", () => {
   beforeEach(async () => {
     await seedAdmin();
@@ -300,6 +367,30 @@ describe("POST /admin/publish/:id/approve name precondition", () => {
       .get(DATASET_ID);
     expect(row?.status).toBe("blocked");
     expect(row?.block_reason).toBe(OWNER_NAME_MISSING_REASON);
+  });
+
+  test("an OpenNeuro import is exempt from the approve gate", async () => {
+    await seedOwner({ given: null, family: null });
+    seedDataset({ source: "openneuro" });
+    seedRequest();
+
+    const res = await post(`/admin/publish/${DATASET_ID}/approve`, ADMIN_KEY, {});
+    expect(res.status).not.toBe(422);
+    const row = db
+      .query<{ status: string }, [string]>(
+        "SELECT status FROM publication_requests WHERE dataset_id = ?",
+      )
+      .get(DATASET_ID);
+    expect(row?.status).toBe("approving");
+  });
+
+  test("an exemplar is exempt from the approve gate", async () => {
+    await seedOwner({ given: null, family: null });
+    seedDataset({ is_exemplar: 1 });
+    seedRequest();
+
+    const res = await post(`/admin/publish/${DATASET_ID}/approve`, ADMIN_KEY, {});
+    expect(res.status).not.toBe(422);
   });
 
   test("a named owner gets past the name gate", async () => {
@@ -348,6 +439,49 @@ describe("POST /admin/datasets/:id/doi/concept name precondition", () => {
       )
       .get(DATASET_ID);
     expect(row?.concept_doi).toBeNull();
+  });
+
+  test("an OpenNeuro import mints without a name", async () => {
+    await seedOwner({ given: null, family: null });
+    seedDataset({ source: "openneuro" });
+
+    const res = await post(`/admin/datasets/${DATASET_ID}/doi/concept`, ADMIN_KEY, {
+      sandbox: true,
+    });
+    const body = (await res.json()) as { block_reason?: string; error?: string };
+    expect(body.block_reason).toBeUndefined();
+    // Stops at the enrichment gate, not the name gate.
+    expect(body.error).toMatch(/[Mm]etadata pipeline/);
+  });
+
+  test("an exemplar mints without a name", async () => {
+    await seedOwner({ given: null, family: null });
+    seedDataset({ is_exemplar: 1 });
+
+    const res = await post(`/admin/datasets/${DATASET_ID}/doi/concept`, ADMIN_KEY, {
+      sandbox: true,
+    });
+    expect(((await res.json()) as { block_reason?: string }).block_reason).toBeUndefined();
+  });
+
+  test("an already-minted dataset reports the no-op, not the name error", async () => {
+    // Ordering (review item 23): a nameless owner on a dataset that already
+    // has a DOI must hear "it already has one", not be sent to fix a name
+    // that would change nothing.
+    await seedOwner({ given: null });
+    seedDataset();
+    db.query("UPDATE datasets SET concept_doi = ? WHERE dataset_id = ?").run(
+      "10.82901/NEMAR.NM000281",
+      DATASET_ID,
+    );
+
+    const res = await post(`/admin/datasets/${DATASET_ID}/doi/concept`, ADMIN_KEY, {
+      sandbox: true,
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; block_reason?: string };
+    expect(body.error).toContain("already has a concept DOI");
+    expect(body.block_reason).toBeUndefined();
   });
 
   test("gets past the name gate for a named owner", async () => {

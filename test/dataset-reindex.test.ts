@@ -129,6 +129,39 @@ describe("extractEnrichmentSubErrors", () => {
   // a list of "<field>: <message>" strings; runEnrichmentForDataset uses
   // it to decide ok vs failed.
 
+  test("surfaces a deliberate doi_sync skip, not just *_error fields", () => {
+    // #1255: an already-published dataset whose owner has no researcher name
+    // has its DOI metadata sync SKIPPED rather than pushed (pushing would
+    // delete the existing DataCurator from a permanent record). That is not
+    // an error, but a bulk-reindex operator has to see it in the same place,
+    // or the run looks like a clean sweep that silently did less.
+    const out = extractEnrichmentSubErrors({
+      doi_sync: {
+        status: "skipped",
+        reason: "owner_name_missing",
+        message: "DOI metadata sync skipped for nm000282: the owner has no researcher name.",
+      },
+    });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain("doi_sync: skipped (owner_name_missing)");
+    expect(out[0]).toContain("nm000282");
+  });
+
+  test("ignores a doi_sync object that is not a skip", () => {
+    expect(extractEnrichmentSubErrors({ doi_sync: { status: "ok" } })).toEqual([]);
+    expect(extractEnrichmentSubErrors({ doi_sync: "nonsense" })).toEqual([]);
+  });
+
+  test("reports a skip alongside a real sub-error", () => {
+    const out = extractEnrichmentSubErrors({
+      commit_error: "push rejected",
+      doi_sync: { status: "skipped", reason: "owner_name_missing", message: "m" },
+    });
+    expect(out).toHaveLength(2);
+    expect(out.join(" ")).toContain("commit_error: push rejected");
+    expect(out.join(" ")).toContain("doi_sync: skipped");
+  });
+
   test("returns empty for a clean body", () => {
     expect(extractEnrichmentSubErrors({ ok: true })).toEqual([]);
   });
