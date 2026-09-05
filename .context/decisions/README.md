@@ -79,7 +79,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0038](0038-byte-size-formatting-stays-bespoke.md) - Byte-size formatting stays bespoke; pretty-bytes is declined
 - [ADR 0039](0039-the-update-check-stays-bespoke.md) - The CLI update check stays bespoke; update-notifier is declined
 - [ADR 0040](0040-approval-is-the-single-writer-of-upload-access.md) - Admin approval is the single writer of upload access; `verified` is the base tier
-- [ADR 0040](0040-dois-cite-the-uploader-by-real-name-or-not-at-all.md) - DOIs cite the uploader by real name, or not at all
+- [ADR 0041](0041-dois-cite-the-uploader-by-real-name-or-not-at-all.md) - DOIs cite the uploader by real name, or not at all
 
 ## Backfill note (2026-07-31)
 
