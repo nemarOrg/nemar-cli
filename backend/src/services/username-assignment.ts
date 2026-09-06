@@ -78,8 +78,13 @@ export const CLAIM_USERNAME_SQL = `UPDATE users
  * with. The LIKE arm can over-match (`alovelace-institute` looks like a
  * suffixed variant and is not one), which only ever makes the taken set larger
  * and the suggestion later in the sequence, never a collision.
+ *
+ * EXPORTED so a test can point THIS statement -- and only this statement -- at
+ * something the database refuses, and prove that a failed scan does not take a
+ * sign-in down with it. A hand-copied string in the test would drift the moment
+ * this one is edited (.rules/testing.md).
  */
-const TAKEN_SQL = `SELECT username FROM users
+export const TAKEN_SQL = `SELECT username FROM users
    WHERE username = ? COLLATE NOCASE OR username LIKE ? ESCAPE '\\'`;
 
 /** What a suggestion attempt produced. `no_base` and `exhausted` are kept apart

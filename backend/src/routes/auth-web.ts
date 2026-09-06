@@ -541,11 +541,38 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
     //
     // No name, no assignment: onboarding asks, and nothing is invented from the
     // email local part (ADR 0042).
-    const pick =
-      (userRow.username ?? "").trim() === ""
-        ? await pickUsernameForName(db, userRow.given_name, userRow.family_name)
-        : { status: "no_base" as const };
-    const claimed = pick.status === "ok" ? pick.username : null;
+    //
+    // THE SCAN IS WRAPPED, and it has to be. `pickUsernameForName` reads D1
+    // live, and by the time it runs the code has ALREADY been consumed by the
+    // conditional UPDATE above -- but the restore-the-code handler is the catch
+    // on the batch BELOW, not this one. A transient failure escaping here would
+    // reach the route's outer catch, answer a generic 500, and burn a code the
+    // user typed correctly. Assigning a username is a nudge and must never
+    // block a login, which is the contract every docstring in
+    // services/username-assignment.ts states; so a failed scan signs the user
+    // in with no assignment, and the sweep (or the next sign-in) picks the row
+    // up.
+    let claimed: string | null = null;
+    if ((userRow.username ?? "").trim() === "") {
+      try {
+        const pick = await pickUsernameForName(db, userRow.given_name, userRow.family_name);
+        if (pick.status === "ok") {
+          claimed = pick.username;
+        } else if (pick.status === "exhausted") {
+          // Nobody would otherwise see this: the account simply stays NULL and
+          // onboarding asks. Same sentence `autoAssignUsername` logs on the two
+          // ORCID doors, because it is the same operational fact.
+          console.warn(
+            `[username-assignment] every variant of "${pick.base}" is taken; user ${userRow.id} keeps a NULL username`,
+          );
+        }
+      } catch (pickErr) {
+        console.error(
+          `[auth-web] /code/verify: could not pick a username for user id=${userRow.id}; signing in without one`,
+          pickErr,
+        );
+      }
+    }
 
     let promoted: boolean;
     let usernameLanded = false;

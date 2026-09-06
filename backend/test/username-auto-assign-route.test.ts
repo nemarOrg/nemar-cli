@@ -23,13 +23,14 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
 import { authOrcidRoutes } from "../src/routes/auth-orcid";
 import { authWebRoutes } from "../src/routes/auth-web";
 import { hashAuthCode } from "../src/services/auth-code";
 import { PENDING_COOKIE_NAME, encodeState, signPending } from "../src/services/orcid-auth";
+import { TAKEN_SQL } from "../src/services/username-assignment";
 import { issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -89,9 +90,30 @@ afterAll(() => {
   orcidPub.stop(true);
 });
 
+/**
+ * When set, the username scan is diverted to SQL the database refuses.
+ *
+ * The sibling of `blockUserWrites()` in web-email-verification.test.ts, which
+ * makes every `UPDATE users` fail with a real SQLite trigger. A trigger cannot
+ * fire on a SELECT, so the equivalent fault for a READ is to point that one
+ * statement -- matched by the production constant, never a copy of it -- at a
+ * column that does not exist. SQLite itself raises the error, at prepare time,
+ * exactly where a transient D1 failure would surface; every other statement in
+ * the request still runs against the real database.
+ */
+let breakUsernameScan = false;
+
 function env(): Bindings {
+  const base = realD1(db);
   return {
-    DB: realD1(db),
+    DB: {
+      ...base,
+      prepare(sql: string) {
+        return base.prepare(
+          breakUsernameScan && sql === TAKEN_SQL ? "SELECT no_such_column FROM users" : sql,
+        );
+      },
+    },
     ENVIRONMENT: "test",
     ENCRYPTION_KEY,
     WEB_SESSION_COOKIE_DOMAIN: "",
@@ -183,11 +205,30 @@ async function waitForUsername(id: number, attempts = 200): Promise<string | nul
   return null;
 }
 
+/** Everything the route logged during one test. Captured rather than muted so
+ *  a test can assert that an operator would actually see the fact. */
+let logs: string[];
+const realWarn = console.warn;
+const realError = console.error;
+
 beforeEach(() => {
   db = freshDb();
+  breakUsernameScan = false;
+  logs = [];
+  console.warn = (...a: unknown[]) => {
+    logs.push(a.join(" "));
+  };
+  console.error = (...a: unknown[]) => {
+    logs.push(a.join(" "));
+  };
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/auth", authWebRoutes);
   app.route("/auth", authOrcidRoutes);
+});
+
+afterEach(() => {
+  console.warn = realWarn;
+  console.error = realError;
 });
 
 describe("POST /auth/code/verify", () => {
@@ -243,6 +284,37 @@ describe("POST /auth/code/verify", () => {
     expect((await codeVerify(EMAIL, "123456")).status).toBe(200);
     expect(usernameOf(id)).toEqual({ username: "chosen", auto: 0 });
     expect(auditRows(id)).toHaveLength(0);
+  });
+
+  test("a failed username scan does not burn the code or the sign-in", async () => {
+    // The scan runs AFTER the code has been consumed and BEFORE the batch whose
+    // catch restores it, so an escaping error would answer a generic 500 and
+    // spend a code the user typed correctly. The feature is a nudge; it may
+    // never cost anybody a login.
+    const id = seedWebUser(EMAIL);
+    await plantCode(EMAIL, "123456");
+    breakUsernameScan = true;
+
+    const res = await codeVerify(EMAIL, "123456");
+
+    expect(res.status).toBe(200);
+    // A real session: the cookie is set and the row exists.
+    expect(res.headers.getSetCookie().some((ck) => ck.startsWith("nemar_session="))).toBe(true);
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM web_sessions").get()?.n).toBe(1);
+    // ...and the sign-in did everything else it does, including promoting the
+    // account off `pending` (the wire spells that "active"; the column is the
+    // fact).
+    expect((await res.json()).user.status).toBe("active");
+    expect(
+      db.query<{ status: string }, [number]>("SELECT status FROM users WHERE id = ?").get(id)
+        ?.status,
+    ).toBe("verified");
+
+    // Nothing was assigned, nothing was claimed to have been.
+    expect(usernameOf(id)).toEqual({ username: null, auto: 0 });
+    expect(auditRows(id)).toHaveLength(0);
+    // But an operator can see it happened, with the account it happened to.
+    expect(logs.join("\n")).toContain(`could not pick a username for user id=${id}`);
   });
 
   test("the assignment is audited, with the door it came through", async () => {
