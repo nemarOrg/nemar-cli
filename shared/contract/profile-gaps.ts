@@ -92,9 +92,23 @@ interface ProfileGapDefinition {
    *  `PATCH /auth/profile` refuses the edit (`name_is_orcid_canonical`), on
    *  both credentials since ADR 0044. */
   readonly orcidWebKey?: AccountCopyKey;
-  /** False for a field that is not account state, so
-   *  {@link computeProfileGaps} never raises it from a row. */
-  readonly derivable: boolean;
+  /**
+   * When this field counts as missing on a given account row, or `null` for a
+   * field that is not account state at all.
+   *
+   * THE RULE LIVES IN THE TABLE, which is the point. {@link computeProfileGaps}
+   * used to carry a hand-written if-chain beside this matrix, so adding a row
+   * here and forgetting the branch there produced a field that every surface
+   * could describe and none could ever raise -- silently, because the matrix
+   * and the derivation had no way to disagree out loud. `Record<GapField, ...>`
+   * now makes the predicate part of what a row IS, so a new field does not
+   * compile until someone has said when it is missing.
+   *
+   * `null` is the honest spelling of "never raised from a row" and replaces the
+   * old `derivable: boolean`: one field rather than two that had to agree, and
+   * {@link DERIVABLE_GAP_FIELDS} is derived from it.
+   */
+  readonly isMissing: ((account: ProfileGapAccount) => boolean) | null;
 }
 
 /**
@@ -116,14 +130,21 @@ export const PROFILE_GAP_MATRIX: Record<GapField, ProfileGapDefinition> = {
     labelKey: "gap.field.email_verified.label",
     webKey: "gap.field.email_verified.set_on.web",
     cliKey: "gap.field.email_verified.set_on.cli",
-    derivable: true,
+    // `status === "pending"` is the unverified tier; an explicit `false` says
+    // the same thing from the newer flag. `undefined`/`null` on an active
+    // account is a caller that does not report the flag, NOT an unproved inbox
+    // -- treating it as one would show a verify step to accounts with nothing
+    // to verify.
+    isMissing: (a) => a.status === "pending" || a.email_verified === false,
   },
   username: {
     blocks: ["upload_access"],
     labelKey: "gap.field.username.label",
     webKey: "gap.field.username.set_on.web",
     cliKey: "gap.field.username.set_on.cli",
-    derivable: true,
+    // `undefined` is "could not be read" and does NOT raise the gap; see the
+    // field's note on ProfileGapAccount.
+    isMissing: (a) => a.username !== undefined && isBlank(a.username),
   },
   given_name: {
     // A DOI cites a person (ADR 0041), so the name outlives the request that
@@ -133,7 +154,11 @@ export const PROFILE_GAP_MATRIX: Record<GapField, ProfileGapDefinition> = {
     webKey: "gap.field.given_name.set_on.web",
     cliKey: "gap.field.given_name.set_on.cli",
     orcidWebKey: "gap.field.given_name.set_on.web.orcid",
-    derivable: true,
+    // Raised even under a verified ORCID iD. The gap is real either way: the
+    // upload-access request refuses with `missing: ["given_name",
+    // "family_name"]` whatever owns the name, and publication is blocked with
+    // `owner_name_missing`. What the iD changes is where it is set.
+    isMissing: (a) => isBlank(a.given_name),
   },
   family_name: {
     blocks: ["upload_access", "publication"],
@@ -141,35 +166,38 @@ export const PROFILE_GAP_MATRIX: Record<GapField, ProfileGapDefinition> = {
     webKey: "gap.field.family_name.set_on.web",
     cliKey: "gap.field.family_name.set_on.cli",
     orcidWebKey: "gap.field.family_name.set_on.web.orcid",
-    derivable: true,
+    isMissing: (a) => isBlank(a.family_name),
   },
   github_username: {
     blocks: ["upload_access", "publication"],
     labelKey: "gap.field.github_username.label",
     webKey: "gap.field.github_username.set_on.web",
     cliKey: "gap.field.github_username.set_on.cli",
-    derivable: true,
+    isMissing: (a) => isBlank(a.github_username),
   },
   city: {
     blocks: ["upload_access"],
     labelKey: "gap.field.city.label",
     webKey: "gap.field.city.set_on.web",
     cliKey: "gap.field.city.set_on.cli",
-    derivable: true,
+    isMissing: (a) => isBlank(a.city),
   },
   country: {
     blocks: ["upload_access"],
     labelKey: "gap.field.country.label",
     webKey: "gap.field.country.set_on.web",
     cliKey: "gap.field.country.set_on.cli",
-    derivable: true,
+    isMissing: (a) => isBlank(a.country),
   },
   why: {
     blocks: ["upload_access"],
     labelKey: "gap.field.why.label",
     webKey: "gap.field.why.set_on.web",
     cliKey: "gap.field.why.set_on.cli",
-    derivable: false,
+    // `null`, not a predicate that always answers false: nothing is stored
+    // until the request form is submitted, so no account ROW can be missing it.
+    // It is in the table only so a refusal's `missing: ["why"]` renders.
+    isMissing: null,
   },
 };
 
@@ -177,9 +205,11 @@ export const PROFILE_GAP_MATRIX: Record<GapField, ProfileGapDefinition> = {
 export const GAP_FIELDS = Object.keys(PROFILE_GAP_MATRIX) as readonly GapField[];
 
 /** The subset {@link computeProfileGaps} can raise from an account row — every
- *  field except `why`, which only a submitted form can be missing. */
+ *  field except `why`, which only a submitted form can be missing. Derived
+ *  from the predicates rather than declared beside them, so the two cannot
+ *  drift apart. */
 export const DERIVABLE_GAP_FIELDS: readonly GapField[] = GAP_FIELDS.filter(
-  (field) => PROFILE_GAP_MATRIX[field].derivable,
+  (field) => PROFILE_GAP_MATRIX[field].isMissing !== null,
 );
 
 const GAP_BLOCK_COPY: Record<GapBlock, AccountCopyKey> = {
@@ -314,25 +344,13 @@ export function computeProfileGaps(account: ProfileGapAccount): ProfileGapEntry[
     set_on: gapSurfaces(field, orcidVerified),
   });
 
-  const gaps: ProfileGapEntry[] = [];
-  // `status === "pending"` is the unverified tier; an explicit `false` says the
-  // same thing from the newer flag. `undefined`/`null` on an active account is
-  // a caller that does not report the flag, NOT an unproved inbox — treating it
-  // as one would show a verify step to accounts with nothing to verify.
-  if (account.status === "pending" || account.email_verified === false) {
-    gaps.push(entry("email_verified"));
-  }
-  if (account.username !== undefined && isBlank(account.username)) gaps.push(entry("username"));
-  // Raised even under a verified ORCID iD. The gap is real either way: the
-  // upload-access request refuses with `missing: ["given_name", "family_name"]`
-  // whatever owns the name, and publication is blocked with
-  // `owner_name_missing`. What the iD changes is where it is set.
-  if (isBlank(account.given_name)) gaps.push(entry("given_name"));
-  if (isBlank(account.family_name)) gaps.push(entry("family_name"));
-  if (isBlank(account.github_username)) gaps.push(entry("github_username"));
-  if (isBlank(account.city)) gaps.push(entry("city"));
-  if (isBlank(account.country)) gaps.push(entry("country"));
-  return gaps;
+  // Iterating the matrix rather than restating it: matrix order IS prompt
+  // order, and every rule is a property of the row it belongs to, so a field
+  // cannot be described here and un-raisable, or raised in an order the
+  // refusal does not share.
+  return GAP_FIELDS.filter((field) => PROFILE_GAP_MATRIX[field].isMissing?.(account) === true).map(
+    entry,
+  );
 }
 
 /** Just the field names, in matrix order — the shape
