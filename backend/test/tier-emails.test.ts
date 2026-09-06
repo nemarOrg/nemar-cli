@@ -98,9 +98,9 @@ function seedVerifiedWebUser(): number {
      VALUES (?, 'verified', 'web', 1, '0000-0002-1825-0097', 1, 0)`,
     [WEB_EMAIL],
   );
-  const row = db.query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?").get(
-    WEB_EMAIL,
-  );
+  const row = db
+    .query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?")
+    .get(WEB_EMAIL);
   if (!row) throw new Error("web seed failed");
   return row.id;
 }

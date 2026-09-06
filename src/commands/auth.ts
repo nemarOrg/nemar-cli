@@ -589,8 +589,6 @@ export async function signupAction(): Promise<void> {
         ),
       );
     }
-    console.log();
-    console.log(chalk.dim("After verifying, use 'nemar auth retrieve-key' to get your API key"));
   } catch (error) {
     if (error instanceof ApiError) {
       spinner.fail(error.message);
