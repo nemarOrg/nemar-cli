@@ -454,6 +454,48 @@ describe("user /me envelope schema", () => {
       userMeResponseSchema.parse({ id: 1, username: "u", email: "e@x.org", role: "user" }),
     ).toThrow();
   });
+
+  test("a profile_gaps entry may carry only its field name", () => {
+    // getCurrentUser throws ApiError on ANY mismatch, so a required `set_on`
+    // would make one thin entry break every /users/me consumer -- over a key
+    // the renderer never reads (resolveWireProfileGaps takes `field` and
+    // `blocks`, and falls back to the matrix for a `blocks` it cannot use).
+    const parsed = userMeResponseSchema.parse({
+      user: {
+        id: 1,
+        username: null,
+        email: "e@x.org",
+        github_username: null,
+        role: "user",
+        profile_gaps: [
+          { field: "username", blocks: ["upload_access"] },
+          { field: "city" },
+        ],
+      },
+      token: null,
+    });
+    expect(parsed.user.profile_gaps?.map((g) => g.field)).toEqual(["username", "city"]);
+    expect(parsed.user.profile_gaps?.[1].set_on).toBeUndefined();
+  });
+
+  test("a profile_gaps entry still needs its field name", () => {
+    // The one key the renderers cannot do without: an entry with no `field` is
+    // dropped by resolveWireProfileGaps, so accepting it would carry a line
+    // nothing can ever print.
+    expect(() =>
+      userMeResponseSchema.parse({
+        user: {
+          id: 1,
+          username: null,
+          email: "e@x.org",
+          github_username: null,
+          role: "user",
+          profile_gaps: [{ blocks: ["upload_access"] }],
+        },
+        token: null,
+      }),
+    ).toThrow();
+  });
 });
 
 describe("neuroschema dataset schema", () => {

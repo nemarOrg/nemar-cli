@@ -27,12 +27,22 @@ import { z } from "zod";
  * `["web"]` alone for a name owned by a verified ORCID record, where no CLI
  * command applies. Both are `.passthrough()`-friendly enums-as-strings for the
  * same reason `field` is.
+ *
+ * ONLY `field` IS REQUIRED, and that is not laxity — it is the same rule the
+ * two renderers already follow. `resolveWireProfileGaps` treats a missing or
+ * unusable `blocks` as "fall back to the matrix" and reads `set_on` not at all;
+ * the CLI's own config-cache schema (src/lib/config.ts) has both `.optional()`
+ * so a cache written by an older build still parses. Demanding them HERE would
+ * have been the strictest link in a chain nothing else tightens, and
+ * `getCurrentUser` throws `ApiError` on any schema mismatch — so one entry
+ * missing one key would take down every `/users/me` consumer over a field the
+ * renderer was ready to do without.
  */
 export const profileGapSchema = z
   .object({
     field: z.string(),
-    blocks: z.array(z.string()),
-    set_on: z.array(z.string()),
+    blocks: z.array(z.string()).optional(),
+    set_on: z.array(z.string()).optional(),
   })
   .passthrough();
 export type ProfileGapWire = z.infer<typeof profileGapSchema>;
