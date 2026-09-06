@@ -39,6 +39,8 @@ const ADMIN_EMAIL = "tieradmin@nemar.test";
 
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
+/** Bumped per seeded row so each gets its own iD; reset with the database. */
+let seededOrcidCount = 0;
 
 function env(): Bindings {
   return {
@@ -98,13 +100,25 @@ function seedAdmin(): void {
   );
 }
 
-/** A web/ORCID-shaped row: username NULL, ORCID verified, email unverified. */
+/**
+ * A web/ORCID-shaped row: username NULL, ORCID verified, email unverified.
+ *
+ * Each seeded row gets a DISTINCT iD. It used to reuse ORCID_ID for every
+ * call, which migration 0077 now refuses outright (an iD backs one live
+ * account, ADR 0043) -- the fixture was manufacturing exactly the duplicate
+ * this suite's sibling tests exist to prevent. Keeping ORCID_ID off these rows
+ * also means the finalize tests below, which sign a pending token FOR
+ * ORCID_ID, are exercising an unclaimed iD rather than colliding with a
+ * fixture.
+ */
 function seedWebUser(email: string, status = "pending"): number {
+  seededOrcidCount += 1;
+  const orcid = `0000-0002-9999-${String(seededOrcidCount).padStart(4, "0")}`;
   db.run(
     `INSERT INTO users (email, status, signup_source, email_verified, orcid, orcid_verified,
                         given_name, family_name, service_access)
      VALUES (?, ?, 'web', 0, ?, 1, 'Ada', 'Lovelace', 0)`,
-    [email, status, ORCID_ID],
+    [email, status, orcid],
   );
   const row = db.query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?").get(email);
   if (!row) throw new Error(`seed failed for ${email}`);
@@ -196,6 +210,7 @@ function codeRow(email: string) {
 
 beforeEach(() => {
   db = freshDb();
+  seededOrcidCount = 0;
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/auth", authWebRoutes);
   app.route("/auth", authOrcidRoutes);

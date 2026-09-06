@@ -24,6 +24,16 @@ import {
 } from "../services/email";
 import { validateGitHubUsername } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
+import {
+  emailFieldSchema,
+  findEmailHolder,
+  findGithubHolder,
+  findOrcidHolder,
+  identityRefusal,
+  isUniqueViolationOn,
+  normalizeGithubHandle,
+  normalizeOrcid,
+} from "../services/identity";
 import { fetchOrcidName, orcidPubBase } from "../services/orcid-auth";
 import { hashPassword, validatePasswordStrength, verifyPassword } from "../services/password";
 import {
@@ -178,16 +188,24 @@ const signupSchema = z.object({
       /^[a-zA-Z0-9_-]+$/,
       "Username can only contain letters, numbers, underscores, and hyphens",
     ),
-  email: z.string().email("Invalid email address"),
+  // Normalised BEFORE validation (ADR 0043) so the stored value can only ever
+  // be canonical: an address is trimmed and lowercased, and a GitHub handle
+  // loses a pasted leading "@" instead of failing the format check over it.
+  // `preprocess` rather than `.transform()` because the rules have to run
+  // before `.email()`/`.regex()`, not after them.
+  email: emailFieldSchema,
   password: z.string().min(12, "Password must be at least 12 characters").max(128),
-  github_username: z
-    .string()
-    .min(1, "GitHub username is required")
-    .max(39, "GitHub username is too long")
-    .regex(
-      /^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/,
-      "GitHub username must start and end with a letter or number, and can only contain letters, numbers, and hyphens",
-    ),
+  github_username: z.preprocess(
+    (v) => (typeof v === "string" ? normalizeGithubHandle(v) : v),
+    z
+      .string()
+      .min(1, "GitHub username is required")
+      .max(39, "GitHub username is too long")
+      .regex(
+        /^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/,
+        "GitHub username must start and end with a letter or number, and can only contain letters, numbers, and hyphens",
+      ),
+  ),
   description: z
     .string()
     .min(
@@ -196,7 +214,11 @@ const signupSchema = z.object({
     )
     .max(500, "Description must be at most 500 characters"),
   // ORCID is now required: it's the canonical source for the user's name (#835).
-  orcid: orcidIdSchema,
+  // Uppercased first so an iD typed with a lowercase `x` check digit is
+  // accepted and STORED canonically -- the partial unique index from migration
+  // 0077 compares `users.orcid` exactly, so a case variant would read as a
+  // different person's iD (ADR 0043).
+  orcid: z.preprocess((v) => (typeof v === "string" ? (normalizeOrcid(v) ?? v) : v), orcidIdSchema),
   // Supplied only when the ORCID record hides its name (#1255): the server
   // still reads ORCID first, so these are a fallback, never an override.
   given_name: z.string().trim().min(1).max(100).optional(),
@@ -242,13 +264,22 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
       );
     }
 
-    // NOTE: the signup de-dup checks below (username / email / github_username)
-    // deliberately do NOT filter `deleted_at IS NULL` — they must see ALL rows,
-    // including tombstones, to honor the UNIQUE constraints. Re-signup with a
-    // deleted user's old email/username/github is enabled by the tombstone
-    // MASKING (email -> deleted+<id>@deleted.invalid, username/github -> NULL),
-    // which frees those values, NOT by excluding deleted rows here. See the
-    // DELETE /admin/users/by-id/:id tombstone + migration 0037.
+    // NOTE on `deleted_at`. The USERNAME check below deliberately does NOT
+    // filter `deleted_at IS NULL`: it mirrors a table-wide UNIQUE, so it must
+    // see tombstones too. Re-signup with a deleted user's old values is
+    // enabled by the tombstone MASKING (email -> deleted+<id>@deleted.invalid,
+    // username/github/orcid -> NULL), which frees them, NOT by excluding
+    // deleted rows here. See DELETE /admin/users/by-id/:id + migration 0037.
+    //
+    // The email, ORCID and GitHub checks go through services/identity.ts and
+    // are live-rows-only. For email and ORCID that is required: the
+    // constraints they mirror are 0077's PARTIAL indexes
+    // (`deleted_at IS NULL AND identity_conflict = 0`), so a live-only
+    // predicate is what matches the index the write will actually hit. For
+    // GitHub the predicate makes no difference either way -- the tombstone
+    // NULLs `github_username`, so no tombstone can hold a handle to collide
+    // with -- and it uses the same helper for symmetry, so all three
+    // identifiers are asked the same question in the same place.
 
     // Check if username already exists
     const existingUsername = await db
@@ -260,14 +291,28 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
       return c.json({ error: "Username already taken" }, 409);
     }
 
-    // Check if email already exists
-    const existingEmail = await db
-      .prepare("SELECT id FROM users WHERE email = ?")
-      .bind(email)
-      .first();
+    // Check if email already exists, case-insensitively (ADR 0043). The
+    // exact-case check this replaces let `Ada@Lab.org` and `ada@lab.org`
+    // become two accounts for one person; migration 0077's partial unique
+    // index now refuses that write outright, and this turns the refusal into
+    // a message that says what to do about it.
+    const existingEmail = await findEmailHolder(db, email);
 
     if (existingEmail) {
-      return c.json({ error: "Email already registered" }, 409);
+      return c.json({ error: "Email already registered", ...identityRefusal("email_in_use") }, 409);
+    }
+
+    // Check if the ORCID iD already backs an account (#1254). Nothing checked
+    // this before: `users.orcid` carried no constraint at all, and the only
+    // ORCID uniqueness in the system lived on `oauth_identities`, which a CLI
+    // signup never writes. So the CLI was a way to mint a second account for
+    // an iD that already had one. `findOrcidHolder` looks at both.
+    const existingOrcid = await findOrcidHolder(db, orcid);
+    if (existingOrcid) {
+      return c.json(
+        { error: "ORCID iD already registered", ...identityRefusal("orcid_in_use") },
+        409,
+      );
     }
 
     // Direct dup check on the raw input (case-insensitive). Common case:
@@ -275,12 +320,15 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     // API call and lets the request 409 even when the GitHub user happens
     // not to resolve (e.g., user was renamed/deleted on GitHub after
     // signing up here).
-    const directDupGithub = await db
-      .prepare("SELECT id FROM users WHERE github_username = ? COLLATE NOCASE")
-      .bind(github_username)
-      .first();
+    const directDupGithub = await findGithubHolder(db, github_username);
     if (directDupGithub) {
-      return c.json({ error: "GitHub account already linked to another user" }, 409);
+      return c.json(
+        {
+          error: "GitHub account already linked to another user",
+          ...identityRefusal("github_in_use"),
+        },
+        409,
+      );
     }
 
     // Validate GitHub username exists. This is also where we recover the
@@ -317,12 +365,15 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     // Re-check with the canonical login when GitHub normalized the case.
     // Catches the "Octocat" stored vs "octocat" submitted shape.
     if (githubUser.login.toLowerCase() !== github_username.toLowerCase()) {
-      const canonicalDup = await db
-        .prepare("SELECT id FROM users WHERE github_username = ? COLLATE NOCASE")
-        .bind(githubUser.login)
-        .first();
+      const canonicalDup = await findGithubHolder(db, githubUser.login);
       if (canonicalDup) {
-        return c.json({ error: "GitHub account already linked to another user" }, 409);
+        return c.json(
+          {
+            error: "GitHub account already linked to another user",
+            ...identityRefusal("github_in_use"),
+          },
+          409,
+        );
       }
     }
 
@@ -473,14 +524,32 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     // D1 errors may not be standard Error instances, so check multiple ways
     const msg = error instanceof Error ? error.message : String(error);
     if (msg.includes("UNIQUE constraint failed")) {
-      if (msg.includes("users.username")) {
+      if (isUniqueViolationOn(error, "username")) {
         return c.json({ error: "Username already taken" }, 409);
       }
-      if (msg.includes("users.email")) {
-        return c.json({ error: "Email already registered" }, 409);
+      if (isUniqueViolationOn(error, "email")) {
+        return c.json(
+          { error: "Email already registered", ...identityRefusal("email_in_use") },
+          409,
+        );
       }
-      if (msg.includes("users.github_username")) {
-        return c.json({ error: "GitHub account already linked to another user" }, 409);
+      // 0077's partial index reports the COLUMN, not the index name, so this
+      // catches a concurrent signup that claimed the iD between the check
+      // above and this insert.
+      if (isUniqueViolationOn(error, "orcid")) {
+        return c.json(
+          { error: "ORCID iD already registered", ...identityRefusal("orcid_in_use") },
+          409,
+        );
+      }
+      if (isUniqueViolationOn(error, "github_username")) {
+        return c.json(
+          {
+            error: "GitHub account already linked to another user",
+            ...identityRefusal("github_in_use"),
+          },
+          409,
+        );
       }
       console.error("Unhandled UNIQUE constraint column in signup:", msg);
       return c.json({ error: "An account with these details already exists" }, 409);
@@ -799,7 +868,10 @@ authRoutes.post("/login", zValidator("json", loginSchema), async (c) => {
  * POST /auth/resend-verification - Resend verification email
  */
 const resendSchema = z.object({
-  email: z.string().email(),
+  // Normalised before validation, and looked up NOCASE below (ADR 0043):
+  // signup stores the address lowercased, so an exact-case lookup would miss
+  // every LEGACY row whose address was stored exactly as typed.
+  email: emailFieldSchema,
 });
 
 authRoutes.post("/resend-verification", zValidator("json", resendSchema), async (c) => {
@@ -808,7 +880,9 @@ authRoutes.post("/resend-verification", zValidator("json", resendSchema), async 
 
   // Find user
   const user = await db
-    .prepare("SELECT id, username, status FROM users WHERE email = ? AND deleted_at IS NULL")
+    .prepare(
+      "SELECT id, username, status FROM users WHERE email = ? COLLATE NOCASE AND deleted_at IS NULL",
+    )
     .bind(email)
     .first<{ id: number; username: string; status: string }>();
 
@@ -863,7 +937,7 @@ authRoutes.post("/resend-verification", zValidator("json", resendSchema), async 
 // ============================================================================
 
 const retrieveKeySchema = z.object({
-  email: z.string().email(),
+  email: emailFieldSchema,
   password: z.string().min(1, "Password is required"),
 });
 
@@ -883,7 +957,7 @@ authRoutes.post("/retrieve-key", zValidator("json", retrieveKeySchema), async (c
   // Find user by email
   const user = await db
     .prepare(
-      "SELECT id, username, email, password_hash, status FROM users WHERE email = ? AND deleted_at IS NULL",
+      "SELECT id, username, email, password_hash, status FROM users WHERE email = ? COLLATE NOCASE AND deleted_at IS NULL",
     )
     .bind(email)
     .first<{
@@ -989,7 +1063,7 @@ authRoutes.post("/retrieve-key", zValidator("json", retrieveKeySchema), async (c
 // ============================================================================
 
 const regenRequestSchema = z.object({
-  email: z.string().email(),
+  email: emailFieldSchema,
 });
 
 /**
@@ -1002,7 +1076,9 @@ authRoutes.post("/request-key-regeneration", zValidator("json", regenRequestSche
 
   // Find user
   const user = await db
-    .prepare("SELECT id, username, email, status FROM users WHERE email = ? AND deleted_at IS NULL")
+    .prepare(
+      "SELECT id, username, email, status FROM users WHERE email = ? COLLATE NOCASE AND deleted_at IS NULL",
+    )
     .bind(email)
     .first<{ id: number; username: string; email: string; status: string }>();
 

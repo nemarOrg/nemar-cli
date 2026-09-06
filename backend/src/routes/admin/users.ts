@@ -37,6 +37,7 @@ import { isNonProductionEnv } from "../../services/environment";
 import { removeCollaborator } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
 import { revokeUserIamAccess } from "../../services/iam";
+import { emailFieldSchema, normalizeGithubHandle, normalizeOrcid } from "../../services/identity";
 import { errorMessage } from "../../services/repo-metadata";
 import { type Bindings, type Variables, isDemotion, parseRole } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
@@ -1513,11 +1514,9 @@ export function registerUsersRoutes(admin: AdminRouter): void {
   // ---------------------------------------------------------------------------
 
   const seedWebUserSchema = z.object({
-    email: z
-      .string()
-      .email()
-      .max(320)
-      .transform((e) => e.trim().toLowerCase()),
+    // Shared field: normalises BEFORE validating, so a pasted address with
+    // surrounding whitespace seeds a row rather than 400ing (ADR 0043).
+    email: emailFieldSchema,
     // Optional. Defaults to 'pending' to mirror what the legacy
     // INSERT-OR-IGNORE produced. The cookie-auth tests (#572) seed a
     // signed-in tier directly; since ADR 0040 phase 2 the cookie path in
@@ -1535,9 +1534,19 @@ export function registerUsersRoutes(admin: AdminRouter): void {
         // Shared iD validator, not a bare length check: `max(19)` accepted
         // any 19-character string as an ORCID, which is how a fixture row
         // could carry an iD the rest of the system would never accept.
-        orcid: orcidIdSchema.optional(),
+        // Canonicalised the same way every real write is (ADR 0043), so a
+        // fixture cannot seed a row shape the production paths can no longer
+        // produce -- a lowercase `x` check digit or an `@handle`.
+        orcid: z
+          .preprocess((v) => (typeof v === "string" ? (normalizeOrcid(v) ?? v) : v), orcidIdSchema)
+          .optional(),
         orcid_verified: z.boolean().optional(),
-        github_username: z.string().max(39).optional(),
+        github_username: z
+          .preprocess(
+            (v) => (typeof v === "string" ? normalizeGithubHandle(v) : v),
+            z.string().max(39),
+          )
+          .optional(),
         city: z.string().max(200).optional(),
         country: z.string().max(200).optional(),
         affiliation: z.string().max(300).optional(),

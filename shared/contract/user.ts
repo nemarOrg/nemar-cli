@@ -31,6 +31,21 @@ export const userSchema = z
      * an older backend does not send it; `undefined` is "unknown", not "no".
      */
     service_access: z.boolean().optional(),
+    /**
+     * Account tier and identifier-verification state, for `nemar auth profile`
+     * (#1254, ADR 0043).
+     *
+     * All five are `.optional()` for the same reason `service_access` is: a
+     * CLI talking to a backend deployed before #1254 receives no such key, and
+     * absence must render as "unknown" rather than as a confident "no". That
+     * matters most for `email_verified` -- telling someone their confirmed
+     * inbox is unconfirmed sends them to redeem a code they do not need.
+     */
+    status: z.string().optional(),
+    email_verified: z.boolean().optional(),
+    orcid_verified: z.boolean().optional(),
+    given_name: z.string().nullable().optional(),
+    family_name: z.string().nullable().optional(),
   })
   .passthrough();
 export type ContractUser = z.infer<typeof userSchema>;

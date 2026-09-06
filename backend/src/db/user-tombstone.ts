@@ -5,7 +5,7 @@
 // The mask is the load-bearing mechanism for two guarantees:
 //   1. PII erasure — email is replaced with a non-PII placeholder; username,
 //      github, password, orcid, description, AWS creds, verification tokens and
-//      email prefs are nulled; email_verified is zeroed.
+//      email prefs are nulled; email_verified and orcid_verified are zeroed.
 //   2. Re-signup freedom — nulling username/github and rewriting email FREES
 //      those UNIQUE values so the original owner can sign up again later. (The
 //      signup de-dup checks intentionally still see tombstoned rows.)
@@ -44,6 +44,14 @@ export const USER_TOMBSTONE_MASK_SQL = `UPDATE users
        github_username = NULL,
        password_hash = NULL,
        orcid = NULL,
+       -- Cleared WITH users.orcid, not left behind (#1254, ADR 0043). A row
+       -- with orcid = NULL and orcid_verified = 1 claims to have proven an iD
+       -- it no longer has, which is a lie in the audit trail and the exact
+       -- half-state that produced production rows 42/43 in the first place --
+       -- there via unlink, observed again here after row 42 was soft-deleted.
+       -- Every writer of one now writes the other: this statement, the unlink
+       -- route, and linkIdentity/relinkIdentity.
+       orcid_verified = 0,
        description = NULL,
        email_preferences = NULL,
        email_verified = 0,

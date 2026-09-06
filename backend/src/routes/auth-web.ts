@@ -75,6 +75,12 @@ import {
 import { validateGitHubUsername } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
 import {
+  emailFieldSchema,
+  findEmailHolder,
+  identityRefusal,
+  isUniqueViolationOn,
+} from "../services/identity";
+import {
   type ProfilePatchInput,
   githubHandleChanged,
   normalizeProfilePatch,
@@ -97,19 +103,11 @@ import { type Bindings, type UserRole, type Variables, parseRole } from "../type
 export const authWebRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 const emailSchema = z.object({
-  email: z
-    .string()
-    .email()
-    .max(320)
-    .transform((e) => e.trim().toLowerCase()),
+  email: emailFieldSchema,
 });
 
 const verifySchema = z.object({
-  email: z
-    .string()
-    .email()
-    .max(320)
-    .transform((e) => e.trim().toLowerCase()),
+  email: emailFieldSchema,
   code: z.string().regex(/^\d{6}$/, "code must be 6 digits"),
   remember: z.boolean(),
 });
@@ -229,8 +227,15 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
     // silently fail; the dashboard surfaces an "if your email is on
     // file, you'll get a code shortly" copy and a CTA pointing typo'd
     // users at the CLI sign-up (companion issue on nemarOrg/website).
+    // COLLATE NOCASE (ADR 0043): the schema lowercases the REQUEST, but the
+    // rows it has to match were stored exactly as typed -- that is most of the
+    // production catalog. An exact-case lookup sends every one of those people
+    // the masked "if your email is on file" 200 and then silently sends no
+    // code, which is indistinguishable from a typo and unreportable.
     const existing = await db
-      .prepare("SELECT status, role FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1")
+      .prepare(
+        "SELECT status, role FROM users WHERE email = ? COLLATE NOCASE AND deleted_at IS NULL LIMIT 1",
+      )
       .bind(email)
       .first<{ status: string; role: string | null }>();
 
@@ -427,13 +432,17 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       return c.json({ error: "Invalid or expired code" }, 401);
     }
 
+    // COLLATE NOCASE for the same reason as /code/request (ADR 0043): the code
+    // was issued against the normalised address, and the row that owns it may
+    // be stored mixed-case. Without this a legacy user could receive a code
+    // and still not be able to redeem it.
     const userRow = await db
       .prepare(
         `SELECT id, email, role, status, email_verified,
                 given_name, family_name, orcid, orcid_verified,
                 github_username, city, country, affiliation, service_access,
                 username, service_access_granted_at, upload_access_requested_at
-           FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1`,
+           FROM users WHERE email = ? COLLATE NOCASE AND deleted_at IS NULL LIMIT 1`,
       )
       .bind(email)
       .first<{
@@ -817,10 +826,7 @@ authWebRoutes.patch(
           .bind(patch.github_username, webUser.id)
           .first<{ id: number }>();
         if (dup) {
-          return c.json(
-            { error: "github_in_use", message: "GitHub account already linked to another user" },
-            409,
-          );
+          return c.json({ error: "github_in_use", ...identityRefusal("github_in_use") }, 409);
         }
 
         // #1052: three answers, not two. A 5xx or a transport failure used to
@@ -864,10 +870,7 @@ authWebRoutes.patch(
             .bind(githubUser.login, webUser.id)
             .first<{ id: number }>();
           if (canonicalDup) {
-            return c.json(
-              { error: "github_in_use", message: "GitHub account already linked to another user" },
-              409,
-            );
+            return c.json({ error: "github_in_use", ...identityRefusal("github_in_use") }, 409);
           }
         }
         patch.github_username = githubUser.login;
@@ -943,12 +946,12 @@ authWebRoutes.patch(
       // concurrent PATCHes claiming the same free handle both pass the
       // pre-check, and the loser's UPDATE hits idx_users_github (0012,
       // COLLATE NOCASE). Same net CLI signup carries in auth.ts.
-      const msg = String(err);
-      if (msg.includes("UNIQUE constraint failed") && msg.includes("users.github_username")) {
-        return c.json(
-          { error: "github_in_use", message: "GitHub account already linked to another user" },
-          409,
-        );
+      // Column-scoped through the shared helper (ADR 0043), which parses the
+      // failing columns out of the message rather than substring-matching
+      // them: `users.github_username` cannot be confused with a neighbour, and
+      // the same check reads identically at every call site.
+      if (isUniqueViolationOn(err, "github_username")) {
+        return c.json({ error: "github_in_use", ...identityRefusal("github_in_use") }, 409);
       }
       // The same window for `username`, and the same answer. This one is
       // reachable ONLY as a race: the pre-check above is COLLATE NOCASE while
@@ -971,11 +974,7 @@ authWebRoutes.patch(
 // ---------------------------------------------------------------
 
 const emailChangeVerifySchema = z.object({
-  email: z
-    .string()
-    .email()
-    .max(320)
-    .transform((e) => e.trim().toLowerCase()),
+  email: emailFieldSchema,
   code: z.string().regex(/^\d{6}$/, "code must be 6 digits"),
 });
 
@@ -1150,12 +1149,13 @@ authWebRoutes.post(
       // is bounded: caller must hold a session, the route sits in the
       // auth-ip bucket (10/min/IP, rateLimit.ts), and the per-user cap
       // below throttles how fast one account can cycle targets.
-      const collision = await db
-        .prepare("SELECT id FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1")
-        .bind(email)
-        .first<{ id: number }>();
+      // Case-insensitive since #1254 (ADR 0043): migration 0077's partial
+      // unique index refuses a case-variant of a live address, so a request
+      // that only checked exact case would mail a code for a target the
+      // verify step could never write.
+      const collision = await findEmailHolder(db, email);
       if (collision) {
-        return c.json({ error: "email_in_use" }, 409);
+        return c.json({ error: "email_in_use", ...identityRefusal("email_in_use") }, 409);
       }
 
       // #1008 analogue: the non-production D1 mirrors real production users,
@@ -1289,14 +1289,13 @@ authWebRoutes.post(
         return c.json({ error: "same_email" }, 409);
       }
       // Re-check the collision: an account for this address may have been
-      // created between request and verify. The users.email UNIQUE
-      // constraint below is the authoritative backstop for the write race.
-      const collision = await db
-        .prepare("SELECT id FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1")
-        .bind(email)
-        .first<{ id: number }>();
+      // created between request and verify. Case-insensitive (ADR 0043), and
+      // the users.email UNIQUE constraints below -- the 0026 table-level one
+      // AND 0077's partial `idx_users_email_live_unique` -- remain the
+      // authoritative backstop for the write race.
+      const collision = await findEmailHolder(db, email);
       if (collision) {
-        return c.json({ error: "email_in_use" }, 409);
+        return c.json({ error: "email_in_use", ...identityRefusal("email_in_use") }, 409);
       }
 
       const row = await db
@@ -1355,9 +1354,12 @@ authWebRoutes.post(
         // Column-scoped, matching the profile PATCH and signup precedents: a
         // UNIQUE hit on anything OTHER than users.email must not be
         // mislabeled as an address collision — rethrow to the generic 500.
-        const msg = String(writeErr);
-        if (msg.includes("UNIQUE constraint failed") && msg.includes("users.email")) {
-          return c.json({ error: "email_in_use" }, 409);
+        // Column-scoped through the shared helper, which also matches 0077's
+        // partial index: SQLite reports `users.email` for both that and the
+        // 0026 table-level constraint, so one check covers the exact-case and
+        // the case-insensitive collision alike (ADR 0043).
+        if (isUniqueViolationOn(writeErr, "email")) {
+          return c.json({ error: "email_in_use", ...identityRefusal("email_in_use") }, 409);
         }
         throw writeErr;
       }

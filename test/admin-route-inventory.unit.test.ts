@@ -45,6 +45,13 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /users/backfill-names": 2,
   // #1253, epic #1250 (ADR 0042): username backfill (zValidator + handler).
   "POST /users/backfill-usernames": 2,
+  // #1254, epic #1250 (ADR 0043): the duplicate-account report and the
+  // identity-conflict flag it reports on. `/users/duplicates` is reachable
+  // ONLY because registerUserDuplicateRoutes runs before registerUsersRoutes
+  // -- `GET /users/:username` matches it too, and the fallback router takes
+  // the first matching handler in registration order (pinned below).
+  "GET /users/duplicates": 1,
+  "POST /users/:id/clear-identity-conflict": 1,
 
   // DOI / enrichment
   "POST /datasets/:id/doi/concept": 2,
@@ -132,8 +139,27 @@ describe("admin route inventory", () => {
     expect(actual).toEqual(EXPECTED_ENTRIES);
   });
 
+  test("GET /users/duplicates is registered BEFORE GET /users/:username", () => {
+    // Both patterns match `/users/duplicates`, and this router's path set makes
+    // Hono's RegExpRouter throw UnsupportedPathError, so the app falls back to
+    // a router that runs every matching handler in REGISTRATION order and
+    // takes the first response. Registered second, the duplicate report is
+    // unreachable -- the username lookup 404s first, which is what happened
+    // before the order in admin/index.ts was fixed.
+    //
+    // Pinned here rather than left to a comment because nothing else fails:
+    // every other test in the suite passes with the order reversed, and the
+    // route just quietly stops existing.
+    const paths = adminRoutes.routes.map((r) => `${r.method} ${r.path}`);
+    const dup = paths.indexOf("GET /users/duplicates");
+    const byUsername = paths.indexOf("GET /users/:username");
+    expect(dup).toBeGreaterThanOrEqual(0);
+    expect(byUsername).toBeGreaterThanOrEqual(0);
+    expect(dup).toBeLessThan(byUsername);
+  });
+
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(100);
+    expect(adminRoutes.routes.length).toBe(102);
   });
 
   // The count pin above can't see a SWAP of the two router-level middleware

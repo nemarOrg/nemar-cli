@@ -81,6 +81,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0040](0040-approval-is-the-single-writer-of-upload-access.md) - Admin approval is the single writer of upload access; `verified` is the base tier
 - [ADR 0041](0041-dois-cite-the-uploader-by-real-name-or-not-at-all.md) - DOIs cite the uploader by real name, or not at all
 - [ADR 0042](0042-upload-access-is-requested-once-by-the-person-who-wants-it.md) - Upload access is requested once, by the person who wants it
+- [ADR 0043](0043-one-person-one-account.md) - One person, one account: ORCID, email and GitHub each back at most one live account
 
 ## Backfill note (2026-07-31)
 
