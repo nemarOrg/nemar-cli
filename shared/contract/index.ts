@@ -14,3 +14,4 @@ export * from "./version.js";
 export * from "./user.js";
 export * from "./dataset.js";
 export * from "./publication.js";
+export * from "./identity.js";

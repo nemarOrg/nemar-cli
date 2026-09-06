@@ -28,6 +28,7 @@
  *     answers 409 `name_is_orcid_canonical` for the rest.
  */
 
+import { normalizeGithubHandle } from "./identity";
 import { type UsernameFormatError, validateUsernameFormat } from "./username";
 
 /**
@@ -86,7 +87,9 @@ export function normalizeProfilePatch(input: ProfilePatchInput): NormalizeResult
   const patch: ProfilePatch = {};
 
   if (input.github_username !== undefined) {
-    const handle = input.github_username.trim().replace(/^@/, "");
+    // One spelling of the handle rule, shared with signup and the duplicate
+    // report (services/identity.ts, ADR 0043).
+    const handle = normalizeGithubHandle(input.github_username);
     if (handle.length === 0) {
       patch.github_username = null;
     } else if (!GITHUB_HANDLE_RE.test(handle)) {
