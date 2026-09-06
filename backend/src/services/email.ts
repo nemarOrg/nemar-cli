@@ -1588,7 +1588,8 @@ export async function sendEmailChangeCodeEmail(
  * CLI, so the old inbox is the only channel that can reach a legitimate owner
  * whose address was moved out from under them with a stolen session or key.
  * The change itself has already happened by the time this is sent -- this is
- * a notice, not a confirmation step, and there is nothing to click.
+ * a notice, not a confirmation step, so there is nothing to confirm and the
+ * only link worth following is the support one, and only if this was not you.
  *
  * `maskedNewEmail` is deliberately masked by the caller (`maskEmail`): the
  * person reading the old inbox may no longer be the account owner, which is
@@ -1627,7 +1628,7 @@ export async function sendEmailChangedNoticeEmail(
 
   <p style="color: #999; font-size: 12px;">
     <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource<br>
-    This is a security notice; there is nothing to confirm and no link to click.
+    This is a security notice: there is nothing to confirm. The only link above goes to NEMAR support, for use if this was not you.
   </p>
 </body>
 </html>

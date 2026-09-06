@@ -86,6 +86,7 @@ import {
   type ProfilePatchInput,
   githubHandleChanged,
   normalizeProfilePatch,
+  profileRefusal,
 } from "../services/profile";
 import {
   isUsernameUniqueViolation,
@@ -761,10 +762,7 @@ authWebRoutes.patch(
             // and because it says out loud that revocation is not a state
             // profile edits happen in.
             return c.json(
-              {
-                error: "account_revoked",
-                message: "This account is revoked; contact an admin",
-              },
+              profileRefusal("account_revoked", "This account is revoked; contact an admin"),
               409,
             );
           } else if (current !== "" && account.status === "approved") {
@@ -776,11 +774,10 @@ authWebRoutes.patch(
             // A first assignment is not a change, so it is allowed at any
             // status.
             return c.json(
-              {
-                error: "username_locked",
-                message:
-                  "Your username is fixed once an admin has approved your account; contact an admin to change it",
-              },
+              profileRefusal(
+                "username_locked",
+                "Your username is fixed once an admin has approved your account; contact an admin to change it",
+              ),
               409,
             );
           } else {
@@ -794,7 +791,7 @@ authWebRoutes.patch(
               .first<{ id: number }>();
             if (taken) {
               return c.json(
-                { error: "username_taken", message: "That username is already taken" },
+                profileRefusal("username_taken", "That username is already taken"),
                 409,
               );
             }
@@ -807,11 +804,10 @@ authWebRoutes.patch(
           (account.orcid ?? "").trim() !== ""
         ) {
           return c.json(
-            {
-              error: "name_is_orcid_canonical",
-              message:
-                "Your name comes from your ORCID record and is refreshed on every sign-in. Update it at orcid.org and sign in again.",
-            },
+            profileRefusal(
+              "name_is_orcid_canonical",
+              "Your name comes from your ORCID record and is refreshed on every sign-in. Update it at orcid.org and sign in again.",
+            ),
             409,
           );
         }
@@ -844,10 +840,10 @@ authWebRoutes.patch(
         if (githubLookup.status === "unavailable") {
           console.error(`[auth-web] /profile GitHub lookup unavailable: ${githubLookup.detail}`);
           return c.json(
-            {
-              error: "github_unavailable",
-              message: "GitHub could not be reached; try again in a few minutes",
-            },
+            profileRefusal(
+              "github_unavailable",
+              "GitHub could not be reached; try again in a few minutes",
+            ),
             503,
           );
         }
@@ -965,7 +961,7 @@ authWebRoutes.patch(
       // case-VARIANT race (`Ada` and `ada` arriving together) slips past both
       // and is what Phase 4's case-insensitive unique index closes.
       if (isUsernameUniqueViolation(err)) {
-        return c.json({ error: "username_taken", message: "That username is already taken" }, 409);
+        return c.json(profileRefusal("username_taken", "That username is already taken"), 409);
       }
       console.error("[auth-web] /profile PATCH failed", err);
       return c.json({ error: "Failed to update profile" }, 500);
@@ -1049,10 +1045,10 @@ async function restoreConsumedCode(db: D1Database, codeId: number, email: string
  * account the code belongs to. `POST /auth/code/verify`, which is
  * unauthenticated, keeps its single collapsed answer for exactly that reason.
  */
-const CODE_EXPIRED_BODY = {
-  error: "code_expired",
-  message: "That code has expired or has already been used. Request a new one.",
-} as const;
+const CODE_EXPIRED_BODY = profileRefusal(
+  "code_expired",
+  "That code has expired or has already been used. Request a new one.",
+);
 
 /**
  * The `same_email` refusal, with a sentence.
@@ -1061,10 +1057,10 @@ const CODE_EXPIRED_BODY = {
  * switch on and a terminal could only print as the word "same_email" (#1266).
  * `error` keeps the code the website already reads; `message` is additive.
  */
-const SAME_EMAIL_REFUSAL = {
-  code: "same_email",
-  message: "That is already the address on this account.",
-} as const;
+const SAME_EMAIL_REFUSAL = profileRefusal(
+  "same_email",
+  "That is already the address on this account.",
+);
 
 /**
  * Tell the PREVIOUS address that the account's sign-in email moved (#1054).
@@ -1197,7 +1193,7 @@ authWebRoutes.post(
 
     try {
       if (email === actor.email.toLowerCase()) {
-        return c.json({ error: "same_email", ...SAME_EMAIL_REFUSAL }, 409);
+        return c.json(SAME_EMAIL_REFUSAL, 409);
       }
       // Deliberate, bounded enumeration tradeoff (PR #1053 review): unlike
       // /code/request's #595 silent skip, this DOES tell the caller whether
@@ -1344,7 +1340,7 @@ authWebRoutes.post(
 
     try {
       if (email === actor.email.toLowerCase()) {
-        return c.json({ error: "same_email", ...SAME_EMAIL_REFUSAL }, 409);
+        return c.json(SAME_EMAIL_REFUSAL, 409);
       }
       // Re-check the collision: an account for this address may have been
       // created between request and verify. Case-insensitive (ADR 0043), and
@@ -1369,11 +1365,12 @@ authWebRoutes.post(
         const attemptsRemaining = await recordFailedAttempt(db, row);
         return c.json(
           {
-            error: "code_incorrect",
-            message:
+            ...profileRefusal(
+              "code_incorrect",
               attemptsRemaining > 0
                 ? `That code did not match. ${attemptsRemaining} attempt${attemptsRemaining === 1 ? "" : "s"} left before it is invalidated.`
                 : "That code did not match and has now been invalidated. Request a new one.",
+            ),
             attempts_remaining: attemptsRemaining,
           },
           401,
@@ -1565,11 +1562,12 @@ authWebRoutes.post(
         const attemptsRemaining = await recordFailedAttempt(db, row);
         return c.json(
           {
-            error: "code_incorrect",
-            message:
+            ...profileRefusal(
+              "code_incorrect",
               attemptsRemaining > 0
                 ? `That code did not match. ${attemptsRemaining} attempt${attemptsRemaining === 1 ? "" : "s"} left before it is invalidated.`
                 : "That code did not match and has now been invalidated. Request a new one.",
+            ),
             attempts_remaining: attemptsRemaining,
           },
           401,

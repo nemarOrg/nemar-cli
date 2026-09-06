@@ -93,6 +93,30 @@ type AllDeclared<A extends string, B extends string> = [A] extends [B] ? true : 
 export const _profileErrorsAreDeclared: AllDeclared<ProfilePatchError, ProfileEditErrorCode> = true;
 
 /**
+ * The body of a route-level self-service refusal, with the code CHECKED.
+ *
+ * The alias above only covers the codes `normalizeProfilePatch` returns. The
+ * ten raised by the routes themselves -- `username_taken`, `username_locked`,
+ * `name_is_orcid_canonical`, `account_revoked`, `github_unavailable`,
+ * `same_email`, `code_expired`, `code_incorrect`, `orcid_already_have`,
+ * `orcid_unavailable` -- were bare string literals in `c.json({ error: "..." })`
+ * calls, so the ADR's claim that a missing code "fails to compile" was true of
+ * a third of them (PR #1269 review item 17). Going through this function makes
+ * it true of all of them: the parameter is `ProfileEditErrorCode`, so a typo or
+ * an undeclared code is a compile error at the call site rather than a bare
+ * token printed at a person.
+ *
+ * `error` carries the code because that is where the browser-facing routes
+ * have always put it (ADR 0043); extra fields are spread in by the caller.
+ */
+export function profileRefusal(
+  code: ProfileEditErrorCode,
+  message: string,
+): { error: ProfileEditErrorCode; message: string } {
+  return { error: code, message };
+}
+
+/**
  * Normalize a raw PATCH body into a sparse, validated update. Keys absent
  * from the input stay absent from the patch (true PATCH semantics); the
  * website always sends all four, but the endpoint contract is any subset.

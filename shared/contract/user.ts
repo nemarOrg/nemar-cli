@@ -242,6 +242,13 @@ export const UPLOAD_ACCESS_ERROR_CODES: readonly string[] = uploadAccessErrorCod
  * The identity-uniqueness codes (`email_in_use`, `github_in_use`,
  * `orcid_in_use`, ...) are NOT repeated here — they are declared once in
  * shared/contract/identity.ts and the CLI checks both sets.
+ *
+ * Enforced on the backend side, not merely documented: every refusal in this
+ * vocabulary is built by `profileRefusal(code, message)` (backend
+ * services/profile.ts), whose parameter is this union, so an undeclared code
+ * is a compile error at the call site rather than a bare token printed at a
+ * person. The codes `normalizeProfilePatch` returns are additionally pinned by
+ * `_profileErrorsAreDeclared` in the same module.
  */
 export const profileEditErrorCodeSchema = z.enum([
   // normalizeProfilePatch (services/profile.ts)
