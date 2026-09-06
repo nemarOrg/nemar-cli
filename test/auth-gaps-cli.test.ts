@@ -39,7 +39,7 @@ const ORCID_VERIFIED_LINE =
 const SANDBOX_LINE =
   "Sandbox training is missing: needed to upload a dataset from the CLI. Run `nemar sandbox`.";
 const NOTHING_LINE = "Nothing outstanding — every field NEMAR needs is filled in.";
-const NOT_CHECKED_LINE = "not checked — run 'nemar auth status --refresh'";
+const NOT_CHECKED_LINE = "not checked: run 'nemar auth status --refresh'";
 const UNREPORTED_LINE = "not reported by this backend";
 const PREFLIGHT_TITLE = "Upload access is not granted yet";
 const PREFLIGHT_CTA = "Ask for it with `nemar auth request-upload-access`.";

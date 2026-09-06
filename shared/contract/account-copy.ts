@@ -235,7 +235,7 @@ export const ACCOUNT_COPY = {
   // A CLI that has never refreshed against a backend has no gap list at all,
   // which is not the same as an empty one. Same three-state treatment the
   // upload-access line already has (ADR 0040).
-  "cli.gaps.unknown": "not checked — run 'nemar auth status --refresh'",
+  "cli.gaps.unknown": "not checked: run 'nemar auth status --refresh'",
   // The same absence for a command that DID fetch: `nemar auth profile` always
   // talks to the backend, so telling it to refresh would be advice it just
   // followed. What is missing there is the field, not the fetch.
