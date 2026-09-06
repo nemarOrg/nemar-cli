@@ -2,8 +2,9 @@
  * Username assignment at web sign-in (#1268, ADR 0045).
  *
  * ADR 0042 built the batch path: an admin sweep names the accounts whose
- * `username IS NULL`. It closes the 19 that exist and nothing after them — a
- * web sign-up whose owner abandons onboarding lands right back in that state.
+ * `username IS NULL`. It has not been run yet, and when it is it closes the
+ * accounts that exist at that moment and nothing after them — a web sign-up
+ * whose owner abandons onboarding lands right back in that state.
  * Phase 8 adds the lazy path at the three doors a web account comes through,
  * and this file drives all three for real:
  *
@@ -30,7 +31,8 @@ import { authOrcidRoutes } from "../src/routes/auth-orcid";
 import { authWebRoutes } from "../src/routes/auth-web";
 import { hashAuthCode } from "../src/services/auth-code";
 import { PENDING_COOKIE_NAME, encodeState, signPending } from "../src/services/orcid-auth";
-import { TAKEN_SQL } from "../src/services/username-assignment";
+import { USERNAME_SUFFIX_LIMIT } from "../src/services/username";
+import { TAKEN_SQL, usernameClaimStatement } from "../src/services/username-assignment";
 import { issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -45,6 +47,10 @@ const EMAIL = "abandoned@nemar.test";
 const SIGNUP_EMAIL = "brandnew@nemar.test";
 const CALLBACK_ORCID = "0000-0001-5109-353X";
 const PENDING_ORCID = "0000-0002-1825-0097";
+
+/** The name ORCID's public record reports, reset per test. Ada Lovelace unless
+ *  a test needs a name the ADR 0042 suggestion cannot be built from. */
+let publicRecordName = { given: "Ada", family: "Lovelace" };
 
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
@@ -64,12 +70,17 @@ beforeAll(() => {
   });
   // ORCID's PUBLIC record API, which `refreshUserName` reads and whose host is
   // derived from a fixed map rather than from ORCID_API_BASE -- so it is
-  // redirected by moving fetch's destination, not by an env knob.
+  // redirected by moving fetch's destination, not by an env knob. What it
+  // serves is `publicRecordName`, so a test can put a real record in front of
+  // the real parser instead of describing one.
   orcidPub = Bun.serve({
     port: 0,
     fetch: () =>
       Response.json({
-        name: { "given-names": { value: "Ada" }, "family-name": { value: "Lovelace" } },
+        name: {
+          "given-names": { value: publicRecordName.given },
+          "family-name": { value: publicRecordName.family },
+        },
       }),
   });
   realFetch = globalThis.fetch;
@@ -205,6 +216,20 @@ async function waitForUsername(id: number, attempts = 200): Promise<string | nul
   return null;
 }
 
+/** The same wait for the name the ORCID public record supplies, which
+ *  `refreshUserName` writes immediately BEFORE the assignment is attempted —
+ *  so it is the signal that the chain reached the assignment at all. */
+async function waitForGivenName(id: number, attempts = 200): Promise<string | null> {
+  for (let i = 0; i < attempts; i++) {
+    const row = db
+      .query<{ given_name: string | null }, [number]>("SELECT given_name FROM users WHERE id = ?")
+      .get(id);
+    if (row?.given_name) return row.given_name;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  return null;
+}
+
 /** Everything the route logged during one test. Captured rather than muted so
  *  a test can assert that an operator would actually see the fact. */
 let logs: string[];
@@ -214,6 +239,7 @@ const realError = console.error;
 beforeEach(() => {
   db = freshDb();
   breakUsernameScan = false;
+  publicRecordName = { given: "Ada", family: "Lovelace" };
   logs = [];
   console.warn = (...a: unknown[]) => {
     logs.push(a.join(" "));
@@ -284,6 +310,91 @@ describe("POST /auth/code/verify", () => {
     expect((await codeVerify(EMAIL, "123456")).status).toBe(200);
     expect(usernameOf(id)).toEqual({ username: "chosen", auto: 0 });
     expect(auditRows(id)).toHaveLength(0);
+  });
+
+  test("a saturated base leaves the column NULL and says so in the log", async () => {
+    // The other end of the suffix search: every variant up to the limit is
+    // taken, so there is nothing to claim. The account still signs in, still
+    // holds no handle, and -- because nothing else would ever surface it -- an
+    // operator gets one line naming the saturated base.
+    seedTakenUsername("alovelace");
+    for (let n = 2; n <= USERNAME_SUFFIX_LIMIT; n++) seedTakenUsername(`alovelace-${n}`);
+    const id = seedWebUser(EMAIL);
+    await plantCode(EMAIL, "123456");
+
+    const res = await codeVerify(EMAIL, "123456");
+
+    expect(res.status).toBe(200);
+    expect(usernameOf(id)).toEqual({ username: null, auto: 0 });
+    expect(auditRows(id)).toHaveLength(0);
+    expect((await res.json()).user.username).toBeNull();
+    expect(logs.join("\n")).toContain(`every variant of "alovelace" is taken; user ${id}`);
+  });
+
+  test("a handle taken between the scan and the write is not stolen", async () => {
+    // The claim's OTHER guard: `NOT EXISTS`, which is evaluated with the write
+    // rather than before it. Staged the same way as the race above -- a trigger
+    // on the session INSERT, the statement immediately before the claim in the
+    // same batch -- except here the competing row is a DIFFERENT account taking
+    // the exact handle this sign-in planned to use.
+    const id = seedWebUser(EMAIL);
+    db.run(
+      `CREATE TRIGGER steal_the_handle AFTER INSERT ON web_sessions
+       BEGIN
+         INSERT INTO users (username, email, password_hash, status)
+         VALUES ('alovelace', 'thief@nemar.test', 'x', 'approved');
+       END`,
+    );
+    await plantCode(EMAIL, "123456");
+
+    const res = await codeVerify(EMAIL, "123456");
+
+    // No exception, no rollback: the sign-in landed whole, minus the username.
+    expect(res.status).toBe(200);
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM web_sessions").get()?.n).toBe(1);
+    expect(usernameOf(id)).toEqual({ username: null, auto: 0 });
+    expect(auditRows(id)).toHaveLength(0);
+    // ...and the handle belongs to whoever got there first.
+    expect(
+      db
+        .query<{ email: string }, [string]>("SELECT email FROM users WHERE username = ?")
+        .get("alovelace")?.email,
+    ).toBe("thief@nemar.test");
+  });
+
+  test("the claim reports a lost race rather than raising", async () => {
+    // The statement's own contract, asserted directly because it is what makes
+    // batching it inside a sign-in transaction safe: `CLAIM_USERNAME_SQL` is
+    // ONE statement whose NOT EXISTS arm runs with the write, so a name taken
+    // in between produces `changes = 0` and NOT a UNIQUE error that would roll
+    // the whole sign-in back. The route test above proves the behaviour; this
+    // proves the mechanism it rests on.
+    const id = seedWebUser(EMAIL);
+    seedTakenUsername("alovelace");
+
+    const claim = await usernameClaimStatement(realD1(db), id, "alovelace").run();
+
+    expect(claim.meta?.changes ?? 0).toBe(0);
+    expect(usernameOf(id)).toEqual({ username: null, auto: 0 });
+  });
+
+  test("signing in twice assigns once", async () => {
+    // Two real sign-ins, not one call and an assumption. The second must find
+    // the username already set and do nothing at all: a second audit row would
+    // tell an operator the handle was re-derived, and a second claim on an
+    // account whose owner had since renamed it would undo their choice.
+    const id = seedWebUser(EMAIL);
+    await plantCode(EMAIL, "123456");
+    expect((await codeVerify(EMAIL, "123456")).status).toBe(200);
+    expect(usernameOf(id)).toEqual({ username: "alovelace", auto: 1 });
+
+    await plantCode(EMAIL, "654321");
+    const second = await codeVerify(EMAIL, "654321");
+
+    expect(second.status).toBe(200);
+    expect(usernameOf(id)).toEqual({ username: "alovelace", auto: 1 });
+    expect(auditRows(id)).toHaveLength(1);
+    expect((await second.json()).user.username).toBe("alovelace");
   });
 
   test("a failed username scan does not burn the code or the sign-in", async () => {
@@ -434,6 +545,51 @@ describe("GET /auth/orcid/callback (sign-in)", () => {
       username: "alovelace",
       source: "orcid_signin",
     });
+  });
+
+  test("a collision is suffixed on this door too", async () => {
+    // Each door runs the scan itself; a suffix rule proved on one of them is
+    // not proved on the others.
+    seedTakenUsername("alovelace");
+    const id = seedWebUser(EMAIL, {
+      given: null as unknown as string,
+      family: null as unknown as string,
+      orcid: CALLBACK_ORCID,
+    });
+    db.run(
+      "INSERT INTO oauth_identities (user_id, provider, provider_subject, display_name) VALUES (?, 'orcid', ?, 'Ada')",
+      [id, CALLBACK_ORCID],
+    );
+
+    expect((await app.request(callback(), undefined, env())).status).toBe(302);
+    expect(await waitForUsername(id)).toBe("alovelace-2");
+  });
+
+  test("a public-record name with no ASCII to fold to leaves the column NULL", async () => {
+    // The no-usable-name case on the door where the name arrives LAST: the
+    // record is read, written to the row, and only then is a handle attempted.
+    // Nothing is invented from the email local part (ADR 0042), so onboarding
+    // asks instead.
+    publicRecordName = { given: "美子", family: "山田" };
+    const id = seedWebUser(EMAIL, {
+      given: null as unknown as string,
+      family: null as unknown as string,
+      orcid: CALLBACK_ORCID,
+    });
+    db.run(
+      "INSERT INTO oauth_identities (user_id, provider, provider_subject, display_name) VALUES (?, 'orcid', ?, 'Ada')",
+      [id, CALLBACK_ORCID],
+    );
+
+    expect((await app.request(callback(), undefined, env())).status).toBe(302);
+
+    // The name landing is the proof the after-response chain actually ran --
+    // `refreshUserName` writes it, and the assignment is the statement directly
+    // after it. Only then is "no username" an answer rather than a not-yet.
+    expect(await waitForGivenName(id)).toBe("美子");
+    expect(await waitForUsername(id, 40)).toBeNull();
+    expect(usernameOf(id)).toEqual({ username: null, auto: 0 });
+    expect(auditRows(id)).toHaveLength(0);
   });
 });
 
