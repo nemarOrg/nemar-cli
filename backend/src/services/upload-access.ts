@@ -22,12 +22,17 @@
  */
 
 import type { z } from "zod";
-import type { uploadAccessErrorCodeSchema } from "../../../shared/contract/user.js";
+import {
+  UPLOAD_ACCESS_WHY_MAX_CHARS,
+  UPLOAD_ACCESS_WHY_MIN_CHARS,
+  type uploadAccessErrorCodeSchema,
+} from "../../../shared/contract/user.js";
 
-/** Bounds on the why text, matching CLI signup's `description` (routes/auth.ts)
- *  -- the same column, and the same question, so the same limits. */
-export const WHY_MIN_CHARS = 20;
-export const WHY_MAX_CHARS = 500;
+/** Bounds on the why text. Re-exported from the wire contract so the rule, the
+ *  CLI prompt and the website form cannot drift; they match CLI signup's
+ *  `description` -- the same column, and the same question. */
+export const WHY_MIN_CHARS = UPLOAD_ACCESS_WHY_MIN_CHARS;
+export const WHY_MAX_CHARS = UPLOAD_ACCESS_WHY_MAX_CHARS;
 
 /**
  * The closed refusal vocabulary, re-exported from the wire contract so the

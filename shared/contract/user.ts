@@ -211,3 +211,14 @@ export type UploadAccessErrorCode = z.infer<typeof uploadAccessErrorCodeSchema>;
 /** The refusal codes as a plain array, for a runtime membership test (the CLI
  *  client uses it to decide whether a body leads with `message`). */
 export const UPLOAD_ACCESS_ERROR_CODES: readonly string[] = uploadAccessErrorCodeSchema.options;
+
+/**
+ * Bounds on the upload request's why text (ADR 0042, #1253).
+ *
+ * Declared here because three places must agree on them: the backend rule that
+ * refuses `why_required`, the CLI prompt that stops a user submitting a text it
+ * will refuse, and the website form. They match CLI signup's `description`
+ * bounds -- the same column, and the same question.
+ */
+export const UPLOAD_ACCESS_WHY_MIN_CHARS = 20;
+export const UPLOAD_ACCESS_WHY_MAX_CHARS = 500;

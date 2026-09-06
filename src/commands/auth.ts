@@ -21,6 +21,10 @@ import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
 import {
+  UPLOAD_ACCESS_WHY_MAX_CHARS,
+  UPLOAD_ACCESS_WHY_MIN_CHARS,
+} from "../../shared/contract/user.js";
+import {
   type OrcidNameResponse,
   type UploadAccessRequestResponse,
   checkGitHubUsername,
@@ -1306,6 +1310,27 @@ function warnIfAdminsNotNotified(result: UploadAccessRequestResponse): void {
   );
 }
 
+/**
+ * The prompt's own check on the why text, extracted so it can be tested.
+ *
+ * Returns `true` when the text is acceptable, or the message inquirer should
+ * show. It exists to stop a user typing 400 characters and THEN being refused
+ * by the server for a reason the terminal already knew -- it is not the rule
+ * itself, which lives at the route (services/upload-access.ts). Both read their
+ * bounds from shared/contract so the prompt cannot accept something the server
+ * will reject, which is the failure mode a local copy of "20" would create.
+ */
+export function validateUploadAccessWhy(input: string | undefined): true | string {
+  const text = (input ?? "").trim();
+  if (text.length < UPLOAD_ACCESS_WHY_MIN_CHARS) {
+    return `Please write at least ${UPLOAD_ACCESS_WHY_MIN_CHARS} characters`;
+  }
+  if (text.length > UPLOAD_ACCESS_WHY_MAX_CHARS) {
+    return `Please keep it under ${UPLOAD_ACCESS_WHY_MAX_CHARS} characters`;
+  }
+  return true;
+}
+
 const requestUploadAccessCmd = authCommand
   .command("request-upload-access")
   .description("Ask an admin for upload access (one-time)")
@@ -1330,12 +1355,7 @@ const requestUploadAccessCmd = authCommand
           type: "input",
           name: "why",
           message: "What do you intend to upload to NEMAR?",
-          validate: (input: string) => {
-            const text = (input ?? "").trim();
-            if (text.length < 20) return "Please write at least 20 characters";
-            if (text.length > 500) return "Please keep it under 500 characters";
-            return true;
-          },
+          validate: validateUploadAccessWhy,
         },
       ]);
       why = String(answers.why).trim();

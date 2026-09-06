@@ -40,6 +40,11 @@ const WHY = "Depositing our lab's 64-channel EEG study of motor imagery, 40 part
 /** GitHub logins the local GitHub server resolves. Anything else 404s, which
  *  is how validateGitHubUsername reports "does not exist". */
 let knownGitHubLogins: Set<string>;
+/** Requested handle -> the canonical login GitHub answers with, when they
+ *  differ (a rename, or a case variant). */
+let canonicalGitHubLogins: Map<string, string>;
+/** Set to a 5xx to make the lookup UNAVAILABLE rather than an answer. */
+let githubStatus: number;
 let server: ReturnType<typeof Bun.serve>;
 
 let db: Database;
@@ -49,12 +54,15 @@ beforeAll(() => {
   server = Bun.serve({
     port: 0,
     fetch(req) {
+      if (githubStatus !== 200) {
+        return new Response(JSON.stringify({ message: "upstream" }), { status: githubStatus });
+      }
       const login = new URL(req.url).pathname.match(/^\/users\/(.+)$/)?.[1];
       if (login && knownGitHubLogins.has(login)) {
-        return new Response(JSON.stringify({ login, id: 4242 }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
+        return new Response(
+          JSON.stringify({ login: canonicalGitHubLogins.get(login) ?? login, id: 4242 }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
       }
       return new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
     },
@@ -178,6 +186,13 @@ async function requestWithCookie(userId: number, why: string = WHY): Promise<Res
   );
 }
 
+/** Re-open the account for another request, without re-seeding its token. */
+function clearRequest(id: number): void {
+  db.query(
+    "UPDATE users SET upload_access_requested_at = NULL, upload_access_notified_at = NULL WHERE id = ?",
+  ).run(id);
+}
+
 function notifiedAt(id: number): string | null {
   return (
     db
@@ -199,6 +214,8 @@ function storedRow(id: number) {
 beforeEach(() => {
   db = freshDb();
   knownGitHubLogins = new Set(["adarivers"]);
+  canonicalGitHubLogins = new Map();
+  githubStatus = 200;
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/users", userRoutes);
   seedAdmin();
@@ -215,12 +232,25 @@ describe("upload-access request: preconditions", () => {
     expect(body.missing).toEqual(["why"]);
   });
 
-  test("a why text over 500 characters is refused the same way", async () => {
+  test("the why bounds are inclusive at both ends", async () => {
+    // Both boundaries, both sides: a `<=` slipped in for a `<` survives a test
+    // that only ever passes 9 and 400 characters.
     await seedRequester();
+    const seedRequesterId = async () =>
+      db.query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?").get(USER_EMAIL)
+        ?.id ?? 0;
 
-    const res = await requestWithToken("x".repeat(501));
-    expect(res.status).toBe(400);
-    expect((await res.json()).error).toBe("why_required");
+    expect((await requestWithToken("x".repeat(19))).status).toBe(400);
+    expect((await requestWithToken("x".repeat(501))).status).toBe(400);
+    expect((await (await requestWithToken("x".repeat(501))).json()).error).toBe("why_required");
+
+    // 20 and 500 are accepted. The stamp is cleared between them because the
+    // first success opens the request and every later call short-circuits on
+    // it -- which would make the second assertion pass for the wrong reason.
+    const id = await seedRequesterId();
+    expect((await withFakeResend(() => requestWithToken("x".repeat(20)))).status).toBe(201);
+    clearRequest(id);
+    expect((await withFakeResend(() => requestWithToken("x".repeat(500)))).status).toBe(201);
   });
 
   test("an unverified inbox is refused before anything about the profile", async () => {
@@ -247,6 +277,15 @@ describe("upload-access request: preconditions", () => {
     expect(body.error).toBe("profile_incomplete");
     // Whitespace counts as absent, which is why `city` is in this list.
     expect(body.missing).toEqual(["username", "city", "country"]);
+  });
+
+  test("the missing list is in the API's own field order, not the row's", async () => {
+    // Non-adjacent fields, so the order is a property of the check rather than
+    // of which columns happen to be blank: a client rendering `missing` in the
+    // order it arrives should get username before country every time.
+    await seedRequester({ username: null, country: null });
+
+    expect((await (await requestWithToken()).json()).missing).toEqual(["username", "country"]);
   });
 
   test("a missing name is reported as its two fields, not as one", async () => {
@@ -402,6 +441,43 @@ describe("upload-access request: asking twice", () => {
     const res = await requestWithToken();
     expect(res.status).toBe(200);
     expect((await res.json()).already_requested).toBe(true);
+  });
+});
+
+describe("upload-access request: the GitHub handle on the card", () => {
+  test("the card carries GitHub's canonical login, not what was stored", async () => {
+    // GitHub resolves renames and case variants to a canonical login, and the
+    // review card is what an admin reads before adding that account as a
+    // repository collaborator. Rendering the stored spelling would show them a
+    // handle that is not the one they will be granting access to.
+    canonicalGitHubLogins.set("adarivers", "AdaRivers");
+    await seedRequester();
+
+    const calls = await withFakeResend(async (captured) => {
+      await requestWithToken();
+      return captured;
+    });
+    const html = sendsTo(calls, ADMIN_EMAIL)[0].html;
+    expect(html).toContain("https://github.com/AdaRivers");
+    expect(html).not.toContain("https://github.com/adarivers");
+  });
+
+  test("a GitHub outage is a 503, not a claim that the handle is wrong", async () => {
+    // #1052. Telling a requester their handle does not exist sends them to
+    // Settings to change a field that is already right, and the change does not
+    // help -- the request keeps failing until GitHub recovers, silently.
+    githubStatus = 503;
+    const id = await seedRequester();
+
+    const res = await requestWithToken();
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error).toBe("github_unavailable");
+    // Nothing about the ACCOUNT is wrong, so a client rendering `missing` as
+    // "fields to fix" must be handed nothing to render.
+    expect(body.missing).toEqual([]);
+    // And the request is not half-written: it is retryable as-is.
+    expect(storedRow(id)?.upload_access_requested_at).toBeNull();
   });
 });
 

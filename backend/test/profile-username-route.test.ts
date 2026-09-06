@@ -288,6 +288,50 @@ describe("PATCH /auth/profile: username", () => {
   });
 });
 
+describe("PATCH /auth/profile: what the audit row and the refusals say", () => {
+  test("the audit details carry the username that was written", async () => {
+    // The audit row is how an admin reconstructs who changed a handle and to
+    // what; a `profile_updated` row that does not name the new username makes
+    // a username change indistinguishable from a city edit.
+    const id = seedUser("audited@example.org");
+
+    await patch(id, { username: "alovelace", city: "Boston" });
+
+    const details = db
+      .query<{ details: string | null }, [string]>(
+        "SELECT details FROM audit_log WHERE action = ? ORDER BY id DESC LIMIT 1",
+      )
+      .get("profile_updated")?.details;
+    expect(JSON.parse(details ?? "{}")).toMatchObject({
+      username: "alovelace",
+      city: "Boston",
+    });
+  });
+
+  test("a locked username refuses the whole patch, name change included", async () => {
+    // Order matters and is worth pinning: the username check runs first, so a
+    // patch that would also have edited a name is refused whole rather than
+    // half-applied. A 409 that had already written the name would leave the
+    // caller unable to tell what landed.
+    const id = seedUser("both@example.org", {
+      username: "oldname",
+      status: "approved",
+      orcid: null,
+      orcid_verified: 0,
+    });
+
+    const res = await patch(id, { username: "newname", given_name: "Augusta" });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe("username_locked");
+    expect(usernameOf(id)).toBe("oldname");
+    expect(
+      db
+        .query<{ given_name: string }, [number]>("SELECT given_name FROM users WHERE id = ?")
+        .get(id)?.given_name,
+    ).toBe("Ada");
+  });
+});
+
 describe("PATCH /auth/profile: name", () => {
   test("refuses a name edit while a verified ORCID is linked", async () => {
     const id = seedUser("orcid@example.org", { orcid_verified: 1 });
@@ -388,6 +432,19 @@ describe("GET /auth/profile/username-suggestion", () => {
     const id = seedUser("third@example.org");
 
     expect((await (await suggestion(id)).json()).suggestion).toBe("alovelace-3");
+  });
+
+  test("a soft-deleted row's leftover username still counts as taken", async () => {
+    // The suggestion scan deliberately does NOT filter `deleted_at IS NULL`,
+    // because `users.username` is UNIQUE across the whole table -- a row the
+    // scan cannot see is still a row the write would collide with. Today the
+    // tombstone nulls the column, so only a synthetic fixture can falsify this
+    // rule; without it, suggesting a name the PATCH must then refuse would go
+    // unnoticed until someone changed how deletion masks a row.
+    seedUser("tombstoned@example.org", { username: "alovelace", deleted: true });
+    const id = seedUser("live@example.org");
+
+    expect((await (await suggestion(id)).json()).suggestion).toBe("alovelace-2");
   });
 
   test("reports unavailable when there is no family name", async () => {
