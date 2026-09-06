@@ -95,6 +95,7 @@ import {
   retryImport,
   revalidateDataset,
   revokeUser,
+  revokeUserById,
   rollbackImport,
   sendBroadcast,
   signalDefaultsSweep,
@@ -579,30 +580,65 @@ adminCommand
 adminCommand
   .command("revoke")
   .description("Revoke user access")
-  .argument("<username>", "Username to revoke")
+  .argument("[username]", "Username to revoke (CLI accounts)")
+  .option("--id <id>", "Revoke by numeric user id (web/ORCID accounts have no username)")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
-  .action(async (username, options: ConfirmOptions) => {
+  .action(async (username: string | undefined, options: ConfirmOptions & { id?: string }) => {
+    // Exactly one addressing key, the same rule `admin approve` enforces:
+    // username (CLI accounts) or --id (web/ORCID accounts, whose username is
+    // NULL by design). Approval can reach those accounts by id, so revocation
+    // has to as well (ADR 0040: revoke is the eraser of what approval wrote).
+    // Validated before the auth gate, like approve's, so an argv mistake
+    // surfaces (exit 1) even when the caller is not logged in.
+    const byId = options.id !== undefined;
+    if (!byId && !username) {
+      console.error(chalk.red("Error: provide a username or --id <id>"));
+      console.error(chalk.dim("Web/ORCID accounts have no username; find their id with:"));
+      console.error(chalk.dim("  nemar admin users"));
+      process.exit(1);
+    }
+    if (byId && username) {
+      console.error(chalk.red("Error: username and --id are mutually exclusive; provide one"));
+      process.exit(1);
+    }
+    let userId = 0;
+    if (byId) {
+      userId = Number.parseInt(options.id ?? "", 10);
+      if (!Number.isInteger(userId) || userId <= 0) {
+        console.error(chalk.red(`Error: invalid user id: ${options.id}`));
+        process.exit(1);
+      }
+    }
+
     if (!requireAuth()) return;
 
-    // Prevent self-revocation
+    // Prevent self-revocation. Only the username is checkable here -- the
+    // config stores no numeric id -- so the backend holds the id-keyed half of
+    // this guard.
     const config = getConfig();
-    if (config.username === username) {
+    if (username && config.username === username) {
       console.log(chalk.red("Error: Cannot revoke your own access"));
       return;
     }
 
+    const label = username ?? `user id ${userId}`;
+    // What the admin types back to confirm: the username, or the id when that
+    // is the only handle the account has.
+    const confirmToken = username ?? String(userId);
+
     // Confirmation with warning
-    console.log(chalk.red(`\nRevoking access for: ${username}\n`));
+    console.log(chalk.red(`\nRevoking access for: ${label}\n`));
     console.log(chalk.yellow("This will:"));
     console.log("  1. Invalidate all API keys for this user");
     console.log("  2. Remove them from datasets they have access to");
-    console.log("  3. Send them a notification email");
+    console.log("  3. Revoke upload access, if they hold it");
+    console.log("  4. Send them a notification email");
     console.log();
 
     const result = await confirmWithInput(
-      `Type '${username}' to confirm revocation:`,
-      username,
+      `Type '${confirmToken}' to confirm revocation:`,
+      confirmToken,
       options,
     );
     if (result !== "confirmed") {
@@ -610,11 +646,11 @@ adminCommand
       return;
     }
 
-    const spinner = ora(`Revoking ${username}...`).start();
+    const spinner = ora(`Revoking ${label}...`).start();
 
     try {
-      await revokeUser(username);
-      spinner.succeed(`Revoked access for ${username}`);
+      await (username ? revokeUser(username) : revokeUserById(userId));
+      spinner.succeed(`Revoked access for ${label}`);
     } catch (error) {
       handleCommandError(error, spinner, "Failed to revoke user", {
         404: "User not found",

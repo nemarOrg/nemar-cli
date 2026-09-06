@@ -1028,11 +1028,15 @@ export async function sendOpenNeuroMaintainerReport(
 }
 
 /**
- * Send revocation notification
+ * Send revocation notification.
+ *
+ * `username` is nullable because a web/ORCID account has none (migration
+ * 0026) and can now be revoked by id. The greeting drops rather than
+ * addressing someone by their email address back at them.
  */
 export async function sendRevocationEmail(
   to: string,
-  username: string,
+  username: string | null,
   resendApiKey: string,
   fromEmail: string,
   replyTo?: string,
@@ -1049,7 +1053,7 @@ export async function sendRevocationEmail(
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
   <h1 style="color: #dc2626;">Account Access Revoked</h1>
 
-  <p>Hello ${escapeHtml(username)},</p>
+  <p>Hello${username ? ` ${escapeHtml(username)}` : ""},</p>
 
   <p>Your NEMAR account access has been revoked by an administrator.</p>
 

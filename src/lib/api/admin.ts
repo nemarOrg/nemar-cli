@@ -127,6 +127,23 @@ export async function revokeUser(username: string): Promise<{ message: string }>
   );
 }
 
+/**
+ * Revoke a user's access by their numeric id (admin only). The mirror of
+ * {@link approveUserById}, and needed for the same accounts: a web/ORCID
+ * signup has username = NULL, so the username-keyed endpoint can never reach
+ * one. Approval grants upload access to those accounts (ADR 0040), so revoke
+ * has to be able to take it back from them.
+ */
+export async function revokeUserById(id: number): Promise<{ message: string }> {
+  return request<{ message: string }>(
+    `/admin/revoke/by-id/${id}`,
+    {
+      method: "POST",
+    },
+    true,
+  );
+}
+
 export interface ChangeRoleResponse {
   message: string;
   user: { username: string; role: string };

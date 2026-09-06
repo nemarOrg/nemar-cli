@@ -301,6 +301,359 @@ async function finalizeApproval(
   });
 }
 
+/** Row shape shared by both revoke routes (username-keyed and id-keyed). */
+interface RevocableUserRow {
+  id: number;
+  username: string | null;
+  email: string;
+  github_username: string | null;
+  status: string;
+  role: string | null;
+  aws_iam_username: string | null;
+  aws_access_key_id_encrypted: string | null;
+}
+
+const REVOCABLE_USER_COLUMNS =
+  "id, username, email, github_username, status, role, aws_iam_username, aws_access_key_id_encrypted";
+
+/**
+ * Shared revocation for POST /admin/revoke/:username and
+ * POST /admin/revoke/by-id/:id. Callers have already 404'd on a missing row;
+ * everything else — the self-revoke guard, the already-revoked 409, the
+ * owner rule, and the whole credential cascade — lives here so the two
+ * addressing modes cannot drift apart.
+ *
+ * The id-keyed route exists for the same reason `approve/by-id/:id` does
+ * (#1012): a web/ORCID account has `username = NULL` by design (migration
+ * 0026), so the username-keyed route can never address one. Since ADR 0040
+ * made approval the single writer of `service_access` and revoke its only
+ * eraser, an approve path that reaches an account a revoke path cannot is a
+ * grant with no way back.
+ *
+ * Nothing username-shaped is assumed, exactly as in `finalizeApproval`: the
+ * GitHub-collaborator sweep is skipped when there is no handle to remove, the
+ * audit resource id falls back to the stable numeric id, and the messages use
+ * an `id N` label.
+ */
+async function finalizeRevocation(
+  c: Context<{ Bindings: Bindings; Variables: Variables }>,
+  user: RevocableUserRow,
+): Promise<Response> {
+  const db = c.env.DB;
+  const adminUser = c.get("user");
+
+  // Prevent self-revocation. Keyed on the id rather than the username so it
+  // holds for an account that has none, and so the two routes share one guard.
+  if (user.id === adminUser.id) {
+    return c.json({ error: "Cannot revoke your own access" }, 400);
+  }
+
+  if (user.status === "revoked") {
+    return c.json({ error: "User already revoked" }, 409);
+  }
+
+  // Only owners can revoke other owners
+  if (user.role === "owner" && adminUser.role !== "owner") {
+    return c.json({ error: "Only owners can revoke other owners" }, 403);
+  }
+
+  const label = user.username ?? `id ${user.id}`;
+
+  // Revoke IAM access if configured - SECURITY CRITICAL
+  // Uses owner credentials to forcefully delete ALL access keys
+  let iamRevoked = false;
+  let iamRevocationError: string | null = null;
+  let iamRevocationSteps: string[] = [];
+
+  if (user.aws_iam_username && user.aws_access_key_id_encrypted && c.env.ENCRYPTION_KEY) {
+    try {
+      const accessKeyId = await decrypt(user.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
+
+      // Use aggressive cleanup with owner credentials
+      const result = await revokeUserIamAccess(
+        {
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          region: c.env.AWS_REGION,
+        },
+        user.aws_iam_username,
+        accessKeyId,
+      );
+
+      iamRevoked = result.success;
+      iamRevocationSteps = result.steps;
+
+      if (result.errors.length > 0) {
+        // Partial failure - some steps succeeded, some failed
+        iamRevocationError = result.errors.join("; ");
+        console.error(
+          "IAM revocation partial failure for",
+          label,
+          "\nErrors:",
+          result.errors,
+          "\nSteps:",
+          result.steps,
+        );
+
+        // Track partial failures for follow-up
+        try {
+          await db
+            .prepare(
+              `INSERT INTO iam_revocation_failures (user_id, username, iam_username, error_message, created_at)
+               VALUES (?, ?, ?, ?, datetime('now'))`,
+            )
+            .bind(user.id, user.username, user.aws_iam_username, iamRevocationError)
+            .run();
+        } catch {
+          console.error("Could not track IAM failure in database");
+        }
+      } else {
+        // Complete success
+        console.log(`IAM revocation succeeded for ${label}:\n${result.steps.join("\n")}`);
+      }
+    } catch (error) {
+      // Complete failure - couldn't even start cleanup
+      const errMsg = errorMessage(error);
+      console.error("CRITICAL SECURITY: Failed to revoke IAM access for", label, errMsg);
+
+      iamRevocationError = errMsg;
+
+      // Track complete failures
+      try {
+        await db
+          .prepare(
+            `INSERT INTO iam_revocation_failures (user_id, username, iam_username, error_message, created_at)
+             VALUES (?, ?, ?, ?, datetime('now'))`,
+          )
+          .bind(user.id, user.username, user.aws_iam_username, errMsg)
+          .run();
+      } catch {
+        console.error("Could not track IAM failure in database");
+      }
+    }
+  }
+
+  // Clear IAM credentials from database (even if revocation failed)
+  await db
+    .prepare(`
+      UPDATE users
+      SET aws_iam_username = NULL,
+          aws_access_key_id_encrypted = NULL,
+          aws_secret_access_key_encrypted = NULL
+      WHERE id = ?
+    `)
+    .bind(user.id)
+    .run();
+
+  // Revoke all tokens
+  await db
+    .prepare(
+      `
+    UPDATE tokens
+    SET revoked_at = datetime('now')
+    WHERE user_id = ? AND revoked_at IS NULL
+  `,
+    )
+    .bind(user.id)
+    .run();
+
+  // Update user status
+  // If IAM revocation failed, mark as revoked_iam_pending for manual cleanup
+  const finalStatus = iamRevoked || !user.aws_iam_username ? "revoked" : "revoked_iam_pending";
+
+  // service_access (migration 0062) gates real (non-sandbox) uploads and
+  // compute independently of `status` -- clearing it here closes issue
+  // #1069 (a revoked user kept the grant and could still pass
+  // realDatasetServiceGate if `status` were ever restored without an
+  // explicit re-grant). The two grant stamps go with it (ADR 0040): revoke
+  // is the eraser of what approval wrote, so a later listing cannot show a
+  // revoked account still carrying "granted by X on Y".
+  //
+  // The upload-REQUEST stamps go too (ADR 0042). An open request is
+  // `upload_access_requested_at` set with no grant, so leaving the stamp on a
+  // revoked row would put a former grantee back into the admin review queue
+  // the moment their grant was taken away -- the one account an admin has
+  // just decided about. Clearing both means a re-instated account asks
+  // again, which is the right shape: the review is of a person at a moment,
+  // and revocation ends that moment.
+  await db
+    .prepare(
+      `
+    UPDATE users
+    SET status = ?,
+        service_access = 0,
+        service_access_granted_at = NULL,
+        service_access_granted_by = NULL,
+        upload_access_requested_at = NULL,
+        upload_access_notified_at = NULL,
+        revoked_at = datetime('now'),
+        updated_at = datetime('now')
+    WHERE id = ?
+  `,
+    )
+    .bind(finalStatus, user.id)
+    .run();
+
+  // Remove from every dataset repo they touch: collaborator grants
+  // (dataset_collaborators) UNION repos they own (datasets.owner_user_id).
+  // Owner-owned repos were previously never removed (epic #713 gap).
+  const collaborations = await db
+    .prepare(
+      `SELECT d.github_repo FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE dc.user_id = ?
+       UNION
+       SELECT github_repo FROM datasets WHERE owner_user_id = ?`,
+    )
+    .bind(user.id, user.id)
+    .all<{ github_repo: string | null }>();
+
+  let reposRemoved = 0;
+  const failedRemovals: string[] = [];
+  // A web/ORCID account can hold no GitHub collaboration at all -- the handle
+  // IS the grant -- so with no handle there is nothing to call GitHub about,
+  // and calling it with an empty login would DELETE a nonsense URL.
+  const githubHandle = user.github_username;
+  if (githubHandle) {
+    for (const collab of collaborations.results || []) {
+      if (collab.github_repo) {
+        // Extract repo name with defensive check
+        const parts = collab.github_repo.split("/");
+        if (parts.length !== 2 || !parts[1]) {
+          console.error(`Invalid github_repo format: ${collab.github_repo}`);
+          failedRemovals.push(collab.github_repo);
+          continue;
+        }
+        const repoName = parts[1];
+        try {
+          await removeCollaborator(repoName, githubHandle, await getDatasetsToken(c.env));
+          reposRemoved++;
+        } catch (error) {
+          console.error(`Failed to remove from ${collab.github_repo}:`, error);
+          failedRemovals.push(collab.github_repo);
+        }
+      }
+    }
+  }
+
+  // Clear their collaborator records
+  await db.prepare("DELETE FROM dataset_collaborators WHERE user_id = ?").bind(user.id).run();
+
+  // Send revocation email
+  let emailSent = false;
+  try {
+    const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
+    await sendRevocationEmail(
+      user.email,
+      user.username,
+      c.env.RESEND_API_KEY,
+      fromEmail,
+      replyTo,
+      isDev,
+      c.env,
+    );
+    emailSent = true;
+  } catch (error) {
+    console.error("Failed to send revocation email:", error);
+  }
+
+  // Clear S3 permissions
+  await db.prepare("DELETE FROM user_s3_permissions WHERE user_id = ?").bind(user.id).run();
+
+  // Audit log (non-blocking). By this point tokens, IAM credentials, GitHub
+  // collaborations, S3 permissions, `status` and `service_access` have all
+  // already been changed and cannot be rolled back — a throwing audit insert
+  // must not turn that completed revocation into a 500 that reads as "the
+  // user still has access". Log the gap loudly instead: an unaudited
+  // revocation is a record-keeping problem, a falsely-reported one is a
+  // security problem.
+  try {
+    await auditLogStatement(db, {
+      userId: adminUser.id,
+      action: "user_revoked",
+      resourceType: "user",
+      // Username where there is one (unchanged for CLI accounts), the stable
+      // numeric id otherwise — the same fallback the approval audit uses.
+      resourceId: user.username ?? String(user.id),
+      details: JSON.stringify({
+        revoked_by: adminUser.username,
+        repos_removed: reposRemoved,
+        failed_removals: failedRemovals,
+        email_sent: emailSent,
+        iam_revoked: iamRevoked,
+        // Mirrors the approval audit row: upload access is a thing that was
+        // taken away here, not something to infer from the status (ADR 0040).
+        service_access_cleared: true,
+      }),
+    }).run();
+  } catch (error) {
+    console.error(
+      `AUDIT GAP: user_revoked row not written for ${label} (the revocation DID complete):`,
+      error,
+    );
+  }
+
+  // If IAM revocation had errors, return warning with detailed steps
+  if (iamRevocationError) {
+    return c.json(
+      {
+        warning: iamRevoked
+          ? "User revoked with partial IAM cleanup"
+          : "User revoked with IAM cleanup failure",
+        message: iamRevoked
+          ? "User's API tokens revoked. Some IAM cleanup steps failed but S3 access keys were deleted."
+          : "User's API tokens and database access revoked, but S3 credentials may still be active",
+        user: {
+          id: user.id,
+          username: user.username,
+          status: finalStatus,
+        },
+        iam_cleanup: {
+          success: iamRevoked,
+          errors: iamRevocationError,
+          steps_attempted: iamRevocationSteps,
+          aws_iam_username: user.aws_iam_username,
+        },
+        action_required: iamRevoked
+          ? [
+              "Review IAM cleanup steps above",
+              `Check AWS console for user '${user.aws_iam_username}'`,
+              "Verify no orphaned resources remain",
+            ]
+          : [
+              `1. Manually delete IAM user '${user.aws_iam_username}' in AWS console`,
+              "2. Or use AWS CLI: aws iam list-access-keys --user-name <username>",
+              "3. Delete each key: aws iam delete-access-key --user-name <username> --access-key-id <key>",
+              "4. Delete user: aws iam delete-user --user-name <username>",
+              // Keyed on the id, which every account has: a web/ORCID row has
+              // no username to put in a WHERE clause.
+              `5. Update user status: UPDATE users SET status = 'revoked' WHERE id = ${user.id}`,
+            ],
+        security_impact: iamRevoked
+          ? "Most IAM resources cleaned up. Review steps for any remaining items."
+          : "User can still upload/download S3 data until manual cleanup completes",
+        repos_removed: reposRemoved,
+        failed_removals: failedRemovals.length > 0 ? failedRemovals : undefined,
+        email_sent: emailSent,
+        iam_revoked: iamRevoked,
+      },
+      207, // 207 Multi-Status: partial success
+    );
+  }
+
+  // Full revocation succeeded
+  return c.json({
+    message: `User ${label} access has been fully revoked`,
+    user: {
+      id: user.id,
+      username: user.username,
+      status: finalStatus,
+    },
+    repos_removed: reposRemoved,
+    failed_removals: failedRemovals.length > 0 ? failedRemovals : undefined,
+    email_sent: emailSent,
+    iam_revoked: iamRevoked,
+  });
+}
+
 /**
  * Resolve whose email preferences a request targets. With no `?user=`, it's the
  * caller (any admin manages their own). With `?user=<username>` it's that user --
@@ -671,331 +1024,58 @@ export function registerUsersRoutes(admin: AdminRouter): void {
   });
 
   /**
-   * POST /admin/revoke/:username - Revoke a user's access
+   * POST /admin/revoke/:username - Revoke a user's access.
+   *
+   * Only reaches accounts that have a username, i.e. CLI signups. Web/ORCID
+   * signups have username = NULL (migration 0026) and are revoked via
+   * POST /admin/revoke/by-id/:id below.
    */
   admin.post("/revoke/:username", async (c) => {
-    const username = c.req.param("username");
-    const db = c.env.DB;
-    const adminUser = c.get("user");
-
-    // Prevent self-revocation
-    if (username === adminUser.username) {
-      return c.json({ error: "Cannot revoke your own access" }, 400);
-    }
-
-    // Find user (include IAM credentials and role for revocation)
-    const user = await db
-      .prepare(`
-      SELECT id, username, email, github_username, status, role,
-             aws_iam_username, aws_access_key_id_encrypted
-      FROM users WHERE username = ? AND deleted_at IS NULL
-    `)
-      .bind(username)
-      .first<{
-        id: number;
-        username: string;
-        email: string;
-        github_username: string;
-        status: string;
-        role: string | null;
-        aws_iam_username: string | null;
-        aws_access_key_id_encrypted: string | null;
-      }>();
+    const user = await c.env.DB.prepare(
+      `SELECT ${REVOCABLE_USER_COLUMNS} FROM users WHERE username = ? AND deleted_at IS NULL`,
+    )
+      .bind(c.req.param("username"))
+      .first<RevocableUserRow>();
 
     if (!user) {
       return c.json({ error: "User not found" }, 404);
     }
 
-    if (user.status === "revoked") {
-      return c.json({ error: "User already revoked" }, 409);
+    return finalizeRevocation(c, user);
+  });
+
+  /**
+   * POST /admin/revoke/by-id/:id - Revoke a user's access by numeric id.
+   *
+   * The mirror of POST /admin/approve/by-id/:id, and it exists for the same
+   * reason (#1012): a web/ORCID signup has username = NULL by design
+   * (migration 0026), so the username-keyed route above can never address one.
+   * Approval could therefore grant upload access to an account nothing could
+   * take it back from, which ADR 0040 does not allow to stand: approval is the
+   * single writer of `service_access` and revoke is its only eraser, so every
+   * account the one reaches the other has to reach as well.
+   *
+   * Works for any account kind, exactly like the approve twin -- a CLI user
+   * can be revoked by id too -- and shares its whole implementation, so the
+   * two addressing modes cannot come apart.
+   */
+  admin.post("/revoke/by-id/:id", async (c) => {
+    const id = Number.parseInt(c.req.param("id"), 10);
+    if (!Number.isInteger(id) || id <= 0 || id === SYSTEM_USER_ID) {
+      return c.json({ error: "Invalid user id" }, 400);
     }
 
-    // Only owners can revoke other owners
-    if (user.role === "owner" && adminUser.role !== "owner") {
-      return c.json({ error: "Only owners can revoke other owners" }, 403);
+    const user = await c.env.DB.prepare(
+      `SELECT ${REVOCABLE_USER_COLUMNS} FROM users WHERE id = ? AND deleted_at IS NULL`,
+    )
+      .bind(id)
+      .first<RevocableUserRow>();
+
+    if (!user) {
+      return c.json({ error: "User not found" }, 404);
     }
 
-    // Revoke IAM access if configured - SECURITY CRITICAL
-    // Uses owner credentials to forcefully delete ALL access keys
-    let iamRevoked = false;
-    let iamRevocationError: string | null = null;
-    let iamRevocationSteps: string[] = [];
-
-    if (user.aws_iam_username && user.aws_access_key_id_encrypted && c.env.ENCRYPTION_KEY) {
-      try {
-        const accessKeyId = await decrypt(user.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
-
-        // Use aggressive cleanup with owner credentials
-        const result = await revokeUserIamAccess(
-          {
-            accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-            secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-            region: c.env.AWS_REGION,
-          },
-          user.aws_iam_username,
-          accessKeyId,
-        );
-
-        iamRevoked = result.success;
-        iamRevocationSteps = result.steps;
-
-        if (result.errors.length > 0) {
-          // Partial failure - some steps succeeded, some failed
-          iamRevocationError = result.errors.join("; ");
-          console.error(
-            "IAM revocation partial failure for",
-            user.username,
-            "\nErrors:",
-            result.errors,
-            "\nSteps:",
-            result.steps,
-          );
-
-          // Track partial failures for follow-up
-          try {
-            await db
-              .prepare(
-                `INSERT INTO iam_revocation_failures (user_id, username, iam_username, error_message, created_at)
-               VALUES (?, ?, ?, ?, datetime('now'))`,
-              )
-              .bind(user.id, user.username, user.aws_iam_username, iamRevocationError)
-              .run();
-          } catch {
-            console.error("Could not track IAM failure in database");
-          }
-        } else {
-          // Complete success
-          console.log(`IAM revocation succeeded for ${user.username}:\n${result.steps.join("\n")}`);
-        }
-      } catch (error) {
-        // Complete failure - couldn't even start cleanup
-        const errMsg = errorMessage(error);
-        console.error("CRITICAL SECURITY: Failed to revoke IAM access for", user.username, errMsg);
-
-        iamRevocationError = errMsg;
-
-        // Track complete failures
-        try {
-          await db
-            .prepare(
-              `INSERT INTO iam_revocation_failures (user_id, username, iam_username, error_message, created_at)
-             VALUES (?, ?, ?, ?, datetime('now'))`,
-            )
-            .bind(user.id, user.username, user.aws_iam_username, errMsg)
-            .run();
-        } catch {
-          console.error("Could not track IAM failure in database");
-        }
-      }
-    }
-
-    // Clear IAM credentials from database (even if revocation failed)
-    await db
-      .prepare(`
-      UPDATE users
-      SET aws_iam_username = NULL,
-          aws_access_key_id_encrypted = NULL,
-          aws_secret_access_key_encrypted = NULL
-      WHERE id = ?
-    `)
-      .bind(user.id)
-      .run();
-
-    // Revoke all tokens
-    await db
-      .prepare(
-        `
-    UPDATE tokens
-    SET revoked_at = datetime('now')
-    WHERE user_id = ? AND revoked_at IS NULL
-  `,
-      )
-      .bind(user.id)
-      .run();
-
-    // Update user status
-    // If IAM revocation failed, mark as revoked_iam_pending for manual cleanup
-    const finalStatus = iamRevoked || !user.aws_iam_username ? "revoked" : "revoked_iam_pending";
-
-    // service_access (migration 0062) gates real (non-sandbox) uploads and
-    // compute independently of `status` -- clearing it here closes issue
-    // #1069 (a revoked user kept the grant and could still pass
-    // realDatasetServiceGate if `status` were ever restored without an
-    // explicit re-grant). The two grant stamps go with it (ADR 0040): revoke
-    // is the eraser of what approval wrote, so a later listing cannot show a
-    // revoked account still carrying "granted by X on Y".
-    //
-    // The upload-REQUEST stamps go too (ADR 0042). An open request is
-    // `upload_access_requested_at` set with no grant, so leaving the stamp on a
-    // revoked row would put a former grantee back into the admin review queue
-    // the moment their grant was taken away -- the one account an admin has
-    // just decided about. Clearing both means a re-instated account asks
-    // again, which is the right shape: the review is of a person at a moment,
-    // and revocation ends that moment.
-    await db
-      .prepare(
-        `
-    UPDATE users
-    SET status = ?,
-        service_access = 0,
-        service_access_granted_at = NULL,
-        service_access_granted_by = NULL,
-        upload_access_requested_at = NULL,
-        upload_access_notified_at = NULL,
-        revoked_at = datetime('now'),
-        updated_at = datetime('now')
-    WHERE id = ?
-  `,
-      )
-      .bind(finalStatus, user.id)
-      .run();
-
-    // Remove from every dataset repo they touch: collaborator grants
-    // (dataset_collaborators) UNION repos they own (datasets.owner_user_id).
-    // Owner-owned repos were previously never removed (epic #713 gap).
-    const collaborations = await db
-      .prepare(
-        `SELECT d.github_repo FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE dc.user_id = ?
-       UNION
-       SELECT github_repo FROM datasets WHERE owner_user_id = ?`,
-      )
-      .bind(user.id, user.id)
-      .all<{ github_repo: string | null }>();
-
-    let reposRemoved = 0;
-    const failedRemovals: string[] = [];
-    for (const collab of collaborations.results || []) {
-      if (collab.github_repo) {
-        // Extract repo name with defensive check
-        const parts = collab.github_repo.split("/");
-        if (parts.length !== 2 || !parts[1]) {
-          console.error(`Invalid github_repo format: ${collab.github_repo}`);
-          failedRemovals.push(collab.github_repo);
-          continue;
-        }
-        const repoName = parts[1];
-        try {
-          await removeCollaborator(repoName, user.github_username, await getDatasetsToken(c.env));
-          reposRemoved++;
-        } catch (error) {
-          console.error(`Failed to remove from ${collab.github_repo}:`, error);
-          failedRemovals.push(collab.github_repo);
-        }
-      }
-    }
-
-    // Clear their collaborator records
-    await db.prepare("DELETE FROM dataset_collaborators WHERE user_id = ?").bind(user.id).run();
-
-    // Send revocation email
-    let emailSent = false;
-    try {
-      const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
-      await sendRevocationEmail(
-        user.email,
-        user.username,
-        c.env.RESEND_API_KEY,
-        fromEmail,
-        replyTo,
-        isDev,
-        c.env,
-      );
-      emailSent = true;
-    } catch (error) {
-      console.error("Failed to send revocation email:", error);
-    }
-
-    // Clear S3 permissions
-    await db.prepare("DELETE FROM user_s3_permissions WHERE user_id = ?").bind(user.id).run();
-
-    // Audit log (non-blocking). By this point tokens, IAM credentials, GitHub
-    // collaborations, S3 permissions, `status` and `service_access` have all
-    // already been changed and cannot be rolled back — a throwing audit insert
-    // must not turn that completed revocation into a 500 that reads as "the
-    // user still has access". Log the gap loudly instead: an unaudited
-    // revocation is a record-keeping problem, a falsely-reported one is a
-    // security problem.
-    try {
-      await auditLogStatement(db, {
-        userId: adminUser.id,
-        action: "user_revoked",
-        resourceType: "user",
-        resourceId: user.username,
-        details: JSON.stringify({
-          revoked_by: adminUser.username,
-          repos_removed: reposRemoved,
-          failed_removals: failedRemovals,
-          email_sent: emailSent,
-          iam_revoked: iamRevoked,
-          // Mirrors the approval audit row: upload access is a thing that was
-          // taken away here, not something to infer from the status (ADR 0040).
-          service_access_cleared: true,
-        }),
-      }).run();
-    } catch (error) {
-      console.error(
-        `AUDIT GAP: user_revoked row not written for ${user.username} (the revocation DID complete):`,
-        error,
-      );
-    }
-
-    // If IAM revocation had errors, return warning with detailed steps
-    if (iamRevocationError) {
-      return c.json(
-        {
-          warning: iamRevoked
-            ? "User revoked with partial IAM cleanup"
-            : "User revoked with IAM cleanup failure",
-          message: iamRevoked
-            ? "User's API tokens revoked. Some IAM cleanup steps failed but S3 access keys were deleted."
-            : "User's API tokens and database access revoked, but S3 credentials may still be active",
-          user: {
-            username: user.username,
-            status: finalStatus,
-          },
-          iam_cleanup: {
-            success: iamRevoked,
-            errors: iamRevocationError,
-            steps_attempted: iamRevocationSteps,
-            aws_iam_username: user.aws_iam_username,
-          },
-          action_required: iamRevoked
-            ? [
-                "Review IAM cleanup steps above",
-                `Check AWS console for user '${user.aws_iam_username}'`,
-                "Verify no orphaned resources remain",
-              ]
-            : [
-                `1. Manually delete IAM user '${user.aws_iam_username}' in AWS console`,
-                "2. Or use AWS CLI: aws iam list-access-keys --user-name <username>",
-                "3. Delete each key: aws iam delete-access-key --user-name <username> --access-key-id <key>",
-                "4. Delete user: aws iam delete-user --user-name <username>",
-                `5. Update user status: UPDATE users SET status = 'revoked' WHERE username = '${user.username}'`,
-              ],
-          security_impact: iamRevoked
-            ? "Most IAM resources cleaned up. Review steps for any remaining items."
-            : "User can still upload/download S3 data until manual cleanup completes",
-          repos_removed: reposRemoved,
-          failed_removals: failedRemovals.length > 0 ? failedRemovals : undefined,
-          email_sent: emailSent,
-          iam_revoked: iamRevoked,
-        },
-        207, // 207 Multi-Status: partial success
-      );
-    }
-
-    // Full revocation succeeded
-    return c.json({
-      message: `User ${username} access has been fully revoked`,
-      user: {
-        username: user.username,
-        status: finalStatus,
-      },
-      repos_removed: reposRemoved,
-      failed_removals: failedRemovals.length > 0 ? failedRemovals : undefined,
-      email_sent: emailSent,
-      iam_revoked: iamRevoked,
-    });
+    return finalizeRevocation(c, user);
   });
 
   /**
