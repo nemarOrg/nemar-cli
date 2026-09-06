@@ -317,6 +317,33 @@ describe("POST /auth/code/verify", () => {
     expect(logs.join("\n")).toContain(`could not pick a username for user id=${id}`);
   });
 
+  test("a username set mid-sign-in is reported, not the NULL we read first", async () => {
+    // The race: a `PATCH /auth/profile` names the account between this
+    // request's SELECT and its claim. Staged with SQLite's own trigger
+    // machinery rather than described -- the session INSERT is the statement
+    // immediately before the claim in the same batch, so a trigger on it lands
+    // the competing write in exactly the window the claim's `username IS NULL`
+    // predicate guards. The claim then reports `changes = 0` (nothing is
+    // stolen), and the row the response was built from is one revision stale.
+    const id = seedWebUser(EMAIL);
+    db.run(
+      `CREATE TRIGGER name_the_row_mid_signin AFTER INSERT ON web_sessions
+       BEGIN UPDATE users SET username = 'typed' WHERE id = NEW.user_id; END`,
+    );
+    await plantCode(EMAIL, "123456");
+
+    const res = await codeVerify(EMAIL, "123456");
+    expect(res.status).toBe(200);
+
+    // The claim lost, so nothing was assigned and nothing was audited...
+    expect(usernameOf(id)).toEqual({ username: "typed", auto: 0 });
+    expect(auditRows(id)).toHaveLength(0);
+    // ...and the response says what the account HAS, not what it had.
+    const body = await res.json();
+    expect(body.user.username).toBe("typed");
+    expect(body.user.username_auto_assigned).toBe(false);
+  });
+
   test("the assignment is audited, with the door it came through", async () => {
     const id = seedWebUser(EMAIL);
     await plantCode(EMAIL, "123456");

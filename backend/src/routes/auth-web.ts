@@ -609,6 +609,37 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       await recordUsernameAssignment(db, userRow.id, claimed, "code_signin");
     }
 
+    // A claim that did NOT land has two causes, and one of them makes the row
+    // this request read at the top stale: either somebody else took the handle
+    // (the row is unchanged, and `userRow` is still right), or this same
+    // account gained a username concurrently -- a `PATCH /auth/profile` racing
+    // the sign-in -- in which case `userRow.username` is the pre-race NULL and
+    // reporting it would tell the dashboard the account has no handle a moment
+    // after it got one. One extra read, on a path that is already rare.
+    //
+    // Non-fatal like everything else about the assignment: the sign-in has
+    // COMMITTED by here, and letting a failed read reach the outer catch would
+    // answer 500 and withhold the cookie for a session that exists.
+    let currentUsername = userRow.username;
+    let currentAutoAssigned = userRow.username_auto_assigned === 1;
+    if (claimed && !usernameLanded) {
+      try {
+        const fresh = await db
+          .prepare("SELECT username, username_auto_assigned FROM users WHERE id = ? LIMIT 1")
+          .bind(userRow.id)
+          .first<{ username: string | null; username_auto_assigned: number }>();
+        if (fresh) {
+          currentUsername = fresh.username;
+          currentAutoAssigned = fresh.username_auto_assigned === 1;
+        }
+      } catch (rereadErr) {
+        console.error(
+          `[auth-web] /code/verify: could not re-read the username of user id=${userRow.id} after a lost claim; reporting the row as read`,
+          rereadErr,
+        );
+      }
+    }
+
     const user = {
       id: userRow.id,
       email: userRow.email,
@@ -624,10 +655,11 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       country: userRow.country,
       affiliation: userRow.affiliation,
       service_access: userRow.service_access === 1,
-      // The row was read before the claim, so the response reports what this
-      // request actually left behind rather than the NULL it started with.
-      username: usernameLanded ? claimed : userRow.username,
-      username_auto_assigned: usernameLanded || userRow.username_auto_assigned === 1,
+      // The row was read before the claim, so neither half is `userRow`'s own
+      // value: a landed claim reports what it wrote, and a lost one reports the
+      // re-read above.
+      username: usernameLanded ? claimed : currentUsername,
+      username_auto_assigned: usernameLanded || currentAutoAssigned,
       service_access_granted_at: userRow.service_access_granted_at,
       upload_access_requested_at: userRow.upload_access_requested_at,
     };
