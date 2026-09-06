@@ -267,9 +267,11 @@ describe("the sandbox routes", () => {
     expect(res.status).toBe(200);
     expect((await res.json()).sandbox_completed).toBe(true);
     expect(
-      db.query<{ sandbox_completed: number }, [number]>(
-        "SELECT sandbox_completed FROM users WHERE id = ?",
-      ).get(user.id)?.sandbox_completed,
+      db
+        .query<{ sandbox_completed: number }, [number]>(
+          "SELECT sandbox_completed FROM users WHERE id = ?",
+        )
+        .get(user.id)?.sandbox_completed,
     ).toBe(1);
   });
 
@@ -288,6 +290,35 @@ describe("the optional-auth middleware (GET /datasets?mine=true)", () => {
     const res = await authed("/datasets?mine=true", user.apiKey);
     expect(res.status).toBe(200);
     expect((await res.json()).datasets).toEqual([]);
+  });
+
+  test("a `pending` COOKIE degrades to anonymous rather than 403", async () => {
+    // authMiddleware answers an inactive cookie with a 403 (it must, or a
+    // signed-in browser is told it sent nothing). This middleware must NOT:
+    // its whole job is to leave the route's anonymous branch reachable, and
+    // a browser carrying a stale cookie should still be able to read the
+    // public catalog.
+    const user = await seedUser("optionalcookiepending", "pending", { withToken: false });
+    const { cookieIdRaw } = await issueSession(env(), user.id, false, null, null, "email_code");
+
+    const res = await app.request(
+      "/datasets",
+      { headers: { Cookie: `nemar_session=${cookieIdRaw}` } },
+      env(),
+    );
+
+    expect(res.status).toBe(200);
+    // The anonymous shape: the public catalog, not a user-scoped list.
+    const body = await res.json();
+    expect(Array.isArray(body.datasets)).toBe(true);
+    // ...and it is genuinely anonymous: ?mine=true, which requires a resolved
+    // user, is refused for the same cookie.
+    const mine = await app.request(
+      "/datasets?mine=true",
+      { headers: { Cookie: `nemar_session=${cookieIdRaw}` } },
+      env(),
+    );
+    expect(mine.status).toBe(401);
   });
 
   test("does not resolve a `pending` token", async () => {
