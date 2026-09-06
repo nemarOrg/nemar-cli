@@ -412,6 +412,23 @@ describe("the orcid_verified row reaches every surface (#1271)", () => {
     }
   });
 
+  test("--dry-run still names it, but continues anyway", async () => {
+    // The general dry-run case (above, in the preflight describe block) uses
+    // an empty gap list; this pins the same continuation for the specific row
+    // #1271 adds, so the two behaviors -- "name what's missing" and "dry-run
+    // never stops" -- are proven together rather than each in isolation.
+    seedAuthenticatedConfig({ sandboxCompleted: true });
+    const server = startMeServer({ service_access: false, profile_gaps: [ORCID_GAP] });
+    try {
+      const result = await runCli(["dataset", "upload", NO_SUCH_PATH, "--dry-run"], server.url);
+      expect(result.all).toContain(ORCID_VERIFIED_LINE);
+      expect(result.all).toContain(PREFLIGHT_DRY_RUN);
+      expect(result.all).toContain(CONTINUED_MARKER);
+    } finally {
+      server.stop();
+    }
+  });
+
   test("a linked iD is not asked for, and the sandbox line is untouched", async () => {
     // The row is absent from `profile_gaps` once the backend has nothing to
     // report, and sandbox training -- the CLI-only step that is deliberately
