@@ -5,9 +5,10 @@
  * the asking half unbuilt; this is the asking half's rulebook. An admin
  * approving an upload request is performing an export-control review of a
  * person, so the request has to arrive with the person on it: a real name, a
- * username to approve them by, a GitHub account that exists, a location, and a
- * sentence about what they intend to deposit. A request missing any of that is
- * refused HERE rather than mailed to an admin who then has to chase it.
+ * username to approve them by, a verified ORCID iD (#1271; `admin`/`owner`
+ * excepted), a GitHub account that exists, a location, and a sentence about
+ * what they intend to deposit. A request missing any of that is refused HERE
+ * rather than mailed to an admin who then has to chase it.
  *
  * Every refusal is `{ error, message, missing }` with a code from a closed
  * vocabulary, because both clients render it: the website turns `missing` into
@@ -28,6 +29,7 @@ import {
   UPLOAD_ACCESS_WHY_MIN_CHARS,
   type uploadAccessErrorCodeSchema,
 } from "../../../shared/contract/user.js";
+import { gapRole } from "./profile-gaps";
 
 /** Bounds on the why text. Re-exported from the wire contract so the rule, the
  *  CLI prompt and the website form cannot drift; they match CLI signup's
@@ -56,10 +58,25 @@ export interface UploadAccessRefusal {
   missing: string[];
 }
 
-/** The account columns the request reads. Deliberately not the whole user row:
- *  these five plus the email flag are the review card's identity half. */
+/**
+ * The account columns the request reads. Deliberately not the whole user row:
+ * these five plus the two flags are the review card's identity half.
+ *
+ * Every field is REQUIRED, including the two added for the `orcid_verified` row
+ * (#1271). A SELECT that forgets one is then a compile error rather than a
+ * silently narrower refusal -- which is the failure mode a gap computed from a
+ * partial row has: it reports the fields it was handed and says nothing about
+ * the one it was not.
+ */
 export interface UploadAccessProfile {
   email_verified: number;
+  /** Unverified iDs block the request, so an admin reviews a proven record
+   *  (#1271). 0/1 INTEGER, migration 0050. */
+  orcid_verified: number;
+  /** `admin`/`owner` are exempt from the `orcid_verified` row. The RAW column
+   *  (migration 0009): anything this build does not recognise is a regular
+   *  user, so the exemption fails closed. */
+  role: string | null;
   username: string | null;
   given_name: string | null;
   family_name: string | null;
@@ -116,6 +133,11 @@ export function checkUploadAccessRequest(
   // exactly the profile half in exactly the order the clients render.
   const gaps = profileGapFields({
     email_verified: profile.email_verified === 1,
+    // An unverified iD refuses the request by CONSTRUCTION rather than by a
+    // check of its own here (#1271): the row is in the matrix, and this list is
+    // the matrix's output.
+    orcid_verified: profile.orcid_verified === 1,
+    role: gapRole(profile.role),
     username: profile.username,
     given_name: profile.given_name,
     family_name: profile.family_name,

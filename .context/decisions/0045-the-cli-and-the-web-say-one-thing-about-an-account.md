@@ -141,6 +141,51 @@ which the backend builds and both clients prefer verbatim when present. Adding a
 sandbox row to the shared matrix would make the table a claim about both
 surfaces that is false on one of them.
 
+## Update 2026-09-06
+
+Phase 9 (#1271; `nemarOrg/website#312`) adds the first row this arrangement was
+built to make cheap, and it is recorded here rather than in an ADR of its own
+because it decides nothing new — it exercises the Consequence above that says a
+precondition is now one row in one table.
+
+**`orcid_verified` blocks `upload_access`.** Nothing gated on a proved iD before.
+`nemar auth signup` takes a TYPED iD and leaves `orcid_verified = 0` unless the
+user later runs `nemar auth profile orcid link`, so a CLI account could claim any
+iD — including one whose real owner is later refused with `orcid_in_use` — and
+DOI attribution on that path (ADR 0041) rested on an unproven record. The row
+sits between `family_name` and `github_username` on both surfaces, carries the
+copy keys `gap.field.orcid_verified.{label,set_on.web,set_on.cli}`, and blocks
+the REQUEST only: a grant already held is untouched, so `cool-vibers` and every
+other `service_access = 1` account keeps uploading while the gap is reported.
+
+**In practice it is a CLI-only row.** ORCID OAuth is the only account-creation
+path on the web (ADR 0008), so every web account already carries a verified iD by
+the time it can reach the list; the row only ever fires for a CLI-created account
+that never linked one.
+
+**`admin` and `owner` are exempt, and that is interim.** They predate having a
+web-signup path of their own, and the alternative is locking an operator out of
+the account that runs the review queue — `nemarOwner`, `nemarAdmin` and
+`test-admin` all hold no verified iD today. The exemption is by the row's RAW
+`users.role`, narrowed once in `backend/src/services/profile-gaps.ts`: a value
+outside `owner`/`admin`/`member`, or none at all, is a regular user, so it fails
+closed. It stands until the service-account and test-account kinds of epic #1272
+give that population a real answer rather than a role check standing in for one.
+Admin approval remains the override for everything here (ADR 0040): the gap
+blocks the ASK, never the grant.
+
+**The plumbing this needed is the shape the phase-8 design predicted.** Two
+columns onto `ProfileGapAccount` (`role`, and `orcid_verified` promoted from a
+set-on modifier to a predicate input), the same two onto the three SELECTs that
+feed the one computation, and no migration — every column already exists (0009,
+0050). `checkUploadAccessRequest` refuses by construction, because its `missing`
+is `profileGapFields` over that same row.
+
+Receipts for this update: issue #1271, `nemarOrg/website#312` (commit 19f93e3e),
+epic #1272 for the exemption's replacement, and
+`test/profile-gaps-matrix.test.ts`, whose combination count is now 2^8 and which
+gained the role dimension the other seven rows do not have.
+
 ## Alternatives considered
 
 - **Publish `@nemar/contract` to npm and have the website import it.** The

@@ -30,6 +30,12 @@ const GITHUB_LINE =
   "GitHub handle is missing: needed to request upload access. Set it in Settings or run `nemar auth profile set-github`.";
 const GIVEN_ORCID_LINE =
   "Given name is missing: needed to request upload access. Set it in your ORCID record at orcid.org, then sign in again.";
+/** The row #1271 adds. Word for word the sentence the website prints for the
+ *  same gap (nemarOrg/website#312), which is the property this file exists to
+ *  hold — the label is the copy table's "Verified ORCID iD" and the command is
+ *  the ADR 0044 browser handoff, not `nemar auth signup`. */
+const ORCID_VERIFIED_LINE =
+  "Verified ORCID iD is missing: needed to request upload access. Set it in Settings or run `nemar auth profile orcid link`.";
 const SANDBOX_LINE =
   "Sandbox training is missing: needed to upload a dataset from the CLI. Run `nemar sandbox`.";
 const NOTHING_LINE = "Nothing outstanding — every field NEMAR needs is filled in.";
@@ -50,6 +56,10 @@ interface UserOptions {
   profile_gaps?: { field: string; blocks: string[]; set_on: string[] }[] | undefined;
   orcid_verified?: boolean;
   sandbox_completed?: boolean;
+  /** The 400 `POST /users/me/upload-access/request` answers with, for the one
+   *  surface that renders a REFUSAL's `missing` rather than `profile_gaps`.
+   *  Absent leaves the endpoint unserved, which no other test here calls. */
+  refusal?: { error: string; message: string; missing: string[] };
 }
 
 /** Serves the real /users/me envelope shape: `{ user, token }`. */
@@ -60,6 +70,9 @@ function startMeServer(options: UserOptions = {}) {
       const url = new URL(req.url);
       if (url.pathname === "/notices") return Response.json({ notices: [] });
       if (url.pathname === "/datasets/facets") return Response.json({});
+      if (url.pathname === "/users/me/upload-access/request" && options.refusal) {
+        return Response.json(options.refusal, { status: 400 });
+      }
       return Response.json({
         user: {
           id: 12,
@@ -324,6 +337,114 @@ describe("nemar auth profile", () => {
       const result = await runCli(["auth", "profile"], server.url);
       expect(result.stdout).toContain(UNREPORTED_LINE);
       expect(result.stdout).not.toContain(NOTHING_LINE);
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("the orcid_verified row reaches every surface (#1271)", () => {
+  const NO_SUCH_PATH = join(tmpdir(), "nemar-no-such-dataset-dir");
+  const ORCID_GAP = GAP("orcid_verified", ["upload_access"]);
+  const WHY = "Depositing our lab's 64-channel EEG study of motor imagery, 40 participants.";
+
+  test("`auth status --refresh` prints it, and it survives into the cache", async () => {
+    seedAuthenticatedConfig();
+    const server = startMeServer({ service_access: false, profile_gaps: [ORCID_GAP] });
+    try {
+      const result = await runCli(["auth", "status", "--refresh"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain(ORCID_VERIFIED_LINE);
+      expect(storedAccount().profileGaps).toEqual([
+        { field: "orcid_verified", blocks: ["upload_access"], set_on: ["web", "cli"] },
+      ]);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("`auth profile` prints it from a live fetch", async () => {
+    seedAuthenticatedConfig();
+    const server = startMeServer({ service_access: false, profile_gaps: [ORCID_GAP] });
+    try {
+      const result = await runCli(["auth", "profile"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain(ORCID_VERIFIED_LINE);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("the upload preflight lists it as something blocking the request", async () => {
+    seedAuthenticatedConfig({ sandboxCompleted: true });
+    const server = startMeServer({ service_access: false, profile_gaps: [ORCID_GAP] });
+    try {
+      const result = await runCli(["dataset", "upload", NO_SUCH_PATH], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.all).toContain(UPLOAD_GAPS_TITLE);
+      expect(result.all).toContain(ORCID_VERIFIED_LINE);
+      expect(result.all).not.toContain(CONTINUED_MARKER);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a refused request renders it from `missing`, in the same words", async () => {
+    // The other input shape: a refusal names bare FIELDS, with no `blocks` and
+    // no `set_on`, and the sentence has to come out identical to the one the
+    // status block prints from a full wire entry.
+    seedAuthenticatedConfig();
+    const server = startMeServer({
+      service_access: false,
+      profile_gaps: [ORCID_GAP],
+      refusal: {
+        error: "profile_incomplete",
+        message: "Complete your profile before requesting upload access: orcid_verified",
+        missing: ["orcid_verified"],
+      },
+    });
+    try {
+      const result = await runCli(["auth", "request-upload-access", "--why", WHY], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.all).toContain(ORCID_VERIFIED_LINE);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a linked iD is not asked for, and the sandbox line is untouched", async () => {
+    // The row is absent from `profile_gaps` once the backend has nothing to
+    // report, and sandbox training -- the CLI-only step that is deliberately
+    // NOT in the shared matrix (ADR 0045) -- still reads exactly as it did.
+    seedAuthenticatedConfig();
+    const server = startMeServer({
+      service_access: false,
+      orcid_verified: true,
+      sandbox_completed: false,
+      profile_gaps: [],
+    });
+    try {
+      const result = await runCli(["auth", "status", "--refresh"], server.url);
+      expect(result.stdout).not.toContain(ORCID_VERIFIED_LINE);
+      expect(result.stdout).toContain(SANDBOX_LINE);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("it is listed above the sandbox step, like every shared gap", async () => {
+    seedAuthenticatedConfig();
+    const server = startMeServer({
+      service_access: false,
+      sandbox_completed: false,
+      profile_gaps: [ORCID_GAP],
+    });
+    try {
+      const result = await runCli(["auth", "status", "--refresh"], server.url);
+      expect(result.stdout).toContain(SANDBOX_LINE);
+      expect(result.stdout.indexOf(SANDBOX_LINE)).toBeGreaterThan(
+        result.stdout.indexOf(ORCID_VERIFIED_LINE),
+      );
     } finally {
       server.stop();
     }
