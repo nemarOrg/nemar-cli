@@ -95,6 +95,41 @@ const accountSchema = z.object({
    */
   serviceAccess: z.boolean().optional(),
   /**
+   * What the account was still missing as of the last `auth status --refresh`
+   * (#1268, ADR 0045) — the backend's `profile_gaps`, cached beside
+   * `serviceAccess` and for the same reason: `auth status` stays usable
+   * offline, and absent means "never refreshed", which the Profile block
+   * reports as not-checked rather than as "nothing missing".
+   *
+   * Stored as the WIRE entries rather than as rendered sentences, so a CLI
+   * upgrade re-renders an old cache through its new copy table instead of
+   * replaying yesterday's wording. `blocks`/`set_on` are loose string arrays
+   * for the same reason they are on the wire: a vocabulary this build has not
+   * heard of must round-trip rather than fail to parse.
+   */
+  profileGaps: z
+    .array(
+      z
+        .object({
+          field: z.string(),
+          blocks: z.array(z.string()).optional(),
+          set_on: z.array(z.string()).optional(),
+        })
+        .passthrough(),
+    )
+    .optional(),
+  /**
+   * Whether a VERIFIED ORCID iD is linked, as of the last refresh (#1268).
+   *
+   * Cached for one reason: it decides where a missing NAME is set. With an iD
+   * linked the record owns the name and `PATCH /auth/profile` refuses the edit,
+   * so telling that person to run `nemar auth profile set-name` is advice that
+   * cannot work. A refused upload-access request names the field and not the
+   * account state, so the renderer has nowhere else to learn it. Absent
+   * defaults to false, which is the pre-#1268 wording.
+   */
+  orcidVerified: z.boolean().optional(),
+  /**
    * Cached from `/auth/login` and `auth status --refresh` (#1256). Not
    * authoritative -- always re-check with the backend for anything
    * access-control-sensitive -- but lets the `--debug` diagnostic bundle

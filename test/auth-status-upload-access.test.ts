@@ -21,7 +21,12 @@ import { spawn } from "bun";
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
 
-const NOT_GRANTED_HINT = "(one-time admin approval; see https://nemar.org/support)";
+/** The explanation under a "not granted" line. Since #1268 it is the website's
+ *  own sentence (shared/contract/account-copy.ts, ADR 0045) rather than a
+ *  pointer at the support page, which was all there was before ADR 0042 built
+ *  the request. */
+const NOT_GRANTED_HINT =
+  "A one-time admin grant. Reviewed against export-control and local-jurisdiction rules.";
 
 /** Serves the real /users/me envelope shape: `{ user, token }`. */
 function startMeServer(serviceAccess: boolean | undefined) {
