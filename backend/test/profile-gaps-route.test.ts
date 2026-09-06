@@ -81,8 +81,10 @@ interface Overrides {
   orcid_verified?: number;
   status?: string;
   /** `member` by default. `admin`/`owner` are exempt from the `orcid_verified`
-   *  gap (#1271), which is the only thing this column changes here. */
-  role?: string;
+   *  gap (#1271), which is the only thing this column changes here. `null` is
+   *  a real, seedable state: migration 0009's column has no CHECK constraint,
+   *  and a NULL row must be a regular user, never an exemption. */
+  role?: string | null;
   /** 0 by default, so the upload-access request is answerable at all: a granted
    *  account 409s before any precondition is read. */
   service_access?: number;
@@ -368,6 +370,18 @@ describe("one row, three answers", () => {
     expect(answers.missing).toEqual(["city"]);
     expect(answers.usersMe).toEqual(["city"]);
     expect(answers.authMe).toEqual(["city"]);
+  });
+
+  test("a NULL role is a regular user, never an exemption", async () => {
+    // Unlike the unrecognised-string case below, a NULL role does not refuse
+    // the bearer credential (`parseRole` defaults it to "member" there); the
+    // gap computation reads the raw column regardless, and `gapRole(null)` is
+    // `null`, which `isExemptRole` never treats as `admin`/`owner`.
+    const id = await seedUser({ orcid_verified: 0, role: null });
+    const answers = await allThree(id);
+    expect(answers.missing).toEqual(["orcid_verified"]);
+    expect(answers.usersMe).toEqual(["orcid_verified"]);
+    expect(answers.authMe).toEqual(["orcid_verified"]);
   });
 
   test("a role the column should not hold is a regular user, not an exemption", async () => {
