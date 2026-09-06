@@ -10,6 +10,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import {
   NEUROSCHEMA_VERSION,
   catalogItemSchema,
@@ -23,6 +25,7 @@ import {
   toVersionTag,
   userMeResponseSchema,
   versionTagSchema,
+  webUserSchema,
 } from "../shared/contract/index.js";
 
 describe("version canonicalizer", () => {
@@ -519,6 +522,102 @@ describe("user /me envelope schema", () => {
         token: null,
       }),
     ).toThrow();
+  });
+});
+
+describe("old-CLI compatibility: no schema in the contract is strict", () => {
+  /**
+   * The property epic #1250 rests on and nothing was watching (#1274).
+   *
+   * A CLI installed before the epic parses THIS repo's schemas as they were
+   * shipped to it, and the backend it talks to is the new one. Every field the
+   * epic added -- `service_access`, the tier fields, `profile_gaps`,
+   * `username_auto_assigned` -- is an unknown key to that older parse, and
+   * `status: "verified"` is a value its `accountStatusSchema` may not have
+   * carried at all. Zod's default is to STRIP unknown keys, and every user
+   * schema here goes further and declares `.passthrough()`. One `.strict()`
+   * anywhere in the contract would turn that forward compatibility into an
+   * ApiError on `nemar auth status` for every un-upgraded install.
+   *
+   * Both halves are pinned: the parse below proves the shapes accept an
+   * extended payload, and the source grep proves nobody can quietly make one
+   * closed. The grep reads the files as TEXT rather than inspecting the schema
+   * objects, because a Zod object gives no public, version-stable answer to
+   * "which unknown-key policy is this?" -- and the thing being forbidden is a
+   * line of source, which is exactly what a reader can see.
+   */
+  const CONTRACT_DIR = join(import.meta.dir, "..", "shared", "contract");
+
+  test("a /users/me payload with verified + the new fields + an unknown key parses", () => {
+    const parsed = userMeResponseSchema.parse({
+      user: {
+        id: 1,
+        username: "u",
+        email: "e@x.org",
+        github_username: "gh",
+        role: "member",
+        // The base tier ADR 0040 introduced. An older CLI has no branch for it
+        // and must still get a parsed object rather than a thrown ApiError.
+        status: "verified",
+        service_access: false,
+        email_verified: true,
+        orcid_verified: false,
+        given_name: "Ada",
+        family_name: "Lovelace",
+        profile_gaps: [{ field: "city", blocks: ["upload_access"] }],
+        username_auto_assigned: true,
+        // A field no released CLI has ever heard of.
+        some_future_field: { nested: true },
+      },
+      token: { prefix: "abc", created_at: "2026-01-01", last_used_at: null },
+      future_envelope_key: 1,
+    });
+    expect(parsed.user.status).toBe("verified");
+    expect(parsed.user.service_access).toBe(false);
+    // `.passthrough()`, not `.strip()`: the unknown key survives the parse, so
+    // a client that learns about it later needs no schema change to read it.
+    expect((parsed.user as Record<string, unknown>).some_future_field).toEqual({ nested: true });
+    expect((parsed as Record<string, unknown>).future_envelope_key).toBe(1);
+  });
+
+  test("an /auth/me payload with an unknown key parses through webUserSchema", () => {
+    // The dashboard's shape, whose `status` is the collapsed vocabulary --
+    // `verified` reaches it as "active" (userStatusForDashboard), which is why
+    // this half pins the unknown key rather than the status value.
+    const parsed = webUserSchema.parse({
+      id: 1,
+      email: "e@x.org",
+      username: "u",
+      role: "member",
+      status: "active",
+      email_verified: true,
+      given_name: null,
+      family_name: null,
+      orcid: null,
+      orcid_verified: false,
+      github_username: null,
+      city: null,
+      country: null,
+      affiliation: null,
+      service_access: false,
+      service_access_granted_at: null,
+      upload_access_requested_at: null,
+      profile_gaps: [],
+      username_auto_assigned: false,
+      some_future_field: "kept",
+    });
+    expect(parsed.status).toBe("active");
+    expect((parsed as Record<string, unknown>).some_future_field).toBe("kept");
+  });
+
+  test("no schema file under shared/contract calls .strict()", () => {
+    const files = readdirSync(CONTRACT_DIR, { recursive: true, encoding: "utf8" })
+      .filter((name) => name.endsWith(".ts"))
+      .map((name) => join(CONTRACT_DIR, name));
+    // Guards the guard: a mistyped directory would scan nothing and pass.
+    expect(files.length).toBeGreaterThan(5);
+    const offenders = files.filter((file) => readFileSync(file, "utf8").includes(".strict("));
+    expect(offenders, "A strict schema breaks every un-upgraded CLI.").toEqual([]);
   });
 });
 
