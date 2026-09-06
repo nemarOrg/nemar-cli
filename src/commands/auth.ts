@@ -38,7 +38,7 @@ import {
   retrieveKey,
   signup,
 } from "../lib/api/auth.js";
-import { ApiError, MaintenanceError } from "../lib/api/errors.js";
+import { ApiError, MaintenanceError, errorDetail } from "../lib/api/errors.js";
 import { printStepFailure } from "../lib/cli-output.js";
 import {
   DEFAULT_API_URL,
@@ -1420,4 +1420,140 @@ Description:
 Examples:
   $ nemar auth request-upload-access
   $ nemar auth request-upload-access --why "Sharing our lab's 64-channel EEG study of motor imagery"`,
+);
+
+// ============================================================================
+// Profile (#1254, epic #1250; ADR 0043)
+// ============================================================================
+
+/** Rendered for a field the backend sent as null/empty. */
+const NOT_SET = "not set";
+
+/**
+ * `verified` / `not verified` / `unknown` for a tri-state flag.
+ *
+ * `undefined` is a backend that predates #1254, and it renders as unknown
+ * rather than as "not verified" for the same reason `Upload access` does (ADR
+ * 0040): telling someone their confirmed inbox is unconfirmed sends them to
+ * redeem a code they do not need.
+ */
+function verifiedMark(flag: boolean | undefined): string {
+  if (flag === undefined) return chalk.dim("verification state unknown");
+  return flag ? chalk.green("verified") : chalk.yellow("not verified");
+}
+
+/**
+ * `nemar auth profile` — what this account's identifiers currently are, and
+ * where each one is changed.
+ *
+ * Separate from `nemar auth status`, which answers "am I logged in and can I
+ * upload" from the CONFIG CACHE. This one always fetches: it is the command
+ * someone runs because they are about to change an identifier, and a cached
+ * answer is exactly the wrong thing to hand them there.
+ *
+ * The footer is the load-bearing half. Identity uniqueness means a duplicate
+ * account is refused rather than created (ADR 0043), so the message a person
+ * hits is "that iD already belongs to an account" -- and the only useful next
+ * sentence is where to go and change it. Email, GitHub and ORCID are all
+ * self-service in Settings today; username and name are not, and saying so is
+ * better than leaving someone hunting for a field that does not exist.
+ */
+export async function profileAction(): Promise<void> {
+  if (!isAuthenticated()) {
+    console.log(chalk.yellow("Not authenticated"));
+    console.log();
+    console.log("  Run 'nemar auth login' to authenticate");
+    return;
+  }
+
+  const spinner = ora("Fetching account profile...").start();
+  let user: Awaited<ReturnType<typeof getCurrentUser>>;
+  try {
+    user = await getCurrentUser();
+    spinner.stop();
+  } catch (error) {
+    spinner.fail(`Could not fetch your profile: ${errorDetail(error)}`);
+    if (error instanceof ApiError && error.statusCode === 401) {
+      console.log(chalk.dim("  Run 'nemar auth login' with a current API key."));
+    }
+    process.exitCode = 1;
+    return;
+  }
+
+  const fullName = [user.given_name, user.family_name].filter(Boolean).join(" ");
+
+  console.log();
+  console.log(chalk.bold("Account"));
+  console.log(`  Username: ${user.username ? chalk.cyan(user.username) : chalk.dim(NOT_SET)}`);
+  console.log(`  Name:     ${fullName ? fullName : chalk.dim(NOT_SET)}`);
+  console.log(`  Email:    ${user.email}  ${verifiedMark(user.email_verified)}`);
+  console.log(
+    `  GitHub:   ${user.github_username ? `@${user.github_username}` : chalk.dim(NOT_SET)}`,
+  );
+  console.log(
+    `  ORCID:    ${user.orcid ? `${user.orcid}  ${verifiedMark(user.orcid_verified)}` : chalk.dim(NOT_SET)}`,
+  );
+  console.log(`  Role:     ${user.role}`);
+
+  console.log();
+  console.log(chalk.bold("Access"));
+  console.log(`  Tier:          ${user.status ?? chalk.dim("unknown")}`);
+  // Same three states as `nemar auth status`, and for the same reason: a
+  // backend that predates ADR 0040 sends nothing, and "not granted" is the one
+  // wrong answer to give someone who already holds the grant.
+  if (user.service_access === true) {
+    console.log(`  Upload access: ${chalk.green("granted")}`);
+  } else if (user.service_access === false) {
+    console.log(
+      `  Upload access: ${chalk.yellow("not granted")} ${chalk.dim(
+        "(one-time admin approval; see https://nemar.org/support)",
+      )}`,
+    );
+  } else {
+    console.log(`  Upload access: ${chalk.dim("unknown (backend did not report it)")}`);
+  }
+
+  console.log();
+  console.log(chalk.bold("Where to change each"));
+  console.log(
+    `  Email, GitHub, ORCID   ${chalk.cyan("https://nemar.org/settings")} ${chalk.dim(
+      "(sign in, then Settings)",
+    )}`,
+  );
+  console.log(`  Username, name         ${chalk.dim("not editable yet (nemarOrg/website#301)")}`);
+  console.log(
+    `  Upload access          ${chalk.dim("one-time admin approval; see https://nemar.org/support")}`,
+  );
+  console.log();
+  console.log(
+    chalk.dim(
+      "An ORCID iD, an email address, and a GitHub username each back at most one NEMAR account. If a sign-up or a link is refused because one is taken, change it on the account that already has it rather than making a second one.",
+    ),
+  );
+}
+
+const profileCmd = authCommand
+  .command("profile")
+  .description("Show your account identifiers and where to change each")
+  .action(profileAction);
+
+addVerboseHelp(
+  profileCmd,
+  `
+Description:
+  Prints the identifiers on your account — username, name, email, GitHub
+  username, ORCID iD — with the verification state of the email and the
+  ORCID link, your access tier, and whether upload access has been granted.
+
+  Always fetched from the server, never from the local config cache: this is
+  the command you run before changing something, so a stale answer is worse
+  than no answer.
+
+  Each of the ORCID iD, the email address, and the GitHub username backs at
+  most one NEMAR account. A second sign-up with any of them is refused rather
+  than creating a duplicate; the fix is to change the identifier on the
+  account that already holds it.
+
+Examples:
+  $ nemar auth profile`,
 );

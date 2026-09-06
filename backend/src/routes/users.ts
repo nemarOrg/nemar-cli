@@ -49,8 +49,13 @@ userRoutes.get("/me", async (c) => {
     .prepare(
       `
     SELECT
+      status,
       created_at,
       approved_at,
+      email_verified,
+      orcid_verified,
+      given_name,
+      family_name,
       sandbox_completed,
       sandbox_completed_at,
       sandbox_dataset_id,
@@ -62,8 +67,13 @@ userRoutes.get("/me", async (c) => {
     )
     .bind(user.id, user.id)
     .first<{
+      status: string;
       created_at: string;
       approved_at: string;
+      email_verified: number;
+      orcid_verified: number;
+      given_name: string | null;
+      family_name: string | null;
       sandbox_completed: number;
       sandbox_completed_at: string | null;
       sandbox_dataset_id: string | null;
@@ -97,6 +107,16 @@ userRoutes.get("/me", async (c) => {
       github_username: user.github_username,
       role: user.role,
       orcid: user.orcid || null,
+      // Added for `nemar auth profile` (#1254): the command's whole job is to
+      // say what each identifier currently IS and where to change it, and
+      // "email: ada@lab.org" with no word on whether that inbox is confirmed
+      // is the half-answer that sends someone to support. Purely additive --
+      // the contract marks all five optional, so an older CLI is unaffected.
+      status: userDetails?.status,
+      email_verified: !!userDetails?.email_verified,
+      orcid_verified: !!userDetails?.orcid_verified,
+      given_name: userDetails?.given_name ?? null,
+      family_name: userDetails?.family_name ?? null,
       created_at: userDetails?.created_at,
       approved_at: userDetails?.approved_at,
       dataset_count: userDetails?.dataset_count || 0,
