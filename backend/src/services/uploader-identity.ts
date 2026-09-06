@@ -137,12 +137,13 @@ export const OWNER_NAME_MISSING_REASON = "owner_name_missing";
 /**
  * User-facing explanation for {@link OWNER_NAME_MISSING_REASON}.
  *
- * Describes the ONE route that exists today. It deliberately does not offer
- * "type your name into Settings": `PATCH /auth/profile` rejects
- * given_name/family_name on purpose (auth-web.ts, "Name is ORCID-canonical
- * (#835) and not editable here"), so that advice would send a blocked user to
- * a form that cannot help them. Phase 3 (#1253) adds profile-side name entry;
- * this message must be revisited then.
+ * Describes the ONE route that exists for the accounts this message reaches.
+ * ADR 0042 opened name entry on `PATCH /auth/profile`, but only for an account
+ * with NO verified ORCID -- a linked record is re-read on every sign-in and
+ * would overwrite a typed name. Signup requires an ORCID, so an account blocked
+ * on this reason is overwhelmingly one that HAS one, and "type your name into
+ * Settings" would send it to a form that answers 409. The ORCID route below is
+ * still the answer for those; an owner with no linked iD can use Settings.
  *
  * ORCID is canonical either way: a public name on the record flows in through
  * the signup lookup, the OAuth link refresh, and `nemar admin backfill-names`.

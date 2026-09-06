@@ -313,9 +313,9 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     // it, so landing an account with NULL names is a real cost -- but not one
     // worth failing a registration over. The gap closes when the record is
     // made public and `nemar admin backfill-names` (or the next ORCID link)
-    // reads it; there is no self-service name field yet, because
-    // PATCH /auth/profile rejects given_name/family_name on purpose until
-    // Phase 3 (#1253).
+    // reads it. PATCH /auth/profile does now accept a typed name, but NOT for
+    // this account: signup requires an ORCID, and ADR 0042 keeps the name
+    // ORCID-canonical for every account that has a verified one.
     let givenName: string | null = null;
     let familyName: string | null = null;
     try {
