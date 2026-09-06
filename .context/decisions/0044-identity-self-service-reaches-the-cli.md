@@ -69,7 +69,10 @@ refused.
 
 There is no version of this that types an ORCID password into a terminal, and
 no way to render ORCID's consent screen there. So `POST /auth/orcid/cli-start`
-(bearer) mints the intent and returns a URL to open.
+mints the intent and returns a URL to open. It takes a bearer token or, under
+the same same-origin gate `POST /orcid/start` applies, a session cookie — the
+gate is what keeps a cookie caller's intent from being mintable by a page
+somewhere else.
 
 The browser that opens it holds **no NEMAR session** — which is precisely what
 the callback used to resolve the user from. So the account travels inside the
@@ -79,33 +82,55 @@ shape first and falls back to the website's plain `decodeState`.
 
 **A state minted for user A can never link to user B.** The id is covered by
 the signature, and the plain web state — the only shape a forged cookie can
-produce — carries no id at all. When a CLI state is present it also OUTRANKS
-whatever session the browser happens to hold: the signature is proof of intent
-from a live API token for that account, and a bystanding cookie for a different
-account is not evidence of anything.
+produce — carries no id at all.
 
 **ADR 0022 survives.** Its rule is that relink intent is never minted on a GET.
 It still is not: `cli-start` is an authenticated POST, and a bearer token is a
 credential no browser sends on its own, so no link click can arm an identity
-swap. `GET /auth/orcid/cli-handoff` mints nothing — it verifies a signature the
-POST made, puts that same signed value in the state cookie, and redirects. That
-is transport, not creation.
+swap. The handoff GET mints nothing — it verifies a signature the POST made and
+shows it to a person. That is transport, not creation.
 
-The handoff exists rather than putting the signed state straight in ORCID's
-`state` parameter, because it keeps the browser binding the website's flow has:
-the state travels in a cookie, so a URL that leaks (browser history, a referrer,
-a log) is not on its own enough to finish a link from somewhere else. The
-intent expires in ten minutes.
+#### Three bounds on a bearer capability
 
-**The residual risk, stated plainly:** a signed intent is a bearer capability
-for the ten minutes it lives. Someone who mints one for their own account and
-persuades a victim to open it and complete ORCID consent would attach the
-victim's iD to the attacker's account. This is the standard OAuth
-account-linking CSRF, it is bounded by the TTL, by ADR 0043's refusal to link an
-iD another live account already holds, and by the victim having to complete a
-consent screen on a link they were handed. It is the price of ORCID being
-completable in a browser that carries no session of ours, and the alternative —
-requiring a web session — is exactly the dead end this ADR exists to close.
+A signed intent is a bearer capability for the ten minutes it lives, and the
+signature alone bounds only WHO it acts for, not who may present it. Left
+there, someone could mint an intent for their own account, send the URL to a
+victim, and have the victim's iD — the identifier a DOI cites (ADR 0041), and
+one ADR 0043 then refuses them on their own account — attached to a stranger's
+row, having seen nothing but the ORCID page they expected. That is the standard
+OAuth account-linking CSRF, and its consequences here are permanent. Three
+things bound it (PR #1269 review):
+
+1. **The person is shown whose account it is.** `GET /auth/orcid/cli-handoff`
+   renders one sentence naming the target account — username and masked email,
+   read from the database by id — and a form they must submit. No script, and
+   deliberately no auto-submit: a page that submits itself is the redirect it
+   replaced, with extra steps. `POST /auth/orcid/cli-handoff/continue` re-runs
+   every check and is same-origin gated, so nothing can post it on the
+   person's behalf without them seeing the page.
+2. **A disagreement is refused, never resolved.** When the browser carries a
+   session for a DIFFERENT account than the intent names, both handoff steps
+   and the callback answer `orcid_intent_account_mismatch` and link nothing.
+   An earlier draft let the signed intent silently outrank the session, which
+   is correct about whose intent it is and wrong about what to do when the
+   page says one account and the browser says another. A browser with no
+   session is the ordinary CLI case and proceeds; a session for the SAME
+   account proceeds too.
+3. **An intent is single-use.** `cli-start` records a nonce in
+   `orcid_link_intents` (migration 0078) and the callback consumes it before
+   writing anything, so a URL out of browser history, a referrer or a log is
+   refused (`orcid_intent_used`) rather than replayed. One browser completion
+   per intent, whatever its outcome; a failed link means running the CLI
+   command again, which is what the CLI already tells people to do. The table
+   is pruned opportunistically at mint time and holds nothing older than one
+   TTL window.
+
+What is left after those three is a person who reads a page naming an account
+that is not theirs and presses the button anyway, inside ten minutes, on a
+single-use link. That is the same residual an emailed confirmation link
+carries, and it is the price of ORCID being completable in a browser that
+holds no session of ours — the alternative, requiring a web session, is
+exactly the dead end this ADR exists to close.
 
 ### The old address is told
 
@@ -137,8 +162,18 @@ address changed and where to report it, not what it changed to.
   (shared/contract/identity.ts) declare which strings are codes, and
   lib/api/client.ts prefers `message` for them — the same mechanism ADR 0042
   added for the upload-access vocabulary. A code the backend adds and the
-  contract does not know about prints as a bare token, so
-  `_profileErrorsAreDeclared` in services/profile.ts fails to compile instead.
+  contract does not know about prints as a bare token, so **every refusal is
+  raised through a typed helper and the compiler catches it instead**:
+  `normalizeProfilePatch`'s codes by `_profileErrorsAreDeclared`, the ten
+  route-level ones (`username_taken`, `username_locked`,
+  `name_is_orcid_canonical`, `account_revoked`, `github_unavailable`,
+  `same_email`, `code_expired`, `code_incorrect`, `orcid_already_have`,
+  `orcid_unavailable`) by `profileRefusal(code, message)`, whose parameter is
+  the contract's union — they were bare string literals until the #1269 review
+  pointed out that the claim was true of a third of them. The identity
+  refusals (`email_in_use`, `github_in_use`, …) go through `identityRefusal`,
+  which is typed the same way. No route-level refusal in this vocabulary is
+  still a literal.
 - **`same_email` gained a `message`.** It shipped as a bare code, which the
   website could switch on and a terminal could only print as the word
   `same_email`.
@@ -150,14 +185,31 @@ address changed and where to report it, not what it changed to.
   `orcid link` re-reads `/users/me` every three seconds until the iD appears or
   the timeout runs out, and a timeout says "check with `nemar auth profile`"
   rather than claiming a failure it cannot see. A relink is judged against the
-  PREVIOUS iD, since `orcid` stays non-null throughout one.
+  PREVIOUS iD, since `orcid` stays non-null throughout one. Two poll failures
+  end the wait early rather than burning it: a 401 (the key was revoked or
+  regenerated mid-flow) and three consecutive network errors, each with its own
+  sentence, because "gave up waiting" would send the person to look at their
+  browser instead of at their credentials.
 - **Opening a browser is a convenience, never the mechanism.** The URL is
   printed first, always; `NEMAR_NO_BROWSER=1` and `--no-open` suppress the
-  spawn. A headless or remote machine is a copy-and-paste, not a dead end.
-- **`/auth/orcid/cli-start` and `/auth/orcid/cli-handoff` join the strict
-  auth rate bucket** (10/min/IP). The rest of `/auth/orcid/*` deliberately does
-  not: the callback is a browser landing and moving it would change the web
-  flow's bucket.
+  spawn. The CLI says it is TRYING to open one, never that it did: `spawn`
+  returns before the child can fail, so a missing `xdg-open` is an async error
+  that reaches the debug log, not the terminal. A headless or remote machine is
+  a copy-and-paste, not a dead end.
+- **A username change re-keys the local config.** The accounts map is keyed by
+  username, so `set-username` moves the key as well as the field — otherwise
+  `nemar auth switch <new>` cannot find the account it just renamed. It
+  declines to move onto a key another stored account holds.
+- **`/auth/orcid/cli-start`, `/auth/orcid/cli-handoff` (with its `/continue`
+  step) and `/auth/orcid/unlink` join the strict auth rate bucket**
+  (10/min/IP): all three are bearer-reachable now, and the token bucket is
+  1000/min. The rest of `/auth/orcid/*` deliberately does not: the callback is
+  a browser landing and moving it would change the web flow's bucket.
+- **A change that lands is never reported as a failure.** The local config
+  writes after an email change happen in their own guarded step, because the
+  server has already moved the address and spent the code by then; a `conf`
+  failure prints "the change is live on the server; your local config could
+  not be updated" rather than "could not confirm the new address".
 - **Two surfaces can now race on one field.** Both write through the same
   handler and the same constraints, so the loser gets a typed refusal rather
   than a corrupt row, but "I changed it in Settings and the terminal still
@@ -175,8 +227,22 @@ address changed and where to report it, not what it changed to.
   the first change to either. The point of this phase is that there is one rule
   per field, not one per surface.
 - **Put the signed state in ORCID's `state` parameter and skip the handoff.**
-  Simpler, and it drops the browser binding: any holder of the leaked URL could
-  finish the link from anywhere inside the TTL. The handoff costs one route.
+  Simpler, and it drops both the browser binding and the only place a person
+  could be shown whose account they are about to link. The handoff costs two
+  routes and is where the whole defence lives.
+- **Keep the handoff a redirect and rely on the signature alone.** What the
+  first draft did. It makes the flow one hop shorter and leaves the victim of a
+  handed-over link with nothing to notice: every page they see is one they
+  expected. The interstitial is the difference between "unforgeable" and
+  "unusable against someone else".
+- **Let the signed intent outrank a session for another account.** Also the
+  first draft, and defensible on the narrow question of whose intent it is. It
+  answers the wrong question: when the page names one account and the browser
+  is signed into another, the disagreement is the signal, and resolving it
+  silently is how this class of attack stays invisible.
+- **Make the intent single-use without a table** (a signed counter, a cookie).
+  Nothing the client holds can prove it has not been replayed; only a server
+  row can. It is four columns that live for ten minutes.
 - **Carry the account id in the plain state cookie.** The web state cookie is
   base64 JSON with no signature, so this would let anyone write a cookie naming
   any user id and link an iD to a stranger's account. The signature is the
@@ -201,8 +267,10 @@ address changed and where to report it, not what it changed to.
 ## Receipts
 
 - Issue #1266 (phase 7) and #1054 (the old-address notice), epic #1250.
+- Migration `backend/src/db/migrations/0078_orcid_link_intents.sql`.
 - Routes `routes/auth-web.ts` (profile PATCH, email change),
-  `routes/auth-orcid.ts` (`cli-start`, `cli-handoff`, callback, unlink),
+  `routes/auth-orcid.ts` (`cli-start`, `cli-handoff`, `cli-handoff/continue`,
+  callback, unlink),
   middleware `middleware/auth.ts` (`resolveBearerUser`,
   `resolveActingAccount`), service `services/orcid-auth.ts`
   (`signCliState` / `verifyCliState`), template
