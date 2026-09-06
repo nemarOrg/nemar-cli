@@ -12,11 +12,23 @@
  *     screening, #835). The columns are nullable in D1 (migration 0052)
  *     for pre-existing rows; the non-empty rule lives here, at the write.
  *   - affiliation: optional free text; empty string clears it (NULL).
- *
- * Name (given_name/family_name) is deliberately NOT accepted: it is
- * ORCID-canonical (#835) and refreshed from the ORCID record on every
- * login/link, so a hand-edited value would just be overwritten.
+ *   - username: format-checked here, uniqueness and the post-approval lock
+ *     checked at the route (both need the database). Added in ADR 0042 — a
+ *     web/ORCID account has none, and an upload request cannot be approved
+ *     without one, so this is the only way those 19 rows get a login handle.
+ *     Never cleared: an empty string is a refusal, not a NULL.
+ *   - given_name / family_name: accepted ONLY when the account has no verified
+ *     ORCID link. NAMES STAY ORCID-CANONICAL when one is linked (#835): the
+ *     record is re-read on every login and link, so a hand-edited value would
+ *     be silently overwritten by the next sign-in — which is worse than
+ *     refusing the edit. ADR 0041 relied on that rule and noted that ADR 0042
+ *     would have to qualify it: an account whose ORCID record hides its name
+ *     had no self-service fix at all, and could therefore never publish. The
+ *     rule now covers exactly the accounts ORCID actually speaks for; the route
+ *     answers 409 `name_is_orcid_canonical` for the rest.
  */
+
+import { type UsernameFormatError, validateUsernameFormat } from "./username";
 
 /**
  * GitHub handle rule, matching the website's client-side check: 1-39 chars,
@@ -33,6 +45,9 @@ export interface ProfilePatch {
   city?: string;
   country?: string;
   affiliation?: string | null;
+  username?: string;
+  given_name?: string;
+  family_name?: string;
 }
 
 export interface ProfilePatchInput {
@@ -40,15 +55,23 @@ export interface ProfilePatchInput {
   city?: string;
   country?: string;
   affiliation?: string;
+  username?: string;
+  given_name?: string;
+  family_name?: string;
 }
 
 /** The closed error vocabulary of normalizeProfilePatch; the website's error
- *  mapping switches on these strings (nemarOrg/website PR #144). */
+ *  mapping switches on these strings (nemarOrg/website PR #144, #301). The
+ *  three `username_*` values are re-exported from services/username.ts so the
+ *  rule and its error codes have one definition shared with CLI signup. */
 export type ProfilePatchError =
   | "invalid_github_username"
   | "city_required"
   | "country_required"
-  | "empty_patch";
+  | "empty_patch"
+  | UsernameFormatError
+  | "given_name_required"
+  | "family_name_required";
 
 export type NormalizeResult =
   | { ok: true; patch: ProfilePatch }
@@ -97,6 +120,41 @@ export function normalizeProfilePatch(input: ProfilePatchInput): NormalizeResult
   if (input.affiliation !== undefined) {
     const affiliation = input.affiliation.trim();
     patch.affiliation = affiliation.length === 0 ? null : affiliation;
+  }
+
+  if (input.username !== undefined) {
+    // Trimmed, never lowercased: the stored case is the user's own choice and
+    // every comparison around it is COLLATE NOCASE. Unlike the other optional
+    // fields an empty string does NOT clear this one — the account still needs
+    // a handle, and a NULL username is the state ADR 0042 exists to end.
+    const username = input.username.trim();
+    const formatError = validateUsernameFormat(username);
+    if (formatError) return { ok: false, ...formatError };
+    patch.username = username;
+  }
+
+  if (input.given_name !== undefined) {
+    const given = input.given_name.trim();
+    if (given.length === 0) {
+      return {
+        ok: false,
+        error: "given_name_required",
+        message: "Given name cannot be empty",
+      };
+    }
+    patch.given_name = given;
+  }
+
+  if (input.family_name !== undefined) {
+    const family = input.family_name.trim();
+    if (family.length === 0) {
+      return {
+        ok: false,
+        error: "family_name_required",
+        message: "Family name cannot be empty",
+      };
+    }
+    patch.family_name = family;
   }
 
   if (Object.keys(patch).length === 0) {
