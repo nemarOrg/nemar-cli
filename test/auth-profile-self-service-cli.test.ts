@@ -535,6 +535,41 @@ describe("nemar auth profile orcid", () => {
     }
   }, 30000);
 
+  test("relink waits for a DIFFERENT iD, not merely for a non-empty one", async () => {
+    // A relink starts and ends with `orcid` set, so "an iD is present" would
+    // report success the instant the command started, before the person had
+    // touched the browser. The previous value is what the wait is measured
+    // against.
+    const OTHER = "0000-0002-1974-1293";
+    seedAuthenticatedConfig();
+    const backend = startBackend({
+      replies: {
+        "/auth/orcid/cli-start": {
+          status: 200,
+          body: {
+            authorize_url: "https://app.nemar.org/auth/orcid/cli-handoff?t=signed-state",
+            expires_in: 600,
+            mode: "relink",
+          },
+        },
+      },
+      // The OLD iD is still on the account for the first poll.
+      user: (n) => meUser({ orcid: n < 2 ? ORCID : OTHER, orcid_verified: true }),
+    });
+    try {
+      const result = await runCli(
+        ["auth", "profile", "orcid", "relink", "--timeout", "20"],
+        backend.url,
+      );
+      expect(result.exitCode).toBe(0);
+      expect(result.out).toContain(`ORCID iD ${OTHER} is linked`);
+      expect(result.out).not.toContain(`ORCID iD ${ORCID} is linked`);
+      expect(backend.calls[0].body).toEqual({ mode: "relink" });
+    } finally {
+      backend.stop();
+    }
+  }, 30000);
+
   test("link prints the refusal when an iD is already linked", async () => {
     seedAuthenticatedConfig();
     const backend = startBackend({
