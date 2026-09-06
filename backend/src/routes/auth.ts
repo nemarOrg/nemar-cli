@@ -25,11 +25,11 @@ import {
 import { validateGitHubUsername } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
 import {
+  emailFieldSchema,
   findEmailHolder,
   findOrcidHolder,
   identityRefusal,
   isUniqueViolationOn,
-  normalizeEmail,
   normalizeGithubHandle,
   normalizeOrcid,
 } from "../services/identity";
@@ -192,10 +192,7 @@ const signupSchema = z.object({
   // loses a pasted leading "@" instead of failing the format check over it.
   // `preprocess` rather than `.transform()` because the rules have to run
   // before `.email()`/`.regex()`, not after them.
-  email: z.preprocess(
-    (v) => (typeof v === "string" ? normalizeEmail(v) : v),
-    z.string().email("Invalid email address"),
-  ),
+  email: emailFieldSchema,
   password: z.string().min(12, "Password must be at least 12 characters").max(128),
   github_username: z.preprocess(
     (v) => (typeof v === "string" ? normalizeGithubHandle(v) : v),
@@ -873,7 +870,10 @@ authRoutes.post("/login", zValidator("json", loginSchema), async (c) => {
  * POST /auth/resend-verification - Resend verification email
  */
 const resendSchema = z.object({
-  email: z.string().email(),
+  // Normalised before validation, and looked up NOCASE below (ADR 0043):
+  // signup stores the address lowercased, so an exact-case lookup would miss
+  // every LEGACY row whose address was stored exactly as typed.
+  email: emailFieldSchema,
 });
 
 authRoutes.post("/resend-verification", zValidator("json", resendSchema), async (c) => {
@@ -882,7 +882,9 @@ authRoutes.post("/resend-verification", zValidator("json", resendSchema), async 
 
   // Find user
   const user = await db
-    .prepare("SELECT id, username, status FROM users WHERE email = ? AND deleted_at IS NULL")
+    .prepare(
+      "SELECT id, username, status FROM users WHERE email = ? COLLATE NOCASE AND deleted_at IS NULL",
+    )
     .bind(email)
     .first<{ id: number; username: string; status: string }>();
 
@@ -937,7 +939,7 @@ authRoutes.post("/resend-verification", zValidator("json", resendSchema), async 
 // ============================================================================
 
 const retrieveKeySchema = z.object({
-  email: z.string().email(),
+  email: emailFieldSchema,
   password: z.string().min(1, "Password is required"),
 });
 
@@ -957,7 +959,7 @@ authRoutes.post("/retrieve-key", zValidator("json", retrieveKeySchema), async (c
   // Find user by email
   const user = await db
     .prepare(
-      "SELECT id, username, email, password_hash, status FROM users WHERE email = ? AND deleted_at IS NULL",
+      "SELECT id, username, email, password_hash, status FROM users WHERE email = ? COLLATE NOCASE AND deleted_at IS NULL",
     )
     .bind(email)
     .first<{
@@ -1063,7 +1065,7 @@ authRoutes.post("/retrieve-key", zValidator("json", retrieveKeySchema), async (c
 // ============================================================================
 
 const regenRequestSchema = z.object({
-  email: z.string().email(),
+  email: emailFieldSchema,
 });
 
 /**
@@ -1076,7 +1078,9 @@ authRoutes.post("/request-key-regeneration", zValidator("json", regenRequestSche
 
   // Find user
   const user = await db
-    .prepare("SELECT id, username, email, status FROM users WHERE email = ? AND deleted_at IS NULL")
+    .prepare(
+      "SELECT id, username, email, status FROM users WHERE email = ? COLLATE NOCASE AND deleted_at IS NULL",
+    )
     .bind(email)
     .first<{ id: number; username: string; email: string; status: string }>();
 

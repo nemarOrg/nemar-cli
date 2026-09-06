@@ -29,6 +29,7 @@ import { authRoutes } from "../src/routes/auth";
 import { authOrcidRoutes } from "../src/routes/auth-orcid";
 import { authWebRoutes } from "../src/routes/auth-web";
 import { PENDING_COOKIE_NAME, encodeState, signPending } from "../src/services/orcid-auth";
+import { hashPassword } from "../src/services/password";
 import { issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -295,6 +296,144 @@ describe("CLI signup normalises what it stores", () => {
     const res = await signup({ orcid: `https://orcid.org/${OTHER_ORCID}` });
     expect(res.status).toBe(201);
     expect(userByEmail("newuser@example.org")?.orcid).toBe(OTHER_ORCID);
+  });
+
+  test("a garbage-prefixed iD is rejected, not silently 'normalised'", async () => {
+    // `normalizeOrcid` anchors BOTH ends. Anchoring only the tail -- which it
+    // did until the #1254 review -- turns `garbage0000-...-0097` into a valid
+    // iD and stores it as if the user had typed one, so a fat-fingered paste
+    // silently claims somebody else's identifier.
+    const res = await signup({ orcid: `garbage${OTHER_ORCID}` });
+    expect(res.status).toBe(400);
+    expect(userByEmail("newuser@example.org")).toBeNull();
+  });
+});
+
+describe("an address is found whatever case it was stored or typed in", () => {
+  // The regression this pins: signup started lowercasing the stored address,
+  // while `retrieve-key` / `resend-verification` / `request-key-regeneration`
+  // still looked it up exact-case. Someone who signed up as
+  // `John.Smith@gmail.com` and typed it that way got "Invalid email or
+  // password" -- a dead end with no way to tell it from a wrong password.
+  const MIXED = "John.Smith@Example.ORG";
+  const OTHER_CASE = "JOHN.smith@example.org";
+  const PASSWORD = "Correct-Horse-Battery-9";
+
+  /**
+   * A LEGACY row: stored with its address exactly as typed, the way every row
+   * created before #1254 was.
+   *
+   * This is what makes the NOCASE lookups load-bearing, and it is why these
+   * tests do NOT go through signup. Normalising the REQUEST is not enough on
+   * its own: once the request is lowercased, an exact-case lookup still
+   * matches every row this phase creates, because those are lowercased too.
+   * It is the ~600 rows already in the catalog that an exact-case lookup
+   * cannot find.
+   */
+  async function seedLegacy(): Promise<void> {
+    db.run(
+      `INSERT INTO users (username, email, password_hash, github_username, status,
+                          signup_source, email_verified, orcid, orcid_verified,
+                          verification_token)
+       VALUES ('legacy', ?, ?, 'legacy-gh', 'verified', 'cli', 1, ?, 0, 'seed-token')`,
+      [MIXED, await hashPassword(PASSWORD), OTHER_ORCID],
+    );
+  }
+
+  function storedToken(): string | null {
+    return (
+      db
+        .query<{ verification_token: string | null }, [string]>(
+          "SELECT verification_token FROM users WHERE email = ?",
+        )
+        .get(MIXED)?.verification_token ?? null
+    );
+  }
+
+  /**
+   * Both notification routes answer vaguely on purpose (no account
+   * enumeration), so a status code cannot tell found from not-found -- and
+   * `resend-verification` sends its email OUTSIDE a try/catch, so the dev
+   * delivery fence can turn a successful lookup into a 500. The honest
+   * observable is the side effect that happens BEFORE the send: each rotates
+   * `verification_token`, and only for a row it actually found.
+   */
+  async function post(path: string, email = OTHER_CASE): Promise<void> {
+    await app
+      .request(
+        path,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email }),
+        },
+        env(),
+      )
+      .catch(() => undefined);
+  }
+
+  test("signup stores a mixed-case address lowercased", async () => {
+    const res = await signup({
+      email: MIXED,
+      username: "jsmith",
+      github_username: "jsmith",
+    });
+    expect(res.status).toBe(201);
+    expect(userByEmail("john.smith@example.org")).toBeTruthy();
+  });
+
+  test("retrieve-key finds a legacy mixed-case row typed in another case", async () => {
+    await seedLegacy();
+    const res = await app.request(
+      "/auth/retrieve-key",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: OTHER_CASE, password: PASSWORD }),
+      },
+      env(),
+    );
+    // 200 (key minted) or 409 (key already issued) both mean the row was
+    // found. 401 is the bug: "Invalid email or password" for a correct
+    // password, with no way for the user to tell which half was wrong.
+    expect([200, 409]).toContain(res.status);
+  });
+
+  test("a wrong password on a found legacy row is still refused", async () => {
+    // The guard against a lookup so loose that it stops proving anything.
+    await seedLegacy();
+    const res = await app.request(
+      "/auth/retrieve-key",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: OTHER_CASE, password: "not-the-password" }),
+      },
+      env(),
+    );
+    expect(res.status).toBe(401);
+  });
+
+  test("resend-verification finds a legacy row typed in another case", async () => {
+    await seedLegacy();
+    db.run("UPDATE users SET status = 'pending' WHERE email = ?", [MIXED]);
+    await post("/auth/resend-verification");
+    expect(storedToken()).not.toBe("seed-token");
+    expect(storedToken()).toBeTruthy();
+  });
+
+  test("key regeneration finds a legacy row typed in another case", async () => {
+    await seedLegacy();
+    await post("/auth/request-key-regeneration");
+    expect(storedToken()).not.toBe("seed-token");
+  });
+
+  test("an address matching NO account rotates nothing", async () => {
+    // The guard against a rotation assertion that would pass on any input.
+    await seedLegacy();
+    db.run("UPDATE users SET status = 'pending' WHERE email = ?", [MIXED]);
+    await post("/auth/resend-verification", "nobody@example.org");
+    expect(storedToken()).toBe("seed-token");
   });
 });
 

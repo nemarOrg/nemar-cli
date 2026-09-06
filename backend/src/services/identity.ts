@@ -74,24 +74,33 @@ export const emailFieldSchema = z.preprocess(
 );
 
 /**
- * Canonical stored form of an ORCID iD, or `null` when the input holds no
- * well-formed iD.
+ * Canonical stored form of an ORCID iD, or `null` when the input is not one.
  *
- * Accepts a bare iD or a full `https://orcid.org/<id>` URI. The check digit is
- * uppercased: `X` is the canonical spelling of a non-numeric checksum, and the
- * unique index compares `users.orcid` exactly, so a lowercase `x` would read
- * as a different person's iD. Migration 0077 canonicalises the existing rows
- * for the same reason.
+ * Accepts EXACTLY two shapes, both anchored at BOTH ends: a bare iD, or an
+ * `orcid.org` / `sandbox.orcid.org` URI wrapping one. Anchoring only the tail
+ * -- which this did until the #1254 review -- accepts
+ * `garbage0000-0002-1825-0097` and "normalises" it into a valid iD, so a
+ * fat-fingered paste would silently claim somebody else's identifier and then
+ * pass the uniqueness checks as that person.
+ *
+ * The check digit is uppercased: `X` is the canonical spelling of a
+ * non-numeric checksum, and the unique index compares `users.orcid` exactly, so
+ * a lowercase `x` would read as a different person's iD. Migration 0077
+ * canonicalises the existing rows for the same reason.
  *
  * Deliberately NOT `orcid-auth.ts`'s `normalizeOrcidId`: that one matches only
  * an uppercase `X` and would reject `...353x` outright rather than fixing it.
  */
+const BARE_ORCID_RE = /^(\d{4}-\d{4}-\d{4}-\d{3}[\dXx])$/;
+const ORCID_URI_RE = /^https?:\/\/(?:sandbox\.)?orcid\.org\/(\d{4}-\d{4}-\d{4}-\d{3}[\dXx])\/?$/i;
+
 export function normalizeOrcid(raw: string | null | undefined): string | null {
   if (!raw) return null;
-  const upper = raw.trim().toUpperCase();
-  const match = upper.match(/(\d{4}-\d{4}-\d{4}-\d{3}[\dX])$/);
-  if (!match) return null;
-  return ORCID_ID_PATTERN.test(match[1]) ? match[1] : null;
+  const trimmed = raw.trim();
+  const id = (BARE_ORCID_RE.exec(trimmed) ?? ORCID_URI_RE.exec(trimmed))?.[1];
+  if (!id) return null;
+  const canonical = id.toUpperCase();
+  return ORCID_ID_PATTERN.test(canonical) ? canonical : null;
 }
 
 /**
