@@ -69,8 +69,11 @@ export async function detectVirtualMemoryLimit(): Promise<number | "unlimited" |
 }
 
 /**
- * Step 1d: is this account allowed to upload at all, and if not, what is in the
+ * Step 1c: is this account allowed to upload at all, and if not, what is in the
  * way (#1268, ADR 0045)?
+ *
+ * (1c, not 1d: the call site in commands/dataset.ts numbers this one 1c and
+ * gives 1d to the required-tools check that follows it.)
  *
  * WHY IT RUNS FIRST, before prerequisites and before validation. Uploading
  * needs a one-time admin grant (ADR 0040), and an account that does not hold it
