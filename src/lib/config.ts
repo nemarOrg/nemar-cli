@@ -491,6 +491,18 @@ export function storeAccount(username: string, accountConfig: Config): void {
 }
 
 /**
+ * What {@link renameActiveAccount} did.
+ *
+ * Three outcomes rather than a boolean, because the caller has to tell the two
+ * "did nothing" cases apart: `unchanged` is the ordinary path (the key was
+ * already right, or there is nothing to rename) and says nothing to the user,
+ * while `key_taken` leaves this machine holding two accounts whose stored name
+ * and map key disagree — which is worth one line of warning, since
+ * `nemar auth switch <name>` will then select the OTHER one.
+ */
+export type RenameAccountResult = "renamed" | "unchanged" | "key_taken";
+
+/**
  * Re-key the ACTIVE account after its username changed on the server (#1266).
  *
  * The accounts map is keyed by username and `switchAccount` looks an account
@@ -500,27 +512,28 @@ export function storeAccount(username: string, accountConfig: Config): void {
  * exists. `nemar auth profile set-username` is the first thing that can change
  * a username from the CLI, so it is the first thing that has to move the key.
  *
- * No-ops when there is no active account, when the key is already right, or
- * when the target key is taken by a DIFFERENT stored account -- clobbering
- * another account's credentials to fix a display name is not a trade worth
- * making, and the account still works under its old key.
- *
- * Returns true when the key actually moved.
+ * Never clobbers a DIFFERENT stored account to do it. Two accounts on one
+ * machine can legitimately end up here — sign in as `harlow`, sign in as
+ * `alovelace`, then rename `harlow` to `alovelace` on the server — and
+ * overwriting the second entry would delete a working API key to fix a name.
+ * The account keeps its old key and still works; only the lookup name is
+ * stale, and the caller says so.
  */
-export function renameActiveAccount(newUsername: string): boolean {
+export function renameActiveAccount(newUsername: string): RenameAccountResult {
   const name = newUsername.trim();
-  if (!name) return false;
+  if (!name) return "unchanged";
   const config = getStore();
   const active = getActiveAccountName();
-  if (!active || active === name) return false;
+  if (!active || active === name) return "unchanged";
   const accounts = getAccountsMap();
   const current = accounts[active];
-  if (!current || accounts[name]) return false;
+  if (!current) return "unchanged";
+  if (accounts[name]) return "key_taken";
 
   delete accounts[active];
   accounts[name] = { ...current, username: name };
   config.store = { ...config.store, accounts, activeAccount: name };
-  return true;
+  return "renamed";
 }
 
 /**

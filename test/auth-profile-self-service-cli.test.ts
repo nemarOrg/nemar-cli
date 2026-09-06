@@ -508,6 +508,42 @@ describe("nemar auth profile set-github / set-username / set-name / set-location
     }
   });
 
+  test("a name another stored account holds is kept, and said out loud", async () => {
+    // Two accounts on one machine, and the server accepts a rename onto the
+    // OTHER one's key -- sign in as harlow, sign in as alovelace, then rename
+    // harlow to alovelace. The re-key declines rather than deleting a working
+    // API key to fix a display name, and the warning is the point: without it
+    // `nemar auth switch alovelace` silently selects the other account.
+    writeFileSync(
+      join(configDir, "config.json"),
+      JSON.stringify({
+        activeAccount: "harlow",
+        accounts: {
+          harlow: { apiKey: "test-user-key-0123456789", username: "harlow" },
+          alovelace: { apiKey: "someone-elses-key", username: "alovelace" },
+        },
+      }),
+    );
+    const backend = startBackend({ user: meUser({ username: "alovelace" }) });
+    try {
+      const result = await runCli(["auth", "profile", "set-username", "alovelace"], backend.url);
+      // The change DID land on the server; only the local re-key was skipped.
+      expect(result.exitCode).toBe(0);
+      expect(result.out).toContain("Username set to alovelace");
+      expect(result.out).toContain("already has a different account stored as 'alovelace'");
+      expect(result.out).toContain("stay under the old name");
+
+      const config = JSON.parse(readFileSync(join(configDir, "config.json"), "utf8"));
+      expect(Object.keys(config.accounts).sort()).toEqual(["alovelace", "harlow"]);
+      expect(config.activeAccount).toBe("harlow");
+      // Neither account's credentials were clobbered by the other's.
+      expect(config.accounts.harlow.apiKey).toBe("test-user-key-0123456789");
+      expect(config.accounts.alovelace.apiKey).toBe("someone-elses-key");
+    } finally {
+      backend.stop();
+    }
+  });
+
   test("set-name sends both halves, and refuses to send an empty patch", async () => {
     seedAuthenticatedConfig();
     const backend = startBackend({ user: meUser() });

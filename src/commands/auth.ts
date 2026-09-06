@@ -1633,7 +1633,23 @@ async function refreshStoredAccount(): Promise<void> {
     // as well as the field, or `nemar auth switch <new>` cannot find the
     // account it just renamed (#1266 review). Done first: the writes below
     // target the active account, and this is what decides which one that is.
-    if (user.username) renameActiveAccount(user.username);
+    //
+    // It declines to overwrite a DIFFERENT stored account holding that key,
+    // which leaves this machine with an account whose stored name and lookup
+    // key disagree. Silence there is the trap: `nemar auth switch <name>`
+    // would then select the other account, and nothing would have said why.
+    if (user.username && renameActiveAccount(user.username) === "key_taken") {
+      console.log(
+        chalk.yellow(
+          `  This machine already has a different account stored as '${user.username}'.`,
+        ),
+      );
+      console.log(
+        chalk.dim(
+          "  Your credentials stay under the old name; 'nemar auth switch' still selects that one.",
+        ),
+      );
+    }
     setConfig("username", user.username ?? undefined);
     setConfig("email", user.email);
     setConfig("githubUsername", user.github_username ?? undefined);
