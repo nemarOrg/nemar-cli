@@ -255,6 +255,39 @@ export interface ProfileGapEntry {
   readonly set_on: readonly GapSurface[];
 }
 
+/**
+ * The same entry as it ARRIVES, before anything has narrowed it.
+ *
+ * Deliberately loose, and deliberately declared ONCE. Two readers take entries
+ * in this shape — {@link resolveWireProfileGaps} and the CLI's `ProfileGapView`
+ * (src/lib/account-gaps.ts) — and they were both spelling it inline, alongside
+ * two zod schemas describing the same thing (the wire's `profileGapSchema` and
+ * the config cache's). Four declarations of one shape is three chances for a
+ * relaxation on one side to go unnoticed on another, which is precisely the
+ * drift this whole module exists to end.
+ *
+ * `unknown` rather than the narrow types, because both sources can hand over
+ * something older or newer than this build: a backend from before the
+ * vocabulary grew, or a config cache written by a different CLI version and
+ * round-tripped through JSON. Narrowing is `resolveWireProfileGaps`'s job, and
+ * an entry it cannot use is dropped rather than fatal.
+ *
+ * The two schemas stay schemas — they validate, and a type cannot — but their
+ * inferred types are pinned as assignable to this one at their declaration
+ * sites, so a schema that tightened past what the readers accept fails to
+ * compile.
+ */
+export interface ProfileGapWireEntry {
+  readonly field?: unknown;
+  readonly blocks?: unknown;
+  readonly set_on?: unknown;
+}
+
+/** Compile-time only: fails to compile unless `A` is assignable to `B`.
+ *  Used at the two schema declarations to pin them to
+ *  {@link ProfileGapWireEntry}. */
+export type AssignableTo<B, A extends B> = true;
+
 /** Where a field can be set, given what owns the name on this account. */
 export function gapSurfaces(field: string, orcidVerified = false): GapSurface[] {
   const def = Object.hasOwn(PROFILE_GAP_MATRIX, field)
@@ -393,7 +426,7 @@ export function resolveProfileGaps(
  * rather than printed raw, and an entry left with none falls back to the matrix.
  */
 export function resolveWireProfileGaps(
-  entries: readonly { field?: unknown; blocks?: unknown }[],
+  entries: readonly ProfileGapWireEntry[],
   options: { readonly orcidVerified?: boolean } = {},
 ): ResolvedProfileGap[] {
   return entries

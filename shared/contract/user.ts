@@ -10,6 +10,7 @@
  */
 
 import { z } from "zod";
+import type { AssignableTo, ProfileGapWireEntry } from "./profile-gaps.js";
 
 /**
  * What `users.status` holds — the account tier, declared once (#1268, ADR 0040).
@@ -84,6 +85,11 @@ export const profileGapSchema = z
   })
   .passthrough();
 export type ProfileGapWire = z.infer<typeof profileGapSchema>;
+
+/** What this schema parses must remain something the renderers accept. The
+ *  alias resolves to `never` and stops compiling if it tightens past
+ *  `ProfileGapWireEntry` — the one declaration of that shape. */
+export const _profileGapWireIsRenderable: AssignableTo<ProfileGapWireEntry, ProfileGapWire> = true;
 
 /** A NEMAR user as returned inside the /users/me envelope. */
 export const userSchema = z

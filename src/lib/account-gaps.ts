@@ -20,6 +20,7 @@
 import chalk from "chalk";
 import { ACCOUNT_COPY } from "../../shared/contract/account-copy.js";
 import {
+  type ProfileGapWireEntry,
   type ResolvedProfileGap,
   describeProfileGap,
   describeSandboxGap,
@@ -42,11 +43,12 @@ export const PROFILE_SECTION_TITLE = ACCOUNT_COPY["cli.gaps.section.title"];
 export interface ProfileGapView {
   /** The wire entries, or undefined when the list could not be read.
    *
-   *  Typed loosely on purpose: the same view is built from a live
-   *  `profile_gaps` and from the config cache, where the arrays round-trip
-   *  through JSON and a vocabulary this build predates must survive rather
-   *  than fail to parse. `resolveWireProfileGaps` does the narrowing. */
-  gaps: readonly { readonly field?: unknown; readonly blocks?: unknown }[] | undefined;
+   *  Typed loosely on purpose, and typed loosely ONCE: the same view is built
+   *  from a live `profile_gaps` and from the config cache, where the arrays
+   *  round-trip through JSON and a vocabulary this build predates must survive
+   *  rather than fail to parse. `ProfileGapWireEntry` is that shape's single
+   *  declaration and `resolveWireProfileGaps` does the narrowing. */
+  gaps: readonly ProfileGapWireEntry[] | undefined;
   /** Moves the two name halves' "set it in" to the ORCID record. */
   orcidVerified?: boolean;
   /**

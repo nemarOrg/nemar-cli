@@ -21,6 +21,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import Conf from "conf";
 import { z } from "zod";
+import type { AssignableTo, ProfileGapWireEntry } from "../../shared/contract/profile-gaps.js";
 
 export const DEFAULT_API_URL = "https://api.nemar.org";
 
@@ -77,6 +78,29 @@ export function getConfigDir(): string {
   return process.env.NEMAR_CONFIG_DIR || join(homedir(), ".config", "nemar");
 }
 
+/**
+ * One cached `profile_gaps` entry, as it comes back off disk.
+ *
+ * Separate from the wire's `profileGapSchema` (shared/contract/user.ts) because
+ * it validates a different source -- a JSON file this or an older build wrote,
+ * not an HTTP response -- but it must stay loose in exactly the same way, so
+ * both are pinned to the one declaration of that shape below.
+ */
+const cachedProfileGapSchema = z
+  .object({
+    field: z.string(),
+    blocks: z.array(z.string()).optional(),
+    set_on: z.array(z.string()).optional(),
+  })
+  .passthrough();
+
+/** A cache entry must stay something the gap renderer can take; a tightening
+ *  here stops compiling rather than throwing at a user's terminal. */
+export const _cachedProfileGapIsRenderable: AssignableTo<
+  ProfileGapWireEntry,
+  z.infer<typeof cachedProfileGapSchema>
+> = true;
+
 // Per-account configuration schema
 const accountSchema = z.object({
   apiKey: z.string().optional(),
@@ -107,17 +131,7 @@ const accountSchema = z.object({
    * for the same reason they are on the wire: a vocabulary this build has not
    * heard of must round-trip rather than fail to parse.
    */
-  profileGaps: z
-    .array(
-      z
-        .object({
-          field: z.string(),
-          blocks: z.array(z.string()).optional(),
-          set_on: z.array(z.string()).optional(),
-        })
-        .passthrough(),
-    )
-    .optional(),
+  profileGaps: z.array(cachedProfileGapSchema).optional(),
   /**
    * Whether a VERIFIED ORCID iD is linked, as of the last refresh (#1268).
    *
