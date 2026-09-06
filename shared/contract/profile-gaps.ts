@@ -14,15 +14,27 @@
  * importing it, for the reason ./account-copy.ts records, and derives the same
  * list locally when talking to a backend that predates `profile_gaps`. Its
  * derivation and this one are line-for-line the same rules; `test/profile-gaps-
- * matrix.test.ts` here pins every one of the 2^7 field combinations against a
+ * matrix.test.ts` here pins every one of the 2^8 field combinations against a
  * fixture copied from that table so a change on either side is loud.
  *
- * **ORCID is not a gap.** The phase-8 matrix lists it as required at CLI signup
- * and as the source of the name, and both are true — but a CLI account cannot
- * exist without one, and a web account holds every tier without one, so an
- * `orcid` entry would name something nothing is waiting on. What an iD changes
- * is WHERE THE NAME IS SET (the `.orcid` set-on variants below), and that is
- * its whole effect on this list.
+ * **A verified ORCID iD is a gap; the iD itself is not** (#1271,
+ * nemarOrg/website#312). `nemar auth signup` takes a TYPED iD and leaves
+ * `orcid_verified = 0`, so a CLI account can claim any iD — including one whose
+ * owner is later refused with `orcid_in_use` — and DOI attribution on that path
+ * rests on an unproven record. `orcid_verified` therefore blocks
+ * `upload_access`: an admin needs the provenance signal before granting the
+ * tier. An `orcid` entry would still name nothing, because an unlinked iD is
+ * not what anything is waiting on. In practice this row is CLI-only: ORCID
+ * OAuth is the only web creation path (ADR 0008), so every web account already
+ * carries a verified iD by the time it can reach this list. What a verified iD
+ * ALSO changes is where the name is set (the `.orcid` set-on variants below),
+ * and that is unchanged by any of this.
+ *
+ * **`admin` and `owner` are exempt from that one row**, because they predate
+ * having a web-signup path of their own and the alternative is locking an
+ * operator out of the account that runs the review queue. It is interim, until
+ * the service-account kind of epic #1272 gives that population a real answer
+ * rather than a role check standing in for one.
  *
  * **`why` is in the table and is not derivable.** It is part of the refused-
  * request vocabulary (`missing` on a 400 from
@@ -59,6 +71,7 @@ export type GapField =
   | "username"
   | "given_name"
   | "family_name"
+  | "orcid_verified"
   | "github_username"
   | "city"
   | "country"
@@ -168,6 +181,24 @@ export const PROFILE_GAP_MATRIX: Record<GapField, ProfileGapDefinition> = {
     orcidWebKey: "gap.field.family_name.set_on.web.orcid",
     isMissing: (a) => isBlank(a.family_name),
   },
+  orcid_verified: {
+    // A CLI-only gap in practice: every web signup already has a verified iD
+    // (ORCID OAuth is the only web creation path, ADR 0008). No `orcidWebKey`
+    // -- an iD is not a name, so a verified record does not move where this one
+    // is set, and `gapSurfaces` needs no special case to keep it web + cli.
+    blocks: ["upload_access"],
+    labelKey: "gap.field.orcid_verified.label",
+    webKey: "gap.field.orcid_verified.set_on.web",
+    cliKey: "gap.field.orcid_verified.set_on.cli",
+    // `!== true` rather than `=== false`: unlike `email_verified`, an absent
+    // flag here is not "a caller that does not report it" -- every account this
+    // rule can see carries the column (migration 0050, NOT NULL DEFAULT 0) --
+    // so reading `undefined` as verified would silently exempt exactly the
+    // CLI-created rows the gap exists for. `admin`/`owner` are exempt
+    // regardless; an absent role is NOT, since it only means the role could not
+    // be read.
+    isMissing: (a) => a.orcid_verified !== true && !isExemptRole(a.role),
+  },
   github_username: {
     blocks: ["upload_access", "publication"],
     labelKey: "gap.field.github_username.label",
@@ -237,6 +268,15 @@ function isBlank(value: string | null | undefined): boolean {
   return (value ?? "").trim().length === 0;
 }
 
+/** True for the two roles the `orcid_verified` gap does not apply to. See the
+ *  module header for why: interim, until the service-account kind of epic
+ *  #1272 replaces the role check with its own answer. Anything else — a member,
+ *  an unreadable value, no role at all — is a regular user, so the exemption
+ *  fails CLOSED and an operator is nagged rather than a member let through. */
+function isExemptRole(role: ProfileGapAccount["role"]): boolean {
+  return role === "admin" || role === "owner";
+}
+
 /**
  * The account columns the gap rules read.
  *
@@ -258,6 +298,19 @@ export interface ProfileGapAccount {
    * constraint since migration 0001), which is what every caller reads it from.
    */
   readonly status?: AccountStatus | null;
+  /**
+   * What exempts an account from the `orcid_verified` row, and nothing else.
+   *
+   * Typed as the union of BOTH surfaces' vocabularies rather than one of them:
+   * the backend passes the `users.role` column as it stands (owner / admin /
+   * member, migration 0009), while the website passes either an uncollapsed
+   * `AdminUserRole` from an admin detail row or its session's collapsed
+   * `"user" | "admin"`. Every spelling of "admin" and "owner" has to be the same
+   * spelling on both sides, which is the point of naming them here rather than
+   * at two call sites. `undefined`/`null` counts as a regular user — a role this
+   * build could not read is not a reason to skip a gap.
+   */
+  readonly role?: "user" | "admin" | "owner" | "member" | null;
   readonly email_verified?: boolean | null;
   /**
    * `undefined` means the username could not be READ, which is not the same as
@@ -274,7 +327,9 @@ export interface ProfileGapAccount {
   readonly github_username?: string | null;
   readonly city?: string | null;
   readonly country?: string | null;
-  /** Moves the name halves' `set_on` to the ORCID record. */
+  /** Raises the `orcid_verified` row when it is not `true` (and the role is not
+   *  exempt), and moves the name halves' `set_on` to the ORCID record when it
+   *  is. */
   readonly orcid_verified?: boolean | null;
 }
 
