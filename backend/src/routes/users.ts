@@ -53,6 +53,7 @@ userRoutes.get("/me", async (c) => {
       `
     SELECT
       status,
+      role,
       created_at,
       approved_at,
       email_verified,
@@ -77,6 +78,12 @@ userRoutes.get("/me", async (c) => {
     .first<{
       // Closed by migration 0001's CHECK constraint (shared/contract/user.ts).
       status: AccountStatus;
+      // Read from the ROW rather than reused from the credential, for the same
+      // reason `username` below is: it is what exempts an `admin`/`owner` from
+      // the `orcid_verified` gap (#1271), and the gap list has to describe the
+      // account as it is now. Unconstrained TEXT (migration 0009), narrowed by
+      // services/profile-gaps.ts.
+      role: string | null;
       created_at: string;
       approved_at: string;
       email_verified: number;
@@ -343,8 +350,8 @@ userRoutes.post(
       const row = await db
         .prepare(
           `SELECT id, username, email, given_name, family_name, github_username,
-                  city, country, affiliation, orcid, description,
-                  email_verified, service_access,
+                  city, country, affiliation, orcid, description, role,
+                  email_verified, orcid_verified, service_access,
                   upload_access_requested_at, upload_access_notified_at
              FROM users
             WHERE id = ? AND deleted_at IS NULL`,
@@ -362,7 +369,11 @@ userRoutes.post(
           affiliation: string | null;
           orcid: string | null;
           description: string | null;
+          // Both read for the profile check: an unverified iD is a gap, and an
+          // `admin`/`owner` row is exempt from it (#1271).
+          role: string | null;
           email_verified: number;
+          orcid_verified: number;
           service_access: number;
           upload_access_requested_at: string | null;
           upload_access_notified_at: string | null;

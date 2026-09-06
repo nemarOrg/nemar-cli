@@ -23,8 +23,10 @@ import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
+import { userMeResponseSchema } from "../../shared/contract/user.js";
 import { authOrcidRoutes } from "../src/routes/auth-orcid";
 import { authWebRoutes } from "../src/routes/auth-web";
+import { userRoutes } from "../src/routes/users";
 import { hashAuthCode } from "../src/services/auth-code";
 import { STATE_COOKIE_NAME, signCliState } from "../src/services/orcid-auth";
 import { hashApiKey } from "../src/services/token";
@@ -133,14 +135,16 @@ interface SeedOpts {
   identityBacked?: boolean;
   givenName?: string | null;
   familyName?: string | null;
+  city?: string | null;
+  country?: string | null;
 }
 
 async function seedUser(email: string, apiKey: string | null, opts: SeedOpts = {}): Promise<number> {
   db.run(
     `INSERT INTO users (username, email, password_hash, status, role, signup_source,
                         email_verified, orcid, orcid_verified, github_username,
-                        given_name, family_name)
-     VALUES (?, ?, 'x', ?, 'member', 'cli', 1, ?, ?, ?, ?, ?)`,
+                        given_name, family_name, city, country)
+     VALUES (?, ?, 'x', ?, 'member', 'cli', 1, ?, ?, ?, ?, ?, ?, ?)`,
     [
       opts.username ?? null,
       email,
@@ -150,6 +154,8 @@ async function seedUser(email: string, apiKey: string | null, opts: SeedOpts = {
       opts.github ?? null,
       opts.givenName ?? null,
       opts.familyName ?? null,
+      opts.city ?? null,
+      opts.country ?? null,
     ],
   );
   const row = db.query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?").get(email);
@@ -213,6 +219,11 @@ function withToken(
   );
 }
 
+/** GET /users/me with a bearer token -- no body, unlike withToken above. */
+function usersMeFor(apiKey: string): Promise<Response> {
+  return app.request("/users/me", { headers: { Authorization: `Bearer ${apiKey}` } }, env());
+}
+
 beforeEach(() => {
   db = freshDb();
   tokenOrcid = ADA_ORCID;
@@ -222,6 +233,7 @@ beforeEach(() => {
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/auth", authOrcidRoutes);
   app.route("/auth", authWebRoutes);
+  app.route("/users", userRoutes);
 });
 
 // ---------------------------------------------------------------------------
@@ -738,6 +750,53 @@ describe("POST /auth/orcid/cli-start", () => {
         )
         .get(ada)?.n,
     ).toBe(1);
+  });
+
+  test("a successful link clears the orcid_verified gap end to end (#1271)", async () => {
+    // The row this gate exists for: a CLI account created with `nemar auth
+    // signup --orcid <id>` gets a TYPED iD and `orcid_verified = 0`. Everything
+    // else on the account is complete, so `orcid_verified` is the ONLY gap --
+    // before the link it must block the upload-access request, and after a
+    // real cli-start -> handoff -> callback round trip it must be gone from
+    // both `GET /users/me` and that same request, with no other gap taking
+    // its place.
+    const ada = await seedUser("ada@nemar.test", ADA_KEY, {
+      username: "alovelace",
+      givenName: "Ada",
+      familyName: "Lovelace",
+      github: "alovelace",
+      city: "London",
+      country: "United Kingdom",
+    });
+    tokenOrcid = ADA_ORCID;
+
+    const before = userMeResponseSchema.parse(await (await usersMeFor(ADA_KEY)).json());
+    expect(before.user.profile_gaps?.map((g) => g.field)).toEqual(["orcid_verified"]);
+
+    const beforeRequest = await withToken("/users/me/upload-access/request", ADA_KEY, {
+      why: "Depositing our lab's 64-channel EEG study of motor imagery, 40 participants.",
+    });
+    expect(beforeRequest.status).toBe(400);
+    const beforeRefusal = (await beforeRequest.json()) as { error: string; missing: string[] };
+    expect(beforeRefusal.error).toBe("profile_incomplete");
+    expect(beforeRefusal.missing).toEqual(["orcid_verified"]);
+
+    const started = await withToken("/auth/orcid/cli-start", ADA_KEY, { mode: "link" });
+    expect(started.status).toBe(200);
+    const { authorize_url } = (await started.json()) as { authorize_url: string };
+    const { cookie, csrf } = await walkHandoff(handoffToken(authorize_url));
+    const linkRes = await callback(csrf, [cookie]);
+    expect(linkRes.status).toBe(302);
+    expect(userRow(ada)?.orcid_verified).toBe(1);
+
+    const after = userMeResponseSchema.parse(await (await usersMeFor(ADA_KEY)).json());
+    expect(after.user.profile_gaps).toEqual([]);
+
+    const afterRequest = await withToken("/users/me/upload-access/request", ADA_KEY, {
+      why: "Depositing our lab's 64-channel EEG study of motor imagery, 40 participants.",
+    });
+    expect(afterRequest.status).toBe(201);
+    expect((await afterRequest.json()) as { ok: boolean }).toMatchObject({ ok: true });
   });
 
   test("the interstitial names the account and does not submit itself", async () => {

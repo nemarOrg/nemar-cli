@@ -5,19 +5,25 @@
  *
  * 1. THE TABLE. `WEBSITE_TABLE` below is transcribed from
  *    `nemarOrg/website`'s `src/lib/profile-gaps.ts` + `account-copy.ts` as
- *    they shipped in website#310 — what each field blocks, the prose that
- *    fits "Set it in ___", and the exact command. If `PROFILE_GAP_MATRIX`
- *    stops agreeing with it, one of the two repos has moved and the other has
- *    not, which is the whole failure mode phase 8 exists to prevent. This is
- *    the local half of that guard; `account-copy-parity.test.ts` is the half
- *    that reads the other checkout when it is present.
+ *    they shipped in website#310, plus the `orcid_verified` row of website#312
+ *    (commit 19f93e3e) — what each field blocks, the prose that fits "Set it
+ *    in ___", and the exact command. If `PROFILE_GAP_MATRIX` stops agreeing
+ *    with it, one of the two repos has moved and the other has not, which is
+ *    the whole failure mode phase 8 exists to prevent. This is the local half
+ *    of that guard; `account-copy-parity.test.ts` is the half that reads the
+ *    other checkout when it is present.
  *
- * 2. THE DERIVATION, over every one of the 2^7 combinations of the seven
+ * 2. THE DERIVATION, over every one of the 2^8 combinations of the eight
  *    derivable fields. The oracle is built by FILTERING the fixture table
  *    rather than by re-running the production rules, so the test can disagree
  *    with the implementation: it says "these fields are blank, therefore these
  *    entries in this order", and `computeProfileGaps` has to arrive at the same
  *    answer from the row.
+ *
+ * `orcid_verified` adds a second dimension the other seven do not have: the
+ * account's ROLE, because `admin` and `owner` are exempt from that row (#1271).
+ * It is walked separately rather than multiplied into the 256, so a failure
+ * says which of the two rules broke.
  *
  * No mocks: `computeProfileGaps` is pure and is called directly.
  */
@@ -51,7 +57,8 @@ interface TableRow {
   derivable: boolean;
 }
 
-/** Transcribed from nemarOrg/website `src/lib/profile-gaps.ts` (website#310). */
+/** Transcribed from nemarOrg/website `src/lib/profile-gaps.ts` (website#310,
+ *  and the `orcid_verified` row of website#312 at 19f93e3e). */
 const WEBSITE_TABLE: Record<string, TableRow> = {
   email_verified: {
     blocks: ["verified", "upload_access"],
@@ -81,6 +88,13 @@ const WEBSITE_TABLE: Record<string, TableRow> = {
     cli: "nemar auth profile set-name",
     orcidWeb: "your ORCID record at orcid.org, then sign in again",
     label: "Family name",
+    derivable: true,
+  },
+  orcid_verified: {
+    blocks: ["upload_access"],
+    web: "Settings",
+    cli: "nemar auth profile orcid link",
+    label: "Verified ORCID iD",
     derivable: true,
   },
   github_username: {
@@ -114,13 +128,19 @@ const WEBSITE_TABLE: Record<string, TableRow> = {
 };
 
 const TABLE_FIELDS = Object.keys(WEBSITE_TABLE);
-/** The seven the derivation can raise from a row; `why` needs a submitted form. */
+/** The eight the derivation can raise from a row; `why` needs a submitted form. */
 const DERIVABLE = TABLE_FIELDS.filter((f) => WEBSITE_TABLE[f].derivable) as GapField[];
+/** The two account columns that are flags rather than text, so "blank" is
+ *  `false` and not `null`. */
+const FLAG_FIELDS = new Set(["email_verified", "orcid_verified"]);
 
-/** A complete account: nothing missing, nothing to report. */
+/** A complete account: nothing missing, nothing to report. A `member`, because
+ *  that is the role the gap rules treat as ordinary — an `admin` would be
+ *  exempt from a row and so could not prove it fires. */
 function fullAccount(): Required<Omit<ProfileGapAccount, "status">> & { status: string } {
   return {
     status: "verified",
+    role: "member",
     email_verified: true,
     username: "alovelace",
     given_name: "Ada",
@@ -128,7 +148,7 @@ function fullAccount(): Required<Omit<ProfileGapAccount, "status">> & { status: 
     github_username: "adalovelace",
     city: "London",
     country: "GB",
-    orcid_verified: false,
+    orcid_verified: true,
   };
 }
 
@@ -136,7 +156,7 @@ function fullAccount(): Required<Omit<ProfileGapAccount, "status">> & { status: 
 function accountMissing(fields: readonly string[]): ProfileGapAccount {
   const account: Record<string, unknown> = fullAccount();
   for (const field of fields) {
-    account[field] = field === "email_verified" ? false : null;
+    account[field] = FLAG_FIELDS.has(field) ? false : null;
   }
   return account as ProfileGapAccount;
 }
@@ -174,22 +194,29 @@ describe("the matrix agrees with the website's table", () => {
 });
 
 describe("computeProfileGaps over every field combination", () => {
-  // 2^7 = 128 subsets of the derivable fields.
+  // 2^8 = 256 subsets of the derivable fields.
   const subsets: string[][] = [];
   for (let mask = 0; mask < 1 << DERIVABLE.length; mask++) {
     subsets.push(DERIVABLE.filter((_, i) => (mask & (1 << i)) !== 0));
   }
 
-  test("raises exactly the blank fields, in table order, for all 128", () => {
-    expect(subsets).toHaveLength(128);
+  test("raises exactly the blank fields, in table order, for all 256", () => {
+    expect(subsets).toHaveLength(256);
     for (const missing of subsets) {
       // The oracle: the fixture's own order, filtered to what was blanked.
       const expected = TABLE_FIELDS.filter((f) => missing.includes(f));
       const gaps = computeProfileGaps(accountMissing(missing));
       expect(gaps.map((g) => g.field)).toEqual(expected);
+      // A subset that did NOT blank `orcid_verified` leaves it verified, which
+      // moves the two name halves' set-on to the ORCID record. Derived from the
+      // fixture rather than assumed, so the interaction is covered in both
+      // directions across the 256 rather than in one hand-written case.
+      const orcidVerified = !missing.includes("orcid_verified");
       for (const gap of gaps) {
-        expect([...gap.blocks]).toEqual(WEBSITE_TABLE[gap.field].blocks);
-        expect([...gap.set_on]).toEqual(WEBSITE_TABLE[gap.field].cli ? ["web", "cli"] : ["web"]);
+        const row = WEBSITE_TABLE[gap.field];
+        expect([...gap.blocks]).toEqual(row.blocks);
+        const setOn = orcidVerified && row.orcidWeb ? ["web"] : row.cli ? ["web", "cli"] : ["web"];
+        expect([...gap.set_on]).toEqual(setOn);
       }
     }
   });
@@ -200,11 +227,53 @@ describe("computeProfileGaps over every field combination", () => {
     expect(profileGapFields(accountMissing(DERIVABLE))).not.toContain("why");
   });
 
-  test("ORCID is never a gap, linked or not", () => {
+  test("the iD itself is never a gap; the VERIFICATION of it is", () => {
+    // An unlinked iD is not what anything is waiting on -- a CLI signup cannot
+    // exist without one and a web account never types one. What blocks the
+    // request is an iD nobody proved (#1271).
     for (const orcid_verified of [true, false]) {
       const fields = profileGapFields({ ...accountMissing(DERIVABLE), orcid_verified });
       expect(fields).not.toContain("orcid");
+      expect(fields.includes("orcid_verified")).toBe(!orcid_verified);
     }
+  });
+
+  test("an absent orcid_verified is unverified, not 'this caller does not say'", () => {
+    // The opposite reading of `email_verified`'s, and deliberately: every row
+    // carries this column (migration 0050, NOT NULL DEFAULT 0), so treating
+    // `undefined` as verified would exempt exactly the CLI-created accounts the
+    // gap exists for.
+    expect(profileGapFields({ ...fullAccount(), orcid_verified: undefined })).toEqual([
+      "orcid_verified",
+    ]);
+    expect(profileGapFields({ ...fullAccount(), orcid_verified: null })).toEqual([
+      "orcid_verified",
+    ]);
+  });
+
+  test("admin and owner are exempt from the ORCID row; nobody else is", () => {
+    // Interim, until the service-account kind of epic #1272: these accounts
+    // predate having a web-signup path of their own, and the alternative is
+    // locking an operator out of the queue they run. A role this build cannot
+    // read is NOT a licence to skip the check.
+    const unverified = { ...fullAccount(), orcid_verified: false };
+    for (const role of ["admin", "owner"] as const) {
+      expect(profileGapFields({ ...unverified, role })).toEqual([]);
+    }
+    for (const role of ["member", "user", null, undefined] as const) {
+      expect(profileGapFields({ ...unverified, role })).toEqual(["orcid_verified"]);
+    }
+  });
+
+  test("the exemption is that one row and nothing else", () => {
+    // An admin with a blank city is still missing a city: the role answers one
+    // question, and answering the others with it would hide real gaps from the
+    // people most likely to be asked about them.
+    const gaps = profileGapFields({
+      ...accountMissing(["orcid_verified", "city"]),
+      role: "admin",
+    });
+    expect(gaps).toEqual(["city"]);
   });
 
   test("a verified iD moves set_on to web-only for the name halves", () => {
@@ -259,6 +328,24 @@ describe("the sentences", () => {
     expect(describeProfileGap(resolveProfileGap("given_name", { orcidVerified: true }))).toBe(
       "Given name is missing: needed to request upload access. Set it in your ORCID record at orcid.org, then sign in again.",
     );
+  });
+
+  test("the ORCID row reads like the rest, and names the link command", () => {
+    // Not `nemar auth signup`: the account already exists and typed an iD; what
+    // is missing is the browser handoff that proves it (ADR 0044).
+    expect(describeProfileGap(resolveProfileGap("orcid_verified"))).toBe(
+      "Verified ORCID iD is missing: needed to request upload access. Set it in Settings or run `nemar auth profile orcid link`.",
+    );
+  });
+
+  test("a verified iD does not move where the ORCID row is set", () => {
+    // The `.orcid` set-on variants belong to the two NAME halves, which a
+    // verified record owns. An iD is not a name, so this row keeps both halves
+    // whatever the flag says -- and it is only ever rendered when the flag is
+    // false anyway.
+    const gap = resolveProfileGap("orcid_verified", { orcidVerified: true });
+    expect(gap.setOnWeb).toBe("Settings");
+    expect(gap.setOnCli).toBe("nemar auth profile orcid link");
   });
 
   test("an unrecognised field renders rather than disappearing", () => {
