@@ -4,14 +4,12 @@
 **Date:** 2026-09-05
 **Owner:** Seyed Yahya Shirazi
 
-> Numbering note: epic #1250 runs phases in parallel, and this one (phase 4,
-> #1254) lands alongside phase 3 (#1253), which owns 0042 and migration 0076.
-> Until phase 3 is rebased in, 0042 does not exist on this branch and the ADR
-> index's gapless check fails here by construction; it goes green with the
-> rebase.
+> Numbering note: epic #1250 ran phases in parallel, and this one (phase 4,
+> #1254) landed alongside phase 3 (#1253), which owns 0042 and migration 0076.
+> Both are now on the epic branch and the index's gapless check is green.
 > ADR 0041 carries an analogous note for the phase-1/phase-2 gap it saw at the
-> time; this is the same situation one phase later, not a reference to the same
-> gap.
+> time; this was the same situation one phase later, not a reference to the
+> same gap.
 
 ## Context
 

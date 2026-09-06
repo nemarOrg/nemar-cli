@@ -27,7 +27,8 @@ import { freshDb, realD1 } from "./helpers/d1";
 
 const ORIGIN = "https://nemar.org";
 const ENCRYPTION_KEY = "profile-username-test-encryption-key-01234";
-const ORCID_ID = "0000-0002-1825-0097";
+/** Distinct-per-row iDs; see seedUser. The last group is a counter. */
+const ORCID_ID_PREFIX = "0000-0002-9999-";
 
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
@@ -51,14 +52,24 @@ interface SeedOptions {
   deleted?: boolean;
 }
 
-/** A web/ORCID-shaped row by default: no username, ORCID verified. */
+/**
+ * A web/ORCID-shaped row by default: no username, ORCID verified.
+ *
+ * Each seeded row gets a DISTINCT iD unless the caller names one. It used to
+ * default to a single shared `ORCID_ID`, which migration 0077 now refuses
+ * outright (an iD backs at most one live account, ADR 0043) -- the helper was
+ * manufacturing exactly the duplicate that migration exists to prevent, and
+ * every test seeding two rows died in the fixture. Callers that pass an
+ * explicit `orcid` are unaffected.
+ */
 function seedUser(email: string, options: SeedOptions = {}): number {
+  seededOrcidCount += 1;
   const row = {
     username: null,
     given_name: "Ada",
     family_name: "Lovelace",
     status: "verified",
-    orcid: ORCID_ID,
+    orcid: `${ORCID_ID_PREFIX}${String(seededOrcidCount).padStart(4, "0")}`,
     orcid_verified: 1,
     deleted: false,
     ...options,
@@ -120,8 +131,12 @@ function usernameOf(id: number): string | null {
   );
 }
 
+/** Bumped per seeded row so each gets its own iD; reset with the database. */
+let seededOrcidCount = 0;
+
 beforeEach(() => {
   db = freshDb();
+  seededOrcidCount = 0;
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/auth", authWebRoutes);
 });

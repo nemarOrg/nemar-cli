@@ -45,6 +45,7 @@ Load-bearing ones to know before touching the relevant area:
 0033 (the queue stamps which engine converted each dataset; pre-stamp rows are declared current),
 0034 (`datasets` stays one table under an enforced column budget; derive, don't store),
 0040 (`verified` is the base tier; admin approval is the only writer of upload access),
+0042 (upload access is requested once, by the person who wants it),
 0043 (one person, one account: an ORCID iD, an email or a GitHub handle backs at most one live account).
 
 ---
@@ -532,12 +533,12 @@ and what is historical. The entries worth knowing by name:
 
 | Group | Covers |
 |---|---|
-| `nemar auth` | login, signup, status/whoami, profile, switch, logout, verification, SSH setup, key retrieval and regeneration |
+| `nemar auth` | login, signup, status/whoami, profile, request-upload-access, switch, logout, verification, SSH setup, key retrieval and regeneration |
 | `nemar dataset` | validate, upload, download, status (alias: view), list, search, release, update, clone, get, commit, push, drop, ci, manifest |
 | `nemar dataset publish` | request, status, resend |
 | `nemar dataset` (access) | request-access, access, invite, collaborators |
 | `nemar sandbox` | training run, status, reset — required before uploading |
-| `nemar admin` | users, approve, revoke, role, notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, recording-stats-sweep, signal-defaults-sweep, zarr-fidelity-sweep, doctor, summary, notice, email-preferences, backfill-names, duplicates, e2e-test |
+| `nemar admin` | users, approve, revoke, role, notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, recording-stats-sweep, signal-defaults-sweep, zarr-fidelity-sweep, doctor, summary, notice, email-preferences, backfill-names, backfill-usernames, duplicates, e2e-test |
 | `nemar admin import*` | OpenNeuro import, status, rollback, retry, verify, recover (issue #754, epic #967) |
 | `nemar admin fleet` | drift, enforce, revalidate — governance across dataset repos (epic #713) |
 | `nemar admin exemplar` | create, status, remint-dois — the staging exemplar fleet |

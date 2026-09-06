@@ -159,7 +159,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(100);
+    expect(adminRoutes.routes.length).toBe(102);
   });
 
   // The count pin above can't see a SWAP of the two router-level middleware

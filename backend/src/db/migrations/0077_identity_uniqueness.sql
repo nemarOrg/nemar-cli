@@ -34,10 +34,10 @@
 -- the collision is actually gone (409 with the colliding rows otherwise), so
 -- the flag cannot be cleared back into a state the index would refuse.
 --
--- NUMBERING: epic #1250 runs phases in parallel. Phase 3 (#1253) owns 0076;
--- this is phase 4 (#1254). Until phase 3 is rebased in, 0076 does not exist on
--- this branch. Nothing here depends on it -- the two touch disjoint columns --
--- but do not read the gap as a lost file.
+-- NUMBERING: epic #1250 ran phases in parallel. Phase 3 (#1253) owns 0076 and
+-- this is phase 4 (#1254); both are now on the epic branch. The two touch
+-- disjoint columns -- 0076 adds the upload-request stamps, this adds
+-- `identity_conflict` -- so their order relative to each other does not matter.
 --
 -- NOT ONE TRANSACTION (same reasoning as 0075's header: wrangler hands the
 -- file to executeSql as one string whose transactional scope is not
