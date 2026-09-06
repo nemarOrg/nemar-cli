@@ -112,6 +112,13 @@ const AUTH_PATHS = [
   // entry as a prefix, so "/auth/email/verify" also matches
   // "/auth/email/verify/request".
   "/auth/email/verify",
+  // NOT an /auth path, and deliberately in this list anyway (ADR 0042, #1253):
+  // POST /users/me/upload-access/request spends a live GitHub API call on the
+  // shared installation token for every attempt, and a refused one writes
+  // nothing, so it is replayable. On the generic token bucket that is ~1000
+  // GitHub calls a minute from one verified account. The strict floor is the
+  // point: a human asks for upload access once.
+  "/users/me/upload-access/request",
 ];
 
 type RateLimitContext = Context<{ Bindings: Bindings; Variables: Variables }>;
@@ -146,8 +153,10 @@ export function __readBearerTokenFromHeader(authHeader: string | undefined): str
  * standing up a Cloudflare runtime. Returns the bucket key kind, the
  * raw key value, and the cap.
  *
- *  - `auth-ip` for `/auth/*` endpoints (10/60s, IP-keyed). Stays
- *    pre-auth-friendly: signup/login don't have a token yet.
+ *  - `auth-ip` for the strict-bucket paths (10/60s, IP-keyed). Mostly
+ *    `/auth/*`, which stays pre-auth-friendly (signup/login have no token
+ *    yet), plus any authenticated endpoint whose per-request cost is an
+ *    external call rather than a D1 read -- see AUTH_PATHS.
  *  - `token` for any request carrying a syntactically-valid bearer
  *    (500/60s). Admin orchestration (`publish approve`, CI deploy
  *    sweeps) fits here; per-token bucketing means one admin's batch

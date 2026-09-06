@@ -144,6 +144,29 @@ describe("__selectBucket", () => {
     }
   });
 
+  test("the upload-access request is in the strict bucket, bearer or not", () => {
+    // ADR 0042, #1253. It is NOT an /auth path, so nothing about its shape
+    // puts it here -- only the explicit AUTH_PATHS entry does. Every attempt
+    // spends a live GitHub call on the shared installation token and a refused
+    // one writes nothing, so on the token bucket one verified account could
+    // replay ~1000 GitHub calls a minute. Asserted WITH a bearer because that
+    // is how it is always called: the token branch must not win.
+    for (const auth of [undefined, `Bearer ${VALID_TOKEN}`]) {
+      const sel = __selectBucket("/users/me/upload-access/request", auth, "10.0.0.1");
+      expect(sel.keyKind).toBe("auth-ip");
+      expect(sel.rawKey).toBe("10.0.0.1");
+      expect(sel.maxRequests).toBe(__limits.AUTH_MAX_REQUESTS);
+    }
+  });
+
+  test("the rest of /users keeps the ordinary token bucket", () => {
+    // The AUTH_PATHS matcher is a prefix match, so an over-broad entry
+    // ("/users") would drag the dashboard's own polling into a 10/min cap.
+    const sel = __selectBucket("/users/me", `Bearer ${VALID_TOKEN}`, "10.0.0.1");
+    expect(sel.keyKind).toBe("token");
+    expect(sel.maxRequests).toBe(__limits.TOKEN_MAX_REQUESTS_AUTHED);
+  });
+
   test("authenticated non-auth requests bucket on token with higher cap", () => {
     const sel = __selectBucket(
       "/admin/publish/nm000110/approve",
