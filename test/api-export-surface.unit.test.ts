@@ -42,12 +42,17 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getSandboxStatus",
     "login",
     "registerSSHKey",
+    "requestEmailChange",
     "requestKeyRegeneration",
     "requestUploadAccess",
     "resendVerification",
     "resetSandbox",
     "retrieveKey",
     "signup",
+    "startOrcidCliLink",
+    "unlinkOrcid",
+    "updateProfile",
+    "verifyEmailChange",
   ],
   datasets: [
     "ORCID_REGEX",
@@ -182,6 +187,11 @@ const POST_SPLIT_ADDITIONS = [
   "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion
   "getUserDuplicates", // #1254, ADR 0043: GET /admin/users/duplicates
   "publishZarrCatalog", // #1062, epic #1181 phase 2: POST /admin/zarr-catalog/publish
+  "requestEmailChange", // #1266, ADR 0044: POST /auth/email/change/request
+  "startOrcidCliLink", // #1266, ADR 0044: POST /auth/orcid/cli-start
+  "unlinkOrcid", // #1266, ADR 0044: POST /auth/orcid/unlink
+  "updateProfile", // #1266, ADR 0044: PATCH /auth/profile
+  "verifyEmailChange", // #1266, ADR 0044: POST /auth/email/change/verify
   "requestUploadAccess", // #1253, epic #1250: POST /users/me/upload-access/request
   "recordingStatsSweep", // #1194, CLI wrapper for POST /admin/datasets/recording-stats-sweep
   "recordingStatsSweepReset", // #1194, CLI wrapper for the recording-stats sweep reset

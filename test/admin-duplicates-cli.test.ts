@@ -230,7 +230,12 @@ describe("nemar admin duplicates", () => {
       const result = await runCli(["admin", "duplicates", "--clear", "42"], server.url);
       expect(result.exitCode).toBe(1);
       expect(`${result.stdout}${result.stderr}`).toContain("Still colliding");
-      expect(`${result.stdout}${result.stderr}`).toContain("identity_conflict_remains");
+      // The SENTENCE, not the code. Until #1266 taught the client which
+      // strings in `error` are machine codes (shared/contract), this line
+      // printed the literal `identity_conflict_remains` at an operator.
+      expect(`${result.stdout}${result.stderr}`).toContain(
+        "Resolve it on the other account first",
+      );
     } finally {
       server.stop();
     }
