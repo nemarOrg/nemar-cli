@@ -14,6 +14,7 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { z } from "zod";
+import type { AccountStatus } from "../../../shared/contract/user.js";
 import { auditLogStatement } from "../db/audit-log";
 import { authMiddleware } from "../middleware/auth";
 import {
@@ -73,7 +74,8 @@ userRoutes.get("/me", async (c) => {
     )
     .bind(user.id, user.id)
     .first<{
-      status: string;
+      // Closed by migration 0001's CHECK constraint (shared/contract/user.ts).
+      status: AccountStatus;
       created_at: string;
       approved_at: string;
       email_verified: number;

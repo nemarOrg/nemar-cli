@@ -46,6 +46,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
+import type { AccountStatus } from "../../../shared/contract/user.js";
 import { auditLogStatement } from "../db/audit-log";
 import { timingSafeEqual } from "../lib/constant-time";
 import { resolveActingAccount } from "../middleware/auth";
@@ -158,7 +159,9 @@ function publicUser(row: {
   id: number;
   email: string;
   role: UserRole | null;
-  status: string;
+  // The COLUMN's vocabulary; `userStatusForDashboard` below is what turns it
+  // into the wire's (shared/contract/user.ts).
+  status: AccountStatus;
   email_verified: boolean;
   given_name: string | null;
   family_name: string | null;
@@ -471,7 +474,9 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
         id: number;
         email: string;
         role: string | null;
-        status: string;
+        // Closed by migration 0001's CHECK constraint, so this is a claim the
+        // database enforces rather than an assumption (shared/contract/user.ts).
+        status: AccountStatus;
         // NOT NULL DEFAULT 0 in D1 (0001), so plain number.
         email_verified: number;
         given_name: string | null;
@@ -1238,7 +1243,8 @@ async function fetchPublicUserById(
       id: number;
       email: string;
       role: string | null;
-      status: string;
+      // Closed by migration 0001's CHECK constraint (shared/contract/user.ts).
+      status: AccountStatus;
       // NOT NULL DEFAULT 0 in D1 (0001), so plain number.
       email_verified: number;
       given_name: string | null;

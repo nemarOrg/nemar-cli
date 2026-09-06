@@ -18,6 +18,7 @@
  * brute-forced offline.
  */
 
+import type { AccountStatus } from "../../../shared/contract/user.js";
 import { type Bindings, type UserRole, parseRole } from "../types/bindings";
 
 export const COOKIE_NAME = "nemar_session";
@@ -137,7 +138,10 @@ export interface WebSessionUser {
    *  means the role column held an unrecognised value; treat as no
    *  role rather than guess. */
   role: UserRole | null;
-  status: string;
+  /** The COLUMN's vocabulary (shared/contract/user.ts), closed by migration
+   *  0001's CHECK constraint -- not the collapsed value `/auth/me` reports,
+   *  which `publicUser` derives from this one. */
+  status: AccountStatus;
   /** Whether the account has proved control of `email` (ADR 0040 phase 2).
    *  Surfaced on /auth/me so the dashboard can render its verify-your-email
    *  step, and read by /auth/email/verify to answer idempotently when there
@@ -215,7 +219,8 @@ export async function findSessionByCookieId(
       last_used_at: string;
       email: string;
       role: string | null;
-      status: string;
+      // Closed by migration 0001's CHECK constraint (shared/contract/user.ts).
+      status: AccountStatus;
       // NOT NULL DEFAULT 0 in D1 (0001), so plain number.
       email_verified: number;
       given_name: string | null;

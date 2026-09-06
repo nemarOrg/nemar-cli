@@ -38,6 +38,7 @@
  */
 
 import { ACCOUNT_COPY, type AccountCopyKey, fillCopy } from "./account-copy.js";
+import type { AccountStatus } from "./user.js";
 
 /**
  * What a missing field stops the account from doing.
@@ -217,8 +218,16 @@ function isBlank(value: string | null | undefined): boolean {
  * interface names the columns, and the route tests assert the resulting gap.
  */
 export interface ProfileGapAccount {
-  /** `"pending"` is the unverified tier (ADR 0040). */
-  readonly status?: string | null;
+  /**
+   * `"pending"` is the unverified tier (ADR 0040).
+   *
+   * The declared vocabulary rather than `string`, because the rule below turns
+   * on one literal and a caller passing the dashboard's collapsed
+   * `"active"`/`"pending"` value, or a typo, would silently take the other
+   * branch. The four values are the ones `users.status` can hold (a CHECK
+   * constraint since migration 0001), which is what every caller reads it from.
+   */
+  readonly status?: AccountStatus | null;
   readonly email_verified?: boolean | null;
   /**
    * `undefined` means the username could not be READ, which is not the same as

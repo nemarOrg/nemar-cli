@@ -13,6 +13,7 @@
  */
 
 import { type ProfileGapEntry, computeProfileGaps } from "../../../shared/contract/profile-gaps.js";
+import type { AccountStatus } from "../../../shared/contract/user.js";
 
 /**
  * The columns the gap rules read, as SQLite hands them over.
@@ -22,7 +23,10 @@ import { type ProfileGapEntry, computeProfileGaps } from "../../../shared/contra
  * demanding one spelling would only add a cast at one of the two call sites.
  */
 export interface ProfileGapRow {
-  status: string;
+  /** The column's own vocabulary, not the dashboard's collapsed one: this is
+   *  what SQLite hands back, and migration 0001's CHECK constraint is what
+   *  closes the set. */
+  status: AccountStatus;
   email_verified: number | boolean;
   orcid_verified: number | boolean;
   username: string | null;
