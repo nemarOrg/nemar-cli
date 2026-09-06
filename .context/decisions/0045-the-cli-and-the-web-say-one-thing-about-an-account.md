@@ -230,7 +230,7 @@ gained the role dimension the other seven rows do not have.
   `0079_username_auto_assigned.sql` and
   `0080_username_case_insensitive_unique.sql`.
 - `test/profile-gaps-matrix.test.ts` (the matrix against a fixture copied from
-  the website's table, and all 2^7 field combinations),
+  the website's table, and all 2^8 field combinations),
   `test/account-copy-parity.test.ts`, `backend/test/profile-gaps-route.test.ts`,
   `backend/test/username-auto-assign-route.test.ts`,
   `test/auth-gaps-cli.test.ts`.
