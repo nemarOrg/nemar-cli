@@ -34,15 +34,47 @@
 -- the collision is actually gone (409 with the colliding rows otherwise), so
 -- the flag cannot be cleared back into a state the index would refuse.
 --
+-- NUMBERING: epic #1250 runs phases in parallel. Phase 3 (#1253) owns 0076;
+-- this is phase 4 (#1254). Until phase 3 is rebased in, 0076 does not exist on
+-- this branch. Nothing here depends on it -- the two touch disjoint columns --
+-- but do not read the gap as a lost file.
+--
 -- NOT ONE TRANSACTION (same reasoning as 0075's header: wrangler hands the
 -- file to executeSql as one string whose transactional scope is not
--- guaranteed on the remote path). Statements 2-5 are individually idempotent
--- and each narrows its own predicate by succeeding, so re-running finishes a
--- partial application. Statement 1, the ALTER, is the exception: SQLite has no
--- `ADD COLUMN IF NOT EXISTS`, so a re-run after it landed fails on it. That is
--- the standing shape for every column-adding migration here (0037, 0062), and
--- the recovery is the same: if the ALTER already landed, re-run statements 2
--- onward. Do not hand-repair the flags.
+-- guaranteed on the remote path). Statements 2 through the trailing lookup
+-- index are individually idempotent and each narrows its own predicate by
+-- succeeding, so re-running finishes a partial application. Statement 1, the
+-- ALTER, is the exception: SQLite has no `ADD COLUMN IF NOT EXISTS`, so a
+-- re-run after it landed fails on it. That is the standing shape for every
+-- column-adding migration here (0037, 0062), and the recovery is the same: if
+-- the ALTER already landed, re-run statements 2 onward. Do not hand-repair the
+-- flags.
+--
+-- PROVEN AGAINST REAL D1, not just bun:sqlite. D1's SQLite build enforces
+-- limits bun:sqlite does not (see statement 2), so a green `bun test` is NOT
+-- evidence this file applies. Run:
+--
+--   bun run migrations:d1-check
+--
+-- which wipes the local D1 state, replays all 78 migrations through
+-- `wrangler d1 execute --local` one file at a time, and then diffs the
+-- resulting object and column catalogue against the bun:sqlite one. This file
+-- was also applied a second time onto a database already carrying 0001-0075
+-- plus a seeded duplicate (the 42/43 ORCID pair, a case-variant email pair and
+-- a lowercase-`x` iD), which is the run that proves the flagging pass and the
+-- index creation survive real data rather than an empty table. Results: the
+-- orphan flagged and the identity-backed row kept, the higher-id case variant
+-- flagged, the check digit canonicalised, and a later duplicate INSERT refused
+-- with `UNIQUE constraint failed: users.orcid` / `users.email` -- the COLUMN
+-- name, which is what `isUniqueViolationOn` matches on.
+--
+-- NOTE `wrangler d1 migrations apply` cannot do this replay, for a
+-- PRE-EXISTING reason unrelated to this file: wrangler text-scans a migration
+-- for `BEGIN TRANSACTION` / `COMMIT` and refuses one that "contains several
+-- transactions" even when those words appear only inside a `--` comment, which
+-- they do in 0021, 0031, 0063, 0064, 0071, 0075 and here. The check script
+-- strips whole-line comments before handing the SQL over, and its catalogue
+-- diff is what proves that strip changed nothing.
 
 -- (1) The flag. 0 = this row's identifiers are its own; 1 = at least one of
 -- them is claimed by another live row and this row is not the canonical
@@ -58,13 +90,33 @@ ALTER TABLE users ADD COLUMN identity_conflict INTEGER NOT NULL DEFAULT 0;
 -- and the index. Every write path now uppercases it (services/identity.ts),
 -- which closes the future; this closes the past.
 --
--- The GLOB is deliberately narrow: it matches ONLY a bare iD ending in a
+-- The predicate is deliberately narrow: it matches ONLY a bare iD ending in a
 -- lowercase `x`, so a row holding a full `https://orcid.org/...` URI (or
 -- anything else unexpected) is left exactly as it is rather than being
 -- uppercased into mojibake by a blanket UPPER().
+--
+-- SPELLED WITHOUT A LONG GLOB ON PURPOSE. The obvious way to write this is one
+-- character-class GLOB per digit
+-- (`'[0-9][0-9][0-9][0-9]-...-[0-9][0-9][0-9]x'`), and that is 79 characters.
+-- **D1 caps a LIKE/GLOB pattern at 50 characters** and raises
+-- `LIKE or GLOB pattern too complex: SQLITE_ERROR` above it. bun:sqlite does
+-- NOT enforce that cap, so the long form passes every test in this repo and
+-- aborts the real migration right here -- after statement 1 has already added
+-- the column. Verified against `wrangler d1 execute --local`: a 50-character
+-- pattern is accepted and a 51-character one is not.
+--
+-- So the shape is checked with LENGTH/SUBSTR (no pattern at all) and the digits
+-- with one 8-character GLOB. `SUBSTR(orcid, 19, 1) = 'x'` is case-SENSITIVE
+-- because the column has no COLLATE and SQLite's default is BINARY -- which is
+-- the whole point: an already-canonical `X` must not be rewritten.
 UPDATE users
    SET orcid = UPPER(orcid)
- WHERE orcid GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9]x';
+ WHERE LENGTH(orcid) = 19
+   AND SUBSTR(orcid, 19, 1) = 'x'
+   AND SUBSTR(orcid, 5, 1) = '-'
+   AND SUBSTR(orcid, 10, 1) = '-'
+   AND SUBSTR(orcid, 15, 1) = '-'
+   AND REPLACE(SUBSTR(orcid, 1, 18), '-', '') NOT GLOB '*[^0-9]*';
 
 -- (3a) Flag non-canonical ORCID holders.
 --
