@@ -26,24 +26,32 @@ import {
 } from "../../shared/contract/user.js";
 import {
   type OrcidNameResponse,
+  type ProfilePatchRequest,
   type UploadAccessRequestResponse,
   checkGitHubUsername,
   checkOrcidName,
   checkUsername,
   getCurrentUser,
   login,
+  requestEmailChange,
   requestKeyRegeneration,
   requestUploadAccess,
   resendVerification,
   retrieveKey,
   signup,
+  startOrcidCliLink,
+  unlinkOrcid,
+  updateProfile,
+  verifyEmailChange,
 } from "../lib/api/auth.js";
 import { ApiError, MaintenanceError, errorDetail } from "../lib/api/errors.js";
+import { openInBrowser } from "../lib/browser.js";
 import { printStepFailure } from "../lib/cli-output.js";
 import {
   DEFAULT_API_URL,
   clearAllConfig,
   clearConfig,
+  deleteConfig,
   getAccounts,
   getConfig,
   getConfigPath,
@@ -1281,12 +1289,14 @@ Examples:
  */
 const UPLOAD_ACCESS_FIX: Record<string, string> = {
   email_verified: "run 'nemar auth resend-verification' and click the link in your inbox",
-  username: "set it in Settings on nemar.org",
-  given_name: "comes from your ORCID record; make it public at orcid.org, or set it in Settings",
-  family_name: "comes from your ORCID record; make it public at orcid.org, or set it in Settings",
-  github_username: "set it in Settings on nemar.org",
-  city: "set it in Settings on nemar.org",
-  country: "set it in Settings on nemar.org",
+  username: "run 'nemar auth profile set-username <name>'",
+  given_name:
+    "comes from your ORCID record when one is linked; otherwise 'nemar auth profile set-name --given <name>'",
+  family_name:
+    "comes from your ORCID record when one is linked; otherwise 'nemar auth profile set-name --family <name>'",
+  github_username: "run 'nemar auth profile set-github <handle>'",
+  city: "run 'nemar auth profile set-location --city <city>'",
+  country: "run 'nemar auth profile set-location --country <country>'",
   why: "pass a longer --why, or answer the prompt",
 };
 
@@ -1454,9 +1464,9 @@ function verifiedMark(flag: boolean | undefined): string {
  * The footer is the load-bearing half. Identity uniqueness means a duplicate
  * account is refused rather than created (ADR 0043), so the message a person
  * hits is "that iD already belongs to an account" -- and the only useful next
- * sentence is where to go and change it. Email, GitHub and ORCID are all
- * self-service in Settings today; username and name are not, and saying so is
- * better than leaving someone hunting for a field that does not exist.
+ * sentence is where to go and change it. Since #1266 every one of them is
+ * self-service from here as well as from Settings, so the footer names the
+ * command rather than a page the person then has to find.
  */
 export async function profileAction(): Promise<void> {
   if (!isAuthenticated()) {
@@ -1515,14 +1525,24 @@ export async function profileAction(): Promise<void> {
 
   console.log();
   console.log(chalk.bold("Where to change each"));
+  console.log(`  Email       ${chalk.cyan("nemar auth profile set-email <address>")}`);
+  console.log(`  Username    ${chalk.cyan("nemar auth profile set-username <name>")}`);
   console.log(
-    `  Email, GitHub, ORCID   ${chalk.cyan("https://nemar.org/settings")} ${chalk.dim(
-      "(sign in, then Settings)",
-    )}`,
+    `  Name        ${chalk.cyan("nemar auth profile set-name --given <g> --family <f>")}`,
   );
-  console.log(`  Username, name         ${chalk.dim("not editable yet (nemarOrg/website#301)")}`);
+  console.log(`  GitHub      ${chalk.cyan("nemar auth profile set-github <handle>")}`);
+  console.log(`  ORCID       ${chalk.cyan("nemar auth profile orcid link|relink|unlink")}`);
   console.log(
-    `  Upload access          ${chalk.dim("one-time admin approval; see https://nemar.org/support")}`,
+    `  Location    ${chalk.cyan("nemar auth profile set-location --city <c> --country <k>")}`,
+  );
+  console.log(
+    `  Upload access          ${chalk.dim("one-time admin approval; nemar auth request-upload-access")}`,
+  );
+  console.log();
+  console.log(
+    chalk.dim(
+      "  Every one of these is also in Settings on https://nemar.org/settings — same rules, same checks.",
+    ),
   );
   console.log();
   console.log(
@@ -1554,6 +1574,503 @@ Description:
   than creating a duplicate; the fix is to change the identifier on the
   account that already holds it.
 
+Subcommands (the same changes Settings on nemar.org makes):
+  set-email <address>     mail a code to a new address, then verify-email
+  verify-email <code>     finish the change
+  set-username <name>     set your NEMAR handle (locked once approved)
+  set-name                --given / --family (ORCID wins when a verified iD is linked)
+  set-github <handle>     set the GitHub username (checked against GitHub)
+  set-location            --city / --country
+  orcid link|relink|unlink   opens a browser for ORCID's consent screen
+
 Examples:
-  $ nemar auth profile`,
+  $ nemar auth profile
+  $ nemar auth profile set-email ada@lab.example.org
+  $ nemar auth profile orcid link`,
+);
+
+// ============================================================================
+// Profile self-service subcommands (#1266, epic #1250; ADR 0044)
+// ============================================================================
+//
+// The identifiers a person can fix themselves, from the terminal, with the
+// same verification the website does: an email change is still proved by a
+// code mailed to the NEW address, an ORCID link is still an ORCID consent
+// screen in a browser, and every rule and refusal is the backend's, not a
+// second copy living here.
+
+/** Where the same change can be made in a browser. Printed by every
+ *  subcommand, because the CLI is the second surface, not the only one. */
+const SETTINGS_HINT = "Also changeable in Settings on https://nemar.org/settings";
+
+/**
+ * Guard every subcommand: an action must not print a spinner for a request
+ * that was never going to be sent, and must exit non-zero (`nemar auth
+ * profile` itself is a query and exits 0).
+ */
+function requireAuthenticatedForChange(): boolean {
+  if (isAuthenticated()) return true;
+  console.log(chalk.yellow("Not authenticated"));
+  console.log();
+  console.log("  Run 'nemar auth login' to authenticate");
+  process.exitCode = 1;
+  return false;
+}
+
+/**
+ * Re-read the account from the server and update the local config cache.
+ *
+ * Called after every successful change so `nemar auth status` stops showing
+ * the value that was just replaced. A failure here is NOT a failure of the
+ * change -- the change has landed on the server -- so it is reported as a
+ * dim note and the command still exits 0.
+ */
+async function refreshStoredAccount(): Promise<void> {
+  try {
+    const user = await getCurrentUser();
+    setConfig("username", user.username ?? undefined);
+    setConfig("email", user.email);
+    setConfig("githubUsername", user.github_username ?? undefined);
+    if (user.service_access !== undefined) setConfig("serviceAccess", user.service_access);
+    setConfig("role", user.role);
+  } catch (error) {
+    console.log(
+      chalk.dim(
+        `  (local copy not refreshed: ${errorDetail(error)} — run 'nemar auth status --refresh')`,
+      ),
+    );
+  }
+}
+
+/**
+ * Fail a subcommand with the backend's own sentence.
+ *
+ * Every refusal these routes raise carries a machine code in `error` and the
+ * actionable sentence in `message`, and lib/api/client.ts already prefers the
+ * sentence for the declared code vocabularies (shared/contract). So there is
+ * nothing to map here: printing `error.message` IS printing the backend's
+ * wording, which is the point -- a second copy in the CLI is how the two
+ * surfaces start telling people different things.
+ */
+function failWithApiError(spinner: ReturnType<typeof ora>, error: unknown, fallback: string): void {
+  if (error instanceof ApiError || error instanceof MaintenanceError) {
+    spinner.fail(error.message);
+  } else {
+    spinner.fail(fallback);
+    console.log(chalk.dim(`  ${errorDetail(error)}`));
+  }
+  process.exitCode = 1;
+}
+
+/** Apply a `PATCH /auth/profile` patch and report it uniformly. */
+async function applyProfilePatch(
+  patch: ProfilePatchRequest,
+  pending: string,
+  succeeded: string,
+): Promise<void> {
+  if (!requireAuthenticatedForChange()) return;
+  const spinner = ora(pending).start();
+  try {
+    await updateProfile(patch);
+    spinner.succeed(succeeded);
+    await refreshStoredAccount();
+    console.log(chalk.dim(`  ${SETTINGS_HINT}`));
+  } catch (error) {
+    failWithApiError(spinner, error, "Could not update your profile");
+  }
+}
+
+// ---------------------------------------------------------------- set-email
+
+const profileSetEmailCmd = profileCmd
+  .command("set-email <address>")
+  .description("Start an email change: mails a confirmation code to the new address")
+  .action(async (address: string) => {
+    if (!requireAuthenticatedForChange()) return;
+    const spinner = ora(`Sending a confirmation code to ${address}...`).start();
+    try {
+      const result = await requestEmailChange(address);
+      // Remembered so the second step needs only the code. Written before
+      // anything is printed so a user who closes the terminal can still
+      // finish with the code in their inbox.
+      setConfig("pendingEmailChange", address);
+      spinner.succeed(`Code sent to ${result.masked_email}`);
+      console.log();
+      console.log("  The address is not changed until you confirm the code:");
+      console.log(`    ${chalk.cyan("nemar auth profile verify-email <code>")}`);
+      console.log(chalk.dim("  The code expires in 10 minutes."));
+      if (result.dev_code) {
+        console.log(chalk.dim(`  (development backend echoed the code: ${result.dev_code})`));
+      }
+      if (result.dev_skip) {
+        console.log(
+          chalk.yellow(
+            "  This backend is non-production and did not mail anything (delivery allow-list).",
+          ),
+        );
+      }
+      console.log(chalk.dim(`  ${SETTINGS_HINT}`));
+    } catch (error) {
+      failWithApiError(spinner, error, "Could not send the confirmation code");
+    }
+  });
+
+addVerboseHelp(
+  profileSetEmailCmd,
+  `
+Description:
+  Step one of changing the email address your NEMAR account signs in with.
+  A 6-digit code goes to the NEW address; nothing changes until you enter it
+  with 'nemar auth profile verify-email'. The old address is told once the
+  change lands, so a change you did not make is visible to you.
+
+  An address that already belongs to a NEMAR account is refused: one person,
+  one account. Change it on the account that holds it instead.
+
+  Your API key keeps working across the change -- it is tied to the account,
+  not to the address.
+
+Examples:
+  $ nemar auth profile set-email ada@lab.example.org
+  $ nemar auth profile verify-email 123456`,
+);
+
+// ------------------------------------------------------------- verify-email
+
+const profileVerifyEmailCmd = profileCmd
+  .command("verify-email <code>")
+  .description("Finish an email change with the code sent to the new address")
+  .option("--email <address>", "The address the code was sent to (defaults to the last requested)")
+  .action(async (code: string, options: { email?: string }) => {
+    if (!requireAuthenticatedForChange()) return;
+    const address = (options.email ?? getConfig().pendingEmailChange ?? "").trim();
+    if (!address) {
+      // No stored request: a code alone cannot say which address it proves.
+      console.log(chalk.yellow("No pending email change on this machine"));
+      console.log();
+      console.log("  Run 'nemar auth profile set-email <address>' first,");
+      console.log("  or pass the address with --email <address>.");
+      process.exitCode = 1;
+      return;
+    }
+
+    const spinner = ora(`Confirming ${address}...`).start();
+    try {
+      const result = await verifyEmailChange(address, code);
+      // Written from the address we just proved rather than from the refresh
+      // below: a refresh that fails must not leave the old address cached as
+      // if nothing had happened.
+      setConfig("email", address);
+      deleteConfig("pendingEmailChange");
+      spinner.succeed(`Account email is now ${address}`);
+      if (result.old_address_notified === false) {
+        console.log(
+          chalk.yellow("  The previous address could not be notified; the change still applied."),
+        );
+      }
+      await refreshStoredAccount();
+      console.log(chalk.dim("  Sign-in codes and NEMAR mail now go to the new address."));
+    } catch (error) {
+      failWithApiError(spinner, error, "Could not confirm the new address");
+    }
+  });
+
+addVerboseHelp(
+  profileVerifyEmailCmd,
+  `
+Description:
+  Step two of an email change. The code is bound to BOTH the new address and
+  your account, so a code from someone else's request cannot be redeemed here,
+  and five wrong guesses invalidate it -- request a new one with
+  'nemar auth profile set-email'.
+
+  The address is remembered from the set-email step; pass --email if you are
+  finishing a change started on another machine.
+
+Examples:
+  $ nemar auth profile verify-email 123456
+  $ nemar auth profile verify-email 123456 --email ada@lab.example.org`,
+);
+
+// -------------------------------------------------------------- set-github
+
+const profileSetGithubCmd = profileCmd
+  .command("set-github <handle>")
+  .description("Set the GitHub username on your account")
+  .action(async (handle: string) => {
+    await applyProfilePatch(
+      { github_username: handle },
+      `Checking GitHub for ${handle}...`,
+      `GitHub username set to ${handle}`,
+    );
+  });
+
+addVerboseHelp(
+  profileSetGithubCmd,
+  `
+Description:
+  Sets the GitHub username your dataset repositories are shared with. The
+  handle must EXIST on GitHub -- it is looked up before it is stored -- and it
+  may back only one NEMAR account.
+
+  Ownership is not proved here: what matters for a review is that the account
+  an admin will add as a collaborator resolves.
+
+Examples:
+  $ nemar auth profile set-github octocat`,
+);
+
+// ------------------------------------------------------------ set-username
+
+const profileSetUsernameCmd = profileCmd
+  .command("set-username <name>")
+  .description("Set your NEMAR username (locked once an admin approves the account)")
+  .action(async (name: string) => {
+    await applyProfilePatch(
+      { username: name },
+      `Setting your username to ${name}...`,
+      `Username set to ${name}`,
+    );
+  });
+
+addVerboseHelp(
+  profileSetUsernameCmd,
+  `
+Description:
+  Your NEMAR handle: what 'nemar admin approve <username>' addresses and what
+  the dataset repositories you own are attributed to.
+
+  It can be set while it is empty at any time, and CHANGED until an admin
+  approves your account -- after that a rename needs an admin, because other
+  records already point at it.
+
+Examples:
+  $ nemar auth profile set-username alovelace`,
+);
+
+// ---------------------------------------------------------------- set-name
+
+const profileSetNameCmd = profileCmd
+  .command("set-name")
+  .description("Set the given and family name your DOIs cite")
+  .option("--given <name>", "Given (first) name")
+  .option("--family <name>", "Family (last) name")
+  .action(async (options: { given?: string; family?: string }) => {
+    if (options.given === undefined && options.family === undefined) {
+      console.log(chalk.yellow("Nothing to set"));
+      console.log();
+      console.log("  Pass --given and/or --family, e.g.");
+      console.log("    nemar auth profile set-name --given Ada --family Lovelace");
+      process.exitCode = 1;
+      return;
+    }
+    const patch: ProfilePatchRequest = {};
+    if (options.given !== undefined) patch.given_name = options.given;
+    if (options.family !== undefined) patch.family_name = options.family;
+    await applyProfilePatch(patch, "Setting your name...", "Name updated");
+  });
+
+addVerboseHelp(
+  profileSetNameCmd,
+  `
+Description:
+  The name a DOI cites you by. Both halves are required before a dataset can
+  be published, which is why this is settable at all.
+
+  It is refused while a VERIFIED ORCID iD is linked: ORCID is canonical there
+  and its record is re-read on every sign-in, so an edit here would be
+  silently overwritten. Change it at orcid.org and sign in again, or unlink
+  the iD first.
+
+Examples:
+  $ nemar auth profile set-name --given Ada --family Lovelace`,
+);
+
+// ------------------------------------------------------------ set-location
+
+const profileSetLocationCmd = profileCmd
+  .command("set-location")
+  .description("Set the city and country on your account")
+  .option("--city <city>", "City")
+  .option("--country <country>", "Country")
+  .action(async (options: { city?: string; country?: string }) => {
+    if (options.city === undefined && options.country === undefined) {
+      console.log(chalk.yellow("Nothing to set"));
+      console.log();
+      console.log("  Pass --city and/or --country, e.g.");
+      console.log("    nemar auth profile set-location --city 'San Diego' --country USA");
+      process.exitCode = 1;
+      return;
+    }
+    const patch: ProfilePatchRequest = {};
+    if (options.city !== undefined) patch.city = options.city;
+    if (options.country !== undefined) patch.country = options.country;
+    await applyProfilePatch(patch, "Setting your location...", "Location updated");
+  });
+
+addVerboseHelp(
+  profileSetLocationCmd,
+  `
+Description:
+  City and country are required for the export-control screening an admin
+  does before granting upload access, so an upload-access request is refused
+  without them. Neither may be blank.
+
+Examples:
+  $ nemar auth profile set-location --city "San Diego" --country USA`,
+);
+
+// ------------------------------------------------------------------- orcid
+
+/** How often the link flow re-checks whether the iD has landed. */
+const ORCID_POLL_INTERVAL_MS = 3000;
+
+/**
+ * Wait for a browser-side ORCID link to finish, or give up.
+ *
+ * The link is completed by the ORCID callback in the browser, so there is
+ * nothing for the CLI to await except the account itself changing. Polling
+ * `/users/me` is that: for a link, an iD appearing; for a relink, a DIFFERENT
+ * iD appearing, which is why the previous value is passed in rather than
+ * re-read (a relink to the same account keeps `orcid` non-null throughout,
+ * so "non-null" would report success the instant it started).
+ *
+ * A transient failure mid-wait is ignored on purpose -- the browser flow is
+ * unaffected by our polling, and the timeout is the only thing that ends the
+ * wait unhappily.
+ */
+async function waitForOrcidLink(
+  previousOrcid: string | null,
+  timeoutMs: number,
+): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, ORCID_POLL_INTERVAL_MS));
+    try {
+      const user = await getCurrentUser();
+      const current = user.orcid ?? null;
+      if (current && current !== previousOrcid) return current;
+    } catch {
+      // Keep waiting: a poll that failed says nothing about the browser flow.
+    }
+  }
+  return null;
+}
+
+const profileOrcidCmd = profileCmd
+  .command("orcid <action>")
+  .description("Link, re-link, or unlink your ORCID iD (link opens a browser)")
+  .option("--no-open", "Print the URL instead of opening a browser")
+  .option("--timeout <seconds>", "How long to wait for the browser flow to finish", "300")
+  .option("-y, --yes", "Skip the confirmation prompt (unlink)")
+  .option("-n, --no", "Decline the confirmation prompt (unlink)")
+  .action(
+    async (
+      action: string,
+      options: { open?: boolean; timeout?: string; yes?: boolean; no?: boolean },
+    ) => {
+      if (action !== "link" && action !== "relink" && action !== "unlink") {
+        console.log(chalk.yellow(`Unknown action '${action}'`));
+        console.log();
+        console.log("  Use one of: link, relink, unlink");
+        process.exitCode = 1;
+        return;
+      }
+      if (!requireAuthenticatedForChange()) return;
+
+      if (action === "unlink") {
+        const result = await confirm(
+          "Unlink your ORCID iD from this NEMAR account?",
+          { yes: options.yes, no: options.no },
+          false,
+        );
+        if (result !== "confirmed") {
+          console.log(result === "declined" ? "Declined" : "Cancelled");
+          return;
+        }
+        const spinner = ora("Unlinking your ORCID iD...").start();
+        try {
+          await unlinkOrcid();
+          spinner.succeed("ORCID iD unlinked");
+          console.log(
+            chalk.dim(
+              "  Your account no longer claims that iD. Link it again any time with 'nemar auth profile orcid link'.",
+            ),
+          );
+          await refreshStoredAccount();
+        } catch (error) {
+          failWithApiError(spinner, error, "Could not unlink your ORCID iD");
+        }
+        return;
+      }
+
+      // link / relink: ORCID's consent screen is a browser page, so the CLI's
+      // job is to get the person in front of it and then wait for the account
+      // to change.
+      const spinner = ora("Preparing the ORCID sign-in link...").start();
+      let authorizeUrl: string;
+      let previousOrcid: string | null = null;
+      try {
+        // Read the current iD FIRST: a relink is only observable as a change
+        // from this value.
+        previousOrcid = (await getCurrentUser()).orcid ?? null;
+        const started = await startOrcidCliLink(action);
+        authorizeUrl = started.authorize_url;
+        spinner.stop();
+      } catch (error) {
+        failWithApiError(spinner, error, "Could not start the ORCID flow");
+        return;
+      }
+
+      console.log();
+      console.log("  Open this link and sign in with ORCID:");
+      console.log(`    ${chalk.cyan(authorizeUrl)}`);
+      console.log(chalk.dim("  The link is good for 10 minutes and works only for this account."));
+      if (options.open !== false && openInBrowser(authorizeUrl)) {
+        console.log(chalk.dim("  (opening it in your browser)"));
+      }
+      console.log();
+
+      const timeoutSeconds = Number.parseInt(options.timeout ?? "300", 10);
+      const waitSpinner = ora("Waiting for you to finish in the browser...").start();
+      const linked = await waitForOrcidLink(
+        previousOrcid,
+        (Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? timeoutSeconds : 300) * 1000,
+      );
+      if (linked) {
+        waitSpinner.succeed(`ORCID iD ${linked} is linked to your account`);
+        await refreshStoredAccount();
+        console.log(chalk.dim(`  ${SETTINGS_HINT}`));
+        return;
+      }
+      waitSpinner.warn("Gave up waiting for the browser flow");
+      console.log();
+      console.log("  If you finished it, check with 'nemar auth profile'.");
+      console.log("  If the browser showed an error, run this command again.");
+      process.exitCode = 1;
+    },
+  );
+
+addVerboseHelp(
+  profileOrcidCmd,
+  `
+Description:
+  ORCID stays a browser flow: the consent screen is ORCID's, and no NEMAR
+  command should ever ask for an ORCID password. This mints a short-lived link
+  for THIS account, opens it if it can, and then waits for the iD to appear.
+
+  link     attach an ORCID iD to an account that has none
+  relink   replace the linked iD with a different one
+  unlink   remove the link (and the iD this account claims)
+
+  An iD backs at most one NEMAR account. If it is already linked elsewhere,
+  unlink it there first.
+
+  The link URL is printed whether or not a browser opens, so a headless or
+  remote machine is a copy-and-paste rather than a dead end.
+
+Examples:
+  $ nemar auth profile orcid link
+  $ nemar auth profile orcid relink --no-open
+  $ nemar auth profile orcid unlink --yes`,
 );

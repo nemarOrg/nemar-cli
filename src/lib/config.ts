@@ -101,6 +101,14 @@ const accountSchema = z.object({
    * report a role without an extra network call.
    */
   role: z.string().optional(),
+  /**
+   * The address `nemar auth profile set-email` last sent a code to (#1266).
+   * Remembered so `verify-email <code>` needs only the code, the way the
+   * website's Settings form remembers it across the two steps. Cleared on a
+   * successful verification; harmless if stale, since the code is bound to
+   * both the address and the account and simply will not verify.
+   */
+  pendingEmailChange: z.string().email().optional(),
 });
 
 export type Config = z.infer<typeof accountSchema>;

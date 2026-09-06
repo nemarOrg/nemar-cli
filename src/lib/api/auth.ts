@@ -303,3 +303,120 @@ export async function requestUploadAccess(why: string): Promise<UploadAccessRequ
     true,
   );
 }
+
+// ============================================================================
+// Self-service identity edits (#1266, epic #1250; ADR 0044)
+// ============================================================================
+//
+// The same routes the website's Settings page uses, reached with the CLI's
+// bearer token instead of a session cookie. Every refusal arrives as an
+// ApiError whose message is the backend's own sentence: the bodies carry a
+// machine code in `error` and the sentence in `message`, and client.ts prefers
+// the latter for the codes declared in shared/contract (identity.ts and
+// user.ts).
+
+export interface EmailChangeRequestResponse {
+  ok: true;
+  /** The new address, masked, for echoing back to the user. */
+  masked_email: string;
+  /** Non-production only, and only for a synthetic test target: the echo IS
+   *  the delivery there (the dev worker must not mail real addresses). */
+  dev_code?: string;
+  /** Non-production: the target was not allow-listed, so nothing was sent. */
+  dev_skip?: string;
+}
+
+/** Step 1 of an email change: mail a 6-digit code to the NEW address. */
+export async function requestEmailChange(email: string): Promise<EmailChangeRequestResponse> {
+  return request<EmailChangeRequestResponse>(
+    "/auth/email/change/request",
+    {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    },
+    true,
+  );
+}
+
+export interface EmailChangeVerifyResponse {
+  ok: true;
+  /**
+   * Whether the PREVIOUS address was told the account email moved (#1054).
+   * `false` is not a failure of the change -- the change has landed either
+   * way -- but it is worth saying out loud, because the notice is the only
+   * thing that would reach a legitimate owner if this were not them.
+   * Optional: a backend deployed before #1266 does not send it.
+   */
+  old_address_notified?: boolean;
+}
+
+/** Step 2: redeem the code and move `users.email`. */
+export async function verifyEmailChange(
+  email: string,
+  code: string,
+): Promise<EmailChangeVerifyResponse> {
+  return request<EmailChangeVerifyResponse>(
+    "/auth/email/change/verify",
+    {
+      method: "POST",
+      body: JSON.stringify({ email, code }),
+    },
+    true,
+  );
+}
+
+/** Any subset of the self-editable profile fields; absent keys are untouched. */
+export interface ProfilePatchRequest {
+  github_username?: string;
+  username?: string;
+  given_name?: string;
+  family_name?: string;
+  city?: string;
+  country?: string;
+  affiliation?: string;
+}
+
+export interface ProfileUpdateResponse {
+  ok: true;
+}
+
+/** Edit the account's own profile fields (`PATCH /auth/profile`). */
+export async function updateProfile(patch: ProfilePatchRequest): Promise<ProfileUpdateResponse> {
+  return request<ProfileUpdateResponse>(
+    "/auth/profile",
+    {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    },
+    true,
+  );
+}
+
+export interface OrcidCliStartResponse {
+  /** Open this in a browser; it sets the state cookie and bounces to ORCID. */
+  authorize_url: string;
+  /** Seconds the intent stays usable. */
+  expires_in: number;
+  mode: "link" | "relink";
+}
+
+/**
+ * Mint a browser-openable ORCID link (or relink) intent for this account.
+ * ORCID cannot be completed in a terminal — this is the handoff, and the
+ * callback finishes the link for the account the intent names.
+ */
+export async function startOrcidCliLink(mode: "link" | "relink"): Promise<OrcidCliStartResponse> {
+  return request<OrcidCliStartResponse>(
+    "/auth/orcid/cli-start",
+    {
+      method: "POST",
+      body: JSON.stringify({ mode }),
+    },
+    true,
+  );
+}
+
+/** Remove the ORCID link (identity row, `users.orcid`, `orcid_verified`). */
+export async function unlinkOrcid(): Promise<{ ok: true }> {
+  return request<{ ok: true }>("/auth/orcid/unlink", { method: "POST" }, true);
+}
