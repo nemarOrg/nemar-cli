@@ -18,6 +18,7 @@ import { registerNoticeRoutes } from "./notices";
 import { registerPublishRoutes } from "./publish";
 import type { AdminRouter } from "./shared";
 import { registerUserNameRoutes } from "./user-names";
+import { registerUserUsernameRoutes } from "./user-usernames";
 import { registerUsersRoutes } from "./users";
 import { registerWithdrawRoutes } from "./withdraw";
 import { registerZarrCatalogRoutes } from "./zarr-catalog";
@@ -31,6 +32,7 @@ adminRoutes.use("*", adminMiddleware);
 
 registerUsersRoutes(adminRoutes);
 registerUserNameRoutes(adminRoutes);
+registerUserUsernameRoutes(adminRoutes);
 registerDoiRoutes(adminRoutes);
 registerFleetRoutes(adminRoutes);
 registerPublishRoutes(adminRoutes);
