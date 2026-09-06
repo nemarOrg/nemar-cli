@@ -38,6 +38,11 @@ const ORCID_VERIFIED_LINE =
   "Verified ORCID iD is missing: needed to request upload access. Set it in Settings or run `nemar auth profile orcid link`.";
 const SANDBOX_LINE =
   "Sandbox training is missing: needed to upload a dataset from the CLI. Run `nemar sandbox`.";
+/** The third state of the same fact (#1274): the cache is silent and the
+ *  backend could not be asked. Spelled out here for the same reason as every
+ *  other line in this block -- so the test fails when the copy moves. */
+const SANDBOX_UNCHECKED_LINE =
+  "Sandbox training could not be confirmed with the server. Run `nemar sandbox status --refresh`, then `nemar sandbox` if it is still outstanding.";
 const NOTHING_LINE = "Nothing outstanding — every field NEMAR needs is filled in.";
 const NOT_CHECKED_LINE = "not checked: run 'nemar auth status --refresh'";
 const UNREPORTED_LINE = "not reported by this backend";
@@ -60,6 +65,9 @@ interface UserOptions {
    *  surface that renders a REFUSAL's `missing` rather than `profile_gaps`.
    *  Absent leaves the endpoint unserved, which no other test here calls. */
   refusal?: { error: string; message: string; missing: string[] };
+  /** `"fail"` makes GET /sandbox/status 500 while everything else still works,
+   *  which is the "nobody could check" branch of the sandbox gate (#1274). */
+  sandbox_status?: "fail";
 }
 
 /** Serves the real /users/me envelope shape: `{ user, token }`. */
@@ -70,6 +78,18 @@ function startMeServer(options: UserOptions = {}) {
       const url = new URL(req.url);
       if (url.pathname === "/notices") return Response.json({ notices: [] });
       if (url.pathname === "/datasets/facets") return Response.json({});
+      // The endpoint the sandbox gate falls back to when the local cache is
+      // silent (#1274). Same `sandbox_completed` the user payload reports, so
+      // a fixture cannot describe an account two ways at once.
+      if (url.pathname === "/sandbox/status") {
+        if (options.sandbox_status === "fail") {
+          return Response.json({ error: "Database is having a moment" }, { status: 500 });
+        }
+        return Response.json({
+          sandbox_completed: options.sandbox_completed ?? true,
+          sandbox_dataset_id: "xx090001",
+        });
+      }
       if (url.pathname === "/users/me/upload-access/request" && options.refusal) {
         return Response.json(options.refusal, { status: 400 });
       }
@@ -468,6 +488,91 @@ describe("the orcid_verified row reaches every surface (#1271)", () => {
   });
 });
 
+describe("nemar dataset upload: the sandbox gate (#1274)", () => {
+  const NO_SUCH_PATH = join(tmpdir(), "nemar-no-such-dataset-dir");
+
+  test("a cache miss asks the backend, and a trained account is let through", async () => {
+    // The bug: `sandboxCompleted` is a local cache, ABSENT on a fresh install,
+    // on a second machine and after any config reset -- and the gate read that
+    // absence as a definitive "you have not trained", sending someone who
+    // trained months ago back through training. (A stored `false` is a
+    // different thing entirely: it is the server's own answer, and is still
+    // taken at face value -- pinned in the preflight block below.)
+    //
+    // Every fixture here therefore seeds the config WITHOUT `sandboxCompleted`.
+    seedAuthenticatedConfig();
+    const server = startMeServer({ service_access: true, sandbox_completed: true });
+    try {
+      const result = await runCli(["dataset", "upload", NO_SUCH_PATH], server.url);
+      expect(result.all).not.toContain(SANDBOX_LINE);
+      expect(result.all).not.toContain(SANDBOX_UNCHECKED_LINE);
+      // Got past the gate: the next step ran.
+      expect(result.all).toContain(CONTINUED_MARKER);
+      // ...and the answer was cached, so the next command costs no round trip.
+      expect(storedAccount().sandboxCompleted).toBe(true);
+      expect(storedAccount().sandboxDatasetId).toBe("xx090001");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a cache miss that the backend confirms is still a stop", async () => {
+    // The gate has to keep working for the account it was written for: nothing
+    // above turns "not trained" into a pass.
+    seedAuthenticatedConfig();
+    const server = startMeServer({ service_access: true, sandbox_completed: false });
+    try {
+      const result = await runCli(["dataset", "upload", NO_SUCH_PATH], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.all).toContain(SANDBOX_LINE);
+      expect(result.all).not.toContain(CONTINUED_MARKER);
+      expect(storedAccount().sandboxCompleted).toBe(false);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("nemar sandbox recognises training that was done on another machine", async () => {
+    // The other half of the same bug: with no cached flag, `nemar sandbox`
+    // walked a trained user back through the whole training run rather than
+    // telling them it was already done.
+    seedAuthenticatedConfig();
+    const server = startMeServer({ sandbox_completed: true });
+    try {
+      const result = await runCli(["sandbox"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(result.all).toContain("Sandbox training already completed!");
+      expect(result.all).toContain("xx090001");
+      // It stopped there: the run never started.
+      expect(result.all).not.toContain("Checking prerequisites");
+      expect(storedAccount().sandboxCompleted).toBe(true);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a cache miss nobody can resolve blocks with the re-check, not the re-training", async () => {
+    // Unconfirmed is not "not done". The stop stands -- nothing but this gate
+    // enforces training from the CLI -- but the sentence sends the user to a
+    // status refresh first, which is the step that actually helps an account
+    // that trained elsewhere.
+    seedAuthenticatedConfig();
+    const server = startMeServer({ service_access: true, sandbox_status: "fail" });
+    try {
+      const result = await runCli(["dataset", "upload", NO_SUCH_PATH], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.all).toContain(SANDBOX_UNCHECKED_LINE);
+      // NOT the "is missing" sentence: the CLI does not know that.
+      expect(result.all).not.toContain(SANDBOX_LINE);
+      expect(result.all).not.toContain(CONTINUED_MARKER);
+      // Nothing was cached from a failed read.
+      expect(storedAccount().sandboxCompleted).toBeUndefined();
+    } finally {
+      server.stop();
+    }
+  });
+});
+
 describe("nemar dataset upload: the upload-access preflight", () => {
   const NO_SUCH_PATH = join(tmpdir(), "nemar-no-such-dataset-dir");
 
@@ -577,6 +682,9 @@ describe("nemar dataset upload: the upload-access preflight", () => {
   });
 
   test("sandbox training is still the CLI-only gate, in the shared sentence", async () => {
+    // A STORED `false` -- the server's answer, cached. Still authoritative
+    // after #1274, which only made the ABSENT case ask; so this path costs no
+    // network call, and the assertion below still holds.
     seedAuthenticatedConfig({ sandboxCompleted: false });
     const server = startMeServer({ service_access: true, profile_gaps: [] });
     try {

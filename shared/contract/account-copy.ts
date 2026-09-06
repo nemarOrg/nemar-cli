@@ -247,6 +247,14 @@ export const ACCOUNT_COPY = {
   "cli.gap.field.sandbox.label": "Sandbox training",
   "cli.gap.blocks.sandbox": "to upload a dataset from the CLI",
   "cli.gap.field.sandbox.set_on.cli": "nemar sandbox",
+  // The third state of the same fact (#1274). Training is recorded on the
+  // account, and the CLI keeps a local copy of that boolean; a fresh install
+  // has no copy, so the gate asks the backend. When the backend cannot be
+  // asked, the refusal stands but the advice changes: re-check, because
+  // "unconfirmed" is not "not done", and re-training an already-trained
+  // account is the wrong first move.
+  "cli.gaps.sandbox_unchecked":
+    "Sandbox training could not be confirmed with the server. Run `nemar sandbox status --refresh`, then `nemar sandbox` if it is still outstanding.",
 
   // `nemar dataset upload` preflight, before validation runs.
   "cli.upload.preflight.title": "Upload access is not granted yet",

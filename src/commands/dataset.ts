@@ -26,7 +26,10 @@ import { Command, Option } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
 import { formatBytesCli } from "../../shared/bytes.js";
-import { describeSandboxGap } from "../../shared/contract/profile-gaps.js";
+import {
+  describeSandboxGap,
+  describeUncheckedSandboxGap,
+} from "../../shared/contract/profile-gaps.js";
 import { LICENSE_TIERS } from "../../shared/license-tiers.js";
 import { RangeParseError } from "../../shared/range.js";
 import { addCi } from "../lib/api/admin.js";
@@ -76,7 +79,7 @@ import {
 } from "../lib/bids-validator.js";
 import { printPartialRetrieval, requireAuth } from "../lib/cli-output.js";
 import { triggerOpportunisticRefresh } from "../lib/completion/refresh.js";
-import { getConfig, isAuthenticated, isSandboxCompleted } from "../lib/config.js";
+import { getConfig, isAuthenticated } from "../lib/config.js";
 import { NO_DESCRIPTION, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
 import {
   type LocalDatasetConfig,
@@ -158,6 +161,7 @@ import { checkPrerequisitesForCommand } from "../lib/prerequisites.js";
 import { DownloadProgressTracker } from "../lib/progress.js";
 import { promptForProvenance } from "../lib/provenance.js";
 import { renderSnippetLine, truncateTokenList } from "../lib/render/snippet.js";
+import { resolveSandboxCompletion } from "../lib/sandbox-status.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
 import { theme } from "../lib/theme.js";
 import type { UploadProgress } from "../lib/upload-progress.js";
@@ -550,10 +554,28 @@ Examples:
 
     // Step 1b: Check sandbox training. CLI-only, and stated in the one sentence
     // every other gap is stated in (#1268, ADR 0045) -- see describeSandboxGap.
-    if (!isSandboxCompleted()) {
+    //
+    // The local flag is a CACHE, not the record (#1274): it is empty on a
+    // fresh install, on a second machine and after a config reset, and reading
+    // it as a definitive "no" told people who had trained to train again. A
+    // miss asks the backend, which owns the fact.
+    const sandbox = await resolveSandboxCompletion();
+    if (sandbox.status === "not_completed") {
       console.log(chalk.yellow(describeSandboxGap()));
       console.log();
       console.log("It verifies your setup and familiarizes you with the workflow.");
+      process.exit(1);
+    }
+    if (sandbox.status === "unknown") {
+      // Still a stop -- unconfirmed is not confirmed, and the upload needs the
+      // setup training verifies -- but the advice is to re-check rather than
+      // to re-train, which is the wrong first move for an account that has
+      // already done it. (The upload-access step below fails OPEN because a
+      // grant it cannot read is one the SERVER will still enforce; nothing
+      // enforces sandbox training but this gate, so it fails closed.)
+      console.log(chalk.yellow(describeUncheckedSandboxGap()));
+      console.log(chalk.dim(`  ${sandbox.reason}`));
+      console.log();
       process.exit(1);
     }
 

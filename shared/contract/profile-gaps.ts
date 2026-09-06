@@ -605,3 +605,16 @@ export function describeSandboxGap(): string {
   });
   return `${need} ${setOn}`;
 }
+
+/**
+ * The same gap when nobody could check it (#1274).
+ *
+ * NOT {@link describeSandboxGap}: that sentence asserts the training is
+ * missing, and the CLI cannot know that from a cache miss plus a failed
+ * fetch. This one says what is true -- the answer is unconfirmed -- and puts
+ * the re-check ahead of the re-training, because an account that trained on
+ * another machine needs the first and not the second.
+ */
+export function describeUncheckedSandboxGap(): string {
+  return ACCOUNT_COPY["cli.gaps.sandbox_unchecked"];
+}
