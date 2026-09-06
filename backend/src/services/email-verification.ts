@@ -31,6 +31,7 @@ import {
   USER_BOUND_CODE_INSERT_SQL,
   generateAuthCode,
   hashAuthCode,
+  maskEmail,
   nonProdCodeEchoAllowed,
 } from "./auth-code";
 import {
@@ -130,13 +131,24 @@ export async function issueEmailVerificationCode(
         env,
       );
     } catch (emailError) {
-      console.error("[email-verification] failed to send verification code email", emailError);
+      // Named: this is per-user work, and "a code failed to send" with no
+      // account attached cannot be chased. The address is MASKED rather than
+      // logged whole (maskEmail, the same treatment the code endpoints give a
+      // recipient) -- the domain is what an operator needs to see a bounce
+      // pattern, the local part is the user's.
+      console.error(
+        `[email-verification] failed to send verification code email to ${maskEmail(email)} (user id=${userId})`,
+        emailError,
+      );
       await db
         .prepare("DELETE FROM auth_codes WHERE id = ?")
         .bind(newCodeId)
         .run()
         .catch((cleanupErr) =>
-          console.error("[email-verification] failed to roll back auth_codes row", cleanupErr),
+          console.error(
+            `[email-verification] failed to roll back auth_codes row id=${newCodeId} (user id=${userId}); an undeliverable code is left live until it expires`,
+            cleanupErr,
+          ),
         );
       return { ok: false, error: "send_failed" };
     }
@@ -269,6 +281,6 @@ export async function notifyAdminsOfVerifiedAccount(
       env,
     );
   } catch (err) {
-    console.error("[email-verification] admin notification failed", err);
+    console.error(`[email-verification] admin notification failed for user id=${user.id}`, err);
   }
 }

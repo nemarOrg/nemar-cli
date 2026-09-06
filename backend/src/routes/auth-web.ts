@@ -1170,7 +1170,12 @@ async function restoreConsumedCode(db: D1Database, codeId: number, email: string
     )
     .bind(codeId, email, codeId)
     .run()
-    .catch((err) => console.error("[auth-web] failed to restore a consumed code", err));
+    .catch((err) =>
+      // With the code id: a restore that failed leaves one specific row spent,
+      // and the user who typed it correctly is told to request a new one. The
+      // id is what connects this line to that person's next support message.
+      console.error(`[auth-web] failed to restore a consumed code id=${codeId}`, err),
+    );
 }
 
 /**
@@ -1217,6 +1222,7 @@ const SAME_EMAIL_REFUSAL = profileRefusal(
  */
 async function notifyOldAddressOfEmailChange(
   c: { env: Bindings },
+  userId: number,
   oldEmail: string,
   newEmail: string,
 ): Promise<boolean> {
@@ -1233,8 +1239,11 @@ async function notifyOldAddressOfEmailChange(
     );
     return true;
   } catch (err) {
+    // The account id, because this mail is the ONLY channel that reaches a
+    // legitimate owner whose address was moved out from under them: a failure
+    // here is one an operator may have to act on, and it has to name whom.
     console.error(
-      "[auth-web] /email/change/verify: could not notify the previous address (the change DID land)",
+      `[auth-web] /email/change/verify: could not notify the previous address of user id=${userId} (the change DID land)`,
       err,
     );
     return false;
@@ -1599,7 +1608,12 @@ authWebRoutes.post(
       // DEV_EMAIL_ALLOWLIST -- the old address is a REAL one on the dev
       // mirror's ~609 rows, and this is the one send in the flow whose
       // target the caller did not choose.
-      const oldAddressNotified = await notifyOldAddressOfEmailChange(c, actor.email, email);
+      const oldAddressNotified = await notifyOldAddressOfEmailChange(
+        c,
+        actor.id,
+        actor.email,
+        email,
+      );
 
       const user = await fetchPublicUserById(db, actor.id);
       if (!user) {
@@ -1607,7 +1621,7 @@ authWebRoutes.post(
       }
       return c.json({ ok: true, user, old_address_notified: oldAddressNotified });
     } catch (err) {
-      console.error("[auth-web] /email/change/verify failed", err);
+      console.error(`[auth-web] /email/change/verify failed for user id=${actor.id}`, err);
       return c.json({ error: "Verification failed" }, 500);
     }
   },
@@ -1674,7 +1688,7 @@ authWebRoutes.post("/email/verify/request", webSessionMiddleware, async (c) => {
     }
     return c.json(body);
   } catch (err) {
-    console.error("[auth-web] /email/verify/request failed", err);
+    console.error(`[auth-web] /email/verify/request failed for user id=${webUser.id}`, err);
     return c.json({ error: "Failed to send code" }, 500);
   }
 });

@@ -703,7 +703,9 @@ authRoutes.get("/verify", async (c) => {
       console.error(`RESEND_API_KEY unset; key-ready email not sent for user id=${user.id}`);
     }
   } catch (emailError) {
-    console.error("Failed to send key-ready email:", emailError);
+    // With the id: this runs per user, and a failure nobody can attribute to
+    // an account is a failure nobody can follow up on.
+    console.error(`Failed to send key-ready email for user id=${user.id}:`, emailError);
   }
 
   // Notify admins who have user_approval notifications enabled

@@ -879,7 +879,13 @@ export function registerUsersRoutes(admin: AdminRouter): void {
             .run();
           tokensRevoked = result.meta.changes ?? 0;
         } catch (error) {
-          console.error(`SECURITY: Failed to revoke tokens for demoted user ${username}:`, error);
+          // The id as well as the handle: a username can be renamed or nulled,
+          // and this line is the record of a demoted account that may still
+          // hold a live token.
+          console.error(
+            `SECURITY: Failed to revoke tokens for demoted user ${username} (id=${target.id}):`,
+            error,
+          );
           tokenRevocationFailed = true;
         }
       }

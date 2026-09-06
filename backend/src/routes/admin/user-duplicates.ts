@@ -326,7 +326,7 @@ export function registerUserDuplicateRoutes(admin: AdminRouter): void {
       }
       return c.json({ ok: true, id, cleared: true });
     } catch (err) {
-      console.error("[admin/user-duplicates] clear failed", err);
+      console.error(`[admin/user-duplicates] clear failed for user id=${id}`, err);
       return c.json({ error: "Failed to clear identity conflict" }, 500);
     }
   });
