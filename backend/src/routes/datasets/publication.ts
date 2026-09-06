@@ -76,10 +76,22 @@ const BLOCK_MESSAGES: Record<PublicationBlockReason, string> = {
   [OWNER_NAME_MISSING_REASON]: OWNER_NAME_MISSING_MESSAGE,
 };
 
-/** Message for a stored block_reason, or a generic one for an unknown value. */
+/**
+ * Message for a stored block_reason, or a generic one for an unknown value.
+ *
+ * `Object.hasOwn`, not a bare index. `block_reason` is a free-TEXT column, so
+ * the lookup key is whatever is in the database -- and a plain index on an
+ * object literal also finds `Object.prototype`'s members, so a row reading
+ * `constructor` or `toString` would return a FUNCTION where the caller expects
+ * a sentence. `??` cannot rescue that: the value is not nullish. The website's
+ * own copy of this table caught it in their tests (nemarOrg/website#306).
+ */
 function blockMessage(reason: string | null | undefined): string {
-  const known = (BLOCK_MESSAGES as Record<string, string>)[reason ?? ""];
-  return known ?? "Publication request blocked.";
+  const key = reason ?? "";
+  if (Object.hasOwn(BLOCK_MESSAGES, key)) {
+    return (BLOCK_MESSAGES as Record<string, string>)[key];
+  }
+  return "Publication request blocked.";
 }
 
 export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {

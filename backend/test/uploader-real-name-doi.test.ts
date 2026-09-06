@@ -35,6 +35,7 @@ import { bidsToDataCite, buildDataCiteXml } from "../src/services/datacite";
 import { buildOrcidEnrichment } from "../src/services/doi";
 import { hashApiKey } from "../src/services/token";
 import {
+  OWNER_NAME_MISSING_MESSAGE,
   OWNER_NAME_MISSING_REASON,
   refreshWouldStripAttribution,
   requiresUploaderName,
@@ -157,6 +158,57 @@ beforeEach(async () => {
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/datasets", datasetRoutes);
   app.route("/admin", adminRoutes);
+});
+
+describe("GET /datasets/:id/publish/status: an unrecognised block reason", () => {
+  function get(path: string, key: string): Promise<Response> {
+    return app.request(path, { headers: { Authorization: `Bearer ${key}` } }, env());
+  }
+
+  /** A blocked request carrying `reason` verbatim. `block_reason` is free TEXT
+   *  (migration 0015), so any string can genuinely be in there. */
+  function seedBlockedRequest(reason: string): void {
+    db.query(
+      `INSERT INTO publication_requests (dataset_id, status, requested_at, requested_by,
+                                         block_reason, updated_at)
+       VALUES (?, 'blocked', datetime('now'), ?, ?, datetime('now'))`,
+    ).run(DATASET_ID, ownerId, reason);
+  }
+
+  test("a reason named after an Object prototype member degrades to text", async () => {
+    // `BLOCK_MESSAGES[reason]` on a plain object literal also finds
+    // Object.prototype's members, so a row reading "constructor" returned a
+    // FUNCTION where the caller expects a sentence -- and `??` cannot rescue
+    // it, because a function is not nullish. Caught by the website's copy of
+    // this table (nemarOrg/website#306).
+    await seedOwner();
+    seedDataset();
+    seedBlockedRequest("constructor");
+
+    const body = await (await get(`/datasets/${DATASET_ID}/publish/status`, OWNER_KEY)).json();
+    expect(body.message).toBe("Publication request blocked.");
+    expect(typeof body.message).toBe("string");
+  });
+
+  test("the same holds for toString", async () => {
+    await seedOwner();
+    seedDataset();
+    seedBlockedRequest("toString");
+
+    const body = await (await get(`/datasets/${DATASET_ID}/publish/status`, OWNER_KEY)).json();
+    expect(body.message).toBe("Publication request blocked.");
+  });
+
+  test("a real reason still renders its own message", async () => {
+    // Guards the fix against being a blanket fallback: the lookup must still
+    // find the entries the table actually owns.
+    await seedOwner();
+    seedDataset();
+    seedBlockedRequest(OWNER_NAME_MISSING_REASON);
+
+    const body = await (await get(`/datasets/${DATASET_ID}/publish/status`, OWNER_KEY)).json();
+    expect(body.message).toBe(OWNER_NAME_MISSING_MESSAGE);
+  });
 });
 
 describe("DataCite XML built from a real owner row", () => {
