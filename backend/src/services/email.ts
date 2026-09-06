@@ -1581,6 +1581,71 @@ export async function sendEmailChangeCodeEmail(
 }
 
 /**
+ * Tell the PREVIOUS address that an account's sign-in email was changed
+ * (#1054; ADR 0044).
+ *
+ * NEMAR sign-in is passwordless for the dashboard and token-based for the
+ * CLI, so the old inbox is the only channel that can reach a legitimate owner
+ * whose address was moved out from under them with a stolen session or key.
+ * The change itself has already happened by the time this is sent -- this is
+ * a notice, not a confirmation step, and there is nothing to click.
+ *
+ * `maskedNewEmail` is deliberately masked by the caller (`maskEmail`): the
+ * person reading the old inbox may no longer be the account owner, which is
+ * the whole reason for the mail, and what they need is that the address
+ * changed rather than what it changed to.
+ */
+export async function sendEmailChangedNoticeEmail(
+  to: string,
+  maskedNewEmail: string,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<void> {
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #2563eb;">Your NEMAR account email was changed</h1>
+
+  <p>The sign-in email for your NEMAR account was changed from this address to <strong>${escapeHtml(maskedNewEmail)}</strong>.</p>
+
+  <p>This address can no longer be used to sign in to the account, and future NEMAR mail goes to the new one.</p>
+
+  <p style="background-color: #fef2f2; border-left: 4px solid #dc2626; padding: 12px 16px; margin: 24px 0;">
+    <strong>If this was not you</strong>, contact NEMAR support at
+    <a href="https://nemar.org/support" style="color: #dc2626;">nemar.org/support</a> right away and say which address this notice reached.
+  </p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource<br>
+    This is a security notice; there is nothing to confirm and no link to click.
+  </p>
+</body>
+</html>
+  `;
+
+  await sendEmail(
+    to,
+    "Your NEMAR account email was changed",
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+    deliveryEnv,
+  );
+}
+
+/**
  * Warn a dataset owner that their private, unpublished dataset is approaching
  * the 90-day inactivity deadline and will be removed unless they act (#662).
  * Sent at 30/14/7/2/1 days remaining; the 1-day notice uses urgent red styling

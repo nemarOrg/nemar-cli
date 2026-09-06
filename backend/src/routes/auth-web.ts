@@ -48,6 +48,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { auditLogStatement } from "../db/audit-log";
 import { timingSafeEqual } from "../lib/constant-time";
+import { resolveActingAccount } from "../middleware/auth";
 import { webSessionMiddleware } from "../middleware/webSession";
 import {
   CODE_TTL_MINUTES,
@@ -65,6 +66,7 @@ import {
 import {
   resolveEmailConfig,
   sendEmailChangeCodeEmail,
+  sendEmailChangedNoticeEmail,
   sendPasswordlessCodeEmail,
 } from "../services/email";
 import {
@@ -670,6 +672,12 @@ export const _profilePatchShapesAgree: MutuallyAssignable<
  * subset of github_username / city / country / affiliation / username /
  * given_name / family_name — see profile.ts for the per-field rules.
  *
+ * Two credentials, ONE handler (#1266, ADR 0044): the dashboard's
+ * `nemar_session` cookie or the CLI's bearer token, resolved by
+ * `resolveActingAccount`. Every rule and every refusal below is reached
+ * identically by both, which is the point — a forked CLI copy is how the two
+ * surfaces drift on what "your username is locked" means.
+ *
  * A changed GitHub handle gets the same three checks as CLI signup: direct
  * dup (COLLATE NOCASE, 409 even when the handle no longer resolves), live
  * existence against the GitHub API, and a canonical-login re-dedup when
@@ -699,13 +707,9 @@ authWebRoutes.patch(
   webSessionMiddleware,
   zValidator("json", profilePatchSchema),
   async (c) => {
-    if (!isAllowedOrigin(c.req.header("Origin"))) {
-      return c.json({ error: "Origin not allowed" }, 403);
-    }
-    const webUser = c.var.webUser;
-    if (!webUser) {
-      return c.json({ error: "Authentication required" }, 401);
-    }
+    const resolved = await resolveActingAccount(c);
+    if (!resolved.ok) return resolved.response;
+    const actor = resolved.actor;
 
     const normalized = normalizeProfilePatch(c.req.valid("json"));
     if (!normalized.ok) {
@@ -721,15 +725,15 @@ authWebRoutes.patch(
         patch.family_name !== undefined
       ) {
         // One read for both rules, and only when one of them is in the patch:
-        // a plain city/country save must not pay for it. `webUser` carries
-        // status and orcid_verified already but NOT username, and reading them
-        // from one statement keeps the three decisions consistent with each
-        // other rather than with two different moments.
+        // a plain city/country save must not pay for it. The credential —
+        // cookie or token — carries neither `username` nor `orcid_verified`,
+        // and reading them from one statement keeps the three decisions
+        // consistent with each other rather than with two different moments.
         const account = await db
           .prepare(
             "SELECT username, status, orcid, orcid_verified FROM users WHERE id = ? AND deleted_at IS NULL",
           )
-          .bind(webUser.id)
+          .bind(actor.id)
           .first<{
             username: string | null;
             status: string;
@@ -786,7 +790,7 @@ authWebRoutes.patch(
                   WHERE username = ? COLLATE NOCASE AND id != ? AND deleted_at IS NULL
                   LIMIT 1`,
               )
-              .bind(patch.username, webUser.id)
+              .bind(patch.username, actor.id)
               .first<{ id: number }>();
             if (taken) {
               return c.json(
@@ -815,7 +819,7 @@ authWebRoutes.patch(
 
       if (
         typeof patch.github_username === "string" &&
-        githubHandleChanged(patch.github_username, webUser.github_username)
+        githubHandleChanged(patch.github_username, actor.github_username)
       ) {
         const dup = await db
           .prepare(
@@ -823,7 +827,7 @@ authWebRoutes.patch(
               WHERE github_username = ? COLLATE NOCASE AND id != ? AND deleted_at IS NULL
               LIMIT 1`,
           )
-          .bind(patch.github_username, webUser.id)
+          .bind(patch.github_username, actor.id)
           .first<{ id: number }>();
         if (dup) {
           return c.json({ error: "github_in_use", ...identityRefusal("github_in_use") }, 409);
@@ -867,7 +871,7 @@ authWebRoutes.patch(
                 WHERE github_username = ? COLLATE NOCASE AND id != ? AND deleted_at IS NULL
                 LIMIT 1`,
             )
-            .bind(githubUser.login, webUser.id)
+            .bind(githubUser.login, actor.id)
             .first<{ id: number }>();
           if (canonicalDup) {
             return c.json({ error: "github_in_use", ...identityRefusal("github_in_use") }, 409);
@@ -911,7 +915,7 @@ authWebRoutes.patch(
       // here is re-submitting your own current username). Answer with the
       // current row rather than building `UPDATE users SET  WHERE ...`.
       if (sets.length === 0) {
-        const unchanged = await fetchPublicUserById(db, webUser.id);
+        const unchanged = await fetchPublicUserById(db, actor.id);
         if (!unchanged) return c.json({ error: "Account not found" }, 403);
         return c.json({ ok: true, user: unchanged });
       }
@@ -922,19 +926,19 @@ authWebRoutes.patch(
       await db.batch([
         db
           .prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ? AND deleted_at IS NULL`)
-          .bind(...binds, webUser.id),
+          .bind(...binds, actor.id),
         auditLogStatement(db, {
-          userId: webUser.id,
+          userId: actor.id,
           action: "profile_updated",
           resourceType: "user",
-          resourceId: String(webUser.id),
+          resourceId: String(actor.id),
           details: JSON.stringify(patch),
         }),
       ]);
 
       // Re-read so the response reflects what actually landed (the website
       // also re-reads /auth/me on reload; this keeps both in agreement).
-      const user = await fetchPublicUserById(db, webUser.id);
+      const user = await fetchPublicUserById(db, actor.id);
       if (!user) {
         // Session resolved but the row is gone (tombstoned mid-request).
         return c.json({ error: "Account not found" }, 403);
@@ -1050,6 +1054,58 @@ const CODE_EXPIRED_BODY = {
   message: "That code has expired or has already been used. Request a new one.",
 } as const;
 
+/**
+ * The `same_email` refusal, with a sentence.
+ *
+ * It shipped as a bare `{ error: "same_email" }`, which the website could
+ * switch on and a terminal could only print as the word "same_email" (#1266).
+ * `error` keeps the code the website already reads; `message` is additive.
+ */
+const SAME_EMAIL_REFUSAL = {
+  code: "same_email",
+  message: "That is already the address on this account.",
+} as const;
+
+/**
+ * Tell the PREVIOUS address that the account's sign-in email moved (#1054).
+ *
+ * Never throws and never blocks: the change has already committed when this
+ * runs, so the only question left is whether the old inbox heard about it.
+ * Returns that answer so the route can report `old_address_notified` rather
+ * than leaving the caller to assume a send that may have been fenced (a
+ * non-production worker refuses any recipient off DEV_EMAIL_ALLOWLIST) or
+ * refused by Resend.
+ *
+ * The new address is MASKED in the notice: whoever reads the old inbox may no
+ * longer be the account owner -- that is precisely the case this mail exists
+ * for -- and they need to know the address changed, not what it changed to.
+ */
+async function notifyOldAddressOfEmailChange(
+  c: { env: Bindings },
+  oldEmail: string,
+  newEmail: string,
+): Promise<boolean> {
+  try {
+    const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
+    await sendEmailChangedNoticeEmail(
+      oldEmail,
+      maskEmail(newEmail),
+      c.env.RESEND_API_KEY,
+      fromEmail,
+      replyTo,
+      isDev,
+      c.env,
+    );
+    return true;
+  } catch (err) {
+    console.error(
+      "[auth-web] /email/change/verify: could not notify the previous address (the change DID land)",
+      err,
+    );
+    return false;
+  }
+}
+
 /** Re-read a user by id and shape the dashboard payload (same SELECT the
  *  /code/verify path runs by email). Null when the row is gone/tombstoned. */
 async function fetchPublicUserById(
@@ -1116,6 +1172,11 @@ async function fetchPublicUserById(
  * auth_codes table and the /code/request mechanics (atomic rate-limited
  * insert, rotation, rollback-on-send-failure, dev_code echo rules).
  *
+ * Cookie OR bearer token since #1266 (ADR 0044) — the same handler either
+ * way. What the credential decides is only WHOSE account is acting; the code
+ * still goes to the new address and is still bound to that account, so a
+ * token can no more redeem someone else's code than a session can.
+ *
  * Purpose-mixing with sign-in codes is structurally impossible, twice over:
  * a change code is only ever issued for an address with NO users row
  * (collisions are refused here), while /code/verify requires a users row for
@@ -1128,19 +1189,15 @@ authWebRoutes.post(
   webSessionMiddleware,
   zValidator("json", emailSchema),
   async (c) => {
-    if (!isAllowedOrigin(c.req.header("Origin"))) {
-      return c.json({ error: "Origin not allowed" }, 403);
-    }
-    const webUser = c.var.webUser;
-    if (!webUser) {
-      return c.json({ error: "Authentication required" }, 401);
-    }
+    const resolved = await resolveActingAccount(c);
+    if (!resolved.ok) return resolved.response;
+    const actor = resolved.actor;
     const { email } = c.req.valid("json");
     const db = c.env.DB;
 
     try {
-      if (email === webUser.email.toLowerCase()) {
-        return c.json({ error: "same_email" }, 409);
+      if (email === actor.email.toLowerCase()) {
+        return c.json({ error: "same_email", ...SAME_EMAIL_REFUSAL }, 409);
       }
       // Deliberate, bounded enumeration tradeoff (PR #1053 review): unlike
       // /code/request's #595 silent skip, this DOES tell the caller whether
@@ -1183,12 +1240,12 @@ authWebRoutes.post(
           email,
           codeHash,
           expiresAt,
-          webUser.id,
+          actor.id,
           email,
           PER_MINUTE_LIMIT,
           email,
           PER_HOUR_LIMIT,
-          webUser.id,
+          actor.id,
           PER_HOUR_LIMIT,
         )
         .run();
@@ -1205,7 +1262,7 @@ authWebRoutes.post(
           `UPDATE auth_codes SET used_at = datetime('now')
             WHERE email = ? AND user_id = ? AND used_at IS NULL AND id != ?`,
         )
-        .bind(email, webUser.id, newCodeId)
+        .bind(email, actor.id, newCodeId)
         .run();
 
       // #1008 + #957: same echo-skips-the-send reasoning as /code/request
@@ -1267,26 +1324,27 @@ authWebRoutes.post(
  * new address (same compare/attempts/consume semantics as /code/verify),
  * then moves users.email in the same D1 batch as the audit row. The session
  * cookie is NOT rotated: web_sessions reference the user id, not the email,
- * so every existing session stays valid across the change.
+ * so every existing session stays valid across the change. Nor is the API
+ * token: `tokens` references the user id too, so a CLI that changed its
+ * address keeps working with the key it already has.
+ *
+ * On success the PREVIOUS address is told (#1054) — best-effort, reported as
+ * `old_address_notified`, never a reason to fail a change that has landed.
  */
 authWebRoutes.post(
   "/email/change/verify",
   webSessionMiddleware,
   zValidator("json", emailChangeVerifySchema),
   async (c) => {
-    if (!isAllowedOrigin(c.req.header("Origin"))) {
-      return c.json({ error: "Origin not allowed" }, 403);
-    }
-    const webUser = c.var.webUser;
-    if (!webUser) {
-      return c.json({ error: "Authentication required" }, 401);
-    }
+    const resolved = await resolveActingAccount(c);
+    if (!resolved.ok) return resolved.response;
+    const actor = resolved.actor;
     const { email, code } = c.req.valid("json");
     const db = c.env.DB;
 
     try {
-      if (email === webUser.email.toLowerCase()) {
-        return c.json({ error: "same_email" }, 409);
+      if (email === actor.email.toLowerCase()) {
+        return c.json({ error: "same_email", ...SAME_EMAIL_REFUSAL }, 409);
       }
       // Re-check the collision: an account for this address may have been
       // created between request and verify. Case-insensitive (ADR 0043), and
@@ -1300,7 +1358,7 @@ authWebRoutes.post(
 
       const row = await db
         .prepare(USER_BOUND_CODE_LOOKUP_SQL)
-        .bind(email, webUser.id)
+        .bind(email, actor.id)
         .first<{ id: number; code_hash: string; attempts: number }>();
       if (!row) {
         return c.json(CODE_EXPIRED_BODY, 401);
@@ -1341,13 +1399,13 @@ authWebRoutes.post(
         await db.batch([
           db
             .prepare("UPDATE users SET email = ?, email_verified = 1 WHERE id = ?")
-            .bind(email, webUser.id),
+            .bind(email, actor.id),
           auditLogStatement(db, {
-            userId: webUser.id,
+            userId: actor.id,
             action: "email_changed",
             resourceType: "user",
-            resourceId: String(webUser.id),
-            details: JSON.stringify({ from: webUser.email, to: email }),
+            resourceId: String(actor.id),
+            details: JSON.stringify({ from: actor.email, to: email }),
           }),
         ]);
       } catch (writeErr) {
@@ -1364,11 +1422,26 @@ authWebRoutes.post(
         throw writeErr;
       }
 
-      const user = await fetchPublicUserById(db, webUser.id);
+      // Tell the address that just LOST the account (#1054). In a
+      // passwordless architecture the old inbox is the only channel that can
+      // reach a legitimate owner whose sign-in address moved out from under
+      // them (a stolen session cookie, a stolen API token), and the audit row
+      // this route already writes is visible to nobody but an admin.
+      //
+      // Best-effort, and deliberately AFTER the write: the change has landed
+      // and is not reversible by a failed send, so a failure is logged and
+      // reported (`old_address_notified`) rather than 500ed. Off production
+      // `sendEmail`'s own fence refuses any recipient that is not on
+      // DEV_EMAIL_ALLOWLIST -- the old address is a REAL one on the dev
+      // mirror's ~609 rows, and this is the one send in the flow whose
+      // target the caller did not choose.
+      const oldAddressNotified = await notifyOldAddressOfEmailChange(c, actor.email, email);
+
+      const user = await fetchPublicUserById(db, actor.id);
       if (!user) {
         return c.json({ error: "Account not found" }, 403);
       }
-      return c.json({ ok: true, user });
+      return c.json({ ok: true, user, old_address_notified: oldAddressNotified });
     } catch (err) {
       console.error("[auth-web] /email/change/verify failed", err);
       return c.json({ error: "Verification failed" }, 500);
