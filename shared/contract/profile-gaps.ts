@@ -303,9 +303,11 @@ export interface ProfileGapEntry {
  * an entry it cannot use is dropped rather than fatal.
  *
  * The two schemas stay schemas — they validate, and a type cannot — but their
- * inferred types are pinned as assignable to this one at their declaration
- * sites, so a schema that tightened past what the readers accept fails to
- * compile.
+ * inferred types are checked at their declaration sites against
+ * {@link GapFieldsStayOptional}, so a schema that makes `blocks` or `set_on`
+ * required fails to compile. The runtime half of the same guarantee is
+ * test/contract-schemas.test.ts "a profile_gaps entry may carry only its
+ * field name".
  */
 export interface ProfileGapWireEntry {
   readonly field?: unknown;
@@ -313,10 +315,24 @@ export interface ProfileGapWireEntry {
   readonly set_on?: unknown;
 }
 
-/** Compile-time only: fails to compile unless `A` is assignable to `B`.
- *  Used at the two schema declarations to pin them to
- *  {@link ProfileGapWireEntry}. */
-export type AssignableTo<B, A extends B> = true;
+/**
+ * Compile-time only: resolves to `never` — and so fails to compile at a
+ * declaration site that assigns it `true` — the moment `blocks` or `set_on`
+ * stops accepting `undefined` on `T`.
+ *
+ * This is the guarantee `resolveWireProfileGaps` below and the config-cache
+ * reader (src/lib/config.ts) actually rest on: an entry naming only `field`
+ * must still parse and render, falling back to the matrix for whatever it
+ * omits. The declaration this replaced, `AssignableTo<ProfileGapWireEntry, T>`,
+ * never enforced that — every field on {@link ProfileGapWireEntry} is typed
+ * `unknown`, so any object shape is assignable to it, required fields
+ * included (checked against tsc 5.9.3 strict: making `blocks` required on
+ * `profileGapSchema` still passed the old check). This one reads the two
+ * fields it actually cares about off `T` directly instead of going through
+ * that interface.
+ */
+export type GapFieldsStayOptional<T extends { blocks?: unknown; set_on?: unknown }> =
+  undefined extends T["blocks"] ? (undefined extends T["set_on"] ? true : never) : never;
 
 /** Where a field can be set, given what owns the name on this account. */
 export function gapSurfaces(field: string, orcidVerified = false): GapSurface[] {

@@ -21,7 +21,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import Conf from "conf";
 import { z } from "zod";
-import type { AssignableTo, ProfileGapWireEntry } from "../../shared/contract/profile-gaps.js";
+import type { GapFieldsStayOptional } from "../../shared/contract/profile-gaps.js";
 
 export const DEFAULT_API_URL = "https://api.nemar.org";
 
@@ -94,10 +94,14 @@ const cachedProfileGapSchema = z
   })
   .passthrough();
 
-/** A cache entry must stay something the gap renderer can take; a tightening
- *  here stops compiling rather than throwing at a user's terminal. */
-export const _cachedProfileGapIsRenderable: AssignableTo<
-  ProfileGapWireEntry,
+/** A cache entry must stay something the gap renderer can take: neither
+ *  `blocks` nor `set_on` may become required, or a cache file missing either
+ *  key (an older build's, or one that never wrote it) would stop parsing
+ *  instead of falling back to the matrix. Fails to compile, not throw at a
+ *  user's terminal -- the runtime half of the same rule is
+ *  test/contract-schemas.test.ts "a profile_gaps entry may carry only its
+ *  field name". */
+export const _cachedProfileGapIsRenderable: GapFieldsStayOptional<
   z.infer<typeof cachedProfileGapSchema>
 > = true;
 

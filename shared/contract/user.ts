@@ -10,7 +10,7 @@
  */
 
 import { z } from "zod";
-import type { AssignableTo, ProfileGapWireEntry } from "./profile-gaps.js";
+import type { GapFieldsStayOptional } from "./profile-gaps.js";
 
 /**
  * What `users.status` holds — the account tier, declared once (#1268, ADR 0040).
@@ -86,10 +86,12 @@ export const profileGapSchema = z
   .passthrough();
 export type ProfileGapWire = z.infer<typeof profileGapSchema>;
 
-/** What this schema parses must remain something the renderers accept. The
- *  alias resolves to `never` and stops compiling if it tightens past
- *  `ProfileGapWireEntry` — the one declaration of that shape. */
-export const _profileGapWireIsRenderable: AssignableTo<ProfileGapWireEntry, ProfileGapWire> = true;
+/** What this schema parses must remain something the renderers accept: neither
+ *  `blocks` nor `set_on` may become required. The alias resolves to `never`
+ *  and stops compiling the moment either one does; the runtime half of the
+ *  same rule is test/contract-schemas.test.ts "a profile_gaps entry may carry
+ *  only its field name". */
+export const _profileGapWireIsRenderable: GapFieldsStayOptional<ProfileGapWire> = true;
 
 /** A NEMAR user as returned inside the /users/me envelope. */
 export const userSchema = z
