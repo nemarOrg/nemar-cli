@@ -47,6 +47,19 @@ let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
 /** Serves ORCID personal-details, ORCID /oauth/token, and GitHub /users/:login. */
 let external: Server;
+/**
+ * GitHub `/users/:login` hits since the last reset.
+ *
+ * This is what makes the signup PRE-CHECKS falsifiable at all. Migration
+ * 0077's partial unique indexes would reject a duplicate email or iD at the
+ * INSERT anyway, and signup's catch turns that into the same 409 body -- so a
+ * status-and-body assertion alone passes whether or not the pre-check exists.
+ * The pre-checks run BEFORE `validateGitHubUsername`, so the observable
+ * difference is that a refused signup spends no GitHub API call. That is also
+ * why they are ordered that way: a duplicate must not cost a rate-limited
+ * request against a shared token.
+ */
+let githubCalls = 0;
 let externalBase: string;
 /** Which iD the local ORCID token endpoint hands back for the next callback. */
 let tokenOrcid = OTHER_ORCID;
@@ -65,7 +78,10 @@ beforeAll(() => {
         });
       }
       const gh = url.pathname.match(/^\/users\/(.+)$/);
-      if (gh) return Response.json({ login: gh[1], id: 4242 });
+      if (gh) {
+        githubCalls += 1;
+        return Response.json({ login: gh[1], id: 4242 });
+      }
       return new Response("not found", { status: 404 });
     },
   });
@@ -97,6 +113,7 @@ function env(): Bindings {
 beforeEach(() => {
   db = freshDb();
   tokenOrcid = OTHER_ORCID;
+  githubCalls = 0;
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/auth", authRoutes);
   app.route("/auth", authOrcidRoutes);
@@ -199,6 +216,9 @@ describe("CLI signup refuses a duplicate identity", () => {
     expect(body.error).toBe("Email already registered");
     expect(body.message).toContain("nemar.org/settings");
     expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM users").get()?.n).toBe(2);
+    // Refused by the pre-check, not by the index at INSERT time: no GitHub
+    // call was spent. Without this the assertions above pass either way.
+    expect(githubCalls).toBe(0);
   });
 
   test("an iD held only through users.orcid is refused (the 42/43 hole)", async () => {
@@ -210,6 +230,7 @@ describe("CLI signup refuses a duplicate identity", () => {
     const body = (await res.json()) as { error: string; code: string; message: string };
     expect(body.code).toBe("orcid_in_use");
     expect(body.message).toContain("nemar.org/settings");
+    expect(githubCalls).toBe(0);
   });
 
   test("an iD held only through oauth_identities is refused too", async () => {
@@ -222,6 +243,7 @@ describe("CLI signup refuses a duplicate identity", () => {
     const res = await signup({ orcid: HELD_ORCID });
     expect(res.status).toBe(409);
     expect(((await res.json()) as { code: string }).code).toBe("orcid_in_use");
+    expect(githubCalls).toBe(0);
   });
 
   test("a case-variant GitHub handle is refused", async () => {
