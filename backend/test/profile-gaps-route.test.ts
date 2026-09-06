@@ -172,8 +172,16 @@ async function allThree(userId: number): Promise<{
   const cli = userMeResponseSchema.parse(await (await usersMe()).json());
   const web = webUserSchema.parse((await (await authMe(userId)).json()).user);
   const refusal = await (await requestUploadAccess()).json();
+  // `profile_gaps` is optional on the wire ONLY because an older backend might
+  // omit it entirely; on THIS route it must always be present, even as `[]`.
+  // Defaulting a missing field to `[]` here would make an exemption
+  // ("reports nothing") indistinguishable from the route silently dropping the
+  // key, which is exactly the regression an owner/admin test must catch.
+  if (cli.user.profile_gaps === undefined) {
+    throw new Error("GET /users/me response carried no profile_gaps key");
+  }
   return {
-    usersMe: (cli.user.profile_gaps ?? []).map((g) => g.field),
+    usersMe: cli.user.profile_gaps.map((g) => g.field),
     authMe: web.profile_gaps.map((g) => g.field),
     missing: refusal.missing ?? [],
   };
@@ -358,6 +366,11 @@ describe("one row, three answers", () => {
     // their own. The exemption has to hold on all three answers, or an operator
     // is told one thing by the terminal and another by the request.
     const id = await seedUser({ orcid_verified: 0, role: "owner" });
+    // Against the RAW parsed field, not allThree()'s `?? []` view: an empty
+    // array here must mean "checked, exempt", not "the key was absent and the
+    // helper defaulted it" -- the two are indistinguishable once defaulted.
+    const cli = userMeResponseSchema.parse(await (await usersMe()).json());
+    expect(cli.user.profile_gaps).toEqual([]);
     const answers = await allThree(id);
     expect(answers.missing).toEqual([]);
     expect(answers.usersMe).toEqual([]);
@@ -366,6 +379,12 @@ describe("one row, three answers", () => {
 
   test("an admin is exempt from that row and from nothing else", async () => {
     const id = await seedUser({ orcid_verified: 0, role: "admin", city: null });
+    // Same raw-field check: a non-empty list here also has to come from the
+    // route, not from allThree()'s defaulting.
+    const cli = userMeResponseSchema.parse(await (await usersMe()).json());
+    expect(cli.user.profile_gaps).toEqual([
+      { field: "city", blocks: ["upload_access"], set_on: ["web", "cli"] },
+    ]);
     const answers = await allThree(id);
     expect(answers.missing).toEqual(["city"]);
     expect(answers.usersMe).toEqual(["city"]);
