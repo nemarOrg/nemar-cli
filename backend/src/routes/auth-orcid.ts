@@ -2,11 +2,20 @@
  * ORCID SSO routes (#832), mounted under the same `/auth` prefix as the
  * passwordless flow in auth-web.ts.
  *
- *   GET  /auth/orcid/start     - set state cookie, 302 to ORCID authorize
- *   GET  /auth/orcid/callback  - verify state, exchange code, then either
- *                                sign in / link / hand off to email collection
- *   POST /auth/orcid/finalize  - finish a brand-new ORCID signup with an email
- *   POST /auth/orcid/unlink    - (authed) remove the ORCID link
+ *   GET  /auth/orcid/start       - set state cookie, 302 to ORCID authorize
+ *   POST /auth/orcid/cli-start  - (token) mint a signed link/relink intent
+ *   GET  /auth/orcid/cli-handoff - carry that intent into the ORCID flow
+ *   GET  /auth/orcid/callback   - verify state, exchange code, then either
+ *                                 sign in / link / hand off to email collection
+ *   POST /auth/orcid/finalize   - finish a brand-new ORCID signup with an email
+ *   POST /auth/orcid/unlink     - (token or cookie) remove the ORCID link
+ *
+ * CLI parity (#1266, ADR 0044): ORCID stays a browser flow, because a consent
+ * screen cannot be shown in a terminal. What the CLI gets is `cli-start`,
+ * which mints the SAME intent the website's POST /orcid/start mints — signed
+ * this time, and carrying the account id, because the browser that finishes
+ * the flow holds no NEMAR session for the callback to read. Unlink needs no
+ * browser at all and takes a bearer token directly.
  *
  * Linking is initiated via `GET /auth/orcid/start?mode=link` and completed in
  * the same callback (the callback links to whichever user the session cookie
@@ -43,6 +52,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { auditLogStatement } from "../db/audit-log";
 import { timingSafeEqual } from "../lib/constant-time";
+import { authMiddleware, resolveActingAccount } from "../middleware/auth";
 import { webSessionMiddleware } from "../middleware/webSession";
 import { issueEmailVerificationCode } from "../services/email-verification";
 import {
@@ -56,7 +66,9 @@ import {
   normalizeOrcid,
 } from "../services/identity";
 import {
+  CLI_STATE_TTL_MS,
   type OauthMode,
+  type OauthState,
   PENDING_COOKIE_NAME,
   RELINK_DELETE_IDENTITY_SQL,
   RELINK_INSERT_IDENTITY_SQL,
@@ -75,7 +87,9 @@ import {
   orcidPubBase,
   relinkParams,
   safeNextPath,
+  signCliState,
   signPending,
+  verifyCliState,
   verifyPending,
 } from "../services/orcid-auth";
 import {
@@ -351,6 +365,132 @@ authOrcidRoutes.post("/orcid/start", webSessionMiddleware, (c) => {
   return startOrcidFlow(c, mode, safeNextPath(url.searchParams.get("next")));
 });
 
+/** Where the browser lands once a CLI-initiated link finishes. */
+const CLI_LINK_LANDING = "/settings";
+
+const cliStartSchema = z.object({
+  mode: z.enum(["link", "relink"]).optional(),
+});
+
+/**
+ * Mint an ORCID link intent for the CALLER'S account and hand back a URL to
+ * open in a browser (#1266, ADR 0044).
+ *
+ * ORCID stays a browser flow — there is no way to show a consent screen in a
+ * terminal, and no version of this should ask for an ORCID password. What the
+ * CLI gets is the intent, signed and short-lived, in a URL the person opens
+ * themselves; the link is then completed by the ordinary callback.
+ *
+ * ADR 0022 survives intact: relink intent is minted ONLY here, by an
+ * authenticated POST. A bearer token is a credential the browser never sends
+ * on its own, so a link click cannot arm an identity swap. A COOKIE caller
+ * still has to clear the same-origin gate `POST /orcid/start` applies, for
+ * exactly the reason that route applies it.
+ */
+authOrcidRoutes.post(
+  "/orcid/cli-start",
+  authMiddleware,
+  zValidator("json", cliStartSchema),
+  async (c) => {
+    if (c.get("authMethod") === "cookie" && !isAllowedOrigin(c.req.header("Origin"))) {
+      return c.json({ error: "Origin not allowed" }, 403);
+    }
+    const user = c.get("user");
+    if (!c.env.ENCRYPTION_KEY) {
+      console.error("[auth-orcid] ENCRYPTION_KEY unset; cannot mint a CLI ORCID state");
+      return c.json({ error: "orcid_unavailable", message: "ORCID linking is unavailable" }, 503);
+    }
+    if (!getOrcidConfig(c.env)) {
+      // Checked at MINT time, not after the browser is open: a missing ORCID
+      // client turns into "this deployment cannot link ORCID" in the terminal
+      // rather than a stray error page at the end of a flow.
+      return c.json({ error: "orcid_unavailable", message: "ORCID linking is unavailable" }, 503);
+    }
+
+    const mode = c.req.valid("json").mode ?? "link";
+    if (mode === "link") {
+      // A plain `link` on an account that already has an iD would spend the
+      // whole browser round trip only to be refused by the callback with
+      // `orcid_already_have`. Answer now, and name the command that does what
+      // they meant.
+      const mine = await c.env.DB.prepare(
+        "SELECT provider_subject FROM oauth_identities WHERE user_id = ? AND provider = 'orcid' LIMIT 1",
+      )
+        .bind(user.id)
+        .first<{ provider_subject: string }>();
+      if (mine) {
+        return c.json(
+          {
+            error: "orcid_already_have",
+            message: `This account is already linked to ORCID iD ${mine.provider_subject}. Replace it with 'nemar auth profile orcid relink', or remove it with 'nemar auth profile orcid unlink'.`,
+            orcid: mine.provider_subject,
+          },
+          409,
+        );
+      }
+    }
+
+    const csrf = generateCsrf();
+    const token = await signCliState(
+      {
+        csrf,
+        mode,
+        userId: user.id,
+        next: CLI_LINK_LANDING,
+        exp: Date.now() + CLI_STATE_TTL_MS,
+      },
+      c.env.ENCRYPTION_KEY,
+    );
+
+    return c.json({
+      // Our own handoff, not ORCID's authorize URL directly: the handoff is
+      // what puts the signed state in a cookie, so a leaked URL is not by
+      // itself enough to finish the link from a different browser.
+      authorize_url: `${appBase(c.env)}/auth/orcid/cli-handoff?t=${encodeURIComponent(token)}`,
+      expires_in: Math.floor(CLI_STATE_TTL_MS / 1000),
+      mode,
+    });
+  },
+);
+
+/**
+ * Carry a CLI-minted intent into the ORCID flow (#1266, ADR 0044).
+ *
+ * This GET mints NOTHING. It verifies a signature made by the authenticated
+ * POST above, puts that same signed value in the state cookie, and bounces to
+ * ORCID — so the browser is bound to the flow the way the website's own start
+ * route binds it, while the account being acted on stays inside the signature
+ * rather than in a cookie anyone could write. ADR 0022's rule is about where
+ * intent is CREATED; transporting an already-signed one is what a redirect is
+ * for.
+ */
+authOrcidRoutes.get("/orcid/cli-handoff", async (c) => {
+  const frontend = appBase(c.env);
+  if (!c.env.ENCRYPTION_KEY) {
+    console.error("[auth-orcid] ENCRYPTION_KEY unset; cannot verify a CLI ORCID state");
+    return redirect(`${frontend}/login?error=orcid_unavailable`);
+  }
+  const token = new URL(c.req.url).searchParams.get("t");
+  const state = await verifyCliState(token, c.env.ENCRYPTION_KEY, Date.now());
+  // Expired, tampered with, or simply not one of ours. Either way there is no
+  // account to act for, so there is nothing to do but say so.
+  if (!token || !state) return redirect(`${frontend}/login?error=orcid_state`);
+
+  const config = getOrcidConfig(c.env);
+  if (!config) return redirect(`${frontend}/login?error=orcid_unavailable`);
+
+  const stateCookie = buildCookie(STATE_COOKIE_NAME, token, {
+    domain: cookieDomain(c.env),
+    maxAgeSeconds: Math.floor(CLI_STATE_TTL_MS / 1000),
+  });
+  const authorizeUrl = buildAuthorizeUrl({
+    config,
+    redirectUri: `${frontend}/auth/orcid/callback`,
+    state: state.csrf,
+  });
+  return redirect(authorizeUrl, [stateCookie]);
+});
+
 authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
   const frontend = appBase(c.env);
   const domain = cookieDomain(c.env);
@@ -364,7 +504,20 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
 
   if (url.searchParams.get("error")) return fail("orcid_denied");
 
-  const state = decodeState(parseCookieHeader(c.req.header("Cookie"), STATE_COOKIE_NAME));
+  // Two state shapes reach this cookie, and the SIGNED one is tried first
+  // (#1266, ADR 0044). A CLI-minted state names the account it was minted for
+  // inside an HMAC the browser cannot forge; the website's plain state cookie
+  // names no account at all and never can, which is what keeps a forged
+  // cookie from linking an iD to somebody else's row. Everything downstream —
+  // the csrf compare, the mode, the landing path — reads the same three
+  // fields either way.
+  const stateCookieRaw = parseCookieHeader(c.req.header("Cookie"), STATE_COOKIE_NAME);
+  const cliState = c.env.ENCRYPTION_KEY
+    ? await verifyCliState(stateCookieRaw, c.env.ENCRYPTION_KEY, Date.now())
+    : null;
+  const state: OauthState | null = cliState
+    ? { csrf: cliState.csrf, mode: cliState.mode, next: cliState.next }
+    : decodeState(stateCookieRaw);
   const stateParam = url.searchParams.get("state");
   if (!state || !stateParam || !timingSafeEqual(stateParam, state.csrf)) {
     return fail("orcid_state");
@@ -395,18 +548,35 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
       .bind(orcid)
       .first<{ user_id: number }>();
 
-    const webUser = c.var.webUser;
+    // WHICH account the finished iD attaches to.
+    //
+    // A CLI-minted state answers it on its own (#1266): the browser that
+    // finishes the flow was opened from a terminal and carries no NEMAR
+    // session, so the id inside the signed state is the only account in play.
+    // It also OUTRANKS whatever session the browser happens to hold — the
+    // signature is proof of intent from a live API token for that account,
+    // and a bystanding cookie for a different account is not evidence of
+    // anything. `loadActiveUser` re-checks the row is still live and not
+    // revoked, since the intent was minted up to ten minutes ago.
+    let actingUserId: number | null = null;
+    if (cliState) {
+      const cliUser = await loadActiveUser(c.env, cliState.userId);
+      if (!cliUser) return fail("orcid_account", state.next);
+      actingUserId = cliUser.id;
+    } else if (c.var.webUser) {
+      actingUserId = c.var.webUser.id;
+    }
 
-    // An already-authenticated session => link to that user (regardless of the
-    // start mode, so a logged-in user can never accidentally spawn a duplicate
-    // account). The default landing is the carried `next` (the onboarding gate
-    // passes /welcome).
-    if (webUser) {
-      const outcome = decideLinkOutcome(ident?.user_id ?? null, webUser.id);
+    // An already-authenticated session (or a CLI intent) => link to that user
+    // (regardless of the start mode, so a logged-in user can never
+    // accidentally spawn a duplicate account). The default landing is the
+    // carried `next` (the onboarding gate passes /welcome).
+    if (actingUserId !== null) {
+      const outcome = decideLinkOutcome(ident?.user_id ?? null, actingUserId);
       if (outcome === "conflict") return fail("orcid_linked_other", state.next);
       if (outcome === "already_linked") {
         await touchIdentityLogin(c.env, orcid);
-        afterResponse(c, refreshUserName(c.env, webUser.id, orcid));
+        afterResponse(c, refreshUserName(c.env, actingUserId, orcid));
         return redirect(`${frontend}${state.next}`, [clearState]);
       }
       // link_new says only that no oauth_identities row claims the iD. That
@@ -416,7 +586,7 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
       // how one person ends up backing two accounts (production rows 42/43).
       // Checked here rather than inside the relink branch so it covers both a
       // first link and an explicit relink -- both write `users.orcid`.
-      const orcidHolder = await findOrcidHolder(c.env.DB, orcid, webUser.id);
+      const orcidHolder = await findOrcidHolder(c.env.DB, orcid, actingUserId);
       if (orcidHolder) return fail("orcid_in_use", state.next);
 
       // If this account already has a *different* iD, only an explicit relink
@@ -424,28 +594,28 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
       const mine = await c.env.DB.prepare(
         "SELECT provider_subject FROM oauth_identities WHERE user_id = ? AND provider = 'orcid' LIMIT 1",
       )
-        .bind(webUser.id)
+        .bind(actingUserId)
         .first<{ provider_subject: string }>();
       if (mine && mine.provider_subject !== orcid) {
         if (decideSecondOrcidOutcome(state.mode) === "refuse") {
           return fail("orcid_already_have", state.next);
         }
         try {
-          await relinkIdentity(c.env, webUser.id, mine.provider_subject, orcid, name);
+          await relinkIdentity(c.env, actingUserId, mine.provider_subject, orcid, name);
         } catch (err) {
           if (claimedByAnother(err)) return fail("orcid_in_use", state.next);
           throw err;
         }
-        afterResponse(c, refreshUserName(c.env, webUser.id, orcid));
+        afterResponse(c, refreshUserName(c.env, actingUserId, orcid));
         return redirect(`${frontend}${state.next}`, [clearState]);
       }
       try {
-        await linkIdentity(c.env, webUser.id, orcid, name);
+        await linkIdentity(c.env, actingUserId, orcid, name);
       } catch (err) {
         if (claimedByAnother(err)) return fail("orcid_in_use", state.next);
         throw err;
       }
-      afterResponse(c, refreshUserName(c.env, webUser.id, orcid));
+      afterResponse(c, refreshUserName(c.env, actingUserId, orcid));
       return redirect(`${frontend}${state.next}`, [clearState]);
     }
 
@@ -715,11 +885,13 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
 });
 
 authOrcidRoutes.post("/orcid/unlink", webSessionMiddleware, async (c) => {
-  if (!isAllowedOrigin(c.req.header("Origin"))) {
-    return c.json({ error: "Origin not allowed" }, 403);
-  }
-  const webUser = c.var.webUser;
-  if (!webUser) return c.json({ error: "Authentication required" }, 401);
+  // Cookie or bearer token (#1266, ADR 0044). Unlink is the one ORCID
+  // operation with no browser step in it -- nothing to consent to, nothing to
+  // redirect through -- so the CLI calls it directly. The same-origin gate
+  // still applies to the cookie half; see `resolveActingAccount`.
+  const resolved = await resolveActingAccount(c);
+  if (!resolved.ok) return resolved.response;
+  const actor = resolved.actor;
 
   // Drop the link COMPLETELY: the identity row, `orcid_verified`, AND
   // `users.orcid` (#1254, ADR 0043).
@@ -745,9 +917,9 @@ authOrcidRoutes.post("/orcid/unlink", webSessionMiddleware, async (c) => {
     await c.env.DB.batch([
       c.env.DB.prepare(
         "DELETE FROM oauth_identities WHERE user_id = ? AND provider = 'orcid'",
-      ).bind(webUser.id),
+      ).bind(actor.id),
       c.env.DB.prepare("UPDATE users SET orcid = NULL, orcid_verified = 0 WHERE id = ?").bind(
-        webUser.id,
+        actor.id,
       ),
     ]);
   } catch (err) {

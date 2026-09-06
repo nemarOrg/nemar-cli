@@ -112,6 +112,15 @@ const AUTH_PATHS = [
   // entry as a prefix, so "/auth/email/verify" also matches
   // "/auth/email/verify/request".
   "/auth/email/verify",
+  // CLI ORCID handoff (#1266, ADR 0044). `cli-start` mints an identity-link
+  // intent and `cli-handoff` is the only thing that can turn a leaked one
+  // into an ORCID redirect, so both belong on the same 10/min floor as the
+  // other identity mutations rather than on the 1000/min token bucket a
+  // bearer request would otherwise land in. A person links an iD once.
+  // The rest of /auth/orcid/* is deliberately NOT here: the callback is a
+  // browser landing, and moving it would change the web flow's bucket.
+  "/auth/orcid/cli-start",
+  "/auth/orcid/cli-handoff",
   // NOT an /auth path, and deliberately in this list anyway (ADR 0042, #1253):
   // POST /users/me/upload-access/request spends a live GitHub API call on the
   // shared installation token for every attempt, and a refused one writes
