@@ -109,6 +109,14 @@ preflight that cannot READ the grant — offline, a 5xx, an older backend — wa
 and continues, because the server enforces the gate regardless and refusing an
 upload over a briefly unavailable status endpoint invents a refusal nobody made.
 
+**The username finally gets the index ADR 0042 promised it.** That ADR's
+Consequences say a case-variant race "can still land two usernames one shift key
+apart" and that "phase 4's case-insensitive unique index closes it"; phase 4
+(migration 0077) built that index for `orcid` and `email` and not for
+`username`, so the sentence has been describing a file that did not exist.
+Migration 0080 is it — the same partial predicate as 0077's two, and clean to
+create because the username catalogue holds no case-variant duplicates.
+
 **Two write paths now name accounts, and both mark what they did.** The sweep is
 the batch path and sign-in is the lazy path; between them an account cannot keep
 browsing NEMAR without a handle. The mark is a column and not just an audit row
@@ -168,8 +176,9 @@ surfaces that is false on one of them.
   CLI).
 - `shared/contract/account-copy.ts`, `shared/contract/profile-gaps.ts`,
   `backend/src/services/profile-gaps.ts`,
-  `backend/src/services/username-assignment.ts`, migration
-  `0079_username_auto_assigned.sql`.
+  `backend/src/services/username-assignment.ts`, migrations
+  `0079_username_auto_assigned.sql` and
+  `0080_username_case_insensitive_unique.sql`.
 - `test/profile-gaps-matrix.test.ts` (the matrix against a fixture copied from
   the website's table, and all 2^7 field combinations),
   `test/account-copy-parity.test.ts`, `backend/test/profile-gaps-route.test.ts`,

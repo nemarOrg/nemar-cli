@@ -278,6 +278,46 @@ describe("PATCH /auth/profile: username", () => {
     ).toBe(1);
   });
 
+  test("refuses a case-variant claim the pre-check could not see", async () => {
+    // What migration 0080 closes, and the reason a race test is not enough:
+    // there the two handlers interleave however bun schedules them, and the
+    // pre-check usually wins. Here the competing row is planted BETWEEN the
+    // pre-check and the write, deterministically, by a real SQLite trigger on
+    // the UPDATE the route is about to run -- the same fault-injection shape
+    // web-email-verification.test.ts uses to block a write.
+    //
+    // Without 0080 this passes and the table ends up holding `Ada` and `ada`
+    // as two accounts: 0001's UNIQUE is BINARY, so to it they are different
+    // strings, while `nemar admin approve <username>`, the suggestion scan and
+    // the sign-in claim all compare NOCASE and cannot tell them apart.
+    const id = seedUser("shift-key@example.org");
+    db.run(
+      `CREATE TRIGGER plant_a_case_variant BEFORE UPDATE OF username ON users
+       WHEN NEW.username = 'Ada'
+       BEGIN
+         INSERT INTO users (username, email, password_hash, status)
+         VALUES ('ada', 'lowercase@example.org', 'x', 'verified');
+       END`,
+    );
+
+    const res = await patch(id, { username: "Ada" });
+
+    // The typed refusal, not a bare 500: the constraint fired, and the catch
+    // classified it through isUsernameUniqueViolation.
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe("username_taken");
+    // The batch is one transaction, so neither the claim nor the planted row
+    // survives -- the account is exactly as it was.
+    expect(usernameOf(id)).toBeNull();
+    expect(
+      db
+        .query<{ n: number }, [string]>(
+          "SELECT COUNT(*) as n FROM users WHERE username = ? COLLATE NOCASE",
+        )
+        .get("ada")?.n,
+    ).toBe(0);
+  });
+
   test("the UNIQUE-violation classifier recognises a real constraint error", async () => {
     // The safety net in the PATCH's catch block, fed the ACTUAL error bun:sqlite
     // raises for this table rather than a hand-written string -- a copy would

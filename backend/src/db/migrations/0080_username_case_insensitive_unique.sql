@@ -1,0 +1,80 @@
+-- One handle, however it is cased: the case-insensitive unique index on
+-- `users.username` that ADR 0042 promised and phase 4 did not ship
+-- (epic #1250 phase #1268, ADR 0045).
+--
+-- WHAT WAS MISSING. ADR 0042's Consequences say, of the username: "A
+-- case-variant race can still land two usernames one shift key apart.
+-- `users.username` is UNIQUE case-SENSITIVELY (migration 0001) while every
+-- check around it is `COLLATE NOCASE`, so `Ada` and `ada` arriving together
+-- pass both the pre-check and the constraint. Phase 4's case-insensitive
+-- unique index closes it." Phase 4 (0077) built exactly that index for `orcid`
+-- and for `email` -- and not for `username`, which still carries only the
+-- exact-case UNIQUE from 0001. The sentence in the ADR has been describing a
+-- file that does not exist since #1254. This is that file.
+--
+-- The window is real and narrow: two concurrent `PATCH /auth/profile` calls
+-- claiming `Ada` and `ada`. Each one's NOCASE pre-check sees the other's row
+-- absent, and 0001's BINARY constraint then admits both, because to it they are
+-- different strings. Everything downstream compares handles case-insensitively
+-- -- `nemar admin approve <username>`, the suggestion scan
+-- (`services/username-assignment.ts`), the sign-in claim -- so a pair like that
+-- makes two accounts one shift key apart that half the product cannot tell
+-- apart.
+--
+-- WHY IT CREATES CLEANLY, unlike 0077's. That migration could not simply add
+-- its indexes: production held a real ORCID duplicate (rows 42/43) and a
+-- case-variant email pair, so it had to add `identity_conflict`, flag the
+-- non-canonical rows, and make the indexes partial around the flag. The
+-- username catalogue was checked before this file was written and holds NO
+-- case-variant duplicates among live rows, so there is nothing to flag and no
+-- flagging pass here -- only the index. Deliberately no pass: flagging a row
+-- for a username collision would also strip its claim on its email and its
+-- iD, which is a much larger consequence than the problem.
+--
+--   If a future catalogue DOES hold one, this file fails at CREATE and the
+--   deploy stops before anything is written (it is the only statement). The
+--   recovery is to rename the non-canonical handle by hand -- a username is
+--   the one identifier a person can simply be asked to change -- and re-run.
+--   Do not widen the predicate to hide the pair.
+--
+-- WHAT THE PREDICATE EXCLUDES, matching 0077's two indexes clause for clause:
+--   * NULL and blank handles. Most web/ORCID rows have none (0026), and
+--     `''` is not so forgiving as NULL -- two blanks WOULD collide -- hence
+--     the TRIM.
+--   * Tombstones. `deleted_at IS NULL` is belt-and-suspenders here rather
+--     than load-bearing: `tombstoneUser` already NULLs `username` (db/
+--     user-tombstone.ts), precisely so a deleted person's handle is free
+--     again. The clause matches 0077 so the three identity indexes read the
+--     same way.
+--   * `identity_conflict = 1`. A row that has already lost its claim on an
+--     identifier does not get to hold a second one hostage, and keeping the
+--     clause identical to 0077's means the three indexes cannot disagree
+--     about which rows are live claims.
+--
+-- THIS IS ADDED TO, NOT INSTEAD OF, the table-level UNIQUE from 0001. Both are
+-- enforced. The older one still covers rows this predicate excludes (a
+-- tombstone that somehow kept a handle), and a case-variant collision now
+-- fails at THIS index. SQLite reports either as
+-- `UNIQUE constraint failed: users.username` -- the COLUMN, not the index name
+-- -- which is what `isUsernameUniqueViolation` (services/username.ts) matches
+-- on, so `PATCH /auth/profile` answers the new failure with the same typed
+-- `username_taken` 409 it already answers the old one with. The route test
+-- `refuses a case-variant claim the pre-check cannot see` provokes it for
+-- real rather than trusting that sentence.
+--
+-- NO PATTERN OF ANY KIND, so D1's 50-character LIKE/GLOB cap (0077's
+-- statement 2, and the reason scripts/d1-migration-check.ts exists) cannot
+-- apply. One idempotent statement: re-running the file is a no-op.
+--
+--   bun run migrations:d1-check
+--
+-- replays every migration through `wrangler d1 execute --local` and diffs the
+-- catalogue against bun:sqlite's; this file was added to that replay before
+-- being committed.
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_live_unique
+  ON users(username COLLATE NOCASE)
+  WHERE username IS NOT NULL
+    AND TRIM(username) <> ''
+    AND deleted_at IS NULL
+    AND identity_conflict = 0;
