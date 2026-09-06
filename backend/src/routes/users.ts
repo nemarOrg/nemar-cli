@@ -12,6 +12,7 @@
 
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { z } from "zod";
 import { auditLogStatement } from "../db/audit-log";
 import { authMiddleware } from "../middleware/auth";
@@ -24,6 +25,7 @@ import { validateGitHubUsername } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
 import {
   ALREADY_APPROVED_REFUSAL,
+  GITHUB_UNAVAILABLE_REFUSAL,
   WHY_MAX_CHARS,
   checkUploadAccessRequest,
   githubUnverifiedRefusal,
@@ -148,6 +150,104 @@ userRoutes.get("/me/datasets", async (c) => {
 // POST /users/me/upload-access/request  (ADR 0042, #1253)
 // ---------------------------------------------------------------
 
+/** The columns the admin review card is built from. */
+interface UploadRequestRow {
+  id: number;
+  username: string | null;
+  email: string;
+  given_name: string | null;
+  family_name: string | null;
+  city: string | null;
+  country: string | null;
+  affiliation: string | null;
+  orcid: string | null;
+  /** The why text as stored. REQUIRED, not optional: a retry reads the card's
+   *  body from here, and an optional field let the route omit the column from
+   *  its SELECT and mail an empty review card without the compiler noticing. */
+  description: string | null;
+}
+
+/**
+ * Mail the admins one review card and stamp `upload_access_notified_at` when
+ * at least one of them received it.
+ *
+ * Shared by the first request and by a retry, so the two cannot drift on what
+ * "notified" means. Never throws: the request row has already committed by the
+ * time this runs on either path, and failing the response would tell a user
+ * their request was not recorded when it was. What it does instead is REPORT,
+ * so the caller can say `email_sent: false` and so the next call re-sends.
+ *
+ * `whyText` is passed on the first request (the text is not on the row yet
+ * when the caller reads it) and read back from `description` on a retry.
+ */
+async function notifyAdminsOfUploadRequest(
+  c: Context<{ Bindings: Bindings; Variables: Variables }>,
+  row: UploadRequestRow,
+  githubLogin: string,
+  whyText?: string,
+): Promise<{ delivered: number; attempted: number }> {
+  const db = c.env.DB;
+  try {
+    const adminEmails = await getAdminEmailsForCategory(db, "user_approval");
+    if (adminEmails.length === 0) {
+      // Not an error the USER can act on, so the request still succeeds -- but
+      // it is a misconfiguration an operator must see, and `admins_notified: 0`
+      // makes it visible in the response as well as the log.
+      console.error(
+        `[upload-access] no admin recipients for user_approval; request from id=${row.id} stored but nobody was told`,
+      );
+      return { delivered: 0, attempted: 0 };
+    }
+
+    const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
+    const outcome = await sendUploadAccessRequestEmail(
+      adminEmails,
+      {
+        id: row.id,
+        username: (row.username ?? "").trim(),
+        given_name: (row.given_name ?? "").trim(),
+        family_name: (row.family_name ?? "").trim(),
+        email: row.email,
+        orcid: row.orcid,
+        github_username: githubLogin,
+        city: (row.city ?? "").trim(),
+        country: (row.country ?? "").trim(),
+        affiliation: row.affiliation,
+        why: whyText ?? (row.description ?? "").trim(),
+      },
+      c.env.RESEND_API_KEY,
+      fromEmail,
+      replyTo,
+      isDev,
+      c.env,
+    );
+
+    if (outcome.delivered > 0) {
+      // Conditional on it still being NULL so two concurrent retries stamp one
+      // timestamp, and so a stamp is never moved forward by a later re-send.
+      await db
+        .prepare(
+          `UPDATE users
+              SET upload_access_notified_at = datetime('now')
+            WHERE id = ? AND upload_access_notified_at IS NULL`,
+        )
+        .bind(row.id)
+        .run();
+    } else {
+      console.error(
+        `[upload-access] no admin received the request from id=${row.id} (${outcome.attempted} attempted, ${outcome.failures.length} failed); it will be re-sent on the next attempt`,
+      );
+    }
+    return { delivered: outcome.delivered, attempted: outcome.attempted };
+  } catch (emailErr) {
+    // Reaching here is the admin-lookup or the config read failing, not a
+    // send: sendUploadAccessRequestEmail catches per recipient. Left unstamped
+    // so the next call retries.
+    console.error("[upload-access] admin notification failed", emailErr);
+    return { delivered: 0, attempted: 0 };
+  }
+}
+
 /**
  * Bounds only. The 20-character minimum, the trim, and every account-state
  * precondition live in services/upload-access.ts so they answer with the typed
@@ -198,8 +298,9 @@ userRoutes.post(
       const row = await db
         .prepare(
           `SELECT id, username, email, given_name, family_name, github_username,
-                  city, country, affiliation, orcid, email_verified, service_access,
-                  upload_access_requested_at
+                  city, country, affiliation, orcid, description,
+                  email_verified, service_access,
+                  upload_access_requested_at, upload_access_notified_at
              FROM users
             WHERE id = ? AND deleted_at IS NULL`,
         )
@@ -215,9 +316,11 @@ userRoutes.post(
           country: string | null;
           affiliation: string | null;
           orcid: string | null;
+          description: string | null;
           email_verified: number;
           service_access: number;
           upload_access_requested_at: string | null;
+          upload_access_notified_at: string | null;
         }>();
 
       if (!row) {
@@ -236,11 +339,31 @@ userRoutes.post(
       // Answered BEFORE the preconditions: an open request is already on an
       // admin's desk, and telling its owner to go fix their profile would
       // imply the request had failed.
+      //
+      // ...unless nobody was actually told. `upload_access_notified_at` is
+      // NULL when every admin send failed, and short-circuiting on that row
+      // would turn request-once into request-never: the stamp says answered,
+      // the guard refuses to act, and no admin ever sees it. So a repeat call
+      // in that state RETRIES the notification. The GitHub check is not
+      // re-run -- the request already passed it, and this path exists to be
+      // called repeatedly.
       if (row.upload_access_requested_at) {
+        if (row.upload_access_notified_at) {
+          return c.json({
+            ok: true,
+            already_requested: true,
+            requested_at: row.upload_access_requested_at,
+            email_sent: true,
+            admins_notified: null,
+          });
+        }
+        const retry = await notifyAdminsOfUploadRequest(c, row, (row.github_username ?? "").trim());
         return c.json({
           ok: true,
           already_requested: true,
           requested_at: row.upload_access_requested_at,
+          email_sent: retry.delivered > 0,
+          admins_notified: retry.delivered,
         });
       }
 
@@ -253,14 +376,26 @@ userRoutes.post(
 
       // Existence only -- not ownership. Nobody proves they control the
       // account here; what the review needs is that the handle an admin will
-      // add as a repository collaborator actually resolves. Same known
-      // limitation as CLI signup and PATCH /auth/profile: validateGitHubUsername
-      // returns null for ANY non-OK response, so a GitHub outage reads as "does
-      // not exist" rather than as a 503.
-      const githubUser = await validateGitHubUsername(githubHandle, await getDatasetsToken(c.env));
-      if (!githubUser) {
+      // add as a repository collaborator actually resolves.
+      //
+      // #1052: the lookup has three answers and only a 404 is one about the
+      // account. Reporting a GitHub outage as `github_username_unverified`
+      // would tell the requester their handle does not exist and send them to
+      // Settings to change a field that is already right -- and the request
+      // would keep failing until GitHub recovered, with nothing on screen
+      // saying so.
+      const githubLookup = await validateGitHubUsername(
+        githubHandle,
+        await getDatasetsToken(c.env),
+      );
+      if (githubLookup.status === "unavailable") {
+        console.error(`[upload-access] GitHub lookup unavailable: ${githubLookup.detail}`);
+        return c.json(GITHUB_UNAVAILABLE_REFUSAL, 503);
+      }
+      if (githubLookup.status === "not_found") {
         return c.json(githubUnverifiedRefusal(githubHandle), 400);
       }
+      const githubUser = githubLookup.user;
 
       const stamped = await db
         .prepare(
@@ -318,43 +453,22 @@ userRoutes.post(
       // Admins only. The requester gets no mail here: they already know they
       // asked, and the answer they are waiting for is the upload-access-granted
       // mail that approval sends (ADR 0040 phase 2).
-      try {
-        const adminEmails = await getAdminEmailsForCategory(db, "user_approval");
-        if (adminEmails.length > 0) {
-          const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
-          await sendUploadAccessRequestEmail(
-            adminEmails,
-            {
-              id: row.id,
-              username: (row.username ?? "").trim(),
-              given_name: (row.given_name ?? "").trim(),
-              family_name: (row.family_name ?? "").trim(),
-              email: row.email,
-              orcid: row.orcid,
-              github_username: githubUser.login,
-              city: (row.city ?? "").trim(),
-              country: (row.country ?? "").trim(),
-              affiliation: row.affiliation,
-              why: text,
-            },
-            c.env.RESEND_API_KEY,
-            fromEmail,
-            replyTo,
-            isDev,
-            c.env,
-          );
-        } else {
-          console.error(
-            "[upload-access] no admin recipients for user_approval; request stored but nobody was told",
-          );
-        }
-      } catch (emailErr) {
-        // Best-effort by construction: the request is stored and visible in
-        // `nemar admin users --awaiting-approval` whether or not the mail went.
-        console.error("[upload-access] admin notification failed", emailErr);
-      }
+      //
+      // The request is stored either way -- it is visible in
+      // `nemar admin users --awaiting-approval` whether or not the mail went --
+      // but the caller is TOLD which happened, and an undelivered one is
+      // retried by the next call rather than silently sitting there.
+      const notified = await notifyAdminsOfUploadRequest(c, row, githubUser.login, text);
 
-      return c.json({ ok: true, already_requested: false }, 201);
+      return c.json(
+        {
+          ok: true,
+          already_requested: false,
+          email_sent: notified.delivered > 0,
+          admins_notified: notified.delivered,
+        },
+        201,
+      );
     } catch (err) {
       console.error("[users] /me/upload-access/request failed", err);
       return c.json({ error: "Failed to submit upload access request" }, 500);

@@ -81,13 +81,25 @@ authRoutes.get("/check-github", async (c) => {
     return c.json({ error: "GitHub username required" }, 400);
   }
 
-  let githubUser: { login: string } | null;
+  // #1052: a lookup has three answers, and only a 404 is evidence about the
+  // account. `unavailable` (5xx, 429, a transport failure) used to arrive here
+  // as `null` and be reported to the caller as `valid: false` -- telling
+  // someone mid-signup that their own handle does not exist because GitHub was
+  // having a bad minute.
+  let lookup: Awaited<ReturnType<typeof validateGitHubUsername>>;
   try {
-    githubUser = await validateGitHubUsername(username, await getDatasetsToken(c.env));
+    lookup = await validateGitHubUsername(username, await getDatasetsToken(c.env));
   } catch (error) {
-    console.error("GitHub API error in check-github:", error);
+    // The helper does not throw for a lookup failure; reaching here means
+    // getDatasetsToken did (no App key, no PAT).
+    console.error("GitHub auth error in check-github:", error);
     return c.json({ error: "Unable to verify GitHub username" }, 503);
   }
+  if (lookup.status === "unavailable") {
+    console.error(`GitHub API error in check-github: ${lookup.detail}`);
+    return c.json({ error: "Unable to verify GitHub username" }, 503);
+  }
+  const githubUser = lookup.status === "found" ? lookup.user : null;
 
   // Only check registration if GitHub user exists (use canonical login for case-insensitive match)
   let registered = false;
@@ -273,8 +285,25 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
 
     // Validate GitHub username exists. This is also where we recover the
     // canonical login (matters for case-variant dedup below).
-    const githubUser = await validateGitHubUsername(github_username, await getDatasetsToken(c.env));
-    if (!githubUser) {
+    const githubLookup = await validateGitHubUsername(
+      github_username,
+      await getDatasetsToken(c.env),
+    );
+    // #1052: a GitHub outage is not a verdict on the handle. Refusing a
+    // registration with "does not exist" when GitHub 500s sends someone to
+    // change a field that was right, and the change does not help.
+    if (githubLookup.status === "unavailable") {
+      console.error(`[signup] GitHub lookup unavailable: ${githubLookup.detail}`);
+      return c.json(
+        {
+          error: "GitHub unavailable",
+          message:
+            "GitHub could not be reached to verify your username; try again in a few minutes",
+        },
+        503,
+      );
+    }
+    if (githubLookup.status === "not_found") {
       return c.json(
         {
           error: "GitHub user not found",
@@ -283,6 +312,7 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
         400,
       );
     }
+    const githubUser = githubLookup.user;
 
     // Re-check with the canonical login when GitHub normalized the case.
     // Catches the "Octocat" stored vs "octocat" submitted shape.

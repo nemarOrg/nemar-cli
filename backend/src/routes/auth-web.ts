@@ -776,14 +776,25 @@ authWebRoutes.patch(
           );
         }
 
-        // Known limitation shared with CLI signup: validateGitHubUsername
-        // returns null for any non-OK GitHub response, so a GitHub-side
-        // outage reads as "does not exist" here rather than a 5xx.
-        const githubUser = await validateGitHubUsername(
+        // #1052: three answers, not two. A 5xx or a transport failure used to
+        // arrive as `null` and be reported as "does not exist", which told
+        // someone their own handle was wrong and left them editing a correct
+        // field. `unavailable` is now its own 503 and the save is not applied.
+        const githubLookup = await validateGitHubUsername(
           patch.github_username,
           await getDatasetsToken(c.env),
         );
-        if (!githubUser) {
+        if (githubLookup.status === "unavailable") {
+          console.error(`[auth-web] /profile GitHub lookup unavailable: ${githubLookup.detail}`);
+          return c.json(
+            {
+              error: "github_unavailable",
+              message: "GitHub could not be reached; try again in a few minutes",
+            },
+            503,
+          );
+        }
+        if (githubLookup.status === "not_found") {
           return c.json(
             {
               error: "invalid_github_username",
@@ -792,6 +803,7 @@ authWebRoutes.patch(
             400,
           );
         }
+        const githubUser = githubLookup.user;
         // GitHub resolves renames/case variants to a canonical login; store
         // that, and re-run the dup check when it differs from what was typed
         // beyond case (the COLLATE NOCASE check above already covered case).

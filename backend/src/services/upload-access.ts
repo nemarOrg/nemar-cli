@@ -21,25 +21,25 @@
  * routes/users.ts).
  */
 
+import type { z } from "zod";
+import type { uploadAccessErrorCodeSchema } from "../../../shared/contract/user.js";
+
 /** Bounds on the why text, matching CLI signup's `description` (routes/auth.ts)
  *  -- the same column, and the same question, so the same limits. */
 export const WHY_MIN_CHARS = 20;
 export const WHY_MAX_CHARS = 500;
 
 /**
- * The closed refusal vocabulary. `error` is the machine-readable half and is
- * part of the wire contract with the website; `message` may be reworded freely.
+ * The closed refusal vocabulary, re-exported from the wire contract so the
+ * route, the website and the CLI all read one list (shared/contract/user.ts).
+ * `error` is the machine-readable half; `message` may be reworded freely.
  *
- * `github_username_unverified` is raised by the route, not by the pure check
- * below: it means the handle IS set on the account but GitHub does not resolve
- * it. Kept in the same union so a client switches on one list.
+ * Two of the five are raised by the route rather than by the pure check below:
+ * `github_username_unverified` (the handle is set but GitHub does not resolve
+ * it) and `github_unavailable` (GitHub could not be reached at all -- #1052).
+ * They are in the same union so a client switches on one list.
  */
-export type UploadAccessErrorCode =
-  | "why_required"
-  | "email_not_verified"
-  | "profile_incomplete"
-  | "github_username_unverified"
-  | "already_approved";
+export type UploadAccessErrorCode = z.infer<typeof uploadAccessErrorCodeSchema>;
 
 export interface UploadAccessRefusal {
   error: UploadAccessErrorCode;
@@ -145,5 +145,18 @@ export function githubUnverifiedRefusal(handle: string): UploadAccessRefusal {
 export const ALREADY_APPROVED_REFUSAL: UploadAccessRefusal = {
   error: "already_approved",
   message: "This account already has upload access; there is nothing to request",
+  missing: [],
+};
+
+/**
+ * The 503 for a GitHub lookup that could not be completed (#1052).
+ *
+ * `missing` is EMPTY on purpose: nothing about the account is wrong, so a
+ * client that renders `missing` as "fields to fix" must render nothing here.
+ * The request is retryable as-is, which is what the message says.
+ */
+export const GITHUB_UNAVAILABLE_REFUSAL: UploadAccessRefusal = {
+  error: "github_unavailable",
+  message: "GitHub could not be reached; try again in a few minutes",
   missing: [],
 };

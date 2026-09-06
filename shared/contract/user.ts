@@ -170,3 +170,37 @@ export const usernameSuggestionResponseSchema = z
   })
   .passthrough();
 export type UsernameSuggestionResponse = z.infer<typeof usernameSuggestionResponseSchema>;
+
+/**
+ * Why `POST /users/me/upload-access/request` refused (ADR 0042, #1253).
+ *
+ * The closed vocabulary the website's Settings form and the CLI both switch on.
+ * Declared here rather than in the backend service because three consumers read
+ * it: the route that raises it, the CLI client that decides how to render such
+ * a body, and nemarOrg/website#301.
+ *
+ * Every refusal carries `{ error, message, missing }`, and `missing` is present
+ * (possibly empty) on all of them so one renderer covers the set:
+ *
+ *   why_required                the submitted text is outside 20-500 chars.
+ *   email_not_verified          the inbox is unconfirmed; POST /auth/email/verify/request.
+ *   profile_incomplete          `missing` names the account fields still blank.
+ *   github_username_unverified  the handle is set but GitHub does not resolve it.
+ *   github_unavailable          GitHub could not be reached (503, #1052). NOTHING
+ *                               about the account is wrong and `missing` is empty:
+ *                               retry the same request later.
+ *   already_approved            409; the grant is already held.
+ */
+export const uploadAccessErrorCodeSchema = z.enum([
+  "why_required",
+  "email_not_verified",
+  "profile_incomplete",
+  "github_username_unverified",
+  "github_unavailable",
+  "already_approved",
+]);
+export type UploadAccessErrorCode = z.infer<typeof uploadAccessErrorCodeSchema>;
+
+/** The refusal codes as a plain array, for a runtime membership test (the CLI
+ *  client uses it to decide whether a body leads with `message`). */
+export const UPLOAD_ACCESS_ERROR_CODES: readonly string[] = uploadAccessErrorCodeSchema.options;

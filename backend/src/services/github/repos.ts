@@ -9,7 +9,7 @@
 import { GITHUB_API, ORG_NAME, ghHeaders } from "./shared";
 import { githubFetchWithRetry } from "./transport";
 
-interface GitHubUser {
+export interface GitHubUser {
   id: number;
   login: string;
   name: string | null;
@@ -25,25 +25,67 @@ export interface GitHubRepo {
 }
 
 /**
- * Validate that a GitHub username exists
+ * The three answers a GitHub user lookup can give (#1052).
+ *
+ * `unavailable` is the one that used to be missing. This helper collapsed
+ * every non-2xx -- a 500, a 429, a DNS failure -- into the same `null` as a
+ * clean 404, so a GitHub outage told a user their handle did not exist and
+ * sent them to go fix a field that was already correct. The three cases need
+ * three different answers from a caller: proceed, refuse, or ask them to try
+ * again later.
+ *
+ * `detail` carries the status (or the thrown message) for the log; it is not
+ * meant for a user, who is told to retry and nothing more.
+ */
+export type GitHubUserLookup =
+  | { status: "found"; user: GitHubUser }
+  | { status: "not_found" }
+  | { status: "unavailable"; detail: string };
+
+/**
+ * Look up a GitHub account. Never throws: a transport failure is reported as
+ * `unavailable`, which is what it is.
+ *
+ * 404 is the ONLY not-found. 403 and 429 are rate limiting or an auth problem
+ * with our own installation token, 5xx is GitHub, and anything else is
+ * unclassified -- none of them is evidence about the account, so none of them
+ * may be reported as one.
  */
 export async function validateGitHubUsername(
   username: string,
   pat: string,
-): Promise<GitHubUser | null> {
-  const response = await fetch(`${GITHUB_API()}/users/${username}`, {
-    headers: {
-      Authorization: `Bearer ${pat}`,
-      Accept: "application/vnd.github.v3+json",
-      "User-Agent": "NEMAR-API",
-    },
-  });
-
-  if (!response.ok) {
-    return null;
+): Promise<GitHubUserLookup> {
+  let response: Response;
+  try {
+    response = await fetch(`${GITHUB_API()}/users/${username}`, {
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+      },
+    });
+  } catch (err) {
+    return {
+      status: "unavailable",
+      detail: err instanceof Error ? err.message : String(err),
+    };
   }
 
-  return response.json();
+  if (response.status === 404) return { status: "not_found" };
+  if (!response.ok) {
+    return { status: "unavailable", detail: `HTTP ${response.status}` };
+  }
+
+  try {
+    return { status: "found", user: (await response.json()) as GitHubUser };
+  } catch (err) {
+    // A 200 whose body will not parse is GitHub misbehaving, not an absent
+    // account.
+    return {
+      status: "unavailable",
+      detail: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 /**
