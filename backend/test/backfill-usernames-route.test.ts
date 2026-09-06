@@ -224,11 +224,39 @@ describe("backfill-usernames: apply", () => {
     expect(usernameOf(id)).toBe("alovelace");
     expect(body.remaining).toBe(0);
 
+    // The 0079 column, which is the STATE half and the reason the sweep must go
+    // through `usernameClaimStatement` rather than write its own UPDATE: the
+    // "we chose this from your name, change it if you like" offer renders on
+    // every page load and cannot scan an audit log for permission to appear.
+    expect(
+      db
+        .query<{ username_auto_assigned: number }, [number]>(
+          "SELECT username_auto_assigned FROM users WHERE id = ?",
+        )
+        .get(id)?.username_auto_assigned,
+    ).toBe(1);
+
     const audit = db
       .query<{ details: string | null }, [string]>("SELECT details FROM audit_log WHERE action = ?")
       .all("usernames_backfilled");
     expect(audit).toHaveLength(1);
     expect(JSON.parse(audit[0].details ?? "{}")).toMatchObject({ assigned: 1, user_ids: [id] });
+
+    // And the PER-ROW event, which is the same action the three sign-in doors
+    // write and is told apart from them only by `source` (#1268, ADR 0045). The
+    // batch row above has no `user_id` subject, so without this one an operator
+    // cannot ask "how did THIS account get its handle".
+    const perRow = db
+      .query<{ user_id: number; details: string | null }, [string]>(
+        "SELECT user_id, details FROM audit_log WHERE action = ?",
+      )
+      .all("username_auto_assigned");
+    expect(perRow).toHaveLength(1);
+    expect(perRow[0].user_id).toBe(id);
+    expect(JSON.parse(perRow[0].details ?? "{}")).toEqual({
+      username: "alovelace",
+      source: "admin_backfill",
+    });
   });
 
   test("two rows sharing a suggestion get a collision suffix", async () => {
