@@ -32,10 +32,28 @@
 -- stands. Backfilling a timestamp would fabricate requests nobody made and put
 -- the whole catalog in the admin review queue.
 --
+-- A SECOND COLUMN, `upload_access_notified_at`, records whether the admins were
+-- actually TOLD. It is not a duplicate of the first: the request landing and
+-- the notification arriving are two events that can and do come apart (Resend
+-- refuses, every admin send fails), and without the second stamp the
+-- request-once rule silently becomes request-never -- the row looks answered,
+-- the idempotency guard short-circuits every retry, and nobody is ever
+-- notified. Keeping them apart is what lets a repeat call re-send instead:
+--
+--   requested_at set, notified_at NULL -> open, admins NOT yet told; retry
+--   requested_at set, notified_at set  -> open and delivered; do not re-send
+--
+-- Same shape as `email_sent` on the approve route, promoted from a response
+-- field to a column because this one has to survive the request that produced
+-- it.
+--
 -- NOT IDEMPOTENT AS A STATEMENT, and it does not need to be: SQLite has no
 -- `ADD COLUMN IF NOT EXISTS`, and wrangler's `d1_migrations` ledger is what
 -- guarantees the file runs once. Re-running it by hand fails loudly with
 -- "duplicate column name: upload_access_requested_at" and changes nothing --
--- there is one statement, so there is no partial application to repair (the
--- concern migration 0075 documents at length applies to multi-statement files).
+-- the two statements are independent ADD COLUMNs, so a partial application
+-- leaves the first column in place and re-running finishes the second (the
+-- concern migration 0075 documents at length is about statements that must
+-- agree with each other; these two do not).
 ALTER TABLE users ADD COLUMN upload_access_requested_at TEXT;
+ALTER TABLE users ADD COLUMN upload_access_notified_at TEXT;

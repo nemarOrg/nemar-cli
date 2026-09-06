@@ -178,6 +178,16 @@ async function requestWithCookie(userId: number, why: string = WHY): Promise<Res
   );
 }
 
+function notifiedAt(id: number): string | null {
+  return (
+    db
+      .query<{ upload_access_notified_at: string | null }, [number]>(
+        "SELECT upload_access_notified_at FROM users WHERE id = ?",
+      )
+      .get(id)?.upload_access_notified_at ?? null
+  );
+}
+
 function storedRow(id: number) {
   return db
     .query<{ upload_access_requested_at: string | null; description: string | null }, [number]>(
@@ -274,7 +284,12 @@ describe("upload-access request: success", () => {
 
     const res = await withFakeResend(() => requestWithToken());
     expect(res.status).toBe(201);
-    expect(await res.json()).toEqual({ ok: true, already_requested: false });
+    expect(await res.json()).toEqual({
+      ok: true,
+      already_requested: false,
+      email_sent: true,
+      admins_notified: 1,
+    });
 
     const row = storedRow(id);
     expect(row?.upload_access_requested_at).toBeTruthy();
@@ -387,6 +402,89 @@ describe("upload-access request: asking twice", () => {
     const res = await requestWithToken();
     expect(res.status).toBe(200);
     expect((await res.json()).already_requested).toBe(true);
+  });
+});
+
+describe("upload-access request: an undelivered notification", () => {
+  test("a request nobody received is stored, reported, and NOT stamped as notified", async () => {
+    const id = await seedRequester();
+
+    const res = await withFakeResend(() => requestWithToken(), { status: 500 });
+    // The request itself succeeded: it is on the row and in the admin queue.
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.already_requested).toBe(false);
+    // ...and the caller is told the admins were not reached, rather than being
+    // handed an unqualified ok:true.
+    expect(body.email_sent).toBe(false);
+    expect(body.admins_notified).toBe(0);
+
+    expect(notifiedAt(id)).toBeNull();
+    expect(storedRow(id)?.upload_access_requested_at).toBeTruthy();
+  });
+
+  test("the next call re-sends instead of short-circuiting", async () => {
+    // Without the second stamp this is where request-once becomes
+    // request-NEVER: the row says answered, the idempotency guard refuses to
+    // act, and no admin ever learns the request exists.
+    const id = await seedRequester();
+    await withFakeResend(() => requestWithToken(), { status: 500 });
+
+    const calls = await withFakeResend(async (captured) => {
+      const second = await requestWithToken();
+      expect(second.status).toBe(200);
+      const body = await second.json();
+      expect(body.already_requested).toBe(true);
+      expect(body.email_sent).toBe(true);
+      expect(body.admins_notified).toBe(1);
+      return captured;
+    });
+
+    expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(1);
+    expect(notifiedAt(id)).toBeTruthy();
+  });
+
+  test("a delivered request is never re-sent", async () => {
+    await seedRequester();
+    await withFakeResend(() => requestWithToken());
+
+    const calls = await withFakeResend(async (captured) => {
+      const second = await requestWithToken();
+      expect((await second.json()).email_sent).toBe(true);
+      return captured;
+    });
+    expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(0);
+  });
+
+  test("the retry carries the ORIGINAL why text, read back off the row", async () => {
+    // The retry does not re-read the request body, so the card an admin
+    // eventually gets is the one the user actually submitted.
+    await seedRequester();
+    await withFakeResend(() => requestWithToken(), { status: 500 });
+
+    const calls = await withFakeResend(async (captured) => {
+      await requestWithToken("An entirely different sentence, comfortably long enough.");
+      return captured;
+    });
+    expect(sendsTo(calls, ADMIN_EMAIL)[0].html).toContain(WHY.replace("'", "&#39;"));
+  });
+
+  test("no eligible admin still succeeds, and says nobody was notified", async () => {
+    db.query("DELETE FROM users WHERE username = 'uploadadmin'").run();
+    const id = await seedRequester();
+
+    const calls = await withFakeResend(async (captured) => {
+      const res = await requestWithToken();
+      expect(res.status).toBe(201);
+      const body = await res.json();
+      expect(body.email_sent).toBe(false);
+      expect(body.admins_notified).toBe(0);
+      return captured;
+    });
+
+    expect(calls).toHaveLength(0);
+    // Unstamped, so a later run (once an admin exists again) still notifies.
+    expect(notifiedAt(id)).toBeNull();
   });
 });
 

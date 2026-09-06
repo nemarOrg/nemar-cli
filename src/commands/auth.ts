@@ -22,6 +22,7 @@ import inquirer from "inquirer";
 import ora from "ora";
 import {
   type OrcidNameResponse,
+  type UploadAccessRequestResponse,
   checkGitHubUsername,
   checkOrcidName,
   checkUsername,
@@ -1280,6 +1281,26 @@ const UPLOAD_ACCESS_FIX: Record<string, string> = {
   why: "pass a longer --why, or answer the prompt",
 };
 
+/**
+ * Say so when the request landed but no admin was reached.
+ *
+ * The request IS recorded either way, so this is a warning and not a failure;
+ * what makes it worth printing is that the fix is in the user's hands (run the
+ * command again) and is otherwise invisible -- a silent `ok` here means waiting
+ * for a review nobody has been asked for. `undefined` is a backend that
+ * predates the notification stamp, and says nothing rather than guessing.
+ */
+function warnIfAdminsNotNotified(result: UploadAccessRequestResponse): void {
+  if (result.email_sent !== false) return;
+  console.log();
+  console.log(
+    chalk.yellow(
+      "  Warning: your request is recorded but admins could not be notified;\n" +
+        "  it will be retried when you run this command again.",
+    ),
+  );
+}
+
 const requestUploadAccessCmd = authCommand
   .command("request-upload-access")
   .description("Ask an admin for upload access (one-time)")
@@ -1321,6 +1342,7 @@ const requestUploadAccessCmd = authCommand
       if (result.already_requested) {
         spinner.info("You already have an open upload access request");
         console.log(chalk.dim("  An admin reviews it once; you will get an email when it lands."));
+        warnIfAdminsNotNotified(result);
         return;
       }
       spinner.succeed("Upload access requested");
@@ -1328,6 +1350,7 @@ const requestUploadAccessCmd = authCommand
       console.log("  A NEMAR admin reviews the request once.");
       console.log("  You will get an email when upload access is granted.");
       console.log(chalk.dim("  Check any time with 'nemar auth status --refresh'."));
+      warnIfAdminsNotNotified(result);
     } catch (error) {
       if (!(error instanceof ApiError)) {
         spinner.fail("Failed to submit upload access request");

@@ -130,6 +130,53 @@ describe("nemar auth request-upload-access", () => {
     }
   });
 
+  test("warns when the request landed but no admin was reached", async () => {
+    // The request IS recorded, so this is a warning and not a failure -- but a
+    // silent ok here means waiting for a review nobody was asked for, and the
+    // fix (run it again) is in the user's hands.
+    seedAuthenticatedConfig();
+    const server = startServer({
+      status: 201,
+      body: { ok: true, already_requested: false, email_sent: false, admins_notified: 0 },
+    });
+    try {
+      const result = await runCli(["auth", "request-upload-access", "--why", WHY], server.url);
+      expect(result.exitCode).toBe(0);
+      const out = `${result.stdout}${result.stderr}`;
+      expect(out).toContain("admins could not be notified");
+      expect(out).toContain("retried when you run this command again");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a delivered request carries no warning", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer({
+      status: 201,
+      body: { ok: true, already_requested: false, email_sent: true, admins_notified: 2 },
+    });
+    try {
+      const result = await runCli(["auth", "request-upload-access", "--why", WHY], server.url);
+      expect(`${result.stdout}${result.stderr}`).not.toContain("could not be notified");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a backend that does not report delivery says nothing about it", async () => {
+    // `email_sent` absent is "unknown", not "failed": an older backend must not
+    // make every request print a warning about a notification that did go out.
+    seedAuthenticatedConfig();
+    const server = startServer({ status: 201, body: { ok: true, already_requested: false } });
+    try {
+      const result = await runCli(["auth", "request-upload-access", "--why", WHY], server.url);
+      expect(`${result.stdout}${result.stderr}`).not.toContain("could not be notified");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("every missing field is printed with where to fix it", async () => {
     seedAuthenticatedConfig();
     const server = startServer({

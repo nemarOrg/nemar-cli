@@ -273,10 +273,19 @@ export async function getSandboxStatus(): Promise<{
 
 export interface UploadAccessRequestResponse {
   ok: true;
-  /** True when a request was already open: nothing was written and no second
-   *  admin email was sent. */
+  /** True when a request was already open. */
   already_requested: boolean;
   requested_at?: string | null;
+  /**
+   * Whether at least one admin actually received the review card. False means
+   * the request IS recorded but nobody was told yet; calling again re-sends
+   * (ADR 0042). Optional so a backend that predates the second stamp reads as
+   * "unknown" rather than as a failure.
+   */
+  email_sent?: boolean;
+  /** Admins reached. `null` on a repeat call for an already-notified request,
+   *  where the count belongs to the original send and is not re-derived. */
+  admins_notified?: number | null;
 }
 
 /**

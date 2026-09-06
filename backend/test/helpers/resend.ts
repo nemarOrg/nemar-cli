@@ -46,12 +46,26 @@ export function sendsTo(calls: CapturedEmail[], recipient: string): ResendSendBo
     .filter((b) => (b.to ?? []).some((addr) => addr.toLowerCase() === want));
 }
 
+export interface FakeResendOptions {
+  /**
+   * What the fake Resend answers with. Defaults to 200. A non-2xx makes
+   * `sendEmail` throw exactly as it does against the real API, which is the
+   * only honest way to exercise a caller's delivery-failure path -- the send
+   * still runs, the fence still applies, and the request is still captured.
+   */
+  status?: number;
+}
+
 /**
  * Run `fn` with `api.resend.com` redirected to a local server, handing it the
  * list of captured requests. Always restores the real `fetch` and stops the
  * server, even if `fn` throws.
  */
-export async function withFakeResend<T>(fn: (calls: CapturedEmail[]) => Promise<T>): Promise<T> {
+export async function withFakeResend<T>(
+  fn: (calls: CapturedEmail[]) => Promise<T>,
+  options: FakeResendOptions = {},
+): Promise<T> {
+  const status = options.status ?? 200;
   const calls: CapturedEmail[] = [];
   const server = Bun.serve({
     port: 0,
@@ -59,6 +73,13 @@ export async function withFakeResend<T>(fn: (calls: CapturedEmail[]) => Promise<
       const url = new URL(req.url);
       const body = await req.json().catch(() => null);
       calls.push({ path: url.pathname, body });
+      if (status >= 400) {
+        // Resend's own error shape, which sendEmail reads for its message.
+        return new Response(JSON.stringify({ message: "simulated Resend failure" }), {
+          status,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       if (url.pathname === "/emails/batch") {
         const items = Array.isArray(body) ? body : [];
         return new Response(JSON.stringify({ data: items.map(() => ({ id: "batch-ok" })) }), {

@@ -776,7 +776,27 @@ export async function sendAdminNotificationEmail(
  * two rather than for anything a reviewer needs. Nothing is sent to the
  * requester: the request is a message to the admins, and the answer arrives as
  * the existing upload-access-granted mail at approval.
+ *
+ * RETURNS PER-RECIPIENT RESULTS rather than swallowing them, unlike its
+ * sibling above. The difference is what the caller does next: a "new verified
+ * account" heads-up that nobody receives is a missed notification, but an
+ * upload REQUEST that nobody receives is a user waiting forever for a review
+ * that was never queued. The route stamps `upload_access_notified_at` only
+ * when at least one send landed, and re-sends on the next attempt when it did
+ * not -- which it cannot do if the failure never leaves this function.
+ *
+ * Recipients in `failures` are redacted (`redactRecipient`): this shape is
+ * logged, and the addresses are real admins'.
  */
+export interface AdminNotificationOutcome {
+  /** Admins we tried to reach. 0 means the category had no opted-in recipient. */
+  attempted: number;
+  /** Sends Resend accepted. `> 0` is what "the admins were told" means. */
+  delivered: number;
+  /** One entry per failed send, recipient redacted for logging. */
+  failures: { recipient: string; error: string }[];
+}
+
 export async function sendUploadAccessRequestEmail(
   adminEmails: string[],
   request: {
@@ -797,7 +817,7 @@ export async function sendUploadAccessRequestEmail(
   replyTo?: string,
   isDev?: boolean,
   deliveryEnv?: EmailDeliveryEnv,
-): Promise<void> {
+): Promise<AdminNotificationOutcome> {
   const notSet = "<em>not set</em>";
   const row = (label: string, value: string) =>
     `<tr>
@@ -862,6 +882,11 @@ export async function sendUploadAccessRequestEmail(
 </html>
   `;
 
+  const outcome: AdminNotificationOutcome = {
+    attempted: adminEmails.length,
+    delivered: 0,
+    failures: [],
+  };
   for (const adminEmail of adminEmails) {
     try {
       await sendEmail(
@@ -874,10 +899,18 @@ export async function sendUploadAccessRequestEmail(
         isDev,
         deliveryEnv,
       );
+      outcome.delivered++;
     } catch (error) {
-      console.error(`Failed to send upload-access request to ${adminEmail}:`, error);
+      // Still per-recipient, so one bad address does not cost the others their
+      // copy -- the failure is now REPORTED as well as logged.
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error(
+        `Failed to send upload-access request to ${redactRecipient(adminEmail)}: ${detail}`,
+      );
+      outcome.failures.push({ recipient: redactRecipient(adminEmail), error: detail });
     }
   }
+  return outcome;
 }
 
 /**
