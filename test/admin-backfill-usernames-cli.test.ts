@@ -400,4 +400,38 @@ describe("nemar admin backfill-usernames", () => {
       server.stop();
     }
   });
+
+  test("--json exits non-zero when the response carries exhausted work", async () => {
+    // The exit code used to be computed AFTER the --json branch's early
+    // return, so a scripted caller reading `--json` output saw exit 0 on a run
+    // that left exhausted or conflicting rows behind. The two output modes
+    // must agree.
+    seedAuthenticatedConfig();
+    const server = startServer({
+      ...DRY_RUN_REPLY,
+      scanned: 1,
+      would_assign: 0,
+      exhausted: 1,
+      remaining: 1,
+      results: [
+        {
+          id: 25,
+          email: "saturated@example.org",
+          orcid: null,
+          outcome: "exhausted",
+          given_name: "Ada",
+          family_name: "Lovelace",
+          verify: "not_attempted",
+          error: "No free variant of 'alovelace' within the suffix limit",
+        },
+      ],
+    });
+    try {
+      const result = await runCli(["admin", "backfill-usernames", "--json"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(JSON.parse(result.stdout)).toMatchObject({ exhausted: 1 });
+    } finally {
+      server.stop();
+    }
+  });
 });
