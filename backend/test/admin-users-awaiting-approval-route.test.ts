@@ -75,6 +75,47 @@ beforeEach(async () => {
   await seedAdmin();
 });
 
+describe("POST /admin/revoke closes an open upload request", () => {
+  test("revoke clears both request stamps", async () => {
+    // Without this, revoking a grantee puts them straight back into the admin
+    // review queue as "awaiting approval" -- the one account an admin has just
+    // decided about. The review is of a person at a moment, and revocation
+    // ends that moment; a re-instated account asks again.
+    seedUser("grantee", {
+      status: "approved",
+      serviceAccess: 1,
+      requestedAt: "2026-09-01T12:00:00Z",
+    });
+    db.query(
+      "UPDATE users SET upload_access_notified_at = '2026-09-01T12:05:00Z' WHERE username = 'grantee'",
+    ).run();
+
+    const res = await app.request(
+      "/admin/revoke/grantee",
+      { method: "POST", headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+      { DB: realD1(db), ENVIRONMENT: "test" } as Bindings,
+    );
+    expect(res.status).toBe(200);
+
+    const row = db
+      .query<
+        {
+          status: string;
+          upload_access_requested_at: string | null;
+          upload_access_notified_at: string | null;
+        },
+        []
+      >(
+        "SELECT status, upload_access_requested_at, upload_access_notified_at FROM users WHERE username = 'grantee'",
+      )
+      .get();
+    expect(row?.status).toBe("revoked");
+    expect(row?.upload_access_requested_at).toBeNull();
+    expect(row?.upload_access_notified_at).toBeNull();
+    expect(await usernames("/admin/users?awaiting_approval=1")).toEqual([]);
+  });
+});
+
 describe("GET /admin/users: the open-request filter", () => {
   beforeEach(() => {
     seedUser("neverasked", { status: "verified", serviceAccess: 0, requestedAt: null });
@@ -115,15 +156,29 @@ describe("GET /admin/users: the open-request filter", () => {
     ]);
   });
 
-  test("combines with the status filter rather than replacing it", async () => {
+  test("a revoked account is never an open request", async () => {
+    // Revoke clears the request stamps (ADR 0042), so this row should not exist
+    // -- which is exactly why the fixture is here. The filter itself constrains
+    // status, so a row that reaches this shape some other way still cannot be
+    // put back into an admin's queue, and website#301 gets the right meaning
+    // without knowing to add a status param.
     seedUser("askedrevoked", {
       status: "revoked",
       serviceAccess: 0,
       requestedAt: "2026-09-03T12:00:00Z",
     });
+    // (The revoke route's other spelling, `revoked_iam_pending`, cannot be
+    // seeded at all: migration 0001's CHECK on `status` does not allow it, so
+    // that branch of the revoke route can never have written a row. Noted, not
+    // fixed here -- it predates this phase.)
 
+    expect(await usernames("/admin/users?awaiting_approval=1")).toEqual(["asked"]);
+  });
+
+  test("combines with an explicit status filter rather than replacing it", async () => {
     expect(await usernames("/admin/users?awaiting_approval=1&status=verified")).toEqual(["asked"]);
-    expect(await usernames("/admin/users?awaiting_approval=1")).toEqual(["asked", "askedrevoked"]);
+    // A contradictory pair returns nothing rather than quietly dropping one.
+    expect(await usernames("/admin/users?awaiting_approval=1&status=approved")).toEqual([]);
   });
 
   test("the request timestamp is in the listing, for asked and granted alike", async () => {

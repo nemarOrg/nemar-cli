@@ -56,6 +56,16 @@ states an admin cares about are readable from two columns:
 `GET /admin/users?awaiting_approval=1` is exactly the middle row, and
 `nemar admin users --awaiting-approval` now means it.
 
+**Revocation clears both stamps, and the filter also requires
+`status = 'verified'`.** The table above has a fourth row it must never
+produce: revoke sets `service_access = 0`, so a former grantee would otherwise
+reappear as an open request the moment their grant was taken away -- the one
+account an admin has just decided about. The revoke route therefore erases the
+request along with the grant (a re-instated account asks again; the review is
+of a person at a moment, and revocation ends that moment), and the filter
+constrains the status as well, so no other path that revokes a row can put a
+dead account back into the queue.
+
 **The request carries the person, or it is refused before an admin sees it.**
 A username, a given and a family name, a GitHub handle that resolves on GitHub,
 a city, a country, and 20-500 characters about what is being deposited. Each

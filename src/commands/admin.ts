@@ -316,10 +316,13 @@ Examples:
     // that ASKED for upload access and has not been granted it. Phase 1 could
     // only approximate that as "verified with no grant" — every base-tier
     // account, whether or not anyone wanted to upload — because there was no
-    // request to read. The narrowing happens server-side on
-    // upload_access_requested_at; `status=verified` is still sent with it
-    // because an open request implies that tier (pending and revoked cannot
-    // reach the endpoint at all, and approved holds the grant).
+    // request to read.
+    //
+    // The narrowing is entirely server-side: an open request is
+    // `upload_access_requested_at` set, no grant, and `status='verified'`, and
+    // the route applies all three. `status=verified` is still sent as well
+    // because the pre-#1253 backend this CLI may be talking to knows only that
+    // half, and it is a true property of every open request either way.
     const awaitingApproval = options.awaitingApproval === true;
 
     // Determine status filter
