@@ -1804,7 +1804,19 @@ authWebRoutes.post(
       }
       return c.json({ ok: true, user });
     } catch (err) {
-      console.error("[auth-web] /email/verify failed", err);
+      // WHAT THIS 500 DOES AND DOES NOT MEAN. Everything after
+      // `applyEmailVerification` -- the admin notification and the
+      // `fetchPublicUserById` read-back -- runs AFTER the verification has
+      // committed, and neither is evidence about whether it did. A throw in
+      // the read-back therefore reports a failure for a write that landed,
+      // which is the honest thing available (the response body is the payload
+      // the dashboard needs and there is none) and is safe to retry: the
+      // second call takes the `already_verified` early return at the top,
+      // 200s, and re-reads the user. So a 500 from here is "we could not tell
+      // you", never "nothing happened" -- the failure that DOES mean nothing
+      // happened is the `verification_incomplete` branch above, which also
+      // puts the code back.
+      console.error(`[auth-web] /email/verify failed for user id=${webUser.id}`, err);
       return c.json({ error: "Verification failed" }, 500);
     }
   },
