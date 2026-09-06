@@ -37,7 +37,7 @@ import { isNonProductionEnv } from "../../services/environment";
 import { removeCollaborator } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
 import { revokeUserIamAccess } from "../../services/iam";
-import { normalizeGithubHandle, normalizeOrcid } from "../../services/identity";
+import { emailFieldSchema, normalizeGithubHandle, normalizeOrcid } from "../../services/identity";
 import { errorMessage } from "../../services/repo-metadata";
 import { type Bindings, type Variables, isDemotion, parseRole } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
@@ -1514,11 +1514,9 @@ export function registerUsersRoutes(admin: AdminRouter): void {
   // ---------------------------------------------------------------------------
 
   const seedWebUserSchema = z.object({
-    email: z
-      .string()
-      .email()
-      .max(320)
-      .transform((e) => e.trim().toLowerCase()),
+    // Shared field: normalises BEFORE validating, so a pasted address with
+    // surrounding whitespace seeds a row rather than 400ing (ADR 0043).
+    email: emailFieldSchema,
     // Optional. Defaults to 'pending' to mirror what the legacy
     // INSERT-OR-IGNORE produced. The cookie-auth tests (#572) seed a
     // signed-in tier directly; since ADR 0040 phase 2 the cookie path in

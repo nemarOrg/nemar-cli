@@ -130,22 +130,56 @@ export interface IdentityHolder {
 }
 
 /**
+ * The `table.column` names a caught UNIQUE violation actually names, or `[]`
+ * when the error is not one.
+ *
+ * SQLite spells the failure as
+ * `UNIQUE constraint failed: <table>.<column>[, <table>.<column>]*`,
+ * and names the COLUMNS even when the violated index is a named partial one
+ * (verified against 0077's two indexes on real D1, where the message reads
+ * `UNIQUE constraint failed: users.orcid: SQLITE_CONSTRAINT (extended: ...)`).
+ * The capture stops at the next `:` so that D1 suffix is not swallowed.
+ *
+ * Parsed into an exact list rather than substring-matched, because substring
+ * matching is wrong in a way that is easy to miss: `users.email` is a
+ * substring of `users.email_verified`, so a violation on the latter would be
+ * reported to a user as "that address is taken".
+ */
+export function uniqueViolationColumns(err: unknown): string[] {
+  const msg = err instanceof Error ? err.message : String(err);
+  const match = /UNIQUE constraint failed:\s*([^\n:]+)/.exec(msg);
+  if (!match) return [];
+  return match[1]
+    .split(",")
+    .map((c) => c.trim())
+    .filter((c) => c.length > 0);
+}
+
+/**
  * Whether a caught D1/SQLite error is a UNIQUE violation on one of the user
  * identifier columns.
  *
- * SQLite names the COLUMN in the message even when the violated index is a
- * named partial one (verified against 0077's two indexes), so
- * `UNIQUE constraint failed: users.email` covers both the 0026 table-level
- * constraint and `idx_users_email_live_unique`. Column-scoped on purpose: a
- * UNIQUE hit on some other column must not be reported to a user as "that
- * address is taken".
+ * Column-scoped on purpose: a UNIQUE hit on some other column must not be
+ * reported to a user as "that address is taken".
  */
 export function isUniqueViolationOn(
   err: unknown,
   column: "email" | "orcid" | "username" | "github_username",
 ): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return msg.includes("UNIQUE constraint failed") && msg.includes(`users.${column}`);
+  return uniqueViolationColumns(err).includes(`users.${column}`);
+}
+
+/**
+ * Whether a caught error is the `UNIQUE(provider, provider_subject)` violation
+ * on `oauth_identities` -- i.e. another account claimed this iD's identity row
+ * in the moment between a check and an insert.
+ *
+ * Separate from {@link isUniqueViolationOn} because it is a different table:
+ * that one only ever answers about `users`, and widening it would make every
+ * call site's meaning depend on a string.
+ */
+export function isOrcidIdentityUniqueViolation(err: unknown): boolean {
+  return uniqueViolationColumns(err).includes("oauth_identities.provider_subject");
 }
 
 // ---------------------------------------------------------------------------

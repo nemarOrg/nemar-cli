@@ -815,10 +815,7 @@ authWebRoutes.patch(
           .bind(patch.github_username, webUser.id)
           .first<{ id: number }>();
         if (dup) {
-          return c.json(
-            { error: "github_in_use", message: "GitHub account already linked to another user" },
-            409,
-          );
+          return c.json({ error: "github_in_use", ...identityRefusal("github_in_use") }, 409);
         }
 
         // #1052: three answers, not two. A 5xx or a transport failure used to
@@ -862,10 +859,7 @@ authWebRoutes.patch(
             .bind(githubUser.login, webUser.id)
             .first<{ id: number }>();
           if (canonicalDup) {
-            return c.json(
-              { error: "github_in_use", message: "GitHub account already linked to another user" },
-              409,
-            );
+            return c.json({ error: "github_in_use", ...identityRefusal("github_in_use") }, 409);
           }
         }
         patch.github_username = githubUser.login;
@@ -941,12 +935,12 @@ authWebRoutes.patch(
       // concurrent PATCHes claiming the same free handle both pass the
       // pre-check, and the loser's UPDATE hits idx_users_github (0012,
       // COLLATE NOCASE). Same net CLI signup carries in auth.ts.
-      const msg = String(err);
-      if (msg.includes("UNIQUE constraint failed") && msg.includes("users.github_username")) {
-        return c.json(
-          { error: "github_in_use", message: "GitHub account already linked to another user" },
-          409,
-        );
+      // Column-scoped through the shared helper (ADR 0043), which parses the
+      // failing columns out of the message rather than substring-matching
+      // them: `users.github_username` cannot be confused with a neighbour, and
+      // the same check reads identically at every call site.
+      if (isUniqueViolationOn(err, "github_username")) {
+        return c.json({ error: "github_in_use", ...identityRefusal("github_in_use") }, 409);
       }
       // The same window for `username`, and the same answer. This one is
       // reachable ONLY as a race: the pre-check above is COLLATE NOCASE while

@@ -34,7 +34,7 @@ import type {
   IdentityKind,
 } from "../../../../shared/contract/identity.js";
 import { auditLogStatement } from "../../db/audit-log";
-import { identityRefusal } from "../../services/identity";
+import { identityRefusal, isUniqueViolationOn } from "../../services/identity";
 import type { AdminRouter } from "./shared";
 
 /**
@@ -122,11 +122,28 @@ function keyFor(row: CandidateRow, kind: IdentityKind): string | null {
  * route test against a fixture the migration itself flagged.
  */
 function canonicalIdOf(rows: CandidateRow[], kind: IdentityKind): number {
+  // AN UNFLAGGED ROW ALWAYS WINS, whatever the per-identifier rule says.
+  //
+  // The flag is the fact that decides this: a flagged row is invisible to the
+  // partial unique indexes, so it does NOT hold the identifier no matter how
+  // low its id is. On the compound shape -- one pair colliding on BOTH iD and
+  // email, where the ORCID pass flagged the LOWER id because the identity row
+  // sits on the higher one -- "lowest id" would mark the flagged row canonical
+  // and send an operator to fix the wrong account.
+  //
+  // Migration 0077's email pass encodes the same precedence in SQL
+  // (`m.identity_conflict = 0` inside its MIN), which is why this has to.
+  const unflagged = rows.filter((r) => r.identity_conflict === 0);
+  const pool = unflagged.length > 0 ? unflagged : rows;
+
   if (kind === "orcid") {
-    const backed = rows.find((r) => r.has_oauth_identity === 1);
+    const backed = pool.find((r) => r.has_oauth_identity === 1);
     if (backed) return backed.id;
   }
-  return rows.reduce((min, r) => (r.id < min ? r.id : min), rows[0].id);
+  // Lowest id, over the unflagged rows when there are any and over the whole
+  // group when a migration flagged every row in it (possible, and then there
+  // is no right answer -- report the migration's rule rather than nothing).
+  return pool.reduce((min, r) => (r.id < min ? r.id : min), pool[0].id);
 }
 
 function toAccount(row: CandidateRow, canonicalId: number): DuplicateAccount {
@@ -175,9 +192,17 @@ export function registerUserDuplicateRoutes(admin: AdminRouter): void {
   /**
    * GET /admin/users/duplicates - live accounts sharing an identifier.
    *
-   * Static segment, so Hono's RegExpRouter matches this before
-   * `GET /users/:username` (static outranks param) -- the same property
-   * `POST /users/backfill-names` already relies on.
+   * REGISTRATION ORDER IS LOAD-BEARING. `GET /users/:username` also matches
+   * `/users/duplicates`, and this route only wins because
+   * `registerUserDuplicateRoutes` runs BEFORE `registerUsersRoutes` in
+   * admin/index.ts. Do not reorder them.
+   *
+   * There is no "static outranks param" rule to fall back on here: this
+   * router's path set makes Hono's RegExpRouter throw `UnsupportedPathError`,
+   * so it falls back to a router that runs every matching handler in
+   * registration order and takes the first response. Registered second, this
+   * route would never be reached -- the username lookup would 404 first, which
+   * is exactly what happened before the order was fixed.
    */
   admin.get("/users/duplicates", async (c) => {
     try {
@@ -257,18 +282,48 @@ export function registerUserDuplicateRoutes(admin: AdminRouter): void {
         return c.json({ ok: true, id, cleared: false });
       }
 
-      await c.env.DB.batch([
-        c.env.DB.prepare(
-          "UPDATE users SET identity_conflict = 0, updated_at = datetime('now') WHERE id = ?",
-        ).bind(id),
-        auditLogStatement(c.env.DB, {
-          userId: c.get("user")?.id ?? null,
-          action: "identity_conflict_cleared",
-          resourceType: "user",
-          resourceId: String(id),
-          details: JSON.stringify({ email: target.email, orcid: target.orcid }),
-        }),
-      ]);
+      // Clearing the flag is what puts the row back INTO the partial unique
+      // indexes, so this UPDATE is itself a uniqueness-checked write: a
+      // collision that appeared between the SELECT above and here fails right
+      // now. That is the same answer the pre-check gives, so it gets the same
+      // 409 rather than a generic 500 -- an operator who retries then sees the
+      // colliding rows named instead of an opaque failure.
+      try {
+        await c.env.DB.batch([
+          c.env.DB.prepare(
+            "UPDATE users SET identity_conflict = 0, updated_at = datetime('now') WHERE id = ?",
+          ).bind(id),
+          auditLogStatement(c.env.DB, {
+            userId: c.get("user")?.id ?? null,
+            action: "identity_conflict_cleared",
+            resourceType: "user",
+            resourceId: String(id),
+            details: JSON.stringify({ email: target.email, orcid: target.orcid }),
+          }),
+        ]);
+      } catch (writeErr) {
+        if (isUniqueViolationOn(writeErr, "orcid") || isUniqueViolationOn(writeErr, "email")) {
+          // Re-read so the response names who it collided with, rather than
+          // reporting the empty list the stale pre-check produced.
+          const fresh = await c.env.DB.prepare(DUPLICATE_CANDIDATES_SQL).all<CandidateRow>();
+          const races = buildDuplicateGroups(fresh.results ?? [])
+            .filter((g) => g.accounts.some((a) => a.id === id))
+            .map((g) => ({
+              kind: g.kind,
+              value: g.value,
+              user_ids: g.accounts.filter((a) => a.id !== id).map((a) => a.id),
+            }));
+          return c.json(
+            {
+              error: "identity_conflict_remains",
+              ...identityRefusal("identity_conflict_remains"),
+              colliding: races,
+            },
+            409,
+          );
+        }
+        throw writeErr;
+      }
       return c.json({ ok: true, id, cleared: true });
     } catch (err) {
       console.error("[admin/user-duplicates] clear failed", err);

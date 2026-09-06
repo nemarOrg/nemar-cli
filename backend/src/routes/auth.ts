@@ -27,6 +27,7 @@ import { getDatasetsToken } from "../services/github-auth";
 import {
   emailFieldSchema,
   findEmailHolder,
+  findGithubHolder,
   findOrcidHolder,
   identityRefusal,
   isUniqueViolationOn,
@@ -263,19 +264,22 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
       );
     }
 
-    // NOTE: the username / github_username de-dup checks below deliberately do
-    // NOT filter `deleted_at IS NULL` — they must see ALL rows, including
-    // tombstones, to honor the table-wide UNIQUE constraints. Re-signup with a
-    // deleted user's old email/username/github is enabled by the tombstone
-    // MASKING (email -> deleted+<id>@deleted.invalid, username/github -> NULL),
-    // which frees those values, NOT by excluding deleted rows here. See the
-    // DELETE /admin/users/by-id/:id tombstone + migration 0037.
+    // NOTE on `deleted_at`. The USERNAME check below deliberately does NOT
+    // filter `deleted_at IS NULL`: it mirrors a table-wide UNIQUE, so it must
+    // see tombstones too. Re-signup with a deleted user's old values is
+    // enabled by the tombstone MASKING (email -> deleted+<id>@deleted.invalid,
+    // username/github/orcid -> NULL), which frees them, NOT by excluding
+    // deleted rows here. See DELETE /admin/users/by-id/:id + migration 0037.
     //
-    // The email and ORCID checks are the exception and are live-rows-only,
-    // because the constraints they mirror are the PARTIAL indexes from 0077
-    // (`deleted_at IS NULL AND identity_conflict = 0`) rather than table-wide
-    // ones. Masking still does the freeing; the predicate just matches the
-    // index the write will actually hit.
+    // The email, ORCID and GitHub checks go through services/identity.ts and
+    // are live-rows-only. For email and ORCID that is required: the
+    // constraints they mirror are 0077's PARTIAL indexes
+    // (`deleted_at IS NULL AND identity_conflict = 0`), so a live-only
+    // predicate is what matches the index the write will actually hit. For
+    // GitHub the predicate makes no difference either way -- the tombstone
+    // NULLs `github_username`, so no tombstone can hold a handle to collide
+    // with -- and it uses the same helper for symmetry, so all three
+    // identifiers are asked the same question in the same place.
 
     // Check if username already exists
     const existingUsername = await db
@@ -316,10 +320,7 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     // API call and lets the request 409 even when the GitHub user happens
     // not to resolve (e.g., user was renamed/deleted on GitHub after
     // signing up here).
-    const directDupGithub = await db
-      .prepare("SELECT id FROM users WHERE github_username = ? COLLATE NOCASE")
-      .bind(github_username)
-      .first();
+    const directDupGithub = await findGithubHolder(db, github_username);
     if (directDupGithub) {
       return c.json(
         {
@@ -364,10 +365,7 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     // Re-check with the canonical login when GitHub normalized the case.
     // Catches the "Octocat" stored vs "octocat" submitted shape.
     if (githubUser.login.toLowerCase() !== github_username.toLowerCase()) {
-      const canonicalDup = await db
-        .prepare("SELECT id FROM users WHERE github_username = ? COLLATE NOCASE")
-        .bind(githubUser.login)
-        .first();
+      const canonicalDup = await findGithubHolder(db, githubUser.login);
       if (canonicalDup) {
         return c.json(
           {

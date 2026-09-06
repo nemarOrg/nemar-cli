@@ -50,6 +50,8 @@ import {
   findEmailHolder,
   findOrcidHolder,
   identityRefusal,
+  isOrcidIdentityUniqueViolation,
+  isUniqueViolationOn,
   normalizeEmail,
   normalizeOrcid,
 } from "../services/identity";
@@ -185,8 +187,13 @@ async function linkIdentity(
   // One D1 batch == one implicit transaction, so the identity insert and the
   // users reconcile land together. Without it a mid-sequence failure could
   // leave an identity row with a stale users.orcid_verified (or vice versa).
-  // A UNIQUE(provider, provider_subject) violation from a concurrent link
-  // throws here; the caller's try/catch turns it into a clean failure.
+  //
+  // A concurrent link that wins the race throws here -- on
+  // UNIQUE(provider, provider_subject), or since 0077 on `users.orcid`. The
+  // CALLER is what turns that into a typed refusal (`orcid_in_use`); this
+  // function only guarantees the batch is atomic. It used to say the caller
+  // produced "a clean typed failure", which was not true: the callback's
+  // catch-all mapped it to the generic `orcid_error` redirect.
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO oauth_identities (user_id, provider, provider_subject, provider_email, display_name, last_login_at)
@@ -264,6 +271,20 @@ async function refreshUserName(env: Bindings, userId: number, orcid: string): Pr
   } catch (err) {
     console.warn(`[auth-orcid] name refresh failed for user ${userId} (${orcid})`, err);
   }
+}
+
+/**
+ * Whether a write failed because another account claimed the iD in the moment
+ * between the check and the write.
+ *
+ * Both spellings count: `users.orcid` (0077's partial unique index) and
+ * `oauth_identities.provider_subject` (0050's). They are two constraints over
+ * the same fact, and which one fires depends only on which statement of the
+ * batch got there first, so a caller that handled one and not the other would
+ * return a typed refusal or a generic 500 at random.
+ */
+function claimedByAnother(err: unknown): boolean {
+  return isUniqueViolationOn(err, "orcid") || isOrcidIdentityUniqueViolation(err);
 }
 
 function clientIp(c: { req: { header: (k: string) => string | undefined } }): string | null {
@@ -409,11 +430,21 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
         if (decideSecondOrcidOutcome(state.mode) === "refuse") {
           return fail("orcid_already_have", state.next);
         }
-        await relinkIdentity(c.env, webUser.id, mine.provider_subject, orcid, name);
+        try {
+          await relinkIdentity(c.env, webUser.id, mine.provider_subject, orcid, name);
+        } catch (err) {
+          if (claimedByAnother(err)) return fail("orcid_in_use", state.next);
+          throw err;
+        }
         afterResponse(c, refreshUserName(c.env, webUser.id, orcid));
         return redirect(`${frontend}${state.next}`, [clearState]);
       }
-      await linkIdentity(c.env, webUser.id, orcid, name);
+      try {
+        await linkIdentity(c.env, webUser.id, orcid, name);
+      } catch (err) {
+        if (claimedByAnother(err)) return fail("orcid_in_use", state.next);
+        throw err;
+      }
       afterResponse(c, refreshUserName(c.env, webUser.id, orcid));
       return redirect(`${frontend}${state.next}`, [clearState]);
     }
@@ -550,13 +581,32 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
     // upload grant, `service_access`, has exactly one writer and it is admin
     // approval (phase 1) — never this route, which is why `approved_at` is
     // NULL rather than a sign-up timestamp.
-    const insert = await c.env.DB.prepare(
-      `INSERT INTO users (email, orcid, orcid_verified, status, email_verified, signup_source,
-         affiliation, city, country, approved_at, service_access)
-       VALUES (?, ?, 1, 'pending', 0, 'web', ?, ?, ?, NULL, 0)`,
-    )
-      .bind(email, orcid, affiliation || null, city, country)
-      .run();
+    // A concurrent sign-up can claim either identifier between the checks
+    // above and this INSERT, and 0077's partial unique indexes are what stop
+    // the second row. Map that to the SAME typed refusal the checks return:
+    // the loser of a race is in exactly the situation the pre-check describes,
+    // and a generic 500 "Sign-up failed" tells them nothing and invites a
+    // retry that will fail identically.
+    let insert: D1Result;
+    try {
+      insert = await c.env.DB.prepare(
+        `INSERT INTO users (email, orcid, orcid_verified, status, email_verified, signup_source,
+           affiliation, city, country, approved_at, service_access)
+         VALUES (?, ?, 1, 'pending', 0, 'web', ?, ?, ?, NULL, 0)`,
+      )
+        .bind(email, orcid, affiliation || null, city, country)
+        .run();
+    } catch (insertErr) {
+      if (isUniqueViolationOn(insertErr, "email")) {
+        c.header("Set-Cookie", clearPending);
+        return c.json({ error: "email_in_use", ...identityRefusal("email_in_use") }, 409);
+      }
+      if (isUniqueViolationOn(insertErr, "orcid")) {
+        c.header("Set-Cookie", clearPending);
+        return c.json({ error: "orcid_in_use", ...identityRefusal("orcid_in_use") }, 409);
+      }
+      throw insertErr;
+    }
     const userId = insert.meta?.last_row_id;
     if (!userId) {
       console.error("[auth-orcid] finalize: user insert returned no row id");
@@ -576,7 +626,9 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
         .bind(userId, orcid, pending.name)
         .run();
     } catch (identErr) {
-      console.error("[auth-orcid] finalize: identity insert failed; rolling back user", identErr);
+      // The users row has already committed, so it MUST be removed either way
+      // -- an account with an email and no usable ORCID login is a dead end
+      // the user cannot fix. What differs is what we then tell them.
       await c.env.DB.prepare("DELETE FROM users WHERE id = ?")
         .bind(userId)
         .run()
@@ -584,10 +636,25 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
           console.error("[auth-orcid] finalize: failed to roll back orphan user", delErr),
         );
       c.header("Set-Cookie", clearPending);
-      return c.json(
-        { error: "orcid_already_linked", ...identityRefusal("orcid_already_linked") },
-        409,
+
+      // ONLY the identity UNIQUE means somebody else claimed the iD. Reporting
+      // `orcid_already_linked` for any failure -- a D1 outage, a schema error
+      // -- sends the user to go unlink an iD from an account that does not
+      // exist, and hides the real fault behind a 409 nobody investigates.
+      if (isOrcidIdentityUniqueViolation(identErr)) {
+        console.error(
+          `[auth-orcid] finalize: iD ${orcid} was claimed concurrently; rolled the user row back`,
+        );
+        return c.json(
+          { error: "orcid_already_linked", ...identityRefusal("orcid_already_linked") },
+          409,
+        );
+      }
+      console.error(
+        "[auth-orcid] finalize: identity insert failed for a NON-uniqueness reason; rolled the user row back",
+        identErr,
       );
+      return c.json({ error: "Sign-up failed" }, 500);
     }
 
     const { cookieIdRaw, maxAgeSeconds } = await issueSession(

@@ -22,10 +22,14 @@ import { z } from "zod";
  * - `orcid_in_use` -- the iD is already on a live account through
  *   `users.orcid`. This is the case nothing checked before #1254, and it is
  *   how production rows 42/43 came to exist.
- * - `orcid_already_linked` -- the iD already has an `oauth_identities` row.
- *   Kept distinct from `orcid_in_use` because it is the pre-existing code the
- *   ORCID finalize route has always returned and the website already handles
- *   it; the two mean the same thing to a user and carry the same message.
+ * - `orcid_already_linked` -- **DEPRECATED ALIAS for `orcid_in_use`.** It means
+ *   the same thing to a user and carries the same message; the only difference
+ *   is which constraint noticed (`oauth_identities` rather than `users.orcid`),
+ *   which is not a distinction anyone can act on. It survives only because it
+ *   is the code the ORCID finalize route has always returned and the website
+ *   switches on it today. Once nemarOrg/website#305 has the site treating
+ *   `orcid_in_use` as the single code, finalize stops emitting this one and it
+ *   can be deleted here. Do not add new emitters.
  * - `orcid_linked_other` -- (redirect flows only) the finished iD backs a
  *   DIFFERENT account than the session's. Pre-existing.
  * - `email_in_use` -- the address is on a live account, compared
