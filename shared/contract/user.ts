@@ -11,6 +11,32 @@
 
 import { z } from "zod";
 
+/**
+ * One `profile_gaps` entry (#1268, ADR 0045).
+ *
+ * Carried by BOTH user payloads — `GET /users/me` for the CLI and
+ * `GET /auth/me` for the dashboard — and computed by the one function in
+ * ./profile-gaps.ts that the upload-access preconditions also build their
+ * `missing` array from, so the two cannot disagree about what an account still
+ * needs.
+ *
+ * `field` is a plain string rather than the `GapField` union: the vocabulary is
+ * closed today, and a client that dropped an entry it did not recognise would
+ * tell a user their request failed for no reason at all. `blocks` says what the
+ * absence stops, nearest first; `set_on` says which surfaces can set it, and is
+ * `["web"]` alone for a name owned by a verified ORCID record, where no CLI
+ * command applies. Both are `.passthrough()`-friendly enums-as-strings for the
+ * same reason `field` is.
+ */
+export const profileGapSchema = z
+  .object({
+    field: z.string(),
+    blocks: z.array(z.string()),
+    set_on: z.array(z.string()),
+  })
+  .passthrough();
+export type ProfileGapWire = z.infer<typeof profileGapSchema>;
+
 /** A NEMAR user as returned inside the /users/me envelope. */
 export const userSchema = z
   .object({
@@ -46,6 +72,21 @@ export const userSchema = z
     orcid_verified: z.boolean().optional(),
     given_name: z.string().nullable().optional(),
     family_name: z.string().nullable().optional(),
+    /**
+     * What this account is still missing, and what each absence blocks (#1268,
+     * ADR 0045). `.optional()` like everything else added since #1254: a
+     * backend that predates phase 8 sends no such key, and an ABSENT list is
+     * "this API cannot say" while an EMPTY one is "nothing is missing". The CLI
+     * renders those two differently and must not collapse them.
+     */
+    profile_gaps: z.array(profileGapSchema).optional(),
+    /**
+     * True when the username on this account was derived from the name rather
+     * than chosen (#1268, ADR 0045) — by the backfill sweep or at a web sign-in
+     * — and has not been changed since. Optional for the same reason; it is
+     * what lets a surface offer "we picked this, change it if you like".
+     */
+    username_auto_assigned: z.boolean().optional(),
   })
   .passthrough();
 export type ContractUser = z.infer<typeof userSchema>;
@@ -330,6 +371,16 @@ export const webUserSchema = z
     service_access: z.boolean(),
     service_access_granted_at: z.string().nullable(),
     upload_access_requested_at: z.string().nullable(),
+    /**
+     * The two phase-8 additions (#1268, ADR 0045). REQUIRED here, unlike their
+     * `.optional()` twins on {@link userSchema}: that schema is what the CLI
+     * parses a possibly-older backend's `/users/me` with, while this one is
+     * only ever used to assert what THIS backend sends, and a `publicUser`
+     * that stopped sending either should fail the route test rather than
+     * quietly serve a dashboard that can no longer say what is missing.
+     */
+    profile_gaps: z.array(profileGapSchema),
+    username_auto_assigned: z.boolean(),
   })
   .passthrough();
 export type WebUser = z.infer<typeof webUserSchema>;

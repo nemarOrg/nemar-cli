@@ -23,6 +23,7 @@ import {
 } from "../services/email";
 import { validateGitHubUsername } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
+import { profileGapsForRow } from "../services/profile-gaps";
 import {
   ALREADY_APPROVED_REFUSAL,
   GITHUB_UNAVAILABLE_REFUSAL,
@@ -56,6 +57,11 @@ userRoutes.get("/me", async (c) => {
       orcid_verified,
       given_name,
       family_name,
+      username,
+      github_username,
+      city,
+      country,
+      username_auto_assigned,
       sandbox_completed,
       sandbox_completed_at,
       sandbox_dataset_id,
@@ -74,6 +80,15 @@ userRoutes.get("/me", async (c) => {
       orcid_verified: number;
       given_name: string | null;
       family_name: string | null;
+      // Read from the ROW rather than reused from the credential (#1268): the
+      // gap list must describe the account as it is now, and `AuthUser` types
+      // both of these non-null because a token-bearing CLI account has them --
+      // which is exactly the assumption a NULL-username web row breaks.
+      username: string | null;
+      github_username: string | null;
+      city: string | null;
+      country: string | null;
+      username_auto_assigned: number;
       sandbox_completed: number;
       sandbox_completed_at: string | null;
       sandbox_dataset_id: string | null;
@@ -125,6 +140,13 @@ userRoutes.get("/me", async (c) => {
       sandbox_dataset_id: userDetails?.sandbox_dataset_id,
       // Tiered access (website ADR 0010): admin-granted permission to upload/compute.
       service_access: !!userDetails?.service_access,
+      // What this account is still missing, computed by the SAME function the
+      // upload-access preconditions use (#1268, ADR 0045) -- so `nemar auth
+      // status` can never list a different set of fields from the one a request
+      // is refused for. An empty array is a real answer; the key is absent only
+      // when the row itself could not be read.
+      profile_gaps: userDetails ? profileGapsForRow(userDetails) : undefined,
+      username_auto_assigned: !!userDetails?.username_auto_assigned,
     },
     token: tokenInfo
       ? {

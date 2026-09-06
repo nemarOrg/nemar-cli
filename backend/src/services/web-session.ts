@@ -165,6 +165,12 @@ export interface WebSessionUser {
    *  fetching it from GET /users/me separately, purely because it was absent
    *  here (nemarOrg/website#306). */
   username: string | null;
+  /** True when that username was DERIVED from the name rather than chosen --
+   *  by the ADR 0042 backfill sweep or at a web sign-in (#1268, ADR 0045) --
+   *  and has not been changed since. Onboarding and Settings use it to offer
+   *  "we picked this, change it if you like", an offer that would be nonsense
+   *  to someone who typed their own. Converted from the 0/1 column here. */
+  username_auto_assigned: boolean;
   /** The DATES behind the two upload-access states (ADR 0042), so the
    *  dashboard can render "granted"/"requested" as events rather than flags. */
   service_access_granted_at: string | null;
@@ -189,7 +195,8 @@ export async function findSessionByCookieId(
             u.email, u.role, u.status, u.email_verified,
             u.given_name, u.family_name, u.orcid, u.orcid_verified,
             u.github_username, u.city, u.country, u.affiliation, u.service_access,
-            u.username, u.service_access_granted_at, u.upload_access_requested_at
+            u.username, u.username_auto_assigned,
+            u.service_access_granted_at, u.upload_access_requested_at
        FROM web_sessions ws
        JOIN users u ON u.id = ws.user_id
       WHERE ws.cookie_id_hash = ?
@@ -224,6 +231,8 @@ export async function findSessionByCookieId(
       service_access: number;
       // NULL on every web/ORCID row until onboarding sets one (migration 0026).
       username: string | null;
+      // NOT NULL DEFAULT 0 in D1 (0079), so plain number.
+      username_auto_assigned: number;
       // The two dates the dashboard needs to render "granted"/"requested" as
       // events rather than as flags (ADR 0042; nemarOrg/website#306).
       service_access_granted_at: string | null;
@@ -263,6 +272,7 @@ export async function findSessionByCookieId(
       affiliation: row.affiliation,
       service_access: row.service_access === 1,
       username: row.username,
+      username_auto_assigned: row.username_auto_assigned === 1,
       service_access_granted_at: row.service_access_granted_at,
       upload_access_requested_at: row.upload_access_requested_at,
     },

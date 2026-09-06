@@ -22,6 +22,7 @@
  */
 
 import type { z } from "zod";
+import { profileGapFields } from "../../../shared/contract/profile-gaps.js";
 import {
   UPLOAD_ACCESS_WHY_MAX_CHARS,
   UPLOAD_ACCESS_WHY_MIN_CHARS,
@@ -67,12 +68,6 @@ export interface UploadAccessProfile {
   country: string | null;
 }
 
-/** Whitespace counts as absent, matching `resolveUploaderIdentity`'s trim
- *  (services/uploader-identity.ts): a row holding " " has no city. */
-function blank(value: string | null | undefined): boolean {
-  return (value ?? "").trim().length === 0;
-}
-
 /**
  * Check everything that can be decided from the account row plus the submitted
  * text. Returns the refusal to send, or null when the request may proceed to
@@ -93,6 +88,14 @@ function blank(value: string | null | undefined): boolean {
  * GitHub existence is checked by the route after this returns null, because it
  * costs a GitHub API call and there is no point spending one on a request that
  * is already refused.
+ *
+ * WHERE THE FIELD LIST COMES FROM (#1268, ADR 0045). `missing` is no longer
+ * assembled here: it is `profileGapFields` over the same row, the function
+ * `/users/me` and `/auth/me` compute their `profile_gaps` with. That is the
+ * whole point of phase 8 — a refusal naming `city` and a status command that
+ * never mentioned it were two implementations of one rule, and one of them was
+ * always going to drift. What stays here is the ORDER OF THE THREE ANSWERS,
+ * which is a property of this endpoint and of nothing else.
  */
 export function checkUploadAccessRequest(
   profile: UploadAccessProfile,
@@ -107,7 +110,21 @@ export function checkUploadAccessRequest(
     };
   }
 
-  if (profile.email_verified !== 1) {
+  // The gap list is computed once and then split at `email_verified`, rather
+  // than computed twice: the inbox has its own refusal code and its own
+  // endpoint, and it comes FIRST in matrix order, so the remaining entries are
+  // exactly the profile half in exactly the order the clients render.
+  const gaps = profileGapFields({
+    email_verified: profile.email_verified === 1,
+    username: profile.username,
+    given_name: profile.given_name,
+    family_name: profile.family_name,
+    github_username: profile.github_username,
+    city: profile.city,
+    country: profile.country,
+  });
+
+  if (gaps.includes("email_verified")) {
     return {
       error: "email_not_verified",
       message:
@@ -116,13 +133,7 @@ export function checkUploadAccessRequest(
     };
   }
 
-  const missing: string[] = [];
-  if (blank(profile.username)) missing.push("username");
-  if (blank(profile.given_name)) missing.push("given_name");
-  if (blank(profile.family_name)) missing.push("family_name");
-  if (blank(profile.github_username)) missing.push("github_username");
-  if (blank(profile.city)) missing.push("city");
-  if (blank(profile.country)) missing.push("country");
+  const missing = gaps;
 
   if (missing.length > 0) {
     return {
