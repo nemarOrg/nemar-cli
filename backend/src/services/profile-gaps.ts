@@ -14,6 +14,7 @@
 
 import { type ProfileGapEntry, computeProfileGaps } from "../../../shared/contract/profile-gaps.js";
 import type { AccountStatus } from "../../../shared/contract/user.js";
+import { flag } from "../db/flag";
 
 /**
  * The columns the gap rules read, as SQLite hands them over.
@@ -35,10 +36,6 @@ export interface ProfileGapRow {
   github_username: string | null;
   city: string | null;
   country: string | null;
-}
-
-function flag(value: number | boolean): boolean {
-  return value === true || value === 1;
 }
 
 /** Compute `profile_gaps` for one account row. */

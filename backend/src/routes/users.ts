@@ -16,6 +16,7 @@ import type { Context } from "hono";
 import { z } from "zod";
 import type { AccountStatus } from "../../../shared/contract/user.js";
 import { auditLogStatement } from "../db/audit-log";
+import { flag } from "../db/flag";
 import { authMiddleware } from "../middleware/auth";
 import {
   getAdminEmailsForCategory,
@@ -148,7 +149,7 @@ userRoutes.get("/me", async (c) => {
       // is refused for. An empty array is a real answer; the key is absent only
       // when the row itself could not be read.
       profile_gaps: userDetails ? profileGapsForRow(userDetails) : undefined,
-      username_auto_assigned: !!userDetails?.username_auto_assigned,
+      username_auto_assigned: flag(userDetails?.username_auto_assigned),
     },
     token: tokenInfo
       ? {

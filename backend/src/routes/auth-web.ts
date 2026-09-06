@@ -48,6 +48,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { AccountStatus } from "../../../shared/contract/user.js";
 import { auditLogStatement } from "../db/audit-log";
+import { flag } from "../db/flag";
 import { timingSafeEqual } from "../lib/constant-time";
 import { resolveActingAccount } from "../middleware/auth";
 import { webSessionMiddleware } from "../middleware/webSession";
@@ -626,7 +627,7 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
     // COMMITTED by here, and letting a failed read reach the outer catch would
     // answer 500 and withhold the cookie for a session that exists.
     let currentUsername = userRow.username;
-    let currentAutoAssigned = userRow.username_auto_assigned === 1;
+    let currentAutoAssigned = flag(userRow.username_auto_assigned);
     if (claimed && !usernameLanded) {
       try {
         const fresh = await db
@@ -635,7 +636,7 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
           .first<{ username: string | null; username_auto_assigned: number }>();
         if (fresh) {
           currentUsername = fresh.username;
-          currentAutoAssigned = fresh.username_auto_assigned === 1;
+          currentAutoAssigned = flag(fresh.username_auto_assigned);
         }
       } catch (rereadErr) {
         console.error(
@@ -1281,7 +1282,7 @@ async function fetchPublicUserById(
     affiliation: row.affiliation,
     service_access: row.service_access === 1,
     username: row.username,
-    username_auto_assigned: row.username_auto_assigned === 1,
+    username_auto_assigned: flag(row.username_auto_assigned),
     service_access_granted_at: row.service_access_granted_at,
     upload_access_requested_at: row.upload_access_requested_at,
   });

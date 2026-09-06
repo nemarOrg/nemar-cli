@@ -19,6 +19,7 @@
  */
 
 import type { AccountStatus } from "../../../shared/contract/user.js";
+import { flag } from "../db/flag";
 import { type Bindings, type UserRole, parseRole } from "../types/bindings";
 
 export const COOKIE_NAME = "nemar_session";
@@ -277,7 +278,7 @@ export async function findSessionByCookieId(
       affiliation: row.affiliation,
       service_access: row.service_access === 1,
       username: row.username,
-      username_auto_assigned: row.username_auto_assigned === 1,
+      username_auto_assigned: flag(row.username_auto_assigned),
       service_access_granted_at: row.service_access_granted_at,
       upload_access_requested_at: row.upload_access_requested_at,
     },
