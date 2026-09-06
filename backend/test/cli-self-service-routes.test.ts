@@ -51,6 +51,18 @@ let externalBase: string;
 let tokenOrcid = ADA_ORCID;
 /** GitHub logins the local mirror should answer 404 for. */
 let missingGithubLogins = new Set<string>();
+/**
+ * `/users/:login` hits since the last reset.
+ *
+ * What makes the duplicate-handle refusal falsifiable at all. `idx_users_github`
+ * (COLLATE NOCASE, migration 0012) would reject the same write at the UPDATE
+ * and the route's catch maps it to the same 409 body, so a status-and-body
+ * assertion passes whether or not the PRE-CHECK exists. The pre-check runs
+ * before `validateGitHubUsername`, so the observable difference is that a
+ * refused save spends no GitHub call -- which is also why it is ordered that
+ * way: a duplicate must not cost a rate-limited request on a shared token.
+ */
+let githubCalls = 0;
 
 beforeAll(() => {
   external = Bun.serve({
@@ -67,6 +79,7 @@ beforeAll(() => {
       }
       const gh = url.pathname.match(/^\/users\/(.+)$/);
       if (gh) {
+        githubCalls += 1;
         if (missingGithubLogins.has(gh[1])) return new Response("not found", { status: 404 });
         return Response.json({ login: gh[1], id: 4242 });
       }
@@ -200,6 +213,7 @@ beforeEach(() => {
   db = freshDb();
   tokenOrcid = ADA_ORCID;
   missingGithubLogins = new Set();
+  githubCalls = 0;
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/auth", authOrcidRoutes);
   app.route("/auth", authWebRoutes);
@@ -412,6 +426,8 @@ describe("PATCH /auth/profile with a bearer token", () => {
     expect(res.status).toBe(200);
     // The leading "@" people paste is stripped by the shared normaliser.
     expect(userRow(ada)?.github_username).toBe("octocat");
+    // A changed handle IS looked up: existence is checked before it is stored.
+    expect(githubCalls).toBe(1);
   });
 
   test("refuses a GitHub handle that does not exist", async () => {
@@ -437,6 +453,9 @@ describe("PATCH /auth/profile with a bearer token", () => {
     expect(res.status).toBe(409);
     expect((await res.json()) as { code: string }).toMatchObject({ code: "github_in_use" });
     expect(userRow(ada)?.github_username).toBeNull();
+    // Refused by the pre-check, not by the index at UPDATE time: no GitHub
+    // call was spent. Without this the assertions above pass either way.
+    expect(githubCalls).toBe(0);
   });
 
   test("sets a username while it is empty, and refuses one that is taken", async () => {
