@@ -189,6 +189,14 @@ export type AdminUsersListResponse = z.infer<typeof adminUsersListResponseSchema
  *   lookup_failed            transient: the ORCID read failed. Retry the batch.
  *   conflict                 the suggested username was claimed between the
  *                            scan and the write. Retry picks the next suffix.
+ *   exhausted                a base exists and EVERY variant of it up to the
+ *                            suffix limit is already taken. Split out from
+ *                            `conflict` because that one is retry-safe by
+ *                            definition and this one is the opposite: the next
+ *                            run scans the same base and reaches the same
+ *                            answer. It needs a human to pick a handle, like
+ *                            `single_name`, and it is an operational fact about
+ *                            a saturated name worth seeing in the summary.
  */
 export const backfillUsernameOutcomeSchema = z.enum([
   "assigned",
@@ -197,6 +205,7 @@ export const backfillUsernameOutcomeSchema = z.enum([
   "no_name",
   "lookup_failed",
   "conflict",
+  "exhausted",
 ]);
 export type BackfillUsernameOutcome = z.infer<typeof backfillUsernameOutcomeSchema>;
 

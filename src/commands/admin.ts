@@ -6675,7 +6675,7 @@ backfillUsernamesCommand
           res.apply ? res.assigned : res.would_assign
         } single_name=${res.single_name} no_name=${res.no_name} lookup_failed=${
           res.lookup_failed
-        } conflict=${res.conflict} verify_sent=${res.verify_sent} verify_failed=${
+        } conflict=${res.conflict} exhausted=${res.exhausted ?? 0} verify_sent=${res.verify_sent} verify_failed=${
           res.verify_failed ?? 0
         } verify_rate_limited=${res.verify_rate_limited ?? 0} remaining=${
           res.remaining ?? "unknown"
@@ -6703,6 +6703,10 @@ backfillUsernamesCommand
         );
       } else if (r.outcome === "conflict") {
         console.log(`  ${chalk.yellow("conflict  ")} ${who}: ${r.error}`);
+      } else if (r.outcome === "exhausted") {
+        // Deliberately not folded in with `conflict` above: re-running the
+        // sweep fixes a conflict and can never fix this one.
+        console.log(`  ${chalk.yellow("exhausted ")} ${who}: ${r.error}; pick a username by hand`);
       } else {
         console.log(`  ${chalk.red("error     ")} ${who}: ${r.error}`);
       }
@@ -6736,9 +6740,15 @@ backfillUsernamesCommand
     // failed. None is fatal, but a caller must not read any of them as a clean
     // sweep -- an unreported verify failure is exactly how "one message per
     // account" quietly became "none" for the accounts it failed on.
+    //
+    // `exhausted` is in the list because it used to BE a conflict: splitting it
+    // out (#1268 review) must not quietly turn a run that finished nothing into
+    // a clean exit. It is the stronger case of the two -- a conflict clears
+    // itself on the next run and a saturated base never does.
     if (
       res.lookup_failed > 0 ||
       res.conflict > 0 ||
+      (res.exhausted ?? 0) > 0 ||
       (res.verify_failed ?? 0) > 0 ||
       (res.verify_rate_limited ?? 0) > 0 ||
       res.remaining === null

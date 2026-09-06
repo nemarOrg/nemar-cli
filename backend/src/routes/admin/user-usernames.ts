@@ -271,13 +271,19 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
       }
 
       const pick = await pickUsernameForName(db, given, family, reserved);
-      const username = pick.status === "ok" ? pick.username : null;
-      if (!username) {
+      if (pick.status !== "ok") {
+        // `no_base` is unreachable here -- the `if (!base)` arm above returned
+        // for exactly that -- so this is `exhausted`, and it is reported as
+        // `exhausted` rather than as `conflict`. The two used to be one value
+        // and they ask opposite things: a conflict is retry-safe by definition
+        // (the next run picks the next suffix), while a saturated base gives
+        // the same answer every run forever and needs a human to choose a
+        // handle, like `single_name`.
         results.push({
           id: user.id,
           email: user.email,
           orcid: user.orcid,
-          outcome: "conflict",
+          outcome: "exhausted",
           given_name: given,
           family_name: family,
           verify: "not_attempted",
@@ -285,6 +291,7 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
         });
         continue;
       }
+      const username = pick.username;
       reserved.add(username.toLowerCase());
 
       if (!apply) {
@@ -405,6 +412,9 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
       no_name: results.filter((r) => r.outcome === "no_name").length,
       lookup_failed: results.filter((r) => r.outcome === "lookup_failed").length,
       conflict: results.filter((r) => r.outcome === "conflict").length,
+      // Counted apart from `conflict` because it is the one outcome in this
+      // report that retrying cannot change.
+      exhausted: results.filter((r) => r.outcome === "exhausted").length,
       // Counted across BOTH passes: an operator reading the summary wants to
       // know how many people were mailed and how many were not, not which loop
       // tried. A failure used to appear in neither the summary nor the exit

@@ -127,10 +127,12 @@ export function suggestUsername(
  * suffix will solve, and an unbounded loop inside a Worker request is worse
  * than an honest "could not pick one".
  */
+export const USERNAME_SUFFIX_LIMIT = 50;
+
 export function pickAvailableUsername(
   base: string,
   taken: Iterable<string>,
-  limit = 50,
+  limit = USERNAME_SUFFIX_LIMIT,
 ): string | null {
   const used = new Set<string>();
   for (const t of taken) used.add(t.trim().toLowerCase());

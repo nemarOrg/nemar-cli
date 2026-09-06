@@ -218,6 +218,44 @@ describe("nemar admin backfill-usernames", () => {
     }
   });
 
+  test("a saturated base is rendered apart from a conflict, and still exits 1", async () => {
+    // `exhausted` used to arrive as `conflict`, which the exit-code rule
+    // already treats as unfinished work. Splitting it out must not quietly
+    // turn a run that assigned nothing into a clean exit, and the line must
+    // say what a retry cannot fix.
+    seedAuthenticatedConfig();
+    const server = startServer({
+      ...DRY_RUN_REPLY,
+      scanned: 1,
+      would_assign: 0,
+      exhausted: 1,
+      remaining: 1,
+      results: [
+        {
+          id: 25,
+          email: "saturated@example.org",
+          orcid: null,
+          outcome: "exhausted",
+          given_name: "Ada",
+          family_name: "Lovelace",
+          verify: "not_attempted",
+          error: "No free variant of 'alovelace' within the suffix limit",
+        },
+      ],
+    });
+    try {
+      const result = await runCli(["admin", "backfill-usernames"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toContain("exhausted ");
+      expect(result.stdout).toContain("No free variant of 'alovelace' within the suffix limit");
+      expect(result.stdout).toContain("pick a username by hand");
+      // And it is counted in its own column, not folded into conflict=.
+      expect(result.stdout).toContain("conflict=0 exhausted=1");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("a run that left work behind exits non-zero", async () => {
     seedAuthenticatedConfig();
     const server = startServer({
