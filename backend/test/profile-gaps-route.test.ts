@@ -83,6 +83,9 @@ interface Overrides {
   /** `member` by default. `admin`/`owner` are exempt from the `orcid_verified`
    *  gap (#1271), which is the only thing this column changes here. */
   role?: string;
+  /** 0 by default, so the upload-access request is answerable at all: a granted
+   *  account 409s before any precondition is read. */
+  service_access?: number;
   username_auto_assigned?: number;
 }
 
@@ -99,6 +102,7 @@ async function seedUser(overrides: Overrides = {}): Promise<number> {
     orcid_verified: 1,
     status: "verified",
     role: "member",
+    service_access: 0,
     username_auto_assigned: 0,
     ...overrides,
   };
@@ -108,7 +112,7 @@ async function seedUser(overrides: Overrides = {}): Promise<number> {
                         orcid, orcid_verified, signup_source, service_access,
                         username_auto_assigned)
      VALUES (?, ?, 'x', ?, ?, ?, ?, ?, ?, ?, ?, 'Swartz Center',
-             '0000-0002-1825-0097', ?, 'web', 0, ?)`,
+             '0000-0002-1825-0097', ?, 'web', ?, ?)`,
   ).run(
     row.username,
     USER_EMAIL,
@@ -121,6 +125,7 @@ async function seedUser(overrides: Overrides = {}): Promise<number> {
     row.city,
     row.country,
     row.orcid_verified,
+    row.service_access,
     row.username_auto_assigned,
   );
   const u = db
@@ -330,6 +335,20 @@ describe("one row, three answers", () => {
     expect(answers.missing).toEqual(["family_name", "orcid_verified", "github_username"]);
     expect(answers.usersMe).toEqual(answers.missing);
     expect(answers.authMe).toEqual(answers.missing);
+  });
+
+  test("a grant already held is untouched: the gap is reported, not enforced", async () => {
+    // The shape of every account that got upload access before this row existed
+    // (`cool-vibers` in production: a member, granted, no verified iD). The gap
+    // blocks the ASK, and there is nothing left to ask for -- so both payloads
+    // still name it and the request answers `already_approved`, not
+    // `profile_incomplete`.
+    const id = await seedUser({ orcid_verified: 0, service_access: 1 });
+    const answers = await allThree(id);
+    expect(answers.usersMe).toEqual(["orcid_verified"]);
+    expect(answers.authMe).toEqual(["orcid_verified"]);
+    expect(answers.missing).toEqual([]);
+    expect((await (await requestUploadAccess()).json()).error).toBe("already_approved");
   });
 
   test("an owner with no verified iD is not asked for one, anywhere", async () => {
