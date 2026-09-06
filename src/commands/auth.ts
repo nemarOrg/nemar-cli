@@ -17,7 +17,7 @@
  */
 
 import chalk from "chalk";
-import { Command } from "commander";
+import { Command, InvalidArgumentError } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
 import {
@@ -56,6 +56,7 @@ import {
   getConfig,
   getConfigPath,
   isAuthenticated,
+  renameActiveAccount,
   setConfig,
   storeAccount,
   switchAccount,
@@ -1628,6 +1629,11 @@ function requireAuthenticatedForChange(): boolean {
 async function refreshStoredAccount(): Promise<void> {
   try {
     const user = await getCurrentUser();
+    // The accounts map is KEYED by username, so a rename has to move the key
+    // as well as the field, or `nemar auth switch <new>` cannot find the
+    // account it just renamed (#1266 review). Done first: the writes below
+    // target the active account, and this is what decides which one that is.
+    if (user.username) renameActiveAccount(user.username);
     setConfig("username", user.username ?? undefined);
     setConfig("email", user.email);
     setConfig("githubUsername", user.github_username ?? undefined);
@@ -1639,6 +1645,30 @@ async function refreshStoredAccount(): Promise<void> {
         `  (local copy not refreshed: ${errorDetail(error)} — run 'nemar auth status --refresh')`,
       ),
     );
+  }
+}
+
+/**
+ * Apply a local config write that must not be mistaken for the network call
+ * that preceded it (#1266 review item 5).
+ *
+ * The server has already changed something by the time these run -- the email
+ * has moved and the code is spent -- so a failed `conf` write is a stale local
+ * copy, not a failed change. Inside the request's own try/catch it printed
+ * "Could not confirm the new address" for a change that had in fact landed,
+ * which is the one sentence that sends a person to re-request a code they no
+ * longer need.
+ */
+function updateLocalConfig(apply: () => void): void {
+  try {
+    apply();
+  } catch (error) {
+    console.log(
+      chalk.yellow(
+        `  The change is live on the server; your local config could not be updated: ${errorDetail(error)}`,
+      ),
+    );
+    console.log(chalk.dim("  Run 'nemar auth status --refresh' once the problem is fixed."));
   }
 }
 
@@ -1688,31 +1718,35 @@ const profileSetEmailCmd = profileCmd
   .action(async (address: string) => {
     if (!requireAuthenticatedForChange()) return;
     const spinner = ora(`Sending a confirmation code to ${address}...`).start();
+    let result: Awaited<ReturnType<typeof requestEmailChange>>;
     try {
-      const result = await requestEmailChange(address);
-      // Remembered so the second step needs only the code. Written before
-      // anything is printed so a user who closes the terminal can still
-      // finish with the code in their inbox.
-      setConfig("pendingEmailChange", address);
-      spinner.succeed(`Code sent to ${result.masked_email}`);
-      console.log();
-      console.log("  The address is not changed until you confirm the code:");
-      console.log(`    ${chalk.cyan("nemar auth profile verify-email <code>")}`);
-      console.log(chalk.dim("  The code expires in 10 minutes."));
-      if (result.dev_code) {
-        console.log(chalk.dim(`  (development backend echoed the code: ${result.dev_code})`));
-      }
-      if (result.dev_skip) {
-        console.log(
-          chalk.yellow(
-            "  This backend is non-production and did not mail anything (delivery allow-list).",
-          ),
-        );
-      }
-      console.log(chalk.dim(`  ${SETTINGS_HINT}`));
+      result = await requestEmailChange(address);
     } catch (error) {
       failWithApiError(spinner, error, "Could not send the confirmation code");
+      return;
     }
+
+    // Past this point the code IS in the person's inbox, so nothing below may
+    // report a failure of the request. The local write gets its own guarded
+    // step for exactly that reason (#1266 review).
+    spinner.succeed(`Code sent to ${result.masked_email}`);
+    updateLocalConfig(() => setConfig("pendingEmailChange", address));
+
+    console.log();
+    console.log("  The address is not changed until you confirm the code:");
+    console.log(`    ${chalk.cyan("nemar auth profile verify-email <code>")}`);
+    console.log(chalk.dim("  The code expires in 10 minutes."));
+    if (result.dev_code) {
+      console.log(chalk.dim(`  (development backend echoed the code: ${result.dev_code})`));
+    }
+    if (result.dev_skip) {
+      console.log(
+        chalk.yellow(
+          "  This backend is non-production and did not mail anything (delivery allow-list).",
+        ),
+      );
+    }
+    console.log(chalk.dim(`  ${SETTINGS_HINT}`));
   });
 
 addVerboseHelp(
@@ -1755,24 +1789,33 @@ const profileVerifyEmailCmd = profileCmd
     }
 
     const spinner = ora(`Confirming ${address}...`).start();
+    let result: Awaited<ReturnType<typeof verifyEmailChange>>;
     try {
-      const result = await verifyEmailChange(address, code);
-      // Written from the address we just proved rather than from the refresh
-      // below: a refresh that fails must not leave the old address cached as
-      // if nothing had happened.
-      setConfig("email", address);
-      deleteConfig("pendingEmailChange");
-      spinner.succeed(`Account email is now ${address}`);
-      if (result.old_address_notified === false) {
-        console.log(
-          chalk.yellow("  The previous address could not be notified; the change still applied."),
-        );
-      }
-      await refreshStoredAccount();
-      console.log(chalk.dim("  Sign-in codes and NEMAR mail now go to the new address."));
+      result = await verifyEmailChange(address, code);
     } catch (error) {
       failWithApiError(spinner, error, "Could not confirm the new address");
+      return;
     }
+
+    // The address HAS moved and the code is spent, so success is reported
+    // before anything local is touched: a `conf` write failure here used to
+    // print "Could not confirm the new address" for a change that had landed
+    // (#1266 review).
+    spinner.succeed(`Account email is now ${address}`);
+    // Written from the address we just proved rather than from the refresh
+    // below: a refresh that fails must not leave the old address cached as if
+    // nothing had happened.
+    updateLocalConfig(() => {
+      setConfig("email", address);
+      deleteConfig("pendingEmailChange");
+    });
+    if (result.old_address_notified === false) {
+      console.log(
+        chalk.yellow("  The previous address could not be notified; the change still applied."),
+      );
+    }
+    await refreshStoredAccount();
+    console.log(chalk.dim("  Sign-in codes and NEMAR mail now go to the new address."));
   });
 
 addVerboseHelp(
@@ -1939,35 +1982,99 @@ const ORCID_POLL_INTERVAL_MS = 3000;
  * unaffected by our polling, and the timeout is the only thing that ends the
  * wait unhappily.
  */
+/**
+ * Consecutive unreachable polls before the wait is abandoned. Three at the
+ * three-second interval is roughly ten seconds of silence -- long enough to
+ * ride out one dropped request, short enough not to spend five minutes
+ * pretending to wait for a browser flow that cannot report back.
+ */
+const ORCID_POLL_MAX_NETWORK_FAILURES = 3;
+
+/**
+ * Why a wait ended. `timeout` is the ordinary "they walked away" case; the
+ * other two are conditions that will not improve by waiting longer, and each
+ * has a different thing for the person to do (#1266 review item 7).
+ */
+type OrcidWaitOutcome =
+  | { kind: "linked"; orcid: string }
+  | { kind: "timeout" }
+  | { kind: "unauthenticated" }
+  | { kind: "unreachable"; detail: string };
+
 async function waitForOrcidLink(
   previousOrcid: string | null,
   timeoutMs: number,
-): Promise<string | null> {
+): Promise<OrcidWaitOutcome> {
   const deadline = Date.now() + timeoutMs;
+  let networkFailures = 0;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, ORCID_POLL_INTERVAL_MS));
     try {
       const user = await getCurrentUser();
+      networkFailures = 0;
       const current = user.orcid ?? null;
-      if (current && current !== previousOrcid) return current;
-    } catch {
-      // Keep waiting: a poll that failed says nothing about the browser flow.
+      if (current && current !== previousOrcid) return { kind: "linked", orcid: current };
+    } catch (error) {
+      // A 401 is not a transient poll failure: the key this command is holding
+      // has been revoked or regenerated, and no amount of waiting fixes it.
+      // Burning the full timeout on it ends in "gave up waiting", which sends
+      // the person to look at their browser rather than at their credentials.
+      if (error instanceof ApiError && error.statusCode === 401) {
+        return { kind: "unauthenticated" };
+      }
+      // statusCode 0 is this codebase's convention for a network-layer
+      // failure (lib/api/client.ts). One is noise; several in a row means the
+      // API is not reachable from here, and the browser flow's result is
+      // unknowable until it is.
+      if (error instanceof ApiError && error.statusCode === 0) {
+        networkFailures += 1;
+        if (networkFailures >= ORCID_POLL_MAX_NETWORK_FAILURES) {
+          return { kind: "unreachable", detail: errorDetail(error) };
+        }
+      } else {
+        // Anything else (a 5xx, a contract drift) is treated as transient:
+        // it says nothing about the browser flow, which is what we are
+        // actually waiting on.
+        networkFailures = 0;
+      }
     }
   }
-  return null;
+  return { kind: "timeout" };
+}
+
+/**
+ * Parse `--timeout` at the ARGUMENT boundary, so a bad value is a usage error
+ * (#1266 review item 9).
+ *
+ * It used to fall back to 300 silently, which is the worst of both: a typo
+ * (`--timeout 5m`) was accepted and then ignored, and the person watched a
+ * five-minute wait they thought they had shortened. Commander turns an
+ * InvalidArgumentError into its own usage failure with a non-zero exit.
+ */
+export function parseOrcidTimeout(raw: string): number {
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || !Number.isInteger(seconds) || seconds <= 0) {
+    throw new InvalidArgumentError("--timeout must be a whole number of seconds greater than 0");
+  }
+  return seconds;
 }
 
 const profileOrcidCmd = profileCmd
   .command("orcid <action>")
   .description("Link, re-link, or unlink your ORCID iD (link opens a browser)")
   .option("--no-open", "Print the URL instead of opening a browser")
-  .option("--timeout <seconds>", "How long to wait for the browser flow to finish", "300")
+  .option(
+    "--timeout <seconds>",
+    "How long to wait for the browser flow to finish",
+    parseOrcidTimeout,
+    300,
+  )
   .option("-y, --yes", "Skip the confirmation prompt (unlink)")
   .option("-n, --no", "Decline the confirmation prompt (unlink)")
   .action(
     async (
       action: string,
-      options: { open?: boolean; timeout?: string; yes?: boolean; no?: boolean },
+      options: { open?: boolean; timeout?: number; yes?: boolean; no?: boolean },
     ) => {
       if (action !== "link" && action !== "relink" && action !== "unlink") {
         console.log(chalk.yellow(`Unknown action '${action}'`));
@@ -2027,20 +2134,37 @@ const profileOrcidCmd = profileCmd
       console.log(`    ${chalk.cyan(authorizeUrl)}`);
       console.log(chalk.dim("  The link is good for 10 minutes and works only for this account."));
       if (options.open !== false && openInBrowser(authorizeUrl)) {
-        console.log(chalk.dim("  (opening it in your browser)"));
+        // "Trying", not "opened": the spawn returns before the child can fail,
+        // so this is a claim about what was attempted (#1266 review item 8).
+        console.log(chalk.dim("  (trying to open your browser; use the link above if it doesn't)"));
       }
       console.log();
 
-      const timeoutSeconds = Number.parseInt(options.timeout ?? "300", 10);
+      // Already validated by parseOrcidTimeout at the argument boundary.
+      const timeoutSeconds = options.timeout ?? 300;
       const waitSpinner = ora("Waiting for you to finish in the browser...").start();
-      const linked = await waitForOrcidLink(
-        previousOrcid,
-        (Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? timeoutSeconds : 300) * 1000,
-      );
-      if (linked) {
-        waitSpinner.succeed(`ORCID iD ${linked} is linked to your account`);
+      const outcome = await waitForOrcidLink(previousOrcid, timeoutSeconds * 1000);
+      if (outcome.kind === "linked") {
+        waitSpinner.succeed(`ORCID iD ${outcome.orcid} is linked to your account`);
         await refreshStoredAccount();
         console.log(chalk.dim(`  ${SETTINGS_HINT}`));
+        return;
+      }
+      if (outcome.kind === "unauthenticated") {
+        waitSpinner.fail("Your credentials no longer authenticate");
+        console.log();
+        console.log("  Run 'nemar auth login' with a current API key, then try again.");
+        console.log(
+          chalk.dim("  If you finished the browser step, the link may still have been made."),
+        );
+        process.exitCode = 1;
+        return;
+      }
+      if (outcome.kind === "unreachable") {
+        waitSpinner.fail(`Cannot reach the API: ${outcome.detail}`);
+        console.log();
+        console.log("  The browser step may still have worked; check with 'nemar auth profile'.");
+        process.exitCode = 1;
         return;
       }
       waitSpinner.warn("Gave up waiting for the browser flow");
@@ -2067,7 +2191,16 @@ Description:
   unlink it there first.
 
   The link URL is printed whether or not a browser opens, so a headless or
-  remote machine is a copy-and-paste rather than a dead end.
+  remote machine is a copy-and-paste rather than a dead end. Pass --no-open,
+  or set NEMAR_NO_BROWSER=1, to stop the CLI reaching for a browser at all.
+
+  Opening the link shows a NEMAR page naming the account it will link to
+  before it sends you to ORCID. If that account is not yours, close the tab:
+  the link was made by somebody else and would attach YOUR iD to THEIR
+  account. A link can only be used once.
+
+  --timeout is a whole number of seconds (default 300); the wait stops early
+  if your credentials stop working or the API becomes unreachable.
 
 Examples:
   $ nemar auth profile orcid link

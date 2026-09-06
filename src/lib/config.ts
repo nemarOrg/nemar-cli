@@ -491,6 +491,39 @@ export function storeAccount(username: string, accountConfig: Config): void {
 }
 
 /**
+ * Re-key the ACTIVE account after its username changed on the server (#1266).
+ *
+ * The accounts map is keyed by username and `switchAccount` looks an account
+ * up by that key, so writing the new username into the account's fields and
+ * leaving the key alone produces an account that `nemar auth switch <new>`
+ * cannot find and `nemar auth switch <old>` finds under a name that no longer
+ * exists. `nemar auth profile set-username` is the first thing that can change
+ * a username from the CLI, so it is the first thing that has to move the key.
+ *
+ * No-ops when there is no active account, when the key is already right, or
+ * when the target key is taken by a DIFFERENT stored account -- clobbering
+ * another account's credentials to fix a display name is not a trade worth
+ * making, and the account still works under its old key.
+ *
+ * Returns true when the key actually moved.
+ */
+export function renameActiveAccount(newUsername: string): boolean {
+  const name = newUsername.trim();
+  if (!name) return false;
+  const config = getStore();
+  const active = getActiveAccountName();
+  if (!active || active === name) return false;
+  const accounts = getAccountsMap();
+  const current = accounts[active];
+  if (!current || accounts[name]) return false;
+
+  delete accounts[active];
+  accounts[name] = { ...current, username: name };
+  config.store = { ...config.store, accounts, activeAccount: name };
+  return true;
+}
+
+/**
  * Switch to a different stored account by NEMAR username or GitHub username.
  * Returns the account that was switched to, or null if not found.
  */

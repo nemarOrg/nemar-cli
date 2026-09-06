@@ -13,6 +13,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { dlog } from "./debug-log.js";
 
 export interface BrowserOpener {
   command: string;
@@ -35,15 +36,24 @@ export function browserOpenerFor(platform: NodeJS.Platform, url: string): Browse
 }
 
 /**
- * Try to open `url`, reporting whether the attempt was made.
+ * Try to open `url`. The return value is whether an opener was LAUNCHED, and
+ * deliberately not whether it worked.
  *
- * `false` means "tell the user to open it themselves" — it is not an error
- * and never throws. `NEMAR_NO_BROWSER=1` forces it, for CI, for tests, and
- * for anyone who does not want a CLI reaching for their browser.
+ * That distinction is the reason the caller says "trying to open your browser"
+ * rather than "opened" (#1266 review): `spawn` returns before the child can
+ * fail, so a missing `xdg-open` on a minimal container produces an async
+ * `error` event long after this function has answered. Claiming success there
+ * would leave someone waiting for a window that is never coming, next to a URL
+ * they were supposed to click.
  *
- * A spawn that fails after the fact (no `xdg-open` on a minimal container)
- * cannot be detected synchronously, which is the other reason the URL is
- * always printed regardless of what this returns.
+ * `false` means "there was nothing to try" — no opener for the platform, or
+ * `NEMAR_NO_BROWSER=1`, which exists for CI, for tests, and for anyone who
+ * does not want a CLI reaching for their browser. Never throws; the URL is
+ * printed by the caller either way.
+ *
+ * The async failure goes to the debug log rather than the terminal: it is
+ * diagnostic detail for `--debug`, and printing it under a URL the person can
+ * already click would be noise.
  */
 export function openInBrowser(url: string): boolean {
   if (process.env.NEMAR_NO_BROWSER === "1") return false;
@@ -54,12 +64,18 @@ export function openInBrowser(url: string): boolean {
       stdio: "ignore",
       detached: true,
     });
-    // Swallow the async failure (ENOENT for a missing opener) rather than
-    // letting it reach the process as an unhandled 'error' event.
-    child.on("error", () => {});
+    // Recorded, not discarded, and never rethrown: an unhandled 'error' event
+    // on a detached child would take the CLI down over a browser that did not
+    // open.
+    child.on("error", (err) => {
+      dlog(`openInBrowser: ${opener.command} failed: ${err instanceof Error ? err.message : err}`);
+    });
     child.unref();
     return true;
-  } catch {
+  } catch (err) {
+    dlog(
+      `openInBrowser: could not spawn ${opener.command}: ${err instanceof Error ? err.message : err}`,
+    );
     return false;
   }
 }
