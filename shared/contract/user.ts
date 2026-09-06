@@ -228,6 +228,54 @@ export type UploadAccessErrorCode = z.infer<typeof uploadAccessErrorCodeSchema>;
 export const UPLOAD_ACCESS_ERROR_CODES: readonly string[] = uploadAccessErrorCodeSchema.options;
 
 /**
+ * Why a self-service identity edit was refused (#1266, ADR 0044).
+ *
+ * `PATCH /auth/profile`, `POST /auth/email/change/{request,verify}` and
+ * `POST /auth/orcid/cli-start` all answer a refusal with a machine CODE in
+ * `error` and the sentence in `message` — the shape the website's Settings
+ * form has always switched on. That shape is unreadable in a terminal, where
+ * `error` is what the CLI prints, so the client needs to know which strings
+ * are codes rather than sentences. Declaring the set here means the routes
+ * and the renderer cannot drift; the same reason
+ * {@link uploadAccessErrorCodeSchema} lives here.
+ *
+ * The identity-uniqueness codes (`email_in_use`, `github_in_use`,
+ * `orcid_in_use`, ...) are NOT repeated here — they are declared once in
+ * shared/contract/identity.ts and the CLI checks both sets.
+ */
+export const profileEditErrorCodeSchema = z.enum([
+  // normalizeProfilePatch (services/profile.ts)
+  "invalid_github_username",
+  "city_required",
+  "country_required",
+  "empty_patch",
+  "username_too_short",
+  "username_too_long",
+  "username_charset",
+  "given_name_required",
+  "family_name_required",
+  // PATCH /auth/profile, decided against the account rather than the value
+  "username_taken",
+  "username_locked",
+  "name_is_orcid_canonical",
+  "account_revoked",
+  "github_unavailable",
+  // email change
+  "same_email",
+  "code_expired",
+  "code_incorrect",
+  // ORCID link intent
+  "orcid_already_have",
+  "orcid_unavailable",
+]);
+export type ProfileEditErrorCode = z.infer<typeof profileEditErrorCodeSchema>;
+
+/** The profile-edit refusal codes as a plain array, for a runtime membership
+ *  test (the CLI client uses it to decide whether a body leads with
+ *  `message`). */
+export const PROFILE_EDIT_ERROR_CODES: readonly string[] = profileEditErrorCodeSchema.options;
+
+/**
  * Bounds on the upload request's why text (ADR 0042, #1253).
  *
  * Declared here because three places must agree on them: the backend rule that

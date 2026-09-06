@@ -28,6 +28,7 @@
  *     answers 409 `name_is_orcid_canonical` for the rest.
  */
 
+import type { ProfileEditErrorCode } from "../../../shared/contract/user.js";
 import { normalizeGithubHandle } from "./identity";
 import { type UsernameFormatError, validateUsernameFormat } from "./username";
 
@@ -77,6 +78,19 @@ export type ProfilePatchError =
 export type NormalizeResult =
   | { ok: true; patch: ProfilePatch }
   | { ok: false; error: ProfilePatchError; message: string };
+
+/**
+ * Compile-time proof that every refusal this module can raise is in the
+ * shared vocabulary the CLI renders from (#1266, ADR 0044).
+ *
+ * The CLI prints `error` for an ordinary failure and `message` for a body
+ * whose `error` is a machine code; it decides which by membership in
+ * `PROFILE_EDIT_ERROR_CODES`. A code added here and not there does not fail
+ * anywhere — it just prints the word `city_required` at a person — so the
+ * alias below resolves to `never` and the assignment stops compiling instead.
+ */
+type AllDeclared<A extends string, B extends string> = [A] extends [B] ? true : never;
+export const _profileErrorsAreDeclared: AllDeclared<ProfilePatchError, ProfileEditErrorCode> = true;
 
 /**
  * Normalize a raw PATCH body into a sparse, validated update. Keys absent

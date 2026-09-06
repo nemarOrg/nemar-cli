@@ -12,7 +12,11 @@
  */
 
 import type { ZodType } from "zod";
-import { UPLOAD_ACCESS_ERROR_CODES } from "../../../shared/contract/user.js";
+import { IDENTITY_CONFLICT_CODES } from "../../../shared/contract/identity.js";
+import {
+  PROFILE_EDIT_ERROR_CODES,
+  UPLOAD_ACCESS_ERROR_CODES,
+} from "../../../shared/contract/user.js";
 import { getConfig } from "../config.js";
 import { isDebugEnabled, recordHttpExchange } from "../debug-log.js";
 import { printMaintenanceBanner } from "../maintenance-banner.js";
@@ -185,8 +189,21 @@ export async function request<T>(
     // imported from shared/contract so the client and the route cannot drift
     // on which codes those are. Every other endpoint still leads with `error`,
     // which is where its human sentence lives.
+    // The third family (#1266, ADR 0044): the self-service identity edits.
+    // `PATCH /auth/profile`, the email change and the ORCID link intent all
+    // answer with a code in `error` and the sentence in `message`, and unlike
+    // the upload-access arm above there is no `missing` array to key on — so
+    // membership in the declared vocabulary IS the test. Both sets are
+    // imported from shared/contract rather than spelled out here, so a code
+    // the backend adds and the CLI has not been taught about prints as a bare
+    // token exactly once, in review.
+    const isProfileEditCode =
+      typeof data.error === "string" &&
+      (PROFILE_EDIT_ERROR_CODES.includes(data.error) ||
+        IDENTITY_CONFLICT_CODES.includes(data.error));
     const prefersMessage =
       hasBlockReason ||
+      isProfileEditCode ||
       (missing !== undefined &&
         typeof data.error === "string" &&
         UPLOAD_ACCESS_ERROR_CODES.includes(data.error));
