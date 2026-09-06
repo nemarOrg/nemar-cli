@@ -247,6 +247,93 @@ describe("nemar admin backfill-usernames", () => {
     }
   });
 
+  test("an undelivered verify message is counted and exits non-zero", async () => {
+    // The failure used to appear in neither the summary nor the exit code, so
+    // a scripted sweep read "clean" while an account sat unable to finish
+    // onboarding.
+    seedAuthenticatedConfig();
+    const server = startServer({
+      ...DRY_RUN_REPLY,
+      apply: true,
+      assigned: 1,
+      would_assign: 0,
+      verify_failed: 1,
+      remaining: 0,
+      results: [{ ...DRY_RUN_REPLY.results[0], outcome: "assigned", verify: "failed" }],
+    });
+    try {
+      const result = await runCli(["admin", "backfill-usernames", "--apply"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toContain("verify_failed=1");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a rate-limited verify message also exits non-zero", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer({
+      ...DRY_RUN_REPLY,
+      apply: true,
+      assigned: 1,
+      would_assign: 0,
+      verify_rate_limited: 1,
+      remaining: 0,
+      results: [{ ...DRY_RUN_REPLY.results[0], outcome: "assigned", verify: "rate_limited" }],
+    });
+    try {
+      const result = await runCli(["admin", "backfill-usernames", "--apply"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toContain("verify_rate_limited=1");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("the verify-retry pass is listed apart from the assignment plan", async () => {
+    // These accounts already have a username, so they are not part of the plan
+    // above; what is being reported is a message that never landed.
+    seedAuthenticatedConfig();
+    const server = startServer({
+      ...DRY_RUN_REPLY,
+      scanned: 0,
+      would_assign: 0,
+      results: [],
+      verify_retried: 2,
+      verify_sent: 1,
+      verify_retries: [
+        { id: 31, email: "retried@example.org", verify: "sent" },
+        { id: 32, email: "still-broken@example.org", verify: "failed" },
+      ],
+      verify_failed: 1,
+      remaining: 0,
+    });
+    try {
+      const result = await runCli(["admin", "backfill-usernames", "--apply"], server.url);
+      expect(result.stdout).toContain("re-sent");
+      expect(result.stdout).toContain("retried@example.org");
+      expect(result.stdout).toContain("verify failed");
+      expect(result.stdout).toContain("still-broken@example.org");
+      expect(result.exitCode).toBe(1);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a backend without the retry pass renders unchanged", async () => {
+    // `verify_failed` and `verify_retries` absent is an older backend, not a
+    // failure: the summary must not report phantom failures or exit non-zero.
+    seedAuthenticatedConfig();
+    const server = startServer(DRY_RUN_REPLY);
+    try {
+      const result = await runCli(["admin", "backfill-usernames"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("verify_failed=0");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("an unknown remainder is surfaced, not silently reported as done", async () => {
     seedAuthenticatedConfig();
     const server = startServer({

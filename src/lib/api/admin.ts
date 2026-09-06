@@ -1541,6 +1541,14 @@ export interface BackfillUsernameResult {
   error?: string;
 }
 
+/** One row of the verify-retry pass: an account that already has a username
+ *  and still has an unproven inbox. */
+export interface BackfillVerifyRetry {
+  id: number;
+  email: string;
+  verify: BackfillVerifyOutcome;
+}
+
 export interface BackfillUsernamesResponse {
   apply: boolean;
   scanned: number;
@@ -1550,7 +1558,14 @@ export interface BackfillUsernamesResponse {
   no_name: number;
   lookup_failed: number;
   conflict: number;
+  /** Verify-message outcomes, counted across BOTH passes. Optional so a
+   *  backend that predates the retry pass is rendered as unknown, not zero. */
   verify_sent: number;
+  verify_failed?: number;
+  verify_rate_limited?: number;
+  verify_skipped_fence?: number;
+  verify_retried?: number;
+  verify_retries?: BackfillVerifyRetry[];
   /** Candidates still without a username after this batch; `null` when the
    *  count query itself failed (never confuse that with "nothing left"). */
   remaining: number | null;

@@ -40,7 +40,16 @@ import { auditLogStatement } from "../../db/audit-log";
 import { issueEmailVerificationCode } from "../../services/email-verification";
 import { fetchOrcidName, orcidPubBase } from "../../services/orcid-auth";
 import { pickAvailableUsername, suggestUsername } from "../../services/username";
+import type { Bindings } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
+
+/** One row of the verify-retry pass: an account that already has a username
+ *  and never received (or never redeemed) its verify-your-email message. */
+export interface BackfillVerifyRetry {
+  id: number;
+  email: string;
+  verify: BackfillVerifyOutcome;
+}
 
 export interface BackfillUsernameResult {
   id: number;
@@ -71,6 +80,42 @@ const CANDIDATES_SQL = `SELECT id, email, orcid, given_name, family_name, email_
    FROM users
    WHERE deleted_at IS NULL
      AND (username IS NULL OR TRIM(username) = '')
+   ORDER BY id
+   LIMIT ?`;
+
+/**
+ * The verify-retry population: a web account that HAS a username, has not
+ * confirmed its inbox, and has no live code waiting to be redeemed.
+ *
+ * This exists because the message the assignment pass sends is best-effort,
+ * and a row whose send failed used to be unreachable forever: it had a
+ * username, so it stopped matching the candidate predicate, and nothing else
+ * in the product mails these accounts. The retry is therefore not a
+ * convenience -- without it "one message per account" silently becomes "zero"
+ * for any account whose one attempt failed.
+ *
+ * `NOT EXISTS (a live code)` is what keeps a re-run from re-mailing someone
+ * who already has a usable code in their inbox, and what makes the pass
+ * converge: a successful send writes a code, so the row drops out until that
+ * code expires or is used. (Outside production the fence writes no code, so
+ * these rows stay listed -- correctly, since nothing was sent.)
+ *
+ * Scoped to `signup_source = 'web'` deliberately: a CLI account proves its
+ * inbox through the signup verification LINK, a different flow with its own
+ * resend command, and mailing it a dashboard code would be the wrong message.
+ */
+const VERIFY_CANDIDATES_SQL = `SELECT id, email
+   FROM users
+   WHERE deleted_at IS NULL
+     AND username IS NOT NULL AND TRIM(username) != ''
+     AND signup_source = 'web'
+     AND email_verified = 0
+     AND NOT EXISTS (
+       SELECT 1 FROM auth_codes ac
+        WHERE ac.user_id = users.id
+          AND ac.used_at IS NULL
+          AND ac.expires_at > datetime('now')
+     )
    ORDER BY id
    LIMIT ?`;
 
@@ -111,6 +156,32 @@ const CLAIM_SQL = `UPDATE users
         SELECT 1 FROM users u2 WHERE u2.username = ? COLLATE NOCASE AND u2.id != ?
       )`;
 
+/**
+ * Issue one verify-your-email code and classify the outcome.
+ *
+ * Shared by both passes so they cannot drift on what counts as sent. Never
+ * throws: the caller has usually just written something it is not going to
+ * roll back over an undelivered message.
+ *
+ * `send_failed` is folded into `failed` rather than reported verbatim: this
+ * vocabulary tells the operator what to do, and "Resend refused it" and "the
+ * call threw" are the same instruction.
+ */
+async function issueVerification(
+  env: Bindings,
+  userId: number,
+  email: string,
+): Promise<BackfillVerifyOutcome> {
+  try {
+    const issued = await issueEmailVerificationCode(env, userId, email.toLowerCase());
+    if (!issued.ok) return issued.error === "rate_limited" ? "rate_limited" : "failed";
+    return issued.skipped ? "skipped_fence" : "sent";
+  } catch (mailErr) {
+    console.error(`[backfill-usernames] verification message failed for id=${userId}`, mailErr);
+    return "failed";
+  }
+}
+
 export function registerUserUsernameRoutes(admin: AdminRouter): void {
   /**
    * POST /admin/users/backfill-usernames - give username-less accounts one
@@ -133,6 +204,29 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
       family_name: string | null;
       email_verified: number;
     }>();
+
+    /**
+     * PASS 1: retry the verify-your-email message for rows that already have a
+     * username and never got one that stuck.
+     *
+     * Deliberately BEFORE the assignment pass, and that ordering is what keeps
+     * the two from colliding: a row this run is about to name has no username
+     * yet, so it cannot appear here, and a row that appears here was named by
+     * an earlier run. No exclusion list is needed, and neither pass can mail
+     * the same account twice in one sweep.
+     */
+    const verifyRetries: BackfillVerifyRetry[] = [];
+    const verifyCandidates = await db
+      .prepare(VERIFY_CANDIDATES_SQL)
+      .bind(limit)
+      .all<{ id: number; email: string }>();
+    for (const user of verifyCandidates.results ?? []) {
+      verifyRetries.push({
+        id: user.id,
+        email: user.email,
+        verify: apply ? await issueVerification(c.env, user.id, user.email) : "not_attempted",
+      });
+    }
 
     const pubBase = orcidPubBase(c.env);
     const results: BackfillUsernameResult[] = [];
@@ -264,33 +358,12 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
       // run against the dev deployment at all (AGENTS.md): outside production
       // it writes no code row and sends no mail unless the address is a
       // synthetic test target.
-      let verify: BackfillVerifyOutcome = "not_attempted";
-      if (user.email_verified === 1) {
-        verify = "already_verified";
-      } else {
-        try {
-          const issued = await issueEmailVerificationCode(c.env, user.id, user.email.toLowerCase());
-          // `send_failed` is mapped to `failed` rather than reported verbatim:
-          // this vocabulary tells the operator what to do, and "Resend refused
-          // it" and "the call threw" are the same instruction.
-          verify = issued.ok
-            ? issued.skipped
-              ? "skipped_fence"
-              : "sent"
-            : issued.error === "rate_limited"
-              ? "rate_limited"
-              : "failed";
-        } catch (mailErr) {
-          // Never fatal: the username IS written, and a failed message is a
-          // thing to retry (the row is no longer a candidate, so retrying
-          // means the user asks for a code themselves, or an admin does).
-          verify = "failed";
-          console.error(
-            `[backfill-usernames] verification message failed for id=${user.id}`,
-            mailErr,
-          );
-        }
-      }
+      // Never fatal: the username IS written, and a failed message is picked
+      // up by the verify-retry pass on the next run.
+      const verify: BackfillVerifyOutcome =
+        user.email_verified === 1
+          ? "already_verified"
+          : await issueVerification(c.env, user.id, user.email);
 
       results.push({
         id: user.id,
@@ -305,6 +378,10 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
     }
 
     const assigned = results.filter((r) => r.outcome === "assigned");
+    /** One verify outcome's count across both passes. */
+    const countVerify = (outcome: BackfillVerifyOutcome): number =>
+      results.filter((r) => r.verify === outcome).length +
+      verifyRetries.filter((r) => r.verify === outcome).length;
 
     if (apply && assigned.length > 0) {
       try {
@@ -317,7 +394,7 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
           details: JSON.stringify({
             assigned: assigned.length,
             user_ids: assigned.map((r) => r.id),
-            verify_sent: assigned.filter((r) => r.verify === "sent").length,
+            verify_sent: countVerify("sent"),
           }),
         }).run();
       } catch (auditErr) {
@@ -350,13 +427,23 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
       no_name: results.filter((r) => r.outcome === "no_name").length,
       lookup_failed: results.filter((r) => r.outcome === "lookup_failed").length,
       conflict: results.filter((r) => r.outcome === "conflict").length,
-      verify_sent: results.filter((r) => r.verify === "sent").length,
+      // Counted across BOTH passes: an operator reading the summary wants to
+      // know how many people were mailed and how many were not, not which loop
+      // tried. A failure used to appear in neither the summary nor the exit
+      // code, which is how an undelivered message became invisible.
+      verify_sent: countVerify("sent"),
+      verify_failed: countVerify("failed"),
+      verify_rate_limited: countVerify("rate_limited"),
+      verify_skipped_fence: countVerify("skipped_fence"),
+      /** Rows the verify-retry pass looked at, whether or not it sent. */
+      verify_retried: verifyRetries.length,
       // What is left after this batch; a dry run's value includes everything it
       // just listed. `null` means the count itself failed -- never confuse that
       // with "nothing left".
       remaining,
       ...(remainingWarning ? { warning: remainingWarning } : {}),
       results,
+      verify_retries: verifyRetries,
     });
   });
 }

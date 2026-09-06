@@ -6669,7 +6669,9 @@ backfillUsernamesCommand
           res.apply ? res.assigned : res.would_assign
         } single_name=${res.single_name} no_name=${res.no_name} lookup_failed=${
           res.lookup_failed
-        } conflict=${res.conflict} verify_sent=${res.verify_sent} remaining=${
+        } conflict=${res.conflict} verify_sent=${res.verify_sent} verify_failed=${
+          res.verify_failed ?? 0
+        } verify_rate_limited=${res.verify_rate_limited ?? 0} remaining=${
           res.remaining ?? "unknown"
         }`,
       ),
@@ -6699,6 +6701,18 @@ backfillUsernamesCommand
         console.log(`  ${chalk.red("error     ")} ${who}: ${r.error}`);
       }
     }
+    // The retry pass, listed separately: these accounts already have a
+    // username, so they are not part of the assignment plan above -- what is
+    // being reported is a message that never landed.
+    for (const r of res.verify_retries ?? []) {
+      const label =
+        r.verify === "sent"
+          ? chalk.green("re-sent  ")
+          : r.verify === "not_attempted"
+            ? chalk.cyan("would send")
+            : chalk.yellow(`verify ${r.verify}`);
+      console.log(`  ${label} id ${r.id} <${r.email}>`);
+    }
     if (res.warning) {
       console.log(chalk.yellow(`  Warning: ${res.warning}`));
     }
@@ -6711,9 +6725,20 @@ backfillUsernamesCommand
       );
     }
     // A lookup failure or a conflict leaves the row a candidate for the next
-    // run, and an unknown remainder means the batch's own bookkeeping failed.
-    // None is fatal, but a caller must not read any of them as a clean sweep.
-    if (res.lookup_failed > 0 || res.conflict > 0 || res.remaining === null) process.exitCode = 1;
+    // run, an undelivered verify message leaves an account unable to finish
+    // onboarding, and an unknown remainder means the batch's own bookkeeping
+    // failed. None is fatal, but a caller must not read any of them as a clean
+    // sweep -- an unreported verify failure is exactly how "one message per
+    // account" quietly became "none" for the accounts it failed on.
+    if (
+      res.lookup_failed > 0 ||
+      res.conflict > 0 ||
+      (res.verify_failed ?? 0) > 0 ||
+      (res.verify_rate_limited ?? 0) > 0 ||
+      res.remaining === null
+    ) {
+      process.exitCode = 1;
+    }
   });
 
 adminCommand.addCommand(backfillUsernamesCommand);

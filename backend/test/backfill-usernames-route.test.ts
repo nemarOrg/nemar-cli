@@ -123,7 +123,22 @@ function seedCandidate(email: string, options: CandidateOptions = {}): number {
   return u.id;
 }
 
-function run(body: Record<string, unknown> = {}): Promise<Response> {
+/**
+ * The same bindings with ENVIRONMENT="production".
+ *
+ * Needed by the delivery-failure tests, and the reason is the fence itself
+ * working: outside production `issueEmailVerificationCode` either echoes a
+ * code for a synthetic `@nemar.test` target (no send at all) or refuses
+ * outright, so `verify: "failed"` is UNREACHABLE in a test environment. The
+ * only way to exercise the production path is to declare the environment the
+ * fence keys on -- with `api.resend.com` still redirected to the local server
+ * by helpers/resend.ts, so nothing leaves the machine.
+ */
+function prodEnv(): Bindings {
+  return { ...env(), ENVIRONMENT: "production" } as Bindings;
+}
+
+function run(body: Record<string, unknown> = {}, bindings: Bindings = env()): Promise<Response> {
   return app.request(
     "/admin/users/backfill-usernames",
     {
@@ -131,7 +146,7 @@ function run(body: Record<string, unknown> = {}): Promise<Response> {
       headers: { Authorization: `Bearer ${ADMIN_KEY}`, "content-type": "application/json" },
       body: JSON.stringify(body),
     },
-    env(),
+    bindings,
   );
 }
 
@@ -392,6 +407,112 @@ describe("backfill-usernames: the verify-your-email message", () => {
     const second = await (await withFakeResend(() => run({ apply: true }))).json();
     expect(second.scanned).toBe(0);
     expect(codesFor("ada@nemar.test")).toBe(1);
+  });
+});
+
+describe("backfill-usernames: the verify-retry pass", () => {
+  /** A row an earlier run already named, whose inbox is still unproven. */
+  function seedNamedButUnverified(email: string, username: string): number {
+    db.query(
+      `INSERT INTO users (username, email, password_hash, status, role, email_verified,
+                          given_name, family_name, signup_source)
+       VALUES (?, ?, 'x', 'pending', 'member', 0, 'Ada', 'Lovelace', 'web')`,
+    ).run(username, email);
+    const u = db.query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?").get(email);
+    if (!u) throw new Error(`seed failed for ${email}`);
+    return u.id;
+  }
+
+  test("a failed message is counted, not silently dropped", async () => {
+    // The Resend fake refuses, so issueEmailVerificationCode rolls its code row
+    // back and reports send_failed -- which used to appear in neither the
+    // summary nor the exit code.
+    const id = seedCandidate("ada@nemar.test");
+
+    const body = await (
+      await withFakeResend(() => run({ apply: true }, prodEnv()), { status: 500 })
+    ).json();
+    expect(body.results[0]).toMatchObject({ outcome: "assigned", verify: "failed" });
+    expect(body.verify_failed).toBe(1);
+    expect(body.verify_sent).toBe(0);
+    // The username IS written: the message is best-effort, the handle is not.
+    expect(usernameOf(id)).toBe("alovelace");
+    expect(codesFor("ada@nemar.test")).toBe(0);
+  });
+
+  test("the next run re-attempts a row whose message failed", async () => {
+    // Without this pass the row is unreachable forever: it has a username, so
+    // it no longer matches the assignment predicate, and nothing else in the
+    // product mails these accounts. "One message per account" would become
+    // "none" for exactly the accounts whose one attempt failed.
+    seedCandidate("ada@nemar.test");
+    await withFakeResend(() => run({ apply: true }, prodEnv()), { status: 500 });
+
+    const body = await (await withFakeResend(() => run({ apply: true }))).json();
+    expect(body.scanned).toBe(0);
+    expect(body.verify_retries).toHaveLength(1);
+    expect(body.verify_retries[0]).toMatchObject({ email: "ada@nemar.test", verify: "sent" });
+    expect(body.verify_sent).toBe(1);
+    expect(codesFor("ada@nemar.test")).toBe(1);
+  });
+
+  test("a row holding a live code is left alone", async () => {
+    // Convergence: a successful send writes a code, which drops the row out of
+    // the retry population until it expires or is used. Without that predicate
+    // every run would re-mail every unverified account.
+    seedCandidate("ada@nemar.test");
+    await withFakeResend(() => run({ apply: true }));
+
+    const body = await (await withFakeResend(() => run({ apply: true }))).json();
+    expect(body.verify_retries).toHaveLength(0);
+    expect(codesFor("ada@nemar.test")).toBe(1);
+  });
+
+  test("a row named by THIS run is not also retried", async () => {
+    // The retry pass runs first, so a row about to be named has no username yet
+    // and cannot appear in it. Nothing is mailed twice in one sweep.
+    seedCandidate("ada@nemar.test");
+
+    const body = await (
+      await withFakeResend(() => run({ apply: true }, prodEnv()), { status: 500 })
+    ).json();
+    expect(body.verify_retries).toHaveLength(0);
+    expect(body.assigned).toBe(1);
+  });
+
+  test("a dry run lists the retries and sends nothing", async () => {
+    seedNamedButUnverified("named@nemar.test", "alovelace");
+
+    const calls = await withFakeResend(async (captured) => {
+      const body = await (await run()).json();
+      expect(body.verify_retries).toEqual([
+        { id: expect.any(Number), email: "named@nemar.test", verify: "not_attempted" },
+      ]);
+      expect(body.verify_sent).toBe(0);
+      return captured;
+    });
+    expect(calls).toHaveLength(0);
+    expect(codesFor("named@nemar.test")).toBe(0);
+  });
+
+  test("a CLI account is not mailed a dashboard code", async () => {
+    // A CLI signup proves its inbox through the signup verification LINK, a
+    // different flow with its own resend command.
+    db.query(
+      `INSERT INTO users (username, email, password_hash, status, role, email_verified, signup_source)
+       VALUES ('clidude', 'clidude@nemar.test', 'x', 'pending', 'member', 0, 'cli')`,
+    ).run();
+
+    const body = await (await withFakeResend(() => run({ apply: true }))).json();
+    expect(body.verify_retries).toHaveLength(0);
+  });
+
+  test("a verified row is never in the retry population", async () => {
+    const id = seedNamedButUnverified("done@nemar.test", "adone");
+    db.query("UPDATE users SET email_verified = 1 WHERE id = ?").run(id);
+
+    const body = await (await withFakeResend(() => run({ apply: true }))).json();
+    expect(body.verify_retries).toHaveLength(0);
   });
 });
 
