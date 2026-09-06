@@ -27,6 +27,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { Hono } from "hono";
 import { adminRoutes } from "../src/routes/admin";
 import { hashApiKey } from "../src/services/token";
+import { USERNAME_SUFFIX_LIMIT } from "../src/services/username";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 import { withFakeResend } from "./helpers/resend";
@@ -102,6 +103,14 @@ interface CandidateOptions {
   family_name?: string | null;
   orcid?: string | null;
   email_verified?: number;
+}
+
+/** An unrelated account already holding a handle, to take it out of the pool. */
+function seedTaken(username: string): void {
+  db.query(
+    `INSERT INTO users (username, email, password_hash, status, role, email_verified)
+     VALUES (?, ?, 'x', 'approved', 'member', 1)`,
+  ).run(username, `${username}@example.org`);
 }
 
 /** A username-less row, the shape the sweep exists for. */
@@ -215,11 +224,39 @@ describe("backfill-usernames: apply", () => {
     expect(usernameOf(id)).toBe("alovelace");
     expect(body.remaining).toBe(0);
 
+    // The 0079 column, which is the STATE half and the reason the sweep must go
+    // through `usernameClaimStatement` rather than write its own UPDATE: the
+    // "we chose this from your name, change it if you like" offer renders on
+    // every page load and cannot scan an audit log for permission to appear.
+    expect(
+      db
+        .query<{ username_auto_assigned: number }, [number]>(
+          "SELECT username_auto_assigned FROM users WHERE id = ?",
+        )
+        .get(id)?.username_auto_assigned,
+    ).toBe(1);
+
     const audit = db
       .query<{ details: string | null }, [string]>("SELECT details FROM audit_log WHERE action = ?")
       .all("usernames_backfilled");
     expect(audit).toHaveLength(1);
     expect(JSON.parse(audit[0].details ?? "{}")).toMatchObject({ assigned: 1, user_ids: [id] });
+
+    // And the PER-ROW event, which is the same action the three sign-in doors
+    // write and is told apart from them only by `source` (#1268, ADR 0045). The
+    // batch row above has no `user_id` subject, so without this one an operator
+    // cannot ask "how did THIS account get its handle".
+    const perRow = db
+      .query<{ user_id: number; details: string | null }, [string]>(
+        "SELECT user_id, details FROM audit_log WHERE action = ?",
+      )
+      .all("username_auto_assigned");
+    expect(perRow).toHaveLength(1);
+    expect(perRow[0].user_id).toBe(id);
+    expect(JSON.parse(perRow[0].details ?? "{}")).toEqual({
+      username: "alovelace",
+      source: "admin_backfill",
+    });
   });
 
   test("two rows sharing a suggestion get a collision suffix", async () => {
@@ -276,6 +313,33 @@ describe("backfill-usernames: apply", () => {
 });
 
 describe("backfill-usernames: rows it will not guess at", () => {
+  test("a saturated base is `exhausted`, which is not a retryable conflict", async () => {
+    // The suffix search is bounded, and exhausting it used to be reported as a
+    // `conflict` -- a value whose whole meaning is "retry, it will pick the next
+    // suffix", which this case never will. The bound is
+    // `pickAvailableUsername`'s own constant, imported rather than written down
+    // here so the fixture follows it instead of pinning a copy. It also proves
+    // the search terminates rather than looping inside a Worker request.
+    seedTaken("alovelace");
+    for (let n = 2; n <= USERNAME_SUFFIX_LIMIT; n++) seedTaken(`alovelace-${n}`);
+    const id = seedCandidate("ada@nemar.test", { email_verified: 1 });
+
+    const body = await (await withFakeResend(() => run({ apply: true }))).json();
+
+    expect(body.exhausted).toBe(1);
+    expect(body.conflict).toBe(0);
+    expect(body.assigned).toBe(0);
+    expect(body.results[0]).toMatchObject({
+      id,
+      outcome: "exhausted",
+      error: "No free variant of 'alovelace' within the suffix limit",
+    });
+    expect(usernameOf(id)).toBeNull();
+    // Still a candidate, and it will be one after every future run too.
+    expect(body.remaining).toBe(1);
+  });
+
+
   test("a one-part name is reported, not derived from the email", async () => {
     // 3 of the 19 production rows are exactly this. `pemberly@nemar.test` would
     // make a perfectly plausible handle and is not this person's name.
@@ -326,24 +390,6 @@ describe("backfill-usernames: rows it will not guess at", () => {
     expect(body.remaining).toBe(1);
   });
 
-  test("gives up rather than looping when every variant is taken", async () => {
-    // The suffix search is bounded (50). Exhausting it is a `conflict`, which
-    // is a thing to retry, not a silent skip -- and not an unbounded loop
-    // inside a Worker request.
-    db.query(
-      "INSERT INTO users (username, email, password_hash, status) VALUES ('alovelace', 'u1@example.org', 'x', 'approved')",
-    ).run();
-    for (let n = 2; n <= 50; n++) {
-      db.query(
-        "INSERT INTO users (username, email, password_hash, status) VALUES (?, ?, 'x', 'approved')",
-      ).run(`alovelace-${n}`, `u${n}@example.org`);
-    }
-    const id = seedCandidate("ada@nemar.test", { email_verified: 1 });
-
-    const body = await (await withFakeResend(() => run({ apply: true }))).json();
-    expect(body.conflict).toBe(1);
-    expect(usernameOf(id)).toBeNull();
-  });
 });
 
 describe("backfill-usernames: the verify-your-email message", () => {

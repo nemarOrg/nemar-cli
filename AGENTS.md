@@ -48,7 +48,19 @@ Load-bearing ones to know before touching the relevant area:
 0042 (upload access is requested once, by the person who wants it),
 0043 (one person, one account: an ORCID iD, an email or a GitHub handle backs at most one live account),
 0044 (identity self-service reaches the CLI; ORCID links through a browser handoff whose
-signed state names the account).
+signed state names the account),
+0045 (the CLI and the web say one thing about an account).
+
+**Account copy and the profile-gap matrix are declared once, in
+[`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
+[`shared/contract/profile-gaps.ts`](shared/contract/profile-gaps.ts)** (ADR 0045).
+Every sentence about tiers, upload access or a missing field comes from the first;
+`computeProfileGaps` in the second is the ONE rule behind `profile_gaps` on
+`GET /users/me`, `profile_gaps` on `GET /auth/me`, and the `missing` array a refused
+upload-access request carries. `nemarOrg/website` transcribes both files and a drift
+test on each side compares them when both checkouts are present. Change a sentence or a
+rule there, never at a call site; `cli.`-prefixed keys are the CLI's own and the website
+ignores them.
 
 ---
 

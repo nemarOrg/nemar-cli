@@ -1,0 +1,47 @@
+-- Mark a username the account did not choose (epic #1250 phase #1268, ADR 0045).
+--
+-- WHAT THIS IS FOR. ADR 0042 gave the username-less web/ORCID rows a handle
+-- through the admin backfill sweep, and phase 8 adds the lazy half: an account
+-- that signs in with `username IS NULL` and a usable name gets the same
+-- suggestion assigned server-side, in the same transaction as the sign-in, so
+-- that abandoning onboarding no longer leaves the column NULL forever. Both
+-- paths write a handle nobody typed.
+--
+-- That fact has to survive the write, because it changes what the product may
+-- say next. Onboarding and Settings offer "we chose this from your name, change
+-- it if you like" (`onboarding.username.auto_assigned.*` in
+-- shared/contract/account-copy.ts) — an offer that would be nonsense to someone
+-- who typed their handle at CLI signup, and the users table has no other way to
+-- tell the two apart afterwards. The audit row records the EVENT; this column is
+-- the STATE, and only the state can be read cheaply on every page load.
+--
+-- CLEARED, NOT STICKY. `PATCH /auth/profile` sets it back to 0 whenever the
+-- username actually changes: once the person has picked one, the offer is spent
+-- and repeating it would invite them to change a handle they just chose.
+--
+-- DEFAULT 0 IS THE HONEST DEFAULT for the back catalogue. Every existing row is
+-- one of: a CLI signup that typed its username, or a web row that is still NULL
+-- (and so has nothing to have been auto-assigned). Neither is an
+-- auto-assignment, and no data migration guesses at history here.
+--
+-- The nameless rows are still nameless. ADR 0042 built the sweep; as of
+-- 2026-09-06 production holds 18 of them (the 19 that ADR describes, minus a
+-- duplicate account since deleted) and the sweep has been run ZERO times — it
+-- is scheduled for after this epic deploys. So the FIRST production run of
+-- `POST /admin/users/backfill-usernames` after this column exists is what marks
+-- those rows; there is nothing here for it to re-mark.
+--
+-- And "re-run the sweep" is not a repair for a row it has already named,
+-- anywhere: its candidate predicate is `username IS NULL OR TRIM(username) = ''`
+-- (REMAINING_SQL, routes/admin/user-usernames.ts), so a row that HAS a username
+-- is no longer a candidate and no future run will ever look at it again. The
+-- only rows that can be left holding 0 after being auto-named are ones named by
+-- a sweep that ran before this migration — dev D1 only, since production has
+-- run none — and fixing those would be a one-off UPDATE against a list of ids,
+-- not a sweep.
+--
+-- One statement, one column, NOT NULL with a default, so it is a rewrite-free
+-- ALTER on SQLite and re-running the file is the only thing that fails (which is
+-- what d1_migrations already prevents).
+
+ALTER TABLE users ADD COLUMN username_auto_assigned INTEGER NOT NULL DEFAULT 0;

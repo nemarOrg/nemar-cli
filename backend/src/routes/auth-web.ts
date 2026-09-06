@@ -46,7 +46,9 @@
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
+import type { AccountStatus } from "../../../shared/contract/user.js";
 import { auditLogStatement } from "../db/audit-log";
+import { flag } from "../db/flag";
 import { timingSafeEqual } from "../lib/constant-time";
 import { resolveActingAccount } from "../middleware/auth";
 import { webSessionMiddleware } from "../middleware/webSession";
@@ -88,11 +90,18 @@ import {
   normalizeProfilePatch,
   profileRefusal,
 } from "../services/profile";
+import { profileGapsForRow } from "../services/profile-gaps";
 import {
   isUsernameUniqueViolation,
   pickAvailableUsername,
   suggestUsername,
 } from "../services/username";
+import {
+  REREAD_USERNAME_SQL,
+  pickUsernameForName,
+  recordUsernameAssignment,
+  usernameClaimStatement,
+} from "../services/username-assignment";
 import {
   buildClearedSessionCookie,
   buildSessionCookie,
@@ -152,7 +161,9 @@ function publicUser(row: {
   id: number;
   email: string;
   role: UserRole | null;
-  status: string;
+  // The COLUMN's vocabulary; `userStatusForDashboard` below is what turns it
+  // into the wire's (shared/contract/user.ts).
+  status: AccountStatus;
   email_verified: boolean;
   given_name: string | null;
   family_name: string | null;
@@ -164,6 +175,7 @@ function publicUser(row: {
   affiliation: string | null;
   service_access: boolean;
   username: string | null;
+  username_auto_assigned: boolean;
   service_access_granted_at: string | null;
   upload_access_requested_at: string | null;
 }) {
@@ -201,6 +213,17 @@ function publicUser(row: {
     // retry logic and the admin queue, not something to render on a profile.
     service_access_granted_at: row.service_access_granted_at,
     upload_access_requested_at: row.upload_access_requested_at,
+    // What this account is still missing, and what each absence blocks (#1268,
+    // ADR 0045). Computed from the SAME matrix the CLI's /users/me reports and
+    // the upload-access request refuses against, so the dashboard nudge, the
+    // terminal and the refusal cannot name three different sets of fields.
+    // `row.status` is the INTERNAL status, not the two-state value above it:
+    // "pending" is what the unverified tier is spelled as in the matrix.
+    profile_gaps: profileGapsForRow(row),
+    // Whether the username above was derived rather than chosen, so onboarding
+    // and Settings can offer to change it once without making that offer to
+    // someone who typed their own (#1268, ADR 0045).
+    username_auto_assigned: row.username_auto_assigned,
   };
 }
 
@@ -444,7 +467,8 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
         `SELECT id, email, role, status, email_verified,
                 given_name, family_name, orcid, orcid_verified,
                 github_username, city, country, affiliation, service_access,
-                username, service_access_granted_at, upload_access_requested_at
+                username, username_auto_assigned,
+                service_access_granted_at, upload_access_requested_at
            FROM users WHERE email = ? COLLATE NOCASE AND deleted_at IS NULL LIMIT 1`,
       )
       .bind(email)
@@ -452,7 +476,9 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
         id: number;
         email: string;
         role: string | null;
-        status: string;
+        // Closed by migration 0001's CHECK constraint, so this is a claim the
+        // database enforces rather than an assumption (shared/contract/user.ts).
+        status: AccountStatus;
         // NOT NULL DEFAULT 0 in D1 (0001), so plain number.
         email_verified: number;
         given_name: string | null;
@@ -467,6 +493,8 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
         // NOT NULL DEFAULT 0 in D1 (0062), so plain number.
         service_access: number;
         username: string | null;
+        // NOT NULL DEFAULT 0 in D1 (0079), so plain number.
+        username_auto_assigned: number;
         service_access_granted_at: string | null;
         upload_access_requested_at: string | null;
       }>();
@@ -509,11 +537,61 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       ip,
       "email_code",
     );
+
+    // A web account that has never been through onboarding holds
+    // `username = NULL` (migration 0026), and #1268 stops that outliving the
+    // sign-in: if the row has a usable name, the ADR 0042 suggestion is claimed
+    // HERE, in the sign-in's own transaction, so the account is never signed in
+    // without a handle. Planned before the batch because picking one is a read,
+    // and the claim itself cannot throw (see CLAIM_USERNAME_SQL) -- a lost race
+    // reports `changes = 0` and leaves the sign-in untouched.
+    //
+    // No name, no assignment: onboarding asks, and nothing is invented from the
+    // email local part (ADR 0042).
+    //
+    // THE SCAN IS WRAPPED, and it has to be. `pickUsernameForName` reads D1
+    // live, and by the time it runs the code has ALREADY been consumed by the
+    // conditional UPDATE above -- but the restore-the-code handler is the catch
+    // on the batch BELOW, not this one. A transient failure escaping here would
+    // reach the route's outer catch, answer a generic 500, and burn a code the
+    // user typed correctly. Assigning a username is a nudge and must never
+    // block a login, which is the contract every docstring in
+    // services/username-assignment.ts states; so a failed scan signs the user
+    // in with no assignment, and the sweep (or the next sign-in) picks the row
+    // up.
+    let claimed: string | null = null;
+    if ((userRow.username ?? "").trim() === "") {
+      try {
+        const pick = await pickUsernameForName(db, userRow.given_name, userRow.family_name);
+        if (pick.status === "ok") {
+          claimed = pick.username;
+        } else if (pick.status === "exhausted") {
+          // Nobody would otherwise see this: the account simply stays NULL and
+          // onboarding asks. Same sentence `autoAssignUsername` logs on the two
+          // ORCID doors, because it is the same operational fact.
+          console.warn(
+            `[username-assignment] every variant of "${pick.base}" is taken; user ${userRow.id} keeps a NULL username`,
+          );
+        }
+      } catch (pickErr) {
+        console.error(
+          `[auth-web] /code/verify: could not pick a username for user id=${userRow.id}; signing in without one`,
+          pickErr,
+        );
+      }
+    }
+
     let promoted: boolean;
+    let usernameLanded = false;
     try {
-      ({ promoted } = await applyEmailVerification(db, userRow.id, "code_signin", [
+      const applied = await applyEmailVerification(db, userRow.id, "code_signin", [
         prepared.statement,
-      ]));
+        ...(claimed ? [usernameClaimStatement(db, userRow.id, claimed)] : []),
+      ]);
+      promoted = applied.promoted;
+      // `extra` mirrors the statements above in order: the session insert, then
+      // the claim when there was one.
+      usernameLanded = claimed !== null && (applied.extra[1]?.meta?.changes ?? 0) > 0;
     } catch (writeErr) {
       // Distinct from the generic 500 below, and distinct in the log: the
       // operator needs the account id to see what state it is in. Nothing in
@@ -534,6 +612,46 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       );
     }
 
+    if (usernameLanded && claimed) {
+      await recordUsernameAssignment(db, userRow.id, claimed, "code_signin");
+    }
+
+    // A claim that did NOT land has two causes, and one of them makes the row
+    // this request read at the top stale: either somebody else took the handle
+    // (the row is unchanged, and `userRow` is still right), or this same
+    // account gained a username concurrently -- a `PATCH /auth/profile` racing
+    // the sign-in -- in which case `userRow.username` is the pre-race NULL and
+    // reporting it would tell the dashboard the account has no handle a moment
+    // after it got one. One extra read, on a path that is already rare.
+    //
+    // Non-fatal like everything else about the assignment: the sign-in has
+    // COMMITTED by here, and letting a failed read reach the outer catch would
+    // answer 500 and withhold the cookie for a session that exists.
+    let currentUsername = userRow.username;
+    let currentAutoAssigned = flag(userRow.username_auto_assigned);
+    if (claimed && !usernameLanded) {
+      try {
+        const fresh = await db
+          .prepare(REREAD_USERNAME_SQL)
+          .bind(userRow.id)
+          .first<{ username: string | null; username_auto_assigned: number }>();
+        if (fresh) {
+          currentUsername = fresh.username;
+          currentAutoAssigned = flag(fresh.username_auto_assigned);
+        }
+      } catch (rereadErr) {
+        // Keeps the pre-race `userRow` values on the response rather than
+        // failing the sign-in over a read that is already a nudge's nudge: the
+        // client's very next `GET /auth/me` reads the row fresh, so a stale
+        // value here is at most one round trip old, and blocking a sign-in
+        // over it would be the wrong trade.
+        console.error(
+          `[auth-web] /code/verify: could not re-read the username of user id=${userRow.id} after a lost claim; reporting the row as read`,
+          rereadErr,
+        );
+      }
+    }
+
     const user = {
       id: userRow.id,
       email: userRow.email,
@@ -549,7 +667,11 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       country: userRow.country,
       affiliation: userRow.affiliation,
       service_access: userRow.service_access === 1,
-      username: userRow.username,
+      // The row was read before the claim, so neither half is `userRow`'s own
+      // value: a landed claim reports what it wrote, and a lost one reports the
+      // re-read above.
+      username: usernameLanded ? claimed : currentUsername,
+      username_auto_assigned: usernameLanded || currentAutoAssigned,
       service_access_granted_at: userRow.service_access_granted_at,
       upload_access_requested_at: userRow.upload_access_requested_at,
     };
@@ -897,6 +1019,12 @@ authWebRoutes.patch(
       if (patch.username !== undefined) {
         sets.push("username = ?");
         binds.push(patch.username);
+        // The handle is now one the person typed, so the "we chose this from
+        // your name, change it if you like" offer is spent (#1268, ADR 0045).
+        // Reached only for a REAL change: re-submitting the current username is
+        // dropped from the patch above, so a routine full-form save from an
+        // auto-named account does not silently retire the offer.
+        sets.push("username_auto_assigned = 0");
       }
       if (patch.given_name !== undefined) {
         sets.push("given_name = ?");
@@ -1113,7 +1241,8 @@ async function fetchPublicUserById(
       `SELECT id, email, role, status, email_verified,
               given_name, family_name, orcid, orcid_verified,
               github_username, city, country, affiliation, service_access,
-              username, service_access_granted_at, upload_access_requested_at
+              username, username_auto_assigned,
+              service_access_granted_at, upload_access_requested_at
          FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
     )
     .bind(userId)
@@ -1121,7 +1250,8 @@ async function fetchPublicUserById(
       id: number;
       email: string;
       role: string | null;
-      status: string;
+      // Closed by migration 0001's CHECK constraint (shared/contract/user.ts).
+      status: AccountStatus;
       // NOT NULL DEFAULT 0 in D1 (0001), so plain number.
       email_verified: number;
       given_name: string | null;
@@ -1136,6 +1266,8 @@ async function fetchPublicUserById(
       // NOT NULL DEFAULT 0 in D1 (0062), so plain number.
       service_access: number;
       username: string | null;
+      // NOT NULL DEFAULT 0 in D1 (0079), so plain number.
+      username_auto_assigned: number;
       service_access_granted_at: string | null;
       upload_access_requested_at: string | null;
     }>();
@@ -1156,6 +1288,7 @@ async function fetchPublicUserById(
     affiliation: row.affiliation,
     service_access: row.service_access === 1,
     username: row.username,
+    username_auto_assigned: flag(row.username_auto_assigned),
     service_access_granted_at: row.service_access_granted_at,
     upload_access_requested_at: row.upload_access_requested_at,
   });

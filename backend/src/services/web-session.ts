@@ -18,6 +18,8 @@
  * brute-forced offline.
  */
 
+import type { AccountStatus } from "../../../shared/contract/user.js";
+import { flag } from "../db/flag";
 import { type Bindings, type UserRole, parseRole } from "../types/bindings";
 
 export const COOKIE_NAME = "nemar_session";
@@ -137,7 +139,10 @@ export interface WebSessionUser {
    *  means the role column held an unrecognised value; treat as no
    *  role rather than guess. */
   role: UserRole | null;
-  status: string;
+  /** The COLUMN's vocabulary (shared/contract/user.ts), closed by migration
+   *  0001's CHECK constraint -- not the collapsed value `/auth/me` reports,
+   *  which `publicUser` derives from this one. */
+  status: AccountStatus;
   /** Whether the account has proved control of `email` (ADR 0040 phase 2).
    *  Surfaced on /auth/me so the dashboard can render its verify-your-email
    *  step, and read by /auth/email/verify to answer idempotently when there
@@ -165,6 +170,12 @@ export interface WebSessionUser {
    *  fetching it from GET /users/me separately, purely because it was absent
    *  here (nemarOrg/website#306). */
   username: string | null;
+  /** True when that username was DERIVED from the name rather than chosen --
+   *  by the ADR 0042 backfill sweep or at a web sign-in (#1268, ADR 0045) --
+   *  and has not been changed since. Onboarding and Settings use it to offer
+   *  "we picked this, change it if you like", an offer that would be nonsense
+   *  to someone who typed their own. Converted from the 0/1 column here. */
+  username_auto_assigned: boolean;
   /** The DATES behind the two upload-access states (ADR 0042), so the
    *  dashboard can render "granted"/"requested" as events rather than flags. */
   service_access_granted_at: string | null;
@@ -189,7 +200,8 @@ export async function findSessionByCookieId(
             u.email, u.role, u.status, u.email_verified,
             u.given_name, u.family_name, u.orcid, u.orcid_verified,
             u.github_username, u.city, u.country, u.affiliation, u.service_access,
-            u.username, u.service_access_granted_at, u.upload_access_requested_at
+            u.username, u.username_auto_assigned,
+            u.service_access_granted_at, u.upload_access_requested_at
        FROM web_sessions ws
        JOIN users u ON u.id = ws.user_id
       WHERE ws.cookie_id_hash = ?
@@ -208,7 +220,8 @@ export async function findSessionByCookieId(
       last_used_at: string;
       email: string;
       role: string | null;
-      status: string;
+      // Closed by migration 0001's CHECK constraint (shared/contract/user.ts).
+      status: AccountStatus;
       // NOT NULL DEFAULT 0 in D1 (0001), so plain number.
       email_verified: number;
       given_name: string | null;
@@ -224,6 +237,8 @@ export async function findSessionByCookieId(
       service_access: number;
       // NULL on every web/ORCID row until onboarding sets one (migration 0026).
       username: string | null;
+      // NOT NULL DEFAULT 0 in D1 (0079), so plain number.
+      username_auto_assigned: number;
       // The two dates the dashboard needs to render "granted"/"requested" as
       // events rather than as flags (ADR 0042; nemarOrg/website#306).
       service_access_granted_at: string | null;
@@ -263,6 +278,7 @@ export async function findSessionByCookieId(
       affiliation: row.affiliation,
       service_access: row.service_access === 1,
       username: row.username,
+      username_auto_assigned: flag(row.username_auto_assigned),
       service_access_granted_at: row.service_access_granted_at,
       upload_access_requested_at: row.upload_access_requested_at,
     },

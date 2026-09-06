@@ -149,6 +149,11 @@ export async function issueEmailVerificationCode(
  *  roads to `verified` stay distinguishable after the fact. */
 export type EmailVerificationRoute = "verify_endpoint" | "code_signin";
 
+/** Just the half of a D1 batch result anyone here reads. D1's own types do not
+ *  narrow `batch()` results per statement, so the cast is unavoidable; naming
+ *  it once keeps it from being spelled three different ways. */
+type BatchMeta = { meta?: { changes?: number } };
+
 /**
  * Record that an account proved its inbox, promote it out of `pending`, and
  * land any statements the CALLER must not outlive that promotion (the sign-in
@@ -185,7 +190,7 @@ export async function applyEmailVerification(
   userId: number,
   via: EmailVerificationRoute,
   alsoInTransaction: D1PreparedStatement[] = [],
-): Promise<{ promoted: boolean }> {
+): Promise<{ promoted: boolean; extra: BatchMeta[] }> {
   const results = await db.batch([
     db
       .prepare(
@@ -207,8 +212,12 @@ export async function applyEmailVerification(
     ...alsoInTransaction,
   ]);
 
-  const promoted = ((results[0] as { meta?: { changes?: number } })?.meta?.changes ?? 0) > 0;
-  if (!promoted) return { promoted: false };
+  // The caller's own statements, in the order it passed them, so it can read
+  // `changes` off a conditional UPDATE it batched in here (#1268: the sign-in
+  // path claims a username this way, and has to know whether it landed).
+  const extra = results.slice(2) as BatchMeta[];
+  const promoted = ((results[0] as BatchMeta)?.meta?.changes ?? 0) > 0;
+  if (!promoted) return { promoted: false, extra };
 
   try {
     await auditLogStatement(db, {
@@ -224,7 +233,7 @@ export async function applyEmailVerification(
       err,
     );
   }
-  return { promoted: true };
+  return { promoted: true, extra };
 }
 
 /**

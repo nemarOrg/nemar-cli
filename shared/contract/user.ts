@@ -10,6 +10,88 @@
  */
 
 import { z } from "zod";
+import type { GapFieldsStayOptional } from "./profile-gaps.js";
+
+/**
+ * What `users.status` holds — the account tier, declared once (#1268, ADR 0040).
+ *
+ * CLOSED, and closed by the database rather than by optimism: migration 0001
+ * put `CHECK (status IN ('pending', 'verified', 'approved', 'revoked'))` on the
+ * column and 0026's table rebuild carried the same four values over, so a fifth
+ * cannot be written without a migration. Every `SET status =` in `backend/src`
+ * writes one of them — `'verified'` (email-verification.ts, auth.ts),
+ * `'approved'` (routes/admin/users.ts, migration 0062), `'revoked'`
+ * (db/user-tombstone.ts) — and signup inserts the `'pending'` default.
+ *
+ * Declared here because it was being compared as a bare string on both sides of
+ * the wire (`status === "pending"` decides the `email_verified` gap in
+ * ./profile-gaps.ts) while typed `z.string()`, so a typo in either place was a
+ * silently-false comparison rather than a compile error. Adding a status is a
+ * schema change AND a contract change on both surfaces already; a closed enum
+ * on the wire costs nothing that was not already owed.
+ */
+export const accountStatusSchema = z.enum(["pending", "verified", "approved", "revoked"]);
+export type AccountStatus = z.infer<typeof accountStatusSchema>;
+
+/**
+ * What `/auth/me` reports as `status`, which is NOT {@link accountStatusSchema}.
+ *
+ * `userStatusForDashboard` (backend routes/auth-web.ts) collapses `approved`
+ * and `verified` into `"active"`, because the dashboard's second state exists
+ * to carry a button — "pending" means exactly "verify your email" and nothing
+ * else. `"revoked"` is the defensive tail of that mapping (`?? row.status` for
+ * a status it will not translate) and is unreachable today: every door that
+ * calls `publicUser` refuses a revoked account before it gets there.
+ *
+ * Two enums rather than one because they are two vocabularies, and folding
+ * them would let a wire value that means "verify your inbox" be compared
+ * against a column value that means "an admin has not looked yet".
+ */
+export const webAccountStatusSchema = z.enum(["active", "pending", "revoked"]);
+export type WebAccountStatus = z.infer<typeof webAccountStatusSchema>;
+
+/**
+ * One `profile_gaps` entry (#1268, ADR 0045).
+ *
+ * Carried by BOTH user payloads — `GET /users/me` for the CLI and
+ * `GET /auth/me` for the dashboard — and computed by the one function in
+ * ./profile-gaps.ts that the upload-access preconditions also build their
+ * `missing` array from, so the two cannot disagree about what an account still
+ * needs.
+ *
+ * `field` is a plain string rather than the `GapField` union: the vocabulary is
+ * closed today, and a client that dropped an entry it did not recognise would
+ * tell a user their request failed for no reason at all. `blocks` says what the
+ * absence stops, nearest first; `set_on` says which surfaces can set it, and is
+ * `["web"]` alone for a name owned by a verified ORCID record, where no CLI
+ * command applies. Both are `.passthrough()`-friendly enums-as-strings for the
+ * same reason `field` is.
+ *
+ * ONLY `field` IS REQUIRED, and that is not laxity — it is the same rule the
+ * two renderers already follow. `resolveWireProfileGaps` treats a missing or
+ * unusable `blocks` as "fall back to the matrix" and reads `set_on` not at all;
+ * the CLI's own config-cache schema (src/lib/config.ts) has both `.optional()`
+ * so a cache written by an older build still parses. Demanding them HERE would
+ * have been the strictest link in a chain nothing else tightens, and
+ * `getCurrentUser` throws `ApiError` on any schema mismatch — so one entry
+ * missing one key would take down every `/users/me` consumer over a field the
+ * renderer was ready to do without.
+ */
+export const profileGapSchema = z
+  .object({
+    field: z.string(),
+    blocks: z.array(z.string()).optional(),
+    set_on: z.array(z.string()).optional(),
+  })
+  .passthrough();
+export type ProfileGapWire = z.infer<typeof profileGapSchema>;
+
+/** What this schema parses must remain something the renderers accept: neither
+ *  `blocks` nor `set_on` may become required. The alias resolves to `never`
+ *  and stops compiling the moment either one does; the runtime half of the
+ *  same rule is test/contract-schemas.test.ts "a profile_gaps entry may carry
+ *  only its field name". */
+export const _profileGapWireIsRenderable: GapFieldsStayOptional<ProfileGapWire> = true;
 
 /** A NEMAR user as returned inside the /users/me envelope. */
 export const userSchema = z
@@ -41,11 +123,26 @@ export const userSchema = z
      * matters most for `email_verified` -- telling someone their confirmed
      * inbox is unconfirmed sends them to redeem a code they do not need.
      */
-    status: z.string().optional(),
+    status: accountStatusSchema.optional(),
     email_verified: z.boolean().optional(),
     orcid_verified: z.boolean().optional(),
     given_name: z.string().nullable().optional(),
     family_name: z.string().nullable().optional(),
+    /**
+     * What this account is still missing, and what each absence blocks (#1268,
+     * ADR 0045). `.optional()` like everything else added since #1254: a
+     * backend that predates phase 8 sends no such key, and an ABSENT list is
+     * "this API cannot say" while an EMPTY one is "nothing is missing". The CLI
+     * renders those two differently and must not collapse them.
+     */
+    profile_gaps: z.array(profileGapSchema).optional(),
+    /**
+     * True when the username on this account was derived from the name rather
+     * than chosen (#1268, ADR 0045) — by the backfill sweep or at a web sign-in
+     * — and has not been changed since. Optional for the same reason; it is
+     * what lets a surface offer "we picked this, change it if you like".
+     */
+    username_auto_assigned: z.boolean().optional(),
   })
   .passthrough();
 export type ContractUser = z.infer<typeof userSchema>;
@@ -138,6 +235,14 @@ export type AdminUsersListResponse = z.infer<typeof adminUsersListResponseSchema
  *   lookup_failed            transient: the ORCID read failed. Retry the batch.
  *   conflict                 the suggested username was claimed between the
  *                            scan and the write. Retry picks the next suffix.
+ *   exhausted                a base exists and EVERY variant of it up to the
+ *                            suffix limit is already taken. Split out from
+ *                            `conflict` because that one is retry-safe by
+ *                            definition and this one is the opposite: the next
+ *                            run scans the same base and reaches the same
+ *                            answer. It needs a human to pick a handle, like
+ *                            `single_name`, and it is an operational fact about
+ *                            a saturated name worth seeing in the summary.
  */
 export const backfillUsernameOutcomeSchema = z.enum([
   "assigned",
@@ -146,6 +251,7 @@ export const backfillUsernameOutcomeSchema = z.enum([
   "no_name",
   "lookup_failed",
   "conflict",
+  "exhausted",
 ]);
 export type BackfillUsernameOutcome = z.infer<typeof backfillUsernameOutcomeSchema>;
 
@@ -299,8 +405,9 @@ export const UPLOAD_ACCESS_WHY_MAX_CHARS = 500;
  * (backend `publicUser`).
  *
  * NOT the same shape as {@link userSchema}, which is the CLI's `/users/me`
- * envelope: this one reports `status` as the dashboard's two-state value
- * ("active" / "pending"), carries the profile fields the Settings page edits,
+ * envelope: this one reports `status` as the dashboard's collapsed value
+ * ({@link webAccountStatusSchema}, not the column's own vocabulary), carries
+ * the profile fields the Settings page edits,
  * and omits everything about API tokens and sandbox state. They are two
  * audiences, not one shape with optional halves.
  *
@@ -317,7 +424,7 @@ export const webUserSchema = z
     email: z.string(),
     username: z.string().nullable(),
     role: z.string(),
-    status: z.string(),
+    status: webAccountStatusSchema,
     email_verified: z.boolean(),
     given_name: z.string().nullable(),
     family_name: z.string().nullable(),
@@ -330,6 +437,16 @@ export const webUserSchema = z
     service_access: z.boolean(),
     service_access_granted_at: z.string().nullable(),
     upload_access_requested_at: z.string().nullable(),
+    /**
+     * The two phase-8 additions (#1268, ADR 0045). REQUIRED here, unlike their
+     * `.optional()` twins on {@link userSchema}: that schema is what the CLI
+     * parses a possibly-older backend's `/users/me` with, while this one is
+     * only ever used to assert what THIS backend sends, and a `publicUser`
+     * that stopped sending either should fail the route test rather than
+     * quietly serve a dashboard that can no longer say what is missing.
+     */
+    profile_gaps: z.array(profileGapSchema),
+    username_auto_assigned: z.boolean(),
   })
   .passthrough();
 export type WebUser = z.infer<typeof webUserSchema>;

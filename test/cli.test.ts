@@ -574,7 +574,9 @@ describe("CLI Dataset Upload", () => {
     const { stdout, exitCode } = await runCli(["dataset", "upload", "/tmp/test"], ctx);
 
     expect(exitCode).toBe(1);
-    expect(stdout).toContain("Sandbox training required");
+    // The sandbox gap is stated in the one sentence every other gap uses
+    // (#1268, ADR 0045); the CTA is still the bare command name.
+    expect(stdout).toContain("Sandbox training is missing");
     expect(stdout).toContain("nemar sandbox");
   });
 

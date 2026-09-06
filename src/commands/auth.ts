@@ -20,10 +20,13 @@ import chalk from "chalk";
 import { Command, InvalidArgumentError } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
+import { accountCopy } from "../../shared/contract/account-copy.js";
+import { resolveProfileGaps } from "../../shared/contract/profile-gaps.js";
 import {
   UPLOAD_ACCESS_WHY_MAX_CHARS,
   UPLOAD_ACCESS_WHY_MIN_CHARS,
 } from "../../shared/contract/user.js";
+import { printGapList, printProfileGaps } from "../lib/account-gaps.js";
 import {
   type OrcidNameResponse,
   type ProfilePatchRequest,
@@ -664,6 +667,15 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
       // the field, and writing `false` there would report "not granted" to
       // someone who has it (ADR 0040).
       if (user.service_access !== undefined) setConfig("serviceAccess", user.service_access);
+      // Same rule for both phase-8 fields (#1268): cache only what the server
+      // actually sent. An absent `profile_gaps` is a backend that predates the
+      // field, and writing `[]` there would print "nothing outstanding" at an
+      // account nobody has checked.
+      if (user.profile_gaps !== undefined) setConfig("profileGaps", user.profile_gaps);
+      if (user.sandbox_completed !== undefined) {
+        setConfig("sandboxCompleted", user.sandbox_completed);
+      }
+      if (user.orcid_verified !== undefined) setConfig("orcidVerified", user.orcid_verified);
       setConfig("role", user.role);
       userRole = user.role;
       spinner.stop();
@@ -737,15 +749,29 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
   } else if (cfg.serviceAccess === true) {
     console.log(`  Upload access: ${chalk.green("granted")}`);
   } else if (cfg.serviceAccess === false) {
-    console.log(
-      `  Upload access: ${chalk.yellow("not granted")} ${chalk.dim(
-        "(one-time admin approval; see https://nemar.org/support)",
-      )}`,
-    );
+    // The explanation and the next step both come from the shared copy table
+    // (#1268, ADR 0045), so the terminal and the website's upload-access card
+    // say the same thing. They used to point at the support page, which was the
+    // only answer available before ADR 0042 built the request.
+    console.log(`  Upload access: ${chalk.yellow("not granted")}`);
+    console.log(`    ${chalk.dim(accountCopy("upload_access.section.lede"))}`);
+    console.log(`    ${chalk.cyan(accountCopy("cli.upload_access.cta"))}`);
   } else {
     console.log(`  Upload access: ${chalk.dim("unknown (run 'nemar auth status --refresh')")}`);
   }
   console.log(`  Config:   ${chalk.dim(getConfigPath())}`);
+
+  // What the account is still missing, in the same sentences the website and a
+  // refused upload-access request use (#1268, ADR 0045). Read from the cache
+  // like the upload-access line above it, and for the same reason: this command
+  // is expected to work offline. A refresh that was ASKED FOR and failed makes
+  // the cache a claim about the past, so it reports not-checked rather than
+  // presenting yesterday's list as today's.
+  printProfileGaps({
+    gaps: refreshFailure ? undefined : cfg.profileGaps,
+    orcidVerified: cfg.orcidVerified,
+    sandboxCompleted: refreshFailure ? undefined : cfg.sandboxCompleted,
+  });
 
   // Show other stored accounts
   const accounts = getAccounts();
@@ -1274,34 +1300,6 @@ Examples:
 // ============================================================================
 
 /**
- * Where a user actually fixes each precondition, keyed on the field names the
- * API sends in `missing`.
- *
- * Most of these point at Settings on nemar.org because that is where the field
- * lives: username, name, GitHub handle, city and country are edited on the
- * account settings page (nemarOrg/website#301), and that page is what a user is
- * meant to use whether they arrived from the browser or the CLI. THIS COPY
- * ASSUMES #301 IS DEPLOYED -- releasing epic #1250 is gated on it, because
- * until then these lines name a page with nothing on it, which is the exact
- * failure ADR 0040 spent a year fixing.
- *
- * `email_verified` is the exception and points at a real CLI command, because
- * that step genuinely has one.
- */
-const UPLOAD_ACCESS_FIX: Record<string, string> = {
-  email_verified: "run 'nemar auth resend-verification' and click the link in your inbox",
-  username: "run 'nemar auth profile set-username <name>'",
-  given_name:
-    "comes from your ORCID record when one is linked; otherwise 'nemar auth profile set-name --given <name>'",
-  family_name:
-    "comes from your ORCID record when one is linked; otherwise 'nemar auth profile set-name --family <name>'",
-  github_username: "run 'nemar auth profile set-github <handle>'",
-  city: "run 'nemar auth profile set-location --city <city>'",
-  country: "run 'nemar auth profile set-location --country <country>'",
-  why: "pass a longer --why, or answer the prompt",
-};
-
-/**
  * Say so when the request landed but no admin was reached.
  *
  * The request IS recorded either way, so this is a warning and not a failure;
@@ -1375,16 +1373,18 @@ const requestUploadAccessCmd = authCommand
     const spinner = ora("Submitting upload access request...").start();
     try {
       const result = await requestUploadAccess(why);
+      // Both outcomes are stated in the website's own words (#1268, ADR 0045):
+      // a person who asked from the dashboard and then checked from a terminal
+      // must not be told two different things about one request.
       if (result.already_requested) {
-        spinner.info("You already have an open upload access request");
-        console.log(chalk.dim("  An admin reviews it once; you will get an email when it lands."));
+        spinner.info(accountCopy("upload_access.requested.title"));
+        console.log(chalk.dim(`  ${accountCopy("upload_access.requested.lede")}`));
         warnIfAdminsNotNotified(result);
         return;
       }
-      spinner.succeed("Upload access requested");
+      spinner.succeed(accountCopy("upload_access.requested.title"));
       console.log();
-      console.log("  A NEMAR admin reviews the request once.");
-      console.log("  You will get an email when upload access is granted.");
+      console.log(`  ${accountCopy("upload_access.requested.body")}`);
       console.log(chalk.dim("  Check any time with 'nemar auth status --refresh'."));
       warnIfAdminsNotNotified(result);
     } catch (error) {
@@ -1400,12 +1400,17 @@ const requestUploadAccessCmd = authCommand
       // where to fix it rather than making the user map an error sentence back
       // onto a settings form (ADR 0042).
       if (error.missing && error.missing.length > 0) {
-        console.log();
-        console.log("  Still needed:");
-        for (const field of error.missing) {
-          const fix = UPLOAD_ACCESS_FIX[field] ?? "update it in Settings on nemar.org";
-          console.log(`    ${chalk.yellow(field)} — ${fix}`);
-        }
+        // `orcidVerified` from the config cache, because a refusal names the
+        // FIELD and not the account state (#1268). It is what decides whether
+        // the name halves point at `nemar auth profile set-name` or at the
+        // ORCID record -- with a verified iD linked the record owns the name
+        // and the PATCH refuses the edit, so the command would be advice that
+        // cannot work. Absent (never refreshed) reads as false, which is the
+        // pre-#1268 wording rather than a wrong one.
+        printGapList(
+          accountCopy("gaps.request.title"),
+          resolveProfileGaps(error.missing, { orcidVerified: getConfig().orcidVerified === true }),
+        );
         console.log();
         console.log(chalk.dim("  Settings: https://nemar.org/settings"));
       }
@@ -1515,14 +1520,23 @@ export async function profileAction(): Promise<void> {
   if (user.service_access === true) {
     console.log(`  Upload access: ${chalk.green("granted")}`);
   } else if (user.service_access === false) {
-    console.log(
-      `  Upload access: ${chalk.yellow("not granted")} ${chalk.dim(
-        "(one-time admin approval; see https://nemar.org/support)",
-      )}`,
-    );
+    console.log(`  Upload access: ${chalk.yellow("not granted")}`);
+    console.log(`    ${chalk.dim(accountCopy("upload_access.section.lede"))}`);
+    console.log(`    ${chalk.cyan(accountCopy("cli.upload_access.cta"))}`);
   } else {
     console.log(`  Upload access: ${chalk.dim("unknown (backend did not report it)")}`);
   }
+
+  // The same block `nemar auth status` prints, from a live fetch rather than
+  // from the cache. `undefined` here is a backend that predates phase 8, not a
+  // stale cache, so it says so rather than telling the user to refresh -- this
+  // command just did.
+  printProfileGaps({
+    gaps: user.profile_gaps,
+    orcidVerified: user.orcid_verified === true,
+    sandboxCompleted: user.sandbox_completed,
+    unknownReason: accountCopy("cli.gaps.unreported"),
+  });
 
   console.log();
   console.log(chalk.bold("Where to change each"));
@@ -1654,6 +1668,7 @@ async function refreshStoredAccount(): Promise<void> {
     setConfig("email", user.email);
     setConfig("githubUsername", user.github_username ?? undefined);
     if (user.service_access !== undefined) setConfig("serviceAccess", user.service_access);
+    if (user.orcid_verified !== undefined) setConfig("orcidVerified", user.orcid_verified);
     setConfig("role", user.role);
   } catch (error) {
     console.log(

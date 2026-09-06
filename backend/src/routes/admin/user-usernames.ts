@@ -39,7 +39,12 @@ import type {
 import { auditLogStatement } from "../../db/audit-log";
 import { issueEmailVerificationCode } from "../../services/email-verification";
 import { fetchOrcidName, orcidPubBase } from "../../services/orcid-auth";
-import { pickAvailableUsername, suggestUsername } from "../../services/username";
+import { suggestUsername } from "../../services/username";
+import {
+  pickUsernameForName,
+  recordUsernameAssignment,
+  usernameClaimStatement,
+} from "../../services/username-assignment";
 import type { Bindings } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
 
@@ -124,37 +129,6 @@ const REMAINING_SQL = `SELECT COUNT(*) as n
    FROM users
    WHERE deleted_at IS NULL
      AND (username IS NULL OR TRIM(username) = '')`;
-
-/**
- * Usernames that would collide with `base` or any of its `-N` variants.
- *
- * Deleted rows are NOT excluded: `users.username` is UNIQUE across the whole
- * table, so a row this query cannot see is still a row the write would collide
- * with. (The tombstone nulls the column, so in practice this returns live rows
- * only -- the predicate is written for the constraint, not for today's data.)
- */
-const TAKEN_SQL = `SELECT username FROM users
-   WHERE username = ? COLLATE NOCASE OR username LIKE ? ESCAPE '\\'`;
-
-/**
- * Claim `username` for `id`, but only while the row still has none and the
- * name is still free.
- *
- * The NOT EXISTS arm makes the check and the write ONE statement, which SQLite
- * and D1 execute atomically -- so a name that was free when the batch scanned
- * it and is taken by the time it writes produces `changes = 0` (reported as
- * `conflict`) rather than a UNIQUE error or, worse, a stolen handle. The
- * username predicate on the row itself is the same idea for the other
- * direction: a row that gained a username between the scan and here keeps it.
- */
-const CLAIM_SQL = `UPDATE users
-      SET username = ?, updated_at = datetime('now')
-    WHERE id = ?
-      AND deleted_at IS NULL
-      AND (username IS NULL OR TRIM(username) = '')
-      AND NOT EXISTS (
-        SELECT 1 FROM users u2 WHERE u2.username = ? COLLATE NOCASE AND u2.id != ?
-      )`;
 
 /**
  * Issue one verify-your-email code and classify the outcome.
@@ -272,6 +246,10 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
         }
       }
 
+      // The scan-and-pick is `pickUsernameForName`, shared with the sign-in path
+      // (#1268, ADR 0045) so both routes suffix collisions the same way. The
+      // suggestion is recomputed here only to tell `single_name` from `no_name`,
+      // which is a distinction this report makes and that one has no use for.
       const base = suggestUsername(given, family);
       if (!base) {
         // Two different facts, kept apart because they ask different things of
@@ -292,21 +270,20 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
         continue;
       }
 
-      const takenRows = await db
-        .prepare(TAKEN_SQL)
-        .bind(base, `${base.replace(/[%_\\]/g, "\\$&")}-%`)
-        .all<{ username: string | null }>();
-      const taken = (takenRows.results ?? [])
-        .map((r) => r.username)
-        .filter((u): u is string => typeof u === "string");
-
-      const username = pickAvailableUsername(base, [...taken, ...reserved]);
-      if (!username) {
+      const pick = await pickUsernameForName(db, given, family, reserved);
+      if (pick.status !== "ok") {
+        // `no_base` is unreachable here -- the `if (!base)` arm above returned
+        // for exactly that -- so this is `exhausted`, and it is reported as
+        // `exhausted` rather than as `conflict`. The two used to be one value
+        // and they ask opposite things: a conflict is retry-safe by definition
+        // (the next run picks the next suffix), while a saturated base gives
+        // the same answer every run forever and needs a human to choose a
+        // handle, like `single_name`.
         results.push({
           id: user.id,
           email: user.email,
           orcid: user.orcid,
-          outcome: "conflict",
+          outcome: "exhausted",
           given_name: given,
           family_name: family,
           verify: "not_attempted",
@@ -314,6 +291,7 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
         });
         continue;
       }
+      const username = pick.username;
       reserved.add(username.toLowerCase());
 
       if (!apply) {
@@ -330,7 +308,7 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
         continue;
       }
 
-      const claimed = await db.prepare(CLAIM_SQL).bind(username, user.id, username, user.id).run();
+      const claimed = await usernameClaimStatement(db, user.id, username).run();
       if ((claimed.meta?.changes ?? 0) === 0) {
         results.push({
           id: user.id,
@@ -360,6 +338,13 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
       // synthetic test target.
       // Never fatal: the username IS written, and a failed message is picked
       // up by the verify-retry pass on the next run.
+      //
+      // The per-row audit row goes in first, so the sweep's assignments and the
+      // sign-in path's carry the same `username_auto_assigned` action and are
+      // told apart by `details.source` rather than by which endpoint ran (the
+      // batch summary below is a separate, coarser record).
+      await recordUsernameAssignment(db, user.id, username, "admin_backfill");
+
       const verify: BackfillVerifyOutcome =
         user.email_verified === 1
           ? "already_verified"
@@ -427,6 +412,9 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
       no_name: results.filter((r) => r.outcome === "no_name").length,
       lookup_failed: results.filter((r) => r.outcome === "lookup_failed").length,
       conflict: results.filter((r) => r.outcome === "conflict").length,
+      // Counted apart from `conflict` because it is the one outcome in this
+      // report that retrying cannot change.
+      exhausted: results.filter((r) => r.outcome === "exhausted").length,
       // Counted across BOTH passes: an operator reading the summary wants to
       // know how many people were mailed and how many were not, not which loop
       // tried. A failure used to appear in neither the summary nor the exit

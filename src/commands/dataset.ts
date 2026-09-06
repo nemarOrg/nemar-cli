@@ -26,6 +26,7 @@ import { Command, Option } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
 import { formatBytesCli } from "../../shared/bytes.js";
+import { describeSandboxGap } from "../../shared/contract/profile-gaps.js";
 import { LICENSE_TIERS } from "../../shared/license-tiers.js";
 import { RangeParseError } from "../../shared/range.js";
 import { addCi } from "../lib/api/admin.js";
@@ -191,6 +192,7 @@ import {
   showUploadPlan,
 } from "../lib/upload/plan.js";
 import {
+  checkUploadAccessStep,
   checkUploadPrerequisites,
   validateBidsStep,
   verifyGhCli,
@@ -546,15 +548,19 @@ Examples:
     // Step 1: Check authentication
     requireAuth();
 
-    // Step 1b: Check sandbox training
+    // Step 1b: Check sandbox training. CLI-only, and stated in the one sentence
+    // every other gap is stated in (#1268, ADR 0045) -- see describeSandboxGap.
     if (!isSandboxCompleted()) {
-      console.log(chalk.yellow("Sandbox training required"));
+      console.log(chalk.yellow(describeSandboxGap()));
       console.log();
-      console.log("You must complete sandbox training before uploading real datasets.");
-      console.log("This verifies your setup and familiarizes you with the workflow.");
-      console.log();
-      console.log("Run sandbox training with:");
-      console.log(chalk.cyan("  nemar sandbox"));
+      console.log("It verifies your setup and familiarizes you with the workflow.");
+      process.exit(1);
+    }
+
+    // Step 1c: Upload access, before anything expensive runs. A missing grant
+    // is a hard stop for a real upload; --dry-run continues, since it uploads
+    // nothing and the plan is what the user asked to see.
+    if ((await checkUploadAccessStep({ dryRun: options.dryRun })).status === "fail") {
       process.exit(1);
     }
 
@@ -565,7 +571,7 @@ Examples:
       process.exit(1);
     }
 
-    // Step 1c: Check required tools
+    // Step 1d: Check required tools
     await checkPrerequisitesForCommand("upload");
 
     // Step 2: Check prerequisites

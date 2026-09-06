@@ -61,8 +61,9 @@ function seed(email: string, identityBacked: boolean): number {
 }
 
 beforeEach(async () => {
-  // Every migration EXCEPT 0077, so the duplicate can be seeded pre-flag and
-  // flagged by the real migration rather than by the test.
+  // Every migration BEFORE 0077, so the duplicate can be seeded pre-flag and
+  // flagged by the real migration rather than by the test. The rest are
+  // replayed after the flag lands (below).
   db = new Database(":memory:");
   for (const file of readdirSync(MIGRATIONS_DIR)
     .filter((f) => f.endsWith(".sql") && f < TARGET)
@@ -73,6 +74,18 @@ beforeEach(async () => {
   flaggedId = seed("orphan@example.org", false);
   canonicalId = seed("holder@example.org", true);
   db.exec(readFileSync(join(MIGRATIONS_DIR, TARGET), "utf-8"));
+  // ...and then everything AFTER it, so the routes below run against the
+  // CURRENT schema rather than a 2026-09 snapshot of it. Splitting the replay
+  // around 0077 is what lets the duplicate be seeded pre-flag; stopping there
+  // was an accident of how that was written, and it broke the moment
+  // `GET /users/me` first selected a column a later migration adds (#1268's
+  // `username_auto_assigned`) -- a 500 that says nothing about identity
+  // conflicts, which is what this file is supposed to be about.
+  for (const file of readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith(".sql") && f > TARGET)
+    .sort()) {
+    db.exec(readFileSync(join(MIGRATIONS_DIR, file), "utf-8"));
+  }
 
   db.run("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, 'nemar_te')", [
     flaggedId,

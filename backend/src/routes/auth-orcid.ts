@@ -106,6 +106,7 @@ import {
   verifyPending,
 } from "../services/orcid-auth";
 import { profileRefusal } from "../services/profile";
+import { type UsernameAssignmentSource, autoAssignUsername } from "../services/username-assignment";
 import {
   buildSessionCookie,
   isAllowedOrigin,
@@ -299,6 +300,30 @@ async function refreshUserName(env: Bindings, userId: number, orcid: string): Pr
   } catch (err) {
     console.warn(`[auth-orcid] name refresh failed for user ${userId} (${orcid})`, err);
   }
+}
+
+/**
+ * Refresh the name from ORCID, then give the account a username if it still has
+ * none (#1268, ADR 0045).
+ *
+ * ORDER IS THE WHOLE POINT. The ADR 0042 suggestion is first initial + family
+ * name, and on both of these paths the name arrives from ORCID rather than from
+ * the row: a brand-new sign-up's columns are NULL at INSERT time, and a
+ * returning sign-in may be the moment a previously name-less record grows one.
+ * Assigning before the refresh would therefore skip exactly the accounts this
+ * exists for.
+ *
+ * Runs behind the response like the refresh it wraps -- a public-record fetch
+ * is not something a sign-in should wait on -- and, like it, never throws.
+ */
+async function refreshNameThenAssignUsername(
+  env: Bindings,
+  userId: number,
+  orcid: string,
+  source: UsernameAssignmentSource,
+): Promise<void> {
+  await refreshUserName(env, userId, orcid);
+  await autoAssignUsername(env.DB, userId, source);
 }
 
 /**
@@ -909,7 +934,7 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
         "orcid",
       );
       await touchIdentityLogin(c.env, orcid);
-      afterResponse(c, refreshUserName(c.env, user.id, orcid));
+      afterResponse(c, refreshNameThenAssignUsername(c.env, user.id, orcid, "orcid_signin"));
       const session = buildSessionCookie(cookieIdRaw, { domain, maxAgeSeconds });
       const next = state.next !== "/" ? state.next : "/dashboard";
       return redirect(`${frontend}${next}`, [clearState, session]);
@@ -1106,8 +1131,12 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
     c.header("Set-Cookie", buildSessionCookie(cookieIdRaw, { domain, maxAgeSeconds }), {
       append: true,
     });
-    // Canonical name from ORCID, after the response (best-effort; never blocks signup).
-    afterResponse(c, refreshUserName(c.env, userId, orcid));
+    // Canonical name from ORCID, after the response (best-effort; never blocks
+    // signup), and then the username derived from it (#1268, ADR 0045): the
+    // INSERT above leaves `username` NULL by design, and onboarding is where
+    // the person is asked to confirm it -- but abandoning onboarding must not
+    // leave the account handle-less forever.
+    afterResponse(c, refreshNameThenAssignUsername(c.env, userId, orcid, "orcid_signup"));
 
     // Mail the first verification code to the address just collected. The
     // account exists and is signed in either way: an undeliverable code

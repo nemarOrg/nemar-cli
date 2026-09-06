@@ -51,12 +51,12 @@ function startServer(reply: { status: number; body: unknown }): CaptureServer {
 
 let configDir: string;
 
-function seedAuthenticatedConfig(): void {
+function seedAuthenticatedConfig(extra: Record<string, unknown> = {}): void {
   writeFileSync(
     join(configDir, "config.json"),
     JSON.stringify({
       activeAccount: "requester",
-      accounts: { requester: { apiKey: "test-user-key" } },
+      accounts: { requester: { apiKey: "test-user-key", ...extra } },
     }),
   );
 }
@@ -106,8 +106,13 @@ describe("nemar auth request-upload-access", () => {
       expect(server.bodies).toEqual([{ why: WHY }]);
       // ora writes its spinner lines to stderr, so success is asserted over
       // the combined output.
-      expect(`${result.stdout}${result.stderr}`).toContain("Upload access requested");
-      expect(result.stdout).toContain("reviews the request once");
+      // The website's own sentences since #1268 (ADR 0045): someone who asked
+      // from the dashboard and checks from a terminal must not be told two
+      // different things about one request.
+      expect(`${result.stdout}${result.stderr}`).toContain("Your request is with an admin");
+      expect(result.stdout).toContain(
+        "We\u2019ll email you when there\u2019s a decision. Everything else on your account keeps working in the meantime.",
+      );
     } finally {
       server.stop();
     }
@@ -122,9 +127,7 @@ describe("nemar auth request-upload-access", () => {
     try {
       const result = await runCli(["auth", "request-upload-access", "--why", WHY], server.url);
       expect(result.exitCode).toBe(0);
-      expect(`${result.stdout}${result.stderr}`).toContain(
-        "already have an open upload access request",
-      );
+      expect(`${result.stdout}${result.stderr}`).toContain("Your request is with an admin");
     } finally {
       server.stop();
     }
@@ -198,11 +201,67 @@ describe("nemar auth request-upload-access", () => {
       // fields is settable from the CLI, so the fix names the command --
       // sending someone to a browser for a field they can set from the shell
       // they are already in is the dead end ADR 0042 was left with.
-      expect(out).toContain("nemar auth profile set-username <name>");
-      expect(out).toContain("nemar auth profile set-location --city <city>");
-      expect(out).toContain("nemar auth profile set-location --country <country>");
+      //
+      // Since #1268 the WORDING is shared/contract/account-copy.ts and is the
+      // sentence the website prints for the same gap (ADR 0045), which is why
+      // the command appears bare rather than with an argument placeholder.
+      expect(out).toContain(
+        "Username is missing: needed to request upload access. Set it in Settings or run `nemar auth profile set-username`.",
+      );
+      expect(out).toContain(
+        "City is missing: needed to request upload access. Set it in Settings or run `nemar auth profile set-location`.",
+      );
+      expect(out).toContain(
+        "Country is missing: needed to request upload access. Set it in Settings or run `nemar auth profile set-location`.",
+      );
       // The website is still the other half of the same rules.
       expect(out).toContain("https://nemar.org/settings");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a verified ORCID iD sends the name gap to orcid.org, not to a command", async () => {
+    // The refusal names the FIELD, not the account state, so the renderer reads
+    // `orcidVerified` from the config cache (#1268). With an iD linked the
+    // record owns the name and `PATCH /auth/profile` refuses the edit -- naming
+    // `nemar auth profile set-name` here would be advice that cannot work.
+    seedAuthenticatedConfig({ orcidVerified: true });
+    const server = startServer({
+      status: 400,
+      body: {
+        error: "profile_incomplete",
+        message: "Complete your profile before requesting upload access: given_name",
+        missing: ["given_name"],
+      },
+    });
+    try {
+      const result = await runCli(["auth", "request-upload-access", "--why", WHY], server.url);
+      const out = `${result.stdout}${result.stderr}`;
+      expect(out).toContain(
+        "Given name is missing: needed to request upload access. Set it in your ORCID record at orcid.org, then sign in again.",
+      );
+      expect(out).not.toContain("nemar auth profile set-name");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("without a linked iD the same gap names the command", async () => {
+    seedAuthenticatedConfig();
+    const server = startServer({
+      status: 400,
+      body: {
+        error: "profile_incomplete",
+        message: "Complete your profile before requesting upload access: given_name",
+        missing: ["given_name"],
+      },
+    });
+    try {
+      const result = await runCli(["auth", "request-upload-access", "--why", WHY], server.url);
+      expect(`${result.stdout}${result.stderr}`).toContain(
+        "Given name is missing: needed to request upload access. Set it in Settings or run `nemar auth profile set-name`.",
+      );
     } finally {
       server.stop();
     }

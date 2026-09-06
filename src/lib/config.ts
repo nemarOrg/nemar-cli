@@ -21,6 +21,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import Conf from "conf";
 import { z } from "zod";
+import type { GapFieldsStayOptional } from "../../shared/contract/profile-gaps.js";
 
 export const DEFAULT_API_URL = "https://api.nemar.org";
 
@@ -77,6 +78,33 @@ export function getConfigDir(): string {
   return process.env.NEMAR_CONFIG_DIR || join(homedir(), ".config", "nemar");
 }
 
+/**
+ * One cached `profile_gaps` entry, as it comes back off disk.
+ *
+ * Separate from the wire's `profileGapSchema` (shared/contract/user.ts) because
+ * it validates a different source -- a JSON file this or an older build wrote,
+ * not an HTTP response -- but it must stay loose in exactly the same way, so
+ * both are pinned to the one declaration of that shape below.
+ */
+const cachedProfileGapSchema = z
+  .object({
+    field: z.string(),
+    blocks: z.array(z.string()).optional(),
+    set_on: z.array(z.string()).optional(),
+  })
+  .passthrough();
+
+/** A cache entry must stay something the gap renderer can take: neither
+ *  `blocks` nor `set_on` may become required, or a cache file missing either
+ *  key (an older build's, or one that never wrote it) would stop parsing
+ *  instead of falling back to the matrix. Fails to compile, not throw at a
+ *  user's terminal -- the runtime half of the same rule is
+ *  test/contract-schemas.test.ts "a profile_gaps entry may carry only its
+ *  field name". */
+export const _cachedProfileGapIsRenderable: GapFieldsStayOptional<
+  z.infer<typeof cachedProfileGapSchema>
+> = true;
+
 // Per-account configuration schema
 const accountSchema = z.object({
   apiKey: z.string().optional(),
@@ -94,6 +122,31 @@ const accountSchema = z.object({
    * as unknown rather than guessing "not granted".
    */
   serviceAccess: z.boolean().optional(),
+  /**
+   * What the account was still missing as of the last `auth status --refresh`
+   * (#1268, ADR 0045) — the backend's `profile_gaps`, cached beside
+   * `serviceAccess` and for the same reason: `auth status` stays usable
+   * offline, and absent means "never refreshed", which the Profile block
+   * reports as not-checked rather than as "nothing missing".
+   *
+   * Stored as the WIRE entries rather than as rendered sentences, so a CLI
+   * upgrade re-renders an old cache through its new copy table instead of
+   * replaying yesterday's wording. `blocks`/`set_on` are loose string arrays
+   * for the same reason they are on the wire: a vocabulary this build has not
+   * heard of must round-trip rather than fail to parse.
+   */
+  profileGaps: z.array(cachedProfileGapSchema).optional(),
+  /**
+   * Whether a VERIFIED ORCID iD is linked, as of the last refresh (#1268).
+   *
+   * Cached for one reason: it decides where a missing NAME is set. With an iD
+   * linked the record owns the name and `PATCH /auth/profile` refuses the edit,
+   * so telling that person to run `nemar auth profile set-name` is advice that
+   * cannot work. A refused upload-access request names the field and not the
+   * account state, so the renderer has nowhere else to learn it. Absent
+   * defaults to false, which is the pre-#1268 wording.
+   */
+  orcidVerified: z.boolean().optional(),
   /**
    * Cached from `/auth/login` and `auth status --refresh` (#1256). Not
    * authoritative -- always re-check with the backend for anything

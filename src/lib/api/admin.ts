@@ -1562,6 +1562,10 @@ export interface BackfillUsernamesResponse {
   no_name: number;
   lookup_failed: number;
   conflict: number;
+  /** Rows whose suggested base was saturated up to the suffix limit. Optional
+   *  for the same reason the verify counters are: a backend that predates the
+   *  split reports those rows inside `conflict`. */
+  exhausted?: number;
   /** Verify-message outcomes, counted across BOTH passes. Optional so a
    *  backend that predates the retry pass is rendered as unknown, not zero. */
   verify_sent: number;
