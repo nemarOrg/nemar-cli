@@ -7,6 +7,7 @@
  * - nemar auth status    - Check authentication status
  * - nemar auth whoami    - Alias for status (common pattern)
  * - nemar auth logout    - Clear stored credentials
+ * - nemar auth request-upload-access - Ask an admin for upload access
  * - nemar auth switch    - Switch between stored accounts
  * - nemar auth setup-ssh - Configure SSH for GitHub (optional, gh CLI preferred)
  *
@@ -27,6 +28,7 @@ import {
   getCurrentUser,
   login,
   requestKeyRegeneration,
+  requestUploadAccess,
   resendVerification,
   retrieveKey,
   signup,
@@ -1247,4 +1249,127 @@ Description:
 
 Examples:
   $ nemar auth regenerate-key`,
+);
+
+// ============================================================================
+// Request Upload Access (ADR 0042, #1253, epic #1250)
+//
+// Verifying your email makes the account usable (browse, API key, sandbox);
+// UPLOADING needs a one-time admin grant on top of it, and this is how you ask
+// for it. Before #1253 the 403 could only point at the support page.
+// ============================================================================
+
+/**
+ * Where a user actually fixes each precondition, keyed on the field names the
+ * API sends in `missing`.
+ *
+ * Every one of these currently says Settings on nemar.org, and that is a
+ * statement about the CLI rather than a placeholder: `PATCH /auth/profile` is
+ * cookie-authenticated, so the CLI cannot write any of these fields today.
+ * Phase 4 adds `nemar auth profile`, at which point the ones it covers get a
+ * command here instead of a URL.
+ */
+const UPLOAD_ACCESS_FIX: Record<string, string> = {
+  email_verified: "run 'nemar auth resend-verification' and click the link in your inbox",
+  username: "set it in Settings on nemar.org",
+  given_name: "comes from your ORCID record; make it public at orcid.org, or set it in Settings",
+  family_name: "comes from your ORCID record; make it public at orcid.org, or set it in Settings",
+  github_username: "set it in Settings on nemar.org",
+  city: "set it in Settings on nemar.org",
+  country: "set it in Settings on nemar.org",
+  why: "pass a longer --why, or answer the prompt",
+};
+
+const requestUploadAccessCmd = authCommand
+  .command("request-upload-access")
+  .description("Ask an admin for upload access (one-time)")
+  .option("--why <text>", "What you intend to upload (20-500 characters)")
+  .action(async (options: { why?: string }) => {
+    // Checked before the spinner starts, rather than left to the client's own
+    // 401: this is an action, not a query, so it exits non-zero, and a script
+    // must not see "Submitting upload access request..." for a request that was
+    // never going to be sent.
+    if (!isAuthenticated()) {
+      console.log(chalk.yellow("Not authenticated"));
+      console.log();
+      console.log("  Run 'nemar auth login' to authenticate");
+      process.exitCode = 1;
+      return;
+    }
+
+    let why = (options.why ?? "").trim();
+    if (!why) {
+      const answers = await inquirer.prompt([
+        {
+          type: "input",
+          name: "why",
+          message: "What do you intend to upload to NEMAR?",
+          validate: (input: string) => {
+            const text = (input ?? "").trim();
+            if (text.length < 20) return "Please write at least 20 characters";
+            if (text.length > 500) return "Please keep it under 500 characters";
+            return true;
+          },
+        },
+      ]);
+      why = String(answers.why).trim();
+    }
+
+    const spinner = ora("Submitting upload access request...").start();
+    try {
+      const result = await requestUploadAccess(why);
+      if (result.already_requested) {
+        spinner.info("You already have an open upload access request");
+        console.log(chalk.dim("  An admin reviews it once; you will get an email when it lands."));
+        return;
+      }
+      spinner.succeed("Upload access requested");
+      console.log();
+      console.log("  A NEMAR admin reviews the request once.");
+      console.log("  You will get an email when upload access is granted.");
+      console.log(chalk.dim("  Check any time with 'nemar auth status --refresh'."));
+    } catch (error) {
+      if (!(error instanceof ApiError)) {
+        spinner.fail("Failed to submit upload access request");
+        console.log(chalk.dim("  Check your internet connection"));
+        process.exitCode = 1;
+        return;
+      }
+
+      spinner.fail(error.message);
+      // The API names the fields it is still missing; print each one with
+      // where to fix it rather than making the user map an error sentence back
+      // onto a settings form (ADR 0042).
+      if (error.missing && error.missing.length > 0) {
+        console.log();
+        console.log("  Still needed:");
+        for (const field of error.missing) {
+          const fix = UPLOAD_ACCESS_FIX[field] ?? "update it in Settings on nemar.org";
+          console.log(`    ${chalk.yellow(field)} — ${fix}`);
+        }
+        console.log();
+        console.log(chalk.dim("  Settings: https://nemar.org/settings"));
+      }
+      process.exitCode = 1;
+    }
+  });
+
+addVerboseHelp(
+  requestUploadAccessCmd,
+  `
+Description:
+  Uploading datasets needs upload access: a one-time grant an admin makes
+  after reviewing who you are and where you are. Verifying your email is
+  not enough on its own, and nothing grants it automatically.
+
+  Before asking, your account needs a username, your given and family name,
+  a GitHub username that exists, and your city and country. Set them in
+  Settings on nemar.org; the request tells you which ones are missing.
+
+  Asking twice does nothing: while a request is open the command reports
+  that and no second message reaches the admins.
+
+Examples:
+  $ nemar auth request-upload-access
+  $ nemar auth request-upload-access --why "Sharing our lab's 64-channel EEG study of motor imagery"`,
 );

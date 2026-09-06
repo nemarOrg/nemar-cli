@@ -164,6 +164,18 @@ function assertNoTierKey(): void {
   expect(JSON.stringify(LEGACY_NO_TIER)).not.toContain("service_access");
 }
 
+/** A base-tier account with an OPEN upload request (ADR 0042, #1253). */
+const ASKED_FOR_UPLOAD = {
+  ...CLI_BROWSER,
+  id: 14,
+  username: "quenby",
+  email: "quenby@example.org",
+  github_username: "quenby-gh",
+  given_name: "Iris",
+  family_name: "Quenby",
+  upload_access_requested_at: "2026-09-04T12:00:00Z",
+};
+
 /** Names absent entirely — a row that never went through onboarding. */
 const NO_NAMES = {
   ...CLI_BROWSER,
@@ -509,6 +521,52 @@ describe("nemar admin users: tier filters", () => {
       expect(result.stdout).toContain("(1 total, filter: no-upload-access)");
       // Still counted and reported, so the exclusion is visible rather than silent.
       expect(result.stdout).toContain("1 account(s) reported no upload tier");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("--awaiting-approval narrows to OPEN requests server-side", async () => {
+    // ADR 0042: the flag used to mean "verified with no grant" -- every
+    // base-tier account, asked or not -- because there was no request to read.
+    // It now sends `awaiting_approval=1`, which the route turns into
+    // `upload_access_requested_at IS NOT NULL AND service_access = 0`. The
+    // client-side tier filter stays as the guard for a backend that predates
+    // #1253 and ignores the parameter (as this fake server does).
+    seedAuthenticatedConfig();
+    const server = startUsersServer([CLI_BROWSER, ASKED_FOR_UPLOAD]);
+    try {
+      const result = await runCli(["admin", "users", "--awaiting-approval"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(server.requests[0].searchParams.get("awaiting_approval")).toBe("1");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a plain listing does not ask for the open-request filter", async () => {
+    seedAuthenticatedConfig();
+    const server = startUsersServer([CLI_BROWSER]);
+    try {
+      await runCli(["admin", "users"], server.url);
+      expect(server.requests[0].searchParams.get("awaiting_approval")).toBeNull();
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a row with an open request shows when it was asked", async () => {
+    seedAuthenticatedConfig();
+    const server = startUsersServer([ASKED_FOR_UPLOAD, CLI_BROWSER]);
+    try {
+      const result = await runCli(["admin", "users"], server.url);
+      expect(entryContaining(result.stdout, "quenby@example.org")).toContain("(upload access)");
+      // A row that never asked gets no line at all -- an absent field means
+      // either "never asked" or a backend older than #1253, and neither is
+      // worth a line that says nothing.
+      expect(entryContaining(result.stdout, "tolliver@example.org")).not.toContain(
+        "(upload access)",
+      );
     } finally {
       server.stop();
     }

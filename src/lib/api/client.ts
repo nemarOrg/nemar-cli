@@ -164,12 +164,22 @@ export async function request<T>(
       printMaintenanceBanner(maintErr);
       throw maintErr;
     }
-    // `message` wins when the body carries a block_reason: those refusals put
-    // the short label in `error` and the ACTIONABLE text in `message`, and
-    // preferring `error` showed the user "Owner has no researcher name on
-    // file" with no hint about how to fix it (#1255).
     const hasBlockReason = typeof data.block_reason === "string";
-    const primary = hasBlockReason
+    // `missing` is carried through only when it is genuinely an array of
+    // strings: a server that sends something else must not turn into a
+    // `.map()` crash inside a catch block (ADR 0042, #1253).
+    const missing = Array.isArray(data.missing)
+      ? data.missing.filter((f): f is string => typeof f === "string")
+      : undefined;
+    // `message` wins when the body carries a block_reason or a `missing` list:
+    // those refusals put a short machine code in `error` and the ACTIONABLE
+    // text in `message`, and preferring `error` showed the user "Owner has no
+    // researcher name on file" with no hint about how to fix it (#1255) — or,
+    // for the upload-access request, the bare word "already_approved" (ADR
+    // 0042). Every other endpoint still leads with `error`, which is where its
+    // human sentence lives.
+    const prefersMessage = hasBlockReason || missing !== undefined;
+    const primary = prefersMessage
       ? (data.message as string) || (data.error as string)
       : (data.error as string) || (data.message as string);
     throw new ApiError(
@@ -178,6 +188,7 @@ export async function request<T>(
       data.details,
       typeof data.step === "string" ? data.step : undefined,
       hasBlockReason ? (data.block_reason as string) : undefined,
+      missing,
     );
   }
 

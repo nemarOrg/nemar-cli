@@ -9,6 +9,8 @@
 import {
   type AdminUserListItem,
   type AdminUsersListResponse,
+  type BackfillUsernameOutcome,
+  type BackfillVerifyOutcome,
   adminUsersListResponseSchema,
 } from "../../../shared/contract/index.js";
 import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
@@ -45,10 +47,18 @@ export function uploadTierOf(user: Pick<UserListItem, "service_access">): Upload
 /**
  * List users (admin only)
  */
-export async function listUsers(status?: string, role?: string): Promise<UsersListResponse> {
+export async function listUsers(
+  status?: string,
+  role?: string,
+  // Open upload requests only (ADR 0042, #1253): asked, not yet granted. This
+  // one is server-side because the timestamp it filters on is not something a
+  // client can derive from the rest of the row.
+  awaitingApproval?: boolean,
+): Promise<UsersListResponse> {
   const params = new URLSearchParams();
   if (status) params.set("status", status);
   if (role) params.set("role", role);
+  if (awaitingApproval) params.set("awaiting_approval", "1");
   const query = params.toString() ? `?${params.toString()}` : "";
   return request(`/admin/users${query}`, {}, true, adminUsersListResponseSchema);
 }
@@ -1503,6 +1513,60 @@ export async function backfillUserNames(options?: {
 }): Promise<BackfillNamesResponse> {
   return request<BackfillNamesResponse>(
     "/admin/users/backfill-names",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        apply: options?.apply ?? false,
+        ...(options?.limit != null ? { limit: options.limit } : {}),
+      }),
+    },
+    true,
+  );
+}
+
+// ============================================================================
+// Username backfill (ADR 0042, #1253)
+// ============================================================================
+
+export interface BackfillUsernameResult {
+  id: number;
+  email: string;
+  orcid: string | null;
+  outcome: BackfillUsernameOutcome;
+  username?: string | null;
+  given_name?: string | null;
+  family_name?: string | null;
+  verify?: BackfillVerifyOutcome;
+  error?: string;
+}
+
+export interface BackfillUsernamesResponse {
+  apply: boolean;
+  scanned: number;
+  assigned: number;
+  would_assign: number;
+  single_name: number;
+  no_name: number;
+  lookup_failed: number;
+  conflict: number;
+  verify_sent: number;
+  /** Candidates still without a username after this batch; `null` when the
+   *  count query itself failed (never confuse that with "nothing left"). */
+  remaining: number | null;
+  /** Set when a non-fatal part of the batch failed, e.g. the remaining count. */
+  warning?: string;
+  results: BackfillUsernameResult[];
+}
+
+/** Give username-less accounts a username derived from their name. Dry run
+ *  unless `apply` is true. */
+export async function backfillUsernames(options?: {
+  apply?: boolean;
+  limit?: number;
+}): Promise<BackfillUsernamesResponse> {
+  return request<BackfillUsernamesResponse>(
+    "/admin/users/backfill-usernames",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

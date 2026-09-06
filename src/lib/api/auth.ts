@@ -266,3 +266,31 @@ export async function getSandboxStatus(): Promise<{
     sandbox_completed_at?: string;
   }>("/sandbox/status", {}, true);
 }
+
+// ============================================================================
+// Upload access (ADR 0042, #1253)
+// ============================================================================
+
+export interface UploadAccessRequestResponse {
+  ok: true;
+  /** True when a request was already open: nothing was written and no second
+   *  admin email was sent. */
+  already_requested: boolean;
+  requested_at?: string | null;
+}
+
+/**
+ * Ask for upload access, once. Every precondition failure arrives as an
+ * ApiError whose `missing` names the account fields still to fill in, so the
+ * caller can print them rather than a single sentence (see errors.ts).
+ */
+export async function requestUploadAccess(why: string): Promise<UploadAccessRequestResponse> {
+  return request<UploadAccessRequestResponse>(
+    "/users/me/upload-access/request",
+    {
+      method: "POST",
+      body: JSON.stringify({ why }),
+    },
+    true,
+  );
+}
