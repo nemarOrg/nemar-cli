@@ -4,12 +4,6 @@
 **Date:** 2026-09-05
 **Owner:** Seyed Yahya Shirazi
 
-> Numbering note: epic #1250 runs its phases in parallel worktrees off one epic
-> branch, so the numbers were claimed out of order — phase 1 took 0040, phase 5
-> took 0041, phase 3 took 0042, phase 4 took 0043 and phase 7 took 0044. This is
-> phase 8, the last of them, and it is 0045. The index's gapless check goes green
-> once the epic branch holds all six, which it does.
-
 ## Context
 
 Epic #1250 rebuilt the account model across two surfaces at once. ADR 0040 fixed

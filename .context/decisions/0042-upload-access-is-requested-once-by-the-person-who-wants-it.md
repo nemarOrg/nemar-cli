@@ -4,11 +4,6 @@
 **Date:** 2026-09-05
 **Owner:** Seyed Yahya Shirazi
 
-> Numbering note: epic #1250 runs its phases in parallel worktrees off one epic
-> branch. Phase 1 (#1258) took 0040 and phase 5 (#1260) took 0041; this is phase
-> 3, so it is 0042. The ADR index's gapless check goes green when the epic branch
-> holds all three, which it does.
-
 ## Context
 
 ADR 0040 fixed the account tiers and made admin approval the single writer of

@@ -4,11 +4,6 @@
 **Date:** 2026-09-05
 **Owner:** Seyed Yahya Shirazi
 
-> Numbering note: epic #1250 runs phases in parallel. Phase 1 (PR #1258) keeps
-> 0040 and merges into the epic branch first, so this one is 0041. Until that
-> merge is rebased in, 0040 does not exist on this branch and the ADR index's
-> gapless check fails here by construction; it goes green with the rebase.
-
 ## Context
 
 Every DOI NEMAR mints names the depositor as a DataCite `DataCurator`
