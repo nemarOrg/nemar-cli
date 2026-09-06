@@ -21,7 +21,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
@@ -95,6 +95,10 @@ function startBackend(options: BackendOptions = {}): FakeBackend {
           typeof options.user === "function"
             ? options.user(meCalls++)
             : (options.user ?? meUser());
+        // The sentinel a test uses to revoke the key part-way through a poll.
+        if ((user as { unauthorized?: boolean }).unauthorized) {
+          return Response.json({ error: "Invalid or expired API key" }, { status: 401 });
+        }
         return Response.json({ user, token: null });
       }
       calls.push({
@@ -137,15 +141,25 @@ afterEach(() => {
   rmSync(configDir, { recursive: true, force: true });
 });
 
-async function runCli(args: string[], apiUrl: string) {
-  const env = {
+interface RunOptions {
+  /** Let the CLI actually try to open a browser, with `pathPrefix` supplying
+   *  a fake opener. Every other test keeps NEMAR_NO_BROWSER=1: a test suite
+   *  may not open real browser windows. */
+  allowBrowser?: boolean;
+  /** Prepended to PATH, so a fake `open` / `xdg-open` is found first. */
+  pathPrefix?: string;
+}
+
+async function runCli(args: string[], apiUrl: string, options: RunOptions = {}) {
+  const env: Record<string, string | undefined> = {
     ...process.env,
     NEMAR_CONFIG_DIR: configDir,
     TEST_API_URL: apiUrl,
     NEMAR_NO_UPDATE_CHECK: "1",
-    NEMAR_NO_BROWSER: "1",
+    NEMAR_NO_BROWSER: options.allowBrowser ? undefined : "1",
     NO_COLOR: "1",
   };
+  if (options.pathPrefix) env.PATH = `${options.pathPrefix}:${process.env.PATH ?? ""}`;
   env.FORCE_COLOR = undefined;
   env.CLICOLOR_FORCE = undefined;
   const proc = spawn({
@@ -297,6 +311,85 @@ describe("nemar auth profile verify-email", () => {
     }
   });
 
+  test("a wrong code prints the attempts left, not the code name", async () => {
+    seedAuthenticatedConfig({ pendingEmailChange: "ada@lab.example.org" });
+    const backend = startBackend({
+      replies: {
+        "/auth/email/change/verify": {
+          status: 401,
+          body: {
+            error: "code_incorrect",
+            message: "That code did not match. 4 attempts left before it is invalidated.",
+            attempts_remaining: 4,
+          },
+        },
+      },
+    });
+    try {
+      const result = await runCli(["auth", "profile", "verify-email", "000000"], backend.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.out).toContain("4 attempts left");
+      expect(result.out).not.toContain("code_incorrect");
+      // The pending address survives a wrong guess: the next attempt is the
+      // same two-step flow, not a new one.
+      expect(storedAccount().pendingEmailChange).toBe("ada@lab.example.org");
+      expect(storedAccount().email).toBeUndefined();
+    } finally {
+      backend.stop();
+    }
+  });
+
+  test("an expired code says to request a new one", async () => {
+    seedAuthenticatedConfig({ pendingEmailChange: "ada@lab.example.org" });
+    const backend = startBackend({
+      replies: {
+        "/auth/email/change/verify": {
+          status: 401,
+          body: {
+            error: "code_expired",
+            message: "That code has expired or has already been used. Request a new one.",
+          },
+        },
+      },
+    });
+    try {
+      const result = await runCli(["auth", "profile", "verify-email", "123456"], backend.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.out).toContain("Request a new one");
+      expect(result.out).not.toContain("code_expired");
+    } finally {
+      backend.stop();
+    }
+  });
+
+  test("a config write that fails does not report the change as failed", async () => {
+    // The server has already moved the address and spent the code by the time
+    // the local write runs, so a `conf` failure is a stale local copy, not a
+    // failed change. Inside the request's try/catch it printed "Could not
+    // confirm the new address", which sends a person to request a code they
+    // no longer need (#1266 review item 5).
+    seedAuthenticatedConfig({ pendingEmailChange: "ada@lab.example.org" });
+    const backend = startBackend({
+      replies: {
+        "/auth/email/change/verify": { status: 200, body: { ok: true, old_address_notified: true } },
+      },
+      user: meUser({ email: "ada@lab.example.org" }),
+    });
+    // Readable, not writable: the store loads and every write fails.
+    chmodSync(configDir, 0o500);
+    try {
+      const result = await runCli(["auth", "profile", "verify-email", "123456"], backend.url);
+      expect(result.out).toContain("Account email is now ada@lab.example.org");
+      expect(result.out).toContain("The change is live on the server");
+      expect(result.out).toContain("local config could not be updated");
+      expect(result.out).not.toContain("Could not confirm the new address");
+      expect(result.exitCode).toBe(0);
+    } finally {
+      chmodSync(configDir, 0o700);
+      backend.stop();
+    }
+  });
+
   test("--email finishes a change started on another machine", async () => {
     seedAuthenticatedConfig();
     const backend = startBackend({ user: meUser({ email: "ada@lab.example.org" }) });
@@ -387,6 +480,34 @@ describe("nemar auth profile set-github / set-username / set-name / set-location
     }
   });
 
+  test("set-username re-keys the stored account, so `auth switch` finds it", async () => {
+    // The accounts map is keyed by username. Writing the new name into the
+    // account's fields and leaving the key alone produced an account that
+    // `nemar auth switch <new>` could not find (#1266 review item 4).
+    seedAuthenticatedConfig();
+    const backend = startBackend({ user: meUser({ username: "alovelace" }) });
+    try {
+      const result = await runCli(["auth", "profile", "set-username", "alovelace"], backend.url);
+      expect(result.exitCode).toBe(0);
+      expect(result.out).toContain("Username set to alovelace");
+      expect(backend.calls[0].body).toEqual({ username: "alovelace" });
+
+      const config = JSON.parse(readFileSync(join(configDir, "config.json"), "utf8"));
+      expect(Object.keys(config.accounts)).toEqual(["alovelace"]);
+      expect(config.activeAccount).toBe("alovelace");
+      // The credentials moved with the key, rather than being left behind.
+      expect(config.accounts.alovelace.apiKey).toBe("test-user-key-0123456789");
+
+      // The actual thing that was broken: switching by the new name.
+      const switched = await runCli(["auth", "switch", "alovelace"], backend.url);
+      expect(switched.exitCode).toBe(0);
+      expect(switched.out).toContain("alovelace");
+      expect(switched.out).not.toContain("not found");
+    } finally {
+      backend.stop();
+    }
+  });
+
   test("set-name sends both halves, and refuses to send an empty patch", async () => {
     seedAuthenticatedConfig();
     const backend = startBackend({ user: meUser() });
@@ -446,6 +567,31 @@ describe("nemar auth profile set-github / set-username / set-name / set-location
       expect(result.exitCode).toBe(0);
       expect(result.out).toContain("Location updated");
       expect(backend.calls[0].body).toEqual({ city: "San Diego", country: "USA" });
+    } finally {
+      backend.stop();
+    }
+  });
+
+  test("an older backend that lacks the route says so, in its own words", async () => {
+    // The API's 404 body names the route; leading with `error` rendered the
+    // whole thing as the words "Not Found", which reads as "your account is
+    // missing" rather than "this deployment predates the command you ran"
+    // (#1266 review item 6).
+    seedAuthenticatedConfig();
+    const backend = startBackend({
+      replies: {
+        "/auth/profile": {
+          status: 404,
+          body: { error: "Not Found", message: "Route PATCH /auth/profile not found" },
+        },
+      },
+    });
+    try {
+      const result = await runCli(["auth", "profile", "set-github", "octocat"], backend.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.out).toContain("Route PATCH /auth/profile not found");
+      expect(result.out).toContain("does not support this command yet");
+      expect(result.out).not.toContain("Could not update your profile");
     } finally {
       backend.stop();
     }
@@ -613,6 +759,127 @@ describe("nemar auth profile orcid", () => {
       backend.stop();
     }
   });
+
+  test("--timeout rejects a value it would otherwise silently ignore", async () => {
+    // It used to fall back to 300 on anything unparseable, so `--timeout 5m`
+    // was accepted and then ignored -- and the person watched a five-minute
+    // wait they thought they had shortened (#1266 review item 9).
+    seedAuthenticatedConfig();
+    const backend = startBackend();
+    try {
+      for (const bad of ["5m", "0", "-30", "abc"]) {
+        const result = await runCli(
+          ["auth", "profile", "orcid", "link", "--timeout", bad],
+          backend.url,
+        );
+        expect(result.exitCode).not.toBe(0);
+        expect(result.out).toContain("--timeout must be a whole number of seconds");
+        // Refused at the argument boundary: nothing was minted.
+        expect(backend.calls).toEqual([]);
+      }
+    } finally {
+      backend.stop();
+    }
+  });
+
+  test("a poll that stops authenticating gives up early and says why", async () => {
+    // Burning the full timeout on a revoked key ends in "gave up waiting",
+    // which sends the person to look at their browser rather than at their
+    // credentials (#1266 review item 7).
+    seedAuthenticatedConfig();
+    const backend = startBackend({
+      replies: {
+        "/auth/orcid/cli-start": {
+          status: 200,
+          body: {
+            authorize_url: "https://app.nemar.org/auth/orcid/cli-handoff?t=signed-state",
+            expires_in: 600,
+            mode: "link",
+          },
+        },
+      },
+      // The pre-flight read succeeds; the key is revoked before the first poll.
+      user: (n) => (n === 0 ? meUser({ orcid: null }) : { unauthorized: true }),
+    });
+    try {
+      const started = Date.now();
+      const result = await runCli(
+        ["auth", "profile", "orcid", "link", "--timeout", "120"],
+        backend.url,
+      );
+      expect(result.exitCode).toBe(1);
+      expect(result.out).toContain("no longer authenticate");
+      expect(result.out).toContain("nemar auth login");
+      expect(result.out).not.toContain("Gave up waiting");
+      // The point of the change: it did not wait out the two minutes.
+      expect(Date.now() - started).toBeLessThan(30_000);
+    } finally {
+      backend.stop();
+    }
+  }, 40000);
+
+  test("--no-open suppresses the opener; without it the opener runs", async () => {
+    // NEMAR_NO_BROWSER=1 is set for every other test in this file, which made
+    // --no-open untestable (#1266 review item 14). Here the flag is the only
+    // difference, and a fake `open` / `xdg-open` first on PATH records
+    // whether the CLI reached for a browser at all.
+    seedAuthenticatedConfig();
+    const binDir = mkdtempSync(join(tmpdir(), "nemar-fake-opener-"));
+    const marker = join(binDir, "opened.txt");
+    // Both names, so the test does not depend on which platform runs it.
+    for (const name of ["open", "xdg-open"]) {
+      writeFileSync(join(binDir, name), `#!/bin/sh
+echo "$1" >> "${marker}"
+`);
+      chmodSync(join(binDir, name), 0o755);
+    }
+    const backend = startBackend({
+      replies: {
+        "/auth/orcid/cli-start": {
+          status: 200,
+          body: {
+            authorize_url: "https://app.nemar.org/auth/orcid/cli-handoff?t=signed-state",
+            expires_in: 600,
+            mode: "link",
+          },
+        },
+      },
+      user: meUser({ orcid: null }),
+    });
+
+    /** The spawn is detached, so the marker can land after the CLI exits. */
+    async function markerAppears(): Promise<boolean> {
+      for (let i = 0; i < 20; i++) {
+        if (existsSync(marker)) return true;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return false;
+    }
+
+    try {
+      const suppressed = await runCli(
+        ["auth", "profile", "orcid", "link", "--no-open", "--timeout", "1"],
+        backend.url,
+        { allowBrowser: true, pathPrefix: binDir },
+      );
+      expect(suppressed.out).toContain("https://app.nemar.org/auth/orcid/cli-handoff?t=signed-state");
+      expect(suppressed.out).not.toContain("trying to open your browser");
+      expect(await markerAppears()).toBe(false);
+
+      const opened = await runCli(
+        ["auth", "profile", "orcid", "link", "--timeout", "1"],
+        backend.url,
+        { allowBrowser: true, pathPrefix: binDir },
+      );
+      expect(opened.out).toContain("trying to open your browser");
+      expect(await markerAppears()).toBe(true);
+      // It opened the URL it printed, not something else.
+      expect(readFileSync(marker, "utf8")).toContain("cli-handoff?t=signed-state");
+    } finally {
+      backend.stop();
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  }, 40000);
 
   test("an unknown action is named rather than silently ignored", async () => {
     seedAuthenticatedConfig();

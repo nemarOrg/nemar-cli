@@ -51,6 +51,9 @@ let externalBase: string;
 let tokenOrcid = ADA_ORCID;
 /** GitHub logins the local mirror should answer 404 for. */
 let missingGithubLogins = new Set<string>();
+/** GitHub logins the local mirror should answer 502 for -- an OUTAGE, which
+ *  is a different answer from "this account does not exist" (#1052). */
+let failingGithubLogins = new Set<string>();
 /**
  * `/users/:login` hits since the last reset.
  *
@@ -80,6 +83,7 @@ beforeAll(() => {
       const gh = url.pathname.match(/^\/users\/(.+)$/);
       if (gh) {
         githubCalls += 1;
+        if (failingGithubLogins.has(gh[1])) return new Response("upstream boom", { status: 502 });
         if (missingGithubLogins.has(gh[1])) return new Response("not found", { status: 404 });
         return Response.json({ login: gh[1], id: 4242 });
       }
@@ -213,6 +217,7 @@ beforeEach(() => {
   db = freshDb();
   tokenOrcid = ADA_ORCID;
   missingGithubLogins = new Set();
+  failingGithubLogins = new Set();
   githubCalls = 0;
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/auth", authOrcidRoutes);
@@ -458,6 +463,74 @@ describe("PATCH /auth/profile with a bearer token", () => {
     expect(githubCalls).toBe(0);
   });
 
+  test("a GitHub OUTAGE is a 503, and the stored handle is untouched", async () => {
+    // #1052's tri-state, over both credentials. Reporting an outage as
+    // `invalid_github_username` tells someone their own correct handle does
+    // not exist and leaves them editing a field that is already right.
+    const ada = await seedUser("ada@nemar.test", ADA_KEY, { github: "old-handle" });
+    failingGithubLogins.add("octocat");
+
+    const viaToken = await withToken(
+      "/auth/profile",
+      ADA_KEY,
+      { github_username: "octocat" },
+      "PATCH",
+    );
+    expect(viaToken.status).toBe(503);
+    const body = (await viaToken.json()) as { error: string; message: string };
+    expect(body.error).toBe("github_unavailable");
+    expect(body.message).toContain("try again");
+    expect(userRow(ada)?.github_username).toBe("old-handle");
+
+    const { cookieIdRaw } = await issueSession(env(), ada, false, null, null, "email_code");
+    const viaCookie = await app.request(
+      "/auth/profile",
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `nemar_session=${cookieIdRaw}`,
+          Origin: "https://nemar.org",
+        },
+        body: JSON.stringify({ github_username: "octocat" }),
+      },
+      env(),
+    );
+    expect(viaCookie.status).toBe(503);
+    expect((await viaCookie.json()) as { error: string }).toMatchObject({
+      error: "github_unavailable",
+    });
+    expect(userRow(ada)?.github_username).toBe("old-handle");
+  });
+
+  test("a bearer token wins when a cookie for another account is also sent", async () => {
+    // `resolveActingAccount` documents this order; nothing exercised it. A
+    // request carrying both must act for the TOKEN's account, because that is
+    // the credential the caller chose deliberately.
+    const ada = await seedUser("ada@nemar.test", ADA_KEY);
+    const bob = await seedUser("bob@nemar.test", BOB_KEY);
+    const { cookieIdRaw } = await issueSession(env(), bob, false, null, null, "email_code");
+
+    const res = await app.request(
+      "/auth/profile",
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${ADA_KEY}`,
+          Cookie: `nemar_session=${cookieIdRaw}`,
+          Origin: "https://nemar.org",
+        },
+        body: JSON.stringify({ username: "alovelace" }),
+      },
+      env(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(userRow(ada)?.username).toBe("alovelace");
+    expect(userRow(bob)?.username).toBeNull();
+  });
+
   test("sets a username while it is empty, and refuses one that is taken", async () => {
     const ada = await seedUser("ada@nemar.test", ADA_KEY);
     await seedUser("other@nemar.test", null, { username: "Taken" });
@@ -576,9 +649,45 @@ function handoffToken(authorizeUrl: string): string {
   return t;
 }
 
-/** Walk the handoff and hand back the state cookie value and the csrf. */
-async function walkHandoff(token: string): Promise<{ cookie: string; csrf: string }> {
-  const res = await app.request(`/auth/orcid/cli-handoff?t=${encodeURIComponent(token)}`, {}, env());
+/** GET the interstitial, with an optional browser session cookie. */
+function openHandoff(token: string, sessionCookie?: string): Promise<Response> {
+  return app.request(
+    `/auth/orcid/cli-handoff?t=${encodeURIComponent(token)}`,
+    sessionCookie ? { headers: { Cookie: sessionCookie } } : {},
+    env(),
+  );
+}
+
+/** POST the interstitial's confirm form, the way its own page does. */
+function continueHandoff(token: string, sessionCookie?: string): Promise<Response> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/x-www-form-urlencoded",
+    Origin: "https://nemar.org",
+  };
+  if (sessionCookie) headers.Cookie = sessionCookie;
+  return app.request(
+    "/auth/orcid/cli-handoff/continue",
+    { method: "POST", headers, body: `t=${encodeURIComponent(token)}` },
+    env(),
+  );
+}
+
+/**
+ * Walk BOTH handoff steps the way a person does -- read the page, press the
+ * button -- and hand back the state cookie and the csrf.
+ *
+ * The interstitial is not a formality to skip in tests: it is the step that
+ * makes the intent's target account visible before ORCID sees anything, so a
+ * helper that jumped straight to the redirect would be testing a flow nobody
+ * can perform.
+ */
+async function walkHandoff(
+  token: string,
+  sessionCookie?: string,
+): Promise<{ cookie: string; csrf: string }> {
+  const page = await openHandoff(token, sessionCookie);
+  expect(page.status).toBe(200);
+  const res = await continueHandoff(token, sessionCookie);
   expect(res.status).toBe(302);
   const setCookie = res.headers.get("Set-Cookie") ?? "";
   const cookie = setCookie.split(";")[0];
@@ -631,31 +740,175 @@ describe("POST /auth/orcid/cli-start", () => {
     ).toBe(1);
   });
 
-  test("a state minted for one account never links to another", async () => {
-    // The browser that finishes the flow may well be signed in as somebody
-    // else. The signed state names the account, and it wins -- a bystanding
-    // cookie is not evidence of intent.
+  test("the interstitial names the account and does not submit itself", async () => {
+    // The page IS the defence a signed state cannot provide on its own: a
+    // bearer capability that a victim could be handed. What stops that is a
+    // person reading whose account it names before ORCID sees anything.
+    const ada = await seedUser("ada@nemar.test", ADA_KEY, { username: "alovelace" });
+
+    const started = await withToken("/auth/orcid/cli-start", ADA_KEY, { mode: "link" });
+    const { authorize_url } = (await started.json()) as { authorize_url: string };
+    const page = await openHandoff(handoffToken(authorize_url));
+
+    expect(page.status).toBe(200);
+    expect(page.headers.get("Content-Type")).toContain("text/html");
+    // NOT a redirect: nothing reaches ORCID until the person presses the
+    // button.
+    expect(page.headers.get("Location")).toBeNull();
+    const html = await page.text();
+    expect(html).toContain("alovelace");
+    // The address is masked, like every other place NEMAR shows one back.
+    expect(html).toContain("a**@nemar.test");
+    expect(html).not.toContain("ada@nemar.test");
+    expect(html).toContain("If this is not your account, close this tab");
+    expect(html).toContain('action="/auth/orcid/cli-handoff/continue"');
+    // No script at all, and in particular nothing that could auto-submit the
+    // form and turn this page back into the redirect it replaced.
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("submit()");
+    // Still unlinked: rendering a page changes nothing.
+    expect(userRow(ada)?.orcid).toBeNull();
+  });
+
+  test("a browser signed in as someone else is REFUSED, not overridden", async () => {
+    // Both ends of the flow, because they are minutes apart and a browser can
+    // sign in between them. An earlier draft let the signed intent silently
+    // win, which is correct about whose intent it is and wrong about what to
+    // do with the disagreement.
     const ada = await seedUser("ada@nemar.test", ADA_KEY);
     const bob = await seedUser("bob@nemar.test", BOB_KEY);
     tokenOrcid = ADA_ORCID;
 
     const started = await withToken("/auth/orcid/cli-start", ADA_KEY, { mode: "link" });
     const { authorize_url } = (await started.json()) as { authorize_url: string };
-    const { cookie, csrf } = await walkHandoff(handoffToken(authorize_url));
+    const token = handoffToken(authorize_url);
     const { cookieIdRaw } = await issueSession(env(), bob, false, null, null, "email_code");
+    const bobSession = `nemar_session=${cookieIdRaw}`;
 
-    const res = await callback(csrf, [cookie, `nemar_session=${cookieIdRaw}`]);
+    const page = await openHandoff(token, bobSession);
+    expect(page.status).toBe(403);
+    const html = await page.text();
+    expect(html).toContain("orcid_intent_account_mismatch");
+    expect(html).toContain("sign out or open it in a browser where you are not signed in");
+
+    // The confirm step refuses on its own, not merely because the page did.
+    const posted = await continueHandoff(token, bobSession);
+    expect(posted.status).toBe(403);
+    expect(posted.headers.get("Set-Cookie")).toBeNull();
+
+    // And so does the callback, for a session that appeared after a clean
+    // handoff.
+    const { cookie, csrf } = await walkHandoff(token);
+    const res = await callback(csrf, [cookie, bobSession]);
+    expect(res.headers.get("Location")).toContain("error=orcid_intent_account_mismatch");
+
+    expect(userRow(ada)?.orcid).toBeNull();
+    expect(userRow(bob)?.orcid).toBeNull();
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM oauth_identities").get()?.n).toBe(
+      0,
+    );
+  });
+
+  test("the same browser signed in as the intent's own account proceeds", async () => {
+    // The refusal above must be about DISAGREEMENT, not about the presence of
+    // a session: someone who happens to be signed in on the same account is
+    // exactly who the intent is for.
+    const ada = await seedUser("ada@nemar.test", ADA_KEY);
+    tokenOrcid = ADA_ORCID;
+
+    const started = await withToken("/auth/orcid/cli-start", ADA_KEY, { mode: "link" });
+    const { authorize_url } = (await started.json()) as { authorize_url: string };
+    const { cookieIdRaw } = await issueSession(env(), ada, false, null, null, "email_code");
+    const session = `nemar_session=${cookieIdRaw}`;
+
+    const { cookie, csrf } = await walkHandoff(handoffToken(authorize_url), session);
+    const res = await callback(csrf, [cookie, session]);
 
     expect(res.status).toBe(302);
     expect(userRow(ada)?.orcid).toBe(ADA_ORCID);
-    expect(userRow(bob)?.orcid).toBeNull();
-    expect(
-      db
-        .query<{ user_id: number }, [string]>(
-          "SELECT user_id FROM oauth_identities WHERE provider_subject = ?",
-        )
-        .get(ADA_ORCID)?.user_id,
-    ).toBe(ada);
+  });
+
+  test("an intent is single-use: a replay links nothing", async () => {
+    // A signed URL sits in browser history, in a referrer, in a log. The
+    // signature makes it unforgeable; the nonce row (migration 0078) makes it
+    // unrepeatable.
+    const ada = await seedUser("ada@nemar.test", ADA_KEY);
+    tokenOrcid = ADA_ORCID;
+
+    const started = await withToken("/auth/orcid/cli-start", ADA_KEY, { mode: "link" });
+    const { authorize_url } = (await started.json()) as { authorize_url: string };
+    const token = handoffToken(authorize_url);
+    const { cookie, csrf } = await walkHandoff(token);
+    expect((await callback(csrf, [cookie])).status).toBe(302);
+    expect(userRow(ada)?.orcid).toBe(ADA_ORCID);
+
+    // Same URL, same cookie, second time. The iD would be re-linkable to this
+    // very account, so the assertion that bites is the refusal itself.
+    const replay = await callback(csrf, [cookie]);
+    expect(replay.headers.get("Location")).toContain("error=orcid_intent_used");
+
+    // And the handoff will not re-issue a cookie for a spent intent either.
+    const page = await openHandoff(token);
+    expect(page.status).toBe(410);
+    expect(await page.text()).toContain("orcid_intent_used");
+    expect((await continueHandoff(token)).status).toBe(410);
+  });
+
+  test("cli-start accepts a session under the same-origin gate", async () => {
+    // The route takes either credential (authMiddleware). A cookie caller
+    // still has to clear the gate `POST /orcid/start` applies, and the ADR
+    // says so -- but nothing exercised the branch, so "it accepts a cookie"
+    // was an unverified claim in a comment.
+    const ada = await seedUser("ada@nemar.test", ADA_KEY);
+    const { cookieIdRaw } = await issueSession(env(), ada, false, null, null, "email_code");
+
+    const refused = await app.request(
+      "/auth/orcid/cli-start",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `nemar_session=${cookieIdRaw}`,
+          Origin: "https://evil.example.com",
+        },
+        body: JSON.stringify({ mode: "link" }),
+      },
+      env(),
+    );
+    expect(refused.status).toBe(403);
+
+    const allowed = await app.request(
+      "/auth/orcid/cli-start",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `nemar_session=${cookieIdRaw}`,
+          Origin: "https://nemar.org",
+        },
+        body: JSON.stringify({ mode: "link" }),
+      },
+      env(),
+    );
+    expect(allowed.status).toBe(200);
+    const { authorize_url } = (await allowed.json()) as { authorize_url: string };
+    expect(authorize_url).toContain("/auth/orcid/cli-handoff?t=");
+  });
+
+  test("503s when this deployment has no ORCID client", async () => {
+    // Checked at MINT time so the terminal says "unavailable" instead of the
+    // person discovering it at the end of a browser round trip.
+    await seedUser("ada@nemar.test", ADA_KEY);
+    const withoutOrcid = { ...env(), ORCID_CLIENT_ID: "", ORCID_CLIENT_SECRET: "" } as Bindings;
+    const res = await withToken("/auth/orcid/cli-start", ADA_KEY, { mode: "link" }, "POST", withoutOrcid);
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe("orcid_unavailable");
+    expect(body.message).toContain("unavailable");
+    // Nothing was recorded for an intent that can never be used.
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM orcid_link_intents").get()?.n).toBe(
+      0,
+    );
   });
 
   test("a tampered state links nothing", async () => {
