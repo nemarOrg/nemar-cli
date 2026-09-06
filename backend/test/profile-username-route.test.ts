@@ -176,6 +176,37 @@ describe("PATCH /auth/profile: username", () => {
     expect(usernameOf(id)).toBe("alovelace");
   });
 
+  test("an approved account with NO username can still set one", async () => {
+    // The 19 rows this phase exists for. They are approved and hold NULL, so a
+    // lock on the FIELD (rather than on a change) would leave them permanently
+    // without a username -- the exact state ADR 0042 exists to end, and the
+    // thing `nemar admin approve <username>` needs to address them by.
+    const id = seedUser("approved-null@example.org", { username: null, status: "approved" });
+
+    const res = await patch(id, { username: "alovelace" });
+    expect(res.status).toBe(200);
+    expect(usernameOf(id)).toBe("alovelace");
+  });
+
+  test("a whitespace-only username counts as absent for the lock", async () => {
+    const id = seedUser("approved-blank@example.org", { username: "   ", status: "approved" });
+
+    expect((await patch(id, { username: "alovelace" })).status).toBe(200);
+    expect(usernameOf(id)).toBe("alovelace");
+  });
+
+  test("a revoked account cannot reach the profile route at all", async () => {
+    // The handler carries a 409 `account_revoked` for a rename, and it is
+    // unreachable today: findSessionByCookieId filters `u.status != 'revoked'`,
+    // so the middleware answers 401 first. Pinned as the OBSERVABLE behaviour
+    // rather than asserted as a 409 that no request can produce.
+    const id = seedUser("revoked@example.org", { username: "oldname", status: "revoked" });
+
+    const res = await patch(id, { username: "newname" });
+    expect(res.status).toBe(401);
+    expect(usernameOf(id)).toBe("oldname");
+  });
+
   test("an approved account can still save its other fields", async () => {
     // The Settings form sends every field on every save, so re-submitting the
     // current username must be a no-op rather than a 409 that blocks the rest
@@ -372,6 +403,24 @@ describe("GET /auth/profile/username-suggestion", () => {
     const id = seedUser("cjk@example.org", { given_name: "明", family_name: "王" });
 
     expect((await (await suggestion(id)).json()).suggestion).toBeNull();
+  });
+
+  test("a saturated base is reported as exhausted, not as unavailable", async () => {
+    // Two different problems with the same empty field: "we cannot build you a
+    // default" and "the default we built is taken 50 times over". Only the
+    // second is an operational fact, and collapsing them hides it.
+    db.query(
+      "INSERT INTO users (username, email, password_hash, status) VALUES ('alovelace', 'u1@example.org', 'x', 'approved')",
+    ).run();
+    for (let n = 2; n <= 50; n++) {
+      db.query(
+        "INSERT INTO users (username, email, password_hash, status) VALUES (?, ?, 'x', 'approved')",
+      ).run(`alovelace-${n}`, `u${n}@example.org`);
+    }
+    const id = seedUser("saturated@example.org");
+
+    const body = await (await suggestion(id)).json();
+    expect(body).toEqual({ suggestion: null, based_on: "exhausted" });
   });
 
   test("requires a session", async () => {

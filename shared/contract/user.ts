@@ -157,16 +157,23 @@ export type BackfillVerifyOutcome = z.infer<typeof backfillVerifyOutcomeSchema>;
 /**
  * `GET /auth/profile/username-suggestion` (ADR 0042, #1253).
  *
- * `suggestion` is null exactly when `based_on` is "unavailable": the account
- * has no family name to build one from, or the name folds to nothing usable in
- * ASCII. The two fields are reported separately so the website can tell "here
- * is a default, edit it if you like" from "type one yourself" without
- * inspecting a null.
+ * `suggestion` is null for both non-"name" cases, and they are kept apart
+ * because they are different problems:
+ *
+ *   unavailable  the account has no family name to build one from, or the name
+ *                folds to nothing usable in ASCII. The user types one.
+ *   exhausted    a default EXISTS but every variant of it up to the suffix
+ *                limit is taken. The user types one too, but the operator has
+ *                a saturated base to look at -- so the backend also logs it.
+ *
+ * The two fields are reported separately so the website can tell "here is a
+ * default, edit it if you like" from "type one yourself" without inspecting a
+ * null.
  */
 export const usernameSuggestionResponseSchema = z
   .object({
     suggestion: z.string().nullable(),
-    based_on: z.enum(["name", "unavailable"]),
+    based_on: z.enum(["name", "unavailable", "exhausted"]),
   })
   .passthrough();
 export type UsernameSuggestionResponse = z.infer<typeof usernameSuggestionResponseSchema>;

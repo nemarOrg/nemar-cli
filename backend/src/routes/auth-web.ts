@@ -648,10 +648,13 @@ export const _profilePatchShapesAgree: MutuallyAssignable<
  * `username` and the name pair (ADR 0042) are the two fields whose rules
  * depend on the ACCOUNT rather than on the submitted value, so they cost one
  * extra read and are checked together:
- *   - a username may be set while NULL and changed until an admin approves the
- *     account, after which it is locked (409 `username_locked`): it is what
- *     `nemar admin approve <username>` addresses and what the dataset repos an
- *     approved account owns are attributed to.
+ *   - a username may be set while NULL -- at ANY status, including `approved`,
+ *     because the 19 web/ORCID rows this phase exists for are approved and
+ *     hold NULL, and a first assignment is not a change -- and CHANGED until
+ *     an admin approves the account, after which a rename is locked (409
+ *     `username_locked`): it is what `nemar admin approve <username>`
+ *     addresses and what the dataset repos an approved account owns are
+ *     attributed to.
  *   - a name is refused (409 `name_is_orcid_canonical`) while a VERIFIED ORCID
  *     is linked, because ORCID is re-read on every sign-in and would overwrite
  *     the edit. Without a linked iD there is nothing to overwrite it, and ADR
@@ -707,14 +710,36 @@ authWebRoutes.patch(
         }
 
         if (patch.username !== undefined) {
-          const current = account.username ?? "";
+          const current = (account.username ?? "").trim();
           if (current.toLowerCase() === patch.username.toLowerCase()) {
             // Same handle, possibly re-cased: not a change, so neither the
             // approval lock nor the uniqueness check applies. Dropped from the
             // patch so a full-form save from an approved account still writes
             // its other fields.
             patch.username = undefined;
-          } else if (account.status === "approved") {
+          } else if (account.status === "revoked") {
+            // Defence in depth, and unreachable today: findSessionByCookieId
+            // filters `u.status != 'revoked'`, so a revoked account has no
+            // session to PATCH with and is answered 401 by the middleware
+            // above. Kept because the alternative -- letting a revoked account
+            // rename itself if that filter ever moves -- is the worse failure,
+            // and because it says out loud that revocation is not a state
+            // profile edits happen in.
+            return c.json(
+              {
+                error: "account_revoked",
+                message: "This account is revoked; contact an admin",
+              },
+              409,
+            );
+          } else if (current !== "" && account.status === "approved") {
+            // The lock is on a CHANGE, not on the field. `current === ""` is
+            // the 19 web/ORCID rows this phase exists for: they were approved
+            // (or re-approved) while holding NULL, and telling them "your
+            // username is fixed once approved" would leave them permanently
+            // without one -- which is the exact state ADR 0042 exists to end.
+            // A first assignment is not a change, so it is allowed at any
+            // status.
             return c.json(
               {
                 error: "username_locked",
@@ -1522,6 +1547,11 @@ authWebRoutes.post(
  * local part in that case: a handle nobody chose is worse than a blank field
  * with a prompt (ADR 0042).
  *
+ * `"exhausted"` is the other null, and it is a different problem: a default
+ * exists and every variant of it is taken. The user sees the same empty field
+ * either way, but a saturated base is an operational fact nobody would
+ * otherwise see, so it is logged as well as reported.
+ *
  * Cookie-authenticated like the rest of the /auth/profile family, and read-only,
  * so it carries no Origin check — same as GET /auth/me.
  */
@@ -1556,9 +1586,13 @@ authWebRoutes.get("/profile/username-suggestion", webSessionMiddleware, async (c
       .filter((u): u is string => typeof u === "string");
 
     const suggestion = pickAvailableUsername(base, taken);
-    return suggestion
-      ? c.json({ suggestion, based_on: "name" })
-      : c.json({ suggestion: null, based_on: "unavailable" });
+    if (!suggestion) {
+      console.warn(
+        `[auth-web] username suggestion exhausted for base "${base}" (${taken.length} variants taken)`,
+      );
+      return c.json({ suggestion: null, based_on: "exhausted" });
+    }
+    return c.json({ suggestion, based_on: "name" });
   } catch (err) {
     console.error("[auth-web] /profile/username-suggestion failed", err);
     return c.json({ error: "Failed to suggest a username" }, 500);

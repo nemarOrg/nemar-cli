@@ -12,6 +12,7 @@
  */
 
 import type { ZodType } from "zod";
+import { UPLOAD_ACCESS_ERROR_CODES } from "../../../shared/contract/user.js";
 import { getConfig } from "../config.js";
 import { isDebugEnabled, recordHttpExchange } from "../debug-log.js";
 import { printMaintenanceBanner } from "../maintenance-banner.js";
@@ -171,14 +172,24 @@ export async function request<T>(
     const missing = Array.isArray(data.missing)
       ? data.missing.filter((f): f is string => typeof f === "string")
       : undefined;
-    // `message` wins when the body carries a block_reason or a `missing` list:
-    // those refusals put a short machine code in `error` and the ACTIONABLE
-    // text in `message`, and preferring `error` showed the user "Owner has no
-    // researcher name on file" with no hint about how to fix it (#1255) — or,
-    // for the upload-access request, the bare word "already_approved" (ADR
-    // 0042). Every other endpoint still leads with `error`, which is where its
-    // human sentence lives.
-    const prefersMessage = hasBlockReason || missing !== undefined;
+    // `message` wins for the two refusal families that put a short MACHINE
+    // CODE in `error` and the actionable sentence in `message`. Preferring
+    // `error` showed the user "Owner has no researcher name on file" with no
+    // hint about how to fix it (#1255) — or, for the upload-access request,
+    // the bare word "already_approved" (ADR 0042).
+    //
+    // The upload-access arm is keyed on the CODE, not merely on `missing`
+    // being present: `missing` is a plausible field name for an unrelated
+    // endpoint to use, and "this body has a `missing` array" is not evidence
+    // that its `error` is a code rather than a sentence. The vocabulary is
+    // imported from shared/contract so the client and the route cannot drift
+    // on which codes those are. Every other endpoint still leads with `error`,
+    // which is where its human sentence lives.
+    const prefersMessage =
+      hasBlockReason ||
+      (missing !== undefined &&
+        typeof data.error === "string" &&
+        UPLOAD_ACCESS_ERROR_CODES.includes(data.error));
     const primary = prefersMessage
       ? (data.message as string) || (data.error as string)
       : (data.error as string) || (data.message as string);

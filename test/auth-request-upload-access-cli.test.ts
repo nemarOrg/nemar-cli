@@ -246,6 +246,30 @@ describe("nemar auth request-upload-access", () => {
     }
   });
 
+  test("an unrelated body carrying `missing` keeps the usual precedence", async () => {
+    // `missing` alone must not change how an error is rendered: it is a
+    // plausible field name for any endpoint, and "this body has a missing
+    // array" is not evidence that its `error` is a machine code. Only the
+    // upload-access refusal vocabulary flips the precedence.
+    seedAuthenticatedConfig();
+    const server = startServer({
+      status: 400,
+      body: {
+        error: "Something went wrong",
+        message: "a much longer explanation nobody asked to lead with",
+        missing: ["whatever"],
+      },
+    });
+    try {
+      const result = await runCli(["auth", "request-upload-access", "--why", WHY], server.url);
+      const out = `${result.stdout}${result.stderr}`;
+      expect(out).toContain("Something went wrong");
+      expect(out).not.toContain("a much longer explanation");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("refuses to ask when nobody is logged in", async () => {
     // No config seeded: the command must not reach the network at all.
     const server = startServer({ status: 201, body: { ok: true, already_requested: false } });
