@@ -194,10 +194,14 @@ describe("nemar auth request-upload-access", () => {
       for (const field of ["username", "city", "country"]) {
         expect(out).toContain(field);
       }
-      // Not just the field names: where to go. For these three that is
-      // Settings on nemar.org, because that is where the fields live
-      // (nemarOrg/website#301) -- not because of anything about the CLI.
-      expect(out).toContain("Settings on nemar.org");
+      // Not just the field names: where to go. Since #1266 every one of these
+      // fields is settable from the CLI, so the fix names the command --
+      // sending someone to a browser for a field they can set from the shell
+      // they are already in is the dead end ADR 0042 was left with.
+      expect(out).toContain("nemar auth profile set-username <name>");
+      expect(out).toContain("nemar auth profile set-location --city <city>");
+      expect(out).toContain("nemar auth profile set-location --country <country>");
+      // The website is still the other half of the same rules.
       expect(out).toContain("https://nemar.org/settings");
     } finally {
       server.stop();

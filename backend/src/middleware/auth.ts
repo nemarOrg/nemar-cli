@@ -18,7 +18,12 @@ import {
   isActiveAccountStatus,
 } from "../services/account-tier";
 import { hashApiKey } from "../services/token";
-import { COOKIE_NAME, hashCookieId, parseCookieHeader } from "../services/web-session";
+import {
+  COOKIE_NAME,
+  hashCookieId,
+  isAllowedOrigin,
+  parseCookieHeader,
+} from "../services/web-session";
 import {
   type AuthUser,
   type Bindings,
@@ -124,41 +129,54 @@ async function resolveCookieUser(c: AuthContext): Promise<CookieAuthResult> {
 }
 
 /**
- * Middleware to require authentication via either a bearer API token or
- * the web-dashboard `nemar_session` cookie (#572).
+ * What an `Authorization` header resolved to.
  *
- * Resolution order:
- *  1. `Authorization: Bearer <api_key>` — CLI path, unchanged.
- *  2. `Cookie: nemar_session=…` — dashboard path, added for #572.
- *  3. Neither resolves -> 401 with the same shape we returned before
- *     cookies existed.
- *
- * Sets `c.var.user` with the resolved AuthUser regardless of which path
- * matched, so route handlers don't need to branch.
+ * `absent` is "no header at all" and is the only outcome a caller may fall
+ * through on: every other failure is a deliberate answer (a malformed header,
+ * a dead key, an inactive account) that must reach the client verbatim rather
+ * than being retried as anonymous.
  */
-export async function authMiddleware(c: AuthContext, next: Next) {
+export type BearerAuthResult =
+  | { kind: "absent" }
+  | { kind: "refused"; response: Response }
+  | { kind: "user"; user: AuthUser };
+
+/**
+ * Resolve `Authorization: Bearer <api_key>` to a full AuthUser.
+ *
+ * Extracted from `authMiddleware` for #1266 so the CLI-facing self-service
+ * routes in auth-web.ts / auth-orcid.ts accept a token through the SAME
+ * lookup the rest of the API uses — same key hashing, same revoked/expired
+ * filter, same active-account rule, same `last_used_at` touch. A second copy
+ * of this SELECT is how a route ends up honouring a token the middleware
+ * would have refused.
+ */
+export async function resolveBearerUser(c: AuthContext): Promise<BearerAuthResult> {
   const authHeader = c.req.header("Authorization");
+  if (!authHeader) return { kind: "absent" };
 
-  // -------------------------------------------------------------------
-  // Path 1: Authorization: Bearer <api_key>
-  // -------------------------------------------------------------------
-  if (authHeader) {
-    if (!authHeader.startsWith("Bearer ")) {
-      return c.json({ error: "Invalid Authorization header format. Use: Bearer <api_key>" }, 401);
-    }
+  if (!authHeader.startsWith("Bearer ")) {
+    return {
+      kind: "refused",
+      response: c.json(
+        { error: "Invalid Authorization header format. Use: Bearer <api_key>" },
+        401,
+      ),
+    };
+  }
 
-    const apiKey = authHeader.substring(7);
+  const apiKey = authHeader.substring(7);
 
-    if (!apiKey || apiKey.length < 32) {
-      return c.json({ error: "Invalid API key format" }, 401);
-    }
+  if (!apiKey || apiKey.length < 32) {
+    return { kind: "refused", response: c.json({ error: "Invalid API key format" }, 401) };
+  }
 
-    // Hash the key for lookup
-    const hashedKey = await hashApiKey(apiKey);
+  // Hash the key for lookup
+  const hashedKey = await hashApiKey(apiKey);
 
-    // Find token and associated user
-    const result = await c.env.DB.prepare(
-      `
+  // Find token and associated user
+  const result = await c.env.DB.prepare(
+    `
       SELECT
         u.id,
         u.username,
@@ -175,54 +193,79 @@ export async function authMiddleware(c: AuthContext, next: Next) {
         AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))
         AND u.deleted_at IS NULL
     `,
-    )
-      .bind(hashedKey)
-      .first<{
-        id: number;
-        username: string;
-        email: string;
-        github_username: string;
-        role: string | null;
-        orcid: string | null;
-        status: string;
-        token_id: number;
-      }>();
+  )
+    .bind(hashedKey)
+    .first<{
+      id: number;
+      username: string;
+      email: string;
+      github_username: string;
+      role: string | null;
+      orcid: string | null;
+      status: string;
+      token_id: number;
+    }>();
 
-    if (!result) {
-      return c.json({ error: "Invalid or expired API key" }, 401);
-    }
+  if (!result) {
+    return { kind: "refused", response: c.json({ error: "Invalid or expired API key" }, 401) };
+  }
 
-    // ADR 0040 phase 2: `verified` is the base tier and holds a usable API
-    // key, so the token is accepted here and the upload gate — not this
-    // middleware — is what a base-tier account runs into.
-    if (!isActiveAccountStatus(result.status)) {
-      return c.json(inactiveAccountBody(result.status), 403);
-    }
+  // ADR 0040 phase 2: `verified` is the base tier and holds a usable API
+  // key, so the token is accepted here and the upload gate — not this
+  // middleware — is what a base-tier account runs into.
+  if (!isActiveAccountStatus(result.status)) {
+    return { kind: "refused", response: c.json(inactiveAccountBody(result.status), 403) };
+  }
 
-    // Validate role from DB
-    const role = parseRole(result.role, result.username);
-    if (role === null) {
-      return c.json({ error: "Account configuration error. Contact an administrator." }, 500);
-    }
+  // Validate role from DB
+  const role = parseRole(result.role, result.username);
+  if (role === null) {
+    return {
+      kind: "refused",
+      response: c.json({ error: "Account configuration error. Contact an administrator." }, 500),
+    };
+  }
 
-    // Update last_used_at for the token
-    await c.env.DB.prepare("UPDATE tokens SET last_used_at = datetime('now') WHERE id = ?")
-      .bind(result.token_id)
-      .run();
+  // Update last_used_at for the token
+  await c.env.DB.prepare("UPDATE tokens SET last_used_at = datetime('now') WHERE id = ?")
+    .bind(result.token_id)
+    .run();
 
-    // Set user in context
-    const user: AuthUser = {
+  return {
+    kind: "user",
+    user: {
       id: result.id,
       username: result.username,
       email: result.email,
       github_username: result.github_username,
       role,
       orcid: result.orcid || undefined,
-    };
+    },
+  };
+}
 
-    c.set("user", user);
+/**
+ * Middleware to require authentication via either a bearer API token or
+ * the web-dashboard `nemar_session` cookie (#572).
+ *
+ * Resolution order:
+ *  1. `Authorization: Bearer <api_key>` — CLI path, unchanged.
+ *  2. `Cookie: nemar_session=…` — dashboard path, added for #572.
+ *  3. Neither resolves -> 401 with the same shape we returned before
+ *     cookies existed.
+ *
+ * Sets `c.var.user` with the resolved AuthUser regardless of which path
+ * matched, so route handlers don't need to branch.
+ */
+export async function authMiddleware(c: AuthContext, next: Next) {
+  // -------------------------------------------------------------------
+  // Path 1: Authorization: Bearer <api_key>
+  // -------------------------------------------------------------------
+  const bearer = await resolveBearerUser(c);
+  if (bearer.kind === "refused") return bearer.response;
+  if (bearer.kind === "user") {
+    c.set("user", bearer.user);
     c.set("authMethod", "token");
-
     await next();
     return;
   }
@@ -250,6 +293,87 @@ export async function authMiddleware(c: AuthContext, next: Next) {
   // clients that pattern-match the error string keep working.
   // -------------------------------------------------------------------
   return c.json({ error: "Missing Authorization header" }, 401);
+}
+
+/**
+ * The account acting on a self-service route, whichever credential it used.
+ *
+ * Only the three fields those routes actually need off the credential: the id
+ * every write is scoped by, the current address the email change compares
+ * against, and the current GitHub handle `githubHandleChanged` compares
+ * against. Everything else is re-read from `users` inside the handler, which
+ * is what lets ONE handler serve both credentials without caring which one
+ * arrived (#1266).
+ */
+export interface ActingAccount {
+  id: number;
+  email: string;
+  github_username: string | null;
+  via: "cookie" | "token";
+}
+
+export type ActingAccountResolution =
+  | { ok: true; actor: ActingAccount }
+  | { ok: false; response: Response };
+
+/**
+ * Resolve the account acting on a route that accepts EITHER the CLI's bearer
+ * token or the dashboard's `nemar_session` cookie (#1266, ADR 0044).
+ *
+ * Deliberately NOT `authMiddleware` mounted on these routes, for one reason
+ * that only shows up on the cookie half: `authMiddleware`'s cookie path
+ * refuses a `pending` account (403, ADR 0040), while `webSessionMiddleware`
+ * admits it. An account that typed its address wrong at sign-up is `pending`
+ * BECAUSE the address is wrong, and the email change is the one thing it must
+ * still be able to do. So the cookie path keeps `webSessionMiddleware`'s
+ * acceptance byte for byte, and the token path uses the shared
+ * `resolveBearerUser` above — which, being the standard token rule, admits
+ * only an active account. A `pending` CLI account has no token to present
+ * anyway: the key is issued after verification.
+ *
+ * The Origin allow-list applies to the COOKIE path only, and that is the whole
+ * point of it: a cookie rides along with any cross-site request the browser is
+ * tricked into making, and a bearer token does not. Requiring an Origin header
+ * a CLI has no reason to send would refuse every terminal.
+ *
+ * Bearer wins when both are present, matching `authMiddleware`.
+ *
+ * Requires `webSessionMiddleware` to have run for the cookie half.
+ */
+export async function resolveActingAccount(c: AuthContext): Promise<ActingAccountResolution> {
+  const bearer = await resolveBearerUser(c);
+  if (bearer.kind === "refused") return { ok: false, response: bearer.response };
+  if (bearer.kind === "user") {
+    c.set("user", bearer.user);
+    c.set("authMethod", "token");
+    return {
+      ok: true,
+      actor: {
+        id: bearer.user.id,
+        email: bearer.user.email,
+        github_username: bearer.user.github_username || null,
+        via: "token",
+      },
+    };
+  }
+
+  if (!isAllowedOrigin(c.req.header("Origin"))) {
+    return { ok: false, response: c.json({ error: "Origin not allowed" }, 403) };
+  }
+  const webUser = c.var.webUser;
+  if (!webUser) {
+    return { ok: false, response: c.json({ error: "Authentication required" }, 401) };
+  }
+  c.set("authMethod", "cookie");
+  return {
+    ok: true,
+    actor: {
+      id: webUser.id,
+      email: webUser.email,
+      github_username: webUser.github_username,
+      via: "cookie",
+    },
+  };
 }
 
 /**

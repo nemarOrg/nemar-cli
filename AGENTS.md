@@ -46,7 +46,9 @@ Load-bearing ones to know before touching the relevant area:
 0034 (`datasets` stays one table under an enforced column budget; derive, don't store),
 0040 (`verified` is the base tier; admin approval is the only writer of upload access),
 0042 (upload access is requested once, by the person who wants it),
-0043 (one person, one account: an ORCID iD, an email or a GitHub handle backs at most one live account).
+0043 (one person, one account: an ORCID iD, an email or a GitHub handle backs at most one live account),
+0044 (identity self-service reaches the CLI; ORCID links through a browser handoff whose
+signed state names the account).
 
 ---
 
@@ -533,7 +535,7 @@ and what is historical. The entries worth knowing by name:
 
 | Group | Covers |
 |---|---|
-| `nemar auth` | login, signup, status/whoami, profile, request-upload-access, switch, logout, verification, SSH setup, key retrieval and regeneration |
+| `nemar auth` | login, signup, status/whoami, profile (plus `set-email`/`verify-email`, `set-github`, `set-username`, `set-name`, `set-location`, `orcid link\|relink\|unlink` — ADR 0044), request-upload-access, switch, logout, verification, SSH setup, key retrieval and regeneration |
 | `nemar dataset` | validate, upload, download, status (alias: view), list, search, release, update, clone, get, commit, push, drop, ci, manifest |
 | `nemar dataset publish` | request, status, resend |
 | `nemar dataset` (access) | request-access, access, invite, collaborators |

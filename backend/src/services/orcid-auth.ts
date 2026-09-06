@@ -422,3 +422,103 @@ export async function verifyPending(
     return null;
   }
 }
+
+// ---------------------------------------------------------------------
+// CLI-initiated link state (#1266, ADR 0044)
+// ---------------------------------------------------------------------
+//
+// ORCID is a browser flow and stays one: the CLI cannot show a consent
+// screen, and nobody should type an ORCID password into a terminal. So
+// `POST /auth/orcid/cli-start` mints the intent for the TOKEN'S account and
+// hands back a URL to open; the browser that opens it has no NEMAR session,
+// which is exactly what the callback used to resolve the user from.
+//
+// The account therefore travels INSIDE the state, and the state is HMAC
+// signed with ENCRYPTION_KEY (the same key and the same construction as the
+// pending-signup cookie above). Two properties follow, and both are
+// load-bearing:
+//
+//   - a state minted for user A can never link to user B, because the id is
+//     covered by the signature and nothing else in the callback supplies one
+//     for this path; and
+//   - a state cannot be MADE at all without a live API token for the account
+//     it names, so the ADR 0022 rule survives: relink intent is still minted
+//     only by an authenticated POST, never by following a link.
+//
+// The token is short-lived (10 minutes, the same TTL as the website's state
+// cookie) and is carried to ORCID in the state COOKIE rather than in the
+// `state` query parameter, so a leaked authorize URL is not on its own enough
+// to finish a link from another browser -- see `/auth/orcid/cli-handoff`.
+
+/** How long a CLI-minted ORCID link intent stays usable. */
+export const CLI_STATE_TTL_MS = 10 * 60 * 1000;
+
+export interface CliOauthState {
+  csrf: string;
+  /** Never "login": a CLI flow always acts on an existing account. */
+  mode: "link" | "relink";
+  /** The account the intent was minted FOR. Covered by the signature. */
+  userId: number;
+  /**
+   * Server-side handle for this intent (`orcid_link_intents.nonce`, migration
+   * 0078). The signature makes an intent unforgeable; this makes it
+   * UNREPEATABLE -- the callback consumes the row, so a second completion with
+   * the same URL is refused. Covered by the signature like the rest, so a
+   * replay cannot swap in a fresh nonce.
+   */
+  nonce: string;
+  /** Same-origin relative path to land the browser on afterwards. */
+  next: string;
+  /** Epoch ms after which the state is rejected. */
+  exp: number;
+}
+
+export async function signCliState(s: CliOauthState, secret: string): Promise<string> {
+  const payload = b64urlEncode(JSON.stringify(s));
+  const sig = await hmacHex(secret, payload);
+  return `${payload}.${sig}`;
+}
+
+/**
+ * Verify and decode a CLI state, or null for anything that is not one: a
+ * missing value, a web flow's plain state cookie, a bad signature, an expired
+ * intent, or a payload whose fields are not the shape above.
+ *
+ * `null` is not an error here -- the callback tries this FIRST and falls back
+ * to the web `decodeState`, so "this is not a CLI state" is the normal answer
+ * for every dashboard sign-in.
+ */
+export async function verifyCliState(
+  token: string | null | undefined,
+  secret: string,
+  nowMs: number,
+): Promise<CliOauthState | null> {
+  if (!token) return null;
+  const dot = token.indexOf(".");
+  if (dot < 1) return null;
+  const payload = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expected = await hmacHex(secret, payload);
+  if (!timingSafeEqual(sig, expected)) return null;
+  try {
+    const p = JSON.parse(b64urlDecode(payload)) as Partial<CliOauthState>;
+    if (typeof p.csrf !== "string" || p.csrf.length === 0) return null;
+    if (p.mode !== "link" && p.mode !== "relink") return null;
+    if (typeof p.userId !== "number" || !Number.isInteger(p.userId) || p.userId <= 0) return null;
+    // A state with no nonce cannot be consumed, so it cannot be single-use.
+    // Rejected outright rather than treated as "no replay protection": the
+    // only states without one predate migration 0078 and expired long ago.
+    if (typeof p.nonce !== "string" || p.nonce.length === 0) return null;
+    if (typeof p.exp !== "number" || nowMs > p.exp) return null;
+    return {
+      csrf: p.csrf,
+      mode: p.mode,
+      userId: p.userId,
+      nonce: p.nonce,
+      next: safeNextPath(typeof p.next === "string" ? p.next : "/"),
+      exp: p.exp,
+    };
+  } catch {
+    return null;
+  }
+}

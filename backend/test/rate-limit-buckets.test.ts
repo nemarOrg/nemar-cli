@@ -159,6 +159,33 @@ describe("__selectBucket", () => {
     }
   });
 
+  test("the CLI ORCID surface is in the strict bucket; the callback is not", () => {
+    // #1266, ADR 0044. All three are bearer-reachable now, so without their
+    // AUTH_PATHS entries a token would put them in the 1000/min bucket -- on
+    // an identity-link mint, on the step that turns a leaked intent into an
+    // ORCID redirect, and on the unlink. /continue is asserted separately
+    // because it relies on the matcher's prefix behaviour.
+    for (const path of [
+      "/auth/orcid/cli-start",
+      "/auth/orcid/cli-handoff",
+      "/auth/orcid/cli-handoff/continue",
+      "/auth/orcid/unlink",
+    ]) {
+      const sel = __selectBucket(path, `Bearer ${VALID_TOKEN}`, "10.0.0.1");
+      expect(sel.keyKind).toBe("auth-ip");
+      expect(sel.rawKey).toBe("10.0.0.1");
+      expect(sel.maxRequests).toBe(__limits.AUTH_MAX_REQUESTS);
+    }
+  });
+
+  test("the ORCID callback stays OUT of the strict bucket", () => {
+    // A browser landing on a shared egress IP, and the one ORCID path a
+    // careless prefix entry ("/auth/orcid") would drag to 10/min -- which
+    // would rate-limit the website's own sign-in flow, not the CLI's.
+    const sel = __selectBucket("/auth/orcid/callback?code=x&state=y", undefined, "10.0.0.1");
+    expect(sel.keyKind).not.toBe("auth-ip");
+  });
+
   test("the rest of /users keeps the ordinary token bucket", () => {
     // The AUTH_PATHS matcher is a prefix match, so an over-broad entry
     // ("/users") would drag the dashboard's own polling into a 10/min cap.

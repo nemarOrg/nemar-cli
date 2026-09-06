@@ -190,18 +190,23 @@ describe("nemar auth profile", () => {
     }
   });
 
-  test("the footer says where each identifier is changed", async () => {
+  test("the footer names the command that changes each identifier", async () => {
     seedAuthenticatedConfig();
     const server = startMeServer(meUser());
     try {
       const result = await runCli(["auth", "profile"], server.url);
       expect(result.stdout).toContain("Where to change each");
-      expect(result.stdout).toContain("Email, GitHub, ORCID");
+      // Since #1266 every identifier is self-service from the CLI, so the
+      // footer names the command rather than a page the person then has to
+      // find. Username and name used to read "not editable yet" here.
+      expect(result.stdout).toContain("nemar auth profile set-email <address>");
+      expect(result.stdout).toContain("nemar auth profile set-username <name>");
+      expect(result.stdout).toContain("nemar auth profile set-name --given <g> --family <f>");
+      expect(result.stdout).toContain("nemar auth profile set-github <handle>");
+      expect(result.stdout).toContain("nemar auth profile orcid link|relink|unlink");
+      expect(result.stdout).not.toContain("not editable yet");
+      // The website is still the other half of the same rules, not a rival.
       expect(result.stdout).toContain("https://nemar.org/settings");
-      // Username and name are NOT self-service yet, and saying so beats
-      // leaving someone hunting for a field that does not exist.
-      expect(result.stdout).toContain("Username, name");
-      expect(result.stdout).toContain("not editable yet");
       expect(result.stdout).toContain("at most one NEMAR account");
     } finally {
       server.stop();

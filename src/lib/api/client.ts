@@ -12,7 +12,11 @@
  */
 
 import type { ZodType } from "zod";
-import { UPLOAD_ACCESS_ERROR_CODES } from "../../../shared/contract/user.js";
+import { IDENTITY_CONFLICT_CODES } from "../../../shared/contract/identity.js";
+import {
+  PROFILE_EDIT_ERROR_CODES,
+  UPLOAD_ACCESS_ERROR_CODES,
+} from "../../../shared/contract/user.js";
 import { getConfig } from "../config.js";
 import { isDebugEnabled, recordHttpExchange } from "../debug-log.js";
 import { printMaintenanceBanner } from "../maintenance-banner.js";
@@ -185,14 +189,44 @@ export async function request<T>(
     // imported from shared/contract so the client and the route cannot drift
     // on which codes those are. Every other endpoint still leads with `error`,
     // which is where its human sentence lives.
+    // The third family (#1266, ADR 0044): the self-service identity edits.
+    // `PATCH /auth/profile`, the email change and the ORCID link intent all
+    // answer with a code in `error` and the sentence in `message`, and unlike
+    // the upload-access arm above there is no `missing` array to key on — so
+    // membership in the declared vocabulary IS the test. Both sets are
+    // imported from shared/contract rather than spelled out here, so a code
+    // the backend adds and the CLI has not been taught about prints as a bare
+    // token exactly once, in review.
+    const isProfileEditCode =
+      typeof data.error === "string" &&
+      (PROFILE_EDIT_ERROR_CODES.includes(data.error) ||
+        IDENTITY_CONFLICT_CODES.includes(data.error));
     const prefersMessage =
       hasBlockReason ||
+      isProfileEditCode ||
       (missing !== undefined &&
         typeof data.error === "string" &&
         UPLOAD_ACCESS_ERROR_CODES.includes(data.error));
-    const primary = prefersMessage
+    let primary = prefersMessage
       ? (data.message as string) || (data.error as string)
       : (data.error as string) || (data.message as string);
+
+    // A route this CLI knows about and the backend does not (#1266 review).
+    // The API's 404 body is `{ error: "Not Found", message: "Route PATCH
+    // /auth/profile not found" }`, and leading with `error` renders the whole
+    // thing as the words "Not Found" -- which reads as "your dataset is
+    // missing", not "this deployment predates the command you just ran". The
+    // message names the route, and the added line names the cause.
+    //
+    // Keyed on the API's own not-found SIGNATURE (`error === "Not Found"` plus
+    // a message, backend/src/index.ts) rather than on the status alone: a
+    // route that answers 404 for a missing DATASET says so in `error`, and
+    // "this backend does not support this command" would be a wrong and
+    // confusing thing to append to it.
+    if (response.status === 404 && data.error === "Not Found" && typeof data.message === "string") {
+      primary = `${data.message}. This NEMAR backend does not support this command yet.`;
+    }
+
     throw new ApiError(
       response.status,
       primary || "Request failed",

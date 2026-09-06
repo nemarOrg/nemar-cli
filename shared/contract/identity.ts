@@ -49,6 +49,11 @@ export const identityConflictCodeSchema = z.enum([
 ]);
 export type IdentityConflictCode = z.infer<typeof identityConflictCodeSchema>;
 
+/** The refusal codes as a plain array, for a runtime membership test. The CLI
+ *  client uses it to decide whether a body's `error` is a machine code whose
+ *  human half rides in `message` (#1266, ADR 0044). */
+export const IDENTITY_CONFLICT_CODES: readonly string[] = identityConflictCodeSchema.options;
+
 /** Where a person changes each identifier once they are signed in. */
 export const IDENTITY_SETTINGS_URL = "https://nemar.org/settings";
 
