@@ -256,6 +256,46 @@ describe("nemar admin backfill-usernames", () => {
     }
   });
 
+  test("a failed write is rendered apart from a conflict, and exits 1", async () => {
+    // #1274: the row is retryable like a conflict, but what failed is OUR
+    // write rather than somebody else claiming the handle -- so it is counted
+    // and worded separately, and a scripted caller must not read a batch that
+    // dropped a row as a clean sweep.
+    seedAuthenticatedConfig();
+    const server = startServer({
+      ...DRY_RUN_REPLY,
+      apply: true,
+      scanned: 2,
+      assigned: 1,
+      write_failed: 1,
+      remaining: 1,
+      results: [
+        {
+          id: 26,
+          email: "blocked@example.org",
+          orcid: null,
+          outcome: "write_failed",
+          username: "aaardvark",
+          given_name: "Ada",
+          family_name: "Aardvark",
+          verify: "not_attempted",
+          error: "D1_ERROR: claim blocked for this row",
+        },
+      ],
+    });
+    try {
+      const result = await runCli(["admin", "backfill-usernames", "--apply"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toContain("write     ");
+      expect(result.stdout).toContain("D1_ERROR: claim blocked for this row");
+      expect(result.stdout).toContain("retry the batch");
+      // Its own column, not folded into conflict= or exhausted=.
+      expect(result.stdout).toContain("write_failed=1");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("a run that left work behind exits non-zero", async () => {
     seedAuthenticatedConfig();
     const server = startServer({

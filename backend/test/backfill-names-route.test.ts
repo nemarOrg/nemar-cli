@@ -277,6 +277,44 @@ describe("POST /admin/users/backfill-names", () => {
     expect(body.remaining).toBe(0);
   });
 
+  test("one failed write is one row's outcome, not the batch's (#1274)", async () => {
+    // The ORCID read was already wrapped per row, so one unreadable record
+    // could not stop the other 600. The UPDATE that follows it was not: a
+    // transient write failure threw out of the loop, answered a bare 500, and
+    // took the report of every row already filled with it -- including the
+    // fact that they HAD been filled, which is what tells an operator whether
+    // to re-run.
+    const blocked = seedUser("blocked", { orcid: "0000-0002-1825-0097" });
+    seedUser("survivor", { orcid: "0000-0001-5109-3519" });
+    // A row-scoped fault: only this account's UPDATE fails, so the assertion
+    // below is that the OTHER row still landed. Real engine -- the statement
+    // genuinely aborts.
+    db.run(
+      `CREATE TRIGGER refuse_one_name_write BEFORE UPDATE ON users
+       WHEN NEW.id = ${blocked}
+       BEGIN SELECT RAISE(ABORT, 'write blocked for this row'); END`,
+    );
+
+    const res = await backfill({ apply: true });
+    // NOT a 500: the batch completed, one row did not.
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body.filled).toBe(1);
+    expect(body.write_failed).toBe(1);
+    expect(body.scanned).toBe(2);
+    const failed = body.results.find((r: { username: string }) => r.username === "blocked");
+    expect(failed.outcome).toBe("write_failed");
+    expect(failed.error).toContain("write blocked for this row");
+
+    // The other row really was written, and the blocked one really was not.
+    expect(nameOf("survivor")).toEqual({ given_name: "Grace", family_name: "Hopper" });
+    expect(nameOf("blocked")).toEqual({ given_name: null, family_name: null });
+    // Still a candidate, so the next run retries it -- the same contract
+    // `lookup_failed` carries.
+    expect(body.remaining).toBe(1);
+  });
+
   test("requires an admin token", async () => {
     seedUser("nameless", { orcid: "0000-0002-1825-0097" });
     const res = await app.request(

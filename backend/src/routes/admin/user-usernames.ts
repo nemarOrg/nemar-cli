@@ -308,7 +308,31 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
         continue;
       }
 
-      const claimed = await usernameClaimStatement(db, user.id, username).run();
+      // The claim and its audit row are WRAPPED (#1274). `conflict` below is
+      // the claim landing on zero rows -- a normal race with a normal answer --
+      // and this is the other thing: the write itself throwing. Unwrapped, it
+      // took the whole request with it, answering a bare 500 and discarding the
+      // summary of every username the batch had already assigned, including the
+      // verify messages it had already sent. One row's storage failure is one
+      // row's outcome, like `lookup_failed` above.
+      let claimed: Awaited<ReturnType<ReturnType<typeof usernameClaimStatement>["run"]>>;
+      try {
+        claimed = await usernameClaimStatement(db, user.id, username).run();
+      } catch (writeErr) {
+        console.error(`[backfill-usernames] claim failed for user id=${user.id}:`, writeErr);
+        results.push({
+          id: user.id,
+          email: user.email,
+          orcid: user.orcid,
+          outcome: "write_failed",
+          username,
+          given_name: given,
+          family_name: family,
+          verify: "not_attempted",
+          error: writeErr instanceof Error ? writeErr.message : String(writeErr),
+        });
+        continue;
+      }
       if ((claimed.meta?.changes ?? 0) === 0) {
         results.push({
           id: user.id,
@@ -343,7 +367,20 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
       // sign-in path's carry the same `username_auto_assigned` action and are
       // told apart by `details.source` rather than by which endpoint ran (the
       // batch summary below is a separate, coarser record).
-      await recordUsernameAssignment(db, user.id, username, "admin_backfill");
+      //
+      // Non-fatal, and NOT a `write_failed`: the username is already claimed,
+      // so the row is finished and reporting it as failed would send an
+      // operator to re-run something that succeeded. An audit gap is a
+      // record-keeping problem; losing the whole batch's summary over one is a
+      // bigger one.
+      try {
+        await recordUsernameAssignment(db, user.id, username, "admin_backfill");
+      } catch (auditErr) {
+        console.error(
+          `AUDIT GAP: username_auto_assigned row not written for user id=${user.id} (the username '${username}' WAS claimed):`,
+          auditErr,
+        );
+      }
 
       const verify: BackfillVerifyOutcome =
         user.email_verified === 1
@@ -415,6 +452,10 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
       // Counted apart from `conflict` because it is the one outcome in this
       // report that retrying cannot change.
       exhausted: results.filter((r) => r.outcome === "exhausted").length,
+      // And apart from BOTH: a conflict is somebody else holding the handle, a
+      // write failure is the storage layer refusing ours. Retryable like a
+      // conflict, but what it points an operator at is D1.
+      write_failed: results.filter((r) => r.outcome === "write_failed").length,
       // Counted across BOTH passes: an operator reading the summary wants to
       // know how many people were mailed and how many were not, not which loop
       // tried. A failure used to appear in neither the summary nor the exit

@@ -1518,6 +1518,9 @@ export interface BackfillNamesResponse {
   would_fill: number;
   no_public_name: number;
   lookup_failed: number;
+  /** Rows whose name UPDATE threw. Optional: a backend that predates #1274 had
+   *  no such outcome -- one failed write 500ed the whole batch. */
+  write_failed?: number;
   /** Candidates still missing a name after this batch; `null` when the count
    *  query itself failed (never confuse that with "nothing left"). */
   remaining: number | null;
@@ -1583,6 +1586,9 @@ export interface BackfillUsernamesResponse {
    *  for the same reason the verify counters are: a backend that predates the
    *  split reports those rows inside `conflict`. */
   exhausted?: number;
+  /** Rows whose claim write threw. Optional for the same reason: a backend
+   *  that predates #1274 had no such outcome -- it 500ed the whole batch. */
+  write_failed?: number;
   /** Verify-message outcomes, counted across BOTH passes. Optional so a
    *  backend that predates the retry pass is rendered as unknown, not zero. */
   verify_sent: number;

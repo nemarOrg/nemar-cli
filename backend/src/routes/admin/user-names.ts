@@ -129,17 +129,38 @@ export function registerUserNameRoutes(admin: AdminRouter): void {
         // The WHERE re-states the candidate predicate so a name written
         // between the SELECT and here (a concurrent ORCID re-link, another
         // operator's run) is never overwritten by this batch's older read.
-        await db
-          .prepare(
-            `UPDATE users
+        //
+        // WRAPPED for the same reason the ORCID read above is (#1274): this is
+        // per-row work in a batch loop, and an unhandled throw here took the
+        // whole request with it -- a bare 500, and the report of every row
+        // already filled thrown away with it. One row's storage failure is one
+        // row's outcome.
+        try {
+          await db
+            .prepare(
+              `UPDATE users
                SET given_name = ?, family_name = ?
              WHERE id = ?
                AND deleted_at IS NULL
                AND (given_name IS NULL OR TRIM(given_name) = ''
                     OR family_name IS NULL OR TRIM(family_name) = '')`,
-          )
-          .bind(given, family, user.id)
-          .run();
+            )
+            .bind(given, family, user.id)
+            .run();
+        } catch (writeErr) {
+          console.error(`[backfill-names] write failed for user id=${user.id}:`, writeErr);
+          results.push({
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            orcid: user.orcid,
+            outcome: "write_failed",
+            given_name: given,
+            family_name: family,
+            error: writeErr instanceof Error ? writeErr.message : String(writeErr),
+          });
+          continue;
+        }
       }
 
       results.push({
@@ -197,6 +218,10 @@ export function registerUserNameRoutes(admin: AdminRouter): void {
       would_fill: results.filter((r) => r.outcome === "would_fill").length,
       no_public_name: results.filter((r) => r.outcome === "no_public_name").length,
       lookup_failed: results.filter((r) => r.outcome === "lookup_failed").length,
+      // Counted apart from `lookup_failed`: both are retryable, but one is
+      // ORCID being unreachable and the other is our own write failing, and an
+      // operator seeing a run of these needs to look at D1, not at orcid.org.
+      write_failed: results.filter((r) => r.outcome === "write_failed").length,
       // What is left to do after this batch; a dry run's value includes
       // everything it just listed. `null` means the count itself failed --
       // never confuse that with "nothing left".

@@ -66,11 +66,19 @@ export type PublicationBlockReason = z.infer<typeof publicationBlockReasonSchema
  * a settled fact about the ORCID record (the owner must act), the second is a
  * transient infrastructure failure (retry the batch). Collapsing them would
  * tell an operator to chase a user over a 503.
+ *
+ * `write_failed` is the same distinction one step later (#1274). The ORCID
+ * read was already wrapped per row, so one unreadable record could not stop
+ * the other 600 -- but the UPDATE that followed it was not, so one failed
+ * write threw out of the loop, answered a bare 500, and discarded the summary
+ * of every row the batch had already filled. The row stays a candidate and the
+ * next run retries it, exactly like `lookup_failed`.
  */
 export const backfillNameOutcomeSchema = z.enum([
   "filled",
   "would_fill",
   "no_public_name",
   "lookup_failed",
+  "write_failed",
 ]);
 export type BackfillNameOutcome = z.infer<typeof backfillNameOutcomeSchema>;

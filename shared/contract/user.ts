@@ -243,6 +243,14 @@ export type AdminUsersListResponse = z.infer<typeof adminUsersListResponseSchema
  *                            answer. It needs a human to pick a handle, like
  *                            `single_name`, and it is an operational fact about
  *                            a saturated name worth seeing in the summary.
+ *   write_failed             the claim or its audit row threw (#1274). Distinct
+ *                            from `conflict`, which is the claim landing on 0
+ *                            rows because somebody else took the handle: that
+ *                            is a normal race with a normal answer, while this
+ *                            is the storage layer failing. It used to abort the
+ *                            whole request with a bare 500, discarding the
+ *                            summary of every row already assigned; now the row
+ *                            is reported and the batch continues.
  */
 export const backfillUsernameOutcomeSchema = z.enum([
   "assigned",
@@ -252,6 +260,7 @@ export const backfillUsernameOutcomeSchema = z.enum([
   "lookup_failed",
   "conflict",
   "exhausted",
+  "write_failed",
 ]);
 export type BackfillUsernameOutcome = z.infer<typeof backfillUsernameOutcomeSchema>;
 

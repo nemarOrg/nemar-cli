@@ -582,4 +582,46 @@ describe("backfill-usernames: batching", () => {
     expect(body.scanned).toBe(0);
     expect(body.remaining).toBe(0);
   });
+
+  test("one failed claim is one row's outcome, not the batch's (#1274)", async () => {
+    // The ORCID read was wrapped per row; the claim that follows it was not.
+    // A write failure threw out of the loop into a bare 500, discarding the
+    // summary of every username already assigned AND of the verify messages
+    // already sent -- so an operator could not tell what the run had done, and
+    // a re-run was the only option.
+    const blocked = seedCandidate("blocked@nemar.test", {
+      given_name: "Ada",
+      family_name: "Aardvark",
+    });
+    const survivor = seedCandidate("survivor@nemar.test", {
+      given_name: "Ben",
+      family_name: "Bishop",
+    });
+    // Row-scoped, so the other candidate's claim still lands.
+    db.run(
+      `CREATE TRIGGER refuse_one_claim BEFORE UPDATE ON users
+       WHEN NEW.id = ${blocked}
+       BEGIN SELECT RAISE(ABORT, 'claim blocked for this row'); END`,
+    );
+
+    const res = await withFakeResend(() => run({ apply: true }));
+    // NOT a 500: the batch completed, one row did not.
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body.assigned).toBe(1);
+    expect(body.write_failed).toBe(1);
+    // Reported as its own outcome, not as a conflict: nobody else took the
+    // handle, our own write refused it.
+    expect(body.conflict).toBe(0);
+    const failed = body.results.find((r: { id: number }) => r.id === blocked);
+    expect(failed.outcome).toBe("write_failed");
+    expect(failed.error).toContain("claim blocked for this row");
+    expect(failed.verify).toBe("not_attempted");
+
+    expect(usernameOf(survivor)).toBe("bbishop");
+    expect(usernameOf(blocked)).toBeNull();
+    // Still a candidate: the next run retries it.
+    expect(body.remaining).toBe(1);
+  });
 });

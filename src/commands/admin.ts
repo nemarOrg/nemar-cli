@@ -6609,7 +6609,9 @@ backfillNamesCommand
     // A lookup failure leaves the row a candidate for the next run, and an
     // unknown remainder means the batch's own bookkeeping failed. Neither is
     // fatal, but a caller must not read either as a clean sweep.
-    if (res.lookup_failed > 0 || res.remaining === null) process.exitCode = 1;
+    if (res.lookup_failed > 0 || (res.write_failed ?? 0) > 0 || res.remaining === null) {
+      process.exitCode = 1;
+    }
 
     if (options.json) {
       console.log(JSON.stringify(res, null, 2));
@@ -6624,9 +6626,9 @@ backfillNamesCommand
       chalk.cyan(
         `scanned=${res.scanned} ${res.apply ? "filled" : "would_fill"}=${
           res.apply ? res.filled : res.would_fill
-        } no_public_name=${res.no_public_name} lookup_failed=${res.lookup_failed} remaining=${
-          res.remaining ?? "unknown"
-        }`,
+        } no_public_name=${res.no_public_name} lookup_failed=${
+          res.lookup_failed
+        } write_failed=${res.write_failed ?? 0} remaining=${res.remaining ?? "unknown"}`,
       ),
     );
     for (const r of res.results) {
@@ -6638,6 +6640,11 @@ backfillNamesCommand
         console.log(
           `  ${chalk.yellow("no name ")} ${who}: ORCID ${r.orcid} does not publish a full name`,
         );
+      } else if (r.outcome === "write_failed") {
+        // Not folded in with the ORCID failure below: the name was READ fine
+        // and our own write is what refused it, so the operator is looking at
+        // D1 rather than at orcid.org.
+        console.log(`  ${chalk.red("write   ")} ${who}: ${r.error}; retry the batch`);
       } else {
         console.log(`  ${chalk.red("error   ")} ${who}: ${r.error}`);
       }
@@ -6717,6 +6724,7 @@ backfillUsernamesCommand
       res.lookup_failed > 0 ||
       res.conflict > 0 ||
       (res.exhausted ?? 0) > 0 ||
+      (res.write_failed ?? 0) > 0 ||
       (res.verify_failed ?? 0) > 0 ||
       (res.verify_rate_limited ?? 0) > 0 ||
       res.remaining === null
@@ -6739,7 +6747,9 @@ backfillUsernamesCommand
           res.apply ? res.assigned : res.would_assign
         } single_name=${res.single_name} no_name=${res.no_name} lookup_failed=${
           res.lookup_failed
-        } conflict=${res.conflict} exhausted=${res.exhausted ?? 0} verify_sent=${res.verify_sent} verify_failed=${
+        } conflict=${res.conflict} exhausted=${res.exhausted ?? 0} write_failed=${
+          res.write_failed ?? 0
+        } verify_sent=${res.verify_sent} verify_failed=${
           res.verify_failed ?? 0
         } verify_rate_limited=${res.verify_rate_limited ?? 0} remaining=${
           res.remaining ?? "unknown"
@@ -6771,6 +6781,11 @@ backfillUsernamesCommand
         // Deliberately not folded in with `conflict` above: re-running the
         // sweep fixes a conflict and can never fix this one.
         console.log(`  ${chalk.yellow("exhausted ")} ${who}: ${r.error}; pick a username by hand`);
+      } else if (r.outcome === "write_failed") {
+        // A conflict is somebody else holding the handle; this is the write
+        // itself failing, so the batch is retryable but the thing to look at
+        // is the database.
+        console.log(`  ${chalk.red("write     ")} ${who}: ${r.error}; retry the batch`);
       } else {
         console.log(`  ${chalk.red("error     ")} ${who}: ${r.error}`);
       }
