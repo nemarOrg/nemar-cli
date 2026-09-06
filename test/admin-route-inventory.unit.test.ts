@@ -139,6 +139,25 @@ describe("admin route inventory", () => {
     expect(actual).toEqual(EXPECTED_ENTRIES);
   });
 
+  test("GET /users/duplicates is registered BEFORE GET /users/:username", () => {
+    // Both patterns match `/users/duplicates`, and this router's path set makes
+    // Hono's RegExpRouter throw UnsupportedPathError, so the app falls back to
+    // a router that runs every matching handler in REGISTRATION order and
+    // takes the first response. Registered second, the duplicate report is
+    // unreachable -- the username lookup 404s first, which is what happened
+    // before the order in admin/index.ts was fixed.
+    //
+    // Pinned here rather than left to a comment because nothing else fails:
+    // every other test in the suite passes with the order reversed, and the
+    // route just quietly stops existing.
+    const paths = adminRoutes.routes.map((r) => `${r.method} ${r.path}`);
+    const dup = paths.indexOf("GET /users/duplicates");
+    const byUsername = paths.indexOf("GET /users/:username");
+    expect(dup).toBeGreaterThanOrEqual(0);
+    expect(byUsername).toBeGreaterThanOrEqual(0);
+    expect(dup).toBeLessThan(byUsername);
+  });
+
   test("entry total is pinned", () => {
     expect(adminRoutes.routes.length).toBe(100);
   });

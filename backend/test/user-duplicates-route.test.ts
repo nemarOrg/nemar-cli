@@ -277,6 +277,54 @@ describe("GET /admin/users/duplicates", () => {
     expect(body.flagged_count).toBe(0);
   });
 
+  test("dataset_count excludes sandbox datasets", async () => {
+    // A sandbox dataset is training, not work: counting it would inflate the
+    // number an operator uses to pick which of two accounts survives.
+    db.run(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, is_sandbox)
+       VALUES ('xx090123', 'Sandbox training', ?, 1)`,
+      [holderId],
+    );
+    const res = await get("/admin/users/duplicates");
+    const body = (await res.json()) as ReportBody;
+    const survivor = body.groups
+      .find((g) => g.kind === "orcid")
+      ?.accounts.find((a) => a.id === holderId);
+    expect(survivor?.dataset_count).toBe(1);
+  });
+
+  test("a compound collision marks the UNFLAGGED row canonical, not the lowest id", async () => {
+    // The shape where "lowest id" and "the row that actually holds the
+    // identifier" disagree: one pair colliding on BOTH iD and email, with the
+    // identity row on the HIGHER id. 0077's ORCID pass flags the lower id, so
+    // for the EMAIL group the lowest id is a FLAGGED row -- which holds
+    // nothing, because a flagged row is invisible to the partial indexes.
+    // Marking it canonical would send an operator to fix the wrong account.
+    db = dbBeforeTarget();
+    const lower = seedUser("Both@Example.org", { orcid: "0000-0005-1111-2222" });
+    const higher = seedUser("both@example.org", {
+      orcid: "0000-0005-1111-2222",
+      identityBacked: true,
+    });
+    adminId = seedUser("root@nemar.org", { username: "root", role: "admin" });
+    db.exec(readFileSync(join(MIGRATIONS_DIR, TARGET), "utf-8"));
+    await seedAdminToken(adminId);
+    app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+    app.route("/admin", adminRoutes);
+
+    // Premise: the migration flagged the LOWER id.
+    expect(flagOf(lower)).toBe(1);
+    expect(flagOf(higher)).toBe(0);
+    expect(lower).toBeLessThan(higher);
+
+    const body = (await (await get("/admin/users/duplicates")).json()) as ReportBody;
+    for (const group of body.groups) {
+      expect(group.canonical_user_id).toBe(higher);
+      expect(group.accounts.find((a) => a.canonical)?.identity_conflict).toBe(0);
+    }
+    expect(body.groups.map((g) => g.kind).sort()).toEqual(["email", "orcid"]);
+  });
+
   test("a non-admin cannot read it", async () => {
     const memberId = seedUser("member@example.org", { username: "member" });
     db.run("UPDATE tokens SET user_id = ? WHERE user_id = ?", [memberId, adminId]);
@@ -357,5 +405,47 @@ describe("POST /admin/users/:id/clear-identity-conflict", () => {
   test("a non-numeric id is a 400", async () => {
     const res = await post("/admin/users/not-a-number/clear-identity-conflict");
     expect(res.status).toBe(400);
+  });
+
+  test("a non-admin cannot clear a flag", async () => {
+    const memberId = seedUser("member@example.org", { username: "member" });
+    db.run("UPDATE tokens SET user_id = ? WHERE user_id = ?", [memberId, adminId]);
+    const res = await post(`/admin/users/${orphanId}/clear-identity-conflict`);
+    expect(res.status).toBe(403);
+    expect(flagOf(orphanId)).toBe(1);
+  });
+
+  test("a collision that appears mid-write is still a 409, not a 500", async () => {
+    // Clearing the flag is what puts the row back INTO the partial unique
+    // index, so the UPDATE is itself uniqueness-checked. A collision that
+    // returned between the SELECT and the UPDATE fails right there, and it
+    // must read as the same refusal the pre-check gives -- an operator who
+    // gets a bare 500 has nothing to act on.
+    //
+    // Real SQLite error text via a trigger, the same fault injection the
+    // finalize race tests use. The pre-check is satisfied first by removing
+    // the other row's claim, so the ONLY thing that can refuse is the write.
+    db.run("UPDATE users SET deleted_at = datetime('now'), orcid = NULL WHERE id = ?", [holderId]);
+    db.run(
+      `CREATE TRIGGER race_on_clear BEFORE UPDATE OF identity_conflict ON users
+       BEGIN SELECT RAISE(ABORT, 'UNIQUE constraint failed: users.orcid'); END`,
+    );
+    const res = await post(`/admin/users/${orphanId}/clear-identity-conflict`);
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; code: string };
+    expect(body.error).toBe("identity_conflict_remains");
+    expect(body.code).toBe("identity_conflict_remains");
+    expect(flagOf(orphanId)).toBe(1);
+  });
+
+  test("an unrelated write failure is still a 500", async () => {
+    // The guard against a catch so wide it labels every failure a collision.
+    db.run("UPDATE users SET deleted_at = datetime('now'), orcid = NULL WHERE id = ?", [holderId]);
+    db.run(
+      `CREATE TRIGGER race_on_clear BEFORE UPDATE OF identity_conflict ON users
+       BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END`,
+    );
+    const res = await post(`/admin/users/${orphanId}/clear-identity-conflict`);
+    expect(res.status).toBe(500);
   });
 });

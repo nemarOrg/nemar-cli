@@ -526,6 +526,86 @@ describe("ORCID finalize refuses a duplicate identity", () => {
 });
 
 // --------------------------------------------------------------------------
+// Races: the loser of a concurrent claim
+// --------------------------------------------------------------------------
+
+/**
+ * Make the next INSERT on `users` fail with a REAL SQLite UNIQUE error, using
+ * SQLite's own trigger machinery -- the same fault injection
+ * web-email-verification.test.ts uses to block writes.
+ *
+ * Nothing is mocked: the production statement runs against a database that
+ * genuinely raises the error, with the exact message text
+ * (`UNIQUE constraint failed: users.<col>`) that both engines produce -- the
+ * same text real D1 emits, verified with `wrangler d1 execute --local`. That
+ * is what makes it a test of the error MAPPING rather than of a string this
+ * test invented.
+ *
+ * A trigger rather than a real second request because the window is between a
+ * SELECT and an INSERT inside one handler: there is no way to interleave a
+ * second HTTP request into it deterministically.
+ */
+function raiseUniqueOnUserInsert(column: string): void {
+  db.run(
+    `CREATE TRIGGER race_on_user_insert BEFORE INSERT ON users
+     BEGIN SELECT RAISE(ABORT, 'UNIQUE constraint failed: users.${column}'); END`,
+  );
+}
+
+describe("finalize maps a lost race to its typed refusal", () => {
+  test("a concurrent email claim is 409 email_in_use, not a generic 500", async () => {
+    raiseUniqueOnUserInsert("email");
+    const res = await finalize(OTHER_ORCID);
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; code: string; message: string };
+    expect(body.code).toBe("email_in_use");
+    expect(body.message).toContain("nemar.org/settings");
+  });
+
+  test("a concurrent iD claim is 409 orcid_in_use", async () => {
+    raiseUniqueOnUserInsert("orcid");
+    const res = await finalize(OTHER_ORCID);
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code: string }).code).toBe("orcid_in_use");
+  });
+
+  test("a UNIQUE hit on some OTHER column is not dressed up as a collision", async () => {
+    // `users.email` is a substring of `users.email_verified`, so a substring
+    // match would report an unrelated constraint failure as "that address is
+    // taken" and send the user to go change an address that is fine.
+    raiseUniqueOnUserInsert("email_verified");
+    const res = await finalize(OTHER_ORCID);
+    expect(res.status).toBe(500);
+  });
+
+  test("a non-uniqueness identity-insert failure is a 500, and leaves no orphan", async () => {
+    // The users row commits before the identity insert, so it must be removed
+    // either way -- an account with an email and no ORCID login is a dead end.
+    // What must NOT happen is reporting `orcid_already_linked` for a D1 fault,
+    // which sends the user to unlink an iD from an account that does not exist.
+    db.run(
+      `CREATE TRIGGER race_on_identity_insert BEFORE INSERT ON oauth_identities
+       BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END`,
+    );
+    const res = await finalize(OTHER_ORCID);
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as { error: string }).error).toBe("Sign-up failed");
+    expect(userByEmail("brandnew@example.org")).toBeNull();
+  });
+
+  test("a concurrent identity claim IS orcid_already_linked, and leaves no orphan", async () => {
+    db.run(
+      `CREATE TRIGGER race_on_identity_insert BEFORE INSERT ON oauth_identities
+       BEGIN SELECT RAISE(ABORT, 'UNIQUE constraint failed: oauth_identities.provider, oauth_identities.provider_subject'); END`,
+    );
+    const res = await finalize(OTHER_ORCID);
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code: string }).code).toBe("orcid_already_linked");
+    expect(userByEmail("brandnew@example.org")).toBeNull();
+  });
+});
+
+// --------------------------------------------------------------------------
 // ORCID link / relink, through the callback
 // --------------------------------------------------------------------------
 
@@ -574,6 +654,39 @@ describe("ORCID link refuses an iD another account holds", () => {
     const res = await callback(await sessionCookie(mine), "relink");
     expect(redirectError(res)).toBe("orcid_in_use");
     expect(userByEmail("me@example.org")?.orcid).toBe(HELD_ORCID);
+  });
+
+  test("a link that loses a race redirects to orcid_in_use, not orcid_error", async () => {
+    // Both constraints spell the same fact and either can fire first, so the
+    // callback has to recognise both. This one is the identity table's.
+    const mine = seedUser("me@example.org");
+    db.run(
+      `CREATE TRIGGER race_on_identity_insert BEFORE INSERT ON oauth_identities
+       BEGIN SELECT RAISE(ABORT, 'UNIQUE constraint failed: oauth_identities.provider, oauth_identities.provider_subject'); END`,
+    );
+    const res = await callback(await sessionCookie(mine), "link");
+    expect(redirectError(res)).toBe("orcid_in_use");
+  });
+
+  test("a link losing the users.orcid race redirects to orcid_in_use too", async () => {
+    const mine = seedUser("me@example.org");
+    db.run(
+      `CREATE TRIGGER race_on_user_update BEFORE UPDATE OF orcid ON users
+       BEGIN SELECT RAISE(ABORT, 'UNIQUE constraint failed: users.orcid'); END`,
+    );
+    const res = await callback(await sessionCookie(mine), "link");
+    expect(redirectError(res)).toBe("orcid_in_use");
+  });
+
+  test("an unrelated write failure is still the generic error", async () => {
+    // The guard against a catch so wide it labels every failure a collision.
+    const mine = seedUser("me@example.org");
+    db.run(
+      `CREATE TRIGGER race_on_identity_insert BEFORE INSERT ON oauth_identities
+       BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END`,
+    );
+    const res = await callback(await sessionCookie(mine), "link");
+    expect(redirectError(res)).toBe("orcid_error");
   });
 
   test("linking an unclaimed iD still works", async () => {

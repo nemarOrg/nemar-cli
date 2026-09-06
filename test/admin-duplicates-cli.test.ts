@@ -236,6 +236,35 @@ describe("nemar admin duplicates", () => {
     }
   });
 
+  test("a malformed report fails loudly instead of printing a wrong answer", async () => {
+    // The command is validated against the shared contract, so a backend that
+    // drifts is a loud parse failure rather than "No duplicate accounts." --
+    // which is the one output that must never be produced by accident, because
+    // an operator reads it as "nothing to do".
+    const server = startServer({ report: { groups: "not-an-array", group_count: 1 } });
+    try {
+      const result = await runCli(["admin", "duplicates"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).not.toContain("No duplicate accounts.");
+      expect(`${result.stdout}${result.stderr}`).toContain("contract");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a report missing flagged_count is rejected, not read as zero", async () => {
+    // A field silently defaulting to 0 would hide exactly the state the
+    // `--clear` half exists for: flags with no collision left behind them.
+    const server = startServer({ report: { groups: [], group_count: 0 } });
+    try {
+      const result = await runCli(["admin", "duplicates"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).not.toContain("No duplicate accounts.");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("a non-numeric --clear id is rejected before any request", async () => {
     const server = startServer({});
     try {

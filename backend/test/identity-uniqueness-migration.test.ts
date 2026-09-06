@@ -283,6 +283,39 @@ describe("migration 0077: the indexes", () => {
     expect(row?.status).toBe("verified");
   });
 
+  test("re-running statements 2 onward changes nothing and does not error", () => {
+    // The header promises a partial application can be finished by re-running
+    // from statement 2. Only the ALTER is non-idempotent (SQLite has no
+    // `ADD COLUMN IF NOT EXISTS`), so that is what is dropped here; everything
+    // after it must be safe to replay onto its own output.
+    const { db } = migratedFixture();
+    const snapshot = () =>
+      db
+        .query<{ id: number; email: string; orcid: string | null; identity_conflict: number }, []>(
+          "SELECT id, email, orcid, identity_conflict FROM users ORDER BY id",
+        )
+        .all();
+    const before = snapshot();
+
+    const full = readFileSync(join(MIGRATIONS_DIR, TARGET), "utf-8");
+    const fromStatementTwo = full.slice(full.indexOf("UPDATE users\n   SET orcid = UPPER(orcid)"));
+    // Guard the slice: if the file is reshaped and this no longer starts at
+    // statement 2, the test would silently replay nothing and still pass.
+    expect(fromStatementTwo).toContain("UPPER(orcid)");
+    expect(fromStatementTwo).toContain("idx_users_orcid_live_unique");
+    expect(fromStatementTwo).not.toContain("ALTER TABLE users ADD COLUMN");
+
+    expect(() => db.exec(fromStatementTwo)).not.toThrow();
+
+    expect(snapshot()).toEqual(before);
+    const indexes = db
+      .query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='index' AND name LIKE 'idx_users_%_live_unique'",
+      )
+      .get();
+    expect(indexes?.n).toBe(2);
+  });
+
   test("multiple rows with no ORCID at all do not collide", () => {
     const { db } = migratedFixture();
     const insert = db.prepare(
