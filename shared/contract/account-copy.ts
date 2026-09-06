@@ -253,6 +253,12 @@ export const ACCOUNT_COPY = {
   // field. Never reported as "not granted": that is the one answer that sends
   // someone who holds the grant off to ask for it again.
   "cli.upload.preflight.unchecked": "Upload access could not be checked ({reason}); continuing.",
+  // The grant was read and is NOT held, but the list of what is missing was not
+  // reported at all -- a backend deployed before #1268. Absent is not empty:
+  // printing nothing under a refusal reads as "nothing is missing", which is
+  // the one thing this screen must never say.
+  "cli.upload.preflight.gaps_unknown":
+    "Could not determine what is still missing; run `nemar auth profile` for the list.",
   "cli.upload.preflight.dry_run": "Continuing anyway: --dry-run uploads nothing.",
 } as const;
 

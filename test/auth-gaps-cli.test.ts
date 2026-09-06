@@ -39,6 +39,8 @@ const PREFLIGHT_TITLE = "Upload access is not granted yet";
 const PREFLIGHT_CTA = "Ask for it with `nemar auth request-upload-access`.";
 const PREFLIGHT_DRY_RUN = "Continuing anyway: --dry-run uploads nothing.";
 const UPLOAD_GAPS_TITLE = "Before you can ask, your account still needs:";
+const PREFLIGHT_GAPS_UNKNOWN =
+  "Could not determine what is still missing; run `nemar auth profile` for the list.";
 /** Printed by the step AFTER the preflight, so it is how a test proves the
  *  pipeline continued rather than stopped. */
 const CONTINUED_MARKER = "Path does not exist";
@@ -364,6 +366,25 @@ describe("nemar dataset upload: the upload-access preflight", () => {
     try {
       const result = await runCli(["dataset", "upload", NO_SUCH_PATH], server.url);
       expect(result.all).toContain(PREFLIGHT_TITLE);
+      expect(result.all).not.toContain(UPLOAD_GAPS_TITLE);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a backend that reports no gap list says so instead of nothing", async () => {
+    // Not granted, and the list itself is absent -- an older backend. Printing
+    // the refusal with no reasons under it reads as "nothing is missing", which
+    // is a claim this build cannot make. `service_access` already distinguishes
+    // absent from false; so must this.
+    seedAuthenticatedConfig({ sandboxCompleted: true });
+    const server = startMeServer({ service_access: false, profile_gaps: undefined });
+    try {
+      const result = await runCli(["dataset", "upload", NO_SUCH_PATH], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.all).toContain(PREFLIGHT_TITLE);
+      expect(result.all).toContain(PREFLIGHT_GAPS_UNKNOWN);
+      // Not the list heading: there is no list.
       expect(result.all).not.toContain(UPLOAD_GAPS_TITLE);
     } finally {
       server.stop();

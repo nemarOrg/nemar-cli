@@ -131,14 +131,23 @@ export async function checkUploadAccessStep(options: { dryRun?: boolean } = {}):
   console.log();
   console.log(`  ${accountCopy("cli.upload.preflight.body")}`);
 
-  // Only the gaps that stop the REQUEST. A gap that blocks publication and
-  // nothing else is real, and is not what this page is about; listing it here
-  // would make the shortest path to an upload look longer than it is.
-  const blocking = resolveWireProfileGaps(user.profile_gaps ?? [], {
-    orcidVerified: user.orcid_verified === true,
-  }).filter((gap) => gap.blocks.includes("upload_access"));
-  if (blocking.length > 0) {
-    printGapList(accountCopy("gaps.upload.title"), blocking);
+  if (user.profile_gaps === undefined) {
+    // Absent is not empty, the same three-state honesty `service_access` gets
+    // above: a backend that predates #1268 sends no list, and silence under a
+    // refusal reads as "nothing is missing". Say which it is, and where the
+    // list can still be had.
+    console.log();
+    console.log(`  ${chalk.dim(accountCopy("cli.upload.preflight.gaps_unknown"))}`);
+  } else {
+    // Only the gaps that stop the REQUEST. A gap that blocks publication and
+    // nothing else is real, and is not what this page is about; listing it here
+    // would make the shortest path to an upload look longer than it is.
+    const blocking = resolveWireProfileGaps(user.profile_gaps, {
+      orcidVerified: user.orcid_verified === true,
+    }).filter((gap) => gap.blocks.includes("upload_access"));
+    if (blocking.length > 0) {
+      printGapList(accountCopy("gaps.upload.title"), blocking);
+    }
   }
   console.log();
   console.log(`  ${chalk.cyan(accountCopy("cli.upload_access.cta"))}`);
