@@ -71,19 +71,20 @@ addVerboseHelp(
   authCommand,
   `
 Description:
-  Manage your NEMAR account authentication. New users must register, verify
-  their email, and be approved by an admin before they can upload datasets.
+  Manage your NEMAR account authentication. New users register and verify
+  their email; that activates the account (browse, download, API key,
+  sandbox training). Uploading datasets additionally needs upload access,
+  a one-time admin approval you request once your account is active.
 
 Workflow:
   1. nemar auth signup         - Register a new account
   2. Verify your email         - Click the link in the verification email
-  3. Wait for approval         - Admin will review your request
-  4. nemar auth retrieve-key   - Retrieve your API key (requires password)
-  5. nemar auth login           - Log in with your API key
+  3. nemar auth retrieve-key   - Retrieve your API key (requires password)
+  4. nemar auth login          - Log in with your API key
 
 Examples:
   $ nemar auth signup                    # Start registration
-  $ nemar auth retrieve-key             # Get your API key after approval
+  $ nemar auth retrieve-key             # Get your API key once verified
   $ nemar auth login                     # Interactive login
   $ nemar auth login -k <api-key>        # Login with API key
   $ nemar auth regenerate-key           # Get a new API key (revokes old)
@@ -280,7 +281,7 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
       if (error.statusCode === 401) {
         console.log(chalk.dim("  Check that your API key is correct"));
       } else if (error.statusCode === 403) {
-        console.log(chalk.dim("  Your account may not be approved yet"));
+        console.log(chalk.dim("  Your account is not active; verify your email first"));
       }
     } else {
       spinner.fail("Connection failed");
@@ -588,8 +589,6 @@ export async function signupAction(): Promise<void> {
         ),
       );
     }
-    console.log();
-    console.log(chalk.dim("Once approved, use 'nemar auth retrieve-key' to get your API key"));
   } catch (error) {
     if (error instanceof ApiError) {
       spinner.fail(error.message);
@@ -667,11 +666,17 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
         return;
       }
       if (error instanceof ApiError && error.statusCode === 403) {
-        // Key authenticates but the account is no longer approved (pending or
-        // suspended). Same reasoning as the 401 case: don't print a green
-        // "Authenticated" banner that contradicts the failed refresh (#851).
-        console.log(chalk.yellow("  Your account is not active (pending approval or suspended)."));
-        console.log(chalk.dim("  Contact a NEMAR admin if you believe this is an error."));
+        // The key authenticates but the account is not active: unverified
+        // email, or revoked. NOT "awaiting approval" -- approval is the
+        // upload grant now (ADR 0040) and never gates the key. Same
+        // reasoning as the 401 case: don't print a green "Authenticated"
+        // banner that contradicts the failed refresh (#851).
+        console.log(chalk.yellow("  Your account is not active (unverified email, or revoked)."));
+        console.log(
+          chalk.dim(
+            "  Verify your email, or contact a NEMAR admin if you believe this is an error.",
+          ),
+        );
         return;
       }
     }
@@ -1094,12 +1099,12 @@ Examples:
 );
 
 // ============================================================================
-// Retrieve Key (after approval)
+// Retrieve Key (after email verification)
 // ============================================================================
 
 const retrieveKeyCmd = authCommand
   .command("retrieve-key")
-  .description("Retrieve your API key after account approval (requires email and password)")
+  .description("Retrieve your API key once your email is verified (requires email and password)")
   .action(async () => {
     const answers = await inquirer.prompt([
       {
@@ -1155,7 +1160,7 @@ const retrieveKeyCmd = authCommand
           if (error.statusCode === 401) {
             console.log(chalk.dim("  Check your email and password"));
           } else if (error.statusCode === 403) {
-            console.log(chalk.dim("  Your account may not be approved yet"));
+            console.log(chalk.dim("  Verify your email address first, then try again"));
           }
         }
       } else {
@@ -1169,9 +1174,10 @@ addVerboseHelp(
   retrieveKeyCmd,
   `
 Description:
-  After an admin approves your account, use this command to securely
+  Once you have verified your email address, use this command to securely
   retrieve your API key. You will need the email and password you used
-  during signup.
+  during signup. No admin approval is needed for the key; approval is the
+  separate, one-time grant that lets you upload datasets.
 
   API keys are not sent via email for security. This is the only way
   to obtain your key.

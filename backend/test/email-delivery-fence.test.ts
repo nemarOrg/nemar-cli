@@ -34,6 +34,7 @@ import {
   sendRevocationEmail,
 } from "../src/services/email";
 import { freshDb, realD1 } from "./helpers/d1";
+import { withFakeResend } from "./helpers/resend";
 
 // ---------------------------------------------------------------------------
 // isRecipientAllowlisted
@@ -127,56 +128,10 @@ describe("redactRecipient", () => {
 
 // ---------------------------------------------------------------------------
 // sendEmail's fence, driven through the real sendRevocationEmail wrapper.
-// Redirects api.resend.com to a local Bun.serve() instance so an ALLOWED
-// send's fetch is real, not mocked -- only its target moves off the live
-// internet, mirroring zarr-index-v3.test.ts's redirect pattern.
+// withFakeResend (helpers/resend.ts) redirects api.resend.com to a local
+// Bun.serve() instance so an ALLOWED send's fetch is real, not mocked -- only
+// its target moves off the live internet.
 // ---------------------------------------------------------------------------
-
-/** Starts a local fake-Resend server and redirects any `api.resend.com`
- *  fetch to it for the duration of `fn`. Every request is recorded (method,
- *  path, parsed JSON body) so a test can assert exactly what reached the
- *  "network" boundary. Always restores the real `fetch` and stops the
- *  server, even if `fn` throws. */
-async function withFakeResend<T>(
-  fn: (calls: Array<{ path: string; body: unknown }>) => Promise<T>,
-): Promise<T> {
-  const calls: Array<{ path: string; body: unknown }> = [];
-  const server = Bun.serve({
-    port: 0,
-    fetch: async (req) => {
-      const url = new URL(req.url);
-      const body = await req.json().catch(() => null);
-      calls.push({ path: url.pathname, body });
-      if (url.pathname === "/emails/batch") {
-        const items = Array.isArray(body) ? body : [];
-        return new Response(JSON.stringify({ data: items.map(() => ({ id: "batch-ok" })) }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      return new Response(JSON.stringify({ id: "email-ok" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    },
-  });
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
-    const req = input instanceof Request ? input : new Request(input, init);
-    const url = new URL(req.url);
-    if (url.hostname === "api.resend.com") {
-      const local = new URL(url.pathname + url.search, `http://127.0.0.1:${server.port}`);
-      return realFetch(new Request(local, req));
-    }
-    return realFetch(input as RequestInfo, init);
-  }) as typeof fetch;
-  try {
-    return await fn(calls);
-  } finally {
-    globalThis.fetch = realFetch;
-    server.stop(true);
-  }
-}
 
 describe("sendEmail delivery fence (via sendRevocationEmail)", () => {
   test("SUPPRESSED: non-production + non-allowlisted recipient rejects with DevEmailFenceError and never reaches the network", async () => {

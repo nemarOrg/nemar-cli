@@ -2,10 +2,12 @@
  * Web-dashboard session helpers (#569).
  *
  * The dashboard authenticates via an opaque HttpOnly session cookie.
- * The CLI continues to use bearer API tokens — these helpers exist
- * only for the four `/auth/code/*`, `/auth/logout`, `/auth/me`
- * endpoints in `routes/auth-web.ts` and the middleware in
- * `middleware/webSession.ts`.
+ * The CLI continues to use bearer API tokens. These helpers are shared by
+ * every cookie-authenticated route — the passwordless and email-verification
+ * flows and the settings endpoints in `routes/auth-web.ts`, the ORCID flow in
+ * `routes/auth-orcid.ts`, `middleware/webSession.ts`, and the cookie path of
+ * `middleware/auth.ts` (#572), which is how the dashboard reaches the
+ * user-scoped /datasets and /users routes.
  *
  * Cookie value is 256 bits of random base64url. Only the SHA-256 hash
  * of that value lives in D1, so an exfiltrated DB cannot forge
@@ -136,6 +138,11 @@ export interface WebSessionUser {
    *  role rather than guess. */
   role: UserRole | null;
   status: string;
+  /** Whether the account has proved control of `email` (ADR 0040 phase 2).
+   *  Surfaced on /auth/me so the dashboard can render its verify-your-email
+   *  step, and read by /auth/email/verify to answer idempotently when there
+   *  is nothing left to verify. Converted from the 0/1 D1 column here. */
+  email_verified: boolean;
   /** Profile fields surfaced on /auth/me for the website Settings page
    *  (#910). All nullable in D1 (migrations 0051/0052); `null` here means
    *  the column is unset, and the website renders its fallback state. */
@@ -170,7 +177,7 @@ export async function findSessionByCookieId(
   // lands.
   const row = await env.DB.prepare(
     `SELECT ws.id, ws.user_id, ws.remember, ws.expires_at, ws.last_used_at,
-            u.email, u.role, u.status,
+            u.email, u.role, u.status, u.email_verified,
             u.given_name, u.family_name, u.orcid, u.orcid_verified,
             u.github_username, u.city, u.country, u.affiliation, u.service_access
        FROM web_sessions ws
@@ -192,6 +199,8 @@ export async function findSessionByCookieId(
       email: string;
       role: string | null;
       status: string;
+      // NOT NULL DEFAULT 0 in D1 (0001), so plain number.
+      email_verified: number;
       given_name: string | null;
       family_name: string | null;
       orcid: string | null;
@@ -227,6 +236,7 @@ export async function findSessionByCookieId(
       email: row.email,
       role: parseRole(row.role, row.email),
       status: row.status,
+      email_verified: row.email_verified === 1,
       given_name: row.given_name,
       family_name: row.family_name,
       orcid: row.orcid,
@@ -244,6 +254,47 @@ export async function findSessionByCookieId(
  *  (0050) so /auth/me and admin tooling can distinguish the flows. */
 export type AuthMethod = "email_code" | "orcid";
 
+/** The cookie a caller will set, plus the not-yet-executed INSERT that makes
+ *  it valid. Split out of `issueSession` so a caller can put the session row
+ *  in the SAME `db.batch()` as the writes it must not outlive — a sign-in
+ *  that consumes a code and promotes an account either lands whole or not at
+ *  all (#1252 review). `issueSession` remains the one-shot form. */
+export interface PreparedSession {
+  cookieIdRaw: string;
+  maxAgeSeconds: number | undefined;
+  expiresAt: string;
+  statement: D1PreparedStatement;
+}
+
+/** Build (but do not run) the web_sessions INSERT for a new session. */
+export async function prepareSessionInsert(
+  env: Bindings,
+  userId: number,
+  remember: boolean,
+  userAgent: string | null,
+  ip: string | null,
+  authMethod: AuthMethod = "email_code",
+): Promise<PreparedSession> {
+  const cookieIdRaw = generateCookieId();
+  const cookieIdHash = await hashCookieId(cookieIdRaw);
+  const ttlMs = remember ? REMEMBER_TTL_MS : NON_REMEMBER_TTL_MS;
+  const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+  const ipHash = await hashIp(ip);
+
+  return {
+    cookieIdRaw,
+    // Browser-session cookies (no Max-Age) for non-remember; explicit
+    // Max-Age for remember-me so reloads survive a browser restart.
+    maxAgeSeconds: remember ? Math.floor(ttlMs / 1000) : undefined,
+    expiresAt,
+    statement: env.DB.prepare(
+      `INSERT INTO web_sessions (
+       user_id, cookie_id_hash, remember, expires_at, user_agent, ip_hash, auth_method
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(userId, cookieIdHash, remember ? 1 : 0, expiresAt, userAgent, ipHash, authMethod),
+  };
+}
+
 /** Insert a new web_sessions row and return the row id + cookie
  *  options for the response. `cookieIdRaw` is returned to the caller
  *  so it can be set as the Set-Cookie value. */
@@ -255,27 +306,10 @@ export async function issueSession(
   ip: string | null,
   authMethod: AuthMethod = "email_code",
 ): Promise<{ cookieIdRaw: string; maxAgeSeconds: number | undefined; expiresAt: string }> {
-  const cookieIdRaw = generateCookieId();
-  const cookieIdHash = await hashCookieId(cookieIdRaw);
-  const ttlMs = remember ? REMEMBER_TTL_MS : NON_REMEMBER_TTL_MS;
-  const expiresAt = new Date(Date.now() + ttlMs).toISOString();
-  const ipHash = await hashIp(ip);
-
-  await env.DB.prepare(
-    `INSERT INTO web_sessions (
-       user_id, cookie_id_hash, remember, expires_at, user_agent, ip_hash, auth_method
-     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(userId, cookieIdHash, remember ? 1 : 0, expiresAt, userAgent, ipHash, authMethod)
-    .run();
-
-  return {
-    cookieIdRaw,
-    // Browser-session cookies (no Max-Age) for non-remember; explicit
-    // Max-Age for remember-me so reloads survive a browser restart.
-    maxAgeSeconds: remember ? Math.floor(ttlMs / 1000) : undefined,
-    expiresAt,
-  };
+  const prepared = await prepareSessionInsert(env, userId, remember, userAgent, ip, authMethod);
+  await prepared.statement.run();
+  const { cookieIdRaw, maxAgeSeconds, expiresAt } = prepared;
+  return { cookieIdRaw, maxAgeSeconds, expiresAt };
 }
 
 /** Mark the row backing this cookie as revoked. Idempotent. */

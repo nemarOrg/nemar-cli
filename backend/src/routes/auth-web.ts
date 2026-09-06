@@ -6,13 +6,15 @@
  * password + API-token flow in `auth.ts` is untouched; these routes
  * exist alongside it under the same `/auth` mount.
  *
- *   POST  /auth/code/request         - mail a code
- *   POST  /auth/code/verify          - check the code, set a session cookie
- *   POST  /auth/logout               - clear the cookie + revoke the session row
- *   GET   /auth/me                   - current user, or { user: null }
- *   PATCH /auth/profile              - self-service profile edit (#912)
- *   POST  /auth/email/change/request - mail an ownership code to a NEW address (#911)
- *   POST  /auth/email/change/verify  - verify it, move users.email (#911)
+ *   POST  /auth/code/request          - mail a code
+ *   POST  /auth/code/verify           - check the code, set a session cookie
+ *   POST  /auth/logout                - clear the cookie + revoke the session row
+ *   GET   /auth/me                    - current user, or { user: null }
+ *   PATCH /auth/profile               - self-service profile edit (#912)
+ *   POST  /auth/email/change/request  - mail an ownership code to a NEW address (#911)
+ *   POST  /auth/email/change/verify   - verify it, move users.email (#911)
+ *   POST  /auth/email/verify/request  - re-mail the verification code (ADR 0040)
+ *   POST  /auth/email/verify          - redeem it: pending -> verified (ADR 0040)
  *
  * Notes for readers:
  *   - In development and test environments the `request` response
@@ -20,17 +22,21 @@
  *     without an email inbox. Production must never see this field;
  *     a defensive `if (env.ENVIRONMENT === 'production')` guard plus
  *     a corresponding test enforces the boundary.
- *   - Web accounts are created by the ORCID flow (auth-orcid.ts) and
- *     auto-approve to base access on sign-up (`status='approved'`,
- *     `service_access=0`; migration 0062, epic #1013). Any web row that
- *     is still `pending` (pre-0062 stragglers, seeded fixtures) or was
- *     revoked has `username = NULL`, so admins approve it by id via
- *     `POST /admin/approve/by-id/:id` (#1012) — the username-keyed
- *     approve route cannot address it. The dashboard renders an
- *     onboarding screen while `status` is `'pending'`.
+ *   - Web accounts are created by the ORCID flow (auth-orcid.ts) and land
+ *     at `status='pending'` with `email_verified=0` (ADR 0040 phase 2;
+ *     the auto-approval that migration 0062 shipped is gone). They reach
+ *     `verified` — the base tier — by redeeming an emailed code, either
+ *     through /auth/email/verify or through a /auth/code/verify sign-in,
+ *     which proves the same inbox by the same means. Upload access is a
+ *     separate later grant an admin makes by id via
+ *     `POST /admin/approve/by-id/:id` (#1012), since a web row has
+ *     `username = NULL` and the username-keyed approve route cannot
+ *     address it. The dashboard renders its verify-your-email step while
+ *     `status` is `'pending'`.
  *   - Rate limits are enforced inline by counting `auth_codes` rows
- *     in the relevant window: per-email buckets on both request
- *     endpoints, plus a per-account bucket on /email/change/request
+ *     in the relevant window: per-email buckets on every request
+ *     endpoint, plus a per-account bucket on the two that are
+ *     session-bound, /email/change/request and /email/verify/request
  *     (keyed on the 0066 user_id column). No KV / new table —
  *     `idx_auth_codes_email_active` covers the email lookups; the
  *     user_id count is unindexed, which is fine at auth_codes' size.
@@ -43,6 +49,12 @@ import { auditLogStatement } from "../db/audit-log";
 import { timingSafeEqual } from "../lib/constant-time";
 import { webSessionMiddleware } from "../middleware/webSession";
 import {
+  CODE_TTL_MINUTES,
+  MAX_CODE_ATTEMPTS,
+  PER_HOUR_LIMIT,
+  PER_MINUTE_LIMIT,
+  USER_BOUND_CODE_INSERT_SQL,
+  USER_BOUND_CODE_LOOKUP_SQL,
   generateAuthCode,
   hashAuthCode,
   maskEmail,
@@ -54,6 +66,11 @@ import {
   sendEmailChangeCodeEmail,
   sendPasswordlessCodeEmail,
 } from "../services/email";
+import {
+  applyEmailVerification,
+  issueEmailVerificationCode,
+  notifyAdminsOfVerifiedAccount,
+} from "../services/email-verification";
 import { validateGitHubUsername } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
 import {
@@ -65,20 +82,13 @@ import {
   buildClearedSessionCookie,
   buildSessionCookie,
   isAllowedOrigin,
-  issueSession,
   maybeSlideExpiry,
+  prepareSessionInsert,
   revokeSession,
 } from "../services/web-session";
 import { type Bindings, type UserRole, type Variables, parseRole } from "../types/bindings";
 
 export const authWebRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
-
-const CODE_TTL_MINUTES = 10;
-const MAX_CODE_ATTEMPTS = 5;
-// Exported (with the SQL consts below) for the engine-level rate-bucket and
-// code-binding tests, which run the production SQL against real SQLite.
-export const PER_MINUTE_LIMIT = 1;
-export const PER_HOUR_LIMIT = 5;
 
 const emailSchema = z.object({
   email: z
@@ -104,13 +114,22 @@ function isDevOrTest(env: Bindings): boolean {
 
 /**
  * Map internal user.status to the dashboard-facing two-state value.
- *   approved        -> "active"
- *   pending|verified -> "pending"
- *   revoked          -> null (caller should refuse the sign-in)
+ *   verified|approved -> "active"
+ *   pending           -> "pending"
+ *   revoked           -> null (caller should refuse the sign-in)
+ *
+ * `verified` moved to "active" in ADR 0040 phase 2, and the two-state shape
+ * survived the move because the second state got a job: "pending" now means
+ * exactly one thing the dashboard can act on — verify your email. It used to
+ * cover `verified` as well, where the page could only say "wait for an admin"
+ * with no button under it. What a dashboard cannot read off this value is
+ * whether the account may upload; that is `service_access`, reported
+ * separately by publicUser, because an active account is the norm and an
+ * upload grant is the exception.
  */
 function userStatusForDashboard(internal: string): "active" | "pending" | null {
-  if (internal === "approved") return "active";
-  if (internal === "pending" || internal === "verified") return "pending";
+  if (internal === "approved" || internal === "verified") return "active";
+  if (internal === "pending") return "pending";
   return null; // revoked or unknown
 }
 
@@ -127,6 +146,7 @@ function publicUser(row: {
   email: string;
   role: UserRole | null;
   status: string;
+  email_verified: boolean;
   given_name: string | null;
   family_name: string | null;
   orcid: string | null;
@@ -142,6 +162,14 @@ function publicUser(row: {
     email: row.email,
     role: row.role ?? "member",
     status: userStatusForDashboard(row.status) ?? row.status,
+    // The two things the website needs to render the account's own state,
+    // and they are deliberately separate flags rather than more `status`
+    // values (ADR 0040): `email_verified` is the step the user can complete
+    // themselves and is what "pending" means, `service_access` is the grant
+    // only an admin can make. Collapsing them into one enum is what made the
+    // old dashboard tell base-tier users to wait for an admin who was never
+    // coming (website ADR 0010, epic #1013 — NOT this repo's ADR 0010).
+    email_verified: row.email_verified,
     given_name: row.given_name,
     family_name: row.family_name,
     orcid: row.orcid,
@@ -150,9 +178,6 @@ function publicUser(row: {
     city: row.city,
     country: row.country,
     affiliation: row.affiliation,
-    // Tiered access (website ADR 0010, epic #1013 — NOT this repo's ADR
-    // 0010): base accounts are false until an admin grants service
-    // (upload + compute) access.
     service_access: row.service_access,
   };
 }
@@ -345,6 +370,11 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
   const db = c.env.DB;
 
   try {
+    // This route is UNAUTHENTICATED, so "no such code" and "wrong digits"
+    // stay collapsed into one answer: telling an anonymous caller which one
+    // it was reveals whether a code is outstanding for that address. The
+    // session-bound verify routes distinguish them (see CODE_EXPIRED_BODY),
+    // because there the caller already holds the account.
     const row = await db
       .prepare(SIGNIN_CODE_LOOKUP_SQL)
       .bind(email)
@@ -355,18 +385,9 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
 
     const submittedHash = await hashAuthCode(code, c.env);
     if (!timingSafeEqual(submittedHash, row.code_hash)) {
-      const newAttempts = row.attempts + 1;
-      if (newAttempts >= MAX_CODE_ATTEMPTS) {
-        await db
-          .prepare(`UPDATE auth_codes SET attempts = ?, used_at = datetime('now') WHERE id = ?`)
-          .bind(newAttempts, row.id)
-          .run();
-      } else {
-        await db
-          .prepare("UPDATE auth_codes SET attempts = ? WHERE id = ?")
-          .bind(newAttempts, row.id)
-          .run();
-      }
+      // Same bookkeeping as the session-bound routes; the count it returns is
+      // deliberately not reported here.
+      await recordFailedAttempt(db, row);
       return c.json({ error: "Invalid or expired code" }, 401);
     }
 
@@ -387,7 +408,7 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
 
     const userRow = await db
       .prepare(
-        `SELECT id, email, role, status,
+        `SELECT id, email, role, status, email_verified,
                 given_name, family_name, orcid, orcid_verified,
                 github_username, city, country, affiliation, service_access
            FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1`,
@@ -398,6 +419,8 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
         email: string;
         role: string | null;
         status: string;
+        // NOT NULL DEFAULT 0 in D1 (0001), so plain number.
+        email_verified: number;
         given_name: string | null;
         family_name: string | null;
         orcid: string | null;
@@ -421,11 +444,65 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
     if (userRow.status === "revoked") {
       return c.json({ error: "Account revoked" }, 403);
     }
+    const userAgent = c.req.header("User-Agent") ?? null;
+    const ip =
+      c.req.header("CF-Connecting-IP") ||
+      c.req.header("X-Forwarded-For")?.split(",")[0]?.trim() ||
+      null;
+
+    // Mark the email verified AND, if the account was still `pending`, move
+    // it to `verified` — the user just proved they control the inbox by
+    // repeating a code that was emailed to them, which is the whole content
+    // of that transition (ADR 0040 phase 2). Signing in is therefore a second
+    // road to the base tier, and the dedicated /auth/email/verify endpoint is
+    // the first; whichever a user reaches first, the other becomes a no-op.
+    // `approved` and `revoked` rows are never re-tiered by this.
+    //
+    // The session row goes in the SAME transaction: the code was consumed
+    // above and cannot be replayed, so a session INSERT that failed on its
+    // own would leave a burned code, a possibly-promoted account, and no way
+    // in — and the retry would read "Invalid or expired code". Either the
+    // whole sign-in lands or none of it does. The session cookie is minted
+    // before the write and only sent once the batch has committed.
+    const prepared = await prepareSessionInsert(
+      c.env,
+      userRow.id,
+      remember,
+      userAgent,
+      ip,
+      "email_code",
+    );
+    let promoted: boolean;
+    try {
+      ({ promoted } = await applyEmailVerification(db, userRow.id, "code_signin", [
+        prepared.statement,
+      ]));
+    } catch (writeErr) {
+      // Distinct from the generic 500 below, and distinct in the log: the
+      // operator needs the account id to see what state it is in. Nothing in
+      // the batch landed, so the account is exactly as it was — and the code
+      // goes back, so the user can simply try the one they already have.
+      console.error(
+        `[auth-web] /code/verify: sign-in transaction failed after the code was consumed (user id=${userRow.id}); nothing was written, restoring the code`,
+        writeErr,
+      );
+      await restoreConsumedCode(db, row.id, email);
+      return c.json(
+        {
+          error: "sign_in_incomplete",
+          message:
+            "Your code was accepted but the sign-in could not be completed, so nothing was changed. Try again with the same code, or request a new one.",
+        },
+        500,
+      );
+    }
+
     const user = {
       id: userRow.id,
       email: userRow.email,
       role: parseRole(userRow.role, userRow.email),
-      status: userRow.status,
+      status: promoted ? "verified" : userRow.status,
+      email_verified: true,
       given_name: userRow.given_name,
       family_name: userRow.family_name,
       orcid: userRow.orcid,
@@ -437,33 +514,21 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       service_access: userRow.service_access === 1,
     };
 
-    // Mark email as verified — the user just proved they control the
-    // inbox by repeating a code that was emailed to them. This is the
-    // web-flow analogue of the CLI's email verification step. NOOP for
-    // users already at email_verified=1.
-    await db
-      .prepare("UPDATE users SET email_verified = 1 WHERE email = ? AND email_verified = 0")
-      .bind(email)
-      .run();
+    if (promoted) {
+      // Same notification a CLI signup fires from its verification link, at
+      // the equivalent moment. Gated on `promoted`, so a returning user
+      // signing in for the hundredth time never re-notifies anyone.
+      await notifyAdminsOfVerifiedAccount(c.env, {
+        id: userRow.id,
+        email: userRow.email,
+        github_username: userRow.github_username,
+        description: "Web sign-up (ORCID); verified via sign-in code.",
+      });
+    }
 
-    const userAgent = c.req.header("User-Agent") ?? null;
-    const ip =
-      c.req.header("CF-Connecting-IP") ||
-      c.req.header("X-Forwarded-For")?.split(",")[0]?.trim() ||
-      null;
-
-    const { cookieIdRaw, maxAgeSeconds } = await issueSession(
-      c.env,
-      user.id,
-      remember,
-      userAgent,
-      ip,
-      "email_code",
-    );
-
-    const cookie = buildSessionCookie(cookieIdRaw, {
+    const cookie = buildSessionCookie(prepared.cookieIdRaw, {
       domain: c.env.WEB_SESSION_COOKIE_DOMAIN || undefined,
-      maxAgeSeconds,
+      maxAgeSeconds: prepared.maxAgeSeconds,
     });
     c.header("Set-Cookie", cookie);
 
@@ -720,6 +785,78 @@ const emailChangeVerifySchema = z.object({
   code: z.string().regex(/^\d{6}$/, "code must be 6 digits"),
 });
 
+/**
+ * Burn one guess against an active code and report how many are left.
+ *
+ * Extracted because the two session-bound verify routes ran identical
+ * bookkeeping, and because the count is now part of their answer: a signed-in
+ * user checking a code sent to their own address gains nothing from the
+ * enumeration-safe vagueness the unauthenticated sign-in path needs. The
+ * fifth wrong guess also consumes the code, so `0` remaining means "request a
+ * new one", not "one more try".
+ */
+async function recordFailedAttempt(
+  db: D1Database,
+  row: { id: number; attempts: number },
+): Promise<number> {
+  const newAttempts = row.attempts + 1;
+  if (newAttempts >= MAX_CODE_ATTEMPTS) {
+    await db
+      .prepare(`UPDATE auth_codes SET attempts = ?, used_at = datetime('now') WHERE id = ?`)
+      .bind(newAttempts, row.id)
+      .run();
+  } else {
+    await db
+      .prepare("UPDATE auth_codes SET attempts = ? WHERE id = ?")
+      .bind(newAttempts, row.id)
+      .run();
+  }
+  return Math.max(0, MAX_CODE_ATTEMPTS - newAttempts);
+}
+
+/**
+ * Put a just-consumed code back, after the write it was consumed FOR failed.
+ *
+ * The consume is deliberately its own statement rather than part of the batch
+ * — it is the mutual-exclusion gate, and inside the transaction the loser of a
+ * race would go on to be promoted and handed a session. The cost is this
+ * window: a batch that throws leaves a spent code and nothing else, which
+ * would make the user's next attempt read "expired" for a code they had
+ * correctly just typed. Restoring it closes that.
+ *
+ * Skipped when a NEWER code exists for the address: `/…/request` rotates
+ * older codes by setting `used_at`, and reviving one behind a rotation would
+ * leave two live codes for one inbox. Best-effort — the caller is already on
+ * a failure path and a failed restore only costs the user a new code.
+ */
+async function restoreConsumedCode(db: D1Database, codeId: number, email: string): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE auth_codes SET used_at = NULL
+        WHERE id = ?
+          AND NOT EXISTS (SELECT 1 FROM auth_codes newer WHERE newer.email = ? AND newer.id > ?)`,
+    )
+    .bind(codeId, email, codeId)
+    .run()
+    .catch((err) => console.error("[auth-web] failed to restore a consumed code", err));
+}
+
+/**
+ * The 401 body for a code that is gone — expired, already used, burned by
+ * five wrong guesses, or never issued.
+ *
+ * Deliberately DIFFERENT from the wrong-digits answer on the session-bound
+ * routes (#1252 review): collapsing the two told a user re-checking their own
+ * inbox to look harder at digits that could never work again. There is no
+ * enumeration to protect here — the caller already holds a session for the
+ * account the code belongs to. `POST /auth/code/verify`, which is
+ * unauthenticated, keeps its single collapsed answer for exactly that reason.
+ */
+const CODE_EXPIRED_BODY = {
+  error: "code_expired",
+  message: "That code has expired or has already been used. Request a new one.",
+} as const;
+
 /** Re-read a user by id and shape the dashboard payload (same SELECT the
  *  /code/verify path runs by email). Null when the row is gone/tombstoned. */
 async function fetchPublicUserById(
@@ -728,7 +865,7 @@ async function fetchPublicUserById(
 ): Promise<ReturnType<typeof publicUser> | null> {
   const row = await db
     .prepare(
-      `SELECT id, email, role, status,
+      `SELECT id, email, role, status, email_verified,
               given_name, family_name, orcid, orcid_verified,
               github_username, city, country, affiliation, service_access
          FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
@@ -739,6 +876,8 @@ async function fetchPublicUserById(
       email: string;
       role: string | null;
       status: string;
+      // NOT NULL DEFAULT 0 in D1 (0001), so plain number.
+      email_verified: number;
       given_name: string | null;
       family_name: string | null;
       orcid: string | null;
@@ -757,6 +896,7 @@ async function fetchPublicUserById(
     email: row.email,
     role: parseRole(row.role, row.email),
     status: row.status,
+    email_verified: row.email_verified === 1,
     given_name: row.given_name,
     family_name: row.family_name,
     orcid: row.orcid,
@@ -783,36 +923,6 @@ async function fetchPublicUserById(
  * codes carry the requester's user_id, /code/verify filters user_id IS NULL,
  * and /email/change/verify filters user_id = <session user>.
  */
-/** Atomic rate-limited insert for email-change codes. Keyed by the TARGET
- *  address (same shape and limits as /code/request; see that route for the
- *  race reasoning), binding the code to the requesting session's user via
- *  user_id (0066). The third guard caps one ACCOUNT's change requests per
- *  hour across ALL targets (the per-email guards only throttle repeats to
- *  one address) — without it a single session could cycle distinct
- *  addresses to spray codes or enumerate faster than the per-IP floor.
- *  Binds: email, code_hash, expires_at, user_id, email, PER_MINUTE_LIMIT,
- *  email, PER_HOUR_LIMIT, user_id, PER_HOUR_LIMIT. Exported so the
- *  rate-bucket test runs the production SQL, not a copy. */
-export const EMAIL_CHANGE_CODE_INSERT_SQL = `INSERT INTO auth_codes (email, code_hash, expires_at, user_id)
-           SELECT ?, ?, ?, ?
-           WHERE (SELECT COUNT(*) FROM auth_codes
-                   WHERE email = ?
-                     AND created_at > datetime('now','-1 minute')) < ?
-             AND (SELECT COUNT(*) FROM auth_codes
-                   WHERE email = ?
-                     AND created_at > datetime('now','-1 hour')) < ?
-             AND (SELECT COUNT(*) FROM auth_codes
-                   WHERE user_id = ?
-                     AND created_at > datetime('now','-1 hour')) < ?`;
-
-/** The change-code lookup: user_id = the redeeming session's user (0066), so
- *  the code must have been requested by the SAME account. A code read from a
- *  shared inbox by a different signed-in user finds no row here. */
-export const EMAIL_CHANGE_CODE_LOOKUP_SQL = `SELECT id, code_hash, attempts FROM auth_codes
-            WHERE email = ? AND user_id = ?
-              AND used_at IS NULL AND expires_at > datetime('now')
-            ORDER BY created_at DESC LIMIT 1`;
-
 authWebRoutes.post(
   "/email/change/request",
   webSessionMiddleware,
@@ -865,9 +975,9 @@ authWebRoutes.post(
       // Atomic rate-limited INSERT binding the code to THIS session's user:
       // only the account that asked for the change can redeem it, so a second
       // person reading a shared inbox cannot attach the address to their own
-      // account by pasting the code first. See EMAIL_CHANGE_CODE_INSERT_SQL.
+      // account by pasting the code first. See USER_BOUND_CODE_INSERT_SQL (services/auth-code.ts).
       const insertResult = await db
-        .prepare(EMAIL_CHANGE_CODE_INSERT_SQL)
+        .prepare(USER_BOUND_CODE_INSERT_SQL)
         .bind(
           email,
           codeHash,
@@ -989,28 +1099,27 @@ authWebRoutes.post(
       }
 
       const row = await db
-        .prepare(EMAIL_CHANGE_CODE_LOOKUP_SQL)
+        .prepare(USER_BOUND_CODE_LOOKUP_SQL)
         .bind(email, webUser.id)
         .first<{ id: number; code_hash: string; attempts: number }>();
       if (!row) {
-        return c.json({ error: "code_incorrect" }, 401);
+        return c.json(CODE_EXPIRED_BODY, 401);
       }
 
       const submittedHash = await hashAuthCode(code, c.env);
       if (!timingSafeEqual(submittedHash, row.code_hash)) {
-        const newAttempts = row.attempts + 1;
-        if (newAttempts >= MAX_CODE_ATTEMPTS) {
-          await db
-            .prepare(`UPDATE auth_codes SET attempts = ?, used_at = datetime('now') WHERE id = ?`)
-            .bind(newAttempts, row.id)
-            .run();
-        } else {
-          await db
-            .prepare("UPDATE auth_codes SET attempts = ? WHERE id = ?")
-            .bind(newAttempts, row.id)
-            .run();
-        }
-        return c.json({ error: "code_incorrect" }, 401);
+        const attemptsRemaining = await recordFailedAttempt(db, row);
+        return c.json(
+          {
+            error: "code_incorrect",
+            message:
+              attemptsRemaining > 0
+                ? `That code did not match. ${attemptsRemaining} attempt${attemptsRemaining === 1 ? "" : "s"} left before it is invalidated.`
+                : "That code did not match and has now been invalidated. Request a new one.",
+            attempts_remaining: attemptsRemaining,
+          },
+          401,
+        );
       }
 
       // Consume-once, same conditional UPDATE as /code/verify.
@@ -1019,7 +1128,9 @@ authWebRoutes.post(
         .bind(row.id)
         .run();
       if ((consumeResult.meta?.changes ?? 0) === 0) {
-        return c.json({ error: "code_incorrect" }, 401);
+        // Lost the race to a concurrent redemption: the code is gone, not
+        // wrong.
+        return c.json(CODE_EXPIRED_BODY, 401);
       }
 
       // The change + its audit row in one batch. email_verified=1: the user
@@ -1057,6 +1168,188 @@ authWebRoutes.post(
       return c.json({ ok: true, user });
     } catch (err) {
       console.error("[auth-web] /email/change/verify failed", err);
+      return c.json({ error: "Verification failed" }, 500);
+    }
+  },
+);
+
+// ---------------------------------------------------------------
+// POST /auth/email/verify/{request,verify}
+// ---------------------------------------------------------------
+
+const emailVerifySchema = z.object({
+  code: z.string().regex(/^\d{6}$/, "code must be 6 digits"),
+});
+
+/**
+ * Email verification, step 1 (ADR 0040 phase 2, #1252). Mails a 6-digit code
+ * to the signed-in account's OWN address so it can leave `pending` for
+ * `verified`, the base tier.
+ *
+ * No request body: the target is `users.email` and nothing else, which is
+ * what keeps this endpoint from being a mail-anyone primitive. (Changing the
+ * address is a different flow with a different code — /email/change/*.)
+ *
+ * The rate limits, rotation, rollback-on-send-failure and non-production
+ * fence all live in issueEmailVerificationCode so this route and ORCID
+ * finalize cannot drift on any of them.
+ */
+authWebRoutes.post("/email/verify/request", webSessionMiddleware, async (c) => {
+  if (!isAllowedOrigin(c.req.header("Origin"))) {
+    return c.json({ error: "Origin not allowed" }, 403);
+  }
+  const webUser = c.var.webUser;
+  if (!webUser) {
+    return c.json({ error: "Authentication required" }, 401);
+  }
+
+  try {
+    const email = webUser.email.toLowerCase();
+
+    // Nothing to prove. Answering before the rate-limited insert means a
+    // double-clicked button on an already-verified account cannot burn the
+    // per-minute bucket of a code nobody needs.
+    if (webUser.email_verified) {
+      return c.json({ ok: true, already_verified: true, masked_email: maskEmail(email) });
+    }
+
+    const issued = await issueEmailVerificationCode(c.env, webUser.id, email);
+    if (!issued.ok) {
+      return issued.error === "rate_limited"
+        ? c.json({ error: "Too many requests. Try again later." }, 429)
+        : c.json({ error: "Could not deliver the code; try again shortly." }, 503);
+    }
+
+    const body: Record<string, unknown> = { ok: true, masked_email: maskEmail(email) };
+    if (issued.skipped) body.dev_skip = "not_allowlisted";
+    if (issued.devCode) body.dev_code = issued.devCode;
+
+    // Same belt-and-braces as /code/request: never ship a code in a
+    // production response body.
+    if (c.env.ENVIRONMENT === "production" && "dev_code" in body) {
+      console.error(
+        "[auth-web] FATAL: dev_code present in production response — refusing to ship the response",
+      );
+      return c.json({ error: "Internal error" }, 500);
+    }
+    return c.json(body);
+  } catch (err) {
+    console.error("[auth-web] /email/verify/request failed", err);
+    return c.json({ error: "Failed to send code" }, 500);
+  }
+});
+
+/**
+ * Email verification, step 2 (ADR 0040 phase 2, #1252). Redeems the code from
+ * step 1 (same compare / attempts / consume-once semantics as /code/verify),
+ * marks the inbox proved, and moves a `pending` account to `verified`.
+ *
+ * Idempotent by early return rather than by re-consuming a code: a second
+ * call from an already-verified account answers 200 with the current user,
+ * because a code is single-use and the honest answer to "verify me" when the
+ * account is verified is "done", not "invalid code". That also means the
+ * admin notification fires exactly once — it is gated on the transition
+ * itself (applyEmailVerification's conditional UPDATE), not on reaching this
+ * line.
+ */
+authWebRoutes.post(
+  "/email/verify",
+  webSessionMiddleware,
+  zValidator("json", emailVerifySchema),
+  async (c) => {
+    if (!isAllowedOrigin(c.req.header("Origin"))) {
+      return c.json({ error: "Origin not allowed" }, 403);
+    }
+    const webUser = c.var.webUser;
+    if (!webUser) {
+      return c.json({ error: "Authentication required" }, 401);
+    }
+    const { code } = c.req.valid("json");
+    const db = c.env.DB;
+
+    try {
+      const email = webUser.email.toLowerCase();
+
+      if (webUser.email_verified) {
+        const current = await fetchPublicUserById(db, webUser.id);
+        if (!current) return c.json({ error: "Account not found" }, 403);
+        return c.json({ ok: true, already_verified: true, user: current });
+      }
+
+      const row = await db
+        .prepare(USER_BOUND_CODE_LOOKUP_SQL)
+        .bind(email, webUser.id)
+        .first<{ id: number; code_hash: string; attempts: number }>();
+      if (!row) {
+        return c.json(CODE_EXPIRED_BODY, 401);
+      }
+
+      const submittedHash = await hashAuthCode(code, c.env);
+      if (!timingSafeEqual(submittedHash, row.code_hash)) {
+        const attemptsRemaining = await recordFailedAttempt(db, row);
+        return c.json(
+          {
+            error: "code_incorrect",
+            message:
+              attemptsRemaining > 0
+                ? `That code did not match. ${attemptsRemaining} attempt${attemptsRemaining === 1 ? "" : "s"} left before it is invalidated.`
+                : "That code did not match and has now been invalidated. Request a new one.",
+            attempts_remaining: attemptsRemaining,
+          },
+          401,
+        );
+      }
+
+      // Consume-once, same conditional UPDATE as /code/verify: two parallel
+      // redemptions of one code let exactly one through.
+      const consumeResult = await db
+        .prepare("UPDATE auth_codes SET used_at = datetime('now') WHERE id = ? AND used_at IS NULL")
+        .bind(row.id)
+        .run();
+      if ((consumeResult.meta?.changes ?? 0) === 0) {
+        // Lost the race to a concurrent redemption: gone, not wrong.
+        return c.json(CODE_EXPIRED_BODY, 401);
+      }
+
+      // Past this point the code is spent. If the write fails, say so
+      // precisely: the generic 500 below would send the caller back to a
+      // code that can never work again, and the retry would read
+      // "code_incorrect" as though they had mistyped it.
+      let promoted: boolean;
+      try {
+        ({ promoted } = await applyEmailVerification(db, webUser.id, "verify_endpoint"));
+      } catch (writeErr) {
+        console.error(
+          `[auth-web] /email/verify: verification write failed after the code was consumed (user id=${webUser.id}); nothing was written, restoring the code`,
+          writeErr,
+        );
+        await restoreConsumedCode(db, row.id, email);
+        return c.json(
+          {
+            error: "verification_incomplete",
+            message:
+              "Your code was accepted but the change could not be saved, so nothing was changed. Try again with the same code, or request a new one.",
+          },
+          500,
+        );
+      }
+
+      if (promoted) {
+        await notifyAdminsOfVerifiedAccount(c.env, {
+          id: webUser.id,
+          email,
+          github_username: webUser.github_username,
+          description: "Web sign-up (ORCID); verified their email address.",
+        });
+      }
+
+      const user = await fetchPublicUserById(db, webUser.id);
+      if (!user) {
+        return c.json({ error: "Account not found" }, 403);
+      }
+      return c.json({ ok: true, user });
+    } catch (err) {
+      console.error("[auth-web] /email/verify failed", err);
       return c.json({ error: "Verification failed" }, 500);
     }
   },

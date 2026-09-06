@@ -66,13 +66,16 @@ function seedCliUser(username: string, { status = "verified", serviceAccess = 0 
   return row;
 }
 
-/** Web/ORCID-style row: username NULL, ORCID-verified, email unverified. */
-function seedWebUser(email: string, status = "pending") {
+/** Web/ORCID-style row: username NULL, ORCID-verified. `emailVerified`
+ *  defaults to 1 because ADR 0040 phase 2 makes a verified email a
+ *  precondition of approval for every signup source; the listing cases below
+ *  that only need a row to exist pass 0. */
+function seedWebUser(email: string, status = "pending", emailVerified: 0 | 1 = 1) {
   db.run(
     `INSERT INTO users (email, status, signup_source, email_verified, orcid, orcid_verified,
                         given_name, family_name)
-     VALUES (?, ?, 'web', 0, '0000-0002-1825-0097', 1, 'Jose', 'Hernandez')`,
-    [email, status],
+     VALUES (?, ?, 'web', ?, '0000-0002-1825-0097', 1, 'Jose', 'Hernandez')`,
+    [email, status, emailVerified],
   );
   const row = db.query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?").get(email);
   if (!row) throw new Error(`seed failed for ${email}`);
@@ -174,8 +177,8 @@ describe("POST /admin/approve/:username grants upload access (#1249)", () => {
 });
 
 describe("POST /admin/approve/by-id/:id grants upload access", () => {
-  test("approving a pending ORCID web signup by id grants it too", async () => {
-    const { id } = seedWebUser("web-grant@example.org");
+  test("approving a verified web signup by id grants it too", async () => {
+    const { id } = seedWebUser("web-grant@example.org", "verified");
     const res = await post(`/admin/approve/by-id/${id}`);
     expect(res.status).toBe(200);
 
@@ -183,6 +186,22 @@ describe("POST /admin/approve/by-id/:id grants upload access", () => {
     expect(row.status).toBe("approved");
     expect(row.service_access).toBe(1);
     expect(row.service_access_granted_by).toBe(adminId);
+  });
+
+  test("a web signup with an unverified email is refused, and granted nothing", async () => {
+    // ADR 0040 phase 2 narrowed #1012's eligibility: ORCID proves the person,
+    // the emailed code proves the inbox, and approval cannot stand in for the
+    // second. The grant is what makes this worth asserting -- a refused
+    // approval that still wrote service_access would be the #1249 bug with
+    // the sign flipped.
+    const { id } = seedWebUser("web-unverified@example.org", "pending", 0);
+    const res = await post(`/admin/approve/by-id/${id}`);
+    expect(res.status).toBe(400);
+    expect((await res.json()).message).toContain("verify their email");
+
+    const row = grantState(id);
+    expect(row.status).toBe("pending");
+    expect(row.service_access).toBe(0);
   });
 });
 
@@ -308,7 +327,7 @@ describe("POST /admin/revoke/:username clears the grant and its stamps", () => {
 describe("GET /admin/users reports the tier", () => {
   test("returns service_access, signup_source, identity and email_verified", async () => {
     seedCliUser("listed1", { status: "approved", serviceAccess: 1 });
-    seedWebUser("listed-web@example.org");
+    seedWebUser("listed-web@example.org", "pending", 0);
 
     const res = await get("/admin/users");
     expect(res.status).toBe(200);

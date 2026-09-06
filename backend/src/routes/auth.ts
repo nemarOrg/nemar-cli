@@ -13,6 +13,7 @@ import {
   orcidIdSchema,
 } from "../../../shared/contract/publication.js";
 import { escapeHtml } from "../lib/escape";
+import { inactiveAccountBody, isActiveAccountStatus } from "../services/account-tier";
 import {
   getAdminEmailsForCategory,
   resolveEmailConfig,
@@ -409,13 +410,20 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
         message: "Registration successful",
         email_sent: emailSent,
         researcher_name: researcherName,
+        // ADR 0040 phase 2: verifying the email is the last step that gates
+        // the account itself, so these are the only steps a new signup owes.
+        // Admin approval is no longer one of them — it is the separate,
+        // later, upload-access decision, and telling someone to wait for it
+        // now stalls them in front of a key they could already fetch. The
+        // missing-name hint (#1255) rides along last: it is about how a DOI
+        // will cite this person, not about whether the account works.
         next_steps: [
           emailSent
             ? "Check your email for a verification link"
             : "Verification email failed to send. Use 'nemar auth resend-verification' to try again",
           ...(emailSent ? ["Click the link to verify your email address"] : []),
-          "Wait for admin approval",
-          "Once approved, run 'nemar auth retrieve-key' to get your API key",
+          "Run 'nemar auth retrieve-key' to get your API key",
+          "Run 'nemar auth login' to sign in with it",
           ...(researcherName === "missing"
             ? [
                 "No researcher name is on file; DOIs cannot cite you until your ORCID record shows your name publicly",
@@ -509,8 +517,12 @@ authRoutes.get("/verify", async (c) => {
   </div>
 
   <div style="background: #f9fafb; padding: 30px; border-radius: 12px;">
-    <p>Your NEMAR account is ${user.status === "approved" ? "approved and ready to use" : "awaiting admin approval"}.</p>
-    ${user.status === "approved" ? "<p>Use <code style='background: #e5e7eb; padding: 2px 6px; border-radius: 4px;'>nemar auth login</code> to sign in with your API key.</p>" : "<p>You'll receive an email with instructions to retrieve your API key once approved.</p>"}
+    <p>Your NEMAR account is ${user.status === "revoked" ? "no longer active" : "active and ready to use"}.</p>
+    ${
+      user.status === "revoked"
+        ? "<p>Contact a NEMAR administrator if you believe this is an error.</p>"
+        : "<p>Run <code style='background: #e5e7eb; padding: 2px 6px; border-radius: 4px;'>nemar auth retrieve-key</code> to get your API key, then <code style='background: #e5e7eb; padding: 2px 6px; border-radius: 4px;'>nemar auth login</code> to sign in with it.</p>"
+    }
   </div>
 
   <p style="color: #9ca3af; font-size: 12px; margin-top: 40px;">
@@ -559,6 +571,39 @@ authRoutes.get("/verify", async (c) => {
     .bind(user.id, user.username)
     .run();
 
+  // The account is now active (ADR 0040 phase 2), so this is the moment the
+  // API key becomes retrievable — and therefore the moment the mail that
+  // explains how to retrieve it belongs. It used to be sent at approval,
+  // which is no longer when the key becomes available. Best-effort: a mail
+  // failure must not undo a verification that has already committed, and the
+  // user can still run `nemar auth retrieve-key` without ever seeing it.
+  //
+  // Whether it actually went is tracked, because the success page below is
+  // the ONLY other place this user is told how to get their key. Promising
+  // an email that was never sent (delivery fenced in dev, RESEND_API_KEY
+  // unset, Resend refusing) leaves them waiting on an inbox instead of
+  // running one command.
+  let keyEmailSent = false;
+  try {
+    if (c.env.RESEND_API_KEY) {
+      const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
+      await sendKeyReadyEmail(
+        user.email,
+        user.username,
+        c.env.RESEND_API_KEY,
+        fromEmail,
+        replyTo,
+        isDev,
+        c.env,
+      );
+      keyEmailSent = true;
+    } else {
+      console.error(`RESEND_API_KEY unset; key-ready email not sent for user id=${user.id}`);
+    }
+  } catch (emailError) {
+    console.error("Failed to send key-ready email:", emailError);
+  }
+
   // Notify admins who have user_approval notifications enabled
   try {
     const adminEmails = await getAdminEmailsForCategory(db, "user_approval");
@@ -567,6 +612,7 @@ authRoutes.get("/verify", async (c) => {
       await sendAdminNotificationEmail(
         adminEmails,
         {
+          id: user.id,
           username: user.username,
           email: user.email,
           github_username: user.github_username,
@@ -609,17 +655,21 @@ authRoutes.get("/verify", async (c) => {
       </div>
       <div style="display: flex; align-items: flex-start; margin-bottom: 15px;">
         <span style="background: #f59e0b; color: white; border-radius: 50%; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; margin-right: 12px; flex-shrink: 0; font-size: 12px;">2</span>
-        <span><strong>Admin review</strong> - An admin will review your request</span>
+        <span><strong>Get your API key</strong> - Run <code>nemar auth retrieve-key</code>, then <code>nemar auth login</code></span>
       </div>
       <div style="display: flex; align-items: flex-start;">
         <span style="background: #e5e7eb; color: #6b7280; border-radius: 50%; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; margin-right: 12px; flex-shrink: 0; font-size: 12px;">3</span>
-        <span><strong>Get API key</strong> - Once approved, run <code>nemar auth retrieve-key</code> to get your API key</span>
+        <span><strong>To upload</strong> - Run <code>nemar sandbox</code> for the training run, and ask an admin for upload access</span>
       </div>
     </div>
   </div>
 
   <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">
-    You can close this page. We'll email you when your account is approved.
+    You can close this page. Your account is active${
+      keyEmailSent
+        ? "; we've emailed you the steps to retrieve your API key."
+        : " — run <code>nemar auth retrieve-key</code> to get your API key."
+    }
   </p>
 
   <p style="color: #9ca3af; font-size: 12px; margin-top: 40px;">
@@ -686,14 +736,11 @@ authRoutes.post("/login", zValidator("json", loginSchema), async (c) => {
     return c.json({ error: "Invalid API key" }, 401);
   }
 
-  if (result.status !== "approved") {
-    return c.json(
-      {
-        error: "Account not approved",
-        status: result.status,
-      },
-      403,
-    );
+  // ADR 0040 phase 2: an API key is issued at `verified`, so logging in with
+  // one has to work at `verified` too. `pending` and `revoked` are refused
+  // with the shared body (services/account-tier.ts).
+  if (!isActiveAccountStatus(result.status)) {
+    return c.json(inactiveAccountBody(result.status), 403);
   }
 
   // Update last_used_at
@@ -779,7 +826,7 @@ authRoutes.post("/resend-verification", zValidator("json", resendSchema), async 
 });
 
 // ============================================================================
-// Retrieve API Key (approved users only, requires email + password)
+// Retrieve API Key (verified or approved accounts, requires email + password)
 // ============================================================================
 
 const retrieveKeySchema = z.object({
@@ -789,8 +836,12 @@ const retrieveKeySchema = z.object({
 
 /**
  * POST /auth/retrieve-key - Retrieve API key using email and password.
- * Only works for approved users. Returns the existing API key prefix
- * and generates a new key if needed (e.g., first retrieval after approval).
+ *
+ * Works from `verified` (ADR 0040 phase 2): the API key is base-tier, and
+ * this route is where it is minted — nothing creates a token at approval, so
+ * a legacy `verified` row with no token gets one here on first call, exactly
+ * as an approved row always did. Returns the existing key's prefix (and a 409)
+ * when one was already issued.
  */
 authRoutes.post("/retrieve-key", zValidator("json", retrieveKeySchema), async (c) => {
   const { email, password } = c.req.valid("json");
@@ -821,19 +872,11 @@ authRoutes.post("/retrieve-key", zValidator("json", retrieveKeySchema), async (c
     return c.json({ error: "Invalid email or password" }, 401);
   }
 
-  if (user.status !== "approved") {
-    return c.json(
-      {
-        error: "Account not approved",
-        message:
-          user.status === "pending"
-            ? "Please verify your email first"
-            : user.status === "verified"
-              ? "Your account is awaiting admin approval"
-              : "Your account access has been revoked",
-      },
-      403,
-    );
+  // ADR 0040 phase 2: the key belongs to the base tier, so `verified` is
+  // enough. Admin approval is the upload decision and happens later, against
+  // an account that already holds a key.
+  if (!isActiveAccountStatus(user.status)) {
+    return c.json(inactiveAccountBody(user.status), 403);
   }
 
   // Check if user has an active (non-revoked, non-expired) token
@@ -848,7 +891,8 @@ authRoutes.post("/retrieve-key", zValidator("json", retrieveKeySchema), async (c
     .first<{ id: number; api_key_prefix: string }>();
 
   if (!existingToken) {
-    // No active token; generate a new one (e.g., first login after approval)
+    // No active token; generate a new one (the first retrieval after email
+    // verification, or a legacy `verified` row that predates ADR 0040)
     const { apiKey, apiKeyPrefix } = generateApiKey();
     const hashedKey = await hashApiKey(apiKey);
 
@@ -929,10 +973,12 @@ authRoutes.post("/request-key-regeneration", zValidator("json", regenRequestSche
     .bind(email)
     .first<{ id: number; username: string; email: string; status: string }>();
 
-  if (!user || user.status !== "approved") {
+  // Regeneration follows the key: it is issuable at `verified` (ADR 0040
+  // phase 2), so losing it must be recoverable at `verified` too.
+  if (!user || !isActiveAccountStatus(user.status)) {
     // Intentionally vague
     return c.json({
-      message: "If an approved account exists with this email, a verification link will be sent",
+      message: "If an active account exists with this email, a verification link will be sent",
     });
   }
 
@@ -971,7 +1017,7 @@ authRoutes.post("/request-key-regeneration", zValidator("json", regenRequestSche
   }
 
   return c.json({
-    message: "If an approved account exists with this email, a verification link will be sent",
+    message: "If an active account exists with this email, a verification link will be sent",
   });
 });
 
@@ -1010,8 +1056,8 @@ authRoutes.get("/confirm-key-regeneration", async (c) => {
     return c.json({ error: "Invalid or expired token" }, 400);
   }
 
-  if (user.status !== "approved") {
-    return c.json({ error: "Account is not approved" }, 403);
+  if (!isActiveAccountStatus(user.status)) {
+    return c.json(inactiveAccountBody(user.status), 403);
   }
 
   // Check expiration

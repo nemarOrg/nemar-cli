@@ -3,22 +3,40 @@
 -- Run with: npx wrangler@latest d1 execute nemar-db-dev --remote --env dev -c backend/wrangler.toml --file scripts/seed-dev-db.sql
 
 -- Test users (all share the same bcrypt password hash; plaintext is in test/.env.test)
-INSERT OR IGNORE INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)
-VALUES ('test-owner', 'testOwner@nemar.org', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-owner-gh', 'approved', 'owner', 1, datetime('now'), NULL);
+--
+-- `service_access` is explicit on every 'approved' row and only on those, to
+-- hold ADR 0040's invariant: status = 'approved' <=> service_access = 1.
+-- Migration 0075 established it over the catalog and the approve/revoke routes
+-- maintain it, but a seed INSERT bypasses both -- an approved row seeded with
+-- the column's 0 default would be exactly the #1249 shape the ADR exists to
+-- remove, and 'test-user' would 403 on the E2E upload to nm099999.
+-- 'test-verified' is the base-tier fixture: verified, no grant, so it can
+-- authenticate and be refused by the upload gate rather than by the
+-- middleware. It deliberately holds no token row -- the CLI path to one is
+-- `nemar auth retrieve-key`, which since ADR 0040 phase 2 works from
+-- 'verified' and is itself worth exercising.
+--
+-- INSERT OR IGNORE means a re-run is a no-op for rows that already exist, so
+-- adding the column here does NOT backfill an existing dev row: migration
+-- 0075 rule (a) is what grants service_access to the approved rows already in
+-- the database. This is for a database seeded fresh AFTER 0075 ran, where
+-- nothing else would.
+INSERT OR IGNORE INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at, service_access)
+VALUES ('test-owner', 'testOwner@nemar.org', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-owner-gh', 'approved', 'owner', 1, datetime('now'), NULL, 1);
 
-INSERT OR IGNORE INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)
-VALUES ('test-admin', 'testAdmin@nemar.org', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-admin-gh', 'approved', 'admin', 1, datetime('now'), NULL);
+INSERT OR IGNORE INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at, service_access)
+VALUES ('test-admin', 'testAdmin@nemar.org', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-admin-gh', 'approved', 'admin', 1, datetime('now'), NULL, 1);
 
-INSERT OR IGNORE INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)
-VALUES ('test-user', 'test-user@nemar.test', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-user-gh', 'approved', 'member', 1, datetime('now'), NULL);
+INSERT OR IGNORE INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at, service_access)
+VALUES ('test-user', 'test-user@nemar.test', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-user-gh', 'approved', 'member', 1, datetime('now'), NULL, 1);
 
 -- Shared web-QA account (#1008): a normal member used to exercise upload and
 -- other researcher flows on test.nemar.org. It is on the non-production
 -- email-code allowlist and gets dev_code echoed, so anyone on the team can
 -- sign in without an inbox. Distinct from 'test-user' on purpose:
 -- test/api.test.ts authenticates with test-user@nemar.test and must not change.
-INSERT OR IGNORE INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)
-VALUES ('test-web', 'test@nemar.org', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-web-gh', 'approved', 'member', 1, datetime('now'), NULL);
+INSERT OR IGNORE INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at, service_access)
+VALUES ('test-web', 'test@nemar.org', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-web-gh', 'approved', 'member', 1, datetime('now'), NULL, 1);
 
 INSERT OR IGNORE INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)
 VALUES ('test-pending', 'test-pending@nemar.test', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-pending-gh', 'pending', 'member', 0, NULL, NULL);

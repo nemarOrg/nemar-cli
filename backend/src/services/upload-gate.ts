@@ -8,10 +8,15 @@
  * holds it and `status='approved'` always does. Sandbox uploads are exempt (they
  * are the capped training playground).
  *
- * The gate itself is unchanged by ADR 0040 and needs nothing from phase 2: it
- * reads `service_access`, never `status`. What phase 2 (#1252) adds is the rest
- * of what `verified` is supposed to unlock — the API key, the sandbox routes,
- * and the login paths, all of which still require `status='approved'` today.
+ * The gate reads `service_access`, never `status`, which is what let phase 2
+ * widen every authenticated path to `verified` without widening upload.
+ *
+ * Phase 2 adds the CHANNEL to the create-time gate. Sandbox training is a CLI
+ * exercise — `nemar sandbox` drives a real create/upload/finalize cycle
+ * against a capped throwaway dataset — and there is no browser equivalent, so
+ * requiring it of a web upload would gate the dashboard on a command the
+ * dashboard cannot run. A browser upload is therefore gated on the admin
+ * grant alone; the CLI keeps both gates.
  *
  * Pure so the decision (and its ordering) is unit-testable without a live
  * backend; every real-upload entry point routes through these helpers so the
@@ -41,16 +46,46 @@ export const SANDBOX_TRAINING_ERROR = {
 export type UploadGateBody = typeof SERVICE_ACCESS_ERROR | typeof SANDBOX_TRAINING_ERROR;
 
 /**
- * Create-time gate for a real dataset: requires service access first (the
- * authorization gate), then sandbox training (the how-to gate). Returns the 403
- * body to send, or null when the upload is allowed.
+ * Which client is uploading. "cli" is the bearer-token path, "web" the
+ * dashboard's `nemar_session` cookie.
  */
-export function realDatasetCreateGate(user: {
-  service_access: number;
-  sandbox_completed: number;
-}): UploadGateBody | null {
+export type UploadChannel = "cli" | "web";
+
+/**
+ * Derive the channel from the credential that authenticated the request
+ * (`c.var.authMethod`, set by authMiddleware) rather than from anything the
+ * client sends. A header or body field naming the channel would be a
+ * self-declared exemption from sandbox training — "web" would be the one word
+ * a CLI user has to type to skip it.
+ *
+ * An absent authMethod falls to "cli", the stricter of the two: a route that
+ * somehow reaches the gate without the middleware having recorded a channel
+ * must not be handed the laxer one by default.
+ */
+export function uploadChannelForAuthMethod(
+  authMethod: "token" | "cookie" | undefined,
+): UploadChannel {
+  return authMethod === "cookie" ? "web" : "cli";
+}
+
+/**
+ * Create-time gate for a real dataset: requires service access first (the
+ * authorization gate), then — on the CLI channel only — sandbox training (the
+ * how-to gate). Returns the 403 body to send, or null when the upload is
+ * allowed.
+ *
+ * `channel` is required, not defaulted: a caller that forgets it should fail
+ * to compile rather than silently pick a policy.
+ */
+export function realDatasetCreateGate(
+  user: {
+    service_access: number;
+    sandbox_completed: number;
+  },
+  channel: UploadChannel,
+): UploadGateBody | null {
   if (!user.service_access) return SERVICE_ACCESS_ERROR;
-  if (!user.sandbox_completed) return SANDBOX_TRAINING_ERROR;
+  if (channel === "cli" && !user.sandbox_completed) return SANDBOX_TRAINING_ERROR;
   return null;
 }
 

@@ -12,6 +12,11 @@
  */
 
 import type { Context, Next } from "hono";
+import {
+  ACTIVE_ACCOUNT_STATUS_SQL_LIST,
+  inactiveAccountBody,
+  isActiveAccountStatus,
+} from "../services/account-tier";
 import { hashApiKey } from "../services/token";
 import { COOKIE_NAME, hashCookieId, parseCookieHeader } from "../services/web-session";
 import {
@@ -25,23 +30,41 @@ import {
 type AuthContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 
 /**
+ * The three things a `nemar_session` cookie can mean. A bare `null` used to
+ * cover all of them, which made a signed-in user whose account is not active
+ * indistinguishable from a browser carrying no cookie at all: `authMiddleware`
+ * answered "Missing Authorization header", which is both untrue and
+ * unactionable for someone looking at a dashboard they are signed into. The
+ * `inactive` case now carries the status so the caller can say what to do
+ * about it — the same answer the bearer path gives.
+ *
+ * `unresolved` is the genuinely anonymous case AND the degraded one (a D1
+ * hiccup, an unreadable role): both mean "this request has no cookie identity
+ * we can use", and neither is something to explain to the caller.
+ */
+type CookieAuthResult =
+  | { kind: "user"; user: AuthUser }
+  | { kind: "unresolved" }
+  | { kind: "inactive"; status: string };
+
+/**
  * Resolve a `nemar_session` cookie to a full AuthUser row.
  *
- * Returns null when the cookie is absent, the session row is missing /
- * revoked / expired, the user is not 'approved', or the role column is
- * unrecognised. The shape mirrors the bearer-token lookup so downstream
- * routes can `c.get("user")` without caring which auth path succeeded.
+ * The `user` shape mirrors the bearer-token lookup so downstream routes can
+ * `c.get("user")` without caring which auth path succeeded.
  *
- * `pending`/`verified` cookie holders are deliberately rejected here:
- * the rest of the API requires an approved account (the CLI middleware
- * already enforces this), and the dashboard uses `/auth/me` — not these
- * routes — to render the onboarding state. Accepting a pending cookie on
- * /datasets would let half-onboarded users mutate state.
+ * `verified` is accepted as of ADR 0040 phase 2: it is the base tier, and
+ * the dashboard's own routes (dataset list, /users/me) are part of it. What
+ * a base-tier account still cannot do is upload — every real-upload entry
+ * point routes through services/upload-gate.ts, which reads `service_access`
+ * and never `status`, so widening this does not widen upload. `pending` is
+ * still rejected, but LOUDLY (see CookieAuthResult): an unverified inbox has
+ * proved nothing, and the caller is told to go verify it.
  */
-async function resolveCookieUser(c: AuthContext): Promise<AuthUser | null> {
+async function resolveCookieUser(c: AuthContext): Promise<CookieAuthResult> {
   const cookieHeader = c.req.header("Cookie");
   const cookieIdRaw = parseCookieHeader(cookieHeader, COOKIE_NAME);
-  if (!cookieIdRaw) return null;
+  if (!cookieIdRaw) return { kind: "unresolved" };
 
   // Wrap the D1 lookup in a try/catch so a transient backend failure
   // degrades to "no cookie auth" instead of bubbling a 500 through
@@ -72,28 +95,31 @@ async function resolveCookieUser(c: AuthContext): Promise<AuthUser | null> {
         orcid: string | null;
         status: string;
       }>();
-    if (!row) return null;
-    if (row.status !== "approved") return null;
+    if (!row) return { kind: "unresolved" };
+    if (!isActiveAccountStatus(row.status)) return { kind: "inactive", status: row.status };
 
     const role = parseRole(row.role, row.username ?? row.email);
-    if (role === null) return null;
+    if (role === null) return { kind: "unresolved" };
 
     return {
-      id: row.id,
-      // Web-only signups (#569) may have NULL username / github_username
-      // until admin onboarding lifts them to a full account. Routes
-      // that only need `id` / `role` / `email` work as-is; routes that
-      // strictly require a GitHub login (e.g. repo creation) will
-      // fail naturally when they reach the GitHub API call.
-      username: row.username ?? "",
-      email: row.email,
-      github_username: row.github_username ?? "",
-      role,
-      orcid: row.orcid || undefined,
+      kind: "user",
+      user: {
+        id: row.id,
+        // Web-only signups (#569) may have NULL username / github_username
+        // until admin onboarding lifts them to a full account. Routes
+        // that only need `id` / `role` / `email` work as-is; routes that
+        // strictly require a GitHub login (e.g. repo creation) will
+        // fail naturally when they reach the GitHub API call.
+        username: row.username ?? "",
+        email: row.email,
+        github_username: row.github_username ?? "",
+        role,
+        orcid: row.orcid || undefined,
+      },
     };
   } catch (err) {
     console.error("[auth] resolveCookieUser: cookie lookup failed", err);
-    return null;
+    return { kind: "unresolved" };
   }
 }
 
@@ -166,18 +192,11 @@ export async function authMiddleware(c: AuthContext, next: Next) {
       return c.json({ error: "Invalid or expired API key" }, 401);
     }
 
-    if (result.status !== "approved") {
-      return c.json(
-        {
-          error: "Account not approved",
-          status: result.status,
-          message:
-            result.status === "verified"
-              ? "Your account is awaiting admin approval"
-              : "Your account access has been revoked",
-        },
-        403,
-      );
+    // ADR 0040 phase 2: `verified` is the base tier and holds a usable API
+    // key, so the token is accepted here and the upload gate — not this
+    // middleware — is what a base-tier account runs into.
+    if (!isActiveAccountStatus(result.status)) {
+      return c.json(inactiveAccountBody(result.status), 403);
     }
 
     // Validate role from DB
@@ -211,12 +230,19 @@ export async function authMiddleware(c: AuthContext, next: Next) {
   // -------------------------------------------------------------------
   // Path 2: nemar_session cookie (#572)
   // -------------------------------------------------------------------
-  const cookieUser = await resolveCookieUser(c);
-  if (cookieUser) {
-    c.set("user", cookieUser);
+  const cookieAuth = await resolveCookieUser(c);
+  if (cookieAuth.kind === "user") {
+    c.set("user", cookieAuth.user);
     c.set("authMethod", "cookie");
     await next();
     return;
+  }
+  // A real session for an account that cannot use the API yet. Falling
+  // through to the 401 below would tell a signed-in browser it sent no
+  // credentials at all; answer with the same 403 body the bearer path uses,
+  // which names the step that unblocks them.
+  if (cookieAuth.kind === "inactive") {
+    return c.json(inactiveAccountBody(cookieAuth.status), 403);
   }
 
   // -------------------------------------------------------------------
@@ -268,8 +294,8 @@ export async function ownerMiddleware(c: AuthContext, next: Next) {
  * Optional auth middleware - sets user if authenticated, but doesn't require it.
  *
  * When an Authorization: Bearer header is provided but the token cannot be
- * resolved to an approved user (revoked, expired, malformed, account not yet
- * approved, etc.), the middleware sets `authAttempted=true` so downstream
+ * resolved to an active user (revoked, expired, malformed, email not yet
+ * verified, etc.), the middleware sets `authAttempted=true` so downstream
  * routes that require auth on a flag (e.g., `GET /datasets?mine=true`) can
  * return a token-specific 401 instead of a generic "Authentication required"
  * — which is indistinguishable from "no header sent" to a confused CLI user
@@ -289,10 +315,14 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
   // not a practical concern, but proxies that lowercase headers will silently
   // degrade to unauthenticated rather than triggering the stale-token path.
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    // No bearer header — try the cookie before going anonymous.
-    const cookieUser = await resolveCookieUser(c);
-    if (cookieUser) {
-      c.set("user", cookieUser);
+    // No bearer header — try the cookie before going anonymous. An inactive
+    // cookie is treated exactly like no cookie here: this middleware never
+    // refuses a request, so the route's anonymous branch is the right
+    // outcome, and `authAttempted` stays reserved for bearer tokens (a
+    // cookie is opaque to the dashboard user; there is nothing to surface).
+    const cookieAuth = await resolveCookieUser(c);
+    if (cookieAuth.kind === "user") {
+      c.set("user", cookieAuth.user);
     }
     await next();
     return;
@@ -324,7 +354,7 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
     JOIN users u ON t.user_id = u.id
     WHERE t.api_key_hash = ?
       AND t.revoked_at IS NULL
-      AND u.status = 'approved'
+      AND u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}
       AND u.deleted_at IS NULL
   `,
   )

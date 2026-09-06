@@ -3,12 +3,15 @@
  * eligibility gate on POST /admin/approve/:username (#1012).
  *
  * Web/ORCID signups have username = NULL (migration 0026), so the
- * username-keyed approve route can never address them; and CLI-style
- * "pending means unverified email" does not apply to them (ORCID is the
- * identity proof, the collected email is deliberately unverified). These
- * tests pin that:
- *   - a pending ORCID-verified web row is approvable by id,
- *   - a revoked web row is re-approvable by id,
+ * username-keyed approve route can never address them. #1012 also let a
+ * `pending` ORCID-verified web row be approved on the reasoning that ORCID
+ * was its identity proof; ADR 0040 phase 2 narrowed that — approval now
+ * requires a verified EMAIL from every signup source, because ORCID proves
+ * the person and the code proves the inbox, and approval sits above the tier
+ * that needs both. These tests pin that:
+ *   - a web row that has verified its email is approvable by id,
+ *   - a revoked web row that has verified its email is re-approvable by id,
+ *   - a web row with an UNVERIFIED email is refused, ORCID or not,
  *   - a pending web row WITHOUT ORCID verification is refused,
  *   - a pending CLI row (unverified email) is still refused, by id too,
  *   - the username route's verified/revoked behavior is unchanged,
@@ -55,17 +58,26 @@ interface WebUserSeed {
   orcidVerified?: 0 | 1;
   /** ADR 0040: an `approved` row 409s only when it already holds the grant. */
   serviceAccess?: 0 | 1;
+  /** ADR 0040 phase 2: approval requires this, whatever the signup source. */
+  emailVerified?: 0 | 1;
 }
 
 /** Web/ORCID-style row: username NULL, signup_source 'web'. */
 function seedWebUser(
   email: string,
-  { status = "pending", orcidVerified = 1, serviceAccess = 0 }: WebUserSeed = {},
+  { status = "pending", orcidVerified = 1, serviceAccess = 0, emailVerified = 0 }: WebUserSeed = {},
 ) {
   db.run(
     `INSERT INTO users (email, status, signup_source, email_verified, orcid, orcid_verified, service_access)
-     VALUES (?, ?, 'web', 0, ?, ?, ?)`,
-    [email, status, orcidVerified ? "0000-0002-1825-0097" : null, orcidVerified, serviceAccess],
+     VALUES (?, ?, 'web', ?, ?, ?, ?)`,
+    [
+      email,
+      status,
+      emailVerified,
+      orcidVerified ? "0000-0002-1825-0097" : null,
+      orcidVerified,
+      serviceAccess,
+    ],
   );
   const row = db.query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?").get(email);
   if (!row) throw new Error(`seed failed for ${email}`);
@@ -110,8 +122,14 @@ beforeEach(async () => {
 });
 
 describe("POST /admin/approve/by-id/:id (#1012)", () => {
-  test("approves a pending ORCID-verified web signup (username NULL)", async () => {
-    const { id } = seedWebUser("orcid-pending@example.org");
+  test("approves a web signup that has verified its email (username NULL)", async () => {
+    // A web row that has verified its email is `verified`, not `pending` --
+    // both roads out of `pending` set the status with the flag. Seeded that
+    // way so the fixture is a state the product can actually produce.
+    const { id } = seedWebUser("orcid-pending@example.org", {
+      status: "verified",
+      emailVerified: 1,
+    });
     const res = await post(`/admin/approve/by-id/${id}`);
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -131,7 +149,10 @@ describe("POST /admin/approve/by-id/:id (#1012)", () => {
   });
 
   test("audit row is keyed on the stable numeric id when username is NULL", async () => {
-    const { id } = seedWebUser("orcid-audit@example.org");
+    const { id } = seedWebUser("orcid-audit@example.org", {
+      status: "verified",
+      emailVerified: 1,
+    });
     await post(`/admin/approve/by-id/${id}`);
     const audit = db
       .query<{ resource_id: string; details: string }, [string]>(
@@ -142,15 +163,34 @@ describe("POST /admin/approve/by-id/:id (#1012)", () => {
     expect(JSON.parse(audit?.details ?? "{}").approved_by).toBe("approveadmin");
   });
 
-  test("re-approves a revoked web account", async () => {
-    const { id } = seedWebUser("orcid-revoked@example.org", { status: "revoked" });
+  test("re-approves a revoked web account that had verified its email", async () => {
+    const { id } = seedWebUser("orcid-revoked@example.org", {
+      status: "revoked",
+      emailVerified: 1,
+    });
     const res = await post(`/admin/approve/by-id/${id}`);
     expect(res.status).toBe(200);
     expect(userRow(id)?.status).toBe("approved");
   });
 
+  test("refuses a web signup whose email is unverified, ORCID or not (ADR 0040)", async () => {
+    // The #1012 shape this narrows: ORCID-verified, admin willing, inbox
+    // never confirmed. Approval must not be the step that skips it.
+    const { id } = seedWebUser("orcid-unverified@example.org");
+    const res = await post(`/admin/approve/by-id/${id}`);
+    expect(res.status).toBe(400);
+    expect((await res.json()).message).toContain("verify their email");
+    expect(userRow(id)?.status).toBe("pending");
+    expect(userRow(id)?.service_access).toBe(0);
+  });
+
   test("refuses a pending web signup without ORCID verification", async () => {
-    const { id } = seedWebUser("web-no-orcid@example.org", { orcidVerified: 0 });
+    // Email verified, ORCID not: the second condition still bites, so the
+    // email check has not swallowed the ORCID one.
+    const { id } = seedWebUser("web-no-orcid@example.org", {
+      orcidVerified: 0,
+      emailVerified: 1,
+    });
     const res = await post(`/admin/approve/by-id/${id}`);
     expect(res.status).toBe(400);
     const body = await res.json();
@@ -185,6 +225,7 @@ describe("POST /admin/approve/by-id/:id (#1012)", () => {
     const { id } = seedWebUser("orcid-approved@example.org", {
       status: "approved",
       serviceAccess: 1,
+      emailVerified: 1,
     });
     const res = await post(`/admin/approve/by-id/${id}`);
     expect(res.status).toBe(409);
@@ -210,10 +251,15 @@ describe("POST /admin/approve/by-id/:id (#1012)", () => {
       await hashApiKey(memberKey),
       memberKey.slice(0, 8),
     );
-    const { id } = seedWebUser("orcid-notyours@example.org");
+    const { id } = seedWebUser("orcid-notyours@example.org", {
+      status: "verified",
+      emailVerified: 1,
+    });
     const res = await post(`/admin/approve/by-id/${id}`, memberKey);
     expect(res.status).toBe(403);
-    expect(userRow(id)?.status).toBe("pending");
+    // Unchanged by the refused call: still the tier it was seeded at, and
+    // still holding no grant.
+    expect(userRow(id)?.status).toBe("verified");
     expect(userRow(id)?.service_access).toBe(0);
   });
 });

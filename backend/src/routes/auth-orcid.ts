@@ -36,6 +36,7 @@ import { z } from "zod";
 import { auditLogStatement } from "../db/audit-log";
 import { timingSafeEqual } from "../lib/constant-time";
 import { webSessionMiddleware } from "../middleware/webSession";
+import { issueEmailVerificationCode } from "../services/email-verification";
 import {
   type OauthMode,
   PENDING_COOKIE_NAME,
@@ -502,17 +503,19 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
     // New web account: username/github_username/password_hash stay NULL
     // (allowed since 0026); name lives on the identity row.
     //
-    // Tiered access (website ADR 0010, #1013): ORCID sign-in auto-approves to BASE
-    // access (status='approved') -- view/dashboard only. This is safe because
-    // 'approved' no longer implies upload: uploading additionally requires
-    // `service_access` (granted 0 here), so a base user cannot consume compute
-    // until an admin grants service access after export-control review. The
-    // email is collected, not verified -- ORCID proves the iD, not the inbox;
-    // email_verified stays 0 (the account can still receive PIN codes).
+    // ADR 0040: this lands at `pending`, and NOTHING here auto-approves.
+    // ORCID proves the person; the email is collected, not verified, and the
+    // base tier needs both — every notification, the sign-in code and the
+    // upload-request thread go to that address. `email_verified` stays 0
+    // until the code mailed below is redeemed, at which point the account
+    // becomes `verified` (the base tier: browse, dashboard, settings). The
+    // upload grant, `service_access`, has exactly one writer and it is admin
+    // approval (phase 1) — never this route, which is why `approved_at` is
+    // NULL rather than a sign-up timestamp.
     const insert = await c.env.DB.prepare(
       `INSERT INTO users (email, orcid, orcid_verified, status, email_verified, signup_source,
          affiliation, city, country, approved_at, service_access)
-       VALUES (?, ?, 1, 'approved', 0, 'web', ?, ?, ?, datetime('now'), 0)`,
+       VALUES (?, ?, 1, 'pending', 0, 'web', ?, ?, ?, NULL, 0)`,
     )
       .bind(email, pending.orcid, affiliation || null, city, country)
       .run();
@@ -560,11 +563,42 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
     });
     // Canonical name from ORCID, after the response (best-effort; never blocks signup).
     afterResponse(c, refreshUserName(c.env, userId, pending.orcid));
-    // status "active" mirrors userStatusForDashboard('approved') used by
-    // /auth/me — the account has base access immediately (website ADR 0010).
-    return c.json({
-      user: { id: userId, email, role: "member", status: "active" },
-    });
+
+    // Mail the first verification code to the address just collected. The
+    // account exists and is signed in either way: an undeliverable code
+    // leaves a `pending` account that can ask for another from the dashboard
+    // (POST /auth/email/verify/request), which is a far better outcome than
+    // 500ing a sign-up whose user row and ORCID identity have already
+    // committed. `code_sent` tells the website whether to say "we've sent you
+    // a code" or offer the resend button immediately.
+    const issued = await issueEmailVerificationCode(c.env, userId, email);
+    if (!issued.ok) {
+      console.error(`[auth-orcid] finalize: verification code not sent (${issued.error})`);
+    }
+
+    // status "pending" mirrors userStatusForDashboard('pending') used by
+    // /auth/me: the dashboard renders its verify-your-email step from it
+    // (ADR 0040). It becomes "active" once that code is redeemed.
+    //
+    // `code_sent` is false when the non-production fence skipped the send, not
+    // just when one failed -- a dev sign-up that reports "check your inbox"
+    // for mail that was deliberately never sent is the same dead end as one
+    // that reports it for mail that bounced.
+    const body: Record<string, unknown> = {
+      user: { id: userId, email, role: "member", status: "pending" },
+      code_sent: issued.ok && !issued.skipped,
+    };
+    if (issued.ok && issued.skipped) body.dev_skip = "not_allowlisted";
+    if (issued.ok && issued.devCode) body.dev_code = issued.devCode;
+    // Same belt-and-braces as the auth-web code routes: a misconfigured
+    // ENVIRONMENT must turn a leak into a 500, not ship the code.
+    if (c.env.ENVIRONMENT === "production" && "dev_code" in body) {
+      console.error(
+        "[auth-orcid] FATAL: dev_code present in production response — refusing to ship the response",
+      );
+      return c.json({ error: "Sign-up failed" }, 500);
+    }
+    return c.json(body);
   } catch (err) {
     console.error("[auth-orcid] finalize failed", err);
     c.header("Set-Cookie", clearPending);

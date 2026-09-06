@@ -159,6 +159,25 @@ describe("POST /auth/signup name sourcing", () => {
     expect(body.next_steps.join(" ")).toContain("No researcher name is on file");
   });
 
+  test("the next steps are verify -> retrieve-key -> login, with no admin approval", async () => {
+    // Round 1's rebase put this file's Phase 5 additions and epic #1250
+    // phase 2's tier copy in the same object literal, and the conflict
+    // resolution had to keep both. Pinned here because a future merge that
+    // takes "theirs" wholesale would quietly reinstate "Wait for admin
+    // approval" -- advice that is now false, and that strands a new user in
+    // front of a key they could already fetch.
+    const res = await signup({});
+    const body = (await res.json()) as { researcher_name: string; next_steps: string[] };
+    const steps = body.next_steps.join(" | ");
+
+    expect(steps).toContain("nemar auth retrieve-key");
+    expect(steps).toContain("nemar auth login");
+    expect(steps).not.toContain("admin approval");
+    expect(steps).not.toContain("Once approved");
+    // Phase 5's field still rides alongside it.
+    expect(body.researcher_name).toBe("recorded");
+  });
+
   test("reports researcher_name 'recorded' when the name landed", async () => {
     const res = await signup({});
     const body = (await res.json()) as { researcher_name: string; next_steps: string[] };
