@@ -3,7 +3,7 @@
  *
  * `config.sandboxCompleted` is a CACHE of a fact the backend owns
  * (`users.sandbox_completed`), and it has THREE states, which the gates that
- * read it through `isSandboxCompleted()` could not tell apart:
+ * read it as a plain boolean could not tell apart:
  *
  *   `true`      the server said yes. Trusted: the fact never goes backwards
  *               without an explicit `nemar sandbox reset`, which writes here.

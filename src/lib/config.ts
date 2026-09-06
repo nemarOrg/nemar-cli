@@ -439,19 +439,6 @@ export function getConfig(): Config {
 }
 
 /**
- * Check if user has completed sandbox training, according to the local cache.
- *
- * NOT the gate (#1274). It collapses "the server said no" and "nobody has ever
- * asked on this machine" into one `false`, and refusing an upload on the
- * second of those is what told a trained user to train again. The gates go
- * through `resolveSandboxCompletion()` (lib/sandbox-status.ts), which keeps
- * the two apart and asks the backend when the cache has nothing to say.
- */
-export function isSandboxCompleted(): boolean {
-  return !!getConfig().sandboxCompleted;
-}
-
-/**
  * Set a configuration value on the active account
  */
 export function setConfig<K extends keyof Config>(key: K, value: Config[K]): void {
