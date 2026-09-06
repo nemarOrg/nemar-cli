@@ -340,12 +340,14 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     // now that they no longer track `status` one-for-one (ADR 0040); the
     // identity columns are here because a web/ORCID row has username = NULL
     // and is otherwise unidentifiable in the listing (#1251).
+    // upload_access_requested_at is what makes "awaiting approval" a fact
+    // rather than an inference (ADR 0042, #1253).
     let query = `
     SELECT
       id, username, email, github_username, status,
       email_verified, role, created_at, approved_at, revoked_at,
       signup_source, service_access, service_access_granted_at,
-      given_name, family_name, orcid
+      given_name, family_name, orcid, upload_access_requested_at
     FROM users
   `;
     const conditions: string[] = [];
@@ -361,6 +363,21 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       conditions.push("status = ?");
       params.push(status);
     }
+
+    // An OPEN upload request: asked, and not yet answered (ADR 0042, #1253).
+    // Phase 1 could only approximate this as "verified with no grant", which
+    // was every base-tier account whether or not anyone wanted to upload. The
+    // grant itself is what closes a request, so `service_access = 0` is the
+    // "still open" half rather than a second status column.
+    //
+    // Server-side, unlike the tier filters the CLI applies over the returned
+    // rows, because this one cannot be computed from what the listing used to
+    // return: the timestamp is new.
+    if (c.req.query("awaiting_approval") === "1") {
+      conditions.push("upload_access_requested_at IS NOT NULL");
+      conditions.push("service_access = 0");
+    }
+
     if (role) {
       if (!["owner", "admin", "member"].includes(role)) {
         return c.json({ error: "Invalid role. Must be: owner, admin, or member" }, 400);
