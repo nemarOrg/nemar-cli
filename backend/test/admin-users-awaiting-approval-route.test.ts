@@ -75,6 +75,27 @@ beforeEach(async () => {
   await seedAdmin();
 });
 
+describe("GET /admin/users/:username", () => {
+  test("carries the request stamp and the why text", async () => {
+    // The route selects `u.*`, so these arrive for free -- which is exactly why
+    // it is worth an assertion: nemarOrg/website#306 builds the admin review
+    // panel on that assumption, and a future narrowing of the SELECT to a named
+    // column list would drop them silently.
+    seedUser("asked", {
+      status: "verified",
+      serviceAccess: 0,
+      requestedAt: "2026-09-04T12:00:00Z",
+    });
+    db.query(
+      "UPDATE users SET description = 'Depositing a 64-channel EEG study.' WHERE username = 'asked'",
+    ).run();
+
+    const body = await (await get("/admin/users/asked")).json();
+    expect(body.user.upload_access_requested_at).toBe("2026-09-04T12:00:00Z");
+    expect(body.user.description).toBe("Depositing a 64-channel EEG study.");
+  });
+});
+
 describe("POST /admin/revoke closes an open upload request", () => {
   test("revoke clears both request stamps", async () => {
     // Without this, revoking a grantee puts them straight back into the admin

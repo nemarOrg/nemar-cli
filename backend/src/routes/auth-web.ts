@@ -162,10 +162,17 @@ function publicUser(row: {
   country: string | null;
   affiliation: string | null;
   service_access: boolean;
+  username: string | null;
+  service_access_granted_at: string | null;
+  upload_access_requested_at: string | null;
 }) {
   return {
     id: row.id,
     email: row.email,
+    // The dashboard used to fetch this from GET /users/me separately, purely
+    // because it was absent here (nemarOrg/website#306). NULL on a web/ORCID
+    // row until onboarding sets one.
+    username: row.username,
     role: row.role ?? "member",
     status: userStatusForDashboard(row.status) ?? row.status,
     // The two things the website needs to render the account's own state,
@@ -185,6 +192,14 @@ function publicUser(row: {
     country: row.country,
     affiliation: row.affiliation,
     service_access: row.service_access,
+    // The DATES behind the two upload-access states. Without them the
+    // dashboard can say "granted" and "requested" but not when, so it cannot
+    // tell a request made this morning from one made in March (ADR 0042).
+    // `upload_access_notified_at` is deliberately NOT here: whether an admin's
+    // copy of the email landed is an operational fact for the requester's
+    // retry logic and the admin queue, not something to render on a profile.
+    service_access_granted_at: row.service_access_granted_at,
+    upload_access_requested_at: row.upload_access_requested_at,
   };
 }
 
@@ -416,7 +431,8 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       .prepare(
         `SELECT id, email, role, status, email_verified,
                 given_name, family_name, orcid, orcid_verified,
-                github_username, city, country, affiliation, service_access
+                github_username, city, country, affiliation, service_access,
+                username, service_access_granted_at, upload_access_requested_at
            FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1`,
       )
       .bind(email)
@@ -438,6 +454,9 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
         affiliation: string | null;
         // NOT NULL DEFAULT 0 in D1 (0062), so plain number.
         service_access: number;
+        username: string | null;
+        service_access_granted_at: string | null;
+        upload_access_requested_at: string | null;
       }>();
     if (!userRow) {
       // No live users row for a matched code. Normally impossible
@@ -518,6 +537,9 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       country: userRow.country,
       affiliation: userRow.affiliation,
       service_access: userRow.service_access === 1,
+      username: userRow.username,
+      service_access_granted_at: userRow.service_access_granted_at,
+      upload_access_requested_at: userRow.upload_access_requested_at,
     };
 
     if (promoted) {
@@ -1039,7 +1061,8 @@ async function fetchPublicUserById(
     .prepare(
       `SELECT id, email, role, status, email_verified,
               given_name, family_name, orcid, orcid_verified,
-              github_username, city, country, affiliation, service_access
+              github_username, city, country, affiliation, service_access,
+              username, service_access_granted_at, upload_access_requested_at
          FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
     )
     .bind(userId)
@@ -1061,6 +1084,9 @@ async function fetchPublicUserById(
       affiliation: string | null;
       // NOT NULL DEFAULT 0 in D1 (0062), so plain number.
       service_access: number;
+      username: string | null;
+      service_access_granted_at: string | null;
+      upload_access_requested_at: string | null;
     }>();
   if (!row) return null;
   return publicUser({
@@ -1078,6 +1104,9 @@ async function fetchPublicUserById(
     country: row.country,
     affiliation: row.affiliation,
     service_access: row.service_access === 1,
+    username: row.username,
+    service_access_granted_at: row.service_access_granted_at,
+    upload_access_requested_at: row.upload_access_requested_at,
   });
 }
 

@@ -222,3 +222,48 @@ export const UPLOAD_ACCESS_ERROR_CODES: readonly string[] = uploadAccessErrorCod
  */
 export const UPLOAD_ACCESS_WHY_MIN_CHARS = 20;
 export const UPLOAD_ACCESS_WHY_MAX_CHARS = 500;
+
+/**
+ * The user payload the web dashboard reads: `GET /auth/me`, and the same shape
+ * echoed by `/auth/code/verify`, `PATCH /auth/profile` and `/auth/email/verify`
+ * (backend `publicUser`).
+ *
+ * NOT the same shape as {@link userSchema}, which is the CLI's `/users/me`
+ * envelope: this one reports `status` as the dashboard's two-state value
+ * ("active" / "pending"), carries the profile fields the Settings page edits,
+ * and omits everything about API tokens and sandbox state. They are two
+ * audiences, not one shape with optional halves.
+ *
+ * `username`, `service_access_granted_at` and `upload_access_requested_at`
+ * arrived in #1253 (nemarOrg/website#306): the dashboard was fetching the
+ * username from `/users/me` separately because it was absent here, and could
+ * report "granted" and "requested" but not when. `upload_access_notified_at` is
+ * deliberately absent -- whether an admin's copy of the email landed drives the
+ * requester's retry and the admin queue, and is not profile content.
+ */
+export const webUserSchema = z
+  .object({
+    id: z.number().int(),
+    email: z.string(),
+    username: z.string().nullable(),
+    role: z.string(),
+    status: z.string(),
+    email_verified: z.boolean(),
+    given_name: z.string().nullable(),
+    family_name: z.string().nullable(),
+    orcid: z.string().nullable(),
+    orcid_verified: z.boolean(),
+    github_username: z.string().nullable(),
+    city: z.string().nullable(),
+    country: z.string().nullable(),
+    affiliation: z.string().nullable(),
+    service_access: z.boolean(),
+    service_access_granted_at: z.string().nullable(),
+    upload_access_requested_at: z.string().nullable(),
+  })
+  .passthrough();
+export type WebUser = z.infer<typeof webUserSchema>;
+
+/** `GET /auth/me` — the user, or `{ user: null }` for an anonymous browser. */
+export const authMeResponseSchema = z.object({ user: webUserSchema.nullable() }).passthrough();
+export type AuthMeResponse = z.infer<typeof authMeResponseSchema>;

@@ -160,6 +160,15 @@ export interface WebSessionUser {
    *  access (upload + compute). Base-access accounts are false. Converted
    *  from the 0/1 D1 column at the read boundary like `orcid_verified`. */
   service_access: boolean;
+  /** NULL on every web/ORCID row until onboarding sets one (migration 0026).
+   *  Carried on the session so /auth/me can report it: the dashboard was
+   *  fetching it from GET /users/me separately, purely because it was absent
+   *  here (nemarOrg/website#306). */
+  username: string | null;
+  /** The DATES behind the two upload-access states (ADR 0042), so the
+   *  dashboard can render "granted"/"requested" as events rather than flags. */
+  service_access_granted_at: string | null;
+  upload_access_requested_at: string | null;
 }
 
 /** Look up an active session by cookie value, returning the joined
@@ -179,7 +188,8 @@ export async function findSessionByCookieId(
     `SELECT ws.id, ws.user_id, ws.remember, ws.expires_at, ws.last_used_at,
             u.email, u.role, u.status, u.email_verified,
             u.given_name, u.family_name, u.orcid, u.orcid_verified,
-            u.github_username, u.city, u.country, u.affiliation, u.service_access
+            u.github_username, u.city, u.country, u.affiliation, u.service_access,
+            u.username, u.service_access_granted_at, u.upload_access_requested_at
        FROM web_sessions ws
        JOIN users u ON u.id = ws.user_id
       WHERE ws.cookie_id_hash = ?
@@ -212,6 +222,12 @@ export async function findSessionByCookieId(
       affiliation: string | null;
       // NOT NULL DEFAULT 0 in D1 (0062), so plain number.
       service_access: number;
+      // NULL on every web/ORCID row until onboarding sets one (migration 0026).
+      username: string | null;
+      // The two dates the dashboard needs to render "granted"/"requested" as
+      // events rather than as flags (ADR 0042; nemarOrg/website#306).
+      service_access_granted_at: string | null;
+      upload_access_requested_at: string | null;
     }>();
   if (!row) return null;
 
@@ -246,6 +262,9 @@ export async function findSessionByCookieId(
       country: row.country,
       affiliation: row.affiliation,
       service_access: row.service_access === 1,
+      username: row.username,
+      service_access_granted_at: row.service_access_granted_at,
+      upload_access_requested_at: row.upload_access_requested_at,
     },
   };
 }
