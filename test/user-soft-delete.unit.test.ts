@@ -42,6 +42,7 @@ CREATE TABLE users (
   aws_secret_access_key_encrypted TEXT,
   aws_iam_username TEXT,
   orcid TEXT,
+  orcid_verified INTEGER NOT NULL DEFAULT 0,
   role TEXT DEFAULT 'member',
   email_preferences TEXT DEFAULT NULL,
   description TEXT,
@@ -76,10 +77,10 @@ function seed(db: Database) {
   // even if the mask SQL typo'd its name).
   db.run(
     `INSERT INTO users (id, username, email, password_hash, github_username, status, email_verified,
-        verification_token, verification_expires_at, role, orcid, description,
+        verification_token, verification_expires_at, role, orcid, orcid_verified, description,
         aws_iam_username, aws_access_key_id_encrypted, aws_secret_access_key_encrypted)
      VALUES (42, 'testuser', 'real@example.com', 'argon2hash', 'ghuser', 'approved', 1,
-        'verifytok', '2099-01-01T00:00:00Z', 'member', '0000-0001', 'a bio',
+        'verifytok', '2099-01-01T00:00:00Z', 'member', '0000-0002-1974-1293', 1, 'a bio',
         'iam-user', 'enc-key-id', 'enc-secret')`,
   );
   db.run("INSERT INTO tokens (user_id, api_key_hash, revoked_at) VALUES (42, 'tokenhash', NULL)");
@@ -121,11 +122,11 @@ describe("user tombstone (soft delete)", () => {
     expect(cols.some((c) => c.name === "deleted_at")).toBe(true);
   });
 
-  test("masks PII, zeroes email_verified, stamps deleted_at, revokes creds", () => {
+  test("masks PII, zeroes both verified flags, stamps deleted_at, revokes creds", () => {
     tombstone(db, 42);
     const row = db
       .query(
-        "SELECT email, username, github_username, password_hash, orcid, description, email_preferences, email_verified, verification_token, verification_expires_at, aws_iam_username, aws_access_key_id_encrypted, aws_secret_access_key_encrypted, status, deleted_at, revoked_at FROM users WHERE id = 42",
+        "SELECT email, username, github_username, password_hash, orcid, orcid_verified, description, email_preferences, email_verified, verification_token, verification_expires_at, aws_iam_username, aws_access_key_id_encrypted, aws_secret_access_key_encrypted, status, deleted_at, revoked_at FROM users WHERE id = 42",
       )
       .get() as Record<string, unknown>;
     expect(row.email).toBe("deleted+42@deleted.invalid");
@@ -133,6 +134,11 @@ describe("user tombstone (soft delete)", () => {
     expect(row.github_username).toBeNull();
     expect(row.password_hash).toBeNull();
     expect(row.orcid).toBeNull();
+    // Cleared WITH users.orcid (#1254, ADR 0043). Leaving it at 1 leaves the
+    // row asserting it proved an iD it no longer has -- observed on production
+    // row 42 after it was soft-deleted, and the same half-state that made 42
+    // and 43 two accounts for one person in the first place.
+    expect(row.orcid_verified).toBe(0);
     expect(row.description).toBeNull();
     expect(row.email_preferences).toBeNull();
     expect(row.email_verified).toBe(0);

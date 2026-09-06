@@ -69,7 +69,14 @@ function migrationFiles(): string[] {
     .sort();
 }
 
-/** Drop whole-line `--` comments; every statement is left byte-identical. */
+/**
+ * Drop whole-line `--` comments; every statement is left byte-identical.
+ *
+ * INVARIANT: no migration may contain a multi-line string literal whose
+ * continuation line starts with `--`. Such a line would be stripped as a
+ * comment and silently corrupt the string VALUE, and the catalogue diff below
+ * would not catch it -- that compares schema, not the data a migration writes.
+ */
 function stripFullLineComments(sql: string): string {
   return sql
     .split("\n")

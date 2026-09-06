@@ -748,6 +748,79 @@ describe("ORCID unlink releases the iD", () => {
 });
 
 // --------------------------------------------------------------------------
+// Passwordless sign-in against a legacy row
+// --------------------------------------------------------------------------
+
+describe("the email-code sign-in finds a legacy mixed-case row", () => {
+  // Same regression as the CLI routes, on the flow most of the production
+  // population actually uses. `emailFieldSchema` lowercases the REQUEST, so an
+  // exact-case lookup misses every row stored as typed -- and /code/request
+  // answers those with the masked "if your email is on file" 200 and then
+  // sends nothing, which is indistinguishable from a typo and unreportable.
+  //
+  // `@nemar.test` because that is the suffix the non-production fence admits
+  // for the dev_code echo (services/auth-code.ts), which is what lets the
+  // whole request -> verify round trip run here without an inbox.
+  const LEGACY = "Legacy.User@Nemar.test";
+  const LOWERCASE = "legacy.user@nemar.test";
+
+  function seedLegacyWebRow(): number {
+    return seedUser(LEGACY, { orcid: OTHER_ORCID });
+  }
+
+  async function codeRequest(email: string): Promise<Response> {
+    return app.request(
+      "/auth/code/request",
+      {
+        method: "POST",
+        headers: { Origin: ORIGIN, "content-type": "application/json" },
+        body: JSON.stringify({ email }),
+      },
+      env(),
+    );
+  }
+
+  test("request issues a real code instead of the silent skip", async () => {
+    seedLegacyWebRow();
+    const res = await codeRequest(LOWERCASE);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { dev_code?: string; dev_skip?: string };
+    // `dev_skip: "unregistered"` is the exact symptom: the route decided no
+    // such account exists and returned the masked 200 having sent nothing.
+    expect(body.dev_skip).toBeUndefined();
+    expect(body.dev_code).toMatch(/^\d{6}$/);
+  });
+
+  test("verify then signs the legacy row in", async () => {
+    const id = seedLegacyWebRow();
+    const code = ((await (await codeRequest(LOWERCASE)).json()) as { dev_code?: string }).dev_code;
+    const res = await app.request(
+      "/auth/code/verify",
+      {
+        method: "POST",
+        headers: { Origin: ORIGIN, "content-type": "application/json" },
+        body: JSON.stringify({ email: LOWERCASE, code, remember: false }),
+      },
+      env(),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { user: { id: number } };
+    expect(body.user.id).toBe(id);
+  });
+
+  test("an address matching no account still gets the silent skip", async () => {
+    // The guard against a lookup so loose it stops distinguishing anything --
+    // and against losing the #595 no-enumeration property while fixing this.
+    seedLegacyWebRow();
+    const res = await codeRequest("nobody@nemar.test");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { dev_code?: string; dev_skip?: string };
+    expect(body.dev_skip).toBe("unregistered");
+    expect(body.dev_code).toBeUndefined();
+  });
+});
+
+// --------------------------------------------------------------------------
 // PATCH /auth/profile
 // --------------------------------------------------------------------------
 

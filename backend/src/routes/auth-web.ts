@@ -227,8 +227,15 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
     // silently fail; the dashboard surfaces an "if your email is on
     // file, you'll get a code shortly" copy and a CTA pointing typo'd
     // users at the CLI sign-up (companion issue on nemarOrg/website).
+    // COLLATE NOCASE (ADR 0043): the schema lowercases the REQUEST, but the
+    // rows it has to match were stored exactly as typed -- that is most of the
+    // production catalog. An exact-case lookup sends every one of those people
+    // the masked "if your email is on file" 200 and then silently sends no
+    // code, which is indistinguishable from a typo and unreportable.
     const existing = await db
-      .prepare("SELECT status, role FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1")
+      .prepare(
+        "SELECT status, role FROM users WHERE email = ? COLLATE NOCASE AND deleted_at IS NULL LIMIT 1",
+      )
       .bind(email)
       .first<{ status: string; role: string | null }>();
 
@@ -425,13 +432,17 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       return c.json({ error: "Invalid or expired code" }, 401);
     }
 
+    // COLLATE NOCASE for the same reason as /code/request (ADR 0043): the code
+    // was issued against the normalised address, and the row that owns it may
+    // be stored mixed-case. Without this a legacy user could receive a code
+    // and still not be able to redeem it.
     const userRow = await db
       .prepare(
         `SELECT id, email, role, status, email_verified,
                 given_name, family_name, orcid, orcid_verified,
                 github_username, city, country, affiliation, service_access,
                 username, service_access_granted_at, upload_access_requested_at
-           FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1`,
+           FROM users WHERE email = ? COLLATE NOCASE AND deleted_at IS NULL LIMIT 1`,
       )
       .bind(email)
       .first<{
