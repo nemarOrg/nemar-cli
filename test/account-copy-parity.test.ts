@@ -15,18 +15,40 @@
  * documented in account-copy.ts and enforced below: every value is a plain
  * string literal.
  *
- * **The extractor is proved on THIS file, which is the same shape.** Nobody
- * running the suite in CI has a website checkout, so the reader that will be
- * pointed at a file they cannot see is first pointed at one they can.
+ * **The extractor is proved on THIS file, which is the same shape.** A
+ * developer running the suite may have no website checkout at all, so the
+ * reader that will be pointed at a file they cannot see is first pointed at one
+ * they can — and those assertions run either way.
  *
- * **An absent checkout skips, it does not fail.** CI clones only this repo.
+ * **CI IS THE POINT, and it used to be excluded from it.** This block ended in
+ * an early `return` when no website checkout was found, so the parity claim was
+ * enforced on developer machines and nowhere else — a green required check that
+ * had never once compared the two files. The `unit-pure` job now sparse-checks
+ * out `nemarOrg/website`'s `src/lib/account-copy.ts` (public, no token) and
+ * names it in `NEMAR_WEBSITE_ACCOUNT_COPY`.
+ *
+ * So there are two modes, and the difference between them is deliberate:
+ *
+ *   `NEMAR_WEBSITE_ACCOUNT_COPY` set   that path IS the contract. A file that
+ *                                      is not there FAILS, naming the path and
+ *                                      the variable — because the only way to
+ *                                      reach it is a checkout step that broke,
+ *                                      and a silent skip would hand the check
+ *                                      straight back to nobody.
+ *   unset                              search the sibling checkouts a developer
+ *                                      is likely to have. Absent is a VISIBLE
+ *                                      skip (bun's `describe.skipIf`), not a
+ *                                      pass: a skipped test is reported as
+ *                                      skipped, and an early `return` is
+ *                                      reported as success.
+ *
  * The website's own `test/account-copy-drift.test.ts` is the mirror image of
- * this file and skips the same way.
+ * this file, and is getting the same treatment via `NEMAR_CLI_ACCOUNT_COPY`.
  */
 
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { ACCOUNT_COPY } from "../shared/contract/account-copy.js";
 import {
   UPLOAD_ACCESS_WHY_MAX_CHARS,
@@ -43,11 +65,26 @@ const CONTRACT_FILE = join(REPO_ROOT, "shared", "contract", "account-copy.ts");
  * WORKTREE (`account-tiers-phase8/`, `epic-account-tiers/`, ...) rather than
  * `nemar-cli/` itself — so the search is one level up from the repo root
  * whatever the root is called.
+ *
+ * Only consulted when {@link WEBSITE_ENV_VAR} is unset; CI names the file
+ * outright rather than hoping it landed somewhere on this list.
  */
 const WEBSITE_CANDIDATES = [
   join(REPO_ROOT, "..", "website", "src", "lib", "account-copy.ts"),
   join(REPO_ROOT, "..", "..", "website", "src", "lib", "account-copy.ts"),
 ];
+
+/** Set by the `unit-pure` job to the sparse checkout it made. A relative value
+ *  is resolved against the repo root, which is the workflow's working
+ *  directory. */
+const WEBSITE_ENV_VAR = "NEMAR_WEBSITE_ACCOUNT_COPY";
+const declaredRaw = process.env[WEBSITE_ENV_VAR];
+const DECLARED_PATH =
+  declaredRaw && declaredRaw.trim() !== ""
+    ? isAbsolute(declaredRaw)
+      ? declaredRaw
+      : join(REPO_ROOT, declaredRaw)
+    : null;
 
 /**
  * Pull `"key": "value"` pairs out of a TypeScript source file.
@@ -125,19 +162,46 @@ describe("the copy table's own rules", () => {
   });
 });
 
-describe("website parity", () => {
-  const found = WEBSITE_CANDIDATES.find((path) => existsSync(path));
+/** Where the website's table is, or null when nobody has told us and none of
+ *  the usual sibling checkouts is present. A DECLARED path counts as found
+ *  whether or not it exists — the existence check is a failing assertion, not a
+ *  reason to skip. */
+const FOUND = DECLARED_PATH ?? WEBSITE_CANDIDATES.find((path) => existsSync(path)) ?? null;
+const NO_CHECKOUT = FOUND === null;
+
+if (NO_CHECKOUT) {
+  console.info(
+    `[account-copy parity] skipping: no website checkout at ${WEBSITE_CANDIDATES.join(" or ")}, ` +
+      `and ${WEBSITE_ENV_VAR} is unset. CI sets it; this is the developer-machine path.`,
+  );
+}
+
+/**
+ * The website's table, or a failure that says exactly what to fix.
+ *
+ * The throw is the whole difference between this file and the version that
+ * silently returned: when CI has named a path, a file that is not there means
+ * the checkout step broke, and that must fail the job rather than quietly
+ * disable the check it exists to run.
+ */
+function websiteCopy(): Map<string, string> {
+  if (FOUND === null) throw new Error("unreachable: the parity block is skipped without a file");
+  if (!existsSync(FOUND)) {
+    throw new Error(
+      `${WEBSITE_ENV_VAR}=${declaredRaw} resolves to ${FOUND}, which does not exist. ` +
+        "That variable is the contract: CI points it at the sparse checkout of " +
+        "nemarOrg/website made by the unit-pure job. If that step changed or was removed, " +
+        "fix the workflow -- do not unset the variable to make this pass.",
+    );
+  }
+  return extractCopy(readFileSync(FOUND, "utf8"));
+}
+
+describe.skipIf(NO_CHECKOUT)("website parity", () => {
+  const found = FOUND as string;
 
   test("every shared key matches the website string for string", () => {
-    if (!found) {
-      // Not a failure: CI has no website checkout. The extractor and the
-      // comparison are covered above regardless.
-      console.info(
-        `[account-copy parity] skipped: no website checkout at ${WEBSITE_CANDIDATES.join(" or ")}`,
-      );
-      return;
-    }
-    const theirs = extractCopy(readFileSync(found, "utf8"));
+    const theirs = websiteCopy();
     const drifted: string[] = [];
     const absent: string[] = [];
     for (const key of SHARED_KEYS) {
@@ -159,11 +223,10 @@ describe("website parity", () => {
   });
 
   test("nothing the website carries is missing here", () => {
-    if (!found) return;
     // The other direction, and the one this repo can actually fix: a key the
     // website has and this contract does not is a sentence with no source of
     // truth. The website's own drift test fails on exactly this.
-    const theirs = extractCopy(readFileSync(found, "utf8"));
+    const theirs = websiteCopy();
     const unmirrored = [...theirs.keys()].filter((key) => !(key in ACCOUNT_COPY));
     expect(unmirrored, "Add these to shared/contract/account-copy.ts.").toEqual([]);
   });
@@ -174,8 +237,7 @@ describe("website parity", () => {
     // whoever added it is not looking.
     const cliOnly = Object.keys(ACCOUNT_COPY).filter((key) => key.startsWith("cli."));
     expect(cliOnly.length).toBeGreaterThan(0);
-    if (!found) return;
-    const theirs = extractCopy(readFileSync(found, "utf8"));
+    const theirs = websiteCopy();
     for (const key of cliOnly) expect(theirs.has(key)).toBe(false);
     for (const key of SHARED_KEYS) expect(theirs.has(key)).toBe(true);
   });
