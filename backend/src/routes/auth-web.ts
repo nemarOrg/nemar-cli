@@ -97,6 +97,7 @@ import {
   suggestUsername,
 } from "../services/username";
 import {
+  REREAD_USERNAME_SQL,
   pickUsernameForName,
   recordUsernameAssignment,
   usernameClaimStatement,
@@ -631,7 +632,7 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
     if (claimed && !usernameLanded) {
       try {
         const fresh = await db
-          .prepare("SELECT username, username_auto_assigned FROM users WHERE id = ? LIMIT 1")
+          .prepare(REREAD_USERNAME_SQL)
           .bind(userRow.id)
           .first<{ username: string | null; username_auto_assigned: number }>();
         if (fresh) {
@@ -639,6 +640,11 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
           currentAutoAssigned = flag(fresh.username_auto_assigned);
         }
       } catch (rereadErr) {
+        // Keeps the pre-race `userRow` values on the response rather than
+        // failing the sign-in over a read that is already a nudge's nudge: the
+        // client's very next `GET /auth/me` reads the row fresh, so a stale
+        // value here is at most one round trip old, and blocking a sign-in
+        // over it would be the wrong trade.
         console.error(
           `[auth-web] /code/verify: could not re-read the username of user id=${userRow.id} after a lost claim; reporting the row as read`,
           rereadErr,

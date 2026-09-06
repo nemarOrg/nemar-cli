@@ -32,7 +32,11 @@ import { authWebRoutes } from "../src/routes/auth-web";
 import { hashAuthCode } from "../src/services/auth-code";
 import { PENDING_COOKIE_NAME, encodeState, signPending } from "../src/services/orcid-auth";
 import { USERNAME_SUFFIX_LIMIT } from "../src/services/username";
-import { TAKEN_SQL, usernameClaimStatement } from "../src/services/username-assignment";
+import {
+  REREAD_USERNAME_SQL,
+  TAKEN_SQL,
+  usernameClaimStatement,
+} from "../src/services/username-assignment";
 import { issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -114,15 +118,28 @@ afterAll(() => {
  */
 let breakUsernameScan = false;
 
+/**
+ * When set, the lost-claim re-read (`REREAD_USERNAME_SQL`) is diverted the
+ * same way `breakUsernameScan` diverts `TAKEN_SQL` above: pointed at a column
+ * that does not exist, so SQLite raises at prepare time instead of the
+ * database quietly returning the row. Proves the re-read's own catch falls
+ * back to the pre-race values rather than reaching the route's outer catch.
+ */
+let breakUsernameReread = false;
+
 function env(): Bindings {
   const base = realD1(db);
   return {
     DB: {
       ...base,
       prepare(sql: string) {
-        return base.prepare(
-          breakUsernameScan && sql === TAKEN_SQL ? "SELECT no_such_column FROM users" : sql,
-        );
+        if (breakUsernameScan && sql === TAKEN_SQL) {
+          return base.prepare("SELECT no_such_column FROM users");
+        }
+        if (breakUsernameReread && sql === REREAD_USERNAME_SQL) {
+          return base.prepare("SELECT no_such_column FROM users");
+        }
+        return base.prepare(sql);
       },
     },
     ENVIRONMENT: "test",
@@ -239,6 +256,7 @@ const realError = console.error;
 beforeEach(() => {
   db = freshDb();
   breakUsernameScan = false;
+  breakUsernameReread = false;
   publicRecordName = { given: "Ada", family: "Lovelace" };
   logs = [];
   console.warn = (...a: unknown[]) => {
@@ -453,6 +471,39 @@ describe("POST /auth/code/verify", () => {
     const body = await res.json();
     expect(body.user.username).toBe("typed");
     expect(body.user.username_auto_assigned).toBe(false);
+  });
+
+  test("a failed lost-claim re-read still signs in with the pre-race row", async () => {
+    // Same race as the test above, but the re-read that is meant to recover
+    // from it is itself broken. The fallback has to hold: the sign-in already
+    // committed by the time this runs, so a broken re-read may not fail the
+    // login over a value that is a nudge's nudge -- it falls back to the
+    // pre-race `userRow` the request already read at the top.
+    const id = seedWebUser(EMAIL);
+    db.run(
+      `CREATE TRIGGER name_the_row_mid_signin_reread AFTER INSERT ON web_sessions
+       BEGIN UPDATE users SET username = 'typed' WHERE id = NEW.user_id; END`,
+    );
+    await plantCode(EMAIL, "123456");
+    breakUsernameReread = true;
+
+    const res = await codeVerify(EMAIL, "123456");
+
+    // Still a real session: a broken re-read must not cost anybody a login.
+    expect(res.status).toBe(200);
+    expect(res.headers.getSetCookie().some((ck) => ck.startsWith("nemar_session="))).toBe(true);
+
+    // The row already changed underneath this request...
+    expect(usernameOf(id)).toEqual({ username: "typed", auto: 0 });
+    // ...but the re-read that would have discovered that failed, so the
+    // response reports the row exactly as it was read at the top: no handle.
+    const body = await res.json();
+    expect(body.user.username).toBeNull();
+    expect(body.user.username_auto_assigned).toBe(false);
+    // An operator can still see it happened, with the account it happened to.
+    expect(logs.join("\n")).toContain(
+      `could not re-read the username of user id=${id} after a lost claim`,
+    );
   });
 
   test("the assignment is audited, with the door it came through", async () => {

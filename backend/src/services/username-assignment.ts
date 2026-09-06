@@ -90,6 +90,28 @@ export const CLAIM_USERNAME_SQL = `UPDATE users
 export const TAKEN_SQL = `SELECT username FROM users
    WHERE username = ? COLLATE NOCASE OR username LIKE ? ESCAPE '\\'`;
 
+/**
+ * `/auth/code/verify`'s lost-claim re-read (routes/auth-web.ts).
+ *
+ * A claim that loses its race leaves the response holding the row it read
+ * BEFORE the race, which is wrong in exactly the direction of "this account
+ * has no handle" when the truth just became "it does, from somewhere else."
+ * This is the one-shot fix for that: re-read the row after the sign-in has
+ * already committed.
+ *
+ * If the re-read itself fails, the caller falls back to the pre-race values
+ * rather than failing the sign-in -- the client's very next `GET /auth/me`
+ * reads the row fresh, so a stale value here is at most one round trip old,
+ * and blocking a sign-in over it would be the wrong trade.
+ *
+ * EXPORTED for the same reason as {@link TAKEN_SQL}: a test needs to point
+ * THIS statement -- and only this statement -- at something the database
+ * refuses, to prove that fallback actually holds rather than throwing past
+ * the route's outer catch.
+ */
+export const REREAD_USERNAME_SQL =
+  "SELECT username, username_auto_assigned FROM users WHERE id = ? LIMIT 1";
+
 /** What a suggestion attempt produced. `no_base` and `exhausted` are kept apart
  *  because they ask different things: no_base needs a name (or a human), while
  *  exhausted means a base exists and every variant of it is taken, which is an
