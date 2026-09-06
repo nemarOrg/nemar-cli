@@ -443,21 +443,6 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       return c.json({ error: "Invalid or expired code" }, 401);
     }
 
-    // Consume the code via a conditional UPDATE that succeeds only
-    // while `used_at IS NULL`. Two parallel verifies that both pass
-    // the hash compare would otherwise both issue sessions; the
-    // conditional update lets exactly one win and the other gets 401.
-    const consumeResult = await db
-      .prepare("UPDATE auth_codes SET used_at = datetime('now') WHERE id = ? AND used_at IS NULL")
-      .bind(row.id)
-      .run();
-    if ((consumeResult.meta?.changes ?? 0) === 0) {
-      // Lost the race to a concurrent verify, or another path
-      // invalidated the code between SELECT and here. Refuse without
-      // leaking the cause.
-      return c.json({ error: "Invalid or expired code" }, 401);
-    }
-
     // COLLATE NOCASE for the same reason as /code/request (ADR 0043): the code
     // was issued against the normalised address, and the row that owns it may
     // be stored mixed-case. Without this a legacy user could receive a code
@@ -523,12 +508,13 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
     // the first; whichever a user reaches first, the other becomes a no-op.
     // `approved` and `revoked` rows are never re-tiered by this.
     //
-    // The session row goes in the SAME transaction: the code was consumed
-    // above and cannot be replayed, so a session INSERT that failed on its
-    // own would leave a burned code, a possibly-promoted account, and no way
-    // in — and the retry would read "Invalid or expired code". Either the
-    // whole sign-in lands or none of it does. The session cookie is minted
-    // before the write and only sent once the batch has committed.
+    // The session row goes in the SAME transaction as the promotion: a session
+    // INSERT that failed on its own would leave a possibly-promoted account
+    // with no way in. Either the whole sign-in lands or none of it does, and
+    // the code that paid for it goes back (the catch below). The session
+    // cookie is minted before the write and only sent once the batch has
+    // committed. Preparing the statement is a pure build with no D1 write, so
+    // it can sit before the consume without opening a replay window.
     const prepared = await prepareSessionInsert(
       c.env,
       userRow.id,
@@ -549,13 +535,12 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
     // No name, no assignment: onboarding asks, and nothing is invented from the
     // email local part (ADR 0042).
     //
-    // THE SCAN IS WRAPPED, and it has to be. `pickUsernameForName` reads D1
-    // live, and by the time it runs the code has ALREADY been consumed by the
-    // conditional UPDATE above -- but the restore-the-code handler is the catch
-    // on the batch BELOW, not this one. A transient failure escaping here would
-    // reach the route's outer catch, answer a generic 500, and burn a code the
-    // user typed correctly. Assigning a username is a nudge and must never
-    // block a login, which is the contract every docstring in
+    // THE SCAN IS WRAPPED, and it still has to be. `pickUsernameForName` reads
+    // D1 live, so it can fail transiently. It no longer sits after the code is
+    // consumed -- the conditional UPDATE moved below it -- so an escaping
+    // failure would cost a login rather than a code; that is still the wrong
+    // answer. Assigning a username is a nudge and must never block a login,
+    // which is the contract every docstring in
     // services/username-assignment.ts states; so a failed scan signs the user
     // in with no assignment, and the sweep (or the next sign-in) picks the row
     // up.
@@ -579,6 +564,32 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
           pickErr,
         );
       }
+    }
+
+    // Consume the code via a conditional UPDATE that succeeds only while
+    // `used_at IS NULL`. Two parallel verifies that both pass the hash compare
+    // would otherwise both issue sessions; the conditional update lets exactly
+    // one win and the other gets 401.
+    //
+    // DELIBERATELY THE LAST THING BEFORE THE PROTECTED WRITE. It used to run
+    // immediately after the hash compare, which put the user row SELECT, the
+    // revoked check and prepareSessionInsert between the burn and the catch
+    // that restores it -- a transient failure in any of them reached the outer
+    // catch, answered a generic 500, and left a correctly-typed code spent
+    // (`/email/verify` has always had this order). The race guarantee is
+    // unchanged: it is the conditional UPDATE, not its position, that lets one
+    // verify win. The work above it is all reads, so a loser pays a little
+    // wasted effort and still gets its 401 here. A `revoked` or missing
+    // account now keeps its code too, which is right -- neither refusal is
+    // something the code could have been wrong about.
+    const consumeResult = await db
+      .prepare("UPDATE auth_codes SET used_at = datetime('now') WHERE id = ? AND used_at IS NULL")
+      .bind(row.id)
+      .run();
+    if ((consumeResult.meta?.changes ?? 0) === 0) {
+      // Lost the race to a concurrent verify, or another path invalidated the
+      // code between SELECT and here. Refuse without leaking the cause.
+      return c.json({ error: "Invalid or expired code" }, 401);
     }
 
     let promoted: boolean;

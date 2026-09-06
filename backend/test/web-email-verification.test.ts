@@ -201,6 +201,25 @@ function blockUserWrites(): void {
   );
 }
 
+/**
+ * Make every read of `users` fail, and let it be undone.
+ *
+ * `blockUserWrites` cannot do this: SQLite has no SELECT trigger, so a fault
+ * on the READ path has to come from the schema. Renaming the table makes the
+ * next `SELECT ... FROM users` fail to prepare with "no such table", which is
+ * the shape of a transient storage failure and is reversible -- every row
+ * survives the round trip, so the same request can be replayed once the fault
+ * clears. Still the real engine: nothing is stubbed, the statement genuinely
+ * fails.
+ */
+function hideUsersTable(): void {
+  db.run("ALTER TABLE users RENAME TO users_hidden");
+}
+
+function restoreUsersTable(): void {
+  db.run("ALTER TABLE users_hidden RENAME TO users");
+}
+
 function codeRow(email: string) {
   const row = db
     .query<{ id: number; used_at: string | null }, [string]>(
@@ -554,6 +573,55 @@ describe("when the write after the code is consumed fails", () => {
     expect(
       db.query<{ email: string }, [number]>("SELECT email FROM users WHERE id = ?").get(id)?.email,
     ).toBe(NEW_EMAIL);
+  });
+
+  test("/auth/code/verify does not burn a code when the account read fails", async () => {
+    // The window this closes: the code used to be consumed immediately after
+    // the hash compare, with the account SELECT, the revoked check and the
+    // session-statement build all sitting between the burn and the catch that
+    // restores it. A failure in any of them reached the outer catch, answered
+    // a generic 500, and left the user holding a correctly-typed code that
+    // would thereafter read "Invalid or expired code".
+    const id = seedWebUser(USER_EMAIL);
+    await plantCode(USER_EMAIL, null, "222222");
+    const planted = codeRow(USER_EMAIL).id;
+    hideUsersTable();
+
+    const res = await app.request(
+      "/auth/code/verify",
+      {
+        method: "POST",
+        headers: { Origin: ORIGIN, "content-type": "application/json" },
+        body: JSON.stringify({ email: USER_EMAIL, code: "222222", remember: false }),
+      },
+      env(),
+    );
+    expect(res.status).toBe(500);
+    // Nothing was signed in, and no cookie was handed out for a session that
+    // does not exist.
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM web_sessions").get()?.n).toBe(0);
+    expect(res.headers.getSetCookie().some((ck) => ck.startsWith("nemar_session="))).toBe(false);
+    // The point of the test: the code is still spendable.
+    expect(
+      db
+        .query<{ used_at: string | null }, [number]>("SELECT used_at FROM auth_codes WHERE id = ?")
+        .get(planted)?.used_at,
+    ).toBeNull();
+
+    // And spendable in practice, not just on paper.
+    restoreUsersTable();
+    const retry = await app.request(
+      "/auth/code/verify",
+      {
+        method: "POST",
+        headers: { Origin: ORIGIN, "content-type": "application/json" },
+        body: JSON.stringify({ email: USER_EMAIL, code: "222222", remember: false }),
+      },
+      env(),
+    );
+    expect(retry.status).toBe(200);
+    expect(userRow(id).status).toBe("verified");
+    expect(retry.headers.getSetCookie().some((ck) => ck.startsWith("nemar_session="))).toBe(true);
   });
 
   test("a code is NOT restored behind a newer one", async () => {
