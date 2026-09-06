@@ -66,7 +66,9 @@ async function withLocalOrcidPub<T>(fn: () => Promise<T>): Promise<T> {
     port: 0,
     fetch: () =>
       new Response(
-        JSON.stringify({ name: { "given-names": { value: "Ada" }, "family-name": { value: "Lovelace" } } }),
+        JSON.stringify({
+          name: { "given-names": { value: "Ada" }, "family-name": { value: "Lovelace" } },
+        }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       ),
   });
@@ -135,12 +137,16 @@ async function plantCode(
   email: string,
   userId: number | null,
   code: string,
-  { expiresIn = "+10 minutes", attempts = 0 }: { expiresIn?: string; attempts?: number } = {},
+  {
+    expiresIn = "+10 minutes",
+    attempts = 0,
+    createdIn = "+0 seconds",
+  }: { expiresIn?: string; attempts?: number; createdIn?: string } = {},
 ): Promise<void> {
   db.run(
-    `INSERT INTO auth_codes (email, code_hash, expires_at, user_id, attempts)
-     VALUES (?, ?, datetime('now', ?), ?, ?)`,
-    [email, await hashAuthCode(code, env()), expiresIn, userId, attempts],
+    `INSERT INTO auth_codes (email, code_hash, expires_at, user_id, attempts, created_at)
+     VALUES (?, ?, datetime('now', ?), ?, ?, datetime('now', ?))`,
+    [email, await hashAuthCode(code, env()), expiresIn, userId, attempts, createdIn],
   );
 }
 
@@ -162,6 +168,30 @@ function liveCodes(email: string): number {
       )
       .get(email)?.n ?? 0
   );
+}
+
+/**
+ * Make every UPDATE on `users` fail, for real, using SQLite's own trigger
+ * machinery — the same kind of fault injection the phase 1 tests use when
+ * they DROP the audit table. Nothing is mocked: the production statements run
+ * against a database that genuinely refuses them, which is the only way to
+ * reach the post-consumption failure branch of the two verify routes.
+ */
+function blockUserWrites(): void {
+  db.run(
+    `CREATE TRIGGER refuse_user_updates BEFORE UPDATE ON users
+     BEGIN SELECT RAISE(ABORT, 'user writes are blocked in this test'); END`,
+  );
+}
+
+function codeRow(email: string) {
+  const row = db
+    .query<{ id: number; used_at: string | null }, [string]>(
+      "SELECT id, used_at FROM auth_codes WHERE email = ? ORDER BY id DESC LIMIT 1",
+    )
+    .get(email);
+  if (!row) throw new Error(`no code for ${email}`);
+  return row;
 }
 
 beforeEach(() => {
@@ -203,7 +233,12 @@ describe("POST /auth/orcid/finalize", () => {
 
     const row = db
       .query<
-        { status: string; email_verified: number; approved_at: string | null; service_access: number },
+        {
+          status: string;
+          email_verified: number;
+          approved_at: string | null;
+          service_access: number;
+        },
         [string]
       >("SELECT status, email_verified, approved_at, service_access FROM users WHERE email = ?")
       .get(USER_EMAIL);
@@ -382,6 +417,103 @@ describe("POST /auth/email/verify", () => {
   });
 });
 
+describe("when the write after the code is consumed fails", () => {
+  test("/auth/email/verify says so, changes nothing, and puts the code back", async () => {
+    const id = seedWebUser(USER_EMAIL);
+    const cookie = await sessionCookie(id);
+    await plantCode(USER_EMAIL, id, "123456");
+    blockUserWrites();
+
+    const res = await post("/auth/email/verify", cookie, { code: "123456" });
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    // NOT the generic "Verification failed": the caller has to be able to
+    // tell "your code was wrong" from "your code was right and we dropped it".
+    expect(body.error).toBe("verification_incomplete");
+    expect(body.message).toContain("nothing was changed");
+
+    // The account is untouched...
+    const row = userRow(id);
+    expect(row.status).toBe("pending");
+    expect(row.email_verified).toBe(0);
+    // ...and the code they correctly typed still works, so the advice the
+    // message gives them is advice they can act on.
+    expect(codeRow(USER_EMAIL).used_at).toBeNull();
+  });
+
+  test("the restored code really is redeemable once the fault clears", async () => {
+    // The assertion above reads a column; this one proves the column means
+    // what it says by driving the same code back through the route.
+    const id = seedWebUser(USER_EMAIL);
+    const cookie = await sessionCookie(id);
+    await plantCode(USER_EMAIL, id, "123456");
+    blockUserWrites();
+    expect((await post("/auth/email/verify", cookie, { code: "123456" })).status).toBe(500);
+
+    db.run("DROP TRIGGER refuse_user_updates");
+
+    const res = await post("/auth/email/verify", cookie, { code: "123456" });
+    expect(res.status).toBe(200);
+    expect(userRow(id).status).toBe("verified");
+  });
+
+  test("/auth/code/verify says so, and issues no session", async () => {
+    const id = seedWebUser(USER_EMAIL);
+    await plantCode(USER_EMAIL, null, "222222");
+    blockUserWrites();
+
+    const res = await app.request(
+      "/auth/code/verify",
+      {
+        method: "POST",
+        headers: { Origin: ORIGIN, "content-type": "application/json" },
+        body: JSON.stringify({ email: USER_EMAIL, code: "222222", remember: false }),
+      },
+      env(),
+    );
+
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toBe("sign_in_incomplete");
+    // The session INSERT is in the same batch as the promotion, so the
+    // rollback takes it with it: no half-signed-in state, and no Set-Cookie
+    // for a session row that does not exist.
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM web_sessions").get()?.n).toBe(0);
+    expect(res.headers.getSetCookie().some((ck) => ck.startsWith("nemar_session="))).toBe(false);
+    expect(userRow(id).status).toBe("pending");
+    expect(codeRow(USER_EMAIL).used_at).toBeNull();
+  });
+
+  test("a code is NOT restored behind a newer one", async () => {
+    // Reviving a code that a rotation had retired would leave two live codes
+    // for one inbox, so the restore is skipped when a newer row exists.
+    //
+    // The fixture is deliberately inside-out: the redeemed code is the newest
+    // by TIMESTAMP (which is what the lookup orders by) while a later-id row
+    // sits behind it (which is what the guard tests, and what rotation
+    // actually produces). The real sequence -- a /request landing between
+    // this call's lookup and its restore -- is a race that cannot be staged
+    // from outside the route, so this stands in for it; without a fixture
+    // like this the guard has no coverage at all.
+    const id = seedWebUser(USER_EMAIL);
+    const cookie = await sessionCookie(id);
+    await plantCode(USER_EMAIL, id, "123456");
+    const redeemed = codeRow(USER_EMAIL).id;
+    await plantCode(USER_EMAIL, id, "999999", { createdIn: "-1 minute" });
+
+    blockUserWrites();
+    expect((await post("/auth/email/verify", cookie, { code: "123456" })).status).toBe(500);
+
+    // Spent and left spent: the user is told to request a new one, and the
+    // message says that too.
+    expect(
+      db
+        .query<{ used_at: string | null }, [number]>("SELECT used_at FROM auth_codes WHERE id = ?")
+        .get(redeemed)?.used_at,
+    ).not.toBeNull();
+  });
+});
+
 describe("POST /auth/email/verify/request", () => {
   test("issues a code for the session's own address and echoes it in non-production", async () => {
     const id = seedWebUser(USER_EMAIL);
@@ -503,9 +635,7 @@ describe("POST /auth/code/verify (the sign-in road to verified)", () => {
     expect(row.email_verified).toBe(0);
     // No session was issued either -- a revoked account must not end the
     // request holding a cookie.
-    expect(
-      db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM web_sessions").get()?.n,
-    ).toBe(0);
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM web_sessions").get()?.n).toBe(0);
   });
 
   test("an approved account signing in keeps its tier and re-notifies nobody", async () => {

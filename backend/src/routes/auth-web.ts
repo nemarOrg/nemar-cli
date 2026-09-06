@@ -479,18 +479,19 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       ]));
     } catch (writeErr) {
       // Distinct from the generic 500 below, and distinct in the log: the
-      // caller's one-time code is already spent, so "try again" is wrong
-      // advice and the operator needs the account id to see what state it is
-      // in. Nothing in the batch landed, so the account is exactly as it was.
+      // operator needs the account id to see what state it is in. Nothing in
+      // the batch landed, so the account is exactly as it was — and the code
+      // goes back, so the user can simply try the one they already have.
       console.error(
-        `[auth-web] /code/verify: sign-in transaction failed AFTER the code was consumed (user id=${userRow.id}); the code is spent and nothing was written`,
+        `[auth-web] /code/verify: sign-in transaction failed after the code was consumed (user id=${userRow.id}); nothing was written, restoring the code`,
         writeErr,
       );
+      await restoreConsumedCode(db, row.id, email);
       return c.json(
         {
           error: "sign_in_incomplete",
           message:
-            "Your code was accepted but the sign-in could not be completed, so nothing was changed. Request a new code and try again.",
+            "Your code was accepted but the sign-in could not be completed, so nothing was changed. Try again with the same code, or request a new one.",
         },
         500,
       );
@@ -811,6 +812,33 @@ async function recordFailedAttempt(
       .run();
   }
   return Math.max(0, MAX_CODE_ATTEMPTS - newAttempts);
+}
+
+/**
+ * Put a just-consumed code back, after the write it was consumed FOR failed.
+ *
+ * The consume is deliberately its own statement rather than part of the batch
+ * — it is the mutual-exclusion gate, and inside the transaction the loser of a
+ * race would go on to be promoted and handed a session. The cost is this
+ * window: a batch that throws leaves a spent code and nothing else, which
+ * would make the user's next attempt read "expired" for a code they had
+ * correctly just typed. Restoring it closes that.
+ *
+ * Skipped when a NEWER code exists for the address: `/…/request` rotates
+ * older codes by setting `used_at`, and reviving one behind a rotation would
+ * leave two live codes for one inbox. Best-effort — the caller is already on
+ * a failure path and a failed restore only costs the user a new code.
+ */
+async function restoreConsumedCode(db: D1Database, codeId: number, email: string): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE auth_codes SET used_at = NULL
+        WHERE id = ?
+          AND NOT EXISTS (SELECT 1 FROM auth_codes newer WHERE newer.email = ? AND newer.id > ?)`,
+    )
+    .bind(codeId, email, codeId)
+    .run()
+    .catch((err) => console.error("[auth-web] failed to restore a consumed code", err));
 }
 
 /**
@@ -1292,14 +1320,15 @@ authWebRoutes.post(
         ({ promoted } = await applyEmailVerification(db, webUser.id, "verify_endpoint"));
       } catch (writeErr) {
         console.error(
-          `[auth-web] /email/verify: verification write failed AFTER the code was consumed (user id=${webUser.id}); the code is spent and nothing was written`,
+          `[auth-web] /email/verify: verification write failed after the code was consumed (user id=${webUser.id}); nothing was written, restoring the code`,
           writeErr,
         );
+        await restoreConsumedCode(db, row.id, email);
         return c.json(
           {
             error: "verification_incomplete",
             message:
-              "Your code was accepted but the change could not be saved, so nothing was changed. Request a new code and try again.",
+              "Your code was accepted but the change could not be saved, so nothing was changed. Try again with the same code, or request a new one.",
           },
           500,
         );
