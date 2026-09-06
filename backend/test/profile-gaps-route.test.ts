@@ -80,6 +80,9 @@ interface Overrides {
   email_verified?: number;
   orcid_verified?: number;
   status?: string;
+  /** `member` by default. `admin`/`owner` are exempt from the `orcid_verified`
+   *  gap (#1271), which is the only thing this column changes here. */
+  role?: string;
   username_auto_assigned?: number;
 }
 
@@ -95,6 +98,7 @@ async function seedUser(overrides: Overrides = {}): Promise<number> {
     email_verified: 1,
     orcid_verified: 1,
     status: "verified",
+    role: "member",
     username_auto_assigned: 0,
     ...overrides,
   };
@@ -103,12 +107,13 @@ async function seedUser(overrides: Overrides = {}): Promise<number> {
                         given_name, family_name, github_username, city, country, affiliation,
                         orcid, orcid_verified, signup_source, service_access,
                         username_auto_assigned)
-     VALUES (?, ?, 'x', ?, 'member', ?, ?, ?, ?, ?, ?, 'Swartz Center',
+     VALUES (?, ?, 'x', ?, ?, ?, ?, ?, ?, ?, ?, 'Swartz Center',
              '0000-0002-1825-0097', ?, 'web', 0, ?)`,
   ).run(
     row.username,
     USER_EMAIL,
     row.status,
+    row.role,
     row.email_verified,
     row.given_name,
     row.family_name,
@@ -291,6 +296,8 @@ describe("one row, three answers", () => {
     const refusal = checkUploadAccessRequest(
       {
         email_verified: 0,
+        orcid_verified: 1,
+        role: "member",
         username: "arivers",
         given_name: "Ada",
         family_name: "Rivers",
@@ -306,6 +313,57 @@ describe("one row, three answers", () => {
     expect(web.profile_gaps.map((g) => g.field)).toEqual(["email_verified", "city"]);
   });
 
+  test("an unverified ORCID iD is the same one field on all three", async () => {
+    // The row this gate exists for: `nemar auth signup` takes a TYPED iD and
+    // leaves the flag at 0, so the request is refused until a browser handoff
+    // proves it (#1271). Nothing else about the account is wrong.
+    const id = await seedUser({ orcid_verified: 0 });
+    const answers = await allThree(id);
+    expect(answers.missing).toEqual(["orcid_verified"]);
+    expect(answers.usersMe).toEqual(answers.missing);
+    expect(answers.authMe).toEqual(answers.missing);
+  });
+
+  test("it takes its place in the order, between the name and the handle", async () => {
+    const id = await seedUser({ orcid_verified: 0, family_name: null, github_username: null });
+    const answers = await allThree(id);
+    expect(answers.missing).toEqual(["family_name", "orcid_verified", "github_username"]);
+    expect(answers.usersMe).toEqual(answers.missing);
+    expect(answers.authMe).toEqual(answers.missing);
+  });
+
+  test("an owner with no verified iD is not asked for one, anywhere", async () => {
+    // Interim (epic #1272): these accounts predate having a web-signup path of
+    // their own. The exemption has to hold on all three answers, or an operator
+    // is told one thing by the terminal and another by the request.
+    const id = await seedUser({ orcid_verified: 0, role: "owner" });
+    const answers = await allThree(id);
+    expect(answers.missing).toEqual([]);
+    expect(answers.usersMe).toEqual([]);
+    expect(answers.authMe).toEqual([]);
+  });
+
+  test("an admin is exempt from that row and from nothing else", async () => {
+    const id = await seedUser({ orcid_verified: 0, role: "admin", city: null });
+    const answers = await allThree(id);
+    expect(answers.missing).toEqual(["city"]);
+    expect(answers.usersMe).toEqual(["city"]);
+    expect(answers.authMe).toEqual(["city"]);
+  });
+
+  test("a role the column should not hold is a regular user, not an exemption", async () => {
+    // `users.role` has no CHECK constraint (migration 0009), so an unreadable
+    // value is constructible. Only one surface can observe such a row: on the
+    // token path `parseRole` answers null and `authMiddleware` refuses the
+    // credential as an account configuration error, while a cookie session
+    // resolves with no role at all. There it must fail CLOSED -- skipping the
+    // check on a value nobody recognises is how an exemption becomes a hole.
+    const id = await seedUser({ orcid_verified: 0, role: "Owner" });
+    expect((await usersMe()).status).toBe(500);
+    const web = webUserSchema.parse((await (await authMe(id)).json()).user);
+    expect(web.profile_gaps.map((g) => g.field)).toEqual(["orcid_verified"]);
+  });
+
   test("a complete row is refused for nothing and reports nothing", async () => {
     const id = await seedUser();
     const answers = await allThree(id);
@@ -318,11 +376,12 @@ describe("one row, three answers", () => {
     // Belt and braces on the refactor: the SELECT feeding the route could drop
     // a column and still return a plausible list. This computes the answer
     // straight from the row and compares.
-    await seedUser({ github_username: null, country: null });
+    await seedUser({ github_username: null, country: null, orcid_verified: 0 });
     const row = db
       .query<
         {
           status: string;
+          role: string | null;
           email_verified: number;
           orcid_verified: number;
           username: string | null;
@@ -334,13 +393,16 @@ describe("one row, three answers", () => {
         },
         [string]
       >(
-        `SELECT status, email_verified, orcid_verified, username, given_name, family_name,
+        `SELECT status, role, email_verified, orcid_verified, username, given_name, family_name,
                 github_username, city, country FROM users WHERE email = ?`,
       )
       .get(USER_EMAIL);
     if (!row) throw new Error("row vanished");
     const expected = computeProfileGaps({
       status: row.status,
+      // Narrowed here rather than imported, so the oracle does not borrow the
+      // production narrowing it is checking.
+      role: row.role === "owner" || row.role === "admin" || row.role === "member" ? row.role : null,
       email_verified: row.email_verified === 1,
       orcid_verified: row.orcid_verified === 1,
       username: row.username,
