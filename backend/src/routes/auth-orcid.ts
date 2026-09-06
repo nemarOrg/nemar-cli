@@ -2,20 +2,29 @@
  * ORCID SSO routes (#832), mounted under the same `/auth` prefix as the
  * passwordless flow in auth-web.ts.
  *
- *   GET  /auth/orcid/start       - set state cookie, 302 to ORCID authorize
- *   POST /auth/orcid/cli-start  - (token) mint a signed link/relink intent
- *   GET  /auth/orcid/cli-handoff - carry that intent into the ORCID flow
- *   GET  /auth/orcid/callback   - verify state, exchange code, then either
- *                                 sign in / link / hand off to email collection
- *   POST /auth/orcid/finalize   - finish a brand-new ORCID signup with an email
- *   POST /auth/orcid/unlink     - (token or cookie) remove the ORCID link
+ *   GET  /auth/orcid/start                - set state cookie, 302 to ORCID authorize
+ *   POST /auth/orcid/cli-start            - (token or cookie) mint a signed
+ *                                           link/relink intent
+ *   GET  /auth/orcid/cli-handoff          - name the account, ask the person
+ *   POST /auth/orcid/cli-handoff/continue - their answer: cookie, then ORCID
+ *   GET  /auth/orcid/callback             - verify state, exchange code, then
+ *                                           sign in / link / collect an email
+ *   POST /auth/orcid/finalize             - finish a new ORCID signup
+ *   POST /auth/orcid/unlink               - (token or cookie) remove the link
  *
  * CLI parity (#1266, ADR 0044): ORCID stays a browser flow, because a consent
  * screen cannot be shown in a terminal. What the CLI gets is `cli-start`,
  * which mints the SAME intent the website's POST /orcid/start mints — signed
  * this time, and carrying the account id, because the browser that finishes
- * the flow holds no NEMAR session for the callback to read. Unlink needs no
- * browser at all and takes a bearer token directly.
+ * the flow holds no NEMAR session for the callback to read.
+ *
+ * Three things bound what that signed intent can do, because it is a bearer
+ * capability for its ten minutes (PR #1269 review): the handoff SHOWS the
+ * person which account it names before they go to ORCID, a session for a
+ * DIFFERENT account is refused rather than overridden at both the handoff and
+ * the callback (`orcid_intent_account_mismatch`), and the intent is single-use
+ * -- a row in `orcid_link_intents` (migration 0078) the callback consumes.
+ * Unlink needs no browser at all and takes a bearer token directly.
  *
  * Linking is initiated via `GET /auth/orcid/start?mode=link` and completed in
  * the same callback (the callback links to whichever user the session cookie
@@ -49,11 +58,14 @@
 
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { z } from "zod";
 import { auditLogStatement } from "../db/audit-log";
 import { timingSafeEqual } from "../lib/constant-time";
+import { escapeHtml } from "../lib/escape";
 import { authMiddleware, resolveActingAccount } from "../middleware/auth";
 import { webSessionMiddleware } from "../middleware/webSession";
+import { maskEmail } from "../services/auth-code";
 import { issueEmailVerificationCode } from "../services/email-verification";
 import {
   emailFieldSchema,
@@ -67,6 +79,7 @@ import {
 } from "../services/identity";
 import {
   CLI_STATE_TTL_MS,
+  type CliOauthState,
   type OauthMode,
   type OauthState,
   PENDING_COOKIE_NAME,
@@ -92,6 +105,7 @@ import {
   verifyCliState,
   verifyPending,
 } from "../services/orcid-auth";
+import { profileRefusal } from "../services/profile";
 import {
   buildSessionCookie,
   isAllowedOrigin,
@@ -368,9 +382,131 @@ authOrcidRoutes.post("/orcid/start", webSessionMiddleware, (c) => {
 /** Where the browser lands once a CLI-initiated link finishes. */
 const CLI_LINK_LANDING = "/settings";
 
+/** One wording for the two ways this deployment can lack ORCID (no client
+ *  credentials, no signing key). Neither is anything the caller can act on. */
+const ORCID_UNAVAILABLE_MESSAGE = "ORCID linking is unavailable";
+
 const cliStartSchema = z.object({
   mode: z.enum(["link", "relink"]).optional(),
 });
+
+/**
+ * The account a CLI intent names, as the interstitial shows it.
+ *
+ * Read from the DATABASE by id, never from anything the browser sent: the
+ * point of the page is to let a person recognise (or fail to recognise) the
+ * account before they hand ORCID their consent.
+ */
+interface IntentAccount {
+  id: number;
+  username: string | null;
+  email: string;
+}
+
+/**
+ * Load the account for a CLI intent AND check the nonce is still usable
+ * (migration 0078). Null when the intent is spent, expired, or names an
+ * account that is gone or revoked.
+ *
+ * Deliberately does NOT consume: the interstitial and its confirm step both
+ * need to know the intent is live, and burning it before the browser has even
+ * reached ORCID would make a mistyped password a dead end.
+ */
+async function loadUsableIntent(
+  env: Bindings,
+  state: CliOauthState,
+): Promise<IntentAccount | null> {
+  const row = await env.DB.prepare(
+    `SELECT u.id, u.username, u.email
+       FROM orcid_link_intents i
+       JOIN users u ON u.id = i.user_id
+      WHERE i.nonce = ?
+        AND i.user_id = ?
+        AND i.consumed_at IS NULL
+        AND i.expires_at > datetime('now')
+        AND u.deleted_at IS NULL
+        AND u.status != 'revoked'
+      LIMIT 1`,
+  )
+    .bind(state.nonce, state.userId)
+    .first<IntentAccount>();
+  return row ?? null;
+}
+
+/**
+ * Consume a CLI intent, returning false when somebody already did.
+ *
+ * The conditional UPDATE is the mutual-exclusion gate: two completions of the
+ * same URL race here and exactly one sees `changes = 1`. Called once the
+ * callback knows which account it is acting for and before it writes anything,
+ * so a refusal downstream still burns the intent -- one browser completion per
+ * intent, whatever its outcome. The cost is that a failed link means re-running
+ * the CLI command, which is what the CLI already tells people to do.
+ */
+async function consumeIntent(env: Bindings, state: CliOauthState): Promise<boolean> {
+  const res = await env.DB.prepare(
+    `UPDATE orcid_link_intents SET consumed_at = datetime('now')
+      WHERE nonce = ? AND user_id = ? AND consumed_at IS NULL
+        AND expires_at > datetime('now')`,
+  )
+    .bind(state.nonce, state.userId)
+    .run();
+  return (res.meta?.changes ?? 0) > 0;
+}
+
+/**
+ * Whether a signed-in browser is signed in as somebody OTHER than the account
+ * the intent names.
+ *
+ * The rule this expresses is "refuse, never override" (PR #1269 review). An
+ * earlier draft let the signed intent silently win over the session, which is
+ * correct about WHOSE intent it is and wrong about what to do with the
+ * disagreement: the person is looking at a page that says one account while
+ * their browser says another, and guessing between them is how an
+ * account-linking CSRF stays invisible. A browser with no session is the
+ * ordinary CLI case and proceeds.
+ */
+function sessionDisagreesWithIntent(
+  webUser: { id: number } | undefined,
+  state: CliOauthState,
+): boolean {
+  return webUser !== undefined && webUser.id !== state.userId;
+}
+
+const INTENT_MISMATCH_MESSAGE =
+  "This link was created for another NEMAR account; sign out or open it in a browser where you are not signed in.";
+
+/** Minimal, styleless HTML shell. No script of any kind. */
+function intentPage(title: string, bodyHtml: string, status: 200 | 403 | 410): Response {
+  return new Response(
+    `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(title)}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 560px; margin: 48px auto; padding: 0 20px;">
+${bodyHtml}
+</body>
+</html>`,
+    {
+      status,
+      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+    },
+  );
+}
+
+/** The typed refusal page both handoff steps and the callback speak. */
+function intentMismatchPage(): Response {
+  return intentPage(
+    "Wrong NEMAR account",
+    `  <h1 style="color: #dc2626;">This link is for a different account</h1>
+  <p>${escapeHtml(INTENT_MISMATCH_MESSAGE)}</p>
+  <p style="color: #666; font-size: 14px;">Nothing has been changed. (orcid_intent_account_mismatch)</p>`,
+    403,
+  );
+}
 
 /**
  * Mint an ORCID link intent for the CALLER'S account and hand back a URL to
@@ -398,13 +534,13 @@ authOrcidRoutes.post(
     const user = c.get("user");
     if (!c.env.ENCRYPTION_KEY) {
       console.error("[auth-orcid] ENCRYPTION_KEY unset; cannot mint a CLI ORCID state");
-      return c.json({ error: "orcid_unavailable", message: "ORCID linking is unavailable" }, 503);
+      return c.json(profileRefusal("orcid_unavailable", ORCID_UNAVAILABLE_MESSAGE), 503);
     }
     if (!getOrcidConfig(c.env)) {
       // Checked at MINT time, not after the browser is open: a missing ORCID
       // client turns into "this deployment cannot link ORCID" in the terminal
       // rather than a stray error page at the end of a flow.
-      return c.json({ error: "orcid_unavailable", message: "ORCID linking is unavailable" }, 503);
+      return c.json(profileRefusal("orcid_unavailable", ORCID_UNAVAILABLE_MESSAGE), 503);
     }
 
     const mode = c.req.valid("json").mode ?? "link";
@@ -421,8 +557,10 @@ authOrcidRoutes.post(
       if (mine) {
         return c.json(
           {
-            error: "orcid_already_have",
-            message: `This account is already linked to ORCID iD ${mine.provider_subject}. Replace it with 'nemar auth profile orcid relink', or remove it with 'nemar auth profile orcid unlink'.`,
+            ...profileRefusal(
+              "orcid_already_have",
+              `This account is already linked to ORCID iD ${mine.provider_subject}. Replace it with 'nemar auth profile orcid relink', or remove it with 'nemar auth profile orcid unlink'.`,
+            ),
             orcid: mine.provider_subject,
           },
           409,
@@ -431,13 +569,34 @@ authOrcidRoutes.post(
     }
 
     const csrf = generateCsrf();
+    const nonce = generateCsrf();
+    const expiresAtMs = Date.now() + CLI_STATE_TTL_MS;
+
+    // Opportunistic prune, so the table cannot outgrow one TTL window and
+    // needs no cron (migration 0078). Best-effort: a failed prune is not a
+    // reason to refuse somebody their link.
+    await c.env.DB.prepare("DELETE FROM orcid_link_intents WHERE expires_at < datetime('now')")
+      .run()
+      .catch((err) => console.error("[auth-orcid] failed to prune expired link intents", err));
+
+    // The row is what makes the intent single-use. Written BEFORE the token is
+    // handed out: an intent the callback cannot find is refused, so a failed
+    // insert must not produce a URL that would then work.
+    await c.env.DB.prepare(
+      `INSERT INTO orcid_link_intents (nonce, user_id, mode, expires_at)
+       VALUES (?, ?, ?, ?)`,
+    )
+      .bind(nonce, user.id, mode, new Date(expiresAtMs).toISOString())
+      .run();
+
     const token = await signCliState(
       {
         csrf,
         mode,
         userId: user.id,
+        nonce,
         next: CLI_LINK_LANDING,
-        exp: Date.now() + CLI_STATE_TTL_MS,
+        exp: expiresAtMs,
       },
       c.env.ENCRYPTION_KEY,
     );
@@ -454,28 +613,125 @@ authOrcidRoutes.post(
 );
 
 /**
- * Carry a CLI-minted intent into the ORCID flow (#1266, ADR 0044).
+ * Resolve the `t=` parameter (or form field) both handoff steps take.
  *
- * This GET mints NOTHING. It verifies a signature made by the authenticated
- * POST above, puts that same signed value in the state cookie, and bounces to
- * ORCID — so the browser is bound to the flow the way the website's own start
- * route binds it, while the account being acted on stays inside the signature
- * rather than in a cookie anyone could write. ADR 0022's rule is about where
- * intent is CREATED; transporting an already-signed one is what a redirect is
- * for.
+ * Returns the token, the verified state and the account it names, or the page
+ * to answer with. Shared so the confirm step re-runs EVERY check the
+ * interstitial ran -- a page that has already been rendered proves nothing
+ * about the moment the form is submitted.
  */
-authOrcidRoutes.get("/orcid/cli-handoff", async (c) => {
+async function resolveHandoffIntent(
+  c: Context<{ Bindings: Bindings; Variables: Variables }>,
+  token: string | null,
+): Promise<
+  | { ok: true; token: string; state: CliOauthState; account: IntentAccount }
+  | { ok: false; res: Response }
+> {
   const frontend = appBase(c.env);
   if (!c.env.ENCRYPTION_KEY) {
     console.error("[auth-orcid] ENCRYPTION_KEY unset; cannot verify a CLI ORCID state");
-    return redirect(`${frontend}/login?error=orcid_unavailable`);
+    return { ok: false, res: redirect(`${frontend}/login?error=orcid_unavailable`) };
   }
-  const token = new URL(c.req.url).searchParams.get("t");
   const state = await verifyCliState(token, c.env.ENCRYPTION_KEY, Date.now());
   // Expired, tampered with, or simply not one of ours. Either way there is no
   // account to act for, so there is nothing to do but say so.
-  if (!token || !state) return redirect(`${frontend}/login?error=orcid_state`);
+  if (!token || !state) return { ok: false, res: redirect(`${frontend}/login?error=orcid_state`) };
 
+  // Refuse, never override (PR #1269 review): a browser signed in as somebody
+  // else is a disagreement, not a preference to resolve.
+  if (sessionDisagreesWithIntent(c.var.webUser, state)) {
+    return { ok: false, res: intentMismatchPage() };
+  }
+
+  const account = await loadUsableIntent(c.env, state);
+  if (!account) {
+    // Already completed, expired out of the table, or the account is gone.
+    // One page for all three: a person who used this link a minute ago and a
+    // person handed a stale one both need the same next step.
+    return {
+      ok: false,
+      res: intentPage(
+        "This link is no longer usable",
+        `  <h1>This link has already been used</h1>
+  <p>An ORCID link can be opened once. Run <code>nemar auth profile orcid link</code> again to get a fresh one.</p>
+  <p style="color: #666; font-size: 14px;">Nothing has been changed. (orcid_intent_used)</p>`,
+        410,
+      ),
+    };
+  }
+  return { ok: true, token, state, account };
+}
+
+/**
+ * Show the person WHOSE account is about to be linked, and make them press a
+ * button (#1266, ADR 0044; PR #1269 review item A1).
+ *
+ * This GET mints nothing and, since the review, no longer redirects anywhere
+ * either. It renders one sentence naming the target account and a form that
+ * POSTs back. That sentence is the whole defence against the attack the signed
+ * state cannot stop on its own: a signed intent is a bearer capability for ten
+ * minutes, so somebody could mint one for THEIR account and send the URL to a
+ * victim, who would otherwise complete ORCID consent and find their iD -- the
+ * identifier a DOI cites (ADR 0041), and one that ADR 0043 then refuses them
+ * on their own account -- attached to a stranger's row, having seen nothing
+ * but an ORCID page they expected to see.
+ *
+ * No script, and deliberately no auto-submit: a page that submits itself is
+ * the redirect this replaced, with extra steps.
+ */
+authOrcidRoutes.get("/orcid/cli-handoff", webSessionMiddleware, async (c) => {
+  const resolved = await resolveHandoffIntent(c, new URL(c.req.url).searchParams.get("t"));
+  if (!resolved.ok) return resolved.res;
+  const { token, state, account } = resolved;
+
+  const who = account.username
+    ? `${escapeHtml(account.username)} (${escapeHtml(maskEmail(account.email))})`
+    : escapeHtml(maskEmail(account.email));
+  const verb = state.mode === "relink" ? "Replace the ORCID iD on" : "Link your ORCID iD to";
+
+  return intentPage(
+    "Confirm your NEMAR account",
+    `  <h1>${escapeHtml(verb)} this NEMAR account?</h1>
+  <p style="font-size: 18px;"><strong>${who}</strong></p>
+  <p>You started this from <code>nemar auth profile orcid ${escapeHtml(state.mode)}</code> in a terminal.
+     Continuing takes you to ORCID to sign in; the iD you sign in with is attached to the account above.</p>
+  <p style="background-color: #fef2f2; border-left: 4px solid #dc2626; padding: 12px 16px;">
+    <strong>If this is not your account, close this tab.</strong>
+    Do not continue with a link somebody else sent you: it would attach your ORCID iD to their NEMAR account.
+  </p>
+  <form method="POST" action="/auth/orcid/cli-handoff/continue">
+    <input type="hidden" name="t" value="${escapeHtml(token)}">
+    <button type="submit" style="font-size: 16px; padding: 10px 20px; background-color: #2563eb; color: #fff; border: 0; border-radius: 6px; cursor: pointer;">
+      Continue to ORCID
+    </button>
+  </form>`,
+    200,
+  );
+});
+
+/**
+ * The confirm step of the interstitial: set the state cookie and go to ORCID.
+ *
+ * Every check the GET ran is run again here, because the GET proves nothing
+ * about this moment -- the intent may have been consumed in another tab, and
+ * the session may have changed. The same-origin gate is what keeps this from
+ * being the redirect it replaced: without it, a page anywhere could auto-POST
+ * a crafted intent and the person would never see whose account it names.
+ */
+authOrcidRoutes.post("/orcid/cli-handoff/continue", webSessionMiddleware, async (c) => {
+  if (!isAllowedOrigin(c.req.header("Origin"))) {
+    return c.json({ error: "Origin not allowed" }, 403);
+  }
+  const form = await c.req.formData().catch(() => null);
+  const submitted = form?.get("t");
+  const resolved = await resolveHandoffIntent(
+    c,
+    typeof submitted === "string" && submitted.length > 0 ? submitted : null,
+  );
+  if (!resolved.ok) return resolved.res;
+  const { token, state } = resolved;
+
+  const frontend = appBase(c.env);
   const config = getOrcidConfig(c.env);
   if (!config) return redirect(`${frontend}/login?error=orcid_unavailable`);
 
@@ -553,15 +809,26 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
     // A CLI-minted state answers it on its own (#1266): the browser that
     // finishes the flow was opened from a terminal and carries no NEMAR
     // session, so the id inside the signed state is the only account in play.
-    // It also OUTRANKS whatever session the browser happens to hold — the
-    // signature is proof of intent from a live API token for that account,
-    // and a bystanding cookie for a different account is not evidence of
-    // anything. `loadActiveUser` re-checks the row is still live and not
-    // revoked, since the intent was minted up to ten minutes ago.
+    // `loadActiveUser` re-checks the row is still live and not revoked, since
+    // the intent was minted up to ten minutes ago.
+    //
+    // A session for a DIFFERENT account is refused rather than overridden (PR
+    // #1269 review). The handoff already refused it once; this is the same
+    // rule at the other end, because the two steps are minutes apart and a
+    // browser can sign in between them.
     let actingUserId: number | null = null;
     if (cliState) {
+      if (sessionDisagreesWithIntent(c.var.webUser, cliState)) {
+        return fail("orcid_intent_account_mismatch", state.next);
+      }
       const cliUser = await loadActiveUser(c.env, cliState.userId);
       if (!cliUser) return fail("orcid_account", state.next);
+      // Consume before anything is written: one browser completion per intent,
+      // whatever its outcome. A replay of the same URL loses this race and is
+      // refused here, with nothing linked.
+      if (!(await consumeIntent(c.env, cliState))) {
+        return fail("orcid_intent_used", state.next);
+      }
       actingUserId = cliUser.id;
     } else if (c.var.webUser) {
       actingUserId = c.var.webUser.id;

@@ -459,6 +459,14 @@ export interface CliOauthState {
   mode: "link" | "relink";
   /** The account the intent was minted FOR. Covered by the signature. */
   userId: number;
+  /**
+   * Server-side handle for this intent (`orcid_link_intents.nonce`, migration
+   * 0078). The signature makes an intent unforgeable; this makes it
+   * UNREPEATABLE -- the callback consumes the row, so a second completion with
+   * the same URL is refused. Covered by the signature like the rest, so a
+   * replay cannot swap in a fresh nonce.
+   */
+  nonce: string;
   /** Same-origin relative path to land the browser on afterwards. */
   next: string;
   /** Epoch ms after which the state is rejected. */
@@ -497,11 +505,16 @@ export async function verifyCliState(
     if (typeof p.csrf !== "string" || p.csrf.length === 0) return null;
     if (p.mode !== "link" && p.mode !== "relink") return null;
     if (typeof p.userId !== "number" || !Number.isInteger(p.userId) || p.userId <= 0) return null;
+    // A state with no nonce cannot be consumed, so it cannot be single-use.
+    // Rejected outright rather than treated as "no replay protection": the
+    // only states without one predate migration 0078 and expired long ago.
+    if (typeof p.nonce !== "string" || p.nonce.length === 0) return null;
     if (typeof p.exp !== "number" || nowMs > p.exp) return null;
     return {
       csrf: p.csrf,
       mode: p.mode,
       userId: p.userId,
+      nonce: p.nonce,
       next: safeNextPath(typeof p.next === "string" ? p.next : "/"),
       exp: p.exp,
     };
