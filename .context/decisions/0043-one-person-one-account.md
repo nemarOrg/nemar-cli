@@ -5,11 +5,13 @@
 **Owner:** Seyed Yahya Shirazi
 
 > Numbering note: epic #1250 runs phases in parallel, and this one (phase 4,
-> #1254) lands alongside phase 3 (#1253), which owns 0042.
+> #1254) lands alongside phase 3 (#1253), which owns 0042 and migration 0076.
 > Until phase 3 is rebased in, 0042 does not exist on this branch and the ADR
 > index's gapless check fails here by construction; it goes green with the
 > rebase.
-> The same note is on 0041 for the same reason.
+> ADR 0041 carries an analogous note for the phase-1/phase-2 gap it saw at the
+> time; this is the same situation one phase later, not a reference to the same
+> gap.
 
 ## Context
 
@@ -113,6 +115,11 @@ constraint error, and the website gets a code instead of a string to grep:
 (`shared/contract/identity.ts`, with the messages, so the CLI, the website and
 the JSON body all read the same wording).
 
+`orcid_already_linked` is a **deprecated alias** for `orcid_in_use`: the two
+differ only in which constraint noticed, which is not a distinction a user can
+act on. It survives because the website switches on it today
+(nemarOrg/website#305 removes that need).
+
 `error` deliberately carries different things on the two families of route,
 because they are read by different things and both are already right:
 the browser-facing routes put the CODE there (the website reads it there, and
@@ -129,9 +136,16 @@ an account still claiming an iD it can no longer prove,
 invisible to every check that looked at `oauth_identities`.
 That row is id 42.
 
-The citation value is RE-DERIVABLE and the identity claim is not:
-linking the iD again refills it, and so does the DOI enrichment pass that
-discovered it. Losing a re-derivable column beats keeping a false claim.
+**The way back is a manual re-link, and nothing else.**
+`users.orcid` is written in exactly three places — ORCID finalize,
+`linkIdentity` and `relinkIdentity` — so an account that unlinks has no iD on
+file until someone signs in through ORCID again.
+That is a real cost and it is the smaller one:
+the alternative is a row that permanently claims an identifier it cannot prove,
+invisible to every check that looked at `oauth_identities`,
+silently blocking the person's own next sign-up.
+(An earlier draft of this ADR claimed the DOI-discovery pass would refill the
+column. It does not; nothing but those three paths writes it.)
 
 ### Normalisation at every write
 

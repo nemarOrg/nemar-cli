@@ -44,7 +44,8 @@ Load-bearing ones to know before touching the relevant area:
 0032 (facet filters are declared once and report what they exclude),
 0033 (the queue stamps which engine converted each dataset; pre-stamp rows are declared current),
 0034 (`datasets` stays one table under an enforced column budget; derive, don't store),
-0040 (`verified` is the base tier; admin approval is the only writer of upload access).
+0040 (`verified` is the base tier; admin approval is the only writer of upload access),
+0043 (one person, one account: an ORCID iD, an email or a GitHub handle backs at most one live account).
 
 ---
 
@@ -298,6 +299,15 @@ without touching the version.
 `[skip ci]` is deliberately absent from the strip commit,
 because GitHub's skip marker would also block the tag-push event that `npm-publish.yml` needs.
 
+**A release that carries a new migration runs `bun run migrations:d1-check` first.**
+Every migration test in this repo runs on bun:sqlite, which is more permissive than
+the SQLite build D1 ships — migration 0077 shipped a 79-character GLOB that bun:sqlite
+executes and D1 rejects (its LIKE/GLOB pattern cap is 50 characters), so every test was
+green and the deploy would have aborted mid-file.
+The script replays every migration through `wrangler d1 execute --local` and diffs the
+resulting object and column catalogue against the bun:sqlite one.
+It is not in per-PR CI because it takes about a minute.
+
 **When a manual bump does apply:** cutting a minor or major release
 (`./scripts/bump-version.sh minor-dev0` on dev, then open the PR),
 or tagging an explicit pre-release (`-rc*`, `-alpha*`, `-beta*`),
@@ -522,12 +532,12 @@ and what is historical. The entries worth knowing by name:
 
 | Group | Covers |
 |---|---|
-| `nemar auth` | login, signup, status/whoami, switch, logout, verification, SSH setup, key retrieval and regeneration |
+| `nemar auth` | login, signup, status/whoami, profile, switch, logout, verification, SSH setup, key retrieval and regeneration |
 | `nemar dataset` | validate, upload, download, status (alias: view), list, search, release, update, clone, get, commit, push, drop, ci, manifest |
 | `nemar dataset publish` | request, status, resend |
 | `nemar dataset` (access) | request-access, access, invite, collaborators |
 | `nemar sandbox` | training run, status, reset — required before uploading |
-| `nemar admin` | users, approve, revoke, role, notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, recording-stats-sweep, signal-defaults-sweep, zarr-fidelity-sweep, doctor, summary, notice, email-preferences, backfill-names, e2e-test |
+| `nemar admin` | users, approve, revoke, role, notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, recording-stats-sweep, signal-defaults-sweep, zarr-fidelity-sweep, doctor, summary, notice, email-preferences, backfill-names, duplicates, e2e-test |
 | `nemar admin import*` | OpenNeuro import, status, rollback, retry, verify, recover (issue #754, epic #967) |
 | `nemar admin fleet` | drift, enforce, revalidate — governance across dataset repos (epic #713) |
 | `nemar admin exemplar` | create, status, remint-dois — the staging exemplar fleet |
