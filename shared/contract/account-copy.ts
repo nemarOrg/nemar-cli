@@ -150,6 +150,10 @@ export const ACCOUNT_COPY = {
   "gap.field.username.label": "Username",
   "gap.field.given_name.label": "Given name",
   "gap.field.family_name.label": "Family name",
+  // Copy for the orcid_verified row lands ahead of the row itself: the
+  // website added the row in website#312, and the matrix half is Phase 9
+  // (#1271). Parity is string-for-string, so the sentences arrive first.
+  "gap.field.orcid_verified.label": "Verified ORCID iD",
   "gap.field.github_username.label": "GitHub handle",
   "gap.field.city.label": "City",
   "gap.field.country.label": "Country",
@@ -172,6 +176,8 @@ export const ACCOUNT_COPY = {
   // same reason.
   "gap.field.given_name.set_on.web.orcid": "your ORCID record at orcid.org, then sign in again",
   "gap.field.family_name.set_on.web.orcid": "your ORCID record at orcid.org, then sign in again",
+  "gap.field.orcid_verified.set_on.web": "Settings",
+  "gap.field.orcid_verified.set_on.cli": "nemar auth profile orcid link",
   "gap.field.github_username.set_on.web": "Settings",
   "gap.field.github_username.set_on.cli": "nemar auth profile set-github",
   "gap.field.city.set_on.web": "Settings",
