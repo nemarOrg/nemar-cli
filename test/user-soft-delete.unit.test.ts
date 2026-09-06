@@ -46,7 +46,15 @@ CREATE TABLE users (
   role TEXT DEFAULT 'member',
   email_preferences TEXT DEFAULT NULL,
   description TEXT,
-  signup_source TEXT NOT NULL DEFAULT 'cli'
+  signup_source TEXT NOT NULL DEFAULT 'cli',
+  -- Later than 0026, and spelled out here rather than applied as migrations
+  -- because 0062 also references columns this slice does not carry
+  -- (sandbox_completed). The mask clears all four (ADR 0040/0042), so the
+  -- slice has to have them or the statement would fail on an unknown column.
+  service_access INTEGER NOT NULL DEFAULT 0,        -- migration 0062
+  service_access_granted_at TEXT,                   -- migration 0062
+  service_access_granted_by INTEGER,                -- migration 0062
+  upload_access_requested_at TEXT                   -- migration 0076
 );
 CREATE TABLE tokens (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,10 +86,14 @@ function seed(db: Database) {
   db.run(
     `INSERT INTO users (id, username, email, password_hash, github_username, status, email_verified,
         verification_token, verification_expires_at, role, orcid, orcid_verified, description,
-        aws_iam_username, aws_access_key_id_encrypted, aws_secret_access_key_encrypted)
+        aws_iam_username, aws_access_key_id_encrypted, aws_secret_access_key_encrypted,
+        service_access, service_access_granted_at, service_access_granted_by,
+        upload_access_requested_at)
      VALUES (42, 'testuser', 'real@example.com', 'argon2hash', 'ghuser', 'approved', 1,
         'verifytok', '2099-01-01T00:00:00Z', 'member', '0000-0002-1974-1293', 1, 'a bio',
-        'iam-user', 'enc-key-id', 'enc-secret')`,
+        'iam-user', 'enc-key-id', 'enc-secret',
+        1, '2026-09-01T00:00:00Z', 7,
+        '2026-08-30T00:00:00Z')`,
   );
   db.run("INSERT INTO tokens (user_id, api_key_hash, revoked_at) VALUES (42, 'tokenhash', NULL)");
   db.run(
@@ -159,6 +171,42 @@ describe("user tombstone (soft delete)", () => {
     };
     expect(tok.revoked_at).not.toBeNull();
     expect(sess.revoked_at).not.toBeNull();
+  });
+
+  test("clears the upload grant and the request behind it (ADR 0040/0042)", () => {
+    // The mask used to leave all four set while forcing status='revoked', so a
+    // tombstoned row sat on the granted side of the `status='approved' <=>
+    // service_access=1` invariant, and `upload_access_requested_at` with no
+    // grant is what the admin review queue reads as an OPEN request -- from an
+    // account with nobody left to review. POST /admin/revoke has always cleared
+    // exactly these four; the harder stop has to clear at least as much.
+    const columns =
+      "service_access, service_access_granted_at, service_access_granted_by, upload_access_requested_at";
+    const before = db.query(`SELECT ${columns} FROM users WHERE id = 42`).get() as Record<
+      string,
+      unknown
+    >;
+    // Proves the assertions below are clearing something: a seed that left
+    // these NULL would pass even if the mask never named the columns.
+    expect(before).toEqual({
+      service_access: 1,
+      service_access_granted_at: "2026-09-01T00:00:00Z",
+      service_access_granted_by: 7,
+      upload_access_requested_at: "2026-08-30T00:00:00Z",
+    });
+
+    tombstone(db, 42);
+
+    const after = db.query(`SELECT ${columns} FROM users WHERE id = 42`).get() as Record<
+      string,
+      unknown
+    >;
+    expect(after).toEqual({
+      service_access: 0,
+      service_access_granted_at: null,
+      service_access_granted_by: null,
+      upload_access_requested_at: null,
+    });
   });
 
   test("expires outstanding login codes for the original email", () => {

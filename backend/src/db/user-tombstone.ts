@@ -2,13 +2,16 @@
 // /admin/users/by-id/:id endpoint and its behavioral test exercise the EXACT
 // same masking statement (no drift between the security logic and its test).
 //
-// The mask is the load-bearing mechanism for two guarantees:
+// The mask is the load-bearing mechanism for three guarantees:
 //   1. PII erasure — email is replaced with a non-PII placeholder; username,
 //      github, password, orcid, description, AWS creds, verification tokens and
 //      email prefs are nulled; email_verified and orcid_verified are zeroed.
 //   2. Re-signup freedom — nulling username/github and rewriting email FREES
 //      those UNIQUE values so the original owner can sign up again later. (The
 //      signup de-dup checks intentionally still see tombstoned rows.)
+//   3. Access erasure — the upload grant and the request behind it are cleared,
+//      the same four columns POST /admin/revoke clears (ADR 0040/0042), so a
+//      tombstoned row cannot sit at status='revoked' still holding the grant.
 
 /**
  * Masked email for a tombstoned user. Embeds the AUTOINCREMENT primary key,
@@ -60,6 +63,18 @@ export const USER_TOMBSTONE_MASK_SQL = `UPDATE users
        aws_iam_username = NULL,
        aws_access_key_id_encrypted = NULL,
        aws_secret_access_key_encrypted = NULL,
+       -- The upload grant and the request that asked for it, cleared exactly as
+       -- POST /admin/revoke clears them (ADR 0040: revoke is the eraser of what
+       -- approval wrote; ADR 0042: an open request is a requested_at stamp with
+       -- no grant). A tombstone is a harder stop than a revocation, so leaving
+       -- service_access = 1 on a row that is force-flipped to 'revoked' would
+       -- put a deleted account back on the granted side of the invariant, and a
+       -- surviving upload_access_requested_at would keep it in the admin review
+       -- queue with no user left to review.
+       service_access = 0,
+       service_access_granted_at = NULL,
+       service_access_granted_by = NULL,
+       upload_access_requested_at = NULL,
        status = 'revoked',
        revoked_at = COALESCE(revoked_at, datetime('now')),
        deleted_at = datetime('now'),
