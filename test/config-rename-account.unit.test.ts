@@ -18,7 +18,7 @@
  * NEMAR_CONFIG_DIR. No mocks.
  */
 
-import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -54,6 +54,23 @@ function onDisk(): {
   return JSON.parse(readFileSync(configPath, "utf8"));
 }
 
+/**
+ * What `NEMAR_CONFIG_DIR` held before this file touched it.
+ *
+ * `bun test` runs every file in ONE process, so this variable is shared state
+ * and restoring it is not tidiness. It used to be "restored" with
+ * `process.env.NEMAR_CONFIG_DIR = undefined`, which does not unset anything: it
+ * assigns the STRING "undefined", and `getConfigDir()` reads that as a relative
+ * path — so every later test in the run wrote its config into `./undefined/` in
+ * the working directory, and a test that expected the real default silently got
+ * a different one.
+ */
+let previousConfigDir: string | undefined;
+
+beforeAll(() => {
+  previousConfigDir = process.env.NEMAR_CONFIG_DIR;
+});
+
 beforeEach(() => {
   mkdirSync(testDir, { recursive: true });
   process.env.NEMAR_CONFIG_DIR = testDir;
@@ -61,7 +78,11 @@ beforeEach(() => {
 });
 
 afterAll(() => {
-  process.env.NEMAR_CONFIG_DIR = undefined;
+  // `delete` when it was unset, because assigning undefined is what caused
+  // this. The store cache is dropped after, so nothing keeps reading the old
+  // directory.
+  if (previousConfigDir === undefined) delete process.env.NEMAR_CONFIG_DIR;
+  else process.env.NEMAR_CONFIG_DIR = previousConfigDir;
   __resetStoreCacheForTesting();
   rmSync(testDir, { recursive: true, force: true });
 });
