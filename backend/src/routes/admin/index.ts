@@ -17,6 +17,7 @@ import { registerImportRoutes } from "./imports";
 import { registerNoticeRoutes } from "./notices";
 import { registerPublishRoutes } from "./publish";
 import type { AdminRouter } from "./shared";
+import { registerUserDuplicateRoutes } from "./user-duplicates";
 import { registerUserNameRoutes } from "./user-names";
 import { registerUserUsernameRoutes } from "./user-usernames";
 import { registerUsersRoutes } from "./users";
@@ -30,6 +31,14 @@ export const adminRoutes: AdminRouter = new Hono();
 adminRoutes.use("*", authMiddleware);
 adminRoutes.use("*", adminMiddleware);
 
+// BEFORE registerUsersRoutes, and it has to be. Hono runs every handler whose
+// pattern matches, in REGISTRATION order, and `GET /users/:username` matches
+// `/users/duplicates` too -- registered second, the duplicate report would
+// never be reached, because the username lookup 404s first. (`POST
+// /users/backfill-names` has no such neighbour, which is why it can sit after.)
+// The cost is that an account literally named `duplicates` is unreachable
+// through `GET /admin/users/:username`; the same trade backfill-names makes.
+registerUserDuplicateRoutes(adminRoutes);
 registerUsersRoutes(adminRoutes);
 registerUserNameRoutes(adminRoutes);
 registerUserUsernameRoutes(adminRoutes);

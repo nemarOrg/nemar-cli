@@ -11,7 +11,11 @@ import {
   type AdminUsersListResponse,
   type BackfillUsernameOutcome,
   type BackfillVerifyOutcome,
+  type ClearIdentityConflictResponse,
+  type DuplicateReport,
   adminUsersListResponseSchema,
+  clearIdentityConflictResponseSchema,
+  duplicateReportSchema,
 } from "../../../shared/contract/index.js";
 import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
 import { request } from "./client.js";
@@ -1591,5 +1595,35 @@ export async function backfillUsernames(options?: {
       }),
     },
     true,
+  );
+}
+
+// ============================================================================
+// Identity uniqueness (#1254, epic #1250; ADR 0043)
+// ============================================================================
+
+/**
+ * Duplicate-account report: live accounts sharing an ORCID iD, an email
+ * address, or a GitHub handle.
+ *
+ * Validated against the shared contract rather than cast, for the reason
+ * stated at the top of this file: the report drives an operator's decision
+ * about which of two real accounts survives, so a silent shape drift here is
+ * worse than a loud parse failure.
+ */
+export async function getUserDuplicates(): Promise<DuplicateReport> {
+  return request("/admin/users/duplicates", {}, true, duplicateReportSchema);
+}
+
+/**
+ * Clear a row's `identity_conflict` flag. 409s while the collision is still
+ * there, which is the expected answer until someone has actually resolved it.
+ */
+export async function clearIdentityConflict(id: number): Promise<ClearIdentityConflictResponse> {
+  return request(
+    `/admin/users/${id}/clear-identity-conflict`,
+    { method: "POST" },
+    true,
+    clearIdentityConflictResponseSchema,
   );
 }

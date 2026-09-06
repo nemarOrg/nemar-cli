@@ -28,6 +28,7 @@ import { Command } from "commander";
 import inquirer from "inquirer";
 import ora, { type Ora } from "ora";
 import { formatBytesCli } from "../../shared/bytes.js";
+import type { DuplicateGroup } from "../../shared/contract/index.js";
 import {
   type AvailabilityReport,
   type AvailabilityReportResult,
@@ -61,6 +62,7 @@ import {
   bulkDeleteDatasets,
   changeUserRole,
   changeVisibility,
+  clearIdentityConflict,
   createConceptDoi,
   createExemplar,
   dataIntegritySweep,
@@ -78,6 +80,7 @@ import {
   getFleetDrift,
   getImportStatus,
   getSummaryCoverage,
+  getUserDuplicates,
   hedSweep,
   hedSweepReset,
   listUsers,
@@ -6745,3 +6748,141 @@ backfillUsernamesCommand
   });
 
 adminCommand.addCommand(backfillUsernamesCommand);
+
+// ============================================================================
+// Duplicate accounts (#1254, epic #1250; ADR 0043)
+// ============================================================================
+
+/**
+ * `nemar admin duplicates` — live accounts sharing an ORCID iD, an email
+ * address, or a GitHub handle, plus the `--clear` half that un-flags a row
+ * once its collision is gone.
+ *
+ * A TOP-LEVEL COMMAND rather than a flag on `nemar admin users`: the listing
+ * is one row per account and this is one row per GROUP, so folding it in would
+ * mean two incompatible table shapes behind one command. It also reports on
+ * something the listing has no column for -- `identity_conflict`, the flag
+ * migration 0077 uses to keep a duplicate out of the unique indexes without
+ * deleting anybody.
+ *
+ * This command NEVER merges or deletes. It says which rows collide and which
+ * one holds the identifier; resolving it is the person's own Settings change,
+ * or an explicit account deletion by an admin.
+ */
+const duplicatesCommand = new Command("duplicates").description(
+  "Report live accounts sharing an ORCID iD, email, or GitHub handle",
+);
+
+/** One line per account inside a group. */
+function printDuplicateAccount(account: DuplicateGroup["accounts"][number]): void {
+  const who = account.username ?? chalk.dim("(no username)");
+  const marks: string[] = [];
+  if (account.canonical) marks.push(chalk.green("canonical"));
+  if (account.identity_conflict === 1) marks.push(chalk.yellow("flagged"));
+  if (account.has_oauth_identity) marks.push(chalk.dim("orcid-login"));
+  const suffix = marks.length > 0 ? `  [${marks.join(", ")}]` : "";
+  const meta = `created ${account.created_at}  datasets=${account.dataset_count}`;
+  console.log(
+    `    id ${String(account.id).padEnd(5)} ${who}  <${account.email}>  ${meta}${suffix}`,
+  );
+}
+
+duplicatesCommand
+  .option("--json", "Output raw JSON instead of the human report")
+  .option(
+    "--clear <id>",
+    "Clear one account's identity-conflict flag (refuses while the collision remains)",
+  )
+  .action(async (options: { json?: boolean; clear?: string }) => {
+    if (!requireAuth()) return;
+
+    if (options.clear !== undefined) {
+      const id = Number.parseInt(options.clear, 10);
+      if (!Number.isInteger(id) || id <= 0) {
+        console.error(chalk.red(`Invalid user id: ${options.clear}`));
+        process.exit(1);
+        return;
+      }
+      const spinner = ora(`Clearing identity-conflict flag on user ${id}...`).start();
+      try {
+        const res = await clearIdentityConflict(id);
+        spinner.stop();
+        if (options.json) {
+          console.log(JSON.stringify(res, null, 2));
+          return;
+        }
+        console.log(
+          res.cleared
+            ? chalk.green(`Cleared the identity-conflict flag on user ${id}.`)
+            : chalk.dim(`User ${id} was not flagged; nothing to clear.`),
+        );
+      } catch (err) {
+        // A 409 here is the normal answer, not a crash: the collision is
+        // still there. Print the API's own sentence, which names what to fix.
+        spinner.fail(
+          err instanceof ApiError && err.statusCode === 409
+            ? "Still colliding; flag not cleared"
+            : "Failed to clear the identity-conflict flag",
+        );
+        console.error(chalk.red(errorDetail(err)));
+        process.exit(1);
+      }
+      return;
+    }
+
+    const spinner = ora("Checking for duplicate accounts...").start();
+    let report: Awaited<ReturnType<typeof getUserDuplicates>>;
+    try {
+      report = await getUserDuplicates();
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Duplicate report failed");
+      console.error(chalk.red(errorDetail(err)));
+      process.exit(1);
+      return;
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
+
+    console.log();
+    if (report.groups.length === 0) {
+      console.log(chalk.green("No duplicate accounts."));
+      // A flag with no group behind it is a resolved collision waiting to be
+      // cleared, and it is invisible in the groups list by definition — so it
+      // gets said out loud rather than left to be inferred from a zero.
+      if (report.flagged_count > 0) {
+        console.log(
+          chalk.yellow(
+            `${report.flagged_count} account(s) still carry an identity-conflict flag with no remaining collision.`,
+          ),
+        );
+        console.log(chalk.dim("  Clear each with 'nemar admin duplicates --clear <id>'."));
+      }
+      return;
+    }
+
+    console.log(
+      chalk.cyan(
+        `${report.group_count} duplicate group(s); ${report.flagged_count} account(s) flagged`,
+      ),
+    );
+    for (const group of report.groups) {
+      console.log();
+      console.log(`  ${chalk.bold(group.kind)}  ${group.value}`);
+      for (const account of group.accounts) printDuplicateAccount(account);
+    }
+    console.log();
+    console.log(
+      chalk.dim(
+        "The fix is self-service on the surviving account: change its email or GitHub username, or unlink/re-link its ORCID iD, in Settings on nemar.org. Merging two accounts is manual.",
+      ),
+    );
+    // Exit non-zero so a scheduled run surfaces a duplicate instead of
+    // scrolling past as a successful command.
+    process.exitCode = 1;
+  });
+
+adminCommand.addCommand(duplicatesCommand);

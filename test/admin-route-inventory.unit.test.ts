@@ -45,6 +45,13 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /users/backfill-names": 2,
   // #1253, epic #1250 (ADR 0042): username backfill (zValidator + handler).
   "POST /users/backfill-usernames": 2,
+  // #1254, epic #1250 (ADR 0043): the duplicate-account report and the
+  // identity-conflict flag it reports on. `/users/duplicates` is reachable
+  // ONLY because registerUserDuplicateRoutes runs before registerUsersRoutes
+  // -- `GET /users/:username` matches it too, and the fallback router takes
+  // the first matching handler in registration order (pinned below).
+  "GET /users/duplicates": 1,
+  "POST /users/:id/clear-identity-conflict": 1,
 
   // DOI / enrichment
   "POST /datasets/:id/doi/concept": 2,

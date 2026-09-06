@@ -101,6 +101,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "bulkDeleteDatasets",
     "changeUserRole",
     "changeVisibility",
+    "clearIdentityConflict",
     "createConceptDoi",
     "createExemplar",
     "dataIntegritySweep",
@@ -118,6 +119,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getFleetDrift",
     "getImportStatus",
     "getSummaryCoverage",
+    "getUserDuplicates",
     "hedSweep",
     "hedSweepReset",
     "importDataset",
@@ -174,9 +176,11 @@ const POST_SPLIT_ADDITIONS = [
   "backfillUserNames", // #1255, epic #1250: POST /admin/users/backfill-names
   "backfillUsernames", // #1253, epic #1250: POST /admin/users/backfill-usernames
   "checkOrcidName", // #1255, epic #1250: GET /auth/orcid-name pre-signup lookup
+  "clearIdentityConflict", // #1254, ADR 0043: POST /admin/users/:id/clear-identity-conflict
   "doctorFix", // #1130, CLI wrapper for POST /admin/doctor/fix
   "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
   "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion
+  "getUserDuplicates", // #1254, ADR 0043: GET /admin/users/duplicates
   "publishZarrCatalog", // #1062, epic #1181 phase 2: POST /admin/zarr-catalog/publish
   "requestUploadAccess", // #1253, epic #1250: POST /users/me/upload-access/request
   "recordingStatsSweep", // #1194, CLI wrapper for POST /admin/datasets/recording-stats-sweep

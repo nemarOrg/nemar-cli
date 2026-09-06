@@ -37,6 +37,7 @@ import { isNonProductionEnv } from "../../services/environment";
 import { removeCollaborator } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
 import { revokeUserIamAccess } from "../../services/iam";
+import { normalizeGithubHandle, normalizeOrcid } from "../../services/identity";
 import { errorMessage } from "../../services/repo-metadata";
 import { type Bindings, type Variables, isDemotion, parseRole } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
@@ -1535,9 +1536,19 @@ export function registerUsersRoutes(admin: AdminRouter): void {
         // Shared iD validator, not a bare length check: `max(19)` accepted
         // any 19-character string as an ORCID, which is how a fixture row
         // could carry an iD the rest of the system would never accept.
-        orcid: orcidIdSchema.optional(),
+        // Canonicalised the same way every real write is (ADR 0043), so a
+        // fixture cannot seed a row shape the production paths can no longer
+        // produce -- a lowercase `x` check digit or an `@handle`.
+        orcid: z
+          .preprocess((v) => (typeof v === "string" ? (normalizeOrcid(v) ?? v) : v), orcidIdSchema)
+          .optional(),
         orcid_verified: z.boolean().optional(),
-        github_username: z.string().max(39).optional(),
+        github_username: z
+          .preprocess(
+            (v) => (typeof v === "string" ? normalizeGithubHandle(v) : v),
+            z.string().max(39),
+          )
+          .optional(),
         city: z.string().max(200).optional(),
         country: z.string().max(200).optional(),
         affiliation: z.string().max(300).optional(),
