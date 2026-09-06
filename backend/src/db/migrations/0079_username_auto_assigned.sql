@@ -21,9 +21,24 @@
 --
 -- DEFAULT 0 IS THE HONEST DEFAULT for the back catalogue. Every existing row is
 -- one of: a CLI signup that typed its username, or a web row that is still NULL
--- (and so has nothing to have been auto-assigned). Neither is an auto-assignment,
--- and the 19 rows the ADR 0042 sweep has since named are re-marked by the sweep
--- itself the next time it runs — no data migration guesses at history here.
+-- (and so has nothing to have been auto-assigned). Neither is an
+-- auto-assignment, and no data migration guesses at history here.
+--
+-- The nameless rows are still nameless. ADR 0042 built the sweep; as of
+-- 2026-09-06 production holds 18 of them (the 19 that ADR describes, minus a
+-- duplicate account since deleted) and the sweep has been run ZERO times — it
+-- is scheduled for after this epic deploys. So the FIRST production run of
+-- `POST /admin/users/backfill-usernames` after this column exists is what marks
+-- those rows; there is nothing here for it to re-mark.
+--
+-- And "re-run the sweep" is not a repair for a row it has already named,
+-- anywhere: its candidate predicate is `username IS NULL OR TRIM(username) = ''`
+-- (REMAINING_SQL, routes/admin/user-usernames.ts), so a row that HAS a username
+-- is no longer a candidate and no future run will ever look at it again. The
+-- only rows that can be left holding 0 after being auto-named are ones named by
+-- a sweep that ran before this migration — dev D1 only, since production has
+-- run none — and fixing those would be a one-off UPDATE against a list of ids,
+-- not a sweep.
 --
 -- One statement, one column, NOT NULL with a default, so it is a rewrite-free
 -- ALTER on SQLite and re-running the file is the only thing that fails (which is

@@ -3,12 +3,15 @@
  * ADR 0045).
  *
  * ADR 0042 built the BATCH path: `POST /admin/users/backfill-usernames` walks
- * the rows whose `username IS NULL` and names them. That closes the 19 accounts
- * that exist today and nothing after them — a web sign-up whose owner abandons
- * onboarding lands right back in the same state, and stays there until an
- * operator remembers to re-run a sweep. This is the LAZY path, and between the
- * two there is no way for an account to keep browsing NEMAR with no handle:
- * the sweep catches the ones already there, sign-in catches the ones arriving.
+ * the rows whose `username IS NULL` and names them. It has not been run yet —
+ * production holds 18 such rows as of 2026-09-06 and the first run is scheduled
+ * for after this epic deploys — and when it is, it closes the accounts that
+ * exist at that moment and nothing after them: a web sign-up whose owner
+ * abandons onboarding lands right back in the same state, and stays there until
+ * an operator remembers to run the sweep again. This is the LAZY path, and
+ * between the two there is no way for an account to keep browsing NEMAR with no
+ * handle: the sweep catches the ones already there, sign-in catches the ones
+ * arriving.
  *
  * THE RULE, in full:
  *   - the row's username is NULL or blank, and

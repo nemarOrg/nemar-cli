@@ -35,11 +35,16 @@ website said "Set it in Settings or run `nemar auth profile set-github`" and the
 CLI said "run 'nemar auth profile set-github <handle>'", for the same gap on the
 same account.
 
-There is a second, smaller version of the same problem. ADR 0042 gave the 19
-username-less web/ORCID rows a handle through an admin sweep. The sweep closes
-the accounts that exist and nothing after them: a web sign-up whose owner
-abandons onboarding lands straight back in `username IS NULL` and stays there
-until an operator remembers to re-run it.
+There is a second, smaller version of the same problem. ADR 0042 built an admin
+sweep to give the username-less web/ORCID rows a handle. It has not been run:
+production still holds 18 of them (the 19 that ADR counted, minus a duplicate
+account deleted since), and the first run is scheduled for after this epic
+deploys. Even once it has, the sweep closes the accounts that exist and nothing
+after them — a web sign-up whose owner abandons onboarding lands straight back
+in `username IS NULL` and stays there until an operator remembers to run it
+again. It also never revisits: its candidate predicate is
+`username IS NULL OR TRIM(username) = ''`, so a row it has named is a row it
+cannot see.
 
 ## Decision
 
