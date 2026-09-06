@@ -7,6 +7,7 @@
  * - nemar auth status    - Check authentication status
  * - nemar auth whoami    - Alias for status (common pattern)
  * - nemar auth logout    - Clear stored credentials
+ * - nemar auth request-upload-access - Ask an admin for upload access
  * - nemar auth switch    - Switch between stored accounts
  * - nemar auth setup-ssh - Configure SSH for GitHub (optional, gh CLI preferred)
  *
@@ -20,13 +21,19 @@ import { Command } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
 import {
+  UPLOAD_ACCESS_WHY_MAX_CHARS,
+  UPLOAD_ACCESS_WHY_MIN_CHARS,
+} from "../../shared/contract/user.js";
+import {
   type OrcidNameResponse,
+  type UploadAccessRequestResponse,
   checkGitHubUsername,
   checkOrcidName,
   checkUsername,
   getCurrentUser,
   login,
   requestKeyRegeneration,
+  requestUploadAccess,
   resendVerification,
   retrieveKey,
   signup,
@@ -1247,4 +1254,170 @@ Description:
 
 Examples:
   $ nemar auth regenerate-key`,
+);
+
+// ============================================================================
+// Request Upload Access (ADR 0042, #1253, epic #1250)
+//
+// Verifying your email makes the account usable (browse, API key, sandbox);
+// UPLOADING needs a one-time admin grant on top of it, and this is how you ask
+// for it. Before #1253 the 403 could only point at the support page.
+// ============================================================================
+
+/**
+ * Where a user actually fixes each precondition, keyed on the field names the
+ * API sends in `missing`.
+ *
+ * Most of these point at Settings on nemar.org because that is where the field
+ * lives: username, name, GitHub handle, city and country are edited on the
+ * account settings page (nemarOrg/website#301), and that page is what a user is
+ * meant to use whether they arrived from the browser or the CLI. THIS COPY
+ * ASSUMES #301 IS DEPLOYED -- releasing epic #1250 is gated on it, because
+ * until then these lines name a page with nothing on it, which is the exact
+ * failure ADR 0040 spent a year fixing.
+ *
+ * `email_verified` is the exception and points at a real CLI command, because
+ * that step genuinely has one.
+ */
+const UPLOAD_ACCESS_FIX: Record<string, string> = {
+  email_verified: "run 'nemar auth resend-verification' and click the link in your inbox",
+  username: "set it in Settings on nemar.org",
+  given_name: "comes from your ORCID record; make it public at orcid.org, or set it in Settings",
+  family_name: "comes from your ORCID record; make it public at orcid.org, or set it in Settings",
+  github_username: "set it in Settings on nemar.org",
+  city: "set it in Settings on nemar.org",
+  country: "set it in Settings on nemar.org",
+  why: "pass a longer --why, or answer the prompt",
+};
+
+/**
+ * Say so when the request landed but no admin was reached.
+ *
+ * The request IS recorded either way, so this is a warning and not a failure;
+ * what makes it worth printing is that the fix is in the user's hands (run the
+ * command again) and is otherwise invisible -- a silent `ok` here means waiting
+ * for a review nobody has been asked for. `undefined` is a backend that
+ * predates the notification stamp, and says nothing rather than guessing.
+ */
+function warnIfAdminsNotNotified(result: UploadAccessRequestResponse): void {
+  if (result.email_sent !== false) return;
+  console.log();
+  console.log(
+    chalk.yellow(
+      "  Warning: your request is recorded but admins could not be notified;\n" +
+        "  it will be retried when you run this command again.",
+    ),
+  );
+}
+
+/**
+ * The prompt's own check on the why text, extracted so it can be tested.
+ *
+ * Returns `true` when the text is acceptable, or the message inquirer should
+ * show. It exists to stop a user typing 400 characters and THEN being refused
+ * by the server for a reason the terminal already knew -- it is not the rule
+ * itself, which lives at the route (services/upload-access.ts). Both read their
+ * bounds from shared/contract so the prompt cannot accept something the server
+ * will reject, which is the failure mode a local copy of "20" would create.
+ */
+export function validateUploadAccessWhy(input: string | undefined): true | string {
+  const text = (input ?? "").trim();
+  if (text.length < UPLOAD_ACCESS_WHY_MIN_CHARS) {
+    return `Please write at least ${UPLOAD_ACCESS_WHY_MIN_CHARS} characters`;
+  }
+  if (text.length > UPLOAD_ACCESS_WHY_MAX_CHARS) {
+    return `Please keep it under ${UPLOAD_ACCESS_WHY_MAX_CHARS} characters`;
+  }
+  return true;
+}
+
+const requestUploadAccessCmd = authCommand
+  .command("request-upload-access")
+  .description("Ask an admin for upload access (one-time)")
+  .option("--why <text>", "What you intend to upload (20-500 characters)")
+  .action(async (options: { why?: string }) => {
+    // Checked before the spinner starts, rather than left to the client's own
+    // 401: this is an action, not a query, so it exits non-zero, and a script
+    // must not see "Submitting upload access request..." for a request that was
+    // never going to be sent.
+    if (!isAuthenticated()) {
+      console.log(chalk.yellow("Not authenticated"));
+      console.log();
+      console.log("  Run 'nemar auth login' to authenticate");
+      process.exitCode = 1;
+      return;
+    }
+
+    let why = (options.why ?? "").trim();
+    if (!why) {
+      const answers = await inquirer.prompt([
+        {
+          type: "input",
+          name: "why",
+          message: "What do you intend to upload to NEMAR?",
+          validate: validateUploadAccessWhy,
+        },
+      ]);
+      why = String(answers.why).trim();
+    }
+
+    const spinner = ora("Submitting upload access request...").start();
+    try {
+      const result = await requestUploadAccess(why);
+      if (result.already_requested) {
+        spinner.info("You already have an open upload access request");
+        console.log(chalk.dim("  An admin reviews it once; you will get an email when it lands."));
+        warnIfAdminsNotNotified(result);
+        return;
+      }
+      spinner.succeed("Upload access requested");
+      console.log();
+      console.log("  A NEMAR admin reviews the request once.");
+      console.log("  You will get an email when upload access is granted.");
+      console.log(chalk.dim("  Check any time with 'nemar auth status --refresh'."));
+      warnIfAdminsNotNotified(result);
+    } catch (error) {
+      if (!(error instanceof ApiError)) {
+        spinner.fail("Failed to submit upload access request");
+        console.log(chalk.dim("  Check your internet connection"));
+        process.exitCode = 1;
+        return;
+      }
+
+      spinner.fail(error.message);
+      // The API names the fields it is still missing; print each one with
+      // where to fix it rather than making the user map an error sentence back
+      // onto a settings form (ADR 0042).
+      if (error.missing && error.missing.length > 0) {
+        console.log();
+        console.log("  Still needed:");
+        for (const field of error.missing) {
+          const fix = UPLOAD_ACCESS_FIX[field] ?? "update it in Settings on nemar.org";
+          console.log(`    ${chalk.yellow(field)} — ${fix}`);
+        }
+        console.log();
+        console.log(chalk.dim("  Settings: https://nemar.org/settings"));
+      }
+      process.exitCode = 1;
+    }
+  });
+
+addVerboseHelp(
+  requestUploadAccessCmd,
+  `
+Description:
+  Uploading datasets needs upload access: a one-time grant an admin makes
+  after reviewing who you are and where you are. Verifying your email is
+  not enough on its own, and nothing grants it automatically.
+
+  Before asking, your account needs a username, your given and family name,
+  a GitHub username that exists, and your city and country. Set them in
+  Settings on nemar.org; the request tells you which ones are missing.
+
+  Asking twice does nothing: while a request is open the command reports
+  that and no second message reaches the admins.
+
+Examples:
+  $ nemar auth request-upload-access
+  $ nemar auth request-upload-access --why "Sharing our lab's 64-channel EEG study of motor imagery"`,
 );

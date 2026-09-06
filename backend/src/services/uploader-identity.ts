@@ -137,12 +137,14 @@ export const OWNER_NAME_MISSING_REASON = "owner_name_missing";
 /**
  * User-facing explanation for {@link OWNER_NAME_MISSING_REASON}.
  *
- * Describes the ONE route that exists today. It deliberately does not offer
- * "type your name into Settings": `PATCH /auth/profile` rejects
- * given_name/family_name on purpose (auth-web.ts, "Name is ORCID-canonical
- * (#835) and not editable here"), so that advice would send a blocked user to
- * a form that cannot help them. Phase 3 (#1253) adds profile-side name entry;
- * this message must be revisited then.
+ * Names BOTH routes, because ADR 0042 made the answer depend on the account.
+ * `PATCH /auth/profile` now accepts a typed name, but only where nothing would
+ * overwrite it: an account with a VERIFIED ORCID link has its record re-read on
+ * every sign-in, so for those the ORCID route below is still the only one that
+ * sticks. An account that never completed an ORCID sign-in -- which includes
+ * every CLI signup, since signup records the iD without setting
+ * `orcid_verified` -- can simply set the name in Settings, and the message says
+ * so rather than sending them to a record they may not control.
  *
  * ORCID is canonical either way: a public name on the record flows in through
  * the signup lookup, the OAuth link refresh, and `nemar admin backfill-names`.
@@ -152,4 +154,5 @@ export const OWNER_NAME_MISSING_MESSAGE =
   "researcher name on file. Make your name public on your ORCID record " +
   "(orcid.org > Names > visibility Everyone), then sign in again on nemar.org — or " +
   "re-link ORCID from Settings — so NEMAR can read it, and re-request publication. " +
+  "Or, if your account has no verified ORCID link, set your name in Settings on nemar.org. " +
   "NEMAR will not cite you by your username.";

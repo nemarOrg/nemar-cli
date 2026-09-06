@@ -1,0 +1,59 @@
+-- The one-time upload-access request (epic #1250, phase #1253; ADR 0042).
+--
+-- ADR 0040 made `verified` the base tier and admin approval the single writer
+-- of `service_access`, but left no way for a verified account to ASK. The 403
+-- pointed at the support page and `nemar admin users --awaiting-approval` could
+-- only mean "verified with no grant" -- every base-tier account, whether or not
+-- anyone wanted to upload. This column is the missing half: the moment a user
+-- asked.
+--
+-- ONE COLUMN, NOT A TABLE. A request is request-once (ADR 0042): it is opened
+-- by the user, closed by `nemar admin approve` (which sets service_access) and
+-- never re-opened, so there is no history to keep and no per-request state
+-- beyond "when". The same reasoning ADR 0036 applies to operational rows -- a
+-- count and a pointer, not a per-event list -- and ADR 0034 applies to
+-- `datasets`. The three facts a reviewer needs are readable together on the
+-- users row:
+--
+--   upload_access_requested_at IS NOT NULL AND service_access = 0  -> open
+--   upload_access_requested_at IS NOT NULL AND service_access = 1  -> granted
+--   upload_access_requested_at IS NULL                             -> never asked
+--
+-- The WHY TEXT reuses `users.description`, the column CLI signup already fills
+-- with "why you need NEMAR access" and that sendAdminNotificationEmail already
+-- renders as "Reason for Access". A web/ORCID row has it NULL because that
+-- signup never collected one, so the request is the first thing to write it --
+-- and for a CLI row the request's text is a newer statement of the same fact
+-- than a signup blurb from months earlier. A second column would leave the
+-- admin email guessing which of the two to render.
+--
+-- NULLABLE, and the absence is meaningful rather than a default: NULL is "has
+-- not asked", which is where every one of the ~609 existing rows genuinely
+-- stands. Backfilling a timestamp would fabricate requests nobody made and put
+-- the whole catalog in the admin review queue.
+--
+-- A SECOND COLUMN, `upload_access_notified_at`, records whether the admins were
+-- actually TOLD. It is not a duplicate of the first: the request landing and
+-- the notification arriving are two events that can and do come apart (Resend
+-- refuses, every admin send fails), and without the second stamp the
+-- request-once rule silently becomes request-never -- the row looks answered,
+-- the idempotency guard short-circuits every retry, and nobody is ever
+-- notified. Keeping them apart is what lets a repeat call re-send instead:
+--
+--   requested_at set, notified_at NULL -> open, admins NOT yet told; retry
+--   requested_at set, notified_at set  -> open and delivered; do not re-send
+--
+-- Same shape as `email_sent` on the approve route, promoted from a response
+-- field to a column because this one has to survive the request that produced
+-- it.
+--
+-- NOT IDEMPOTENT AS A STATEMENT, and it does not need to be: SQLite has no
+-- `ADD COLUMN IF NOT EXISTS`, and wrangler's `d1_migrations` ledger is what
+-- guarantees the file runs once. Re-running it by hand fails loudly with
+-- "duplicate column name: upload_access_requested_at" and changes nothing --
+-- the two statements are independent ADD COLUMNs, so a partial application
+-- leaves the first column in place and re-running finishes the second (the
+-- concern migration 0075 documents at length is about statements that must
+-- agree with each other; these two do not).
+ALTER TABLE users ADD COLUMN upload_access_requested_at TEXT;
+ALTER TABLE users ADD COLUMN upload_access_notified_at TEXT;

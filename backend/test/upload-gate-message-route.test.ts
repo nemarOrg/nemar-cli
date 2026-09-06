@@ -2,11 +2,14 @@
  * The 403 body a user actually receives when they lack upload access
  * (ADR 0040, #1251), read off the real route rather than the constant.
  *
- * The message used to say "Request upload access from your account settings",
- * pointing at a settings feature that has never existed (website ADR 0010's phase 2 was
- * never built, #1249) -- so the one place the product ever explains the gate
- * sent people to a page with nothing on it. This pins the replacement text at
- * the boundary, and pins that `error` did NOT change: the CLI matches on it.
+ * The message has been wrong twice. It first said "Request upload access from
+ * your account settings", pointing at a settings feature that has never existed
+ * (website ADR 0010's phase 2 was never built, #1249) -- so the one place the
+ * product ever explains the gate sent people to a page with nothing on it.
+ * Phase 1 replaced that with the support page plus a promise that a request
+ * flow was coming; phase 3 (ADR 0042) built it, so the message now names the
+ * two places a person can actually ask. This pins the current text at the
+ * boundary, and pins that `error` did NOT change: the CLI matches on it.
  *
  * Entry point is POST /datasets/:id/upload-urls, whose service gate is the one
  * a collaborator or owner hits when pushing bytes. Real engine: bun:sqlite
@@ -74,7 +77,7 @@ beforeEach(() => {
 });
 
 describe("the upload gate's 403 body", () => {
-  test("names admin approval and the support page, not a settings feature", async () => {
+  test("names the two places a request can actually be made", async () => {
     await seedOwnerWithoutUploadAccess(0);
 
     const res = await requestUploadUrls();
@@ -82,11 +85,16 @@ describe("the upload gate's 403 body", () => {
     const body = await res.json();
 
     expect(body.message).toBe(
-      "Uploading requires upload access, a one-time admin approval. Ask an admin via https://nemar.org/support; the request flow is coming to Settings and the CLI.",
+      "Request upload access from Settings on nemar.org or run `nemar auth request-upload-access`; an admin reviews it once.",
     );
-    // The dead pointer this replaced. Asserted negatively so a well-meaning
-    // reinstatement has to argue with a test rather than slip through.
+    // Both dead pointers this replaced, asserted negatively so a well-meaning
+    // reinstatement of either has to argue with a test rather than slip
+    // through: the settings page that never existed (#1249), and phase 1's
+    // "coming soon", which stopped being true when ADR 0042 shipped the flow.
     expect(body.message).not.toContain("account settings");
+    expect(body.message).not.toContain("coming");
+    // The command it names has to be the real one.
+    expect(body.message).toContain("nemar auth request-upload-access");
   });
 
   test("the machine-readable `error` is unchanged (the CLI matches on it)", async () => {

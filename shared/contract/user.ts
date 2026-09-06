@@ -85,6 +85,14 @@ export const adminUserListItemSchema = z
     given_name: z.string().nullable().optional(),
     family_name: z.string().nullable().optional(),
     orcid: z.string().nullable().optional(),
+    /**
+     * When this account asked for upload access (ADR 0042, #1253). `.optional()`
+     * for the same reason `service_access` is: a backend deployed before #1253
+     * omits the key, and absence means "this API cannot say", not "never asked".
+     * An OPEN request is this being set while `service_access` is 0 — once an
+     * admin approves, the stamp stays as the record of when they asked.
+     */
+    upload_access_requested_at: z.string().nullable().optional(),
   })
   .passthrough();
 export type AdminUserListItem = z.infer<typeof adminUserListItemSchema>;
@@ -97,3 +105,165 @@ export const adminUsersListResponseSchema = z
   })
   .passthrough();
 export type AdminUsersListResponse = z.infer<typeof adminUsersListResponseSchema>;
+
+/**
+ * Per-user outcome of `POST /admin/users/backfill-usernames` (ADR 0042, #1253).
+ *
+ * The five terminal values are kept apart because each one asks a different
+ * thing of the operator, exactly as `backfillNameOutcomeSchema` splits
+ * `no_public_name` from `lookup_failed`:
+ *
+ *   assigned / would_assign  the sweep can finish this row on its own.
+ *   single_name              a given name and no family name. NOT guessed at:
+ *                            deriving a handle from the email local part
+ *                            invents an identity the person never chose
+ *                            (ADR 0042), so these are listed for a human.
+ *   no_name                  neither part, and no ORCID record to read one
+ *                            from. Run `nemar admin backfill-names` first.
+ *   lookup_failed            transient: the ORCID read failed. Retry the batch.
+ *   conflict                 the suggested username was claimed between the
+ *                            scan and the write. Retry picks the next suffix.
+ */
+export const backfillUsernameOutcomeSchema = z.enum([
+  "assigned",
+  "would_assign",
+  "single_name",
+  "no_name",
+  "lookup_failed",
+  "conflict",
+]);
+export type BackfillUsernameOutcome = z.infer<typeof backfillUsernameOutcomeSchema>;
+
+/**
+ * What happened to the one verify-your-email message an `--apply` run sends to
+ * a row it just gave a username to (ADR 0042, #1253).
+ *
+ * `skipped_fence` is not a failure: outside production `issueEmailVerificationCode`
+ * refuses any address that is not a synthetic test target and writes nothing at
+ * all (AGENTS.md — the dev D1 holds ~609 real addresses behind a live Resend
+ * key). Reporting it as `failed` would send an operator hunting a bug in the
+ * one behaviour that is protecting real people.
+ */
+export const backfillVerifyOutcomeSchema = z.enum([
+  "sent",
+  "already_verified",
+  "skipped_fence",
+  "rate_limited",
+  "failed",
+  "not_attempted",
+]);
+export type BackfillVerifyOutcome = z.infer<typeof backfillVerifyOutcomeSchema>;
+
+/**
+ * `GET /auth/profile/username-suggestion` (ADR 0042, #1253).
+ *
+ * `suggestion` is null for both non-"name" cases, and they are kept apart
+ * because they are different problems:
+ *
+ *   unavailable  the account has no family name to build one from, or the name
+ *                folds to nothing usable in ASCII. The user types one.
+ *   exhausted    a default EXISTS but every variant of it up to the suffix
+ *                limit is taken. The user types one too, but the operator has
+ *                a saturated base to look at -- so the backend also logs it.
+ *
+ * The two fields are reported separately so the website can tell "here is a
+ * default, edit it if you like" from "type one yourself" without inspecting a
+ * null.
+ */
+export const usernameSuggestionResponseSchema = z
+  .object({
+    suggestion: z.string().nullable(),
+    based_on: z.enum(["name", "unavailable", "exhausted"]),
+  })
+  .passthrough();
+export type UsernameSuggestionResponse = z.infer<typeof usernameSuggestionResponseSchema>;
+
+/**
+ * Why `POST /users/me/upload-access/request` refused (ADR 0042, #1253).
+ *
+ * The closed vocabulary the website's Settings form and the CLI both switch on.
+ * Declared here rather than in the backend service because three consumers read
+ * it: the route that raises it, the CLI client that decides how to render such
+ * a body, and nemarOrg/website#301.
+ *
+ * Every refusal carries `{ error, message, missing }`, and `missing` is present
+ * (possibly empty) on all of them so one renderer covers the set:
+ *
+ *   why_required                the submitted text is outside 20-500 chars.
+ *   email_not_verified          the inbox is unconfirmed; POST /auth/email/verify/request.
+ *   profile_incomplete          `missing` names the account fields still blank.
+ *   github_username_unverified  the handle is set but GitHub does not resolve it.
+ *   github_unavailable          GitHub could not be reached (503, #1052). NOTHING
+ *                               about the account is wrong and `missing` is empty:
+ *                               retry the same request later.
+ *   already_approved            409; the grant is already held.
+ */
+export const uploadAccessErrorCodeSchema = z.enum([
+  "why_required",
+  "email_not_verified",
+  "profile_incomplete",
+  "github_username_unverified",
+  "github_unavailable",
+  "already_approved",
+]);
+export type UploadAccessErrorCode = z.infer<typeof uploadAccessErrorCodeSchema>;
+
+/** The refusal codes as a plain array, for a runtime membership test (the CLI
+ *  client uses it to decide whether a body leads with `message`). */
+export const UPLOAD_ACCESS_ERROR_CODES: readonly string[] = uploadAccessErrorCodeSchema.options;
+
+/**
+ * Bounds on the upload request's why text (ADR 0042, #1253).
+ *
+ * Declared here because three places must agree on them: the backend rule that
+ * refuses `why_required`, the CLI prompt that stops a user submitting a text it
+ * will refuse, and the website form. They match CLI signup's `description`
+ * bounds -- the same column, and the same question.
+ */
+export const UPLOAD_ACCESS_WHY_MIN_CHARS = 20;
+export const UPLOAD_ACCESS_WHY_MAX_CHARS = 500;
+
+/**
+ * The user payload the web dashboard reads: `GET /auth/me`, and the same shape
+ * echoed by `/auth/code/verify`, `PATCH /auth/profile` and `/auth/email/verify`
+ * (backend `publicUser`).
+ *
+ * NOT the same shape as {@link userSchema}, which is the CLI's `/users/me`
+ * envelope: this one reports `status` as the dashboard's two-state value
+ * ("active" / "pending"), carries the profile fields the Settings page edits,
+ * and omits everything about API tokens and sandbox state. They are two
+ * audiences, not one shape with optional halves.
+ *
+ * `username`, `service_access_granted_at` and `upload_access_requested_at`
+ * arrived in #1253 (nemarOrg/website#306): the dashboard was fetching the
+ * username from `/users/me` separately because it was absent here, and could
+ * report "granted" and "requested" but not when. `upload_access_notified_at` is
+ * deliberately absent -- whether an admin's copy of the email landed drives the
+ * requester's retry and the admin queue, and is not profile content.
+ */
+export const webUserSchema = z
+  .object({
+    id: z.number().int(),
+    email: z.string(),
+    username: z.string().nullable(),
+    role: z.string(),
+    status: z.string(),
+    email_verified: z.boolean(),
+    given_name: z.string().nullable(),
+    family_name: z.string().nullable(),
+    orcid: z.string().nullable(),
+    orcid_verified: z.boolean(),
+    github_username: z.string().nullable(),
+    city: z.string().nullable(),
+    country: z.string().nullable(),
+    affiliation: z.string().nullable(),
+    service_access: z.boolean(),
+    service_access_granted_at: z.string().nullable(),
+    upload_access_requested_at: z.string().nullable(),
+  })
+  .passthrough();
+export type WebUser = z.infer<typeof webUserSchema>;
+
+/** `GET /auth/me` — the user, or `{ user: null }` for an anonymous browser. */
+export const authMeResponseSchema = z.object({ user: webUserSchema.nullable() }).passthrough();
+export type AuthMeResponse = z.infer<typeof authMeResponseSchema>;

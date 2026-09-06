@@ -15,6 +15,7 @@
  *   POST  /auth/email/change/verify   - verify it, move users.email (#911)
  *   POST  /auth/email/verify/request  - re-mail the verification code (ADR 0040)
  *   POST  /auth/email/verify          - redeem it: pending -> verified (ADR 0040)
+ *   GET   /auth/profile/username-suggestion - a default username (ADR 0042)
  *
  * Notes for readers:
  *   - In development and test environments the `request` response
@@ -78,6 +79,11 @@ import {
   githubHandleChanged,
   normalizeProfilePatch,
 } from "../services/profile";
+import {
+  isUsernameUniqueViolation,
+  pickAvailableUsername,
+  suggestUsername,
+} from "../services/username";
 import {
   buildClearedSessionCookie,
   buildSessionCookie,
@@ -156,10 +162,17 @@ function publicUser(row: {
   country: string | null;
   affiliation: string | null;
   service_access: boolean;
+  username: string | null;
+  service_access_granted_at: string | null;
+  upload_access_requested_at: string | null;
 }) {
   return {
     id: row.id,
     email: row.email,
+    // The dashboard used to fetch this from GET /users/me separately, purely
+    // because it was absent here (nemarOrg/website#306). NULL on a web/ORCID
+    // row until onboarding sets one.
+    username: row.username,
     role: row.role ?? "member",
     status: userStatusForDashboard(row.status) ?? row.status,
     // The two things the website needs to render the account's own state,
@@ -179,6 +192,14 @@ function publicUser(row: {
     country: row.country,
     affiliation: row.affiliation,
     service_access: row.service_access,
+    // The DATES behind the two upload-access states. Without them the
+    // dashboard can say "granted" and "requested" but not when, so it cannot
+    // tell a request made this morning from one made in March (ADR 0042).
+    // `upload_access_notified_at` is deliberately NOT here: whether an admin's
+    // copy of the email landed is an operational fact for the requester's
+    // retry logic and the admin queue, not something to render on a profile.
+    service_access_granted_at: row.service_access_granted_at,
+    upload_access_requested_at: row.upload_access_requested_at,
   };
 }
 
@@ -410,7 +431,8 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       .prepare(
         `SELECT id, email, role, status, email_verified,
                 given_name, family_name, orcid, orcid_verified,
-                github_username, city, country, affiliation, service_access
+                github_username, city, country, affiliation, service_access,
+                username, service_access_granted_at, upload_access_requested_at
            FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1`,
       )
       .bind(email)
@@ -432,6 +454,9 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
         affiliation: string | null;
         // NOT NULL DEFAULT 0 in D1 (0062), so plain number.
         service_access: number;
+        username: string | null;
+        service_access_granted_at: string | null;
+        upload_access_requested_at: string | null;
       }>();
     if (!userRow) {
       // No live users row for a matched code. Normally impossible
@@ -512,6 +537,9 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       country: userRow.country,
       affiliation: userRow.affiliation,
       service_access: userRow.service_access === 1,
+      username: userRow.username,
+      service_access_granted_at: userRow.service_access_granted_at,
+      upload_access_requested_at: userRow.upload_access_requested_at,
     };
 
     if (promoted) {
@@ -602,11 +630,18 @@ authWebRoutes.get("/me", webSessionMiddleware, async (c) => {
 // city/country, empty-string-clears) live in normalizeProfilePatch so they
 // are unit-testable. Bounds match finalizeSchema in auth-orcid.ts where the
 // same columns are first written (city/country 120, affiliation 200).
+// `username` is bounded at 60 rather than at its real 30 so that a 31-character
+// attempt is refused by validateUsernameFormat with `username_too_long` — the
+// code the website maps to a field message — instead of by zod's issue tree.
+// given_name/family_name match signupSchema's 100.
 const profilePatchSchema = z.object({
   github_username: z.string().max(60).optional(),
   city: z.string().max(120).optional(),
   country: z.string().max(120).optional(),
   affiliation: z.string().max(200).optional(),
+  username: z.string().max(60).optional(),
+  given_name: z.string().max(100).optional(),
+  family_name: z.string().max(100).optional(),
 });
 
 // The schema above and ProfilePatchInput in profile.ts describe the same
@@ -622,15 +657,33 @@ export const _profilePatchShapesAgree: MutuallyAssignable<
 > = true;
 
 /**
- * Self-service profile edit (#912; nemarOrg/website#135). Accepts any subset
- * of github_username / city / country / affiliation — see profile.ts for the
- * per-field rules. Name is ORCID-canonical (#835) and not editable here.
+ * Self-service profile edit (#912; nemarOrg/website#135, #301). Accepts any
+ * subset of github_username / city / country / affiliation / username /
+ * given_name / family_name — see profile.ts for the per-field rules.
  *
  * A changed GitHub handle gets the same three checks as CLI signup: direct
  * dup (COLLATE NOCASE, 409 even when the handle no longer resolves), live
  * existence against the GitHub API, and a canonical-login re-dedup when
  * GitHub normalises what was typed. Re-saving the current handle skips all
  * three so a routine "Save profile" never spends a GitHub call.
+ *
+ * `username` and the name pair (ADR 0042) are the two fields whose rules
+ * depend on the ACCOUNT rather than on the submitted value, so they cost one
+ * extra read and are checked together:
+ *   - a username may be set while NULL -- at ANY status, including `approved`,
+ *     because the 19 web/ORCID rows this phase exists for are approved and
+ *     hold NULL, and a first assignment is not a change -- and CHANGED until
+ *     an admin approves the account, after which a rename is locked (409
+ *     `username_locked`): it is what `nemar admin approve <username>`
+ *     addresses and what the dataset repos an approved account owns are
+ *     attributed to.
+ *   - a name is refused (409 `name_is_orcid_canonical`) while a VERIFIED ORCID
+ *     is linked, because ORCID is re-read on every sign-in and would overwrite
+ *     the edit. Without a linked iD there is nothing to overwrite it, and ADR
+ *     0041 needs the name filled in before that account can publish at all.
+ * Re-submitting the current username is a no-op rather than a refusal, for the
+ * same reason `githubHandleChanged` exists: the Settings form sends every field
+ * on every save, so an approved account must still be able to save its city.
  */
 authWebRoutes.patch(
   "/profile",
@@ -654,6 +707,104 @@ authWebRoutes.patch(
 
     try {
       if (
+        patch.username !== undefined ||
+        patch.given_name !== undefined ||
+        patch.family_name !== undefined
+      ) {
+        // One read for both rules, and only when one of them is in the patch:
+        // a plain city/country save must not pay for it. `webUser` carries
+        // status and orcid_verified already but NOT username, and reading them
+        // from one statement keeps the three decisions consistent with each
+        // other rather than with two different moments.
+        const account = await db
+          .prepare(
+            "SELECT username, status, orcid, orcid_verified FROM users WHERE id = ? AND deleted_at IS NULL",
+          )
+          .bind(webUser.id)
+          .first<{
+            username: string | null;
+            status: string;
+            orcid: string | null;
+            orcid_verified: number;
+          }>();
+        if (!account) {
+          return c.json({ error: "Account not found" }, 403);
+        }
+
+        if (patch.username !== undefined) {
+          const current = (account.username ?? "").trim();
+          if (current.toLowerCase() === patch.username.toLowerCase()) {
+            // Same handle, possibly re-cased: not a change, so neither the
+            // approval lock nor the uniqueness check applies. Dropped from the
+            // patch so a full-form save from an approved account still writes
+            // its other fields.
+            patch.username = undefined;
+          } else if (account.status === "revoked") {
+            // Defence in depth, and unreachable today: findSessionByCookieId
+            // filters `u.status != 'revoked'`, so a revoked account has no
+            // session to PATCH with and is answered 401 by the middleware
+            // above. Kept because the alternative -- letting a revoked account
+            // rename itself if that filter ever moves -- is the worse failure,
+            // and because it says out loud that revocation is not a state
+            // profile edits happen in.
+            return c.json(
+              {
+                error: "account_revoked",
+                message: "This account is revoked; contact an admin",
+              },
+              409,
+            );
+          } else if (current !== "" && account.status === "approved") {
+            // The lock is on a CHANGE, not on the field. `current === ""` is
+            // the 19 web/ORCID rows this phase exists for: they were approved
+            // (or re-approved) while holding NULL, and telling them "your
+            // username is fixed once approved" would leave them permanently
+            // without one -- which is the exact state ADR 0042 exists to end.
+            // A first assignment is not a change, so it is allowed at any
+            // status.
+            return c.json(
+              {
+                error: "username_locked",
+                message:
+                  "Your username is fixed once an admin has approved your account; contact an admin to change it",
+              },
+              409,
+            );
+          } else {
+            const taken = await db
+              .prepare(
+                `SELECT id FROM users
+                  WHERE username = ? COLLATE NOCASE AND id != ? AND deleted_at IS NULL
+                  LIMIT 1`,
+              )
+              .bind(patch.username, webUser.id)
+              .first<{ id: number }>();
+            if (taken) {
+              return c.json(
+                { error: "username_taken", message: "That username is already taken" },
+                409,
+              );
+            }
+          }
+        }
+
+        if (
+          (patch.given_name !== undefined || patch.family_name !== undefined) &&
+          account.orcid_verified === 1 &&
+          (account.orcid ?? "").trim() !== ""
+        ) {
+          return c.json(
+            {
+              error: "name_is_orcid_canonical",
+              message:
+                "Your name comes from your ORCID record and is refreshed on every sign-in. Update it at orcid.org and sign in again.",
+            },
+            409,
+          );
+        }
+      }
+
+      if (
         typeof patch.github_username === "string" &&
         githubHandleChanged(patch.github_username, webUser.github_username)
       ) {
@@ -672,14 +823,25 @@ authWebRoutes.patch(
           );
         }
 
-        // Known limitation shared with CLI signup: validateGitHubUsername
-        // returns null for any non-OK GitHub response, so a GitHub-side
-        // outage reads as "does not exist" here rather than a 5xx.
-        const githubUser = await validateGitHubUsername(
+        // #1052: three answers, not two. A 5xx or a transport failure used to
+        // arrive as `null` and be reported as "does not exist", which told
+        // someone their own handle was wrong and left them editing a correct
+        // field. `unavailable` is now its own 503 and the save is not applied.
+        const githubLookup = await validateGitHubUsername(
           patch.github_username,
           await getDatasetsToken(c.env),
         );
-        if (!githubUser) {
+        if (githubLookup.status === "unavailable") {
+          console.error(`[auth-web] /profile GitHub lookup unavailable: ${githubLookup.detail}`);
+          return c.json(
+            {
+              error: "github_unavailable",
+              message: "GitHub could not be reached; try again in a few minutes",
+            },
+            503,
+          );
+        }
+        if (githubLookup.status === "not_found") {
           return c.json(
             {
               error: "invalid_github_username",
@@ -688,6 +850,7 @@ authWebRoutes.patch(
             400,
           );
         }
+        const githubUser = githubLookup.user;
         // GitHub resolves renames/case variants to a canonical login; store
         // that, and re-run the dup check when it differs from what was typed
         // beyond case (the COLLATE NOCASE check above already covered case).
@@ -728,6 +891,27 @@ authWebRoutes.patch(
         sets.push("affiliation = ?");
         binds.push(patch.affiliation);
       }
+      if (patch.username !== undefined) {
+        sets.push("username = ?");
+        binds.push(patch.username);
+      }
+      if (patch.given_name !== undefined) {
+        sets.push("given_name = ?");
+        binds.push(patch.given_name);
+      }
+      if (patch.family_name !== undefined) {
+        sets.push("family_name = ?");
+        binds.push(patch.family_name);
+      }
+
+      // Every field in the patch turned out to be a no-op (the only way to get
+      // here is re-submitting your own current username). Answer with the
+      // current row rather than building `UPDATE users SET  WHERE ...`.
+      if (sets.length === 0) {
+        const unchanged = await fetchPublicUserById(db, webUser.id);
+        if (!unchanged) return c.json({ error: "Account not found" }, 403);
+        return c.json({ ok: true, user: unchanged });
+      }
 
       // One D1 batch == one implicit transaction: the update and its audit
       // row land together. Details carry the new values — profile fields,
@@ -765,6 +949,16 @@ authWebRoutes.patch(
           { error: "github_in_use", message: "GitHub account already linked to another user" },
           409,
         );
+      }
+      // The same window for `username`, and the same answer. This one is
+      // reachable ONLY as a race: the pre-check above is COLLATE NOCASE while
+      // the column's own UNIQUE constraint (migration 0001) is case-sensitive,
+      // so anything the constraint would refuse the pre-check has already
+      // refused — unless another request claimed the name in between. A
+      // case-VARIANT race (`Ada` and `ada` arriving together) slips past both
+      // and is what Phase 4's case-insensitive unique index closes.
+      if (isUsernameUniqueViolation(err)) {
+        return c.json({ error: "username_taken", message: "That username is already taken" }, 409);
       }
       console.error("[auth-web] /profile PATCH failed", err);
       return c.json({ error: "Failed to update profile" }, 500);
@@ -867,7 +1061,8 @@ async function fetchPublicUserById(
     .prepare(
       `SELECT id, email, role, status, email_verified,
               given_name, family_name, orcid, orcid_verified,
-              github_username, city, country, affiliation, service_access
+              github_username, city, country, affiliation, service_access,
+              username, service_access_granted_at, upload_access_requested_at
          FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
     )
     .bind(userId)
@@ -889,6 +1084,9 @@ async function fetchPublicUserById(
       affiliation: string | null;
       // NOT NULL DEFAULT 0 in D1 (0062), so plain number.
       service_access: number;
+      username: string | null;
+      service_access_granted_at: string | null;
+      upload_access_requested_at: string | null;
     }>();
   if (!row) return null;
   return publicUser({
@@ -906,6 +1104,9 @@ async function fetchPublicUserById(
     country: row.country,
     affiliation: row.affiliation,
     service_access: row.service_access === 1,
+    username: row.username,
+    service_access_granted_at: row.service_access_granted_at,
+    upload_access_requested_at: row.upload_access_requested_at,
   });
 }
 
@@ -1354,3 +1555,75 @@ authWebRoutes.post(
     }
   },
 );
+
+// ---------------------------------------------------------------
+// GET /auth/profile/username-suggestion  (ADR 0042, #1253)
+// ---------------------------------------------------------------
+
+/**
+ * Offer a default username for an account that has none.
+ *
+ * First initial plus family name, ASCII-folded and lowercased, with `-2`,
+ * `-3`, ... appended past a collision (services/username.ts). It is a
+ * SUGGESTION, not a reservation: nothing is written and nothing is held, so
+ * two people offered the same base can still race for it at the PATCH — which
+ * is exactly what the uniqueness check there is for. Holding a name would mean
+ * a table of expiring reservations for a form most people submit in seconds.
+ *
+ * `{ suggestion: null, based_on: "unavailable" }` when the account has no
+ * family name, or when the name folds to nothing usable in ASCII (a record
+ * written entirely in a non-Latin script). Nothing is derived from the email
+ * local part in that case: a handle nobody chose is worse than a blank field
+ * with a prompt (ADR 0042).
+ *
+ * `"exhausted"` is the other null, and it is a different problem: a default
+ * exists and every variant of it is taken. The user sees the same empty field
+ * either way, but a saturated base is an operational fact nobody would
+ * otherwise see, so it is logged as well as reported.
+ *
+ * Cookie-authenticated like the rest of the /auth/profile family, and read-only,
+ * so it carries no Origin check — same as GET /auth/me.
+ */
+authWebRoutes.get("/profile/username-suggestion", webSessionMiddleware, async (c) => {
+  const webUser = c.var.webUser;
+  if (!webUser) {
+    return c.json({ error: "Authentication required" }, 401);
+  }
+
+  try {
+    const base = suggestUsername(webUser.given_name, webUser.family_name);
+    if (!base) {
+      return c.json({ suggestion: null, based_on: "unavailable" });
+    }
+
+    // Deleted rows are INCLUDED on purpose: a tombstone nulls the username
+    // (db/user-tombstone.ts) so it holds nothing, but a row that somehow still
+    // carries one would hold the UNIQUE index against this suggestion, and
+    // suggesting a name the PATCH must then refuse is worse than suffixing it.
+    //
+    // The LIKE arm can over-match (`alovelace-institute` looks like a suffixed
+    // variant and is not one), which only ever makes the taken-set larger and
+    // the suggestion later in the sequence — never a collision.
+    const rows = await c.env.DB.prepare(
+      "SELECT username FROM users WHERE username = ? COLLATE NOCASE OR username LIKE ? ESCAPE '\\'",
+    )
+      .bind(base, `${base.replace(/[%_\\]/g, "\\$&")}-%`)
+      .all<{ username: string | null }>();
+
+    const taken = (rows.results ?? [])
+      .map((r) => r.username)
+      .filter((u): u is string => typeof u === "string");
+
+    const suggestion = pickAvailableUsername(base, taken);
+    if (!suggestion) {
+      console.warn(
+        `[auth-web] username suggestion exhausted for base "${base}" (${taken.length} variants taken)`,
+      );
+      return c.json({ suggestion: null, based_on: "exhausted" });
+    }
+    return c.json({ suggestion, based_on: "name" });
+  } catch (err) {
+    console.error("[auth-web] /profile/username-suggestion failed", err);
+    return c.json({ error: "Failed to suggest a username" }, 500);
+  }
+});

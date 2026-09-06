@@ -33,6 +33,7 @@ import {
   type AvailabilityReportResult,
   type AvailabilityReportSweepBatchResponse,
   type BackfillNamesResponse,
+  type BackfillUsernamesResponse,
   type DataIntegritySweepBatchResponse,
   type DatasetTransitionResponse,
   type DoctorFixLiveResponse,
@@ -56,6 +57,7 @@ import {
   availabilityReportSweep,
   availabilityReportSweepReset,
   backfillUserNames,
+  backfillUsernames,
   bulkDeleteDatasets,
   changeUserRole,
   changeVisibility,
@@ -167,7 +169,7 @@ import {
  */
 const BLOCK_REASON_HINTS: Record<string, string> = {
   owner_name_missing:
-    "Run `nemar admin backfill-names --apply` if the owner's ORCID record publishes their name; otherwise the owner must make it public on ORCID and sign in again (name entry on nemar.org arrives with #1253).",
+    "Run `nemar admin backfill-names --apply` if the owner's ORCID record publishes their name; an ORCID-linked owner must otherwise make it public on ORCID and sign in again, and an owner with no linked ORCID can now type it into Settings on nemar.org (ADR 0042).",
 };
 
 /** Handle common error patterns in admin CLI commands */
@@ -284,7 +286,7 @@ adminCommand
   .option("--approved", "Show only approved users")
   .option("--revoked", "Show only revoked users")
   .option("--no-upload-access", "Show only accounts without upload access")
-  .option("--awaiting-approval", "Show verified accounts that hold no upload access yet")
+  .option("--awaiting-approval", "Show accounts with an open upload-access request")
   .option("--role <role>", "Filter by role: owner, admin, or member")
   .addHelpText(
     "after",
@@ -298,7 +300,7 @@ Tiers (ADR 0040):
 
 Examples:
   $ nemar admin users                    # List all users
-  $ nemar admin users --awaiting-approval # Verified, no upload access yet
+  $ nemar admin users --awaiting-approval # Open upload-access requests
   $ nemar admin users --no-upload-access # Every account without the upload grant
   $ nemar admin users --role admin       # List all admins
   $ nemar admin users --role owner       # List all owners
@@ -310,9 +312,17 @@ Examples:
     // Commander turns `--no-upload-access` into `uploadAccess`, defaulting to
     // true and set false when the flag is passed.
     const noUploadAccess = options.uploadAccess === false;
-    // --awaiting-approval is "verified, no upload grant". Phase 3 (#1253)
-    // narrows it to accounts with an OPEN upload request; until that table
-    // exists this is the whole population an admin could act on.
+    // --awaiting-approval now means what it says (ADR 0042, #1253): an account
+    // that ASKED for upload access and has not been granted it. Phase 1 could
+    // only approximate that as "verified with no grant" — every base-tier
+    // account, whether or not anyone wanted to upload — because there was no
+    // request to read.
+    //
+    // The narrowing is entirely server-side: an open request is
+    // `upload_access_requested_at` set, no grant, and `status='verified'`, and
+    // the route applies all three. `status=verified` is still sent as well
+    // because the pre-#1253 backend this CLI may be talking to knows only that
+    // half, and it is a true property of every open request either way.
     const awaitingApproval = options.awaitingApproval === true;
 
     // Determine status filter
@@ -344,11 +354,15 @@ Examples:
     const spinner = ora("Fetching users...").start();
 
     try {
-      const result = await listUsers(status, role);
+      const result = await listUsers(status, role, awaitingApproval);
       spinner.stop();
 
-      // The tier filters are applied here rather than server-side: the listing
+      // The TIER filters are applied here rather than server-side: the listing
       // is unpaginated, so there is nothing to gain from a new query param.
+      // (--awaiting-approval is the exception and is filtered server-side; the
+      // client-side pass below still runs for it, which is what keeps a backend
+      // that predates #1253 — and so ignores the query param entirely — from
+      // presenting every verified account as an open request.)
       //
       // Both filters select an EXPLICIT "browse", never an unreported tier: a
       // backend that does not send `service_access` would otherwise dump every
@@ -417,6 +431,14 @@ Examples:
         console.log(`    GitHub:  ${user.github_username ? `@${user.github_username}` : "-"}`);
         console.log(`    Status:  ${statusColor(user.status)}`);
         console.log(`    Tier:    ${tier}`);
+        // Only when there IS one. An absent field means either "never asked" or
+        // a backend older than #1253, and neither is worth a line that says
+        // nothing (ADR 0042).
+        if (user.upload_access_requested_at) {
+          console.log(
+            `    Asked:   ${new Date(user.upload_access_requested_at).toLocaleDateString()} (upload access)`,
+          );
+        }
         console.log(`    Created: ${new Date(user.created_at).toLocaleDateString()}`);
         console.log();
       }
@@ -6583,7 +6605,7 @@ backfillNamesCommand
       console.log();
       console.log(
         chalk.dim(
-          "These accounts must make their name public on their ORCID record and sign in again; NEMAR cannot type a name in for them (ORCID is canonical until #1253 lands profile editing).",
+          "These accounts must make their name public on their ORCID record and sign in again; NEMAR cannot type a name in for an ORCID-linked account, because the record is re-read on every sign-in and would overwrite it. An account with no verified ORCID can set its name in Settings (ADR 0042).",
         ),
       );
     }
@@ -6594,3 +6616,132 @@ backfillNamesCommand
   });
 
 adminCommand.addCommand(backfillNamesCommand);
+
+// ============================================================================
+// Username backfill (ADR 0042, #1253, epic #1250)
+//
+// 19 live accounts have no username: web/ORCID sign-ups, where the column has
+// been NULL by design since migration 0026. An upload request cannot be
+// reviewed or approved without one, so this derives it from the account's own
+// name (first initial plus family name) and, for a row it finishes, sends the
+// one verify-your-email message that lets the person sign in and use it.
+//
+// Run `nemar admin backfill-names` FIRST: this reads the names that one fills.
+// ============================================================================
+
+const backfillUsernamesCommand = new Command("backfill-usernames").description(
+  "Give username-less accounts a username from their name (dry run by default)",
+);
+
+backfillUsernamesCommand
+  .option("--apply", "Write the usernames and send verification messages")
+  .option("--limit <n>", "Users per batch (server clamps to [1,100])", "25")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { apply?: boolean; limit?: string; json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const limit = Number.parseInt(options.limit ?? "25", 10) || 25;
+    const apply = options.apply === true;
+    const spinner = ora(
+      apply ? "Assigning usernames..." : "Checking which accounts need a username...",
+    ).start();
+
+    let res: BackfillUsernamesResponse;
+    try {
+      res = await backfillUsernames({ apply, limit });
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Username backfill failed");
+      console.error(chalk.red(errorDetail(err)));
+      process.exit(1);
+      return;
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    console.log();
+    if (!res.apply) {
+      console.log(chalk.yellow("DRY RUN — nothing was written. Re-run with --apply."));
+    }
+    console.log(
+      chalk.cyan(
+        `scanned=${res.scanned} ${res.apply ? "assigned" : "would_assign"}=${
+          res.apply ? res.assigned : res.would_assign
+        } single_name=${res.single_name} no_name=${res.no_name} lookup_failed=${
+          res.lookup_failed
+        } conflict=${res.conflict} verify_sent=${res.verify_sent} verify_failed=${
+          res.verify_failed ?? 0
+        } verify_rate_limited=${res.verify_rate_limited ?? 0} remaining=${
+          res.remaining ?? "unknown"
+        }`,
+      ),
+    );
+    for (const r of res.results) {
+      const who = `id ${r.id} <${r.email}>`;
+      const name = [r.given_name, r.family_name].filter(Boolean).join(" ");
+      if (r.outcome === "assigned" || r.outcome === "would_assign") {
+        const verb =
+          r.outcome === "assigned" ? chalk.green("assigned  ") : chalk.cyan("would give");
+        // The verify outcome is printed for an assigned row because
+        // `skipped_fence` is the NORMAL result outside production and reads as
+        // a failure if it is not named (AGENTS.md's non-production email fence).
+        const mail = r.outcome === "assigned" ? `  [verify: ${r.verify}]` : "";
+        console.log(`  ${verb} ${who}: ${chalk.cyan(r.username ?? "?")}  (${name})${mail}`);
+      } else if (r.outcome === "single_name") {
+        console.log(
+          `  ${chalk.yellow("one name  ")} ${who}: only "${name}" on record; pick a username by hand`,
+        );
+      } else if (r.outcome === "no_name") {
+        console.log(
+          `  ${chalk.yellow("no name   ")} ${who}: run 'nemar admin backfill-names --apply' first`,
+        );
+      } else if (r.outcome === "conflict") {
+        console.log(`  ${chalk.yellow("conflict  ")} ${who}: ${r.error}`);
+      } else {
+        console.log(`  ${chalk.red("error     ")} ${who}: ${r.error}`);
+      }
+    }
+    // The retry pass, listed separately: these accounts already have a
+    // username, so they are not part of the assignment plan above -- what is
+    // being reported is a message that never landed.
+    for (const r of res.verify_retries ?? []) {
+      const label =
+        r.verify === "sent"
+          ? chalk.green("re-sent  ")
+          : r.verify === "not_attempted"
+            ? chalk.cyan("would send")
+            : chalk.yellow(`verify ${r.verify}`);
+      console.log(`  ${label} id ${r.id} <${r.email}>`);
+    }
+    if (res.warning) {
+      console.log(chalk.yellow(`  Warning: ${res.warning}`));
+    }
+    if (res.single_name > 0 || res.no_name > 0) {
+      console.log();
+      console.log(
+        chalk.dim(
+          "Accounts with one name or none are listed, never guessed at: a username derived from an email address is a handle the person never chose.",
+        ),
+      );
+    }
+    // A lookup failure or a conflict leaves the row a candidate for the next
+    // run, an undelivered verify message leaves an account unable to finish
+    // onboarding, and an unknown remainder means the batch's own bookkeeping
+    // failed. None is fatal, but a caller must not read any of them as a clean
+    // sweep -- an unreported verify failure is exactly how "one message per
+    // account" quietly became "none" for the accounts it failed on.
+    if (
+      res.lookup_failed > 0 ||
+      res.conflict > 0 ||
+      (res.verify_failed ?? 0) > 0 ||
+      (res.verify_rate_limited ?? 0) > 0 ||
+      res.remaining === null
+    ) {
+      process.exitCode = 1;
+    }
+  });
+
+adminCommand.addCommand(backfillUsernamesCommand);

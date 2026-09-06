@@ -43,6 +43,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "login",
     "registerSSHKey",
     "requestKeyRegeneration",
+    "requestUploadAccess",
     "resendVerification",
     "resetSandbox",
     "retrieveKey",
@@ -96,6 +97,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "availabilityReportSweep",
     "availabilityReportSweepReset",
     "backfillUserNames",
+    "backfillUsernames",
     "bulkDeleteDatasets",
     "changeUserRole",
     "changeVisibility",
@@ -170,11 +172,13 @@ const POST_SPLIT_ADDITIONS = [
   "NOTICE_LEVELS", // #1025, notice level vocabulary
   "approveUserById", // #1012, id-keyed approve for web/ORCID accounts
   "backfillUserNames", // #1255, epic #1250: POST /admin/users/backfill-names
+  "backfillUsernames", // #1253, epic #1250: POST /admin/users/backfill-usernames
   "checkOrcidName", // #1255, epic #1250: GET /auth/orcid-name pre-signup lookup
   "doctorFix", // #1130, CLI wrapper for POST /admin/doctor/fix
   "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
   "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion
   "publishZarrCatalog", // #1062, epic #1181 phase 2: POST /admin/zarr-catalog/publish
+  "requestUploadAccess", // #1253, epic #1250: POST /users/me/upload-access/request
   "recordingStatsSweep", // #1194, CLI wrapper for POST /admin/datasets/recording-stats-sweep
   "recordingStatsSweepReset", // #1194, CLI wrapper for the recording-stats sweep reset
   "signalDefaultsSweep", // #1194, CLI wrapper for POST /admin/datasets/signal-defaults-sweep

@@ -340,12 +340,14 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     // now that they no longer track `status` one-for-one (ADR 0040); the
     // identity columns are here because a web/ORCID row has username = NULL
     // and is otherwise unidentifiable in the listing (#1251).
+    // upload_access_requested_at is what makes "awaiting approval" a fact
+    // rather than an inference (ADR 0042, #1253).
     let query = `
     SELECT
       id, username, email, github_username, status,
       email_verified, role, created_at, approved_at, revoked_at,
       signup_source, service_access, service_access_granted_at,
-      given_name, family_name, orcid
+      given_name, family_name, orcid, upload_access_requested_at
     FROM users
   `;
     const conditions: string[] = [];
@@ -361,6 +363,31 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       conditions.push("status = ?");
       params.push(status);
     }
+
+    // An OPEN upload request: asked, and not yet answered (ADR 0042, #1253).
+    // Phase 1 could only approximate this as "verified with no grant", which
+    // was every base-tier account whether or not anyone wanted to upload. The
+    // grant itself is what closes a request, so `service_access = 0` is the
+    // "still open" half rather than a second status column.
+    //
+    // `status = 'verified'` is part of the filter and not left to the caller.
+    // Revoke clears the request stamps, so a revoked row should not match
+    // anyway -- but that is the CURRENT behaviour of one route, and this
+    // predicate is what nemarOrg/website#301 renders as "open requests". A
+    // consumer should get that meaning without having to know to add a status
+    // param, and a future path that revokes a row some other way must not be
+    // able to put a dead account back in an admin's queue. Belt and braces, on
+    // purpose. (`revoked_iam_pending` is excluded by the same clause.)
+    //
+    // Server-side, unlike the tier filters the CLI applies over the returned
+    // rows, because this one cannot be computed from what the listing used to
+    // return: the timestamp is new.
+    if (c.req.query("awaiting_approval") === "1") {
+      conditions.push("upload_access_requested_at IS NOT NULL");
+      conditions.push("service_access = 0");
+      conditions.push("status = 'verified'");
+    }
+
     if (role) {
       if (!["owner", "admin", "member"].includes(role)) {
         return c.json({ error: "Invalid role. Must be: owner, admin, or member" }, 400);
@@ -796,6 +823,14 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     // explicit re-grant). The two grant stamps go with it (ADR 0040): revoke
     // is the eraser of what approval wrote, so a later listing cannot show a
     // revoked account still carrying "granted by X on Y".
+    //
+    // The upload-REQUEST stamps go too (ADR 0042). An open request is
+    // `upload_access_requested_at` set with no grant, so leaving the stamp on a
+    // revoked row would put a former grantee back into the admin review queue
+    // the moment their grant was taken away -- the one account an admin has
+    // just decided about. Clearing both means a re-instated account asks
+    // again, which is the right shape: the review is of a person at a moment,
+    // and revocation ends that moment.
     await db
       .prepare(
         `
@@ -804,6 +839,8 @@ export function registerUsersRoutes(admin: AdminRouter): void {
         service_access = 0,
         service_access_granted_at = NULL,
         service_access_granted_by = NULL,
+        upload_access_requested_at = NULL,
+        upload_access_notified_at = NULL,
         revoked_at = datetime('now'),
         updated_at = datetime('now')
     WHERE id = ?

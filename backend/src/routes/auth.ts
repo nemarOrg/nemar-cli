@@ -81,13 +81,25 @@ authRoutes.get("/check-github", async (c) => {
     return c.json({ error: "GitHub username required" }, 400);
   }
 
-  let githubUser: { login: string } | null;
+  // #1052: a lookup has three answers, and only a 404 is evidence about the
+  // account. `unavailable` (5xx, 429, a transport failure) used to arrive here
+  // as `null` and be reported to the caller as `valid: false` -- telling
+  // someone mid-signup that their own handle does not exist because GitHub was
+  // having a bad minute.
+  let lookup: Awaited<ReturnType<typeof validateGitHubUsername>>;
   try {
-    githubUser = await validateGitHubUsername(username, await getDatasetsToken(c.env));
+    lookup = await validateGitHubUsername(username, await getDatasetsToken(c.env));
   } catch (error) {
-    console.error("GitHub API error in check-github:", error);
+    // The helper does not throw for a lookup failure; reaching here means
+    // getDatasetsToken did (no App key, no PAT).
+    console.error("GitHub auth error in check-github:", error);
     return c.json({ error: "Unable to verify GitHub username" }, 503);
   }
+  if (lookup.status === "unavailable") {
+    console.error(`GitHub API error in check-github: ${lookup.detail}`);
+    return c.json({ error: "Unable to verify GitHub username" }, 503);
+  }
+  const githubUser = lookup.status === "found" ? lookup.user : null;
 
   // Only check registration if GitHub user exists (use canonical login for case-insensitive match)
   let registered = false;
@@ -273,8 +285,25 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
 
     // Validate GitHub username exists. This is also where we recover the
     // canonical login (matters for case-variant dedup below).
-    const githubUser = await validateGitHubUsername(github_username, await getDatasetsToken(c.env));
-    if (!githubUser) {
+    const githubLookup = await validateGitHubUsername(
+      github_username,
+      await getDatasetsToken(c.env),
+    );
+    // #1052: a GitHub outage is not a verdict on the handle. Refusing a
+    // registration with "does not exist" when GitHub 500s sends someone to
+    // change a field that was right, and the change does not help.
+    if (githubLookup.status === "unavailable") {
+      console.error(`[signup] GitHub lookup unavailable: ${githubLookup.detail}`);
+      return c.json(
+        {
+          error: "GitHub unavailable",
+          message:
+            "GitHub could not be reached to verify your username; try again in a few minutes",
+        },
+        503,
+      );
+    }
+    if (githubLookup.status === "not_found") {
       return c.json(
         {
           error: "GitHub user not found",
@@ -283,6 +312,7 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
         400,
       );
     }
+    const githubUser = githubLookup.user;
 
     // Re-check with the canonical login when GitHub normalized the case.
     // Catches the "Octocat" stored vs "octocat" submitted shape.
@@ -313,9 +343,12 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     // it, so landing an account with NULL names is a real cost -- but not one
     // worth failing a registration over. The gap closes when the record is
     // made public and `nemar admin backfill-names` (or the next ORCID link)
-    // reads it; there is no self-service name field yet, because
-    // PATCH /auth/profile rejects given_name/family_name on purpose until
-    // Phase 3 (#1253).
+    // reads it -- and, since ADR 0042, the owner can also just type it into
+    // Settings. That last route DOES apply here: signup records an ORCID iD
+    // but never sets `orcid_verified` (only the OAuth link flow proves the
+    // iD), and the name lock keys on the VERIFIED flag. So a CLI-signup
+    // account whose ORCID record hides its name can set one itself, and only
+    // an account that has actually linked ORCID is held to the record.
     let givenName: string | null = null;
     let familyName: string | null = null;
     try {

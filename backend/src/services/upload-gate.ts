@@ -25,16 +25,17 @@
 
 /**
  * `error` is the stable machine-readable half and must not change — the CLI
- * matches on it. `message` is the human half: it used to point at a
- * "request upload access from your account settings" flow that has never
- * existed (website ADR 0010 phase 2 was never built, #1249), so it sent people to a
- * settings page with nothing on it. It now names the path that actually works
- * today and says which one is coming.
+ * matches on it. `message` is the human half, and it has now been wrong twice
+ * in two different ways. It first pointed at a "request upload access from your
+ * account settings" flow that had never been built (website ADR 0010 phase 2,
+ * #1249); phase 1 replaced that with the support page and a promise that a
+ * request flow was coming. Phase 3 (ADR 0042) built it, so the message finally
+ * names the two places a person can actually ask, and says what happens next.
  */
 export const SERVICE_ACCESS_ERROR = {
   error: "Service access required",
   message:
-    "Uploading requires upload access, a one-time admin approval. Ask an admin via https://nemar.org/support; the request flow is coming to Settings and the CLI.",
+    "Request upload access from Settings on nemar.org or run `nemar auth request-upload-access`; an admin reviews it once.",
 } as const;
 
 export const SANDBOX_TRAINING_ERROR = {
