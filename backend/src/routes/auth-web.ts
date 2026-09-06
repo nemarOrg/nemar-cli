@@ -1549,7 +1549,30 @@ authWebRoutes.post(
         if (isUniqueViolationOn(writeErr, "email")) {
           return c.json({ error: "email_in_use", ...identityRefusal("email_in_use") }, 409);
         }
-        throw writeErr;
+        // Anything else: the batch rolled back, so nothing changed -- but the
+        // code above is already spent, and rethrowing here would hand the
+        // caller the outer catch's generic "Verification failed" 500 plus a
+        // code that can never work again. Their next attempt would then read
+        // "that code has expired", for a code they had just typed correctly.
+        // Both siblings that consume a code (/code/verify, /email/verify) put
+        // it back and say so; this one is the third and was the exception.
+        //
+        // The UNIQUE branch above deliberately does NOT restore: there the
+        // address itself is gone, so the same code could never complete this
+        // change however many times it were retried.
+        console.error(
+          `[auth-web] /email/change/verify: email-change write failed after the code was consumed (user id=${actor.id}); nothing was written, restoring the code`,
+          writeErr,
+        );
+        await restoreConsumedCode(db, row.id, email);
+        return c.json(
+          {
+            error: "email_change_incomplete",
+            message:
+              "Your code was accepted but the change could not be saved, so nothing was changed. Try again with the same code, or request a new one.",
+          },
+          500,
+        );
       }
 
       // Tell the address that just LOST the account (#1054). In a

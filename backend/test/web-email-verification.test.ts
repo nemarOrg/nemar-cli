@@ -36,6 +36,9 @@ const ORCID_ID = "0000-0002-1825-0097";
  *  the fake Resend so it can be counted. */
 const USER_EMAIL = "newweb@nemar.test";
 const ADMIN_EMAIL = "tieradmin@nemar.test";
+/** The address an /auth/email/change/* flow moves TO. Same synthetic suffix,
+ *  so its code is echoed rather than mailed. */
+const NEW_EMAIL = "movedweb@nemar.test";
 
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
@@ -497,6 +500,60 @@ describe("when the write after the code is consumed fails", () => {
     expect(res.headers.getSetCookie().some((ck) => ck.startsWith("nemar_session="))).toBe(false);
     expect(userRow(id).status).toBe("pending");
     expect(codeRow(USER_EMAIL).used_at).toBeNull();
+  });
+
+  test("/auth/email/change/verify says so, changes nothing, and puts the code back", async () => {
+    // The third consumer of a code, and the one that used to rethrow: its
+    // catch special-cased a users.email UNIQUE violation and let everything
+    // else fall to the outer catch, which answers a generic "Verification
+    // failed" 500 and never restores. The address the user just proved they
+    // control would then be unreachable until they requested another code.
+    const id = seedWebUser(USER_EMAIL);
+    const cookie = await sessionCookie(id);
+    // A code for the NEW address, bound to this account, exactly as
+    // /email/change/request writes it.
+    await plantCode(NEW_EMAIL, id, "654321");
+    blockUserWrites();
+
+    const res = await post("/auth/email/change/verify", cookie, {
+      email: NEW_EMAIL,
+      code: "654321",
+    });
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toBe("email_change_incomplete");
+    expect(body.message).toContain("nothing was changed");
+
+    // The address did not move...
+    expect(
+      db.query<{ email: string }, [number]>("SELECT email FROM users WHERE id = ?").get(id)?.email,
+    ).toBe(USER_EMAIL);
+    // ...and the code is usable again, which is what the message promises.
+    expect(codeRow(NEW_EMAIL).used_at).toBeNull();
+  });
+
+  test("the restored email-change code really is redeemable once the fault clears", async () => {
+    // Reads the column above; drives it here, so "usable again" is a claim the
+    // route itself has honoured rather than one a SELECT infers.
+    const id = seedWebUser(USER_EMAIL);
+    const cookie = await sessionCookie(id);
+    await plantCode(NEW_EMAIL, id, "654321");
+    blockUserWrites();
+    expect(
+      (await post("/auth/email/change/verify", cookie, { email: NEW_EMAIL, code: "654321" })).status,
+    ).toBe(500);
+
+    db.run("DROP TRIGGER refuse_user_updates");
+
+    const res = await post("/auth/email/change/verify", cookie, {
+      email: NEW_EMAIL,
+      code: "654321",
+    });
+    expect(res.status).toBe(200);
+    expect(
+      db.query<{ email: string }, [number]>("SELECT email FROM users WHERE id = ?").get(id)?.email,
+    ).toBe(NEW_EMAIL);
   });
 
   test("a code is NOT restored behind a newer one", async () => {
