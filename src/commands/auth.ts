@@ -1264,11 +1264,16 @@ Examples:
  * Where a user actually fixes each precondition, keyed on the field names the
  * API sends in `missing`.
  *
- * Every one of these currently says Settings on nemar.org, and that is a
- * statement about the CLI rather than a placeholder: `PATCH /auth/profile` is
- * cookie-authenticated, so the CLI cannot write any of these fields today.
- * Phase 4 adds `nemar auth profile`, at which point the ones it covers get a
- * command here instead of a URL.
+ * Most of these point at Settings on nemar.org because that is where the field
+ * lives: username, name, GitHub handle, city and country are edited on the
+ * account settings page (nemarOrg/website#301), and that page is what a user is
+ * meant to use whether they arrived from the browser or the CLI. THIS COPY
+ * ASSUMES #301 IS DEPLOYED -- releasing epic #1250 is gated on it, because
+ * until then these lines name a page with nothing on it, which is the exact
+ * failure ADR 0040 spent a year fixing.
+ *
+ * `email_verified` is the exception and points at a real CLI command, because
+ * that step genuinely has one.
  */
 const UPLOAD_ACCESS_FIX: Record<string, string> = {
   email_verified: "run 'nemar auth resend-verification' and click the link in your inbox",

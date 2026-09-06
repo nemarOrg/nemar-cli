@@ -343,9 +343,12 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     // it, so landing an account with NULL names is a real cost -- but not one
     // worth failing a registration over. The gap closes when the record is
     // made public and `nemar admin backfill-names` (or the next ORCID link)
-    // reads it. PATCH /auth/profile does now accept a typed name, but NOT for
-    // this account: signup requires an ORCID, and ADR 0042 keeps the name
-    // ORCID-canonical for every account that has a verified one.
+    // reads it -- and, since ADR 0042, the owner can also just type it into
+    // Settings. That last route DOES apply here: signup records an ORCID iD
+    // but never sets `orcid_verified` (only the OAuth link flow proves the
+    // iD), and the name lock keys on the VERIFIED flag. So a CLI-signup
+    // account whose ORCID record hides its name can set one itself, and only
+    // an account that has actually linked ORCID is held to the record.
     let givenName: string | null = null;
     let familyName: string | null = null;
     try {

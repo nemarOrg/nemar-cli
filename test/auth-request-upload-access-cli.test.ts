@@ -194,9 +194,9 @@ describe("nemar auth request-upload-access", () => {
       for (const field of ["username", "city", "country"]) {
         expect(out).toContain(field);
       }
-      // Not just the field names: where to go. Today that is Settings for all
-      // of them, because PATCH /auth/profile is cookie-authenticated and the
-      // CLI cannot write any of these fields itself.
+      // Not just the field names: where to go. For these three that is
+      // Settings on nemar.org, because that is where the fields live
+      // (nemarOrg/website#301) -- not because of anything about the CLI.
       expect(out).toContain("Settings on nemar.org");
       expect(out).toContain("https://nemar.org/settings");
     } finally {

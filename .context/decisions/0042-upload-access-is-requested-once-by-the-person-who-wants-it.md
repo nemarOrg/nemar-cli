@@ -122,6 +122,14 @@ so an edit would be silently overwritten) while closing ADR 0041's dead end
   flag: an assigned row no longer has a NULL username, so it is never scanned
   again. There is no cron, deliberately -- the same reasoning ADR 0041 gives for
   `backfill-names`.
+- **The CLI copy assumes nemarOrg/website#301 is deployed, and the release of
+  epic #1250 is gated on it.** Every precondition except the email check sends
+  the user to Settings on nemar.org, because that is where the field lives --
+  username, name, GitHub handle, city and country are all edited there. Until
+  #301 ships, those lines name a page with nothing on it, which is precisely
+  the failure ADR 0040 spent a year undoing ("request upload access from your
+  account settings", pointing at a feature that never existed). The npm release
+  waits for the page.
 - **The 3 single-name accounts stay unfinished** and need a human. That is the
   cost of not guessing, and it is 3 rows.
 - `users.description` now means two things over an account's life: why they
