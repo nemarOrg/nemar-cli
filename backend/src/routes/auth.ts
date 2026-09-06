@@ -24,6 +24,14 @@ import {
 } from "../services/email";
 import { validateGitHubUsername } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
+import {
+  findEmailHolder,
+  findOrcidHolder,
+  identityRefusal,
+  normalizeEmail,
+  normalizeGithubHandle,
+  normalizeOrcid,
+} from "../services/identity";
 import { fetchOrcidName, orcidPubBase } from "../services/orcid-auth";
 import { hashPassword, validatePasswordStrength, verifyPassword } from "../services/password";
 import {
@@ -178,16 +186,27 @@ const signupSchema = z.object({
       /^[a-zA-Z0-9_-]+$/,
       "Username can only contain letters, numbers, underscores, and hyphens",
     ),
-  email: z.string().email("Invalid email address"),
+  // Normalised BEFORE validation (ADR 0043) so the stored value can only ever
+  // be canonical: an address is trimmed and lowercased, and a GitHub handle
+  // loses a pasted leading "@" instead of failing the format check over it.
+  // `preprocess` rather than `.transform()` because the rules have to run
+  // before `.email()`/`.regex()`, not after them.
+  email: z.preprocess(
+    (v) => (typeof v === "string" ? normalizeEmail(v) : v),
+    z.string().email("Invalid email address"),
+  ),
   password: z.string().min(12, "Password must be at least 12 characters").max(128),
-  github_username: z
-    .string()
-    .min(1, "GitHub username is required")
-    .max(39, "GitHub username is too long")
-    .regex(
-      /^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/,
-      "GitHub username must start and end with a letter or number, and can only contain letters, numbers, and hyphens",
-    ),
+  github_username: z.preprocess(
+    (v) => (typeof v === "string" ? normalizeGithubHandle(v) : v),
+    z
+      .string()
+      .min(1, "GitHub username is required")
+      .max(39, "GitHub username is too long")
+      .regex(
+        /^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/,
+        "GitHub username must start and end with a letter or number, and can only contain letters, numbers, and hyphens",
+      ),
+  ),
   description: z
     .string()
     .min(
@@ -196,7 +215,11 @@ const signupSchema = z.object({
     )
     .max(500, "Description must be at most 500 characters"),
   // ORCID is now required: it's the canonical source for the user's name (#835).
-  orcid: orcidIdSchema,
+  // Uppercased first so an iD typed with a lowercase `x` check digit is
+  // accepted and STORED canonically -- the partial unique index from migration
+  // 0077 compares `users.orcid` exactly, so a case variant would read as a
+  // different person's iD (ADR 0043).
+  orcid: z.preprocess((v) => (typeof v === "string" ? (normalizeOrcid(v) ?? v) : v), orcidIdSchema),
   // Supplied only when the ORCID record hides its name (#1255): the server
   // still reads ORCID first, so these are a fallback, never an override.
   given_name: z.string().trim().min(1).max(100).optional(),
@@ -242,13 +265,19 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
       );
     }
 
-    // NOTE: the signup de-dup checks below (username / email / github_username)
-    // deliberately do NOT filter `deleted_at IS NULL` — they must see ALL rows,
-    // including tombstones, to honor the UNIQUE constraints. Re-signup with a
+    // NOTE: the username / github_username de-dup checks below deliberately do
+    // NOT filter `deleted_at IS NULL` — they must see ALL rows, including
+    // tombstones, to honor the table-wide UNIQUE constraints. Re-signup with a
     // deleted user's old email/username/github is enabled by the tombstone
     // MASKING (email -> deleted+<id>@deleted.invalid, username/github -> NULL),
     // which frees those values, NOT by excluding deleted rows here. See the
     // DELETE /admin/users/by-id/:id tombstone + migration 0037.
+    //
+    // The email and ORCID checks are the exception and are live-rows-only,
+    // because the constraints they mirror are the PARTIAL indexes from 0077
+    // (`deleted_at IS NULL AND identity_conflict = 0`) rather than table-wide
+    // ones. Masking still does the freeing; the predicate just matches the
+    // index the write will actually hit.
 
     // Check if username already exists
     const existingUsername = await db
@@ -260,14 +289,28 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
       return c.json({ error: "Username already taken" }, 409);
     }
 
-    // Check if email already exists
-    const existingEmail = await db
-      .prepare("SELECT id FROM users WHERE email = ?")
-      .bind(email)
-      .first();
+    // Check if email already exists, case-insensitively (ADR 0043). The
+    // exact-case check this replaces let `Ada@Lab.org` and `ada@lab.org`
+    // become two accounts for one person; migration 0077's partial unique
+    // index now refuses that write outright, and this turns the refusal into
+    // a message that says what to do about it.
+    const existingEmail = await findEmailHolder(db, email);
 
     if (existingEmail) {
-      return c.json({ error: "Email already registered" }, 409);
+      return c.json({ error: "Email already registered", ...identityRefusal("email_in_use") }, 409);
+    }
+
+    // Check if the ORCID iD already backs an account (#1254). Nothing checked
+    // this before: `users.orcid` carried no constraint at all, and the only
+    // ORCID uniqueness in the system lived on `oauth_identities`, which a CLI
+    // signup never writes. So the CLI was a way to mint a second account for
+    // an iD that already had one. `findOrcidHolder` looks at both.
+    const existingOrcid = await findOrcidHolder(db, orcid);
+    if (existingOrcid) {
+      return c.json(
+        { error: "ORCID iD already registered", ...identityRefusal("orcid_in_use") },
+        409,
+      );
     }
 
     // Direct dup check on the raw input (case-insensitive). Common case:
@@ -280,7 +323,13 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
       .bind(github_username)
       .first();
     if (directDupGithub) {
-      return c.json({ error: "GitHub account already linked to another user" }, 409);
+      return c.json(
+        {
+          error: "GitHub account already linked to another user",
+          ...identityRefusal("github_in_use"),
+        },
+        409,
+      );
     }
 
     // Validate GitHub username exists. This is also where we recover the
@@ -322,7 +371,13 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
         .bind(githubUser.login)
         .first();
       if (canonicalDup) {
-        return c.json({ error: "GitHub account already linked to another user" }, 409);
+        return c.json(
+          {
+            error: "GitHub account already linked to another user",
+            ...identityRefusal("github_in_use"),
+          },
+          409,
+        );
       }
     }
 
@@ -477,10 +532,28 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
         return c.json({ error: "Username already taken" }, 409);
       }
       if (msg.includes("users.email")) {
-        return c.json({ error: "Email already registered" }, 409);
+        return c.json(
+          { error: "Email already registered", ...identityRefusal("email_in_use") },
+          409,
+        );
+      }
+      // 0077's partial index reports the COLUMN, not the index name, so this
+      // catches a concurrent signup that claimed the iD between the check
+      // above and this insert.
+      if (msg.includes("users.orcid")) {
+        return c.json(
+          { error: "ORCID iD already registered", ...identityRefusal("orcid_in_use") },
+          409,
+        );
       }
       if (msg.includes("users.github_username")) {
-        return c.json({ error: "GitHub account already linked to another user" }, 409);
+        return c.json(
+          {
+            error: "GitHub account already linked to another user",
+            ...identityRefusal("github_in_use"),
+          },
+          409,
+        );
       }
       console.error("Unhandled UNIQUE constraint column in signup:", msg);
       return c.json({ error: "An account with these details already exists" }, 409);

@@ -74,6 +74,7 @@ import {
 } from "../services/email-verification";
 import { validateGitHubUsername } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
+import { emailFieldSchema, findEmailHolder, identityRefusal } from "../services/identity";
 import {
   type ProfilePatchInput,
   githubHandleChanged,
@@ -97,19 +98,11 @@ import { type Bindings, type UserRole, type Variables, parseRole } from "../type
 export const authWebRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 const emailSchema = z.object({
-  email: z
-    .string()
-    .email()
-    .max(320)
-    .transform((e) => e.trim().toLowerCase()),
+  email: emailFieldSchema,
 });
 
 const verifySchema = z.object({
-  email: z
-    .string()
-    .email()
-    .max(320)
-    .transform((e) => e.trim().toLowerCase()),
+  email: emailFieldSchema,
   code: z.string().regex(/^\d{6}$/, "code must be 6 digits"),
   remember: z.boolean(),
 });
@@ -971,11 +964,7 @@ authWebRoutes.patch(
 // ---------------------------------------------------------------
 
 const emailChangeVerifySchema = z.object({
-  email: z
-    .string()
-    .email()
-    .max(320)
-    .transform((e) => e.trim().toLowerCase()),
+  email: emailFieldSchema,
   code: z.string().regex(/^\d{6}$/, "code must be 6 digits"),
 });
 
@@ -1150,12 +1139,13 @@ authWebRoutes.post(
       // is bounded: caller must hold a session, the route sits in the
       // auth-ip bucket (10/min/IP, rateLimit.ts), and the per-user cap
       // below throttles how fast one account can cycle targets.
-      const collision = await db
-        .prepare("SELECT id FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1")
-        .bind(email)
-        .first<{ id: number }>();
+      // Case-insensitive since #1254 (ADR 0043): migration 0077's partial
+      // unique index refuses a case-variant of a live address, so a request
+      // that only checked exact case would mail a code for a target the
+      // verify step could never write.
+      const collision = await findEmailHolder(db, email);
       if (collision) {
-        return c.json({ error: "email_in_use" }, 409);
+        return c.json({ error: "email_in_use", ...identityRefusal("email_in_use") }, 409);
       }
 
       // #1008 analogue: the non-production D1 mirrors real production users,
@@ -1289,14 +1279,13 @@ authWebRoutes.post(
         return c.json({ error: "same_email" }, 409);
       }
       // Re-check the collision: an account for this address may have been
-      // created between request and verify. The users.email UNIQUE
-      // constraint below is the authoritative backstop for the write race.
-      const collision = await db
-        .prepare("SELECT id FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1")
-        .bind(email)
-        .first<{ id: number }>();
+      // created between request and verify. Case-insensitive (ADR 0043), and
+      // the users.email UNIQUE constraints below -- the 0026 table-level one
+      // AND 0077's partial `idx_users_email_live_unique` -- remain the
+      // authoritative backstop for the write race.
+      const collision = await findEmailHolder(db, email);
       if (collision) {
-        return c.json({ error: "email_in_use" }, 409);
+        return c.json({ error: "email_in_use", ...identityRefusal("email_in_use") }, 409);
       }
 
       const row = await db

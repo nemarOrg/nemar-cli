@@ -24,6 +24,14 @@
  * the finished iD is unclaimed; without relink mode a second, different iD
  * is refused (`orcid_already_have`), as before.
  *
+ * Identity uniqueness (#1254, ADR 0043): an iD backs at most one LIVE account,
+ * and "backs" means `users.orcid` OR an `oauth_identities` row -- not just the
+ * identity table, which is all this file checked before. Finalize, link and
+ * relink all consult `findOrcidHolder`; unlink now clears `users.orcid` too,
+ * so an unlinked account stops claiming an iD it can no longer prove. The
+ * refusal codes are `orcid_in_use`, `orcid_already_linked`, `orcid_linked_other`
+ * and `email_in_use` (shared/contract/identity.ts).
+ *
  * Host/cookie model: these routes run on api.nemar.org but the browser reaches
  * them through the app.nemar.org same-origin proxy (like /auth/code/*), which
  * mirrors our Set-Cookie. Cookies therefore carry Domain=WEB_SESSION_COOKIE_DOMAIN
@@ -37,6 +45,14 @@ import { auditLogStatement } from "../db/audit-log";
 import { timingSafeEqual } from "../lib/constant-time";
 import { webSessionMiddleware } from "../middleware/webSession";
 import { issueEmailVerificationCode } from "../services/email-verification";
+import {
+  emailFieldSchema,
+  findEmailHolder,
+  findOrcidHolder,
+  identityRefusal,
+  normalizeEmail,
+  normalizeOrcid,
+} from "../services/identity";
 import {
   type OauthMode,
   PENDING_COOKIE_NAME,
@@ -74,22 +90,14 @@ const STATE_TTL_SECONDS = 10 * 60;
 const PENDING_TTL_MS = 15 * 60 * 1000;
 
 const emailSchema = z.object({
-  email: z
-    .string()
-    .email()
-    .max(320)
-    .transform((e) => e.trim().toLowerCase()),
+  email: emailFieldSchema,
 });
 
 // Finalize a brand-new ORCID signup. Mirrors the CLI signup's required fields
 // (#835): city/country are required for export-control screening, affiliation
 // optional. Name comes from ORCID, never the form.
 const finalizeSchema = z.object({
-  email: z
-    .string()
-    .email()
-    .max(320)
-    .transform((e) => e.trim().toLowerCase()),
+  email: emailFieldSchema,
   affiliation: z.string().max(200).optional(),
   city: z.string().min(1, "City is required").max(120),
   country: z.string().min(1, "Country is required").max(120),
@@ -380,9 +388,18 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
         afterResponse(c, refreshUserName(c.env, webUser.id, orcid));
         return redirect(`${frontend}${state.next}`, [clearState]);
       }
-      // link_new: the finished iD is unclaimed. If this account already has a
-      // *different* iD, only an explicit relink flow may swap it (#913);
-      // any other mode keeps the historical refusal.
+      // link_new says only that no oauth_identities row claims the iD. That
+      // is not the same as unclaimed (#1254, ADR 0043): a row whose identity
+      // row was removed while `users.orcid` stayed behind still holds the iD
+      // for citation and for `nemar admin duplicates`, and linking over it is
+      // how one person ends up backing two accounts (production rows 42/43).
+      // Checked here rather than inside the relink branch so it covers both a
+      // first link and an explicit relink -- both write `users.orcid`.
+      const orcidHolder = await findOrcidHolder(c.env.DB, orcid, webUser.id);
+      if (orcidHolder) return fail("orcid_in_use", state.next);
+
+      // If this account already has a *different* iD, only an explicit relink
+      // flow may swap it (#913); any other mode keeps the historical refusal.
       const mine = await c.env.DB.prepare(
         "SELECT provider_subject FROM oauth_identities WHERE user_id = ? AND provider = 'orcid' LIMIT 1",
       )
@@ -474,30 +491,51 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
       return c.json({ error: "orcid_pending_expired" }, 401);
     }
 
-    const { email, affiliation, city, country } = c.req.valid("json");
+    const { affiliation, city, country } = c.req.valid("json");
+    // The Zod field already trims and lowercases; re-normalising here is what
+    // makes the rule the SCHEMA's rather than this route's, so a future schema
+    // change cannot quietly store a mixed-case address (ADR 0043).
+    const email = normalizeEmail(c.req.valid("json").email);
+    // Unreachable as a repair, and kept as a guarantee: `verifyPending`
+    // already rejects a token whose iD is not in canonical form, so this
+    // cannot fire for a cookie the callback minted. What it buys is that the
+    // value this route STORES is canonical by construction rather than by
+    // trusting an upstream check to stay where it is.
+    const orcid = normalizeOrcid(pending.orcid);
+    if (!orcid) {
+      console.error(`[auth-orcid] finalize: pending token carried a malformed iD ${pending.orcid}`);
+      c.header("Set-Cookie", clearPending);
+      return c.json({ error: "orcid_pending_expired" }, 401);
+    }
 
     // Email collision: never auto-link onto an existing account (takeover
     // vector). Make the user sign in with their existing method, then link
-    // ORCID from settings.
-    const existing = await c.env.DB.prepare(
-      "SELECT id FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1",
-    )
-      .bind(email)
-      .first<{ id: number }>();
-    if (existing) {
-      return c.json({ error: "email_in_use" }, 409);
+    // ORCID from settings. Case-insensitive since #1254: `Ada@Lab.org` and
+    // `ada@lab.org` are one person, and storing both is one of the two ways
+    // this catalog grew duplicate accounts.
+    const emailHolder = await findEmailHolder(c.env.DB, email);
+    if (emailHolder) {
+      return c.json({ error: "email_in_use", ...identityRefusal("email_in_use") }, 409);
     }
 
-    // Same ORCID may already back an account if the user double-submitted or
-    // raced the form; UNIQUE(provider, provider_subject) is the backstop.
-    const identExists = await c.env.DB.prepare(
-      "SELECT user_id FROM oauth_identities WHERE provider = 'orcid' AND provider_subject = ? LIMIT 1",
-    )
-      .bind(pending.orcid)
-      .first<{ user_id: number }>();
-    if (identExists) {
+    // The iD may already back an account through `users.orcid` even with no
+    // oauth_identities row -- an unlink, or an identity insert whose rollback
+    // did not run, leaves exactly that shape, and it is why production rows 42
+    // and 43 both carry 0000-0002-1974-1293. Checking only the identity table
+    // (all this route did before #1254) is what let the second sign-up
+    // through. The two codes are kept apart because `orcid_already_linked` is
+    // the pre-existing one the website already handles; they mean the same
+    // thing to the person reading them and carry the same message.
+    const orcidHolder = await findOrcidHolder(c.env.DB, orcid);
+    if (orcidHolder) {
+      const identExists = await c.env.DB.prepare(
+        "SELECT user_id FROM oauth_identities WHERE provider = 'orcid' AND provider_subject = ? LIMIT 1",
+      )
+        .bind(orcid)
+        .first<{ user_id: number }>();
+      const code = identExists ? "orcid_already_linked" : "orcid_in_use";
       c.header("Set-Cookie", clearPending);
-      return c.json({ error: "orcid_already_linked" }, 409);
+      return c.json({ error: code, ...identityRefusal(code) }, 409);
     }
 
     // New web account: username/github_username/password_hash stay NULL
@@ -517,7 +555,7 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
          affiliation, city, country, approved_at, service_access)
        VALUES (?, ?, 1, 'pending', 0, 'web', ?, ?, ?, NULL, 0)`,
     )
-      .bind(email, pending.orcid, affiliation || null, city, country)
+      .bind(email, orcid, affiliation || null, city, country)
       .run();
     const userId = insert.meta?.last_row_id;
     if (!userId) {
@@ -535,7 +573,7 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
         `INSERT INTO oauth_identities (user_id, provider, provider_subject, provider_email, display_name, last_login_at)
          VALUES (?, 'orcid', ?, NULL, ?, datetime('now'))`,
       )
-        .bind(userId, pending.orcid, pending.name)
+        .bind(userId, orcid, pending.name)
         .run();
     } catch (identErr) {
       console.error("[auth-orcid] finalize: identity insert failed; rolling back user", identErr);
@@ -546,7 +584,10 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
           console.error("[auth-orcid] finalize: failed to roll back orphan user", delErr),
         );
       c.header("Set-Cookie", clearPending);
-      return c.json({ error: "orcid_already_linked" }, 409);
+      return c.json(
+        { error: "orcid_already_linked", ...identityRefusal("orcid_already_linked") },
+        409,
+      );
     }
 
     const { cookieIdRaw, maxAgeSeconds } = await issueSession(
@@ -562,7 +603,7 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
       append: true,
     });
     // Canonical name from ORCID, after the response (best-effort; never blocks signup).
-    afterResponse(c, refreshUserName(c.env, userId, pending.orcid));
+    afterResponse(c, refreshUserName(c.env, userId, orcid));
 
     // Mail the first verification code to the address just collected. The
     // account exists and is signed in either way: an undeliverable code
@@ -613,16 +654,34 @@ authOrcidRoutes.post("/orcid/unlink", webSessionMiddleware, async (c) => {
   const webUser = c.var.webUser;
   if (!webUser) return c.json({ error: "Authentication required" }, 401);
 
-  // Drop the verified link but keep users.orcid (the citation-facing value).
+  // Drop the link COMPLETELY: the identity row, `orcid_verified`, AND
+  // `users.orcid` (#1254, ADR 0043).
+  //
+  // Keeping `users.orcid` used to be the deliberate choice -- it is the
+  // citation-facing value, and dropping it loses whatever a DOI-discovery pass
+  // had attached to the account. That reasoning does not survive the shape it
+  // produces: a row that still claims an iD it can no longer sign in with,
+  // which is invisible to every check that looked at `oauth_identities`, and
+  // which silently blocks (or, before this phase, silently duplicated) the
+  // person's next sign-up. Production rows 42/43 are that shape.
+  //
+  // The citation value is RE-DERIVABLE and the identity is not: linking the iD
+  // again refills `users.orcid` (`linkIdentity`), and so does the DOI
+  // enrichment pass that discovered it in the first place. Losing a
+  // re-derivable column beats keeping a claim on an identifier the account
+  // cannot prove.
+  //
   // Email-code login still works, so removing the only OAuth identity never
-  // locks the account out. The two writes go in one D1 batch so we never leave
+  // locks the account out. The writes go in one D1 batch so we never leave
   // orcid_verified=1 with the identity row already gone (or vice versa).
   try {
     await c.env.DB.batch([
       c.env.DB.prepare(
         "DELETE FROM oauth_identities WHERE user_id = ? AND provider = 'orcid'",
       ).bind(webUser.id),
-      c.env.DB.prepare("UPDATE users SET orcid_verified = 0 WHERE id = ?").bind(webUser.id),
+      c.env.DB.prepare("UPDATE users SET orcid = NULL, orcid_verified = 0 WHERE id = ?").bind(
+        webUser.id,
+      ),
     ]);
   } catch (err) {
     console.error("[auth-orcid] unlink failed", err);
