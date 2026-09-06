@@ -748,6 +748,65 @@ describe("ORCID unlink releases the iD", () => {
 });
 
 // --------------------------------------------------------------------------
+// PATCH /auth/profile
+// --------------------------------------------------------------------------
+
+describe("profile GitHub collisions", () => {
+  async function patchProfile(userId: number, handle: string): Promise<Response> {
+    return app.request(
+      "/auth/profile",
+      {
+        method: "PATCH",
+        headers: {
+          Origin: ORIGIN,
+          Cookie: await sessionCookie(userId),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ github_username: handle, city: "San Diego", country: "USA" }),
+      },
+      env(),
+    );
+  }
+
+  test("a taken handle is refused with the shared message", async () => {
+    seedUser("holder@example.org", { github: "Octocat" });
+    const mine = seedUser("me@example.org");
+    const res = await patchProfile(mine, "octocat");
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; code: string; message: string };
+    expect(body.error).toBe("github_in_use");
+    expect(body.code).toBe("github_in_use");
+    expect(body.message).toContain("nemar.org/settings");
+  });
+
+  test("a handle claimed mid-write is still github_in_use, not a 500", async () => {
+    // The TOCTOU window past the dedup SELECT: two concurrent PATCHes claiming
+    // the same free handle both pass the pre-check and the loser's UPDATE hits
+    // idx_users_github. Real SQLite error text via a trigger, so this tests
+    // the mapping rather than a string the test invented.
+    const mine = seedUser("me@example.org");
+    db.run(
+      `CREATE TRIGGER race_on_profile_update BEFORE UPDATE OF github_username ON users
+       BEGIN SELECT RAISE(ABORT, 'UNIQUE constraint failed: users.github_username'); END`,
+    );
+    const res = await patchProfile(mine, "brand-new-handle");
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code: string }).code).toBe("github_in_use");
+  });
+
+  test("an unrelated write failure is still a 500", async () => {
+    // The guard against a catch so wide it labels every failure a collision.
+    const mine = seedUser("me@example.org");
+    db.run(
+      `CREATE TRIGGER race_on_profile_update BEFORE UPDATE OF github_username ON users
+       BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END`,
+    );
+    const res = await patchProfile(mine, "brand-new-handle");
+    expect(res.status).toBe(500);
+  });
+});
+
+// --------------------------------------------------------------------------
 // Email change
 // --------------------------------------------------------------------------
 
