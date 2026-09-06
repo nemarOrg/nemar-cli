@@ -74,7 +74,12 @@ import {
 } from "../services/email-verification";
 import { validateGitHubUsername } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
-import { emailFieldSchema, findEmailHolder, identityRefusal } from "../services/identity";
+import {
+  emailFieldSchema,
+  findEmailHolder,
+  identityRefusal,
+  isUniqueViolationOn,
+} from "../services/identity";
 import {
   type ProfilePatchInput,
   githubHandleChanged,
@@ -1344,9 +1349,12 @@ authWebRoutes.post(
         // Column-scoped, matching the profile PATCH and signup precedents: a
         // UNIQUE hit on anything OTHER than users.email must not be
         // mislabeled as an address collision — rethrow to the generic 500.
-        const msg = String(writeErr);
-        if (msg.includes("UNIQUE constraint failed") && msg.includes("users.email")) {
-          return c.json({ error: "email_in_use" }, 409);
+        // Column-scoped through the shared helper, which also matches 0077's
+        // partial index: SQLite reports `users.email` for both that and the
+        // 0026 table-level constraint, so one check covers the exact-case and
+        // the case-insensitive collision alike (ADR 0043).
+        if (isUniqueViolationOn(writeErr, "email")) {
+          return c.json({ error: "email_in_use", ...identityRefusal("email_in_use") }, 409);
         }
         throw writeErr;
       }

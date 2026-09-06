@@ -28,6 +28,7 @@ import {
   findEmailHolder,
   findOrcidHolder,
   identityRefusal,
+  isUniqueViolationOn,
   normalizeEmail,
   normalizeGithubHandle,
   normalizeOrcid,
@@ -528,10 +529,10 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
     // D1 errors may not be standard Error instances, so check multiple ways
     const msg = error instanceof Error ? error.message : String(error);
     if (msg.includes("UNIQUE constraint failed")) {
-      if (msg.includes("users.username")) {
+      if (isUniqueViolationOn(error, "username")) {
         return c.json({ error: "Username already taken" }, 409);
       }
-      if (msg.includes("users.email")) {
+      if (isUniqueViolationOn(error, "email")) {
         return c.json(
           { error: "Email already registered", ...identityRefusal("email_in_use") },
           409,
@@ -540,13 +541,13 @@ authRoutes.post("/signup", zValidator("json", signupSchema), async (c) => {
       // 0077's partial index reports the COLUMN, not the index name, so this
       // catches a concurrent signup that claimed the iD between the check
       // above and this insert.
-      if (msg.includes("users.orcid")) {
+      if (isUniqueViolationOn(error, "orcid")) {
         return c.json(
           { error: "ORCID iD already registered", ...identityRefusal("orcid_in_use") },
           409,
         );
       }
-      if (msg.includes("users.github_username")) {
+      if (isUniqueViolationOn(error, "github_username")) {
         return c.json(
           {
             error: "GitHub account already linked to another user",
