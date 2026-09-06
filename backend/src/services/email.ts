@@ -759,6 +759,128 @@ export async function sendAdminNotificationEmail(
 }
 
 /**
+ * The review card an admin gets when someone asks for upload access
+ * (ADR 0042, #1253).
+ *
+ * Same delivery shape as sendAdminNotificationEmail above -- recipient list,
+ * per-admin try/catch, the shared `sendEmail` fence -- and deliberately a
+ * SEPARATE mail rather than a variant of it: that one announces a new account
+ * at the base tier and is informational, this one is the export-control review
+ * itself and carries every field the reviewer needs (ADR 0040's "admins act
+ * once per uploader, at the upload request"). Folding them together would put
+ * an approve command in front of an admin at a moment nobody has asked for
+ * anything.
+ *
+ * Every field here is a REQUIRED precondition of the request except
+ * `affiliation` and `orcid`, so the card renders "not set" for exactly those
+ * two rather than for anything a reviewer needs. Nothing is sent to the
+ * requester: the request is a message to the admins, and the answer arrives as
+ * the existing upload-access-granted mail at approval.
+ */
+export async function sendUploadAccessRequestEmail(
+  adminEmails: string[],
+  request: {
+    id: number;
+    username: string;
+    given_name: string;
+    family_name: string;
+    email: string;
+    orcid: string | null;
+    github_username: string;
+    city: string;
+    country: string;
+    affiliation: string | null;
+    why: string;
+  },
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<void> {
+  const notSet = "<em>not set</em>";
+  const row = (label: string, value: string) =>
+    `<tr>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb; background: #f9fafb; font-weight: bold;">${label}</td>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb;">${value}</td>
+    </tr>`;
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #f59e0b;">Upload Access Requested</h1>
+
+  <p>A verified account has asked for upload access. This is the one-time
+  export-control review: check the person, their institution and their location,
+  then grant or decline.</p>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Requester</h2>
+
+  <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
+    ${row("Username", escapeHtml(request.username))}
+    ${row("Name", escapeHtml(`${request.given_name} ${request.family_name}`))}
+    ${row("Email", escapeHtml(request.email))}
+    ${row(
+      "ORCID",
+      request.orcid
+        ? `<a href="https://orcid.org/${escapeHtml(request.orcid)}" style="color: #2563eb;">${escapeHtml(request.orcid)}</a>`
+        : notSet,
+    )}
+    ${row(
+      "GitHub",
+      `<a href="https://github.com/${escapeHtml(request.github_username)}" style="color: #2563eb;">${escapeHtml(request.github_username)}</a>`,
+    )}
+    ${row("Affiliation", request.affiliation ? escapeHtml(request.affiliation) : notSet)}
+    ${row("City", escapeHtml(request.city))}
+    ${row("Country", escapeHtml(request.country))}
+  </table>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">What they intend to upload</h2>
+  <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; margin: 16px 0; white-space: pre-wrap;">${escapeHtml(request.why)}</div>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Granting upload access</h2>
+
+  <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+    <span style="color: #16a34a;">nemar admin approve</span> ${escapeHtml(request.username)}
+  </div>
+
+  <p style="color: #666; font-size: 14px;">
+    To see every open request:<br>
+    <code style="background: #f4f4f5; padding: 2px 6px; border-radius: 4px;">nemar admin users --awaiting-approval</code>
+  </p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+
+  for (const adminEmail of adminEmails) {
+    try {
+      await sendEmail(
+        adminEmail,
+        `[NEMAR] Upload access requested: ${request.username}`,
+        html,
+        resendApiKey,
+        fromEmail,
+        replyTo,
+        isDev,
+        deliveryEnv,
+      );
+    } catch (error) {
+      console.error(`Failed to send upload-access request to ${adminEmail}:`, error);
+    }
+  }
+}
+
+/**
  * Alert admins that an OpenNeuro import failed and was quarantined (#754).
  * Sent on a terminal import failure that left an orphan; the admin reviews it
  * in `nemar admin import status` and clears it with `nemar admin import
