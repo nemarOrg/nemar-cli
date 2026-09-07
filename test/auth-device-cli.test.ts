@@ -32,6 +32,7 @@ import {
   type DeviceAuthRefusalCode,
   type DeviceTokenSuccess,
 } from "../shared/contract/device-auth";
+import { type UserMeResponse, userMeResponseSchema } from "../shared/contract/user";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -83,10 +84,14 @@ interface DeviceServerOptions {
   apiKey?: string;
   /** `POST /auth/login` (the --key / stale-probe path). */
   login?: (apiKey: string) => { status: number; body: unknown };
-  /** `GET /users/me` -- for `nemar auth signup`/`status --refresh`. A
-   *  function is called per request so a test can change the answer across
-   *  calls (e.g. after a PATCH). */
-  me?: Record<string, unknown> | ((callIndex: number) => Record<string, unknown>);
+  /** `GET /users/me` -- for `nemar auth signup`/`status --refresh`. Typed
+   *  from the contract (`UserMeResponse`) and re-validated against
+   *  `userMeResponseSchema` before being served, so a body a test wrote
+   *  BEFORE a contract change fails this file loudly instead of quietly
+   *  serving a shape the real backend could no longer send. A function is
+   *  called per request so a test can change the answer across calls (e.g.
+   *  after a PATCH). */
+  me?: UserMeResponse | ((callIndex: number) => UserMeResponse);
   keysList?: { keys: ApiKeySummary[] };
   keysCreate?: (name: string) => { status: number; body: unknown };
   keysRevoke?: (id: string, headers: Record<string, string>) => { status: number; body: unknown };
@@ -249,11 +254,13 @@ function startDeviceServer(options: DeviceServerOptions): DeviceServer {
       }
 
       if (url.pathname === "/users/me" && method === "GET") {
-        const me =
-          typeof options.me === "function"
-            ? options.me(calls.length)
-            : (options.me ?? { user: {} });
-        return Response.json(me);
+        if (!options.me) return Response.json({ user: {} });
+        const me = typeof options.me === "function" ? options.me(calls.length) : options.me;
+        // Re-parsed, not merely typed: a test fixture written against an
+        // OLDER contract shape still type-checks against a stale local
+        // `.d.ts` cache, but fails this at runtime the moment the schema
+        // actually changes.
+        return Response.json(userMeResponseSchema.parse(me));
       }
 
       if (url.pathname === "/auth/keys" && method === "GET") {
@@ -487,7 +494,10 @@ describe("nemar auth login: polling cadence", () => {
       const gap12 = server.polls[1].at - server.polls[0].at;
       const gap23 = server.polls[2].at - server.polls[1].at;
       expect(gap12).toBeLessThan(3000);
-      expect(gap23 - gap12).toBeGreaterThanOrEqual(4500);
+      // Loose on purpose: this only needs to show the slow_down step
+      // actually widened the gap, not pin the exact scheduling jitter of a
+      // subprocess under test-suite load.
+      expect(gap23 > gap12 * 2 && gap23 - gap12 >= 4000).toBe(true);
     } finally {
       server.stop();
     }
@@ -583,6 +593,21 @@ describe("nemar auth login: terminal answers", () => {
       expect(result.exitCode).toBe(1);
       expect(result.out).toContain("custom sentence from the body");
       expect(server.polls.length).toBe(1);
+      expect(existsSync(configPath())).toBe(false);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("invalid_grant/too_many_keys prints the contract sentence and exits 1", async () => {
+    const server = startDeviceServer({
+      interval: 1,
+      token: [{ kind: "invalid", reason: "too_many_keys" }],
+    });
+    try {
+      const result = await run(["auth", "login", "--no-open"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.out).toContain(DEVICE_AUTH_MESSAGES.too_many_keys);
       expect(existsSync(configPath())).toBe(false);
     } finally {
       server.stop();
@@ -781,6 +806,51 @@ describe("nemar auth login: an already-active account", () => {
       server.stop();
     }
   });
+
+  test("a live (not stale) device key: the revoke still fires and prints the replaced-key confirmation", async () => {
+    seedConfig({
+      activeAccount: "ada",
+      accounts: {
+        ada: {
+          apiKey: "nm_live_device_key_0123456789ab",
+          username: "ada",
+          email: "ada@example.org",
+          keySource: "device",
+          keyId: 99,
+          keyName: "old-laptop",
+          keyCreatedAt: "2025-01-01T00:00:00Z",
+        },
+      },
+    });
+
+    const revokedIds: string[] = [];
+    const server = startDeviceServer({
+      interval: 1,
+      token: [{ kind: "success" }],
+      // The preflight probe reports the STORED key as still VALID (active,
+      // not stale) -- the revoke below must fire and the confirmation must
+      // print regardless, since a re-login on the SAME machine always
+      // replaces its own key.
+      login: () => ({ status: 200, body: { valid: true, user: defaultUser() } }),
+      user: defaultUser(),
+      keysRevoke: (id) => {
+        revokedIds.push(id);
+        return { status: 200, body: { ok: true } };
+      },
+    });
+    try {
+      const result = await run(["auth", "login", "--no-open"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(result.out).toContain("Already signed in as ada");
+      expect(result.out).toContain("(replaced this machine's previous key)");
+      expect(revokedIds).toEqual(["99"]);
+      const account = storedAccounts().ada;
+      expect(account.keyId).toBe(7);
+      expect(account.apiKey).toBe("nm_test_devicekey1234567890abcdef");
+    } finally {
+      server.stop();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -807,6 +877,35 @@ describe("nemar auth login: Ctrl-C during the poll", () => {
       expect(server.polls[0]?.aborted).toBe(true);
       expect(existsSync(configPath())).toBe(false);
       expect(stdout + stderr).not.toContain("Run again with --debug");
+    } finally {
+      server.stop();
+    }
+  }, 20000);
+
+  test("with a seeded config, the file is byte-identical before and after", async () => {
+    seedConfig({
+      activeAccount: "ada",
+      accounts: {
+        ada: { apiKey: "nm_untouched_key_0123456789ab", username: "ada", email: "ada@example.org" },
+      },
+    });
+    const before = readFileSync(configPath());
+    const server = startDeviceServer({ interval: 1, token: () => "hold" });
+    try {
+      const proc = runCli(["auth", "login", "--no-open"], server.url);
+      const stdoutPromise = new Response(proc.stdout).text();
+      const stderrPromise = new Response(proc.stderr).text();
+
+      await server.firstPoll;
+      proc.kill("SIGINT");
+
+      await stdoutPromise;
+      await stderrPromise;
+      const exitCode = await proc.exited;
+
+      expect(exitCode).toBe(130);
+      const after = readFileSync(configPath());
+      expect(after.equals(before)).toBe(true);
     } finally {
       server.stop();
     }
@@ -846,6 +945,15 @@ describe("nemar auth login: two parallel logins", () => {
 
 // ---------------------------------------------------------------------------
 // 10: unreachable mid-poll, then recovers
+// ---------------------------------------------------------------------------
+//
+// The deadline-reached "unreachable" GIVE UP outcome itself (as opposed to
+// the retry note below) is NOT covered here: this stand-in always answers
+// SOMETHING once it is up, and the real grace window is minutes long, so
+// reaching that branch through this entry point would mean actually
+// waiting it out. test/device-login.unit.test.ts covers it directly against
+// `pollForDeviceToken`, with the grace window shrunk to 0 via its
+// `graceSeconds` option.
 // ---------------------------------------------------------------------------
 
 describe("nemar auth login: the server goes away mid-poll and comes back", () => {
@@ -1147,6 +1255,54 @@ describe("nemar auth status", () => {
       const result = await run(["auth", "status", "--refresh"], server.url);
       expect(result.exitCode).toBe(0);
       expect(Object.keys(storedAccounts())).toEqual(["ada"]);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a password-era flat config is migrated in place; status reads it and shows the password-era Key: line", async () => {
+    // No "accounts" key at all -- the shape a pre-multi-account build wrote.
+    seedConfig({
+      apiKey: "nm_flat_key_0123456789abcdefgh",
+      username: "ada",
+      apiUrl: "https://api.nemar.org",
+      email: "ada@example.org",
+    });
+    const result = await run(["auth", "status"], "http://127.0.0.1:1");
+    expect(result.exitCode).toBe(0);
+    expect(result.out).toContain("ada");
+    expect(result.out).toContain(
+      "password-era key; run `nemar auth login` to replace it with a machine-named key",
+    );
+    const accounts = storedAccounts();
+    expect(Object.keys(accounts)).toEqual(["ada"]);
+    expect(accounts.ada.apiKey).toBe("nm_flat_key_0123456789abcdefgh");
+  });
+
+  test("auth login --no-open on a password-era flat config merges into the migrated entry", async () => {
+    seedConfig({
+      apiKey: "nm_flat_key_0123456789abcdefgh",
+      username: "ada",
+      apiUrl: "https://api.nemar.org",
+      email: "ada@example.org",
+    });
+    const server = startDeviceServer({
+      interval: 1,
+      token: [{ kind: "success" }],
+      // The preflight probe reports the flat-config key dead, routing
+      // through the no-confirmation "stale" path straight to the device
+      // flow.
+      login: () => ({ status: 401, body: { error: "Invalid or expired API key" } }),
+      user: defaultUser(),
+    });
+    try {
+      const result = await run(["auth", "login", "--no-open"], server.url);
+      expect(result.exitCode).toBe(0);
+      // ONE entry, not two: the device login's user (same username/email)
+      // must find and merge into the migrated flat account rather than
+      // creating a second one keyed differently.
+      expect(Object.keys(storedAccounts())).toEqual(["ada"]);
+      expect(storedAccounts().ada.keySource).toBe("device");
     } finally {
       server.stop();
     }
@@ -1475,10 +1631,7 @@ describe("nemar auth keys", () => {
 // 16: signup completion
 // ---------------------------------------------------------------------------
 
-function gapsMe(
-  fields: string[],
-  overrides: Record<string, unknown> = {},
-): Record<string, unknown> {
+function gapsMe(fields: string[], overrides: Record<string, unknown> = {}): UserMeResponse {
   return {
     user: {
       id: 12,

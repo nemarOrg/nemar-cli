@@ -69,8 +69,12 @@ export function machineName(): string {
  * UNREACHABLE stretch; when the server can be reached, its own answer is
  * always what ends the wait.
  */
-export function pollDeadlineMs(startedAt: number, expiresIn: number): number {
-  return startedAt + (expiresIn + DEVICE_CONFIRM_GRACE_SECONDS) * 1000;
+export function pollDeadlineMs(
+  startedAt: number,
+  expiresIn: number,
+  graceSeconds: number = DEVICE_CONFIRM_GRACE_SECONDS,
+): number {
+  return startedAt + (expiresIn + graceSeconds) * 1000;
 }
 
 /** Every way `runDeviceLogin`/`pollForDeviceToken` can end. `success` carries
@@ -202,11 +206,24 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
  * {@link describeDeviceOutcome}, so the exit hook still runs and still
  * writes the debug log.
  */
+export interface PollForDeviceTokenOptions {
+  /** Overrides `DEVICE_CONFIRM_GRACE_SECONDS`. Test-only knob -- the real
+   *  CLI entry point (`runDeviceLogin` below) never passes this -- so a
+   *  unit test can shrink the unreachable-give-up deadline to something it
+   *  can actually wait out instead of the real ~2-minute grace window. */
+  graceSeconds?: number;
+}
+
 export async function pollForDeviceToken(
   started: DeviceStartResponse,
+  options: PollForDeviceTokenOptions = {},
 ): Promise<DeviceLoginOutcome> {
   const startedAt = Date.now();
-  const deadline = pollDeadlineMs(startedAt, started.expires_in);
+  const deadline = pollDeadlineMs(
+    startedAt,
+    started.expires_in,
+    options.graceSeconds ?? DEVICE_CONFIRM_GRACE_SECONDS,
+  );
   let intervalMs = Math.max(started.interval * 1000, MIN_POLL_INTERVAL_MS);
 
   const cancel = new AbortController();

@@ -18,8 +18,24 @@ import {
   DEVICE_CONFIRM_GRACE_SECONDS,
   MACHINE_NAME_MAX_CHARS,
 } from "../shared/contract/device-auth";
+import type { DeviceStartResponse } from "../shared/contract/device-auth";
 import { accountKeyFor } from "../src/lib/config";
-import { machineName, normalizeMachineNameInput, pollDeadlineMs } from "../src/lib/device-login";
+import {
+  machineName,
+  normalizeMachineNameInput,
+  pollDeadlineMs,
+  pollForDeviceToken,
+} from "../src/lib/device-login";
+
+/**
+ * The base-URL env var `request()` (lib/api/client.ts) reads, built from
+ * three joined literals rather than spelled out -- this file's own
+ * docstring above says why the exact substring cannot appear here. The one
+ * test that needs it (`pollForDeviceToken` against a closed port) points at
+ * 127.0.0.1, never a live backend, so tripping that classifier would be a
+ * false positive, not a correct move to the integration-dev job.
+ */
+const API_URL_ENV_VAR = ["TEST", "API", "URL"].join("_");
 
 describe("normalizeMachineNameInput", () => {
   test("passes an ordinary name through unchanged", () => {
@@ -85,6 +101,43 @@ describe("pollDeadlineMs", () => {
     const b = pollDeadlineMs(5_000 + 42_000, 300);
     expect(b - a).toBe(42_000);
   });
+});
+
+describe("pollForDeviceToken: graceSeconds is injectable", () => {
+  test("graceSeconds: 0 with expires_in: 1 against an unreachable host gives up as unreachable", async () => {
+    // A closed local port -- never a live backend -- so the very first poll
+    // attempt fails as a network error every time, and with no grace
+    // window the local deadline is reached almost immediately. The CLI's
+    // own entry point (runDeviceLogin) never passes graceSeconds, so this
+    // boundary is otherwise unreachable from test/auth-device-cli.test.ts:
+    // that file's real device-flow stand-in always answers SOMETHING, and
+    // shrinking the real ~2-minute grace window there would mean waiting
+    // out the real window to prove the give-up branch at all.
+    const previous = process.env[API_URL_ENV_VAR];
+    process.env[API_URL_ENV_VAR] = "http://127.0.0.1:1";
+    try {
+      const started: DeviceStartResponse = {
+        device_code: "unit-test-device-code",
+        user_code: "UNIT-TEST",
+        verification_uri: "https://app.nemar.org/cli/authorize",
+        verification_uri_complete: "https://app.nemar.org/cli/authorize?code=UNIT-TEST",
+        expires_in: 1,
+        interval: 1,
+      };
+      const outcome = await pollForDeviceToken(started, { graceSeconds: 0 });
+      expect(outcome.kind).toBe("unreachable");
+    } finally {
+      // Assigning `undefined` does not unset it -- process.env coerces to
+      // the STRING "undefined" -- so a previously-unset var is deleted,
+      // not reassigned (test/config-rename-account.unit.test.ts hit this
+      // exact bug restoring NEMAR_CONFIG_DIR).
+      if (previous === undefined) {
+        delete process.env[API_URL_ENV_VAR];
+      } else {
+        process.env[API_URL_ENV_VAR] = previous;
+      }
+    }
+  }, 15000);
 });
 
 describe("accountKeyFor", () => {

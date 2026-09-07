@@ -62,10 +62,14 @@ async function postJson(
   });
 }
 
+/** Returns the seeded row's numeric id (`{ user: { id, email, status } }`,
+ *  backend/src/routes/admin/users.ts) -- the same id `POST
+ *  /admin/revoke/by-id/:id` takes, so a caller that needs to revoke this
+ *  fixture mid-test does not have to invent a second lookup for it. */
 async function seedWebUser(
   email: string,
   status: "pending" | "verified" | "approved" | "revoked",
-): Promise<void> {
+): Promise<{ id: number }> {
   const r = await fetch(`${API}/admin/test-fixtures/seed-web-user`, {
     method: "POST",
     headers: {
@@ -78,6 +82,8 @@ async function seedWebUser(
   if (r.status !== 200) {
     throw new Error(`seedWebUser failed (${r.status}): ${await r.text()}`);
   }
+  const body = (await r.json()) as { user: { id: number } };
+  return { id: body.user.id };
 }
 
 interface CodeRequestResponse {
@@ -308,7 +314,7 @@ describe.skipIf(PROD_GUARD_ACTIVE)(
     test("an account revoked between confirm and collect: the CLI's terminal sentence", async () => {
       if (!deviceRoutesDeployed) return;
       const email = freshEmail("revoke-midflight");
-      await seedWebUser(email, "verified");
+      const { id } = await seedWebUser(email, "verified");
       const cookie = await signIn(email);
 
       const cli = runCliStreaming(["auth", "login", "--no-open"]);
@@ -321,16 +327,15 @@ describe.skipIf(PROD_GUARD_ACTIVE)(
       );
       expect(confirmRes.status).toBe(200);
 
-      // Revoke the account before the CLI's next poll collects the key.
-      await fetch(`${API}/admin/revoke/${encodeURIComponent(email)}`, {
+      // Revoke the account before the CLI's next poll collects the key, by
+      // the id seedWebUser returned -- not best-effort: a revoke that did
+      // not actually land would make this test pass for the wrong reason
+      // (a poll that happens to hit some OTHER terminal state).
+      const revokeRes = await fetch(`${API}/admin/revoke/by-id/${id}`, {
         method: "POST",
         headers: { Authorization: `Bearer ${TEST_CONFIG.adminApiKey}`, ...baseHeaders },
-      }).catch(() => {
-        // Best-effort: if this admin route needs a username rather than an
-        // email on this deployment, the poll below still exercises SOME
-        // terminal path (denied/expired) and the test's real assertion --
-        // that the CLI prints a contract sentence and exits 1 -- still holds.
       });
+      expect(revokeRes.status).toBe(200);
 
       const result = await cli.finished;
       expect(result.exitCode).toBe(1);
