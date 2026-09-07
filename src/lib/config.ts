@@ -16,7 +16,7 @@
  * }
  */
 
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import Conf from "conf";
@@ -162,6 +162,28 @@ const accountSchema = z.object({
    * both the address and the account and simply will not verify.
    */
   pendingEmailChange: z.string().email().optional(),
+  /**
+   * The named key this machine currently holds (epic #1272 phase 3; ADR
+   * 0047): the row id, its `name` (the machine name at mint time, e.g. from
+   * `os.hostname()`), and when it was minted. `nemar auth status` prints
+   * them as the `Key:` line, and `keyId`/`keySource` together are what
+   * `loginAction` compares against a fresh mint to decide whether a
+   * same-machine re-login should revoke the OLD row (decision 7: only ever
+   * a `"device"`-sourced key, never a pasted or password-era one).
+   */
+  keyId: z.number().int().optional(),
+  keyName: z.string().nullable().optional(),
+  keyCreatedAt: z.string().optional(),
+  /**
+   * How this account's CURRENT key was obtained: minted by the device flow's
+   * browser confirm, or pasted with `--key` / `NEMAR_API_KEY` (validated by
+   * `POST /auth/login` before the write). Absent means a password-era key
+   * predating both -- `nemar auth status`'s `Key:` line and `logoutAction`'s
+   * revoke-on-logout default (decision 10: only a `"device"` key is revoked
+   * automatically, since a pasted or password-era key may be shared with
+   * other machines) both read this to tell the three apart.
+   */
+  keySource: z.enum(["device", "paste"]).optional(),
 });
 
 export type Config = z.infer<typeof accountSchema>;
@@ -253,6 +275,11 @@ function getStore(): Conf<StoreSchema> {
 
   cachedStore = new Conf<StoreSchema>({
     projectName: "nemar",
+    // The config holds a live API key (epic #1272 phase 3): conf 13 honours
+    // this regardless of umask, writing through `atomically` (secureConfigFile
+    // below migrates a file an OLDER build already wrote with conf's 0o666
+    // default).
+    configFileMode: 0o600,
     schema: {
       activeAccount: { type: "string" },
       accounts: { type: "object" },
@@ -283,11 +310,34 @@ function getStore(): Conf<StoreSchema> {
   // re-execute when a previously-seen dir comes back into view.
   if (!migrationsRunForDirs.has(dir)) {
     migrationsRunForDirs.add(dir);
+    secureConfigFile(cachedStore.path);
     migrateConfig();
     migrateApiUrl();
   }
 
   return cachedStore;
+}
+
+/**
+ * chmod an on-disk config.json to 0600 if its mode differs, on non-Windows
+ * platforms only (epic #1272 phase 3): `configFileMode` above only governs
+ * WRITES conf itself makes, so a password-era file an older build wrote
+ * under conf's pre-13-configured 0o666 default stays world-readable until
+ * something rewrites it -- this migrates it in place on first use instead of
+ * waiting for the next `setConfig` call, which might be a long way off for a
+ * dormant account. The key inside keeps working either way; only the file's
+ * permission bits change. Best-effort: a chmod failure (read-only mount,
+ * permissions) is logged and never blocks CLI startup.
+ */
+function secureConfigFile(path: string): void {
+  if (process.platform === "win32") return;
+  if (!existsSync(path)) return;
+  try {
+    const mode = statSync(path).mode & 0o777;
+    if (mode !== 0o600) chmodSync(path, 0o600);
+  } catch (err) {
+    console.error(`[nemar] could not secure config file permissions for ${path}:`, err);
+  }
 }
 
 /**
@@ -534,6 +584,113 @@ export function storeAccount(username: string, accountConfig: Config): void {
   const accounts = getAccountsMap();
   accounts[username] = accountConfig;
   config.store = { ...config.store, accounts, activeAccount: username };
+}
+
+/**
+ * The accounts-map key for a signed-in server user (epic #1272 phase 3; ADR
+ * 0047): the username when there is one, the email otherwise.
+ *
+ * A brand-new ORCID account has `username: null` until
+ * `refreshNameThenAssignUsername` runs behind the response (ADR 0047), and
+ * `POST /auth/login`'s user shape shares that nullability -- so this is what
+ * the device-flow login AND a `--key` paste both key their entry by, rather
+ * than each inventing its own fallback. `.trim()` guards a username that is
+ * present but blank (a shape no route sends today, but `accountSchema`
+ * itself allows an empty string through `z.string().optional()`).
+ */
+export function accountKeyFor(user: { username?: string | null; email: string }): string {
+  const trimmed = user.username?.trim();
+  return trimmed || user.email;
+}
+
+/**
+ * Find the accounts-map key of the entry whose `email` matches, case
+ * insensitively -- how {@link upsertAccount} locates an account that was
+ * keyed by email (no username yet) before a rename, so a re-login does not
+ * orphan the entry `dismissedNoticeIds`/`profileGaps`/`orcidVerified`/
+ * `serviceAccess` live on. `undefined` when no stored account holds it.
+ */
+export function findAccountKeyByEmail(email: string): string | undefined {
+  const target = email.trim().toLowerCase();
+  if (!target) return undefined;
+  for (const [key, account] of Object.entries(getAccountsMap())) {
+    if (account.email && account.email.toLowerCase() === target) return key;
+  }
+  return undefined;
+}
+
+export interface UpsertAccountOptions {
+  /**
+   * The account this machine was signed into before this write, if the
+   * caller already knows it (e.g. the active account a preflight probe just
+   * checked). Tried before the email search below, so a rename lands on
+   * THAT entry even in the case `findAccountKeyByEmail` cannot resolve on
+   * its own -- the cached email disagreeing with the server's, or none
+   * stored yet.
+   */
+  previousKey?: string;
+}
+
+/** What {@link upsertAccount} merged into, if anything -- how a caller (e.g.
+ *  `loginAction`'s same-machine-key-replacement, decision 7) learns the
+ *  PRE-merge state to compare a freshly minted key against. `undefined`
+ *  means the entry did not exist before this call. */
+export interface UpsertAccountResult {
+  /** The map key the account now lives under (always `key`, echoed for
+   *  convenience at call sites that destructure the result). */
+  key: string;
+  /** The account's previous contents, before `patch` was merged in. */
+  previous?: Config;
+}
+
+/**
+ * Create or update one account entry, keyed by `key`, and set it active.
+ *
+ * Unlike {@link storeAccount} (which always REPLACES the entry at `username`
+ * wholesale), this MERGES `patch` onto whatever entry it finds -- at `key`
+ * itself, at `options.previousKey`, or by `patch.email` -- so fields the
+ * patch does not mention (`dismissedNoticeIds`, `profileGaps`,
+ * `orcidVerified`, `serviceAccess`, and critically `apiUrl`) survive a
+ * re-login rather than reverting to their schema defaults. When the entry is
+ * found under a DIFFERENT map key than `key` (a rename: the server now
+ * reports a username where the account was keyed by email, or the reverse),
+ * the old key is deleted so the account never ends up stored twice.
+ *
+ * `apiUrl` is deliberately never read from `getApiUrl()`/`TEST_API_URL` by
+ * any caller of this function: a brand-new entry gets `DEFAULT_API_URL`
+ * (the `existing ?? { apiUrl: DEFAULT_API_URL }` fallback below), and an
+ * existing one keeps whatever it already had, because `patch` never
+ * includes the field. Baking a live run's `TEST_API_URL` into the account
+ * a real `nemar auth login` on a developer's own machine would otherwise
+ * write is exactly the failure this avoids.
+ */
+export function upsertAccount(
+  key: string,
+  patch: Partial<Config>,
+  options: UpsertAccountOptions = {},
+): UpsertAccountResult {
+  const config = getStore();
+  const accounts = getAccountsMap();
+
+  let sourceKey: string | undefined;
+  if (accounts[key]) {
+    sourceKey = key;
+  } else if (options.previousKey && accounts[options.previousKey]) {
+    sourceKey = options.previousKey;
+  } else if (patch.email) {
+    sourceKey = findAccountKeyByEmail(patch.email);
+  }
+
+  const existing = sourceKey ? accounts[sourceKey] : undefined;
+  const merged: Config = { ...(existing ?? { apiUrl: DEFAULT_API_URL }), ...patch };
+
+  if (sourceKey && sourceKey !== key) {
+    delete accounts[sourceKey];
+  }
+  accounts[key] = merged;
+  config.store = { ...config.store, accounts, activeAccount: key };
+
+  return { key, previous: existing };
 }
 
 /**
