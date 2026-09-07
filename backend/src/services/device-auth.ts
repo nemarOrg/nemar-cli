@@ -326,6 +326,26 @@ export const DEVICE_MINT_CONSUME_SQL = `UPDATE device_codes
    WHERE device_code_hash = ? AND status = 'confirmed'
      AND EXISTS (SELECT 1 FROM tokens WHERE api_key_hash = ?)`;
 
+/** How many live keys an account holds right now, for the token route's
+ *  mint-failure diagnosis (`too_many_keys` vs. some other reason -- the mint
+ *  statement's own cap only says THAT it refused, not WHY). Binds: userId.
+ *  Same predicate as the cap inside {@link DEVICE_MINT_INSERT_SQL} and
+ *  {@link KEY_MINT_SQL}, kept as one statement so the three cannot drift. */
+export const LIVE_KEY_COUNT_SQL = `SELECT COUNT(*) AS n FROM tokens
+   WHERE user_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > datetime('now'))`;
+
+/** The account fields a mint-failure diagnosis needs to run
+ *  {@link accountRefusal} outside of the mint statement's own WHERE clause.
+ *  Binds: userId. A NULL row (no such user) is handled by the caller the
+ *  same way as a deleted one. */
+export const USER_STATUS_FOR_DEVICE_AUTH_SQL =
+  "SELECT status, deleted_at, identity_conflict FROM users WHERE id = ?";
+
+/** The user block for `POST /auth/device/token`'s success response,
+ *  matching `POST /auth/login`'s shape (routes/auth.ts). Binds: userId. */
+export const USER_BLOCK_FOR_DEVICE_TOKEN_SQL = `SELECT username, email, github_username, role, sandbox_completed, sandbox_dataset_id
+   FROM users WHERE id = ?`;
+
 /** Named-key mint for `POST /auth/keys` (the paste-key fallback). Binds:
  *  userId, hash, prefix, name, userId. Shares the {@link MAX_LIVE_API_KEYS}
  *  cap with the device mint above -- one cap, wherever a key is created. */

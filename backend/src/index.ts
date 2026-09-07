@@ -24,6 +24,7 @@ import { maintenanceMode } from "./middleware/maintenance";
 import { rateLimiter } from "./middleware/rateLimit";
 import { adminRoutes } from "./routes/admin";
 import { authRoutes } from "./routes/auth";
+import { authDeviceRoutes } from "./routes/auth-device";
 import { authOrcidRoutes } from "./routes/auth-orcid";
 import { authWebRoutes } from "./routes/auth-web";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
@@ -152,6 +153,9 @@ api.route("/auth", authRoutes);
 api.route("/auth", authWebRoutes);
 // ORCID SSO (#832). Same /auth prefix; new paths under /auth/orcid/*.
 api.route("/auth", authOrcidRoutes);
+// Device authorization grant (RFC 8628; epic #1272 phase 1, #1281; ADR
+// 0047). Same /auth prefix; new paths under /auth/device/*.
+api.route("/auth", authDeviceRoutes);
 api.route("/users", userRoutes);
 api.route("/admin", adminRoutes);
 api.route("/datasets", datasetRoutes);
