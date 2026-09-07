@@ -29,6 +29,11 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "GET /users": 1,
   "GET /users/:username": 1,
   "POST /users/:username/role": 3,
+  // #1284, epic #1272 phase 4 (ADR 0048): account kinds.
+  "POST /users/:username/kind": 3,
+  "GET /users/:username/keys": 2,
+  "POST /users/:username/keys": 3,
+  "DELETE /users/:username/keys/:id": 2,
   "POST /approve/:username": 1,
   // #1012: id-keyed approve for web/ORCID accounts (username = NULL).
   "POST /approve/by-id/:id": 1,
@@ -162,7 +167,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(103);
+    expect(adminRoutes.routes.length).toBe(113);
   });
 
   // The count pin above can't see a SWAP of the two router-level middleware
