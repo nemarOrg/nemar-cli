@@ -92,6 +92,23 @@ UPDATE users
        sandbox_completed_at = COALESCE(sandbox_completed_at, datetime('now'))
  WHERE username IN ('test-owner', 'test-admin', 'test-user');
 
+-- Account kinds (epic #1272 phase 4, #1284; ADR 0048; migration 0082's data
+-- half repeated here for a database seeded fresh AFTER that migration ran,
+-- same reasoning as the service_access UPDATE above). test-owner and
+-- test-admin are operational fixtures with no ORCID and never will be;
+-- test-user/test-pending/test-verified/test-revoked are a human's secondary
+-- persona. test-web stays 'person' (the default): it is the shared web-QA
+-- account (#1008) that has to reach the ORCID authorize page and the
+-- Settings key form like a real person.
+UPDATE users
+   SET account_kind = 'service'
+ WHERE username IN ('test-owner', 'test-admin') AND account_kind = 'person';
+
+UPDATE users
+   SET account_kind = 'test'
+ WHERE username IN ('test-user', 'test-pending', 'test-verified', 'test-revoked')
+   AND account_kind = 'person';
+
 -- Verification: confirm seed data exists (check counts manually if unexpected)
 SELECT 'users' AS tbl, COUNT(*) AS n FROM users WHERE username LIKE 'test-%';
 SELECT 'tokens' AS tbl, COUNT(*) AS n FROM tokens WHERE api_key_prefix LIKE 'nemar_test_%';
