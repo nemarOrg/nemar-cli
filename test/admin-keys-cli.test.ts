@@ -87,10 +87,20 @@ describe("nemar admin keys create", () => {
     seedAuthenticatedConfig();
     const server = startServer({
       api_key: "nm_mintedkeyforservice0123456789abcdef",
-      key: { id: 5, name: "svc-job", prefix: "nm_minte...", created_at: "2026-09-01", last_used_at: null, current: false },
+      key: {
+        id: 5,
+        name: "svc-job",
+        prefix: "nm_minte...",
+        created_at: "2026-09-01",
+        last_used_at: null,
+        current: false,
+      },
     });
     try {
-      const result = await runCli(["admin", "keys", "create", "svc-account", "svc-job"], server.url);
+      const result = await runCli(
+        ["admin", "keys", "create", "svc-account", "svc-job"],
+        server.url,
+      );
       expect(result.exitCode).toBe(0);
       expect(result.combined).toContain("nm_mintedkeyforservice0123456789abcdef");
       expect(result.combined).toContain("nemar auth login --key");
@@ -109,7 +119,8 @@ describe("nemar admin keys create", () => {
     const server = startServer(
       {
         error: "person_account",
-        message: "A person creates their own keys with `nemar auth login` or in Settings on nemar.org.",
+        message:
+          "A person creates their own keys with `nemar auth login` or in Settings on nemar.org.",
       },
       403,
     );
@@ -186,7 +197,10 @@ describe("nemar admin keys revoke", () => {
     seedAuthenticatedConfig();
     const server = startServer({ ok: true });
     try {
-      const result = await runCli(["admin", "keys", "revoke", "svc-account", "notanumber"], server.url);
+      const result = await runCli(
+        ["admin", "keys", "revoke", "svc-account", "notanumber"],
+        server.url,
+      );
       expect(result.exitCode).not.toBe(0);
       expect(result.combined).toContain("Invalid key id");
       expect(server.requests).toHaveLength(0);
