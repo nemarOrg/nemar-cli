@@ -84,6 +84,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0043](0043-one-person-one-account.md) - One person, one account: ORCID, email and GitHub each back at most one live account
 - [ADR 0044](0044-identity-self-service-reaches-the-cli.md) - Identity self-service reaches the CLI, and ORCID does it through the browser
 - [ADR 0045](0045-the-cli-and-the-web-say-one-thing-about-an-account.md) - The CLI and the web say one thing about an account: one matrix, one copy table, one gap function
+- [ADR 0046](0046-cross-repo-parity-compares-pre-release-branches.md) - Cross-repo parity compares pre-release branches, never `main`
 
 ## Backfill note (2026-07-31)
 

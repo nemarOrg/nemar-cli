@@ -329,11 +329,28 @@ jobs:
       # below cannot reach (it lists test/*.test.ts and backend/test/*.test.ts
       # only) and .gitignore covers.
       #
-      # REF PAIRING: website `staging` is the counterpart of nemar-cli `dev` and
-      # of every feature branch off it; website `main` pairs with nemar-cli
-      # `main`. Comparing a dev-side contract against the website's released
-      # copy would fail every PR that lands a copy change ahead of the website
-      # release, which is the normal order.
+      # REF PAIRING: always website `staging`, never `main`, whatever this PR
+      # targets. The pre-release branches are the coupled pair — website
+      # `staging` and nemar-cli `dev` carry a copy change together — and `main`
+      # on either side is only a snapshot of them taken at the last release.
+      #
+      # Pinning `main` for a main-targeted PR, as this step did until #1278,
+      # DEADLOCKS every coordinated release that touches the copy, and does so
+      # symmetrically: this repo's release PR compares dev-side copy against the
+      # website's not-yet-promoted `main`, while the website's release PR
+      # compares its staging copy against OUR not-yet-promoted `main`. Both go
+      # red, and neither can merge to give the other what it wants. Observed on
+      # the v0.9.16 / website v0.2.8 release of epic #1250, the first release
+      # after the gate landed (nemar-cli #1276, website #314).
+      #
+      # Comparing against `staging` keeps the gate non-vacuous: every copy
+      # change lands on `dev` or `staging` through a PR, and that PR is checked
+      # against the counterpart's live pre-release branch. A promotion PR
+      # re-checks the exact pair that is about to ship together, which is the
+      # question worth asking at release time. `main` vs `main` adds nothing
+      # once both have promoted, since each then equals its pre-release branch.
+      #
+      # See ADR 0046.
       - name: Check out the website's copy table
         uses: actions/checkout@v4
         with:
@@ -341,7 +358,7 @@ jobs:
           path: website-copy
           sparse-checkout: src/lib/account-copy.ts
           sparse-checkout-cone-mode: false
-          ref: ${{ (github.base_ref == 'main' || github.ref_name == 'main') && 'main' || 'staging' }}
+          ref: staging
 
       - name: Run pure unit tests (no live backend)
         env:
