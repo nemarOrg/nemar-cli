@@ -21,8 +21,10 @@ import { Command, InvalidArgumentError } from "commander";
 import inquirer from "inquirer";
 import ora from "ora";
 import { accountCopy } from "../../shared/contract/account-copy.js";
+import type { ApiKeySummary } from "../../shared/contract/device-auth.js";
 import { resolveProfileGaps } from "../../shared/contract/profile-gaps.js";
 import {
+  type ContractUser,
   UPLOAD_ACCESS_WHY_MAX_CHARS,
   UPLOAD_ACCESS_WHY_MIN_CHARS,
 } from "../../shared/contract/user.js";
@@ -41,6 +43,7 @@ import {
   requestUploadAccess,
   resendVerification,
   retrieveKey,
+  revokeApiKey,
   signup,
   startOrcidCliLink,
   unlinkOrcid,
@@ -51,7 +54,7 @@ import { ApiError, MaintenanceError, errorDetail } from "../lib/api/errors.js";
 import { openInBrowser } from "../lib/browser.js";
 import { printStepFailure } from "../lib/cli-output.js";
 import {
-  DEFAULT_API_URL,
+  accountKeyFor,
   clearAllConfig,
   clearConfig,
   deleteConfig,
@@ -61,8 +64,8 @@ import {
   isAuthenticated,
   renameActiveAccount,
   setConfig,
-  storeAccount,
   switchAccount,
+  upsertAccount,
 } from "../lib/config.js";
 import {
   type ConfirmOptions,
@@ -73,6 +76,11 @@ import {
   confirm,
 } from "../lib/confirm.js";
 import { recordStep } from "../lib/debug-log.js";
+import {
+  type DeviceLoginOutcome,
+  describeDeviceOutcome,
+  runDeviceLogin,
+} from "../lib/device-login.js";
 import { addVerboseHelp } from "../lib/help.js";
 import { warnMissingPrerequisites } from "../lib/prerequisites.js";
 import {
@@ -161,11 +169,153 @@ export function decideLoginPreflight(input: LoginPreflightInput): LoginPreflight
     : { kind: "active", username };
 }
 
+/**
+ * Update the ACTIVE account's local config from a freshly known server user:
+ * rename the entry once a username appears (#1266, ADR 0047), and cache the
+ * fields `nemar auth status` reads. Shared by every place that learns a
+ * user object -- `writeSignedInAccount` below (right after the credential
+ * half of a sign-in is written), `refreshStoredAccount` (the `profile set-*`
+ * subcommands), and `statusAction`'s `--refresh` branch -- so a rename and a
+ * cache update happen the same way regardless of which one triggered it.
+ *
+ * Synchronous: both `renameActiveAccount` and `setConfig` are.
+ */
+function applyServerUser(user: {
+  username: string | null;
+  email: string;
+  github_username: string | null;
+  role: string;
+  service_access?: boolean;
+  profile_gaps?: ContractUser["profile_gaps"];
+  sandbox_completed?: boolean;
+  orcid_verified?: boolean;
+}): void {
+  if (user.username && renameActiveAccount(user.username) === "key_taken") {
+    console.log(
+      chalk.yellow(`  This machine already has a different account stored as '${user.username}'.`),
+    );
+    console.log(
+      chalk.dim(
+        "  Your credentials stay under the old name; 'nemar auth switch' still selects that one.",
+      ),
+    );
+  }
+  setConfig("username", user.username ?? undefined);
+  setConfig("email", user.email);
+  setConfig("githubUsername", user.github_username ?? undefined);
+  if (user.service_access !== undefined) setConfig("serviceAccess", user.service_access);
+  if (user.profile_gaps !== undefined) setConfig("profileGaps", user.profile_gaps);
+  if (user.sandbox_completed !== undefined) setConfig("sandboxCompleted", user.sandbox_completed);
+  if (user.orcid_verified !== undefined) setConfig("orcidVerified", user.orcid_verified);
+  setConfig("role", user.role);
+}
+
+/**
+ * Write a successful sign-in's credential to disk and print the welcome
+ * block -- the one place `loginAction`'s device and `--key` paths converge
+ * (decision 5-7, ADR 0047).
+ *
+ * `key` is the minted key's summary (device path) or `null` (a pasted key
+ * was not just minted, so there is no row to name); `keyId`/`keyName`/
+ * `keyCreatedAt` are explicitly cleared (set to `undefined`, which
+ * `upsertAccount`'s JSON write drops) rather than left stale from a
+ * previous device login on this same machine when `key` is null.
+ *
+ * `oldKeyKnownDead` comes from the preflight probe this action already ran:
+ * when it already confirmed the STORED key was dead, the best-effort revoke
+ * below is skipped rather than spending a network call on a row the server
+ * likely already treats as gone (decision 7).
+ */
+async function writeSignedInAccount(
+  user: {
+    username: string | null;
+    email: string;
+    github_username: string | null;
+    role: string;
+    sandbox_completed: boolean;
+    sandbox_dataset_id?: string | null;
+  },
+  apiKey: string,
+  key: ApiKeySummary | null,
+  source: "device" | "paste",
+  oldKeyKnownDead: boolean,
+): Promise<void> {
+  const accountKey = accountKeyFor(user);
+  const { previous } = upsertAccount(accountKey, {
+    apiKey,
+    email: user.email,
+    keySource: source,
+    keyId: key?.id,
+    keyName: key?.name ?? undefined,
+    keyCreatedAt: key?.created_at,
+  });
+  applyServerUser(user);
+
+  console.log();
+  console.log(`  Welcome${user.username ? `, ${chalk.cyan(user.username)}` : ""}!`);
+  if (user.role === "owner") {
+    console.log(`  ${chalk.red("Owner access enabled")}`);
+  } else if (user.role === "admin") {
+    console.log(`  ${chalk.magenta("Admin access enabled")}`);
+  }
+
+  if (!user.sandbox_completed) {
+    console.log();
+    console.log(chalk.yellow("  Note: Sandbox training required before uploading datasets"));
+    console.log(chalk.dim("  Run 'nemar sandbox' to complete training"));
+  }
+
+  // Decision 7: a re-login on the SAME machine replaces its key, so a run
+  // never mints a row per invocation until the 25-key cap. Only when the
+  // merge landed on an existing entry that already held a DIFFERENT
+  // "device"-sourced key -- a pasted or password-era key belongs to more
+  // than this one machine by definition, and is never revoked here.
+  if (
+    key &&
+    !oldKeyKnownDead &&
+    previous?.keySource === "device" &&
+    previous.keyId !== undefined &&
+    previous.keyId !== key.id
+  ) {
+    try {
+      await revokeApiKey(previous.keyId);
+      console.log(chalk.dim("  (replaced this machine's previous key)"));
+    } catch {
+      // Best-effort: the new key is already stored and works either way.
+    }
+  }
+
+  const refreshed = getConfig();
+  printProfileGaps({
+    gaps: refreshed.profileGaps,
+    orcidVerified: refreshed.orcidVerified,
+    sandboxCompleted: refreshed.sandboxCompleted,
+  });
+}
+
+/** Print a non-success device-flow outcome and set the exit code
+ *  (decision 4: 130 for a cancel, 1 for anything else). `login` and
+ *  `signup` both funnel through this so a failure reads identically. */
+function printDeviceOutcomeFailure(
+  outcome: Exclude<DeviceLoginOutcome, { kind: "success" }>,
+): void {
+  const { lines, exitCode } = describeDeviceOutcome(outcome);
+  console.log();
+  const color = outcome.kind === "cancelled" ? chalk.yellow : chalk.red;
+  for (const line of lines) console.log(color(line));
+  process.exitCode = exitCode;
+}
+
 /** Exported login action handler for use in root-level shortcuts */
-export async function loginAction(options: { key?: string } & ConfirmOptions): Promise<void> {
+export async function loginAction(
+  options: { key?: string; open?: boolean } & ConfirmOptions,
+): Promise<void> {
+  const pastedKey = options.key || process.env.NEMAR_API_KEY;
+
   // Check for existing authentication. isAuthenticated() only proves a key
   // STRING is on disk, not that it still works, so probe the stored key's
   // liveness before deciding how to greet the user (#851).
+  let oldKeyKnownDead = false;
   if (isAuthenticated()) {
     const cfg = getConfig();
     const storedKey = cfg.apiKey;
@@ -191,6 +341,7 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
           error instanceof ApiError && error.statusCode === 401 ? "invalid" : "unknown";
       }
     }
+    oldKeyKnownDead = storedKeyState === "invalid";
 
     const preflight = decideLoginPreflight({
       hasStoredKey: true,
@@ -198,54 +349,69 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
       username: cfg.username,
     });
 
-    if (preflight.kind === "active") {
-      console.log(chalk.yellow(`Already logged in as ${preflight.username}`));
-      console.log(chalk.dim("  This will add another account (use 'nemar auth switch' to switch)"));
-      const result = await confirm("Add a different account?", options);
-      if (result !== "confirmed") return;
-    } else if (preflight.kind === "stale") {
-      // Stale: SAME account, dead key. Guide a straightforward re-auth instead
-      // of the misleading "different account?" prompt the bug report hit.
-      console.log(chalk.yellow(`Your saved API key for ${preflight.username} is no longer valid.`));
+    if (pastedKey) {
+      // --key / NEMAR_API_KEY (decision 1, 8): the one path that still asks
+      // a question. Its "identity" is just a string on the command line, so
+      // unlike the device flow it cannot establish for itself whether this
+      // is the same account signing back in or a different one being added.
+      if (preflight.kind === "active") {
+        console.log(chalk.yellow(`Already logged in as ${preflight.username}`));
+        console.log(
+          chalk.dim("  This will add another account (use 'nemar auth switch' to switch)"),
+        );
+        const result = await confirm("Add a different account?", options);
+        if (result !== "confirmed") return;
+      } else if (preflight.kind === "stale") {
+        // Stale: SAME account, dead key. Guide a straightforward re-auth instead
+        // of the misleading "different account?" prompt the bug report hit.
+        console.log(
+          chalk.yellow(`Your saved API key for ${preflight.username} is no longer valid.`),
+        );
+        console.log(
+          chalk.dim(
+            "  It may have expired or been revoked (e.g. via 'nemar auth regenerate-key').",
+          ),
+        );
+        console.log(chalk.dim("  Enter your new key below to re-authenticate."));
+      }
+    } else if (preflight.kind === "active") {
+      // Device path: one notice, never a question (decision 8) -- the
+      // browser step is where identity is actually established.
       console.log(
-        chalk.dim("  It may have expired or been revoked (e.g. via 'nemar auth regenerate-key')."),
+        chalk.yellow(
+          `Already signed in as ${preflight.username}; signing in again refreshes this machine's key.`,
+        ),
       );
-      console.log(chalk.dim("  Enter your new key below to re-authenticate."));
+    } else if (preflight.kind === "stale") {
+      // The stale wording names the browser, not "enter your key": there is
+      // no key to enter on this path.
+      console.log(chalk.yellow(`Your saved key for ${preflight.username} is no longer valid.`));
+      console.log(chalk.dim("  Sign in again below; the browser step continues."));
     }
   }
 
-  // Get API key from options, environment, or prompt
-  let apiKey = options.key || process.env.NEMAR_API_KEY;
-
-  if (!apiKey) {
-    const answers = await inquirer.prompt([
-      {
-        type: "password",
-        name: "apiKey",
-        message: "Enter your API key:",
-        mask: "*",
-        validate: (input) => {
-          if (!input || input.length < 32) {
-            return "Please enter a valid API key";
-          }
-          return true;
-        },
-      },
-    ]);
-    apiKey = answers.apiKey;
-  }
-
-  // Validate with backend
-  if (!apiKey) {
-    console.log(chalk.red("No API key provided"));
-    // A failed login is a failed command (#1257 review item 23): this used
-    // to `return` with the default exit code (0), so the debug bundle's
-    // exit-code line and failure hint both lied about the run having
-    // succeeded -- for the very command a brand-new user runs first.
-    process.exitCode = 1;
+  if (pastedKey) {
+    await loginWithPastedKey(pastedKey, oldKeyKnownDead);
     return;
   }
 
+  const outcome = await runDeviceLogin({ open: options.open });
+  if (outcome.kind === "success") {
+    await writeSignedInAccount(
+      outcome.user,
+      outcome.api_key,
+      outcome.key,
+      "device",
+      oldKeyKnownDead,
+    );
+    return;
+  }
+  printDeviceOutcomeFailure(outcome);
+}
+
+/** The `--key`/`NEMAR_API_KEY` path: validate a pasted key with the backend
+ *  before writing anything (decision 1). */
+async function loginWithPastedKey(apiKey: string, oldKeyKnownDead: boolean): Promise<void> {
   const spinner = ora("Validating API key...").start();
 
   try {
@@ -260,38 +426,8 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
       return;
     }
 
-    // Store credentials as a named account and set as active. Falls back to
-    // email when username is null (a brand-new ORCID account, ADR 0047) --
-    // a transitional shim; loginAction is rewritten onto accountKeyFor /
-    // upsertAccount in the device-flow-login commit that follows this one.
-    storeAccount(result.user.username ?? result.user.email, {
-      apiKey,
-      apiUrl: DEFAULT_API_URL,
-      username: result.user.username ?? undefined,
-      email: result.user.email,
-      githubUsername: result.user.github_username,
-      sandboxCompleted: result.user.sandbox_completed,
-      role: result.user.role,
-      ...(result.user.sandbox_dataset_id
-        ? { sandboxDatasetId: result.user.sandbox_dataset_id }
-        : {}),
-    });
-
     spinner.succeed("Login successful");
-    console.log();
-    console.log(`  Welcome back, ${chalk.cyan(result.user.username)}!`);
-    if (result.user.role === "owner") {
-      console.log(`  ${chalk.red("Owner access enabled")}`);
-    } else if (result.user.role === "admin") {
-      console.log(`  ${chalk.magenta("Admin access enabled")}`);
-    }
-
-    // Show sandbox training status
-    if (!result.user.sandbox_completed) {
-      console.log();
-      console.log(chalk.yellow("  Note: Sandbox training required before uploading datasets"));
-      console.log(chalk.dim("  Run 'nemar sandbox' to complete training"));
-    }
+    await writeSignedInAccount(result.user, apiKey, null, "paste", oldKeyKnownDead);
   } catch (error) {
     // Same defect as the two branches above, same fix: this catch has
     // always been reachable on a genuine failure (a real 401/403/5xx, or a
@@ -315,8 +451,9 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
 
 const loginCmd = authCommand
   .command("login")
-  .description("Authenticate with your NEMAR API key")
-  .option("-k, --key <key>", "API key (alternative: set NEMAR_API_KEY env var)")
+  .description("Sign in with your browser (opens NEMAR's device sign-in page)")
+  .option("-k, --key <key>", "Paste an existing API key instead (alternative: NEMAR_API_KEY)")
+  .option("--no-open", "Print the sign-in link instead of trying to open a browser")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .action(loginAction);
@@ -324,13 +461,24 @@ const loginCmd = authCommand
 addVerboseHelp(
   loginCmd,
   `
+Description:
+  Prints a link and a code, tries to open your browser to it, then waits
+  for you to authorize this machine there. The link and code are the real
+  mechanism -- on a headless or remote host, copy the link into any
+  browser; the browser attempt is only a convenience.
+
+  Use --key (or set NEMAR_API_KEY) to paste an existing key instead, for a
+  host that cannot poll or open a browser at all. It is validated with the
+  backend before anything is written.
+
 Environment Variables:
-  NEMAR_API_KEY    Your API key (alternative to -k flag)
+  NEMAR_API_KEY      An API key to use with --key
+  NEMAR_NO_BROWSER=1 Never try to open a browser (same as --no-open)
 
 Examples:
-  $ nemar auth login                     # Interactive prompt
-  $ nemar auth login -k nemar_abc123...  # Provide key directly
-  $ NEMAR_API_KEY=nemar_abc... nemar auth login`,
+  $ nemar auth login                     # Browser sign-in
+  $ nemar auth login --no-open           # Print the link only (headless)
+  $ nemar auth login -k nemar_abc123...  # Paste an existing key`,
 );
 
 // ============================================================================
@@ -640,6 +788,33 @@ authCommand.command("signup").description("Register for a new NEMAR account").ac
 // Status / Whoami
 // ============================================================================
 
+/**
+ * The `Key:` line (decision 14, epic #1272 phase 3): what this machine's
+ * stored credential IS, so a person can tell a browser-minted key from a
+ * pasted one without running `nemar auth keys`. `undefined` when there is
+ * no stored key at all (statusAction already returns before reaching this
+ * for that case, but the guard keeps the function honest on its own).
+ *
+ * `keySource` absent is a password-era key: it predates both the device
+ * flow and the `--key` validation this phase adds, so neither "device" nor
+ * "paste" describes it.
+ */
+function describeStoredKey(cfg: {
+  apiKey?: string;
+  keyName?: string | null;
+  keyCreatedAt?: string;
+  keySource?: "device" | "paste";
+}): string | undefined {
+  if (!cfg.apiKey) return undefined;
+  if (cfg.keySource === "device") {
+    const name = cfg.keyName || "this machine";
+    const when = cfg.keyCreatedAt ? cfg.keyCreatedAt.slice(0, 10) : "an unknown date";
+    return `${name}, signed in via browser on ${when}`;
+  }
+  if (cfg.keySource === "paste") return "pasted key";
+  return "password-era key; run `nemar auth login` to replace it with a machine-named key";
+}
+
 /** Exported status action handler for use in root-level shortcuts (whoami) */
 export async function statusAction(options: { refresh?: boolean }): Promise<void> {
   if (!isAuthenticated()) {
@@ -661,25 +836,12 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
     const spinner = ora("Fetching user info...").start();
     try {
       const user = await getCurrentUser();
-      // username/github_username are nullable on the wire (web-signup users);
-      // config fields are string|undefined, so coerce null -> undefined.
-      setConfig("username", user.username ?? undefined);
-      setConfig("email", user.email);
-      setConfig("githubUsername", user.github_username ?? undefined);
-      // Only cache a value the server actually sent: an older backend omits
-      // the field, and writing `false` there would report "not granted" to
-      // someone who has it (ADR 0040).
-      if (user.service_access !== undefined) setConfig("serviceAccess", user.service_access);
-      // Same rule for both phase-8 fields (#1268): cache only what the server
-      // actually sent. An absent `profile_gaps` is a backend that predates the
-      // field, and writing `[]` there would print "nothing outstanding" at an
-      // account nobody has checked.
-      if (user.profile_gaps !== undefined) setConfig("profileGaps", user.profile_gaps);
-      if (user.sandbox_completed !== undefined) {
-        setConfig("sandboxCompleted", user.sandbox_completed);
-      }
-      if (user.orcid_verified !== undefined) setConfig("orcidVerified", user.orcid_verified);
-      setConfig("role", user.role);
+      // Renames the stored entry once a username appears, and caches every
+      // field below through the SAME logic `writeSignedInAccount` and
+      // `refreshStoredAccount` use (epic #1272 phase 3) -- previously this
+      // branch set the fields inline and never renamed, so an email-keyed
+      // entry stayed email-keyed even after the account got a username.
+      applyServerUser(user);
       userRole = user.role;
       spinner.stop();
     } catch (error) {
@@ -737,6 +899,8 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
           : chalk.white("Member");
     console.log(`  Role:     ${roleDisplay}`);
   }
+  const keyLine = describeStoredKey(cfg);
+  if (keyLine) console.log(`  Key:      ${keyLine}`);
   // Upload access is the one-time admin approval (ADR 0040); `status` no
   // longer implies it, which is why it gets its own line. `undefined` means
   // this account has never been refreshed against a backend that reports it.
@@ -1646,33 +1810,14 @@ function requireAuthenticatedForChange(): boolean {
 async function refreshStoredAccount(): Promise<void> {
   try {
     const user = await getCurrentUser();
-    // The accounts map is KEYED by username, so a rename has to move the key
-    // as well as the field, or `nemar auth switch <new>` cannot find the
-    // account it just renamed (#1266 review). Done first: the writes below
-    // target the active account, and this is what decides which one that is.
-    //
-    // It declines to overwrite a DIFFERENT stored account holding that key,
-    // which leaves this machine with an account whose stored name and lookup
-    // key disagree. Silence there is the trap: `nemar auth switch <name>`
-    // would then select the other account, and nothing would have said why.
-    if (user.username && renameActiveAccount(user.username) === "key_taken") {
-      console.log(
-        chalk.yellow(
-          `  This machine already has a different account stored as '${user.username}'.`,
-        ),
-      );
-      console.log(
-        chalk.dim(
-          "  Your credentials stay under the old name; 'nemar auth switch' still selects that one.",
-        ),
-      );
-    }
-    setConfig("username", user.username ?? undefined);
-    setConfig("email", user.email);
-    setConfig("githubUsername", user.github_username ?? undefined);
-    if (user.service_access !== undefined) setConfig("serviceAccess", user.service_access);
-    if (user.orcid_verified !== undefined) setConfig("orcidVerified", user.orcid_verified);
-    setConfig("role", user.role);
+    // `applyServerUser` (epic #1272 phase 3) is the same rename-then-cache
+    // logic `writeSignedInAccount` and `statusAction --refresh` use: the
+    // accounts map is KEYED by username, so a rename has to move the key as
+    // well as the field, or `nemar auth switch <new>` cannot find the
+    // account it just renamed (#1266 review), and it declines to overwrite
+    // a DIFFERENT stored account holding that key so a naming collision
+    // never silently orphans one entry's credentials under the other's name.
+    applyServerUser(user);
   } catch (error) {
     console.log(
       chalk.dim(

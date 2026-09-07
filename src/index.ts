@@ -114,11 +114,19 @@ const isCompletionRequest = findCompletionArgsStart(rawArgs) !== null;
  * error escaping to main().catch() below, or Commander's own _exit) funnels
  * through. 'exit' handlers must be synchronous; writeDebugLogSync() is
  * synchronous by construction for exactly this reason (see its docstring).
+ *
+ * Exit code 130 (128 + SIGINT) is a fourth self-explanatory case, alongside
+ * `--json`/usage exits (epic #1272 phase 3, decision 4): a Ctrl-C during
+ * `nemar auth login`'s device-flow poll (lib/device-login.ts) already
+ * printed its own "Sign-in cancelled" sentence, and nothing about walking
+ * away from a prompt is evidence of a bug worth a debug log's nudge. The
+ * log itself is still written either way -- only the NUDGE below is
+ * suppressed, matching every other case this early return covers.
  */
 process.on("exit", (code) => {
   const exitCode = code ?? 0;
   const logPath = isCompletionRequest ? null : writeDebugLogSync(rawArgs, exitCode);
-  if (exitCode === 0 || rawArgs.includes("--json") || wasUsageExit()) return;
+  if (exitCode === 0 || exitCode === 130 || rawArgs.includes("--json") || wasUsageExit()) return;
   if (logPath) {
     process.stderr.write(`Debug log: ${logPath}\n`);
   } else if (isDebugEnabled()) {
@@ -156,7 +164,7 @@ This CLI provides tools for uploading, downloading, and managing datasets.`,
     "after",
     `
 Examples:
-  $ nemar auth login              # Authenticate with your API key
+  $ nemar auth login              # Sign in with your browser
   $ nemar dataset validate ./my-dataset
   $ nemar dataset upload ./my-dataset -n "My EEG Dataset"
   $ nemar dataset download nm000104
@@ -184,8 +192,9 @@ program.addCommand(completionCommand);
 
 program
   .command("login")
-  .description("Authenticate with your API key (shortcut for 'auth login')")
-  .option("-k, --key <key>", "API key (alternative: set NEMAR_API_KEY env var)")
+  .description("Sign in with your browser (shortcut for 'auth login')")
+  .option("-k, --key <key>", "Paste an existing API key instead (alternative: NEMAR_API_KEY)")
+  .option("--no-open", "Print the sign-in link instead of trying to open a browser")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .action(loginAction);

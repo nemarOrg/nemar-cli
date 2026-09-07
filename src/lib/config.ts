@@ -576,17 +576,6 @@ export function getAccounts(): AccountInfo[] {
 }
 
 /**
- * Store or update an account in the accounts map and set it as active.
- * The account is keyed by username.
- */
-export function storeAccount(username: string, accountConfig: Config): void {
-  const config = getStore();
-  const accounts = getAccountsMap();
-  accounts[username] = accountConfig;
-  config.store = { ...config.store, accounts, activeAccount: username };
-}
-
-/**
  * The accounts-map key for a signed-in server user (epic #1272 phase 3; ADR
  * 0047): the username when there is one, the email otherwise.
  *
@@ -619,21 +608,9 @@ export function findAccountKeyByEmail(email: string): string | undefined {
   return undefined;
 }
 
-export interface UpsertAccountOptions {
-  /**
-   * The account this machine was signed into before this write, if the
-   * caller already knows it (e.g. the active account a preflight probe just
-   * checked). Tried before the email search below, so a rename lands on
-   * THAT entry even in the case `findAccountKeyByEmail` cannot resolve on
-   * its own -- the cached email disagreeing with the server's, or none
-   * stored yet.
-   */
-  previousKey?: string;
-}
-
 /** What {@link upsertAccount} merged into, if anything -- how a caller (e.g.
- *  `loginAction`'s same-machine-key-replacement, decision 7) learns the
- *  PRE-merge state to compare a freshly minted key against. `undefined`
+ *  `writeSignedInAccount`'s same-machine-key-replacement, decision 7) learns
+ *  the PRE-merge state to compare a freshly minted key against. `undefined`
  *  means the entry did not exist before this call. */
 export interface UpsertAccountResult {
   /** The map key the account now lives under (always `key`, echoed for
@@ -646,15 +623,21 @@ export interface UpsertAccountResult {
 /**
  * Create or update one account entry, keyed by `key`, and set it active.
  *
- * Unlike {@link storeAccount} (which always REPLACES the entry at `username`
- * wholesale), this MERGES `patch` onto whatever entry it finds -- at `key`
- * itself, at `options.previousKey`, or by `patch.email` -- so fields the
- * patch does not mention (`dismissedNoticeIds`, `profileGaps`,
- * `orcidVerified`, `serviceAccess`, and critically `apiUrl`) survive a
- * re-login rather than reverting to their schema defaults. When the entry is
- * found under a DIFFERENT map key than `key` (a rename: the server now
- * reports a username where the account was keyed by email, or the reverse),
- * the old key is deleted so the account never ends up stored twice.
+ * Unlike a wholesale replace of the entry at `key`, this MERGES `patch` onto
+ * whatever entry it finds -- at `key` itself, or by `patch.email` -- so
+ * fields the patch does not mention
+ * (`dismissedNoticeIds`, `profileGaps`, `orcidVerified`, `serviceAccess`, and
+ * critically `apiUrl`) survive a re-login rather than reverting to their
+ * schema defaults. The email search is what makes a re-login find an entry
+ * that was keyed by email (no username yet, ADR 0047) once the server
+ * reports one: `accountKeyFor`'s result changes, but the row it should land
+ * on is found by the one field that did not. When the entry is found under
+ * a DIFFERENT map key than `key`, the old key is deleted so the account
+ * never ends up stored twice -- deliberately NOT tried against a caller-
+ * supplied "previous account" hint: an account this machine was signed into
+ * before is not evidence that the NEW login is the same one (a person may
+ * deliberately switch accounts), and only `key`/`email` actually identify
+ * the row an incoming server user belongs to.
  *
  * `apiUrl` is deliberately never read from `getApiUrl()`/`TEST_API_URL` by
  * any caller of this function: a brand-new entry gets `DEFAULT_API_URL`
@@ -664,19 +647,13 @@ export interface UpsertAccountResult {
  * a real `nemar auth login` on a developer's own machine would otherwise
  * write is exactly the failure this avoids.
  */
-export function upsertAccount(
-  key: string,
-  patch: Partial<Config>,
-  options: UpsertAccountOptions = {},
-): UpsertAccountResult {
+export function upsertAccount(key: string, patch: Partial<Config>): UpsertAccountResult {
   const config = getStore();
   const accounts = getAccountsMap();
 
   let sourceKey: string | undefined;
   if (accounts[key]) {
     sourceKey = key;
-  } else if (options.previousKey && accounts[options.previousKey]) {
-    sourceKey = options.previousKey;
   } else if (patch.email) {
     sourceKey = findAccountKeyByEmail(patch.email);
   }
