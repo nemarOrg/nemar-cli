@@ -36,7 +36,9 @@ import {
   checkGitHubUsername,
   checkOrcidName,
   checkUsername,
+  createApiKey,
   getCurrentUser,
+  listApiKeys,
   login,
   requestEmailChange,
   requestKeyRegeneration,
@@ -1677,6 +1679,151 @@ Description:
 Examples:
   $ nemar auth request-upload-access
   $ nemar auth request-upload-access --why "Sharing our lab's 64-channel EEG study of motor imagery"`,
+);
+
+// ============================================================================
+// Keys (epic #1272 phase 3; ADR 0047)
+// ============================================================================
+//
+// Every named key on the account -- one minted per machine by the device
+// flow, plus any pasted key created here for a host that cannot run it.
+// `nemar auth login`/`logout` cover the common case (this machine's own
+// key); this group is for looking at or managing the whole set, including
+// another machine's.
+
+/** One row of `nemar auth keys`. Exported so the rendering is testable
+ *  without parsing terminal output. */
+export function formatKeyRow(key: ApiKeySummary): string {
+  const name = key.name || chalk.dim("(unnamed)");
+  const marker = key.current ? chalk.dim(" (this machine)") : "";
+  const lastUsed = key.last_used_at ? key.last_used_at.slice(0, 10) : "never";
+  return `  ${chalk.cyan(String(key.id))}  ${name}${marker}\n      ${key.prefix}...  created ${key.created_at.slice(0, 10)}, last used ${lastUsed}`;
+}
+
+/** `nemar auth keys` (also the group's default action -- no subcommand). */
+export async function keysListAction(): Promise<void> {
+  if (!isAuthenticated()) {
+    console.log(chalk.yellow("Not authenticated"));
+    console.log();
+    console.log("  Run 'nemar auth login' to authenticate");
+    process.exitCode = 1;
+    return;
+  }
+  const spinner = ora("Fetching keys...").start();
+  try {
+    const { keys } = await listApiKeys();
+    spinner.stop();
+    if (keys.length === 0) {
+      console.log(chalk.yellow("No keys on this account"));
+      return;
+    }
+    for (const key of keys) console.log(formatKeyRow(key));
+  } catch (error) {
+    failWithApiError(spinner, error, "Could not fetch keys");
+  }
+}
+
+/** `nemar auth keys create <name>`: the paste-key fallback for a machine
+ *  that cannot run the device flow's browser half. */
+export async function keysCreateAction(name: string): Promise<void> {
+  if (!isAuthenticated()) {
+    console.log(chalk.yellow("Not authenticated"));
+    console.log();
+    console.log("  Run 'nemar auth login' to authenticate");
+    process.exitCode = 1;
+    return;
+  }
+  const spinner = ora(`Creating key "${name}"...`).start();
+  try {
+    const result = await createApiKey(name);
+    spinner.succeed("Key created");
+    console.log();
+    console.log(
+      chalk.yellow("Your new API key (store this securely; it will not be shown again):"),
+    );
+    console.log(`  ${result.api_key}`);
+    console.log();
+    console.log("  Paste it into the CLI on the other machine:");
+    console.log(
+      `    ${chalk.cyan("nemar auth login --key")} ${chalk.dim("<paste the key above>")}`,
+    );
+  } catch (error) {
+    failWithApiError(spinner, error, "Could not create the key");
+  }
+}
+
+/** Either a key's row id, or the literal `"current"` for the key presenting
+ *  THIS request. Validated at the Commander argument boundary, matching
+ *  `parseOrcidTimeout`: a bad value is a usage error, not a request that
+ *  reaches the backend only to be told `key_not_found`. */
+export type KeyRevokeTarget = number | "current";
+
+export function parseKeyRevokeTarget(raw: string): KeyRevokeTarget {
+  if (raw === "current") return "current";
+  if (/^\d+$/.test(raw)) return Number(raw);
+  throw new InvalidArgumentError("Expected a key id (a number) or 'current'");
+}
+
+/** `nemar auth keys revoke <id|current>`. */
+export async function keysRevokeAction(target: KeyRevokeTarget): Promise<void> {
+  if (!isAuthenticated()) {
+    console.log(chalk.yellow("Not authenticated"));
+    console.log();
+    console.log("  Run 'nemar auth login' to authenticate");
+    process.exitCode = 1;
+    return;
+  }
+  const spinner = ora(
+    target === "current" ? "Revoking this machine's key..." : `Revoking key ${target}...`,
+  ).start();
+  try {
+    await revokeApiKey(target);
+    spinner.succeed(target === "current" ? "This machine's key revoked" : `Key ${target} revoked`);
+    if (target === "current") {
+      console.log(chalk.dim("  Run 'nemar auth login' to sign back in on this machine."));
+    }
+  } catch (error) {
+    failWithApiError(spinner, error, "Could not revoke the key");
+  }
+}
+
+const keysCmd = authCommand
+  .command("keys")
+  .description("List, create, or revoke this account's named API keys")
+  .action(keysListAction);
+
+keysCmd
+  .command("list")
+  .description("List this account's live keys (same as 'nemar auth keys')")
+  .action(keysListAction);
+
+keysCmd
+  .command("create")
+  .description("Mint a named key -- the paste-key fallback for a machine without a browser")
+  .argument("<name>", "A name for the machine this key is for")
+  .action(keysCreateAction);
+
+keysCmd
+  .command("revoke")
+  .description("Revoke a key by id, or 'current' for this machine's own")
+  .argument("<idOrCurrent>", "A key id, or 'current'", parseKeyRevokeTarget)
+  .action(keysRevokeAction);
+
+addVerboseHelp(
+  keysCmd,
+  `
+Description:
+  Every named key on this account: one minted per machine by 'nemar auth
+  login', plus any created here for a machine that cannot open a browser.
+
+  'nemar auth login'/'logout' already cover the common case -- this
+  machine's own key; use this group to look at or manage the whole set.
+
+Examples:
+  $ nemar auth keys                       # List (default action)
+  $ nemar auth keys create build-box      # Mint a key for a headless host
+  $ nemar auth keys revoke 12             # Revoke by id
+  $ nemar auth keys revoke current        # Revoke this machine's own key`,
 );
 
 // ============================================================================
