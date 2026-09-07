@@ -20,9 +20,10 @@
  * it never renders HTML.
  *
  * The key is minted only when the CLI collects it at `/token`, never at
- * `/confirm` (decision 1, ADR 0047): `/confirm` only ever flips the row to
- * `confirmed` and records `user_id`. All timestamps this file writes or
- * compares are SQL-side (decision 4; see services/device-auth.ts).
+ * `/confirm` (ADR 0047: mint at collect, never at confirm): `/confirm`
+ * only ever flips the row to `confirmed` and records `user_id`. All
+ * timestamps this file writes or compares are SQL-side (ADR 0047; see
+ * services/device-auth.ts).
  */
 
 import { zValidator } from "@hono/zod-validator";
@@ -65,10 +66,12 @@ import {
   USER_BLOCK_FOR_DEVICE_TOKEN_SQL,
   USER_STATUS_FOR_DEVICE_AUTH_SQL,
   accountRefusal,
+  buildApiKeySummary,
   deviceRefusal,
   generateDeviceCode,
   generateUserCode,
   hashDeviceCode,
+  isLivePending,
   normalizeMachineName,
   refusalForRow,
   sqliteUtcToIso,
@@ -96,7 +99,7 @@ const MAX_USER_CODE_MINT_ATTEMPTS = 3;
 
 /** Re-read a `device_codes` row by its primary lookup key, stamping it
  *  `expired` (once, best-effort audited) and re-reading if it turns out to
- *  be a pending/confirmed row past `expires_at` (decision 5: expiry is
+ *  be a pending/confirmed row past `expires_at` (ADR 0047: expiry is
  *  observed, not scheduled). Shared by every route below that needs a
  *  current view of one row. */
 async function loadFreshRow(
@@ -143,13 +146,26 @@ function nestedRefusal(code: DeviceAuthRefusalCode): {
   return { code, message: DEVICE_AUTH_MESSAGES[code] };
 }
 
-function tokenErrorResponse(
+/** The two "keep polling" outcomes: never a `reason` (there is nothing to
+ *  explain -- the code is still live), matching {@link DeviceTokenError}'s
+ *  discriminated union. */
+function pendingTokenError(
   c: { json: (body: unknown, status: number) => Response },
-  error: DeviceGrantError,
-  reason?: DeviceAuthRefusalCode,
+  error: "authorization_pending" | "slow_down",
 ): Response {
-  const message = reason ? DEVICE_AUTH_MESSAGES[reason] : DEVICE_GRANT_MESSAGES[error];
-  const body: DeviceTokenError = reason ? { error, reason, message } : { error, message };
+  const body: DeviceTokenError = { error, message: DEVICE_GRANT_MESSAGES[error] };
+  return c.json(body, 400);
+}
+
+/** The three terminal outcomes: always a `reason`, the refusal vocabulary's
+ *  more specific code -- the type requires it, so a call site cannot omit
+ *  one here the way it could when `reason` was merely optional. */
+function terminalTokenError(
+  c: { json: (body: unknown, status: number) => Response },
+  error: "expired_token" | "access_denied" | "invalid_grant",
+  reason: DeviceAuthRefusalCode,
+): Response {
+  const body: DeviceTokenError = { error, reason, message: DEVICE_AUTH_MESSAGES[reason] };
   return c.json(body, 400);
 }
 
@@ -172,8 +188,23 @@ authDeviceRoutes.post("/device/start", async (c) => {
     .catch((err) => console.error("[auth-device] failed to prune expired device codes", err));
 
   // Tolerate an empty body: `machine_name` is optional, and a CLI that
-  // sends no body at all (or `{}`) must still get a code, not a 400.
-  const rawBody = await c.req.json().catch(() => ({}));
+  // sends no body at all (or `{}`) must still get a code, not a 400. A
+  // NON-empty body that fails to parse is different -- that is a malformed
+  // CLI build or a hand-rolled client, and must be visible rather than
+  // silently defaulted, so it gets its own 400 and a warning naming why.
+  const rawText = (await c.req.text()).trim();
+  let rawBody: unknown = {};
+  if (rawText.length > 0) {
+    try {
+      rawBody = JSON.parse(rawText);
+    } catch (err) {
+      console.warn(
+        "[auth-device] /device/start received a non-empty body that is not valid JSON",
+        err,
+      );
+      return c.json({ error: "Invalid request body" }, 400);
+    }
+  }
   const parsed = deviceStartBodySchema.safeParse(rawBody);
   if (!parsed.success) {
     return c.json({ error: "Invalid request body" }, 400);
@@ -249,7 +280,7 @@ authDeviceRoutes.post("/device/token", zValidator("json", deviceTokenBodySchema)
   // immediately -- no further read needed.
   const pollResult = await db.prepare(DEVICE_POLL_SQL).bind(hash).run();
   if ((pollResult.meta?.changes ?? 0) === 1) {
-    return tokenErrorResponse(c, "authorization_pending");
+    return pendingTokenError(c, "authorization_pending");
   }
 
   // (2)-(4) `changes === 0`: disambiguate why. `loadFreshRow` observes and
@@ -257,53 +288,90 @@ authDeviceRoutes.post("/device/token", zValidator("json", deviceTokenBodySchema)
   // reads back as 'expired' here.
   const row = await loadFreshRow(db, DEVICE_ROW_BY_HASH_SQL, hash);
   if (!row) {
-    return tokenErrorResponse(c, "invalid_grant", "device_code_unknown");
+    return terminalTokenError(c, "invalid_grant", "device_code_unknown");
   }
   if (row.status === "expired") {
-    return tokenErrorResponse(c, "expired_token", "device_code_expired");
+    return terminalTokenError(c, "expired_token", "device_code_expired");
   }
   if (row.status === "denied") {
-    return tokenErrorResponse(c, "access_denied", "device_code_denied");
+    return terminalTokenError(c, "access_denied", "device_code_denied");
   }
   if (row.status === "consumed") {
-    return tokenErrorResponse(c, "invalid_grant", "device_code_used");
+    return terminalTokenError(c, "invalid_grant", "device_code_used");
   }
   if (row.status === "pending") {
     // Live and unexpired, so the poll UPDATE above matched zero rows only
     // because it arrived inside the {@link DEVICE_POLL_INTERVAL_SECONDS}
-    // floor since the last STAMPED poll -- the floor is not reset (decision
-    // 7: a jittery client is not starved).
-    return tokenErrorResponse(c, "slow_down");
+    // floor since the last STAMPED poll -- the floor is not reset (ADR
+    // 0047: a jittery client is not starved).
+    return pendingTokenError(c, "slow_down");
   }
 
   // (5) row.status === "confirmed" and not expired: attempt the mint. Never
-  // read `last_insert_rowid()` (decision 1) -- the consume statement's
+  // read `last_insert_rowid()` (ADR 0047) -- the consume statement's
   // `changes` is the only trustworthy signal, gated on `EXISTS` against the
   // hash this route just generated.
+  //
+  // The two read-backs run INSIDE this same batch. D1 (and the `realD1`
+  // test double) run a batch as one transaction, so both SELECTs see the
+  // INSERT's row, and if anything after the batch throws, nothing in it
+  // was ever committed -- the CLI simply polls again for a code that is
+  // still perfectly usable, rather than this route minting a key it then
+  // fails to hand back.
   const { apiKey, apiKeyPrefix } = generateApiKey();
   const apiKeyHash = await hashApiKey(apiKey);
-  const results = await db.batch([
+  const results = await db.batch<Record<string, unknown>>([
     db.prepare(DEVICE_MINT_INSERT_SQL).bind(apiKeyHash, apiKeyPrefix, hash),
     db.prepare(DEVICE_MINT_CONSUME_SQL).bind(apiKeyHash, hash, apiKeyHash),
+    db.prepare(KEY_BY_HASH_SQL).bind(apiKeyHash),
+    db.prepare(USER_BLOCK_FOR_DEVICE_TOKEN_SQL).bind(row.user_id),
   ]);
-  const consumeChanges = results[1]?.meta?.changes ?? 0;
+
+  const consumeResult = results[1];
+  if (!consumeResult?.meta) {
+    // D1 always returns `meta` for a run statement inside a batch; this is
+    // a canary for a driver-shape change, not an expected outcome. Fail
+    // safe toward "nothing changed" (a recoverable `slow_down`-shaped
+    // retry) rather than crash on the missing property.
+    console.error(
+      `[auth-device] canary: batch result for DEVICE_MINT_CONSUME_SQL carried no meta (hash prefix ${hash.slice(0, 8)}, user_code=${row.user_code})`,
+    );
+  }
+  const consumeChanges = consumeResult?.meta?.changes ?? 0;
 
   if (consumeChanges === 1) {
-    const keyRow = await db.prepare(KEY_BY_HASH_SQL).bind(apiKeyHash).first<{
-      id: number;
-      name: string | null;
-      prefix: string;
-      created_at: string;
-      last_used_at: string | null;
-    }>();
-    const userRow = await db.prepare(USER_BLOCK_FOR_DEVICE_TOKEN_SQL).bind(row.user_id).first<{
-      username: string | null;
-      email: string;
-      github_username: string | null;
-      role: string | null;
-      sandbox_completed: number;
-      sandbox_dataset_id: string | null;
-    }>();
+    const keyRow = results[2]?.results?.[0] as
+      | {
+          id: number;
+          name: string | null;
+          prefix: string;
+          created_at: string;
+          last_used_at: string | null;
+        }
+      | undefined;
+    const userRow = results[3]?.results?.[0] as
+      | {
+          username: string | null;
+          email: string;
+          github_username: string | null;
+          role: string | null;
+          sandbox_completed: number;
+          sandbox_dataset_id: string | null;
+        }
+      | undefined;
+
+    if (!keyRow || !userRow) {
+      // Impossible inside one committed transaction: the INSERT just wrote
+      // the tokens row this SELECT reads back by the very hash it inserted,
+      // and `row.user_id` is the same account the mint's WHERE clause just
+      // matched. Ship nothing rather than a response built from fillers.
+      console.error(
+        `[auth-device] canary: mint committed (user_code=${row.user_code}, ` +
+          `hash prefix ${hash.slice(0, 8)}, user_id=${row.user_id}) but a read-back inside ` +
+          `the same batch came back empty (key=${Boolean(keyRow)}, user=${Boolean(userRow)})`,
+      );
+      throw new Error("device token mint committed but its read-back was empty");
+    }
 
     await auditLogStatement(db, {
       userId: row.user_id,
@@ -312,8 +380,8 @@ authDeviceRoutes.post("/device/token", zValidator("json", deviceTokenBodySchema)
       resourceId: row.user_code,
       details: JSON.stringify({
         machine_name: row.machine_name,
-        prefix: keyRow?.prefix ?? apiKeyPrefix,
-        token_id: keyRow?.id ?? null,
+        prefix: keyRow.prefix,
+        token_id: keyRow.id,
       }),
     })
       .run()
@@ -323,21 +391,14 @@ authDeviceRoutes.post("/device/token", zValidator("json", deviceTokenBodySchema)
 
     const body: DeviceTokenSuccess = {
       api_key: apiKey,
-      key: {
-        id: keyRow?.id ?? 0,
-        name: keyRow?.name ?? null,
-        prefix: keyRow?.prefix ?? apiKeyPrefix,
-        created_at: keyRow?.created_at ?? "",
-        last_used_at: keyRow?.last_used_at ?? null,
-        current: true,
-      },
+      key: buildApiKeySummary(keyRow, true),
       user: {
-        username: userRow?.username ?? null,
-        email: userRow?.email ?? "",
-        github_username: userRow?.github_username ?? null,
-        role: userRow?.role || "member",
-        sandbox_completed: flag(userRow?.sandbox_completed),
-        sandbox_dataset_id: userRow?.sandbox_dataset_id ?? null,
+        username: userRow.username,
+        email: userRow.email,
+        github_username: userRow.github_username,
+        role: userRow.role || "member",
+        sandbox_completed: flag(userRow.sandbox_completed),
+        sandbox_dataset_id: userRow.sandbox_dataset_id,
       },
     };
     return c.json(body);
@@ -346,15 +407,17 @@ authDeviceRoutes.post("/device/token", zValidator("json", deviceTokenBodySchema)
   // (6) `changes === 0`: the row was 'confirmed' a moment ago but the mint
   // still landed nothing. Diagnose why against a fresh read, in the same
   // order a caller would want to hear it: is the code itself now gone
-  // (expired/used by a racing poll), then the ACCOUNT (revoked, pending,
-  // flagged), then the key cap, then fall back to whatever `refusalForRow`
-  // says.
+  // (expired), then the ACCOUNT (revoked, pending, flagged), then the key
+  // cap. `denied`/`pending` cannot appear here -- neither transition is
+  // reachable once a row is `confirmed` -- so what remains is either the
+  // account genuinely gained a problem, or (the `confirmed` fallthrough
+  // below) a race this route did not expect.
   const freshRow = await loadFreshRow(db, DEVICE_ROW_BY_HASH_SQL, hash);
   if (!freshRow) {
-    return tokenErrorResponse(c, "invalid_grant", "device_code_unknown");
+    return terminalTokenError(c, "invalid_grant", "device_code_unknown");
   }
   if (freshRow.status === "expired") {
-    return tokenErrorResponse(c, "expired_token", "device_code_expired");
+    return terminalTokenError(c, "expired_token", "device_code_expired");
   }
 
   const userId = freshRow.user_id;
@@ -366,28 +429,47 @@ authDeviceRoutes.post("/device/token", zValidator("json", deviceTokenBodySchema)
       }>()
     : null;
 
-  let reason: DeviceAuthRefusalCode;
-  if (!userStatusRow || userStatusRow.deleted_at) {
-    reason = "account_revoked";
-  } else {
-    const accountIssue = accountRefusal(
-      userStatusRow.status,
-      flag(userStatusRow.identity_conflict),
-    );
-    if (accountIssue) {
-      reason = accountIssue;
-    } else {
-      const keyCountRow = await db.prepare(LIVE_KEY_COUNT_SQL).bind(userId).first<{ n: number }>();
-      if ((keyCountRow?.n ?? 0) >= MAX_LIVE_API_KEYS) {
-        reason = "too_many_keys";
-      } else {
-        reason = refusalForRow(freshRow) ?? "device_code_used";
-      }
+  if (!userStatusRow) {
+    if (userId) {
+      // `device_codes.user_id REFERENCES users(id) ON DELETE CASCADE` makes
+      // a confirmed row naming a user that no longer resolves impossible --
+      // deleting the user deletes this row along with it. A canary, not a
+      // silent `account_revoked`.
+      console.error(
+        `[auth-device] canary: confirmed device_codes row user_code=${freshRow.user_code} ` +
+          `names user_id=${userId}, which does not resolve to a user`,
+      );
     }
+    return terminalTokenError(c, "access_denied", "account_revoked");
   }
-  const grantError: DeviceGrantError =
-    reason === "device_code_used" ? "invalid_grant" : "access_denied";
-  return tokenErrorResponse(c, grantError, reason);
+  if (userStatusRow.deleted_at) {
+    return terminalTokenError(c, "access_denied", "account_revoked");
+  }
+  const accountIssue = accountRefusal(userStatusRow.status, flag(userStatusRow.identity_conflict));
+  if (accountIssue) {
+    return terminalTokenError(c, "access_denied", accountIssue);
+  }
+  const keyCountRow = await db.prepare(LIVE_KEY_COUNT_SQL).bind(userId).first<{ n: number }>();
+  if ((keyCountRow?.n ?? 0) >= MAX_LIVE_API_KEYS) {
+    return terminalTokenError(c, "access_denied", "too_many_keys");
+  }
+
+  if (freshRow.status === "confirmed") {
+    // The row is still confirmed, the account is fine, and the key count is
+    // under the cap -- the mint SHOULD have succeeded. This is a raced
+    // batch (a concurrent poll's INSERT landed between this poll's first
+    // read and its own batch), not a real refusal: answer the CLI's normal
+    // "keep waiting" state so the next poll retries a code that is still
+    // perfectly usable, rather than a terminal error for it.
+    console.error(
+      `[auth-device] canary: mint found no reason to refuse user_code=${freshRow.user_code} ` +
+        `(hash prefix ${hash.slice(0, 8)}, user_id=${userId}) yet inserted no token row`,
+    );
+    return pendingTokenError(c, "slow_down");
+  }
+
+  // freshRow.status === "consumed": a concurrent poll already won the mint.
+  return terminalTokenError(c, "invalid_grant", "device_code_used");
 });
 
 // -------------------------------- lookup -----------------------------------
@@ -405,13 +487,12 @@ authDeviceRoutes.get("/device/lookup", webSessionMiddleware, async (c) => {
   }
 
   const row = await loadFreshRow(db, DEVICE_ROW_BY_USER_CODE_SQL, userCode);
-  const codeRefusal = refusalForRow(row);
-  if (codeRefusal) {
-    return refusalResponse(c, codeRefusal);
+  if (!isLivePending(row)) {
+    // `isLivePending` narrows the ONE case `refusalForRow` answers `null`
+    // for; anything else is a refusal, and `refusalForRow` names it -- no
+    // `as DeviceCodeRow` cast needed past this point.
+    return refusalResponse(c, refusalForRow(row) ?? "device_code_unknown");
   }
-  // refusalForRow returns null only for a live, pending row -- so `row` is
-  // guaranteed non-null past this point.
-  const liveRow = row as DeviceCodeRow;
 
   const identityRow = await c.env.DB.prepare("SELECT identity_conflict FROM users WHERE id = ?")
     .bind(webUser.id)
@@ -419,10 +500,10 @@ authDeviceRoutes.get("/device/lookup", webSessionMiddleware, async (c) => {
   const accountCode = accountRefusal(webUser.status, flag(identityRow?.identity_conflict));
 
   const body: DeviceLookupResponse = {
-    user_code: formatUserCode(liveRow.user_code),
-    machine_name: liveRow.machine_name,
-    requested_at: sqliteUtcToIso(liveRow.created_at),
-    expires_in: liveRow.expires_in,
+    user_code: formatUserCode(row.user_code),
+    machine_name: row.machine_name,
+    requested_at: sqliteUtcToIso(row.created_at),
+    expires_in: row.expires_in,
     account: {
       username: webUser.username,
       email_masked: maskEmail(webUser.email),
@@ -466,16 +547,25 @@ authDeviceRoutes.post(
       return refusalResponse(c, accountCode);
     }
 
+    // Read BEFORE the UPDATE, not after: `machine_name` never changes once
+    // a row exists, so this pre-read is all the audit row and the response
+    // need. Answering `refusalForRow` here, before attempting the UPDATE,
+    // means a decorative POST-update read can never turn an already
+    // committed confirm into a 500 -- there is no read left after the write
+    // that anything could fail on.
+    const preRow = await loadFreshRow(db, DEVICE_ROW_BY_USER_CODE_SQL, userCode);
+    if (!isLivePending(preRow)) {
+      return refusalResponse(c, refusalForRow(preRow) ?? "device_code_unknown");
+    }
+    const machineName = preRow.machine_name;
+
     const result = await db.prepare(DEVICE_CONFIRM_SQL).bind(webUser.id, userCode).run();
     if ((result.meta?.changes ?? 0) === 0) {
+      // Lost a race between the pre-read above and this UPDATE (a
+      // concurrent deny/expiry/confirm landed in between) -- re-read fresh
+      // rather than trust the row this request already saw.
       return refusalResponse(c, await refusalAfterNoChange(db, userCode));
     }
-
-    const confirmedRow = await db
-      .prepare(DEVICE_ROW_BY_USER_CODE_SQL)
-      .bind(userCode)
-      .first<DeviceCodeRow>();
-    const machineName = confirmedRow?.machine_name ?? "";
 
     await auditLogStatement(db, {
       userId: webUser.id,
@@ -515,8 +605,8 @@ authDeviceRoutes.post(
       return refusalResponse(c, "device_code_unknown");
     }
 
-    // Any signed-in account may deny (decision 12): the row records no
-    // `user_id`, only the audit row names the denier.
+    // Any signed-in account may deny (ADR 0047: deny records no `user_id`
+    // on the row itself, only the audit row names the denier).
     const result = await db.prepare(DEVICE_DENY_SQL).bind(userCode).run();
     if ((result.meta?.changes ?? 0) === 0) {
       return refusalResponse(c, await refusalAfterNoChange(db, userCode));

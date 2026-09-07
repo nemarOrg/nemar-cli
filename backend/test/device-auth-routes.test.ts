@@ -11,6 +11,26 @@
  * `authKeysRoutes` is mounted for parity with the app's real routing, even
  * though nothing in this file exercises `/auth/keys` -- that surface has
  * its own real-route coverage in api-keys-routes.test.ts.
+ *
+ * THREE THINGS THIS FILE CANNOT EXERCISE, BY CONSTRUCTION, NOT BY OMISSION
+ * (`.rules/testing.md`: say so when real data cannot falsify a rule).
+ * First, the actual concurrent RACE every conditional UPDATE here closes
+ * (two pollers, or a poll racing a confirm) -- bun:sqlite is a single
+ * writer with no interleaving hook, so every "changes 1 then 0" assertion
+ * in this file proves the SQL's own mutual exclusion, not that two
+ * simultaneous callers cannot both win. Second, `POST /device/start`'s
+ * `user_code` collision retry loop (`MAX_USER_CODE_MINT_ATTEMPTS`,
+ * routes/auth-device.ts): `generateUserCode` draws from `crypto
+ * .getRandomValues` with no seam to force a collision on demand, so the
+ * retry path is read-reviewed, not driven end to end here. Third, and for
+ * the same single-writer reason as the first: `/device/token` step 6's
+ * `freshRow.status === "confirmed"` canary branch (routes/auth-device.ts)
+ * answers `slow_down` for a mint that passed every gate yet inserted no
+ * row -- the shape only a genuine concurrent racer produces. Verified by
+ * hand (mutate the branch to a terminal error, run this file plus
+ * device-codes-migration.test.ts and api-keys-routes.test.ts, confirm
+ * nothing goes red, revert) rather than by a red test, because nothing
+ * in a single-threaded suite can put the code in that state.
  */
 
 import type { Database } from "bun:sqlite";
@@ -21,6 +41,12 @@ import {
   DEVICE_CODE_TTL_SECONDS,
   MACHINE_NAME_MAX_CHARS,
   MAX_LIVE_API_KEYS,
+  deviceConfirmResponseSchema,
+  deviceLookupResponseSchema,
+  deviceRefusalResponseSchema,
+  deviceStartResponseSchema,
+  deviceTokenErrorSchema,
+  deviceTokenSuccessSchema,
   normalizeUserCode,
 } from "../../shared/contract/device-auth.js";
 import { authRoutes } from "../src/routes/auth";
@@ -304,6 +330,32 @@ describe("POST /auth/device/start", () => {
     expect(row?.machine_name.length).toBe(MACHINE_NAME_MAX_CHARS);
   });
 
+  test("a whitespace-only machine_name defaults to unnamed machine", async () => {
+    const { userCode } = await startCode("   ");
+    const row = deviceCodeRowByRawUserCode(userCode);
+    expect(row?.machine_name).toBe("unnamed machine");
+  });
+
+  test("a control-characters-only machine_name defaults to unnamed machine", async () => {
+    const { userCode } = await startCode("\x00\x01\x02");
+    const row = deviceCodeRowByRawUserCode(userCode);
+    expect(row?.machine_name).toBe("unnamed machine");
+  });
+
+  test("a 201-char machine_name answers 400", async () => {
+    const res = await start("x".repeat(201));
+    expect(res.status).toBe(400);
+  });
+
+  test("a malformed non-empty JSON body answers 400", async () => {
+    const res = await app.request(
+      "/auth/device/start",
+      { method: "POST", headers: { "content-type": "application/json" }, body: "{not valid json" },
+      env(),
+    );
+    expect(res.status).toBe(400);
+  });
+
   test("two starts coexist as two distinct rows", async () => {
     const a = await startCode("machine-a");
     const b = await startCode("machine-b");
@@ -402,6 +454,26 @@ describe("POST /auth/device/token", () => {
     expect(secondBody.reason).toBe("device_code_expired");
 
     expect(auditRows("device_auth_expired", userCode)).toHaveLength(1);
+  });
+
+  test("poll_count stays unchanged when polling an expired code", async () => {
+    const { deviceCode, userCode } = await startCode();
+    db.run(
+      "UPDATE device_codes SET expires_at = datetime('now', '-1 seconds') WHERE user_code = ?",
+      [userCode],
+    );
+    await pollToken(deviceCode);
+    const row = deviceCodeRowByRawUserCode(userCode);
+    expect(row?.poll_count).toBe(0);
+  });
+
+  test("poll_count stays unchanged when polling a denied code", async () => {
+    const bob = seedUser("bob-poll-denied@nemar.test");
+    const { deviceCode, userCode } = await startCode();
+    await deny(userCode, await sessionCookie(bob));
+    await pollToken(deviceCode);
+    const row = deviceCodeRowByRawUserCode(userCode);
+    expect(row?.poll_count).toBe(0);
   });
 });
 
@@ -517,6 +589,7 @@ describe("POST /auth/device/confirm", () => {
     expect(res.status).toBe(403);
     expect((await res.json()).error).toBe("account_pending");
     expect(deviceCodeRowByRawUserCode(userCode)?.status).toBe("pending");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
 
   test("403 typed for an identity_conflict account, and the row stays pending", async () => {
@@ -600,6 +673,24 @@ describe("POST /auth/device/deny", () => {
     const row = deviceCodeRowByRawUserCode(userCode);
     expect(row?.status).toBe("denied");
     expect(row?.user_id).toBeNull();
+  });
+
+  test("writes a device_auth_denied audit row naming the denier", async () => {
+    const bob = seedUser("bob-deny-audit@nemar.test");
+    const { userCode } = await startCode();
+    await deny(userCode, await sessionCookie(bob));
+    const rows = auditRows("device_auth_denied", userCode);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].user_id).toBe(bob);
+  });
+
+  test("Cache-Control: no-store on a 409 (deny on an already-confirmed code)", async () => {
+    const bob = seedUser("bob-deny-cache@nemar.test");
+    const { userCode } = await startCode();
+    await confirm(userCode, await sessionCookie(bob));
+    const res = await deny(userCode, await sessionCookie(bob));
+    expect(res.status).toBe(409);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
 
   test("a denied code then polls access_denied/device_code_denied", async () => {
@@ -713,6 +804,24 @@ describe("account state changes between confirm and collect", () => {
     const { deviceCode, userCode } = await startCode();
     await confirm(userCode, await sessionCookie(ada));
     db.run("UPDATE users SET status = 'revoked' WHERE id = ?", [ada]);
+
+    const before = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM tokens").get()?.n ?? 0;
+    const res = await pollToken(deviceCode);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; reason?: string };
+    expect(body.error).toBe("access_denied");
+    expect(body.reason).toBe("account_revoked");
+    const after = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM tokens").get()?.n ?? 0;
+    expect(after).toBe(before);
+  });
+
+  test("a soft-deleted account answers account_revoked and mints no token row", async () => {
+    const ada = seedUser("ada-delete-between@nemar.test");
+    const { deviceCode, userCode } = await startCode();
+    await confirm(userCode, await sessionCookie(ada));
+    // Soft-delete, status untouched: `deleted_at` alone is what the mint
+    // gate checks (`u.deleted_at IS NULL`), independent of `status`.
+    db.run("UPDATE users SET deleted_at = datetime('now') WHERE id = ?", [ada]);
 
     const before = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM tokens").get()?.n ?? 0;
     const res = await pollToken(deviceCode);
@@ -854,8 +963,75 @@ describe("device flow reached through a brand-new ORCID sign-in", () => {
       user: { email: string; username: string | null };
     };
     expect(tokenBody.user.email).toBe("device-new-id@nemar.test");
-    // Deliberately no assertion on `username`: assignment runs best-effort
-    // behind the response (decision 11), so it is not guaranteed to have
-    // landed by the time this request returns.
+    // Deliberately no assertion on `username`: ADR 0047 -- `username` is
+    // nullable because assignment runs best-effort behind the response,
+    // so it is not guaranteed to have landed by the time this request
+    // returns.
+  });
+});
+
+// --------------------------------------------------------------------------
+// contract compliance: every response shape matches its published schema
+// --------------------------------------------------------------------------
+
+/** Named issue paths on failure, rather than a bare "expected true" --
+ *  matches the pattern in backend/test/auth-me-payload-route.test.ts. */
+function schemaIssues(parsed: {
+  success: boolean;
+  error?: { issues: { path: (string | number)[] }[] };
+}): string[] {
+  return parsed.success ? [] : (parsed.error?.issues ?? []).map((i) => i.path.join("."));
+}
+
+describe("responses match their published contract schemas", () => {
+  test("POST /auth/device/start", async () => {
+    const res = await start("schema-check-machine");
+    const parsed = deviceStartResponseSchema.safeParse(await res.json());
+    expect(schemaIssues(parsed)).toEqual([]);
+  });
+
+  test("POST /auth/device/token: authorization_pending carries no reason", async () => {
+    const { deviceCode } = await startCode();
+    const res = await pollToken(deviceCode);
+    const parsed = deviceTokenErrorSchema.safeParse(await res.json());
+    expect(schemaIssues(parsed)).toEqual([]);
+  });
+
+  test("POST /auth/device/token: a terminal error carries reason", async () => {
+    const res = await pollToken("z".repeat(40));
+    const parsed = deviceTokenErrorSchema.safeParse(await res.json());
+    expect(schemaIssues(parsed)).toEqual([]);
+  });
+
+  test("POST /auth/device/token: success", async () => {
+    const ada = seedUser("ada-schema-token@nemar.test");
+    const { deviceCode, userCode } = await startCode();
+    await confirm(userCode, await sessionCookie(ada));
+    const res = await pollToken(deviceCode);
+    const parsed = deviceTokenSuccessSchema.safeParse(await res.json());
+    expect(schemaIssues(parsed)).toEqual([]);
+  });
+
+  test("GET /auth/device/lookup", async () => {
+    const ada = seedUser("ada-schema-lookup@nemar.test");
+    const { userCode } = await startCode();
+    const res = await lookup(userCode, await sessionCookie(ada));
+    const parsed = deviceLookupResponseSchema.safeParse(await res.json());
+    expect(schemaIssues(parsed)).toEqual([]);
+  });
+
+  test("POST /auth/device/confirm: success", async () => {
+    const ada = seedUser("ada-schema-confirm@nemar.test");
+    const { userCode } = await startCode();
+    const res = await confirm(userCode, await sessionCookie(ada));
+    const parsed = deviceConfirmResponseSchema.safeParse(await res.json());
+    expect(schemaIssues(parsed)).toEqual([]);
+  });
+
+  test("a top-level refusal body (e.g. an unknown code at lookup)", async () => {
+    const ada = seedUser("ada-schema-refusal@nemar.test");
+    const res = await lookup("not-a-code", await sessionCookie(ada));
+    const parsed = deviceRefusalResponseSchema.safeParse(await res.json());
+    expect(schemaIssues(parsed)).toEqual([]);
   });
 });
