@@ -28,8 +28,8 @@ describe("USER_CODE_ALPHABET", () => {
   });
 
   test("has no duplicate symbols and is exactly 28 characters", () => {
-    // 28 = 9 * (byte rejection ceiling 252 / 28), the clean divisor
-    // generateUserCode's rejection sampling relies on.
+    // 252 (the byte rejection ceiling) = 9 x 28, so rejection sampling is
+    // unbiased: every accepted byte maps to exactly 9 values per symbol.
     expect(USER_CODE_ALPHABET.length).toBe(28);
     expect(new Set(USER_CODE_ALPHABET.split("")).size).toBe(USER_CODE_ALPHABET.length);
   });

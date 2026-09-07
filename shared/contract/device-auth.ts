@@ -32,7 +32,7 @@ export const DEVICE_CODE_TTL_SECONDS = 600;
 export const DEVICE_POLL_INTERVAL_SECONDS = 5;
 /** Grace window `confirm` extends a near-expiry code by, so a person who
  *  authorizes in the closing seconds of the window is not told "expired" by
- *  the very next poll (decision 6). */
+ *  the very next poll (ADR 0047: confirm grants a collection grace). */
 export const DEVICE_CONFIRM_GRACE_SECONDS = 120;
 /** No vowels, no `0`/`O`/`1`/`I`: a person reads this off a screen and types
  *  it, or it is pre-filled into `verification_uri_complete`. 20 letters + 8
@@ -143,11 +143,24 @@ export const DEVICE_AUTH_MESSAGES: Record<DeviceAuthRefusalCode, string> = {
     "This account shares an identifier with another NEMAR account and cannot sign in until that is resolved. Fix it in Settings on nemar.org or contact the NEMAR team.",
   service_account:
     "Service accounts cannot sign in this way. Ask an owner to create a key for it with `nemar admin`.",
-  too_many_keys:
-    "This account already has 25 active keys. Revoke one in Settings on nemar.org or with `nemar auth keys`, then try again.",
+  too_many_keys: `This account already has ${MAX_LIVE_API_KEYS} active keys. Revoke one in Settings on nemar.org or with \`nemar auth keys\`, then try again.`,
   key_not_found:
     "That key was not found on this account, or it is already revoked. Run `nemar auth keys` to see the active ones.",
 };
+
+/** Every top-level refusal this file's routes answer with: `{ error, message }`,
+ *  where `error` carries the refusal CODE (matching the browser-facing
+ *  convention `identity.ts` documents). `deviceRefusal()` in
+ *  `services/device-auth.ts` builds exactly this shape; phase 2 (the
+ *  website confirm page) and phase 3 (the CLI) both import the schema
+ *  rather than re-typing `{ error, message }` on their own end of the wire. */
+export const deviceRefusalResponseSchema = z
+  .object({
+    error: deviceAuthRefusalCodeSchema,
+    message: z.string(),
+  })
+  .passthrough();
+export type DeviceRefusalResponse = z.infer<typeof deviceRefusalResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // Response schemas (.passthrough(), matching userSchema/webUserSchema)
@@ -166,17 +179,51 @@ export const deviceStartResponseSchema = z
   .passthrough();
 export type DeviceStartResponse = z.infer<typeof deviceStartResponseSchema>;
 
-/** `POST /auth/device/token` on HTTP 400: the RFC code in `error`, and --
- *  only for a terminal outcome -- the refusal vocabulary's code in `reason`.
- *  Named `reason` rather than `code` because elsewhere on this wire
- *  `error === code`, and here the two fields disagree by design (decision 8). */
-export const deviceTokenErrorSchema = z
-  .object({
-    error: deviceGrantErrorSchema,
-    reason: deviceAuthRefusalCodeSchema.optional(),
-    message: z.string(),
-  })
-  .passthrough();
+/**
+ * `POST /auth/device/token` on HTTP 400. A discriminated union on `error`,
+ * so the TYPE itself forces exactly what the two poll outcomes carry:
+ * `authorization_pending`/`slow_down` are "keep polling", never `reason`
+ * (there is nothing to explain -- the code is still live); the three
+ * terminal codes always carry `reason`, the refusal vocabulary's more
+ * specific code (ADR 0047: `reason` names the refusal, `error` carries the
+ * RFC 8628 code the CLI's retry loop switches on -- they disagree on
+ * purpose, which is why `reason` is not spelled `code` like everywhere else
+ * on this wire). `routes/auth-device.ts` reaches every branch through one of
+ * two helpers, `pendingTokenError`/`terminalTokenError`, so a call site
+ * cannot pass a `reason` where the type says there is none, or omit one
+ * where the type requires it.
+ */
+const devicePendingTokenErrorSchema = z.discriminatedUnion("error", [
+  z.object({ error: z.literal("authorization_pending"), message: z.string() }).passthrough(),
+  z.object({ error: z.literal("slow_down"), message: z.string() }).passthrough(),
+]);
+const deviceTerminalTokenErrorSchema = z.discriminatedUnion("error", [
+  z
+    .object({
+      error: z.literal("expired_token"),
+      reason: deviceAuthRefusalCodeSchema,
+      message: z.string(),
+    })
+    .passthrough(),
+  z
+    .object({
+      error: z.literal("access_denied"),
+      reason: deviceAuthRefusalCodeSchema,
+      message: z.string(),
+    })
+    .passthrough(),
+  z
+    .object({
+      error: z.literal("invalid_grant"),
+      reason: deviceAuthRefusalCodeSchema,
+      message: z.string(),
+    })
+    .passthrough(),
+]);
+export const deviceTokenErrorSchema = z.union([
+  devicePendingTokenErrorSchema,
+  deviceTerminalTokenErrorSchema,
+]);
 export type DeviceTokenError = z.infer<typeof deviceTokenErrorSchema>;
 
 /** One API key as listed or minted. `current` is true only for the key the
@@ -195,7 +242,8 @@ export type ApiKeySummary = z.infer<typeof apiKeySummarySchema>;
 
 /** `POST /auth/device/token` on success. `user.username` is nullable: a
  *  brand-new ORCID account has no username until
- *  `refreshNameThenAssignUsername` runs after finalize (decision 11). */
+ *  `refreshNameThenAssignUsername` runs after finalize (ADR 0047: `username` is
+ *  nullable because assignment runs after finalize). */
 export const deviceTokenSuccessSchema = z
   .object({
     api_key: z.string(),
@@ -240,7 +288,7 @@ export const deviceLookupResponseSchema = z
 export type DeviceLookupResponse = z.infer<typeof deviceLookupResponseSchema>;
 
 /** `POST /auth/device/confirm` on success. Never carries the key -- the key
- *  is minted only when the CLI collects it (decision 1). */
+ *  is minted only when the CLI collects it, never at confirm (ADR 0047). */
 export const deviceConfirmResponseSchema = z
   .object({
     ok: z.literal(true),
