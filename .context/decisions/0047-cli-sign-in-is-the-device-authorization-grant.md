@@ -14,8 +14,7 @@ Two creation paths with two different identity roots produced the null-username 
 A terminal cannot receive an OAuth redirect,
 and nobody should type an ORCID password into a CLI prompt.
 `nemar auth login` therefore needs a way to authenticate that starts in the terminal and finishes in a browser the person already trusts.
-`gh auth login` solves the identical problem with the device authorization grant
-(RFC 8628), a pattern built for exactly this shape:
+`gh auth login` solves the identical problem with the device authorization grant (RFC 8628), a pattern built for exactly this shape:
 a CLI mints a short code, a person authorizes it in a browser,
 and the CLI polls for the credential once authorization lands.
 
@@ -26,8 +25,8 @@ so every ORCID lesson already in the tree (ADR 0022, 0043, 0044) applies unchang
 
 ## Decision
 
-CLI sign-in is the device authorization grant, layered on top of the existing
-web ORCID session rather than a new identity path.
+CLI sign-in is the device authorization grant,
+layered on top of the existing web ORCID session rather than a new identity path.
 The API key is minted only when the CLI collects it at `/auth/device/token`,
 never when the browser confirms at `/auth/device/confirm`:
 confirm records `user_id` and `status = 'confirmed'` only,
@@ -41,8 +40,7 @@ so a read of the table cannot be turned into a working code.
 
 ## Consequences
 
-`POST /auth/device/token` sits OUTSIDE the strict per-IP auth bucket
-(`AUTH_PATHS`, 10 requests/minute) and rides the generic bucket instead --
+`POST /auth/device/token` sits OUTSIDE the strict per-IP auth bucket (`AUTH_PATHS`, 10 requests/minute) and rides the generic bucket instead --
 in practice `ip` (500/min), since the CLI holds no bearer until it has collected a key --
 because the CLI polls it roughly every 5 seconds while waiting, up to ~120 polls across one 10-minute code.
 At that cadence 10 polls fit inside the strict bucket's 60-second window and the 11th would trip it, about 50 seconds in.
@@ -57,8 +55,7 @@ and the easiest, most reliable flow wins (the epic's guiding principle).
 The mitigation is that phase 2's confirm page names the account and the machine before asking anyone to press Authorize --
 a person who did not just run `nemar auth login` sees exactly that, and closes the tab.
 
-Confirm extends a near-expiry code by 120 seconds
-(`expires_at = MAX(expires_at, datetime('now', '+120 seconds'))`)
+Confirm extends a near-expiry code by 120 seconds (`expires_at = MAX(expires_at, datetime('now', '+120 seconds'))`),
 so a person who authorizes in the closing seconds of the 10-minute window is not told "expired" by the CLI's very next poll.
 This is safe because the code is already bound to one account by that point,
 and the CLI still has to hold the device secret to collect the key.
@@ -89,8 +86,8 @@ and `reason` -- present only on a terminal answer, never on the two "keep pollin
 is the more specific refusal code (`account_pending`, `too_many_keys`, ...) a person-facing message reads from.
 They disagree on purpose, which is why `reason` is not spelled `code` like every other refusal on this wire.
 
-Every device-flow timestamp is written and compared in SQL
-(`datetime('now', '+N seconds')`, `julianday` for `expires_in`), never in JavaScript.
+Every device-flow timestamp is written and compared in SQL (`datetime('now', '+N seconds')`, `julianday` for `expires_in`),
+never in JavaScript.
 A JS `toISOString()` value compares greater than a same-day SQL `datetime('now')` value at index 10 (`'T' > ' '`),
 so mixing the two silently breaks expiry.
 This is a pre-existing bug in `auth_codes`, `web_sessions`, and `orcid_link_intents`;
@@ -104,14 +101,11 @@ but that call belongs to the phase that builds the CLI-facing key management UX,
 ## Alternatives considered
 
 - **Mint the key at confirm, encrypted at rest.**
-  An encrypted key is plaintext-equivalent the moment it needs to be read back
-  for the CLI to collect,
+  An encrypted key is plaintext-equivalent the moment it needs to be read back for the CLI to collect,
   and it adds a second secret (the encryption key) to rotate and protect.
-  Minting at collect removes the "at rest between steps" window entirely
-  rather than encrypting it.
+  Minting at collect removes the "at rest between steps" window entirely rather than encrypting it.
 - **HMAC-signed device state, no table.**
-  Works for the ORCID CLI-link intent (migration 0078) because that flow is single-use
-  and needs no server-side rate floor.
+  Works for the ORCID CLI-link intent (migration 0078) because that flow is single-use and needs no server-side rate floor.
   The device grant needs both: single use (confirm must not be replayable)
   and a per-code poll floor (`slow_down`),
   neither of which a stateless signed token can enforce on its own.

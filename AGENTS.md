@@ -243,27 +243,22 @@ Five routes: `POST /auth/device/start` (CLI mints a device code + user code),
 and `GET /auth/device/lookup`, `POST /auth/device/confirm`, `POST /auth/device/deny`
 (the browser, behind the existing web session).
 `lookup`/`confirm`/`deny` never talk to ORCID directly —
-they sit behind the same web session and identity checks every other
-cookie-authenticated route does (ADR 0022, 0043, 0044).
-**The key is minted only when the CLI collects it at `/token`, never when the browser
-confirms at `/confirm`** (ADR 0047):
+they sit behind the same web session and identity checks every other cookie-authenticated route does (ADR 0022, 0043, 0044).
+**The key is minted only when the CLI collects it at `/token`, never when the browser confirms at `/confirm`** (ADR 0047):
 confirm records `user_id` and `status='confirmed'` only,
 so no plaintext key is ever at rest between the two steps.
 Every key is a named row for one machine (`tokens.name`),
 and a new sign-in never revokes another machine's key.
-`POST /auth/device/token` is the one route in this family deliberately OUTSIDE the
-strict `AUTH_PATHS` bucket:
-at a 5-second poll cadence, 10 polls fit inside the strict bucket's 60-second window
-and the 11th trips it, about 50 seconds in,
+`POST /auth/device/token` is the one route in this family deliberately OUTSIDE the strict `AUTH_PATHS` bucket:
+at a 5-second poll cadence,
+10 polls fit inside the strict bucket's 60-second window and the 11th trips it, about 50 seconds in,
 so the route rides the generic bucket instead — in practice `ip` (500/min),
 since the CLI holds no bearer until it has collected a key —
 plus its own per-row 5-second floor (`slow_down`).
-Every timestamp this flow writes or compares is SQL-side (`datetime('now', ...)`,
-`julianday`),
+Every timestamp this flow writes or compares is SQL-side (`datetime('now', ...)`, `julianday`),
 never a JS `toISOString()` value,
 because the two compare unequally on the same day and silently break expiry.
-Named API keys (list/mint/revoke, plus the device flow's paste-key fallback) live
-alongside it at `GET/POST /auth/keys` and `DELETE /auth/keys/:id`.
+Named API keys (list/mint/revoke, plus the device flow's paste-key fallback) live alongside it at `GET/POST /auth/keys` and `DELETE /auth/keys/:id`.
 Three files: `backend/src/routes/auth-device.ts`, `backend/src/routes/auth-keys.ts`,
 and the shared SQL/helpers in `backend/src/services/device-auth.ts`.
 
