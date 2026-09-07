@@ -65,6 +65,7 @@ import {
   clearIdentityConflict,
   createConceptDoi,
   createExemplar,
+  createKeyFor,
   dataIntegritySweep,
   dataIntegritySweepReset,
   deleteDataset,
@@ -83,6 +84,7 @@ import {
   getUserDuplicates,
   hedSweep,
   hedSweepReset,
+  listKeysFor,
   listUsers,
   publishDataset,
   publishZarrCatalog,
@@ -94,10 +96,12 @@ import {
   restoreDataset,
   retryImport,
   revalidateDataset,
+  revokeKeyFor,
   revokeUser,
   revokeUserById,
   rollbackImport,
   sendBroadcast,
+  setAccountKind,
   signalDefaultsSweep,
   signalDefaultsSweepReset,
   syncCi,
@@ -292,6 +296,7 @@ adminCommand
   .option("--no-upload-access", "Show only accounts without upload access")
   .option("--awaiting-approval", "Show accounts with an open upload-access request")
   .option("--role <role>", "Filter by role: owner, admin, or member")
+  .option("--kind <kind>", "Filter by account kind: person, service, or test")
   .addHelpText(
     "after",
     `
@@ -355,10 +360,17 @@ Examples:
       process.exit(1);
     }
 
+    // Validate kind filter (epic #1272 phase 4, #1284; ADR 0048).
+    const kind: string | undefined = options.kind;
+    if (kind && !["person", "service", "test"].includes(kind)) {
+      console.error(chalk.red(`Invalid kind '${kind}'. Must be: person, service, or test`));
+      process.exit(1);
+    }
+
     const spinner = ora("Fetching users...").start();
 
     try {
-      const result = await listUsers(status, role, awaitingApproval);
+      const result = await listUsers(status, role, awaitingApproval, kind);
       spinner.stop();
 
       // The TIER filters are applied here rather than server-side: the listing
@@ -381,6 +393,7 @@ Examples:
       const filterLabel = [
         status,
         role ? `role=${role}` : "",
+        kind ? `kind=${kind}` : "",
         awaitingApproval ? "awaiting-approval" : noUploadAccess ? "no-upload-access" : "",
       ]
         .filter(Boolean)
@@ -435,6 +448,12 @@ Examples:
         console.log(`    GitHub:  ${user.github_username ? `@${user.github_username}` : "-"}`);
         console.log(`    Status:  ${statusColor(user.status)}`);
         console.log(`    Tier:    ${tier}`);
+        // Only when not `person` (epic #1272 phase 4, #1284; ADR 0048): the
+        // overwhelming majority of rows are people, and a line that always
+        // said "Kind: person" would be noise in every listing.
+        if (user.account_kind && user.account_kind !== "person") {
+          console.log(`    Kind:    ${chalk.yellow(user.account_kind)}`);
+        }
         // Only when there IS one. An absent field means either "never asked" or
         // a backend older than #1253, and neither is worth a line that says
         // nothing (ADR 0042).
@@ -729,6 +748,164 @@ Examples:
       });
     }
   });
+
+// ============================================================================
+// Account Kind (Owner Only) -- epic #1272 phase 4, #1284; ADR 0048
+// ============================================================================
+
+adminCommand
+  .command("kind")
+  .description("Change a user's account kind (owner only)")
+  .argument("<username>", "Username to change the kind for")
+  .argument("<kind>", "New kind: person, service, or test")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .addHelpText(
+    "after",
+    `
+Kinds:
+  person  - a human's own account (the default)
+  service - operational automation; no human signs in to it directly, keys
+            are owner-minted with 'nemar admin keys create'
+  test    - a human's secondary persona; signs in and uploads like a person,
+            but on production may only own xx sandbox datasets
+
+Rules:
+  - Only owners can change account kinds
+  - You cannot change your own account kind
+  - A verified ORCID iD blocks a move to service/test (unlink it first)
+  - Keys are not revoked on a kind change
+
+Examples:
+  $ nemar admin kind cool-vibers test      # Mark a persona account
+  $ nemar admin kind nemarAdmin service    # Mark an operational account
+  $ nemar admin kind cool-vibers person -y # Revert (skip confirm)`,
+  )
+  .action(async (username: string, kind: string, options: ConfirmOptions) => {
+    if (!requireAuth()) return;
+
+    if (!["person", "service", "test"].includes(kind)) {
+      console.error(chalk.red(`Invalid kind '${kind}'. Must be: person, service, or test`));
+      process.exit(1);
+    }
+
+    const confirmResult = await confirm(`Change ${username}'s account kind to '${kind}'?`, options);
+    if (confirmResult !== "confirmed") {
+      console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      return;
+    }
+
+    const spinner = ora(`Changing ${username}'s account kind to '${kind}'...`).start();
+
+    try {
+      const result = await setAccountKind(username, kind as "person" | "service" | "test");
+      spinner.succeed(result.message);
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to change account kind", {
+        400: "Invalid request (check that you are not targeting your own account)",
+        403: "Owner access required",
+        404: "User not found",
+        409: "The account already has that kind, or a verified ORCID iD blocks the move",
+      });
+    }
+  });
+
+// ============================================================================
+// Owner Key Management for Non-Person Accounts -- epic #1272 phase 4, #1284;
+// ADR 0048
+// ============================================================================
+
+const adminKeysCommand = new Command("keys").description(
+  "Manage API keys for service/test accounts (owner only)",
+);
+
+adminKeysCommand
+  .command("create")
+  .description("Mint a key for a service/test account")
+  .argument("<username>", "Username of the service/test account")
+  .argument("<name>", "Name for the key (e.g. the machine or job it authenticates)")
+  .action(async (username: string, name: string) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora(`Minting a key for ${username}...`).start();
+    try {
+      const result = await createKeyFor(username, name);
+      spinner.succeed(`Key minted for ${username}`);
+      console.log();
+      console.log(chalk.yellow("  This key will only be shown once:"));
+      console.log(`  ${chalk.cyan(result.api_key)}`);
+      console.log();
+      console.log(chalk.dim(`  Sign in as ${username} with:`));
+      console.log(chalk.dim(`    nemar auth login --key ${result.api_key}`));
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to mint key", {
+        403: "Owner access required, or this account is a person (person_account)",
+        404: "User not found",
+        409: "This account already has the maximum number of live keys",
+      });
+    }
+  });
+
+adminKeysCommand
+  .command("list")
+  .description("List a target account's live keys")
+  .argument("<username>", "Username of the account")
+  .action(async (username: string) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora(`Fetching keys for ${username}...`).start();
+    try {
+      const result = await listKeysFor(username);
+      spinner.stop();
+      if (result.keys.length === 0) {
+        console.log(chalk.yellow(`No live keys for ${username}`));
+        return;
+      }
+      console.log(`\n${chalk.cyan(`Keys for ${username}`)} (${result.keys.length} total)\n`);
+      for (const key of result.keys) {
+        console.log(`  ${chalk.cyan(`#${key.id}`)} ${key.name ?? chalk.dim("(unnamed)")}`);
+        console.log(`    Prefix:  ${key.prefix}`);
+        console.log(`    Created: ${new Date(key.created_at).toLocaleDateString()}`);
+        console.log(
+          `    Used:    ${key.last_used_at ? new Date(key.last_used_at).toLocaleDateString() : chalk.dim("never")}`,
+        );
+        console.log();
+      }
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to fetch keys", {
+        403: "Owner access required",
+        404: "User not found",
+      });
+    }
+  });
+
+adminKeysCommand
+  .command("revoke")
+  .description("Revoke one of a target account's keys")
+  .argument("<username>", "Username of the account")
+  .argument("<id>", "Key row id (from 'nemar admin keys list')")
+  .action(async (username: string, idStr: string) => {
+    if (!requireAuth()) return;
+
+    const id = Number.parseInt(idStr, 10);
+    if (Number.isNaN(id)) {
+      console.error(chalk.red("Invalid key id"));
+      process.exit(1);
+    }
+
+    const spinner = ora(`Revoking key #${id} for ${username}...`).start();
+    try {
+      await revokeKeyFor(username, id);
+      spinner.succeed(`Key #${id} revoked for ${username}`);
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to revoke key", {
+        403: "Owner access required",
+        404: "User or key not found",
+      });
+    }
+  });
+
+adminCommand.addCommand(adminKeysCommand);
 
 // ============================================================================
 // S3 / IAM Management

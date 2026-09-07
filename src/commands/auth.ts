@@ -199,6 +199,8 @@ function applyServerUser(user: {
   sandbox_completed?: boolean;
   sandbox_dataset_id?: string | null;
   orcid_verified?: boolean;
+  /** What this account IS (epic #1272 phase 4, #1284; ADR 0048). */
+  account_kind?: string;
 }): void {
   if (user.username && renameActiveAccount(user.username) === "key_taken") {
     console.log(
@@ -223,6 +225,7 @@ function applyServerUser(user: {
   if (user.sandbox_dataset_id) setConfig("sandboxDatasetId", user.sandbox_dataset_id);
   if (user.orcid_verified !== undefined) setConfig("orcidVerified", user.orcid_verified);
   setConfig("role", user.role);
+  if (user.account_kind !== undefined) setConfig("accountKind", user.account_kind);
 }
 
 /**
@@ -846,6 +849,10 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
 
   // If refresh requested, fetch latest from server
   let userRole: string | undefined;
+  // What this account IS (epic #1272 phase 4, #1284; ADR 0048), cached the
+  // same way `userRole` is: printed only after a refresh, not read back from
+  // the config cache on a plain `auth status`.
+  let userKind: string | undefined;
   // Set when a requested refresh did not complete for a reason that is neither
   // 401 nor 403 (offline, 5xx, a shape drift). Everything printed below then
   // comes from the config cache, and the upload-access line in particular must
@@ -862,6 +869,7 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
       // entry stayed email-keyed even after the account got a username.
       applyServerUser(user);
       userRole = user.role;
+      userKind = user.account_kind;
       spinner.stop();
     } catch (error) {
       // Put the reason ON the failure line. It used to scroll past as a bare
@@ -917,6 +925,12 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
           ? chalk.magenta("Admin")
           : chalk.white("Member");
     console.log(`  Role:     ${roleDisplay}`);
+  }
+  // Only when not `person` (epic #1272 phase 4, #1284; ADR 0048): the
+  // overwhelming majority of accounts are people, and a line that always
+  // said "Kind: person" would be noise on every status check.
+  if (userKind && userKind !== "person") {
+    console.log(`  Kind:     ${chalk.yellow(userKind)}`);
   }
   const keyLine = describeStoredKey(cfg);
   if (keyLine) console.log(`  Key:      ${keyLine}`);

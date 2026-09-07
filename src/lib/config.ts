@@ -173,6 +173,12 @@ const accountSchema = z.object({
    */
   role: z.string().optional(),
   /**
+   * Cached from `/auth/login` and `auth status --refresh` (epic #1272 phase
+   * 4, #1284; ADR 0048), the same way `role` is. `nemar auth status` prints
+   * a `Kind:` line only when this is present and not `"person"`.
+   */
+  accountKind: z.string().optional(),
+  /**
    * The address `nemar auth profile set-email` last sent a code to (#1266).
    * Remembered so `verify-email <code>` needs only the code, the way the
    * website's Settings form remembers it across the two steps. Cleared on a

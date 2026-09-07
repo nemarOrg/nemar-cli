@@ -49,7 +49,9 @@ Load-bearing ones to know before touching the relevant area:
 0043 (one person, one account: an ORCID iD, an email or a GitHub handle backs at most one live account),
 0044 (identity self-service reaches the CLI; ORCID links through a browser handoff whose
 signed state names the account),
-0045 (the CLI and the web say one thing about an account).
+0045 (the CLI and the web say one thing about an account),
+0048 (account kinds are explicit: person, service, test; superseding 0045's role-based
+ORCID-gap exemption).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
@@ -96,6 +98,12 @@ hardcoded rather than environment-scoped.
 So a dev-side job that selects users by a generic predicate can still email real people,
 and a cascade delete can still destroy a real repo.
 The catalog purge removed one blast-radius vector; it did not remove the reason these fences exist.
+
+`users.account_kind` (ADR 0048) is explicit on the seeded fixtures: `test-owner` and `test-admin`
+are `service` (operational, no human signs in to them directly); `test-user`, `test-pending`,
+`test-verified`, and `test-revoked` are `test` (a persona, not a real identity); `test-web` stays
+`person` — it is the shared web-QA account and has to reach the ORCID authorize page and the
+Settings key form the way a real person would.
 
 **A new daily cron job is production-only BY DEFAULT.** The dev cron is governed by a fail-safe
 allowlist in `scheduled()`. Before adding a job to the non-prod set, confirm it cannot email a
@@ -215,6 +223,13 @@ Four statuses, fixed meanings, one writer for upload access (**ADR 0040**):
 3. Admin approves the one-time upload request → `service_access` → user uploads
    → BIDS validation → private GitHub repo + S3 upload
 4. Admin creates concept DOI → user can version with new DOIs
+
+`users.account_kind` is a separate axis from status: `person` (the default), `service`
+(operational automation — no human signs in to it directly, keys are minted only by an owner
+via `nemar admin keys create`), `test` (a human's secondary persona — signs in and uploads like
+a person, but on production may only own `xx` sandbox datasets). `service`/`test` are exempt
+from the ORCID-verification profile gap; kinds are set only by an owner
+(`nemar admin kind <username> <kind>`), never inferred (**ADR 0048**).
 
 ### Web dashboard auth (#569)
 
@@ -589,7 +604,7 @@ and what is historical. The entries worth knowing by name:
 | `nemar dataset publish` | request, status, resend |
 | `nemar dataset` (access) | request-access, access, invite, collaborators |
 | `nemar sandbox` | training run, status, reset — required before uploading |
-| `nemar admin` | users, approve, revoke, role, notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, recording-stats-sweep, signal-defaults-sweep, zarr-fidelity-sweep, doctor, summary, notice, email-preferences, backfill-names, backfill-usernames, duplicates, e2e-test |
+| `nemar admin` | users (`--kind`), approve, revoke, role, kind (account kind, owner-only — ADR 0048), keys (create/list/revoke a service/test account's API keys, owner-only), notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, recording-stats-sweep, signal-defaults-sweep, zarr-fidelity-sweep, doctor, summary, notice, email-preferences, backfill-names, backfill-usernames, duplicates, e2e-test |
 | `nemar admin import*` | OpenNeuro import, status, rollback, retry, verify, recover (issue #754, epic #967) |
 | `nemar admin fleet` | drift, enforce, revalidate — governance across dataset repos (epic #713) |
 | `nemar admin exemplar` | create, status, remint-dois — the staging exemplar fleet |
