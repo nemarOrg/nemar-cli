@@ -52,6 +52,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "resetSandbox",
     "retrieveKey",
     "revokeApiKey",
+    "revokeApiKeyWithBearer",
     "signup",
     "startDeviceAuth",
     "startOrcidCliLink",
@@ -200,6 +201,7 @@ const POST_SPLIT_ADDITIONS = [
   "publishZarrCatalog", // #1062, epic #1181 phase 2: POST /admin/zarr-catalog/publish
   "requestEmailChange", // #1266, ADR 0044: POST /auth/email/change/request
   "revokeApiKey", // #1283, epic #1272 phase 3, ADR 0047: DELETE /auth/keys/:id|current
+  "revokeApiKeyWithBearer", // #1289 review: DELETE /auth/keys/:id with an explicit bearer, for revoking a just-minted key whose write to disk failed
   "startDeviceAuth", // #1283, epic #1272 phase 3, ADR 0047: POST /auth/device/start
   "startOrcidCliLink", // #1266, ADR 0044: POST /auth/orcid/cli-start
   "suggestUsername", // #1283, epic #1272 phase 3, ADR 0042/0047: GET /auth/profile/username-suggestion

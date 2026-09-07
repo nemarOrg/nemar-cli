@@ -22,6 +22,7 @@ import { join } from "node:path";
 import Conf from "conf";
 import { z } from "zod";
 import type { GapFieldsStayOptional } from "../../shared/contract/profile-gaps.js";
+import { dlog } from "./debug-log.js";
 
 export const DEFAULT_API_URL = "https://api.nemar.org";
 
@@ -632,10 +633,23 @@ export function accountKeyFor(user: { username?: string | null; email: string })
 export function findAccountKeyByEmail(email: string): string | undefined {
   const target = email.trim().toLowerCase();
   if (!target) return undefined;
-  for (const [key, account] of Object.entries(getAccountsMap())) {
-    if (account.email && account.email.toLowerCase() === target) return key;
+  const matches = Object.entries(getAccountsMap())
+    .filter(([, account]) => account.email && account.email.toLowerCase() === target)
+    .map(([key]) => key);
+  if (matches.length > 1) {
+    // Two stored entries claiming the same email is a state this build never
+    // writes on its own -- hand-edited config.json, or a merge bug -- and
+    // guessing which one a re-login means would risk merging the WRONG
+    // account's key/cached fields into it. Report no match at all: the
+    // caller (upsertAccount) then lands the login as a fresh entry keyed by
+    // the login's own key, exactly like the "no match" case, rather than
+    // silently picking one of the ambiguous rows.
+    dlog(
+      `findAccountKeyByEmail: ${matches.length} accounts share email ${target}: ${matches.join(", ")}`,
+    );
+    return undefined;
   }
-  return undefined;
+  return matches[0];
 }
 
 /** What {@link upsertAccount} merged into, if anything -- how a caller (e.g.

@@ -653,6 +653,38 @@ describe("nemar auth login: success writes the account", () => {
       server.stop();
     }
   });
+
+  test("a config write failure after a successful device login revokes the new key and reports it", async () => {
+    seedConfig({});
+    const revokeCalls: { id: string; headers: Record<string, string> }[] = [];
+    const server = startDeviceServer({
+      interval: 1,
+      token: [{ kind: "success" }],
+      keysRevoke: (id, headers) => {
+        revokeCalls.push({ id, headers });
+        return { status: 200, body: { ok: true } };
+      },
+    });
+    // Readable, not writable: the store's initial read succeeds and every
+    // write (upsertAccount's) fails -- the same pattern
+    // test/auth-profile-self-service-cli.test.ts uses.
+    chmodSync(configDir, 0o500);
+    try {
+      const result = await run(["auth", "login", "--no-open"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.out).toContain("Could not save your credentials");
+      expect(result.out).toContain("The new key was revoked");
+      expect(result.out).toContain(configPath());
+      // Revoked with the NEW key as its own bearer -- nothing was ever
+      // stored to authenticate the ordinary way.
+      expect(revokeCalls.length).toBe(1);
+      expect(revokeCalls[0].id).toBe("7");
+      expect(revokeCalls[0].headers.authorization).toBe("Bearer nm_test_devicekey1234567890abcdef");
+    } finally {
+      chmodSync(configDir, 0o700);
+      server.stop();
+    }
+  }, 40000);
 });
 
 // ---------------------------------------------------------------------------

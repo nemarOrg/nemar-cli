@@ -42,6 +42,7 @@ import {
   resendVerification,
   retrieveKey,
   revokeApiKey,
+  revokeApiKeyWithBearer,
   startOrcidCliLink,
   suggestUsername,
   unlinkOrcid,
@@ -52,6 +53,7 @@ import { ApiError, MaintenanceError, errorDetail } from "../lib/api/errors.js";
 import { openInBrowser } from "../lib/browser.js";
 import { printStepFailure } from "../lib/cli-output.js";
 import {
+  type Config,
   type KeyFields,
   accountKeyFor,
   clearAllConfig,
@@ -242,6 +244,14 @@ function applyServerUser(user: {
  * still attempted (best-effort; a repeat revoke of an already-gone row is
  * harmless), but the "(replaced...)" confirmation line is skipped -- there
  * is nothing meaningfully replaced about a key that was already dead.
+ *
+ * If `upsertAccount` itself throws (a corrupt store, an unwritable config
+ * dir), the sign-in already succeeded server-side -- a device login already
+ * minted a real, live key -- so nothing landed on disk is worse than the
+ * save failure alone. Caught below: a `"device"` key is best-effort revoked
+ * with ITSELF as bearer (`revokeApiKeyWithBearer`, since nothing was ever
+ * stored to authenticate the ordinary way), and the failure is reported
+ * with exit 1 rather than propagating as an uncaught exception.
  */
 async function writeSignedInAccount(
   user: {
@@ -270,11 +280,38 @@ async function writeSignedInAccount(
         // keyCreatedAt from a previous device login on this same machine must
         // be cleared, not left referring to a key that is no longer current.
         { keySource: "paste", keyId: undefined, keyName: undefined, keyCreatedAt: undefined };
-  const { previous } = upsertAccount(accountKey, {
-    apiKey,
-    email: user.email,
-    ...keyFields,
-  });
+  let previous: Config | undefined;
+  try {
+    ({ previous } = upsertAccount(accountKey, {
+      apiKey,
+      email: user.email,
+      ...keyFields,
+    }));
+  } catch (error) {
+    // A corrupt store or an unwritable config dir: the sign-in itself
+    // succeeded server-side (a device login already minted a real key), but
+    // nothing landed on disk. Leaving a live, un-saved key behind would be
+    // worse than the save failure alone -- best-effort revoke it with ITS
+    // OWN bearer (writeSignedInAccount was never called with it stored, so
+    // getConfig().apiKey is stale or absent) before reporting.
+    if (keyInfo.source === "device") {
+      try {
+        await revokeApiKeyWithBearer(keyInfo.key.id, apiKey);
+      } catch {
+        // Best-effort: report the save failure below regardless.
+      }
+    }
+    console.log();
+    console.log(
+      chalk.red(
+        `  Could not save your credentials (${errorDetail(error)}).${
+          keyInfo.source === "device" ? " The new key was revoked;" : ""
+        } fix ${getConfigPath()} and run \`nemar auth login\` again.`,
+      ),
+    );
+    process.exitCode = 1;
+    return;
+  }
   applyServerUser(user);
 
   console.log();

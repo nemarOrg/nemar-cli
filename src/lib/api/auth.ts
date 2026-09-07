@@ -586,6 +586,28 @@ export async function revokeApiKey(id: number | "current"): Promise<{ ok: true }
   return request<{ ok: true }>(`/auth/keys/${id}`, { method: "DELETE" }, true);
 }
 
+/**
+ * `DELETE /auth/keys/:id`, authenticated with an EXPLICIT bearer rather
+ * than the stored config's key (epic #1272 phase 3). For the one caller
+ * that needs it: a just-minted device key whose write to disk then failed
+ * (`writeSignedInAccount`'s `upsertAccount` catch) has to be revoked with
+ * ITSELF, since it was never saved and `getConfig().apiKey` is stale or
+ * absent. Passed as `authenticated: false` deliberately -- `request()`'s
+ * authenticated branch (client.ts) always prefers the stored key over a
+ * caller-supplied `Authorization` header when one exists, which would
+ * silently revoke the WRONG key (or none) here.
+ */
+export async function revokeApiKeyWithBearer(
+  id: number | "current",
+  bearer: string,
+): Promise<{ ok: true }> {
+  return request<{ ok: true }>(
+    `/auth/keys/${id}`,
+    { method: "DELETE", headers: { Authorization: `Bearer ${bearer}` } },
+    false,
+  );
+}
+
 /** `GET /auth/profile/username-suggestion`: a default username built from
  *  the account's name, for `nemar auth signup`'s guided completion. */
 export async function suggestUsername(): Promise<UsernameSuggestionResponse> {
