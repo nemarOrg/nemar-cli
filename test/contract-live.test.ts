@@ -9,10 +9,17 @@
  * Integration tier (hits the live dev backend). Skips when TEST_API_URL is
  * unset, and guards against pointing at prod unless TEST_ALLOW_PROD=1.
  *
- * NOTE (#898 foundation): the Zod checks are HARD asserts. The FULL neuroschema
- * JSON-Schema conformance check on the data-plane metadata is WARN-only here
- * because current rows may still carry known drift; phase 4 (#899) fixes the
- * drift and flips it to a hard assert.
+ * NOTE: every Zod check here is a HARD assert, including the two that were
+ * warn-only while the shapes they describe were still in flight (#937 item 4):
+ * the canonical vX.Y.Z `latest_version` on the catalog, and the neuroschema
+ * envelope on the data-plane metadata. Both were measured clean against the
+ * deployed dev backend before being flipped.
+ *
+ * The one remaining WARN-only check is FULL neuroschema JSON-Schema
+ * conformance on the data-plane metadata, which has live failures with three
+ * concrete causes in the served data (publish_date format, signal_defaults
+ * type, bare ORCIDs against format: uri). Those are tracked in #1247; flip it
+ * when that closes.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -48,6 +55,31 @@ async function getJson(path: string, auth?: string): Promise<{ status: number; b
   return { status: res.status, body: res.status === 204 ? null : await res.json() };
 }
 
+/**
+ * A dataset whose `metadata.json` the DEPLOYED backend actually serves.
+ *
+ * `TEST_DATASET` (nm099999 by default) is the E2E fixture, created on demand
+ * and torn down, so its data plane is usually absent: measured on
+ * api-test.nemar.org, `/data/nm099999/metadata.json` is a 404 while the
+ * exemplar fleet serves 200. The data-plane check below used to skip silently
+ * on that 404, which meant it validated nothing at all in CI and would have
+ * kept reporting success however far the served shape drifted (#937 item 4).
+ *
+ * Resolution order: an explicit `TEST_DATA_DATASET`, else the first id the
+ * anonymous catalog returns (anonymous callers only ever see public rows, so
+ * this cannot pick something unreadable), else `TEST_DATASET` so the caller
+ * still gets the old behaviour rather than an exception.
+ */
+async function resolveDataPlaneDataset(): Promise<string> {
+  if (process.env.TEST_DATA_DATASET) return process.env.TEST_DATA_DATASET;
+  const { status, body } = await getJson("/datasets?limit=1");
+  if (status === 200) {
+    const first = (body as { datasets?: Array<{ dataset_id?: unknown }> }).datasets?.[0]?.dataset_id;
+    if (typeof first === "string" && first) return first;
+  }
+  return TEST_DATASET;
+}
+
 d("live wire contract", () => {
   test("GET /datasets matches the list envelope", async () => {
     const { status, body } = await getJson("/datasets?limit=5");
@@ -59,23 +91,21 @@ d("live wire contract", () => {
 
     // #899: the WIRE value should be the canonical vX.Y.Z tag, not merely
     // tag-shaped after the schema's coercion. Check the RAW value (pre-coercion)
-    // with the non-coercing strict schema — but WARN-only, because this validates
-    // the DEPLOYED dev backend, which lags this PR until the epic merges + deploys
-    // (pre-#899 it serves bare "1.0.0"). A hard assert here would red integration-
-    // dev during the very PR that ships the fix. Flip to a hard assert in the
-    // #937 follow-up once #899 is live on dev (same warn->hard path as the
-    // neuroschema check below). The wiring itself is unit-guarded by
-    // backend/test/catalog-version-normalize.test.ts + code review.
+    // with the non-coercing strict schema.
+    //
+    // HARD assert since #937 item 4. It was warn-only while #899 was in flight,
+    // because the deployed dev backend still served bare "1.0.0" and a hard
+    // assert would have redded integration-dev during the very PR that shipped
+    // the fix. That deploy has long since landed: measured against
+    // api-test.nemar.org on 2026-09-03, all 7 catalog rows serve canonical
+    // vX.Y.Z and none are bare. So the warn had nothing left to report and was
+    // only costing us the next regression.
     const rawRows = (body as { datasets?: Array<{ latest_version?: unknown }> }).datasets ?? [];
     const bareVersions = rawRows
       .map((r) => r.latest_version)
       .filter((v): v is string => typeof v === "string" && !!v)
       .filter((v) => !strictVersionTagSchema.safeParse(v).success);
-    if (bareVersions.length > 0) {
-      console.warn(
-        `[contract] catalog latest_version not yet canonical on the deployed backend (fix live post-#899 deploy): ${JSON.stringify(bareVersions.slice(0, 5))}`,
-      );
-    }
+    expect(bareVersions).toEqual([]);
   });
 
   test("GET /datasets/:id matches the detail envelope (list/search parity)", async () => {
@@ -121,28 +151,43 @@ d("live wire contract", () => {
     expect(r.success).toBe(true);
   });
 
-  test("data-plane metadata conforms to the neuroschema dataset shape (warn-only)", async () => {
-    const { status, body } = await getJson(`/data/${TEST_DATASET}/metadata.json`);
-    if (status === 404) return; // not published; skip
-    expect(status).toBe(200);
-    // WARN-only: an un-classified dataset can legitimately still carry known
-    // drift (e.g. recording_modality: [] before modality classification), which
-    // the canonical schema rejects by design; and this validates the DEPLOYED
-    // backend, which lags the epic until it ships. Flip BOTH checks (this + the
-    // strict-version one above) to hard asserts in the #937 follow-up once the
-    // data-plane drift is cleaned up and the epic is live on dev. We assert only
-    // that the response is a JSON object here; shape gaps surface as warnings.
-    expect(typeof body).toBe("object");
-    const r = neuroschemaDatasetSchema.safeParse(body);
-    if (!r.success) {
-      console.warn(
-        `[contract] neuroschema envelope gaps (fix in #937): ${JSON.stringify(r.error.issues.slice(0, 6))}`,
+  test("data-plane metadata matches the neuroschema envelope", async () => {
+    const dataset = await resolveDataPlaneDataset();
+    const { status, body } = await getJson(`/data/${dataset}/metadata.json`);
+    // A 404 is no longer a silent pass: if the resolver could not find a
+    // dataset with a served data plane, say so, because that is the state in
+    // which this test proves nothing (#937 item 4).
+    if (status === 404) {
+      throw new Error(
+        `no served data plane to validate: /data/${dataset}/metadata.json is 404 on ${API}. ` +
+          "Set TEST_DATA_DATASET to a dataset whose metadata.json is published.",
       );
     }
+    expect(status).toBe(200);
+    expect(typeof body).toBe("object");
+
+    // HARD assert since #937 item 4: the Zod envelope passes against every
+    // dataset the deployed dev backend serves (measured 2026-09-03 on
+    // api-test.nemar.org across xx099900/901/903/905), so a failure here is a
+    // real regression rather than known drift.
+    const r = neuroschemaDatasetSchema.safeParse(body);
+    if (!r.success)
+      throw new Error(
+        `data-plane metadata drift: ${JSON.stringify(r.error.issues.slice(0, 6))}`,
+      );
+    expect(r.success).toBe(true);
+
+    // Still WARN-only: the FULL JSON-Schema conformance check. Unlike the
+    // envelope above, this one has live failures with concrete causes, all of
+    // them in the served data rather than in this test -- publish_date is not
+    // RFC 3339 date-time, signal_defaults is not always an object, and ORCIDs
+    // are served bare where neuroschema declares format: uri. Those are
+    // tracked in #1247; flip this to a hard assert when it closes. Kept as a
+    // warning rather than deleted so the drift stays visible in CI logs.
     const validate = compileNeuroschemaDatasetValidator();
     if (!validate(body)) {
       console.warn(
-        `[contract] neuroschema conformance gaps (fix in #937): ${formatAjvErrors(validate)}`,
+        `[contract] neuroschema conformance gaps for ${dataset} (tracked in #1247): ${formatAjvErrors(validate)}`,
       );
     }
   });

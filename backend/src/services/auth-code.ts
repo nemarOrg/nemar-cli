@@ -18,6 +18,64 @@
 
 import type { Bindings } from "../types/bindings";
 
+/** How long an emailed 6-digit code stays redeemable. */
+export const CODE_TTL_MINUTES = 10;
+/** Wrong guesses before a code is burned. */
+export const MAX_CODE_ATTEMPTS = 5;
+/** Per-email issue caps, enforced inline by the INSERT statements below. */
+export const PER_MINUTE_LIMIT = 1;
+export const PER_HOUR_LIMIT = 5;
+
+/**
+ * Atomic rate-limited INSERT for a code BOUND TO AN ACCOUNT (`user_id`, added
+ * by migration 0066). Two flows use it and neither can redeem the other's
+ * codes:
+ *
+ *   - the self-service email change (#911), whose target address is one with
+ *     no users row, and
+ *   - a web account verifying its OWN address (ADR 0040 phase 2).
+ *
+ * Those two populations are disjoint by construction, which is what makes one
+ * statement safe for both: /email/change/{request,verify} refuse
+ * `email === session email` outright, so a change code is never for the
+ * account's own address, and a verification code is only ever for exactly
+ * that address.
+ *
+ * SELECT-then-INSERT had a race window where two concurrent requests both
+ * passed the gate before either wrote a row; `INSERT … SELECT … WHERE (count
+ * subquery) < limit` is a single statement, and under SQLite's serialised
+ * write semantics only one of two concurrent requests can satisfy the WHERE
+ * — the other's `changes()` returns 0.
+ *
+ * The first two guards throttle repeats to ONE address; the third caps one
+ * ACCOUNT's requests per hour across all addresses, so a single session
+ * cannot cycle distinct targets to spray codes faster than the per-IP floor.
+ *
+ * Binds: email, code_hash, expires_at, user_id, email, PER_MINUTE_LIMIT,
+ * email, PER_HOUR_LIMIT, user_id, PER_HOUR_LIMIT. Exported so the
+ * rate-bucket and code-binding tests run the production SQL, not a copy.
+ */
+export const USER_BOUND_CODE_INSERT_SQL = `INSERT INTO auth_codes (email, code_hash, expires_at, user_id)
+           SELECT ?, ?, ?, ?
+           WHERE (SELECT COUNT(*) FROM auth_codes
+                   WHERE email = ?
+                     AND created_at > datetime('now','-1 minute')) < ?
+             AND (SELECT COUNT(*) FROM auth_codes
+                   WHERE email = ?
+                     AND created_at > datetime('now','-1 hour')) < ?
+             AND (SELECT COUNT(*) FROM auth_codes
+                   WHERE user_id = ?
+                     AND created_at > datetime('now','-1 hour')) < ?`;
+
+/** The account-bound code lookup: `user_id` = the redeeming session's user
+ *  (0066), so the code must have been requested by the SAME account. A code
+ *  read from a shared inbox by a different signed-in user finds no row here.
+ *  Binds: email, user_id. */
+export const USER_BOUND_CODE_LOOKUP_SQL = `SELECT id, code_hash, attempts FROM auth_codes
+            WHERE email = ? AND user_id = ?
+              AND used_at IS NULL AND expires_at > datetime('now')
+            ORDER BY created_at DESC LIMIT 1`;
+
 const CODE_DIGITS = 6;
 const CODE_MAX_EXCLUSIVE = 1_000_000;
 // Reject draws above this ceiling so the remainder modulo 1e6 is uniform.

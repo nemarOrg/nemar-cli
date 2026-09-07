@@ -1,11 +1,15 @@
 /**
- * Upload pipeline: preflight steps (prerequisites, GitHub CLI auth, BIDS
- * validation).
+ * Upload pipeline: preflight steps (upload access, prerequisites, GitHub CLI
+ * auth, BIDS validation).
  *
  * Moved verbatim from the upload action in commands/dataset.ts (#907,
  * epic #902); the only intentional changes are import paths, the
  * step-function wrappers (process.exit -> return FAIL; the command
  * sequencer owns exits), and printStepFailure at the gh-auth failure site.
+ *
+ * `checkUploadAccessStep` is the one that was not moved from anywhere: it is
+ * new in #1268 (ADR 0045) and runs FIRST, because an account without the
+ * upload grant cannot finish this command however good the dataset is.
  */
 
 import { existsSync } from "node:fs";
@@ -13,6 +17,11 @@ import { resolve } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
 import { formatBytesCli } from "../../../shared/bytes.js";
+import { accountCopy, fillCopy } from "../../../shared/contract/account-copy.js";
+import { resolveWireProfileGaps } from "../../../shared/contract/profile-gaps.js";
+import { printGapList } from "../account-gaps.js";
+import { getCurrentUser } from "../api/auth.js";
+import { errorDetail } from "../api/errors.js";
 import {
   checkDenoInstalled,
   formatValidationResult,
@@ -57,6 +66,102 @@ export async function detectVirtualMemoryLimit(): Promise<number | "unlimited" |
   } catch {
     return null;
   }
+}
+
+/**
+ * Step 1c: is this account allowed to upload at all, and if not, what is in the
+ * way (#1268, ADR 0045)?
+ *
+ * (1c, not 1d: the call site in commands/dataset.ts numbers this one 1c and
+ * gives 1d to the required-tools check that follows it.)
+ *
+ * WHY IT RUNS FIRST, before prerequisites and before validation. Uploading
+ * needs a one-time admin grant (ADR 0040), and an account that does not hold it
+ * cannot finish this command no matter how good the dataset is. Discovering
+ * that after a ten-minute BIDS validation is how someone concludes NEMAR is
+ * broken; discovering it in the first second, next to the exact commands that
+ * unblock it, is the same fact delivered usefully.
+ *
+ * WHAT IT PRINTS is the backend's own `profile_gaps`, rendered through the
+ * shared sentences — the same list, in the same words, that the website's
+ * Settings card and `nemar auth request-upload-access` show. The CLI does not
+ * decide which fields are missing; asking is what a request costs, and the
+ * answer comes from the one function that also refuses the request.
+ *
+ * THREE OUTCOMES, and the middle one is the reason this is not simply a gate:
+ *   granted        nothing is printed; the upload proceeds.
+ *   not granted    a hard stop, unless `--dry-run` (which uploads nothing, so
+ *                  refusing a preview would withhold the plan a user is trying
+ *                  to read).
+ *   not readable   offline, a 5xx, or a backend that predates the field. It
+ *                  WARNS and continues: this check is a courtesy in front of a
+ *                  gate the server enforces regardless, and failing an upload
+ *                  because a status endpoint was briefly unavailable would
+ *                  invent a refusal the backend never made.
+ */
+export async function checkUploadAccessStep(options: { dryRun?: boolean } = {}): Promise<Step> {
+  const spinner = ora("Checking upload access...").start();
+
+  let user: Awaited<ReturnType<typeof getCurrentUser>>;
+  try {
+    user = await getCurrentUser();
+  } catch (error) {
+    spinner.warn(
+      fillCopy(accountCopy("cli.upload.preflight.unchecked"), { reason: errorDetail(error) }),
+    );
+    console.log();
+    return ok();
+  }
+
+  if (user.service_access === true) {
+    spinner.succeed("Upload access granted");
+    console.log();
+    return ok();
+  }
+  if (user.service_access === undefined) {
+    // Absent is not "no" (ADR 0040): telling someone who holds the grant that
+    // they do not is the one answer worth avoiding at any cost.
+    spinner.warn(
+      fillCopy(accountCopy("cli.upload.preflight.unchecked"), {
+        reason: "this backend does not report it",
+      }),
+    );
+    console.log();
+    return ok();
+  }
+
+  spinner.warn(accountCopy("cli.upload.preflight.title"));
+  console.log();
+  console.log(`  ${accountCopy("cli.upload.preflight.body")}`);
+
+  if (user.profile_gaps === undefined) {
+    // Absent is not empty, the same three-state honesty `service_access` gets
+    // above: a backend that predates #1268 sends no list, and silence under a
+    // refusal reads as "nothing is missing". Say which it is, and where the
+    // list can still be had.
+    console.log();
+    console.log(`  ${chalk.dim(accountCopy("cli.upload.preflight.gaps_unknown"))}`);
+  } else {
+    // Only the gaps that stop the REQUEST. A gap that blocks publication and
+    // nothing else is real, and is not what this page is about; listing it here
+    // would make the shortest path to an upload look longer than it is.
+    const blocking = resolveWireProfileGaps(user.profile_gaps, {
+      orcidVerified: user.orcid_verified === true,
+    }).filter((gap) => gap.blocks.includes("upload_access"));
+    if (blocking.length > 0) {
+      printGapList(accountCopy("gaps.upload.title"), blocking);
+    }
+  }
+  console.log();
+  console.log(`  ${chalk.cyan(accountCopy("cli.upload_access.cta"))}`);
+
+  if (options.dryRun) {
+    console.log(`  ${chalk.dim(accountCopy("cli.upload.preflight.dry_run"))}`);
+    console.log();
+    return ok();
+  }
+  console.log();
+  return FAIL;
 }
 
 /** Step 2: Check prerequisites (git-annex, GitHub SSH). */

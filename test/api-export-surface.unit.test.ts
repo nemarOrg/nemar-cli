@@ -34,6 +34,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   client: ["IS_DEV_BUILD", "checkHealth", "request"],
   auth: [
     "checkGitHubUsername",
+    "checkOrcidName",
     "checkSSHKeyStatus",
     "checkUsername",
     "completeSandbox",
@@ -41,11 +42,17 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getSandboxStatus",
     "login",
     "registerSSHKey",
+    "requestEmailChange",
     "requestKeyRegeneration",
+    "requestUploadAccess",
     "resendVerification",
     "resetSandbox",
     "retrieveKey",
     "signup",
+    "startOrcidCliLink",
+    "unlinkOrcid",
+    "updateProfile",
+    "verifyEmailChange",
   ],
   datasets: [
     "ORCID_REGEX",
@@ -94,9 +101,12 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "availabilityReport",
     "availabilityReportSweep",
     "availabilityReportSweepReset",
+    "backfillUserNames",
+    "backfillUsernames",
     "bulkDeleteDatasets",
     "changeUserRole",
     "changeVisibility",
+    "clearIdentityConflict",
     "createConceptDoi",
     "createExemplar",
     "dataIntegritySweep",
@@ -114,6 +124,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getFleetDrift",
     "getImportStatus",
     "getSummaryCoverage",
+    "getUserDuplicates",
     "hedSweep",
     "hedSweepReset",
     "importDataset",
@@ -131,6 +142,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "retryImport",
     "revalidateDataset",
     "revokeUser",
+    "revokeUserById",
     "rollbackImport",
     "sendBroadcast",
     "signalDefaultsSweep",
@@ -138,6 +150,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "syncCi",
     "updateDoi",
     "updateEmailPreferences",
+    "uploadTierOf",
     "validateCi",
     "verifyImport",
     "withdrawDataset",
@@ -166,14 +179,27 @@ const INTERNAL_WIRING = ["request"];
 const POST_SPLIT_ADDITIONS = [
   "NOTICE_LEVELS", // #1025, notice level vocabulary
   "approveUserById", // #1012, id-keyed approve for web/ORCID accounts
+  "revokeUserById", // #1274, ADR 0040: id-keyed revoke, the approve twin's eraser
+  "backfillUserNames", // #1255, epic #1250: POST /admin/users/backfill-names
+  "backfillUsernames", // #1253, epic #1250: POST /admin/users/backfill-usernames
+  "checkOrcidName", // #1255, epic #1250: GET /auth/orcid-name pre-signup lookup
+  "clearIdentityConflict", // #1254, ADR 0043: POST /admin/users/:id/clear-identity-conflict
   "doctorFix", // #1130, CLI wrapper for POST /admin/doctor/fix
   "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
   "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion
+  "getUserDuplicates", // #1254, ADR 0043: GET /admin/users/duplicates
   "publishZarrCatalog", // #1062, epic #1181 phase 2: POST /admin/zarr-catalog/publish
+  "requestEmailChange", // #1266, ADR 0044: POST /auth/email/change/request
+  "startOrcidCliLink", // #1266, ADR 0044: POST /auth/orcid/cli-start
+  "unlinkOrcid", // #1266, ADR 0044: POST /auth/orcid/unlink
+  "updateProfile", // #1266, ADR 0044: PATCH /auth/profile
+  "verifyEmailChange", // #1266, ADR 0044: POST /auth/email/change/verify
+  "requestUploadAccess", // #1253, epic #1250: POST /users/me/upload-access/request
   "recordingStatsSweep", // #1194, CLI wrapper for POST /admin/datasets/recording-stats-sweep
   "recordingStatsSweepReset", // #1194, CLI wrapper for the recording-stats sweep reset
   "signalDefaultsSweep", // #1194, CLI wrapper for POST /admin/datasets/signal-defaults-sweep
   "signalDefaultsSweepReset", // #1194, CLI wrapper for the signal-defaults sweep reset
+  "uploadTierOf", // #1251, ADR 0040: upload / browse / unknown from a listed row
   "zarrFidelitySweep", // #1068, epic #1181 phase 8: POST /admin/datasets/zarr-fidelity-sweep
 ];
 

@@ -2,10 +2,12 @@
  * Web-dashboard session helpers (#569).
  *
  * The dashboard authenticates via an opaque HttpOnly session cookie.
- * The CLI continues to use bearer API tokens — these helpers exist
- * only for the four `/auth/code/*`, `/auth/logout`, `/auth/me`
- * endpoints in `routes/auth-web.ts` and the middleware in
- * `middleware/webSession.ts`.
+ * The CLI continues to use bearer API tokens. These helpers are shared by
+ * every cookie-authenticated route — the passwordless and email-verification
+ * flows and the settings endpoints in `routes/auth-web.ts`, the ORCID flow in
+ * `routes/auth-orcid.ts`, `middleware/webSession.ts`, and the cookie path of
+ * `middleware/auth.ts` (#572), which is how the dashboard reaches the
+ * user-scoped /datasets and /users routes.
  *
  * Cookie value is 256 bits of random base64url. Only the SHA-256 hash
  * of that value lives in D1, so an exfiltrated DB cannot forge
@@ -16,6 +18,8 @@
  * brute-forced offline.
  */
 
+import type { AccountStatus } from "../../../shared/contract/user.js";
+import { flag } from "../db/flag";
 import { type Bindings, type UserRole, parseRole } from "../types/bindings";
 
 export const COOKIE_NAME = "nemar_session";
@@ -135,7 +139,15 @@ export interface WebSessionUser {
    *  means the role column held an unrecognised value; treat as no
    *  role rather than guess. */
   role: UserRole | null;
-  status: string;
+  /** The COLUMN's vocabulary (shared/contract/user.ts), closed by migration
+   *  0001's CHECK constraint -- not the collapsed value `/auth/me` reports,
+   *  which `publicUser` derives from this one. */
+  status: AccountStatus;
+  /** Whether the account has proved control of `email` (ADR 0040 phase 2).
+   *  Surfaced on /auth/me so the dashboard can render its verify-your-email
+   *  step, and read by /auth/email/verify to answer idempotently when there
+   *  is nothing left to verify. Converted from the 0/1 D1 column here. */
+  email_verified: boolean;
   /** Profile fields surfaced on /auth/me for the website Settings page
    *  (#910). All nullable in D1 (migrations 0051/0052); `null` here means
    *  the column is unset, and the website renders its fallback state. */
@@ -149,10 +161,25 @@ export interface WebSessionUser {
   city: string | null;
   country: string | null;
   affiliation: string | null;
-  /** Tiered access (ADR 0010, #1013): true once an admin grants service
+  /** Tiered access (website ADR 0010, #1013): true once an admin grants service
    *  access (upload + compute). Base-access accounts are false. Converted
    *  from the 0/1 D1 column at the read boundary like `orcid_verified`. */
   service_access: boolean;
+  /** NULL on every web/ORCID row until onboarding sets one (migration 0026).
+   *  Carried on the session so /auth/me can report it: the dashboard was
+   *  fetching it from GET /users/me separately, purely because it was absent
+   *  here (nemarOrg/website#306). */
+  username: string | null;
+  /** True when that username was DERIVED from the name rather than chosen --
+   *  by the ADR 0042 backfill sweep or at a web sign-in (#1268, ADR 0045) --
+   *  and has not been changed since. Onboarding and Settings use it to offer
+   *  "we picked this, change it if you like", an offer that would be nonsense
+   *  to someone who typed their own. Converted from the 0/1 column here. */
+  username_auto_assigned: boolean;
+  /** The DATES behind the two upload-access states (ADR 0042), so the
+   *  dashboard can render "granted"/"requested" as events rather than flags. */
+  service_access_granted_at: string | null;
+  upload_access_requested_at: string | null;
 }
 
 /** Look up an active session by cookie value, returning the joined
@@ -170,9 +197,11 @@ export async function findSessionByCookieId(
   // lands.
   const row = await env.DB.prepare(
     `SELECT ws.id, ws.user_id, ws.remember, ws.expires_at, ws.last_used_at,
-            u.email, u.role, u.status,
+            u.email, u.role, u.status, u.email_verified,
             u.given_name, u.family_name, u.orcid, u.orcid_verified,
-            u.github_username, u.city, u.country, u.affiliation, u.service_access
+            u.github_username, u.city, u.country, u.affiliation, u.service_access,
+            u.username, u.username_auto_assigned,
+            u.service_access_granted_at, u.upload_access_requested_at
        FROM web_sessions ws
        JOIN users u ON u.id = ws.user_id
       WHERE ws.cookie_id_hash = ?
@@ -191,7 +220,10 @@ export async function findSessionByCookieId(
       last_used_at: string;
       email: string;
       role: string | null;
-      status: string;
+      // Closed by migration 0001's CHECK constraint (shared/contract/user.ts).
+      status: AccountStatus;
+      // NOT NULL DEFAULT 0 in D1 (0001), so plain number.
+      email_verified: number;
       given_name: string | null;
       family_name: string | null;
       orcid: string | null;
@@ -203,6 +235,14 @@ export async function findSessionByCookieId(
       affiliation: string | null;
       // NOT NULL DEFAULT 0 in D1 (0062), so plain number.
       service_access: number;
+      // NULL on every web/ORCID row until onboarding sets one (migration 0026).
+      username: string | null;
+      // NOT NULL DEFAULT 0 in D1 (0079), so plain number.
+      username_auto_assigned: number;
+      // The two dates the dashboard needs to render "granted"/"requested" as
+      // events rather than as flags (ADR 0042; nemarOrg/website#306).
+      service_access_granted_at: string | null;
+      upload_access_requested_at: string | null;
     }>();
   if (!row) return null;
 
@@ -227,6 +267,7 @@ export async function findSessionByCookieId(
       email: row.email,
       role: parseRole(row.role, row.email),
       status: row.status,
+      email_verified: row.email_verified === 1,
       given_name: row.given_name,
       family_name: row.family_name,
       orcid: row.orcid,
@@ -236,6 +277,10 @@ export async function findSessionByCookieId(
       country: row.country,
       affiliation: row.affiliation,
       service_access: row.service_access === 1,
+      username: row.username,
+      username_auto_assigned: flag(row.username_auto_assigned),
+      service_access_granted_at: row.service_access_granted_at,
+      upload_access_requested_at: row.upload_access_requested_at,
     },
   };
 }
@@ -243,6 +288,47 @@ export async function findSessionByCookieId(
 /** How a session was established. Stored on `web_sessions.auth_method`
  *  (0050) so /auth/me and admin tooling can distinguish the flows. */
 export type AuthMethod = "email_code" | "orcid";
+
+/** The cookie a caller will set, plus the not-yet-executed INSERT that makes
+ *  it valid. Split out of `issueSession` so a caller can put the session row
+ *  in the SAME `db.batch()` as the writes it must not outlive — a sign-in
+ *  that consumes a code and promotes an account either lands whole or not at
+ *  all (#1252 review). `issueSession` remains the one-shot form. */
+export interface PreparedSession {
+  cookieIdRaw: string;
+  maxAgeSeconds: number | undefined;
+  expiresAt: string;
+  statement: D1PreparedStatement;
+}
+
+/** Build (but do not run) the web_sessions INSERT for a new session. */
+export async function prepareSessionInsert(
+  env: Bindings,
+  userId: number,
+  remember: boolean,
+  userAgent: string | null,
+  ip: string | null,
+  authMethod: AuthMethod = "email_code",
+): Promise<PreparedSession> {
+  const cookieIdRaw = generateCookieId();
+  const cookieIdHash = await hashCookieId(cookieIdRaw);
+  const ttlMs = remember ? REMEMBER_TTL_MS : NON_REMEMBER_TTL_MS;
+  const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+  const ipHash = await hashIp(ip);
+
+  return {
+    cookieIdRaw,
+    // Browser-session cookies (no Max-Age) for non-remember; explicit
+    // Max-Age for remember-me so reloads survive a browser restart.
+    maxAgeSeconds: remember ? Math.floor(ttlMs / 1000) : undefined,
+    expiresAt,
+    statement: env.DB.prepare(
+      `INSERT INTO web_sessions (
+       user_id, cookie_id_hash, remember, expires_at, user_agent, ip_hash, auth_method
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(userId, cookieIdHash, remember ? 1 : 0, expiresAt, userAgent, ipHash, authMethod),
+  };
+}
 
 /** Insert a new web_sessions row and return the row id + cookie
  *  options for the response. `cookieIdRaw` is returned to the caller
@@ -255,27 +341,10 @@ export async function issueSession(
   ip: string | null,
   authMethod: AuthMethod = "email_code",
 ): Promise<{ cookieIdRaw: string; maxAgeSeconds: number | undefined; expiresAt: string }> {
-  const cookieIdRaw = generateCookieId();
-  const cookieIdHash = await hashCookieId(cookieIdRaw);
-  const ttlMs = remember ? REMEMBER_TTL_MS : NON_REMEMBER_TTL_MS;
-  const expiresAt = new Date(Date.now() + ttlMs).toISOString();
-  const ipHash = await hashIp(ip);
-
-  await env.DB.prepare(
-    `INSERT INTO web_sessions (
-       user_id, cookie_id_hash, remember, expires_at, user_agent, ip_hash, auth_method
-     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(userId, cookieIdHash, remember ? 1 : 0, expiresAt, userAgent, ipHash, authMethod)
-    .run();
-
-  return {
-    cookieIdRaw,
-    // Browser-session cookies (no Max-Age) for non-remember; explicit
-    // Max-Age for remember-me so reloads survive a browser restart.
-    maxAgeSeconds: remember ? Math.floor(ttlMs / 1000) : undefined,
-    expiresAt,
-  };
+  const prepared = await prepareSessionInsert(env, userId, remember, userAgent, ip, authMethod);
+  await prepared.statement.run();
+  const { cookieIdRaw, maxAgeSeconds, expiresAt } = prepared;
+  return { cookieIdRaw, maxAgeSeconds, expiresAt };
 }
 
 /** Mark the row backing this cookie as revoked. Idempotent. */

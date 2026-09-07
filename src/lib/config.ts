@@ -21,6 +21,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import Conf from "conf";
 import { z } from "zod";
+import type { GapFieldsStayOptional } from "../../shared/contract/profile-gaps.js";
 
 export const DEFAULT_API_URL = "https://api.nemar.org";
 
@@ -73,9 +74,36 @@ function normalizeApiUrl(raw: string): string {
  *
  * Standardized default: ~/.config/nemar/ on all platforms.
  */
-function getConfigDir(): string {
+export function getConfigDir(): string {
   return process.env.NEMAR_CONFIG_DIR || join(homedir(), ".config", "nemar");
 }
+
+/**
+ * One cached `profile_gaps` entry, as it comes back off disk.
+ *
+ * Separate from the wire's `profileGapSchema` (shared/contract/user.ts) because
+ * it validates a different source -- a JSON file this or an older build wrote,
+ * not an HTTP response -- but it must stay loose in exactly the same way, so
+ * both are pinned to the one declaration of that shape below.
+ */
+const cachedProfileGapSchema = z
+  .object({
+    field: z.string(),
+    blocks: z.array(z.string()).optional(),
+    set_on: z.array(z.string()).optional(),
+  })
+  .passthrough();
+
+/** A cache entry must stay something the gap renderer can take: neither
+ *  `blocks` nor `set_on` may become required, or a cache file missing either
+ *  key (an older build's, or one that never wrote it) would stop parsing
+ *  instead of falling back to the matrix. Fails to compile, not throw at a
+ *  user's terminal -- the runtime half of the same rule is
+ *  test/contract-schemas.test.ts "a profile_gaps entry may carry only its
+ *  field name". */
+export const _cachedProfileGapIsRenderable: GapFieldsStayOptional<
+  z.infer<typeof cachedProfileGapSchema>
+> = true;
 
 // Per-account configuration schema
 const accountSchema = z.object({
@@ -87,6 +115,53 @@ const accountSchema = z.object({
   sandboxCompleted: z.boolean().optional(),
   sandboxDatasetId: z.string().optional(),
   dismissedNoticeIds: z.array(z.number()).optional(),
+  /**
+   * Upload access as of the last `auth status --refresh` (ADR 0040). Cached
+   * rather than fetched on every `auth status` so the command stays usable
+   * offline; absent means "never refreshed", which the status output reports
+   * as unknown rather than guessing "not granted".
+   */
+  serviceAccess: z.boolean().optional(),
+  /**
+   * What the account was still missing as of the last `auth status --refresh`
+   * (#1268, ADR 0045) — the backend's `profile_gaps`, cached beside
+   * `serviceAccess` and for the same reason: `auth status` stays usable
+   * offline, and absent means "never refreshed", which the Profile block
+   * reports as not-checked rather than as "nothing missing".
+   *
+   * Stored as the WIRE entries rather than as rendered sentences, so a CLI
+   * upgrade re-renders an old cache through its new copy table instead of
+   * replaying yesterday's wording. `blocks`/`set_on` are loose string arrays
+   * for the same reason they are on the wire: a vocabulary this build has not
+   * heard of must round-trip rather than fail to parse.
+   */
+  profileGaps: z.array(cachedProfileGapSchema).optional(),
+  /**
+   * Whether a VERIFIED ORCID iD is linked, as of the last refresh (#1268).
+   *
+   * Cached for one reason: it decides where a missing NAME is set. With an iD
+   * linked the record owns the name and `PATCH /auth/profile` refuses the edit,
+   * so telling that person to run `nemar auth profile set-name` is advice that
+   * cannot work. A refused upload-access request names the field and not the
+   * account state, so the renderer has nowhere else to learn it. Absent
+   * defaults to false, which is the pre-#1268 wording.
+   */
+  orcidVerified: z.boolean().optional(),
+  /**
+   * Cached from `/auth/login` and `auth status --refresh` (#1256). Not
+   * authoritative -- always re-check with the backend for anything
+   * access-control-sensitive -- but lets the `--debug` diagnostic bundle
+   * report a role without an extra network call.
+   */
+  role: z.string().optional(),
+  /**
+   * The address `nemar auth profile set-email` last sent a code to (#1266).
+   * Remembered so `verify-email <code>` needs only the code, the way the
+   * website's Settings form remembers it across the two steps. Cleared on a
+   * successful verification; harmless if stale, since the code is bound to
+   * both the address and the account and simply will not verify.
+   */
+  pendingEmailChange: z.string().email().optional(),
 });
 
 export type Config = z.infer<typeof accountSchema>;
@@ -364,13 +439,6 @@ export function getConfig(): Config {
 }
 
 /**
- * Check if user has completed sandbox training
- */
-export function isSandboxCompleted(): boolean {
-  return !!getConfig().sandboxCompleted;
-}
-
-/**
  * Set a configuration value on the active account
  */
 export function setConfig<K extends keyof Config>(key: K, value: Config[K]): void {
@@ -466,6 +534,52 @@ export function storeAccount(username: string, accountConfig: Config): void {
   const accounts = getAccountsMap();
   accounts[username] = accountConfig;
   config.store = { ...config.store, accounts, activeAccount: username };
+}
+
+/**
+ * What {@link renameActiveAccount} did.
+ *
+ * Three outcomes rather than a boolean, because the caller has to tell the two
+ * "did nothing" cases apart: `unchanged` is the ordinary path (the key was
+ * already right, or there is nothing to rename) and says nothing to the user,
+ * while `key_taken` leaves this machine holding two accounts whose stored name
+ * and map key disagree — which is worth one line of warning, since
+ * `nemar auth switch <name>` will then select the OTHER one.
+ */
+export type RenameAccountResult = "renamed" | "unchanged" | "key_taken";
+
+/**
+ * Re-key the ACTIVE account after its username changed on the server (#1266).
+ *
+ * The accounts map is keyed by username and `switchAccount` looks an account
+ * up by that key, so writing the new username into the account's fields and
+ * leaving the key alone produces an account that `nemar auth switch <new>`
+ * cannot find and `nemar auth switch <old>` finds under a name that no longer
+ * exists. `nemar auth profile set-username` is the first thing that can change
+ * a username from the CLI, so it is the first thing that has to move the key.
+ *
+ * Never clobbers a DIFFERENT stored account to do it. Two accounts on one
+ * machine can legitimately end up here — sign in as `harlow`, sign in as
+ * `alovelace`, then rename `harlow` to `alovelace` on the server — and
+ * overwriting the second entry would delete a working API key to fix a name.
+ * The account keeps its old key and still works; only the lookup name is
+ * stale, and the caller says so.
+ */
+export function renameActiveAccount(newUsername: string): RenameAccountResult {
+  const name = newUsername.trim();
+  if (!name) return "unchanged";
+  const config = getStore();
+  const active = getActiveAccountName();
+  if (!active || active === name) return "unchanged";
+  const accounts = getAccountsMap();
+  const current = accounts[active];
+  if (!current) return "unchanged";
+  if (accounts[name]) return "key_taken";
+
+  delete accounts[active];
+  accounts[name] = { ...current, username: name };
+  config.store = { ...config.store, accounts, activeAccount: name };
+  return "renamed";
 }
 
 /**

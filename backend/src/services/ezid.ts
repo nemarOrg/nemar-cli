@@ -16,6 +16,17 @@
 import { HttpError } from "./retry";
 
 export const EZID_BASE_URL = "https://ezid.cdlib.org";
+
+// NEMAR_EZID_API_URL is a test-only override that points at a local
+// Bun.serve fake, mirroring NEMAR_GITHUB_API_URL in services/github/shared.ts.
+// Stored on globalThis because the Workers runtime has no `process.env`; read
+// at call time so a test can install it after the module has loaded. It is
+// what lets a route test assert on the DataCite XML this Worker would send to
+// EZID (#1255 review item 13) without touching the registrar.
+export function EZID_BASE(): string {
+  const override = (globalThis as { NEMAR_EZID_API_URL?: string }).NEMAR_EZID_API_URL;
+  return override ?? EZID_BASE_URL;
+}
 export const PRODUCTION_SHOULDER = "doi:10.82901/NEMAR.";
 export const TEST_SHOULDER = "doi:10.5072/FK2";
 
@@ -186,7 +197,7 @@ async function ezidRequest(
 
   let response: Response;
   try {
-    response = await fetch(`${EZID_BASE_URL}${path}`, {
+    response = await fetch(`${EZID_BASE()}${path}`, {
       method,
       headers,
       body,

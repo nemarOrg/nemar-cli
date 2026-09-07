@@ -114,7 +114,7 @@ export {
   setRepoVisibility,
   validateGitHubUsername,
 } from "./github/repos";
-export type { GitHubRepo } from "./github/repos";
+export type { GitHubRepo, GitHubUser, GitHubUserLookup } from "./github/repos";
 export { ORG_NAME } from "./github/shared";
 export {
   __resetRateLimitStateForTests,

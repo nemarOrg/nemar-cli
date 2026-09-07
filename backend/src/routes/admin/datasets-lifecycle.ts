@@ -1664,7 +1664,13 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
 
     const result: {
       dataset_id: string;
-      enrichment: { status: "ok" | "failed" | "skipped"; ref?: string; error?: string };
+      enrichment: {
+        status: "ok" | "failed" | "skipped";
+        ref?: string;
+        error?: string;
+        /** Deliberate skips on an otherwise successful run (#1255). */
+        warnings?: string[];
+      };
       sync: {
         status: "ok" | "failed" | "skipped";
         metadata_columns_written?: boolean;
@@ -1681,7 +1687,14 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       // llm_usage rides along on BOTH branches: a run that fails after its
       // LLM calls (e.g. commit error) still spent the tokens.
       result.enrichment = enr.ok
-        ? { status: "ok", ref: enr.ref, ...(enr.llm_usage && { llm_usage: enr.llm_usage }) }
+        ? {
+            status: "ok",
+            ref: enr.ref,
+            ...(enr.llm_usage && { llm_usage: enr.llm_usage }),
+            // A deliberate skip keeps the run "ok" and rides along as a
+            // warning; "failed" stays reserved for real errors (#1255).
+            ...(enr.warnings && { warnings: enr.warnings }),
+          }
         : {
             status: "failed",
             ref: enr.ref,
@@ -1806,6 +1819,8 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       enrichment: {
         status: "ok" | "failed" | "skipped";
         error?: string;
+        /** Deliberate skips on an otherwise successful run (#1255). */
+        warnings?: string[];
         llm_usage?: LlmUsageTotals;
       };
       sync: {
@@ -1836,7 +1851,11 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       if (!skipEnrichment) {
         const enr = await runEnrichmentForDataset(c.env, datasetId);
         entry.enrichment = enr.ok
-          ? { status: "ok", ...(enr.llm_usage && { llm_usage: enr.llm_usage }) }
+          ? {
+              status: "ok",
+              ...(enr.llm_usage && { llm_usage: enr.llm_usage }),
+              ...(enr.warnings && { warnings: enr.warnings }),
+            }
           : {
               status: "failed",
               error: enr.error,

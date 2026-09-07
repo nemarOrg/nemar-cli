@@ -34,10 +34,105 @@ import { IS_DEV_BUILD } from "./lib/api/client.js";
 import { MaintenanceError, errorDetail } from "./lib/api/errors.js";
 import { runComplete } from "./lib/completion/run.js";
 import { NO_DESCRIPTION, NO_OPTION, YES_DESCRIPTION, YES_OPTION } from "./lib/confirm.js";
+import {
+  enableDebug,
+  getLastWriteFailureReason,
+  isDebugEnabled,
+  markUsageExit,
+  primeEnvironmentSnapshot,
+  shouldEnableDebug,
+  wasUsageExit,
+  writeDebugLogSync,
+} from "./lib/debug-log.js";
 import { printMaintenanceBanner } from "./lib/maintenance-banner.js";
 import { fetchAndDisplayNotices } from "./lib/notices.js";
 import { initUpdateCheck, printUpdateBanner } from "./lib/update-check.js";
 import { version } from "./lib/version.js";
+
+/**
+ * Index into `argv` (already `process.argv.slice(2)`) of the `__complete`
+ * token, or null if this is not a completion invocation. `argv[2]` alone is
+ * not reliable: a global flag typed before the subcommand (`nemar --verbose
+ * __complete -- ...`) shifts `__complete` to a later position, and checking
+ * position 2 positionally missed it entirely (#1173 review) -- the guard
+ * below never fired, so the request fell through to `initUpdateCheck()` and
+ * paid a real blocking fetch before Commander finally rejected it as an
+ * unknown command.
+ *
+ * Every global option this program declares (`--no-color`, `--verbose`,
+ * `--help-all`, `--debug`, `-v`/`--version`) is boolean, so "the first token
+ * that is not itself a flag" is unambiguous here: it is either `__complete` or the
+ * name of a subcommand. `nemar dataset get __complete` must NOT dispatch --
+ * `dataset` is that first non-flag token, and `__complete` there is just an
+ * (unusual) positional argument to `dataset get`.
+ *
+ * Defined here (moved up from further down the file) so the `--debug` exit
+ * handler below can use it too: a shell asking for completion candidates on
+ * every keystroke, combined with a `NEMAR_DEBUG=1` a user forgot was set in
+ * their shell rc, must not write a log per keystroke (see isCompletionRequest).
+ */
+function findCompletionArgsStart(argv: string[]): number | null {
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i].startsWith("-")) continue;
+    return argv[i] === "__complete" ? i : null;
+  }
+  return null;
+}
+
+// ============================================================================
+// --debug / NEMAR_DEBUG=1 diagnostic bundle (issue #1256, epic #1250 phase 6)
+// ============================================================================
+//
+// Set up as early as possible, before `program` even exists: HTTP calls
+// through lib/api/client.ts's `request()` can happen from the `preAction`
+// hook below (fetchAndDisplayNotices) or from `initUpdateCheck()`, both of
+// which run before Commander dispatches to any command action.
+const rawArgs = process.argv.slice(2);
+if (shouldEnableDebug(rawArgs)) {
+  enableDebug();
+}
+
+// A persistent NEMAR_DEBUG=1 (set in a shell rc, say) combined with shell-tab
+// completion would otherwise write one log per completion request -- these
+// fire on every keystroke -- and evict real logs from the MAX_DEBUG_LOGS
+// window well before a user gets to attach one (review finding, PR #1257).
+const isCompletionRequest = findCompletionArgsStart(rawArgs) !== null;
+
+/**
+ * Print the standard "how to help us help you" hint on any non-zero exit --
+ * unless the command asked for machine-readable output (`--json`) or the
+ * exit came from Commander itself (help/version/a usage error): those are
+ * self-explanatory and don't need a bug-report nudge. If --debug was on and
+ * the log was written, its path replaces the generic hint (the log already
+ * IS the artifact the hint would have asked for); if --debug was on but the
+ * log could NOT be written (see getLastWriteFailureReason), the hint says so
+ * instead of telling the user to re-run with the flag they just used.
+ *
+ * Registered as a `process.on("exit", ...)` handler -- not tied to any one
+ * of the ~270 `process.exit()` call sites across the CLI -- because that is
+ * the one place every exit path (a command's own process.exit, an uncaught
+ * error escaping to main().catch() below, or Commander's own _exit) funnels
+ * through. 'exit' handlers must be synchronous; writeDebugLogSync() is
+ * synchronous by construction for exactly this reason (see its docstring).
+ */
+process.on("exit", (code) => {
+  const exitCode = code ?? 0;
+  const logPath = isCompletionRequest ? null : writeDebugLogSync(rawArgs, exitCode);
+  if (exitCode === 0 || rawArgs.includes("--json") || wasUsageExit()) return;
+  if (logPath) {
+    process.stderr.write(`Debug log: ${logPath}\n`);
+  } else if (isDebugEnabled()) {
+    const reason = getLastWriteFailureReason();
+    process.stderr.write(
+      `Debug log could not be written${reason ? ` (${reason})` : ""}; attach the [debug] lines above to the issue\n`,
+    );
+  } else {
+    process.stderr.write(
+      "Run again with --debug and attach the log to a new issue: " +
+        "https://github.com/nemarOrg/nemar-cli/issues/new?template=bug_report.yml\n",
+    );
+  }
+});
 
 const program = new Command();
 
@@ -53,6 +148,10 @@ This CLI provides tools for uploading, downloading, and managing datasets.`,
   .option("--no-color", "Disable colored output")
   .option("--verbose", "Enable verbose output")
   .option("--help-all", "Show detailed help with examples and descriptions")
+  .option(
+    "--debug",
+    "Write a diagnostic log for this run (see NEMAR_DEBUG=1); attach it to a bug report",
+  )
   .addHelpText(
     "after",
     `
@@ -123,6 +222,28 @@ program
 // Apply color formatting to all commands (must be after addCommand calls)
 configureColorHelp(program);
 
+/**
+ * Tell a Commander-detected exit (help, `--version`, or a usage/validation
+ * error) apart from a command's own `process.exit()` call, so the failure
+ * hint above doesn't fire on "error: unknown option '--bogus'" (Commander
+ * already explained itself).
+ *
+ * `exitOverride`'s callback runs BEFORE Commander's own `process.exit()`,
+ * not instead of it (see node_modules/commander lib/command.js `_exit`) --
+ * passing a callback that doesn't throw leaves exit codes and printed text
+ * byte-identical to not overriding at all. Applied to every command in the
+ * tree individually (not just `program`) because `addCommand()` does not
+ * propagate `exitOverride` to the subtrees it attaches (only Commander's
+ * own `.command()` copies parent settings, and only at creation time).
+ */
+function markCommanderExitsRecursively(cmd: Command): void {
+  cmd.exitOverride(() => markUsageExit());
+  for (const sub of cmd.commands) {
+    markCommanderExitsRecursively(sub);
+  }
+}
+markCommanderExitsRecursively(program);
+
 // Display system notices before command execution
 program.hook("preAction", async () => {
   await fetchAndDisplayNotices();
@@ -134,31 +255,6 @@ if (IS_DEV_BUILD) {
     chalk.yellow.bold("[DEV BUILD]") +
       chalk.yellow(" Connected to development backend. Not for production use."),
   );
-}
-
-/**
- * Index into `argv` (already `process.argv.slice(2)`) of the `__complete`
- * token, or null if this is not a completion invocation. `argv[2]` alone is
- * not reliable: a global flag typed before the subcommand (`nemar --verbose
- * __complete -- ...`) shifts `__complete` to a later position, and checking
- * position 2 positionally missed it entirely (#1173 review) -- the guard
- * below never fired, so the request fell through to `initUpdateCheck()` and
- * paid a real blocking fetch before Commander finally rejected it as an
- * unknown command.
- *
- * Every global option this program declares (`--no-color`, `--verbose`,
- * `--help-all`, `-v`/`--version`) is boolean, so "the first token that is
- * not itself a flag" is unambiguous here: it is either `__complete` or the
- * name of a subcommand. `nemar dataset get __complete` must NOT dispatch --
- * `dataset` is that first non-flag token, and `__complete` there is just an
- * (unusual) positional argument to `dataset get`.
- */
-function findCompletionArgsStart(argv: string[]): number | null {
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i].startsWith("-")) continue;
-    return argv[i] === "__complete" ? i : null;
-  }
-  return null;
 }
 
 // Initialize update check before parsing (may block up to 5s on first run)
@@ -186,10 +282,17 @@ async function main() {
   // The budget is ~100ms and __complete must touch the network zero times --
   // not even with a timeout, since a timeout still pays DNS and connect on
   // exactly the networks where someone is offline pressing TAB.
-  const completionArgsStart = findCompletionArgsStart(process.argv.slice(2));
+  const completionArgsStart = findCompletionArgsStart(rawArgs);
   if (completionArgsStart !== null) {
-    await runComplete(program, process.argv.slice(2 + completionArgsStart + 1));
+    await runComplete(program, rawArgs.slice(completionArgsStart + 1));
     return;
+  }
+
+  // Capture CLI/OS/Bun version, account, and tool-version info ONCE, up
+  // front, before anything can fail. See lib/debug-log.ts's docstring for
+  // why this can't be deferred to the (synchronous) exit handler above.
+  if (isDebugEnabled()) {
+    await primeEnvironmentSnapshot();
   }
 
   const pendingUpdate = await initUpdateCheck();

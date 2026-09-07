@@ -1,5 +1,5 @@
 /**
- * Integration test for migration 0062_service_access.sql (ADR 0010, #1013).
+ * Integration test for migration 0062_service_access.sql (website ADR 0010, #1013).
  *
  * Runs against a real in-memory SQLite database via bun:sqlite (no mocks). To
  * exercise the grandfather backfill, it applies every migration EXCEPT 0062,

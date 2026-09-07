@@ -22,6 +22,7 @@
  */
 
 import type { Context, Next } from "hono";
+import { ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "../services/account-tier";
 import { hashApiKey } from "../services/token";
 import { hashIp } from "../services/web-session";
 import type { Bindings, Variables } from "../types/bindings";
@@ -105,6 +106,31 @@ const AUTH_PATHS = [
   "/auth/profile",
   "/auth/email/change/request",
   "/auth/email/change/verify",
+  // Email verification (ADR 0040 phase 2): the request endpoint mails a
+  // code and the verify endpoint guesses at one, so both belong in the
+  // stricter bucket. One entry covers both -- the matcher below treats an
+  // entry as a prefix, so "/auth/email/verify" also matches
+  // "/auth/email/verify/request".
+  "/auth/email/verify",
+  // CLI ORCID surface (#1266, ADR 0044). `cli-start` mints an identity-link
+  // intent, `cli-handoff` (and its /continue confirm step, covered by the
+  // prefix match) is the only thing that can turn a leaked one into an ORCID
+  // redirect, and `unlink` drops an iD outright -- all three are now reachable
+  // with a bearer token, so without these entries they would sit in the
+  // 1000/min token bucket instead of the 10/min floor every other identity
+  // mutation has. A person links or unlinks an iD once.
+  // The rest of /auth/orcid/* is deliberately NOT here: the callback is a
+  // browser landing, and moving it would change the web flow's bucket.
+  "/auth/orcid/cli-start",
+  "/auth/orcid/cli-handoff",
+  "/auth/orcid/unlink",
+  // NOT an /auth path, and deliberately in this list anyway (ADR 0042, #1253):
+  // POST /users/me/upload-access/request spends a live GitHub API call on the
+  // shared installation token for every attempt, and a refused one writes
+  // nothing, so it is replayable. On the generic token bucket that is ~1000
+  // GitHub calls a minute from one verified account. The strict floor is the
+  // point: a human asks for upload access once.
+  "/users/me/upload-access/request",
 ];
 
 type RateLimitContext = Context<{ Bindings: Bindings; Variables: Variables }>;
@@ -139,8 +165,10 @@ export function __readBearerTokenFromHeader(authHeader: string | undefined): str
  * standing up a Cloudflare runtime. Returns the bucket key kind, the
  * raw key value, and the cap.
  *
- *  - `auth-ip` for `/auth/*` endpoints (10/60s, IP-keyed). Stays
- *    pre-auth-friendly: signup/login don't have a token yet.
+ *  - `auth-ip` for the strict-bucket paths (10/60s, IP-keyed). Mostly
+ *    `/auth/*`, which stays pre-auth-friendly (signup/login have no token
+ *    yet), plus any authenticated endpoint whose per-request cost is an
+ *    external call rather than a D1 read -- see AUTH_PATHS.
  *  - `token` for any request carrying a syntactically-valid bearer
  *    (500/60s). Admin orchestration (`publish approve`, CI deploy
  *    sweeps) fits here; per-token bucketing means one admin's batch
@@ -215,12 +243,17 @@ async function isPrivilegedToken(env: Bindings, hashedApiKey: string): Promise<b
       const data = (await cached.json()) as { admin: boolean };
       return data.admin === true;
     }
+    // Same status set authMiddleware accepts (ADR 0040 phase 2): the quota a
+    // token gets must be decided over the same population that token can
+    // authenticate as, or an admin sitting at `verified` would authenticate
+    // fine and then be throttled as an anonymous stranger. The privilege
+    // itself still comes from `role`, which this widening does not touch.
     const row = await env.DB.prepare(
       `SELECT u.role FROM tokens t JOIN users u ON t.user_id = u.id
        WHERE t.api_key_hash = ?
          AND t.revoked_at IS NULL
          AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))
-         AND u.status = 'approved'
+         AND u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}
          AND u.deleted_at IS NULL`,
     )
       .bind(hashedApiKey)

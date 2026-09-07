@@ -386,6 +386,13 @@ import type { LlmUsageTotals } from "./llm-enrich.js";
 export interface EnrichmentRunResult {
   ok: boolean;
   error?: string;
+  /**
+   * Sub-steps the pipeline deliberately DECLINED to run, on an otherwise
+   * successful run (#1255). Never populated for an error: "failed" stays
+   * reserved for something that actually broke, so an operator scanning a
+   * bulk reindex for failures is not reading past a hundred correct skips.
+   */
+  warnings?: string[];
   ref: string;
   /** Token usage + estimated USD cost of this run's LLM calls, when the
    *  pipeline completed and reported it. */
@@ -426,6 +433,32 @@ export function extractEnrichmentSubErrors(body: unknown): string[] {
     if (typeof v === "string" && v.length > 0) out.push(`${field}: ${v}`);
   }
   return out;
+}
+
+/**
+ * Pull DELIBERATE skips out of an enrichment response body.
+ *
+ * Separate from {@link extractEnrichmentSubErrors} on purpose (#1255 review
+ * item 26). A skip is not a failure: `doi_sync: skipped` means the pipeline
+ * declined to push a DOI record that would have deleted an existing
+ * DataCurator, which is the correct outcome, not a broken run. Folding it
+ * into the sub-error list made every reindex of a dataset whose owner has no
+ * name yet -- most of the catalogue until `nemar admin backfill-names --apply`
+ * has been run -- report `status: "failed"` and log "enrichment failed",
+ * burying the real failures in the same batch.
+ *
+ * Operators still need to see it, so it travels as a WARNING alongside an
+ * `ok` result.
+ */
+export function extractEnrichmentSkips(body: unknown): string[] {
+  if (!body || typeof body !== "object") return [];
+  const sync = (body as Record<string, unknown>).doi_sync;
+  if (!sync || typeof sync !== "object") return [];
+  const s = sync as { status?: unknown; reason?: unknown; message?: unknown };
+  if (s.status !== "skipped") return [];
+  const reason = typeof s.reason === "string" ? s.reason : "unknown";
+  const message = typeof s.message === "string" ? s.message : "";
+  return [`doi_sync: skipped (${reason})${message ? ` — ${message}` : ""}`];
 }
 
 /**
@@ -489,7 +522,13 @@ export async function runEnrichmentForDataset(
     if (subErrors.length > 0) {
       return { ok: false, error: subErrors.join("; "), ref, llm_usage: llmUsage };
     }
-    return { ok: true, ref, llm_usage: llmUsage };
+    const skips = extractEnrichmentSkips(outcome.body);
+    return {
+      ok: true,
+      ref,
+      llm_usage: llmUsage,
+      ...(skips.length > 0 && { warnings: skips }),
+    };
   } catch (err) {
     return { ok: false, error: errorMessage(err), ref };
   }
