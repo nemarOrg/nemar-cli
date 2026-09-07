@@ -112,7 +112,9 @@ function defaultUser(overrides: Partial<DeviceUser> = {}): DeviceUser {
     github_username: "ada-gh",
     role: "member",
     sandbox_completed: true,
-    sandbox_dataset_id: null,
+    // A returning trained account, not a fresh one: the default fixture
+    // must not hide a caller that forgets to cache sandbox_dataset_id.
+    sandbox_dataset_id: "xx090001",
     ...overrides,
   };
 }
@@ -585,6 +587,21 @@ describe("nemar auth login: success writes the account", () => {
       server.stop();
     }
   });
+
+  test("a returning trained account's sandbox_dataset_id is cached", async () => {
+    const server = startDeviceServer({
+      interval: 1,
+      token: [{ kind: "success" }],
+      user: defaultUser({ sandbox_completed: true, sandbox_dataset_id: "xx090001" }),
+    });
+    try {
+      const result = await run(["auth", "login", "--no-open"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(activeAccount().sandboxDatasetId).toBe("xx090001");
+    } finally {
+      server.stop();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -840,6 +857,30 @@ describe("nemar auth login --key", () => {
       expect(Object.keys(accounts)).toEqual(["ada@example.org"]);
       expect(accounts["ada@example.org"].keySource).toBe("paste");
       expect(accounts["ada@example.org"].keyId).toBeUndefined();
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a returning trained account's sandbox_dataset_id is cached", async () => {
+    const server = startDeviceServer({
+      interval: 1,
+      token: [{ kind: "success" }],
+      login: () => ({
+        status: 200,
+        body: {
+          valid: true,
+          user: defaultUser({ sandbox_completed: true, sandbox_dataset_id: "xx090001" }),
+        },
+      }),
+    });
+    try {
+      const result = await run(
+        ["auth", "login", "--key", "nm_good_key_0123456789abcdefgh"],
+        server.url,
+      );
+      expect(result.exitCode).toBe(0);
+      expect(activeAccount().sandboxDatasetId).toBe("xx090001");
     } finally {
       server.stop();
     }

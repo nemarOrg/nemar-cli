@@ -192,6 +192,7 @@ function applyServerUser(user: {
   service_access?: boolean;
   profile_gaps?: ContractUser["profile_gaps"];
   sandbox_completed?: boolean;
+  sandbox_dataset_id?: string | null;
   orcid_verified?: boolean;
 }): void {
   if (user.username && renameActiveAccount(user.username) === "key_taken") {
@@ -210,6 +211,11 @@ function applyServerUser(user: {
   if (user.service_access !== undefined) setConfig("serviceAccess", user.service_access);
   if (user.profile_gaps !== undefined) setConfig("profileGaps", user.profile_gaps);
   if (user.sandbox_completed !== undefined) setConfig("sandboxCompleted", user.sandbox_completed);
+  // A returning trained account's login/refresh must not lose the sandbox
+  // dataset id `nemar sandbox` already recorded -- `undefined` means the
+  // server did not report it (predates the field, or genuinely never
+  // trained), and both leave the cached value untouched.
+  if (user.sandbox_dataset_id) setConfig("sandboxDatasetId", user.sandbox_dataset_id);
   if (user.orcid_verified !== undefined) setConfig("orcidVerified", user.orcid_verified);
   setConfig("role", user.role);
 }
