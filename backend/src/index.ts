@@ -25,6 +25,7 @@ import { rateLimiter } from "./middleware/rateLimit";
 import { adminRoutes } from "./routes/admin";
 import { authRoutes } from "./routes/auth";
 import { authDeviceRoutes } from "./routes/auth-device";
+import { authKeysRoutes } from "./routes/auth-keys";
 import { authOrcidRoutes } from "./routes/auth-orcid";
 import { authWebRoutes } from "./routes/auth-web";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
@@ -156,6 +157,10 @@ api.route("/auth", authOrcidRoutes);
 // Device authorization grant (RFC 8628; epic #1272 phase 1, #1281; ADR
 // 0047). Same /auth prefix; new paths under /auth/device/*.
 api.route("/auth", authDeviceRoutes);
+// Named API key routes (#1281, ADR 0047): list/mint/revoke, plus the
+// device flow's paste-key fallback. Same /auth prefix; new paths under
+// /auth/keys*.
+api.route("/auth", authKeysRoutes);
 api.route("/users", userRoutes);
 api.route("/admin", adminRoutes);
 api.route("/datasets", datasetRoutes);

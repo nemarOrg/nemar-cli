@@ -8,8 +8,9 @@
  * `hashApiKey`, and a local `Bun.serve()` standing in for ORCID (only the
  * "brand-new ORCID account" case needs it). No mocks.
  *
- * `authKeysRoutes` (backend/src/routes/auth-keys.ts) is mounted starting
- * with the phase's next commit; nothing in this file exercises `/auth/keys`.
+ * `authKeysRoutes` is mounted for parity with the app's real routing, even
+ * though nothing in this file exercises `/auth/keys` -- that surface has
+ * its own real-route coverage in api-keys-routes.test.ts.
  */
 
 import type { Database } from "bun:sqlite";
@@ -24,6 +25,7 @@ import {
 } from "../../shared/contract/device-auth.js";
 import { authRoutes } from "../src/routes/auth";
 import { authDeviceRoutes } from "../src/routes/auth-device";
+import { authKeysRoutes } from "../src/routes/auth-keys";
 import { authOrcidRoutes } from "../src/routes/auth-orcid";
 import { authWebRoutes } from "../src/routes/auth-web";
 import { userRoutes } from "../src/routes/users";
@@ -94,6 +96,7 @@ beforeEach(() => {
   app.route("/auth", authWebRoutes);
   app.route("/auth", authOrcidRoutes);
   app.route("/auth", authDeviceRoutes);
+  app.route("/auth", authKeysRoutes);
   app.route("/users", userRoutes);
 });
 
