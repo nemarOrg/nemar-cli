@@ -136,7 +136,17 @@ describe("Authentication API", () => {
           password: "TestPassword123!",
           github_username: "test-user-gh",
           description: "I need NEMAR access for testing and research purposes.",
-          orcid: "0000-0002-1825-0097",
+          // NOT the shared 0000-0002-1825-0097 fixture every other case here
+          // uses. Signup checks username, then email, then ORCID (#1254,
+          // ADR 0043), then GitHub. Once some dev row holds the shared iD --
+          // any live profile test that links it leaves one behind -- the ORCID
+          // gate answers first and this case can never reach the GitHub gate
+          // it exists to cover. It failed exactly that way on the v0.9.16
+          // release PR: "ORCID iD already registered" where the GitHub refusal
+          // was expected. 0000-0000 is outside every range ORCID assigns, so
+          // this value denotes no real person and no run can claim it: the
+          // request 409s on GitHub before a row is written.
+          orcid: "0000-0000-0000-0001",
           city: "San Diego",
           country: "United States",
         }),
