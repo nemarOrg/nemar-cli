@@ -80,4 +80,4 @@ That was already true before this ADR and is unchanged by it.
 - nemar-cli #1268 (phase 8) introduced the parity test; website#311 its mirror.
 - Deadlock observed 2026-09-06 on nemar-cli #1276 and website#314,
   the v0.9.16 / v0.2.8 promotion of epic #1250.
-- Fixed by #1277 here and its website counterpart.
+- Reported as #1277; fixed by #1278 here and website#315.
