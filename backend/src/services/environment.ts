@@ -23,6 +23,8 @@ export function isNonProductionEnv(env: Pick<Bindings, "ENVIRONMENT">): boolean 
  *  stay usable without an env; keep the three in sync. */
 const DEFAULT_LANDING_BASE = "https://nemar.org";
 const DEFAULT_DATA_ORIGIN = "https://data.nemar.org";
+/** Prod default for {@link appBase}. */
+const DEFAULT_APP_BASE = "https://app.nemar.org";
 
 /** Strip trailing slash(es) and surrounding whitespace from an origin. */
 function normalizeOrigin(url: string): string {
@@ -67,4 +69,17 @@ export function resolveDataBaseOrigin(
     );
   }
   return normalizeOrigin(override || DEFAULT_DATA_ORIGIN);
+}
+
+/** Authenticated app origin for OAuth redirects + post-login landings. Uses
+ *  APP_BASE_URL, NOT FRONTEND_URL: the latter is the marketing apex
+ *  (https://nemar.org), but the ORCID redirect_uri and the session/pending
+ *  cookies are scoped to the app host (https://app.nemar.org).
+ *
+ *  Hoisted here from routes/auth-orcid.ts (#1281, epic #1272 phase 1): the
+ *  device-authorization routes (routes/auth-device.ts) need the same origin
+ *  for `verification_uri`, and this is the second consumer that earns the
+ *  hoist (AGENTS.md: hoist only what gains a second consumer). */
+export function appBase(env: Pick<Bindings, "APP_BASE_URL">): string {
+  return (env.APP_BASE_URL?.trim() || DEFAULT_APP_BASE).replace(/\/+$/, "");
 }
