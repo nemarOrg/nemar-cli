@@ -22,8 +22,9 @@ import {
   MACHINE_NAME_MAX_CHARS,
 } from "../../shared/contract/device-auth.js";
 import { pollDeviceToken, startDeviceAuth } from "./api/auth.js";
-import { errorDetail } from "./api/errors.js";
+import { ApiError, errorDetail } from "./api/errors.js";
 import { openInBrowser } from "./browser.js";
+import { dlog } from "./debug-log.js";
 
 /**
  * The machine name a device code is minted for -- `os.hostname()`, cleaned
@@ -82,6 +83,7 @@ export type DeviceLoginOutcome =
   | { kind: "invalid"; message: string }
   | { kind: "cancelled" }
   | { kind: "unreachable"; detail: string }
+  | { kind: "server_error"; detail: string }
   | { kind: "start_failed"; detail: string };
 
 /** What a non-success outcome should print, and the exit code to set.
@@ -118,6 +120,13 @@ export function describeDeviceOutcome(
         ],
         exitCode: 1,
       };
+    case "server_error":
+      return {
+        lines: [
+          `NEMAR keeps answering with an error (${outcome.detail}). Try again in a few minutes; if it keeps happening, run \`nemar auth login --debug\` and report the log.`,
+        ],
+        exitCode: 1,
+      };
     case "start_failed":
       return { lines: [`Could not start sign-in: ${outcome.detail}`], exitCode: 1 };
   }
@@ -126,6 +135,24 @@ export function describeDeviceOutcome(
 const POLL_REQUEST_TIMEOUT_MS = 15_000;
 const MIN_POLL_INTERVAL_MS = 1_000;
 const SLOW_DOWN_INCREMENT_MS = 5_000;
+/** Consecutive non-network poll failures (a 5xx, an unrecognized 400, a 200
+ *  that failed the response schema, a non-ApiError) before the wait gives
+ *  up rather than retrying forever. Distinct from an outright network
+ *  failure (statusCode 0), which keeps retrying until the local deadline --
+ *  a server that is UP and answering, just answering wrong, is a different
+ *  problem than one that cannot be reached at all. */
+const CONSECUTIVE_SERVER_ERROR_LIMIT = 3;
+
+/** What to name a poll failure that is not a network failure, both in the
+ *  printed retry line and in the terminal `server_error` outcome. An
+ *  `ApiError` with a real HTTP status names it (`"HTTP 500"`); anything
+ *  else (a non-ApiError exception) falls back to its own message. */
+function describePollError(error: unknown): string {
+  if (error instanceof ApiError && error.statusCode !== 0) {
+    return `HTTP ${error.statusCode}`;
+  }
+  return errorDetail(error);
+}
 
 /** `AbortSignal.any` where Bun has it; a hand-composed controller otherwise
  *  (decision 3). Only ever combines two signals here (the SIGINT controller
@@ -185,6 +212,10 @@ export async function pollForDeviceToken(
   const cancel = new AbortController();
   const onSigint = () => cancel.abort();
   process.on("SIGINT", onSigint);
+  // Consecutive poll failures that were NOT a plain network failure (see
+  // describePollError) -- reset the moment a poll reaches the server and
+  // gets a real answer, pending/slow_down/terminal/success alike.
+  let consecutiveServerErrors = 0;
 
   try {
     while (true) {
@@ -207,13 +238,33 @@ export async function pollForDeviceToken(
       let result: Awaited<ReturnType<typeof pollDeviceToken>>;
       try {
         result = await pollDeviceToken(started.device_code, pollSignal);
+        consecutiveServerErrors = 0;
       } catch (error) {
         if (cancel.signal.aborted) return { kind: "cancelled" };
-        // Network failure, a 5xx, or a 400 this build's grant-error
-        // vocabulary does not recognize (a contract drift) -- all transient,
-        // the same way `waitForOrcidLink` treats anything that is not a
-        // definitive 401 (decision 3).
-        console.log(chalk.dim("  NEMAR is unreachable; retrying..."));
+        if (error instanceof ApiError && error.statusCode === 0) {
+          // A genuine network failure -- DNS, connection refused, the
+          // request timing out -- retries indefinitely until the local
+          // deadline, the same way `waitForOrcidLink` treats anything that
+          // is not a definitive 401.
+          console.log(chalk.dim("  NEMAR is unreachable; retrying..."));
+          consecutiveServerErrors = 0;
+          continue;
+        }
+        // The server IS reachable but answering wrong: a 5xx, a 400 whose
+        // `error` this build's grant-error vocabulary does not recognize (a
+        // contract drift), a 200 that failed `deviceTokenSuccessSchema`, or
+        // a non-ApiError exception. A different problem from "cannot be
+        // reached at all", so it does not retry forever.
+        const detail = describePollError(error);
+        consecutiveServerErrors += 1;
+        dlog(
+          `poll error ${consecutiveServerErrors}/${CONSECUTIVE_SERVER_ERROR_LIMIT}: ` +
+            `${detail} -- ${errorDetail(error)}`,
+        );
+        console.log(chalk.dim(`  NEMAR answered with an error (${detail}); retrying...`));
+        if (consecutiveServerErrors >= CONSECUTIVE_SERVER_ERROR_LIMIT) {
+          return { kind: "server_error", detail };
+        }
         continue;
       }
 
@@ -227,7 +278,10 @@ export async function pollForDeviceToken(
         continue;
       }
       if (result.status === "success") {
-        return { kind: "success", ...result.data };
+        // `result.data` spreads FIRST so a passthrough field named `kind`
+        // (the wire schemas allow additive fields) can never overwrite the
+        // discriminant.
+        return { ...result.data, kind: "success" };
       }
       // result.status === "terminal"
       if (result.error === "expired_token") return { kind: "expired", message: result.message };

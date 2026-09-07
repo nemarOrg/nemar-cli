@@ -47,6 +47,10 @@ type TokenReply =
   | { kind: "slow_down" }
   | { kind: "success" }
   | { kind: "expired" | "denied" | "invalid"; reason: DeviceAuthRefusalCode; message?: string }
+  /** An arbitrary status/body pair -- a 500, a 200 that fails
+   *  `deviceTokenSuccessSchema`, or a 400 with an `error` this build
+   *  doesn't recognize. */
+  | { kind: "raw"; status: number; body: unknown }
   | "hold";
 
 interface Recorded {
@@ -192,6 +196,9 @@ function startDeviceServer(options: DeviceServerOptions): DeviceServer {
             req.signal.addEventListener("abort", () => resolve());
           });
           return new Response(null, { status: 499 });
+        }
+        if (reply.kind === "raw") {
+          return Response.json(reply.body, { status: reply.status });
         }
         if (reply.kind === "pending") {
           return Response.json(
@@ -814,7 +821,93 @@ async function retryUntilPortFree(
 }
 
 // ---------------------------------------------------------------------------
-// 11: --key (the paste-key fallback)
+// 11: the poll loop gives up after repeated non-network errors
+// ---------------------------------------------------------------------------
+
+describe("nemar auth login: repeated poll errors give up", () => {
+  test("three consecutive 500s: the give-up sentence, exit 1, no config", async () => {
+    const server = startDeviceServer({
+      interval: 1,
+      token: () => ({ kind: "raw", status: 500, body: { error: "internal" } }),
+    });
+    try {
+      const result = await run(["auth", "login", "--no-open"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.out).toContain(
+        "NEMAR keeps answering with an error (HTTP 500). Try again in a few minutes",
+      );
+      expect(server.polls.length).toBe(3);
+      expect(existsSync(configPath())).toBe(false);
+    } finally {
+      server.stop();
+    }
+  }, 40000);
+
+  test("a 200 that fails the success schema three times: same give-up, no config", async () => {
+    const server = startDeviceServer({
+      interval: 1,
+      // Missing `api_key`/`key`/`user` -- fails deviceTokenSuccessSchema, so
+      // `request()` throws an ApiError with statusCode 200, not 400.
+      token: () => ({ kind: "raw", status: 200, body: { ok: true } }),
+    });
+    try {
+      const result = await run(["auth", "login", "--no-open"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.out).toContain(
+        "NEMAR keeps answering with an error (HTTP 200). Try again in a few minutes",
+      );
+      expect(server.polls.length).toBe(3);
+      expect(existsSync(configPath())).toBe(false);
+    } finally {
+      server.stop();
+    }
+  }, 40000);
+
+  test("a 400 with an error code this build doesn't recognize: same give-up, no config", async () => {
+    const server = startDeviceServer({
+      interval: 1,
+      token: () => ({
+        kind: "raw",
+        status: 400,
+        body: { error: "some_future_grant_code", message: "not in this build's vocabulary" },
+      }),
+    });
+    try {
+      const result = await run(["auth", "login", "--no-open"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.out).toContain(
+        "NEMAR keeps answering with an error (HTTP 400). Try again in a few minutes",
+      );
+      expect(server.polls.length).toBe(3);
+      expect(existsSync(configPath())).toBe(false);
+    } finally {
+      server.stop();
+    }
+  }, 40000);
+
+  test("a success after two errors resets the count: no give-up, config written", async () => {
+    let calls = 0;
+    const server = startDeviceServer({
+      interval: 1,
+      token: () => {
+        calls += 1;
+        if (calls <= 2) return { kind: "raw", status: 500, body: { error: "internal" } };
+        return { kind: "success" };
+      },
+    });
+    try {
+      const result = await run(["auth", "login", "--no-open"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(result.out).not.toContain("NEMAR keeps answering with an error");
+      expect(existsSync(configPath())).toBe(true);
+    } finally {
+      server.stop();
+    }
+  }, 40000);
+});
+
+// ---------------------------------------------------------------------------
+// 12: --key (the paste-key fallback)
 // ---------------------------------------------------------------------------
 
 describe("nemar auth login --key", () => {
@@ -888,7 +981,7 @@ describe("nemar auth login --key", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 12: status -- file mode migration, rename on refresh
+// 13: status -- file mode migration, rename on refresh
 // ---------------------------------------------------------------------------
 
 describe("nemar auth status", () => {
@@ -942,7 +1035,7 @@ describe("nemar auth status", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 13: logout
+// 14: logout
 // ---------------------------------------------------------------------------
 
 function readRawAccounts(): Record<string, Record<string, unknown>> {
@@ -1100,7 +1193,7 @@ describe("nemar auth logout", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 14: keys group
+// 15: keys group
 // ---------------------------------------------------------------------------
 
 describe("nemar auth keys", () => {
@@ -1222,7 +1315,7 @@ describe("nemar auth keys", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 15: signup completion
+// 16: signup completion
 // ---------------------------------------------------------------------------
 
 function gapsMe(
@@ -1427,7 +1520,7 @@ describe("nemar auth signup", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 16: deprecation sentences
+// 17: deprecation sentences
 // ---------------------------------------------------------------------------
 
 describe("password-era commands print a deprecation sentence", () => {
@@ -1449,7 +1542,7 @@ describe("password-era commands print a deprecation sentence", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 17: root shortcuts
+// 18: root shortcuts
 // ---------------------------------------------------------------------------
 
 describe("root shortcuts accept the same flags as their auth subcommands", () => {
@@ -1498,7 +1591,7 @@ describe("root shortcuts accept the same flags as their auth subcommands", () =>
 });
 
 // ---------------------------------------------------------------------------
-// 18: --debug never leaks a secret
+// 19: --debug never leaks a secret
 // ---------------------------------------------------------------------------
 
 function findDebugLog(): string {
