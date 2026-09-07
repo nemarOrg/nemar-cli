@@ -264,7 +264,8 @@ Named API keys (list/mint/revoke, plus the device flow's paste-key fallback) liv
 Three files: `backend/src/routes/auth-device.ts`, `backend/src/routes/auth-keys.ts`,
 and the shared SQL/helpers in `backend/src/services/device-auth.ts`.
 The CLI half (epic #1272 phase 3, #1283) is `src/lib/device-login.ts` plus `src/commands/auth.ts`:
-`nemar auth login`/`signup` run this flow by default (`-k`/`--key` pastes a key instead),
+`nemar auth login`/`signup` run this flow by default (`login` alone also takes `-k`/`--key`
+to paste an existing key instead),
 a re-login on the same machine best-effort revokes its own previous device-sourced key,
 `nemar auth logout` revokes it back by default (never a pasted or password-era one),
 and `nemar auth keys` manages the whole set.
@@ -583,7 +584,7 @@ and what is historical. The entries worth knowing by name:
 
 | Group | Covers |
 |---|---|
-| `nemar auth` | login, signup (both browser device sign-in by default, `-k`/`--key` to paste a key — ADR 0047), status/whoami, keys (list/create/revoke this account's named API keys), profile (plus `set-email`/`verify-email`, `set-github`, `set-username`, `set-name`, `set-location`, `orcid link\|relink\|unlink` — ADR 0044), request-upload-access, switch, logout, verification, SSH setup, deprecated password-era key retrieval and regeneration |
+| `nemar auth` | login (browser device sign-in by default, `-k`/`--key` to paste a key instead — ADR 0047), signup (browser device sign-in, no `-k`/`--key`), status/whoami, keys (list/create/revoke this account's named API keys), profile (plus `set-email`/`verify-email`, `set-github`, `set-username`, `set-name`, `set-location`, `orcid link\|relink\|unlink` — ADR 0044), request-upload-access, switch, logout, verification, SSH setup, deprecated password-era key retrieval and regeneration |
 | `nemar dataset` | validate, upload, download, status (alias: view), list, search, release, update, clone, get, commit, push, drop, ci, manifest |
 | `nemar dataset publish` | request, status, resend |
 | `nemar dataset` (access) | request-access, access, invite, collaborators |

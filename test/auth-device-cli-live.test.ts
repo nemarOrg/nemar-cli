@@ -6,8 +6,9 @@
  * routes.
  *
  * Targets a deployed backend (set TEST_API_URL; defaults to api.nemar.org
- * per test/setup.ts). The dev worker deploys only from `dev` (AGENTS.md
- * release pipeline), so this phase's CLI-facing wiring is not guaranteed to
+ * per test/setup.ts). The dev worker deploys only from `dev`
+ * (.github/workflows/deploy-backend.yml's push trigger), so this phase's
+ * CLI-facing wiring is not guaranteed to
  * be live on whatever backend TEST_API_URL points at until the epic branch
  * reaches dev. This file probes `POST /auth/device/start` first; a 404
  * means the routes are not deployed yet, and every case below skips itself
@@ -114,9 +115,9 @@ beforeAll(async () => {
   if (!deviceRoutesDeployed) {
     console.warn(
       "[auth-device-cli-live] SKIPPING every case: POST /auth/device/start answered 404. " +
-        "The dev worker deploys only from `dev` (AGENTS.md release pipeline), so this " +
-        "phase's routes are not live on the backend TEST_API_URL points at yet -- " +
-        "expected until the epic branch reaches dev.",
+        "The dev worker deploys only from `dev` (.github/workflows/deploy-backend.yml's " +
+        "push trigger), so this phase's routes are not live on the backend TEST_API_URL " +
+        "points at yet -- expected until the epic branch reaches dev.",
     );
   }
 });

@@ -116,7 +116,7 @@ const isCompletionRequest = findCompletionArgsStart(rawArgs) !== null;
  * synchronous by construction for exactly this reason (see its docstring).
  *
  * Exit code 130 (128 + SIGINT) is a fourth self-explanatory case, alongside
- * `--json`/usage exits (epic #1272 phase 3, decision 4): a Ctrl-C during
+ * `--json`/usage exits (epic #1272 phase 3): a Ctrl-C during
  * `nemar auth login`'s device-flow poll (lib/device-login.ts) already
  * printed its own "Sign-in cancelled" sentence, and nothing about walking
  * away from a prompt is evidence of a bug worth a debug log's nudge. The

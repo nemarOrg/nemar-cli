@@ -8,8 +8,8 @@
  * for every OTHER outcome: {@link describeDeviceOutcome} is the one place
  * that wording lives.
  *
- * Headless-first (decision 2): the printed URL is the mechanism, a browser
- * is only a convenience. No display detection -- see AGENTS.md "CLI sign-in".
+ * Headless-first: the printed URL is the mechanism, a browser is only a
+ * convenience. No display detection -- see AGENTS.md "CLI sign-in".
  */
 
 import { hostname } from "node:os";
@@ -62,7 +62,7 @@ export function machineName(): string {
  * server cannot be reached to say so itself. Pure, and built from RELATIVE
  * values (`expiresIn` seconds counted from `startedAt`, never an absolute
  * server timestamp) so it is immune to clock skew between this machine and
- * the API (decision 3). The grace window matches the one `confirm` itself
+ * the API. The grace window matches the one `confirm` itself
  * extends a near-expiry code by (ADR 0047) so a person who authorizes in the
  * closing seconds of the window is not cut off locally before the server's
  * own `expired_token` answer would arrive -- this cutoff exists only for the
@@ -100,7 +100,7 @@ export function describeDeviceOutcome(
   switch (outcome.kind) {
     case "cancelled":
       // Exit code 130 (128 + SIGINT), not a bare 1: `main().catch` and the
-      // exit hook's bug-report nudge both special-case it (decision 4).
+      // exit hook's bug-report nudge both special-case it.
       return {
         lines: ["Sign-in cancelled. Run `nemar auth login` to try again."],
         exitCode: 130,
@@ -154,9 +154,9 @@ function describePollError(error: unknown): string {
   return errorDetail(error);
 }
 
-/** `AbortSignal.any` where Bun has it; a hand-composed controller otherwise
- *  (decision 3). Only ever combines two signals here (the SIGINT controller
- *  and one request's own timeout), so the fallback need not generalize. */
+/** `AbortSignal.any` where Bun has it; a hand-composed controller otherwise.
+ *  Only ever combines two signals here (the SIGINT controller and one
+ *  request's own timeout), so the fallback need not generalize. */
 function combineSignals(signals: AbortSignal[]): AbortSignal {
   if (typeof AbortSignal.any === "function") return AbortSignal.any(signals);
   const controller = new AbortController();
@@ -197,7 +197,7 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
  * A SIGINT handler is installed for exactly this stretch (`process.on`
  * before the loop, `process.off` in `finally`) and aborts both the sleep
  * and the in-flight fetch through one `AbortController` -- never calls
- * `process.exit` itself (decision 4); the caller (`loginAction`/
+ * `process.exit` itself; the caller (`loginAction`/
  * `signupAction`) is what sets `process.exitCode` from
  * {@link describeDeviceOutcome}, so the exit hook still runs and still
  * writes the debug log.
@@ -303,8 +303,8 @@ export interface RunDeviceLoginOptions {
 /**
  * Mint a device code, print it, try the browser, then poll for the key.
  *
- * The URL comes first and is the whole mechanism (decision 2): a headless
- * host is the CLI's normal case, not a fallback path, so nothing here waits
+ * The URL comes first and is the whole mechanism: a headless host is the
+ * CLI's normal case, not a fallback path, so nothing here waits
  * on whether a browser attempt looks like it worked.
  */
 export async function runDeviceLogin(

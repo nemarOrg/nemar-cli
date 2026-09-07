@@ -105,21 +105,21 @@ pointing at `nemar auth login` as the replacement for both.
 Phase 3's local config keys an account by `accountKeyFor(user) = username?.trim() || email`,
 since a brand-new ORCID account's `username` is `null` at collection time (this decision's own point above).
 `upsertAccount` merges a re-login into whatever entry it finds by that key OR by email,
-so an account that was stored under its email (no username yet) is found and renamed rather than duplicated
-the moment the server starts reporting a username --
+so an account that was stored under its email (no username yet) is found and renamed rather than duplicated the moment the server starts reporting a username --
 `dismissedNoticeIds`, `profileGaps`, `orcidVerified`, and `serviceAccess` all survive the merge intact.
-A re-login on the SAME machine also mints a new device key every time (the token endpoint keeps no memory of "this machine already has one"),
+A re-login on the SAME machine also mints a new device key every time
+(the token endpoint keeps no memory of "this machine already has one"),
 so phase 3 best-effort revokes the machine's OWN previous key with the newly collected bearer, after the local config write lands --
 never a pasted or password-era key, which by definition is not this machine's alone to kill.
 The revoke is attempted even when the preflight probe already found the OLD key dead --
 a repeat revoke of an already-gone row is harmless and caught the same way any other failure is --
 what that foreknowledge skips is only the "(replaced this machine's previous key)" confirmation line,
 since nothing was meaningfully replaced by revoking a key that was already dead.
-Left unbounded, a script that re-runs `nemar auth login` would otherwise mint a fresh row per invocation until the 25-key cap.
+Left unbounded, a script that re-runs `nemar auth login` would otherwise mint a fresh row per invocation until the `MAX_LIVE_API_KEYS` cap (25).
 
 The CLI's config file now always holds a live API key rather than a password hash on every account it stores,
 so `getStore()` writes it `configFileMode: 0o600` (honoured by `conf` 13's `atomically` writer regardless of umask)
-and migrates an existing file an older build left at `conf`'s pre-13 default (0o666) to 0600 on first use, non-Windows only.
+and migrates an existing file an older build left at `conf`'s default file mode (0o666, unrelated to the conf version) to 0600 on first use, non-Windows only.
 
 ## Alternatives considered
 

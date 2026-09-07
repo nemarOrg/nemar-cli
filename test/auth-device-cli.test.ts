@@ -1780,10 +1780,10 @@ describe("--debug", () => {
 });
 
 // ---------------------------------------------------------------------------
-// confirm()'s non-interactive guard (decision 13): the --key path is the
-// only one that still asks a question (decision 8), so it is the one place
-// a removed isTTY guard would surface as an inquirer crash under a closed
-// stdin instead of a graceful decline.
+// confirm()'s non-interactive guard: the --key path is the only one that
+// still asks a question, so it is the one place a removed isTTY guard would
+// surface as an inquirer crash under a closed stdin instead of a graceful
+// decline.
 // ---------------------------------------------------------------------------
 
 describe("nemar auth login --key: the 'add a different account?' prompt", () => {

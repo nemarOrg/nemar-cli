@@ -79,8 +79,8 @@ describe("pollDeadlineMs", () => {
   test("is built from relative values, so it does not depend on wall-clock time", () => {
     // Two different "now" values with the same relative expiresIn produce
     // deadlines offset by exactly the difference between them -- proving the
-    // computation never reads Date.now() itself (clock-skew immunity,
-    // decision 3), only the `startedAt` it was handed.
+    // computation never reads Date.now() itself (clock-skew immunity), only
+    // the `startedAt` it was handed.
     const a = pollDeadlineMs(5_000, 300);
     const b = pollDeadlineMs(5_000 + 42_000, 300);
     expect(b - a).toBe(42_000);

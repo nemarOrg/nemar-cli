@@ -27,6 +27,15 @@ import { dlog } from "./debug-log.js";
 export const DEFAULT_API_URL = "https://api.nemar.org";
 
 /**
+ * The config file's permission bits (epic #1272 phase 3): the config holds
+ * a live API key, so it is owner-read-write only, never group/world
+ * readable. Used both for WRITES conf itself makes (`configFileMode` in
+ * `getStore()`) and for migrating a file an older build already wrote under
+ * conf's default file mode (`secureConfigFile`).
+ */
+const CONFIG_FILE_MODE = 0o600;
+
+/**
  * Hosts that pointed at NEMAR backends before the SCCN cutover and are now
  * either retired or stuck in MAINTENANCE_MODE. migrateApiUrl() rewrites any
  * stored apiUrl matching one of these (after trailing-slash and host-case
@@ -308,7 +317,7 @@ function getStore(): Conf<StoreSchema> {
     // this regardless of umask, writing through `atomically` (secureConfigFile
     // below migrates a file an OLDER build already wrote with conf's 0o666
     // default).
-    configFileMode: 0o600,
+    configFileMode: CONFIG_FILE_MODE,
     schema: {
       activeAccount: { type: "string" },
       accounts: { type: "object" },
@@ -348,22 +357,23 @@ function getStore(): Conf<StoreSchema> {
 }
 
 /**
- * chmod an on-disk config.json to 0600 if its mode differs, on non-Windows
- * platforms only (epic #1272 phase 3): `configFileMode` above only governs
- * WRITES conf itself makes, so a password-era file an older build wrote
- * under conf's pre-13-configured 0o666 default stays world-readable until
- * something rewrites it -- this migrates it in place on first use instead of
- * waiting for the next `setConfig` call, which might be a long way off for a
- * dormant account. The key inside keeps working either way; only the file's
- * permission bits change. Best-effort: a chmod failure (read-only mount,
- * permissions) is logged and never blocks CLI startup.
+ * chmod an on-disk config.json to CONFIG_FILE_MODE if its mode differs, on
+ * non-Windows platforms only (epic #1272 phase 3): `configFileMode` above
+ * only governs WRITES conf itself makes, so a password-era file an older
+ * build wrote under conf's default file mode (0o666, unrelated to the conf
+ * version) stays world-readable until something rewrites it -- this
+ * migrates it in place on first use instead of waiting for the next
+ * `setConfig` call, which might be a long way off for a dormant account.
+ * The key inside keeps working either way; only the file's permission bits
+ * change. Best-effort: a chmod failure (read-only mount, permissions) is
+ * logged and never blocks CLI startup.
  */
 function secureConfigFile(path: string): void {
   if (process.platform === "win32") return;
   if (!existsSync(path)) return;
   try {
     const mode = statSync(path).mode & 0o777;
-    if (mode !== 0o600) chmodSync(path, 0o600);
+    if (mode !== CONFIG_FILE_MODE) chmodSync(path, CONFIG_FILE_MODE);
   } catch (err) {
     console.error(`[nemar] could not secure config file permissions for ${path}:`, err);
   }
@@ -653,9 +663,10 @@ export function findAccountKeyByEmail(email: string): string | undefined {
 }
 
 /** What {@link upsertAccount} merged into, if anything -- how a caller (e.g.
- *  `writeSignedInAccount`'s same-machine-key-replacement, decision 7) learns
- *  the PRE-merge state to compare a freshly minted key against. `undefined`
- *  means the entry did not exist before this call. */
+ *  `writeSignedInAccount`'s same-machine-key-replacement, ADR 0047: a
+ *  re-login on the same machine revokes and replaces its previous device
+ *  key) learns the PRE-merge state to compare a freshly minted key against.
+ *  `undefined` means the entry did not exist before this call. */
 export interface UpsertAccountResult {
   /** The map key the account now lives under (always `key`, echoed for
    *  convenience at call sites that destructure the result). */

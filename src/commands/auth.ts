@@ -112,10 +112,12 @@ Workflow:
   3. nemar sandbox        - Complete sandbox training before your first upload
 
 Keys:
-  Every 'nemar auth login' names a key for the machine it runs on
-  (list/create/revoke the whole set with 'nemar auth keys'). 'retrieve-key'
-  and 'regenerate-key' still work for a password-era account but are
-  deprecated; 'nemar auth login' is the replacement for both.
+  Every browser-based 'nemar auth login' names a key for the machine it
+  runs on (list/create/revoke the whole set with 'nemar auth keys'); the
+  -k/--key or NEMAR_API_KEY path stores the key you paste and mints
+  nothing new. 'retrieve-key' and 'regenerate-key' still work for a
+  password-era account but are deprecated; 'nemar auth login' is the
+  replacement for both.
 
 Examples:
   $ nemar auth signup                    # Sign in with your browser; complete your profile
@@ -334,15 +336,15 @@ async function writeSignedInAccount(
   }
 
   // A re-login on the SAME machine replaces its key, so a run never mints a
-  // row per invocation until the 25-key cap. Only when the merge landed on
-  // an existing entry that already held a DIFFERENT "device"-sourced key --
-  // a pasted or password-era key belongs to more than this one machine by
-  // definition, and is never revoked here. The revoke is attempted even
-  // when the preflight probe already found the stored key dead (a repeat
-  // revoke of an already-gone row is harmless, caught below like any other
-  // failure) -- what that foreknowledge skips is only the confirmation
-  // line, since there is nothing meaningfully "replaced" about a key that
-  // was already dead.
+  // row per invocation until the MAX_LIVE_API_KEYS cap. Only when the merge
+  // landed on an existing entry that already held a DIFFERENT
+  // "device"-sourced key -- a pasted or password-era key belongs to more
+  // than this one machine by definition, and is never revoked here. The
+  // revoke is attempted even when the preflight probe already found the
+  // stored key dead (a repeat revoke of an already-gone row is harmless,
+  // caught below like any other failure) -- what that foreknowledge skips
+  // is only the confirmation line, since there is nothing meaningfully
+  // "replaced" about a key that was already dead.
   if (
     keyInfo.source === "device" &&
     previous?.keySource === "device" &&
@@ -374,9 +376,9 @@ async function writeSignedInAccount(
   });
 }
 
-/** Print a non-success device-flow outcome and set the exit code
- *  (decision 4: 130 for a cancel, 1 for anything else). `login` and
- *  `signup` both funnel through this so a failure reads identically. */
+/** Print a non-success device-flow outcome and set the exit code (130 for a
+ *  cancel, 1 for anything else). `login` and `signup` both funnel through
+ *  this so a failure reads identically. */
 function printDeviceOutcomeFailure(
   outcome: Exclude<DeviceLoginOutcome, { kind: "success" }>,
 ): void {
@@ -431,8 +433,8 @@ export async function loginAction(
     });
 
     if (pastedKey) {
-      // --key / NEMAR_API_KEY (decision 1, 8): the one path that still asks
-      // a question. Its "identity" is just a string on the command line, so
+      // --key / NEMAR_API_KEY is the one path that still asks a question.
+      // Its "identity" is just a string on the command line, so
       // unlike the device flow it cannot establish for itself whether this
       // is the same account signing back in or a different one being added.
       if (preflight.kind === "active") {
@@ -456,8 +458,8 @@ export async function loginAction(
         console.log(chalk.dim("  Enter your new key below to re-authenticate."));
       }
     } else if (preflight.kind === "active") {
-      // Device path: one notice, never a question (decision 8) -- the
-      // browser step is where identity is actually established.
+      // Device path: one notice, never a question -- the browser step is
+      // where identity is actually established.
       console.log(
         chalk.yellow(
           `Already signed in as ${preflight.username}; signing in again refreshes this machine's key.`,
@@ -490,7 +492,7 @@ export async function loginAction(
 }
 
 /** The `--key`/`NEMAR_API_KEY` path: validate a pasted key with the backend
- *  before writing anything (decision 1). */
+ *  before writing anything. */
 async function loginWithPastedKey(apiKey: string, oldKeyKnownDead: boolean): Promise<void> {
   const spinner = ora("Validating API key...").start();
 
@@ -562,7 +564,7 @@ Examples:
 );
 
 // ============================================================================
-// Signup (decision 9, epic #1272 phase 3; ADR 0045: one rule)
+// Signup (epic #1272 phase 3; ADR 0045: one rule)
 // ============================================================================
 //
 // The account itself is created by the device flow's browser step (ORCID
@@ -570,11 +572,13 @@ Examples:
 // and no typed ORCID iD -- signup IS login, plus a few questions afterward
 // for whatever `profile_gaps` says is still missing.
 
-/** Prints the one line decision 9 requires and returns `true` when stdin
- *  cannot prompt and at least one answer is still needed -- checked BEFORE
- *  any `inquirer.prompt` call in the flow below. inquirer 9 under a closed
- *  stdin does not reject; it dies with an internal stack trace at process
- *  exit, so this has to be knowable without ever calling it. */
+/** Prints one line naming what is still missing and returns `true` when
+ *  stdin cannot prompt and at least one answer is still needed -- checked
+ *  BEFORE any `inquirer.prompt` call in the flow below, for the same reason
+ *  `confirm()` in lib/confirm.ts checks its own non-interactive guard up
+ *  front rather than relying on a catch: under `stdin: "ignore"` inquirer's
+ *  prompt never settles at all, so a failure this early has to be knowable
+ *  without ever calling it. */
 function guardNonInteractive(pendingFlags: string[]): boolean {
   if (pendingFlags.length === 0 || process.stdin.isTTY) return false;
   console.log(chalk.yellow(`Provide ${pendingFlags.join(", ")} (this terminal cannot prompt).`));
@@ -607,8 +611,9 @@ async function promptForRequired(message: string): Promise<string> {
 /**
  * Guided completion after the device flow signs into a fresh (or returning)
  * account: fetch the live profile, fill in what the CLI can set --
- * username, GitHub handle, city, country, exactly decision 9's list -- via
- * flag or prompt in ONE `PATCH /auth/profile`, request upload access unless
+ * username, GitHub handle, city, country, exactly `PROFILE_GAP_MATRIX`'s CLI
+ * fields (ADR 0045) -- via flag or prompt in ONE `PATCH /auth/profile`,
+ * request upload access unless
  * `--no-upload-access`, then print whatever is still outstanding through
  * `printProfileGaps`. `profile_gaps` IS the checklist: the same one `nemar
  * auth status` and a refused upload-access request already read, so this
@@ -750,8 +755,10 @@ export async function signupAction(
   }
   // The stored-key preflight above never runs for a fresh signup on an
   // authenticated-from-scratch machine, so there is no "old key" to skip
-  // revoking (decision 7's `oldKeyKnownDead` is only ever meaningful when a
-  // stale key was already probed).
+  // revoking -- `oldKeyKnownDead` (ADR 0047: the revoke is attempted even
+  // when the preflight probe already found the old key dead; it only skips
+  // the confirmation line) is only ever meaningful when a stale key was
+  // already probed.
   await writeSignedInAccount(
     outcome.user,
     outcome.api_key,
@@ -801,8 +808,8 @@ Examples:
 // ============================================================================
 
 /**
- * The `Key:` line (decision 14, epic #1272 phase 3): what this machine's
- * stored credential IS, so a person can tell a browser-minted key from a
+ * The `Key:` line (epic #1272 phase 3): what this machine's stored
+ * credential IS, so a person can tell a browser-minted key from a
  * pasted one without running `nemar auth keys`. `undefined` when there is
  * no stored key at all (statusAction already returns before reaching this
  * for that case, but the guard keeps the function honest on its own).
@@ -1113,8 +1120,8 @@ Examples:
 // ============================================================================
 
 /**
- * Best-effort revoke of the ACTIVE account's key (decision 10, epic #1272
- * phase 3, ADR 0047).
+ * Best-effort revoke of the ACTIVE account's key (epic #1272 phase 3, ADR
+ * 0047).
  *
  * Default: revoke only a `"device"`-sourced key -- a pasted or password-era
  * key is by definition not this machine's alone to kill, so it is kept and
@@ -1408,9 +1415,9 @@ Examples:
 // Retrieve Key (after email verification)
 // ============================================================================
 
-/** Decision 12, epic #1272 phase 3: the password-era key commands survive
- *  this release, but say so on every invocation before the first prompt --
- *  ADR 0047's deferred call on `confirm-key-regeneration` is now this. */
+/** Epic #1272 phase 3 (ADR 0047: `retrieve-key` and `regenerate-key` survive
+ *  this release, each printing a deprecation sentence before its first
+ *  prompt). */
 const PASSWORD_ERA_DEPRECATION =
   "Password sign-in is deprecated and will be removed in the next release; run `nemar auth login`.";
 
@@ -1488,6 +1495,10 @@ addVerboseHelp(
   retrieveKeyCmd,
   `
 Description:
+  Deprecated: password sign-in is being removed in favor of 'nemar auth
+  login' (browser device sign-in). This command still works for a
+  password-era account in the meantime.
+
   Once you have verified your email address, use this command to securely
   retrieve your API key. You will need the email and password you used
   during signup. No admin approval is needed for the key; approval is the
@@ -1558,11 +1569,16 @@ addVerboseHelp(
   regenerateKeyCmd,
   `
 Description:
+  Deprecated: password sign-in is being removed in favor of 'nemar auth
+  login' (browser device sign-in). This command still works for a
+  password-era account in the meantime.
+
   If you lost your API key or it was compromised, use this command to
   request a new one. A verification email will be sent to confirm the
   request. Clicking the link will:
 
-  1. Revoke your current API key
+  1. Revoke your current API key ON EVERY MACHINE, not just this one --
+     use 'nemar auth keys revoke' instead to remove only one machine's key
   2. Generate a new API key (shown in the browser)
   3. You will need to login again with the new key
 
@@ -1622,7 +1638,7 @@ export function validateUploadAccessWhy(input: string | undefined): true | strin
 /**
  * `POST /users/me/upload-access/request`, and every line of its rendering --
  * shared by `nemar auth request-upload-access` and `nemar auth signup`'s
- * guided completion (decision 9, epic #1272 phase 3) so the two say exactly
+ * guided completion (epic #1272 phase 3) so the two say exactly
  * the same thing about the same request rather than two near-identical
  * copies drifting apart. Sets `process.exitCode = 1` on any failure; never
  * throws.
@@ -1866,8 +1882,10 @@ addVerboseHelp(
   keysCmd,
   `
 Description:
-  Every named key on this account: one minted per machine by 'nemar auth
-  login', plus any created here for a machine that cannot open a browser.
+  Every named key on this account: one minted per machine by a
+  browser-based 'nemar auth login' (the -k/--key or NEMAR_API_KEY path
+  stores the key you paste and mints nothing new), plus any created here
+  for a machine that cannot open a browser.
 
   'nemar auth login'/'logout' already cover the common case -- this
   machine's own key; use this group to look at or manage the whole set.
