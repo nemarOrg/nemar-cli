@@ -105,7 +105,15 @@ export const _cachedProfileGapIsRenderable: GapFieldsStayOptional<
   z.infer<typeof cachedProfileGapSchema>
 > = true;
 
-// Per-account configuration schema
+// Per-account configuration schema. Key-tagging fields (keyId/keyName/
+// keyCreatedAt/keySource) are declared separately, below, as a hand-written
+// discriminated union rather than zod fields here: zod 3's
+// discriminatedUnion requires a ZodLiteral on every branch, and a
+// password-era account's discriminant VALUE is "absent entirely", which
+// ZodLiteral cannot express. Nothing calls `.parse()`/`.safeParse()` on this
+// schema at runtime (searched -- it exists only for `z.infer`), so the split
+// costs nothing there; TypeScript enforces the invariant on `Config`
+// instead, below.
 const accountSchema = z.object({
   apiKey: z.string().optional(),
   apiUrl: z.string().url().default(DEFAULT_API_URL),
@@ -162,35 +170,51 @@ const accountSchema = z.object({
    * both the address and the account and simply will not verify.
    */
   pendingEmailChange: z.string().email().optional(),
-  /**
-   * The named key this machine currently holds (epic #1272 phase 3; ADR
-   * 0047): the row id, its `name` (the machine name at mint time, e.g. from
-   * `os.hostname()`), and when it was minted. `nemar auth status` prints
-   * them as the `Key:` line, and `keyId`/`keySource` together are what
-   * `loginAction` compares against a fresh mint to decide whether a
-   * same-machine re-login should revoke the OLD row (decision 7: only ever
-   * a `"device"`-sourced key, never a pasted or password-era one).
-   */
-  keyId: z.number().int().optional(),
-  keyName: z.string().nullable().optional(),
-  keyCreatedAt: z.string().optional(),
-  /**
-   * How this account's CURRENT key was obtained: minted by the device flow's
-   * browser confirm, or pasted with `--key` / `NEMAR_API_KEY` (validated by
-   * `POST /auth/login` before the write). Absent means a password-era key
-   * predating both -- `nemar auth status`'s `Key:` line and `logoutAction`'s
-   * revoke-on-logout default (decision 10: only a `"device"` key is revoked
-   * automatically, since a pasted or password-era key may be shared with
-   * other machines) both read this to tell the three apart.
-   */
-  keySource: z.enum(["device", "paste"]).optional(),
 });
+type AccountBaseFields = z.infer<typeof accountSchema>;
 
-export type Config = z.infer<typeof accountSchema>;
+/**
+ * How this account's CURRENT key was obtained (epic #1272 phase 3; ADR
+ * 0047), tagged as a discriminated union so the fields a `"device"` key
+ * needs are a COMPILE-TIME requirement rather than a convention each reader
+ * has to remember on its own:
+ *
+ * - `"device"` -- minted by the device flow's browser confirm. Always
+ *   carries the row id, its `name` at mint time (itself nullable -- a key
+ *   minted with no name), and when it was minted. `nemar auth status`'s
+ *   `Key:` line (`describeStoredKey`) and the same-machine-replace check in
+ *   `writeSignedInAccount` both read all three together.
+ * - `"paste"` -- pasted with `--key` / `NEMAR_API_KEY` and validated by
+ *   `POST /auth/login` rather than minted here, so there is no row this
+ *   machine named: carries none of the three.
+ * - absent entirely -- a password-era account predating both paths.
+ *
+ * `logoutAction`'s revoke-on-logout default reads `keySource` alone to tell
+ * the three apart (only a `"device"` key is revoked automatically, since a
+ * pasted or password-era key may be shared with other machines).
+ */
+export type KeyFields =
+  | { keySource?: undefined; keyId?: undefined; keyName?: undefined; keyCreatedAt?: undefined }
+  | { keySource: "paste"; keyId?: undefined; keyName?: undefined; keyCreatedAt?: undefined }
+  | { keySource: "device"; keyId: number; keyName: string | null; keyCreatedAt: string };
 
-/** Summary of a stored account for listing */
+export type Config = AccountBaseFields & KeyFields;
+
+/**
+ * Summary of a stored account for listing.
+ *
+ * `key` is the accounts-map key this entry actually lives under (epic
+ * #1272 phase 3) -- the same string {@link accountKeyFor} would produce
+ * (a username, or an email when there is no username yet). `username` is
+ * now honestly optional: an entry keyed by email has none, and reporting
+ * the map key AS a username (the pre-phase-3 behavior) mislabeled an email
+ * address as one. Every consumer that looks an account up or switches to
+ * it must use `key`, not `username` -- that is the field `switchAccount`
+ * and `renameActiveAccount` actually index by.
+ */
 export interface AccountInfo {
-  username: string;
+  key: string;
+  username?: string;
   email?: string;
   githubUsername?: string;
   active: boolean;
@@ -572,7 +596,8 @@ export function getAccounts(): AccountInfo[] {
   const accounts = getAccountsMap();
   const active = getActiveAccountName();
   return Object.entries(accounts).map(([name, acct]) => ({
-    username: acct.username || name,
+    key: name,
+    username: acct.username,
     email: acct.email,
     githubUsername: acct.githubUsername,
     active: name === active,
@@ -652,7 +677,10 @@ export interface UpsertAccountResult {
  * a real `nemar auth login` on a developer's own machine would otherwise
  * write is exactly the failure this avoids.
  */
-export function upsertAccount(key: string, patch: Partial<Config>): UpsertAccountResult {
+export function upsertAccount(
+  key: string,
+  patch: Partial<AccountBaseFields> & KeyFields,
+): UpsertAccountResult {
   const config = getStore();
   const accounts = getAccountsMap();
 
@@ -664,7 +692,16 @@ export function upsertAccount(key: string, patch: Partial<Config>): UpsertAccoun
   }
 
   const existing = sourceKey ? accounts[sourceKey] : undefined;
-  const merged: Config = { ...(existing ?? { apiUrl: DEFAULT_API_URL }), ...patch };
+  // Spreading `patch` over `existing` (or a fresh default) is runtime-correct
+  // for the tagged key fields even though TypeScript cannot verify it through
+  // two combined union operands: `patch` is always a single matched KeyFields
+  // branch (enforced by its own parameter type at every call site), and JS's
+  // presence-vs-absence spread semantics already give the right answer -- a
+  // field `patch` never mentions preserves `existing`'s value (the MERGE this
+  // function's own doc comment above describes), while one `patch` sets, even
+  // to `undefined` (how a "paste" login clears a stale device key), overwrites
+  // it.
+  const merged = { ...(existing ?? { apiUrl: DEFAULT_API_URL }), ...patch } as Config;
 
   if (sourceKey && sourceKey !== key) {
     delete accounts[sourceKey];

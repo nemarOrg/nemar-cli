@@ -999,6 +999,49 @@ describe("nemar auth login --key", () => {
     }
   });
 
+  test("pasting a key over an existing device-sourced account clears its stale key fields", async () => {
+    seedConfig({
+      activeAccount: "ada",
+      accounts: {
+        ada: {
+          apiKey: "nm_stale_device_key_0123456789",
+          username: "ada",
+          email: "ada@example.org",
+          keySource: "device",
+          keyId: 42,
+          keyName: "old-laptop",
+          keyCreatedAt: "2025-01-01T00:00:00Z",
+        },
+      },
+    });
+    const server = startDeviceServer({
+      interval: 1,
+      // The preflight probe (called with the OLD stored key) must fail so
+      // this routes through the no-confirmation "stale" path rather than
+      // "active", which would otherwise block on an "Add a different
+      // account?" prompt this test never answers.
+      login: (apiKey) =>
+        apiKey === "nm_pasted_key_0123456789abcdef"
+          ? { status: 200, body: { valid: true, user: defaultUser() } }
+          : { status: 401, body: { error: "Invalid or expired API key" } },
+    });
+    try {
+      const result = await run(
+        ["auth", "login", "--key", "nm_pasted_key_0123456789abcdef"],
+        server.url,
+      );
+      expect(result.exitCode).toBe(0);
+      const account = storedAccounts().ada;
+      expect(account.keySource).toBe("paste");
+      expect(account.keyId).toBeUndefined();
+      expect(account.keyName).toBeUndefined();
+      expect(account.keyCreatedAt).toBeUndefined();
+      expect(account.apiKey).toBe("nm_pasted_key_0123456789abcdef");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("a returning trained account's sandbox_dataset_id is cached", async () => {
     const server = startDeviceServer({
       interval: 1,
@@ -1211,6 +1254,44 @@ describe("nemar auth logout", () => {
       activeAccount: "ada",
       accounts: {
         ada: { apiKey: "nm_ada_device_key_0123456789ab", username: "ada", keySource: "device" },
+        bob: { apiKey: "nm_bob_device_key_0123456789ab", username: "bob", keySource: "device" },
+      },
+    });
+    const bearers: string[] = [];
+    const server = startDeviceServer({
+      interval: 1,
+      token: [{ kind: "success" }],
+      keysRevoke: (id, headers) => {
+        bearers.push(headers.authorization ?? "");
+        return { status: 200, body: { ok: true } };
+      },
+    });
+    try {
+      const result = await run(["auth", "logout", "-y", "--all"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(bearers.sort()).toEqual(
+        ["Bearer nm_ada_device_key_0123456789ab", "Bearer nm_bob_device_key_0123456789ab"].sort(),
+      );
+      expect(Object.keys(readRawAccounts())).toEqual([]);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("--all reaches an email-keyed account too, not just ones whose key equals their username", async () => {
+    // A regression fixture on purpose: an entry keyed by EMAIL (no username)
+    // alongside one keyed by username, so a loop that switches by
+    // `account.username` instead of the accounts-map key silently skips the
+    // first one -- `switchAccount(undefined)` finds nothing, its key is
+    // never revoked, and it survives in accounts.json after "logged out".
+    seedConfig({
+      activeAccount: "ada@example.org",
+      accounts: {
+        "ada@example.org": {
+          apiKey: "nm_ada_device_key_0123456789ab",
+          email: "ada@example.org",
+          keySource: "device",
+        },
         bob: { apiKey: "nm_bob_device_key_0123456789ab", username: "bob", keySource: "device" },
       },
     });

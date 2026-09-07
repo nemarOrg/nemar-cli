@@ -52,6 +52,7 @@ import { ApiError, MaintenanceError, errorDetail } from "../lib/api/errors.js";
 import { openInBrowser } from "../lib/browser.js";
 import { printStepFailure } from "../lib/cli-output.js";
 import {
+  type KeyFields,
   accountKeyFor,
   clearAllConfig,
   clearConfig,
@@ -223,20 +224,24 @@ function applyServerUser(user: {
 /**
  * Write a successful sign-in's credential to disk and print the welcome
  * block -- the one place `loginAction`'s device and `--key` paths converge
- * (decision 5-7, ADR 0047).
+ * (ADR 0047).
  *
- * `key` is the minted key's summary (device path) or `null` (a pasted key
- * was not just minted, so there is no row to name); `keyId`/`keyName`/
- * `keyCreatedAt` are explicitly cleared (set to `undefined`, which
- * `upsertAccount`'s JSON write drops) rather than left stale from a
- * previous device login on this same machine when `key` is null.
+ * `keyInfo` ties `source` and the minted key TOGETHER as one tagged value
+ * (matching `Config`'s own `KeyFields` shape in lib/config.ts) instead of
+ * two separately-typed parameters that happened to always agree at every
+ * call site: a `"device"` login always carries the row `POST
+ * /auth/device/token` just minted, and a `"paste"` login never mints one,
+ * so there is nothing to make invalid states of "device with no key"
+ * representable for. `upsertAccount`'s merge still explicitly clears
+ * `keyId`/`keyName`/`keyCreatedAt` on the `"paste"` branch (set to
+ * `undefined`, which its JSON write drops) rather than leaving them stale
+ * from a previous device login on this same machine.
  *
  * `oldKeyKnownDead` comes from the preflight probe this action already ran:
  * when it already confirmed the STORED key was dead, the revoke below is
  * still attempted (best-effort; a repeat revoke of an already-gone row is
  * harmless), but the "(replaced...)" confirmation line is skipped -- there
- * is nothing meaningfully replaced about a key that was already dead
- * (decision 7).
+ * is nothing meaningfully replaced about a key that was already dead.
  */
 async function writeSignedInAccount(
   user: {
@@ -248,18 +253,27 @@ async function writeSignedInAccount(
     sandbox_dataset_id?: string | null;
   },
   apiKey: string,
-  key: ApiKeySummary | null,
-  source: "device" | "paste",
+  keyInfo: { source: "device"; key: ApiKeySummary } | { source: "paste" },
   oldKeyKnownDead: boolean,
 ): Promise<void> {
   const accountKey = accountKeyFor(user);
+  const keyFields: KeyFields =
+    keyInfo.source === "device"
+      ? {
+          keySource: "device",
+          keyId: keyInfo.key.id,
+          keyName: keyInfo.key.name,
+          keyCreatedAt: keyInfo.key.created_at,
+        }
+      : // Explicitly present-but-undefined, not merely omitted: a pasted key
+        // replaces whatever this account's key WAS, so a stale keyId/keyName/
+        // keyCreatedAt from a previous device login on this same machine must
+        // be cleared, not left referring to a key that is no longer current.
+        { keySource: "paste", keyId: undefined, keyName: undefined, keyCreatedAt: undefined };
   const { previous } = upsertAccount(accountKey, {
     apiKey,
     email: user.email,
-    keySource: source,
-    keyId: key?.id,
-    keyName: key?.name ?? undefined,
-    keyCreatedAt: key?.created_at,
+    ...keyFields,
   });
   applyServerUser(user);
 
@@ -268,7 +282,7 @@ async function writeSignedInAccount(
   // this phase: a person pasting a key already holds an account. The
   // device path is the new first-time-or-returning browser flow, and gets
   // the plain "Welcome" this phase introduced.
-  const greeting = source === "paste" ? "Welcome back" : "Welcome";
+  const greeting = keyInfo.source === "paste" ? "Welcome back" : "Welcome";
   console.log(`  ${greeting}${user.username ? `, ${chalk.cyan(user.username)}` : ""}!`);
   if (user.role === "owner") {
     console.log(`  ${chalk.red("Owner access enabled")}`);
@@ -282,29 +296,36 @@ async function writeSignedInAccount(
     console.log(chalk.dim("  Run 'nemar sandbox' to complete training"));
   }
 
-  // Decision 7: a re-login on the SAME machine replaces its key, so a run
-  // never mints a row per invocation until the 25-key cap. Only when the
-  // merge landed on an existing entry that already held a DIFFERENT
-  // "device"-sourced key -- a pasted or password-era key belongs to more
-  // than this one machine by definition, and is never revoked here. The
-  // revoke is attempted even when the preflight probe already found the
-  // stored key dead (a repeat revoke of an already-gone row is harmless,
-  // caught below like any other failure) -- what that foreknowledge skips
-  // is only the confirmation line, since there is nothing meaningfully
-  // "replaced" about a key that was already dead.
+  // A re-login on the SAME machine replaces its key, so a run never mints a
+  // row per invocation until the 25-key cap. Only when the merge landed on
+  // an existing entry that already held a DIFFERENT "device"-sourced key --
+  // a pasted or password-era key belongs to more than this one machine by
+  // definition, and is never revoked here. The revoke is attempted even
+  // when the preflight probe already found the stored key dead (a repeat
+  // revoke of an already-gone row is harmless, caught below like any other
+  // failure) -- what that foreknowledge skips is only the confirmation
+  // line, since there is nothing meaningfully "replaced" about a key that
+  // was already dead.
   if (
-    key &&
+    keyInfo.source === "device" &&
     previous?.keySource === "device" &&
     previous.keyId !== undefined &&
-    previous.keyId !== key.id
+    previous.keyId !== keyInfo.key.id
   ) {
     try {
       await revokeApiKey(previous.keyId);
       if (!oldKeyKnownDead) {
         console.log(chalk.dim("  (replaced this machine's previous key)"));
       }
-    } catch {
-      // Best-effort: the new key is already stored and works either way.
+    } catch (error) {
+      // The new key is already stored and works either way -- but a live
+      // orphaned key is a real, actionable loose end, not silence: name it
+      // and say how to clean it up by hand.
+      console.log(
+        chalk.yellow(
+          `  Could not revoke this machine's previous key (${errorDetail(error)}); it stays active until you run \`nemar auth keys revoke ${previous.keyId}\`.`,
+        ),
+      );
     }
   }
 
@@ -423,8 +444,7 @@ export async function loginAction(
     await writeSignedInAccount(
       outcome.user,
       outcome.api_key,
-      outcome.key,
-      "device",
+      { source: "device", key: outcome.key },
       oldKeyKnownDead,
     );
     return;
@@ -450,7 +470,7 @@ async function loginWithPastedKey(apiKey: string, oldKeyKnownDead: boolean): Pro
     }
 
     spinner.succeed("Login successful");
-    await writeSignedInAccount(result.user, apiKey, null, "paste", oldKeyKnownDead);
+    await writeSignedInAccount(result.user, apiKey, { source: "paste" }, oldKeyKnownDead);
   } catch (error) {
     // Same defect as the two branches above, same fix: this catch has
     // always been reachable on a genuine failure (a real 401/403/5xx, or a
@@ -695,7 +715,12 @@ export async function signupAction(
   // authenticated-from-scratch machine, so there is no "old key" to skip
   // revoking (decision 7's `oldKeyKnownDead` is only ever meaningful when a
   // stale key was already probed).
-  await writeSignedInAccount(outcome.user, outcome.api_key, outcome.key, "device", false);
+  await writeSignedInAccount(
+    outcome.user,
+    outcome.api_key,
+    { source: "device", key: outcome.key },
+    false,
+  );
 
   await completeProfile(options);
 }
@@ -895,7 +920,12 @@ export async function statusAction(options: { refresh?: boolean }): Promise<void
   const others = accounts.filter((a) => !a.active);
   if (others.length > 0) {
     console.log();
-    console.log(`  Other accounts: ${others.map((a) => chalk.dim(a.username)).join(", ")}`);
+    // `a.username` is honestly optional now (epic #1272 phase 3): an entry
+    // keyed by email has none, and reporting the map key instead of a made-up
+    // username tells the truth about what `nemar auth switch` will select.
+    console.log(
+      `  Other accounts: ${others.map((a) => chalk.dim(a.username ?? a.key)).join(", ")}`,
+    );
     console.log(chalk.dim("  Run 'nemar auth switch' to switch accounts"));
   }
 }
@@ -965,7 +995,7 @@ export async function switchAction(identifier?: string): Promise<void> {
   if (accounts.length === 1) {
     const only = accounts[0];
     if (only.active) {
-      console.log(chalk.yellow(`Only one account stored: ${only.username}`));
+      console.log(chalk.yellow(`Only one account stored: ${only.username ?? only.key}`));
       console.log("  Run 'nemar auth login' to add another account");
       return;
     }
@@ -976,11 +1006,14 @@ export async function switchAction(identifier?: string): Promise<void> {
   if (identifier) {
     target = identifier;
   } else {
-    // Interactive picker
+    // Interactive picker. `value`/`default` use `a.key` -- the actual
+    // accounts-map key `switchAccount` indexes by -- not `a.username`,
+    // which is honestly absent for an email-keyed entry (epic #1272 phase
+    // 3) and would otherwise make that choice unselectable.
     const choices = accounts.map((a) => ({
-      name: `${a.username}${a.githubUsername ? ` (@${a.githubUsername})` : ""}${a.active ? chalk.green(" (active)") : ""}`,
-      value: a.username,
-      short: a.username,
+      name: `${a.username ?? a.key}${a.githubUsername ? ` (@${a.githubUsername})` : ""}${a.active ? chalk.green(" (active)") : ""}`,
+      value: a.key,
+      short: a.username ?? a.key,
     }));
 
     const { selected } = await inquirer.prompt([
@@ -989,7 +1022,7 @@ export async function switchAction(identifier?: string): Promise<void> {
         name: "selected",
         message: "Switch to account:",
         choices,
-        default: accounts.find((a) => a.active)?.username,
+        default: accounts.find((a) => a.active)?.key,
       },
     ]);
     target = selected;
@@ -997,8 +1030,8 @@ export async function switchAction(identifier?: string): Promise<void> {
 
   // Check if already active
   const current = accounts.find((a) => a.active);
-  if (current && current.username === target) {
-    console.log(chalk.yellow(`Already using account ${target}`));
+  if (current && current.key === target) {
+    console.log(chalk.yellow(`Already using account ${current.username ?? current.key}`));
     return;
   }
 
@@ -1006,7 +1039,7 @@ export async function switchAction(identifier?: string): Promise<void> {
   if (!switched) {
     console.log(chalk.red(`Account not found: ${target}`));
     console.log(chalk.dim("  Provide a NEMAR username or GitHub username"));
-    console.log(chalk.dim(`  Available: ${accounts.map((a) => a.username).join(", ")}`));
+    console.log(chalk.dim(`  Available: ${accounts.map((a) => a.username ?? a.key).join(", ")}`));
     return;
   }
 
@@ -1100,11 +1133,14 @@ export async function logoutAction(
     const accounts = getAccounts();
     const result = await confirm(`Log out all ${accounts.length} stored account(s)?`, options);
     if (result !== "confirmed") return;
-    // Each account's key is revoked with ITS OWN bearer (decision 10): the
-    // active account has to be switched to it first, since request()'s
-    // authenticated path always reads the currently active credential.
+    // Each account's key is revoked with ITS OWN bearer: the active account
+    // has to be switched to it first, since request()'s authenticated path
+    // always reads the currently active credential. `account.key` (the
+    // accounts-map key, epic #1272 phase 3) rather than `account.username`,
+    // which is honestly absent for an email-keyed entry and would switch to
+    // nothing for exactly the accounts this loop most needs to reach.
     for (const account of accounts) {
-      switchAccount(account.username);
+      switchAccount(account.key);
       await revokeStoredKey(account, options);
     }
     clearAllConfig();
