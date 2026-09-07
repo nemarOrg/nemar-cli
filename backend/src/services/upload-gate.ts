@@ -44,7 +44,22 @@ export const SANDBOX_TRAINING_ERROR = {
     "You must complete sandbox training before uploading real datasets. Run 'nemar sandbox' to complete training.",
 } as const;
 
-export type UploadGateBody = typeof SERVICE_ACCESS_ERROR | typeof SANDBOX_TRAINING_ERROR;
+/**
+ * A `test`-kind account on production may own only `xx` sandbox datasets, so
+ * a real DOI never attaches to a persona (epic #1272 phase 4, #1284; ADR
+ * 0048). `error` matches the stable-machine-readable convention the two
+ * bodies above already follow.
+ */
+export const TEST_ACCOUNT_SANDBOX_ONLY_ERROR = {
+  error: "test_account_sandbox_only",
+  message:
+    "Test accounts can only create sandbox (xx) datasets on production. Use a person account for real data.",
+} as const;
+
+export type UploadGateBody =
+  | typeof SERVICE_ACCESS_ERROR
+  | typeof SANDBOX_TRAINING_ERROR
+  | typeof TEST_ACCOUNT_SANDBOX_ONLY_ERROR;
 
 /**
  * Which client is uploading. "cli" is the bearer-token path, "web" the
@@ -70,10 +85,19 @@ export function uploadChannelForAuthMethod(
 }
 
 /**
- * Create-time gate for a real dataset: requires service access first (the
+ * Create-time gate for a real dataset: refuses a `test`-kind account first
+ * (epic #1272 phase 4, #1284; ADR 0048), then requires service access (the
  * authorization gate), then — on the CLI channel only — sandbox training (the
  * how-to gate). Returns the 403 body to send, or null when the upload is
  * allowed.
+ *
+ * The kind check needs no separate `isProduction` input: the route only ever
+ * calls this function from inside its own `if (!sandbox)` branch, and
+ * `sandbox` is unconditionally forced `true` off production (the route
+ * decides that from its own `isProduction` literal before this function ever
+ * runs) -- so REACHING this function already proves the environment is
+ * production, and a `test`-kind account off production is never refused here
+ * (it never reaches `!sandbox` at all).
  *
  * `channel` is required, not defaulted: a caller that forgets it should fail
  * to compile rather than silently pick a policy.
@@ -82,9 +106,11 @@ export function realDatasetCreateGate(
   user: {
     service_access: number;
     sandbox_completed: number;
+    account_kind: string;
   },
   channel: UploadChannel,
 ): UploadGateBody | null {
+  if (user.account_kind === "test") return TEST_ACCOUNT_SANDBOX_ONLY_ERROR;
   if (!user.service_access) return SERVICE_ACCESS_ERROR;
   if (channel === "cli" && !user.sandbox_completed) return SANDBOX_TRAINING_ERROR;
   return null;

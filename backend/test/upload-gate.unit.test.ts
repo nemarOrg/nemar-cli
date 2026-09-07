@@ -19,6 +19,7 @@ import { describe, expect, test } from "bun:test";
 import {
   SANDBOX_TRAINING_ERROR,
   SERVICE_ACCESS_ERROR,
+  TEST_ACCOUNT_SANDBOX_ONLY_ERROR,
   type UploadChannel,
   type UploadGateBody,
   realDatasetCreateGate,
@@ -33,6 +34,13 @@ interface Case {
   expected: UploadGateBody | null;
   why: string;
 }
+
+/** `person` throughout this matrix: the kind check is a separate dimension,
+ *  covered exhaustively of its own accord below (epic #1272 phase 4, #1284;
+ *  ADR 0048), and mixing it into this matrix would double the case count for
+ *  a dimension that does not interact with channel/service_access/sandbox at
+ *  all -- it is checked FIRST and short-circuits everything else. */
+const PERSON = "person" as const;
 
 const CASES: Case[] = [
   // The authorization gate comes first on both channels, and nothing about
@@ -106,12 +114,76 @@ describe("realDatasetCreateGate: channel x service_access x sandbox_completed", 
     test(label, () => {
       expect(
         realDatasetCreateGate(
-          { service_access: c.service_access, sandbox_completed: c.sandbox_completed },
+          {
+            service_access: c.service_access,
+            sandbox_completed: c.sandbox_completed,
+            account_kind: PERSON,
+          },
           c.channel,
         ),
       ).toBe(c.expected);
     });
   }
+});
+
+describe("realDatasetCreateGate: account_kind is checked first (epic #1272 phase 4, #1284; ADR 0048)", () => {
+  test("a test-kind account is refused even with full service_access and training", () => {
+    expect(
+      realDatasetCreateGate(
+        { service_access: 1, sandbox_completed: 1, account_kind: "test" },
+        "cli",
+      ),
+    ).toBe(TEST_ACCOUNT_SANDBOX_ONLY_ERROR);
+  });
+
+  test("a test-kind account is refused on the web channel too", () => {
+    expect(
+      realDatasetCreateGate(
+        { service_access: 1, sandbox_completed: 1, account_kind: "test" },
+        "web",
+      ),
+    ).toBe(TEST_ACCOUNT_SANDBOX_ONLY_ERROR);
+  });
+
+  test("a test-kind account with NO service_access still gets the kind refusal, not the grant refusal", () => {
+    // Order is the point: the kind refusal names the actual reason (this
+    // account can never create a real dataset, granted or not) rather than a
+    // grant refusal that implies asking for upload access would fix it.
+    expect(
+      realDatasetCreateGate(
+        { service_access: 0, sandbox_completed: 0, account_kind: "test" },
+        "cli",
+      ),
+    ).toBe(TEST_ACCOUNT_SANDBOX_ONLY_ERROR);
+  });
+
+  test("a service-kind account is NOT refused by the kind check (falls through to the ordinary gates)", () => {
+    // Service accounts cannot reach this route in practice (the device flow
+    // and self-service key mint both refuse them), but the gate itself only
+    // singles out `test` -- proving that is what makes the predicate exactly
+    // `=== 'test'` rather than `!== 'person'`.
+    expect(
+      realDatasetCreateGate(
+        { service_access: 1, sandbox_completed: 1, account_kind: "service" },
+        "cli",
+      ),
+    ).toBeNull();
+    expect(
+      realDatasetCreateGate(
+        { service_access: 0, sandbox_completed: 0, account_kind: "service" },
+        "cli",
+      ),
+    ).toBe(SERVICE_ACCESS_ERROR);
+  });
+
+  test("a person account is unaffected", () => {
+    expect(
+      realDatasetCreateGate(
+        { service_access: 1, sandbox_completed: 1, account_kind: PERSON },
+        "cli",
+      ),
+    ).toBeNull();
+  });
 });
 
 describe("uploadChannelForAuthMethod", () => {
