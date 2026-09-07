@@ -338,8 +338,15 @@ export async function sendVerificationEmail(
 
   <p style="color: #666; font-size: 14px;">
     <strong>What happens next?</strong><br>
-    After verifying your email, an administrator will review your account.
-    Once approved, you'll receive your API key and can start uploading datasets.
+    Verifying your email activates your account: you can browse and download
+    datasets, and <code style="background:#f4f4f5;padding:2px 6px;border-radius:4px;">nemar auth retrieve-key</code>
+    will give you your API key right away.
+  </p>
+
+  <p style="color: #666; font-size: 14px;">
+    Uploading your own datasets needs one more thing — upload access, a
+    one-time approval you request from an administrator once your account is
+    active.
   </p>
 
   <p style="color: #999; font-size: 12px; margin-top: 30px;">
@@ -363,8 +370,16 @@ export async function sendVerificationEmail(
 }
 
 /**
- * Send approval notification (without API key for security).
- * Instructs user to retrieve their key via CLI.
+ * "Your API key is ready" — sent when a CLI account's EMAIL is verified
+ * (ADR 0040 phase 2), not when an admin approves it. The key is base-tier:
+ * `nemar auth retrieve-key` mints it from `verified`, so the mail that
+ * explains how to get it has to arrive at that moment or it describes a step
+ * the recipient cannot take yet.
+ *
+ * Never carries the key itself; the CLI retrieves it against a password.
+ * Upload access is a separate, later, one-time admin grant and this mail says
+ * so rather than implying the account can now upload — that claim is what
+ * sendUploadAccessGrantedEmail is for.
  */
 export async function sendKeyReadyEmail(
   to: string,
@@ -383,9 +398,10 @@ export async function sendKeyReadyEmail(
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-  <h1 style="color: #16a34a;">Congratulations, ${escapeHtml(username)}!</h1>
+  <h1 style="color: #16a34a;">Your email is verified, ${escapeHtml(username)}!</h1>
 
-  <p>Your NEMAR account has been approved. You can now upload and manage datasets.</p>
+  <p>Your NEMAR account is active. You can retrieve your API key, browse and
+  download datasets, and run the sandbox training.</p>
 
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Retrieve Your API Key</h2>
 
@@ -405,6 +421,13 @@ nemar auth login
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
 
   <p style="color: #666; font-size: 14px;">
+    <strong>Uploading a dataset?</strong><br>
+    That needs upload access, a one-time admin approval, plus the sandbox
+    training run (<code style="background: #f4f4f5; padding: 2px 6px; border-radius: 4px;">nemar sandbox</code>).
+    Ask an admin via <a href="https://nemar.org/support" style="color: #2563eb;">nemar.org/support</a>.
+  </p>
+
+  <p style="color: #666; font-size: 14px;">
     <strong>Need help?</strong><br>
     Check out the documentation at <a href="https://nemar-cli.pages.dev" style="color: #2563eb;">nemar-cli.pages.dev</a>
   </p>
@@ -418,7 +441,7 @@ nemar auth login
 
   await sendEmail(
     to,
-    "Your NEMAR account has been approved!",
+    "Your NEMAR API key is ready",
     html,
     resendApiKey,
     fromEmail,
@@ -429,12 +452,84 @@ nemar auth login
 }
 
 /**
- * Approval notification for web/ORCID accounts (#1012). These have no
- * username, no password, and never hold an API key — the CLI retrieve-key
- * instructions in sendKeyReadyEmail would be dead ends — so this variant
- * points at the dashboard sign-in instead.
+ * "Upload access granted" for a CLI account — what an admin approval now
+ * means (ADR 0040): the one-time grant of `service_access`, on an account
+ * that has been usable since it verified its email. It deliberately does NOT
+ * repeat the retrieve-key instructions: by this point the recipient has had a
+ * key for as long as they have had an account (sendKeyReadyEmail), and
+ * telling them to fetch one again would read as "the old one stopped
+ * working".
  */
-export async function sendWebApprovalEmail(
+export async function sendUploadAccessGrantedEmail(
+  to: string,
+  username: string,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<void> {
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #16a34a;">Upload access granted, ${escapeHtml(username)}!</h1>
+
+  <p>An administrator has reviewed your request and granted upload access to
+  your NEMAR account. You can now create and upload real datasets.</p>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Before your first upload</h2>
+
+  <p>Sandbox training is a one-time run that walks the whole upload flow on a
+  throwaway dataset:</p>
+
+  <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 13px; white-space: pre-line;">
+# Complete the training run (once)
+nemar sandbox
+
+# Then upload your dataset
+nemar dataset upload &lt;path&gt;
+  </div>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+
+  <p style="color: #666; font-size: 14px;">
+    <strong>Need help?</strong><br>
+    Check out the documentation at <a href="https://nemar-cli.pages.dev" style="color: #2563eb;">nemar-cli.pages.dev</a>
+  </p>
+
+  <p style="color: #999; font-size: 12px; margin-top: 30px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+
+  await sendEmail(
+    to,
+    "Upload access granted on NEMAR",
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+    deliveryEnv,
+  );
+}
+
+/**
+ * "Upload access granted" for web/ORCID accounts (#1012, re-aimed by ADR
+ * 0040). These have no username, no password, and never hold an API key — the
+ * CLI instructions in sendUploadAccessGrantedEmail would be dead ends — so
+ * this variant points at the dashboard instead. Sandbox training is CLI-only,
+ * so it is not mentioned here either: a browser upload is gated on the grant
+ * alone.
+ */
+export async function sendWebUploadAccessGrantedEmail(
   to: string,
   resendApiKey: string,
   fromEmail: string,
@@ -450,14 +545,13 @@ export async function sendWebApprovalEmail(
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-  <h1 style="color: #16a34a;">Congratulations!</h1>
+  <h1 style="color: #16a34a;">Upload access granted!</h1>
 
-  <p>Your NEMAR account has been approved.</p>
-
-  <p>Sign in to your dashboard with your email address to get started:</p>
+  <p>An administrator has reviewed your request and granted upload access to
+  your NEMAR account. You can now upload datasets from your dashboard.</p>
 
   <p>
-    <a href="https://nemar.org/login" style="display: inline-block; background-color: #2563eb; color: #ffffff; padding: 10px 20px; border-radius: 8px; text-decoration: none;">Sign in to NEMAR</a>
+    <a href="https://nemar.org/upload" style="display: inline-block; background-color: #2563eb; color: #ffffff; padding: 10px 20px; border-radius: 8px; text-decoration: none;">Upload a dataset</a>
   </p>
 
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
@@ -476,7 +570,7 @@ export async function sendWebApprovalEmail(
 
   await sendEmail(
     to,
-    "Your NEMAR account has been approved!",
+    "Upload access granted on NEMAR",
     html,
     resendApiKey,
     fromEmail,
@@ -553,15 +647,26 @@ export async function sendKeyRegenerationVerificationEmail(
 }
 
 /**
- * Notify admins that a user needs approval
- * Called when a user verifies their email address
+ * Notify admins that a new account has verified its email.
+ *
+ * Fired the moment an account reaches `verified` on EITHER channel (ADR 0040
+ * phase 2): the CLI's verification link, and the web account's email code.
+ * The account is already usable at that point — this is not a gate the admin
+ * has to open before anything works, it is the heads-up that an upload
+ * request may follow.
+ *
+ * `username` and `github_username` are nullable because a web/ORCID account
+ * has neither (migration 0026): the mail names the account by id and its
+ * approve command by `--id` in that case, rather than rendering an empty
+ * GitHub link and a `nemar admin approve` with no argument.
  */
 export async function sendAdminNotificationEmail(
   adminEmails: string[],
   user: {
-    username: string;
+    id?: number;
+    username: string | null;
     email: string;
-    github_username: string;
+    github_username: string | null;
     description: string;
   },
   resendApiKey: string,
@@ -570,6 +675,13 @@ export async function sendAdminNotificationEmail(
   isDev?: boolean,
   deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
+  const label = user.username ?? (user.id ? `id ${user.id}` : user.email);
+  const approveCommand = user.username
+    ? `nemar admin approve</span> ${escapeHtml(user.username)}`
+    : `nemar admin approve</span> --id ${escapeHtml(String(user.id ?? ""))}`;
+  const githubCell = user.github_username
+    ? `<a href="https://github.com/${escapeHtml(user.github_username)}" style="color: #2563eb;">${escapeHtml(user.github_username)}</a>`
+    : "<em>not linked</em>";
   const html = `
 <!DOCTYPE html>
 <html>
@@ -578,16 +690,18 @@ export async function sendAdminNotificationEmail(
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-  <h1 style="color: #f59e0b;">New User Awaiting Approval</h1>
+  <h1 style="color: #f59e0b;">New Verified Account</h1>
 
-  <p>A new user has verified their email and is waiting for admin approval to access NEMAR.</p>
+  <p>A new user has verified their email address. The account is active at the
+  base tier (browse, dashboard, API key, sandbox); uploading additionally
+  requires the one-time upload-access grant below.</p>
 
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">User Details</h2>
 
   <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
     <tr>
-      <td style="padding: 8px 12px; border: 1px solid #e5e7eb; background: #f9fafb; font-weight: bold;">Username</td>
-      <td style="padding: 8px 12px; border: 1px solid #e5e7eb;">${escapeHtml(user.username)}</td>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb; background: #f9fafb; font-weight: bold;">Account</td>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb;">${escapeHtml(label)}</td>
     </tr>
     <tr>
       <td style="padding: 8px 12px; border: 1px solid #e5e7eb; background: #f9fafb; font-weight: bold;">Email</td>
@@ -596,7 +710,7 @@ export async function sendAdminNotificationEmail(
     <tr>
       <td style="padding: 8px 12px; border: 1px solid #e5e7eb; background: #f9fafb; font-weight: bold;">GitHub</td>
       <td style="padding: 8px 12px; border: 1px solid #e5e7eb;">
-        <a href="https://github.com/${escapeHtml(user.github_username)}" style="color: #2563eb;">${escapeHtml(user.github_username)}</a>
+        ${githubCell}
       </td>
     </tr>
   </table>
@@ -604,16 +718,16 @@ export async function sendAdminNotificationEmail(
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Reason for Access</h2>
   <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; margin: 16px 0; white-space: pre-wrap;">${escapeHtml(user.description)}</div>
 
-  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
-  <p>Review this user and approve or deny their access using the CLI:</p>
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Granting upload access</h2>
+  <p>When this user asks to upload, review them and grant it with the CLI:</p>
 
   <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
-    <span style="color: #16a34a;">nemar admin approve</span> ${user.username}
+    <span style="color: #16a34a;">${approveCommand}
   </div>
 
   <p style="color: #666; font-size: 14px;">
-    To see all pending users:<br>
-    <code style="background: #f4f4f5; padding: 2px 6px; border-radius: 4px;">nemar admin users --verified</code>
+    To see accounts holding no upload access:<br>
+    <code style="background: #f4f4f5; padding: 2px 6px; border-radius: 4px;">nemar admin users --awaiting-approval</code>
   </p>
 
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
@@ -630,7 +744,7 @@ export async function sendAdminNotificationEmail(
     try {
       await sendEmail(
         adminEmail,
-        `[NEMAR] New user awaiting approval: ${user.username}`,
+        `[NEMAR] New verified account: ${label}`,
         html,
         resendApiKey,
         fromEmail,
@@ -642,6 +756,161 @@ export async function sendAdminNotificationEmail(
       console.error(`Failed to send admin notification to ${adminEmail}:`, error);
     }
   }
+}
+
+/**
+ * The review card an admin gets when someone asks for upload access
+ * (ADR 0042, #1253).
+ *
+ * Same delivery shape as sendAdminNotificationEmail above -- recipient list,
+ * per-admin try/catch, the shared `sendEmail` fence -- and deliberately a
+ * SEPARATE mail rather than a variant of it: that one announces a new account
+ * at the base tier and is informational, this one is the export-control review
+ * itself and carries every field the reviewer needs (ADR 0040's "admins act
+ * once per uploader, at the upload request"). Folding them together would put
+ * an approve command in front of an admin at a moment nobody has asked for
+ * anything.
+ *
+ * Every field here is a REQUIRED precondition of the request except
+ * `affiliation` and `orcid`, so the card renders "not set" for exactly those
+ * two rather than for anything a reviewer needs. Nothing is sent to the
+ * requester: the request is a message to the admins, and the answer arrives as
+ * the existing upload-access-granted mail at approval.
+ *
+ * RETURNS PER-RECIPIENT RESULTS rather than swallowing them, unlike its
+ * sibling above. The difference is what the caller does next: a "new verified
+ * account" heads-up that nobody receives is a missed notification, but an
+ * upload REQUEST that nobody receives is a user waiting forever for a review
+ * that was never queued. The route stamps `upload_access_notified_at` only
+ * when at least one send landed, and re-sends on the next attempt when it did
+ * not -- which it cannot do if the failure never leaves this function.
+ *
+ * Recipients in `failures` are redacted (`redactRecipient`): this shape is
+ * logged, and the addresses are real admins'.
+ */
+export interface AdminNotificationOutcome {
+  /** Admins we tried to reach. 0 means the category had no opted-in recipient. */
+  attempted: number;
+  /** Sends Resend accepted. `> 0` is what "the admins were told" means. */
+  delivered: number;
+  /** One entry per failed send, recipient redacted for logging. */
+  failures: { recipient: string; error: string }[];
+}
+
+export async function sendUploadAccessRequestEmail(
+  adminEmails: string[],
+  request: {
+    id: number;
+    username: string;
+    given_name: string;
+    family_name: string;
+    email: string;
+    orcid: string | null;
+    github_username: string;
+    city: string;
+    country: string;
+    affiliation: string | null;
+    why: string;
+  },
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<AdminNotificationOutcome> {
+  const notSet = "<em>not set</em>";
+  const row = (label: string, value: string) =>
+    `<tr>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb; background: #f9fafb; font-weight: bold;">${label}</td>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb;">${value}</td>
+    </tr>`;
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #f59e0b;">Upload Access Requested</h1>
+
+  <p>A verified account has asked for upload access. This is the one-time
+  export-control review: check the person, their institution and their location,
+  then grant or decline.</p>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Requester</h2>
+
+  <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
+    ${row("Username", escapeHtml(request.username))}
+    ${row("Name", escapeHtml(`${request.given_name} ${request.family_name}`))}
+    ${row("Email", escapeHtml(request.email))}
+    ${row(
+      "ORCID",
+      request.orcid
+        ? `<a href="https://orcid.org/${escapeHtml(request.orcid)}" style="color: #2563eb;">${escapeHtml(request.orcid)}</a>`
+        : notSet,
+    )}
+    ${row(
+      "GitHub",
+      `<a href="https://github.com/${escapeHtml(request.github_username)}" style="color: #2563eb;">${escapeHtml(request.github_username)}</a>`,
+    )}
+    ${row("Affiliation", request.affiliation ? escapeHtml(request.affiliation) : notSet)}
+    ${row("City", escapeHtml(request.city))}
+    ${row("Country", escapeHtml(request.country))}
+  </table>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">What they intend to upload</h2>
+  <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; margin: 16px 0; white-space: pre-wrap;">${escapeHtml(request.why)}</div>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Granting upload access</h2>
+
+  <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+    <span style="color: #16a34a;">nemar admin approve</span> ${escapeHtml(request.username)}
+  </div>
+
+  <p style="color: #666; font-size: 14px;">
+    To see every open request:<br>
+    <code style="background: #f4f4f5; padding: 2px 6px; border-radius: 4px;">nemar admin users --awaiting-approval</code>
+  </p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+
+  const outcome: AdminNotificationOutcome = {
+    attempted: adminEmails.length,
+    delivered: 0,
+    failures: [],
+  };
+  for (const adminEmail of adminEmails) {
+    try {
+      await sendEmail(
+        adminEmail,
+        `[NEMAR] Upload access requested: ${request.username}`,
+        html,
+        resendApiKey,
+        fromEmail,
+        replyTo,
+        isDev,
+        deliveryEnv,
+      );
+      outcome.delivered++;
+    } catch (error) {
+      // Still per-recipient, so one bad address does not cost the others their
+      // copy -- the failure is now REPORTED as well as logged.
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error(
+        `Failed to send upload-access request to ${redactRecipient(adminEmail)}: ${detail}`,
+      );
+      outcome.failures.push({ recipient: redactRecipient(adminEmail), error: detail });
+    }
+  }
+  return outcome;
 }
 
 /**
@@ -759,11 +1028,15 @@ export async function sendOpenNeuroMaintainerReport(
 }
 
 /**
- * Send revocation notification
+ * Send revocation notification.
+ *
+ * `username` is nullable because a web/ORCID account has none (migration
+ * 0026) and can now be revoked by id. The greeting drops rather than
+ * addressing someone by their email address back at them.
  */
 export async function sendRevocationEmail(
   to: string,
-  username: string,
+  username: string | null,
   resendApiKey: string,
   fromEmail: string,
   replyTo?: string,
@@ -780,7 +1053,7 @@ export async function sendRevocationEmail(
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
   <h1 style="color: #dc2626;">Account Access Revoked</h1>
 
-  <p>Hello ${escapeHtml(username)},</p>
+  <p>Hello${username ? ` ${escapeHtml(username)}` : ""},</p>
 
   <p>Your NEMAR account access has been revoked by an administrator.</p>
 
@@ -1191,6 +1464,71 @@ export async function sendPasswordlessCodeEmail(
 }
 
 /**
+ * Inbox-proof code for a web account's FIRST email verification (ADR 0040
+ * phase 2). Sent to the address collected at ORCID sign-up, and again on
+ * demand from the dashboard, because ORCID proves the person and not the
+ * inbox — and the base tier's whole content (notifications, the sign-in code,
+ * the upload-request thread) is delivered to that inbox.
+ *
+ * Deliberately NOT sendPasswordlessCodeEmail: that mail says "finish signing
+ * in", which is the wrong instruction for someone who is already signed in
+ * and being asked to confirm the address. Same code hygiene as the sign-in
+ * and email-change mails: the code never appears in the subject line.
+ */
+export async function sendEmailVerificationCodeEmail(
+  to: string,
+  code: string,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<void> {
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #2563eb;">Verify your email for NEMAR</h1>
+
+  <p>Enter the code below on NEMAR to confirm this is your email address:</p>
+
+  <p style="text-align: center; margin: 30px 0;">
+    <span style="display: inline-block; font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 32px; letter-spacing: 8px; padding: 16px 24px; background-color: #f4f4f5; border-radius: 8px; color: #111;">
+      ${escapeHtml(code)}
+    </span>
+  </p>
+
+  <p style="color: #666; font-size: 14px;">This code expires in 10 minutes. After 5 incorrect attempts the code is invalidated; request a new one if that happens.</p>
+
+  <p style="color: #666; font-size: 14px;">Verifying activates your account: browsing, your dashboard, and dataset downloads. Uploading a dataset needs a separate, one-time approval from an administrator.</p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource<br>
+    Didn't request this? You can safely ignore this email. Your account has not been changed.
+  </p>
+</body>
+</html>
+  `;
+
+  await sendEmail(
+    to,
+    "Verify your email for NEMAR",
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+    deliveryEnv,
+  );
+}
+
+/**
  * Ownership-proof code for a self-service email change (#911). Sent to the
  * NEW address; nothing is written to the account until the code is verified.
  * Same code hygiene as the sign-in mail: code kept out of the subject line.
@@ -1237,6 +1575,72 @@ export async function sendEmailChangeCodeEmail(
   await sendEmail(
     to,
     "Confirm your new NEMAR email address",
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+    deliveryEnv,
+  );
+}
+
+/**
+ * Tell the PREVIOUS address that an account's sign-in email was changed
+ * (#1054; ADR 0044).
+ *
+ * NEMAR sign-in is passwordless for the dashboard and token-based for the
+ * CLI, so the old inbox is the only channel that can reach a legitimate owner
+ * whose address was moved out from under them with a stolen session or key.
+ * The change itself has already happened by the time this is sent -- this is
+ * a notice, not a confirmation step, so there is nothing to confirm and the
+ * only link worth following is the support one, and only if this was not you.
+ *
+ * `maskedNewEmail` is deliberately masked by the caller (`maskEmail`): the
+ * person reading the old inbox may no longer be the account owner, which is
+ * the whole reason for the mail, and what they need is that the address
+ * changed rather than what it changed to.
+ */
+export async function sendEmailChangedNoticeEmail(
+  to: string,
+  maskedNewEmail: string,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<void> {
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #2563eb;">Your NEMAR account email was changed</h1>
+
+  <p>The sign-in email for your NEMAR account was changed from this address to <strong>${escapeHtml(maskedNewEmail)}</strong>.</p>
+
+  <p>This address can no longer be used to sign in to the account, and future NEMAR mail goes to the new one.</p>
+
+  <p style="background-color: #fef2f2; border-left: 4px solid #dc2626; padding: 12px 16px; margin: 24px 0;">
+    <strong>If this was not you</strong>, contact NEMAR support at
+    <a href="https://nemar.org/support" style="color: #dc2626;">nemar.org/support</a> right away and say which address this notice reached.
+  </p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource<br>
+    This is a security notice: there is nothing to confirm. The only link above goes to NEMAR support, for use if this was not you.
+  </p>
+</body>
+</html>
+  `;
+
+  await sendEmail(
+    to,
+    "Your NEMAR account email was changed",
     html,
     resendApiKey,
     fromEmail,

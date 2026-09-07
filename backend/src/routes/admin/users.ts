@@ -11,6 +11,7 @@
 import { zValidator } from "@hono/zod-validator";
 import type { Context } from "hono";
 import { z } from "zod";
+import { orcidIdSchema } from "../../../../shared/contract/publication.js";
 import { ownerMiddleware } from "../../middleware/auth";
 
 import { auditLogStatement } from "../../db/audit-log";
@@ -27,15 +28,16 @@ import {
 import {
   parseEmailPreferences,
   resolveEmailConfig,
-  sendKeyReadyEmail,
   sendRevocationEmail,
-  sendWebApprovalEmail,
+  sendUploadAccessGrantedEmail,
+  sendWebUploadAccessGrantedEmail,
 } from "../../services/email";
 import { decrypt } from "../../services/encryption";
 import { isNonProductionEnv } from "../../services/environment";
 import { removeCollaborator } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
 import { revokeUserIamAccess } from "../../services/iam";
+import { emailFieldSchema, normalizeGithubHandle, normalizeOrcid } from "../../services/identity";
 import { errorMessage } from "../../services/repo-metadata";
 import { type Bindings, type Variables, isDemotion, parseRole } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
@@ -47,26 +49,46 @@ interface ApprovableUserRow {
   email: string;
   status: string;
   signup_source: string | null;
+  email_verified: number;
   orcid_verified: number;
+  service_access: number;
 }
 
-const APPROVABLE_USER_COLUMNS = "id, username, email, status, signup_source, orcid_verified";
+const APPROVABLE_USER_COLUMNS =
+  "id, username, email, status, signup_source, email_verified, orcid_verified, service_access";
 
 /**
- * Approval eligibility (#1012). `verified` and `revoked` are approvable as
- * before. `pending` is additionally approvable for ORCID-verified web
- * signups: ORCID is the identity proof there (email is collected, not
- * verified, by design) and admin review is the gate. CLI signups stay
- * blocked at `pending` until they verify their email — there is no ORCID
- * proof backing those rows.
+ * Approval eligibility (#1012, narrowed by ADR 0040 phase 2).
+ *
+ * **A verified email is required, whatever the signup source.** #1012 let an
+ * admin approve a `pending` ORCID-verified web row on the reasoning that
+ * ORCID was its identity proof and the collected email was unverified by
+ * design. ADR 0040 settles the other half: ORCID proves the PERSON, the email
+ * code proves the INBOX, and the base tier needs both — every notification,
+ * the sign-in code and the upload-request thread go to that address. Approval
+ * sits ABOVE the base tier, so it cannot be the thing that skips it.
+ *
+ * The practical effect is that `pending` is no longer approvable at all (both
+ * roads out of `pending` set `email_verified`), and a `revoked` row whose
+ * email was never confirmed has to confirm it before it can be re-approved.
+ * The web branch is kept rather than deleted because ORCID verification is
+ * still a real requirement for a web row — it is now the second condition,
+ * not a substitute for the first.
  */
 function isApprovable(user: ApprovableUserRow): boolean {
+  if (user.email_verified !== 1) return false;
   if (user.status === "verified" || user.status === "revoked") return true;
   return user.status === "pending" && user.signup_source === "web" && user.orcid_verified === 1;
 }
 
 /** The 400 body both approve routes return for an ineligible status. */
 function ineligibilityMessage(user: ApprovableUserRow): string {
+  // Checked first because it is the one an admin can act on: tell them to ask
+  // the user to verify, rather than reporting a status the user can fix
+  // themselves in a minute.
+  if (user.email_verified !== 1) {
+    return "User must verify their email address first; approval cannot skip the inbox check";
+  }
   if (user.status !== "pending") return "User status is not eligible for approval";
   return user.signup_source === "web"
     ? "Web signup is not ORCID-verified; not eligible for approval"
@@ -74,15 +96,98 @@ function ineligibilityMessage(user: ApprovableUserRow): string {
 }
 
 /**
+ * The upload grant, on its own, for an account that is already `approved` but
+ * carries no `service_access` (ADR 0040). Migration 0075 removed that
+ * combination from the catalog, and the approve routes below are the only
+ * thing that can create it again, so reaching this is a repair, not a normal
+ * path — but a 409 here would leave an admin with no way to fix a row whose
+ * status says "approved" while the upload gate says no.
+ */
+async function regrantUploadAccess(
+  c: Context<{ Bindings: Bindings; Variables: Variables }>,
+  user: ApprovableUserRow,
+): Promise<Response> {
+  const db = c.env.DB;
+  const adminUser = c.get("user");
+
+  // Grant + audit in one db.batch(): D1 wraps a batch in a single implicit
+  // transaction (same reasoning as the tombstone batch further down), so the
+  // repair cannot commit without its audit row. Unbatched, a throwing audit
+  // insert would 500 an admin whose grant HAD landed, and the retry would then
+  // 409 "already approved" — a dead end for an operation that succeeded.
+  // Nothing here talks to the network, so there is no ordering constraint
+  // forcing the two apart, unlike finalizeApproval's email step.
+  try {
+    await db.batch([
+      db
+        .prepare(
+          `
+    UPDATE users
+    SET service_access = 1,
+        service_access_granted_at = datetime('now'),
+        service_access_granted_by = ?,
+        updated_at = datetime('now')
+    WHERE id = ?
+  `,
+        )
+        .bind(adminUser.id, user.id),
+      auditLogStatement(db, {
+        userId: adminUser.id,
+        action: "user_upload_access_granted",
+        resourceType: "user",
+        resourceId: user.username ?? String(user.id),
+        details: JSON.stringify({
+          granted_by: adminUser.username,
+          granted_by_id: adminUser.id,
+          repair: "status was already approved with service_access=0",
+        }),
+      }),
+    ]);
+  } catch (error) {
+    // The batch rolled back atomically, so nothing was granted: report the
+    // failure rather than a success the caller cannot verify. Retrying is safe
+    // (the row is still approved-without-grant, so it lands here again).
+    console.error(`[approve] upload-access repair batch failed for id=${user.id}:`, error);
+    return c.json(
+      {
+        error: "Upload access was NOT granted; the grant transaction failed. Retry.",
+        detail: errorMessage(error),
+      },
+      500,
+    );
+  }
+
+  const label = user.username ?? `id ${user.id}`;
+  return c.json({
+    message: `User ${label} already had status 'approved'; upload access granted`,
+    note: "Only the upload grant was written — the account was already approved, so no status change or approval email was needed.",
+    user: {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      status: "approved",
+      service_access: true,
+    },
+    email_sent: false,
+  });
+}
+
+/**
  * Shared approval finalizer for POST /admin/approve/:username and
- * POST /admin/approve/by-id/:id (#1012): status flip, notification email,
- * audit row, response. Callers have already 404'd on a missing row, 409'd
- * on `approved`, and 400'd on ineligible statuses.
+ * POST /admin/approve/by-id/:id (#1012): status flip, upload grant,
+ * notification email, audit row, response. Callers have already 404'd on a
+ * missing row, 409'd on an `approved` row that already holds the grant, and
+ * 400'd on ineligible statuses.
+ *
+ * The status flip and `service_access` move together (ADR 0040): approval IS
+ * the upload decision, and this is the single writer of `service_access = 1`.
+ * Splitting them is what #1249 was — an admin approving a user who then could
+ * not upload.
  *
  * Web/ORCID accounts have `username = NULL`, so anything username-shaped is
- * conditional: they get a dashboard-flavored approval email instead of the
- * CLI retrieve-key one, and the audit resource id falls back to the stable
- * numeric id. Nothing GitHub- or IAM-side happens for either kind of
+ * conditional: they get a dashboard-flavored upload-access email instead of
+ * the CLI one, and the audit resource id falls back to the stable numeric id.
+ * Nothing GitHub- or IAM-side happens for either kind of
  * account — approval has been a pure status transition since per-user IAM
  * and auto-collaborator adds were removed.
  */
@@ -99,25 +204,32 @@ async function finalizeApproval(
     UPDATE users
     SET status = 'approved',
         approved_at = datetime('now'),
+        service_access = 1,
+        service_access_granted_at = datetime('now'),
+        service_access_granted_by = ?,
         updated_at = datetime('now')
     WHERE id = ?
   `,
     )
-    .bind(user.id)
+    .bind(adminUser.id, user.id)
     .run();
 
-  // Note: API token is NOT created here. CLI users retrieve it via
-  // `nemar auth retrieve-key`, which generates the token on first call;
-  // web users sign in with an email code and never hold an API key.
+  // Note: API token is NOT created here, and no longer needs to be announced
+  // here either. A CLI account has been able to retrieve one since it
+  // verified its email (ADR 0040 phase 2, `nemar auth retrieve-key`), and web
+  // users sign in with an email code and never hold an API key.
 
-  // Send approval notification email. Skipped (not failed) when the email
-  // service is unconfigured, so approval still completes in dev/test.
+  // Send the upload-access notification. This used to be the key-ready mail,
+  // which now fires at email verification instead: what an admin grants here
+  // is upload access, so that is what the mail announces. Skipped (not
+  // failed) when the email service is unconfigured, so approval still
+  // completes in dev/test.
   let emailSent = false;
   try {
     if (c.env.RESEND_API_KEY) {
       const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
       if (user.username) {
-        await sendKeyReadyEmail(
+        await sendUploadAccessGrantedEmail(
           user.email,
           user.username,
           c.env.RESEND_API_KEY,
@@ -127,7 +239,7 @@ async function finalizeApproval(
           c.env,
         );
       } else {
-        await sendWebApprovalEmail(
+        await sendWebUploadAccessGrantedEmail(
           user.email,
           c.env.RESEND_API_KEY,
           fromEmail,
@@ -138,24 +250,42 @@ async function finalizeApproval(
       }
       emailSent = true;
     } else {
-      console.error(`RESEND_API_KEY unset; approval email not sent for user id=${user.id}`);
+      console.error(`RESEND_API_KEY unset; upload-access email not sent for user id=${user.id}`);
     }
   } catch (error) {
-    console.error("Failed to send approval email:", error);
+    console.error("Failed to send upload-access email:", error);
   }
 
   // Audit log. resource_id is the username where one exists (unchanged for
   // CLI accounts) and the stable numeric id otherwise (web/ORCID accounts).
-  await auditLogStatement(db, {
-    userId: adminUser.id,
-    action: "user_approved",
-    resourceType: "user",
-    resourceId: user.username ?? String(user.id),
-    details: JSON.stringify({
-      approved_by: adminUser.username,
-      email_sent: emailSent,
-    }),
-  }).run();
+  //
+  // NOT batched with the UPDATE above, unlike regrantUploadAccess: `email_sent`
+  // is only known after the notification attempt, and that attempt must follow
+  // the commit (never tell a user they are approved before the row says so).
+  // So this is the role-change route's shape instead — a failed audit write is
+  // logged, never propagated. The approval and its grant have already
+  // committed, and 500ing here would tell the admin their completed action
+  // failed and send them into a retry that now 409s.
+  try {
+    await auditLogStatement(db, {
+      userId: adminUser.id,
+      action: "user_approved",
+      resourceType: "user",
+      resourceId: user.username ?? String(user.id),
+      details: JSON.stringify({
+        approved_by: adminUser.username,
+        email_sent: emailSent,
+        // ADR 0040: the grant is part of the approval, so the audit row says so
+        // rather than leaving upload access to be inferred from the status.
+        service_access_granted: true,
+      }),
+    }).run();
+  } catch (error) {
+    console.error(
+      `AUDIT GAP: user_approved row not written for id=${user.id} (approval and upload grant DID commit):`,
+      error,
+    );
+  }
 
   const label = user.username ?? `id ${user.id}`;
   return c.json({
@@ -165,8 +295,362 @@ async function finalizeApproval(
       username: user.username,
       email: user.email,
       status: "approved",
+      service_access: true,
     },
     email_sent: emailSent,
+  });
+}
+
+/** Row shape shared by both revoke routes (username-keyed and id-keyed). */
+interface RevocableUserRow {
+  id: number;
+  username: string | null;
+  email: string;
+  github_username: string | null;
+  status: string;
+  role: string | null;
+  aws_iam_username: string | null;
+  aws_access_key_id_encrypted: string | null;
+}
+
+const REVOCABLE_USER_COLUMNS =
+  "id, username, email, github_username, status, role, aws_iam_username, aws_access_key_id_encrypted";
+
+/**
+ * Shared revocation for POST /admin/revoke/:username and
+ * POST /admin/revoke/by-id/:id. Callers have already 404'd on a missing row;
+ * everything else — the self-revoke guard, the already-revoked 409, the
+ * owner rule, and the whole credential cascade — lives here so the two
+ * addressing modes cannot drift apart.
+ *
+ * The id-keyed route exists for the same reason `approve/by-id/:id` does
+ * (#1012): a web/ORCID account has `username = NULL` by design (migration
+ * 0026), so the username-keyed route can never address one. Since ADR 0040
+ * made approval the single writer of `service_access` and revoke its only
+ * eraser, an approve path that reaches an account a revoke path cannot is a
+ * grant with no way back.
+ *
+ * Nothing username-shaped is assumed, exactly as in `finalizeApproval`: the
+ * GitHub-collaborator sweep is skipped when there is no handle to remove, the
+ * audit resource id falls back to the stable numeric id, and the messages use
+ * an `id N` label.
+ */
+async function finalizeRevocation(
+  c: Context<{ Bindings: Bindings; Variables: Variables }>,
+  user: RevocableUserRow,
+): Promise<Response> {
+  const db = c.env.DB;
+  const adminUser = c.get("user");
+
+  // Prevent self-revocation. Keyed on the id rather than the username so it
+  // holds for an account that has none, and so the two routes share one guard.
+  if (user.id === adminUser.id) {
+    return c.json({ error: "Cannot revoke your own access" }, 400);
+  }
+
+  if (user.status === "revoked") {
+    return c.json({ error: "User already revoked" }, 409);
+  }
+
+  // Only owners can revoke other owners
+  if (user.role === "owner" && adminUser.role !== "owner") {
+    return c.json({ error: "Only owners can revoke other owners" }, 403);
+  }
+
+  const label = user.username ?? `id ${user.id}`;
+
+  // Revoke IAM access if configured - SECURITY CRITICAL
+  // Uses owner credentials to forcefully delete ALL access keys
+  let iamRevoked = false;
+  let iamRevocationError: string | null = null;
+  let iamRevocationSteps: string[] = [];
+
+  if (user.aws_iam_username && user.aws_access_key_id_encrypted && c.env.ENCRYPTION_KEY) {
+    try {
+      const accessKeyId = await decrypt(user.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
+
+      // Use aggressive cleanup with owner credentials
+      const result = await revokeUserIamAccess(
+        {
+          accessKeyId: c.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
+          region: c.env.AWS_REGION,
+        },
+        user.aws_iam_username,
+        accessKeyId,
+      );
+
+      iamRevoked = result.success;
+      iamRevocationSteps = result.steps;
+
+      if (result.errors.length > 0) {
+        // Partial failure - some steps succeeded, some failed
+        iamRevocationError = result.errors.join("; ");
+        console.error(
+          "IAM revocation partial failure for",
+          label,
+          "\nErrors:",
+          result.errors,
+          "\nSteps:",
+          result.steps,
+        );
+
+        // Track partial failures for follow-up
+        try {
+          await db
+            .prepare(
+              `INSERT INTO iam_revocation_failures (user_id, username, iam_username, error_message, created_at)
+               VALUES (?, ?, ?, ?, datetime('now'))`,
+            )
+            .bind(user.id, user.username, user.aws_iam_username, iamRevocationError)
+            .run();
+        } catch {
+          console.error("Could not track IAM failure in database");
+        }
+      } else {
+        // Complete success
+        console.log(`IAM revocation succeeded for ${label}:\n${result.steps.join("\n")}`);
+      }
+    } catch (error) {
+      // Complete failure - couldn't even start cleanup
+      const errMsg = errorMessage(error);
+      console.error("CRITICAL SECURITY: Failed to revoke IAM access for", label, errMsg);
+
+      iamRevocationError = errMsg;
+
+      // Track complete failures
+      try {
+        await db
+          .prepare(
+            `INSERT INTO iam_revocation_failures (user_id, username, iam_username, error_message, created_at)
+             VALUES (?, ?, ?, ?, datetime('now'))`,
+          )
+          .bind(user.id, user.username, user.aws_iam_username, errMsg)
+          .run();
+      } catch {
+        console.error("Could not track IAM failure in database");
+      }
+    }
+  }
+
+  // Clear IAM credentials from database (even if revocation failed)
+  await db
+    .prepare(`
+      UPDATE users
+      SET aws_iam_username = NULL,
+          aws_access_key_id_encrypted = NULL,
+          aws_secret_access_key_encrypted = NULL
+      WHERE id = ?
+    `)
+    .bind(user.id)
+    .run();
+
+  // Revoke all tokens
+  await db
+    .prepare(
+      `
+    UPDATE tokens
+    SET revoked_at = datetime('now')
+    WHERE user_id = ? AND revoked_at IS NULL
+  `,
+    )
+    .bind(user.id)
+    .run();
+
+  // Update user status
+  // If IAM revocation failed, mark as revoked_iam_pending for manual cleanup
+  const finalStatus = iamRevoked || !user.aws_iam_username ? "revoked" : "revoked_iam_pending";
+
+  // service_access (migration 0062) gates real (non-sandbox) uploads and
+  // compute independently of `status` -- clearing it here closes issue
+  // #1069 (a revoked user kept the grant and could still pass
+  // realDatasetServiceGate if `status` were ever restored without an
+  // explicit re-grant). The two grant stamps go with it (ADR 0040): revoke
+  // is the eraser of what approval wrote, so a later listing cannot show a
+  // revoked account still carrying "granted by X on Y".
+  //
+  // The upload-REQUEST stamps go too (ADR 0042). An open request is
+  // `upload_access_requested_at` set with no grant, so leaving the stamp on a
+  // revoked row would put a former grantee back into the admin review queue
+  // the moment their grant was taken away -- the one account an admin has
+  // just decided about. Clearing both means a re-instated account asks
+  // again, which is the right shape: the review is of a person at a moment,
+  // and revocation ends that moment.
+  await db
+    .prepare(
+      `
+    UPDATE users
+    SET status = ?,
+        service_access = 0,
+        service_access_granted_at = NULL,
+        service_access_granted_by = NULL,
+        upload_access_requested_at = NULL,
+        upload_access_notified_at = NULL,
+        revoked_at = datetime('now'),
+        updated_at = datetime('now')
+    WHERE id = ?
+  `,
+    )
+    .bind(finalStatus, user.id)
+    .run();
+
+  // Remove from every dataset repo they touch: collaborator grants
+  // (dataset_collaborators) UNION repos they own (datasets.owner_user_id).
+  // Owner-owned repos were previously never removed (epic #713 gap).
+  const collaborations = await db
+    .prepare(
+      `SELECT d.github_repo FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE dc.user_id = ?
+       UNION
+       SELECT github_repo FROM datasets WHERE owner_user_id = ?`,
+    )
+    .bind(user.id, user.id)
+    .all<{ github_repo: string | null }>();
+
+  let reposRemoved = 0;
+  const failedRemovals: string[] = [];
+  // A web/ORCID account can hold no GitHub collaboration at all -- the handle
+  // IS the grant -- so with no handle there is nothing to call GitHub about,
+  // and calling it with an empty login would DELETE a nonsense URL.
+  const githubHandle = user.github_username;
+  if (githubHandle) {
+    for (const collab of collaborations.results || []) {
+      if (collab.github_repo) {
+        // Extract repo name with defensive check
+        const parts = collab.github_repo.split("/");
+        if (parts.length !== 2 || !parts[1]) {
+          console.error(`Invalid github_repo format: ${collab.github_repo}`);
+          failedRemovals.push(collab.github_repo);
+          continue;
+        }
+        const repoName = parts[1];
+        try {
+          await removeCollaborator(repoName, githubHandle, await getDatasetsToken(c.env));
+          reposRemoved++;
+        } catch (error) {
+          console.error(`Failed to remove from ${collab.github_repo}:`, error);
+          failedRemovals.push(collab.github_repo);
+        }
+      }
+    }
+  }
+
+  // Clear their collaborator records
+  await db.prepare("DELETE FROM dataset_collaborators WHERE user_id = ?").bind(user.id).run();
+
+  // Send revocation email
+  let emailSent = false;
+  try {
+    const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
+    await sendRevocationEmail(
+      user.email,
+      user.username,
+      c.env.RESEND_API_KEY,
+      fromEmail,
+      replyTo,
+      isDev,
+      c.env,
+    );
+    emailSent = true;
+  } catch (error) {
+    console.error("Failed to send revocation email:", error);
+  }
+
+  // Clear S3 permissions
+  await db.prepare("DELETE FROM user_s3_permissions WHERE user_id = ?").bind(user.id).run();
+
+  // Audit log (non-blocking). By this point tokens, IAM credentials, GitHub
+  // collaborations, S3 permissions, `status` and `service_access` have all
+  // already been changed and cannot be rolled back — a throwing audit insert
+  // must not turn that completed revocation into a 500 that reads as "the
+  // user still has access". Log the gap loudly instead: an unaudited
+  // revocation is a record-keeping problem, a falsely-reported one is a
+  // security problem.
+  try {
+    await auditLogStatement(db, {
+      userId: adminUser.id,
+      action: "user_revoked",
+      resourceType: "user",
+      // Username where there is one (unchanged for CLI accounts), the stable
+      // numeric id otherwise — the same fallback the approval audit uses.
+      resourceId: user.username ?? String(user.id),
+      details: JSON.stringify({
+        revoked_by: adminUser.username,
+        repos_removed: reposRemoved,
+        failed_removals: failedRemovals,
+        email_sent: emailSent,
+        iam_revoked: iamRevoked,
+        // Mirrors the approval audit row: upload access is a thing that was
+        // taken away here, not something to infer from the status (ADR 0040).
+        service_access_cleared: true,
+      }),
+    }).run();
+  } catch (error) {
+    console.error(
+      `AUDIT GAP: user_revoked row not written for ${label} (the revocation DID complete):`,
+      error,
+    );
+  }
+
+  // If IAM revocation had errors, return warning with detailed steps
+  if (iamRevocationError) {
+    return c.json(
+      {
+        warning: iamRevoked
+          ? "User revoked with partial IAM cleanup"
+          : "User revoked with IAM cleanup failure",
+        message: iamRevoked
+          ? "User's API tokens revoked. Some IAM cleanup steps failed but S3 access keys were deleted."
+          : "User's API tokens and database access revoked, but S3 credentials may still be active",
+        user: {
+          id: user.id,
+          username: user.username,
+          status: finalStatus,
+        },
+        iam_cleanup: {
+          success: iamRevoked,
+          errors: iamRevocationError,
+          steps_attempted: iamRevocationSteps,
+          aws_iam_username: user.aws_iam_username,
+        },
+        action_required: iamRevoked
+          ? [
+              "Review IAM cleanup steps above",
+              `Check AWS console for user '${user.aws_iam_username}'`,
+              "Verify no orphaned resources remain",
+            ]
+          : [
+              `1. Manually delete IAM user '${user.aws_iam_username}' in AWS console`,
+              "2. Or use AWS CLI: aws iam list-access-keys --user-name <username>",
+              "3. Delete each key: aws iam delete-access-key --user-name <username> --access-key-id <key>",
+              "4. Delete user: aws iam delete-user --user-name <username>",
+              // Keyed on the id, which every account has: a web/ORCID row has
+              // no username to put in a WHERE clause.
+              `5. Update user status: UPDATE users SET status = 'revoked' WHERE id = ${user.id}`,
+            ],
+        security_impact: iamRevoked
+          ? "Most IAM resources cleaned up. Review steps for any remaining items."
+          : "User can still upload/download S3 data until manual cleanup completes",
+        repos_removed: reposRemoved,
+        failed_removals: failedRemovals.length > 0 ? failedRemovals : undefined,
+        email_sent: emailSent,
+        iam_revoked: iamRevoked,
+      },
+      207, // 207 Multi-Status: partial success
+    );
+  }
+
+  // Full revocation succeeded
+  return c.json({
+    message: `User ${label} access has been fully revoked`,
+    user: {
+      id: user.id,
+      username: user.username,
+      status: finalStatus,
+    },
+    repos_removed: reposRemoved,
+    failed_removals: failedRemovals.length > 0 ? failedRemovals : undefined,
+    email_sent: emailSent,
+    iam_revoked: iamRevoked,
   });
 }
 
@@ -206,10 +690,18 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     const role = c.req.query("role"); // owner, admin, member
     const db = c.env.DB;
 
+    // service_access is what separates an uploader from a browse-only account
+    // now that they no longer track `status` one-for-one (ADR 0040); the
+    // identity columns are here because a web/ORCID row has username = NULL
+    // and is otherwise unidentifiable in the listing (#1251).
+    // upload_access_requested_at is what makes "awaiting approval" a fact
+    // rather than an inference (ADR 0042, #1253).
     let query = `
     SELECT
       id, username, email, github_username, status,
-      email_verified, role, created_at, approved_at, revoked_at
+      email_verified, role, created_at, approved_at, revoked_at,
+      signup_source, service_access, service_access_granted_at,
+      given_name, family_name, orcid, upload_access_requested_at
     FROM users
   `;
     const conditions: string[] = [];
@@ -225,6 +717,31 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       conditions.push("status = ?");
       params.push(status);
     }
+
+    // An OPEN upload request: asked, and not yet answered (ADR 0042, #1253).
+    // Phase 1 could only approximate this as "verified with no grant", which
+    // was every base-tier account whether or not anyone wanted to upload. The
+    // grant itself is what closes a request, so `service_access = 0` is the
+    // "still open" half rather than a second status column.
+    //
+    // `status = 'verified'` is part of the filter and not left to the caller.
+    // Revoke clears the request stamps, so a revoked row should not match
+    // anyway -- but that is the CURRENT behaviour of one route, and this
+    // predicate is what nemarOrg/website#301 renders as "open requests". A
+    // consumer should get that meaning without having to know to add a status
+    // param, and a future path that revokes a row some other way must not be
+    // able to put a dead account back in an admin's queue. Belt and braces, on
+    // purpose. (`revoked_iam_pending` is excluded by the same clause.)
+    //
+    // Server-side, unlike the tier filters the CLI applies over the returned
+    // rows, because this one cannot be computed from what the listing used to
+    // return: the timestamp is new.
+    if (c.req.query("awaiting_approval") === "1") {
+      conditions.push("upload_access_requested_at IS NOT NULL");
+      conditions.push("service_access = 0");
+      conditions.push("status = 'verified'");
+    }
+
     if (role) {
       if (!["owner", "admin", "member"].includes(role)) {
         return c.json({ error: "Invalid role. Must be: owner, admin, or member" }, 400);
@@ -362,7 +879,13 @@ export function registerUsersRoutes(admin: AdminRouter): void {
             .run();
           tokensRevoked = result.meta.changes ?? 0;
         } catch (error) {
-          console.error(`SECURITY: Failed to revoke tokens for demoted user ${username}:`, error);
+          // The id as well as the handle: a username can be renamed or nulled,
+          // and this line is the record of a demoted account that may still
+          // hold a live token.
+          console.error(
+            `SECURITY: Failed to revoke tokens for demoted user ${username} (id=${target.id}):`,
+            error,
+          );
           tokenRevocationFailed = true;
         }
       }
@@ -429,6 +952,9 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     }
 
     if (user.status === "approved") {
+      // An approved row that never got the grant is the #1249 shape; repair it
+      // instead of 409ing an admin into a dead end (ADR 0040).
+      if (!user.service_access) return regrantUploadAccess(c, user);
       return c.json({ error: "User already approved" }, 409);
     }
 
@@ -461,10 +987,10 @@ export function registerUsersRoutes(admin: AdminRouter): void {
    * `revoked` always, plus `pending` for ORCID-verified web signups (ORCID
    * is the identity proof; the collected email is deliberately unverified).
    *
-   * Most ORCID signups never need this: they auto-approve to base access on
-   * sign-up (migration 0062, epic #1013). This route covers the rows that
-   * don't — re-approving a revoked web account, and any web row that landed
-   * `pending` outside the auto-approve path.
+   * Since ADR 0040 phase 2 an ORCID sign-up lands at `pending` and reaches
+   * `verified` by confirming its email — nothing auto-approves any more — so
+   * this route is how EVERY web account gets upload access, not the exception
+   * it was under migration 0062's auto-approval.
    */
   admin.post("/approve/by-id/:id", async (c) => {
     const db = c.env.DB;
@@ -484,6 +1010,8 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     }
 
     if (user.status === "approved") {
+      // Same repair path as the username route above (ADR 0040).
+      if (!user.service_access) return regrantUploadAccess(c, user);
       return c.json({ error: "User already approved" }, 409);
     }
 
@@ -502,301 +1030,58 @@ export function registerUsersRoutes(admin: AdminRouter): void {
   });
 
   /**
-   * POST /admin/revoke/:username - Revoke a user's access
+   * POST /admin/revoke/:username - Revoke a user's access.
+   *
+   * Only reaches accounts that have a username, i.e. CLI signups. Web/ORCID
+   * signups have username = NULL (migration 0026) and are revoked via
+   * POST /admin/revoke/by-id/:id below.
    */
   admin.post("/revoke/:username", async (c) => {
-    const username = c.req.param("username");
-    const db = c.env.DB;
-    const adminUser = c.get("user");
-
-    // Prevent self-revocation
-    if (username === adminUser.username) {
-      return c.json({ error: "Cannot revoke your own access" }, 400);
-    }
-
-    // Find user (include IAM credentials and role for revocation)
-    const user = await db
-      .prepare(`
-      SELECT id, username, email, github_username, status, role,
-             aws_iam_username, aws_access_key_id_encrypted
-      FROM users WHERE username = ? AND deleted_at IS NULL
-    `)
-      .bind(username)
-      .first<{
-        id: number;
-        username: string;
-        email: string;
-        github_username: string;
-        status: string;
-        role: string | null;
-        aws_iam_username: string | null;
-        aws_access_key_id_encrypted: string | null;
-      }>();
+    const user = await c.env.DB.prepare(
+      `SELECT ${REVOCABLE_USER_COLUMNS} FROM users WHERE username = ? AND deleted_at IS NULL`,
+    )
+      .bind(c.req.param("username"))
+      .first<RevocableUserRow>();
 
     if (!user) {
       return c.json({ error: "User not found" }, 404);
     }
 
-    if (user.status === "revoked") {
-      return c.json({ error: "User already revoked" }, 409);
+    return finalizeRevocation(c, user);
+  });
+
+  /**
+   * POST /admin/revoke/by-id/:id - Revoke a user's access by numeric id.
+   *
+   * The mirror of POST /admin/approve/by-id/:id, and it exists for the same
+   * reason (#1012): a web/ORCID signup has username = NULL by design
+   * (migration 0026), so the username-keyed route above can never address one.
+   * Approval could therefore grant upload access to an account nothing could
+   * take it back from, which ADR 0040 does not allow to stand: approval is the
+   * single writer of `service_access` and revoke is its only eraser, so every
+   * account the one reaches the other has to reach as well.
+   *
+   * Works for any account kind, exactly like the approve twin -- a CLI user
+   * can be revoked by id too -- and shares its whole implementation, so the
+   * two addressing modes cannot come apart.
+   */
+  admin.post("/revoke/by-id/:id", async (c) => {
+    const id = Number.parseInt(c.req.param("id"), 10);
+    if (!Number.isInteger(id) || id <= 0 || id === SYSTEM_USER_ID) {
+      return c.json({ error: "Invalid user id" }, 400);
     }
 
-    // Only owners can revoke other owners
-    if (user.role === "owner" && adminUser.role !== "owner") {
-      return c.json({ error: "Only owners can revoke other owners" }, 403);
+    const user = await c.env.DB.prepare(
+      `SELECT ${REVOCABLE_USER_COLUMNS} FROM users WHERE id = ? AND deleted_at IS NULL`,
+    )
+      .bind(id)
+      .first<RevocableUserRow>();
+
+    if (!user) {
+      return c.json({ error: "User not found" }, 404);
     }
 
-    // Revoke IAM access if configured - SECURITY CRITICAL
-    // Uses owner credentials to forcefully delete ALL access keys
-    let iamRevoked = false;
-    let iamRevocationError: string | null = null;
-    let iamRevocationSteps: string[] = [];
-
-    if (user.aws_iam_username && user.aws_access_key_id_encrypted && c.env.ENCRYPTION_KEY) {
-      try {
-        const accessKeyId = await decrypt(user.aws_access_key_id_encrypted, c.env.ENCRYPTION_KEY);
-
-        // Use aggressive cleanup with owner credentials
-        const result = await revokeUserIamAccess(
-          {
-            accessKeyId: c.env.AWS_ACCESS_KEY_ID,
-            secretAccessKey: c.env.AWS_SECRET_ACCESS_KEY,
-            region: c.env.AWS_REGION,
-          },
-          user.aws_iam_username,
-          accessKeyId,
-        );
-
-        iamRevoked = result.success;
-        iamRevocationSteps = result.steps;
-
-        if (result.errors.length > 0) {
-          // Partial failure - some steps succeeded, some failed
-          iamRevocationError = result.errors.join("; ");
-          console.error(
-            "IAM revocation partial failure for",
-            user.username,
-            "\nErrors:",
-            result.errors,
-            "\nSteps:",
-            result.steps,
-          );
-
-          // Track partial failures for follow-up
-          try {
-            await db
-              .prepare(
-                `INSERT INTO iam_revocation_failures (user_id, username, iam_username, error_message, created_at)
-               VALUES (?, ?, ?, ?, datetime('now'))`,
-              )
-              .bind(user.id, user.username, user.aws_iam_username, iamRevocationError)
-              .run();
-          } catch {
-            console.error("Could not track IAM failure in database");
-          }
-        } else {
-          // Complete success
-          console.log(`IAM revocation succeeded for ${user.username}:\n${result.steps.join("\n")}`);
-        }
-      } catch (error) {
-        // Complete failure - couldn't even start cleanup
-        const errMsg = errorMessage(error);
-        console.error("CRITICAL SECURITY: Failed to revoke IAM access for", user.username, errMsg);
-
-        iamRevocationError = errMsg;
-
-        // Track complete failures
-        try {
-          await db
-            .prepare(
-              `INSERT INTO iam_revocation_failures (user_id, username, iam_username, error_message, created_at)
-             VALUES (?, ?, ?, ?, datetime('now'))`,
-            )
-            .bind(user.id, user.username, user.aws_iam_username, errMsg)
-            .run();
-        } catch {
-          console.error("Could not track IAM failure in database");
-        }
-      }
-    }
-
-    // Clear IAM credentials from database (even if revocation failed)
-    await db
-      .prepare(`
-      UPDATE users
-      SET aws_iam_username = NULL,
-          aws_access_key_id_encrypted = NULL,
-          aws_secret_access_key_encrypted = NULL
-      WHERE id = ?
-    `)
-      .bind(user.id)
-      .run();
-
-    // Revoke all tokens
-    await db
-      .prepare(
-        `
-    UPDATE tokens
-    SET revoked_at = datetime('now')
-    WHERE user_id = ? AND revoked_at IS NULL
-  `,
-      )
-      .bind(user.id)
-      .run();
-
-    // Update user status
-    // If IAM revocation failed, mark as revoked_iam_pending for manual cleanup
-    const finalStatus = iamRevoked || !user.aws_iam_username ? "revoked" : "revoked_iam_pending";
-
-    // service_access (migration 0062) gates real (non-sandbox) uploads and
-    // compute independently of `status` -- clearing it here closes issue
-    // #1069 (a revoked user kept the grant and could still pass
-    // realDatasetServiceGate if `status` were ever restored without an
-    // explicit re-grant).
-    await db
-      .prepare(
-        `
-    UPDATE users
-    SET status = ?,
-        service_access = 0,
-        revoked_at = datetime('now'),
-        updated_at = datetime('now')
-    WHERE id = ?
-  `,
-      )
-      .bind(finalStatus, user.id)
-      .run();
-
-    // Remove from every dataset repo they touch: collaborator grants
-    // (dataset_collaborators) UNION repos they own (datasets.owner_user_id).
-    // Owner-owned repos were previously never removed (epic #713 gap).
-    const collaborations = await db
-      .prepare(
-        `SELECT d.github_repo FROM dataset_collaborators dc JOIN datasets d ON dc.dataset_id = d.id WHERE dc.user_id = ?
-       UNION
-       SELECT github_repo FROM datasets WHERE owner_user_id = ?`,
-      )
-      .bind(user.id, user.id)
-      .all<{ github_repo: string | null }>();
-
-    let reposRemoved = 0;
-    const failedRemovals: string[] = [];
-    for (const collab of collaborations.results || []) {
-      if (collab.github_repo) {
-        // Extract repo name with defensive check
-        const parts = collab.github_repo.split("/");
-        if (parts.length !== 2 || !parts[1]) {
-          console.error(`Invalid github_repo format: ${collab.github_repo}`);
-          failedRemovals.push(collab.github_repo);
-          continue;
-        }
-        const repoName = parts[1];
-        try {
-          await removeCollaborator(repoName, user.github_username, await getDatasetsToken(c.env));
-          reposRemoved++;
-        } catch (error) {
-          console.error(`Failed to remove from ${collab.github_repo}:`, error);
-          failedRemovals.push(collab.github_repo);
-        }
-      }
-    }
-
-    // Clear their collaborator records
-    await db.prepare("DELETE FROM dataset_collaborators WHERE user_id = ?").bind(user.id).run();
-
-    // Send revocation email
-    let emailSent = false;
-    try {
-      const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
-      await sendRevocationEmail(
-        user.email,
-        user.username,
-        c.env.RESEND_API_KEY,
-        fromEmail,
-        replyTo,
-        isDev,
-        c.env,
-      );
-      emailSent = true;
-    } catch (error) {
-      console.error("Failed to send revocation email:", error);
-    }
-
-    // Clear S3 permissions
-    await db.prepare("DELETE FROM user_s3_permissions WHERE user_id = ?").bind(user.id).run();
-
-    // Audit log
-    await auditLogStatement(db, {
-      userId: adminUser.id,
-      action: "user_revoked",
-      resourceType: "user",
-      resourceId: user.username,
-      details: JSON.stringify({
-        revoked_by: adminUser.username,
-        repos_removed: reposRemoved,
-        failed_removals: failedRemovals,
-        email_sent: emailSent,
-        iam_revoked: iamRevoked,
-      }),
-    }).run();
-
-    // If IAM revocation had errors, return warning with detailed steps
-    if (iamRevocationError) {
-      return c.json(
-        {
-          warning: iamRevoked
-            ? "User revoked with partial IAM cleanup"
-            : "User revoked with IAM cleanup failure",
-          message: iamRevoked
-            ? "User's API tokens revoked. Some IAM cleanup steps failed but S3 access keys were deleted."
-            : "User's API tokens and database access revoked, but S3 credentials may still be active",
-          user: {
-            username: user.username,
-            status: finalStatus,
-          },
-          iam_cleanup: {
-            success: iamRevoked,
-            errors: iamRevocationError,
-            steps_attempted: iamRevocationSteps,
-            aws_iam_username: user.aws_iam_username,
-          },
-          action_required: iamRevoked
-            ? [
-                "Review IAM cleanup steps above",
-                `Check AWS console for user '${user.aws_iam_username}'`,
-                "Verify no orphaned resources remain",
-              ]
-            : [
-                `1. Manually delete IAM user '${user.aws_iam_username}' in AWS console`,
-                "2. Or use AWS CLI: aws iam list-access-keys --user-name <username>",
-                "3. Delete each key: aws iam delete-access-key --user-name <username> --access-key-id <key>",
-                "4. Delete user: aws iam delete-user --user-name <username>",
-                `5. Update user status: UPDATE users SET status = 'revoked' WHERE username = '${user.username}'`,
-              ],
-          security_impact: iamRevoked
-            ? "Most IAM resources cleaned up. Review steps for any remaining items."
-            : "User can still upload/download S3 data until manual cleanup completes",
-          repos_removed: reposRemoved,
-          failed_removals: failedRemovals.length > 0 ? failedRemovals : undefined,
-          email_sent: emailSent,
-          iam_revoked: iamRevoked,
-        },
-        207, // 207 Multi-Status: partial success
-      );
-    }
-
-    // Full revocation succeeded
-    return c.json({
-      message: `User ${username} access has been fully revoked`,
-      user: {
-        username: user.username,
-        status: finalStatus,
-      },
-      repos_removed: reposRemoved,
-      failed_removals: failedRemovals.length > 0 ? failedRemovals : undefined,
-      email_sent: emailSent,
-      iam_revoked: iamRevoked,
-    });
+    return finalizeRevocation(c, user);
   });
 
   /**
@@ -1315,15 +1600,14 @@ export function registerUsersRoutes(admin: AdminRouter): void {
   // ---------------------------------------------------------------------------
 
   const seedWebUserSchema = z.object({
-    email: z
-      .string()
-      .email()
-      .max(320)
-      .transform((e) => e.trim().toLowerCase()),
+    // Shared field: normalises BEFORE validating, so a pasted address with
+    // surrounding whitespace seeds a row rather than 400ing (ADR 0043).
+    email: emailFieldSchema,
     // Optional. Defaults to 'pending' to mirror what the legacy
-    // INSERT-OR-IGNORE produced. The cookie-auth tests (#572) seed
-    // directly as 'approved' because the cookie path in authMiddleware
-    // gates on status='approved'.
+    // INSERT-OR-IGNORE produced. The cookie-auth tests (#572) seed a
+    // signed-in tier directly; since ADR 0040 phase 2 the cookie path in
+    // authMiddleware accepts 'verified' as well as 'approved', so either
+    // works for a fixture that only needs to authenticate.
     status: z.enum(["pending", "verified", "approved", "revoked"]).optional(),
     // Optional profile columns (#910) so the passwordless suite can
     // assert a populated /auth/me payload, not just the all-null
@@ -1333,9 +1617,22 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       .object({
         given_name: z.string().max(200).optional(),
         family_name: z.string().max(200).optional(),
-        orcid: z.string().max(19).optional(),
+        // Shared iD validator, not a bare length check: `max(19)` accepted
+        // any 19-character string as an ORCID, which is how a fixture row
+        // could carry an iD the rest of the system would never accept.
+        // Canonicalised the same way every real write is (ADR 0043), so a
+        // fixture cannot seed a row shape the production paths can no longer
+        // produce -- a lowercase `x` check digit or an `@handle`.
+        orcid: z
+          .preprocess((v) => (typeof v === "string" ? (normalizeOrcid(v) ?? v) : v), orcidIdSchema)
+          .optional(),
         orcid_verified: z.boolean().optional(),
-        github_username: z.string().max(39).optional(),
+        github_username: z
+          .preprocess(
+            (v) => (typeof v === "string" ? normalizeGithubHandle(v) : v),
+            z.string().max(39),
+          )
+          .optional(),
         city: z.string().max(200).optional(),
         country: z.string().max(200).optional(),
         affiliation: z.string().max(300).optional(),

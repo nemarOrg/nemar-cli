@@ -39,6 +39,7 @@ import {
   toS3Credentials,
 } from "../lib/git-annex/s3-remote.js";
 import { copyToAnnexRemote } from "../lib/git-annex/transfer.js";
+import { resolveSandboxCompletion } from "../lib/sandbox-status.js";
 import {
   cleanupSandboxDataset,
   generateSandboxDataset,
@@ -92,9 +93,21 @@ async function sandboxAction(options: { verbose?: boolean } = {}): Promise<void>
     return;
   }
 
-  // Step 2: Check if already completed
+  // Step 2: Check if already completed. The local flag is a CACHE of a fact
+  // the account carries (#1274), so a miss asks the backend instead of walking
+  // somebody who trained on another machine through training again. A failed
+  // ask says so and continues: the user typed `nemar sandbox`, and the run is
+  // idempotent enough to be the right default when nobody can say otherwise.
+  const completion = await resolveSandboxCompletion();
+  if (completion.status === "unknown") {
+    console.log(chalk.yellow("Could not confirm your training status with the server."));
+    console.log(chalk.dim(`  ${completion.reason}`));
+    console.log(chalk.dim("  Continuing; run 'nemar sandbox status --refresh' to re-check."));
+    console.log();
+  }
+  // Re-read: a server answer above may have just written both fields.
   const config = getConfig();
-  if (config.sandboxCompleted) {
+  if (completion.status === "completed") {
     console.log(chalk.green("Sandbox training already completed!"));
     console.log(chalk.dim(`Dataset ID: ${config.sandboxDatasetId}`));
     console.log();

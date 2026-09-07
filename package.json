@@ -12,6 +12,7 @@
     "build": "bun build src/index.ts --outdir dist --target bun --minify && sed '1s|#!/usr/bin/env node|#!/usr/bin/env bun|' dist/index.js > dist/index.js.tmp && mv dist/index.js.tmp dist/index.js",
     "test": "bun test",
     "lint": "biome check src/",
+    "migrations:d1-check": "bun run scripts/d1-migration-check.ts",
     "lint:fix": "biome check --fix src/",
     "format": "biome format --write src/",
     "typecheck": "tsc --noEmit && tsc --noEmit -p backend",

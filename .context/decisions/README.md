@@ -78,6 +78,12 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0037](0037-make-versus-take-is-decided-explicitly-in-both-directions.md) - Make versus take is decided explicitly, in both directions
 - [ADR 0038](0038-byte-size-formatting-stays-bespoke.md) - Byte-size formatting stays bespoke; pretty-bytes is declined
 - [ADR 0039](0039-the-update-check-stays-bespoke.md) - The CLI update check stays bespoke; update-notifier is declined
+- [ADR 0040](0040-approval-is-the-single-writer-of-upload-access.md) - Admin approval is the single writer of upload access; `verified` is the base tier
+- [ADR 0041](0041-dois-cite-the-uploader-by-real-name-or-not-at-all.md) - DOIs cite the uploader by real name, or not at all
+- [ADR 0042](0042-upload-access-is-requested-once-by-the-person-who-wants-it.md) - Upload access is requested once, by the person who wants it
+- [ADR 0043](0043-one-person-one-account.md) - One person, one account: ORCID, email and GitHub each back at most one live account
+- [ADR 0044](0044-identity-self-service-reaches-the-cli.md) - Identity self-service reaches the CLI, and ORCID does it through the browser
+- [ADR 0045](0045-the-cli-and-the-web-say-one-thing-about-an-account.md) - The CLI and the web say one thing about an account: one matrix, one copy table, one gap function
 
 ## Backfill note (2026-07-31)
 

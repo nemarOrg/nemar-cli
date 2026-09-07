@@ -129,6 +129,30 @@ describe("extractEnrichmentSubErrors", () => {
   // a list of "<field>: <message>" strings; runEnrichmentForDataset uses
   // it to decide ok vs failed.
 
+  test("a deliberate doi_sync skip is NOT a sub-error", () => {
+    // #1255 review item 26: it used to be, and runEnrichmentForDataset treats
+    // a non-empty sub-error list as ok:false -- so every reindex of a
+    // nameless-owner dataset reported "failed". Skips travel as warnings now
+    // (extractEnrichmentSkips); see backend/test/enrich-doi-sync-skip.test.ts.
+    expect(
+      extractEnrichmentSubErrors({
+        doi_sync: {
+          status: "skipped",
+          reason: "owner_name_missing",
+          message: "DOI metadata sync skipped for nm000282.",
+        },
+      }),
+    ).toEqual([]);
+  });
+
+  test("a real sub-error alongside a skip still reports the sub-error alone", () => {
+    const out = extractEnrichmentSubErrors({
+      commit_error: "push rejected",
+      doi_sync: { status: "skipped", reason: "owner_name_missing", message: "m" },
+    });
+    expect(out).toEqual(["commit_error: push rejected"]);
+  });
+
   test("returns empty for a clean body", () => {
     expect(extractEnrichmentSubErrors({ ok: true })).toEqual([]);
   });

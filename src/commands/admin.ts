@@ -28,10 +28,13 @@ import { Command } from "commander";
 import inquirer from "inquirer";
 import ora, { type Ora } from "ora";
 import { formatBytesCli } from "../../shared/bytes.js";
+import type { DuplicateGroup } from "../../shared/contract/index.js";
 import {
   type AvailabilityReport,
   type AvailabilityReportResult,
   type AvailabilityReportSweepBatchResponse,
+  type BackfillNamesResponse,
+  type BackfillUsernamesResponse,
   type DataIntegritySweepBatchResponse,
   type DatasetTransitionResponse,
   type DoctorFixLiveResponse,
@@ -54,9 +57,12 @@ import {
   availabilityReport,
   availabilityReportSweep,
   availabilityReportSweepReset,
+  backfillUserNames,
+  backfillUsernames,
   bulkDeleteDatasets,
   changeUserRole,
   changeVisibility,
+  clearIdentityConflict,
   createConceptDoi,
   createExemplar,
   dataIntegritySweep,
@@ -74,6 +80,7 @@ import {
   getFleetDrift,
   getImportStatus,
   getSummaryCoverage,
+  getUserDuplicates,
   hedSweep,
   hedSweepReset,
   listUsers,
@@ -88,6 +95,7 @@ import {
   retryImport,
   revalidateDataset,
   revokeUser,
+  revokeUserById,
   rollbackImport,
   sendBroadcast,
   signalDefaultsSweep,
@@ -95,6 +103,7 @@ import {
   syncCi,
   updateDoi,
   updateEmailPreferences,
+  uploadTierOf,
   validateCi,
   verifyImport,
   withdrawDataset,
@@ -156,6 +165,17 @@ import {
   resolveWithdrawTargets,
 } from "../lib/withdrawn-datasets.js";
 
+/**
+ * Hints keyed on a publication `block_reason`, which outrank the status-code
+ * hint: a 422 from the publish paths is not always a CI problem, and telling
+ * an admin to "fix the CI issues" when the real problem is a missing
+ * researcher name sends them to the wrong place entirely (#1255).
+ */
+const BLOCK_REASON_HINTS: Record<string, string> = {
+  owner_name_missing:
+    "Run `nemar admin backfill-names --apply` if the owner's ORCID record publishes their name; an ORCID-linked owner must otherwise make it public on ORCID and sign in again, and an owner with no linked ORCID can now type it into Settings on nemar.org (ADR 0042).",
+};
+
 /** Handle common error patterns in admin CLI commands */
 function handleCommandError(
   error: unknown,
@@ -165,7 +185,8 @@ function handleCommandError(
 ): void {
   if (error instanceof ApiError) {
     spinner.fail(error.message);
-    const hint = hints?.[error.statusCode];
+    const reasonHint = error.blockReason ? BLOCK_REASON_HINTS[error.blockReason] : undefined;
+    const hint = reasonHint ?? hints?.[error.statusCode];
     if (hint) {
       console.log(chalk.dim(`  ${hint}`));
     } else if (error.statusCode === 403) {
@@ -265,16 +286,26 @@ adminCommand
   .command("users")
   .description("List NEMAR users")
   .option("--pending", "Show only pending approval")
-  .option("--verified", "Show only verified (awaiting approval)")
+  .option("--verified", "Show only verified (base tier: browse, no upload access)")
   .option("--approved", "Show only approved users")
   .option("--revoked", "Show only revoked users")
+  .option("--no-upload-access", "Show only accounts without upload access")
+  .option("--awaiting-approval", "Show accounts with an open upload-access request")
   .option("--role <role>", "Filter by role: owner, admin, or member")
   .addHelpText(
     "after",
     `
+Tiers (ADR 0040):
+  browse   base tier: browse, dashboard, settings (CLI key and sandbox
+           follow in Phase 2)
+  upload   an admin granted upload access; 'nemar admin approve' is the grant
+  unknown  the API reported no tier for this account (a backend older than
+           the tier split, or a rolling deploy)
+
 Examples:
   $ nemar admin users                    # List all users
-  $ nemar admin users --verified         # Users awaiting approval
+  $ nemar admin users --awaiting-approval # Open upload-access requests
+  $ nemar admin users --no-upload-access # Every account without the upload grant
   $ nemar admin users --role admin       # List all admins
   $ nemar admin users --role owner       # List all owners
   $ nemar admin users --approved --role member  # Approved regular users`,
@@ -282,12 +313,40 @@ Examples:
   .action(async (options) => {
     if (!requireAuth()) return;
 
+    // Commander turns `--no-upload-access` into `uploadAccess`, defaulting to
+    // true and set false when the flag is passed.
+    const noUploadAccess = options.uploadAccess === false;
+    // --awaiting-approval now means what it says (ADR 0042, #1253): an account
+    // that ASKED for upload access and has not been granted it. Phase 1 could
+    // only approximate that as "verified with no grant" — every base-tier
+    // account, whether or not anyone wanted to upload — because there was no
+    // request to read.
+    //
+    // The narrowing is entirely server-side: an open request is
+    // `upload_access_requested_at` set, no grant, and `status='verified'`, and
+    // the route applies all three. `status=verified` is still sent as well
+    // because the pre-#1253 backend this CLI may be talking to knows only that
+    // half, and it is a true property of every open request either way.
+    const awaitingApproval = options.awaitingApproval === true;
+
     // Determine status filter
     let status: string | undefined;
     if (options.pending) status = "pending";
     else if (options.verified) status = "verified";
     else if (options.approved) status = "approved";
     else if (options.revoked) status = "revoked";
+
+    if (awaitingApproval) {
+      if (status && status !== "verified") {
+        console.error(
+          chalk.red(
+            `--awaiting-approval implies --verified; it cannot be combined with --${status}`,
+          ),
+        );
+        process.exit(1);
+      }
+      status = "verified";
+    }
 
     // Validate role filter
     const role: string | undefined = options.role;
@@ -299,22 +358,47 @@ Examples:
     const spinner = ora("Fetching users...").start();
 
     try {
-      const result = await listUsers(status, role);
+      const result = await listUsers(status, role, awaitingApproval);
       spinner.stop();
 
-      if (result.users.length === 0) {
-        const filters = [status, role].filter(Boolean).join(", ");
-        console.log(chalk.yellow(`No users found${filters ? ` (filter: ${filters})` : ""}`));
+      // The TIER filters are applied here rather than server-side: the listing
+      // is unpaginated, so there is nothing to gain from a new query param.
+      // (--awaiting-approval is the exception and is filtered server-side; the
+      // client-side pass below still runs for it, which is what keeps a backend
+      // that predates #1253 — and so ignores the query param entirely — from
+      // presenting every verified account as an open request.)
+      //
+      // Both filters select an EXPLICIT "browse", never an unreported tier: a
+      // backend that does not send `service_access` would otherwise dump every
+      // account into "needs approving", which is the opposite of what an admin
+      // asked for (ADR 0040).
+      const users =
+        noUploadAccess || awaitingApproval
+          ? result.users.filter((u) => uploadTierOf(u) === "browse")
+          : result.users;
+      const unknownTierCount = result.users.filter((u) => uploadTierOf(u) === "unknown").length;
+
+      const filterLabel = [
+        status,
+        role ? `role=${role}` : "",
+        awaitingApproval ? "awaiting-approval" : noUploadAccess ? "no-upload-access" : "",
+      ]
+        .filter(Boolean)
+        .join(", ");
+
+      if (users.length === 0) {
+        console.log(
+          chalk.yellow(`No users found${filterLabel ? ` (filter: ${filterLabel})` : ""}`),
+        );
         return;
       }
 
-      const filterLabel = [status, role ? `role=${role}` : ""].filter(Boolean).join(", ");
       console.log(
-        `\n${chalk.cyan("NEMAR Users")} (${result.count} total${filterLabel ? `, filter: ${filterLabel}` : ""})\n`,
+        `\n${chalk.cyan("NEMAR Users")} (${users.length} total${filterLabel ? `, filter: ${filterLabel}` : ""})\n`,
       );
 
       // Display users in a clean format
-      for (const user of result.users) {
+      for (const user of users) {
         const statusColor =
           {
             pending: chalk.dim,
@@ -332,12 +416,45 @@ Examples:
               : chalk.dim(" [member]");
         const verifiedBadge = user.email_verified ? "" : chalk.dim(" (unverified)");
 
-        console.log(`  ${chalk.cyan(user.username)}${roleBadge}`);
+        // Web/ORCID accounts have username = NULL by design (#1012), so the
+        // heading falls back to the email and carries the numeric id — the
+        // only key `nemar admin approve --id` can address them by. Printing
+        // the raw field would put the literal "null" in the listing.
+        const heading = user.username ?? user.email;
+        const idHint = user.username ? "" : chalk.dim(` (no username, id ${user.id})`);
+        const realName = [user.given_name, user.family_name].filter(Boolean).join(" ");
+        const tier = {
+          upload: chalk.green("upload"),
+          browse: chalk.dim("browse"),
+          unknown: chalk.dim("unknown"),
+        }[uploadTierOf(user)];
+
+        console.log(`  ${chalk.cyan(heading)}${roleBadge}${idHint}`);
+        if (realName) console.log(`    Name:    ${realName}`);
         console.log(`    Email:   ${user.email}${verifiedBadge}`);
-        console.log(`    GitHub:  @${user.github_username}`);
+        console.log(`    GitHub:  ${user.github_username ? `@${user.github_username}` : "-"}`);
         console.log(`    Status:  ${statusColor(user.status)}`);
+        console.log(`    Tier:    ${tier}`);
+        // Only when there IS one. An absent field means either "never asked" or
+        // a backend older than #1253, and neither is worth a line that says
+        // nothing (ADR 0042).
+        if (user.upload_access_requested_at) {
+          console.log(
+            `    Asked:   ${new Date(user.upload_access_requested_at).toLocaleDateString()} (upload access)`,
+          );
+        }
         console.log(`    Created: ${new Date(user.created_at).toLocaleDateString()}`);
         console.log();
+      }
+
+      // Say it out loud rather than letting a column of "unknown" imply the
+      // backend is fine. This is what a pre-#1251 or mid-rollout API looks like.
+      if (unknownTierCount > 0) {
+        console.log(
+          chalk.yellow(
+            `Note: ${unknownTierCount} account(s) reported no upload tier; the API may predate it.`,
+          ),
+        );
       }
     } catch (error) {
       handleCommandError(error, spinner, "Failed to fetch users");
@@ -387,7 +504,7 @@ adminCommand
     // Confirmation
     console.log(chalk.cyan(`\nApproving user: ${label}\n`));
     console.log("This will:");
-    console.log("  1. Mark the account approved");
+    console.log("  1. Mark the account approved and grant upload access");
     if (username) {
       console.log("  2. Notify them to retrieve their API key via CLI");
     } else {
@@ -409,9 +526,33 @@ adminCommand
       console.log();
       console.log(`  Email: ${result.user.email}`);
       console.log(`  Status: ${chalk.green(result.user.status)}`);
+      // Approval is the single writer of upload access (ADR 0040) — say so,
+      // because #1249 was exactly an admin assuming it and being wrong. Read it
+      // off the RESPONSE rather than hardcoding "upload": an older backend that
+      // still approves without granting is the very bug this phase fixes, and
+      // printing the outcome we wanted would hide it on exactly the deployment
+      // where an admin most needs to see it.
+      if (result.user.service_access === true) {
+        console.log(`  Tier: ${chalk.green("upload")}`);
+      } else {
+        console.log(`  Tier: ${chalk.yellow("grant not confirmed by server")}`);
+        console.log(
+          chalk.yellow(
+            "  The account is approved but the API did not report upload access; verify with 'nemar admin users'.",
+          ),
+        );
+      }
+      if (result.note) console.log(chalk.dim(`  ${result.note}`));
 
       console.log();
-      if (result.email_sent) {
+      // `note` marks the repair path, where the account was ALREADY approved so
+      // no notification was attempted (the backend returns email_sent: false by
+      // design). Reporting "Notification email failed to send" there sends an
+      // admin chasing a delivery problem that does not exist, so say nothing
+      // about email at all.
+      if (result.note) {
+        // Nothing to report: no email was owed and none was tried.
+      } else if (result.email_sent) {
         console.log(
           result.user.username
             ? chalk.green("User notified to retrieve their API key via 'nemar auth retrieve-key'")
@@ -439,30 +580,65 @@ adminCommand
 adminCommand
   .command("revoke")
   .description("Revoke user access")
-  .argument("<username>", "Username to revoke")
+  .argument("[username]", "Username to revoke (CLI accounts)")
+  .option("--id <id>", "Revoke by numeric user id (web/ORCID accounts have no username)")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
-  .action(async (username, options: ConfirmOptions) => {
+  .action(async (username: string | undefined, options: ConfirmOptions & { id?: string }) => {
+    // Exactly one addressing key, the same rule `admin approve` enforces:
+    // username (CLI accounts) or --id (web/ORCID accounts, whose username is
+    // NULL by design). Approval can reach those accounts by id, so revocation
+    // has to as well (ADR 0040: revoke is the eraser of what approval wrote).
+    // Validated before the auth gate, like approve's, so an argv mistake
+    // surfaces (exit 1) even when the caller is not logged in.
+    const byId = options.id !== undefined;
+    if (!byId && !username) {
+      console.error(chalk.red("Error: provide a username or --id <id>"));
+      console.error(chalk.dim("Web/ORCID accounts have no username; find their id with:"));
+      console.error(chalk.dim("  nemar admin users"));
+      process.exit(1);
+    }
+    if (byId && username) {
+      console.error(chalk.red("Error: username and --id are mutually exclusive; provide one"));
+      process.exit(1);
+    }
+    let userId = 0;
+    if (byId) {
+      userId = Number.parseInt(options.id ?? "", 10);
+      if (!Number.isInteger(userId) || userId <= 0) {
+        console.error(chalk.red(`Error: invalid user id: ${options.id}`));
+        process.exit(1);
+      }
+    }
+
     if (!requireAuth()) return;
 
-    // Prevent self-revocation
+    // Prevent self-revocation. Only the username is checkable here -- the
+    // config stores no numeric id -- so the backend holds the id-keyed half of
+    // this guard.
     const config = getConfig();
-    if (config.username === username) {
+    if (username && config.username === username) {
       console.log(chalk.red("Error: Cannot revoke your own access"));
       return;
     }
 
+    const label = username ?? `user id ${userId}`;
+    // What the admin types back to confirm: the username, or the id when that
+    // is the only handle the account has.
+    const confirmToken = username ?? String(userId);
+
     // Confirmation with warning
-    console.log(chalk.red(`\nRevoking access for: ${username}\n`));
+    console.log(chalk.red(`\nRevoking access for: ${label}\n`));
     console.log(chalk.yellow("This will:"));
     console.log("  1. Invalidate all API keys for this user");
     console.log("  2. Remove them from datasets they have access to");
-    console.log("  3. Send them a notification email");
+    console.log("  3. Revoke upload access, if they hold it");
+    console.log("  4. Send them a notification email");
     console.log();
 
     const result = await confirmWithInput(
-      `Type '${username}' to confirm revocation:`,
-      username,
+      `Type '${confirmToken}' to confirm revocation:`,
+      confirmToken,
       options,
     );
     if (result !== "confirmed") {
@@ -470,11 +646,11 @@ adminCommand
       return;
     }
 
-    const spinner = ora(`Revoking ${username}...`).start();
+    const spinner = ora(`Revoking ${label}...`).start();
 
     try {
-      await revokeUser(username);
-      spinner.succeed(`Revoked access for ${username}`);
+      await (username ? revokeUser(username) : revokeUserById(userId));
+      spinner.succeed(`Revoked access for ${label}`);
     } catch (error) {
       handleCommandError(error, spinner, "Failed to revoke user", {
         404: "User not found",
@@ -6391,3 +6567,390 @@ zarrCatalogCommand
   });
 
 adminCommand.addCommand(zarrCatalogCommand);
+
+// ============================================================================
+// Researcher-name backfill (#1255, epic #1250)
+//
+// DOIs cite the uploader by real name and publishing is blocked without one,
+// but most accounts predate the signup-time ORCID name lookup. This fills the
+// gap from each account's own public ORCID record.
+// ============================================================================
+
+const backfillNamesCommand = new Command("backfill-names").description(
+  "Fill missing researcher names from users' public ORCID records (dry run by default)",
+);
+
+backfillNamesCommand
+  .option("--apply", "Write the names (without this flag, only report what would change)")
+  .option("--limit <n>", "Users per batch (server clamps to [1,100])", "25")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { apply?: boolean; limit?: string; json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const limit = Number.parseInt(options.limit ?? "25", 10) || 25;
+    const apply = options.apply === true;
+    const spinner = ora(
+      apply ? "Backfilling names from ORCID..." : "Checking ORCID for missing names...",
+    ).start();
+
+    let res: BackfillNamesResponse;
+    try {
+      res = await backfillUserNames({ apply, limit });
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Name backfill failed");
+      console.error(chalk.red(errorDetail(err)));
+      process.exit(1);
+      return;
+    }
+
+    // Computed before the --json branch returns, so a scripted caller reading
+    // the exit code sees the same verdict as someone reading the summary below.
+    // A lookup failure leaves the row a candidate for the next run, and an
+    // unknown remainder means the batch's own bookkeeping failed. Neither is
+    // fatal, but a caller must not read either as a clean sweep.
+    if (res.lookup_failed > 0 || (res.write_failed ?? 0) > 0 || res.remaining === null) {
+      process.exitCode = 1;
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    console.log();
+    if (!res.apply) {
+      console.log(chalk.yellow("DRY RUN — nothing was written. Re-run with --apply."));
+    }
+    console.log(
+      chalk.cyan(
+        `scanned=${res.scanned} ${res.apply ? "filled" : "would_fill"}=${
+          res.apply ? res.filled : res.would_fill
+        } no_public_name=${res.no_public_name} lookup_failed=${
+          res.lookup_failed
+        } write_failed=${res.write_failed ?? 0} remaining=${res.remaining ?? "unknown"}`,
+      ),
+    );
+    for (const r of res.results) {
+      const who = r.username ?? `id ${r.id} <${r.email}>`;
+      if (r.outcome === "filled" || r.outcome === "would_fill") {
+        const verb = r.outcome === "filled" ? chalk.green("filled  ") : chalk.cyan("would fill");
+        console.log(`  ${verb} ${who}: ${r.given_name} ${r.family_name}  (${r.orcid})`);
+      } else if (r.outcome === "no_public_name") {
+        console.log(
+          `  ${chalk.yellow("no name ")} ${who}: ORCID ${r.orcid} does not publish a full name`,
+        );
+      } else if (r.outcome === "write_failed") {
+        // Not folded in with the ORCID failure below: the name was READ fine
+        // and our own write is what refused it, so the operator is looking at
+        // D1 rather than at orcid.org.
+        console.log(`  ${chalk.red("write   ")} ${who}: ${r.error}; retry the batch`);
+      } else {
+        console.log(`  ${chalk.red("error   ")} ${who}: ${r.error}`);
+      }
+    }
+    // `remaining=unknown` above means the count query itself failed; say what
+    // failed rather than leaving the operator to guess (#1255 review item 28).
+    if (res.warning) {
+      console.log(chalk.yellow(`  Warning: ${res.warning}`));
+    }
+    if (res.no_public_name > 0) {
+      console.log();
+      console.log(
+        chalk.dim(
+          "These accounts must make their name public on their ORCID record and sign in again; NEMAR cannot type a name in for an ORCID-linked account, because the record is re-read on every sign-in and would overwrite it. An account with no verified ORCID can set its name in Settings (ADR 0042).",
+        ),
+      );
+    }
+  });
+
+adminCommand.addCommand(backfillNamesCommand);
+
+// ============================================================================
+// Username backfill (ADR 0042, #1253, epic #1250)
+//
+// 19 live accounts have no username: web/ORCID sign-ups, where the column has
+// been NULL by design since migration 0026. An upload request cannot be
+// reviewed or approved without one, so this derives it from the account's own
+// name (first initial plus family name) and, for a row it finishes, sends the
+// one verify-your-email message that lets the person sign in and use it.
+//
+// Run `nemar admin backfill-names` FIRST: this reads the names that one fills.
+// ============================================================================
+
+const backfillUsernamesCommand = new Command("backfill-usernames").description(
+  "Give username-less accounts a username from their name (dry run by default)",
+);
+
+backfillUsernamesCommand
+  .option("--apply", "Write the usernames and send verification messages")
+  .option("--limit <n>", "Users per batch (server clamps to [1,100])", "25")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { apply?: boolean; limit?: string; json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const limit = Number.parseInt(options.limit ?? "25", 10) || 25;
+    const apply = options.apply === true;
+    const spinner = ora(
+      apply ? "Assigning usernames..." : "Checking which accounts need a username...",
+    ).start();
+
+    let res: BackfillUsernamesResponse;
+    try {
+      res = await backfillUsernames({ apply, limit });
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Username backfill failed");
+      console.error(chalk.red(errorDetail(err)));
+      process.exit(1);
+      return;
+    }
+
+    // Computed before the --json branch returns, so a scripted caller reading
+    // the exit code sees the same verdict as someone reading the summary below.
+    //
+    // A lookup failure or a conflict leaves the row a candidate for the next
+    // run, an undelivered verify message leaves an account unable to finish
+    // onboarding, and an unknown remainder means the batch's own bookkeeping
+    // failed. None is fatal, but a caller must not read any of them as a clean
+    // sweep -- an unreported verify failure is exactly how "one message per
+    // account" quietly became "none" for the accounts it failed on.
+    //
+    // `exhausted` is in the list because it used to BE a conflict: splitting it
+    // out (#1268 review) must not quietly turn a run that finished nothing into
+    // a clean exit. It is the stronger case of the two -- a conflict clears
+    // itself on the next run and a saturated base never does.
+    if (
+      res.lookup_failed > 0 ||
+      res.conflict > 0 ||
+      (res.exhausted ?? 0) > 0 ||
+      (res.write_failed ?? 0) > 0 ||
+      (res.verify_failed ?? 0) > 0 ||
+      (res.verify_rate_limited ?? 0) > 0 ||
+      res.remaining === null
+    ) {
+      process.exitCode = 1;
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    console.log();
+    if (!res.apply) {
+      console.log(chalk.yellow("DRY RUN — nothing was written. Re-run with --apply."));
+    }
+    console.log(
+      chalk.cyan(
+        `scanned=${res.scanned} ${res.apply ? "assigned" : "would_assign"}=${
+          res.apply ? res.assigned : res.would_assign
+        } single_name=${res.single_name} no_name=${res.no_name} lookup_failed=${
+          res.lookup_failed
+        } conflict=${res.conflict} exhausted=${res.exhausted ?? 0} write_failed=${
+          res.write_failed ?? 0
+        } verify_sent=${res.verify_sent} verify_failed=${
+          res.verify_failed ?? 0
+        } verify_rate_limited=${res.verify_rate_limited ?? 0} remaining=${
+          res.remaining ?? "unknown"
+        }`,
+      ),
+    );
+    for (const r of res.results) {
+      const who = `id ${r.id} <${r.email}>`;
+      const name = [r.given_name, r.family_name].filter(Boolean).join(" ");
+      if (r.outcome === "assigned" || r.outcome === "would_assign") {
+        const verb =
+          r.outcome === "assigned" ? chalk.green("assigned  ") : chalk.cyan("would give");
+        // The verify outcome is printed for an assigned row because
+        // `skipped_fence` is the NORMAL result outside production and reads as
+        // a failure if it is not named (AGENTS.md's non-production email fence).
+        const mail = r.outcome === "assigned" ? `  [verify: ${r.verify}]` : "";
+        console.log(`  ${verb} ${who}: ${chalk.cyan(r.username ?? "?")}  (${name})${mail}`);
+      } else if (r.outcome === "single_name") {
+        console.log(
+          `  ${chalk.yellow("one name  ")} ${who}: only "${name}" on record; pick a username by hand`,
+        );
+      } else if (r.outcome === "no_name") {
+        console.log(
+          `  ${chalk.yellow("no name   ")} ${who}: run 'nemar admin backfill-names --apply' first`,
+        );
+      } else if (r.outcome === "conflict") {
+        console.log(`  ${chalk.yellow("conflict  ")} ${who}: ${r.error}`);
+      } else if (r.outcome === "exhausted") {
+        // Deliberately not folded in with `conflict` above: re-running the
+        // sweep fixes a conflict and can never fix this one.
+        console.log(`  ${chalk.yellow("exhausted ")} ${who}: ${r.error}; pick a username by hand`);
+      } else if (r.outcome === "write_failed") {
+        // A conflict is somebody else holding the handle; this is the write
+        // itself failing, so the batch is retryable but the thing to look at
+        // is the database.
+        console.log(`  ${chalk.red("write     ")} ${who}: ${r.error}; retry the batch`);
+      } else {
+        console.log(`  ${chalk.red("error     ")} ${who}: ${r.error}`);
+      }
+    }
+    // The retry pass, listed separately: these accounts already have a
+    // username, so they are not part of the assignment plan above -- what is
+    // being reported is a message that never landed.
+    for (const r of res.verify_retries ?? []) {
+      const label =
+        r.verify === "sent"
+          ? chalk.green("re-sent  ")
+          : r.verify === "not_attempted"
+            ? chalk.cyan("would send")
+            : chalk.yellow(`verify ${r.verify}`);
+      console.log(`  ${label} id ${r.id} <${r.email}>`);
+    }
+    if (res.warning) {
+      console.log(chalk.yellow(`  Warning: ${res.warning}`));
+    }
+    if (res.single_name > 0 || res.no_name > 0) {
+      console.log();
+      console.log(
+        chalk.dim(
+          "Accounts with one name or none are listed, never guessed at: a username derived from an email address is a handle the person never chose.",
+        ),
+      );
+    }
+  });
+
+adminCommand.addCommand(backfillUsernamesCommand);
+
+// ============================================================================
+// Duplicate accounts (#1254, epic #1250; ADR 0043)
+// ============================================================================
+
+/**
+ * `nemar admin duplicates` — live accounts sharing an ORCID iD, an email
+ * address, or a GitHub handle, plus the `--clear` half that un-flags a row
+ * once its collision is gone.
+ *
+ * A TOP-LEVEL COMMAND rather than a flag on `nemar admin users`: the listing
+ * is one row per account and this is one row per GROUP, so folding it in would
+ * mean two incompatible table shapes behind one command. It also reports on
+ * something the listing has no column for -- `identity_conflict`, the flag
+ * migration 0077 uses to keep a duplicate out of the unique indexes without
+ * deleting anybody.
+ *
+ * This command NEVER merges or deletes. It says which rows collide and which
+ * one holds the identifier; resolving it is the person's own Settings change,
+ * or an explicit account deletion by an admin.
+ */
+const duplicatesCommand = new Command("duplicates").description(
+  "Report live accounts sharing an ORCID iD, email, or GitHub handle",
+);
+
+/** One line per account inside a group. */
+function printDuplicateAccount(account: DuplicateGroup["accounts"][number]): void {
+  const who = account.username ?? chalk.dim("(no username)");
+  const marks: string[] = [];
+  if (account.canonical) marks.push(chalk.green("canonical"));
+  if (account.identity_conflict === 1) marks.push(chalk.yellow("flagged"));
+  if (account.has_oauth_identity) marks.push(chalk.dim("orcid-login"));
+  const suffix = marks.length > 0 ? `  [${marks.join(", ")}]` : "";
+  const meta = `created ${account.created_at}  datasets=${account.dataset_count}`;
+  console.log(
+    `    id ${String(account.id).padEnd(5)} ${who}  <${account.email}>  ${meta}${suffix}`,
+  );
+}
+
+duplicatesCommand
+  .option("--json", "Output raw JSON instead of the human report")
+  .option(
+    "--clear <id>",
+    "Clear one account's identity-conflict flag (refuses while the collision remains)",
+  )
+  .action(async (options: { json?: boolean; clear?: string }) => {
+    if (!requireAuth()) return;
+
+    if (options.clear !== undefined) {
+      const id = Number.parseInt(options.clear, 10);
+      if (!Number.isInteger(id) || id <= 0) {
+        console.error(chalk.red(`Invalid user id: ${options.clear}`));
+        process.exit(1);
+        return;
+      }
+      const spinner = ora(`Clearing identity-conflict flag on user ${id}...`).start();
+      try {
+        const res = await clearIdentityConflict(id);
+        spinner.stop();
+        if (options.json) {
+          console.log(JSON.stringify(res, null, 2));
+          return;
+        }
+        console.log(
+          res.cleared
+            ? chalk.green(`Cleared the identity-conflict flag on user ${id}.`)
+            : chalk.dim(`User ${id} was not flagged; nothing to clear.`),
+        );
+      } catch (err) {
+        // A 409 here is the normal answer, not a crash: the collision is
+        // still there. Print the API's own sentence, which names what to fix.
+        spinner.fail(
+          err instanceof ApiError && err.statusCode === 409
+            ? "Still colliding; flag not cleared"
+            : "Failed to clear the identity-conflict flag",
+        );
+        console.error(chalk.red(errorDetail(err)));
+        process.exit(1);
+      }
+      return;
+    }
+
+    const spinner = ora("Checking for duplicate accounts...").start();
+    let report: Awaited<ReturnType<typeof getUserDuplicates>>;
+    try {
+      report = await getUserDuplicates();
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Duplicate report failed");
+      console.error(chalk.red(errorDetail(err)));
+      process.exit(1);
+      return;
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
+
+    console.log();
+    if (report.groups.length === 0) {
+      console.log(chalk.green("No duplicate accounts."));
+      // A flag with no group behind it is a resolved collision waiting to be
+      // cleared, and it is invisible in the groups list by definition — so it
+      // gets said out loud rather than left to be inferred from a zero.
+      if (report.flagged_count > 0) {
+        console.log(
+          chalk.yellow(
+            `${report.flagged_count} account(s) still carry an identity-conflict flag with no remaining collision.`,
+          ),
+        );
+        console.log(chalk.dim("  Clear each with 'nemar admin duplicates --clear <id>'."));
+      }
+      return;
+    }
+
+    console.log(
+      chalk.cyan(
+        `${report.group_count} duplicate group(s); ${report.flagged_count} account(s) flagged`,
+      ),
+    );
+    for (const group of report.groups) {
+      console.log();
+      console.log(`  ${chalk.bold(group.kind)}  ${group.value}`);
+      for (const account of group.accounts) printDuplicateAccount(account);
+    }
+    console.log();
+    console.log(
+      chalk.dim(
+        "The fix is self-service on the surviving account: change its email or GitHub username, or unlink/re-link its ORCID iD, in Settings on nemar.org. Merging two accounts is manual.",
+      ),
+    );
+    // Exit non-zero so a scheduled run surfaces a duplicate instead of
+    // scrolling past as a successful command.
+    process.exitCode = 1;
+  });
+
+adminCommand.addCommand(duplicatesCommand);

@@ -65,7 +65,8 @@ Records of what was done. Do not use as a current-state reference.
 [plan-923-test-staging.md](plan-923-test-staging.md) ·
 [plan-legacy-separation-793.md](plan-legacy-separation-793.md) ·
 [plan-import-robustness.md](plan-import-robustness.md) ·
-[plan-phase2-retry-engine.md](plan-phase2-retry-engine.md)
+[plan-phase2-retry-engine.md](plan-phase2-retry-engine.md) ·
+[draft-1023-service-access-endpoints-plan.md](draft-1023-service-access-endpoints-plan.md)
 
 ---
 
@@ -78,6 +79,8 @@ Left in place because the surrounding document is still useful, each annotated i
 - **`epic_central_manifest_state.md`** ops sequence references the retired personal Cloudflare
   account — superseded by ADR 0008.
 - **`architecture_review.md`** item 2 is marked RESOLVED but was later reversed — see ADR 0019.
+- **`draft-1023-service-access-endpoints-plan.md`** proposes separate service-access grant/revoke
+  endpoints — superseded by ADR 0040, which puts the grant on approve/revoke themselves.
 
 ## Adding to this directory
 

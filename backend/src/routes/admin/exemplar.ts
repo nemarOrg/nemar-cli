@@ -22,6 +22,7 @@ import { type GitHubRepo, createRepository, deleteRepository } from "../../servi
 import { getDatasetsToken } from "../../services/github-auth";
 import { ORG_NAME } from "../../services/github/shared";
 import { extractRepoName, readRepoMetadata } from "../../services/repo-metadata";
+import { requiresUploaderName, resolveOwnerIdentity } from "../../services/uploader-identity";
 import type { AdminRouter } from "./shared";
 
 /** Exemplar id band xx099900-xx099999 (canonical 8-char id: xx + 6 digits). */
@@ -189,7 +190,8 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
     const dataset = await db
       .prepare(
         `SELECT d.dataset_id, d.name, d.description, d.github_repo, d.concept_doi, d.is_exemplar,
-                u.username as owner_username, u.orcid as owner_orcid
+                u.username as owner_username, u.orcid as owner_orcid,
+                u.given_name as owner_given_name, u.family_name as owner_family_name
          FROM datasets d JOIN users u ON d.owner_user_id = u.id WHERE d.dataset_id = ?`,
       )
       .bind(datasetId)
@@ -202,6 +204,8 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
         is_exemplar: number | null;
         owner_username: string;
         owner_orcid: string | null;
+        owner_given_name: string | null;
+        owner_family_name: string | null;
       }>();
     if (!dataset) {
       return c.json({ error: "Dataset not found" }, 404);
@@ -211,16 +215,14 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
     }
 
     // Assemble metadata like the concept-DOI route, then re-mint (sandbox).
+    // One resolve, threaded to both the enrichment and the mint options.
+    const uploader = resolveOwnerIdentity(dataset);
     let bidsDescription: Record<string, unknown> | undefined;
     let repoEnrichment: DataCiteEnrichment | undefined;
     if (dataset.github_repo) {
       const repoName = extractRepoName(dataset.github_repo);
       if (repoName) {
-        const baseEnrichment = buildOrcidEnrichment(
-          undefined,
-          dataset.owner_username,
-          dataset.owner_orcid || undefined,
-        );
+        const baseEnrichment = buildOrcidEnrichment(undefined, uploader);
         const repoMeta = await readRepoMetadata(
           repoName,
           await getDatasetsToken(c.env),
@@ -242,8 +244,10 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
           githubRepo: dataset.github_repo,
           bidsDescription,
           enrichment: repoEnrichment,
-          uploaderOrcid: dataset.owner_orcid || undefined,
-          uploaderName: dataset.owner_username,
+          uploader,
+          // Exemplars are exempt: their owner row is an admin/service account
+          // and they mint on the EZID sandbox shoulder (requiresUploaderName).
+          uploaderRequired: requiresUploaderName(dataset),
           sandbox: true,
         },
         {

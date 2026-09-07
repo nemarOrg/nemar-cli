@@ -43,7 +43,24 @@ Load-bearing ones to know before touching the relevant area:
 0031 (one annex policy module; `_motion.tsv` is data despite the extension),
 0032 (facet filters are declared once and report what they exclude),
 0033 (the queue stamps which engine converted each dataset; pre-stamp rows are declared current),
-0034 (`datasets` stays one table under an enforced column budget; derive, don't store).
+0034 (`datasets` stays one table under an enforced column budget; derive, don't store),
+0040 (`verified` is the base tier; admin approval is the only writer of upload access),
+0042 (upload access is requested once, by the person who wants it),
+0043 (one person, one account: an ORCID iD, an email or a GitHub handle backs at most one live account),
+0044 (identity self-service reaches the CLI; ORCID links through a browser handoff whose
+signed state names the account),
+0045 (the CLI and the web say one thing about an account).
+
+**Account copy and the profile-gap matrix are declared once, in
+[`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
+[`shared/contract/profile-gaps.ts`](shared/contract/profile-gaps.ts)** (ADR 0045).
+Every sentence about tiers, upload access or a missing field comes from the first;
+`computeProfileGaps` in the second is the ONE rule behind `profile_gaps` on
+`GET /users/me`, `profile_gaps` on `GET /auth/me`, and the `missing` array a refused
+upload-access request carries. `nemarOrg/website` transcribes both files and a drift
+test on each side compares them when both checkouts are present. Change a sentence or a
+rule there, never at a call site; `cli.`-prefixed keys are the CLI's own and the website
+ignores them.
 
 ---
 
@@ -182,9 +199,19 @@ s3://nemar/staging/pr-{n}/{datasetId}/objects/   # PR staging area
 
 ### User flow
 
-1. Sign up (username, email, password) → email verification → admin approval
-2. Admin approves → system generates API token, S3 credentials, GitHub PAT
-3. User uploads → BIDS validation → private GitHub repo + S3 upload
+Four statuses, fixed meanings, one writer for upload access (**ADR 0040**):
+`pending` (email unverified) → `verified` (the base tier, no admin needed) →
+`approved` (an admin granted upload) → `revoked`.
+
+1. Sign up (CLI: username, email, password; web: ORCID + an email) → verify the email → `verified`
+2. `verified` needs no admin: browse, dashboard, settings, `nemar auth retrieve-key`,
+   `nemar sandbox`. Upload access is requested ONCE, when it is needed, from Settings
+   on nemar.org or `nemar auth request-upload-access`
+   (`POST /users/me/upload-access/request`, **ADR 0042**). The request needs a username,
+   a real name, a GitHub account that exists, a city and a country, and a sentence about
+   what is being deposited; each missing field is named in a typed refusal
+3. Admin approves the one-time upload request → `service_access` → user uploads
+   → BIDS validation → private GitHub repo + S3 upload
 4. Admin creates concept DOI → user can version with new DOIs
 
 ### Web dashboard auth (#569)
@@ -286,6 +313,15 @@ without touching the version.
 
 `[skip ci]` is deliberately absent from the strip commit,
 because GitHub's skip marker would also block the tag-push event that `npm-publish.yml` needs.
+
+**A release that carries a new migration runs `bun run migrations:d1-check` first.**
+Every migration test in this repo runs on bun:sqlite, which is more permissive than
+the SQLite build D1 ships — migration 0077 shipped a 79-character GLOB that bun:sqlite
+executes and D1 rejects (its LIKE/GLOB pattern cap is 50 characters), so every test was
+green and the deploy would have aborted mid-file.
+The script replays every migration through `wrangler d1 execute --local` and diffs the
+resulting object and column catalogue against the bun:sqlite one.
+It is not in per-PR CI because it takes about a minute.
 
 **When a manual bump does apply:** cutting a minor or major release
 (`./scripts/bump-version.sh minor-dev0` on dev, then open the PR),
@@ -511,12 +547,12 @@ and what is historical. The entries worth knowing by name:
 
 | Group | Covers |
 |---|---|
-| `nemar auth` | login, signup, status/whoami, switch, logout, verification, SSH setup, key retrieval and regeneration |
+| `nemar auth` | login, signup, status/whoami, profile (plus `set-email`/`verify-email`, `set-github`, `set-username`, `set-name`, `set-location`, `orcid link\|relink\|unlink` — ADR 0044), request-upload-access, switch, logout, verification, SSH setup, key retrieval and regeneration |
 | `nemar dataset` | validate, upload, download, status (alias: view), list, search, release, update, clone, get, commit, push, drop, ci, manifest |
 | `nemar dataset publish` | request, status, resend |
 | `nemar dataset` (access) | request-access, access, invite, collaborators |
 | `nemar sandbox` | training run, status, reset — required before uploading |
-| `nemar admin` | users, approve, revoke, role, notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, recording-stats-sweep, signal-defaults-sweep, zarr-fidelity-sweep, doctor, summary, notice, email-preferences, e2e-test |
+| `nemar admin` | users, approve, revoke, role, notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, recording-stats-sweep, signal-defaults-sweep, zarr-fidelity-sweep, doctor, summary, notice, email-preferences, backfill-names, backfill-usernames, duplicates, e2e-test |
 | `nemar admin import*` | OpenNeuro import, status, rollback, retry, verify, recover (issue #754, epic #967) |
 | `nemar admin fleet` | drift, enforce, revalidate — governance across dataset repos (epic #713) |
 | `nemar admin exemplar` | create, status, remint-dois — the staging exemplar fleet |

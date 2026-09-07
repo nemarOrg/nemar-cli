@@ -131,6 +131,69 @@ describe("__selectBucket", () => {
     expect(sel.maxRequests).toBe(__limits.AUTH_MAX_REQUESTS);
   });
 
+  test("the email-verification endpoints are in the auth bucket, request path included", () => {
+    // One AUTH_PATHS entry covers both because the matcher treats entries as
+    // prefixes. Asserted on the SUB-PATH as well as the entry itself: if that
+    // prefix behaviour ever changes, /auth/email/verify/request silently
+    // falls to the 500/min IP bucket and a code-mailing endpoint loses its
+    // floor.
+    for (const path of ["/auth/email/verify", "/auth/email/verify/request"]) {
+      const sel = __selectBucket(path, null, "10.0.0.1");
+      expect(sel.keyKind).toBe("auth-ip");
+      expect(sel.maxRequests).toBe(__limits.AUTH_MAX_REQUESTS);
+    }
+  });
+
+  test("the upload-access request is in the strict bucket, bearer or not", () => {
+    // ADR 0042, #1253. It is NOT an /auth path, so nothing about its shape
+    // puts it here -- only the explicit AUTH_PATHS entry does. Every attempt
+    // spends a live GitHub call on the shared installation token and a refused
+    // one writes nothing, so on the token bucket one verified account could
+    // replay ~1000 GitHub calls a minute. Asserted WITH a bearer because that
+    // is how it is always called: the token branch must not win.
+    for (const auth of [undefined, `Bearer ${VALID_TOKEN}`]) {
+      const sel = __selectBucket("/users/me/upload-access/request", auth, "10.0.0.1");
+      expect(sel.keyKind).toBe("auth-ip");
+      expect(sel.rawKey).toBe("10.0.0.1");
+      expect(sel.maxRequests).toBe(__limits.AUTH_MAX_REQUESTS);
+    }
+  });
+
+  test("the CLI ORCID surface is in the strict bucket; the callback is not", () => {
+    // #1266, ADR 0044. All three are bearer-reachable now, so without their
+    // AUTH_PATHS entries a token would put them in the 1000/min bucket -- on
+    // an identity-link mint, on the step that turns a leaked intent into an
+    // ORCID redirect, and on the unlink. /continue is asserted separately
+    // because it relies on the matcher's prefix behaviour.
+    for (const path of [
+      "/auth/orcid/cli-start",
+      "/auth/orcid/cli-handoff",
+      "/auth/orcid/cli-handoff/continue",
+      "/auth/orcid/unlink",
+    ]) {
+      const sel = __selectBucket(path, `Bearer ${VALID_TOKEN}`, "10.0.0.1");
+      expect(sel.keyKind).toBe("auth-ip");
+      expect(sel.rawKey).toBe("10.0.0.1");
+      expect(sel.maxRequests).toBe(__limits.AUTH_MAX_REQUESTS);
+    }
+  });
+
+  test("the ORCID callback stays OUT of the strict bucket", () => {
+    // A browser landing on a shared egress IP, and the one ORCID path a
+    // careless prefix entry ("/auth/orcid") would drag to 10/min -- which
+    // would rate-limit the website's own sign-in flow, not the CLI's.
+    const sel = __selectBucket("/auth/orcid/callback?code=x&state=y", undefined, "10.0.0.1");
+    expect(sel.keyKind).not.toBe("auth-ip");
+  });
+
+  test("the rest of /users keeps the ordinary token bucket", () => {
+    // The AUTH_PATHS matcher is a prefix match, so an over-broad entry
+    // ("/users") would drag the dashboard's own polling into a 10/min cap.
+    const sel = __selectBucket("/users/me", `Bearer ${VALID_TOKEN}`, "10.0.0.1");
+    expect(sel.keyKind).toBe("token");
+    expect(sel.maxRequests).toBe(__limits.TOKEN_MAX_REQUESTS_AUTHED);
+  });
+
   test("authenticated non-auth requests bucket on token with higher cap", () => {
     const sel = __selectBucket(
       "/admin/publish/nm000110/approve",

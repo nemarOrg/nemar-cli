@@ -6,49 +6,82 @@
  * verbatim.
  */
 
+import {
+  type AdminUserListItem,
+  type AdminUsersListResponse,
+  type BackfillUsernameOutcome,
+  type BackfillVerifyOutcome,
+  type ClearIdentityConflictResponse,
+  type DuplicateReport,
+  adminUsersListResponseSchema,
+  clearIdentityConflictResponseSchema,
+  duplicateReportSchema,
+} from "../../../shared/contract/index.js";
+import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
 import { request } from "./client.js";
 
 // ============================================================================
 // Admin
 // ============================================================================
 
-export interface UserListItem {
-  id: number;
-  username: string;
-  email: string;
-  github_username: string;
-  status: string;
-  email_verified: number;
-  role: string;
-  created_at: string;
-  approved_at: string | null;
-  revoked_at: string | null;
-}
+/**
+ * Wire shapes for GET /admin/users live in shared/contract/user.ts and are
+ * VALIDATED on the way in (below), not merely asserted with a cast. The
+ * hand-written interface these replaced declared `service_access: number` and
+ * `username: string`, neither of which the endpoint guarantees — a cast makes
+ * both drifts invisible, which is the getCurrentUser bug (#899) in a new place.
+ */
+export type UserListItem = AdminUserListItem;
+export type UsersListResponse = AdminUsersListResponse;
 
-export interface UsersListResponse {
-  users: UserListItem[];
-  count: number;
+/**
+ * The upload tier of a listed account (ADR 0040). Three states, not two:
+ * `unknown` is a backend that did not report `service_access` at all (deployed
+ * before #1251, or a rolling deploy mid-flight), and must not be shown or
+ * filtered as "browse" — telling an uploader they have no upload access sends
+ * them to an admin to ask for something they already hold.
+ */
+export type UploadTier = "upload" | "browse" | "unknown";
+
+export function uploadTierOf(user: Pick<UserListItem, "service_access">): UploadTier {
+  if (user.service_access === undefined || user.service_access === null) return "unknown";
+  return user.service_access ? "upload" : "browse";
 }
 
 /**
  * List users (admin only)
  */
-export async function listUsers(status?: string, role?: string): Promise<UsersListResponse> {
+export async function listUsers(
+  status?: string,
+  role?: string,
+  // Open upload requests only (ADR 0042, #1253): asked, not yet granted. This
+  // one is server-side because the timestamp it filters on is not something a
+  // client can derive from the rest of the row.
+  awaitingApproval?: boolean,
+): Promise<UsersListResponse> {
   const params = new URLSearchParams();
   if (status) params.set("status", status);
   if (role) params.set("role", role);
+  if (awaitingApproval) params.set("awaiting_approval", "1");
   const query = params.toString() ? `?${params.toString()}` : "";
-  return request<UsersListResponse>(`/admin/users${query}`, {}, true);
+  return request(`/admin/users${query}`, {}, true, adminUsersListResponseSchema);
 }
 
 export interface ApproveResponse {
   message: string;
+  /**
+   * Present only on the repair path: the account was already `approved` but
+   * carried no upload grant, so only the grant was written (ADR 0040).
+   */
+  note?: string;
   user: {
     id: number;
     // NULL for web/ORCID accounts (they have no username by design).
     username: string | null;
     email: string;
     status: string;
+    /** Approval grants upload access; always true on a 200 (ADR 0040). */
+    service_access?: boolean;
   };
   email_sent: boolean;
 }
@@ -87,6 +120,23 @@ export async function approveUserById(id: number): Promise<ApproveResponse> {
 export async function revokeUser(username: string): Promise<{ message: string }> {
   return request<{ message: string }>(
     `/admin/revoke/${username}`,
+    {
+      method: "POST",
+    },
+    true,
+  );
+}
+
+/**
+ * Revoke a user's access by their numeric id (admin only). The mirror of
+ * {@link approveUserById}, and needed for the same accounts: a web/ORCID
+ * signup has username = NULL, so the username-keyed endpoint can never reach
+ * one. Approval grants upload access to those accounts (ADR 0040), so revoke
+ * has to be able to take it back from them.
+ */
+export async function revokeUserById(id: number): Promise<{ message: string }> {
+  return request<{ message: string }>(
+    `/admin/revoke/by-id/${id}`,
     {
       method: "POST",
     },
@@ -1443,5 +1493,164 @@ export async function zarrFidelitySweep(options?: {
     `/admin/datasets/zarr-fidelity-sweep${query}`,
     { method: "POST", headers: { "Content-Type": "application/json" } },
     true,
+  );
+}
+
+// ============================================================================
+// Researcher-name backfill (#1255, epic #1250)
+// ============================================================================
+
+export interface BackfillNameResult {
+  id: number;
+  username: string | null;
+  email: string;
+  orcid: string;
+  outcome: BackfillNameOutcome;
+  given_name?: string | null;
+  family_name?: string | null;
+  error?: string;
+}
+
+export interface BackfillNamesResponse {
+  apply: boolean;
+  scanned: number;
+  filled: number;
+  would_fill: number;
+  no_public_name: number;
+  lookup_failed: number;
+  /** Rows whose name UPDATE threw. Optional: a backend that predates #1274 had
+   *  no such outcome -- one failed write 500ed the whole batch. */
+  write_failed?: number;
+  /** Candidates still missing a name after this batch; `null` when the count
+   *  query itself failed (never confuse that with "nothing left"). */
+  remaining: number | null;
+  /** Set when a non-fatal part of the batch failed, e.g. the remaining count. */
+  warning?: string;
+  results: BackfillNameResult[];
+}
+
+/** Fill NULL researcher names from the public ORCID record. Dry run unless
+ *  `apply` is true. */
+export async function backfillUserNames(options?: {
+  apply?: boolean;
+  limit?: number;
+}): Promise<BackfillNamesResponse> {
+  return request<BackfillNamesResponse>(
+    "/admin/users/backfill-names",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        apply: options?.apply ?? false,
+        ...(options?.limit != null ? { limit: options.limit } : {}),
+      }),
+    },
+    true,
+  );
+}
+
+// ============================================================================
+// Username backfill (ADR 0042, #1253)
+// ============================================================================
+
+export interface BackfillUsernameResult {
+  id: number;
+  email: string;
+  orcid: string | null;
+  outcome: BackfillUsernameOutcome;
+  username?: string | null;
+  given_name?: string | null;
+  family_name?: string | null;
+  verify?: BackfillVerifyOutcome;
+  error?: string;
+}
+
+/** One row of the verify-retry pass: an account that already has a username
+ *  and still has an unproven inbox. */
+export interface BackfillVerifyRetry {
+  id: number;
+  email: string;
+  verify: BackfillVerifyOutcome;
+}
+
+export interface BackfillUsernamesResponse {
+  apply: boolean;
+  scanned: number;
+  assigned: number;
+  would_assign: number;
+  single_name: number;
+  no_name: number;
+  lookup_failed: number;
+  conflict: number;
+  /** Rows whose suggested base was saturated up to the suffix limit. Optional
+   *  for the same reason the verify counters are: a backend that predates the
+   *  split reports those rows inside `conflict`. */
+  exhausted?: number;
+  /** Rows whose claim write threw. Optional for the same reason: a backend
+   *  that predates #1274 had no such outcome -- it 500ed the whole batch. */
+  write_failed?: number;
+  /** Verify-message outcomes, counted across BOTH passes. Optional so a
+   *  backend that predates the retry pass is rendered as unknown, not zero. */
+  verify_sent: number;
+  verify_failed?: number;
+  verify_rate_limited?: number;
+  verify_skipped_fence?: number;
+  verify_retried?: number;
+  verify_retries?: BackfillVerifyRetry[];
+  /** Candidates still without a username after this batch; `null` when the
+   *  count query itself failed (never confuse that with "nothing left"). */
+  remaining: number | null;
+  /** Set when a non-fatal part of the batch failed, e.g. the remaining count. */
+  warning?: string;
+  results: BackfillUsernameResult[];
+}
+
+/** Give username-less accounts a username derived from their name. Dry run
+ *  unless `apply` is true. */
+export async function backfillUsernames(options?: {
+  apply?: boolean;
+  limit?: number;
+}): Promise<BackfillUsernamesResponse> {
+  return request<BackfillUsernamesResponse>(
+    "/admin/users/backfill-usernames",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        apply: options?.apply ?? false,
+        ...(options?.limit != null ? { limit: options.limit } : {}),
+      }),
+    },
+    true,
+  );
+}
+
+// ============================================================================
+// Identity uniqueness (#1254, epic #1250; ADR 0043)
+// ============================================================================
+
+/**
+ * Duplicate-account report: live accounts sharing an ORCID iD, an email
+ * address, or a GitHub handle.
+ *
+ * Validated against the shared contract rather than cast, for the reason
+ * stated at the top of this file: the report drives an operator's decision
+ * about which of two real accounts survives, so a silent shape drift here is
+ * worse than a loud parse failure.
+ */
+export async function getUserDuplicates(): Promise<DuplicateReport> {
+  return request("/admin/users/duplicates", {}, true, duplicateReportSchema);
+}
+
+/**
+ * Clear a row's `identity_conflict` flag. 409s while the collision is still
+ * there, which is the expected answer until someone has actually resolved it.
+ */
+export async function clearIdentityConflict(id: number): Promise<ClearIdentityConflictResponse> {
+  return request(
+    `/admin/users/${id}/clear-identity-conflict`,
+    { method: "POST" },
+    true,
+    clearIdentityConflictResponseSchema,
   );
 }

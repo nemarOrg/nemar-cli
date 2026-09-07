@@ -317,7 +317,38 @@ jobs:
       - name: Install backend dependencies
         run: cd backend && bun install
 
+      # The website's transcription of shared/contract/account-copy.ts, so
+      # test/account-copy-parity.test.ts can actually compare the two here
+      # (#1268, ADR 0045). Without it that test found no checkout and returned
+      # early: the parity claim was enforced on developer machines and nowhere
+      # else, while reporting green as a required check.
+      #
+      # nemarOrg/website is PUBLIC, so no token is needed. Sparse, non-cone, one
+      # file: a table of string constants, not that repo's module graph. It
+      # lands in website-copy/ at the repo root, which the unit-pure file glob
+      # below cannot reach (it lists test/*.test.ts and backend/test/*.test.ts
+      # only) and .gitignore covers.
+      #
+      # REF PAIRING: website `staging` is the counterpart of nemar-cli `dev` and
+      # of every feature branch off it; website `main` pairs with nemar-cli
+      # `main`. Comparing a dev-side contract against the website's released
+      # copy would fail every PR that lands a copy change ahead of the website
+      # release, which is the normal order.
+      - name: Check out the website's copy table
+        uses: actions/checkout@v4
+        with:
+          repository: nemarOrg/website
+          path: website-copy
+          sparse-checkout: src/lib/account-copy.ts
+          sparse-checkout-cone-mode: false
+          ref: ${{ (github.base_ref == 'main' || github.ref_name == 'main') && 'main' || 'staging' }}
+
       - name: Run pure unit tests (no live backend)
+        env:
+          # Names the checkout above. The parity test treats this as the
+          # contract: a path that is not there FAILS rather than skipping, so a
+          # broken checkout step cannot silently disable the check.
+          NEMAR_WEBSITE_ACCOUNT_COPY: website-copy/src/lib/account-copy.ts
         run: |
           # Deliberately no TEST_API_URL / secrets: these tests don't touch the
           # backend, so a misclassified file fails loudly here instead of
