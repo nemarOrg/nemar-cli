@@ -205,6 +205,8 @@ program
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .option("--all", "Remove all stored accounts")
+  .option("--revoke-key", "Revoke this machine's key even if it may be shared")
+  .option("--no-revoke-key", "Never revoke the key server-side, only clear it locally")
   .action(logoutAction);
 
 program

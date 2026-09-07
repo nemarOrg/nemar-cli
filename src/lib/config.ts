@@ -194,6 +194,10 @@ export interface AccountInfo {
   email?: string;
   githubUsername?: string;
   active: boolean;
+  /** How this account's CURRENT key was obtained (epic #1272 phase 3, ADR
+   *  0047) -- `logoutAction --all` reads this per account to decide whether
+   *  each one's key is safe to revoke automatically. */
+  keySource?: "device" | "paste";
 }
 
 // Full store schema. Legacy flat fields are kept so migrateConfig() can read
@@ -572,6 +576,7 @@ export function getAccounts(): AccountInfo[] {
     email: acct.email,
     githubUsername: acct.githubUsername,
     active: name === active,
+    keySource: acct.keySource,
   }));
 }
 

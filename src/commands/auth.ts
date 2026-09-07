@@ -1092,8 +1092,55 @@ Examples:
 // Logout
 // ============================================================================
 
+/**
+ * Best-effort revoke of the ACTIVE account's key (decision 10, epic #1272
+ * phase 3, ADR 0047).
+ *
+ * Default: revoke only a `"device"`-sourced key -- a pasted or password-era
+ * key is by definition not this machine's alone to kill, so it is kept and
+ * the caller is told where to revoke it deliberately. `--revoke-key` forces
+ * a revoke regardless of source; `--no-revoke-key` skips it entirely; both
+ * are declared as a negatable Commander pair so ABSENCE of either reads as
+ * `undefined` ("derive from keySource"), not as a false default.
+ *
+ * A 401 counts as already done (the key is gone either way). Anything else
+ * -- network failure, 5xx -- is reported as a warning; the caller clears the
+ * LOCAL account regardless, since a revoke that could not be confirmed is
+ * not a reason to leave a dead credential sitting in the config file.
+ */
+async function revokeStoredKey(
+  account: { keySource?: "device" | "paste" },
+  options: { revokeKey?: boolean },
+): Promise<void> {
+  if (options.revokeKey === false) return;
+  const shouldRevoke = options.revokeKey === true || account.keySource === "device";
+  if (!shouldRevoke) {
+    if (account.keySource !== "device") {
+      console.log(
+        chalk.dim(
+          "  This key may be used on other machines and was kept; revoke it with " +
+            "'nemar auth keys revoke' or in Settings on nemar.org.",
+        ),
+      );
+    }
+    return;
+  }
+  try {
+    await revokeApiKey("current");
+  } catch (error) {
+    if (error instanceof ApiError && error.statusCode === 401) return;
+    console.log(
+      chalk.yellow(
+        `  Could not revoke this machine's key (${errorDetail(error)}); it stays valid.`,
+      ),
+    );
+  }
+}
+
 /** Exported logout action handler for use in root-level shortcuts */
-export async function logoutAction(options: ConfirmOptions & { all?: boolean }): Promise<void> {
+export async function logoutAction(
+  options: ConfirmOptions & { all?: boolean; revokeKey?: boolean },
+): Promise<void> {
   if (!isAuthenticated()) {
     console.log(chalk.yellow("Not currently authenticated"));
     return;
@@ -1103,6 +1150,13 @@ export async function logoutAction(options: ConfirmOptions & { all?: boolean }):
     const accounts = getAccounts();
     const result = await confirm(`Log out all ${accounts.length} stored account(s)?`, options);
     if (result !== "confirmed") return;
+    // Each account's key is revoked with ITS OWN bearer (decision 10): the
+    // active account has to be switched to it first, since request()'s
+    // authenticated path always reads the currently active credential.
+    for (const account of accounts) {
+      switchAccount(account.username);
+      await revokeStoredKey(account, options);
+    }
     clearAllConfig();
     console.log(chalk.green("All accounts removed"));
     return;
@@ -1111,6 +1165,8 @@ export async function logoutAction(options: ConfirmOptions & { all?: boolean }):
   const cfg = getConfig();
   const result = await confirm(`Log out ${cfg.username || "current user"}?`, options);
   if (result !== "confirmed") return;
+
+  await revokeStoredKey(cfg, options);
 
   clearConfig();
   console.log(chalk.green("Logged out successfully"));
@@ -1125,13 +1181,31 @@ export async function logoutAction(options: ConfirmOptions & { all?: boolean }):
   }
 }
 
-authCommand
+const logoutCmd = authCommand
   .command("logout")
   .description("Remove the active account (use --all to remove all)")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .option("--all", "Remove all stored accounts")
+  .option("--revoke-key", "Revoke this machine's key even if it may be shared")
+  .option("--no-revoke-key", "Never revoke the key server-side, only clear it locally")
   .action(logoutAction);
+
+addVerboseHelp(
+  logoutCmd,
+  `
+Description:
+  Clears the active account's credential from this machine. A key this
+  machine's own 'nemar auth login' minted (device sign-in) is also revoked
+  server-side by default, since it is not used anywhere else; a pasted or
+  password-era key may be shared with other machines and is kept -- revoke
+  it deliberately with 'nemar auth keys revoke' or in Settings on nemar.org.
+
+Examples:
+  $ nemar auth logout                # Remove the active account
+  $ nemar auth logout --no-revoke-key # Clear locally, keep the key valid
+  $ nemar auth logout --all          # Remove every stored account`,
+);
 
 // ============================================================================
 // Resend Verification
