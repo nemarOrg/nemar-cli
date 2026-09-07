@@ -258,7 +258,12 @@ async function writeSignedInAccount(
   applyServerUser(user);
 
   console.log();
-  console.log(`  Welcome${user.username ? `, ${chalk.cyan(user.username)}` : ""}!`);
+  // "Welcome back" on the --key/NEMAR_API_KEY path, unchanged from before
+  // this phase: a person pasting a key already holds an account. The
+  // device path is the new first-time-or-returning browser flow, and gets
+  // the plain "Welcome" this phase introduced.
+  const greeting = source === "paste" ? "Welcome back" : "Welcome";
+  console.log(`  ${greeting}${user.username ? `, ${chalk.cyan(user.username)}` : ""}!`);
   if (user.role === "owner") {
     console.log(`  ${chalk.red("Owner access enabled")}`);
   } else if (user.role === "admin") {

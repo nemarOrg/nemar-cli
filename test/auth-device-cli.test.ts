@@ -577,6 +577,9 @@ describe("nemar auth login: success writes the account", () => {
       expect(result.exitCode).toBe(0);
       expect(Object.keys(storedAccounts())).toEqual(["ada"]);
       expect(result.stdout).toContain("Welcome, ada!");
+      // Not the --key path's "Welcome back": the device flow is the new
+      // first-time-or-returning browser greeting.
+      expect(result.stdout).not.toContain("Welcome back");
       expect(result.stdout).toContain("Profile");
     } finally {
       server.stop();
@@ -830,6 +833,9 @@ describe("nemar auth login --key", () => {
         server.url,
       );
       expect(result.exitCode).toBe(0);
+      // The --key/NEMAR_API_KEY path keeps the pre-phase-3 greeting: a
+      // person pasting a key already holds an account.
+      expect(result.stdout).toContain("Welcome back");
       const accounts = storedAccounts();
       expect(Object.keys(accounts)).toEqual(["ada@example.org"]);
       expect(accounts["ada@example.org"].keySource).toBe("paste");
