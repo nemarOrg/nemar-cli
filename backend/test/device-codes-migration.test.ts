@@ -34,6 +34,7 @@ import {
   DEVICE_ROW_BY_HASH_SQL,
   DEVICE_ROW_BY_USER_CODE_SQL,
   DEVICE_STAMP_EXPIRED_SQL,
+  KEY_MINT_SQL,
 } from "../src/services/device-auth";
 import { freshDb } from "./helpers/d1";
 
@@ -155,6 +156,21 @@ describe("device_codes schema", () => {
     expect(row.expires_in).toBeGreaterThanOrEqual(595);
     expect(row.expires_in).toBeLessThanOrEqual(600);
   });
+
+  test("expires_in is negative for a past-expiry row read before it is stamped", () => {
+    db.query(
+      `INSERT INTO device_codes (device_code_hash, user_code, machine_name, expires_at)
+       VALUES ('hash-negative', 'AAAAHHHH', 'm', datetime('now', '-30 seconds'))`,
+    ).run();
+    const row = db.query(DEVICE_ROW_BY_HASH_SQL).get("hash-negative") as {
+      status: string;
+      expires_in: number;
+    };
+    // Still 'pending' -- nothing has stamped it yet -- but the computed
+    // column already reports the row is past expiry.
+    expect(row.status).toBe("pending");
+    expect(row.expires_in).toBeLessThan(0);
+  });
 });
 
 describe("DEVICE_CONFIRM_SQL", () => {
@@ -233,6 +249,20 @@ describe("DEVICE_PRUNE_SQL", () => {
     db.query(DEVICE_PRUNE_SQL).run();
     expect(db.query(DEVICE_ROW_BY_HASH_SQL).get("hash-old")).toBeNull();
     expect(db.query(DEVICE_ROW_BY_HASH_SQL).get("hash-recent")).not.toBeNull();
+  });
+
+  test("the 24h boundary itself: +5s past is pruned, -5s past is kept", () => {
+    db.query(
+      `INSERT INTO device_codes (device_code_hash, user_code, machine_name, expires_at)
+       VALUES ('hash-boundary-over', 'EEEECCCC', 'm', datetime('now', '-24 hours', '-5 seconds'))`,
+    ).run();
+    db.query(
+      `INSERT INTO device_codes (device_code_hash, user_code, machine_name, expires_at)
+       VALUES ('hash-boundary-under', 'EEEEDDDD', 'm', datetime('now', '-24 hours', '+5 seconds'))`,
+    ).run();
+    db.query(DEVICE_PRUNE_SQL).run();
+    expect(db.query(DEVICE_ROW_BY_HASH_SQL).get("hash-boundary-over")).toBeNull();
+    expect(db.query(DEVICE_ROW_BY_HASH_SQL).get("hash-boundary-under")).not.toBeNull();
   });
 });
 
@@ -333,6 +363,19 @@ describe("mint pair: DEVICE_MINT_INSERT_SQL + DEVICE_MINT_CONSUME_SQL", () => {
     expect(consumeResult.changes).toBe(0);
   });
 
+  test("mints nothing for a soft-deleted user", () => {
+    const dave = seedUser("dave-deleted@nemar.test", { deleted: true });
+    confirmedCode("hash-deleted", "GGGGZZZZ", dave);
+    const insertResult = db
+      .query(DEVICE_MINT_INSERT_SQL)
+      .run("apikeyhash-7", "nm_x...", "hash-deleted");
+    const consumeResult = db
+      .query(DEVICE_MINT_CONSUME_SQL)
+      .run("apikeyhash-7", "hash-deleted", "apikeyhash-7");
+    expect(insertResult.changes).toBe(0);
+    expect(consumeResult.changes).toBe(0);
+  });
+
   test("mints nothing for an identity_conflict account", () => {
     const carol = seedUser("carol-conflict@nemar.test", { identityConflict: true });
     confirmedCode("hash-conflict", "GGGGEEEE", carol);
@@ -363,6 +406,49 @@ describe("mint pair: DEVICE_MINT_INSERT_SQL + DEVICE_MINT_CONSUME_SQL", () => {
       .run("apikeyhash-6", "hash-full", "apikeyhash-6");
     expect(insertResult.changes).toBe(0);
     expect(consumeResult.changes).toBe(0);
+  });
+});
+
+describe("KEY_MINT_SQL", () => {
+  test("mints for an active, unflagged, under-cap account", () => {
+    const ada = seedUser("ada-key-mint@nemar.test");
+    const result = db.query(KEY_MINT_SQL).run(ada, "keyhash-1", "nm_key1...", "adas-key", ada);
+    expect(result.changes).toBe(1);
+    const row = db
+      .query<{ user_id: number; name: string | null }, [string]>(
+        "SELECT user_id, name FROM tokens WHERE api_key_hash = ?",
+      )
+      .get("keyhash-1");
+    expect(row?.user_id).toBe(ada);
+    expect(row?.name).toBe("adas-key");
+  });
+
+  test("mints nothing for an identity_conflict account", () => {
+    const carol = seedUser("carol-key-mint@nemar.test", { identityConflict: true });
+    const result = db
+      .query(KEY_MINT_SQL)
+      .run(carol, "keyhash-2", "nm_key2...", "carols-key", carol);
+    expect(result.changes).toBe(0);
+  });
+
+  test("mints nothing for a revoked account", () => {
+    const bob = seedUser("bob-key-mint@nemar.test", { status: "revoked" });
+    const result = db.query(KEY_MINT_SQL).run(bob, "keyhash-3", "nm_key3...", "bobs-key", bob);
+    expect(result.changes).toBe(0);
+  });
+
+  test("mints nothing once the account already holds 25 live keys", () => {
+    const dave = seedUser("dave-key-mint@nemar.test");
+    for (let i = 0; i < 25; i++) {
+      db.run(
+        "INSERT INTO tokens (user_id, api_key_hash, api_key_prefix, name) VALUES (?, ?, ?, ?)",
+        [dave, `existing-key-mint-hash-${i}`, "nm_xxx...", `key-${i}`],
+      );
+    }
+    const result = db
+      .query(KEY_MINT_SQL)
+      .run(dave, "keyhash-4", "nm_key4...", "one-too-many", dave);
+    expect(result.changes).toBe(0);
   });
 });
 

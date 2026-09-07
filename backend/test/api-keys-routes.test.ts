@@ -11,7 +11,11 @@
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
-import { MAX_LIVE_API_KEYS } from "../../shared/contract/device-auth.js";
+import {
+  MAX_LIVE_API_KEYS,
+  apiKeyCreateResponseSchema,
+  apiKeyListResponseSchema,
+} from "../../shared/contract/device-auth.js";
 import { authKeysRoutes } from "../src/routes/auth-keys";
 import { userRoutes } from "../src/routes/users";
 import { hashApiKey } from "../src/services/token";
@@ -40,15 +44,27 @@ beforeEach(() => {
   app.route("/users", userRoutes);
 });
 
-function seedUser(email: string, status: "pending" | "verified" | "approved" = "verified"): number {
+function seedUser(
+  email: string,
+  status: "pending" | "verified" | "approved" = "verified",
+  opts: { identityConflict?: boolean } = {},
+): number {
   db.run(
-    `INSERT INTO users (username, email, password_hash, status, role, signup_source, email_verified)
-     VALUES (?, ?, 'x', ?, 'member', 'web', 1)`,
-    [email.split("@")[0], email, status],
+    `INSERT INTO users (username, email, password_hash, status, role, signup_source, email_verified, identity_conflict)
+     VALUES (?, ?, 'x', ?, 'member', 'web', 1, ?)`,
+    [email.split("@")[0], email, status, opts.identityConflict ? 1 : 0],
   );
   const row = db.query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?").get(email);
   if (!row) throw new Error("seed failed");
   return row.id;
+}
+
+function auditRows(action: string) {
+  return db
+    .query<{ user_id: number | null; details: string | null }, [string]>(
+      "SELECT user_id, details FROM audit_log WHERE action = ? ORDER BY id",
+    )
+    .all(action);
 }
 
 async function seedKey(userId: number, name: string, apiKey: string): Promise<number> {
@@ -160,6 +176,14 @@ describe("GET /auth/keys", () => {
     const res = await listKeys({});
     expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
+
+  test("matches the published contract schema", async () => {
+    const ada = seedUser("ada-schema-list@nemar.test");
+    await seedKey(ada, "schema-key", "nm_schemalist0123456789abcdefghijklmno");
+    const res = await listKeys(cookieHeaders(await sessionCookie(ada)));
+    const parsed = apiKeyListResponseSchema.safeParse(await res.json());
+    expect(parsed.success ? [] : parsed.error.issues.map((i) => i.path.join("."))).toEqual([]);
+  });
 });
 
 // --------------------------------------------------------------------------
@@ -197,6 +221,43 @@ describe("POST /auth/keys", () => {
     const ada = seedUser("ada-empty-name@nemar.test");
     const res = await createKey(cookieHeaders(await sessionCookie(ada)), "");
     expect(res.status).toBe(400);
+  });
+
+  test("a whitespace-only name answers 400, never a silent default", async () => {
+    const ada = seedUser("ada-whitespace-name@nemar.test");
+    const res = await createKey(cookieHeaders(await sessionCookie(ada)), "   ");
+    expect(res.status).toBe(400);
+  });
+
+  test("an identity_conflict account answers 403 identity_conflict and mints no row", async () => {
+    const carol = seedUser("carol-conflict-mint@nemar.test", "verified", {
+      identityConflict: true,
+    });
+    const before = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM tokens").get()?.n ?? 0;
+    const res = await createKey(cookieHeaders(await sessionCookie(carol)), "carols-machine");
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe("identity_conflict");
+    const after = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM tokens").get()?.n ?? 0;
+    expect(after).toBe(before);
+  });
+
+  test("writes an api_key_created audit row with name and via", async () => {
+    const ada = seedUser("ada-mint-audit@nemar.test");
+    await createKey(cookieHeaders(await sessionCookie(ada)), "audited-machine");
+    const rows = auditRows("api_key_created");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].user_id).toBe(ada);
+    expect(JSON.parse(rows[0].details ?? "{}")).toEqual({
+      name: "audited-machine",
+      via: "cookie",
+    });
+  });
+
+  test("matches the published contract schema", async () => {
+    const ada = seedUser("ada-schema-create@nemar.test");
+    const res = await createKey(cookieHeaders(await sessionCookie(ada)), "schema-machine");
+    const parsed = apiKeyCreateResponseSchema.safeParse(await res.json());
+    expect(parsed.success ? [] : parsed.error.issues.map((i) => i.path.join("."))).toEqual([]);
   });
 });
 
@@ -256,5 +317,37 @@ describe("DELETE /auth/keys/:id", () => {
     const res = await revokeKey(cookieHeaders(await sessionCookie(ada)), "current");
     expect(res.status).toBe(404);
     expect((await res.json()).error).toBe("key_not_found");
+  });
+
+  test("api_key_revoked details: self=true for DELETE current", async () => {
+    const ada = seedUser("ada-revoke-self-current@nemar.test");
+    const key = "nm_selfcurrent0123456789abcdefghijklmn";
+    await seedKey(ada, "current-key", key);
+    await revokeKey(bearerHeaders(key), "current");
+    const rows = auditRows("api_key_revoked");
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0].details ?? "{}")).toMatchObject({ self: true });
+  });
+
+  test("api_key_revoked details: self=true when a bearer revokes its own id", async () => {
+    const ada = seedUser("ada-revoke-self-id@nemar.test");
+    const key = "nm_selfid0123456789abcdefghijklmnopqrs";
+    const id = await seedKey(ada, "own-key", key);
+    await revokeKey(bearerHeaders(key), id);
+    const rows = auditRows("api_key_revoked");
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0].details ?? "{}")).toMatchObject({ self: true });
+  });
+
+  test("api_key_revoked details: self=false when revoking a non-presenting key by id", async () => {
+    const ada = seedUser("ada-revoke-other-self@nemar.test");
+    const key1 = "nm_notself10123456789abcdefghijklmnop";
+    const key2 = "nm_notself20123456789abcdefghijklmnop";
+    await seedKey(ada, "presenting-key", key1);
+    const id2 = await seedKey(ada, "target-key", key2);
+    await revokeKey(bearerHeaders(key1), id2);
+    const rows = auditRows("api_key_revoked");
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0].details ?? "{}")).toMatchObject({ self: false });
   });
 });
