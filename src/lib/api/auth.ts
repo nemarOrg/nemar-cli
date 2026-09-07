@@ -5,9 +5,25 @@
  * verbatim.
  */
 
-import { type ContractUser, userMeResponseSchema } from "../../../shared/contract/index.js";
+import {
+  type ApiKeyCreateResponse,
+  type ApiKeyListResponse,
+  type ContractUser,
+  type DeviceGrantError,
+  type DeviceStartResponse,
+  type DeviceTokenSuccess,
+  type UsernameSuggestionResponse,
+  apiKeyCreateResponseSchema,
+  apiKeyListResponseSchema,
+  deviceGrantErrorSchema,
+  deviceStartResponseSchema,
+  deviceTokenSuccessSchema,
+  userMeResponseSchema,
+  usernameSuggestionResponseSchema,
+} from "../../../shared/contract/index.js";
 import type { OrcidNameLookupStatus } from "../../../shared/contract/publication.js";
 import { request } from "./client.js";
+import { ApiError } from "./errors.js";
 
 // ============================================================================
 // Authentication
@@ -104,7 +120,12 @@ export interface LoginRequest {
 export interface LoginResponse {
   valid: boolean;
   user: {
-    username: string;
+    // Nullable (epic #1272 phase 3; ADR 0047): `POST /auth/login` shares its
+    // user shape with `POST /auth/device/token`'s success response, and a
+    // brand-new ORCID account has no username until
+    // `refreshNameThenAssignUsername` runs after finalize -- a --key paste
+    // moments after signup can present the same still-unset column.
+    username: string | null;
     email: string;
     github_username: string;
     role: "owner" | "admin" | "member";
@@ -419,4 +440,119 @@ export async function startOrcidCliLink(mode: "link" | "relink"): Promise<OrcidC
 /** Remove the ORCID link (identity row, `users.orcid`, `orcid_verified`). */
 export async function unlinkOrcid(): Promise<{ ok: true }> {
   return request<{ ok: true }>("/auth/orcid/unlink", { method: "POST" }, true);
+}
+
+// ============================================================================
+// Device authorization grant + named keys (epic #1272 phase 3; ADR 0047)
+// ============================================================================
+
+/** `POST /auth/device/start`: mint a device code for this machine. Never
+ *  authenticated -- there is no credential yet, that is the point of the
+ *  flow. */
+export async function startDeviceAuth(machineName: string): Promise<DeviceStartResponse> {
+  return request<DeviceStartResponse>(
+    "/auth/device/start",
+    { method: "POST", body: JSON.stringify({ machine_name: machineName }) },
+    false,
+    deviceStartResponseSchema,
+  );
+}
+
+/** One outcome of a single `POST /auth/device/token` poll. `terminal.error`
+ *  is the RFC 8628 grant-error code (the poll loop's retry logic switches on
+ *  it); `terminal.message` is the sentence to print verbatim (ADR 0047:
+ *  `reason` is the more specific refusal code `message` was already built
+ *  from server-side, so nothing here re-derives it). */
+export type PollDeviceTokenResult =
+  | { status: "success"; data: DeviceTokenSuccess }
+  | { status: "pending" }
+  | { status: "slow_down" }
+  | {
+      status: "terminal";
+      error: Exclude<DeviceGrantError, "authorization_pending" | "slow_down">;
+      reason: string;
+      message: string;
+    };
+
+function isDeviceGrantErrorCode(code: string | undefined): code is DeviceGrantError {
+  return (
+    typeof code === "string" && (deviceGrantErrorSchema.options as readonly string[]).includes(code)
+  );
+}
+
+/**
+ * `POST /auth/device/token`: one poll. Every RFC 8628 answer this endpoint
+ * gives (`authorization_pending`, `slow_down`, and the three terminal codes)
+ * arrives as a 400 `ApiError` whose `code` is the grant-error code -- caught
+ * here and turned into a plain result so the caller (device-login.ts) never
+ * has to `instanceof ApiError` for a "keep polling" answer. Anything else
+ * (a network failure, a 5xx, or a 400 whose `code` this build does not
+ * recognize -- a contract drift) is rethrown, so the caller can treat those
+ * as transient the same way `waitForOrcidLink` already does.
+ *
+ * `signal` composes with the request's own timeout the same way every other
+ * `request()` caller's does -- see device-login.ts's poll loop for how the
+ * two are combined.
+ */
+export async function pollDeviceToken(
+  deviceCode: string,
+  signal?: AbortSignal,
+): Promise<PollDeviceTokenResult> {
+  try {
+    const data = await request(
+      "/auth/device/token",
+      { method: "POST", body: JSON.stringify({ device_code: deviceCode }), signal },
+      false,
+      deviceTokenSuccessSchema,
+    );
+    return { status: "success", data };
+  } catch (error) {
+    if (
+      error instanceof ApiError &&
+      error.statusCode === 400 &&
+      isDeviceGrantErrorCode(error.code)
+    ) {
+      if (error.code === "authorization_pending") return { status: "pending" };
+      if (error.code === "slow_down") return { status: "slow_down" };
+      return {
+        status: "terminal",
+        error: error.code,
+        reason: error.reason ?? error.code,
+        message: error.message,
+      };
+    }
+    throw error;
+  }
+}
+
+/** `GET /auth/keys`: this account's live named keys. */
+export async function listApiKeys(): Promise<ApiKeyListResponse> {
+  return request<ApiKeyListResponse>("/auth/keys", {}, true, apiKeyListResponseSchema);
+}
+
+/** `POST /auth/keys`: mint a new named key -- the paste-key fallback for a
+ *  machine that cannot run the device flow's browser half. */
+export async function createApiKey(name: string): Promise<ApiKeyCreateResponse> {
+  return request<ApiKeyCreateResponse>(
+    "/auth/keys",
+    { method: "POST", body: JSON.stringify({ name }) },
+    true,
+    apiKeyCreateResponseSchema,
+  );
+}
+
+/** `DELETE /auth/keys/:id` or `DELETE /auth/keys/current`. */
+export async function revokeApiKey(id: number | "current"): Promise<{ ok: true }> {
+  return request<{ ok: true }>(`/auth/keys/${id}`, { method: "DELETE" }, true);
+}
+
+/** `GET /auth/profile/username-suggestion`: a default username built from
+ *  the account's name, for `nemar auth signup`'s guided completion. */
+export async function suggestUsername(): Promise<UsernameSuggestionResponse> {
+  return request<UsernameSuggestionResponse>(
+    "/auth/profile/username-suggestion",
+    {},
+    true,
+    usernameSuggestionResponseSchema,
+  );
 }

@@ -260,11 +260,14 @@ export async function loginAction(options: { key?: string } & ConfirmOptions): P
       return;
     }
 
-    // Store credentials as a named account and set as active
-    storeAccount(result.user.username, {
+    // Store credentials as a named account and set as active. Falls back to
+    // email when username is null (a brand-new ORCID account, ADR 0047) --
+    // a transitional shim; loginAction is rewritten onto accountKeyFor /
+    // upsertAccount in the device-flow-login commit that follows this one.
+    storeAccount(result.user.username ?? result.user.email, {
       apiKey,
       apiUrl: DEFAULT_API_URL,
-      username: result.user.username,
+      username: result.user.username ?? undefined,
       email: result.user.email,
       githubUsername: result.user.github_username,
       sandboxCompleted: result.user.sandbox_completed,
