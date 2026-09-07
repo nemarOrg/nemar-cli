@@ -42,11 +42,11 @@ import {
   KEY_REVOKE_BY_ID_SQL,
   KEY_ROW_BY_HASH_FOR_USER_SQL,
   KEY_ROW_BY_ID_FOR_USER_SQL,
-  USER_STATUS_FOR_DEVICE_AUTH_SQL,
   accountRefusal,
   buildApiKeySummary,
   deviceRefusal,
   normalizeMachineName,
+  readDeviceAuthAccount,
 } from "../services/device-auth";
 import { generateApiKey, hashApiKey } from "../services/token";
 import type { Bindings, Variables } from "../types/bindings";
@@ -145,20 +145,16 @@ authKeysRoutes.post(
 
     // `resolveKeysActor` already refused a non-active status AT CALL TIME.
     // This re-reads the account and runs the SAME `accountRefusal` the
-    // device mint answers with, because it is the one gate that check does
-    // not cover: `identity_conflict`. pending/revoked are refused above
-    // already, but routing them through this same map (rather than a
-    // second, hand-written refusal) means every refusal in this route
-    // answers with the status `HTTP_STATUS_FOR_REFUSAL` names for it.
-    const statusRow = await db.prepare(USER_STATUS_FOR_DEVICE_AUTH_SQL).bind(actor.id).first<{
-      status: string;
-      deleted_at: string | null;
-      identity_conflict: number;
-    }>();
-    const accountIssue =
-      statusRow && !statusRow.deleted_at
-        ? accountRefusal(statusRow.status, Boolean(statusRow.identity_conflict))
-        : "account_revoked";
+    // device mint answers with, because it covers two gates that check does
+    // not: `identity_conflict`, and (epic #1272 phase 4, #1284; ADR 0048)
+    // `account_kind` -- a `service`/`test` account must self-mint no key
+    // either, the same `service_account` reason the device flow refuses it
+    // with. pending/revoked are refused above already, but routing them
+    // through this same map (rather than a second, hand-written refusal)
+    // means every refusal in this route answers with the status
+    // `HTTP_STATUS_FOR_REFUSAL` names for it.
+    const account = await readDeviceAuthAccount(db, actor.id);
+    const accountIssue = accountRefusal(account);
     if (accountIssue) {
       return c.json(deviceRefusal(accountIssue), HTTP_STATUS_FOR_REFUSAL[accountIssue]);
     }

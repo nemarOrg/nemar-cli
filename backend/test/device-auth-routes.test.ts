@@ -133,13 +133,21 @@ beforeEach(() => {
 interface SeedOpts {
   status?: "pending" | "verified" | "approved" | "revoked";
   identityConflict?: boolean;
+  /** `person` by default (epic #1272 phase 4, #1284; ADR 0048). */
+  accountKind?: "person" | "service" | "test";
 }
 
 function seedUser(email: string, opts: SeedOpts = {}): number {
   db.run(
-    `INSERT INTO users (username, email, password_hash, status, role, signup_source, email_verified, identity_conflict)
-     VALUES (?, ?, 'x', ?, 'member', 'web', 1, ?)`,
-    [email.split("@")[0], email, opts.status ?? "verified", opts.identityConflict ? 1 : 0],
+    `INSERT INTO users (username, email, password_hash, status, role, signup_source, email_verified, identity_conflict, account_kind)
+     VALUES (?, ?, 'x', ?, 'member', 'web', 1, ?, ?)`,
+    [
+      email.split("@")[0],
+      email,
+      opts.status ?? "verified",
+      opts.identityConflict ? 1 : 0,
+      opts.accountKind ?? "person",
+    ],
   );
   const row = db.query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?").get(email);
   if (!row) throw new Error("seed failed");
@@ -528,6 +536,23 @@ describe("GET /auth/device/lookup", () => {
     expect(body.refusal?.code).toBe("identity_conflict");
   });
 
+  test("a service-kind session sees refusal.code service_account", async () => {
+    // Epic #1272 phase 4 (ADR 0048): one code covers both non-person kinds.
+    const service = seedUser("service-lookup@nemar.test", { accountKind: "service" });
+    const { userCode } = await startCode();
+    const res = await lookup(userCode, await sessionCookie(service));
+    const body = (await res.json()) as { refusal: { code: string } | null };
+    expect(body.refusal?.code).toBe("service_account");
+  });
+
+  test("a test-kind session also sees refusal.code service_account", async () => {
+    const test = seedUser("test-persona-lookup@nemar.test", { accountKind: "test" });
+    const { userCode } = await startCode();
+    const res = await lookup(userCode, await sessionCookie(test));
+    const body = (await res.json()) as { refusal: { code: string } | null };
+    expect(body.refusal?.code).toBe("service_account");
+  });
+
   test("410 for an expired code", async () => {
     const ada = seedUser("ada-expired-lookup@nemar.test");
     const { userCode } = await startCode();
@@ -598,6 +623,24 @@ describe("POST /auth/device/confirm", () => {
     const res = await confirm(userCode, await sessionCookie(flagged));
     expect(res.status).toBe(403);
     expect((await res.json()).error).toBe("identity_conflict");
+    expect(deviceCodeRowByRawUserCode(userCode)?.status).toBe("pending");
+  });
+
+  test("403 service_account for a service-kind account, and the row stays pending", async () => {
+    const service = seedUser("service-confirm@nemar.test", { accountKind: "service" });
+    const { userCode } = await startCode();
+    const res = await confirm(userCode, await sessionCookie(service));
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe("service_account");
+    expect(deviceCodeRowByRawUserCode(userCode)?.status).toBe("pending");
+  });
+
+  test("403 service_account for a test-kind account, and the row stays pending", async () => {
+    const test = seedUser("test-persona-confirm@nemar.test", { accountKind: "test" });
+    const { userCode } = await startCode();
+    const res = await confirm(userCode, await sessionCookie(test));
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe("service_account");
     expect(deviceCodeRowByRawUserCode(userCode)?.status).toBe("pending");
   });
 
@@ -673,6 +716,17 @@ describe("POST /auth/device/deny", () => {
     const row = deviceCodeRowByRawUserCode(userCode);
     expect(row?.status).toBe("denied");
     expect(row?.user_id).toBeNull();
+  });
+
+  test("deny stays ungated: a service-kind account may still deny (200)", async () => {
+    // ADR 0047: `deny` records no `user_id` on the row, so it never runs
+    // `accountRefusal` at all -- unlike lookup/confirm, a service/test kind
+    // is not refused here (epic #1272 phase 4, #1284; ADR 0048).
+    const service = seedUser("service-deny@nemar.test", { accountKind: "service" });
+    const { userCode } = await startCode();
+    const res = await deny(userCode, await sessionCookie(service));
+    expect(res.status).toBe(200);
+    expect((await res.json()).ok).toBe(true);
   });
 
   test("writes a device_auth_denied audit row naming the denier", async () => {
@@ -842,6 +896,25 @@ describe("account state changes between confirm and collect", () => {
     const res = await pollToken(deviceCode);
     const body = (await res.json()) as { error: string; reason?: string };
     expect(body.reason).toBe("identity_conflict");
+  });
+
+  test("a kind change to service between confirm and collect answers service_account and mints no token row", async () => {
+    // Epic #1272 phase 4 (ADR 0048): `DEVICE_MINT_INSERT_SQL`'s own
+    // `account_kind = 'person'` predicate refuses the mint outright; this is
+    // the diagnosis path (services/device-auth.ts step 6) explaining why.
+    const ada = seedUser("ada-kind-change-between@nemar.test");
+    const { deviceCode, userCode } = await startCode();
+    await confirm(userCode, await sessionCookie(ada));
+    db.run("UPDATE users SET account_kind = 'service' WHERE id = ?", [ada]);
+
+    const before = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM tokens").get()?.n ?? 0;
+    const res = await pollToken(deviceCode);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; reason?: string };
+    expect(body.error).toBe("access_denied");
+    expect(body.reason).toBe("service_account");
+    const after = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM tokens").get()?.n ?? 0;
+    expect(after).toBe(before);
   });
 
   test("an account already at 25 live keys answers too_many_keys", async () => {
