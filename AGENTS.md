@@ -203,9 +203,11 @@ Four statuses, fixed meanings, one writer for upload access (**ADR 0040**):
 `pending` (email unverified) → `verified` (the base tier, no admin needed) →
 `approved` (an admin granted upload) → `revoked`.
 
-1. Sign up (CLI: username, email, password; web: ORCID + an email) → verify the email → `verified`
-2. `verified` needs no admin: browse, dashboard, settings, `nemar auth retrieve-key`,
-   `nemar sandbox`. Upload access is requested ONCE, when it is needed, from Settings
+1. Sign up (CLI and web both: ORCID sign-in — the CLI's device flow, ADR 0047, mints the
+   account through the same browser step web signup uses; `nemar auth signup` is that flow
+   plus guided completion of whatever `profile_gaps` still names) → verify the email → `verified`
+2. `verified` needs no admin: browse, dashboard, settings, `nemar sandbox`.
+   Upload access is requested ONCE, when it is needed, from Settings
    on nemar.org or `nemar auth request-upload-access`
    (`POST /users/me/upload-access/request`, **ADR 0042**). The request needs a username,
    a real name, a GitHub account that exists, a city and a country, and a sentence about
@@ -261,6 +263,12 @@ because the two compare unequally on the same day and silently break expiry.
 Named API keys (list/mint/revoke, plus the device flow's paste-key fallback) live alongside it at `GET/POST /auth/keys` and `DELETE /auth/keys/:id`.
 Three files: `backend/src/routes/auth-device.ts`, `backend/src/routes/auth-keys.ts`,
 and the shared SQL/helpers in `backend/src/services/device-auth.ts`.
+The CLI half (epic #1272 phase 3, #1283) is `src/lib/device-login.ts` plus `src/commands/auth.ts`:
+`nemar auth login`/`signup` run this flow by default (`login` alone also takes `-k`/`--key`
+to paste an existing key instead),
+a re-login on the same machine best-effort revokes its own previous device-sourced key,
+`nemar auth logout` revokes it back by default (never a pasted or password-era one),
+and `nemar auth keys` manages the whole set.
 
 ### Dataset deletion
 
@@ -576,7 +584,7 @@ and what is historical. The entries worth knowing by name:
 
 | Group | Covers |
 |---|---|
-| `nemar auth` | login, signup, status/whoami, profile (plus `set-email`/`verify-email`, `set-github`, `set-username`, `set-name`, `set-location`, `orcid link\|relink\|unlink` — ADR 0044), request-upload-access, switch, logout, verification, SSH setup, key retrieval and regeneration |
+| `nemar auth` | login (browser device sign-in by default, `-k`/`--key` to paste a key instead — ADR 0047), signup (browser device sign-in, no `-k`/`--key`), status/whoami, keys (list/create/revoke this account's named API keys), profile (plus `set-email`/`verify-email`, `set-github`, `set-username`, `set-name`, `set-location`, `orcid link\|relink\|unlink` — ADR 0044), request-upload-access, switch, logout, verification, SSH setup, deprecated password-era key retrieval and regeneration |
 | `nemar dataset` | validate, upload, download, status (alias: view), list, search, release, update, clone, get, commit, push, drop, ci, manifest |
 | `nemar dataset publish` | request, status, resend |
 | `nemar dataset` (access) | request-access, access, invite, collaborators |

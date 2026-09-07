@@ -68,24 +68,21 @@ gh auth login
 ## Quick Start
 
 ```bash
-# 1. Sign up for NEMAR
+# 1. Sign up for NEMAR (opens your browser to sign in with ORCID, then a few quick questions)
 nemar auth signup
 
-# 2. After admin approval, retrieve your API key
-nemar auth retrieve-key
-
-# 3. Login with your API key
-nemar auth login
-
-# 4. Complete sandbox training
+# 2. Complete sandbox training
 nemar sandbox
 
-# 5. Validate your BIDS dataset
+# 3. Validate your BIDS dataset
 nemar dataset validate /path/to/dataset
 
-# 6. Upload to NEMAR
+# 4. Upload to NEMAR
 nemar dataset upload /path/to/dataset
 ```
+
+On another machine, `nemar auth login` signs in the same way (browser by default; `--key <api-key>`
+pastes an existing key for a host that cannot open one).
 
 ## Architecture Overview
 
@@ -277,14 +274,13 @@ sequenceDiagram
 ### Authentication
 
 ```bash
-nemar auth signup              # Register new account
-nemar auth retrieve-key        # Retrieve API key after approval
-nemar auth login               # Login with API key
+nemar auth signup              # Sign in with your browser; create or continue your account
+nemar auth login               # Sign in with your browser (-k/--key to paste an existing key)
 nemar auth status              # Check authentication status
 nemar auth switch              # Switch between accounts
 nemar auth logout              # Remove active account (--all for all)
 nemar auth setup-ssh           # Configure SSH for GitHub
-nemar auth regenerate-key      # Request new API key
+nemar auth keys                # List, create, or revoke this account's named API keys
 ```
 
 ### Dataset Management
@@ -444,8 +440,8 @@ See [the Zenodo testing guide](https://docs.nemar.org/develop/zenodo-testing/) f
 ### CLI Usage
 
 ```bash
-NEMAR_API_KEY          # API key (alternative to login)
-NEMAR_API_URL          # Custom API endpoint (default: https://api.nemar.org)
+NEMAR_API_KEY          # API key (alternative to `nemar auth login -k`)
+NEMAR_NO_BROWSER=1     # Never try to open a browser during sign-in (same as --no-open)
 NEMAR_NO_COLOR         # Disable colored output
 ```
 
@@ -517,9 +513,21 @@ nemar auth logout
 nemar auth login
 ```
 
-**"Account pending approval"**
-- Admin must approve your account after signup
-- Contact your NEMAR administrator
+**Browser doesn't open, or you're on a headless/remote host**
+- The printed link is the real mechanism, not the browser: copy it into any
+  browser, on any machine, and authorize there
+- `nemar auth login --no-open` (or `NEMAR_NO_BROWSER=1`) skips the attempt
+  entirely and just prints the link
+- If nothing can open a browser at all, paste an existing key instead:
+  `nemar auth login -k <api-key>` (create one with `nemar auth keys create`
+  on a machine that can)
+
+**Upload access is not granted yet**
+- Upload access is a separate, one-time admin approval requested with
+  `nemar auth request-upload-access` (or automatically at the end of
+  `nemar auth signup`)
+- Browsing, downloading, and sandbox training all work without it
+- Contact your NEMAR administrator if the request has been pending a while
 
 ### Branch Protection
 

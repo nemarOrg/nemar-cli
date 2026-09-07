@@ -1847,17 +1847,28 @@ authWebRoutes.post(
  * either way, but a saturated base is an operational fact nobody would
  * otherwise see, so it is logged as well as reported.
  *
- * Cookie-authenticated like the rest of the /auth/profile family, and read-only,
- * so it carries no Origin check — same as GET /auth/me.
+ * Accepts either credential `resolveActingAccount` accepts (#1266, ADR 0044)
+ * -- the dashboard's `nemar_session` cookie, or the CLI's bearer token, added
+ * in epic #1272 phase 3 so `nemar auth signup`'s guided completion can offer
+ * the same default a brand-new ORCID account sees on the website. That
+ * widens what was "no Origin check, same as GET /auth/me" to the family's
+ * usual rule: the COOKIE half still requires an allow-listed Origin (a CSRF
+ * fence a bearer token needs, and has, no part of), while a bearer request
+ * carries none. `ActingAccount` has no name fields, so this reads them by
+ * `actor.id` rather than off `c.var.webUser`, which the bearer path never sets.
  */
 authWebRoutes.get("/profile/username-suggestion", webSessionMiddleware, async (c) => {
-  const webUser = c.var.webUser;
-  if (!webUser) {
-    return c.json({ error: "Authentication required" }, 401);
-  }
+  const resolved = await resolveActingAccount(c);
+  if (!resolved.ok) return resolved.response;
+  const actor = resolved.actor;
 
   try {
-    const base = suggestUsername(webUser.given_name, webUser.family_name);
+    const nameRow = await c.env.DB.prepare(
+      "SELECT given_name, family_name FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1",
+    )
+      .bind(actor.id)
+      .first<{ given_name: string | null; family_name: string | null }>();
+    const base = suggestUsername(nameRow?.given_name ?? null, nameRow?.family_name ?? null);
     if (!base) {
       return c.json({ suggestion: null, based_on: "unavailable" });
     }

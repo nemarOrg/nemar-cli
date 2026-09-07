@@ -968,6 +968,50 @@ describe("device flow reached through a brand-new ORCID sign-in", () => {
     // so it is not guaranteed to have landed by the time this request
     // returns.
   });
+
+  test("the /auth/orcid/complete redirect carries the device-flow next", async () => {
+    // Phase 3's one backend fix (nemarOrg/website#316): a brand-new ORCID
+    // account started from the CLI's confirm page must not lose its way back
+    // there. Drives only the callback -- the pending cookie's contents and
+    // the finalize step are already covered by the test above.
+    const csrf = "csrf-device-next";
+    const callbackRes = await app.request(
+      new Request(`${APP}/auth/orcid/callback?state=${csrf}&code=fake-code`, {
+        method: "GET",
+        headers: {
+          Cookie: `${STATE_COOKIE_NAME}=${encodeState({
+            csrf,
+            mode: "login",
+            next: "/cli/authorize?code=XXXX-XXXX",
+          })}`,
+        },
+      }),
+      undefined,
+      env(),
+    );
+    expect(callbackRes.status).toBe(302);
+    expect(callbackRes.headers.get("Location")).toBe(
+      `${APP}/auth/orcid/complete?next=${encodeURIComponent("/cli/authorize?code=XXXX-XXXX")}`,
+    );
+  });
+
+  test("an ordinary signup's next ('/') is not appended", async () => {
+    // The unqualified case (a plain click on the public /signup page) must
+    // render exactly as it did before this change -- no bare `?next=%2F`.
+    const csrf = "csrf-device-next-default";
+    const callbackRes = await app.request(
+      new Request(`${APP}/auth/orcid/callback?state=${csrf}&code=fake-code`, {
+        method: "GET",
+        headers: {
+          Cookie: `${STATE_COOKIE_NAME}=${encodeState({ csrf, mode: "login", next: "/" })}`,
+        },
+      }),
+      undefined,
+      env(),
+    );
+    expect(callbackRes.status).toBe(302);
+    expect(callbackRes.headers.get("Location")).toBe(`${APP}/auth/orcid/complete`);
+  });
 });
 
 // --------------------------------------------------------------------------

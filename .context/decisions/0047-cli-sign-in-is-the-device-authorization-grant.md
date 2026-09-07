@@ -93,10 +93,33 @@ so mixing the two silently breaks expiry.
 This is a pre-existing bug in `auth_codes`, `web_sessions`, and `orcid_link_intents`;
 fixing those is out of scope here and gets its own issue after this phase lands.
 
-`confirm-key-regeneration` (the existing settings flow) still revokes every key on the account, machine-named or not.
-Phase 3 decides whether that survives once keys are per-machine --
-revoking a laptop's key to regenerate a compute cluster's is not obviously right,
-but that call belongs to the phase that builds the CLI-facing key management UX, not to this one.
+`confirm-key-regeneration` (the existing settings flow `regenerate-key` sends its email link through) is UNCHANGED by phase 3
+and still revokes every key on the account, machine-named or not:
+it is a password-era flow being retired, not the phase's own key-management surface, and phase 3 does not extend it.
+`nemar auth login`'s device flow and `nemar auth logout` are the scoped replacement --
+logout's default only ever revokes the ACTIVE machine's own key, and only when that key's `keySource` is `"device"`;
+a pasted or password-era key may be shared with other machines and is kept, not silently killed by a different machine's logout.
+`retrieve-key` and `regenerate-key` survive this release, each printing a deprecation sentence before its first prompt,
+pointing at `nemar auth login` as the replacement for both.
+
+Phase 3's local config keys an account by `accountKeyFor(user) = username?.trim() || email`,
+since a brand-new ORCID account's `username` is `null` at collection time (this decision's own point above).
+`upsertAccount` merges a re-login into whatever entry it finds by that key OR by email,
+so an account that was stored under its email (no username yet) is found and renamed rather than duplicated the moment the server starts reporting a username --
+`dismissedNoticeIds`, `profileGaps`, `orcidVerified`, and `serviceAccess` all survive the merge intact.
+A re-login on the SAME machine also mints a new device key every time
+(the token endpoint keeps no memory of "this machine already has one"),
+so phase 3 best-effort revokes the machine's OWN previous key with the newly collected bearer, after the local config write lands --
+never a pasted or password-era key, which by definition is not this machine's alone to kill.
+The revoke is attempted even when the preflight probe already found the OLD key dead --
+a repeat revoke of an already-gone row is harmless and caught the same way any other failure is --
+what that foreknowledge skips is only the "(replaced this machine's previous key)" confirmation line,
+since nothing was meaningfully replaced by revoking a key that was already dead.
+Left unbounded, a script that re-runs `nemar auth login` would otherwise mint a fresh row per invocation until the `MAX_LIVE_API_KEYS` cap (25).
+
+The CLI's config file now always holds a live API key rather than a password hash on every account it stores,
+so `getStore()` writes it `configFileMode: 0o600` (honoured by `conf` 13's `atomically` writer regardless of umask)
+and migrates an existing file an older build left at `conf`'s default file mode (0o666, unrelated to the conf version) to 0600 on first use, non-Windows only.
 
 ## Alternatives considered
 

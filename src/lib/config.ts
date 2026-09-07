@@ -16,14 +16,24 @@
  * }
  */
 
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import Conf from "conf";
 import { z } from "zod";
 import type { GapFieldsStayOptional } from "../../shared/contract/profile-gaps.js";
+import { dlog } from "./debug-log.js";
 
 export const DEFAULT_API_URL = "https://api.nemar.org";
+
+/**
+ * The config file's permission bits (epic #1272 phase 3): the config holds
+ * a live API key, so it is owner-read-write only, never group/world
+ * readable. Used both for WRITES conf itself makes (`configFileMode` in
+ * `getStore()`) and for migrating a file an older build already wrote under
+ * conf's default file mode (`secureConfigFile`).
+ */
+const CONFIG_FILE_MODE = 0o600;
 
 /**
  * Hosts that pointed at NEMAR backends before the SCCN cutover and are now
@@ -105,7 +115,15 @@ export const _cachedProfileGapIsRenderable: GapFieldsStayOptional<
   z.infer<typeof cachedProfileGapSchema>
 > = true;
 
-// Per-account configuration schema
+// Per-account configuration schema. Key-tagging fields (keyId/keyName/
+// keyCreatedAt/keySource) are declared separately, below, as a hand-written
+// discriminated union rather than zod fields here: zod 3's
+// discriminatedUnion requires a ZodLiteral on every branch, and a
+// password-era account's discriminant VALUE is "absent entirely", which
+// ZodLiteral cannot express. Nothing calls `.parse()`/`.safeParse()` on this
+// schema at runtime (searched -- it exists only for `z.infer`), so the split
+// costs nothing there; TypeScript enforces the invariant on `Config`
+// instead, below.
 const accountSchema = z.object({
   apiKey: z.string().optional(),
   apiUrl: z.string().url().default(DEFAULT_API_URL),
@@ -163,15 +181,57 @@ const accountSchema = z.object({
    */
   pendingEmailChange: z.string().email().optional(),
 });
+type AccountBaseFields = z.infer<typeof accountSchema>;
 
-export type Config = z.infer<typeof accountSchema>;
+/**
+ * How this account's CURRENT key was obtained (epic #1272 phase 3; ADR
+ * 0047), tagged as a discriminated union so the fields a `"device"` key
+ * needs are a COMPILE-TIME requirement rather than a convention each reader
+ * has to remember on its own:
+ *
+ * - `"device"` -- minted by the device flow's browser confirm. Always
+ *   carries the row id, its `name` at mint time (itself nullable -- a key
+ *   minted with no name), and when it was minted. `nemar auth status`'s
+ *   `Key:` line (`describeStoredKey`) and the same-machine-replace check in
+ *   `writeSignedInAccount` both read all three together.
+ * - `"paste"` -- pasted with `--key` / `NEMAR_API_KEY` and validated by
+ *   `POST /auth/login` rather than minted here, so there is no row this
+ *   machine named: carries none of the three.
+ * - absent entirely -- a password-era account predating both paths.
+ *
+ * `logoutAction`'s revoke-on-logout default reads `keySource` alone to tell
+ * the three apart (only a `"device"` key is revoked automatically, since a
+ * pasted or password-era key may be shared with other machines).
+ */
+export type KeyFields =
+  | { keySource?: undefined; keyId?: undefined; keyName?: undefined; keyCreatedAt?: undefined }
+  | { keySource: "paste"; keyId?: undefined; keyName?: undefined; keyCreatedAt?: undefined }
+  | { keySource: "device"; keyId: number; keyName: string | null; keyCreatedAt: string };
 
-/** Summary of a stored account for listing */
+export type Config = AccountBaseFields & KeyFields;
+
+/**
+ * Summary of a stored account for listing.
+ *
+ * `key` is the accounts-map key this entry actually lives under (epic
+ * #1272 phase 3) -- the same string {@link accountKeyFor} would produce
+ * (a username, or an email when there is no username yet). `username` is
+ * now honestly optional: an entry keyed by email has none, and reporting
+ * the map key AS a username (the pre-phase-3 behavior) mislabeled an email
+ * address as one. Every consumer that looks an account up or switches to
+ * it must use `key`, not `username` -- that is the field `switchAccount`
+ * and `renameActiveAccount` actually index by.
+ */
 export interface AccountInfo {
-  username: string;
+  key: string;
+  username?: string;
   email?: string;
   githubUsername?: string;
   active: boolean;
+  /** How this account's CURRENT key was obtained (epic #1272 phase 3, ADR
+   *  0047) -- `logoutAction --all` reads this per account to decide whether
+   *  each one's key is safe to revoke automatically. */
+  keySource?: "device" | "paste";
 }
 
 // Full store schema. Legacy flat fields are kept so migrateConfig() can read
@@ -253,6 +313,11 @@ function getStore(): Conf<StoreSchema> {
 
   cachedStore = new Conf<StoreSchema>({
     projectName: "nemar",
+    // The config holds a live API key (epic #1272 phase 3): conf 13 honours
+    // this regardless of umask, writing through `atomically` (secureConfigFile
+    // below migrates a file an OLDER build already wrote with conf's 0o666
+    // default).
+    configFileMode: CONFIG_FILE_MODE,
     schema: {
       activeAccount: { type: "string" },
       accounts: { type: "object" },
@@ -283,11 +348,35 @@ function getStore(): Conf<StoreSchema> {
   // re-execute when a previously-seen dir comes back into view.
   if (!migrationsRunForDirs.has(dir)) {
     migrationsRunForDirs.add(dir);
+    secureConfigFile(cachedStore.path);
     migrateConfig();
     migrateApiUrl();
   }
 
   return cachedStore;
+}
+
+/**
+ * chmod an on-disk config.json to CONFIG_FILE_MODE if its mode differs, on
+ * non-Windows platforms only (epic #1272 phase 3): `configFileMode` above
+ * only governs WRITES conf itself makes, so a password-era file an older
+ * build wrote under conf's default file mode (0o666, unrelated to the conf
+ * version) stays world-readable until something rewrites it -- this
+ * migrates it in place on first use instead of waiting for the next
+ * `setConfig` call, which might be a long way off for a dormant account.
+ * The key inside keeps working either way; only the file's permission bits
+ * change. Best-effort: a chmod failure (read-only mount, permissions) is
+ * logged and never blocks CLI startup.
+ */
+function secureConfigFile(path: string): void {
+  if (process.platform === "win32") return;
+  if (!existsSync(path)) return;
+  try {
+    const mode = statSync(path).mode & 0o777;
+    if (mode !== CONFIG_FILE_MODE) chmodSync(path, CONFIG_FILE_MODE);
+  } catch (err) {
+    console.error(`[nemar] could not secure config file permissions for ${path}:`, err);
+  }
 }
 
 /**
@@ -518,22 +607,134 @@ export function getAccounts(): AccountInfo[] {
   const accounts = getAccountsMap();
   const active = getActiveAccountName();
   return Object.entries(accounts).map(([name, acct]) => ({
-    username: acct.username || name,
+    key: name,
+    username: acct.username,
     email: acct.email,
     githubUsername: acct.githubUsername,
     active: name === active,
+    keySource: acct.keySource,
   }));
 }
 
 /**
- * Store or update an account in the accounts map and set it as active.
- * The account is keyed by username.
+ * The accounts-map key for a signed-in server user (epic #1272 phase 3; ADR
+ * 0047): the username when there is one, the email otherwise.
+ *
+ * A brand-new ORCID account has `username: null` until
+ * `refreshNameThenAssignUsername` runs behind the response (ADR 0047), and
+ * `POST /auth/login`'s user shape shares that nullability -- so this is what
+ * the device-flow login AND a `--key` paste both key their entry by, rather
+ * than each inventing its own fallback. `.trim()` guards a username that is
+ * present but blank (a shape no route sends today, but `accountSchema`
+ * itself allows an empty string through `z.string().optional()`).
  */
-export function storeAccount(username: string, accountConfig: Config): void {
+export function accountKeyFor(user: { username?: string | null; email: string }): string {
+  const trimmed = user.username?.trim();
+  return trimmed || user.email;
+}
+
+/**
+ * Find the accounts-map key of the entry whose `email` matches, case
+ * insensitively -- how {@link upsertAccount} locates an account that was
+ * keyed by email (no username yet) before a rename, so a re-login does not
+ * orphan the entry `dismissedNoticeIds`/`profileGaps`/`orcidVerified`/
+ * `serviceAccess` live on. `undefined` when no stored account holds it.
+ */
+export function findAccountKeyByEmail(email: string): string | undefined {
+  const target = email.trim().toLowerCase();
+  if (!target) return undefined;
+  const matches = Object.entries(getAccountsMap())
+    .filter(([, account]) => account.email && account.email.toLowerCase() === target)
+    .map(([key]) => key);
+  if (matches.length > 1) {
+    // Two stored entries claiming the same email is a state this build never
+    // writes on its own -- hand-edited config.json, or a merge bug -- and
+    // guessing which one a re-login means would risk merging the WRONG
+    // account's key/cached fields into it. Report no match at all: the
+    // caller (upsertAccount) then lands the login as a fresh entry keyed by
+    // the login's own key, exactly like the "no match" case, rather than
+    // silently picking one of the ambiguous rows.
+    dlog(
+      `findAccountKeyByEmail: ${matches.length} accounts share email ${target}: ${matches.join(", ")}`,
+    );
+    return undefined;
+  }
+  return matches[0];
+}
+
+/** What {@link upsertAccount} merged into, if anything -- how a caller (e.g.
+ *  `writeSignedInAccount`'s same-machine-key-replacement, ADR 0047: a
+ *  re-login on the same machine revokes and replaces its previous device
+ *  key) learns the PRE-merge state to compare a freshly minted key against.
+ *  `undefined` means the entry did not exist before this call. */
+export interface UpsertAccountResult {
+  /** The map key the account now lives under (always `key`, echoed for
+   *  convenience at call sites that destructure the result). */
+  key: string;
+  /** The account's previous contents, before `patch` was merged in. */
+  previous?: Config;
+}
+
+/**
+ * Create or update one account entry, keyed by `key`, and set it active.
+ *
+ * Unlike a wholesale replace of the entry at `key`, this MERGES `patch` onto
+ * whatever entry it finds -- at `key` itself, or by `patch.email` -- so
+ * fields the patch does not mention
+ * (`dismissedNoticeIds`, `profileGaps`, `orcidVerified`, `serviceAccess`, and
+ * critically `apiUrl`) survive a re-login rather than reverting to their
+ * schema defaults. The email search is what makes a re-login find an entry
+ * that was keyed by email (no username yet, ADR 0047) once the server
+ * reports one: `accountKeyFor`'s result changes, but the row it should land
+ * on is found by the one field that did not. When the entry is found under
+ * a DIFFERENT map key than `key`, the old key is deleted so the account
+ * never ends up stored twice -- deliberately NOT tried against a caller-
+ * supplied "previous account" hint: an account this machine was signed into
+ * before is not evidence that the NEW login is the same one (a person may
+ * deliberately switch accounts), and only `key`/`email` actually identify
+ * the row an incoming server user belongs to.
+ *
+ * `apiUrl` is deliberately never read from `getApiUrl()`/`TEST_API_URL` by
+ * any caller of this function: a brand-new entry gets `DEFAULT_API_URL`
+ * (the `existing ?? { apiUrl: DEFAULT_API_URL }` fallback below), and an
+ * existing one keeps whatever it already had, because `patch` never
+ * includes the field. Baking a live run's `TEST_API_URL` into the account
+ * a real `nemar auth login` on a developer's own machine would otherwise
+ * write is exactly the failure this avoids.
+ */
+export function upsertAccount(
+  key: string,
+  patch: Partial<AccountBaseFields> & KeyFields,
+): UpsertAccountResult {
   const config = getStore();
   const accounts = getAccountsMap();
-  accounts[username] = accountConfig;
-  config.store = { ...config.store, accounts, activeAccount: username };
+
+  let sourceKey: string | undefined;
+  if (accounts[key]) {
+    sourceKey = key;
+  } else if (patch.email) {
+    sourceKey = findAccountKeyByEmail(patch.email);
+  }
+
+  const existing = sourceKey ? accounts[sourceKey] : undefined;
+  // Spreading `patch` over `existing` (or a fresh default) is runtime-correct
+  // for the tagged key fields even though TypeScript cannot verify it through
+  // two combined union operands: `patch` is always a single matched KeyFields
+  // branch (enforced by its own parameter type at every call site), and JS's
+  // presence-vs-absence spread semantics already give the right answer -- a
+  // field `patch` never mentions preserves `existing`'s value (the MERGE this
+  // function's own doc comment above describes), while one `patch` sets, even
+  // to `undefined` (how a "paste" login clears a stale device key), overwrites
+  // it.
+  const merged = { ...(existing ?? { apiUrl: DEFAULT_API_URL }), ...patch } as Config;
+
+  if (sourceKey && sourceKey !== key) {
+    delete accounts[sourceKey];
+  }
+  accounts[key] = merged;
+  config.store = { ...config.store, accounts, activeAccount: key };
+
+  return { key, previous: existing };
 }
 
 /**

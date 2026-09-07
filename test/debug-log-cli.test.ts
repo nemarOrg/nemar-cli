@@ -310,10 +310,10 @@ describe("nemar doctor --report", () => {
   // Item D11: an authenticated account's username/role show up, and the
   // key never does -- this is the whole point of the "no credential" rule.
   //
-  // Written directly in the nested `accounts` shape storeAccount() itself
-  // produces (rather than the flat legacy shape migrateConfig() upgrades),
-  // since `role` is new in this phase and was never part of that legacy
-  // flat shape -- there is nothing for a migration path to carry over.
+  // Written directly in the nested `accounts` shape (rather than the flat
+  // legacy shape migrateConfig() upgrades), since `role` is new in this
+  // phase and was never part of that legacy flat shape -- there is nothing
+  // for a migration path to carry over.
   test("authenticated: shows username and role, never the API key", async () => {
     const configDir = makeConfigDir();
     const fakeApiKey = "sk-fake-doctor-report-secret-999";

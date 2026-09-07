@@ -5,9 +5,28 @@
  * verbatim.
  */
 
-import { type ContractUser, userMeResponseSchema } from "../../../shared/contract/index.js";
+import {
+  type ApiKeyCreateResponse,
+  type ApiKeyListResponse,
+  type ContractUser,
+  DEVICE_GRANT_MESSAGES,
+  type DeviceAuthRefusalCode,
+  type DeviceGrantError,
+  type DeviceStartResponse,
+  type DeviceTokenSuccess,
+  type UsernameSuggestionResponse,
+  apiKeyCreateResponseSchema,
+  apiKeyListResponseSchema,
+  deviceGrantErrorSchema,
+  deviceStartResponseSchema,
+  deviceTokenErrorSchema,
+  deviceTokenSuccessSchema,
+  userMeResponseSchema,
+  usernameSuggestionResponseSchema,
+} from "../../../shared/contract/index.js";
 import type { OrcidNameLookupStatus } from "../../../shared/contract/publication.js";
 import { request } from "./client.js";
+import { ApiError } from "./errors.js";
 
 // ============================================================================
 // Authentication
@@ -104,7 +123,12 @@ export interface LoginRequest {
 export interface LoginResponse {
   valid: boolean;
   user: {
-    username: string;
+    // Nullable (epic #1272 phase 3; ADR 0047): `POST /auth/login` shares its
+    // user shape with `POST /auth/device/token`'s success response, and a
+    // brand-new ORCID account has no username until
+    // `refreshNameThenAssignUsername` runs after finalize -- a --key paste
+    // moments after signup can present the same still-unset column.
+    username: string | null;
     email: string;
     github_username: string;
     role: "owner" | "admin" | "member";
@@ -419,4 +443,178 @@ export async function startOrcidCliLink(mode: "link" | "relink"): Promise<OrcidC
 /** Remove the ORCID link (identity row, `users.orcid`, `orcid_verified`). */
 export async function unlinkOrcid(): Promise<{ ok: true }> {
   return request<{ ok: true }>("/auth/orcid/unlink", { method: "POST" }, true);
+}
+
+// ============================================================================
+// Device authorization grant + named keys (epic #1272 phase 3; ADR 0047)
+// ============================================================================
+
+/** `POST /auth/device/start`: mint a device code for this machine. Never
+ *  authenticated -- there is no credential yet, that is the point of the
+ *  flow. */
+export async function startDeviceAuth(machineName: string): Promise<DeviceStartResponse> {
+  return request<DeviceStartResponse>(
+    "/auth/device/start",
+    { method: "POST", body: JSON.stringify({ machine_name: machineName }) },
+    false,
+    deviceStartResponseSchema,
+  );
+}
+
+/** One outcome of a single `POST /auth/device/token` poll. `terminal.error`
+ *  is the RFC 8628 grant-error code (the poll loop's retry logic switches on
+ *  it); `terminal.message` is the sentence to print verbatim. `reason` is
+ *  the more specific refusal code the message was already built from
+ *  server-side (ADR 0047: the two disagree on purpose) -- it is `undefined`
+ *  only when the 400 body itself failed to validate against the contract,
+ *  in which case there is no validated refusal code to report and none is
+ *  invented by falling back to `error`. */
+export type PollDeviceTokenResult =
+  | { status: "success"; data: DeviceTokenSuccess }
+  | { status: "pending" }
+  | { status: "slow_down" }
+  | {
+      status: "terminal";
+      error: Exclude<DeviceGrantError, "authorization_pending" | "slow_down">;
+      reason: DeviceAuthRefusalCode | undefined;
+      message: string;
+    };
+
+function isDeviceGrantErrorCode(code: string | undefined): code is DeviceGrantError {
+  return (
+    typeof code === "string" && (deviceGrantErrorSchema.options as readonly string[]).includes(code)
+  );
+}
+
+/** The raw error body's `message` field, when it happens to be a string --
+ *  used only once the body has already failed `deviceTokenErrorSchema`, so
+ *  a still-readable sentence isn't thrown away just because some OTHER
+ *  field of the body drifted from the contract. */
+function rawMessage(body: unknown): string | undefined {
+  if (typeof body !== "object" || body === null) return undefined;
+  const message = (body as Record<string, unknown>).message;
+  return typeof message === "string" ? message : undefined;
+}
+
+/**
+ * `POST /auth/device/token`: one poll. Every RFC 8628 answer this endpoint
+ * gives (`authorization_pending`, `slow_down`, and the three terminal codes)
+ * arrives as a 400 whose body is re-parsed here against
+ * `deviceTokenErrorSchema` -- the contract's discriminated union -- rather
+ * than probed field by field, so the caller (device-login.ts) never has to
+ * `instanceof ApiError` for a "keep polling" answer.
+ *
+ * When the body fails that parse but `error` is still one of the three
+ * TERMINAL grant codes this build recognizes, the poll still ends: a
+ * `reason` this build doesn't know about (or some other field drifting from
+ * the contract) must not turn a real refusal into an infinite retry. That
+ * fallback reports `reason: undefined` (never backfilled from `error`,
+ * which is a different vocabulary -- ADR 0047) and prints the body's own
+ * `message` when it parsed as a string, else the RFC-level
+ * `DEVICE_GRANT_MESSAGES[error]` sentence.
+ *
+ * Anything else (a network failure, a 5xx, a 200 that failed
+ * `deviceTokenSuccessSchema`, or a 400 whose `error` this build does not
+ * recognize at all) is rethrown, so the caller can classify it as transient
+ * the same way `waitForOrcidLink` already does.
+ *
+ * `signal` composes with the request's own timeout the same way every other
+ * `request()` caller's does -- see device-login.ts's poll loop for how the
+ * two are combined.
+ */
+export async function pollDeviceToken(
+  deviceCode: string,
+  signal?: AbortSignal,
+): Promise<PollDeviceTokenResult> {
+  try {
+    const data = await request(
+      "/auth/device/token",
+      { method: "POST", body: JSON.stringify({ device_code: deviceCode }), signal },
+      false,
+      deviceTokenSuccessSchema,
+    );
+    return { status: "success", data };
+  } catch (error) {
+    if (error instanceof ApiError && error.statusCode === 400) {
+      const parsed = deviceTokenErrorSchema.safeParse(error.rawBody);
+      if (parsed.success) {
+        const body = parsed.data;
+        if (body.error === "authorization_pending") return { status: "pending" };
+        if (body.error === "slow_down") return { status: "slow_down" };
+        return {
+          status: "terminal",
+          error: body.error,
+          reason: body.reason,
+          message: body.message,
+        };
+      }
+      if (
+        isDeviceGrantErrorCode(error.code) &&
+        error.code !== "authorization_pending" &&
+        error.code !== "slow_down"
+      ) {
+        return {
+          status: "terminal",
+          error: error.code,
+          reason: undefined,
+          message: rawMessage(error.rawBody) ?? DEVICE_GRANT_MESSAGES[error.code],
+        };
+      }
+    }
+    throw error;
+  }
+}
+
+/** `GET /auth/keys`: this account's live named keys. */
+export async function listApiKeys(): Promise<ApiKeyListResponse> {
+  return request<ApiKeyListResponse>("/auth/keys", {}, true, apiKeyListResponseSchema);
+}
+
+/** `POST /auth/keys`: mint a new named key -- the paste-key fallback for a
+ *  machine that cannot run the device flow's browser half. */
+export async function createApiKey(name: string): Promise<ApiKeyCreateResponse> {
+  return request<ApiKeyCreateResponse>(
+    "/auth/keys",
+    { method: "POST", body: JSON.stringify({ name }) },
+    true,
+    apiKeyCreateResponseSchema,
+  );
+}
+
+/** `DELETE /auth/keys/:id` or `DELETE /auth/keys/current`. */
+export async function revokeApiKey(id: number | "current"): Promise<{ ok: true }> {
+  return request<{ ok: true }>(`/auth/keys/${id}`, { method: "DELETE" }, true);
+}
+
+/**
+ * `DELETE /auth/keys/:id`, authenticated with an EXPLICIT bearer rather
+ * than the stored config's key (epic #1272 phase 3). For the one caller
+ * that needs it: a just-minted device key whose write to disk then failed
+ * (`writeSignedInAccount`'s `upsertAccount` catch) has to be revoked with
+ * ITSELF, since it was never saved and `getConfig().apiKey` is stale or
+ * absent. Passed as `authenticated: false` deliberately -- `request()`'s
+ * authenticated branch (client.ts) always prefers the stored key over a
+ * caller-supplied `Authorization` header when one exists, which would
+ * silently revoke the WRONG key (or none) here.
+ */
+export async function revokeApiKeyWithBearer(
+  id: number | "current",
+  bearer: string,
+): Promise<{ ok: true }> {
+  return request<{ ok: true }>(
+    `/auth/keys/${id}`,
+    { method: "DELETE", headers: { Authorization: `Bearer ${bearer}` } },
+    false,
+  );
+}
+
+/** `GET /auth/profile/username-suggestion`: a default username built from
+ *  the account's name, for `nemar auth signup`'s guided completion. */
+export async function suggestUsername(): Promise<UsernameSuggestionResponse> {
+  return request<UsernameSuggestionResponse>(
+    "/auth/profile/username-suggestion",
+    {},
+    true,
+    usernameSuggestionResponseSchema,
+  );
 }

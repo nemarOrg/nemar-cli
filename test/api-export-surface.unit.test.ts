@@ -38,9 +38,12 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "checkSSHKeyStatus",
     "checkUsername",
     "completeSandbox",
+    "createApiKey",
     "getCurrentUser",
     "getSandboxStatus",
+    "listApiKeys",
     "login",
+    "pollDeviceToken",
     "registerSSHKey",
     "requestEmailChange",
     "requestKeyRegeneration",
@@ -48,8 +51,12 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "resendVerification",
     "resetSandbox",
     "retrieveKey",
+    "revokeApiKey",
+    "revokeApiKeyWithBearer",
     "signup",
+    "startDeviceAuth",
     "startOrcidCliLink",
+    "suggestUsername",
     "unlinkOrcid",
     "updateProfile",
     "verifyEmailChange",
@@ -184,13 +191,20 @@ const POST_SPLIT_ADDITIONS = [
   "backfillUsernames", // #1253, epic #1250: POST /admin/users/backfill-usernames
   "checkOrcidName", // #1255, epic #1250: GET /auth/orcid-name pre-signup lookup
   "clearIdentityConflict", // #1254, ADR 0043: POST /admin/users/:id/clear-identity-conflict
+  "createApiKey", // #1283, epic #1272 phase 3, ADR 0047: POST /auth/keys
   "doctorFix", // #1130, CLI wrapper for POST /admin/doctor/fix
   "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
   "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion
   "getUserDuplicates", // #1254, ADR 0043: GET /admin/users/duplicates
+  "listApiKeys", // #1283, epic #1272 phase 3, ADR 0047: GET /auth/keys
+  "pollDeviceToken", // #1283, epic #1272 phase 3, ADR 0047: POST /auth/device/token
   "publishZarrCatalog", // #1062, epic #1181 phase 2: POST /admin/zarr-catalog/publish
   "requestEmailChange", // #1266, ADR 0044: POST /auth/email/change/request
+  "revokeApiKey", // #1283, epic #1272 phase 3, ADR 0047: DELETE /auth/keys/:id|current
+  "revokeApiKeyWithBearer", // #1289 review: DELETE /auth/keys/:id with an explicit bearer, for revoking a just-minted key whose write to disk failed
+  "startDeviceAuth", // #1283, epic #1272 phase 3, ADR 0047: POST /auth/device/start
   "startOrcidCliLink", // #1266, ADR 0044: POST /auth/orcid/cli-start
+  "suggestUsername", // #1283, epic #1272 phase 3, ADR 0042/0047: GET /auth/profile/username-suggestion
   "unlinkOrcid", // #1266, ADR 0044: POST /auth/orcid/unlink
   "updateProfile", // #1266, ADR 0044: PATCH /auth/profile
   "verifyEmailChange", // #1266, ADR 0044: POST /auth/email/change/verify

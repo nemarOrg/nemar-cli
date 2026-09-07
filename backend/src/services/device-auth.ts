@@ -367,7 +367,7 @@ export const DEVICE_POLL_SQL = `UPDATE device_codes SET last_polled_at = datetim
    WHERE device_code_hash = ? AND status = 'pending' AND expires_at > datetime('now')
      AND (last_polled_at IS NULL OR last_polled_at <= datetime('now', '-${DEVICE_POLL_INTERVAL_SECONDS} seconds'))`;
 
-/** Binds: userId, userCode. The `MAX(expires_at, ...)` grants the decision-6
+/** Binds: userId, userCode. The `MAX(expires_at, ...)` grants ADR 0047's
  *  collection grace: confirming in the closing seconds of the 10-minute
  *  window extends expiry by {@link DEVICE_CONFIRM_GRACE_SECONDS} rather than
  *  leaving the very next poll to find it already expired. Safe because the

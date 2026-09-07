@@ -55,6 +55,17 @@ export async function confirm(
     return "confirmed";
   }
 
+  // Checked BEFORE inquirer is ever invoked (epic #1272 phase 3): under
+  // `stdin: "ignore"` inquirer's prompt never settles at all and the
+  // process dies at exit with an uncatchable `ERR_USE_AFTER_CLOSE`, so the
+  // catch block below -- which only ever fires once inquirer itself has
+  // rejected -- cannot cover this case. A non-interactive stdin is knowable
+  // up front, so it is checked up front.
+  if (!process.stdin.isTTY) {
+    console.error("Interactive prompt unavailable; use --yes or --no");
+    return "cancelled";
+  }
+
   // Interactive prompt
   try {
     const { confirmed } = await inquirer.prompt([
@@ -121,6 +132,14 @@ export async function confirmWithInput(
   // --yes flag auto-confirms
   if (options.yes) {
     return "confirmed";
+  }
+
+  // See the matching guard in confirm() above: checked before inquirer runs
+  // because a non-interactive stdin does not reject at all under `stdin:
+  // "ignore"`, it dies uncatchably at process exit.
+  if (!process.stdin.isTTY) {
+    console.error("Interactive prompt unavailable; use --yes or --no");
+    return "cancelled";
   }
 
   // Interactive prompt with validation
