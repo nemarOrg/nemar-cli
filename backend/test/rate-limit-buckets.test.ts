@@ -209,11 +209,13 @@ describe("__selectBucket", () => {
     }
   });
 
-  test("/auth/device/token stays OUT of the strict bucket -- it rides `ip`/`token` with MAX_REQUESTS-scale caps", () => {
-    // Deliberately absent from AUTH_PATHS (comment there explains why): the
-    // CLI polls roughly every 5 seconds, which would trip a 10/min floor on
-    // the third poll. An unauthenticated poll (no key collected yet) lands
-    // on the plain `ip` bucket at `MAX_REQUESTS`.
+  test("/auth/device/token stays OUT of the strict bucket -- it rides `ip` with MAX_REQUESTS", () => {
+    // Deliberately absent from AUTH_PATHS (comment there explains why): at a
+    // 5-second poll cadence, 10 polls fit inside the strict bucket's 60s
+    // window and the 11th trips it, about 50 seconds in -- not the "third
+    // poll" a looser count might suggest. An unauthenticated poll (no key
+    // collected yet, so no bearer to carry) lands on the plain `ip` bucket
+    // at `MAX_REQUESTS`.
     const sel = __selectBucket("/auth/device/token", undefined, "10.0.0.1");
     expect(sel.keyKind).toBe("ip");
     expect(sel.maxRequests).toBe(__limits.MAX_REQUESTS);

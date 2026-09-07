@@ -9,13 +9,11 @@
 Epic #1272 makes ORCID the single identity root for NEMAR.
 After epic #1250 the web already creates accounts only through ORCID OAuth,
 but the CLI still creates them with a password and a typed, unverified ORCID iD.
-Two creation paths with two different identity roots produced the
-null-username and duplicate-account problems that epic #1250 cleaned up.
+Two creation paths with two different identity roots produced the null-username and duplicate-account problems that epic #1250 cleaned up.
 
 A terminal cannot receive an OAuth redirect,
 and nobody should type an ORCID password into a CLI prompt.
-`nemar auth login` therefore needs a way to authenticate that starts in the terminal
-and finishes in a browser the person already trusts.
+`nemar auth login` therefore needs a way to authenticate that starts in the terminal and finishes in a browser the person already trusts.
 `gh auth login` solves the identical problem with the device authorization grant
 (RFC 8628), a pattern built for exactly this shape:
 a CLI mints a short code, a person authorizes it in a browser,
@@ -34,35 +32,34 @@ The API key is minted only when the CLI collects it at `/auth/device/token`,
 never when the browser confirms at `/auth/device/confirm`:
 confirm records `user_id` and `status = 'confirmed'` only,
 so no plaintext key is ever at rest between the two steps.
-Every key is a named row for one machine
-(`tokens.name` holds the machine name the CLI or the paste-key form supplied),
+Every key is a named row for one machine (`tokens.name` holds the machine name the CLI or the paste-key form supplied),
 and a new sign-in never revokes another machine's key --
-a laptop and a compute cluster can both hold a live key for the same account
-at the same time.
+a laptop and a compute cluster can both hold a live key for the same account at the same time.
+The polling secret itself is never stored in the clear:
+`device_codes.device_code_hash` holds only its SHA-256 hash, the same function `tokens.api_key_hash` uses,
+so a read of the table cannot be turned into a working code.
 
 ## Consequences
 
 `POST /auth/device/token` sits OUTSIDE the strict per-IP auth bucket
-(`AUTH_PATHS`, 10 requests/minute) and rides the generic `ip`/`token` bucket instead,
-because the CLI polls it roughly every 5 seconds while waiting --
-up to ~120 polls across one 10-minute code.
-It gets its own per-row floor instead:
-a poll sooner than 5 seconds after the last STAMPED poll answers `slow_down`
-without resetting the timer, so a jittery client is never starved.
+(`AUTH_PATHS`, 10 requests/minute) and rides the generic bucket instead --
+in practice `ip` (500/min), since the CLI holds no bearer until it has collected a key --
+because the CLI polls it roughly every 5 seconds while waiting, up to ~120 polls across one 10-minute code.
+At that cadence 10 polls fit inside the strict bucket's 60-second window and the 11th would trip it, about 50 seconds in.
+The route gets its own per-row floor instead:
+a poll sooner than 5 seconds after the last STAMPED poll answers `slow_down` without resetting the timer,
+so a jittery client is never starved and can never restart its own countdown.
 
 `verification_uri_complete` pre-fills the user code in the URL.
 This is the RFC 8628 section 5.4 phishing trade-off, accepted deliberately:
 NEMAR's users are researchers, not security engineers,
 and the easiest, most reliable flow wins (the epic's guiding principle).
-The mitigation is that phase 2's confirm page names the account and the machine
-before asking anyone to press Authorize --
-a person who did not just run `nemar auth login` sees exactly that,
-and closes the tab.
+The mitigation is that phase 2's confirm page names the account and the machine before asking anyone to press Authorize --
+a person who did not just run `nemar auth login` sees exactly that, and closes the tab.
 
 Confirm extends a near-expiry code by 120 seconds
 (`expires_at = MAX(expires_at, datetime('now', '+120 seconds'))`)
-so a person who authorizes in the closing seconds of the 10-minute window
-is not told "expired" by the CLI's very next poll.
+so a person who authorizes in the closing seconds of the 10-minute window is not told "expired" by the CLI's very next poll.
 This is safe because the code is already bound to one account by that point,
 and the CLI still has to hold the device secret to collect the key.
 
@@ -72,21 +69,37 @@ so a revoked person carries no web session and gets a 401, never this refusal.
 It IS reachable at `/auth/device/token`,
 for the case where an admin revokes the account between confirm and collect.
 
+`POST /auth/device/deny` records no `user_id` on the `device_codes` row itself:
+any signed-in account may deny a pending code,
+and the denier is named only on the audit row, not on the table a later confirm/token read would see.
+
+A brand-new ORCID account's `username` is `null` in `/auth/device/token`'s success response:
+`refreshNameThenAssignUsername` runs after finalize, behind the response, not before it,
+so a CLI collecting a key moments after sign-up may see the field still unset.
+Phase 3 must not key config or first-run behavior on `username` alone.
+
+`identity_conflict` refuses a NEW sign-in -- device confirm and the paste-key mint (`POST /auth/keys`) both check it --
+while a key minted before the flag was set keeps authenticating.
+The account has to clear the conflict (Settings) before it can add another key,
+but nothing already issued stops working the moment the flag is set.
+
+The polling endpoint's error body carries two different fields for "why":
+`error` is the RFC 8628 code the CLI's retry loop switches on (`authorization_pending`, `slow_down`, `expired_token`, `access_denied`, `invalid_grant`),
+and `reason` -- present only on a terminal answer, never on the two "keep polling" ones --
+is the more specific refusal code (`account_pending`, `too_many_keys`, ...) a person-facing message reads from.
+They disagree on purpose, which is why `reason` is not spelled `code` like every other refusal on this wire.
+
 Every device-flow timestamp is written and compared in SQL
-(`datetime('now', '+N seconds')`, `julianday` for `expires_in`),
-never in JavaScript.
-A JS `toISOString()` value compares greater than a same-day SQL `datetime('now')`
-value at index 10 (`'T' > ' '`),
+(`datetime('now', '+N seconds')`, `julianday` for `expires_in`), never in JavaScript.
+A JS `toISOString()` value compares greater than a same-day SQL `datetime('now')` value at index 10 (`'T' > ' '`),
 so mixing the two silently breaks expiry.
 This is a pre-existing bug in `auth_codes`, `web_sessions`, and `orcid_link_intents`;
 fixing those is out of scope here and gets its own issue after this phase lands.
 
-`confirm-key-regeneration` (the existing settings flow) still revokes every key
-on the account, machine-named or not.
+`confirm-key-regeneration` (the existing settings flow) still revokes every key on the account, machine-named or not.
 Phase 3 decides whether that survives once keys are per-machine --
 revoking a laptop's key to regenerate a compute cluster's is not obviously right,
-but that call belongs to the phase that builds the CLI-facing key management UX,
-not to this one.
+but that call belongs to the phase that builds the CLI-facing key management UX, not to this one.
 
 ## Alternatives considered
 

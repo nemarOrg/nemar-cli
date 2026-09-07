@@ -22,9 +22,10 @@
  *
  * ENVIRONMENT=development skips `rateLimiter` entirely
  * (middleware/rateLimit.ts), so nothing here asserts a 429 -- including on
- * `/auth/device/token`, whose whole reason for sitting outside the strict
- * `AUTH_PATHS` bucket (decision 7, ADR 0047) is a rate a real user's poll
- * loop would otherwise trip.
+ * `/auth/device/token`. ADR 0047's whole reason for keeping that route
+ * outside the strict `AUTH_PATHS` bucket is a rate a real 5-second poll
+ * loop would trip: 10 polls fit inside the strict bucket's 60-second
+ * window, and the 11th would not.
  */
 
 import { beforeAll, describe, expect, test } from "bun:test";
@@ -228,9 +229,10 @@ describe.skipIf(PROD_GUARD_ACTIVE)("device authorization grant (#1281, ADR 0047)
     // `findSessionByCookieId` filters revoked accounts out of session
     // resolution (services/web-session.ts), so a revoked account never
     // gets far enough to reach `lookup`/`confirm`/`deny`'s account check
-    // (decision 10, ADR 0047) -- `account_revoked` is only reachable at
-    // `/auth/device/token`, for an account revoked between confirm and
-    // collect (covered by the real-engine route tests, not here). What IS
+    // (ADR 0047: `account_revoked` is unreachable there for exactly this
+    // reason) -- it is only reachable at `/auth/device/token`, for an
+    // account revoked between confirm and collect (covered by the
+    // real-engine route tests, not here). What IS
     // assertable against a live deploy is the precondition: this account
     // cannot obtain a session at all.
     const email = freshEmail("revoked");

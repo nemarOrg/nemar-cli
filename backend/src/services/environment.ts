@@ -78,8 +78,8 @@ export function resolveDataBaseOrigin(
  *
  *  Hoisted here from routes/auth-orcid.ts (#1281, epic #1272 phase 1): the
  *  device-authorization routes (routes/auth-device.ts) need the same origin
- *  for `verification_uri`, and this is the second consumer that earns the
- *  hoist (AGENTS.md: hoist only what gains a second consumer). */
+ *  for `verification_uri`, and a helper earns a shared home once it has a
+ *  second real consumer rather than living duplicated in each caller. */
 export function appBase(env: Pick<Bindings, "APP_BASE_URL">): string {
   return (env.APP_BASE_URL?.trim() || DEFAULT_APP_BASE).replace(/\/+$/, "");
 }

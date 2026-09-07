@@ -89,8 +89,8 @@ export async function hashIp(ip: string | null | undefined): Promise<string | nu
  *
  *  Hoisted here from routes/auth-orcid.ts (#1281, epic #1272 phase 1): the
  *  device-authorization routes need the same lookup for `hashIp`-backed
- *  audit details, and this is the second consumer that earns the hoist
- *  (AGENTS.md: hoist only what gains a second consumer). */
+ *  audit details, and a helper earns a shared home once it has a second
+ *  real consumer rather than living duplicated in each caller. */
 export function clientIp(c: {
   req: { header: (k: string) => string | undefined };
 }): string | null {

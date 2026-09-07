@@ -12,8 +12,12 @@
 -- pending -> denied, or any non-terminal status -> expired once something
 -- observes `expires_at` has passed (no cron: the first poll, lookup, confirm
 -- or deny past expiry stamps it). Rows older than 24 hours past expiry are
--- pruned opportunistically at `start`, same pattern as `orcid_link_intents`
--- (migration 0078), so this table needs no cron either.
+-- pruned opportunistically at `start` -- the same opportunistic-prune-
+-- instead-of-cron IDEA as `orcid_link_intents` (migration 0078), but not
+-- the same retention: that table deletes a row the moment it expires
+-- (nothing there is useful once its ten minutes are up), while a device
+-- code stays around for 24 hours past expiry so one more `token` poll can
+-- still answer `expired_token` with a sentence instead of "unknown code".
 --
 -- NOTHING SECRET LIVES HERE. `device_code_hash` is the SHA-256 hash of the
 -- polling secret the CLI holds (`hashApiKey`, same function `tokens
@@ -44,14 +48,14 @@ CREATE TABLE IF NOT EXISTS device_codes (
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'confirmed', 'denied', 'consumed', 'expired')),
   -- Set by confirm. NULL until then; NEVER set by deny (the denier is
-  -- recorded on the audit row, not on this table -- decision 12).
+  -- recorded on the audit row, not on this table -- ADR 0047).
   user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
   -- Set by the token endpoint's mint, once. Lets an admin trace which
   -- device-auth row produced a given tokens row.
   token_id INTEGER REFERENCES tokens(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   expires_at TEXT NOT NULL,
-  -- Poll floor bookkeeping (decision 7): a poll sooner than 5 seconds after
+  -- Poll floor bookkeeping (ADR 0047): a poll sooner than 5 seconds after
   -- the previous one is answered `slow_down` without resetting the timer.
   last_polled_at TEXT,
   poll_count INTEGER NOT NULL DEFAULT 0,
@@ -64,6 +68,10 @@ CREATE TABLE IF NOT EXISTS device_codes (
   CHECK (status NOT IN ('confirmed', 'consumed') OR user_id IS NOT NULL)
 );
 
--- Drives the opportunistic prune, the observed-expiry stamp, and the
--- `expires_in` read.
+-- Drives ONLY the opportunistic prune's scan (`DELETE ... WHERE expires_at
+-- < ...`, the one statement here that has to search by `expires_at` rather
+-- than look a single row up). The observed-expiry stamp and every row read
+-- go through the primary key (`device_code_hash`) or the `user_code` unique
+-- index instead -- `expires_at` is a filter on those lookups, not the path
+-- to the row.
 CREATE INDEX IF NOT EXISTS idx_device_codes_expires ON device_codes(expires_at);
