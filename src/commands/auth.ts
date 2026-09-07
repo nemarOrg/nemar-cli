@@ -1316,10 +1316,18 @@ Examples:
 // Retrieve Key (after email verification)
 // ============================================================================
 
+/** Decision 12, epic #1272 phase 3: the password-era key commands survive
+ *  this release, but say so on every invocation before the first prompt --
+ *  ADR 0047's deferred call on `confirm-key-regeneration` is now this. */
+const PASSWORD_ERA_DEPRECATION =
+  "Password sign-in is deprecated and will be removed in the next release; run `nemar auth login`.";
+
 const retrieveKeyCmd = authCommand
   .command("retrieve-key")
   .description("Retrieve your API key once your email is verified (requires email and password)")
   .action(async () => {
+    console.log(chalk.yellow(PASSWORD_ERA_DEPRECATION));
+    console.log();
     const answers = await inquirer.prompt([
       {
         type: "input",
@@ -1408,6 +1416,13 @@ const regenerateKeyCmd = authCommand
   .command("regenerate-key")
   .description("Request a new API key (revokes current key, requires email verification)")
   .action(async () => {
+    console.log(chalk.yellow(PASSWORD_ERA_DEPRECATION));
+    console.log(
+      chalk.dim(
+        "  It also revokes the key on EVERY machine, not just this one; see 'nemar auth keys revoke'.",
+      ),
+    );
+    console.log();
     console.log(chalk.yellow("API Key Regeneration"));
     console.log(chalk.dim("This will revoke your current key and generate a new one\n"));
 
