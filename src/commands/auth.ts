@@ -30,12 +30,8 @@ import {
 } from "../../shared/contract/user.js";
 import { printGapList, printProfileGaps } from "../lib/account-gaps.js";
 import {
-  type OrcidNameResponse,
   type ProfilePatchRequest,
   type UploadAccessRequestResponse,
-  checkGitHubUsername,
-  checkOrcidName,
-  checkUsername,
   createApiKey,
   getCurrentUser,
   listApiKeys,
@@ -46,8 +42,8 @@ import {
   resendVerification,
   retrieveKey,
   revokeApiKey,
-  signup,
   startOrcidCliLink,
+  suggestUsername,
   unlinkOrcid,
   updateProfile,
   verifyEmailChange,
@@ -100,23 +96,29 @@ addVerboseHelp(
   authCommand,
   `
 Description:
-  Manage your NEMAR account authentication. New users register and verify
-  their email; that activates the account (browse, download, API key,
-  sandbox training). Uploading datasets additionally needs upload access,
-  a one-time admin approval you request once your account is active.
+  Manage your NEMAR account authentication. New users sign in with their
+  browser (ORCID creates the account); that activates it (browse, download,
+  API key, sandbox training). Uploading datasets additionally needs upload
+  access, a one-time admin approval 'nemar auth signup' requests for you
+  once your profile is complete.
 
 Workflow:
-  1. nemar auth signup         - Register a new account
-  2. Verify your email         - Click the link in the verification email
-  3. nemar auth retrieve-key   - Retrieve your API key (requires password)
-  4. nemar auth login          - Log in with your API key
+  1. nemar auth signup   - Browser sign-in; ORCID creates the account, then
+                            a few questions for whatever is still missing
+  2. Verify your email   - Click the link NEMAR sends you
+  3. nemar sandbox        - Complete sandbox training before your first upload
+
+Keys:
+  Every 'nemar auth login' names a key for the machine it runs on
+  (list/create/revoke the whole set with 'nemar auth keys'). 'retrieve-key'
+  and 'regenerate-key' still work for a password-era account but are
+  deprecated; 'nemar auth login' is the replacement for both.
 
 Examples:
-  $ nemar auth signup                    # Start registration
-  $ nemar auth retrieve-key             # Get your API key once verified
-  $ nemar auth login                     # Interactive login
-  $ nemar auth login -k <api-key>        # Login with API key
-  $ nemar auth regenerate-key           # Get a new API key (revokes old)
+  $ nemar auth signup                    # Sign in with your browser; complete your profile
+  $ nemar auth login                     # Sign in with your browser
+  $ nemar auth login -k <api-key>        # Paste an existing key instead
+  $ nemar auth keys                      # List this account's named keys
   $ nemar auth status --refresh          # Check authentication status
   $ nemar auth whoami                    # Alias for status
   $ nemar auth switch                    # Switch between accounts
@@ -484,307 +486,234 @@ Examples:
 );
 
 // ============================================================================
-// Signup
+// Signup (decision 9, epic #1272 phase 3; ADR 0045: one rule)
 // ============================================================================
+//
+// The account itself is created by the device flow's browser step (ORCID
+// sign-in), so there is no separate registration form here, no password,
+// and no typed ORCID iD -- signup IS login, plus a few questions afterward
+// for whatever `profile_gaps` says is still missing.
 
-/**
- * Look up the name on a public ORCID record, treating any failure as "no
- * name" (#1255): the caller's next move -- ask the user to type it -- is the
- * same for a hidden name, an unreachable backend, and a 4xx, and the backend
- * re-reads ORCID itself when the account is created.
- */
-async function lookupOrcidName(orcid: string): Promise<OrcidNameResponse> {
-  try {
-    return await checkOrcidName(orcid);
-  } catch {
-    // An unreachable backend is a lookup failure, not evidence about the
-    // user's record -- same distinction the endpoint itself draws.
-    return { status: "lookup_failed", given_name: null, family_name: null };
-  }
+/** Prints the one line decision 9 requires and returns `true` when stdin
+ *  cannot prompt and at least one answer is still needed -- checked BEFORE
+ *  any `inquirer.prompt` call in the flow below. inquirer 9 under a closed
+ *  stdin does not reject; it dies with an internal stack trace at process
+ *  exit, so this has to be knowable without ever calling it. */
+function guardNonInteractive(pendingFlags: string[]): boolean {
+  if (pendingFlags.length === 0 || process.stdin.isTTY) return false;
+  console.log(chalk.yellow(`Provide ${pendingFlags.join(", ")} (this terminal cannot prompt).`));
+  process.exitCode = 1;
+  return true;
+}
+
+export interface SignupCompletionOptions extends ConfirmOptions {
+  username?: string;
+  github?: string;
+  city?: string;
+  country?: string;
+  why?: string;
+  /** `false` for `--no-upload-access`. */
+  uploadAccess?: boolean;
+}
+
+async function promptForRequired(message: string): Promise<string> {
+  const { value } = await inquirer.prompt([
+    {
+      type: "input",
+      name: "value",
+      message,
+      validate: (v: string) => (v?.trim() ? true : "Required"),
+    },
+  ]);
+  return String(value).trim();
 }
 
 /**
- * Collect the researcher's name, asking for it ONLY when ORCID does not
- * publish one. NEMAR needs a real name because DOIs cite the uploader by name
- * and never by username (#1255); when the record has one, nobody is asked to
- * retype it.
+ * Guided completion after the device flow signs into a fresh (or returning)
+ * account: fetch the live profile, fill in what the CLI can set --
+ * username, GitHub handle, city, country, exactly decision 9's list -- via
+ * flag or prompt in ONE `PATCH /auth/profile`, request upload access unless
+ * `--no-upload-access`, then print whatever is still outstanding through
+ * `printProfileGaps`. `profile_gaps` IS the checklist: the same one `nemar
+ * auth status` and a refused upload-access request already read, so this
+ * asks for nothing the server does not already say is missing -- a name
+ * under a verified ORCID iD, for instance, is never prompted for here, only
+ * reported.
  */
-async function collectResearcherName(
-  orcid: string,
-): Promise<{ given_name?: string; family_name?: string }> {
-  const spinner = ora("Reading your name from ORCID...").start();
-  const record = await lookupOrcidName(orcid);
-  if (record.status === "found") {
-    spinner.succeed(`Name from your ORCID record: ${record.given_name} ${record.family_name}`);
-    // Deliberately not sent: the backend reads the same record itself, and
-    // the record is the authority on how this person is cited.
-    return {};
+async function completeProfile(options: SignupCompletionOptions): Promise<void> {
+  const spinner = ora("Checking your profile...").start();
+  let user: ContractUser;
+  try {
+    user = await getCurrentUser();
+    spinner.stop();
+  } catch (error) {
+    spinner.fail(`Could not read your profile: ${errorDetail(error)}`);
+    process.exitCode = 1;
+    return;
   }
 
-  // Both remaining cases prompt, but they are different situations and the
-  // sentence says which (#1255): telling someone their record hides their
-  // name when ORCID is simply down sends them to fix nothing.
-  if (record.status === "lookup_failed") {
-    spinner.warn(
-      "ORCID is unreachable right now, so NEMAR could not read your name. Please enter it; " +
-        "if your ORCID record publishes a name, that name wins.",
-    );
-  } else {
-    spinner.info("Your ORCID record does not publish a name; NEMAR needs it for DOI citations.");
+  const gapFields = new Set((user.profile_gaps ?? []).map((gap) => gap.field));
+  // Addressed even when it is not a `profile_gaps` entry: a server-assigned
+  // handle (e.g. "jsmith2") is still worth a "keep or change" the moment an
+  // account is new, and `isMissing` for `username` is false the instant it
+  // is non-blank -- auto-assigned or not.
+  const usernameIsGap = gapFields.has("username") || !user.username;
+  const offerUsernameChange = user.username_auto_assigned === true;
+
+  // Computed WITHOUT any I/O, so the one non-interactive line below can be
+  // printed before the first prompt rather than discovered mid-flow. `-n`
+  // deterministically declines the keep-or-change question (see below), so
+  // it is the only offerUsernameChange case that provably needs the flag;
+  // "keep" (confirmed, or a non-TTY default) needs nothing.
+  const pendingFlags: string[] = [];
+  if (usernameIsGap && !options.username) pendingFlags.push("--username");
+  if (offerUsernameChange && !options.username && options.no === true)
+    pendingFlags.push("--username");
+  if (gapFields.has("github_username") && !options.github) pendingFlags.push("--github");
+  if (gapFields.has("city") && !options.city) pendingFlags.push("--city");
+  if (gapFields.has("country") && !options.country) pendingFlags.push("--country");
+  if (guardNonInteractive(pendingFlags)) return;
+
+  const patch: ProfilePatchRequest = {};
+
+  if (offerUsernameChange) {
+    if (options.username) {
+      if (options.username !== user.username) patch.username = options.username;
+    } else {
+      // `confirm()` already carries its own non-TTY guard (returning
+      // "cancelled"); treated the same as "confirmed" here -- keeping the
+      // server's own pick is the safe default when nobody answered.
+      const keep = await confirm(`Keep the username '${user.username}'?`, options, true);
+      if (keep === "declined") {
+        patch.username = options.username ?? (await promptForRequired("New username:"));
+      }
+    }
+  } else if (usernameIsGap) {
+    if (options.username) {
+      patch.username = options.username;
+    } else {
+      // Best-effort: a suggestion failure still lets the person type one.
+      const suggestion = await suggestUsername().catch(() => null);
+      const { chosen } = await inquirer.prompt([
+        {
+          type: "input",
+          name: "chosen",
+          message: "Choose a username:",
+          default: suggestion?.suggestion ?? undefined,
+          validate: (v: string) => (v?.trim() ? true : "A username is required"),
+        },
+      ]);
+      patch.username = String(chosen).trim();
+    }
   }
 
-  const answers = await inquirer.prompt([
-    {
-      type: "input",
-      name: "given_name",
-      message: "Given (first) name:",
-      validate: (input: string) =>
-        input?.trim() ? true : "A given name is required: DOIs cite you by name, not by username",
-    },
-    {
-      type: "input",
-      name: "family_name",
-      message: "Family (last) name:",
-      validate: (input: string) =>
-        input?.trim() ? true : "A family name is required: DOIs cite you by name, not by username",
-    },
-  ]);
-  return {
-    given_name: answers.given_name.trim(),
-    family_name: answers.family_name.trim(),
-  };
+  if (gapFields.has("github_username")) {
+    patch.github_username =
+      options.github ?? (await promptForRequired("GitHub username (for PR collaboration):"));
+  }
+  if (gapFields.has("city")) {
+    patch.city = options.city ?? (await promptForRequired("City (for export-control screening):"));
+  }
+  if (gapFields.has("country")) {
+    patch.country =
+      options.country ?? (await promptForRequired("Country (for export-control screening):"));
+  }
+
+  if (Object.keys(patch).length > 0) {
+    const patchSpinner = ora("Saving your profile...").start();
+    try {
+      await updateProfile(patch);
+      patchSpinner.succeed("Profile updated");
+    } catch (error) {
+      failWithApiError(patchSpinner, error, "Could not save your profile");
+      return;
+    }
+  }
+
+  if (options.uploadAccess !== false) {
+    let why = options.why?.trim();
+    if (!why) {
+      if (guardNonInteractive(["--why"])) return;
+      const answers = await inquirer.prompt([
+        {
+          type: "input",
+          name: "why",
+          message: "What do you intend to upload to NEMAR?",
+          validate: validateUploadAccessWhy,
+        },
+      ]);
+      why = String(answers.why).trim();
+    }
+    await submitUploadAccessRequest(why);
+  }
+
+  await refreshStoredAccount();
+  const cfg = getConfig();
+  printProfileGaps({
+    gaps: cfg.profileGaps,
+    orcidVerified: cfg.orcidVerified,
+    sandboxCompleted: cfg.sandboxCompleted,
+  });
 }
 
 /** Exported signup action handler for use in root-level shortcuts */
-export async function signupAction(): Promise<void> {
-  console.log(chalk.cyan("NEMAR Account Registration"));
-  console.log(chalk.dim("Create an account to upload and manage datasets\n"));
+export async function signupAction(
+  options: SignupCompletionOptions & { open?: boolean },
+): Promise<void> {
+  console.log(chalk.cyan("NEMAR Account Sign-Up"));
+  console.log(chalk.dim("Sign in with your browser to create or continue your account\n"));
 
   // Non-fatal heads-up about external tools needed for upload/validation, so
   // users (especially on Windows) learn what to install before they get there.
   await warnMissingPrerequisites();
 
-  // Collect user information
-  const answers = await inquirer.prompt([
-    {
-      type: "input",
-      name: "username",
-      message: "Choose a username:",
-      validate: async (input) => {
-        if (!input || input.length < 3) {
-          return "Username must be at least 3 characters";
-        }
-        if (input.length > 30) {
-          return "Username must be at most 30 characters";
-        }
-        if (!/^[a-zA-Z0-9_-]+$/.test(input)) {
-          return "Username can only contain letters, numbers, underscores, and hyphens";
-        }
-        // Check availability with backend
-        try {
-          const result = await checkUsername(input);
-          if (!result.available) {
-            return result.reason || `Username "${input}" is already taken`;
-          }
-        } catch (error) {
-          // Only allow network errors to pass; report other issues
-          if (error instanceof ApiError && error.statusCode === 0) {
-            // Network error - will be validated at signup
-            return true;
-          }
-          // Server error or unexpected issue - let user know
-          return true; // Don't block signup, backend will validate
-        }
-        return true;
-      },
-    },
-    {
-      type: "input",
-      name: "email",
-      message: "Email address:",
-      validate: (input) => {
-        if (!input || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input)) {
-          return "Please enter a valid email address";
-        }
-        return true;
-      },
-    },
-    {
-      type: "password",
-      name: "password",
-      message: "Password (min 12 characters):",
-      mask: "*",
-      validate: (input) => {
-        if (!input || input.length < 12) {
-          return "Password must be at least 12 characters";
-        }
-        if (input.length > 128) {
-          return "Password must be at most 128 characters";
-        }
-        return true;
-      },
-    },
-    {
-      type: "password",
-      name: "confirmPassword",
-      message: "Confirm password:",
-      mask: "*",
-      validate: (input, answers) => {
-        if (input !== answers?.password) {
-          return "Passwords do not match";
-        }
-        return true;
-      },
-    },
-    {
-      type: "input",
-      name: "github_username",
-      message: "GitHub username (for PR collaboration):",
-      validate: async (input) => {
-        if (!input || input.length < 1) {
-          return "GitHub username is required for PR collaboration";
-        }
-        if (input.length > 39) {
-          return "GitHub username is too long";
-        }
-        // Validate GitHub username exists via backend
-        try {
-          const result = await checkGitHubUsername(input);
-          if (!result.valid) {
-            return `GitHub user "${input}" not found. Please check the username.`;
-          }
-        } catch (error) {
-          // Only allow network errors to pass; report other issues
-          if (error instanceof ApiError && error.statusCode === 0) {
-            // Network error - will be validated at signup
-            return true;
-          }
-          // Server error or unexpected issue - let user know
-          return true; // Don't block signup, backend will validate
-        }
-        return true;
-      },
-    },
-    {
-      type: "input",
-      name: "orcid",
-      message: "ORCID iD (e.g. 0000-0002-1825-0097):",
-      validate: (input) => {
-        const v = input?.trim();
-        if (!v) return "ORCID iD is required — it's how NEMAR gets your name";
-        if (!/^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/.test(v)) {
-          return "ORCID must be in format 0000-0000-0000-000X";
-        }
-        return true;
-      },
-    },
-  ]);
-
-  // Right after the ORCID prompt, because ORCID is where the name comes from.
-  const researcherName = await collectResearcherName(answers.orcid.trim());
-
-  const rest = await inquirer.prompt([
-    {
-      type: "input",
-      name: "affiliation",
-      message: "Affiliation / institution (optional):",
-      validate: (input) =>
-        !input || input.trim().length <= 200 ? true : "Affiliation must be at most 200 characters",
-    },
-    {
-      type: "input",
-      name: "city",
-      message: "City (required for export-control screening):",
-      validate: (input) => (input?.trim() ? true : "City is required"),
-    },
-    {
-      type: "input",
-      name: "country",
-      message: "Country (required for export-control screening):",
-      validate: (input) => (input?.trim() ? true : "Country is required"),
-    },
-    {
-      type: "input",
-      name: "description",
-      message: "Why do you need access to NEMAR? (1-2 sentences):",
-      validate: (input) => {
-        const trimmed = input?.trim();
-        if (!trimmed || trimmed.length < 20) {
-          return "Please provide at least 20 characters describing why you need NEMAR access";
-        }
-        if (trimmed.length > 500) {
-          return "Description must be at most 500 characters";
-        }
-        return true;
-      },
-    },
-  ]);
-
-  // Register with backend
-  const spinner = ora("Creating account...").start();
-
-  try {
-    const result = await signup({
-      username: answers.username,
-      email: answers.email,
-      password: answers.password,
-      github_username: answers.github_username,
-      description: rest.description.trim(),
-      orcid: answers.orcid.trim(),
-      ...researcherName,
-      affiliation: rest.affiliation?.trim() || undefined,
-      city: rest.city.trim(),
-      country: rest.country.trim(),
-    });
-
-    spinner.succeed("Account created");
-    console.log();
-    console.log(chalk.green("Registration successful!"));
-    console.log();
-    console.log("Next steps:");
-    result.next_steps.forEach((step, i) => {
-      console.log(`  ${i + 1}. ${step}`);
-    });
-    // The server is the only party that knows whether the name actually
-    // landed on the row; say so loudly rather than leaving it to publish time.
-    if (result.researcher_name === "missing") {
-      console.log();
-      console.log(
-        chalk.yellow(
-          "No researcher name is on file for this account. DOIs cite depositors by name, " +
-            "never by username, so publishing stays blocked until one is recorded.",
-        ),
-      );
-      console.log(
-        chalk.dim(
-          "  Make your name public on your ORCID record, then sign in again so NEMAR can read it.",
-        ),
-      );
-    }
-  } catch (error) {
-    if (error instanceof ApiError) {
-      spinner.fail(error.message);
-      if (error.details && Array.isArray(error.details)) {
-        error.details.forEach((detail) => {
-          console.log(chalk.dim(`  - ${detail}`));
-        });
-      }
-      // Provide helpful hints for common errors
-      if (error.message.includes("already taken")) {
-        console.log(chalk.dim("  Try a different username"));
-      } else if (error.message.includes("already registered")) {
-        console.log(
-          chalk.dim("  Use 'nemar auth resend-verification' if you need a new verification link"),
-        );
-      }
-    } else {
-      spinner.fail("Registration failed");
-      console.log(chalk.dim(`  ${error instanceof Error ? error.message : "Unknown error"}`));
-    }
+  const outcome = await runDeviceLogin({ open: options.open });
+  if (outcome.kind !== "success") {
+    printDeviceOutcomeFailure(outcome);
+    return;
   }
+  // The stored-key preflight above never runs for a fresh signup on an
+  // authenticated-from-scratch machine, so there is no "old key" to skip
+  // revoking (decision 7's `oldKeyKnownDead` is only ever meaningful when a
+  // stale key was already probed).
+  await writeSignedInAccount(outcome.user, outcome.api_key, outcome.key, "device", false);
+
+  await completeProfile(options);
 }
 
-authCommand.command("signup").description("Register for a new NEMAR account").action(signupAction);
+const signupCmd = authCommand
+  .command("signup")
+  .description("Create or continue your NEMAR account (browser sign-in, then a few questions)")
+  .option("--username <name>", "Username to set, or to change to")
+  .option("--github <handle>", "GitHub username")
+  .option("--city <city>", "City")
+  .option("--country <country>", "Country")
+  .option("--why <text>", "What you intend to upload (20-500 characters)")
+  .option("--no-upload-access", "Skip the upload-access request")
+  .option("--no-open", "Print the sign-in link instead of trying to open a browser")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .action(signupAction);
+
+addVerboseHelp(
+  signupCmd,
+  `
+Description:
+  Signs in with your browser like 'nemar auth login' -- ORCID creates a
+  brand-new account the first time, or signs into an existing one. Then
+  asks only what 'profile_gaps' says is still missing: a username (kept or
+  changed if the server already assigned one), a GitHub handle, city, and
+  country. Anything the CLI cannot set -- a name under a verified ORCID iD,
+  for instance -- is reported, never prompted for.
+
+  Ends by requesting upload access, unless --no-upload-access.
+
+Examples:
+  $ nemar auth signup
+  $ nemar auth signup --no-open
+  $ nemar auth signup --github octocat --city "San Diego" --country USA \\
+      --why "Sharing our lab's 64-channel EEG study of motor imagery"`,
+);
 
 // ============================================================================
 // Status / Whoami
@@ -1583,6 +1512,63 @@ export function validateUploadAccessWhy(input: string | undefined): true | strin
   return true;
 }
 
+/**
+ * `POST /users/me/upload-access/request`, and every line of its rendering --
+ * shared by `nemar auth request-upload-access` and `nemar auth signup`'s
+ * guided completion (decision 9, epic #1272 phase 3) so the two say exactly
+ * the same thing about the same request rather than two near-identical
+ * copies drifting apart. Sets `process.exitCode = 1` on any failure; never
+ * throws.
+ */
+async function submitUploadAccessRequest(why: string): Promise<void> {
+  const spinner = ora("Submitting upload access request...").start();
+  try {
+    const result = await requestUploadAccess(why);
+    // Both outcomes are stated in the website's own words (#1268, ADR 0045):
+    // a person who asked from the dashboard and then checked from a terminal
+    // must not be told two different things about one request.
+    if (result.already_requested) {
+      spinner.info(accountCopy("upload_access.requested.title"));
+      console.log(chalk.dim(`  ${accountCopy("upload_access.requested.lede")}`));
+      warnIfAdminsNotNotified(result);
+      return;
+    }
+    spinner.succeed(accountCopy("upload_access.requested.title"));
+    console.log();
+    console.log(`  ${accountCopy("upload_access.requested.body")}`);
+    console.log(chalk.dim("  Check any time with 'nemar auth status --refresh'."));
+    warnIfAdminsNotNotified(result);
+  } catch (error) {
+    if (!(error instanceof ApiError)) {
+      spinner.fail("Failed to submit upload access request");
+      console.log(chalk.dim("  Check your internet connection"));
+      process.exitCode = 1;
+      return;
+    }
+
+    spinner.fail(error.message);
+    // The API names the fields it is still missing; print each one with
+    // where to fix it rather than making the user map an error sentence back
+    // onto a settings form (ADR 0042).
+    if (error.missing && error.missing.length > 0) {
+      // `orcidVerified` from the config cache, because a refusal names the
+      // FIELD and not the account state (#1268). It is what decides whether
+      // the name halves point at `nemar auth profile set-name` or at the
+      // ORCID record -- with a verified iD linked the record owns the name
+      // and the PATCH refuses the edit, so the command would be advice that
+      // cannot work. Absent (never refreshed) reads as false, which is the
+      // pre-#1268 wording rather than a wrong one.
+      printGapList(
+        accountCopy("gaps.request.title"),
+        resolveProfileGaps(error.missing, { orcidVerified: getConfig().orcidVerified === true }),
+      );
+      console.log();
+      console.log(chalk.dim("  Settings: https://nemar.org/settings"));
+    }
+    process.exitCode = 1;
+  }
+}
+
 const requestUploadAccessCmd = authCommand
   .command("request-upload-access")
   .description("Ask an admin for upload access (one-time)")
@@ -1602,6 +1588,11 @@ const requestUploadAccessCmd = authCommand
 
     let why = (options.why ?? "").trim();
     if (!why) {
+      if (!process.stdin.isTTY) {
+        console.log(chalk.yellow("Provide --why (this terminal cannot prompt)."));
+        process.exitCode = 1;
+        return;
+      }
       const answers = await inquirer.prompt([
         {
           type: "input",
@@ -1613,52 +1604,7 @@ const requestUploadAccessCmd = authCommand
       why = String(answers.why).trim();
     }
 
-    const spinner = ora("Submitting upload access request...").start();
-    try {
-      const result = await requestUploadAccess(why);
-      // Both outcomes are stated in the website's own words (#1268, ADR 0045):
-      // a person who asked from the dashboard and then checked from a terminal
-      // must not be told two different things about one request.
-      if (result.already_requested) {
-        spinner.info(accountCopy("upload_access.requested.title"));
-        console.log(chalk.dim(`  ${accountCopy("upload_access.requested.lede")}`));
-        warnIfAdminsNotNotified(result);
-        return;
-      }
-      spinner.succeed(accountCopy("upload_access.requested.title"));
-      console.log();
-      console.log(`  ${accountCopy("upload_access.requested.body")}`);
-      console.log(chalk.dim("  Check any time with 'nemar auth status --refresh'."));
-      warnIfAdminsNotNotified(result);
-    } catch (error) {
-      if (!(error instanceof ApiError)) {
-        spinner.fail("Failed to submit upload access request");
-        console.log(chalk.dim("  Check your internet connection"));
-        process.exitCode = 1;
-        return;
-      }
-
-      spinner.fail(error.message);
-      // The API names the fields it is still missing; print each one with
-      // where to fix it rather than making the user map an error sentence back
-      // onto a settings form (ADR 0042).
-      if (error.missing && error.missing.length > 0) {
-        // `orcidVerified` from the config cache, because a refusal names the
-        // FIELD and not the account state (#1268). It is what decides whether
-        // the name halves point at `nemar auth profile set-name` or at the
-        // ORCID record -- with a verified iD linked the record owns the name
-        // and the PATCH refuses the edit, so the command would be advice that
-        // cannot work. Absent (never refreshed) reads as false, which is the
-        // pre-#1268 wording rather than a wrong one.
-        printGapList(
-          accountCopy("gaps.request.title"),
-          resolveProfileGaps(error.missing, { orcidVerified: getConfig().orcidVerified === true }),
-        );
-        console.log();
-        console.log(chalk.dim("  Settings: https://nemar.org/settings"));
-      }
-      process.exitCode = 1;
-    }
+    await submitUploadAccessRequest(why);
   });
 
 addVerboseHelp(

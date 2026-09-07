@@ -209,15 +209,27 @@ program
   .option("--no-revoke-key", "Never revoke the key server-side, only clear it locally")
   .action(logoutAction);
 
-program
-  .command("signup")
-  .description("Register for a new account (shortcut for 'auth signup')")
-  .action(signupAction);
+const signupFlags = (cmd: Command): Command =>
+  cmd
+    .option("--username <name>", "Username to set, or to change to")
+    .option("--github <handle>", "GitHub username")
+    .option("--city <city>", "City")
+    .option("--country <country>", "Country")
+    .option("--why <text>", "What you intend to upload (20-500 characters)")
+    .option("--no-upload-access", "Skip the upload-access request")
+    .option("--no-open", "Print the sign-in link instead of trying to open a browser")
+    .option(YES_OPTION, YES_DESCRIPTION)
+    .option(NO_OPTION, NO_DESCRIPTION);
 
-program
-  .command("register")
-  .description("Register for a new account (alias for signup)")
-  .action(signupAction);
+signupFlags(
+  program
+    .command("signup")
+    .description("Create or continue your account (shortcut for 'auth signup')"),
+).action(signupAction);
+
+signupFlags(
+  program.command("register").description("Create or continue your account (alias for signup)"),
+).action(signupAction);
 
 program
   .command("whoami")
