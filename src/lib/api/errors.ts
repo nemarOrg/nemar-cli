@@ -41,10 +41,19 @@ export function errorDetail(error: unknown): string {
  * reads `reason` -- present only on a terminal answer -- for the more
  * specific refusal code `message` was already built from (the two disagree
  * on purpose, ADR 0047).
+ *
+ * `rawBody` is the whole parsed JSON error body, unlike `code`/`reason`/
+ * `details` which each pick out one field generically for every caller.
+ * `pollDeviceToken` re-parses it against `deviceTokenErrorSchema` instead of
+ * probing individual fields, so a caller that needs the CONTRACT's full
+ * shape (a discriminated union, not just two loose strings) has it without
+ * every other `request()` caller paying for a second body it never asked
+ * for.
  */
 export class ApiError extends Error {
   public code?: string;
   public reason?: string;
+  public rawBody?: unknown;
 
   constructor(
     public statusCode: number,

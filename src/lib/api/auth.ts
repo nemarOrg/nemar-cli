@@ -9,6 +9,8 @@ import {
   type ApiKeyCreateResponse,
   type ApiKeyListResponse,
   type ContractUser,
+  DEVICE_GRANT_MESSAGES,
+  type DeviceAuthRefusalCode,
   type DeviceGrantError,
   type DeviceStartResponse,
   type DeviceTokenSuccess,
@@ -17,6 +19,7 @@ import {
   apiKeyListResponseSchema,
   deviceGrantErrorSchema,
   deviceStartResponseSchema,
+  deviceTokenErrorSchema,
   deviceTokenSuccessSchema,
   userMeResponseSchema,
   usernameSuggestionResponseSchema,
@@ -460,9 +463,12 @@ export async function startDeviceAuth(machineName: string): Promise<DeviceStartR
 
 /** One outcome of a single `POST /auth/device/token` poll. `terminal.error`
  *  is the RFC 8628 grant-error code (the poll loop's retry logic switches on
- *  it); `terminal.message` is the sentence to print verbatim (ADR 0047:
- *  `reason` is the more specific refusal code `message` was already built
- *  from server-side, so nothing here re-derives it). */
+ *  it); `terminal.message` is the sentence to print verbatim. `reason` is
+ *  the more specific refusal code the message was already built from
+ *  server-side (ADR 0047: the two disagree on purpose) -- it is `undefined`
+ *  only when the 400 body itself failed to validate against the contract,
+ *  in which case there is no validated refusal code to report and none is
+ *  invented by falling back to `error`. */
 export type PollDeviceTokenResult =
   | { status: "success"; data: DeviceTokenSuccess }
   | { status: "pending" }
@@ -470,7 +476,7 @@ export type PollDeviceTokenResult =
   | {
       status: "terminal";
       error: Exclude<DeviceGrantError, "authorization_pending" | "slow_down">;
-      reason: string;
+      reason: DeviceAuthRefusalCode | undefined;
       message: string;
     };
 
@@ -480,15 +486,37 @@ function isDeviceGrantErrorCode(code: string | undefined): code is DeviceGrantEr
   );
 }
 
+/** The raw error body's `message` field, when it happens to be a string --
+ *  used only once the body has already failed `deviceTokenErrorSchema`, so
+ *  a still-readable sentence isn't thrown away just because some OTHER
+ *  field of the body drifted from the contract. */
+function rawMessage(body: unknown): string | undefined {
+  if (typeof body !== "object" || body === null) return undefined;
+  const message = (body as Record<string, unknown>).message;
+  return typeof message === "string" ? message : undefined;
+}
+
 /**
  * `POST /auth/device/token`: one poll. Every RFC 8628 answer this endpoint
  * gives (`authorization_pending`, `slow_down`, and the three terminal codes)
- * arrives as a 400 `ApiError` whose `code` is the grant-error code -- caught
- * here and turned into a plain result so the caller (device-login.ts) never
- * has to `instanceof ApiError` for a "keep polling" answer. Anything else
- * (a network failure, a 5xx, or a 400 whose `code` this build does not
- * recognize -- a contract drift) is rethrown, so the caller can treat those
- * as transient the same way `waitForOrcidLink` already does.
+ * arrives as a 400 whose body is re-parsed here against
+ * `deviceTokenErrorSchema` -- the contract's discriminated union -- rather
+ * than probed field by field, so the caller (device-login.ts) never has to
+ * `instanceof ApiError` for a "keep polling" answer.
+ *
+ * When the body fails that parse but `error` is still one of the three
+ * TERMINAL grant codes this build recognizes, the poll still ends: a
+ * `reason` this build doesn't know about (or some other field drifting from
+ * the contract) must not turn a real refusal into an infinite retry. That
+ * fallback reports `reason: undefined` (never backfilled from `error`,
+ * which is a different vocabulary -- ADR 0047) and prints the body's own
+ * `message` when it parsed as a string, else the RFC-level
+ * `DEVICE_GRANT_MESSAGES[error]` sentence.
+ *
+ * Anything else (a network failure, a 5xx, a 200 that failed
+ * `deviceTokenSuccessSchema`, or a 400 whose `error` this build does not
+ * recognize at all) is rethrown, so the caller can classify it as transient
+ * the same way `waitForOrcidLink` already does.
  *
  * `signal` composes with the request's own timeout the same way every other
  * `request()` caller's does -- see device-login.ts's poll loop for how the
@@ -507,19 +535,31 @@ export async function pollDeviceToken(
     );
     return { status: "success", data };
   } catch (error) {
-    if (
-      error instanceof ApiError &&
-      error.statusCode === 400 &&
-      isDeviceGrantErrorCode(error.code)
-    ) {
-      if (error.code === "authorization_pending") return { status: "pending" };
-      if (error.code === "slow_down") return { status: "slow_down" };
-      return {
-        status: "terminal",
-        error: error.code,
-        reason: error.reason ?? error.code,
-        message: error.message,
-      };
+    if (error instanceof ApiError && error.statusCode === 400) {
+      const parsed = deviceTokenErrorSchema.safeParse(error.rawBody);
+      if (parsed.success) {
+        const body = parsed.data;
+        if (body.error === "authorization_pending") return { status: "pending" };
+        if (body.error === "slow_down") return { status: "slow_down" };
+        return {
+          status: "terminal",
+          error: body.error,
+          reason: body.reason,
+          message: body.message,
+        };
+      }
+      if (
+        isDeviceGrantErrorCode(error.code) &&
+        error.code !== "authorization_pending" &&
+        error.code !== "slow_down"
+      ) {
+        return {
+          status: "terminal",
+          error: error.code,
+          reason: undefined,
+          message: rawMessage(error.rawBody) ?? DEVICE_GRANT_MESSAGES[error.code],
+        };
+      }
     }
     throw error;
   }

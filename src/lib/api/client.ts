@@ -259,6 +259,7 @@ export async function request<T>(
     // classifiers) predates these two fields and passes neither.
     if (typeof data.error === "string") apiError.code = data.error;
     if (typeof data.reason === "string") apiError.reason = data.reason;
+    apiError.rawBody = data;
     throw apiError;
   }
 

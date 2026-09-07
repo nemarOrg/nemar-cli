@@ -544,6 +544,50 @@ describe("nemar auth login: terminal answers", () => {
       server.stop();
     }
   });
+
+  test("a terminal code with a body that fails the contract schema still ends the poll", async () => {
+    const server = startDeviceServer({
+      interval: 1,
+      // No `reason`, no `message` -- fails deviceTokenErrorSchema even
+      // though `error` is a grant code this build recognizes.
+      token: [{ kind: "raw", status: 400, body: { error: "expired_token" } }],
+    });
+    try {
+      const result = await run(["auth", "login", "--no-open"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.out).toContain(DEVICE_GRANT_MESSAGES.expired_token);
+      expect(server.polls.length).toBe(1);
+      expect(existsSync(configPath())).toBe(false);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a terminal code with an unrecognized reason still ends the poll, using the body's own message", async () => {
+    const server = startDeviceServer({
+      interval: 1,
+      token: [
+        {
+          kind: "raw",
+          status: 400,
+          body: {
+            error: "access_denied",
+            reason: "some_future_reason",
+            message: "custom sentence from the body",
+          },
+        },
+      ],
+    });
+    try {
+      const result = await run(["auth", "login", "--no-open"], server.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.out).toContain("custom sentence from the body");
+      expect(server.polls.length).toBe(1);
+      expect(existsSync(configPath())).toBe(false);
+    } finally {
+      server.stop();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
