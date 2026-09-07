@@ -77,9 +77,7 @@ function seedAndMigrate(): Database {
 
 function kindOf(db: Database, username: string): string {
   const row = db
-    .query<{ account_kind: string }, [string]>(
-      "SELECT account_kind FROM users WHERE username = ?",
-    )
+    .query<{ account_kind: string }, [string]>("SELECT account_kind FROM users WHERE username = ?")
     .get(username);
   if (!row) throw new Error(`no row for ${username}`);
   return row.account_kind;
@@ -150,7 +148,17 @@ describe("migration 0082: the data half", () => {
       )
       .all();
     expect(nonPerson.map((r) => r.username).sort()).toEqual(
-      ["cool-vibers", "nemarAdmin", "nemarOwner", "test-admin", "test-owner", "test-pending", "test-revoked", "test-user", "test-verified"].sort(),
+      [
+        "cool-vibers",
+        "nemarAdmin",
+        "nemarOwner",
+        "test-admin",
+        "test-owner",
+        "test-pending",
+        "test-revoked",
+        "test-user",
+        "test-verified",
+      ].sort(),
     );
   });
 

@@ -61,9 +61,10 @@ function kindOf(username: string): string | undefined {
 
 function auditRows(action: string) {
   return db
-    .query<{ user_id: number | null; resource_id: string | null; details: string | null }, [string]>(
-      "SELECT user_id, resource_id, details FROM audit_log WHERE action = ? ORDER BY id",
-    )
+    .query<
+      { user_id: number | null; resource_id: string | null; details: string | null },
+      [string]
+    >("SELECT user_id, resource_id, details FROM audit_log WHERE action = ? ORDER BY id")
     .all(action);
 }
 
@@ -80,11 +81,10 @@ function postKind(username: string, kind: string, apiKey: string): Promise<Respo
 }
 
 function getUsers(query: string, apiKey: string): Promise<Response> {
-  return app.request(
-    `/admin/users${query}`,
-    { headers: { Authorization: `Bearer ${apiKey}` } },
-    { DB: realD1(db), ENVIRONMENT: "test" } as Bindings,
-  );
+  return app.request(`/admin/users${query}`, { headers: { Authorization: `Bearer ${apiKey}` } }, {
+    DB: realD1(db),
+    ENVIRONMENT: "test",
+  } as Bindings);
 }
 
 beforeEach(async () => {
@@ -178,9 +178,11 @@ describe("POST /admin/users/:username/kind", () => {
       .query<{ id: number }, [string]>("SELECT id FROM users WHERE username = ?")
       .get("persona8");
     if (!target) throw new Error("seed failed");
-    db.query(
-      "INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)",
-    ).run(target.id, "persona8-existing-hash", "nm_persona");
+    db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
+      target.id,
+      "persona8-existing-hash",
+      "nm_persona",
+    );
 
     await postKind("persona8", "service", OWNER_KEY);
 

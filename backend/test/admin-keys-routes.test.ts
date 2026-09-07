@@ -76,9 +76,10 @@ function seedTarget(
 
 function auditRows(action: string) {
   return db
-    .query<{ user_id: number | null; resource_id: string | null; details: string | null }, [string]>(
-      "SELECT user_id, resource_id, details FROM audit_log WHERE action = ? ORDER BY id",
-    )
+    .query<
+      { user_id: number | null; resource_id: string | null; details: string | null },
+      [string]
+    >("SELECT user_id, resource_id, details FROM audit_log WHERE action = ? ORDER BY id")
     .all(action);
 }
 
@@ -289,9 +290,11 @@ describe("DELETE /admin/users/:username/keys/:id", () => {
 
   test("an admin (non-owner) gets 403", async () => {
     const targetId = seedTarget("svcrevoke3", { accountKind: "service" });
-    db.query(
-      "INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)",
-    ).run(targetId, "svcrevoke3-hash", "nm_c");
+    db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
+      targetId,
+      "svcrevoke3-hash",
+      "nm_c",
+    );
     const id = db
       .query<{ id: number }, [string]>("SELECT id FROM tokens WHERE api_key_hash = ?")
       .get("svcrevoke3-hash")?.id;
