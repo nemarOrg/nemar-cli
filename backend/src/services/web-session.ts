@@ -18,7 +18,7 @@
  * brute-forced offline.
  */
 
-import type { AccountStatus } from "../../../shared/contract/user.js";
+import type { AccountKind, AccountStatus } from "../../../shared/contract/user.js";
 import { flag } from "../db/flag";
 import { type Bindings, type UserRole, parseRole } from "../types/bindings";
 
@@ -198,6 +198,12 @@ export interface WebSessionUser {
    *  dashboard can render "granted"/"requested" as events rather than flags. */
   service_access_granted_at: string | null;
   upload_access_requested_at: string | null;
+  /** What this account IS (epic #1272 phase 4, #1284; ADR 0048). Read so
+   *  `publicUser` (routes/auth-web.ts) can compute `profile_gaps` for the
+   *  session row through the same `profileGapsForRow` every other reader
+   *  uses -- it is NOT itself put on the wire (webUserSchema carries no
+   *  such field; only `userSchema` and `adminUserListItemSchema` do). */
+  account_kind: AccountKind;
 }
 
 /** Look up an active session by cookie value, returning the joined
@@ -219,7 +225,7 @@ export async function findSessionByCookieId(
             u.given_name, u.family_name, u.orcid, u.orcid_verified,
             u.github_username, u.city, u.country, u.affiliation, u.service_access,
             u.username, u.username_auto_assigned,
-            u.service_access_granted_at, u.upload_access_requested_at
+            u.service_access_granted_at, u.upload_access_requested_at, u.account_kind
        FROM web_sessions ws
        JOIN users u ON u.id = ws.user_id
       WHERE ws.cookie_id_hash = ?
@@ -261,6 +267,9 @@ export async function findSessionByCookieId(
       // events rather than as flags (ADR 0042; nemarOrg/website#306).
       service_access_granted_at: string | null;
       upload_access_requested_at: string | null;
+      // Closed by migration 0082's CHECK constraint (epic #1272 phase 4,
+      // #1284; ADR 0048).
+      account_kind: AccountKind;
     }>();
   if (!row) return null;
 
@@ -299,6 +308,7 @@ export async function findSessionByCookieId(
       username_auto_assigned: flag(row.username_auto_assigned),
       service_access_granted_at: row.service_access_granted_at,
       upload_access_requested_at: row.upload_access_requested_at,
+      account_kind: row.account_kind,
     },
   };
 }

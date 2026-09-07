@@ -34,6 +34,24 @@ export const accountStatusSchema = z.enum(["pending", "verified", "approved", "r
 export type AccountStatus = z.infer<typeof accountStatusSchema>;
 
 /**
+ * What `users.account_kind` holds — what an account IS, not what it may do
+ * (epic #1272 phase 4, #1284; ADR 0048).
+ *
+ * `person` (the default) is a human's own account. `service` is operational
+ * automation with no human signing in to it directly (`nemarOwner`,
+ * `nemarAdmin`); its keys are minted only by an owner. `test` is a human's
+ * secondary persona (`cool-vibers`, the seeded `test-*` fixtures) — it signs
+ * in and uploads like a person, but on production may only own `xx` sandbox
+ * datasets (`realDatasetCreateGate`, backend/src/services/upload-gate.ts),
+ * so a real DOI never attaches to it.
+ *
+ * CLOSED by migration 0082's `CHECK (account_kind IN ('person', 'service',
+ * 'test'))`, the same pattern {@link accountStatusSchema} documents above.
+ */
+export const accountKindSchema = z.enum(["person", "service", "test"]);
+export type AccountKind = z.infer<typeof accountKindSchema>;
+
+/**
  * What `/auth/me` reports as `status`, which is NOT {@link accountStatusSchema}.
  *
  * `userStatusForDashboard` (backend routes/auth-web.ts) collapses `approved`
@@ -143,6 +161,14 @@ export const userSchema = z
      * what lets a surface offer "we picked this, change it if you like".
      */
     username_auto_assigned: z.boolean().optional(),
+    /**
+     * What this account IS (epic #1272 phase 4, #1284; ADR 0048). Optional
+     * for the same reason `service_access` is: a backend deployed before
+     * this phase sends no such key, and absence must render as "unknown",
+     * not as a confident "person". `nemar auth status` prints a `Kind:`
+     * line only when this is present and not `"person"`.
+     */
+    account_kind: accountKindSchema.optional(),
   })
   .passthrough();
 export type ContractUser = z.infer<typeof userSchema>;
@@ -205,6 +231,11 @@ export const adminUserListItemSchema = z
      * admin approves, the stamp stays as the record of when they asked.
      */
     upload_access_requested_at: z.string().nullable().optional(),
+    /** What this account IS (epic #1272 phase 4, #1284; ADR 0048). Optional
+     *  for the same reason as the other post-#1251 additions above: a
+     *  backend deployed before this phase omits the key. `nemar admin
+     *  users --kind` and the `Kind:` row line both read this. */
+    account_kind: accountKindSchema.optional(),
   })
   .passthrough();
 export type AdminUserListItem = z.infer<typeof adminUserListItemSchema>;

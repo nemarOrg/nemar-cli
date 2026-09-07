@@ -134,13 +134,13 @@ const DERIVABLE = TABLE_FIELDS.filter((f) => WEBSITE_TABLE[f].derivable) as GapF
  *  `false` and not `null`. */
 const FLAG_FIELDS = new Set(["email_verified", "orcid_verified"]);
 
-/** A complete account: nothing missing, nothing to report. A `member`, because
- *  that is the role the gap rules treat as ordinary — an `admin` would be
- *  exempt from a row and so could not prove it fires. */
+/** A complete account: nothing missing, nothing to report. A `person`, because
+ *  that is the kind the gap rules treat as ordinary — a `service`/`test`
+ *  account would be exempt from a row and so could not prove it fires. */
 function fullAccount(): Required<Omit<ProfileGapAccount, "status">> & { status: string } {
   return {
     status: "verified",
-    role: "member",
+    account_kind: "person",
     email_verified: true,
     username: "alovelace",
     given_name: "Ada",
@@ -251,27 +251,27 @@ describe("computeProfileGaps over every field combination", () => {
     ]);
   });
 
-  test("admin and owner are exempt from the ORCID row; nobody else is", () => {
-    // Interim, until the service-account kind of epic #1272: these accounts
-    // predate having a web-signup path of their own, and the alternative is
-    // locking an operator out of the queue they run. A role this build cannot
-    // read is NOT a licence to skip the check.
+  test("service and test kinds are exempt from the ORCID row; nobody else is", () => {
+    // Epic #1272 phase 4 (ADR 0048): a service account has no human signing
+    // in to it, and a test persona is a human's secondary account -- neither
+    // is the identity a DOI would need to cite. An unrecognised or absent
+    // kind is NOT a licence to skip the check (fails closed).
     const unverified = { ...fullAccount(), orcid_verified: false };
-    for (const role of ["admin", "owner"] as const) {
-      expect(profileGapFields({ ...unverified, role })).toEqual([]);
+    for (const account_kind of ["service", "test"] as const) {
+      expect(profileGapFields({ ...unverified, account_kind })).toEqual([]);
     }
-    for (const role of ["member", "user", null, undefined] as const) {
-      expect(profileGapFields({ ...unverified, role })).toEqual(["orcid_verified"]);
+    for (const account_kind of ["person", "member", null, undefined] as const) {
+      expect(profileGapFields({ ...unverified, account_kind })).toEqual(["orcid_verified"]);
     }
   });
 
   test("the exemption is that one row and nothing else", () => {
-    // An admin with a blank city is still missing a city: the role answers one
-    // question, and answering the others with it would hide real gaps from the
-    // people most likely to be asked about them.
+    // A service account with a blank city is still missing a city: the kind
+    // answers one question, and answering the others with it would hide
+    // real gaps from the people most likely to be asked about them.
     const gaps = profileGapFields({
       ...accountMissing(["orcid_verified", "city"]),
-      role: "admin",
+      account_kind: "service",
     });
     expect(gaps).toEqual(["city"]);
   });
