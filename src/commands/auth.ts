@@ -226,9 +226,11 @@ function applyServerUser(user: {
  * previous device login on this same machine when `key` is null.
  *
  * `oldKeyKnownDead` comes from the preflight probe this action already ran:
- * when it already confirmed the STORED key was dead, the best-effort revoke
- * below is skipped rather than spending a network call on a row the server
- * likely already treats as gone (decision 7).
+ * when it already confirmed the STORED key was dead, the revoke below is
+ * still attempted (best-effort; a repeat revoke of an already-gone row is
+ * harmless), but the "(replaced...)" confirmation line is skipped -- there
+ * is nothing meaningfully replaced about a key that was already dead
+ * (decision 7).
  */
 async function writeSignedInAccount(
   user: {
@@ -273,17 +275,23 @@ async function writeSignedInAccount(
   // never mints a row per invocation until the 25-key cap. Only when the
   // merge landed on an existing entry that already held a DIFFERENT
   // "device"-sourced key -- a pasted or password-era key belongs to more
-  // than this one machine by definition, and is never revoked here.
+  // than this one machine by definition, and is never revoked here. The
+  // revoke is attempted even when the preflight probe already found the
+  // stored key dead (a repeat revoke of an already-gone row is harmless,
+  // caught below like any other failure) -- what that foreknowledge skips
+  // is only the confirmation line, since there is nothing meaningfully
+  // "replaced" about a key that was already dead.
   if (
     key &&
-    !oldKeyKnownDead &&
     previous?.keySource === "device" &&
     previous.keyId !== undefined &&
     previous.keyId !== key.id
   ) {
     try {
       await revokeApiKey(previous.keyId);
-      console.log(chalk.dim("  (replaced this machine's previous key)"));
+      if (!oldKeyKnownDead) {
+        console.log(chalk.dim("  (replaced this machine's previous key)"));
+      }
     } catch {
       // Best-effort: the new key is already stored and works either way.
     }

@@ -32,14 +32,25 @@ import { openInBrowser } from "./browser.js";
  * over, so it falls back to {@link DEFAULT_MACHINE_NAME} like an empty or
  * all-control-character hostname does.
  */
+/**
+ * The cleanup rules on their own, pure and directly testable -- separated
+ * from `machineName()`'s `os.hostname()` call (which a unit test cannot
+ * hand an arbitrary value to) the same way the backend's own
+ * `normalizeMachineName` (services/device-auth.ts) is one function, not a
+ * method on a live hostname lookup.
+ */
+export function normalizeMachineNameInput(raw: string): string {
+  const cleaned = raw
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: deliberately stripping control bytes, matching backend/src/services/device-auth.ts's normalizeMachineName
+    .replace(/[\x00-\x1f\x7f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned ? cleaned.slice(0, MACHINE_NAME_MAX_CHARS) : DEFAULT_MACHINE_NAME;
+}
+
 export function machineName(): string {
   try {
-    const cleaned = hostname()
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: deliberately stripping control bytes, matching backend/src/services/device-auth.ts's normalizeMachineName
-      .replace(/[\x00-\x1f\x7f]/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
-    return cleaned ? cleaned.slice(0, MACHINE_NAME_MAX_CHARS) : DEFAULT_MACHINE_NAME;
+    return normalizeMachineNameInput(hostname());
   } catch {
     return DEFAULT_MACHINE_NAME;
   }
