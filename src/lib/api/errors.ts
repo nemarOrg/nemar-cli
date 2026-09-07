@@ -30,8 +30,22 @@ export function errorDetail(error: unknown): string {
  * filling in, and the CLI prints each one with where to fix it. Like `step`
  * and `blockReason` it is a TOP-LEVEL field of the error body, which is why it
  * cannot ride inside `details`.
+ *
+ * `code` and `reason` (epic #1272 phase 3; ADR 0047) are the raw `error` and
+ * `reason` fields of a JSON error body, when present and string-valued --
+ * assigned by `request()` AFTER construction rather than taken as
+ * constructor parameters, so the existing call sites that build an ApiError
+ * directly (tests, retry classifiers) are unaffected. `pollDeviceToken`
+ * (lib/api/auth.ts) switches on `code` to tell a device-flow "keep polling"
+ * answer (`authorization_pending`, `slow_down`) from a terminal one, and
+ * reads `reason` -- present only on a terminal answer -- for the more
+ * specific refusal code `message` was already built from (the two disagree
+ * on purpose, ADR 0047).
  */
 export class ApiError extends Error {
+  public code?: string;
+  public reason?: string;
+
   constructor(
     public statusCode: number,
     message: string,
