@@ -83,6 +83,24 @@ export async function hashIp(ip: string | null | undefined): Promise<string | nu
   return hashCookieId(ip);
 }
 
+/** Best-effort client IP off the request, preferring Cloudflare's
+ *  `CF-Connecting-IP` and falling back to the first `X-Forwarded-For` hop.
+ *  `null` when neither header is present (e.g. a local test request).
+ *
+ *  Hoisted here from routes/auth-orcid.ts (#1281, epic #1272 phase 1): the
+ *  device-authorization routes need the same lookup for `hashIp`-backed
+ *  audit details, and a helper earns a shared home once it has a second
+ *  real consumer rather than living duplicated in each caller. */
+export function clientIp(c: {
+  req: { header: (k: string) => string | undefined };
+}): string | null {
+  return (
+    c.req.header("CF-Connecting-IP") ||
+    c.req.header("X-Forwarded-For")?.split(",")[0]?.trim() ||
+    null
+  );
+}
+
 /** Parse a single named cookie out of a request's `Cookie` header.
  *  Returns null if the header is missing or doesn't contain the name.
  *  Matches the strict comma-and-semicolon syntax of RFC 6265 enough

@@ -15,6 +15,7 @@ export * from "./user.js";
 export * from "./dataset.js";
 export * from "./publication.js";
 export * from "./identity.js";
+export * from "./device-auth.js";
 // Zero-dep string tables, not zod shapes: the copy every surface prints for a
 // tier, an upload-access state or a missing profile field, and the matrix that
 // decides which fields are missing (#1268, ADR 0045).
