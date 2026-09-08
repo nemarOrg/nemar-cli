@@ -196,7 +196,7 @@ describe("POST /admin/users/:username/keys", () => {
     expect((await res.json()).error).toBe("identity_conflict");
   });
 
-  test("a target already at 25 live keys answers 409 too_many_keys", async () => {
+  test(`a target already at ${MAX_LIVE_API_KEYS} live keys answers 409 too_many_keys`, async () => {
     const targetId = seedTarget("svccap", { accountKind: "service" });
     for (let i = 0; i < MAX_LIVE_API_KEYS; i++) {
       db.query(
@@ -286,6 +286,31 @@ describe("DELETE /admin/users/:username/keys/:id", () => {
     const res = await revokeKey("svcrevoke2", 999999, OWNER_KEY);
     expect(res.status).toBe(404);
     expect((await res.json()).error).toBe("key_not_found");
+  });
+
+  test("revoking works for a person target too, mirroring GET's person case (#1284 review)", async () => {
+    // The docstring at the top of this file promises GET/DELETE work for any
+    // kind, but until this test only the GET describe block above actually
+    // exercised a person-kind target -- every DELETE case seeded 'service'.
+    const personId = seedTarget("personrevoke", { accountKind: "person" });
+    db.query(
+      "INSERT INTO tokens (user_id, api_key_hash, api_key_prefix, name) VALUES (?, ?, ?, ?)",
+    ).run(personId, "personrevoke-hash", "nm_person2", "persons-phone");
+    const id = db
+      .query<{ id: number }, [string]>("SELECT id FROM tokens WHERE api_key_hash = ?")
+      .get("personrevoke-hash")?.id;
+    if (!id) throw new Error("seed failed");
+
+    const res = await revokeKey("personrevoke", id, OWNER_KEY);
+    expect(res.status).toBe(200);
+    expect((await res.json()).ok).toBe(true);
+
+    const row = db
+      .query<{ revoked_at: string | null }, [string]>(
+        "SELECT revoked_at FROM tokens WHERE api_key_hash = ?",
+      )
+      .get("personrevoke-hash");
+    expect(row?.revoked_at).not.toBeNull();
   });
 
   test("an admin (non-owner) gets 403", async () => {
