@@ -1,24 +1,48 @@
 #!/usr/bin/env bash
 # MCP server smoke test under real workerd (epic #1065 phase 2, issue #1294),
 # derived from the phase 1 spike's smoke.sh (backend/spike/mcp-transport/,
-# deleted by this phase). Starts `wrangler dev -c wrangler-sccn.toml --env dev
-# --local` from backend/, waits for readiness, then exercises the MCP sub-app
-# through the api-host path mount (/mcp) -- the hostname fork (mcp.nemar.org)
-# cannot be exercised on loopback, since resolveHostRoute reads the hostname
-# from the request URL, and a bare 127.0.0.1 request never matches it.
+# deleted by this phase). Starts `wrangler dev --local` against
+# mcp-smoke-entry.ts / mcp-smoke.wrangler.toml -- a throwaway entry/config
+# pair, NOT backend/wrangler-sccn.toml -- because `wrangler dev --local`
+# cannot start the real backend/src/index.ts in this environment at all
+# (issue #1324: that entry module also exports two plain string constants
+# alongside the default handler, and this local workerd runtime rejects any
+# named export that isn't a function/ExportedHandler). The throwaway config
+# pins the SAME compatibility_date/compatibility_flags as wrangler-sccn.toml
+# (see that file's comment) so this run still proves the real config works.
 #
-# Local D1 (--local) may be empty; none of these checks need rows -- they
-# exercise the transport (both protocol eras), the tool registry, and input
-# validation, not catalog data.
+# Because the entry IS the mcp sub-app directly (no host fork in front of
+# it), every path this script drives -- including `/` -- reaches the real
+# mcp sub-app, unlike a prior version of this script that could only reach
+# the sub-app through the workers.dev-style `/mcp` path mount and had to
+# settle for asserting the (unrelated) API root descriptor at `/` instead.
+#
+# Local D1 DOES need the migrated schema for two of these checks
+# (describe_dataset/search_datasets query the `datasets`/`dataset_versions`
+# tables even for a row that doesn't exist -- an unmigrated D1 has no such
+# TABLE at all, which surfaces as a D1_ERROR wrapped in isError:true whose
+# text never mentions search_datasets, failing the check below for the
+# wrong reason). So this script applies every migration to the local D1
+# first, via `wrangler d1 execute --local --file`, one file at a time, with
+# full-line `--` comments stripped -- the same technique
+# scripts/d1-migration-check.ts already uses, and for the same reason:
+# `wrangler d1 migrations apply` scans the raw file text for the words
+# "BEGIN TRANSACTION"/"COMMIT" and refuses "a file containing several
+# transactions" even when those words appear only inside a comment (true
+# for migration 0021 and others). No row data is ever inserted -- every
+# check below still works against an empty, merely-migrated catalog.
 #
 # Prints PASS/FAIL per check and exits non-zero if any check fails.
 set -u
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")"
 
 PORT=8799
 BASE="http://127.0.0.1:${PORT}"
 LOG="$(mktemp -t mcp-smoke-wrangler-dev)"
+CONFIG="mcp-smoke.wrangler.toml"
+DB_NAME="nemar-mcp-smoke-db"
+MIGRATIONS_DIR="../src/db/migrations"
 FAILED=0
 
 pass() { echo "PASS: $1"; }
@@ -26,10 +50,35 @@ fail() {
   echo "FAIL: $1"
   FAILED=1
 }
-info() { echo "INFO: $1"; }
+
+echo "Wiping this script's local D1 state (fresh migrate every run, like scripts/d1-migration-check.ts)..."
+# `find -delete` rather than `rm -rf`: this directory is re-created empty by
+# wrangler on demand, so removing its CONTENTS is equivalent and sidesteps
+# environments that refuse a recursive directory delete outright.
+find .wrangler/state/v3/d1 -mindepth 1 -delete 2>/dev/null || true
+
+echo "Applying local D1 migrations to ${DB_NAME} (--local; never touches Cloudflare)..."
+MIG_TMP=$(mktemp -d)
+mig_count=0
+for f in $(ls "${MIGRATIONS_DIR}" | grep '\.sql$' | sort); do
+  # Drop whole-line `--` comments only; every statement stays byte-identical.
+  # See scripts/d1-migration-check.ts's stripFullLineComments for the same
+  # technique and its documented invariant (no migration may continue a
+  # multi-line string literal on a line starting with `--`).
+  sed -E '/^[[:space:]]*--/d' "${MIGRATIONS_DIR}/${f}" >"${MIG_TMP}/${f}"
+  if ! bunx wrangler d1 execute "${DB_NAME}" -c "${CONFIG}" --local --file "${MIG_TMP}/${f}" -y >"${MIG_TMP}/last.log" 2>&1; then
+    echo "FAIL: migration ${f} did not apply to the local smoke D1:"
+    cat "${MIG_TMP}/last.log"
+    rm -rf "${MIG_TMP}"
+    exit 1
+  fi
+  mig_count=$((mig_count + 1))
+done
+rm -rf "${MIG_TMP}"
+echo "Applied ${mig_count} migrations."
 
 echo "Starting wrangler dev on port ${PORT} (log: ${LOG})..."
-WRANGLER_CMD=(bunx wrangler dev -c wrangler-sccn.toml --env dev --local --port "${PORT}")
+WRANGLER_CMD=(bunx wrangler dev -c "${CONFIG}" --local --port "${PORT}")
 "${WRANGLER_CMD[@]}" >"${LOG}" 2>&1 &
 WRANGLER_PID=$!
 
@@ -40,7 +89,7 @@ if grep -qi "not logged in\|please log in\|authentication" "${LOG}" 2>/dev/null;
   echo "Plain wrangler asked for a login; retrying via cfman..."
   kill "${WRANGLER_PID}" >/dev/null 2>&1
   wait "${WRANGLER_PID}" 2>/dev/null
-  WRANGLER_CMD=(bunx cfman wrangler --account sccn dev -c wrangler-sccn.toml --env dev --local --port "${PORT}")
+  WRANGLER_CMD=(bunx cfman wrangler --account sccn dev -c "${CONFIG}" --local --port "${PORT}")
   "${WRANGLER_CMD[@]}" >"${LOG}" 2>&1 &
   WRANGLER_PID=$!
 fi
@@ -75,19 +124,32 @@ post_modern() {
 }
 
 echo "Waiting for readiness..."
+READY=0
 for _ in $(seq 1 30); do
   if curl -s -o /dev/null "${BASE}/mcp" -X OPTIONS; then
+    READY=1
     break
   fi
   sleep 1
 done
-if ! curl -s -o /dev/null "${BASE}/mcp" -X OPTIONS; then
-  echo "FAIL: wrangler dev never became ready; log:"
+if [ "${READY}" -ne 1 ]; then
+  echo "FAIL: wrangler dev never became ready under compatibility_date=2024-12-01; log:"
   cat "${LOG}"
+  echo "COMPATIBILITY DATE VERDICT: 2024-12-01 did NOT start the SDK -- see log above. Not bumped (per instruction); reporting only."
   exit 1
 fi
+echo "COMPATIBILITY DATE VERDICT: 2024-12-01 (unchanged from wrangler-sccn.toml) started the SDK cleanly under real workerd."
 
 MODERN_META='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}'
+
+# --- GET / : the real mcp descriptor (the entry IS the sub-app now) ---
+ROOT_STATUS=$(curl -s -o "${TMPD}/root.json" -w "%{http_code}" "${BASE}/")
+ROOT_RESP=$(cat "${TMPD}/root.json")
+if [ "${ROOT_STATUS}" = "200" ] && echo "${ROOT_RESP}" | grep -q '"service":"nemar-mcp"' && echo "${ROOT_RESP}" | grep -q "\"endpoint\":\"${BASE}/mcp\""; then
+  pass "GET / answers 200 with the real mcp descriptor, endpoint built from the request origin"
+else
+  fail "GET /: expected 200 + nemar-mcp descriptor with endpoint ${BASE}/mcp, got HTTP ${ROOT_STATUS}: ${ROOT_RESP}"
+fi
 
 # --- server/discover ---
 DISCOVER_STATUS=$(post_modern 1 "server/discover" "")
@@ -112,13 +174,22 @@ else
   fail "tools/list: expected ttlMs=86400000/cacheScope=public on the result: ${LIST_RESP}"
 fi
 
-# --- tools/call describe_dataset for an id absent from (possibly empty) local D1 ---
+# --- tools/call describe_dataset for an id absent from the migrated-but-empty local D1 ---
 DESCRIBE_STATUS=$(post_modern 3 "tools/call" '"name":"describe_dataset","arguments":{"dataset_id":"xx000000"},' -H "Mcp-Name: describe_dataset")
 DESCRIBE_RESP=$(cat "${TMPD}/3.json")
 if [ "${DESCRIBE_STATUS}" = "200" ] && echo "${DESCRIBE_RESP}" | grep -q '"isError":true' && echo "${DESCRIBE_RESP}" | grep -q 'search_datasets'; then
   pass "describe_dataset(xx000000): tool error naming search_datasets"
 else
   fail "describe_dataset(xx000000): expected isError naming search_datasets, got HTTP ${DESCRIBE_STATUS}: ${DESCRIBE_RESP}"
+fi
+
+# --- tools/call search_datasets, no arguments, over the migrated-but-empty catalog ---
+SEARCH_STATUS=$(post_modern 9 "tools/call" '"name":"search_datasets","arguments":{},' -H "Mcp-Name: search_datasets")
+SEARCH_RESP=$(cat "${TMPD}/9.json")
+if [ "${SEARCH_STATUS}" = "200" ] && echo "${SEARCH_RESP}" | grep -q '"count":0'; then
+  pass "search_datasets(): 200 with count 0 over the empty (migrated) catalog"
+else
+  fail "search_datasets(): expected 200 + count 0, got HTTP ${SEARCH_STATUS}: ${SEARCH_RESP}"
 fi
 
 # --- tools/call describe_dataset with a malformed dataset_id ---
@@ -201,22 +272,6 @@ if [ "${EVIL_STATUS}" = "403" ] && echo "${EVIL_RESP}" | grep -q '"code":-32000'
   pass "a disallowed Origin on POST /mcp is rejected 403 / -32000"
 else
   fail "disallowed Origin: expected 403/-32000, got HTTP ${EVIL_STATUS}: ${EVIL_RESP}"
-fi
-
-# --- GET / (bare root): the api-host path mount forwards ONLY the exact
-# `/mcp` path (decision 2's app.all("/mcp", ...), not a `.route()` sub-tree
-# mount), so the mcp sub-app's own descriptor at `/` is reachable ONLY via
-# the hostname fork (mcp.nemar.org / mcp-test.nemar.org), which cannot be
-# exercised on loopback (see this file's header comment). This check
-# therefore confirms the EXISTING api root descriptor still answers
-# unaffected by the /mcp mount -- not the MCP descriptor. See the PR body's
-# deviations section for the full derivation.
-ROOT_STATUS=$(curl -s -o "${TMPD}/root.json" -w "%{http_code}" "${BASE}/")
-ROOT_RESP=$(cat "${TMPD}/root.json")
-if [ "${ROOT_STATUS}" = "200" ] && echo "${ROOT_RESP}" | grep -q '"name":"NEMAR API"'; then
-  pass "GET / answers 200 with the (unaffected) NEMAR API descriptor -- see header comment on why this isn't the MCP descriptor on loopback"
-else
-  fail "GET /: expected 200 + NEMAR API descriptor, got HTTP ${ROOT_STATUS}: ${ROOT_RESP}"
 fi
 
 echo ""
