@@ -19,13 +19,14 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Hono } from "hono";
 import {
   composeCitation,
   describeDatasetOutputSchema,
   searchDatasetsOutputSchema,
 } from "../../shared/contract/mcp";
+import { __limits } from "../src/middleware/rateLimit";
 import { createMcpRoutes } from "../src/routes/mcp";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -245,8 +246,10 @@ describe("MCP sub-app: full protocol + tool surface (epic #1065 phase 2)", () =>
       const pending = results.find((r) => r.dataset_id === PENDING_ID);
       expect(converted?.has_zarr).toBe(true);
       expect(pending?.has_zarr).toBe(false);
-      expect(typeof converted?.has_hed).toBe("boolean");
-      expect(typeof pending?.has_hed).toBe("boolean");
+      // Explicit values, not just typeof -- CONVERTED_ID was inserted with
+      // has_hed: 1, PENDING_ID with has_hed: 0 (PR #1323 review item G.15).
+      expect(converted?.has_hed).toBe(true);
+      expect(pending?.has_hed).toBe(false);
     });
 
     test("has_zarr: true narrows to the one converted row", async () => {
@@ -285,18 +288,25 @@ describe("MCP sub-app: full protocol + tool surface (epic #1065 phase 2)", () =>
       expect(output.zarr_verify_status).toBe("verified");
       expect(output.zarr_source_commit).toBe(COMMIT);
       expect(output.zarr_store_count).toBe(3);
+      // A dataset_versions row exists for CONVERTED_ID ("1.2.0" ->
+      // canonicalized "v1.2.0"), so the citation carries a version segment
+      // (PR #1323 review item G.14).
+      expect(output.citation).toContain("(v1.2.0)");
       const costHint = output.cost_hint as { next_cheapest_tool: string; reason: string };
       expect(costHint.next_cheapest_tool).toBe("list_recordings");
       expect(costHint.reason).toContain("ready");
     });
 
-    test("the pending row: cost_hint states pending", async () => {
+    test("the pending row: cost_hint states pending, and the citation has no version segment", async () => {
       const { body } = await callTool(app, env(db), 7, "describe_dataset", {
         dataset_id: PENDING_ID,
       });
       const output = structuredContentOf(body);
       const costHint = output.cost_hint as { reason: string };
       expect(costHint.reason).toContain("pending");
+      // No dataset_versions row exists for PENDING_ID, so composeCitation's
+      // version segment is omitted entirely (PR #1323 review item G.14).
+      expect(output.citation).not.toContain("(v");
     });
 
     test.each([
@@ -456,5 +466,312 @@ describe("MCP sub-app: full protocol + tool surface (epic #1065 phase 2)", () =>
     expect(res.headers.get("access-control-allow-headers")).toBe(
       "Content-Type, Accept, Mcp-Method, Mcp-Name, MCP-Protocol-Version",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rate limiter 429 carries the MCP CORS headers (PR #1323 review item G.12).
+// The double-cast bridge in routes/mcp.ts hits rateLimiter's REAL,
+// non-"development" code path, which reads the real caches.default global --
+// absent under bun:test. This block installs a real in-memory CacheStorage
+// stand-in for its own duration only, EXACTLY the technique
+// zarr-data-cache.test.ts's "rate limiter exemption for redirect candidates"
+// block uses (see that file's RateLimitCache, lines ~1873-1962), restored in
+// afterAll so no other suite sharing this process (root `bun test` runs
+// test/ and backend/test/ together) sees a stray global.
+// ---------------------------------------------------------------------------
+
+function keyFor(request: RequestInfo | URL): string {
+  return request instanceof Request ? request.url : String(request);
+}
+
+class RateLimitCache implements Cache {
+  private store = new Map<string, { body: string; headers: Record<string, string> }>();
+
+  async match(req: RequestInfo | URL): Promise<Response | undefined> {
+    const entry = this.store.get(keyFor(req));
+    return entry ? new Response(entry.body, { headers: entry.headers }) : undefined;
+  }
+
+  async put(req: RequestInfo | URL, res: Response): Promise<void> {
+    const headers: Record<string, string> = {};
+    res.headers.forEach((v, k) => {
+      headers[k] = v;
+    });
+    this.store.set(keyFor(req), { body: await res.text(), headers });
+  }
+
+  async delete(): Promise<boolean> {
+    return false;
+  }
+  async add(): Promise<void> {
+    throw new Error("not implemented");
+  }
+  async addAll(): Promise<void> {
+    throw new Error("not implemented");
+  }
+  async keys(): Promise<readonly Request[]> {
+    return [];
+  }
+  async matchAll(): Promise<readonly Response[]> {
+    return [];
+  }
+
+  clear(): void {
+    this.store.clear();
+  }
+
+  /** Seed a bucket directly at the real cap boundary, in the exact shape
+   *  rateLimiter writes, mirroring zarr-data-cache.test.ts's identical
+   *  helper -- lets this test prove enforcement AT the real MAX_REQUESTS cap
+   *  without looping hundreds of real requests through the app. */
+  seedCount(url: string, count: number): void {
+    this.store.set(url, {
+      body: JSON.stringify({ count }),
+      headers: { "Cache-Control": `max-age=${__limits.WINDOW_SIZE}` },
+    });
+  }
+}
+
+describe("rate limiter 429 carries the MCP CORS headers (PR #1323 review item G.12)", () => {
+  const rlCache = new RateLimitCache();
+  // biome-ignore lint/suspicious/noExplicitAny: test-only runtime patch, mirrors zarr-data-cache.test.ts
+  let originalCaches: any;
+
+  beforeAll(() => {
+    // biome-ignore lint/suspicious/noExplicitAny: test-only runtime patch
+    originalCaches = (globalThis as any).caches;
+    // biome-ignore lint/suspicious/noExplicitAny: test-only runtime patch
+    (globalThis as any).caches = { default: rlCache } as unknown as CacheStorage;
+  });
+
+  afterAll(() => {
+    // biome-ignore lint/suspicious/noExplicitAny: test-only runtime restore
+    (globalThis as any).caches = originalCaches;
+  });
+
+  beforeEach(() => {
+    rlCache.clear();
+  });
+
+  test("a POST past the ip bucket cap is 429 with Access-Control-Allow-Origin and the MCP Allow-Methods", async () => {
+    const ip = "203.0.113.77";
+    // /mcp matches none of AUTH_PATHS/DATA_PATH_RE/ZARR_PATH_RE and carries
+    // no Authorization header, so it lands in the plain "ip" bucket
+    // (__selectBucket's fallthrough), capped at MAX_REQUESTS.
+    const key = `https://rate-limit.internal/rl:ip:${ip}`;
+    rlCache.seedCount(key, __limits.MAX_REQUESTS);
+
+    const db = freshDb();
+    const app = createMcpRoutes();
+    // ENVIRONMENT must NOT be "development" here -- that's rateLimiter's own
+    // bypass, and this test exists specifically to exercise the real,
+    // non-bypassed code path (mirrors zarr-data-cache.test.ts's rlEnv()).
+    const prodEnv = { DB: realD1(db), ENVIRONMENT: "production" } as unknown as Bindings;
+
+    const res = await app.request(
+      "/mcp",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Mcp-Method": "server/discover",
+          "CF-Connecting-IP": ip,
+          Origin: "https://nemar.org",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "server/discover",
+          params: { _meta: MODERN_META },
+        }),
+      },
+      prodEnv,
+      ctx,
+    );
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get("access-control-allow-origin")).toBe("https://nemar.org");
+    expect(res.headers.get("access-control-allow-methods")).toBe("POST, OPTIONS");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// search_datasets filter wiring on the no-query (catalog list) path (PR
+// #1323 review item G.16). A self-contained fixture pair, independent of the
+// shared outer describe block's fixtures, so each filter's narrowing is
+// proven against a row that actually HAS a different value (not just a row
+// with a NULL/unset column, which is a weaker proof of the filter working).
+// ---------------------------------------------------------------------------
+
+describe("search_datasets filter wiring on the no-query path (PR #1323 review item G.16)", () => {
+  let db: Database;
+  let app: App;
+  const EEG_ID = "nm500020";
+  const MEG_ID = "nm500021";
+
+  beforeEach(() => {
+    db = freshDb();
+    app = createMcpRoutes();
+    insertDataset(db, EEG_ID, {
+      name: "Filter Wiring EEG Fixture",
+      modalities: "eeg",
+      tasks: "rest",
+      has_hed: 1,
+    });
+    insertDataset(db, MEG_ID, {
+      name: "Filter Wiring MEG Fixture",
+      modalities: "meg",
+      tasks: "faces",
+      has_hed: 0,
+    });
+  });
+
+  test("modality narrows to the matching row", async () => {
+    const { body } = await callTool(app, env(db), 1, "search_datasets", { modality: "eeg" });
+    const output = structuredContentOf(body);
+    const results = output.results as Array<Record<string, unknown>>;
+    expect(results.map((r) => r.dataset_id)).toEqual([EEG_ID]);
+  });
+
+  test("task narrows to the matching row", async () => {
+    const { body } = await callTool(app, env(db), 2, "search_datasets", { task: "faces" });
+    const output = structuredContentOf(body);
+    const results = output.results as Array<Record<string, unknown>>;
+    expect(results.map((r) => r.dataset_id)).toEqual([MEG_ID]);
+  });
+
+  test("has_hed narrows to the matching row", async () => {
+    const { body } = await callTool(app, env(db), 3, "search_datasets", { has_hed: true });
+    const output = structuredContentOf(body);
+    const results = output.results as Array<Record<string, unknown>>;
+    expect(results.map((r) => r.dataset_id)).toEqual([EEG_ID]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// search_datasets limit wiring on both paths (PR #1323 review item G.17).
+// ---------------------------------------------------------------------------
+
+describe("search_datasets limit wiring on both paths (PR #1323 review item G.17)", () => {
+  let db: Database;
+  let app: App;
+  const ID_A = "nm500030";
+  const ID_B = "nm500031";
+
+  beforeEach(() => {
+    db = freshDb();
+    app = createMcpRoutes();
+    insertDataset(db, ID_A, { name: "Limit Wiring Fixture Alpha" });
+    insertDataset(db, ID_B, { name: "Limit Wiring Fixture Beta" });
+  });
+
+  test("no-query path: limit at the cap (100) echoes in output.limit and returns both rows", async () => {
+    const { body } = await callTool(app, env(db), 1, "search_datasets", { limit: 100 });
+    const output = structuredContentOf(body);
+    expect(output.limit).toBe(100);
+    expect((output.results as unknown[]).length).toBe(2);
+  });
+
+  test("no-query path: limit: 1 returns exactly one row, proving the LIMIT ? bind", async () => {
+    const { body } = await callTool(app, env(db), 2, "search_datasets", { limit: 1 });
+    const output = structuredContentOf(body);
+    expect(output.limit).toBe(1);
+    expect((output.results as unknown[]).length).toBe(1);
+    // count is the total over the predicate, independent of the page size.
+    expect(output.count).toBe(2);
+  });
+
+  test("query path: limit at the cap (100) echoes in output.limit", async () => {
+    const { body } = await callTool(app, env(db), 3, "search_datasets", {
+      query: "Limit Wiring Fixture",
+      limit: 100,
+    });
+    const output = structuredContentOf(body);
+    expect(output.limit).toBe(100);
+    expect((output.results as unknown[]).length).toBe(2);
+  });
+
+  test("query path: limit: 1 returns one row", async () => {
+    const { body } = await callTool(app, env(db), 4, "search_datasets", {
+      query: "Limit Wiring Fixture",
+      limit: 1,
+    });
+    const output = structuredContentOf(body);
+    expect(output.limit).toBe(1);
+    expect((output.results as unknown[]).length).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A count: 0 response is not an error (PR #1323 review item G.18).
+// ---------------------------------------------------------------------------
+
+describe("search_datasets: count 0 is not an error (PR #1323 review item G.18)", () => {
+  let db: Database;
+  let app: App;
+  const ID = "nm500040";
+
+  beforeEach(() => {
+    db = freshDb();
+    app = createMcpRoutes();
+    insertDataset(db, ID, { name: "Count Zero Fixture", zarr_status: "pending" });
+  });
+
+  test("a non-matching query returns count 0 with no isError", async () => {
+    const { res, body } = await callTool(app, env(db), 1, "search_datasets", {
+      query: "totally-unrelated-nonsense-xyz",
+    });
+    expect(res.status).toBe(200);
+    const result = body.result as { isError?: boolean };
+    expect(result.isError).not.toBe(true);
+    const output = structuredContentOf(body);
+    expect(output.count).toBe(0);
+    expect((output.results as unknown[]).length).toBe(0);
+  });
+
+  test("has_zarr: true with no converted fixture returns count 0 with no isError", async () => {
+    const { res, body } = await callTool(app, env(db), 2, "search_datasets", { has_zarr: true });
+    expect(res.status).toBe(200);
+    const result = body.result as { isError?: boolean };
+    expect(result.isError).not.toBe(true);
+    const output = structuredContentOf(body);
+    expect(output.count).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// zarr_status: "failed" on describe_dataset, and search_datasets' index-
+// unavailable degradation (PR #1323 review item G.19).
+// ---------------------------------------------------------------------------
+
+describe("describe_dataset zarr_status failed; search_datasets index-unavailable (PR #1323 review item G.19)", () => {
+  let db: Database;
+  let app: App;
+  const FAILED_ID = "nm500050";
+
+  beforeEach(() => {
+    db = freshDb();
+    app = createMcpRoutes();
+    insertDataset(db, FAILED_ID, { name: "Failed Conversion Fixture", zarr_status: "failed" });
+  });
+
+  test("describe_dataset reports zarr_status: failed, and the cost_hint reason names it", async () => {
+    const { body } = await callTool(app, env(db), 1, "describe_dataset", {
+      dataset_id: FAILED_ID,
+    });
+    const output = structuredContentOf(body);
+    expect(output.zarr_status).toBe("failed");
+    const costHint = output.cost_hint as { reason: string };
+    expect(costHint.reason).toContain("failed");
+  });
+
+  test("search_datasets(query) answers isError when the FTS index is unavailable (datasets_fts dropped)", async () => {
+    db.exec("DROP TABLE datasets_fts");
+    const { res, body } = await callTool(app, env(db), 2, "search_datasets", { query: "anything" });
+    expect(res.status).toBe(200);
+    const result = body.result as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text.toLowerCase()).toContain("search index");
   });
 });

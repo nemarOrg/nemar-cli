@@ -83,4 +83,72 @@ describe("decodeBloscZstdInt16", () => {
     view.setUint32(12, truncated.length, true); // cbytes = the truncated length
     expect(() => decodeBloscZstdInt16(truncated)).toThrow(/offset table does not fit/);
   });
+
+  // PR #1323 review item G.20: every remaining guard, triggered individually.
+  // Real header field values for this fixture (verified against the file):
+  // flags=0x91 (byte-shuffle set, memcpyed/bitshuffle clear), nbytes=126000,
+  // blocksize=126000, cbytes=119327=bytes.length, one block whose offset
+  // table entry (bytes [16,20)) is 20, whose 4-byte compressedLen field
+  // (bytes [20,24)) is 119303, with the payload running to exactly
+  // bytes.length (24 + 119303 === 119327).
+
+  test("throws when the memcpyed flag (0x2) is set", () => {
+    const mutated = chunkBytes.slice();
+    mutated[2] = chunkBytes[2] | 0x2; // flags byte: add the memcpyed bit
+    expect(() => decodeBloscZstdInt16(mutated)).toThrow(/memcpyed \(uncompressed\)/);
+  });
+
+  test("throws when the bit-shuffle flag (0x4) is set", () => {
+    const mutated = chunkBytes.slice();
+    mutated[2] = chunkBytes[2] | 0x4; // flags byte: add the bit-shuffle bit
+    expect(() => decodeBloscZstdInt16(mutated)).toThrow(/bit-shuffle is not implemented/);
+  });
+
+  test("throws when nbytes is mutated to 0 (distinct from the blocksize=0 case above)", () => {
+    const mutated = chunkBytes.slice();
+    const view = new DataView(mutated.buffer);
+    view.setUint32(4, 0, true); // nbytes field; blocksize stays real (126000 > 0)
+    expect(() => decodeBloscZstdInt16(mutated)).toThrow(/invalid blosc2 header \(nbytes 0/);
+  });
+
+  test("throws when nbytes is not a multiple of typesize", () => {
+    const mutated = chunkBytes.slice();
+    const view = new DataView(mutated.buffer);
+    view.setUint32(4, 126001, true); // nbytes: odd, not divisible by typesize 2
+    expect(() => decodeBloscZstdInt16(mutated)).toThrow(/nbytes 126001 is not a multiple/);
+  });
+
+  test("throws when a block's offset table entry points past the end of the chunk", () => {
+    const mutated = chunkBytes.slice();
+    const view = new DataView(mutated.buffer);
+    view.setUint32(16, 0xfffffffe, true); // the one offset-table entry, bytes [16, 20)
+    expect(() => decodeBloscZstdInt16(mutated)).toThrow(/offset 4294967294 is past the end/);
+  });
+
+  test("throws when a block's compressedLen field is 0", () => {
+    const mutated = chunkBytes.slice();
+    const view = new DataView(mutated.buffer);
+    view.setUint32(20, 0, true); // compressedLen field at the real block start (20)
+    expect(() => decodeBloscZstdInt16(mutated)).toThrow(/claims 0 compressed bytes/);
+  });
+
+  test("throws when a block's compressedLen field claims more bytes than the chunk has", () => {
+    const mutated = chunkBytes.slice();
+    const view = new DataView(mutated.buffer);
+    view.setUint32(20, 999_999, true); // compressedLen field, way past bytes.length
+    expect(() => decodeBloscZstdInt16(mutated)).toThrow(/claims 999999 compressed bytes/);
+  });
+
+  test("throws on a decompressed-length mismatch (declared nbytes/blocksize disagree with the real payload)", () => {
+    const mutated = chunkBytes.slice();
+    const view = new DataView(mutated.buffer);
+    // The real zstd payload is untouched -- it still decompresses to its
+    // real 126000 bytes -- but the header now declares a single 1000-byte
+    // block, so decodeBloscZstdInt16 expects 1000 and gets 126000.
+    view.setUint32(4, 1000, true); // nbytes
+    view.setUint32(8, 1000, true); // blocksize
+    expect(() => decodeBloscZstdInt16(mutated)).toThrow(
+      /block 0 decompressed to 126000 bytes, expected 1000/,
+    );
+  });
 });
