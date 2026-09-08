@@ -100,6 +100,12 @@ UPDATE users
 -- persona. test-web stays 'person' (the default): it is the shared web-QA
 -- account (#1008) that has to reach the ORCID authorize page and the
 -- Settings key form like a real person.
+--
+-- Marker comments below (#1284 review) let
+-- backend/test/seed-dev-db-account-kind.test.ts slice out exactly these two
+-- statements with readFileSync and run them for real, rather than
+-- retyping them (.rules/testing.md).
+-- ACCOUNT-KIND-SEED:BEGIN
 UPDATE users
    SET account_kind = 'service'
  WHERE username IN ('test-owner', 'test-admin') AND account_kind = 'person';
@@ -108,6 +114,7 @@ UPDATE users
    SET account_kind = 'test'
  WHERE username IN ('test-user', 'test-pending', 'test-verified', 'test-revoked')
    AND account_kind = 'person';
+-- ACCOUNT-KIND-SEED:END
 
 -- Verification: confirm seed data exists (check counts manually if unexpected)
 SELECT 'users' AS tbl, COUNT(*) AS n FROM users WHERE username LIKE 'test-%';
