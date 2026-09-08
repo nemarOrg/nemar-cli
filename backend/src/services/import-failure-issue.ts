@@ -28,12 +28,17 @@ import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { addIssueComment, createIssue, findOpenIssueByTitle } from "./github.js";
 import { classifyImportFailure } from "./import-failure-cause.js";
+import {
+  IMPORT_FAILURE_ISSUES_REPO,
+  IMPORT_FAILURE_ISSUE_LABEL,
+  importFailureIssueTitle,
+} from "./import-issue-identity.js";
 
-export const IMPORT_FAILURE_ISSUE_LABEL = "import-failure";
-/** Central repo the failure-tracking issue template + triage doc live on
- *  (nemarDatasets/.github#83) -- same repo the onboard workflow itself is
- *  deployed to (github/dispatch.ts CENTRAL_WORKFLOW_REPO). */
-export const IMPORT_FAILURE_ISSUES_REPO = "nemarDatasets/.github";
+// Identity lives in a leaf module so import-issue-accrual.ts can recognise an
+// issue without importing this one (which imports it back). Re-exported here so
+// existing import sites keep working and there is still one obvious place to
+// import them from.
+export { IMPORT_FAILURE_ISSUE_LABEL, IMPORT_FAILURE_ISSUES_REPO, importFailureIssueTitle };
 
 // ============================================================================
 // Pure decision + content functions -- no I/O, exhaustively unit-tested.
@@ -66,11 +71,6 @@ export function shouldFileImportFailureIssue(ctx: ImportFailureIssueContext): bo
   if (isSandboxDatasetId(ctx.datasetId)) return false;
   if (ctx.isSandbox || ctx.isExemplar) return false;
   return true;
-}
-
-/** Deterministic per-dataset issue title -- doubles as the dedup key. */
-export function importFailureIssueTitle(datasetId: string, sourceId: string): string {
-  return `Import failure: ${datasetId} (${sourceId})`;
 }
 
 export interface ImportFailureIssueDetails {
