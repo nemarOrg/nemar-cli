@@ -1,5 +1,5 @@
 /**
- * The one rule about `import_jobs.last_error` (epic #1306, ADR 0050).
+ * The one rule about `import_jobs.last_error` (epic #1306, ADR 0049).
  *
  *   A SPECIFIC error message must never be overwritten by a GENERIC one.
  *
@@ -70,8 +70,8 @@ export function isGenericImportError(message: string | null | undefined): boolea
 
 /**
  * Decide which of two messages `last_error` should end up holding. Pure, and the
- * reference implementation of the rule -- {@link lastErrorPreserveCase} is the same
- * decision expressed in SQL, and both are exercised by the same test table.
+ * reference implementation of the rule -- {@link lastErrorAssignmentSql} is the same
+ * decision expressed in SQL.
  *
  * A specific incoming message always wins (a later, better diagnosis should
  * replace an earlier one). A generic incoming message wins only when there is
