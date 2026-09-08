@@ -10,7 +10,8 @@
  * assertion, rather than re-deriving a route here -- `mcp-route.test.ts`
  * owns the full protocol/tool-surface coverage; this file only checks that
  * `withToolMetrics` (`src/mcp/server.ts`) actually wires `recordMcpToolCall`
- * into every tool call.
+ * into every tool call, on all three finishes (`"ok"` / `"tool_error"` /
+ * `"exception"`).
  */
 
 import type { Database } from "bun:sqlite";
@@ -25,17 +26,18 @@ import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
 describe("buildMcpDataPoint", () => {
-  test("shape: indexes/blobs/doubles in the documented order", () => {
+  test("shape: indexes/blobs/doubles in the documented order, including the outcome blob", () => {
     const event: McpToolCallEvent = {
       tool: "describe_dataset",
       datasetId: "nm000329",
       cacheStatus: "none",
       elapsedMs: 12.5,
       upstreamBytes: 0,
+      outcome: "ok",
     };
     expect(buildMcpDataPoint(event)).toEqual({
       indexes: ["describe_dataset"],
-      blobs: ["describe_dataset", "nm000329", "none"],
+      blobs: ["describe_dataset", "nm000329", "none", "ok"],
       doubles: [12.5, 0],
     });
   });
@@ -47,8 +49,9 @@ describe("buildMcpDataPoint", () => {
       cacheStatus: "none",
       elapsedMs: 3,
       upstreamBytes: 0,
+      outcome: "ok",
     };
-    expect(buildMcpDataPoint(event).blobs).toEqual(["search_datasets", "-", "none"]);
+    expect(buildMcpDataPoint(event).blobs).toEqual(["search_datasets", "-", "none", "ok"]);
   });
 
   test("a null dataset_id also reports blob2 as '-'", () => {
@@ -58,8 +61,30 @@ describe("buildMcpDataPoint", () => {
       cacheStatus: "none",
       elapsedMs: 3,
       upstreamBytes: 0,
+      outcome: "ok",
     };
-    expect(buildMcpDataPoint(event).blobs).toEqual(["search_datasets", "-", "none"]);
+    expect(buildMcpDataPoint(event).blobs).toEqual(["search_datasets", "-", "none", "ok"]);
+  });
+
+  test("outcome blob carries tool_error and exception verbatim", () => {
+    const toolError: McpToolCallEvent = {
+      tool: "describe_dataset",
+      datasetId: "nm599999",
+      cacheStatus: "none",
+      elapsedMs: 1,
+      upstreamBytes: 0,
+      outcome: "tool_error",
+    };
+    const exception: McpToolCallEvent = {
+      tool: "describe_dataset",
+      datasetId: "nm000001",
+      cacheStatus: "none",
+      elapsedMs: 1,
+      upstreamBytes: 0,
+      outcome: "exception",
+    };
+    expect(buildMcpDataPoint(toolError).blobs?.[3]).toBe("tool_error");
+    expect(buildMcpDataPoint(exception).blobs?.[3]).toBe("exception");
   });
 });
 
@@ -73,6 +98,7 @@ describe("recordMcpToolCall", () => {
         cacheStatus: "none",
         elapsedMs: 1,
         upstreamBytes: 0,
+        outcome: "ok",
       }),
     ).not.toThrow();
   });
@@ -93,11 +119,12 @@ describe("recordMcpToolCall", () => {
       cacheStatus: "none",
       elapsedMs: 7,
       upstreamBytes: 0,
+      outcome: "ok",
     });
 
     expect(points.length).toBe(1);
     expect(points[0].indexes).toEqual(["describe_dataset"]);
-    expect(points[0].blobs).toEqual(["describe_dataset", "nm000329", "none"]);
+    expect(points[0].blobs).toEqual(["describe_dataset", "nm000329", "none", "ok"]);
     expect(points[0].doubles).toEqual([7, 0]);
   });
 
@@ -121,6 +148,7 @@ describe("recordMcpToolCall", () => {
           cacheStatus: "none",
           elapsedMs: 1,
           upstreamBytes: 0,
+          outcome: "ok",
         }),
       ).not.toThrow();
       expect(calls.length).toBe(1);
@@ -166,7 +194,11 @@ describe("withToolMetrics wiring, driven through the real sub-app", () => {
     } as unknown as Bindings;
   }
 
-  async function callTool(name: string, args: Record<string, unknown>) {
+  async function callTool(
+    name: string,
+    args: Record<string, unknown>,
+    env: Bindings = envWithCollector(),
+  ) {
     const app = createMcpRoutes();
     return app.request(
       "/mcp",
@@ -184,36 +216,71 @@ describe("withToolMetrics wiring, driven through the real sub-app", () => {
           params: { name, arguments: args, _meta: MODERN_META },
         }),
       },
-      envWithCollector(),
+      env,
       ctx,
     );
   }
 
-  test("a successful search_datasets call records exactly one point", async () => {
+  test("a successful search_datasets call records exactly one point, outcome ok", async () => {
     const res = await callTool("search_datasets", {});
     expect(res.status).toBe(200);
     expect(points.length).toBe(1);
     expect(points[0].indexes).toEqual(["search_datasets"]);
     expect(points[0].blobs?.[1]).toBe("-"); // search_datasets names no dataset id
+    expect(points[0].blobs?.[3]).toBe("ok");
     expect(points[0].doubles?.[0]).toBeGreaterThanOrEqual(0);
   });
 
-  test("a describe_dataset call records the requested dataset_id", async () => {
+  test("a describe_dataset call records the requested dataset_id, outcome ok", async () => {
     const res = await callTool("describe_dataset", { dataset_id: "nm500010" });
     expect(res.status).toBe(200);
     expect(points.length).toBe(1);
     expect(points[0].blobs?.[0]).toBe("describe_dataset");
     expect(points[0].blobs?.[1]).toBe("nm500010");
+    expect(points[0].blobs?.[3]).toBe("ok");
     expect(points[0].doubles?.[0]).toBeGreaterThanOrEqual(0);
   });
 
-  test("an unknown-id describe_dataset call (isError: true) still records exactly one point, dataset_id included", async () => {
+  test("an unknown-id describe_dataset call (isError: true) still records exactly one point, outcome tool_error, dataset id included", async () => {
     const res = await callTool("describe_dataset", { dataset_id: "nm599999" });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { result: { isError?: boolean } };
     expect(body.result.isError).toBe(true);
     expect(points.length).toBe(1);
     expect(points[0].blobs?.[1]).toBe("nm599999");
+    expect(points[0].blobs?.[3]).toBe("tool_error");
+    expect(points[0].doubles?.[0]).toBeGreaterThanOrEqual(0);
+  });
+
+  test("a thrown D1 error (no migrated schema) still records exactly one point, outcome exception, the requested dataset id attributed", async () => {
+    // A completely unmigrated database -- freshDb() with no schema applied
+    // at all -- so the tool's own SELECT throws "no such table: datasets"
+    // before it can return anything. getDatasetId(args) in withToolMetrics
+    // reads args.dataset_id BEFORE the tool runs, so this id is still
+    // attributed even though the tool itself never got far enough to
+    // report one.
+    const { Database: BunDatabase } = await import("bun:sqlite");
+    const emptyDb = new BunDatabase(":memory:");
+    const env: Bindings = {
+      DB: realD1(emptyDb),
+      ENVIRONMENT: "development",
+      ANALYTICS_MCP: {
+        writeDataPoint: (p: AnalyticsEngineDataPoint) => {
+          points.push(p);
+        },
+      },
+    } as unknown as Bindings;
+
+    const res = await callTool("describe_dataset", { dataset_id: "nm500010" }, env);
+    // The transport answers an error (the SDK's own tool-execution catch
+    // surfaces a thrown error as a result, not a bare HTTP 500) -- what
+    // matters here is that exactly one metrics point was still written,
+    // with the right id and outcome, before/around that error surfacing.
+    expect(res.status).toBeGreaterThanOrEqual(200);
+    expect(points.length).toBe(1);
+    expect(points[0].blobs?.[0]).toBe("describe_dataset");
+    expect(points[0].blobs?.[1]).toBe("nm500010");
+    expect(points[0].blobs?.[3]).toBe("exception");
     expect(points[0].doubles?.[0]).toBeGreaterThanOrEqual(0);
   });
 });

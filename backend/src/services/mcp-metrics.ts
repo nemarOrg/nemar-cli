@@ -11,7 +11,17 @@
 // nemar_mcp_metrics dataset via the account-scoped Analytics Engine SQL API,
 // not a binding.
 
+import type { McpToolName } from "../../../shared/contract/mcp.js";
 import type { Bindings } from "../types/bindings";
+
+/** How the call actually finished: `"ok"` for a normal (non-error) result,
+ *  `"tool_error"` for a normal `CallToolResult` with `isError: true` (a
+ *  business-logic error the tool handled itself -- an unknown dataset id,
+ *  a malformed-but-schema-valid state), `"exception"` for a thrown error
+ *  `withToolMetrics`'s own try/catch caught (e.g. a D1 query failure) --
+ *  the metrics point is written for that case too, then the error is
+ *  rethrown unchanged. */
+export type McpToolOutcome = "ok" | "tool_error" | "exception";
 
 /** One `tools/call` measurement. `datasetId` is `undefined`/null for a tool
  *  (or a call) with no single dataset in scope -- `search_datasets` names no
@@ -21,11 +31,12 @@ import type { Bindings } from "../types/bindings";
  *  "none": neither touches the phase 3 `list_recordings`/`get_events`
  *  projection cache section 7 describes. */
 export interface McpToolCallEvent {
-  tool: string;
+  tool: McpToolName;
   datasetId?: string | null;
   cacheStatus: "hit" | "miss" | "none";
   elapsedMs: number;
   upstreamBytes: number;
+  outcome: McpToolOutcome;
 }
 
 /**
@@ -36,13 +47,14 @@ export interface McpToolCallEvent {
  *   blob1      = tool
  *   blob2      = dataset_id (or "-" when the call named none)
  *   blob3      = cache_status
+ *   blob4      = outcome ("ok" | "tool_error" | "exception")
  *   double1    = elapsed_ms
  *   double2    = upstream_bytes
  */
 export function buildMcpDataPoint(event: McpToolCallEvent): AnalyticsEngineDataPoint {
   return {
     indexes: [event.tool],
-    blobs: [event.tool, event.datasetId ?? "-", event.cacheStatus],
+    blobs: [event.tool, event.datasetId ?? "-", event.cacheStatus, event.outcome],
     doubles: [event.elapsedMs, event.upstreamBytes],
   };
 }

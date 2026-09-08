@@ -17,6 +17,7 @@
 
 import { type CallToolResult, McpServer } from "@modelcontextprotocol/server";
 import pkg from "../../../package.json" with { type: "json" };
+import type { McpToolName } from "../../../shared/contract/mcp.js";
 import { recordMcpToolCall } from "../services/mcp-metrics.js";
 import type { Bindings } from "../types/bindings.js";
 import {
@@ -25,6 +26,7 @@ import {
   searchDatasetsInputSchema4,
   searchDatasetsOutputSchema4,
 } from "./schemas.js";
+import type { ToolOutcome } from "./tool-types.js";
 import { describeDatasetTool } from "./tools/describe-dataset.js";
 import { searchDatasetsTool } from "./tools/search-datasets.js";
 
@@ -48,36 +50,55 @@ const INSTRUCTIONS = [
   "later phases of this server.",
 ].join(" ");
 
-/** Times `fn`, writes one metrics point per call (success or error -- a
- *  thrown exception re-throws AFTER the point is written; a returned
- *  `isError: true` result records normally, since it is a successful
- *  RETURN as far as this wrapper is concerned), and unwraps `fn`'s
- *  `{ result, datasetId }` outcome to the bare `CallToolResult`
- *  `registerTool` expects. `cache_status` is "none" for every phase 2
- *  tool: neither `search_datasets` nor `describe_dataset` touches the
- *  phase 3 `list_recordings`/`get_events` projection cache (design doc
- *  section 7); `upstream_bytes` is 0 for the same reason -- both tools
- *  read D1 only, never a store byte. */
+/**
+ * Times `fn`, writes exactly one metrics point per call, and unwraps `fn`'s
+ * {@link ToolOutcome} to the bare `CallToolResult` `registerTool` expects.
+ *
+ * `getDatasetId(args)` is called BEFORE `fn`, not derived from `fn`'s
+ * return -- so a thrown error (a D1 query failure, say) still attributes
+ * the metrics point to the right dataset instead of recording `"-"`
+ * because the tool never got far enough to report one itself.
+ *
+ * `outcome` distinguishes three finishes: `"ok"` (a normal result),
+ * `"tool_error"` (`result.isError: true` -- a business-logic error the
+ * tool handled, e.g. an unknown dataset id), and `"exception"` (`fn`
+ * threw; the point is written and then the error is RETHROWN unchanged,
+ * so the transport's own error handling is unaffected by this wrapper).
+ * `cache_status`/`upstream_bytes` come from `fn`'s optional
+ * `outcome.metrics`, defaulting to `"none"`/`0` when absent -- true of
+ * both phase 2 tools, which read D1 only and never touch the phase 3
+ * projection cache or a store byte.
+ */
 function withToolMetrics<Args>(
   env: Bindings,
-  toolName: string,
-  fn: (args: Args) => Promise<{ result: CallToolResult; datasetId?: string | null }>,
+  toolName: McpToolName,
+  getDatasetId: (args: Args) => string | null | undefined,
+  fn: (args: Args) => Promise<ToolOutcome>,
 ): (args: Args) => Promise<CallToolResult> {
   return async (args: Args): Promise<CallToolResult> => {
+    const datasetId = getDatasetId(args) ?? null;
     const start = performance.now();
-    let datasetId: string | null | undefined;
     try {
       const outcome = await fn(args);
-      datasetId = outcome.datasetId;
-      return outcome.result;
-    } finally {
       recordMcpToolCall(env, {
         tool: toolName,
-        datasetId: datasetId ?? null,
+        datasetId,
+        cacheStatus: outcome.metrics?.cacheStatus ?? "none",
+        elapsedMs: performance.now() - start,
+        upstreamBytes: outcome.metrics?.upstreamBytes ?? 0,
+        outcome: outcome.result.isError ? "tool_error" : "ok",
+      });
+      return outcome.result;
+    } catch (err) {
+      recordMcpToolCall(env, {
+        tool: toolName,
+        datasetId,
         cacheStatus: "none",
         elapsedMs: performance.now() - start,
         upstreamBytes: 0,
+        outcome: "exception",
       });
+      throw err;
     }
   };
 }
@@ -110,7 +131,13 @@ export function buildMcpServer(deps: BuildMcpServerDeps): McpServer {
       inputSchema: searchDatasetsInputSchema4,
       outputSchema: searchDatasetsOutputSchema4,
     },
-    withToolMetrics(deps.env, "search_datasets", (args) => searchDatasetsTool(deps.env, args)),
+    withToolMetrics(
+      deps.env,
+      "search_datasets",
+      // search_datasets names no single dataset id.
+      () => undefined,
+      (args) => searchDatasetsTool(deps.env, args),
+    ),
   );
 
   server.registerTool(
@@ -124,7 +151,12 @@ export function buildMcpServer(deps: BuildMcpServerDeps): McpServer {
       inputSchema: describeDatasetInputSchema4,
       outputSchema: describeDatasetOutputSchema4,
     },
-    withToolMetrics(deps.env, "describe_dataset", (args) => describeDatasetTool(deps.env, args)),
+    withToolMetrics(
+      deps.env,
+      "describe_dataset",
+      (args) => args.dataset_id,
+      (args) => describeDatasetTool(deps.env, args),
+    ),
   );
 
   return server;
