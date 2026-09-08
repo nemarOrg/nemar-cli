@@ -1,7 +1,7 @@
 /**
- * Pure helpers for `render_overview` (epic #1065 phase 3, issue #1295; plan
- * decision 8): view-level selection, chunk planning, chunk reassembly, and
- * PNG rendering. No I/O here at all -- `backend/src/mcp/tools/render-overview.ts`
+ * Pure helpers for `render_overview` (epic #1065 phase 3, issue #1295):
+ * view-level selection, chunk planning, chunk reassembly, and PNG
+ * rendering. No I/O here at all -- `backend/src/mcp/tools/render-overview.ts`
  * does the fetching (straight from `data_base`, never `zarr.json`: the
  * geometry is entirely known from `index.json`) and calls into this file for
  * every computation, so the computation itself is unit-testable without a
@@ -16,10 +16,12 @@ import { encode } from "fast-png";
 
 /** Column count at each pyramid level 1..nViewLevels, via the biosigio rule
  *  (`_pyramid_level_lengths`): each level is `Math.floor(n / 4)` of the
- *  previous, applied iteratively (never `Math.floor(n0 / 4 ** L)` in one
- *  step -- the two can disagree by a sample near a level boundary because
- *  flooring does not commute with repeated division). Returns an array
- *  indexed `[level - 1]`. */
+ *  previous, applied ITERATIVELY -- mirroring biosigio's own
+ *  implementation line for line, rather than computing
+ *  `Math.floor(n0 / 4 ** L)` in one step, which happens to be numerically
+ *  identical for these non-negative integer inputs but reads as a
+ *  derivation from the source rule rather than a restatement of it.
+ *  Returns an array indexed `[level - 1]`. */
 export function computeViewLevelColumns(nSamples: number, nViewLevels: number): number[] {
   const columns: number[] = [];
   let n = nSamples;

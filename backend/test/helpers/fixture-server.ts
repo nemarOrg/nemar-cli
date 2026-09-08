@@ -1,6 +1,6 @@
 /**
  * A real local HTTP upstream for the MCP recording-tools tests (epic #1065
- * phase 3, issue #1295; plan decision 9) -- the `Bun.serve()` precedent
+ * phase 3, issue #1295) -- the `Bun.serve()` precedent
  * `zarr-data-cache.test.ts` documents (its own module doc, "Real engines
  * throughout, no mocks"): a real server on an ephemeral port, standing in
  * for both S3 (`zarr-data.ts`'s `deps.s3Base`) and
@@ -25,8 +25,10 @@
 
 export interface FixtureRequestLogEntry {
   method: string;
-  /** The decoded request path, without the leading `/` -- the same "S3
-   *  key" shape `zarr-data-cache.test.ts`'s fake upstream logs. */
+  /** The decoded request path, without the leading `/` -- the same "S3 key"
+   *  VALUE SHAPE `zarr-data-cache.test.ts`'s fake upstream logs, but under
+   *  this field's own name, `url` -- that file's `LoggedRequest` calls the
+   *  identical value `path` instead; the two are not the same interface. */
   url: string;
   range: string;
 }

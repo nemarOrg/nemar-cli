@@ -32,9 +32,9 @@ export interface ToolOutcome {
 
 /**
  * Shared dependency bundle for the three recording-level tools (epic #1065
- * phase 3, issue #1295; plan decision 9). One shape so `server.ts` builds it
- * once per request and every tool reads the same fields the same way,
- * rather than each tool inventing its own subset.
+ * phase 3, issue #1295). One shape so `server.ts` builds it once per
+ * request and every tool reads the same fields the same way, rather than
+ * each tool inventing its own subset.
  *
  *  - `env`/`executionCtx`: the same per-request values `BuildMcpServerDeps`
  *    already carries (`server.ts`).

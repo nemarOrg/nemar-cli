@@ -74,7 +74,7 @@ function mcpCorsHeaders(origin: string | null): Record<string, string> {
  *  response -- the SDK reports these for observability only).
  *
  *  `cache`/`fetch`/`zarrRoutes`/`rawGithubBase` (epic #1065 phase 3, issue
- *  #1295; plan decision 9) are the recording-level tools' seam, threaded
+ *  #1295) are the recording-level tools' seam, threaded
  *  straight through to `buildMcpServer` (`mcp/server.ts`)'s
  *  `BuildMcpServerDeps` of the same shape. `cache` is a thunk so
  *  `caches.default` is read lazily per request rather than at module load

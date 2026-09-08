@@ -5,9 +5,9 @@ Scope: design and contracts only.
 No route exists yet; phases 2 to 4 (#1294 to #1296) build the host fork, the
 discovery tools, the recording tools, and `read_window`.
 Phase 5 (#1297) is docs, OSA wiring, and release.
-(Phase 3, #1295, decision 1 moved `render_overview` here from phase 4 --
-this section's original phase-4 placement was corrected to match the
-issues; `read_window` alone remains phase 4's scope.)
+(Phase 3, #1295, moved `render_overview` here from phase 4 -- this
+section's original phase-4 placement was corrected to match the issues;
+`read_window` alone remains phase 4's scope.)
 
 ## 1. Purpose and constraints
 
@@ -173,9 +173,9 @@ Confirmed against `@modelcontextprotocol/server@2.0.0`'s own classifier
 `ServerOptions.cacheHints` sets per-operation defaults; a handler or a
 per-registration `cacheHint` can override them.
 This phase sets `tools/list` and `server/discover` to
-`{ ttlMs: 86_400_000, cacheScope: 'public' }` (24 hours, per decision 5):
-the tool registry is fixed at deploy time, so there is no reason for a
-client to re-fetch it inside a day.
+`{ ttlMs: 86_400_000, cacheScope: 'public' }` (24 hours): the tool
+registry is fixed at deploy time, so there is no reason for a client to
+re-fetch it inside a day.
 Resolution order, most-specific first: the handler's own result, a
 per-registration `cacheHint`, the server-level `cacheHints`, then the
 conservative default (`ttlMs: 0`, `cacheScope: 'private'`).
@@ -426,8 +426,8 @@ listing up to 20 of the dataset's actual `zarr` identifiers, not a bare
 
 ### 5.5 `render_overview`
 
-(Landed in phase 3, #1295 -- decision 1 moved it here from phase 4 to match
-the issues; this section's content is otherwise unchanged in intent.)
+(Landed in phase 3, #1295 -- moved here from phase 4 to match the issues;
+this section's content is otherwise unchanged in intent.)
 
 **Inputs:** `dataset_id`, `recording`, `group?`, `width_px`
 (default 800, capped at 4000).
@@ -464,8 +464,8 @@ dark on a light background per `width_px` column bucket. `fast-png`'s
 **Cache behavior:** the rendered PNG itself is what gets cached, per
 `(dataset_id, source_commit, recording, group, width_px)`, so a repeat call
 at the same width is a cache match with zero decode and zero encode work
-(decision 4 of the phase 1 plan) -- `level`/`width_px`/`height_px` are
-still recomputed on a hit (cheap, no I/O) so the metadata is always
+(section 7's compute-minimization rule) -- `level`/`width_px`/`height_px`
+are still recomputed on a hit (cheap, no I/O) so the metadata is always
 present.
 `width_px` defaults to 800 and is capped at 4000, so in practice one or two
 widths per recording ever exist; a miss at an unusual width costs one fresh
@@ -493,7 +493,7 @@ physical units.
 reads; the Worker never touches a signal byte.
 **Cost class (taste):** decodes exactly the inner chunks the requested
 window spans, capped at `duration_s x channels.length <= 3840` (60 s x 64
-channels; see decision 7 and the spike's decode-path verdict below).
+channels; see the spike's decode-path verdict in section 10 below).
 A taste requires `channels`: the schema cannot know a recording's channel
 count, and a MEG store already in the live catalog (on003392) has 320, so
 treating an omitted list as "all channels" would pass a request five times
@@ -569,7 +569,8 @@ and for view level 1 to the matching `.../eeg_250hz/view/1`.
 
 ## 7. Compute-minimization rules and cache key scheme
 
-Restating decision 4 of the phase 1 plan, made concrete:
+The rule of never re-doing work an existing cache already paid for, made
+concrete:
 
 - **`index.json` is fetched through the existing zarr sub-app**
   (`createZarrDataRoutes(...).fetch(new Request(...))`), so the D1 public
@@ -689,14 +690,14 @@ not the budget itself.
 |---|---|---|---|
 | `@modelcontextprotocol/server` | `2.0.0` (exact) | MCP server SDK, `createMcpHandler`, `McpServer` | **Works under workerd.** Both protocol eras served correctly; see section 10. |
 | `@modelcontextprotocol/hono` | `2.0.0` (exact) | Hono adapter, `createMcpHonoApp` | **Works.** Peers `hono ^4.11.4`, `@modelcontextprotocol/server ^2.0.0`. |
-| `zod` | `^3.23.x` (repo bump reverted, see section 10.1) | SDK peer dependency; also this phase's own contract schemas | **Repo bump reverted.** `bun run typecheck` went green after two mechanical fixes (`z.record(valueSchema)` &rarr; `z.record(z.string(), valueSchema)` in three call sites), but `bun test` surfaced a real zod-4/`@asteasolutions/zod-to-openapi` incompatibility that a mechanical fix cannot close without adding new test-preload infrastructure the repo does not have today. Reverted per decision 10's fallback; see section 10.1. This phase's own contract files (`shared/contract/zarr-index.ts`, `shared/contract/mcp.ts`) use only zod APIs unchanged between 3 and 4, so the revert cost them one type-name edit (`z.SafeParseReturnType` instead of zod 4's `z.ZodSafeParseResult`). |
-| `hono` | `^4.11.4` | Hono itself; backend previously pinned `^4.6.0` | **Bumped and kept**, per decision 10's unconditional instruction. `bun run typecheck` and the backend suite are green at this version regardless of the zod outcome. |
+| `zod` | `^3.23.x` (repo bump reverted, see section 10.1) | SDK peer dependency; also this phase's own contract schemas | **Repo bump reverted.** `bun run typecheck` went green after two mechanical fixes (`z.record(valueSchema)` &rarr; `z.record(z.string(), valueSchema)` in three call sites), but `bun test` surfaced a real zod-4/`@asteasolutions/zod-to-openapi` incompatibility that a mechanical fix cannot close without adding new test-preload infrastructure the repo does not have today. Reverted to the pre-bump pin per section 10.1's fallback path. This phase's own contract files (`shared/contract/zarr-index.ts`, `shared/contract/mcp.ts`) use only zod APIs unchanged between 3 and 4, so the revert cost them one type-name edit (`z.SafeParseReturnType` instead of zod 4's `z.ZodSafeParseResult`). |
+| `hono` | `^4.11.4` | Hono itself; backend previously pinned `^4.6.0` | **Bumped and kept**: unlike the `zod` bump, this half of the upgrade has no test-harness conflict, so it stands unconditionally. `bun run typecheck` and the backend suite are green at this version regardless of the zod outcome. |
 | `numcodecs` | `0.3.2` | JS Blosc/Zstd/GZip/LZ4/Zlib codecs, WASM-backed | **Does not run under workerd.** `numcodecs/blosc` loads its WASM module via a runtime `fetch()` + `WebAssembly.instantiate()` on the fetched bytes -- dynamic code generation, which workerd's embedder disallows by default. The npm package ships no `.wasm` file to statically import as a workaround either. Not a dependency of the real server; kept only as the spike's path (a) for the record. |
-| `fzstd` | `0.1.1` | Pure-JS zstd decompressor, no WASM | **Works under workerd**, and is the chosen decode primitive (decision 7). **Phase 3: also the codec `get_events` uses directly for `events.parquet`** (see the `hyparquet-compressors` row below) -- one decoder serves `render_overview`'s pyramid chunks AND `get_events`'s parquet rows. |
+| `fzstd` | `0.1.1` | Pure-JS zstd decompressor, no WASM | **Works under workerd**, and is the chosen decode primitive (section 10's spike verdict). **Phase 3: also the codec `get_events` uses directly for `events.parquet`** (see the `hyparquet-compressors` row below) -- one decoder serves `render_overview`'s pyramid chunks AND `get_events`'s parquet rows. |
 | `hyparquet` | `1.30.0` | Parquet reader (`asyncBufferFromUrl`, `parquetReadObjects`) | **Phase 3: works under workerd on its own.** Confirmed via `bunx wrangler dev --local` against the throwaway smoke entry (bundled and started cleanly with `hyparquet` in the graph). `hyparquet`'s own built-in SNAPPY path (`src/snappy.js`) is a pure-JS port (`snappyjs`), not WASM -- the incompatibility is entirely in the `hyparquet-compressors` package, next row. |
 | `hyparquet-compressors` | matching `hyparquet` | zstd codec for `hyparquet` | **REMOVED from `package.json` (phase 3). Does not run under workerd.** Its `compressors` export EAGERLY constructs `SNAPPY: snappyUncompressor()` (the `hysnappy` dependency) at MODULE LOAD, which synchronously compiles a WASM module -- `WebAssembly.Module(): Wasm code generation disallowed by embedder`, reproduced under real workerd (`bunx wrangler dev --local` against `mcp-smoke-entry.ts`; the exact failure class this table's `numcodecs` row already documents for `blosc-decode.ts`). This crashes isolate startup for EVERY request, not only a `get_events` call, regardless of whether any dataset's parquet actually uses SNAPPY (none in the live catalog does -- every column sampled, nm000329 included, is ZSTD). The package's own `ZSTD` entry was exactly `fzstd`'s `decompress`, already a pinned dependency, so `backend/src/mcp/tools/get-events.ts` now builds a one-entry `{ ZSTD: (input) => decompress(input) }` compressors map itself instead of importing the package -- functionally identical for every dataset that exists, none of `hysnappy`'s baggage. A dataset whose parquet ever used a non-ZSTD codec would throw here (hyparquet's own missing-compressor error) rather than silently mis-decode. |
 | `fast-png` | `8.0.0` | PNG encoding for `render_overview`, pure JS via `fflate` | **Phase 3: works under workerd**, confirmed by the smoke script's `tools/list` registering `render_overview` and by `mcp-overview.test.ts`'s route-level PNG round-trip (encode here, decode back with the same package in the test). No WASM dependency, consistent with the decode-path finding. |
-| `zarrita` | `0.7.5` | Zarr store/array abstraction, FetchStore, sharding | **Not directly exercised by this spike.** The spike tested the codec layer (blosc/zstd decode) in isolation, which is the part decision 7 needed evidence on; zarrita's own store/array logic has no WASM dependency of its own (only the codec it would otherwise delegate to, which this phase replaces with the pure-JS path). Whether to use zarrita for chunk-key/shard-index bookkeeping or hand-roll it (as the spike does, see `README.md`'s shard-index derivation) is a phase 2 decision. |
+| `zarrita` | `0.7.5` | Zarr store/array abstraction, FetchStore, sharding | **Not directly exercised by this spike.** The spike tested the codec layer (blosc/zstd decode) in isolation, which is the part the spike needed evidence on (section 10); zarrita's own store/array logic has no WASM dependency of its own (only the codec it would otherwise delegate to, which this phase replaces with the pure-JS path). Whether to use zarrita for chunk-key/shard-index bookkeeping or hand-roll it (as the spike does, see `README.md`'s shard-index derivation) is a phase 2 decision. |
 
 ## 10. Spike results (phase 1) and the real bundle delta (phase 2)
 
@@ -720,7 +721,7 @@ Summary of the phase 1 findings:
 | `tools/call decode_chunk` wall time (local `wrangler dev`, 5 calls) | 4.5-5.7 ms |
 | Decode path (a): `numcodecs` WASM Blosc | **Fails.** `RuntimeError: Aborted(CompileError: WebAssembly.instantiate(): Wasm code generation disallowed by embedder)`. Dynamic WASM compilation from a runtime-fetched byte buffer is exactly what workerd blocks by default; the package also ships no `.wasm` file to statically import instead. |
 | Decode path (b): pure JS (blosc2 header parse + `fzstd` + unshuffle) | **Works, and matches the Python-derived ground truth exactly**: first/last 16 values, full-array sum, and an order-sensitive weighted checksum all agree with `fixtures/chunk.expected.json`. |
-| **Chosen decode path** | **(b), pure JS.** Decision 7's stated preference (`fzstd` also serves `events.parquet`) is confirmed, and path (a) is now disqualified on evidence, not preference: it does not run on the target platform at all. |
+| **Chosen decode path** | **(b), pure JS.** The stated preference for a pure-JS codec (section 9's `fzstd` row; `fzstd` also serves `events.parquet` in phase 3) is confirmed, and path (a) is now disqualified on evidence, not preference: it does not run on the target platform at all. |
 
 ### 10.1 The zod / hono repo-wide bump
 
@@ -781,14 +782,14 @@ code in the whole suite -- new test infrastructure the repo does not have
 today, which is a redesign of the test harness's module-loading order, not
 a mechanical gate-passing fix.
 That is outside this implementer's mandate (the plan explicitly says do not
-redesign around a plan conflict), so the bump was reverted per decision 10's
-own fallback: **the repo's `zod` pin stays `^3.23.x`; this phase's contracts
-stay on zod 3; the MCP SDK's own nested zod 4 copy (inside
+redesign around a plan conflict), so the bump was reverted to its own
+documented fallback: **the repo's `zod` pin stays `^3.23.x`; this phase's
+contracts stay on zod 3; the MCP SDK's own nested zod 4 copy (inside
 `node_modules/@modelcontextprotocol/*`) is what the SDK itself uses, and the
 spike's isolated `package.json` is what proves the SDK's tool-registration
-API against that copy** -- the "two-copy risk" decision 10 named. `hono` stays
-bumped to `^4.11.4` per decision 10's unconditional instruction; that half
-of the bump has no such conflict and both `bun test` and `bun run typecheck`
+API against that copy** -- the two-copy arrangement this section documents.
+`hono` stays bumped to `^4.11.4`, unconditionally, since that half of the
+bump has no such conflict and both `bun test` and `bun run typecheck`
 are green with it.
 
 A real fix for the underlying `zod-to-openapi`/zod-4 order dependency is a
@@ -957,14 +958,16 @@ the fix.
   module warm-up) is not meaningfully slower than the rest here, unlike
   the phase 1 spike's cold-start note.
 - **Phase 3 (#1295): DONE.** `list_recordings`, `get_events`, and
-  `render_overview` (moved here from phase 4, decision 1) all landed, each
+  `render_overview` (moved here from phase 4, section 5.5) all landed, each
   with real-route tests (real D1, a real `Bun.serve()` fixture upstream, a
   real in-memory projection cache -- `backend/test/mcp-recording-tools.test.ts`,
   `backend/test/mcp-overview.test.ts`, `backend/test/mcp-index-reader.test.ts`,
   `backend/test/mcp-projection-cache.test.ts`). `list_recordings`/`get_events`
   serve a legacy (v1/v2) index honestly -- an inferred `source_tree`/
   `derived`, a `note`, `excluded_legacy_non_raw_count` -- rather than
-  failing on the roughly half of the catalog still pre-ADR-0033-bump.
+  failing on the roughly half of the catalog still pre-ADR-0033-bump (as of
+  2026-09-08; see `index-reader.ts`'s module doc for the same figure at the
+  code level).
   `get_events` reads `events.parquet` with `hyparquet`, falls back to a
   sibling `events.tsv` (flagged `estimated: true`) for a v1 index, and
   computes `sample_index` locally on that path with the exact
@@ -978,18 +981,86 @@ the fix.
   ZSTD-only `compressors` map from `fzstd` instead. All five tools verified
   together under real workerd via `backend/scripts/mcp-smoke.sh`, two
   consecutive runs, `compatibility_date` unchanged.
+
+  **Result, two consecutive runs (same script, same throwaway entry as
+  phase 2's table above):**
+
+  | Check | Verdict |
+  |---|---|
+  | compatibility_date 2024-12-01 starts the SDK under real workerd | **PASS -- unchanged, not bumped** |
+  | `GET /` -- real mcp descriptor, endpoint built from the request origin | PASS |
+  | `server/discover` -- 200, `supportedVersions: ["2026-07-28"]` | PASS |
+  | `tools/list` -- 200, all five tools (`search_datasets`, `describe_dataset`, `list_recordings`, `get_events`, `render_overview`) | PASS |
+  | `tools/list` -- 24h public cache hint (`ttlMs`/`cacheScope` on the result) | PASS |
+  | `describe_dataset(xx000000)` -- tool error naming `search_datasets` | PASS |
+  | `search_datasets()` -- 200, `count: 0` over the empty migrated catalog | PASS |
+  | `list_recordings(xx000000)` -- tool error, not found in the public catalog | PASS |
+  | `describe_dataset(not-an-id)` -- `isError` naming `dataset_id` (no ajv code generation under workerd) | PASS |
+  | legacy `initialize` handshake -- 200 | PASS |
+  | legacy `tools/call` (no `_meta` envelope) -- 200 | PASS |
+  | `Mcp-Name`/body mismatch -- HTTP 400 / `-32020` | PASS |
+  | `GET`/`DELETE` `/mcp` -- 405 | PASS |
+  | `OPTIONS /mcp` -- 204 with the `Mcp-*` headers allowed | PASS |
+  | disallowed `Origin` on `POST /mcp` -- 403 / `-32000` | PASS |
+
+  All 15 checks PASS on both runs. Per-call wall time (`curl`'s
+  `%{time_total}`, local loopback, so a floor not a production estimate):
+  `server/discover` ~9-10 ms, `tools/list` ~5-6 ms, `tools/call
+  describe_dataset` ~3-8 ms, `tools/call search_datasets`/
+  `list_recordings` ~4-6 ms -- comfortably sub-10ms, consistent with phase
+  2's numbers.
+  `get_events` and `render_overview` are exercised indirectly here
+  (through `tools/list`'s five-tool listing and, for `render_overview`,
+  the bundle-size measurement in section 10.2); their own real-route
+  behavior is covered by `backend/test/mcp-recording-tools.test.ts` and
+  `backend/test/mcp-overview.test.ts` instead of a dedicated smoke check,
+  the same division phase 2 drew between `search_datasets`/
+  `describe_dataset`'s smoke coverage and their broader route-test suites.
 - **Phase 4 (#1296):** `read_window` (the recipe builder wired to live
   `index.json` data, plus the capped taste using this phase's chosen decode
-  path). `render_overview` is no longer phase 4's scope (decision 1;
-  landed in phase 3 instead).
+  path). `render_overview` is no longer phase 4's scope (moved to phase 3,
+  see section 5.5's header note; landed in phase 3 instead).
 - **Phase 5 (#1297):** docs site coverage, the OSA tool-registration wiring
   ADR 0049 anticipates, and the release.
-- **ADR 0050** (decision 11): `origin/dev` did not yet carry ADR 0049 when
-  this PR was opened (PR #1292 was still open), so per the plan's numbering
-  rule this PR omits the ADR file and the README index entry.
-  The decision text above (sections 2 to 4 and 7, and this section's decode
-  verdict) stands in for it until phase 5, where ADR 0050 should be filed
-  once ADR 0049 has landed and its final number is confirmed unclaimed.
+- **ADR 0050:** `origin/dev` did not yet carry ADR 0049 when this PR was
+  opened (PR #1292 was still open), and the ADR index test enforces
+  gapless numbering, so this PR omits the ADR file and the README index
+  entry -- filing 0050 now would either collide with 0049's number or
+  leave a gap the index test rejects. It should be filed once ADR 0049 has
+  landed on `dev` and its final number is confirmed unclaimed (expected in
+  phase 5). Its content, staged here in the meantime:
+
+  **The rule ADR 0050 will formalize: no WASM in the Worker bundle,
+  ever, for a package this server depends on.** Two independent
+  dependencies hit the identical failure, caught only under real
+  workerd, never under `bun test`:
+  - **Phase 1:** `numcodecs`'s Blosc codec loads its WASM module via a
+    runtime `fetch()` + `WebAssembly.instantiate()` on the fetched bytes
+    (dynamic code generation) -- `RuntimeError: Aborted(CompileError:
+    WebAssembly.instantiate(): Wasm code generation disallowed by
+    embedder)`. See section 10's decode-path table.
+  - **Phase 3:** `hyparquet-compressors`'s `compressors` export eagerly
+    constructs `hysnappy`'s `snappyUncompressor()` at MODULE LOAD, which
+    synchronously compiles a WASM module -- `WebAssembly.Module(): Wasm
+    code generation disallowed by embedder`, crashing isolate startup for
+    EVERY request regardless of whether any call actually needed SNAPPY.
+    See section 9's `hyparquet-compressors` row and section 10.3.
+  Both were only caught by `bunx wrangler dev --local` against a real
+  workerd instance (the throwaway smoke entry this section's tables
+  measure); `bun test` alone stayed green in both cases, because bun's own
+  JS runtime has no equivalent restriction on WASM code generation. The
+  fix pattern in both cases was the same: replace the WASM-eager package
+  with a hand-rolled subset built on an already-proven pure-JS codec
+  (`fzstd`), never a mock or a stub -- the resulting code still really
+  decodes the real byte format, just without the disallowed compile step.
+  **The actionable rule for phase 4 and beyond:** before adding any new
+  dependency that touches binary decode/encode (codecs, compression,
+  image or audio formats), check whether it ships a WASM artifact and, if
+  so, whether it is loaded eagerly (module load / import time) or lazily
+  behind a call a request path can avoid -- eager WASM loading is
+  disqualifying under workerd's embedder restriction regardless of
+  whether the WASM would otherwise work, and `bun test` will not catch
+  it; only a real `wrangler dev --local` (or deployed) run will.
 - **Tool registration under the two-copy zod split: DONE for `search_datasets`/
   `describe_dataset` (phase 2); `read_window`'s discriminated-union/
   `superRefine` shapes remain a phase 4 item.**
@@ -1015,7 +1086,7 @@ the fix.
   `superRefine`/discriminated-union shapes (the channel-seconds check, the
   recipe/taste result union) are deferred to phase 4 along with the tool
   itself.
-- **CLOSED (phase 3, decision 1): `zarrita` is never used in the Worker.**
+- **CLOSED (phase 3): `zarrita` is never used in the Worker.**
   `render_overview`'s chunk keys (`view/<L>/c/0/0/<k>`) and its chunk plan
   (`Math.ceil(levelColumns / (view_chunk_columns ?? 1024))`) are hand-rolled
   in `backend/src/mcp/overview.ts` -- no store/array abstraction needed for

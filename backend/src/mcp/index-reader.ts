@@ -1,6 +1,6 @@
 /**
  * `index.json` reader for the recording-level MCP tools (epic #1065 phase 3,
- * issue #1295; plan decision 2).
+ * issue #1295).
  *
  * Fetches `index.json` IN PROCESS through the real zarr sub-app
  * (`deps.zarrRoutes.fetch(request, env, ctx)`, `createZarrDataRoutes` in
@@ -9,22 +9,26 @@
  * cache, and the `ZARR_DATASET_DOCUMENTS` purge list all apply exactly as
  * they do for a browser or `zarrita` client hitting `zarr.nemar.org`
  * directly. `zarrBase` is `zarrCacheBaseUrl(env)` (`services/cloudflare.ts`)
- * when set, else the production host -- the same fallback
- * `zarrPurgeTargets()` uses.
+ * when set, else the production host, `DEFAULT_ZARR_BASE` below -- a NEW
+ * fallback introduced by this file, not shared with `zarrPurgeTargets()`
+ * (`services/cloudflare.ts`, which returns an empty target list when the
+ * env var is unset -- it has nothing to fall back TO) or `s3PublicUrl`
+ * (`routes/zarr-data.ts`, whose own fallback is the S3 bucket URL, a
+ * different host entirely).
  *
- * ABOUT HALF THE CATALOG STILL PUBLISHES `format_version` 1 while the ADR
- * 0033 engine bump re-converts the back catalog (AGENTS.md's "widening of
- * discovery reaches the back catalog only through the engine stamp"
- * paragraph). A v1 document has no `layout`, no `events_parquet`, no
- * `source_tree`/`derived` on its stores, no `engine_version`, and a group
- * may carry no `n_view_levels` at all -- none of `zarrIndexSchema`'s
- * required fields hold, so this reader inspects the document's own
- * `format_version` BEFORE choosing a schema, parsing a genuine v3 document
- * with `zarrIndexSchema` and everything else with the lower-bound
- * `zarrIndexLegacySchema` (`shared/contract/zarr-index.ts`). The three
- * phase 3 tools serve v1 honestly (an inferred `source_tree`/`derived`, no
- * pyramid, no `events.parquet`) rather than failing outright on half the
- * catalog.
+ * ABOUT HALF THE CATALOG STILL PUBLISHES `format_version` 1 (as of
+ * 2026-09-08) while the ADR 0033 engine bump re-converts the back catalog
+ * (AGENTS.md's "widening of discovery reaches the back catalog only
+ * through the engine stamp" paragraph). A v1 document has no `layout`, no
+ * `events_parquet`, no `source_tree`/`derived` on its stores, no
+ * `engine_version`, and a group may carry no `n_view_levels` at all --
+ * none of `zarrIndexSchema`'s required fields hold, so this reader
+ * inspects the document's own `format_version` BEFORE choosing a schema,
+ * parsing a genuine v3 document with `zarrIndexSchema` and everything else
+ * with the lower-bound `zarrIndexLegacySchema`
+ * (`shared/contract/zarr-index.ts`). The three phase 3 tools serve v1
+ * honestly (an inferred `source_tree`/`derived`, no pyramid, no
+ * `events.parquet`) rather than failing outright on half the catalog.
  *
  * `sourceCommit` is the document's `source_commit` when it matches
  * `SOURCE_COMMIT_RE` (a full 40-hex SHA), else `null` -- v1 predates the
@@ -44,8 +48,10 @@ import {
 import { zarrCacheBaseUrl } from "../services/cloudflare.js";
 import type { Bindings } from "../types/bindings.js";
 
-/** Production zarr.nemar.org, used when `ZARR_CACHE_BASE_URL` is unset
- *  (the same fallback `zarrPurgeTargets()`/`s3PublicUrl` use elsewhere). */
+/** Production zarr.nemar.org, used when `ZARR_CACHE_BASE_URL` is unset --
+ *  see the module doc for why this fallback is NOT shared with
+ *  `zarrPurgeTargets()` or `s3PublicUrl`, which each answer that question
+ *  differently. */
 export const DEFAULT_ZARR_BASE = "https://zarr.nemar.org";
 
 /** The subset of `Hono<...>`'s instance surface this reader needs: a

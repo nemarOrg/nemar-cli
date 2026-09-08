@@ -471,7 +471,8 @@ type SidecarFetchOutcome =
  *  `events.tsv` fallback, which builds the identical
  *  `<base>/<org>/<repo>/<commit>/<encoded path>` shape against the dataset
  *  id as the repo name (nemarDatasets names a dataset's repo after its own
- *  id, `.context/README.md`'s org layout) -- no behavior change here. */
+ *  id, `.context/systems-inventory.md`'s org layout) -- no behavior change
+ *  here. */
 export function rawContentUrl(base: string, repo: string, commit: string, path: string): string {
   const encoded = path
     .split("/")

@@ -1,6 +1,6 @@
 // Shared real (in-memory) `CacheLike` test double (epic #1065 phase 3, issue
-// #1295; plan decision 9). Moved here, unchanged, from
-// `zarr-data-cache.test.ts` (#1178 phase 1) so the MCP recording-tools tests
+// #1295). Moved here from `zarr-data-cache.test.ts` (#1178 phase 1) so the
+// MCP recording-tools tests
 // (`mcp-recording-tools.test.ts`, `mcp-overview.test.ts`,
 // `mcp-projection-cache.test.ts`, `mcp-index-reader.test.ts`) can share the
 // same implementation zarr-data.ts's own edge-cache tests already trust.
@@ -29,8 +29,11 @@ export class InMemoryCache implements CacheLike {
 
   async put(request: RequestInfo | URL, response: Response): Promise<void> {
     // The real Workers Cache API refuses to store a 206 Partial Content
-    // response outright (`cache.put` throws) -- mirrored here so any code
-    // path that tries to put a raw 206 fails the same way in tests.
+    // response outright (`cache.put` throws) -- mirrored here so any
+    // FUTURE code path that tries to put a raw 206 (rather than the
+    // synthetic 200 `zarr-data.ts` writes for a cached range, or a real
+    // 404 negative entry -- both of which the real API DOES accept) fails
+    // the same way in tests (#1181 review item 13).
     if (response.status === 206) {
       throw new Error("Cache API cannot store a 206 response");
     }
