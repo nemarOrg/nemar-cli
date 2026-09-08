@@ -9,8 +9,10 @@
  * the compute-minimization rules in `.context/mcp-server-design.md` section
  * 1). `latest_version` is not a stored column; the SAME correlated
  * subquery `GET /datasets` uses (`routes/datasets/catalog.ts`) computes it,
- * normalized to the canonical `vX.Y.Z` tag via `withCanonicalLatestVersion`
- * before `composeCitation` reads it.
+ * normalized to the canonical `vX.Y.Z` tag via `toVersionTag`
+ * (`shared/contract/version.ts`) before `composeCitation` reads it -- the
+ * one thing `routes/datasets/catalog.ts`'s own `withCanonicalLatestVersion`
+ * does, without pulling a route module into a tool.
  */
 
 import type { CallToolResult } from "@modelcontextprotocol/server";
@@ -21,7 +23,7 @@ import {
   describeDatasetOutputSchema,
   flagToBoolean,
 } from "../../../../shared/contract/mcp.js";
-import { withCanonicalLatestVersion } from "../../routes/datasets/catalog.js";
+import { toVersionTag } from "../../../../shared/contract/version.js";
 import { splitCsv } from "../../services/data-router.js";
 import { ZARR_VERIFIED_AT_PATH, ZARR_VERIFY_STATUS_PATH } from "../../services/sweep-stamps.js";
 import type { Bindings } from "../../types/bindings.js";
@@ -109,19 +111,20 @@ export async function describeDatasetTool(
     return { result: notFoundResult(args.dataset_id), datasetId: args.dataset_id };
   }
 
-  // withCanonicalLatestVersion<T extends Record<string, unknown>> (catalog.ts)
-  // has no index signature on DescribeDatasetRow to key off; the function
-  // itself only ever reads/rewrites the one `latest_version` key and returns
-  // the same shape it was given, so the round-trip cast is safe.
-  const canonical = withCanonicalLatestVersion(
-    row as unknown as Record<string, unknown>,
-  ) as unknown as DescribeDatasetRow;
+  // The same canonicalization routes/datasets/catalog.ts's
+  // withCanonicalLatestVersion applies, inlined so this tool needs no
+  // import from a route module: a non-empty string gets the `v` prefix
+  // (idempotent); null/empty passes through untouched.
+  const canonicalLatestVersion =
+    typeof row.latest_version === "string" && row.latest_version
+      ? toVersionTag(row.latest_version)
+      : row.latest_version;
   const citation = composeCitation({
-    name: canonical.name,
-    authors: canonical.authors,
-    concept_doi: canonical.concept_doi,
-    latest_version: canonical.latest_version,
-    created_at: canonical.created_at,
+    name: row.name,
+    authors: row.authors,
+    concept_doi: row.concept_doi,
+    latest_version: canonicalLatestVersion,
+    created_at: row.created_at,
   });
 
   const zarrStatus =
