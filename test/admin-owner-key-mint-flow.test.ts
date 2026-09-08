@@ -45,9 +45,7 @@ let routeDeployed = false;
 beforeAll(async () => {
   if (PROD_GUARD_ACTIVE) return;
   if (!TEST_CONFIG.adminApiKey) {
-    console.warn(
-      "[admin-owner-key-mint-flow] SKIPPING every case: TEST_ADMIN_API_KEY is unset.",
-    );
+    console.warn("[admin-owner-key-mint-flow] SKIPPING every case: TEST_ADMIN_API_KEY is unset.");
     return;
   }
   const probe = await fetch(`${API}/admin/users/nonexistent-probe-account/keys`, {
