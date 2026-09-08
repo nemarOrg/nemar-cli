@@ -314,6 +314,11 @@ bun test                                         # real tests only, no mocks
 bun build src/index.ts --outdir dist --target node
 ```
 
+Wrangler on a dev machine runs through cfman, which holds the SCCN account token:
+`bunx cfman wrangler --account sccn <wrangler arguments>` (for example `... whoami`,
+`... d1 execute nemar-db-dev --remote --env dev -c wrangler-sccn.toml --file <sql>` from `backend/`).
+There is no plain `wrangler login` on these machines; a command that says "Not logged in" was run without cfman.
+
 ---
 
 ## Development workflow
