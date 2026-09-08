@@ -111,9 +111,9 @@ interface Overrides {
   /** 1 by default: an unverified iD is its own refusal (#1271), so the fixture
    *  carries a proven one and the tests about it blank it deliberately. */
   orcid_verified?: number;
-  /** `member` by default; `admin`/`owner` are exempt from the
-   *  `orcid_verified` row. */
-  role?: string;
+  /** `person` by default; `service`/`test` kinds are exempt from the
+   *  `orcid_verified` row (epic #1272 phase 4, #1284; ADR 0048). */
+  account_kind?: "person" | "service" | "test";
   service_access?: number;
   status?: string;
   upload_access_requested_at?: string | null;
@@ -130,7 +130,7 @@ async function seedRequester(overrides: Overrides = {}): Promise<number> {
     affiliation: "Swartz Center",
     email_verified: 1,
     orcid_verified: 1,
-    role: "member",
+    account_kind: "person" as const,
     service_access: 0,
     status: "verified",
     upload_access_requested_at: null,
@@ -140,14 +140,13 @@ async function seedRequester(overrides: Overrides = {}): Promise<number> {
     `INSERT INTO users (username, email, password_hash, status, role, email_verified,
                         given_name, family_name, github_username, city, country, affiliation,
                         orcid, orcid_verified, signup_source, service_access,
-                        upload_access_requested_at)
-     VALUES (?, ?, 'x', ?, ?, ?, ?, ?, ?, ?, ?, ?,
-             '0000-0002-1825-0097', ?, 'web', ?, ?)`,
+                        upload_access_requested_at, account_kind)
+     VALUES (?, ?, 'x', ?, 'member', ?, ?, ?, ?, ?, ?, ?,
+             '0000-0002-1825-0097', ?, 'web', ?, ?, ?)`,
   ).run(
     row.username,
     USER_EMAIL,
     row.status,
-    row.role,
     row.email_verified,
     row.given_name,
     row.family_name,
@@ -158,6 +157,7 @@ async function seedRequester(overrides: Overrides = {}): Promise<number> {
     row.orcid_verified,
     row.service_access,
     row.upload_access_requested_at,
+    row.account_kind,
   );
   const u = db
     .query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?")
@@ -333,11 +333,10 @@ describe("upload-access request: preconditions", () => {
     expect((await res.json()).already_requested).toBe(false);
   });
 
-  test("an admin is not blocked by the ORCID row", async () => {
-    // Interim exemption (epic #1272): an operator with no verified iD must not
-    // be locked out of asking, since these accounts predate having a web-signup
-    // path of their own.
-    await seedRequester({ orcid_verified: 0, role: "admin" });
+  test("a service-kind account is not blocked by the ORCID row", async () => {
+    // Epic #1272 phase 4 (ADR 0048): a service account has no human signing
+    // in to it to prove an identity, so it must not be locked out of asking.
+    await seedRequester({ orcid_verified: 0, account_kind: "service" });
 
     const res = await withFakeResend(() => requestWithToken());
     expect(res.status).toBe(201);

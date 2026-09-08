@@ -186,6 +186,41 @@ describe("__selectBucket", () => {
     expect(sel.keyKind).not.toBe("auth-ip");
   });
 
+  test("the device authorization grant's browser-facing paths and /auth/keys are strict, with or without a bearer", () => {
+    // #1281, ADR 0047. A person starts, looks up, confirms, or denies a
+    // sign-in a handful of times, not in a loop -- same reasoning as the
+    // CLI ORCID surface above. `/auth/keys/12` and `/auth/keys/current`
+    // prove the prefix match covers the named-key routes too.
+    for (const path of [
+      "/auth/device/start",
+      "/auth/device/lookup",
+      "/auth/device/confirm",
+      "/auth/device/deny",
+      "/auth/keys",
+      "/auth/keys/12",
+      "/auth/keys/current",
+    ]) {
+      for (const auth of [undefined, `Bearer ${VALID_TOKEN}`]) {
+        const sel = __selectBucket(path, auth, "10.0.0.1");
+        expect(sel.keyKind).toBe("auth-ip");
+        expect(sel.rawKey).toBe("10.0.0.1");
+        expect(sel.maxRequests).toBe(__limits.AUTH_MAX_REQUESTS);
+      }
+    }
+  });
+
+  test("/auth/device/token stays OUT of the strict bucket -- it rides `ip` with MAX_REQUESTS", () => {
+    // Deliberately absent from AUTH_PATHS (comment there explains why): at a
+    // 5-second poll cadence, 10 polls fit inside the strict bucket's 60s
+    // window and the 11th trips it, about 50 seconds in -- not the "third
+    // poll" a looser count might suggest. An unauthenticated poll (no key
+    // collected yet, so no bearer to carry) lands on the plain `ip` bucket
+    // at `MAX_REQUESTS`.
+    const sel = __selectBucket("/auth/device/token", undefined, "10.0.0.1");
+    expect(sel.keyKind).toBe("ip");
+    expect(sel.maxRequests).toBe(__limits.MAX_REQUESTS);
+  });
+
   test("the rest of /users keeps the ordinary token bucket", () => {
     // The AUTH_PATHS matcher is a prefix match, so an over-broad entry
     // ("/users") would drag the dashboard's own polling into a 10/min cap.

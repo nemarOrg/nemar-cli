@@ -67,6 +67,7 @@ import { authMiddleware, resolveActingAccount } from "../middleware/auth";
 import { webSessionMiddleware } from "../middleware/webSession";
 import { maskEmail } from "../services/auth-code";
 import { issueEmailVerificationCode } from "../services/email-verification";
+import { appBase } from "../services/environment";
 import {
   emailFieldSchema,
   findEmailHolder,
@@ -109,6 +110,7 @@ import { profileRefusal } from "../services/profile";
 import { type UsernameAssignmentSource, autoAssignUsername } from "../services/username-assignment";
 import {
   buildSessionCookie,
+  clientIp,
   isAllowedOrigin,
   issueSession,
   parseCookieHeader,
@@ -135,14 +137,6 @@ const finalizeSchema = z.object({
 });
 
 // ------------------------------- helpers -------------------------------
-
-/** Authenticated app origin for OAuth redirects + post-login landings. Uses
- *  APP_BASE_URL, NOT FRONTEND_URL: the latter is the marketing apex
- *  (https://nemar.org), but the ORCID redirect_uri and the session/pending
- *  cookies are scoped to the app host (https://app.nemar.org). */
-function appBase(env: Bindings): string {
-  return (env.APP_BASE_URL?.trim() || "https://app.nemar.org").replace(/\/+$/, "");
-}
 
 function cookieDomain(env: Bindings): string | undefined {
   return env.WEB_SESSION_COOKIE_DOMAIN || undefined;
@@ -338,14 +332,6 @@ async function refreshNameThenAssignUsername(
  */
 function claimedByAnother(err: unknown): boolean {
   return isUniqueViolationOn(err, "orcid") || isOrcidIdentityUniqueViolation(err);
-}
-
-function clientIp(c: { req: { header: (k: string) => string | undefined } }): string | null {
-  return (
-    c.req.header("CF-Connecting-IP") ||
-    c.req.header("X-Forwarded-For")?.split(",")[0]?.trim() ||
-    null
-  );
 }
 
 // ------------------------------- routes --------------------------------
@@ -955,7 +941,21 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
     // Hand off to the email-collection page. It lives under /auth (an app-host
     // route) so the Domain=app.nemar.org pending cookie is actually sent to it;
     // the public /signup page is not app-scoped. See website#128.
-    return redirect(`${frontend}/auth/orcid/complete`, [clearState, pendingCookie]);
+    //
+    // `next` rides along whenever it names somewhere other than the default
+    // landing ("/"): a device-flow signup carries `next =
+    // "/cli/authorize?code=..."` so the browser can return to the CLI
+    // confirm page once account creation finishes here, and dropping it
+    // silently was epic #1272 phase 3's one backend fix (nemarOrg/website#316
+    // reads it in `complete.astro`). Unvalidated like every other `${frontend}
+    // ${state.next}` interpolation in this handler (see `fail` above) --
+    // `state.next` is bound to the signed/plain state cookie this callback
+    // already trusts, not to a query param an attacker controls.
+    const completeUrl =
+      state.next !== "/"
+        ? `${frontend}/auth/orcid/complete?next=${encodeURIComponent(state.next)}`
+        : `${frontend}/auth/orcid/complete`;
+    return redirect(completeUrl, [clearState, pendingCookie]);
   } catch (err) {
     console.error("[auth-orcid] callback failed after token exchange", err);
     // Carry state.next so an authenticated user who started from Settings

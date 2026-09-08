@@ -8,6 +8,7 @@
 
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
+import type { AccountKind } from "../../../../shared/contract/user.js";
 import { authMiddleware } from "../../middleware/auth";
 import { cliVersionGuard } from "../../middleware/cliVersion";
 import { generateDatasetId, isValidDatasetId } from "../../services/datasetId";
@@ -257,21 +258,33 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         );
       }
 
-      // Non-sandbox (real) dataset creation is gated on service access, then
-      // — on the CLI channel — sandbox training (website ADR 0010, #1013;
-      // ADR 0040 phase 2 for the channel). The channel comes from the
-      // credential that authenticated this request, never from the request
-      // body. See services/upload-gate.ts.
+      // Non-sandbox (real) dataset creation is gated on account kind first
+      // (epic #1272 phase 4, #1284; ADR 0048: a `test`-kind account may only
+      // own `xx` sandbox datasets), then service access, then — on the CLI
+      // channel — sandbox training (website ADR 0010, #1013; ADR 0040 phase
+      // 2 for the channel). The channel comes from the credential that
+      // authenticated this request, never from the request body. See
+      // services/upload-gate.ts.
       if (!sandbox) {
         const userStatus = await db
-          .prepare("SELECT service_access, sandbox_completed FROM users WHERE id = ?")
+          .prepare("SELECT service_access, sandbox_completed, account_kind FROM users WHERE id = ?")
           .bind(user.id)
-          .first<{ service_access: number; sandbox_completed: number }>();
+          .first<{
+            service_access: number;
+            sandbox_completed: number;
+            account_kind: AccountKind;
+          }>();
 
         const gate = realDatasetCreateGate(
           {
             service_access: userStatus?.service_access ?? 0,
             sandbox_completed: userStatus?.sandbox_completed ?? 0,
+            // `person` (the fail-safe default) when the row could not be
+            // read, matching `service_access`'s own `?? 0` fallback -- an
+            // unreadable kind must not be treated as an automatic refusal
+            // here (the OTHER two fields already gate an unreadable row
+            // closed).
+            account_kind: userStatus?.account_kind ?? "person",
           },
           uploadChannelForAuthMethod(c.get("authMethod")),
         );

@@ -18,7 +18,7 @@
  * brute-forced offline.
  */
 
-import type { AccountStatus } from "../../../shared/contract/user.js";
+import type { AccountKind, AccountStatus } from "../../../shared/contract/user.js";
 import { flag } from "../db/flag";
 import { type Bindings, type UserRole, parseRole } from "../types/bindings";
 
@@ -81,6 +81,24 @@ export async function hashCookieId(cookieIdRaw: string): Promise<string> {
 export async function hashIp(ip: string | null | undefined): Promise<string | null> {
   if (!ip) return null;
   return hashCookieId(ip);
+}
+
+/** Best-effort client IP off the request, preferring Cloudflare's
+ *  `CF-Connecting-IP` and falling back to the first `X-Forwarded-For` hop.
+ *  `null` when neither header is present (e.g. a local test request).
+ *
+ *  Hoisted here from routes/auth-orcid.ts (#1281, epic #1272 phase 1): the
+ *  device-authorization routes need the same lookup for `hashIp`-backed
+ *  audit details, and a helper earns a shared home once it has a second
+ *  real consumer rather than living duplicated in each caller. */
+export function clientIp(c: {
+  req: { header: (k: string) => string | undefined };
+}): string | null {
+  return (
+    c.req.header("CF-Connecting-IP") ||
+    c.req.header("X-Forwarded-For")?.split(",")[0]?.trim() ||
+    null
+  );
 }
 
 /** Parse a single named cookie out of a request's `Cookie` header.
@@ -180,6 +198,12 @@ export interface WebSessionUser {
    *  dashboard can render "granted"/"requested" as events rather than flags. */
   service_access_granted_at: string | null;
   upload_access_requested_at: string | null;
+  /** What this account IS (epic #1272 phase 4, #1284; ADR 0048). Read so
+   *  `publicUser` (routes/auth-web.ts) can compute `profile_gaps` for the
+   *  session row through the same `profileGapsForRow` every other reader
+   *  uses -- it is NOT itself put on the wire (webUserSchema carries no
+   *  such field; only `userSchema` and `adminUserListItemSchema` do). */
+  account_kind: AccountKind;
 }
 
 /** Look up an active session by cookie value, returning the joined
@@ -201,7 +225,7 @@ export async function findSessionByCookieId(
             u.given_name, u.family_name, u.orcid, u.orcid_verified,
             u.github_username, u.city, u.country, u.affiliation, u.service_access,
             u.username, u.username_auto_assigned,
-            u.service_access_granted_at, u.upload_access_requested_at
+            u.service_access_granted_at, u.upload_access_requested_at, u.account_kind
        FROM web_sessions ws
        JOIN users u ON u.id = ws.user_id
       WHERE ws.cookie_id_hash = ?
@@ -243,6 +267,9 @@ export async function findSessionByCookieId(
       // events rather than as flags (ADR 0042; nemarOrg/website#306).
       service_access_granted_at: string | null;
       upload_access_requested_at: string | null;
+      // Closed by migration 0082's CHECK constraint (epic #1272 phase 4,
+      // #1284; ADR 0048).
+      account_kind: AccountKind;
     }>();
   if (!row) return null;
 
@@ -281,6 +308,7 @@ export async function findSessionByCookieId(
       username_auto_assigned: flag(row.username_auto_assigned),
       service_access_granted_at: row.service_access_granted_at,
       upload_access_requested_at: row.upload_access_requested_at,
+      account_kind: row.account_kind,
     },
   };
 }

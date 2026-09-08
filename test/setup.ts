@@ -40,6 +40,13 @@ export const TEST_CONFIG = {
   adminApiKey: process.env.TEST_ADMIN_API_KEY || "",
   userApiKey: process.env.TEST_USER_API_KEY || "",
   bypassToken: process.env.TEST_BYPASS_TOKEN || "",
+  /** Optional (epic #1272 phase 4, #1284; ADR 0048): an OWNER-role token,
+   *  distinct from `adminApiKey` (an admin, not an owner). Only the owner-only
+   *  routes this phase adds (`POST /admin/users/:username/kind`,
+   *  `POST /admin/users/:username/keys`) need it, and only one live suite
+   *  reads it (admin-owner-key-mint-flow.test.ts) -- it probe-skips its
+   *  owner-path cases when this is unset rather than failing the run. */
+  ownerApiKey: process.env.TEST_OWNER_API_KEY || "",
 };
 
 /**

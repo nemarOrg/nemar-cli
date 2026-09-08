@@ -20,6 +20,7 @@ import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { authWebRoutes } from "../src/routes/auth-web";
+import { hashApiKey } from "../src/services/token";
 import { isUsernameUniqueViolation } from "../src/services/username";
 import { issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
@@ -118,9 +119,27 @@ async function patch(userId: number, body: unknown): Promise<Response> {
 async function suggestion(userId: number): Promise<Response> {
   return app.request(
     "/auth/profile/username-suggestion",
-    { headers: { Cookie: await cookieFor(userId) } },
+    { headers: { Origin: ORIGIN, Cookie: await cookieFor(userId) } },
     env(),
   );
+}
+
+/** The bearer path: no cookie, no Origin -- the way the CLI calls it. */
+function suggestionByKey(apiKey: string): Promise<Response> {
+  return app.request(
+    "/auth/profile/username-suggestion",
+    { headers: { Authorization: `Bearer ${apiKey}` } },
+    env(),
+  );
+}
+
+/** Mints a live token row for `userId` and returns the raw key. */
+async function issueApiKey(userId: number, apiKey: string): Promise<void> {
+  db.run("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)", [
+    userId,
+    await hashApiKey(apiKey),
+    apiKey.slice(0, 8),
+  ]);
 }
 
 function usernameOf(id: number): string | null {
@@ -535,9 +554,25 @@ describe("GET /auth/profile/username-suggestion", () => {
     expect(body).toEqual({ suggestion: null, based_on: "exhausted" });
   });
 
-  test("requires a session", async () => {
-    const res = await app.request("/auth/profile/username-suggestion", {}, env());
+  test("an allow-listed Origin with no cookie is unauthenticated", async () => {
+    const res = await app.request(
+      "/auth/profile/username-suggestion",
+      { headers: { Origin: ORIGIN } },
+      env(),
+    );
     expect(res.status).toBe(401);
+    expect((await res.json()).error).toBe("Authentication required");
+  });
+
+  test("no bearer and no allow-listed Origin is refused (epic #1272 phase 3)", async () => {
+    // `resolveActingAccount`'s CSRF fence, gained when this route widened to
+    // accept a bearer token alongside the cookie: the docstring used to say
+    // "no Origin check, same as GET /auth/me", which stopped being true the
+    // moment the cookie half started sharing a resolver with the routes that
+    // DO need one.
+    const res = await app.request("/auth/profile/username-suggestion", {}, env());
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe("Origin not allowed");
   });
 
   test("suggests, but does not reserve", async () => {
@@ -549,5 +584,39 @@ describe("GET /auth/profile/username-suggestion", () => {
 
     expect((await (await suggestion(a)).json()).suggestion).toBe("alovelace");
     expect((await (await suggestion(b)).json()).suggestion).toBe("alovelace");
+  });
+
+  describe("over a bearer token (epic #1272 phase 3: nemar auth signup)", () => {
+    test("offers the same default the cookie path would", async () => {
+      const id = seedUser("cli-suggest@example.org");
+      await issueApiKey(id, "profile-username-route-key-0123456789ab");
+
+      const body = await (await suggestionByKey("profile-username-route-key-0123456789ab")).json();
+      expect(body).toEqual({ suggestion: "alovelace", based_on: "name" });
+    });
+
+    test("a revoked or unknown key is refused, not treated as anonymous", async () => {
+      const res = await suggestionByKey("no-such-key-0123456789abcdef0123456789");
+      expect(res.status).toBe(401);
+    });
+
+    test("bearer wins when a cookie is also present, matching resolveActingAccount", async () => {
+      const bearerUser = seedUser("cli-wins@example.org", { given_name: "Grace", family_name: "Hopper" });
+      const cookieUser = seedUser("cookie-loses@example.org");
+      await issueApiKey(bearerUser, "profile-username-route-key-precedence1");
+
+      const res = await app.request(
+        "/auth/profile/username-suggestion",
+        {
+          headers: {
+            Authorization: "Bearer profile-username-route-key-precedence1",
+            Origin: ORIGIN,
+            Cookie: await cookieFor(cookieUser),
+          },
+        },
+        env(),
+      );
+      expect(await res.json()).toEqual({ suggestion: "ghopper", based_on: "name" });
+    });
   });
 });
