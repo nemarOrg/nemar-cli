@@ -1,0 +1,5 @@
+onset	duration	trial_type	value	HED
+1.0	0.5	sleep_stage_1	n/a	Sleep-stage/N1
+2.5	n/a	sleep_stage_2	7	n/a
+n/a	1.0	sleep_stage_3	n/a	Sleep-stage/N3
+4.25	0.25	n/a	n/a	n/a

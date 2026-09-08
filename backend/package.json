@@ -16,8 +16,10 @@
     "@modelcontextprotocol/server": "2.0.0",
     "aws4fetch": "^1.0.20",
     "bcryptjs": "^3.0.3",
+    "fast-png": "8.0.0",
     "fzstd": "0.1.1",
     "hono": "^4.11.4",
+    "hyparquet": "1.30.0",
     "zod": "^3.23.0",
     "zod4": "npm:zod@^4.2.0"
   },

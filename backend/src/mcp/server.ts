@@ -18,36 +18,62 @@
 import { type CallToolResult, McpServer } from "@modelcontextprotocol/server";
 import pkg from "../../../package.json" with { type: "json" };
 import type { McpToolName } from "../../../shared/contract/mcp.js";
+import type { CacheLike } from "../routes/zarr-data.js";
 import { recordMcpToolCall } from "../services/mcp-metrics.js";
+import { GITHUB_RAW_ORIGIN } from "../services/zarr-fidelity-sweep.js";
 import type { Bindings } from "../types/bindings.js";
+import type { ZarrRoutesLike } from "./index-reader.js";
 import {
   describeDatasetInputSchema4,
   describeDatasetOutputSchema4,
+  getEventsInputSchema4,
+  getEventsOutputSchema4,
+  listRecordingsInputSchema4,
+  listRecordingsOutputSchema4,
+  renderOverviewInputSchema4,
+  renderOverviewOutputSchema4,
   searchDatasetsInputSchema4,
   searchDatasetsOutputSchema4,
 } from "./schemas.js";
-import type { ToolOutcome } from "./tool-types.js";
+import type { RecordingToolDeps, ToolOutcome } from "./tool-types.js";
 import { describeDatasetTool } from "./tools/describe-dataset.js";
+import { getEventsTool } from "./tools/get-events.js";
+import { listRecordingsTool } from "./tools/list-recordings.js";
+import { renderOverviewTool } from "./tools/render-overview.js";
 import { searchDatasetsTool } from "./tools/search-datasets.js";
 
 /** What `createMcpHandler`'s factory is called with per request (routes/mcp.ts):
  *  `env` for the tools' D1/AI/Vectorize access and the metrics binding;
  *  `executionCtx`/`era` are accepted for parity with the SDK's own
- *  `McpRequestContext` shape (not used by phase 2's two tools, neither of
- *  which defers work past the response or varies by protocol era). */
+ *  `McpRequestContext` shape.
+ *
+ *  `cache`/`fetch`/`zarrRoutes`/`rawGithubBase` (epic #1065 phase 3, issue
+ *  #1295) are the recording-level tools' dependency seam:
+ *  `cache` is a thunk (never a bare value) for the same reason
+ *  `ZarrDataDeps.cache` in `routes/zarr-data.ts` is -- `caches.default` must
+ *  be read lazily per request, since it does not exist outside a Worker
+ *  (bun:test included). `zarrRoutes` defaults to the real `zarrDataRoutes`
+ *  sub-app instance so `index.json` reads go through its D1 gate, edge
+ *  cache, and purge list unchanged. `rawGithubBase` defaults to
+ *  `GITHUB_RAW_ORIGIN` (`services/zarr-fidelity-sweep.ts`), the same
+ *  content host that module's fidelity sweep already reads from. */
 export interface BuildMcpServerDeps {
   env: Bindings;
   executionCtx: ExecutionContext;
   era: "legacy" | "modern";
+  cache: () => CacheLike;
+  fetch: typeof fetch;
+  zarrRoutes: ZarrRoutesLike;
+  rawGithubBase: string;
 }
 
 const INSTRUCTIONS = [
   "NEMAR (Neuroelectromagnetic Data Archive and Tools Resource) archives, describes, and serves",
   "EEG, MEG, iEEG, and related electrophysiology datasets in BIDS format.",
   "Start with search_datasets to find a dataset by keyword or facet, then describe_dataset for",
-  "its metadata, license, DOI, citation, and Zarr conversion status.",
-  "Recording-level tools (list_recordings, get_events, render_overview, read_window) arrive in",
-  "later phases of this server.",
+  "its metadata, license, DOI, citation, and Zarr conversion status. list_recordings, get_events,",
+  "and render_overview describe a converted dataset's recordings, events, and a quick visual",
+  "overview; read_window (full signal reads) arrives in a later phase.",
 ].join(" ");
 
 /**
@@ -90,6 +116,12 @@ function withToolMetrics<Args>(
       });
       return outcome.result;
     } catch (err) {
+      // Logged here, once, before the rethrow: the point below records the
+      // MEASUREMENT (an exception happened), but says nothing about WHAT
+      // failed -- an operator watching Analytics Engine alone has no error
+      // message to go on. The transport's own error handling still gets
+      // the unmodified error immediately after.
+      console.error("[mcp] tool exception", { tool: toolName, datasetId }, err);
       recordMcpToolCall(env, {
         tool: toolName,
         datasetId,
@@ -156,6 +188,78 @@ export function buildMcpServer(deps: BuildMcpServerDeps): McpServer {
       "describe_dataset",
       (args) => args.dataset_id,
       (args) => describeDatasetTool(deps.env, args),
+    ),
+  );
+
+  // Bundled once per request for the three recording-level tools
+  // (`RecordingToolDeps`, `tool-types.ts`) -- one shape so every tool reads
+  // env/executionCtx/cache/fetch/zarrRoutes/rawGithubBase the same way.
+  const recordingDeps: RecordingToolDeps = {
+    env: deps.env,
+    executionCtx: deps.executionCtx,
+    cache: deps.cache,
+    fetch: deps.fetch,
+    zarrRoutes: deps.zarrRoutes,
+    rawGithubBase: deps.rawGithubBase,
+  };
+
+  server.registerTool(
+    "list_recordings",
+    {
+      title: "List recordings",
+      description:
+        "List a converted dataset's recordings (Zarr stores) with their channel groups. Parses " +
+        "index.json once per (dataset, source_commit) and caches the result -- repeat calls are " +
+        "cheap. A count of 0 is not an error -- an unrecognized modality value simply matches " +
+        "nothing; the response note lists the dataset's actual modality vocabulary when that " +
+        "happens. A dataset that has not finished converting answers a tool error naming its " +
+        "actual zarr_status, never an empty list.",
+      inputSchema: listRecordingsInputSchema4,
+      outputSchema: listRecordingsOutputSchema4,
+    },
+    withToolMetrics(
+      deps.env,
+      "list_recordings",
+      (args) => args.dataset_id,
+      (args) => listRecordingsTool(recordingDeps, args),
+    ),
+  );
+
+  server.registerTool(
+    "get_events",
+    {
+      title: "Get events",
+      description:
+        "Get one recording's BIDS events (onset, duration, trial_type, value, HED, sample_index). " +
+        "Reads events.parquet when the dataset has one (exact sample_index); otherwise falls back " +
+        "to the recording's sibling events.tsv and flags the result estimated.",
+      inputSchema: getEventsInputSchema4,
+      outputSchema: getEventsOutputSchema4,
+    },
+    withToolMetrics(
+      deps.env,
+      "get_events",
+      (args) => args.dataset_id,
+      (args) => getEventsTool(recordingDeps, args),
+    ),
+  );
+
+  server.registerTool(
+    "render_overview",
+    {
+      title: "Render overview",
+      description:
+        "Render a quick min-max envelope image of one recording's channel group, from the " +
+        "pre-computed view/* pyramid (never level 0). Cheap by construction: kilobytes read, " +
+        "one PNG returned, cached per (dataset, source_commit, recording, group, width_px).",
+      inputSchema: renderOverviewInputSchema4,
+      outputSchema: renderOverviewOutputSchema4,
+    },
+    withToolMetrics(
+      deps.env,
+      "render_overview",
+      (args) => args.dataset_id,
+      (args) => renderOverviewTool(recordingDeps, args),
     ),
   );
 

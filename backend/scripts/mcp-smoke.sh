@@ -186,10 +186,15 @@ fi
 # --- tools/list ---
 LIST_STATUS=$(post_modern 2 "tools/list" "")
 LIST_RESP=$(cat "${TMPD}/2.json")
-if [ "${LIST_STATUS}" = "200" ] && echo "${LIST_RESP}" | grep -q '"search_datasets"' && echo "${LIST_RESP}" | grep -q '"describe_dataset"'; then
-  pass "tools/list answers 200 listing exactly search_datasets and describe_dataset"
+if [ "${LIST_STATUS}" = "200" ] \
+  && echo "${LIST_RESP}" | grep -q '"search_datasets"' \
+  && echo "${LIST_RESP}" | grep -q '"describe_dataset"' \
+  && echo "${LIST_RESP}" | grep -q '"list_recordings"' \
+  && echo "${LIST_RESP}" | grep -q '"get_events"' \
+  && echo "${LIST_RESP}" | grep -q '"render_overview"'; then
+  pass "tools/list answers 200 listing all five tools (phase 2+3)"
 else
-  fail "tools/list: expected 200 + both tools, got HTTP ${LIST_STATUS}: ${LIST_RESP}"
+  fail "tools/list: expected 200 + all five tools, got HTTP ${LIST_STATUS}: ${LIST_RESP}"
 fi
 if echo "${LIST_RESP}" | grep -q '"ttlMs":86400000' && echo "${LIST_RESP}" | grep -q '"cacheScope":"public"'; then
   pass "tools/list carries the 24h public cache hint (ttlMs/cacheScope on the result)"
@@ -213,6 +218,17 @@ if [ "${SEARCH_STATUS}" = "200" ] && echo "${SEARCH_RESP}" | grep -q '"count":0'
   pass "search_datasets(): 200 with count 0 over the empty (migrated) catalog"
 else
   fail "search_datasets(): expected 200 + count 0, got HTTP ${SEARCH_STATUS}: ${SEARCH_RESP}"
+fi
+
+# --- tools/call list_recordings for an id absent from the migrated-but-empty local D1 ---
+# (epic #1065 phase 3, issue #1295): the shared catalog-row not-found error,
+# the same wording describe_dataset(xx000000) got above.
+LIST_RECORDINGS_STATUS=$(post_modern 10 "tools/call" '"name":"list_recordings","arguments":{"dataset_id":"xx000000"},' -H "Mcp-Name: list_recordings")
+LIST_RECORDINGS_RESP=$(cat "${TMPD}/10.json")
+if [ "${LIST_RECORDINGS_STATUS}" = "200" ] && echo "${LIST_RECORDINGS_RESP}" | grep -q '"isError":true' && echo "${LIST_RECORDINGS_RESP}" | grep -qi 'not found'; then
+  pass "list_recordings(xx000000): tool error, not found in the public catalog"
+else
+  fail "list_recordings(xx000000): expected isError naming 'not found', got HTTP ${LIST_RECORDINGS_STATUS}: ${LIST_RECORDINGS_RESP}"
 fi
 
 # --- tools/call describe_dataset with a malformed dataset_id ---

@@ -108,7 +108,7 @@ export const ZARR_FIDELITY_MODALITY_RATE_CAPS: Record<string, number> = {
   EMG: 1000,
 };
 
-/** Bounded sample size (decision 1): every store when the dataset has 40 or
+/** Bounded sample size: every store when the dataset has 40 or
  *  fewer, else 40 spread evenly by path order. */
 export const ZARR_FIDELITY_MAX_SAMPLE_STORES = 40;
 
@@ -134,13 +134,18 @@ export const ZARR_FIDELITY_MAX_SIDECAR_FETCHES_PER_DATASET = 90;
  *  are left completely untouched, not errored, not stamped. */
 export const ZARR_FIDELITY_SWEEP_WIDE_BUDGET = 600;
 
-/** Default / max datasets per invocation (decision 1; max lowered from 100
+/** Default / max datasets per invocation (max lowered from 100
  *  to 25 in PR #1203 review, item 3, so one admin call cannot alone spend
  *  the sweep-wide budget across pathological datasets). */
 export const ZARR_FIDELITY_SWEEP_DEFAULT = 25;
 export const ZARR_FIDELITY_SWEEP_MAX = 25;
 
-const GITHUB_RAW_ORIGIN = "https://raw.githubusercontent.com";
+/** Exported for `backend/src/mcp/tools/get-events.ts` (epic #1065 phase 3,
+ *  issue #1295): the `events.tsv` fallback reads the same public,
+ *  credential-free content host this sweep uses (module doc's "WHY
+ *  RAW.GITHUBUSERCONTENT.COM" section), rather than duplicating the origin
+ *  string. Also the `McpRoutesDeps.rawGithubBase` default. */
+export const GITHUB_RAW_ORIGIN = "https://raw.githubusercontent.com";
 
 export type ZarrFidelityVerdict = "verified" | "failed" | "unverifiable";
 
@@ -150,7 +155,7 @@ export interface ZarrFidelityMismatchExample {
 }
 
 /**
- * Candidates (decision 1, amended by PR #1203 review items 5): converted,
+ * Candidates (amended by PR #1203 review items 5): converted,
  * PUBLIC, active datasets never verified, OR verified against a commit that
  * is no longer the dataset's current `zarr_source_commit`, OR stamped with
  * a null/unusable commit. The last clause fixes a fossilisation bug the
@@ -201,7 +206,7 @@ export const ZARR_FIDELITY_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n FROM data
 /**
  * The per-candidate stamp write, exported so a test drives the exact SQL
  * text (`.rules/testing.md`: never hand-copy). Writes ONLY `sweep_stamps`
- * (decision 1 / ADR 0034) -- no other `datasets` column changes, on any
+ * (ADR 0034) -- no other `datasets` column changes, on any
  * verdict. `json(?)` wraps the examples parameter so it lands as a nested
  * JSON array, not an escaped string. Bind order: commit (never null --
  * `''` when the index has no usable commit, PR #1203 review item 5),
@@ -308,11 +313,11 @@ function toFiniteNumber(value: unknown): number | null {
 const FULL_COMMIT_RE = /^[0-9a-f]{40}$/i;
 
 /**
- * Nearest-first BIDS sidecar candidate paths for one recording (decision 1's
- * "reuse the existing sidecar resolution helper if one exists, otherwise
- * implement nearest-first resolution" -- see the module doc for why this is
- * a bounded heuristic rather than generate_zarr.py's full HEAD-file-list
- * walk). `suffix` is the sidecar's own trailing name, e.g. `"channels.tsv"`
+ * Nearest-first BIDS sidecar candidate paths for one recording: no existing
+ * helper resolves a sidecar for this shape, so resolution is implemented here
+ * -- see the module doc for why this is a bounded heuristic rather than
+ * generate_zarr.py's full HEAD-file-list walk. `suffix` is the sidecar's own
+ * trailing name, e.g. `"channels.tsv"`
  * or `"eeg.json"`.
  *
  * Four placements, nearest first, deduplicated (PR #1203 review, item 9):
@@ -462,7 +467,13 @@ type SidecarFetchOutcome =
   | { kind: "absent" }
   | { kind: "error"; reason: string };
 
-function rawContentUrl(base: string, repo: string, commit: string, path: string): string {
+/** Exported (epic #1065 phase 3, issue #1295) for `get-events.ts`'s
+ *  `events.tsv` fallback, which builds the identical
+ *  `<base>/<org>/<repo>/<commit>/<encoded path>` shape against the dataset
+ *  id as the repo name (nemarDatasets names a dataset's repo after its own
+ *  id, `.context/systems-inventory.md`'s org layout) -- no behavior change
+ *  here. */
+export function rawContentUrl(base: string, repo: string, commit: string, path: string): string {
   const encoded = path
     .split("/")
     .map((seg) => encodeURIComponent(seg))
@@ -569,7 +580,7 @@ async function resolveSidecar(
 }
 
 /**
- * Sample selection (decision 1): every store when the dataset has at most
+ * Sample selection: every store when the dataset has at most
  * {@link ZARR_FIDELITY_MAX_SAMPLE_STORES}, else that many spread evenly by
  * path order (`sampleEvenly`, reused from bids-tree.ts) plus every store
  * whose group has `n_channels === 1` -- a single-channel recording is the
@@ -925,8 +936,8 @@ export interface ZarrFidelitySweepResult {
   failed: number;
   unverifiable: number;
   /** Per-dataset outcomes for every candidate a verdict was actually reached
-   *  for (decision 3: "include the dataset in the sweep's response ... so
-   *  the observability dashboard can pick it up"). Datasets that errored
+   *  for -- the dataset rides along in the sweep's response so the
+   *  observability dashboard can pick it up. Datasets that errored
    *  before a verdict was reached are in `errors` instead, not here. */
   results: ZarrFidelityDatasetResult[];
   errors: { dataset_id: string; error: string }[];
@@ -940,7 +951,7 @@ export interface ZarrFidelitySweepResult {
 }
 
 /**
- * Run one bounded pass of the zarr fidelity sweep (decision 1): fetch up to
+ * Run one bounded pass of the zarr fidelity sweep: fetch up to
  * `limit` candidates' full index, sample a bounded set of stores, verify
  * each against its own ground truth, and stamp a verdict. Shared by
  * `POST /admin/datasets/zarr-fidelity-sweep` and the daily cron (both prod
@@ -1087,7 +1098,7 @@ export async function runZarrFidelitySweep(
     });
 
     if (outcome.status === "failed") {
-      // Escalation (decision 3): audit row + the dataset already rides along
+      // Escalation: audit row + the dataset already rides along
       // in `results` above for the response/cron log line. Best-effort --
       // an audit-write failure must not undo the verdict just stamped.
       try {

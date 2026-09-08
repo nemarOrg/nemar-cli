@@ -59,6 +59,7 @@ import {
 } from "../src/routes/zarr-data";
 import { ZARR_DATASET_DOCUMENTS, zarrPurgeTargets } from "../src/services/cloudflare";
 import type { Bindings } from "../src/types/bindings";
+import { InMemoryCache, keyFor } from "./helpers/cache";
 import { freshDb, realD1 } from "./helpers/d1";
 
 const PUBLIC_ID = "on000001";
@@ -292,33 +293,10 @@ afterAll(() => {
 
 // ---------------------------------------------------------------------------
 // Real in-memory CacheLike -- whatever is put() is what match() returns.
+// `InMemoryCache`/`keyFor` moved to `test/helpers/cache.ts` (epic #1065
+// phase 3, issue #1295) so the MCP recording-tools tests share the same
+// implementation this file's own edge-cache tests already trust.
 // ---------------------------------------------------------------------------
-
-class InMemoryCache implements CacheLike {
-  private store = new Map<string, Response>();
-
-  async match(request: RequestInfo | URL): Promise<Response | undefined> {
-    const stored = this.store.get(keyFor(request));
-    return stored?.clone();
-  }
-
-  async put(request: RequestInfo | URL, response: Response): Promise<void> {
-    // The real Workers Cache API refuses to store a 206 Partial Content
-    // response outright (`cache.put` throws) -- mirrored here so any future
-    // code path that tries to put a raw 206 (rather than the synthetic 200
-    // zarr-data.ts writes for a cached range, or a real 404 negative entry
-    // -- both of which the real API DOES accept) fails the same way in
-    // tests (#1181 review item 13).
-    if (response.status === 206) {
-      throw new Error("Cache API cannot store a 206 response");
-    }
-    this.store.set(keyFor(request), response.clone());
-  }
-}
-
-function keyFor(request: RequestInfo | URL): string {
-  return request instanceof Request ? request.url : String(request);
-}
 
 /** Always misses, and every put() rejects -- for the cache.put-failure
  *  visibility test (#1181 review item 6). */
@@ -1542,7 +1520,7 @@ describe("private dataset redirect safety: the bucket's own deny-list, not this 
     expect(location).not.toBeNull();
 
     // This IS the actual safety argument for the redirect branch skipping
-    // the D1 gate (decision 2 in the phase 6 brief, and the module doc
+    // the D1 gate (see also the module doc
     // comment above): the bucket's NotResource deny-list
     // (services/bucket-policy.ts) denies ANONYMOUS s3:GetObject on a
     // private dataset's ENTIRE prefix at the bucket level, independent of

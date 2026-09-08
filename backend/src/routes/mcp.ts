@@ -30,10 +30,12 @@
 import { createMcpHandler } from "@modelcontextprotocol/server";
 import type { Context } from "hono";
 import { Hono } from "hono";
+import type { ZarrRoutesLike } from "../mcp/index-reader.js";
 import { buildMcpServer } from "../mcp/server.js";
 import { rateLimiter } from "../middleware/rateLimit.js";
+import { GITHUB_RAW_ORIGIN } from "../services/zarr-fidelity-sweep.js";
 import type { Bindings } from "../types/bindings.js";
-import { allowedOrigin, corsHeaders } from "./zarr-data.js";
+import { type CacheLike, allowedOrigin, corsHeaders, zarrDataRoutes } from "./zarr-data.js";
 
 /**
  * CORS headers for the MCP transport: `corsHeaders(origin)` (zarr-data.ts)
@@ -66,17 +68,38 @@ function mcpCorsHeaders(origin: string | null): Record<string, string> {
   };
 }
 
-/** Test/DI seam (matching `ZarrDataDeps`'s precedent): `onerror` is the one
- *  piece of injectable behavior `createMcpHandler` itself exposes. Defaults
- *  to a `[mcp]`-prefixed console.error, logged once per out-of-band error or
- *  rejected request (never altering the response -- the SDK reports these
- *  for observability only). */
+/** Test/DI seam (matching `ZarrDataDeps`'s precedent): `onerror` is the
+ *  piece of injectable behavior `createMcpHandler` itself exposes, logged
+ *  once per out-of-band error or rejected request (never altering the
+ *  response -- the SDK reports these for observability only).
+ *
+ *  `cache`/`fetch`/`zarrRoutes`/`rawGithubBase` (epic #1065 phase 3, issue
+ *  #1295) are the recording-level tools' seam, threaded
+ *  straight through to `buildMcpServer` (`mcp/server.ts`)'s
+ *  `BuildMcpServerDeps` of the same shape. `cache` is a thunk so
+ *  `caches.default` is read lazily per request rather than at module load
+ *  (it does not exist outside a Worker, bun:test included, matching
+ *  `ZarrDataDeps.cache`'s own rationale in `routes/zarr-data.ts`).
+ *  `zarrRoutes` defaults to the real `zarrDataRoutes` sub-app instance, so
+ *  `index.json` reads (`mcp/index-reader.ts`) go through its D1 gate, edge
+ *  cache, and purge list exactly as a browser hitting `zarr.nemar.org`
+ *  would. `rawGithubBase` defaults to `GITHUB_RAW_ORIGIN`
+ *  (`services/zarr-fidelity-sweep.ts`), the same public, credential-free
+ *  content host that module's fidelity sweep already reads from. */
 export interface McpRoutesDeps {
   onerror: (error: Error) => void;
+  cache: () => CacheLike;
+  fetch: typeof fetch;
+  zarrRoutes: ZarrRoutesLike;
+  rawGithubBase: string;
 }
 
 const defaultDeps: McpRoutesDeps = {
   onerror: (error) => console.error("[mcp] transport error", error),
+  cache: () => caches.default,
+  fetch: (...args: Parameters<typeof fetch>) => fetch(...args),
+  zarrRoutes: zarrDataRoutes,
+  rawGithubBase: GITHUB_RAW_ORIGIN,
 };
 
 /** JSON-RPC `-32000` error body for a request whose `Origin` header is
@@ -182,7 +205,16 @@ export function createMcpRoutes(deps: McpRoutesDeps = defaultDeps): Hono<{ Bindi
   app.all("/mcp", async (c: Context<{ Bindings: Bindings }>) => {
     const origin = c.req.header("origin") ?? null;
     const handler = createMcpHandler(
-      (ctx) => buildMcpServer({ env: c.env, executionCtx: c.executionCtx, era: ctx.era }),
+      (ctx) =>
+        buildMcpServer({
+          env: c.env,
+          executionCtx: c.executionCtx,
+          era: ctx.era,
+          cache: deps.cache,
+          fetch: deps.fetch,
+          zarrRoutes: deps.zarrRoutes,
+          rawGithubBase: deps.rawGithubBase,
+        }),
       { onerror: deps.onerror },
     );
     const response = await handler.fetch(c.req.raw);

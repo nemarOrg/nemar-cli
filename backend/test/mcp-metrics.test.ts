@@ -16,14 +16,19 @@
 
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
-import { createMcpRoutes } from "../src/routes/mcp";
+import { readFileSync } from "node:fs";
+import { type McpRoutesDeps, createMcpRoutes } from "../src/routes/mcp";
+import { createZarrDataRoutes } from "../src/routes/zarr-data";
 import {
   type McpToolCallEvent,
   buildMcpDataPoint,
   recordMcpToolCall,
 } from "../src/services/mcp-metrics";
 import type { Bindings } from "../src/types/bindings";
+import nm000329IndexRaw from "./fixtures/mcp/nm000329-index.json";
+import { InMemoryCache } from "./helpers/cache";
 import { freshDb, realD1 } from "./helpers/d1";
+import { type FixtureServer, startFixtureServer } from "./helpers/fixture-server";
 
 describe("buildMcpDataPoint", () => {
   test("shape: indexes/blobs/doubles in the documented order, including the outcome blob", () => {
@@ -282,5 +287,148 @@ describe("withToolMetrics wiring, driven through the real sub-app", () => {
     expect(points[0].blobs?.[1]).toBe("nm500010");
     expect(points[0].blobs?.[3]).toBe("exception");
     expect(points[0].doubles?.[0]).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("cache_status metrics for the three recording-level tools (PR review item 16)", () => {
+  const ctx = {
+    waitUntil: (p: Promise<unknown>) => {
+      p.catch(() => {});
+    },
+    passThroughOnException: () => {},
+  } as unknown as ExecutionContext;
+
+  const MODERN_META = {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientCapabilities": {},
+  };
+
+  const V3_ID = "nm000329";
+  const V3_COMMIT = "7172d2d492dad63650f80cdb83352a0e9d4420f7";
+  const FIXTURE_PUBLIC_ORIGIN = "https://fixture.nemar.test";
+  const FIRST_STORE_ZARR =
+    "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-calibration_run-0_eeg.zarr";
+
+  function translatingFetch(real: typeof fetch, fixtureBase: string): typeof fetch {
+    return (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.startsWith(FIXTURE_PUBLIC_ORIGIN)) {
+        return real(fixtureBase + url.slice(FIXTURE_PUBLIC_ORIGIN.length), init);
+      }
+      return real(input, init);
+    }) as typeof fetch;
+  }
+
+  let db: Database;
+  let fixtureServer: FixtureServer;
+  let points: AnalyticsEngineDataPoint[];
+  let deps: McpRoutesDeps;
+  let app: ReturnType<typeof createMcpRoutes>;
+
+  beforeEach(() => {
+    db = freshDb();
+    db.query(
+      `INSERT INTO datasets (dataset_id, owner_user_id, name, visibility, status, is_sandbox, zarr_status, zarr_store_count, zarr_source_commit)
+       VALUES (?, -1, ?, 'public', 'active', 0, 'ready', ?, ?)`,
+    ).run(V3_ID, V3_ID, (nm000329IndexRaw as { store_count: number }).store_count, V3_COMMIT);
+
+    fixtureServer = startFixtureServer();
+    const rewrittenIndex = {
+      ...nm000329IndexRaw,
+      data_base: `${FIXTURE_PUBLIC_ORIGIN}/${V3_ID}/zarr/`,
+      contract_base: `${FIXTURE_PUBLIC_ORIGIN}/${V3_ID}/zarr/`,
+      events_parquet: `${FIXTURE_PUBLIC_ORIGIN}/${V3_ID}/zarr/events.parquet`,
+    };
+    fixtureServer.files.set(
+      `${V3_ID}/zarr/index.json`,
+      new TextEncoder().encode(JSON.stringify(rewrittenIndex)),
+    );
+    fixtureServer.files.set(
+      `${V3_ID}/zarr/events.parquet`,
+      new Uint8Array(
+        readFileSync(new URL("./fixtures/mcp/nm000329-events.parquet", import.meta.url)),
+      ),
+    );
+    fixtureServer.files.set(
+      `${V3_ID}/zarr/${FIRST_STORE_ZARR}/eeg_250hz/view/5/c/0/0/0`,
+      new Uint8Array(
+        readFileSync(new URL("./fixtures/mcp/nm000329-view5-c-0-0-0.bin", import.meta.url)),
+      ),
+    );
+
+    const cache = new InMemoryCache();
+    points = [];
+    deps = {
+      onerror: () => {},
+      cache: () => cache,
+      fetch: translatingFetch(fetch, fixtureServer.url),
+      zarrRoutes: createZarrDataRoutes({
+        cache: () => cache,
+        fetch: (...args: Parameters<typeof fetch>) => fetch(...args),
+        s3Base: fixtureServer.url,
+      }),
+      rawGithubBase: fixtureServer.url,
+    };
+    app = createMcpRoutes(deps);
+  });
+
+  function envWithCollector(): Bindings {
+    return {
+      DB: realD1(db),
+      ENVIRONMENT: "development",
+      ANALYTICS_MCP: {
+        writeDataPoint: (p: AnalyticsEngineDataPoint) => {
+          points.push(p);
+        },
+      },
+    } as unknown as Bindings;
+  }
+
+  async function callTool(name: string, args: Record<string, unknown>) {
+    return app.request(
+      "/mcp",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Mcp-Method": "tools/call",
+          "Mcp-Name": name,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name, arguments: args, _meta: MODERN_META },
+        }),
+      },
+      envWithCollector(),
+      ctx,
+    );
+  }
+
+  test("list_recordings: first call miss, second call hit (blob index 2)", async () => {
+    await callTool("list_recordings", { dataset_id: V3_ID });
+    await callTool("list_recordings", { dataset_id: V3_ID });
+    expect(points.length).toBe(2);
+    expect(points[0].blobs?.[2]).toBe("miss");
+    expect(points[1].blobs?.[2]).toBe("hit");
+  });
+
+  test("get_events: first call miss, second call hit (blob index 2)", async () => {
+    const args = { dataset_id: V3_ID, recording: FIRST_STORE_ZARR };
+    await callTool("get_events", args);
+    await callTool("get_events", args);
+    expect(points.length).toBe(2);
+    expect(points[0].blobs?.[2]).toBe("miss");
+    expect(points[1].blobs?.[2]).toBe("hit");
+  });
+
+  test("render_overview: first call miss, second call hit (blob index 2)", async () => {
+    const args = { dataset_id: V3_ID, recording: FIRST_STORE_ZARR, width_px: 100 };
+    await callTool("render_overview", args);
+    await callTool("render_overview", args);
+    expect(points.length).toBe(2);
+    expect(points[0].blobs?.[2]).toBe("miss");
+    expect(points[1].blobs?.[2]).toBe("hit");
   });
 });
