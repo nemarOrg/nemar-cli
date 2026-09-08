@@ -171,13 +171,20 @@ the narrative each schema's JSDoc restates in code.
 
 ### 5.1 `search_datasets`
 
-**Inputs:** `query?`, `modality?`, `task?`, `min_participants?`, `has_hed?`,
-`has_zarr?`, `limit` (default 20, capped at 100).
+**Inputs:** `query?`, `modality?`, `task?`, `has_hed?`, `has_zarr?`,
+`limit` (default 20, capped at 100).
+There is no participant-count input because the catalog has no such filter
+server-side; a caller reads `subject_count` off each hit instead.
+Adding one later is a catalog change first and a tool change second.
 **Outputs:** a page of catalog rows (`dataset_id`, `name`, `doi`, `license`,
 `modalities`, `tasks`, `subject_count`, `has_hed`, `has_zarr`) plus `count`
 and `limit`.
-**Cost class:** one `api.nemar.org/datasets` (or `/datasets/search`) fetch;
-no signal bytes, no `index.json` read.
+`has_hed` is a boolean on the wire; the catalog's `0 | 1 | null` goes
+through the contract's `flagToBoolean`, the one place that conversion lives.
+**Cost class:** one catalog fetch: `GET /datasets/search`
+(`executeDatasetSearch`, FTS plus Vectorize) when `query` is present, since
+that route rejects a request without `q`, and the plain `GET /datasets` list
+otherwise; no signal bytes, no `index.json` read.
 **Cache behavior:** whatever cache policy the wrapped catalog endpoint
 already has; this tool adds none of its own.
 **`has_zarr` means converted, never verified.**
@@ -285,8 +292,8 @@ found."
 ### 5.6 `read_window`
 
 **Inputs:** `dataset_id`, `recording`, `group?`, `start_s` (default 0),
-`duration_s` (default 10), `channels?` (an array of channel indices),
-`taste` (default `false`).
+`duration_s` (default 10), `channels?` (an array of channel indices;
+REQUIRED when `taste` is true), `taste` (default `false`).
 **Outputs (recipe mode, the default):** `{ mode: "recipe", recipe,
 envelope }`, where `recipe` is `shared/contract/mcp.ts`'s
 `readRecipeSchema` (section 6.2).
@@ -298,6 +305,10 @@ reads; the Worker never touches a signal byte.
 **Cost class (taste):** decodes exactly the inner chunks the requested
 window spans, capped at `duration_s x channels.length <= 3840` (60 s x 64
 channels; see decision 7 and the spike's decode-path verdict below).
+A taste requires `channels`: the schema cannot know a recording's channel
+count, and a MEG store already in the live catalog (on003392) has 320, so
+treating an omitted list as "all channels" would pass a request five times
+over the cap.
 Past the cap, `read_window` never truncates silently: the input schema
 rejects the request with a validation error that names the cap and tells
 the caller to omit `taste` for a recipe, because a caller asking for a
@@ -325,15 +336,15 @@ field on either side of the wire never breaks an older consumer.
 | Field | Type | Source |
 |---|---|---|
 | `dataset_id` | string | `index.dataset_id` |
-| `doi` | string \| null | catalog entry, falling back to `index.doi` |
-| `license` | string \| null | catalog entry, falling back to `index.license` |
+| `doi` | string \| null | the catalog row when one is supplied, its null included (D1 is the system of record; a DOI invalidated after the last conversion must not come back from the stale index); `index.doi` only when no row is |
+| `license` | string \| null | same rule as `doi` |
 | `citation` | string \| null | `index.citation` |
 | `source_commit` | string (40-hex) | `index.source_commit` |
 | `index_etag` | string \| null | the `index.json` HTTP response's ETag, when kept |
 | `engine_version` | string | `index.engine_version` |
 | `source_tree` | `"raw"` | `store.source_tree` (always `"raw"`, ADR 0027) |
 | `derived` | boolean | `store.derived` |
-| `sss` | object, optional | `store.sss`, present exactly when `derived` is true (ADR 0028) |
+| `sss` | object, optional | `store.sss`, present exactly when `derived` is true (ADR 0028); the schema refuses an envelope, and the index reader a store, where the two disagree |
 | `lossy` | boolean | always `true` today -- every served level-0 array is int16-quantized and rate-capped relative to the source; there is no lossless path |
 | `dtype` | string \| null | from the array-metadata fetch (`zarr.json`), null until made |
 | `effective_rate_hz` | number \| null | `group.rate` (the SERVING rate, after the cap) |
@@ -351,9 +362,10 @@ field on either side of the wire never breaks an older consumer.
 | `group` | string | the channel group name |
 | `level` | `"0"` \| positive integer | `"0"` for the signal array, a view level otherwise |
 | `array_path` | string (absolute URL) | `contract_base` + the path `layout.level0`/`layout.view` computes -- the caller never fills the template |
-| `dtype`, `codecs` | string \| null, array, optional | from the array-metadata fetch; absent means "not made" |
+| `dtype` | string \| null | Zarr's `data_type` from the array's `zarr.json` (`zarrArrayMetadataSchema`), renamed once here; null when that fetch was not made |
+| `codecs` | array, optional | the same document's `codecs`; the key is absent when the fetch was not made |
 | `chunk_samples`, `shard_samples`, `n_channels` | number \| null | straight from the index's group entry, no extra fetch |
-| `sample_slice`, `channel_slice` | `{ start, end }`, optional | present when the caller named a window |
+| `sample_slice`, `channel_slice` | `{ start, end }`, optional | half-open, `end >= start` enforced; present when the caller named a window |
 | `scale_offset` | string | `layout.scale_offset` verbatim: WHERE to find the conversion, not the values themselves |
 | `how_to.python_zarr` | string | a ready-to-run Python snippet: `zarr.open(s3_uri, storage_options={"anon": True})`, slice, done |
 | `how_to.zarrita` | string | the TypeScript/JS equivalent using `zarrita`: a `FetchStore` on `array_path`, `open.v3`, `get` with a `slice` |
@@ -558,6 +570,23 @@ silent side effect of this design phase.
   The decision text above (sections 2 to 4 and 7, and this section's decode
   verdict) stands in for it until phase 5, where ADR 0050 should be filed
   once ADR 0049 has landed and its final number is confirmed unclaimed.
+- **Tool registration under the two-copy zod split (phase 2).**
+  `registerTool` in `@modelcontextprotocol/server@2.0.0` takes a Standard
+  Schema that also emits JSON Schema (`~standard.jsonSchema`), which zod 4
+  implements and zod 3 does not; its deprecated raw-shape overload takes a
+  flat object shape, which `readWindowInputSchema` (a `superRefine`) and
+  `readWindowOutputSchema` (a discriminated union) do not have.
+  So the zod 3 schemas in `shared/contract/mcp.ts` are the WIRE contract and
+  the test oracle, not what is handed to `registerTool`.
+  Phase 2 adds a `zod4` npm alias to `backend/package.json`
+  (`"zod4": "npm:zod@^4.2.0"`, which Bun resolves without touching the
+  repo-wide `zod` pin), authors registration mirrors of each tool's input
+  and output schema against it, and adds a drift test that compares the
+  JSON Schema each mirror emits with the contract's (zod 3 via
+  `zod-to-json-schema`, zod 4 via `z.toJSONSchema()`), so the two copies
+  cannot disagree silently.
+  The channel-seconds check stays in the input schema on both copies; it is
+  a `superRefine` in zod 3 and a `.check()` in zod 4.
 - **Whether `zarrita` is used as-is or replaced by hand-rolled chunk-key /
   shard-index logic** (as this phase's spike does for `decode_chunk`) is
   still open; either way, the codec underneath it is this phase's path (b),
