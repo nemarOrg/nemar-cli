@@ -24,6 +24,7 @@ import { computeProfileGaps } from "../../shared/contract/profile-gaps.js";
 import { userMeResponseSchema, webUserSchema } from "../../shared/contract/user.js";
 import { authWebRoutes } from "../src/routes/auth-web";
 import { userRoutes } from "../src/routes/users";
+import { hashAuthCode } from "../src/services/auth-code";
 import { hashApiKey } from "../src/services/token";
 import { checkUploadAccessRequest } from "../src/services/upload-access";
 import { issueSession } from "../src/services/web-session";
@@ -466,5 +467,119 @@ describe("one row, three answers", () => {
     });
     const body = userMeResponseSchema.parse(await (await usersMe()).json());
     expect(body.user.profile_gaps).toEqual(expected);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Two more readers of the same `account_kind` exemption (#1284 review): the
+// gap matrix's kind exemption was proven above only against GET /users/me,
+// GET /auth/me, and the upload-access refusal. `publicUser` (and so
+// `profileGapsForRow`) is also reached by POST /auth/code/verify (which
+// builds its own row inline) and by PATCH /auth/profile via
+// `fetchPublicUserById` -- two SEPARATE SELECTs in auth-web.ts that each
+// name `account_kind` by hand. Nothing forced those two to agree with the
+// SELECT `GET /auth/me` uses; these tests are what would have caught it if
+// one of them had dropped the column or mistyped its exemption.
+// ---------------------------------------------------------------------------
+
+describe("POST /auth/code/verify carries profile_gaps, exempting service/test kinds", () => {
+  /** A sign-in code is user_id NULL (0066); SIGNIN_CODE_LOOKUP_SQL in
+   *  auth-web.ts is the real statement this plants against. */
+  async function plantSigninCode(email: string, code: string): Promise<void> {
+    db.run(
+      `INSERT INTO auth_codes (email, code_hash, expires_at, user_id, attempts, created_at)
+       VALUES (?, ?, datetime('now', '+10 minutes'), NULL, 0, datetime('now'))`,
+      [email, await hashAuthCode(code, env())],
+    );
+  }
+
+  function verifyCode(code: string): Promise<Response> {
+    return app.request(
+      "/auth/code/verify",
+      {
+        method: "POST",
+        headers: { Origin: ORIGIN, "content-type": "application/json" },
+        body: JSON.stringify({ email: USER_EMAIL, code, remember: false }),
+      },
+      env(),
+    );
+  }
+
+  test("a service-kind account is not asked for a verified iD", async () => {
+    await seedUser({ orcid_verified: 0, account_kind: "service" });
+    await plantSigninCode(USER_EMAIL, "111222");
+    const res = await verifyCode("111222");
+    expect(res.status).toBe(200);
+    const body = webUserSchema.parse((await res.json()).user);
+    expect(body.profile_gaps).toEqual([]);
+  });
+
+  test("a test-kind account is exempt from that row and from nothing else", async () => {
+    await seedUser({ orcid_verified: 0, account_kind: "test", city: null });
+    await plantSigninCode(USER_EMAIL, "222333");
+    const res = await verifyCode("222333");
+    expect(res.status).toBe(200);
+    const body = webUserSchema.parse((await res.json()).user);
+    expect(body.profile_gaps.map((g) => g.field)).toEqual(["city"]);
+  });
+
+  test("an ordinary person account is still asked", async () => {
+    await seedUser({ orcid_verified: 0 });
+    await plantSigninCode(USER_EMAIL, "333444");
+    const res = await verifyCode("333444");
+    expect(res.status).toBe(200);
+    const body = webUserSchema.parse((await res.json()).user);
+    expect(body.profile_gaps.map((g) => g.field)).toEqual(["orcid_verified"]);
+  });
+});
+
+describe("PATCH /auth/profile carries profile_gaps via fetchPublicUserById, exempting service/test kinds", () => {
+  /** normalizeProfilePatch refuses a truly empty body (`empty_patch`), so
+   *  the way to reach the `sets.length === 0` branch in auth-web.ts -- which
+   *  answers directly from fetchPublicUserById(actor.id) without writing
+   *  anything -- is re-submitting the account's OWN current username: the
+   *  route drops it from the patch as a no-op (see the "Same handle" comment
+   *  in auth-web.ts) rather than refusing or writing it, matching seedUser's
+   *  default `username: "arivers"` above. */
+  async function patchProfile(userId: number): Promise<Response> {
+    const cookie = await sessionCookie(userId);
+    return app.request(
+      "/auth/profile",
+      {
+        method: "PATCH",
+        headers: { Origin: ORIGIN, Cookie: cookie, "content-type": "application/json" },
+        body: JSON.stringify({ username: "arivers" }),
+      },
+      env(),
+    );
+  }
+
+  async function sessionCookie(userId: number): Promise<string> {
+    const { cookieIdRaw } = await issueSession(env(), userId, false, null, null, "orcid");
+    return `nemar_session=${cookieIdRaw}`;
+  }
+
+  test("a service-kind account is not asked for a verified iD", async () => {
+    const id = await seedUser({ orcid_verified: 0, account_kind: "service" });
+    const res = await patchProfile(id);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { user: { profile_gaps: { field: string }[] } };
+    expect(body.user.profile_gaps).toEqual([]);
+  });
+
+  test("a test-kind account is exempt from that row and from nothing else", async () => {
+    const id = await seedUser({ orcid_verified: 0, account_kind: "test", city: null });
+    const res = await patchProfile(id);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { user: { profile_gaps: { field: string }[] } };
+    expect(body.user.profile_gaps.map((g) => g.field)).toEqual(["city"]);
+  });
+
+  test("an ordinary person account is still asked", async () => {
+    const id = await seedUser({ orcid_verified: 0 });
+    const res = await patchProfile(id);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { user: { profile_gaps: { field: string }[] } };
+    expect(body.user.profile_gaps.map((g) => g.field)).toEqual(["orcid_verified"]);
   });
 });
