@@ -1,8 +1,9 @@
 /**
  * NEMAR MCP server wire contract (issue #1293, phase 1 of epic #1065).
  *
- * ADR 0049 (carrying forward the still-valid parts of ADR 0025) fixes the
- * server's shape: a stateless, recipe-first broker on Cloudflare Workers.
+ * ADR 0049 (PR #1292; its number is final once it lands on dev; it carries
+ * forward the still-valid parts of ADR 0025) fixes the server's shape: a
+ * stateless, recipe-first broker on Cloudflare Workers.
  * The Worker never decodes signal data beyond a capped taste; bulk bytes go
  * direct to S3. This file is the zod vocabulary for that shape -- the
  * provenance envelope every tool response carries, the read recipe
@@ -22,9 +23,11 @@ import { z } from "zod";
 import {
   DATASET_ID_RE,
   SOURCE_COMMIT_RE,
+  type ZarrArrayMetadata,
   type ZarrGroup,
   type ZarrIndex,
   type ZarrStore,
+  assertSssIffDerived,
   zarrSssSchema,
   zarrUnitsReportSchema,
 } from "./zarr-index.js";
@@ -77,6 +80,15 @@ export const zarrCatalogSchema = z
   .passthrough();
 export type ZarrCatalog = z.infer<typeof zarrCatalogSchema>;
 
+/** The catalog and every D1-backed row carry `has_hed` as `0 | 1 | null`
+ *  (`shared/contract/dataset.ts`'s `zeroOneNullable` convention); the MCP
+ *  tools answer a boolean. This is the ONE place that conversion lives, so a
+ *  phase 2 call site never re-derives `=== 1` by hand. */
+export function flagToBoolean(value: 0 | 1 | null | undefined): boolean | null {
+  if (value === undefined || value === null) return null;
+  return value === 1;
+}
+
 // ---------------------------------------------------------------------------
 // Provenance envelope -- on every response, not optional, not only when asked
 // ---------------------------------------------------------------------------
@@ -121,14 +133,33 @@ export const provenanceEnvelopeSchema = z
      *  has 3 recordings pending conversion"). Null when there is none. */
     note: z.string().nullable().optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine(assertSssIffDerived);
 export type ProvenanceEnvelope = z.infer<typeof provenanceEnvelopeSchema>;
+
+/** The catalog row is D1-backed and the system of record for `doi` and
+ *  `license`: when a row is supplied and carries the key, its value wins EVEN
+ *  WHEN NULL. A DOI invalidated in D1 after the last conversion hoisted it
+ *  into index.json must not come back from the stale index. The index copy is
+ *  consulted only when no catalog row was supplied at all, or the row omits
+ *  the key. */
+function fromCatalogOrIndex(
+  catalogEntry: Pick<ZarrCatalogEntry, "doi" | "license"> | undefined,
+  index: Pick<ZarrIndex, "doi" | "license">,
+  key: "doi" | "license",
+): string | null {
+  if (catalogEntry !== undefined && catalogEntry[key] !== undefined) {
+    return catalogEntry[key] ?? null;
+  }
+  return index[key] ?? null;
+}
 
 /** Assemble the envelope from an index document, the store it names, and
  *  (optionally) the store's channel group and the dataset's catalog.json
- *  entry. `doi`/`license` prefer the catalog entry (the D1-backed, cheaper
- *  read `describe_dataset` uses) and fall back to the index's own hoisted
- *  copy of the same facts; every other field has exactly one source. */
+ *  entry. `doi`/`license` come from the catalog row when one is supplied
+ *  (see `fromCatalogOrIndex`: its null is authoritative) and from the index's
+ *  hoisted copy only when no row is; every other field has exactly one
+ *  source. Throws when `derived` and `sss` disagree (ADR 0028). */
 export function computeProvenanceEnvelope(input: {
   index: Pick<
     ZarrIndex,
@@ -144,8 +175,8 @@ export function computeProvenanceEnvelope(input: {
   const { index, store, group, catalogEntry, indexEtag, dtype, note } = input;
   return provenanceEnvelopeSchema.parse({
     dataset_id: index.dataset_id,
-    doi: catalogEntry?.doi ?? index.doi ?? null,
-    license: catalogEntry?.license ?? index.license ?? null,
+    doi: fromCatalogOrIndex(catalogEntry, index, "doi"),
+    license: fromCatalogOrIndex(catalogEntry, index, "license"),
     citation: index.citation ?? null,
     source_commit: index.source_commit,
     index_etag: indexEtag ?? null,
@@ -167,12 +198,15 @@ export function computeProvenanceEnvelope(input: {
 // Read recipe -- the default `read_window` contract (ADR 0049)
 // ---------------------------------------------------------------------------
 
+/** A half-open `[start, end)` index range; a backwards range is a bug in the
+ *  caller, never something to hand a client as a "recipe". */
 const rangeSchema = z
   .object({
     start: z.number().int().nonnegative(),
     end: z.number().int().nonnegative(),
   })
-  .passthrough();
+  .passthrough()
+  .refine((v) => v.end >= v.start, { message: "end must be >= start", path: ["end"] });
 
 export const readRecipeHowToSchema = z
   .object({
@@ -218,14 +252,34 @@ export const readRecipeSchema = z
   .passthrough();
 export type ReadRecipe = z.infer<typeof readRecipeSchema>;
 
+const LAYOUT_PLACEHOLDER_RE = /<zarr>|<group>|<L>/g;
+
+/** Fill a `layout` template in ONE pass, so a value substituted for one
+ *  placeholder is never re-scanned for another (sequential `replace` calls
+ *  would let a `<group>` inside a store path eat the template's own slot).
+ *  Throws when the template lacks a placeholder the caller supplied a value
+ *  for: a recipe whose URL still carries `<L>` looks valid and fails only at
+ *  the fetch, so the failure has to happen here. */
 function fillTemplate(
   template: string,
   vars: { zarr: string; group: string; level?: string },
 ): string {
-  return template
-    .replace("<zarr>", vars.zarr)
-    .replace("<group>", vars.group)
-    .replace("<L>", vars.level ?? "");
+  const values: Record<string, string> = {
+    "<zarr>": vars.zarr,
+    "<group>": vars.group,
+    "<L>": vars.level ?? "",
+  };
+  const seen = new Set<string>();
+  const filled = template.replace(LAYOUT_PLACEHOLDER_RE, (placeholder) => {
+    seen.add(placeholder);
+    return values[placeholder];
+  });
+  const required = ["<zarr>", "<group>", ...(vars.level !== undefined ? ["<L>"] : [])];
+  const missing = required.filter((ph) => !seen.has(ph));
+  if (missing.length > 0) {
+    throw new Error(`layout template "${template}" lacks ${missing.join(", ")}`);
+  }
+  return filled;
 }
 
 function buildHowTo(opts: {
@@ -259,11 +313,13 @@ function buildHowTo(opts: {
  * -- no probing, per `layout`'s own doc comment. Throws if `groupName` is not
  * one of the store's groups.
  *
- * `arrayMetadata` is the ONE extra fetch (`GET <array_path>`, i.e. the
- * array's own `zarr.json`) a caller makes to fill in `dtype`/`codecs`; omit
- * it and those two fields come back null/absent, which is a valid recipe --
- * a client that already knows the codec shape (every store uses the same
- * blosc/zstd configuration today) does not have to make that fetch at all.
+ * `arrayMetadata` is the ONE extra fetch (`GET <array_path>/zarr.json`, the
+ * array's own Zarr v3 metadata, `zarrArrayMetadataSchema`) a caller makes to
+ * fill in `dtype`/`codecs`. Zarr spells it `data_type`; this is the one place
+ * it becomes the recipe's `dtype`. Omit it and `dtype` is null and `codecs`
+ * absent, which is a valid recipe -- a client that already knows the codec
+ * shape (every store uses the same blosc/zstd configuration today) does not
+ * have to make that fetch at all.
  */
 export function buildReadRecipe(input: {
   index: Pick<
@@ -275,7 +331,7 @@ export function buildReadRecipe(input: {
   level?: "0" | number;
   sampleSlice?: { start: number; end: number };
   channelSlice?: { start: number; end: number };
-  arrayMetadata?: { dtype?: string; codecs?: unknown[] };
+  arrayMetadata?: Pick<ZarrArrayMetadata, "data_type" | "codecs">;
 }): ReadRecipe {
   const { index, store, groupName, level = "0", sampleSlice, channelSlice, arrayMetadata } = input;
   const group = store.groups?.find((g) => g.name === groupName);
@@ -298,7 +354,7 @@ export function buildReadRecipe(input: {
     group: groupName,
     level: isLevel0 ? "0" : level,
     array_path: arrayPath,
-    dtype: arrayMetadata?.dtype ?? null,
+    dtype: arrayMetadata?.data_type ?? null,
     codecs: arrayMetadata?.codecs,
     chunk_samples: group.chunk_samples ?? null,
     shard_samples: group.shard_samples ?? null,
@@ -331,15 +387,19 @@ export type McpToolName = (typeof MCP_TOOL_NAMES)[number];
 export const SEARCH_DATASETS_DEFAULT_LIMIT = 20;
 export const SEARCH_DATASETS_MAX_LIMIT = 100;
 
-/** Wraps `api.nemar.org/datasets` (`executeDatasetSearch` /
- *  `dataset-search.ts`). `has_zarr` filters on the catalog's converted flag,
- *  never `zarr_verify_status` -- see `zarrVerifyStatusSchema`'s doc. */
+/** Wraps the public catalog: `GET /datasets/search` (`executeDatasetSearch`,
+ *  FTS plus Vectorize) when `query` is present, since that route 400s without
+ *  `q`, and the plain `GET /datasets` list otherwise. `modality`, `task`,
+ *  `has_hed` and `has_zarr` are real server-side filters on both; there is no
+ *  participant-count filter server-side today, so none is offered here (a
+ *  caller reads `subject_count` off each hit). `has_zarr` filters on the
+ *  catalog's converted flag, never `zarr_verify_status` -- see
+ *  `zarrVerifyStatusSchema`'s doc. */
 export const searchDatasetsInputSchema = z
   .object({
     query: z.string().optional(),
     modality: z.string().optional(),
     task: z.string().optional(),
-    min_participants: z.number().int().nonnegative().optional(),
     has_hed: z.boolean().optional(),
     has_zarr: z.boolean().optional(),
     limit: z
@@ -361,6 +421,8 @@ export const searchDatasetsHitSchema = z
     modalities: z.array(z.string()).optional(),
     tasks: z.array(z.string()).optional(),
     subject_count: z.number().int().nullable().optional(),
+    /** Boolean here; the catalog row's `0 | 1 | null` goes through
+     *  `flagToBoolean`, never an inline `=== 1`. */
     has_hed: z.boolean().nullable().optional(),
     has_zarr: z.boolean(),
   })
@@ -549,9 +611,12 @@ export type RenderOverviewOutput = z.infer<typeof renderOverviewOutputSchema>;
  *  (`duration_s x channels.length`) may be decoded inline. Chosen from the
  *  issue's own "something like 60 s times 64 channels" note -- the point at
  *  which a 176 s outer shard read starts costing real Worker memory (ADR
- *  0049 / the isolate ceiling discussion). Past the cap, `read_window` never
- *  truncates silently: the input is rejected with a message that names the
- *  cap and points the caller at the recipe (omit `taste`). */
+ *  0049 / the isolate ceiling discussion). A taste therefore REQUIRES
+ *  `channels`: the schema cannot know a recording's channel count, and a
+ *  MEG store in the live catalog has 320, so "omitted means all" would let a
+ *  request five times over the cap through. Past the cap, `read_window`
+ *  never truncates silently: the input is rejected with a message that names
+ *  the cap and points the caller at the recipe (omit `taste`). */
 export const READ_WINDOW_TASTE_MAX_DURATION_S = 60;
 export const READ_WINDOW_TASTE_MAX_CHANNELS = 64;
 export const READ_WINDOW_TASTE_MAX_CHANNEL_SECONDS =
@@ -591,8 +656,17 @@ export const readWindowInputSchema = z
   .passthrough()
   .superRefine((val, ctx) => {
     if (!val.taste) return;
-    const channelCount = val.channels?.length ?? READ_WINDOW_TASTE_MAX_CHANNELS;
-    const channelSeconds = val.duration_s * channelCount;
+    if (val.channels === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "taste requires channels: name the channel indices you want " +
+          "(list_recordings reports each group's n_channels), or omit taste for a recipe",
+        path: ["channels"],
+      });
+      return;
+    }
+    const channelSeconds = val.duration_s * val.channels.length;
     if (channelSeconds > READ_WINDOW_TASTE_MAX_CHANNEL_SECONDS) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

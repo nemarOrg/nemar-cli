@@ -11,8 +11,15 @@
 
 import { describe, expect, test } from "bun:test";
 import { Ajv2020 } from "ajv/dist/2020";
-import { safeParseZarrIndex, zarrIndexSchema } from "../shared/contract/zarr-index.js";
+import {
+  safeParseZarrIndex,
+  zarrArrayMetadataSchema,
+  zarrIndexSchema,
+  zarrStoreSchema,
+} from "../shared/contract/zarr-index.js";
 import indexSchema from "../shared/zarr-index.schema.json";
+import level0ArrayFixture from "./fixtures/zarr-array-level0.zarr.json";
+import view1ArrayFixture from "./fixtures/zarr-array-view1.zarr.json";
 import nm000329SliceFixture from "./fixtures/zarr-index-nm000329-slice.json";
 import onSssSliceFixture from "./fixtures/zarr-index-on003392-meg-sss-slice.json";
 import v3Fixture from "./fixtures/zarr-index-v3.json";
@@ -92,5 +99,55 @@ describe("zarrIndexSchema is a lower bound, unlike the closed JSON Schema", () =
     const mutated = { ...(v3Fixture as Record<string, unknown>), surprise: 1 };
     expect(ajvValidate(mutated)).toBe(false);
     expect(safeParseZarrIndex(mutated).success).toBe(true);
+  });
+});
+
+describe("zarrStoreSchema enforces the sss/derived pairing the JSON Schema only describes", () => {
+  const sssStore = (onSssSliceFixture as { stores: Array<Record<string, unknown>> }).stores[0];
+
+  test("the live MEG store (derived: true with sss) parses", () => {
+    expect(zarrStoreSchema.safeParse(sssStore).success).toBe(true);
+  });
+
+  test("derived: true without sss is refused, and Ajv would not have caught it", () => {
+    const { sss: _dropped, ...withoutSss } = sssStore;
+    const result = zarrStoreSchema.safeParse(withoutSss);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.issues[0]?.path).toEqual(["sss"]);
+    // The closed producer schema states the pairing in prose only.
+    const index = structuredClone(onSssSliceFixture) as { stores: unknown[] };
+    index.stores[0] = withoutSss;
+    expect(ajvValidate(index)).toBe(true);
+  });
+
+  test("sss on a store with derived: false is refused", () => {
+    const result = zarrStoreSchema.safeParse({ ...sssStore, derived: false });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("zarrArrayMetadataSchema reads the served arrays' zarr.json", () => {
+  test("the nm000329 level-0 array: int16, sharding_indexed over bytes + blosc", () => {
+    const meta = zarrArrayMetadataSchema.parse(level0ArrayFixture);
+    expect(meta.data_type).toBe("int16");
+    expect(meta.shape).toEqual([63, 138750]);
+    expect(meta.codecs[0]?.name).toBe("sharding_indexed");
+    const inner = meta.codecs[0]?.configuration?.codecs as Array<{ name: string }>;
+    expect(inner.map((c) => c.name)).toEqual(["bytes", "blosc"]);
+  });
+
+  test("the nm000329 view/1 array: int16 min-max pairs, bytes + blosc, no sharding", () => {
+    const meta = zarrArrayMetadataSchema.parse(view1ArrayFixture);
+    expect(meta.data_type).toBe("int16");
+    expect(meta.shape[0]).toBe(2);
+    expect(meta.codecs.map((c) => c.name)).toEqual(["bytes", "blosc"]);
+  });
+
+  test("a group document (node_type: group) is not an array", () => {
+    expect(
+      zarrArrayMetadataSchema.safeParse({ zarr_format: 3, node_type: "group", attributes: {} })
+        .success,
+    ).toBe(false);
   });
 });

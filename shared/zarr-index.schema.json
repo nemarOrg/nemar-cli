@@ -237,7 +237,7 @@
         },
         "derived": {
           "type": "boolean",
-          "description": "True when the served signal is PROCESSED rather than the source signal quantised and rate-capped. Today the only true case is an ADR 0028 Signal-Space Separation MEG store, which also carries `sss`. Deliberately distinct from source_tree, which is about BIDS layout."
+          "description": "True when the served signal is PROCESSED rather than the source signal quantized and rate-capped. Today the only true case is an ADR 0028 Signal-Space Separation MEG store, which also carries `sss`. Deliberately distinct from source_tree, which is about BIDS layout."
         },
         "modalities": {
           "type": "array",

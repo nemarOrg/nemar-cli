@@ -66,12 +66,42 @@ export const zarrUnitsReportSchema = z
   .passthrough();
 export type ZarrUnitsReport = z.infer<typeof zarrUnitsReportSchema>;
 
-/** ADR 0028 Signal-Space Separation parameters, present exactly when a store's
- *  `derived` is true. Field shape is the converter's own MaxShield record, not
- *  pinned further here -- callers read the known keys (`applied`, `method`,
- *  ...) and pass the rest through in the provenance envelope's `sss` field. */
-export const zarrSssSchema = z.record(z.string(), z.unknown());
+/** ADR 0028 Signal-Space Separation record, present exactly when a store's
+ *  `derived` is true. The keys named here are what `generate_zarr.py`'s
+ *  `apply_sss` writes today; anything it adds later passes through, so the
+ *  provenance envelope's `sss` field never drops a fact the converter
+ *  recorded. */
+export const zarrSssSchema = z
+  .object({
+    applied: z.boolean().optional(),
+    method: z.string().optional(),
+    calibration: z.string().optional(),
+    cross_talk: z.string().optional(),
+    mne_version: z.string().optional(),
+  })
+  .passthrough();
 export type ZarrSss = z.infer<typeof zarrSssSchema>;
+
+/** ADR 0028: `sss` is present exactly when `derived` is true. The producer
+ *  guarantees it (`derived` is set from the presence of `sss`), so a document
+ *  where the two disagree is corrupt rather than merely unusual, and the
+ *  reader refuses it even though `shared/zarr-index.schema.json` only states
+ *  the pairing in prose. Shared with the provenance envelope in `mcp.ts`. */
+export function assertSssIffDerived(
+  value: { derived: boolean; sss?: unknown },
+  ctx: z.RefinementCtx,
+): void {
+  const hasSss = value.sss !== undefined;
+  if (value.derived !== hasSss) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["sss"],
+      message: value.derived
+        ? "derived is true but sss is absent (ADR 0028: the two travel together)"
+        : "sss is present but derived is false (ADR 0028: the two travel together)",
+    });
+  }
+}
 
 /** One converted recording. Read the bytes at `<contract_base><zarr>/`. */
 export const zarrStoreSchema = z
@@ -84,7 +114,7 @@ export const zarrStoreSchema = z
      *  index rather than republished. */
     source_tree: z.literal("raw"),
     /** True when the served signal is PROCESSED rather than the source signal
-     *  quantised and rate-capped (today: an ADR 0028 SSS-filtered MEG store,
+     *  quantized and rate-capped (today: an ADR 0028 SSS-filtered MEG store,
      *  which also carries `sss`). Distinct from `source_tree`. */
     derived: z.boolean(),
     modalities: z.array(z.string()).optional(),
@@ -98,7 +128,8 @@ export const zarrStoreSchema = z
     split_members: z.array(z.string()).optional(),
     sss: zarrSssSchema.optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine(assertSssIffDerived);
 export type ZarrStore = z.infer<typeof zarrStoreSchema>;
 
 /** A recording that has no store for a reason retrying will not change. */
@@ -211,6 +242,43 @@ export const zarrIndexSchema = z
   })
   .passthrough();
 export type ZarrIndex = z.infer<typeof zarrIndexSchema>;
+
+/** A Zarr v3 codec entry as the array metadata lists it (`bytes`, `blosc`,
+ *  `sharding_indexed`, `crc32c`, ...). `configuration` is codec-specific. */
+export const zarrCodecSchema = z
+  .object({
+    name: z.string(),
+    configuration: z.record(z.string(), z.unknown()).optional(),
+  })
+  .passthrough();
+export type ZarrCodec = z.infer<typeof zarrCodecSchema>;
+
+/**
+ * The `zarr.json` of one served ARRAY (`<zarr>/<group>/0` or a view level):
+ * Zarr v3 array metadata, the ONE extra fetch a recipe caller makes to learn
+ * `data_type` and `codecs`. Wire names are Zarr's (`data_type`, not `dtype`);
+ * `buildReadRecipe` in `mcp.ts` does the one rename. Lower bound like every
+ * other schema here, so a future Zarr extension key passes through.
+ */
+export const zarrArrayMetadataSchema = z
+  .object({
+    zarr_format: z.literal(3),
+    node_type: z.literal("array"),
+    shape: z.array(z.number().int().nonnegative()),
+    data_type: z.string(),
+    chunk_grid: z
+      .object({
+        name: z.string(),
+        configuration: z.record(z.string(), z.unknown()).optional(),
+      })
+      .passthrough(),
+    codecs: z.array(zarrCodecSchema),
+    fill_value: z.unknown().optional(),
+    attributes: z.record(z.string(), z.unknown()).optional(),
+    dimension_names: z.array(z.string().nullable()).optional(),
+  })
+  .passthrough();
+export type ZarrArrayMetadata = z.infer<typeof zarrArrayMetadataSchema>;
 
 /** Parse and validate an index document, returning the typed reader shape. */
 export function parseZarrIndex(doc: unknown): ZarrIndex {
