@@ -54,7 +54,8 @@ import {
 } from "./services/email";
 import { isNonProductionEnv } from "./services/environment";
 import { resolveHostRoute } from "./services/host-routing";
-import { OPENNEURO_UPSTREAM_MARKER, runImportRecovery } from "./services/import-recovery";
+import { isGenericImportError, lastErrorAssignmentSql } from "./services/import-error";
+import { runImportRecovery } from "./services/import-recovery";
 import { sweepImportRetries } from "./services/import-retry";
 import { manifestIntegritySweep } from "./services/manifest-sweep";
 import { getActiveNotices } from "./services/notices";
@@ -682,21 +683,30 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
         )
         .bind(MAX_DELETIONS_PER_RUN)
         .all<{ dataset_id: string }>();
+      // The sweep's own bookkeeping message. Declared once so the string and its
+      // ADR 0049 classification cannot drift apart: passing a hand-written `true`
+      // would keep claiming "generic" even if this wording later became a real
+      // diagnosis. No quote escaping needed, and asserted by the const's own text.
+      const STUCK_IMPORT_MESSAGE = "stuck > 6h (scheduled sweep)";
       for (const row of stuckImports.results ?? []) {
         try {
           const upd = await db
             .prepare(
-              // Preserve a sticky upstream marker (#808): a row can be in-flight
-              // here yet already carry the OpenNeuro-inaccessible marker (a racing
-              // finalize POST moved it off `failed` before the webhook's dropped
-              // waitUntil recovery ran -- the very eviction case this sweep backstops).
-              // Overwriting it would make runImportRecovery below misclassify the
-              // upstream failure as a generic stuck import. [ ] are literal in LIKE.
+              // A specific error is never overwritten by a generic one (ADR 0049).
+              // "stuck > 6h" says only that this sweep fired; a row can be in-flight
+              // here yet already carry a real diagnosis (a racing finalize POST moved
+              // it off `failed` before the webhook's dropped waitUntil recovery ran --
+              // the very eviction case this sweep backstops). Overwriting it would make
+              // runImportRecovery below misclassify a known failure as a generic stuck
+              // import, and for the OpenNeuro marker specifically would also drop the
+              // string the retry engine needs to re-select the row.
               `UPDATE import_jobs
                SET status = 'failed',
-                   last_error = CASE
-                     WHEN last_error LIKE '%${OPENNEURO_UPSTREAM_MARKER}%' THEN last_error
-                     ELSE 'stuck > 6h (scheduled sweep)' END,
+                   last_error = ${lastErrorAssignmentSql(
+                     isGenericImportError(STUCK_IMPORT_MESSAGE),
+                     "last_error",
+                     `'${STUCK_IMPORT_MESSAGE}'`,
+                   )},
                    completed_at = datetime('now'), updated_at = datetime('now')
              WHERE dataset_id = ? AND status IN ('preparing', 'copying', 'finalizing')`,
             )

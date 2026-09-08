@@ -87,6 +87,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0046](0046-cross-repo-parity-compares-pre-release-branches.md) - Cross-repo parity compares pre-release branches, never `main`
 - [ADR 0047](0047-cli-sign-in-is-the-device-authorization-grant.md) - CLI sign-in is the device authorization grant, layered on the web ORCID session
 - [ADR 0048](0048-account-kinds-are-explicit.md) - Account kinds are explicit: person, service, test
+- [ADR 0049](0049-a-specific-import-error-is-never-overwritten-by-a-generic-one.md) - A specific import error is never overwritten by a generic one
 
 ## Backfill note (2026-07-31)
 

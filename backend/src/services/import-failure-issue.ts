@@ -27,6 +27,7 @@ import { isSandboxDatasetId } from "./datasetId.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { addIssueComment, createIssue, findOpenIssueByTitle } from "./github.js";
+import { classifyImportFailure } from "./import-failure-cause.js";
 
 export const IMPORT_FAILURE_ISSUE_LABEL = "import-failure";
 /** Central repo the failure-tracking issue template + triage doc live on
@@ -80,34 +81,24 @@ export interface ImportFailureIssueDetails {
   workflowRunUrl: string | null;
 }
 
-/** Best-effort, clearly-labeled failure-class hint from the failing stage.
- *  Unrecognized/finalize stages get no hint rather than a guess. */
-const STAGE_HINTS: Record<string, string> = {
-  prepare: "possible git-divergence",
-  copy: "possible upstream-403/shard-gap",
-};
-
-function stageHint(stage: string): string | null {
-  return STAGE_HINTS[stage] ?? null;
-}
-
 /** Issue body for a fresh CREATE. */
 export function buildImportFailureIssueBody(details: ImportFailureIssueDetails): string {
-  const lines = [
+  const classified = classifyImportFailure({
+    stage: details.stage,
+    lastError: details.errorMessage,
+  });
+  return [
     `Dataset: ${details.datasetId}`,
     `Source: OpenNeuro ${details.sourceId}`,
     `Stage: ${details.stage}`,
+    `Cause: ${classified.cause}`,
     `Error: ${details.errorMessage ?? "(none reported)"}`,
     `Workflow run: ${details.workflowRunUrl ?? "(none reported)"}`,
-  ];
-  const hint = stageHint(details.stage);
-  if (hint)
-    lines.push(`Hint (best-effort, from stage=${details.stage}, not authoritative): ${hint}`);
-  lines.push(
+    "",
+    classified.summary,
     "",
     "See nemarOrg/nemar-cli#967 and docs/import-failure-procedure.md for the triage procedure.",
-  );
-  return lines.join("\n");
+  ].join("\n");
 }
 
 /** Comment body for a re-failure against an existing open issue. `nowIso` is
@@ -116,15 +107,18 @@ export function buildImportFailureIssueComment(
   details: ImportFailureIssueDetails,
   nowIso: string,
 ): string {
-  const lines = [
+  const classified = classifyImportFailure({
+    stage: details.stage,
+    lastError: details.errorMessage,
+  });
+  return [
     `Re-failed at stage \`${details.stage}\` (${nowIso}).`,
+    `Cause: ${classified.cause}`,
     `Error: ${details.errorMessage ?? "(none reported)"}`,
     `Workflow run: ${details.workflowRunUrl ?? "(none reported)"}`,
-  ];
-  const hint = stageHint(details.stage);
-  if (hint)
-    lines.push(`Hint (best-effort, from stage=${details.stage}, not authoritative): ${hint}`);
-  return lines.join("\n");
+    "",
+    classified.summary,
+  ].join("\n");
 }
 
 // ============================================================================
@@ -217,11 +211,20 @@ export async function fileImportFailureIssueIfNeeded(
     return;
   }
 
+  // The cause label rides alongside the tracking label so the repo can be
+  // filtered by what actually failed, not just that something did. Only applied
+  // at creation: GitHub's issues API surface here has no label-mutation helper,
+  // so a re-failure whose cause CHANGES currently comments under the original
+  // label -- relabelling lands with close-on-recovery in epic #1306 phase 2.
+  const classified = classifyImportFailure({
+    stage: args.stage,
+    lastError: args.errorMessage,
+  });
   const created = await createIssue(
     IMPORT_FAILURE_ISSUES_REPO,
     title,
     buildImportFailureIssueBody(details),
-    [IMPORT_FAILURE_ISSUE_LABEL],
+    [IMPORT_FAILURE_ISSUE_LABEL, classified.label],
     pat,
   );
   console.log(
