@@ -5,6 +5,9 @@ Scope: design and contracts only.
 No route exists yet; phases 2 to 4 (#1294 to #1296) build the host fork, the
 discovery tools, the recording tools, and `read_window`.
 Phase 5 (#1297) is docs, OSA wiring, and release.
+(Phase 3, #1295, decision 1 moved `render_overview` here from phase 4 --
+this section's original phase-4 placement was corrected to match the
+issues; `read_window` alone remains phase 4's scope.)
 
 ## 1. Purpose and constraints
 
@@ -326,19 +329,46 @@ message says the id was not found in the catalog and suggests
 `include_derived` (default `false`), `limit` (default 50, capped at 500),
 `offset` (default 0).
 **Outputs:** a page of compact recording summaries (`path`, `zarr`,
-`source_tree`, `derived`, `groups[]`), `total_count`,
-`excluded_derived_count`, `source_commit`.
+`source_tree`, `derived`, `groups[]` -- each with `name`, `modality`,
+`rate`, `n_channels`, `duration_s`, `n_view_levels`, plus the internal
+`n_samples`/`view_chunk_columns` `render_overview` needs), `n_events` per
+store when the index has it, `total_count`, `excluded_derived_count`,
+`source_commit` (nullable -- see below), plus `index_format_version`,
+`discovered_count`/`failure_count`/`pending_count` (null for a legacy
+index), `excluded_legacy_non_raw_count`, `note`, and an optional
+dataset-level `envelope` built from the first recording on the page.
 **Cost class:** one `index.json` parse per `(dataset_id, source_commit)`,
 ever; every subsequent call for the same pair is a cache match plus a
-slice.
+slice -- proven in `mcp-recording-tools.test.ts` by asserting the fixture
+upstream's request log gains no new `index.json` GET on a second call.
 **`include_derived` defaults false.**
 A caller has to opt in to seeing an ADR 0028 SSS-filtered MEG store; the
 count excluded by that default is always reported
 (`excluded_derived_count`), so the omission is visible rather than silent,
 matching the day-one value issue #1065 named for this tool.
+**Legacy (v1/v2) indexes are served honestly, not rejected.** About half
+the catalog still publishes `format_version` 1 while the ADR 0033 engine
+bump re-converts the back catalog. A legacy document has no
+`source_tree`/`derived` at all; `list_recordings` infers `source_tree:
+"raw"` and `derived: false` for every store EXCEPT one whose `path` falls
+under `derivatives/`, `sourcedata/`, or `code/` (ADR 0027's raw-only rule,
+which a legacy index predates) -- those are excluded outright and counted
+in `excluded_legacy_non_raw_count`, and every legacy response carries a
+`note`: "legacy index v1: re-conversion pending; source_tree, derived and
+engine stamp are inferred." `source_commit` is `null` when the document's
+own `source_commit` does not match the 40-hex pattern (a v1 document
+predates the #1197 guarantee; on008083 once published `""`) -- a widening
+of the phase 2 non-nullable shape, safe since no consumer existed yet.
 **Cache behavior:** see section 7; the compact projection (not the raw
 `index.json`) is what gets cached, keyed by `(dataset_id, source_commit)`,
-long TTL (immutable per commit).
+7-day TTL (immutable per commit) -- and is bypassed entirely (never read,
+never written) for a dataset whose D1 `zarr_source_commit` is missing or
+not 40-hex, so a `list_recordings`/`get_events`/`render_overview` call for
+such a dataset is always reported `cacheStatus: "miss"` rather than being
+keyed on a guess. The SAME cached projection is shared by `get_events` and
+`render_overview` (a `list_recordings` call primes the cache the other two
+read, and vice versa) -- see `backend/src/mcp/tools/list-recordings.ts`'s
+exported `loadRecordingsProjection`.
 **Error that teaches:** a dataset with `zarr_status` not `ready` answers a
 tool error naming the actual status (`pending` or `failed`) rather than an
 empty recordings list, so a caller does not read "zero recordings" as "this
@@ -347,44 +377,96 @@ dataset has no data."
 ### 5.4 `get_events`
 
 **Inputs:** `dataset_id`, `recording` (a store's `path` or `zarr`),
-`group?`.
+`group?`, `limit` (default 1000, capped at 5000), `offset` (default 0).
 **Outputs:** `events[]` (`store_path`, `group_name`, `onset_s`,
-`duration_s?`, `sample_index`, `trial_type?`, `value?`, `hed?`), `source`
-(`"events_parquet"` or `"events_tsv_fallback"`), `estimated` (boolean).
-**Cost class:** `events.parquet` range reads via `hyparquet` +
-`hyparquet-compressors` (zstd), once per `(dataset_id, source_commit)`,
-cached the same way `list_recordings`' projection is.
+`duration_s?`, `sample_index`, `trial_type?`, `value?`, `hed?`, plus any
+`subject`/`session`/`task`/`run`/`x_`-prefixed extra passed through),
+`source` (`"events_parquet"` or `"events_tsv_fallback"`), `estimated`
+(boolean), `total_count`, `limit`, `offset`, `truncated`, `note`, and an
+optional `envelope`.
+**Cost class:** the WHOLE `events.parquet` file is read once per
+`(dataset_id, source_commit)` on a miss (`hyparquet`'s `asyncBufferFromUrl`
++ `parquetMetadataAsync` + `parquetReadObjects`, no `columns` filter so
+every pass-through BIDS entity column survives), grouped by `store_path`,
+and every store's rows are written to the cache in one pass -- so ONE
+dataset-wide read serves every recording's future `get_events` call, not
+just the one this request named. **Codec: hand-rolled ZSTD-only, not
+`hyparquet-compressors`** -- that package's `compressors` export eagerly
+WASM-compiles its `SNAPPY` entry (the `hysnappy` dependency) at module
+load, which crashes isolate startup under real workerd regardless of
+whether any dataset's parquet ever uses SNAPPY (none in the live catalog
+does; every column sampled is ZSTD). `get-events.ts` builds
+`{ ZSTD: (input) => decompress(input) }` from `fzstd` directly instead --
+functionally identical to what the package supplied for ZSTD. See section
+9's `hyparquet-compressors` row and section 10.3.
 **The fallback flips `estimated: true`.**
-When the index names no `events_parquet`, the tool falls back to
-`events.tsv` from `data.nemar.org` and computes a sample index locally;
-that estimate is wrong by a sub-sample amount wherever source and target
-rates are not integer multiples, which is common in this catalog, so the
-flag is load-bearing, not decorative.
-The primary path never sets it, because the converter's own
+When the index names no `events_parquet` (every v1 index today), the tool
+derives the sibling `events.tsv` from the recording's `path` (BIDS naming:
+the trailing `_<suffix>.<ext>` becomes `_events.tsv`) and fetches it
+credential-free from `raw.githubusercontent.com` -- the SAME URL builder
+the zarr fidelity sweep uses (`rawContentUrl`,
+`services/zarr-fidelity-sweep.ts`, exported for this reuse), `ref` the
+resolved 40-hex `source_commit` when usable else `main` -- and computes a
+sample index locally against the resolved group's serving rate; that
+estimate is wrong by a sub-sample amount wherever source and target rates
+are not integer multiples, which is common in this catalog, so the flag is
+load-bearing, not decorative. A clean 404 (a missing file, or a private
+repo, which reads identically to an anonymous GET) answers `events: []`
+with a note that no events file was found next to the recording; BIDS
+inheritance (walking up to a session/subject/root-level events.tsv) is
+explicitly out of scope, and the note says so. Never `data.nemar.org`:
+its file branch is a redirect with no injectable `fetch` seam.
+The primary path never sets `estimated`, because the converter's own
 `sample_index` (`floor(onset_s * rate + 0.5)`, computed against the SERVING
 rate) is exact.
 **Error that teaches:** a `recording` that does not match any store's
-`path` or `zarr` in the cached index answers a tool error listing the
-dataset's actual recording identifiers (or a truncated sample of them for a
-large dataset), not a bare "not found."
+`path` or `zarr` in the cached recordings projection answers a tool error
+listing up to 20 of the dataset's actual `zarr` identifiers, not a bare
+"not found."
 
 ### 5.5 `render_overview`
+
+(Landed in phase 3, #1295 -- decision 1 moved it here from phase 4 to match
+the issues; this section's content is otherwise unchanged in intent.)
 
 **Inputs:** `dataset_id`, `recording`, `group?`, `width_px`
 (default 800, capped at 4000).
 **Outputs:** an MCP `image` content block (`image/png`, base64) plus a
-metadata object (`level`, `width_px`, `height_px`, `mime_type`).
-**Cost class:** reads the `view/*` min-max pyramid, never level 0; those
-reads are kilobytes by construction (biosigIO chunks the pyramid at a
-constant column count across levels since 1.2.6, so a viewport-sized read
-is one to three requests at any level).
-**Picks the smallest view level satisfying `width_px`** -- never a level
-finer than what the requested pixel width can show, so the Worker never
-decodes more samples than the image needs.
+metadata object (`level`, `width_px`, `height_px`, `mime_type`,
+`columns_read`, `chunks_read`, `bytes_read`, an optional `envelope`).
+`columns_read`/`chunks_read`/`bytes_read` are all `0` on a cache hit --
+nothing was actually read that call.
+**Cost class:** reads the `view/*` min-max pyramid, never level 0 and never
+`zarr.json` -- every geometry fact (`n_view_levels`, `n_samples`,
+`n_channels`, `view_chunk_columns`) comes off the shared `recordings`
+projection (section 5.3), never a probe fetch. Verified live on nm000329's
+`eeg_250hz` group (138750 samples, 5 view levels): the column count at
+level `L` is `Math.floor(n / 4)` applied ITERATIVELY from level 1 (never
+`n0 / 4**L` in one step, which can disagree near a level boundary) --
+`[34687, 8671, 2167, 541, 135]` for levels 1 through 5. A level's chunk
+count is `Math.ceil(levelColumns / (group.view_chunk_columns ?? 1024))`;
+nm000329's level 5 (135 columns) and level 4 (541 columns) both land under
+the default 1024, so both are naturally one chunk each -- no special-casing
+"is this the last level" is needed, the same `ceil` formula produces it.
+**Picks the COARSEST view level satisfying `width_px`** (`pickViewLevel`,
+`backend/src/mcp/overview.ts`) -- the highest `L` whose column count is
+still `>= width_px`, never a level finer than what the requested pixel
+width can show; when even level 1 (the finest that exists) has fewer
+columns than `width_px`, level 1 is returned rather than erroring. Table
+(nm000329, 5 levels): `width_px` 100 -> level 5, 800 -> level 3, 4000 ->
+level 2, 40000 -> level 1.
+**Image geometry:** one grayscale band per channel,
+`rowPx = clamp(floor(1200 / n_channels), 2, 24)` (63 EEG channels -> 19px
+rows, a 320-channel MEG store -> 3px rows), a 1px separator between bands,
+each channel scaled to its OWN min/max over the level, a min-max bar drawn
+dark on a light background per `width_px` column bucket. `fast-png`'s
+`encode({ width, height, data, channels: 1, depth: 8 })`.
 **Cache behavior:** the rendered PNG itself is what gets cached, per
 `(dataset_id, source_commit, recording, group, width_px)`, so a repeat call
 at the same width is a cache match with zero decode and zero encode work
-(decision 4 of the phase 1 plan).
+(decision 4 of the phase 1 plan) -- `level`/`width_px`/`height_px` are
+still recomputed on a hit (cheap, no I/O) so the metadata is always
+present.
 `width_px` defaults to 800 and is capped at 4000, so in practice one or two
 widths per recording ever exist; a miss at an unusual width costs one fresh
 render, never a second copy of the decoded level.
@@ -495,15 +577,40 @@ Restating decision 4 of the phase 1 plan, made concrete:
   purge list apply unchanged.
   The MCP host does not re-implement any of that.
 - **Derived projections use synthetic cache URLs on the mcp host:**
-  `https://mcp.nemar.org/_cache/<dataset_id>/<source_commit>/<projection>`.
-  `<projection>` is one of `recordings` (the `list_recordings` compact
-  array, unfiltered -- filters apply after the cache read, not before),
-  `events` (the parsed `events.parquet` rows, unfiltered the same way), or
-  `overview/<recording>/<group>/<width_px>` (the rendered PNG, one entry
-  per width actually requested, per section 5.5).
-  All three are immutable per `source_commit`, so they get a long TTL
-  (a day or more; the exact number is a phase 2 acceptance item, not fixed
-  here).
+  `https://mcp.nemar.org/_cache/<dataset_id>/<source_commit>/<projection>`
+  (`backend/src/mcp/projection-cache.ts`'s `projectionUrl`) -- a constant
+  key NAMESPACE, never a real route this sub-app answers. **Fixed in phase
+  3 (#1295) at a 7-day TTL** (`Cache-Control: public, max-age=604800`,
+  `PROJECTION_CACHE_CONTROL`): immutable per `(dataset_id, source_commit)`,
+  since a re-conversion mints a new commit and the old key never again
+  resolves to different bytes -- unlike `zarr-data.ts`'s per-chunk
+  `cacheControlFor`, there is no tokened/untokened split to make here.
+  The concrete `<projection>` strings, one cache entry per commit unless
+  noted:
+    - `recordings` -- the FULL, unfiltered `list_recordings` array plus the
+      index-level facts (`engine_version`/`doi`/`license`/`citation`/
+      `isLegacy`, `events_parquet` URL, `data_base`) every recording-level
+      tool needs; filters (`modality`, `min_duration_s`, `include_derived`)
+      and pagination apply AFTER the cache read. Shared by all three
+      recording tools -- a `list_recordings` call primes the entry
+      `get_events`/`render_overview` read, and vice versa.
+    - `events/<zarr>` -- one entry per STORE (keyed by the store's own
+      `zarr` path, matching the parquet's own `store_path` column), written
+      for every store in the dataset in one pass on the first `get_events`
+      miss for that commit (reading `events.parquet` once serves every
+      recording's future call). `events/_stores` is a companion entry: the
+      store list with per-store row counts.
+    - `overview/<zarr>/<group>/<width_px>` -- the rendered PNG bytes,
+      `Content-Type: image/png`, one entry per (recording, group, width)
+      actually requested (per section 5.5, in practice one or two widths
+      per recording).
+  A dataset whose D1 `zarr_source_commit` is missing or not 40-hex bypasses
+  this cache entirely for every projection kind (never read, never
+  written) rather than being keyed on a guess -- every such call reports
+  `cacheStatus: "miss"`.
+  A `CacheLike.match`/`.put` that throws (synchronously or as a rejected
+  promise) is logged once and treated as a miss/no-op, mirroring
+  `zarr-data.ts`'s `safeCachePut` discipline exactly.
 - **The tool registry is module-scope.**
   Only the transport (`PerRequestHTTPServerTransport`) and the `McpServer`
   instance `createMcpHandler`'s factory returns are per-request; the tool
@@ -585,10 +692,10 @@ not the budget itself.
 | `zod` | `^3.23.x` (repo bump reverted, see section 10.1) | SDK peer dependency; also this phase's own contract schemas | **Repo bump reverted.** `bun run typecheck` went green after two mechanical fixes (`z.record(valueSchema)` &rarr; `z.record(z.string(), valueSchema)` in three call sites), but `bun test` surfaced a real zod-4/`@asteasolutions/zod-to-openapi` incompatibility that a mechanical fix cannot close without adding new test-preload infrastructure the repo does not have today. Reverted per decision 10's fallback; see section 10.1. This phase's own contract files (`shared/contract/zarr-index.ts`, `shared/contract/mcp.ts`) use only zod APIs unchanged between 3 and 4, so the revert cost them one type-name edit (`z.SafeParseReturnType` instead of zod 4's `z.ZodSafeParseResult`). |
 | `hono` | `^4.11.4` | Hono itself; backend previously pinned `^4.6.0` | **Bumped and kept**, per decision 10's unconditional instruction. `bun run typecheck` and the backend suite are green at this version regardless of the zod outcome. |
 | `numcodecs` | `0.3.2` | JS Blosc/Zstd/GZip/LZ4/Zlib codecs, WASM-backed | **Does not run under workerd.** `numcodecs/blosc` loads its WASM module via a runtime `fetch()` + `WebAssembly.instantiate()` on the fetched bytes -- dynamic code generation, which workerd's embedder disallows by default. The npm package ships no `.wasm` file to statically import as a workaround either. Not a dependency of the real server; kept only as the spike's path (a) for the record. |
-| `fzstd` | `0.1.1` | Pure-JS zstd decompressor, no WASM | **Works under workerd**, and is the chosen decode primitive (decision 7). Also what `hyparquet-compressors` uses for `events.parquet`, so one decoder serves both `render_overview`/`read_window`'s taste and `get_events`. |
-| `hyparquet` | `1.30.0` | Parquet reader (`asyncBufferFromUrl`, `parquetReadObjects`) | Not exercised by this spike; snappy is built in, zstd needs `hyparquet-compressors`. Phase 3 item. |
-| `hyparquet-compressors` | matching `hyparquet` | zstd codec for `hyparquet` | Same as above. |
-| `fast-png` | `8.0.0` | PNG encoding for `render_overview`, pure JS via `fflate` | Not exercised by this spike (no image-producing tool in it). Chosen because it has no WASM dependency, consistent with this phase's decode-path finding. Phase 3 item. |
+| `fzstd` | `0.1.1` | Pure-JS zstd decompressor, no WASM | **Works under workerd**, and is the chosen decode primitive (decision 7). **Phase 3: also the codec `get_events` uses directly for `events.parquet`** (see the `hyparquet-compressors` row below) -- one decoder serves `render_overview`'s pyramid chunks AND `get_events`'s parquet rows. |
+| `hyparquet` | `1.30.0` | Parquet reader (`asyncBufferFromUrl`, `parquetReadObjects`) | **Phase 3: works under workerd on its own.** Confirmed via `bunx wrangler dev --local` against the throwaway smoke entry (bundled and started cleanly with `hyparquet` in the graph). `hyparquet`'s own built-in SNAPPY path (`src/snappy.js`) is a pure-JS port (`snappyjs`), not WASM -- the incompatibility is entirely in the `hyparquet-compressors` package, next row. |
+| `hyparquet-compressors` | matching `hyparquet` | zstd codec for `hyparquet` | **REMOVED from `package.json` (phase 3). Does not run under workerd.** Its `compressors` export EAGERLY constructs `SNAPPY: snappyUncompressor()` (the `hysnappy` dependency) at MODULE LOAD, which synchronously compiles a WASM module -- `WebAssembly.Module(): Wasm code generation disallowed by embedder`, reproduced under real workerd (`bunx wrangler dev --local` against `mcp-smoke-entry.ts`; the exact failure class this table's `numcodecs` row already documents for `blosc-decode.ts`). This crashes isolate startup for EVERY request, not only a `get_events` call, regardless of whether any dataset's parquet actually uses SNAPPY (none in the live catalog does -- every column sampled, nm000329 included, is ZSTD). The package's own `ZSTD` entry was exactly `fzstd`'s `decompress`, already a pinned dependency, so `backend/src/mcp/tools/get-events.ts` now builds a one-entry `{ ZSTD: (input) => decompress(input) }` compressors map itself instead of importing the package -- functionally identical for every dataset that exists, none of `hysnappy`'s baggage. A dataset whose parquet ever used a non-ZSTD codec would throw here (hyparquet's own missing-compressor error) rather than silently mis-decode. |
+| `fast-png` | `8.0.0` | PNG encoding for `render_overview`, pure JS via `fflate` | **Phase 3: works under workerd**, confirmed by the smoke script's `tools/list` registering `render_overview` and by `mcp-overview.test.ts`'s route-level PNG round-trip (encode here, decode back with the same package in the test). No WASM dependency, consistent with the decode-path finding. |
 | `zarrita` | `0.7.5` | Zarr store/array abstraction, FetchStore, sharding | **Not directly exercised by this spike.** The spike tested the codec layer (blosc/zstd decode) in isolation, which is the part decision 7 needed evidence on; zarrita's own store/array logic has no WASM dependency of its own (only the codec it would otherwise delegate to, which this phase replaces with the pure-JS path). Whether to use zarrita for chunk-key/shard-index bookkeeping or hand-roll it (as the spike does, see `README.md`'s shard-index derivation) is a phase 2 decision. |
 
 ## 10. Spike results (phase 1) and the real bundle delta (phase 2)
@@ -729,6 +836,34 @@ Bun's install layout makes the two indistinguishable in the bundle without a
 dedicated dependency-graph diff, which was out of scope for this
 measurement.
 
+### 10.3 Phase 3's real bundle delta
+
+Same measurement (`bunx wrangler deploy -c wrangler-sccn.toml --dry-run`),
+before phase 3's code and dependencies landed versus after:
+
+| Measurement | Total Upload | gzip |
+|---|---|---|
+| Before this PR (epic branch tip, phase 2 already merged) | 2986.72 KiB | 607.29 KiB |
+| After the full phase 3 implementation | 3235.64 KiB | 662.82 KiB |
+| **Delta (the real cost of this phase)** | **+248.92 KiB** | **+55.53 KiB** |
+
+(The "before" row here is a few epic-branch commits ahead of section 10.2's
+own "after" row for phase 2 -- 2983.28 KiB there versus 2986.72 KiB here --
+from unrelated `dev` syncs merged into the epic branch between the two
+measurements, not from anything in this phase.)
+
+The delta is `hyparquet` (parquet metadata/row-group decode), `fast-png`
+(PNG encode), the three new tools and their supporting modules
+(`index-reader.ts`, `catalog-row.ts`, `projection-cache.ts`, `envelope.ts`,
+`overview.ts`), and the zod 4 registration mirrors for all three.
+`hyparquet-compressors` contributes NOTHING to this bundle -- it was removed
+from `package.json` entirely (section 9's `hyparquet-compressors` row) once
+`bunx wrangler dev --local` against the throwaway smoke entry proved it
+crashes isolate startup under real workerd (`hysnappy`'s eager WASM
+compile). `compatibility_date` is unchanged (`2024-12-01`); the smoke
+script's compatibility-date check still passes, twice consecutively, after
+the fix.
+
 ## 11. Client compatibility
 
 | Client | Supports protocol revision 2026-07-28 |
@@ -821,12 +956,32 @@ measurement.
   comfortably sub-10ms, and the first call of a run (which pays isolate/
   module warm-up) is not meaningfully slower than the rest here, unlike
   the phase 1 spike's cold-start note.
-- **Phase 3 (#1295):** `list_recordings` and `get_events`, including the
-  `hyparquet` + `hyparquet-compressors` wiring against real
-  `events.parquet` objects, and the `events.tsv` fallback path.
-- **Phase 4 (#1296):** `render_overview` (the `fast-png` encode path) and
-  `read_window` (the recipe builder wired to live `index.json` data, plus
-  the capped taste using this phase's chosen decode path).
+- **Phase 3 (#1295): DONE.** `list_recordings`, `get_events`, and
+  `render_overview` (moved here from phase 4, decision 1) all landed, each
+  with real-route tests (real D1, a real `Bun.serve()` fixture upstream, a
+  real in-memory projection cache -- `backend/test/mcp-recording-tools.test.ts`,
+  `backend/test/mcp-overview.test.ts`, `backend/test/mcp-index-reader.test.ts`,
+  `backend/test/mcp-projection-cache.test.ts`). `list_recordings`/`get_events`
+  serve a legacy (v1/v2) index honestly -- an inferred `source_tree`/
+  `derived`, a `note`, `excluded_legacy_non_raw_count` -- rather than
+  failing on the roughly half of the catalog still pre-ADR-0033-bump.
+  `get_events` reads `events.parquet` with `hyparquet`, falls back to a
+  sibling `events.tsv` (flagged `estimated: true`) for a v1 index, and
+  computes `sample_index` locally on that path with the exact
+  `Math.floor(onset_s * rate + 0.5)` rule the converter itself uses.
+  `render_overview` reads only the `view/*` pyramid (never level 0, never
+  `zarr.json`) and encodes a grayscale envelope PNG with `fast-png`.
+  **`hyparquet-compressors` was dropped** (section 9's row, section 10.3):
+  it crashes isolate startup under real workerd (`hysnappy`'s eager WASM
+  compile), discovered by the smoke script, not by `bun test` -- `bun test`
+  alone would have stayed green. `get_events` now builds its own
+  ZSTD-only `compressors` map from `fzstd` instead. All five tools verified
+  together under real workerd via `backend/scripts/mcp-smoke.sh`, two
+  consecutive runs, `compatibility_date` unchanged.
+- **Phase 4 (#1296):** `read_window` (the recipe builder wired to live
+  `index.json` data, plus the capped taste using this phase's chosen decode
+  path). `render_overview` is no longer phase 4's scope (decision 1;
+  landed in phase 3 instead).
 - **Phase 5 (#1297):** docs site coverage, the OSA tool-registration wiring
   ADR 0049 anticipates, and the release.
 - **ADR 0050** (decision 11): `origin/dev` did not yet carry ADR 0049 when
@@ -860,10 +1015,17 @@ measurement.
   `superRefine`/discriminated-union shapes (the channel-seconds check, the
   recipe/taste result union) are deferred to phase 4 along with the tool
   itself.
-- **Whether `zarrita` is used as-is or replaced by hand-rolled chunk-key /
-  shard-index logic** (as this phase's spike does for `decode_chunk`) is
-  still open; either way, the codec underneath it is this phase's path (b),
-  never `numcodecs`.
+- **CLOSED (phase 3, decision 1): `zarrita` is never used in the Worker.**
+  `render_overview`'s chunk keys (`view/<L>/c/0/0/<k>`) and its chunk plan
+  (`Math.ceil(levelColumns / (view_chunk_columns ?? 1024))`) are hand-rolled
+  in `backend/src/mcp/overview.ts` -- no store/array abstraction needed for
+  a fixed, non-sharded, always-regular-chunked object shape. `zarrita`
+  remains the recommendation the read recipe's `how_to.zarrita` snippet
+  hands to a CLIENT (section 6.2); the Worker itself never imports it. The
+  codec underneath every in-Worker decode is this phase's path (b) -- pure
+  JS, no WASM -- for both the blosc/zstd pyramid chunks (`fzstd` via
+  `decodeBloscZstdInt16`) and the parquet zstd codec (`fzstd` directly,
+  section 9's `hyparquet-compressors` row), never `numcodecs`.
 - **The browser-origin allowlist decision** (which origins beyond
   `nemar.org` get proxied `zarr.nemar.org` access for a browser-executed
   OSA widget, per ADR 0049) is explicitly out of scope for this phase and
