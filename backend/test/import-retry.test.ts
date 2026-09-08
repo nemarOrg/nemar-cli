@@ -355,7 +355,7 @@ describe("IMPORT_RETRY_CANDIDATES_QUERY", () => {
       dataset_id: "on000001",
       status: "quarantined",
       // The message production actually stores: the CLI's own marker line,
-      // preserved through recovery by the ADR 0050 rule. This fixture used to
+      // preserved through recovery by the ADR 0049 rule. This fixture used to
       // read `quarantined: ${OPENNEURO_UPSTREAM_MARKER}` -- a string no writer
       // ever produced -- which let this test pass green while the real recovery
       // path wrote "quarantined: upstream_inaccessible", dropped the bracketed

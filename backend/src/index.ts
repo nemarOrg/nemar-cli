@@ -687,7 +687,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
         try {
           const upd = await db
             .prepare(
-              // A specific error is never overwritten by a generic one (ADR 0050).
+              // A specific error is never overwritten by a generic one (ADR 0049).
               // "stuck > 6h" says only that this sweep fired; a row can be in-flight
               // here yet already carry a real diagnosis (a racing finalize POST moved
               // it off `failed` before the webhook's dropped waitUntil recovery ran --

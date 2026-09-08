@@ -1,5 +1,5 @@
 /**
- * The `last_error` invariant (epic #1306, ADR 0050):
+ * The `last_error` invariant (epic #1306, ADR 0049):
  *
  *   A SPECIFIC error message must never be overwritten by a GENERIC one.
  *

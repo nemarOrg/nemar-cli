@@ -139,7 +139,7 @@ export function registerImportStateRoutes(webhooks: WebhookRouter): void {
              stage = excluded.stage, status = excluded.status,
              shards_total = COALESCE(excluded.shards_total, import_jobs.shards_total),
              workflow_run_url = COALESCE(excluded.workflow_run_url, import_jobs.workflow_run_url),
-             -- A specific error is never overwritten by a generic one (ADR 0050).
+             -- A specific error is never overwritten by a generic one (ADR 0049).
              -- Originally this protected only the OpenNeuro-inaccessible marker
              -- (#808); the rule is broader. The doomed copy/finalize legs that still
              -- run under \`if: !cancelled()\`, and the report job that runs after all
