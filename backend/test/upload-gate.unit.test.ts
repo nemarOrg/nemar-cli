@@ -158,10 +158,15 @@ describe("realDatasetCreateGate: account_kind is checked first (epic #1272 phase
   });
 
   test("a service-kind account is NOT refused by the kind check (falls through to the ordinary gates)", () => {
-    // Service accounts cannot reach this route in practice (the device flow
-    // and self-service key mint both refuse them), but the gate itself only
-    // singles out `test` -- proving that is what makes the predicate exactly
-    // `=== 'test'` rather than `!== 'person'`.
+    // A service account CAN reach this route in practice, using a key an
+    // owner minted for it (POST /admin/users/:username/keys) -- that key
+    // authenticates through authMiddleware exactly like any other, which
+    // never reads account_kind. The device flow and self-service key mint
+    // only refuse a service/test account from SELF-serving a key; they say
+    // nothing about a request already carrying one (ADR 0048; #1284
+    // review corrected an earlier, false version of this comment). The gate
+    // itself only singles out `test` -- proving that is what makes the
+    // predicate exactly `=== 'test'` rather than `!== 'person'`.
     expect(
       realDatasetCreateGate(
         { service_access: 1, sandbox_completed: 1, account_kind: "service" },

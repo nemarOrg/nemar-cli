@@ -52,9 +52,13 @@ names the fix: `nemar admin keys create`.
 `isExemptRole`. This is a strictly better predicate than the role check it
 replaces: the operational accounts this phase moves to `service` keep their
 exemption, and a person who happens to hold `admin`/`owner` is no longer exempt at
-all — the two real owner accounts (`yahya`, `arnodelorme`) already hold verified
-iDs, so nothing regresses for them. An absent or unrecognised kind is not exempt
-(fails closed, the same posture the role check held).
+all — at the time of writing, the two real owner accounts (`yahya`,
+`arnodelorme`) already hold verified iDs, so nothing regresses for them today.
+That fact is an observation about the current catalog, not something this
+migration or the kind exemption depends on: a future owner without a verified
+iD would simply see the `orcid_verified` gap like any other `person`, which is
+the fail-closed behavior this decision wants. An absent or unrecognised kind is
+not exempt (fails closed, the same posture the role check held).
 
 **Keys for non-person kinds are owner-minted, never self-served.** Self-service
 `POST /auth/keys` and the device flow's own mint (`DEVICE_MINT_INSERT_SQL`) both
@@ -70,10 +74,19 @@ liveness question.
 `realDatasetCreateGate` (backend/src/services/upload-gate.ts) gains a third input
 and refuses a real (`nm`) create with `test_account_sandbox_only` when
 `isProduction && !sandbox && account_kind === "test"`. No restriction off
-production, and no restriction on a `service` account — a service account cannot
-sign in to reach this route at all (the device/key gates above already stop it),
-so the dataset-create gate is a `test`-only rule by construction, not by a second
-check of its own.
+production, and no restriction on a `service` account, deliberately: the
+device/key gates above stop a `service`/`test` account only from SELF-serving a
+key (self-minting, or the device flow's own sign-in) — they say nothing about a
+request already carrying a key an owner minted for it through
+`POST /admin/users/:username/keys`. That key authenticates through
+`authMiddleware` exactly like any other (it never reads `account_kind`), so an
+owner-minted `service` key reaches the dataset-create route, and every other
+authenticated route, normally. `test_account_sandbox_only` is therefore the one
+and only place a `service` account is unrestricted here on purpose — it is what
+an operational/automation account is FOR — while `test` stays fenced to `xx`
+sandbox datasets on production (#1284 review corrected this section; it
+previously and incorrectly claimed a service account could not reach this route
+at all).
 
 ## Consequences
 
