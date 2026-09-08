@@ -204,14 +204,69 @@ export function parseEmailPreferences(raw: string | null): EmailPreferences {
 }
 
 /**
+ * Env fields the admin-notification fence below needs. Structurally typed
+ * (like EmailDeliveryEnv above), not `Bindings`, so this module stays
+ * decoupled from the full binding surface.
+ */
+export interface AdminNotificationEnv {
+  ENVIRONMENT?: string;
+  /** Opt-in escape hatch for a DELIBERATE staging test of admin mail: set to
+   *  exactly "1" to let a non-production worker generate admin notifications.
+   *  Unset/anything else keeps the fence closed. */
+  DEV_ADMIN_NOTIFICATIONS?: string;
+}
+
+/**
+ * True when a non-production worker may generate admin-facing notification
+ * mail at all (repo issue: admin notifications must be production-only).
+ * Production always allows. Every other (or unset/unrecognized) ENVIRONMENT
+ * requires the explicit opt-in `DEV_ADMIN_NOTIFICATIONS === "1"`.
+ *
+ * Deliberately mirrors isEmailDeliveryAllowed's notion of "production"
+ * (only the literal string "production" bypasses; unset/unknown fails
+ * toward suppressing) rather than services/environment.ts's
+ * isNonProductionEnv, which treats an unknown ENVIRONMENT as production.
+ * The risk here is the same as isEmailDeliveryAllowed's: the dev worker
+ * shares production's `users` table and holds a live RESEND_API_KEY, and
+ * its own admin account is on DEV_EMAIL_ALLOWLIST (so staging sign-in
+ * codes reach them) -- which means the per-recipient delivery fence alone
+ * does NOT stop admin notifications from reaching that admin in dev. A
+ * misconfigured/typo'd ENVIRONMENT on a worker that holds live secrets must
+ * fail toward NOT generating admin mail, not toward generating it.
+ */
+export function isAdminNotificationAllowed(env: AdminNotificationEnv | undefined): boolean {
+  const environment = (env?.ENVIRONMENT ?? "").trim().toLowerCase();
+  if (environment === "production") return true;
+  return (env?.DEV_ADMIN_NOTIFICATIONS ?? "").trim() === "1";
+}
+
+/**
  * Get admin/owner emails filtered by notification category.
  * If all admins have opted out, falls back to the first admin
  * to ensure at least one recipient.
+ *
+ * `env` is the single chokepoint fence (repo issue: admin notifications
+ * must be production-only): every call site funnels through here, so no
+ * call site can forget the fence. On a non-production worker (and without
+ * the DEV_ADMIN_NOTIFICATIONS opt-in) this returns [] before the D1 query
+ * even runs, and logs one console.warn naming the category. `env` is a
+ * required parameter -- not optional -- so a caller cannot silently allow
+ * delivery by forgetting to pass it; TypeScript enforces that here, and
+ * isAdminNotificationAllowed's own undefined-safe checks keep the fence
+ * closed even if a caller passes an empty object.
  */
 export async function getAdminEmailsForCategory(
   db: D1Database,
   category: EmailCategory,
+  env: AdminNotificationEnv,
 ): Promise<string[]> {
+  if (!isAdminNotificationAllowed(env)) {
+    console.warn(
+      `[email] admin notification for "${category}" suppressed: admin notifications are production-only (ENVIRONMENT=${env?.ENVIRONMENT ?? "unset"}). Set DEV_ADMIN_NOTIFICATIONS=1 to opt in for a deliberate staging test.`,
+    );
+    return [];
+  }
+
   const result = await db
     .prepare(
       "SELECT email, email_preferences FROM users WHERE role IN ('owner', 'admin') AND status = 'approved' AND deleted_at IS NULL",

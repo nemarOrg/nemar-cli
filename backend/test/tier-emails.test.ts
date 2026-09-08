@@ -140,11 +140,20 @@ describe("GET /auth/verify (the CLI verification link)", () => {
     expect(row?.service_access).toBe(0);
   });
 
-  test("notifies the admins that a new account is verified", async () => {
+  test("in production, notifies the admins that a new account is verified", async () => {
+    // Admin notifications are production-only (getAdminEmailsForCategory's
+    // fence in services/email.ts), so this now has to run against a
+    // production-configured app to actually observe the send -- production
+    // bypasses DEV_EMAIL_ALLOWLIST entirely, so no allow-list entry is
+    // needed for ADMIN_EMAIL here.
     seedUnverifiedCliUser();
 
     const calls = await withFakeResend(async (calls) => {
-      await app.request(`/auth/verify?token=${VERIFY_TOKEN}`, {}, env());
+      await app.request(
+        `/auth/verify?token=${VERIFY_TOKEN}`,
+        {},
+        { ...env(), ENVIRONMENT: "production" },
+      );
       return calls;
     });
 
@@ -154,6 +163,42 @@ describe("GET /auth/verify (the CLI verification link)", () => {
     // The admin's action is the upload grant, so that is the command the
     // mail names.
     expect(toAdmin[0].html).toContain("nemar admin approve");
+  });
+
+  test("outside production, the admin notification is suppressed by default", async () => {
+    // env() is a dev/test-configured app (ENVIRONMENT: "test") with
+    // ADMIN_EMAIL itself on DEV_EMAIL_ALLOWLIST -- proving that the
+    // per-recipient delivery fence alone would NOT have stopped this send
+    // (the admin's own address is deliverable to). getAdminEmailsForCategory's
+    // production-only fence is what actually suppresses it, before the
+    // recipient list is even built.
+    seedUnverifiedCliUser();
+
+    const calls = await withFakeResend(async (calls) => {
+      const res = await app.request(`/auth/verify?token=${VERIFY_TOKEN}`, {}, env());
+      expect(res.status).toBe(200);
+      return calls;
+    });
+
+    // The user-facing key-ready mail is unrelated to the admin-notification
+    // fence and still goes out, so this isn't the whole route going dark.
+    expect(sendsTo(calls, USER_EMAIL).length).toBe(1);
+    expect(sendsTo(calls, ADMIN_EMAIL).length).toBe(0);
+  });
+
+  test("outside production, DEV_ADMIN_NOTIFICATIONS=1 opts back in for a deliberate staging test", async () => {
+    seedUnverifiedCliUser();
+
+    const calls = await withFakeResend(async (calls) => {
+      await app.request(
+        `/auth/verify?token=${VERIFY_TOKEN}`,
+        {},
+        { ...env(), DEV_ADMIN_NOTIFICATIONS: "1" },
+      );
+      return calls;
+    });
+
+    expect(sendsTo(calls, ADMIN_EMAIL).length).toBe(1);
   });
 });
 

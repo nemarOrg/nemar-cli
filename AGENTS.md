@@ -99,6 +99,11 @@ So a dev-side job that selects users by a generic predicate can still email real
 and a cascade delete can still destroy a real repo.
 The catalog purge removed one blast-radius vector; it did not remove the reason these fences exist.
 
+Admin-facing notification mail (new-user approval, upload-access and publication requests,
+import recovery, cron digests) is production-only by default,
+via `getAdminEmailsForCategory`'s fence in `backend/src/services/email.ts`.
+Set `DEV_ADMIN_NOTIFICATIONS=1` only for a deliberate staging test of admin mail.
+
 `users.account_kind` (ADR 0048) is explicit on the seeded fixtures: `test-owner` and `test-admin`
 are `service` (operational, no human signs in to them directly); `test-user`, `test-pending`,
 `test-verified`, and `test-revoked` are `test` (a persona, not a real identity); `test-web` stays
