@@ -87,11 +87,18 @@ export function resolveImportError(
   return incoming ?? null;
 }
 
-/** SQL-literal-escape a prefix for use inside a LIKE pattern. */
-function sqlPrefixPattern(prefix: string): string {
-  // Prefixes are compile-time constants from the array above (no user input), but
-  // escaping single quotes keeps this safe if one ever gains an apostrophe.
-  return `'${prefix.replace(/'/g, "''")}%'`;
+/** SQL string literal, single quotes escaped. */
+function sqlLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+/**
+ * SQLite's bare `TRIM(x)` strips SPACES only, while JS `.trim()` strips all
+ * whitespace. Passing the character set explicitly closes that gap, so a message
+ * indented with a tab or led by a newline is classified the same on both sides.
+ */
+function sqlTrimmed(expr: string): string {
+  return `TRIM(${expr}, ' ' || char(9) || char(10) || char(11) || char(12) || char(13))`;
 }
 
 /**
@@ -101,15 +108,30 @@ function sqlPrefixPattern(prefix: string): string {
  * {@link isGenericImportError} there, which keeps the incoming value bound exactly
  * once instead of once per prefix.
  *
- * `[` and `]` are literal in SQLite LIKE (no character classes), so a bracketed
- * marker inside a message is matched literally -- the property the retry engine's
- * candidate query already relies on.
+ * This is the SAME rule as {@link isGenericImportError}, so it must reach the same
+ * verdict on the same string; `import-error.test.ts` runs both over a shared corpus
+ * to keep them honest. Two SQLite defaults would otherwise break that agreement,
+ * and both are avoided here rather than papered over:
+ *
+ *   - `LIKE` is case-INSENSITIVE for ASCII, so `'Terminal: x' LIKE 'terminal: %'`
+ *     is true while `"Terminal: x".startsWith("terminal: ")` is false. A prefix
+ *     test via `substr(...) != '...'` uses the default BINARY collation and is
+ *     case-sensitive, matching JS.
+ *   - `LIKE` also gives `%` and `_` wildcard meaning inside the pattern. Comparing
+ *     a substring instead removes pattern semantics altogether, so a prefix that
+ *     one day contains either character keeps working and needs no escape clause.
+ *
+ * `substr` counts characters and every prefix is ASCII, so `prefix.length` (UTF-16
+ * code units, as `startsWith` compares) is the right length to take.
  */
 export function storedErrorIsSpecificSql(expr: string): string {
+  const trimmed = sqlTrimmed(expr);
   return [
     `${expr} IS NOT NULL`,
-    `TRIM(${expr}) != ''`,
-    ...GENERIC_IMPORT_ERROR_PREFIXES.map((p) => `TRIM(${expr}) NOT LIKE ${sqlPrefixPattern(p)}`),
+    `${trimmed} != ''`,
+    ...GENERIC_IMPORT_ERROR_PREFIXES.map(
+      (p) => `substr(${trimmed}, 1, ${p.length}) != ${sqlLiteral(p)}`,
+    ),
   ].join("\n                AND ");
 }
 

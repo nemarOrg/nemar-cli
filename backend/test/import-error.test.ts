@@ -26,6 +26,7 @@ import {
   GENERIC_IMPORT_ERROR_PREFIXES,
   isGenericImportError,
   resolveImportError,
+  storedErrorIsSpecificSql,
 } from "../src/services/import-error";
 import { OPENNEURO_UPSTREAM_MARKER, runImportRecovery } from "../src/services/import-recovery";
 import { IMPORT_RETRY_CANDIDATES_QUERY } from "../src/services/import-retry";
@@ -103,6 +104,77 @@ describe("resolveImportError", () => {
       "quarantined: has_doi",
     );
     expect(resolveImportError(null, "terminal: prepare=failure")).toBe("terminal: prepare=failure");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The two halves of one rule must agree
+// ---------------------------------------------------------------------------
+
+/**
+ * `isGenericImportError` (TypeScript, applied to the INCOMING message) and
+ * `storedErrorIsSpecificSql` (SQL, applied to the STORED one) state the same rule
+ * in two languages. Nothing in the type system makes them agree, so agreement is
+ * asserted here, against real SQLite rather than against a re-typed pattern.
+ *
+ * The corpus deliberately includes the cases where SQLite's defaults diverge from
+ * JS: `LIKE` is case-insensitive for ASCII, and bare `TRIM()` strips spaces but
+ * not tabs or newlines. Both produced real divergences before the SQL side moved
+ * to a `substr` comparison with an explicit trim character set.
+ */
+describe("the SQL half agrees with the TypeScript half", () => {
+  const corpus: (string | null)[] = [
+    // what the pipeline actually writes
+    "terminal: prepare=failure copy=failure finalize=failure",
+    "quarantined: upstream_inaccessible",
+    "auto-rollback: unambiguous_orphan",
+    "stuck > 6h (scheduled sweep)",
+    // real diagnoses
+    UPSTREAM_MESSAGE,
+    "Failed to push: remote: Invalid username or token.",
+    "fatal: Authentication failed for 'https://github.com/nemarDatasets/on000001.git/'",
+    // case: LIKE would fold these into the generic bucket, startsWith does not
+    "Terminal: prepare=failure",
+    "TERMINAL: prepare=failure",
+    "Quarantined: something",
+    // leading whitespace: bare TRIM() strips only the spaces
+    "\tterminal: prepare=failure",
+    "\nterminal: prepare=failure",
+    "\r\nquarantined: has_doi",
+    "  terminal: prepare=failure",
+    // boundaries
+    "terminal:",
+    "stuck > 6h",
+    "",
+    "   ",
+    null,
+  ];
+
+  test("every message classifies identically on both sides", () => {
+    const db = freshDb();
+    // A named parameter, because storedErrorIsSpecificSql inlines its expression
+    // once per prefix -- a positional `?` would multiply the binds.
+    const query = db.query<{ generic: number }, { $e: string | null }>(
+      `SELECT NOT (${storedErrorIsSpecificSql("$e")}) AS generic`,
+    );
+
+    for (const message of corpus) {
+      const sqlSaysGeneric = Boolean(query.get({ $e: message })?.generic);
+      expect({ message, generic: sqlSaysGeneric }).toEqual({
+        message,
+        generic: isGenericImportError(message),
+      });
+    }
+  });
+
+  test("each declared prefix is generic in SQL too, with its real body", () => {
+    const db = freshDb();
+    const query = db.query<{ generic: number }, { $e: string }>(
+      `SELECT NOT (${storedErrorIsSpecificSql("$e")}) AS generic`,
+    );
+    for (const prefix of GENERIC_IMPORT_ERROR_PREFIXES) {
+      expect(Boolean(query.get({ $e: `${prefix}whatever` })?.generic)).toBe(true);
+    }
   });
 });
 
