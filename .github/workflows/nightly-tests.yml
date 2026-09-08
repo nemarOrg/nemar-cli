@@ -35,6 +35,7 @@ jobs:
     env:
       TEST_API_URL: https://nemar-api-dev.sccn-org.workers.dev
       TEST_ADMIN_API_KEY: ${{ secrets.TEST_ADMIN_API_KEY }}
+      TEST_OWNER_API_KEY: ${{ secrets.TEST_OWNER_API_KEY }}
       TEST_USER_API_KEY: ${{ secrets.TEST_USER_API_KEY }}
       TEST_BYPASS_TOKEN: ${{ secrets.TEST_BYPASS_TOKEN }}
     steps:
