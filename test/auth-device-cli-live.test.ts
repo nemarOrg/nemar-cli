@@ -31,6 +31,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { machineName } from "../src/lib/device-login";
 import "./setup";
 import { TEST_CONFIG } from "./setup";
 
@@ -233,6 +234,18 @@ describe.skipIf(PROD_GUARD_ACTIVE)(
 
       const cli = runCliStreaming(["auth", "login", "--no-open"]);
       const userCode = await cli.codeReady;
+
+      // Real browser-side lookup before confirm, mirroring
+      // test/auth-device-flow.test.ts's full-loop test: the CLI printed
+      // this code, so the machine name the "browser" sees must be the one
+      // the CLI itself started the device code with.
+      const lookupRes = await fetch(
+        `${API}/auth/device/lookup?code=${encodeURIComponent(userCode)}`,
+        { headers: { ...baseHeaders, Cookie: cookie } },
+      );
+      expect(lookupRes.status).toBe(200);
+      const lookupBody = (await lookupRes.json()) as { machine_name: string };
+      expect(lookupBody.machine_name).toBe(machineName());
 
       const confirmRes = await postJson(
         "/auth/device/confirm",
