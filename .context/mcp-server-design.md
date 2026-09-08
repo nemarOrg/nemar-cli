@@ -658,11 +658,12 @@ delta: no route or tool in phase 2 imports `blosc-decode.ts`, so it is
 tree-shaken out of the reachable graph entirely -- it only becomes part of
 the deployed bundle once phase 3/4 wires a tool that calls it.
 
-**`bun` did not hoist a single shared copy of zod 4.** Both
+**`bun` installed two copies of zod 4, not one.** Both
 `backend/node_modules/zod4/package.json` and
 `backend/node_modules/@modelcontextprotocol/server/node_modules/zod/package.json`
-exist, byte-identical content (`4.5.4`) but distinct inodes -- exactly the
-"two-copy risk" section 12 named. Harmless for correctness (the SDK's
+exist, byte-identical content (`4.5.4`) but distinct inodes -- **expected,
+not a defect**: exactly the "two-copy risk" section 12 named ahead of
+time. Harmless for correctness (the SDK's
 `registerTool` only ever sees the mirrors built against `zod4`, and the
 parity test -- `backend/test/mcp-schema-parity.test.ts` -- proves those
 mirrors agree with the zod 3 wire contract on every case in its table), but
@@ -694,27 +695,75 @@ measurement.
   dataset; the p95 CPU budget itself is still open, pending real traffic
   once the host is live -- the smoke run's per-call timings are the
   starting measurement.
-  **Blocker, not carried forward silently:** `bash backend/scripts/mcp-smoke.sh`
-  could not be run to completion in this phase's environment --
-  `wrangler dev --local` fails to even START the worker (`Uncaught
-  TypeError: Incorrect type for map entry 'NON_PROD_SANDBOX_CLEANUP_QUERY':
-  the provided value is not of type 'function or ExportedHandler'`),
-  reproduced identically on wrangler 4.85.0 (the repo's pin) and 4.130.0
-  (latest), both plain and via `cfman`, and on the UNMODIFIED epic-branch
-  `backend/src/index.ts` (i.e. it predates this PR and is unrelated to the
-  MCP work: `index.ts` has exported `NON_PROD_SANDBOX_CLEANUP_QUERY`/
-  `PROD_SANDBOX_CLEANUP_QUERY` as plain string constants since the epic #923
-  cron-safety work, and some local-workerd validation added between the
-  spike's wrangler version and this one rejects a non-function named export
-  on the entry module). `wrangler deploy --dry-run` (bundling only, no
-  runtime start) is unaffected and was used for the bundle measurement
-  above. The smoke script itself (`backend/scripts/mcp-smoke.sh`) is
-  written and, per a manual dry run of its assertions against the real
-  `@modelcontextprotocol/server` package under Bun (not workerd --
-  `backend/test/mcp-route.test.ts`, 18/18 passing, exercises the identical
-  request/response shapes), is expected to pass once this environment
-  blocker is cleared -- filing it (or fixing `index.ts`'s export shape) is
-  outside this phase's mandate.
+  **The workerd smoke now runs, via a throwaway entry, not `index.ts`.**
+  `wrangler dev --local` cannot start the real `backend/src/index.ts` in
+  this environment at all -- `Uncaught TypeError: Incorrect type for map
+  entry 'NON_PROD_SANDBOX_CLEANUP_QUERY': the provided value is not of type
+  'function or ExportedHandler'`, reproduced identically on wrangler 4.85.0
+  (the repo's pin) and 4.130.0 (latest), both plain and via `cfman`, and on
+  the UNMODIFIED epic-branch `index.ts` -- i.e. it predates this PR and is
+  unrelated to the MCP work: `index.ts` has exported
+  `NON_PROD_SANDBOX_CLEANUP_QUERY`/`PROD_SANDBOX_CLEANUP_QUERY` as plain
+  string constants since the epic #923 cron-safety work, and this local
+  workerd runtime rejects any named export on the entry module that is not
+  a function or `ExportedHandler`. Filed as issue #1324; fixing
+  `index.ts`'s export shape is out of this phase's scope.
+  So the smoke script drives a MINIMAL throwaway entry instead --
+  `backend/scripts/mcp-smoke-entry.ts` (`export default { fetch: (req, env,
+  ctx) => mcpRoutes.fetch(req, env, ctx) }`) and
+  `backend/scripts/mcp-smoke.wrangler.toml` (same `compatibility_date`/
+  `compatibility_flags` as `wrangler-sccn.toml`, a local-only `DB`
+  binding, `ENVIRONMENT=development`, nothing else) -- which starts
+  cleanly under real workerd. Because the entry IS the mcp sub-app
+  directly, every path the script drives, including `/`, reaches the real
+  sub-app; there is no host fork in front of it to route around, so the
+  loopback caveat a prior version of this note carried (the descriptor at
+  `/` being unreachable from the api-host path mount) no longer applies to
+  this script.
+  Two of the checks (`describe_dataset`/`search_datasets` querying an id
+  that does not exist) need the MIGRATED schema, not just a live D1
+  binding: an unmigrated local D1 has no `datasets` table at all, and that
+  surfaces as a `D1_ERROR` wrapped in `isError: true` whose text never
+  mentions `search_datasets`, which is a different (and wrong) reason for
+  those checks to fail. The script applies every migration first, via
+  `wrangler d1 execute --local --file`, one file at a time with full-line
+  `--` comments stripped -- the same technique
+  `scripts/d1-migration-check.ts` already uses, and for the identical
+  reason: `wrangler d1 migrations apply` scans the raw file text for the
+  words "BEGIN TRANSACTION"/"COMMIT" and refuses "a file containing
+  several transactions" even when those words appear only inside a
+  comment (true for migration 0021 and others). No row data is inserted;
+  every check still runs against an empty, merely-migrated catalog.
+  `wrangler deploy --dry-run` (bundling only, no runtime start; unaffected
+  by the `index.ts` blocker either way) was used for the bundle
+  measurement above.
+
+  **Result, two consecutive runs, `backend/scripts/mcp-smoke.sh`:**
+
+  | Check | Verdict |
+  |---|---|
+  | compatibility_date 2024-12-01 starts the SDK under real workerd | **PASS -- unchanged, not bumped** |
+  | `GET /` -- real mcp descriptor, endpoint built from the request origin | PASS |
+  | `server/discover` -- 200, `supportedVersions: ["2026-07-28"]` | PASS |
+  | `tools/list` -- 200, exactly `search_datasets`/`describe_dataset` | PASS |
+  | `tools/list` -- 24h public cache hint (`ttlMs`/`cacheScope` on the result) | PASS |
+  | `describe_dataset(xx000000)` -- tool error naming `search_datasets` | PASS |
+  | `search_datasets()` -- 200, `count: 0` over the empty migrated catalog | PASS |
+  | `describe_dataset(not-an-id)` -- `isError` naming `dataset_id` (no ajv code generation under workerd) | PASS |
+  | legacy `initialize` handshake -- 200 | PASS |
+  | legacy `tools/call` (no `_meta` envelope) -- 200 | PASS |
+  | `Mcp-Name`/body mismatch -- HTTP 400 / `-32020` | PASS |
+  | `GET`/`DELETE` `/mcp` -- 405 | PASS |
+  | `OPTIONS /mcp` -- 204 with the `Mcp-*` headers allowed | PASS |
+  | disallowed `Origin` on `POST /mcp` -- 403 / `-32000` | PASS |
+
+  All 14 checks PASS on both runs. Per-call wall time (`curl`'s
+  `%{time_total}`, local loopback, so a floor not a production estimate):
+  `server/discover` ~7-8 ms, `tools/list` ~3 ms, `tools/call
+  describe_dataset` ~2-7 ms, `tools/call search_datasets` ~4 ms -- all
+  comfortably sub-10ms, and the first call of a run (which pays isolate/
+  module warm-up) is not meaningfully slower than the rest here, unlike
+  the phase 1 spike's cold-start note.
 - **Phase 3 (#1295):** `list_recordings` and `get_events`, including the
   `hyparquet` + `hyparquet-compressors` wiring against real
   `events.parquet` objects, and the `events.tsv` fallback path.
