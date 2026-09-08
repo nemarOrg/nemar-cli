@@ -22,6 +22,7 @@ import {
   getEventsOutputSchema,
   listRecordingsInputSchema,
   listRecordingsOutputSchema,
+  provenanceEnvelopeSchema,
   renderOverviewInputSchema,
   renderOverviewOutputSchema,
   searchDatasetsInputSchema,
@@ -34,6 +35,7 @@ import {
   getEventsOutputSchema4,
   listRecordingsInputSchema4,
   listRecordingsOutputSchema4,
+  provenanceEnvelopeSchema4,
   renderOverviewInputSchema4,
   renderOverviewOutputSchema4,
   searchDatasetsInputSchema4,
@@ -389,4 +391,144 @@ describe("renderOverviewOutputSchema parity", () => {
     test(label, () =>
       assertParity(renderOverviewOutputSchema, renderOverviewOutputSchema4, input, label));
   }
+});
+
+// ---------------------------------------------------------------------------
+// provenanceEnvelopeSchema (PR review item 24): the sss-iff-derived
+// refinement (ADR 0028) is the exact invariant whose absence on
+// recordingSummarySchema caused the item-1 bug (every derived store's
+// envelope threw) -- covered here directly, plus embedded in each of the
+// three recording-level tools' own output parity below.
+// ---------------------------------------------------------------------------
+
+describe("provenanceEnvelopeSchema parity", () => {
+  const base = {
+    dataset_id: "on003392",
+    doi: "10.82901/nemar.on003392",
+    license: "CC0",
+    citation: "Someone (2026) A Dataset (v1.0.0). NEMAR. https://doi.org/10.82901/nemar.on003392",
+    source_commit: "1035360c2cbb5a349cc43a46a58543c5f02a4e38",
+    index_etag: null,
+    engine_version: "3",
+    source_tree: "raw",
+    lossy: true,
+    dtype: "int16",
+    effective_rate_hz: 250,
+    source_rate_hz: 2000,
+    zarr_verify_status: null,
+  };
+  const sss = {
+    applied: true,
+    method: "maxwell_filter",
+    calibration: "sub-01_acq-calibration_meg.dat",
+    cross_talk: "sub-01_acq-crosstalk_meg.fif",
+    mne_version: "1.12.1",
+  };
+  const cases: Array<[string, unknown]> = [
+    ["derived: false, no sss -- accepted", { ...base, derived: false }],
+    ["derived: true WITH sss -- accepted", { ...base, derived: true, sss }],
+    ["derived: true WITHOUT sss -- rejected by both copies (ADR 0028)", { ...base, derived: true }],
+    [
+      "derived: false WITH sss -- rejected by both copies (ADR 0028)",
+      { ...base, derived: false, sss },
+    ],
+    [
+      "a malformed (non-40-hex) source_commit -- rejected",
+      { ...base, derived: false, source_commit: "abc" },
+    ],
+  ];
+  for (const [label, input] of cases) {
+    test(label, () =>
+      assertParity(provenanceEnvelopeSchema, provenanceEnvelopeSchema4, input, label));
+  }
+});
+
+describe("envelope embedded in the three recording-level tools' outputs (item 24)", () => {
+  const derivedEnvelope = {
+    dataset_id: "on003392",
+    doi: "10.82901/nemar.on003392",
+    license: "CC0",
+    citation: null,
+    source_commit: "1035360c2cbb5a349cc43a46a58543c5f02a4e38",
+    index_etag: null,
+    engine_version: "3",
+    source_tree: "raw",
+    derived: true,
+    sss: {
+      applied: true,
+      method: "maxwell_filter",
+      calibration: "sub-01_acq-calibration_meg.dat",
+      cross_talk: "sub-01_acq-crosstalk_meg.fif",
+      mne_version: "1.12.1",
+    },
+    lossy: true,
+    dtype: "int16",
+    effective_rate_hz: 250,
+    source_rate_hz: 2000,
+    zarr_verify_status: null,
+  };
+
+  test("listRecordingsOutputSchema accepts a derived-store envelope with sss", () => {
+    assertParity(
+      listRecordingsOutputSchema,
+      listRecordingsOutputSchema4,
+      {
+        dataset_id: "on003392",
+        source_commit: "1035360c2cbb5a349cc43a46a58543c5f02a4e38",
+        recordings: [],
+        total_count: 0,
+        excluded_derived_count: 1,
+        limit: 50,
+        offset: 0,
+        index_format_version: 3,
+        discovered_count: 1,
+        failure_count: 0,
+        pending_count: 0,
+        excluded_legacy_non_raw_count: 0,
+        envelope: derivedEnvelope,
+      },
+      "listRecordingsOutputSchema with a derived envelope",
+    );
+  });
+
+  test("getEventsOutputSchema accepts a derived-store envelope with sss", () => {
+    assertParity(
+      getEventsOutputSchema,
+      getEventsOutputSchema4,
+      {
+        dataset_id: "on003392",
+        recording: "sub-01/meg/sub-01_task-localizer_meg.zarr",
+        events: [],
+        source: "events_tsv_fallback",
+        estimated: true,
+        total_count: 0,
+        limit: 1000,
+        offset: 0,
+        truncated: false,
+        envelope: derivedEnvelope,
+      },
+      "getEventsOutputSchema with a derived envelope",
+    );
+  });
+
+  test("renderOverviewOutputSchema accepts a derived-store envelope with sss", () => {
+    assertParity(
+      renderOverviewOutputSchema,
+      renderOverviewOutputSchema4,
+      {
+        dataset_id: "on003392",
+        recording: "sub-01/meg/sub-01_task-localizer_meg.zarr",
+        group: "meg_250hz",
+        level: 3,
+        width_px: 50,
+        height_px: 100,
+        mime_type: "image/png",
+        columns_read: 132,
+        chunks_read: 1,
+        bytes_read: 1079,
+        envelope: derivedEnvelope,
+      },
+      "renderOverviewOutputSchema with a derived envelope",
+    );
+  });
 });

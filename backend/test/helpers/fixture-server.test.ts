@@ -1,6 +1,6 @@
 /**
- * Small self-test for `fixture-server.ts` (epic #1065 phase 3, issue #1295;
- * plan decision 9): before other suites trust it as a stand-in S3/GitHub-raw
+ * Small self-test for `fixture-server.ts` (epic #1065 phase 3, issue
+ * #1295): before other suites trust it as a stand-in S3/GitHub-raw
  * upstream, confirm its HEAD/Range/logging behavior against a real
  * `Bun.serve()` instance.
  */
@@ -56,6 +56,22 @@ describe("fixture-server", () => {
     });
     expect(res.status).toBe(206);
     expect(res.headers.get("content-range")).toBe("bytes 95-99/100");
+  });
+
+  test("a malformed Range (non-numeric) answers 416 with Content-Range: bytes */<len> (item 22)", async () => {
+    const res = await fetch(`${server.url}/dataset/object.bin`, {
+      headers: { Range: "bytes=abc-def" },
+    });
+    expect(res.status).toBe(416);
+    expect(res.headers.get("content-range")).toBe("bytes */100");
+  });
+
+  test("an out-of-range Range (start past the end) answers 416 with Content-Range: bytes */<len> (item 22)", async () => {
+    const res = await fetch(`${server.url}/dataset/object.bin`, {
+      headers: { Range: "bytes=200-300" },
+    });
+    expect(res.status).toBe(416);
+    expect(res.headers.get("content-range")).toBe("bytes */100");
   });
 
   test("an unknown key answers 404", async () => {

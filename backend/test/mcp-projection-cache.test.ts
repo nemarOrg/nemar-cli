@@ -1,12 +1,14 @@
 /**
- * `projection-cache.ts` tests (epic #1065 phase 3, issue #1295; plan
- * decision 4). Real in-memory `CacheLike` (`InMemoryCache`,
- * `test/helpers/cache.ts`) -- no mocks.
+ * `projection-cache.ts` tests (epic #1065 phase 3, issue #1295). Real
+ * in-memory `CacheLike` (`InMemoryCache`, `test/helpers/cache.ts`) -- no
+ * mocks.
  */
 
 import { describe, expect, test } from "bun:test";
+import { z } from "zod";
 import {
   PROJECTION_CACHE_CONTROL,
+  PROJECTION_SCHEMA_VERSION,
   projectionUrl,
   readBinaryProjection,
   readJsonProjection,
@@ -22,17 +24,21 @@ const ctx = {
   passThroughOnException: () => {},
 } as unknown as ExecutionContext;
 
+const helloSchema = z.object({ hello: z.string(), n: z.number() });
+
 describe("projectionUrl", () => {
-  test("key shape: host + dataset id + commit + projection", () => {
+  test("key shape: host + dataset id + commit + projection + schema version", () => {
     const url = projectionUrl("nm000329", "7172d2d492dad63650f80cdb83352a0e9d4420f7", "recordings");
     expect(url).toBe(
-      "https://mcp.nemar.org/_cache/nm000329/7172d2d492dad63650f80cdb83352a0e9d4420f7/recordings",
+      `https://mcp.nemar.org/_cache/nm000329/7172d2d492dad63650f80cdb83352a0e9d4420f7/recordings/v${PROJECTION_SCHEMA_VERSION}`,
     );
   });
 
-  test("a nested projection string (events/<zarr>) passes through verbatim", () => {
+  test("a nested projection string (events/<zarr>) passes through verbatim, version last", () => {
     const url = projectionUrl("nm000329", "abc", "events/sub-1/ses-0/eeg/x.zarr");
-    expect(url).toBe("https://mcp.nemar.org/_cache/nm000329/abc/events/sub-1/ses-0/eeg/x.zarr");
+    expect(url).toBe(
+      `https://mcp.nemar.org/_cache/nm000329/abc/events/sub-1/ses-0/eeg/x.zarr/v${PROJECTION_SCHEMA_VERSION}`,
+    );
   });
 });
 
@@ -44,7 +50,7 @@ describe("JSON projections", () => {
     // writeJsonProjection defers the put() via waitUntil -- flush it.
     await Promise.resolve();
 
-    const result = await readJsonProjection<{ hello: string; n: number }>(cache, url);
+    const result = await readJsonProjection(cache, url, helloSchema);
     expect(result.status).toBe("hit");
     if (result.status !== "hit") throw new Error("unreachable");
     expect(result.value).toEqual({ hello: "world", n: 3 });
@@ -52,7 +58,11 @@ describe("JSON projections", () => {
 
   test("a cache miss answers status miss", async () => {
     const cache = new InMemoryCache();
-    const result = await readJsonProjection(cache, projectionUrl("nm000329", "abc", "recordings"));
+    const result = await readJsonProjection(
+      cache,
+      projectionUrl("nm000329", "abc", "recordings"),
+      helloSchema,
+    );
     expect(result.status).toBe("miss");
   });
 
@@ -83,14 +93,26 @@ describe("JSON projections", () => {
     const result = await readJsonProjection(
       new ThrowingMatchCache(),
       projectionUrl("nm000329", "abc", "recordings"),
+      helloSchema,
     );
+    expect(result.status).toBe("miss");
+  });
+
+  test("a stored entry that fails schema validation is a miss, not a crash", async () => {
+    const cache = new InMemoryCache();
+    const url = projectionUrl("nm000329", "abc", "recordings");
+    // Wrong shape entirely: `n` is a string, `hello` is missing.
+    writeJsonProjection(ctx, cache, url, { n: "not-a-number" });
+    await Promise.resolve();
+
+    const result = await readJsonProjection(cache, url, helloSchema);
     expect(result.status).toBe("miss");
   });
 
   test("the stored entry carries the 7-day Cache-Control header", async () => {
     const cache = new InMemoryCache();
     const url = projectionUrl("nm000329", "abc", "recordings");
-    writeJsonProjection(ctx, cache, url, { x: 1 });
+    writeJsonProjection(ctx, cache, url, { hello: "world", n: 1 });
     await Promise.resolve();
     const hit = await cache.match(new Request(url));
     expect(hit).toBeDefined();
