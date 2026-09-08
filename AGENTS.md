@@ -111,7 +111,8 @@ real user, dispatch GitHub work against `nemarDatasets`, or mutate a real DOI or
 
 Authentication against staging never uses production keys: use `TEST_ADMIN_API_KEY` from
 `test/.env.test` — it matches the `test-admin` token seeded by `scripts/seed-dev-db.sql` —
-with an isolated `NEMAR_CONFIG_DIR`, so the real `~/.config/nemar` is untouched.
+with an isolated `NEMAR_CONFIG_DIR`, so the real `~/.config/nemar` is untouched;
+`TEST_OWNER_API_KEY`, the seeded `test-owner` token, is its owner-role sibling.
 
 ### Never hand-bump the version
 
