@@ -618,8 +618,23 @@ export const recordingGroupSummarySchema = z
     rate: z.number().nullable().optional(),
     n_channels: z.number().int().nullable().optional(),
     duration_s: z.number().nullable().optional(),
+    /** Additive, phase 3 (#1295): how many `view/*` pyramid levels this
+     *  group publishes -- null/absent for a v1 group (no pyramid at all) or
+     *  a v3 group converted before biosigio 1.2.6 (`n_view_levels: 0`). */
+    n_view_levels: z.number().int().nonnegative().nullable().optional(),
+    /** Additive, phase 3: the level-0 sample count -- `render_overview`'s
+     *  `pickViewLevel` needs the exact figure the pyramid was built from
+     *  (`duration_s x rate` can differ by rounding), cached here so a
+     *  `list_recordings`/`render_overview` cache hit never has to re-read
+     *  `index.json` just to recover it. */
+    n_samples: z.number().int().nonnegative().nullable().optional(),
+    /** Additive, phase 3: columns per `view/*` chunk (the producer's
+     *  `view_chunk_columns`, defaulting to 1024 when absent) -- the chunk
+     *  plan `render_overview` computes from it. */
+    view_chunk_columns: z.number().int().positive().nullable().optional(),
   })
   .passthrough();
+export type RecordingGroupSummary = z.infer<typeof recordingGroupSummarySchema>;
 
 export const recordingSummarySchema = z
   .object({
@@ -628,13 +643,22 @@ export const recordingSummarySchema = z
     source_tree: z.literal("raw"),
     derived: z.boolean(),
     groups: z.array(recordingGroupSummarySchema).optional(),
+    /** Additive, phase 3 (#1295): the store's own `n_events` (index v3 only;
+     *  absent for v1 and for a v3 store the converter never parsed events
+     *  for). */
+    n_events: z.number().int().nonnegative().optional(),
   })
   .passthrough();
+export type RecordingSummary = z.infer<typeof recordingSummarySchema>;
 
 export const listRecordingsOutputSchema = z
   .object({
     dataset_id: z.string().regex(DATASET_ID_RE),
-    source_commit: z.string().regex(SOURCE_COMMIT_RE),
+    /** Additive widening, phase 3 (#1295): null when the index document
+     *  carries no usable 40-hex commit (a v1 index with an empty
+     *  `source_commit`, e.g. on008083 before #1197). No consumer of the
+     *  phase 2 non-nullable shape exists yet, so this widening is safe. */
+    source_commit: z.string().regex(SOURCE_COMMIT_RE).nullable(),
     recordings: z.array(recordingSummarySchema),
     total_count: z.number().int().nonnegative(),
     /** How many derived (ADR 0028) stores this call excluded, so the
@@ -642,6 +666,30 @@ export const listRecordingsOutputSchema = z
     excluded_derived_count: z.number().int().nonnegative(),
     limit: z.number().int(),
     offset: z.number().int(),
+    /** Additive, phase 3 (#1295): the source index document's own
+     *  `format_version` (1, 2, or 3), so a caller can tell a legacy listing
+     *  apart from a v3 one without re-deriving it from which fields are
+     *  present. */
+    index_format_version: z.number().int(),
+    /** Additive, phase 3: the v3 index's own coverage counters, verbatim.
+     *  Null for a v1/v2 index, which publishes none of them. */
+    discovered_count: z.number().int().nonnegative().nullable(),
+    failure_count: z.number().int().nonnegative().nullable(),
+    pending_count: z.number().int().nonnegative().nullable(),
+    /** Additive, phase 3: how many v1 stores under `derivatives/`,
+     *  `sourcedata/`, or `code/` this call excluded outright (ADR 0027 is
+     *  v3-only, so a legacy index can still carry one) -- always 0 for a v3
+     *  index, whose producer already drops these before publishing. */
+    excluded_legacy_non_raw_count: z.number().int().nonnegative(),
+    /** A short caveat the caller should surface verbatim, e.g. the legacy
+     *  index note (decision 5) or an unusable-commit note. Null when none. */
+    note: z.string().nullable().optional(),
+    /** A dataset-level envelope built from the first listed recording, so a
+     *  caller gets one provenance fact set without a second tool call.
+     *  Omitted when the page is empty or the index carries no usable commit
+     *  -- the per-recording envelope on `get_events`/`render_overview` is
+     *  the authoritative one for a specific store. */
+    envelope: provenanceEnvelopeSchema.optional(),
   })
   .passthrough();
 export type ListRecordingsOutput = z.infer<typeof listRecordingsOutputSchema>;
@@ -652,12 +700,19 @@ export type ListRecordingsOutput = z.infer<typeof listRecordingsOutputSchema>;
  *  result `estimated: true` -- the fallback's sample index is wrong by a
  *  sub-sample amount wherever source and target rates are not integer
  *  multiples. */
+export const GET_EVENTS_DEFAULT_LIMIT = 1000;
+export const GET_EVENTS_MAX_LIMIT = 5000;
+
 export const getEventsInputSchema = z
   .object({
     dataset_id: z.string().regex(DATASET_ID_RE),
     /** A store's `path` or `zarr` -- either identifies the recording. */
     recording: z.string(),
     group: z.string().optional(),
+    /** Additive, phase 3 (#1295): pages a large dataset's event rows the
+     *  same way `list_recordings` pages recordings. */
+    limit: z.number().int().positive().max(GET_EVENTS_MAX_LIMIT).default(GET_EVENTS_DEFAULT_LIMIT),
+    offset: z.number().int().nonnegative().default(0),
   })
   .passthrough();
 export type GetEventsInput = z.infer<typeof getEventsInputSchema>;
@@ -674,6 +729,7 @@ export const eventRowSchema = z
     hed: z.string().nullable().optional(),
   })
   .passthrough();
+export type EventRow = z.infer<typeof eventRowSchema>;
 
 export const getEventsOutputSchema = z
   .object({
@@ -682,6 +738,17 @@ export const getEventsOutputSchema = z
     events: z.array(eventRowSchema),
     source: z.enum(["events_parquet", "events_tsv_fallback"]),
     estimated: z.boolean(),
+    /** Additive, phase 3: pagination facts mirroring `list_recordings`'.
+     *  `total_count` is the recording's full row count before paging. */
+    total_count: z.number().int().nonnegative(),
+    limit: z.number().int(),
+    offset: z.number().int(),
+    /** True when `offset + events.length < total_count`. */
+    truncated: z.boolean(),
+    /** A short caveat, e.g. "no events file found next to this recording"
+     *  (the fallback's clean-404 case). Null when there is none. */
+    note: z.string().nullable().optional(),
+    envelope: provenanceEnvelopeSchema.optional(),
   })
   .passthrough();
 export type GetEventsOutput = z.infer<typeof getEventsOutputSchema>;
@@ -718,6 +785,17 @@ export const renderOverviewOutputSchema = z
     width_px: z.number().int().positive(),
     height_px: z.number().int().positive(),
     mime_type: z.literal("image/png"),
+    /** Additive, phase 3 (#1295): how many pyramid columns were decoded to
+     *  build this image, before downsampling to `width_px` buckets. */
+    columns_read: z.number().int().nonnegative(),
+    /** Additive, phase 3: how many `view/<L>/c/0/0/<k>` chunk objects were
+     *  fetched -- 1 on a cache hit is impossible (a hit skips fetch
+     *  entirely), so this is 0 on a cache hit and >=1 on a miss. */
+    chunks_read: z.number().int().nonnegative(),
+    /** Additive, phase 3: total upstream bytes fetched for those chunks
+     *  (0 on a cache hit). Mirrors the metrics outcome's `upstreamBytes`. */
+    bytes_read: z.number().int().nonnegative(),
+    envelope: provenanceEnvelopeSchema.optional(),
   })
   .passthrough();
 export type RenderOverviewOutput = z.infer<typeof renderOverviewOutputSchema>;

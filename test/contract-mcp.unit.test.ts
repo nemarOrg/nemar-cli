@@ -10,6 +10,8 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  GET_EVENTS_DEFAULT_LIMIT,
+  GET_EVENTS_MAX_LIMIT,
   LIST_RECORDINGS_DEFAULT_LIMIT,
   LIST_RECORDINGS_MAX_LIMIT,
   READ_WINDOW_TASTE_MAX_CHANNELS,
@@ -23,20 +25,30 @@ import {
   composeCitation,
   computeProvenanceEnvelope,
   describeDatasetInputSchema,
+  eventRowSchema,
   flagToBoolean,
   getEventsInputSchema,
+  getEventsOutputSchema,
   listRecordingsInputSchema,
+  listRecordingsOutputSchema,
   readWindowInputSchema,
   readWindowOutputSchema,
+  recordingGroupSummarySchema,
   renderOverviewInputSchema,
+  renderOverviewOutputSchema,
   searchDatasetsInputSchema,
   zarrCatalogEntrySchema,
   zarrCatalogSchema,
 } from "../shared/contract/mcp.js";
-import { zarrArrayMetadataSchema, zarrIndexSchema } from "../shared/contract/zarr-index.js";
+import {
+  zarrArrayMetadataSchema,
+  zarrIndexLegacySchema,
+  zarrIndexSchema,
+} from "../shared/contract/zarr-index.js";
 import nm000329RowFixture from "./fixtures/dataset-row-nm000329.json";
 import level0ArrayFixture from "./fixtures/zarr-array-level0.zarr.json";
 import catalogSliceFixture from "./fixtures/zarr-catalog-slice.json";
+import nm000111LegacyFixture from "./fixtures/zarr-index-nm000111-slice.json";
 import nm000329SliceFixture from "./fixtures/zarr-index-nm000329-slice.json";
 import v3Fixture from "./fixtures/zarr-index-v3.json";
 
@@ -579,5 +591,174 @@ describe("composeCitation (issue #1064 / #1294, port of dataset_citation)", () =
 
   test("a two-digit year (created_at too short) yields no year segment", () => {
     expect(composeCitation({ name: "A Dataset", created_at: "20" })).toBe("A Dataset. NEMAR.");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3 additions (epic #1065, issue #1295): the legacy index schema and
+// the additive list_recordings/get_events/render_overview fields.
+// ---------------------------------------------------------------------------
+
+describe("zarrIndexLegacySchema", () => {
+  test("parses a real v1 index slice (nm000111) with format_version 1", () => {
+    const parsed = zarrIndexLegacySchema.parse(nm000111LegacyFixture);
+    expect(parsed.format_version).toBe(1);
+    expect(parsed.dataset_id).toBe("nm000111");
+    expect(parsed.source_commit).toBe("510a05377459cf857e60b861ab377bc53b5b5b29");
+    expect(parsed.stores.length).toBeGreaterThan(0);
+  });
+
+  test("accepts an empty source_commit (#1197's on008083 case) -- ANY string, no regex", () => {
+    const doc = { ...nm000111LegacyFixture, source_commit: "" };
+    const parsed = zarrIndexLegacySchema.parse(doc);
+    expect(parsed.source_commit).toBe("");
+  });
+
+  test("a v1 store's groups reuse the shared zarrGroupSchema shape", () => {
+    const parsed = zarrIndexLegacySchema.parse(nm000111LegacyFixture);
+    const group = parsed.stores[0].groups?.[0];
+    expect(group?.name).toBeDefined();
+    expect(group?.rate).toBeGreaterThan(0);
+  });
+
+  test("a v1 store carries no source_tree/derived (v3-only concepts) -- passthrough tolerates their absence", () => {
+    const parsed = zarrIndexLegacySchema.parse(nm000111LegacyFixture);
+    const store = parsed.stores[0] as unknown as Record<string, unknown>;
+    expect(store.source_tree).toBeUndefined();
+    expect(store.derived).toBeUndefined();
+  });
+
+  test("rejects a document missing dataset_id entirely", () => {
+    const { dataset_id: _dataset_id, ...rest } = nm000111LegacyFixture;
+    expect(() => zarrIndexLegacySchema.parse(rest)).toThrow();
+  });
+
+  test("format_version is any int, not literal 3 -- a v2 document also parses", () => {
+    const doc = { ...nm000111LegacyFixture, format_version: 2 };
+    const parsed = zarrIndexLegacySchema.parse(doc);
+    expect(parsed.format_version).toBe(2);
+  });
+});
+
+describe("listRecordingsInputSchema / OutputSchema additive fields (phase 3)", () => {
+  test("limit/offset default as documented", () => {
+    const parsed = listRecordingsInputSchema.parse({ dataset_id: "nm000329" });
+    expect(parsed.limit).toBe(LIST_RECORDINGS_DEFAULT_LIMIT);
+    expect(parsed.offset).toBe(0);
+    expect(parsed.include_derived).toBe(false);
+  });
+
+  test("source_commit is nullable (widened, phase 3)", () => {
+    const parsed = listRecordingsOutputSchema.parse({
+      dataset_id: "nm000111",
+      source_commit: null,
+      recordings: [],
+      total_count: 0,
+      excluded_derived_count: 0,
+      limit: 50,
+      offset: 0,
+      index_format_version: 1,
+      discovered_count: null,
+      failure_count: null,
+      pending_count: null,
+      excluded_legacy_non_raw_count: 1,
+      note: "legacy index v1: re-conversion pending; source_tree, derived and engine stamp are inferred",
+    });
+    expect(parsed.source_commit).toBeNull();
+    expect(parsed.index_format_version).toBe(1);
+  });
+
+  test("recordingGroupSummarySchema accepts the new n_samples/view_chunk_columns fields", () => {
+    const parsed = recordingGroupSummarySchema.parse({
+      name: "eeg_250hz",
+      n_view_levels: 5,
+      n_samples: 138750,
+      view_chunk_columns: 1024,
+    });
+    expect(parsed.n_samples).toBe(138750);
+    expect(parsed.view_chunk_columns).toBe(1024);
+  });
+});
+
+describe("getEventsInputSchema / OutputSchema additive fields (phase 3)", () => {
+  test("limit/offset default as documented", () => {
+    const parsed = getEventsInputSchema.parse({ dataset_id: "nm000329", recording: "x.zarr" });
+    expect(parsed.limit).toBe(GET_EVENTS_DEFAULT_LIMIT);
+    expect(parsed.offset).toBe(0);
+  });
+
+  test("limit is capped at GET_EVENTS_MAX_LIMIT", () => {
+    expect(() =>
+      getEventsInputSchema.parse({
+        dataset_id: "nm000329",
+        recording: "x.zarr",
+        limit: GET_EVENTS_MAX_LIMIT + 1,
+      }),
+    ).toThrow();
+  });
+
+  test("output requires total_count/limit/offset/truncated", () => {
+    const parsed = getEventsOutputSchema.parse({
+      dataset_id: "nm000329",
+      recording: "x.zarr",
+      events: [],
+      source: "events_tsv_fallback",
+      estimated: true,
+      total_count: 0,
+      limit: 1000,
+      offset: 0,
+      truncated: false,
+      note: "no events file was found next to this recording",
+    });
+    expect(parsed.truncated).toBe(false);
+  });
+
+  test("eventRowSchema passes through subject/session/task/run (BIDS entities)", () => {
+    const parsed = eventRowSchema.parse({
+      store_path: "sub-1/eeg/sub-1_task-x_eeg.zarr",
+      group_name: "eeg_250hz",
+      onset_s: 1.5,
+      sample_index: 375,
+      subject: "1",
+      session: "0",
+      task: "imagery",
+      run: "0",
+    });
+    expect((parsed as unknown as Record<string, unknown>).subject).toBe("1");
+  });
+});
+
+describe("renderOverviewOutputSchema additive fields (phase 3)", () => {
+  test("columns_read/chunks_read/bytes_read and an optional envelope", () => {
+    const parsed = renderOverviewOutputSchema.parse({
+      dataset_id: "nm000329",
+      recording: "x.zarr",
+      group: "eeg_250hz",
+      level: 5,
+      width_px: 100,
+      height_px: 1197,
+      mime_type: "image/png",
+      columns_read: 135,
+      chunks_read: 1,
+      bytes_read: 33379,
+    });
+    expect(parsed.columns_read).toBe(135);
+    expect(parsed.envelope).toBeUndefined();
+  });
+
+  test("a cache-hit shape (all zero reads) is still valid", () => {
+    const parsed = renderOverviewOutputSchema.parse({
+      dataset_id: "nm000329",
+      recording: "x.zarr",
+      group: "eeg_250hz",
+      level: 5,
+      width_px: 100,
+      height_px: 1197,
+      mime_type: "image/png",
+      columns_read: 0,
+      chunks_read: 0,
+      bytes_read: 0,
+    });
+    expect(parsed.chunks_read).toBe(0);
   });
 });

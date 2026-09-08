@@ -290,3 +290,53 @@ export function parseZarrIndex(doc: unknown): ZarrIndex {
 export function safeParseZarrIndex(doc: unknown): z.SafeParseReturnType<unknown, ZarrIndex> {
   return zarrIndexSchema.safeParse(doc);
 }
+
+// ---------------------------------------------------------------------------
+// Legacy (pre-v3) index documents (epic #1065 phase 3, issue #1295).
+//
+// About half the catalog still publishes format_version 1 while the ADR 0033
+// engine bump re-converts the back catalog (`backend/src/mcp/index-reader.ts`'s
+// module doc). A v1 document has no `layout`, no `events_parquet`, no
+// `source_tree`/`derived` on its stores, no `engine_version`, and a group may
+// carry no `n_view_levels` at all -- none of `zarrIndexSchema`'s required
+// fields hold, so a v1 document fails that schema outright rather than
+// partially validating. This is a DELIBERATELY MINIMAL lower bound (a true
+// lower bound of "whatever format_version 1 and 2 ever published"), not a
+// full mirror of `zarrIndexSchema`: the MCP tools serve v1 honestly (no
+// pyramid, no events.parquet, an inferred `source_tree`/`derived`) rather
+// than pretending it is v3. `source_commit` is `z.string()` with NO regex --
+// v1 predates the 40-hex guarantee (#1197) and on008083 once published `""`;
+// a reader must not crash on that, only treat it as "no usable commit".
+// -----------------------------------------------------------------------
+
+/** A legacy store entry: only `path`/`zarr` are guaranteed; `groups`/
+ *  `modalities` are the two fields the phase 3 tools actually read off it.
+ *  No `source_tree`/`derived` -- those are v3-only and inferred by the
+ *  caller from `path` instead (ADR 0027). */
+export const zarrLegacyStoreSchema = z
+  .object({
+    path: z.string(),
+    zarr: z.string().regex(/\.zarr$/, "must end in .zarr"),
+    groups: z.array(zarrGroupSchema).optional(),
+    modalities: z.array(z.string()).optional(),
+  })
+  .passthrough();
+export type ZarrLegacyStore = z.infer<typeof zarrLegacyStoreSchema>;
+
+/** Lower-bound schema for a pre-v3 (`format_version` 1 or 2) index document.
+ *  `format_version` is any int, not `z.literal(3)` -- this schema is the
+ *  catch-all for "not v3", not a schema for one specific legacy version. */
+export const zarrIndexLegacySchema = z
+  .object({
+    format: z.literal("nemar-zarr-index"),
+    format_version: z.number().int(),
+    dataset_id: z.string().regex(DATASET_ID_RE, "NEMAR dataset id (nm/on/xx band)"),
+    /** ANY string, including empty -- v1 predates the 40-hex guarantee. */
+    source_commit: z.string(),
+    stores: z.array(zarrLegacyStoreSchema),
+  })
+  .passthrough();
+export type ZarrIndexLegacy = z.infer<typeof zarrIndexLegacySchema>;
+
+/** Either shape an index document may take, narrowed by `format_version`. */
+export type ZarrIndexAny = ZarrIndex | ZarrIndexLegacy;
