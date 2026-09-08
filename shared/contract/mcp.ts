@@ -244,10 +244,11 @@ function buildHowTo(opts: {
       "# physical = digital * scale + offset -- see the recipe's scale_offset field",
     ].join("\n"),
     zarrita: [
-      'import { open, get, slice } from "zarrita";',
+      'import * as zarr from "zarrita";',
       "",
-      `const arr = await open.v3("${httpPath}", { kind: "array" });`,
-      "const window = await get(arr, [null, slice(startSample, endSample)]);",
+      `const store = new zarr.FetchStore("${httpPath}");`,
+      'const arr = await zarr.open.v3(store, { kind: "array" });',
+      "const window = await zarr.get(arr, [null, zarr.slice(startSample, endSample)]);",
       "// physical = digital * scale + offset -- see the recipe's scale_offset field",
     ].join("\n"),
   };
@@ -549,7 +550,8 @@ export type RenderOverviewOutput = z.infer<typeof renderOverviewOutputSchema>;
  *  issue's own "something like 60 s times 64 channels" note -- the point at
  *  which a 176 s outer shard read starts costing real Worker memory (ADR
  *  0049 / the isolate ceiling discussion). Past the cap, `read_window` never
- *  truncates silently: it stays a recipe. */
+ *  truncates silently: the input is rejected with a message that names the
+ *  cap and points the caller at the recipe (omit `taste`). */
 export const READ_WINDOW_TASTE_MAX_DURATION_S = 60;
 export const READ_WINDOW_TASTE_MAX_CHANNELS = 64;
 export const READ_WINDOW_TASTE_MAX_CHANNEL_SECONDS =

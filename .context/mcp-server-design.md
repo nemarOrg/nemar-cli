@@ -267,11 +267,16 @@ is one to three requests at any level).
 **Picks the smallest view level satisfying `width_px`** -- never a level
 finer than what the requested pixel width can show, so the Worker never
 decodes more samples than the image needs.
-**Cache behavior:** the DECODED pyramid level (not the rendered PNG) is
-what gets cached per `(dataset_id, source_commit, recording, group, level)`;
-re-rendering a PNG at a different `width_px` from an already-decoded level
-is cheap enough to redo per call rather than multiply cache entries by
-every possible width.
+**Cache behavior:** the rendered PNG itself is what gets cached, per
+`(dataset_id, source_commit, recording, group, width_px)`, so a repeat call
+at the same width is a cache match with zero decode and zero encode work
+(decision 4 of the phase 1 plan).
+`width_px` defaults to 800 and is capped at 4000, so in practice one or two
+widths per recording ever exist; a miss at an unusual width costs one fresh
+render, never a second copy of the decoded level.
+Phase 4 may add a decoded-level cache underneath if measurements show
+repeated renders of one level at many widths, but that is an optimization
+to earn, not the baseline.
 **Error that teaches:** a `group` that exists in the index but has no
 `view/*` pyramid (a store converted before biosigio 1.2.6, or `n_view_levels:
 0`) answers a tool error saying so explicitly, distinct from "recording not
@@ -292,10 +297,14 @@ physical units.
 reads; the Worker never touches a signal byte.
 **Cost class (taste):** decodes exactly the inner chunks the requested
 window spans, capped at `duration_s x channels.length <= 3840` (60 s x 64
-channels; see decision 7 and the spike's decode-path verdict below) -- past
-the cap, `read_window` never truncates silently, it answers the recipe
-instead, because a caller asking for a window this large almost certainly
-wants the S3 path anyway.
+channels; see decision 7 and the spike's decode-path verdict below).
+Past the cap, `read_window` never truncates silently: the input schema
+rejects the request with a validation error that names the cap and tells
+the caller to omit `taste` for a recipe, because a caller asking for a
+window this large almost certainly wants the S3 path anyway.
+The rejection is deliberate over a silent downgrade to recipe mode; a
+caller who asked for numbers and got a recipe would have to notice the
+`mode` discriminator changed, whereas an error is impossible to misread.
 **Cache behavior:** none across calls (a taste is an inline decode of
 specific inner chunks on demand); the recipe path's inputs (`index.json`,
 chunk geometry) are the same cached projection every other tool reads.
@@ -347,7 +356,7 @@ field on either side of the wire never breaks an older consumer.
 | `sample_slice`, `channel_slice` | `{ start, end }`, optional | present when the caller named a window |
 | `scale_offset` | string | `layout.scale_offset` verbatim: WHERE to find the conversion, not the values themselves |
 | `how_to.python_zarr` | string | a ready-to-run Python snippet: `zarr.open(s3_uri, storage_options={"anon": True})`, slice, done |
-| `how_to.zarrita` | string | the TypeScript/JS equivalent using `zarrita` |
+| `how_to.zarrita` | string | the TypeScript/JS equivalent using `zarrita`: a `FetchStore` on `array_path`, `open.v3`, `get` with a `slice` |
 
 `buildReadRecipe()` (`shared/contract/mcp.ts`) computes every field above
 from an index document plus the store/group it names -- no probing, per the
@@ -371,8 +380,8 @@ Restating decision 4 of the phase 1 plan, made concrete:
   `<projection>` is one of `recordings` (the `list_recordings` compact
   array, unfiltered -- filters apply after the cache read, not before),
   `events` (the parsed `events.parquet` rows, unfiltered the same way), or
-  `overview/<recording>/<group>/<level>` (the decoded pyramid level, one
-  entry per level actually requested, not every level up front).
+  `overview/<recording>/<group>/<width_px>` (the rendered PNG, one entry
+  per width actually requested, per section 5.5).
   All three are immutable per `source_commit`, so they get a long TTL
   (a day or more; the exact number is a phase 2 acceptance item, not fixed
   here).

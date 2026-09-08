@@ -94,6 +94,8 @@ describe("buildReadRecipe", () => {
     const recipe = buildReadRecipe({ index: on008083Index, store, groupName: "eeg_250hz" });
     expect(recipe.how_to.python_zarr).toContain(on008083Index.s3_uri);
     expect(recipe.how_to.zarrita).toContain(on008083Index.contract_base);
+    expect(recipe.how_to.zarrita).toContain("new zarr.FetchStore(");
+    expect(recipe.how_to.zarrita).toContain("zarr.open.v3(store");
   });
 
   test("throws for a group name the store does not have", () => {
