@@ -54,7 +54,7 @@ import {
 } from "./services/email";
 import { isNonProductionEnv } from "./services/environment";
 import { resolveHostRoute } from "./services/host-routing";
-import { lastErrorAssignmentSql } from "./services/import-error";
+import { isGenericImportError, lastErrorAssignmentSql } from "./services/import-error";
 import { runImportRecovery } from "./services/import-recovery";
 import { sweepImportRetries } from "./services/import-retry";
 import { manifestIntegritySweep } from "./services/manifest-sweep";
@@ -683,6 +683,11 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
         )
         .bind(MAX_DELETIONS_PER_RUN)
         .all<{ dataset_id: string }>();
+      // The sweep's own bookkeeping message. Declared once so the string and its
+      // ADR 0049 classification cannot drift apart: passing a hand-written `true`
+      // would keep claiming "generic" even if this wording later became a real
+      // diagnosis. No quote escaping needed, and asserted by the const's own text.
+      const STUCK_IMPORT_MESSAGE = "stuck > 6h (scheduled sweep)";
       for (const row of stuckImports.results ?? []) {
         try {
           const upd = await db
@@ -697,7 +702,11 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
               // string the retry engine needs to re-select the row.
               `UPDATE import_jobs
                SET status = 'failed',
-                   last_error = ${lastErrorAssignmentSql(true, "last_error", "'stuck > 6h (scheduled sweep)'")},
+                   last_error = ${lastErrorAssignmentSql(
+                     isGenericImportError(STUCK_IMPORT_MESSAGE),
+                     "last_error",
+                     `'${STUCK_IMPORT_MESSAGE}'`,
+                   )},
                    completed_at = datetime('now'), updated_at = datetime('now')
              WHERE dataset_id = ? AND status IN ('preparing', 'copying', 'finalizing')`,
             )
