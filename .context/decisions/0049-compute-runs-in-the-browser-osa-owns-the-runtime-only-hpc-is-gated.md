@@ -22,7 +22,7 @@ eegprep 0.3.0 ships as a pure-Python wheel;
 its only `oct2py` import is a lazy import inside the EEGLAB comparison bridge (`eegprep/eeglabcompat.py`),
 and `psutil` is imported the same way.
 What blocks a browser install is the dependency declaration in `pyproject.toml`
-(`oct2py`, `pyedflib`, `psutil`, and `python-picard` through `numexpr`), not the algorithms.
+(`oct2py`, `pyedflib`, and `psutil`; the ICA dependency `python-picard` is pure Python and its `numexpr` use is optional), not the algorithms.
 The owner maintains eegprep, so that is a packaging fix, not a constraint.
 Separately, the OSA NEMAR assistant is deployed at `api.osc.earth`, not nemarring,
 and OSA is gaining a browser-side code execution runtime.
@@ -66,8 +66,12 @@ It now also hands the user a place to run the science, in their own browser, but
 ## Consequences
 
 - **eegprep packaging is on the critical path.**
-  Move `oct2py`, `pyedflib`, `psutil`, and `python-picard` into extras, keep the lazy imports,
+  Move `oct2py`, `pyedflib`, and `psutil` into extras, keep the lazy imports,
   and add a CI job that installs eegprep under Pyodide and runs the EEGLAB-parity tests there.
+  ICA needs no new dependency: `runica` and `eeg_picard` are pure numpy and scipy, and `python-picard`
+  falls back to numpy when `numexpr` is absent. Browser ICA speed depends on routing matrix products
+  through scipy's OpenBLAS, because Pyodide builds numpy without BLAS; ICLabel needs a torch-free
+  inference path before it is available in the browser.
   Until it lands, the browser lane uses MNE; that is a tracked gap, not accepted drift.
 - **Browser reads are HTTPS only.** WebAssembly has no sockets,
   so `boto3`-based clients (eegdash, and nemar-py as packaged today) are not browser clients.
