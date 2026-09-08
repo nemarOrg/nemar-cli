@@ -209,8 +209,35 @@ describe.skipIf(PROD_GUARD_ACTIVE)("device authorization grant (#1281, ADR 0047)
     expect(meAfter.status).toBe(401);
   });
 
-  test("a pending account cannot confirm", async () => {
+  test("a pending account is promoted to verified by sign-in, so confirm succeeds (account_pending unreachable here, ADR 0047)", async () => {
     if (!deviceRoutesDeployed) return;
+    // seedWebUser(email, "pending") plants status='pending', but signIn()
+    // below is the REAL /auth/code/request + /auth/code/verify passwordless
+    // flow, and applyEmailVerification
+    // (backend/src/services/email-verification.ts) unconditionally
+    // promotes a pending row to 'verified' in the SAME transaction that
+    // mints the session -- proving the inbox is the whole content of that
+    // transition (ADR 0040 phase 2, epic #1252). By the time this test
+    // holds a session cookie, the account is no longer pending: there is no
+    // window in which a session-bound request can observe
+    // status='pending' through this path.
+    //
+    // This is the same SHAPE of unreachability this file already records
+    // below for account_revoked at lookup/confirm/deny
+    // ("findSessionByCookieId already filters revoked accounts out of
+    // session resolution, so a revoked person carries no web session and
+    // never reaches this refusal") -- just a different mechanism
+    // (promotion-on-verify instead of exclusion-at-lookup). The one place a
+    // session CAN legitimately be pending is a brand-new ORCID sign-up
+    // (backend/src/routes/auth-orcid.ts's finalize handler mints a session
+    // before the first verification code is even sent), which this
+    // fixture-plus-passwordless-signin path cannot reach: seed-web-user has
+    // no way to hand back a session without going through
+    // /auth/code/verify, and that route promotes on every successful
+    // verify. Driving a real ORCID sign-up is out of reach for an
+    // automated test, so this test instead pins the actual, provable
+    // behavior of the reachable path: sign-in promotes, and confirm then
+    // succeeds.
     const email = freshEmail("pending-confirm");
     await seedWebUser(email, "pending");
     const cookie = await signIn(email);
@@ -220,8 +247,7 @@ describe.skipIf(PROD_GUARD_ACTIVE)("device authorization grant (#1281, ADR 0047)
       { code: started.user_code },
       { Origin: ORIGIN, Cookie: cookie },
     );
-    expect(res.status).toBe(403);
-    expect(((await res.json()) as { error: string }).error).toBe("account_pending");
+    expect(res.status).toBe(200);
   });
 
   test("a revoked account cannot sign in at all, so account_revoked is unreachable here", async () => {
