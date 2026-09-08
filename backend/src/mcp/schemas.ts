@@ -25,6 +25,10 @@
  */
 
 import * as z4 from "zod4";
+import {
+  SEARCH_DATASETS_DEFAULT_LIMIT,
+  SEARCH_DATASETS_MAX_LIMIT,
+} from "../../../shared/contract/mcp.js";
 import { DATASET_ID_RE } from "../../../shared/contract/zarr-index.js";
 
 const DATASET_ID_DESCRIPTION =
@@ -33,9 +37,10 @@ const DATASET_ID_DESCRIPTION =
 // ---------------------------------------------------------------------------
 // search_datasets
 // ---------------------------------------------------------------------------
-
-export const SEARCH_DATASETS_DEFAULT_LIMIT = 20;
-export const SEARCH_DATASETS_MAX_LIMIT = 100;
+// SEARCH_DATASETS_DEFAULT_LIMIT / SEARCH_DATASETS_MAX_LIMIT are imported from
+// the zod 3 wire contract above, not redefined here -- a mirror must never
+// own a number the contract already owns (the parity test would still catch
+// a silent drift, but there is no reason to give it something to catch).
 
 export const searchDatasetsInputSchema4 = z4
   .object({
