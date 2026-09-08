@@ -178,7 +178,21 @@ ZARR_CACHE_BASE_URL = "https://zarr.nemar.org"
 # 0-byte S3 objects (curl|aws-cp empty PUT on OpenNeuro 403; presence-only
 # verification passed it). 56 datasets / ~680GB affected. Keep OFF until the
 # content-copy contract + per-key size verification land. See the incident issue.
-AUTO_IMPORT_ENABLED = "false"
+#
+# RE-ENABLED 2026-09-08: the condition above is met. Epic #967 phases 1-5 are all
+# merged -- the copy no longer PUTs on a failed fetch and verifies the downloaded
+# byte count against the annex key's declared size (s3-server-copy.ts
+# `curlStreamCopy`), and per-key size is now the definition of "present" at the
+# publish gate: finalizeImport re-lists the destination and counts a 0-byte or
+# truncated key as missing (`isKeyPresentAtDeclaredSize`, import-openneuro.ts),
+# with a separate guard refusing to publish an empty manifest over a repo that
+# has annexed files. The corpus was remediated in Phase 5.
+#
+# The re-enable itself is what nobody did when the epic closed: the switch stayed
+# down for seven weeks and nothing in the system could say so. 53 in-scope
+# OpenNeuro datasets accrued while it was off. That silence is the reason the
+# import-coverage sweep exists -- do not treat this flag as fire-and-forget.
+AUTO_IMPORT_ENABLED = "true"
 # Pacing macro: minutes between auto-imports. 25 -> ~one import every 30 min (the
 # gate sits just under the 30-min cron tick). Tunable live (wrangler deploy or the
 # dashboard) without a code change -- raise it to throttle back if a run misbehaves.
