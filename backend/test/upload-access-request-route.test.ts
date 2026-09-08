@@ -83,6 +83,12 @@ function env(): Bindings {
     ENCRYPTION_KEY,
     RESEND_API_KEY: "fake-resend-key",
     DEV_EMAIL_ALLOWLIST: "@nemar.test",
+    // Admin notifications are production-only by default
+    // (getAdminEmailsForCategory's fence in services/email.ts); this suite
+    // is about the review card's content and retry semantics, not about
+    // that fence, so it opts back in deliberately. The fence itself is
+    // covered separately below and in email-delivery-fence.test.ts.
+    DEV_ADMIN_NOTIFICATIONS: "1",
     FROM_EMAIL: "NEMAR <noreply@nemar.org>",
     GITHUB_ADMIN_PAT: "test-pat-never-used-against-a-real-host",
     WEB_SESSION_COOKIE_DOMAIN: "",
@@ -461,6 +467,43 @@ describe("upload-access request: success", () => {
       .all("upload_access_requested");
     // The channel follows the credential that authenticated the request.
     expect(JSON.parse(audit[0].details ?? "{}").via).toBe("web");
+  });
+});
+
+describe("upload-access request: the production-only admin-notification fence", () => {
+  test("on a dev-configured app without the opt-in, the request still succeeds but mails no admin", async () => {
+    const id = await seedRequester();
+    // The plain env(), minus the DEV_ADMIN_NOTIFICATIONS opt-in the rest of
+    // this file adds -- ADMIN_EMAIL is still on DEV_EMAIL_ALLOWLIST, so a
+    // failure here would mean the per-recipient delivery fence let this
+    // through; it is getAdminEmailsForCategory's separate production-only
+    // fence that must stop it.
+    const noOptInEnv = { ...env(), DEV_ADMIN_NOTIFICATIONS: undefined } as unknown as Bindings;
+
+    const calls = await withFakeResend(async (captured) => {
+      const res = await app.request(
+        "/users/me/upload-access/request",
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${USER_KEY}`, "content-type": "application/json" },
+          body: JSON.stringify({ why: WHY }),
+        },
+        noOptInEnv,
+      );
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({
+        ok: true,
+        already_requested: false,
+        email_sent: false,
+        admins_notified: 0,
+      });
+      return captured;
+    });
+
+    expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(0);
+    // The request itself is still recorded -- only the mail is suppressed.
+    const row = storedRow(id);
+    expect(row?.upload_access_requested_at).toBeTruthy();
   });
 });
 
