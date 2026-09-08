@@ -14,6 +14,9 @@
  */
 
 import type { CallToolResult } from "@modelcontextprotocol/server";
+import type { CacheLike } from "../routes/zarr-data.js";
+import type { Bindings } from "../types/bindings.js";
+import type { ZarrRoutesLike } from "./index-reader.js";
 
 export interface ToolOutcome {
   result: CallToolResult;
@@ -25,4 +28,36 @@ export interface ToolOutcome {
     cacheStatus?: "hit" | "miss" | "none";
     upstreamBytes?: number;
   };
+}
+
+/**
+ * Shared dependency bundle for the three recording-level tools (epic #1065
+ * phase 3, issue #1295; plan decision 9). One shape so `server.ts` builds it
+ * once per request and every tool reads the same fields the same way,
+ * rather than each tool inventing its own subset.
+ *
+ *  - `env`/`executionCtx`: the same per-request values `BuildMcpServerDeps`
+ *    already carries (`server.ts`).
+ *  - `cache`: a thunk (never a bare value), matching `ZarrDataDeps.cache` in
+ *    `routes/zarr-data.ts` -- `caches.default` must be read lazily per
+ *    request, not at module load, since it does not exist outside a Worker
+ *    (bun:test included).
+ *  - `fetch`: the upstream fetch used for `events.parquet` (hyparquet's
+ *    `asyncBufferFromUrl`), the `events.tsv` fallback, and the `view/*`
+ *    pyramid chunks -- injectable so tests point it at a local fixture
+ *    server instead of the real network.
+ *  - `zarrRoutes`: the real zarr sub-app instance (`index-reader.ts`'s
+ *    `ZarrRoutesLike`), so `index.json` reads go through its D1 gate, edge
+ *    cache, and purge list unchanged.
+ *  - `rawGithubBase`: `https://raw.githubusercontent.com` by default (the
+ *    `GITHUB_RAW_ORIGIN` `zarr-fidelity-sweep.ts` already uses) -- the
+ *    `get_events` `events.tsv` fallback's content host.
+ */
+export interface RecordingToolDeps {
+  env: Bindings;
+  executionCtx: ExecutionContext;
+  cache: () => CacheLike;
+  fetch: typeof fetch;
+  zarrRoutes: ZarrRoutesLike;
+  rawGithubBase: string;
 }
