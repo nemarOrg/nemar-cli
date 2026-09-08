@@ -90,7 +90,73 @@ export function flagToBoolean(value: 0 | 1 | null | undefined): boolean | null {
 }
 
 // ---------------------------------------------------------------------------
-// Provenance envelope -- on every response, not optional, not only when asked
+// Citation composition (issue #1064 / #1294) -- a line-for-line TypeScript
+// port of `dataset_citation` in `scripts/zarr/generate_zarr.py` (lines 4456
+// to 4485), so `describe_dataset` and the Zarr index's own `citation` field
+// agree on the exact same string for the same row.
+// ---------------------------------------------------------------------------
+
+/** Matches `_CITATION_PUBLISHER` in `scripts/zarr/generate_zarr.py`, and
+ *  `publisher` in `backend/src/services/datacite.ts`, shortened to the form
+ *  a reference list actually carries. */
+const CITATION_PUBLISHER = "NEMAR";
+
+/** The subset of a `datasets` row (or the public `GET /datasets/:id`
+ *  response's `dataset` object) {@link composeCitation} reads. Every field
+ *  is optional/nullable: a row missing everything but `name` still composes
+ *  a (short) citation, and a row missing `name` entirely composes none. */
+export interface ComposeCitationInput {
+  name?: string | null;
+  authors?: string | null;
+  concept_doi?: string | null;
+  doi?: string | null;
+  /** Already the canonical `vX.Y.Z` tag (`toVersionTag`/`withCanonicalLatestVersion`
+   *  in `shared/contract/version.ts`) -- this function does not normalize it. */
+  latest_version?: string | null;
+  created_at?: string | null;
+}
+
+/**
+ * A ready-to-paste citation string for a dataset, or `null` when the row
+ * does not carry enough to make one honestly (no `name`).
+ *
+ * Port of `dataset_citation(row)` in `scripts/zarr/generate_zarr.py`: every
+ * part comes from the public row, and a missing part omits its segment
+ * instead of printing an empty one. `doi` prefers `concept_doi`, falling
+ * back to `doi`; a leading `doi:` prefix (if either ever carries one) is
+ * stripped before building the `https://doi.org/...` segment. `created_at`'s
+ * year is its first four characters, included only when they are all
+ * digits (an empty or malformed `created_at` omits the year segment rather
+ * than emitting a bogus one).
+ */
+export function composeCitation(row: ComposeCitationInput | null | undefined): string | null {
+  if (!row || typeof row !== "object") return null;
+  const name = (row.name ?? "").trim();
+  if (!name) return null;
+  const authors = (row.authors ?? "").trim();
+  const doi = (row.concept_doi || row.doi || "").trim();
+  const version = (row.latest_version ?? "").trim();
+  const year = (row.created_at ?? "").slice(0, 4);
+  const parts: string[] = [];
+  if (authors) parts.push(authors);
+  if (year.length > 0 && /^\d+$/.test(year)) parts.push(`(${year})`);
+  parts.push(`${name}${version ? ` (${version})` : ""}.`);
+  parts.push(`${CITATION_PUBLISHER}.`);
+  if (doi) parts.push(`https://doi.org/${doi.startsWith("doi:") ? doi.slice(4) : doi}`);
+  return parts.join(" ");
+}
+
+// ---------------------------------------------------------------------------
+// Provenance envelope -- rides RECORDING-level tool responses (`list_recordings`,
+// `get_events`, `render_overview`, `read_window`; phases 3 and 4), not optional
+// and not only when asked, there. Dataset-level tools (`search_datasets`,
+// `describe_dataset`) never construct one: they carry `doi`, `license`,
+// `citation`, `zarr_status`, `zarr_source_commit` and `zarr_verify_status`
+// directly on their own output schema instead -- an index-document read (what
+// this envelope is built from) is exactly the cost `describe_dataset` avoids
+// (see its schema's doc and `.context/mcp-server-design.md` section 5). Phase 1's
+// design doc said "every tool's output includes a provenance envelope"; this is
+// the phase 2 correction to that sentence.
 // ---------------------------------------------------------------------------
 
 /** `has_zarr` (the catalog filter) means converted; this rides separately and
@@ -467,6 +533,16 @@ export const describeDatasetOutputSchema = z
     total_recording_duration_s: z.number().nullable().optional(),
     zarr_status: z.enum(["pending", "ready", "failed"]).nullable().optional(),
     zarr_verify_status: zarrVerifyStatusSchema.optional(),
+    /** Additive, phase 2 (#1294): the commit the catalog's `zarr_status`/
+     *  `zarr_verify_status` verdict was reached against -- present exactly
+     *  when the dataset has ever converted (null before a first conversion,
+     *  same nullability as `zarr_status` itself). */
+    zarr_source_commit: z.string().nullable().optional(),
+    /** Additive, phase 2 (#1294): store count backing `zarr_status`, the
+     *  same `>0` fact `has_zarr` on `search_datasets` tests for -- surfaced
+     *  here too so a caller does not have to re-derive "converted with data"
+     *  from `zarr_status` alone. */
+    zarr_store_count: z.number().int().nullable().optional(),
     cost_hint: describeDatasetCostHintSchema,
   })
   .passthrough();

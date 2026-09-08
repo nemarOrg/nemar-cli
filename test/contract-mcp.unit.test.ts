@@ -20,6 +20,7 @@ import {
   SEARCH_DATASETS_DEFAULT_LIMIT,
   SEARCH_DATASETS_MAX_LIMIT,
   buildReadRecipe,
+  composeCitation,
   computeProvenanceEnvelope,
   describeDatasetInputSchema,
   flagToBoolean,
@@ -33,10 +34,13 @@ import {
   zarrCatalogSchema,
 } from "../shared/contract/mcp.js";
 import { zarrArrayMetadataSchema, zarrIndexSchema } from "../shared/contract/zarr-index.js";
+import nm000329RowFixture from "./fixtures/dataset-row-nm000329.json";
 import level0ArrayFixture from "./fixtures/zarr-array-level0.zarr.json";
 import catalogSliceFixture from "./fixtures/zarr-catalog-slice.json";
 import nm000329SliceFixture from "./fixtures/zarr-index-nm000329-slice.json";
 import v3Fixture from "./fixtures/zarr-index-v3.json";
+
+const nm000329Row = nm000329RowFixture.dataset;
 
 const on008083Index = zarrIndexSchema.parse(v3Fixture);
 const nm000329Index = zarrIndexSchema.parse(nm000329SliceFixture);
@@ -496,5 +500,71 @@ describe("listRecordingsInputSchema", () => {
   test("rejects a dataset_id that does not match the NEMAR id pattern", () => {
     const result = listRecordingsInputSchema.safeParse({ dataset_id: "not-an-id" });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("composeCitation (issue #1064 / #1294, port of dataset_citation)", () => {
+  test("matches the nm000329 index fixture's citation, produced by the Python function from the same row", () => {
+    // The fixture string ends in "(v1.0.7).": nm000329Row.latest_version
+    // ("v1.0.7", already the canonical tag) is load-bearing here.
+    expect(nm000329Row.latest_version).toBe("v1.0.7");
+    expect(composeCitation(nm000329Row)).toBe(nm000329Index.citation);
+  });
+
+  test("each optional segment drops out when its input is empty", () => {
+    expect(composeCitation({ name: "A Dataset" })).toBe("A Dataset. NEMAR.");
+    expect(composeCitation({ name: "A Dataset", authors: "" })).toBe("A Dataset. NEMAR.");
+    expect(composeCitation({ name: "A Dataset", created_at: "" })).toBe("A Dataset. NEMAR.");
+    expect(composeCitation({ name: "A Dataset", latest_version: "" })).toBe("A Dataset. NEMAR.");
+    expect(composeCitation({ name: "A Dataset", concept_doi: "", doi: "" })).toBe(
+      "A Dataset. NEMAR.",
+    );
+  });
+
+  test("a full row composes every segment, in order", () => {
+    expect(
+      composeCitation({
+        name: "A Dataset",
+        authors: "Ada Lovelace, Alan Turing",
+        concept_doi: "10.5072/FK2abc123",
+        latest_version: "v2.1.0",
+        created_at: "2025-01-15 00:00:00",
+      }),
+    ).toBe(
+      "Ada Lovelace, Alan Turing (2025) A Dataset (v2.1.0). NEMAR. https://doi.org/10.5072/FK2abc123",
+    );
+  });
+
+  test("concept_doi wins over doi when both are present", () => {
+    const citation = composeCitation({
+      name: "A Dataset",
+      concept_doi: "10.5072/FK2concept",
+      doi: "10.5072/FK2fallback",
+    });
+    expect(citation).toContain("https://doi.org/10.5072/FK2concept");
+    expect(citation).not.toContain("FK2fallback");
+  });
+
+  test("falls back to doi when concept_doi is absent", () => {
+    const citation = composeCitation({ name: "A Dataset", doi: "10.5072/FK2fallback" });
+    expect(citation).toContain("https://doi.org/10.5072/FK2fallback");
+  });
+
+  test("a doi: prefix is stripped before building the doi.org URL", () => {
+    const citation = composeCitation({ name: "A Dataset", concept_doi: "doi:10.5072/FK2abc" });
+    expect(citation).toContain("https://doi.org/10.5072/FK2abc");
+    expect(citation).not.toContain("doi:10.5072");
+  });
+
+  test("no name means null", () => {
+    expect(composeCitation({ authors: "Someone" })).toBeNull();
+    expect(composeCitation({ name: "" })).toBeNull();
+    expect(composeCitation({ name: "   " })).toBeNull();
+    expect(composeCitation(null)).toBeNull();
+    expect(composeCitation(undefined)).toBeNull();
+  });
+
+  test("a non-digit or partial year is omitted rather than emitting a bogus segment", () => {
+    expect(composeCitation({ name: "A Dataset", created_at: "unknown" })).toBe("A Dataset. NEMAR.");
   });
 });
