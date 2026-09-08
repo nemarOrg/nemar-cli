@@ -126,6 +126,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "doctorScan",
     "enforceBulk",
     "enforceDataset",
+    "getAdminUserByUsername",
     "getCiStatus",
     "getDoiInfo",
     "getEmailPreferences",
@@ -199,6 +200,7 @@ const POST_SPLIT_ADDITIONS = [
   "createKeyFor", // #1284, epic #1272 phase 4, ADR 0048: owner-mint POST /admin/users/:username/keys
   "doctorFix", // #1130, CLI wrapper for POST /admin/doctor/fix
   "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
+  "getAdminUserByUsername", // #1284 review, epic #1272 phase 4, ADR 0048: GET /admin/users/:username, read by `nemar admin doctor kinds`
   "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion
   "getUserDuplicates", // #1254, ADR 0043: GET /admin/users/duplicates
   "listApiKeys", // #1283, epic #1272 phase 3, ADR 0047: GET /auth/keys

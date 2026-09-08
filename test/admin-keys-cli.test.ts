@@ -131,6 +131,23 @@ describe("nemar admin keys create", () => {
       server.stop();
     }
   });
+
+  test("a network failure appends the retry-safety hint naming the target username", async () => {
+    // Epic #1272 phase 4 (#1284 review): the mint and its read-back run in
+    // one D1 batch, so a dropped connection can land on either side of that
+    // commit -- the key may already exist even though this command never
+    // saw the response. No server at all: `http://127.0.0.1:1` is this
+    // codebase's stand-in for an unreachable host (matches
+    // test/auth-status-upload-access.test.ts's offline cases).
+    seedAuthenticatedConfig();
+    const result = await runCli(
+      ["admin", "keys", "create", "svc-account", "svc-job"],
+      "http://127.0.0.1:1",
+    );
+    expect(result.combined).toContain("Network error");
+    expect(result.combined).toContain("The key may have been minted before the connection dropped");
+    expect(result.combined).toContain("nemar admin keys list svc-account");
+  });
 });
 
 describe("nemar admin keys list", () => {

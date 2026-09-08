@@ -28,7 +28,12 @@ import { Command } from "commander";
 import inquirer from "inquirer";
 import ora, { type Ora } from "ora";
 import { formatBytesCli } from "../../shared/bytes.js";
-import type { DuplicateGroup } from "../../shared/contract/index.js";
+import {
+  ACCOUNT_KIND_VALUES,
+  type DuplicateGroup,
+  OPERATIONAL_ACCOUNT_KINDS,
+  isAccountKind,
+} from "../../shared/contract/index.js";
 import {
   type AvailabilityReport,
   type AvailabilityReportResult,
@@ -75,6 +80,7 @@ import {
   doctorScan,
   enforceBulk,
   enforceDataset,
+  getAdminUserByUsername,
   getCiStatus,
   getDoiInfo,
   getEmailPreferences,
@@ -301,8 +307,8 @@ adminCommand
     "after",
     `
 Tiers (ADR 0040):
-  browse   base tier: browse, dashboard, settings (CLI key and sandbox
-           follow in Phase 2)
+  browse   base tier: browse, dashboard, settings, CLI API key, and sandbox
+           training (ADR 0040 phase 2, landed)
   upload   an admin granted upload access; 'nemar admin approve' is the grant
   unknown  the API reported no tier for this account (a backend older than
            the tier split, or a rolling deploy)
@@ -313,7 +319,8 @@ Examples:
   $ nemar admin users --no-upload-access # Every account without the upload grant
   $ nemar admin users --role admin       # List all admins
   $ nemar admin users --role owner       # List all owners
-  $ nemar admin users --approved --role member  # Approved regular users`,
+  $ nemar admin users --approved --role member  # Approved regular users
+  $ nemar admin users --kind test        # List every test-kind account`,
   )
   .action(async (options) => {
     if (!requireAuth()) return;
@@ -361,11 +368,14 @@ Examples:
     }
 
     // Validate kind filter (epic #1272 phase 4, #1284; ADR 0048).
-    const kind: string | undefined = options.kind;
-    if (kind && !["person", "service", "test"].includes(kind)) {
-      console.error(chalk.red(`Invalid kind '${kind}'. Must be: person, service, or test`));
+    const kindOption: string | undefined = options.kind;
+    if (kindOption !== undefined && !isAccountKind(kindOption)) {
+      console.error(
+        chalk.red(`Invalid kind '${kindOption}'. Must be: ${ACCOUNT_KIND_VALUES.join(", ")}`),
+      );
       process.exit(1);
     }
+    const kind = kindOption;
 
     const spinner = ora("Fetching users...").start();
 
@@ -384,10 +394,18 @@ Examples:
       // backend that does not send `service_access` would otherwise dump every
       // account into "needs approving", which is the opposite of what an admin
       // asked for (ADR 0040).
-      const users =
+      const tierFiltered =
         noUploadAccess || awaitingApproval
           ? result.users.filter((u) => uploadTierOf(u) === "browse")
           : result.users;
+      // Same reasoning as the tier filter above, for `--kind` (epic #1272
+      // phase 4, #1284 review; ADR 0048): `?kind=` is sent server-side too,
+      // but a backend that predates this phase ignores an unrecognised
+      // query param and would otherwise return every account unfiltered.
+      // Re-narrowing here client-side means an older backend cannot produce
+      // a listing mislabeled as "just the test accounts" when it is really
+      // everyone.
+      const users = kind ? tierFiltered.filter((u) => u.account_kind === kind) : tierFiltered;
       const unknownTierCount = result.users.filter((u) => uploadTierOf(u) === "unknown").length;
 
       const filterLabel = [
@@ -773,7 +791,8 @@ Kinds:
 Rules:
   - Only owners can change account kinds
   - You cannot change your own account kind
-  - A verified ORCID iD blocks a move to service/test (unlink it first)
+  - A verified ORCID iD blocks a move to service/test -- run
+    'nemar auth profile orcid unlink' on that account first, then retry
   - Keys are not revoked on a kind change
 
 Examples:
@@ -781,13 +800,16 @@ Examples:
   $ nemar admin kind nemarAdmin service    # Mark an operational account
   $ nemar admin kind cool-vibers person -y # Revert (skip confirm)`,
   )
-  .action(async (username: string, kind: string, options: ConfirmOptions) => {
+  .action(async (username: string, kindArg: string, options: ConfirmOptions) => {
     if (!requireAuth()) return;
 
-    if (!["person", "service", "test"].includes(kind)) {
-      console.error(chalk.red(`Invalid kind '${kind}'. Must be: person, service, or test`));
+    if (!isAccountKind(kindArg)) {
+      console.error(
+        chalk.red(`Invalid kind '${kindArg}'. Must be: ${ACCOUNT_KIND_VALUES.join(", ")}`),
+      );
       process.exit(1);
     }
+    const kind = kindArg;
 
     const confirmResult = await confirm(`Change ${username}'s account kind to '${kind}'?`, options);
     if (confirmResult !== "confirmed") {
@@ -798,7 +820,7 @@ Examples:
     const spinner = ora(`Changing ${username}'s account kind to '${kind}'...`).start();
 
     try {
-      const result = await setAccountKind(username, kind as "person" | "service" | "test");
+      const result = await setAccountKind(username, kind);
       spinner.succeed(result.message);
     } catch (error) {
       handleCommandError(error, spinner, "Failed to change account kind", {
@@ -842,6 +864,13 @@ adminKeysCommand
         403: "Owner access required, or this account is a person (person_account)",
         404: "User not found",
         409: "This account already has the maximum number of live keys",
+        // statusCode 0 is this codebase's convention for a network-layer
+        // failure (lib/api/client.ts). The mint and its read-back run in one
+        // D1 batch (routes/admin/user-keys.ts), so a drop here can land on
+        // either side of that commit -- the key may already exist even
+        // though this command never saw the response (epic #1272 phase 4,
+        // #1284 review).
+        0: `The key may have been minted before the connection dropped; run \`nemar admin keys list ${username}\` before retrying.`,
       });
     }
   });
@@ -6084,6 +6113,59 @@ export async function runDoctorFixLoop(
   }
   return { totals, results };
 }
+
+doctorCommand
+  .command("kinds")
+  .description("Check that operational accounts carry their expected account kind (read-only)")
+  .action(async () => {
+    if (!requireAuth()) return;
+
+    const entries = Object.entries(OPERATIONAL_ACCOUNT_KINDS);
+    const spinner = ora(`Checking ${entries.length} operational account kind(s)...`).start();
+    const mismatches: string[] = [];
+    const absent: string[] = [];
+    try {
+      for (const [username, expectedKind] of entries) {
+        try {
+          const { user } = await getAdminUserByUsername(username);
+          if (user.account_kind !== expectedKind) {
+            mismatches.push(
+              `${username}: expected '${expectedKind}', found '${user.account_kind ?? "unknown"}'`,
+            );
+          }
+        } catch (err) {
+          if (err instanceof ApiError && err.statusCode === 404) {
+            absent.push(username);
+          } else {
+            throw err;
+          }
+        }
+      }
+      spinner.stop();
+
+      if (mismatches.length === 0 && absent.length === 0) {
+        console.log(
+          chalk.green(`All ${entries.length} operational account(s) carry their expected kind.`),
+        );
+        return;
+      }
+      for (const m of mismatches) {
+        console.log(`  ${chalk.yellow("kind mismatch")}  ${m}`);
+      }
+      for (const u of absent) {
+        console.log(`  ${chalk.yellow("account absent")} ${u}`);
+      }
+      console.log(
+        chalk.yellow(
+          `\n${mismatches.length + absent.length} finding(s). Fix a mismatch with \`nemar admin kind <username> <kind>\`.`,
+        ),
+      );
+    } catch (err) {
+      spinner.fail("Doctor kinds check failed");
+      console.error(chalk.red(errorDetail(err)));
+      process.exit(1);
+    }
+  });
 
 adminCommand.addCommand(doctorCommand);
 

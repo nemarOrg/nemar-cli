@@ -7,6 +7,7 @@
  */
 
 import {
+  type AccountKind,
   type AdminUserListItem,
   type AdminUsersListResponse,
   type ApiKeyCreateResponse,
@@ -63,7 +64,7 @@ export async function listUsers(
   // client can derive from the rest of the row.
   awaitingApproval?: boolean,
   // What the account IS (epic #1272 phase 4, #1284; ADR 0048).
-  kind?: string,
+  kind?: AccountKind,
 ): Promise<UsersListResponse> {
   const params = new URLSearchParams();
   if (status) params.set("status", status);
@@ -176,7 +177,7 @@ export async function changeUserRole(
 
 export interface ChangeKindResponse {
   message: string;
-  user: { username: string; account_kind: string };
+  user: { username: string; account_kind: AccountKind };
 }
 
 /**
@@ -185,7 +186,7 @@ export interface ChangeKindResponse {
  */
 export async function setAccountKind(
   username: string,
-  kind: "person" | "service" | "test",
+  kind: AccountKind,
 ): Promise<ChangeKindResponse> {
   return request<ChangeKindResponse>(
     `/admin/users/${username}/kind`,
@@ -195,6 +196,24 @@ export async function setAccountKind(
     },
     true,
   );
+}
+
+/** The fields `nemar admin doctor kinds` reads off `GET
+ *  /admin/users/:username` (epic #1272 phase 4, #1284 review; ADR 0048).
+ *  The route selects `u.*` plus two computed columns, so this is
+ *  deliberately narrow rather than a full mirror of the row -- everything
+ *  else is untyped here on purpose (`.passthrough()`-shaped, no contract
+ *  schema exists for this endpoint yet). */
+export interface AdminUserDetail {
+  username: string | null;
+  account_kind?: AccountKind;
+}
+
+/** `GET /admin/users/:username` (owner/admin; any kind). Throws `ApiError`
+ *  404 for an unknown username, same as every other username-keyed admin
+ *  route. */
+export async function getAdminUserByUsername(username: string): Promise<{ user: AdminUserDetail }> {
+  return request<{ user: AdminUserDetail }>(`/admin/users/${username}`, {}, true);
 }
 
 /**

@@ -13,6 +13,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { OPERATIONAL_ACCOUNT_KINDS } from "../shared/contract/user.js";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -57,6 +58,25 @@ function startUsersServer(users: unknown[]): CaptureServer {
         ? users.filter((u) => (u as { account_kind?: string }).account_kind === kind)
         : users;
       return Response.json({ users: filtered, count: filtered.length });
+    },
+  });
+  return { url: `http://localhost:${server.port}`, requests, stop: () => server.stop(true) };
+}
+
+/** A stand-in for a backend that predates `?kind=` (epic #1272 phase 4,
+ *  #1284 review): it records the query string but always returns every
+ *  user, unfiltered -- proving the CLI's own client-side re-filter is what
+ *  narrows the listing, not the (ignored) server param. */
+function startUsersServerIgnoringKind(users: unknown[]): CaptureServer {
+  const requests: URL[] = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/notices") return Response.json({ notices: [] });
+      if (url.pathname === "/datasets/facets") return Response.json({});
+      requests.push(url);
+      return Response.json({ users, count: users.length });
     },
   });
   return { url: `http://localhost:${server.port}`, requests, stop: () => server.stop(true) };
@@ -142,6 +162,23 @@ describe("nemar admin users --kind", () => {
       expect(server.requests.some((u) => u.searchParams.get("kind") === "test")).toBe(true);
       expect(result.stdout).toContain("cool-vibers");
       expect(result.stdout).not.toContain("riverstone");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("re-filters client-side, so a backend that ignores ?kind= cannot mislabel the listing", async () => {
+    seedAuthenticatedConfig();
+    const server = startUsersServerIgnoringKind([PERSON_USER, TEST_PERSONA_USER]);
+    try {
+      const result = await runCli(["admin", "users", "--kind", "test"], server.url);
+      expect(result.exitCode).toBe(0);
+      // The param was still SENT (a newer client talking to an older
+      // backend costs nothing extra) -- it is just not trusted alone.
+      expect(server.requests.some((u) => u.searchParams.get("kind") === "test")).toBe(true);
+      expect(result.stdout).toContain("cool-vibers");
+      expect(result.stdout).not.toContain("riverstone");
+      expect(result.stdout).toContain("1 total");
     } finally {
       server.stop();
     }
@@ -238,6 +275,32 @@ describe("nemar admin kind", () => {
       server.stop();
     }
   });
+
+  test("a 409 orcid_linked refusal prints the SENTENCE a person reads, not just the bare code", async () => {
+    // Epic #1272 phase 4 (#1284 review; ADR 0048): every kind-route refusal
+    // is `{ error: <code>, message }`, and `nemar admin kind` must show the
+    // MESSAGE -- the bare code `orcid_linked` on its own tells nobody what
+    // to do next.
+    seedAuthenticatedConfig();
+    const server = startKindServer(
+      {
+        error: "orcid_linked",
+        message:
+          "An ORCID iD identifies a person, and this account has one verified and linked. Run `nemar auth profile orcid unlink` on that account first, then retry.",
+      },
+      409,
+    );
+    try {
+      const result = await runCli(["admin", "kind", "cool-vibers", "service", "--yes"], server.url);
+      const combined = `${result.stdout}${result.stderr}`;
+      expect(combined).toContain(
+        "An ORCID iD identifies a person, and this account has one verified and linked.",
+      );
+      expect(combined).toContain("nemar auth profile orcid unlink");
+    } finally {
+      server.stop();
+    }
+  });
 });
 
 describe("nemar auth status: Kind:", () => {
@@ -271,12 +334,14 @@ describe("nemar auth status: Kind:", () => {
     return { url: `http://localhost:${server.port}`, stop: () => server.stop(true) };
   }
 
-  function seedUserConfig(): void {
+  function seedUserConfig(extra: Record<string, unknown> = {}): void {
     writeFileSync(
       join(configDir, "config.json"),
       JSON.stringify({
         activeAccount: "cool-vibers",
-        accounts: { "cool-vibers": { apiKey: "test-user-key", username: "cool-vibers" } },
+        accounts: {
+          "cool-vibers": { apiKey: "test-user-key", username: "cool-vibers", ...extra },
+        },
       }),
     );
   }
@@ -289,6 +354,19 @@ describe("nemar auth status: Kind:", () => {
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("Kind:");
       expect(result.stdout).toContain("test");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("--refresh against a service-kind account prints Kind: service", async () => {
+    seedUserConfig();
+    const server = startMeServer("service");
+    try {
+      const result = await runCli(["auth", "status", "--refresh"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Kind:");
+      expect(result.stdout).toContain("service");
     } finally {
       server.stop();
     }
@@ -311,6 +389,106 @@ describe("nemar auth status: Kind:", () => {
     try {
       const result = await runCli(["auth", "status", "--refresh"], server.url);
       expect(result.stdout).not.toContain("Kind:");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("without --refresh, a cached test kind from a prior refresh is NOT printed (#1284 review)", async () => {
+    // src/commands/auth.ts: `userKind` is a local variable set ONLY inside
+    // the `--refresh` branch -- the `Kind:` line is never driven by the
+    // cached `accountKind` config field this same seed simulates having been
+    // written by an earlier `auth status --refresh` or `auth login`. This is
+    // the deliberate shipped behavior (see the field's own comment in
+    // src/lib/config.ts), not a gap: a plain `auth status` makes no network
+    // call for this field and so has nothing fresher to report than what a
+    // stale cached value might already be wrong about.
+    seedUserConfig({ accountKind: "test" });
+    const server = startMeServer("test");
+    try {
+      const result = await runCli(["auth", "status"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).not.toContain("Kind:");
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("nemar admin doctor kinds", () => {
+  /** Stand-in for `GET /admin/users/:username`, the one endpoint `nemar
+   *  admin doctor kinds` calls once per entry of OPERATIONAL_ACCOUNT_KINDS
+   *  (#1284 review). `users` maps username -> the kind the stand-in should
+   *  report for it; a username with no entry answers 404, exactly like the
+   *  real route does for an unknown username. */
+  function startAdminUserServer(users: Record<string, string>): CaptureServer {
+    const requests: URL[] = [];
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/notices") return Response.json({ notices: [] });
+        if (url.pathname === "/datasets/facets") return Response.json({});
+        requests.push(url);
+        const match = url.pathname.match(/^\/admin\/users\/([^/]+)$/);
+        if (!match) return Response.json({ error: "not found" }, { status: 404 });
+        const username = decodeURIComponent(match[1]);
+        const kind = users[username];
+        if (kind === undefined) return Response.json({ error: "User not found" }, { status: 404 });
+        return Response.json({ user: { username, account_kind: kind } });
+      },
+    });
+    return { url: `http://localhost:${server.port}`, requests, stop: () => server.stop(true) };
+  }
+
+  function allExpectedKinds(): Record<string, string> {
+    return { ...OPERATIONAL_ACCOUNT_KINDS };
+  }
+
+  test("every operational account matches its expected kind: reports all clean", async () => {
+    seedAuthenticatedConfig();
+    const server = startAdminUserServer(allExpectedKinds());
+    try {
+      const result = await runCli(["admin", "doctor", "kinds"], server.url);
+      expect(result.exitCode).toBe(0);
+      const combined = `${result.stdout}${result.stderr}`;
+      expect(combined).toContain("carry their expected kind");
+      expect(combined).not.toContain("kind mismatch");
+      expect(combined).not.toContain("account absent");
+      expect(server.requests.length).toBe(Object.keys(OPERATIONAL_ACCOUNT_KINDS).length);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a mismatched kind is reported by username, naming expected and found", async () => {
+    seedAuthenticatedConfig();
+    const users = allExpectedKinds();
+    users.nemarOwner = "person"; // expected 'service'
+    const server = startAdminUserServer(users);
+    try {
+      const result = await runCli(["admin", "doctor", "kinds"], server.url);
+      expect(result.exitCode).toBe(0);
+      const combined = `${result.stdout}${result.stderr}`;
+      expect(combined).toContain("kind mismatch");
+      expect(combined).toContain("nemarOwner: expected 'service', found 'person'");
+      expect(combined).toContain("nemar admin kind <username> <kind>");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("an absent operational account is reported separately from a mismatch", async () => {
+    seedAuthenticatedConfig();
+    const { "test-owner": _omitted, ...users } = allExpectedKinds();
+    const server = startAdminUserServer(users);
+    try {
+      const result = await runCli(["admin", "doctor", "kinds"], server.url);
+      expect(result.exitCode).toBe(0);
+      const combined = `${result.stdout}${result.stderr}`;
+      expect(combined).toContain("account absent");
+      expect(combined).toContain("test-owner");
+      expect(combined).not.toContain("test-owner: expected");
     } finally {
       server.stop();
     }

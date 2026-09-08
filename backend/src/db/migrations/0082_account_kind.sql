@@ -39,6 +39,15 @@
 --
 -- NO INDEX. Nothing queries this column by range or joins on it; the CHECK
 -- constraint is the only enforcement it needs.
+--
+-- THIS USERNAME LIST IS COPIED, NOT SHARED (#1284 review). SQL cannot
+-- import shared/contract/user.ts's OPERATIONAL_ACCOUNT_KINDS, which is the
+-- one TypeScript source for this same list; scripts/seed-dev-db.sql
+-- repeats it a third time in SQL for a database seeded fresh after this
+-- migration. All three must be kept in sync by hand when the list changes;
+-- backend/test/account-kind-migration.test.ts and `nemar admin doctor
+-- kinds` both read the TypeScript constant, so at least those two agree
+-- with each other automatically.
 
 ALTER TABLE users ADD COLUMN account_kind TEXT NOT NULL DEFAULT 'person'
   CHECK (account_kind IN ('person', 'service', 'test'));
