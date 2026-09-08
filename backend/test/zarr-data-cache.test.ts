@@ -1520,7 +1520,7 @@ describe("private dataset redirect safety: the bucket's own deny-list, not this 
     expect(location).not.toBeNull();
 
     // This IS the actual safety argument for the redirect branch skipping
-    // the D1 gate (decision 2 in the phase 6 brief, and the module doc
+    // the D1 gate (see also the module doc
     // comment above): the bucket's NotResource deny-list
     // (services/bucket-policy.ts) denies ANONYMOUS s3:GetObject on a
     // private dataset's ENTIRE prefix at the bucket level, independent of
