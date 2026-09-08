@@ -5,12 +5,33 @@
  * Real engine: bun:sqlite behind realD1 with every migration applied, the
  * real admin router (authMiddleware + adminMiddleware + ownerMiddleware,
  * real hashed tokens). No mocks.
+ *
+ * ONE THING THIS FILE CANNOT EXERCISE, BY CONSTRUCTION, NOT BY OMISSION
+ * (`.rules/testing.md`: say so when real data cannot falsify a rule): the
+ * ACTUAL concurrent race the kind route's guarded UPDATE closes (two
+ * owners changing the same account's kind at once). Tried first with
+ * `Promise.all([postKind(target, "service"), postKind(target, "test")])`
+ * run 20 times against this harness: every attempt landed 200/200, never
+ * 200/409 -- `realD1`'s `.first()`/`.run()` wrap an already-synchronous
+ * bun:sqlite call in `Promise.resolve(...)`, so by the time either
+ * request's async function yields at an `await`, ITS OWN database
+ * operation has already completed; nothing is left for the other
+ * request's handler to interleave with. Same limitation
+ * device-auth-routes.test.ts's header documents for its own conditional
+ * UPDATEs. The "guarded UPDATE's shape" test below is the real-engine
+ * substitute this file uses instead: it runs the EXACT exported statement
+ * the route runs, and proves its guard by mutating the row between two
+ * calls to it -- by hand, since the harness cannot do it via real
+ * concurrency -- rather than asserting something a fake would only be
+ * pretending to prove.
  */
 
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
+import { ACCOUNT_KIND_ERROR_MESSAGES } from "../../shared/contract/user.js";
 import { adminRoutes } from "../src/routes/admin";
+import { KIND_CHANGE_GUARDED_UPDATE_SQL } from "../src/routes/admin/users";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -118,18 +139,24 @@ describe("POST /admin/users/:username/kind", () => {
     expect(kindOf("persona2")).toBe("person");
   });
 
-  test("targeting your own account answers 400", async () => {
+  test("targeting your own account answers 400 own_account", async () => {
     const res = await postKind("kindowner", "service", OWNER_KEY);
     expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe("own_account");
+    expect(body.message).toBe(ACCOUNT_KIND_ERROR_MESSAGES.own_account);
+    expect("code" in body).toBe(false);
     expect(kindOf("kindowner")).toBe("person");
   });
 
-  test("an unchanged kind answers 409 same_kind", async () => {
+  test("an unchanged kind answers 409 same_kind, with the typed message and no separate code field", async () => {
     seedTarget("persona3", { accountKind: "test" });
     const res = await postKind("persona3", "test", OWNER_KEY);
     expect(res.status).toBe(409);
-    const body = (await res.json()) as { code?: string };
-    expect(body.code).toBe("same_kind");
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe("same_kind");
+    expect(body.message).toBe(ACCOUNT_KIND_ERROR_MESSAGES.same_kind);
+    expect("code" in body).toBe(false);
   });
 
   test("an invalid kind value answers 400 at the validation boundary", async () => {
@@ -150,7 +177,9 @@ describe("POST /admin/users/:username/kind", () => {
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string; message: string };
     expect(body.error).toBe("orcid_linked");
-    expect(body.message).toContain("unlink it before making this a service or test account");
+    expect(body.message).toBe(ACCOUNT_KIND_ERROR_MESSAGES.orcid_linked);
+    expect(body.message).toContain("nemar auth profile orcid unlink");
+    expect("code" in body).toBe(false);
     expect(kindOf("persona5")).toBe("person");
   });
 
@@ -192,6 +221,44 @@ describe("POST /admin/users/:username/kind", () => {
       )
       .get("persona8-existing-hash");
     expect(row?.revoked_at).toBeNull();
+  });
+
+  test("the guarded UPDATE's shape: a matching from-kind updates, a stale one does not (kind_changed_concurrently)", async () => {
+    // Proves what the route's own zero-changes branch answers
+    // `kind_changed_concurrently` for, without needing a real concurrent
+    // requester -- bun:sqlite's single-writer test double cannot reliably
+    // produce that interleaving (see the SQL constant's own docstring and
+    // device-auth-routes.test.ts's header for the same limitation). This
+    // "flips the kind between read and write" by hand: read, then mutate
+    // the row as a concurrent winner would have, then run the SAME guarded
+    // statement the route runs with the now-STALE from-kind and observe it
+    // change nothing.
+    seedTarget("persona9", { accountKind: "person" });
+    const target = db
+      .query<{ id: number; account_kind: string }, [string]>(
+        "SELECT id, account_kind FROM users WHERE username = ?",
+      )
+      .get("persona9");
+    if (!target) throw new Error("seed failed");
+    expect(target.account_kind).toBe("person");
+
+    // A matching from-kind updates.
+    const matching = db.query(KIND_CHANGE_GUARDED_UPDATE_SQL).run("service", target.id, "person");
+    expect(matching.changes).toBe(1);
+    expect(kindOf("persona9")).toBe("service");
+
+    // A concurrent winner changes the row again, out from under the first
+    // read (the row is now 'test', not the 'person' the guard below still
+    // names).
+    db.query("UPDATE users SET account_kind = 'test' WHERE id = ?").run(target.id);
+
+    // The SAME statement, bound with the now-stale `person` from-kind,
+    // changes nothing -- this is exactly the shape that makes the route
+    // answer 409 `kind_changed_concurrently` instead of silently
+    // overwriting the concurrent winner's write.
+    const stale = db.query(KIND_CHANGE_GUARDED_UPDATE_SQL).run("service", target.id, "person");
+    expect(stale.changes).toBe(0);
+    expect(kindOf("persona9")).toBe("test");
   });
 });
 
