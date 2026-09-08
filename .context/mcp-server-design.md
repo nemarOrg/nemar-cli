@@ -92,9 +92,15 @@ app.all("/mcp", async (c) => {
 one route: a 2026-07-28 client gets per-request envelope handling, and a
 2025-era client is served through the established stateless
 `initialize` + `tools/call` idiom, with no branching in `buildMcpServer` at
-all -- verified in phase 2 (`backend/test/mcp-route.test.ts`): the same
-`search_datasets`/`describe_dataset` tools answer both a modern `tools/call`
-and a legacy one built with no `_meta` envelope at all.
+all -- verified in phase 2 from two independent sources: `backend/test/mcp-route.test.ts`'s
+"a legacy initialize handshake plus a legacy tools/call ... both work" test
+drives the legacy path against `describe_dataset` (in-process, real
+`@modelcontextprotocol/server`, real bun:sqlite D1), and
+`backend/scripts/mcp-smoke.sh`'s "legacy tools/call (no `_meta` envelope at
+all)" check drives the identical legacy path against `search_datasets`
+under REAL workerd. Between the two, both phase 2 tools are proven to
+answer a legacy `tools/call` built with no `_meta` envelope at all, on both
+runtimes this server actually serves from.
 Do not mount `@modelcontextprotocol/server-legacy` (the frozen v1 SSE/OAuth
 code; it is not a compatibility shim, it is the old package under a new
 name), and do not use `@hono/mcp` (peer-depends on SDK 1.x) or Cloudflare's
@@ -266,6 +272,38 @@ rejected outright (the catalog's own vocabulary is authoritative and can
 grow); the response's `count` is simply 0, and the tool description should
 point the caller at `describe_dataset`'s facet fields on any hit for
 spelling.
+
+**Phase 2 implementation, three additive output fields (PR #1323 review):**
+- **`note`** (`string | null`, optional): a caveat the caller should
+  surface verbatim. Two producers, joined with a space when both fire on
+  the same call: `executeDatasetSearch`'s own `warning` (a degraded
+  `count`, e.g. the count query itself failed -- ADR 0005, partial data
+  still serves), and a NEW phase 2 case -- a hit whose id has no row in
+  the follow-up license/zarr lookup names the unresolved ids here (see
+  below), rather than presenting `license: null, has_zarr: false` as a
+  confirmed fact.
+- **`truncated`** (`boolean`, optional): `executeDatasetSearch`'s own
+  `truncated` passed through unchanged, on the `query` path only -- the
+  no-`query` catalog-list path always answers its own exact `count`, so
+  this is never set there.
+- **The search index itself being unavailable is a tool error, not an
+  empty page.** `executeDatasetSearch` DEGRADES (`method: "unavailable"`)
+  rather than throwing when `datasets_fts` is missing; earlier phases of
+  this design treated ADR 0005 ("partial data still serves") as license to
+  pass that straight through as `count: 0`, but an infra failure silently
+  read as "no matches" is exactly the kind of masking ADR 0005 does NOT
+  endorse. `search_datasets` instead answers `isError: true` naming the
+  fallback (browse without `query`, or retry) and logs one
+  `console.error`.
+- **A follow-up-lookup miss is reported, not silently guessed.** The
+  `query` path's license/Zarr facts come from a SEPARATE query keyed by
+  the search hits' ids (design doc's own cost-class note above); when
+  that lookup has no row for a hit id (a stale Vectorize id, or a delete
+  race), the hit still gets the schema-required `license: null,
+  has_zarr: false`, but the ids are named in `note` and `console.warn`'d
+  -- extracted as the pure `mergeHitsWithCatalog`
+  (`backend/src/mcp/tools/search-datasets.ts`), unit-tested directly with
+  a real, deliberately incomplete `Map`.
 
 ### 5.2 `describe_dataset`
 
@@ -485,7 +523,9 @@ than inventing a second convention:
 
 ```
 indexes: [tool_name]
-blobs:   [tool_name, dataset_id ?? "-", cache_status]   // cache_status: "hit" | "miss" | "none"
+blobs:   [tool_name, dataset_id ?? "-", cache_status, outcome]
+         // cache_status: "hit" | "miss" | "none"
+         // outcome (PR #1323 review, phase 2 implementation): "ok" | "tool_error" | "exception"
 doubles: [elapsed_ms, upstream_bytes]
 ```
 
@@ -493,6 +533,17 @@ doubles: [elapsed_ms, upstream_bytes]
 projection cache at all (`search_datasets`, a `read_window` taste), so the
 dashboard can tell "cache was irrelevant here" apart from "cache was
 consulted and missed."
+**`outcome` (phase 2 implementation, the 4th blob) distinguishes how the
+call actually finished:** `"ok"` for a normal (non-error) result,
+`"tool_error"` for a normal `CallToolResult` with `isError: true` (a
+business-logic error the tool handled itself -- an unknown dataset id, a
+malformed-but-schema-valid state), `"exception"` for a thrown error
+`withToolMetrics` itself caught (a D1 query failure, say) -- the metrics
+point is written for that case too, then the error is rethrown unchanged
+so the transport's own error handling is unaffected. This lets a future
+dashboard tell "the tool ran and reported a business-logic problem" apart
+from "the tool never got to run its own logic at all," which a bare
+success/failure count cannot.
 **Phase 2 decision: a dedicated Analytics Engine dataset**, `ANALYTICS_MCP`
 (`nemar_mcp_metrics` prod, `nemar_mcp_metrics_dev` dev;
 `backend/src/services/mcp-metrics.ts`, `buildMcpDataPoint`/
@@ -513,9 +564,14 @@ Every phase 2 tool call is wrapped in `withToolMetrics`
 `performance.now()` and records exactly one point per call, on the success
 path AND the error path (a thrown exception, or a returned `isError: true`
 result) alike -- the point is the measurement, not the success.
-Both phase 2 tools report `cache_status: "none"` and `upstream_bytes: 0`:
-neither touches the phase 3 `list_recordings`/`get_events` projection cache
-(section 7) or a store byte; they read D1 only.
+`withToolMetrics(env, name, getDatasetId, fn)` reads the dataset id by
+calling `getDatasetId(args)` BEFORE `fn` runs, not from `fn`'s return
+value: a thrown D1 error is therefore still attributed to the right
+dataset, since the id was already captured before the tool had a chance
+to fail. Both phase 2 tools report `cache_status: "none"` and
+`upstream_bytes: 0`: neither touches the phase 3
+`list_recordings`/`get_events` projection cache (section 7) or a store
+byte; they read D1 only.
 A p95 CPU budget per call as acceptance criteria is still open -- the smoke
 run's per-call timings (section 10) are the first measurement toward that,
 not the budget itself.
@@ -539,7 +595,8 @@ not the budget itself.
 
 Full detail of the phase 1 spike, including the exact failure message and
 the byte-level derivation of `fixtures/chunk.bin`, lived in
-`backend/spike/mcp-transport/README.md` -- deleted by phase 2 (decision 9);
+`backend/spike/mcp-transport/README.md` -- deleted by phase 2 once its decode
+path was promoted and its transport wiring superseded by the real host fork;
 `fixtures/chunk.bin`/`chunk.expected.json` moved to
 `backend/test/fixtures/blosc/`, and the decode path itself was promoted to
 `backend/src/services/blosc-decode.ts` (`decodeBloscZstdInt16`), dropping
