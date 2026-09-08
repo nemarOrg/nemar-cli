@@ -26,8 +26,11 @@
 
 import * as z4 from "zod4";
 import {
+  NEXT_CHEAPEST_TOOL_VALUES,
   SEARCH_DATASETS_DEFAULT_LIMIT,
   SEARCH_DATASETS_MAX_LIMIT,
+  ZARR_STATUS_VALUES,
+  ZARR_VERIFY_STATUS_VALUES,
 } from "../../../shared/contract/mcp.js";
 import { DATASET_ID_RE } from "../../../shared/contract/zarr-index.js";
 
@@ -123,6 +126,15 @@ export const searchDatasetsOutputSchema4 = z4
       .nonnegative()
       .describe("Total number of matching datasets (not just this page)."),
     limit: z4.number().int().describe("The limit this response was paged against."),
+    note: z4
+      .string()
+      .nullable()
+      .optional()
+      .describe("A caveat to surface verbatim, e.g. a degraded search index or an unresolved hit."),
+    truncated: z4
+      .boolean()
+      .optional()
+      .describe("True when more rows matched than this response's candidate window could return."),
   })
   .passthrough();
 
@@ -139,7 +151,7 @@ export const describeDatasetInputSchema4 = z4
 const describeDatasetCostHintSchema4 = z4
   .object({
     next_cheapest_tool: z4
-      .enum(["list_recordings", "get_events", "render_overview", "read_window"])
+      .enum(NEXT_CHEAPEST_TOOL_VALUES)
       .describe("The cheapest tool to call next for more detail on this dataset."),
     reason: z4
       .string()
@@ -183,12 +195,12 @@ export const describeDatasetOutputSchema4 = z4
       .optional()
       .describe("Total recording duration across the dataset, in seconds."),
     zarr_status: z4
-      .enum(["pending", "ready", "failed"])
+      .enum(ZARR_STATUS_VALUES)
       .nullable()
       .optional()
       .describe("Zarr conversion status: pending (not yet converted), ready, or failed."),
     zarr_verify_status: z4
-      .enum(["verified", "failed", "unverifiable"])
+      .enum(ZARR_VERIFY_STATUS_VALUES)
       .nullable()
       .optional()
       .describe(

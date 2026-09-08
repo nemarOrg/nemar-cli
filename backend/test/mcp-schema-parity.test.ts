@@ -94,6 +94,13 @@ describe("searchDatasetsOutputSchema parity", () => {
       "unknown top-level key -- passthrough keeps it",
       { results: [], count: 0, limit: 20, future_field: "x" },
     ],
+    [
+      "unknown key nested inside a results[] hit -- passthrough keeps it",
+      { results: [{ ...validHit, future_field: "x" }], count: 1, limit: 20 },
+    ],
+    ["note populated", { results: [], count: 0, limit: 20, note: "the search index is degraded" }],
+    ["note explicitly null", { results: [], count: 0, limit: 20, note: null }],
+    ["truncated true", { results: [validHit], count: 500, limit: 20, truncated: true }],
   ];
   for (const [label, input] of cases) {
     test(label, () =>
@@ -165,6 +172,10 @@ describe("describeDatasetOutputSchema parity", () => {
     ],
     ["malformed dataset_id -- rejected", { ...base, dataset_id: "not-an-id" }],
     ["unknown top-level key -- passthrough keeps it", { ...base, future_field: "x" }],
+    [
+      "unknown key nested inside cost_hint -- passthrough keeps it",
+      { ...base, cost_hint: { ...base.cost_hint, future_field: "x" } },
+    ],
   ];
   for (const [label, input] of cases) {
     test(label, () =>

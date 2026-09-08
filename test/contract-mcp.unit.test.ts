@@ -550,6 +550,15 @@ describe("composeCitation (issue #1064 / #1294, port of dataset_citation)", () =
     expect(citation).toContain("https://doi.org/10.5072/FK2fallback");
   });
 
+  test("a whitespace-only concept_doi falls through to doi, not an empty segment", () => {
+    const citation = composeCitation({
+      name: "A Dataset",
+      concept_doi: "   ",
+      doi: "10.5072/FK2fallback",
+    });
+    expect(citation).toContain("https://doi.org/10.5072/FK2fallback");
+  });
+
   test("a doi: prefix is stripped before building the doi.org URL", () => {
     const citation = composeCitation({ name: "A Dataset", concept_doi: "doi:10.5072/FK2abc" });
     expect(citation).toContain("https://doi.org/10.5072/FK2abc");
@@ -566,5 +575,9 @@ describe("composeCitation (issue #1064 / #1294, port of dataset_citation)", () =
 
   test("a non-digit or partial year is omitted rather than emitting a bogus segment", () => {
     expect(composeCitation({ name: "A Dataset", created_at: "unknown" })).toBe("A Dataset. NEMAR.");
+  });
+
+  test("a two-digit year (created_at too short) yields no year segment", () => {
+    expect(composeCitation({ name: "A Dataset", created_at: "20" })).toBe("A Dataset. NEMAR.");
   });
 });
