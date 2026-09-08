@@ -148,23 +148,37 @@ describe("buildImportFailureIssueBody", () => {
     expect(body).toContain("docs/import-failure-procedure.md");
   });
 
-  test("prepare stage carries the git-divergence hint, clearly labeled", () => {
-    const body = buildImportFailureIssueBody(details({ stage: "prepare" }));
-    expect(body).toContain("Hint");
-    expect(body).toContain("git-divergence");
-  });
-
-  test("copy stage carries the upstream-403/shard-gap hint", () => {
-    const body = buildImportFailureIssueBody(details({ stage: "copy" }));
-    expect(body).toContain("Hint");
-    expect(body).toContain("upstream-403/shard-gap");
-  });
-
-  test("finalize (and unrecognized) stages get no hint line", () => {
-    expect(buildImportFailureIssueBody(details({ stage: "finalize" }))).not.toContain("Hint");
-    expect(buildImportFailureIssueBody(details({ stage: "something-unrecognized" }))).not.toContain(
-      "Hint",
+  // These three replace the STAGE_HINTS assertions (#1309). The old map guessed
+  // "possible git-divergence" from stage=prepare and "possible
+  // upstream-403/shard-gap" from stage=copy. Every automated failure between
+  // 2026-07-22 and 2026-09-08 was stage=prepare and none was git divergence, so
+  // the hint was wrong for every case it described. The cause now comes from the
+  // error message, and stage alone never implies one.
+  test("names the cause from the error message", () => {
+    const body = buildImportFailureIssueBody(
+      details({
+        stage: "prepare",
+        errorMessage:
+          "Failed to push: remote: Invalid username or token. Password authentication is not supported for Git operations.",
+      }),
     );
+    expect(body).toContain("Cause: auth_invalid");
+    expect(body).toContain("NEMAR_GITHUB_PAT");
+  });
+
+  test("the generic roll-up yields an explicit unknown, not a guess", () => {
+    // details() carries the generic `terminal: ...` string the report job posts.
+    const body = buildImportFailureIssueBody(details({ stage: "prepare" }));
+    expect(body).toContain("Cause: unknown");
+    expect(body).not.toContain("git-divergence");
+  });
+
+  test("stage alone never implies a cause", () => {
+    for (const stage of ["prepare", "copy", "finalize", "something-unrecognized"]) {
+      expect(buildImportFailureIssueBody(details({ stage, errorMessage: null }))).toContain(
+        "Cause: unknown",
+      );
+    }
   });
 
   test("null error_message / workflow_run_url render as explicit placeholders, not 'null'", () => {
@@ -196,12 +210,14 @@ describe("buildImportFailureIssueComment", () => {
     );
   });
 
-  test("carries the same stage hint convention as the create body", () => {
-    expect(buildImportFailureIssueComment(details({ stage: "prepare" }), nowIso)).toContain(
-      "git-divergence",
-    );
-    expect(buildImportFailureIssueComment(details({ stage: "finalize" }), nowIso)).not.toContain(
-      "Hint",
+  test("names the cause the same way the create body does", () => {
+    const errorMessage =
+      "Failed to configure S3 remote: The bucket already exists, and its annex-uuid file indicates it is used by a different special remote.";
+    const comment = buildImportFailureIssueComment(details({ stage: "prepare", errorMessage }), nowIso);
+    expect(comment).toContain("Cause: annex_uuid_conflict");
+    // A re-failure whose cause is undiagnosable still says so explicitly.
+    expect(buildImportFailureIssueComment(details({ stage: "finalize" }), nowIso)).toContain(
+      "Cause: unknown",
     );
   });
 });
