@@ -20,10 +20,11 @@
  *    scope and constructed once (design doc section 7).
  *
  * Mounted on the `mcp` host fork in `index.ts` and path-mounted at `/mcp` on
- * the api host for workers.dev/dev access (decision 2): the SAME code
- * serves both entry points, but the path mount forwards only the exact
- * `/mcp` path, so the descriptor at `/` is reachable only via the host fork
- * (`mcp.nemar.org` / `mcp-test.nemar.org`), not the workers.dev fallback.
+ * the api host for workers.dev/dev access (`.context/mcp-server-design.md`
+ * section 3, "Host and routing"): the SAME code serves both entry points,
+ * but the path mount forwards only the exact `/mcp` path, so the descriptor
+ * at `/` is reachable only via the host fork (`mcp.nemar.org` /
+ * `mcp-test.nemar.org`), not the workers.dev fallback.
  */
 
 import { createMcpHandler } from "@modelcontextprotocol/server";
@@ -33,6 +34,37 @@ import { buildMcpServer } from "../mcp/server.js";
 import { rateLimiter } from "../middleware/rateLimit.js";
 import type { Bindings } from "../types/bindings.js";
 import { allowedOrigin, corsHeaders } from "./zarr-data.js";
+
+/**
+ * CORS headers for the MCP transport: `corsHeaders(origin)` (zarr-data.ts)
+ * supplies the shared `Vary`/`Access-Control-Max-Age`/
+ * `Access-Control-Allow-Origin` fields, overridden here for the THREE that
+ * are transport-specific -- zarr's own `corsHeaders` answers with its
+ * `Range`/`GET, HEAD, OPTIONS`/`ETag, Content-Length, Content-Range,
+ * Accept-Ranges` set, which is meaningless (and previously shipped
+ * unmodified) on the MCP POST response and 429 branch below:
+ *   - `Access-Control-Allow-Methods`: `POST, OPTIONS` (Streamable HTTP;
+ *     `GET`/`DELETE` answer 405, not a CORS-blocked method)
+ *   - `Access-Control-Allow-Headers`: the four request headers a Streamable
+ *     HTTP client sends (`Content-Type`, `Accept`, `Mcp-Method`, `Mcp-Name`,
+ *     `MCP-Protocol-Version`)
+ *   - `Access-Control-Expose-Headers`: `MCP-Protocol-Version, Content-Type`
+ *     -- the two response headers a client needs to read back, replacing
+ *     zarr's `ETag`/`Content-Length`/`Content-Range`/`Accept-Ranges` set,
+ *     none of which this transport ever sends
+ * Used on all four MCP responses that carry CORS at all: the OPTIONS
+ * preflight, the POST response re-wrap, the rate-limiter's 429 branch, and
+ * `app.onError`.
+ */
+function mcpCorsHeaders(origin: string | null): Record<string, string> {
+  return {
+    ...corsHeaders(origin),
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers":
+      "Content-Type, Accept, Mcp-Method, Mcp-Name, MCP-Protocol-Version",
+    "Access-Control-Expose-Headers": "MCP-Protocol-Version, Content-Type",
+  };
+}
 
 /** Test/DI seam (matching `ZarrDataDeps`'s precedent): `onerror` is the one
  *  piece of injectable behavior `createMcpHandler` itself exposes. Defaults
@@ -76,7 +108,7 @@ export function createMcpRoutes(deps: McpRoutesDeps = defaultDeps): Hono<{ Bindi
   // CORS-less Workers 500 -- same rationale as zarr-data.ts's app.onError.
   app.onError((err, c) => {
     console.error("[mcp] unhandled", { path: c.req.path }, err);
-    return c.body(null, 500, corsHeaders(c.req.header("origin") ?? null));
+    return c.body(null, 500, mcpCorsHeaders(c.req.header("origin") ?? null));
   });
 
   // Rate limiter: the same double-cast bridge and OPTIONS exemption
@@ -93,7 +125,7 @@ export function createMcpRoutes(deps: McpRoutesDeps = defaultDeps): Hono<{ Bindi
     // Hono context regardless of the static Variables generic.
     const res = await rateLimiter(c as unknown as Parameters<typeof rateLimiter>[0], next);
     if (res && res.status === 429) {
-      for (const [k, v] of Object.entries(corsHeaders(c.req.header("origin") ?? null))) {
+      for (const [k, v] of Object.entries(mcpCorsHeaders(c.req.header("origin") ?? null))) {
         res.headers.set(k, v);
       }
     }
@@ -136,20 +168,11 @@ export function createMcpRoutes(deps: McpRoutesDeps = defaultDeps): Hono<{ Bindi
   // first. Always 204 regardless of Origin (same as zarr-data.ts's OPTIONS
   // handler) -- a disallowed origin gets no Access-Control-Allow-Origin, so
   // the BROWSER blocks the follow-up request; the preflight itself is never
-  // the thing that fails. Headers/methods here are MCP's own (Streamable
-  // HTTP's Mcp-Method/Mcp-Name/MCP-Protocol-Version, POST/OPTIONS only), not
-  // zarr's Range/GET/HEAD set -- corsHeaders(origin) supplies the shared
-  // Vary/Expose-Headers/Max-Age/Allow-Origin fields, overridden here for the
-  // two that differ per transport.
+  // the thing that fails. mcpCorsHeaders() carries all three MCP-specific
+  // overrides (Allow-Methods, Allow-Headers, Expose-Headers), not zarr's own
+  // Range/GET/HEAD/ETag set.
   app.options("/mcp", (c) => {
-    const origin = c.req.header("origin") ?? null;
-    const headers = {
-      ...corsHeaders(origin),
-      "Access-Control-Allow-Headers":
-        "Content-Type, Accept, Mcp-Method, Mcp-Name, MCP-Protocol-Version",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-    };
-    return c.body(null, 204, headers);
+    return c.body(null, 204, mcpCorsHeaders(c.req.header("origin") ?? null));
   });
 
   // The Streamable HTTP transport endpoint. A fresh createMcpHandler per
@@ -164,7 +187,7 @@ export function createMcpRoutes(deps: McpRoutesDeps = defaultDeps): Hono<{ Bindi
     );
     const response = await handler.fetch(c.req.raw);
     const headers = new Headers(response.headers);
-    for (const [k, v] of Object.entries(corsHeaders(origin))) headers.set(k, v);
+    for (const [k, v] of Object.entries(mcpCorsHeaders(origin))) headers.set(k, v);
     return new Response(response.body, { status: response.status, headers });
   });
 
