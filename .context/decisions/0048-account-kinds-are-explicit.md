@@ -71,9 +71,12 @@ for any kind: listing and revoking are administrative record-keeping, not a
 liveness question.
 
 **A `test` account on production may own only `xx` sandbox datasets.**
-`realDatasetCreateGate` (backend/src/services/upload-gate.ts) gains a third input
-and refuses a real (`nm`) create with `test_account_sandbox_only` when
-`isProduction && !sandbox && account_kind === "test"`. No restriction off
+`realDatasetCreateGate` (backend/src/services/upload-gate.ts) checks the account kind first
+and refuses a real (`nm`) create with `test_account_sandbox_only` when `account_kind === "test"`.
+The gate runs only for a non-sandbox create,
+and its caller (backend/src/routes/datasets/upload.ts) forces `sandbox` on outside production,
+so reaching the gate already proves `isProduction && !sandbox`; the gate itself has no environment input.
+No restriction off
 production, and no restriction on a `service` account, deliberately: the
 device/key gates above stop a `service`/`test` account only from SELF-serving a
 key (self-minting, or the device flow's own sign-in). They say nothing about a
