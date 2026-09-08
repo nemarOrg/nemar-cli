@@ -9,7 +9,8 @@
  * store's rows (`events/<zarr>`) plus a store-list summary
  * (`events/_stores`) to the projection cache in one pass -- one dataset-wide
  * parquet read serves every recording's future `get_events` call, not just
- * the one this request named. `sample_index` comes back from hyparquet as a
+ * the one this request named, up to {@link MAX_STORE_FANOUT_ENTRIES}
+ * stores. `sample_index` comes back from hyparquet as a
  * `BigInt` (parquet INT64); converted to `Number` here, once, before the
  * value is cached or returned, with a `Number.isSafeInteger` guard -- the
  * whole point of the primary path is that `sample_index` is EXACT, so a
@@ -54,11 +55,12 @@
  * **A store the parquet has no rows for** (the converter never found or
  * parsed its events.tsv, distinct from a store with a genuinely empty
  * events.tsv, which is indistinguishable from this on the wire either way)
- * still gets a `[]` cache entry and a `rowCount: 0` row in `events/_stores`,
- * written in the SAME pass as every other store -- so a repeat call for
- * that store is a cache hit, never a re-read of the whole file, and the
- * response carries a `note` saying so explicitly rather than a bare empty
- * list a caller could misread as "this recording truly has no events".
+ * still gets a `rowCount: 0` row in `events/_stores` and, below the
+ * {@link MAX_STORE_FANOUT_ENTRIES} bound, a `[]` cache entry written in the
+ * SAME pass as every other store -- so a repeat call for that store is a
+ * cache hit, never a re-read of the whole file. Either way the response
+ * carries a `note` saying so explicitly rather than a bare empty list a
+ * caller could misread as "this recording truly has no events".
  *
  * **Fallback path** (no `events_parquet` -- every v1/v2 index today):
  * derives the sibling `<prefix>_events.tsv` from the recording's `path`
@@ -192,6 +194,23 @@ interface EventsStoresSummaryEntry {
  *  they check -- a cache entry that fails validation (a stale shape from
  *  before `PROJECTION_SCHEMA_VERSION` was bumped, or simple corruption) is
  *  a miss, not a crash. */
+/** Upper bound on the per-store `events/<zarr>` entries one parquet miss
+ *  fans out into. The requested store's entry is ALWAYS written; the
+ *  placeholder pass for every other store is skipped above this bound.
+ *
+ *  Store counts in the live catalog are not bounded by anything this code
+ *  controls: nm000281 publishes 25,253 stores, on005873 10,944 (measured
+ *  2026-09-08 from `zarr.nemar.org/catalog.json`). Writing one Response
+ *  plus one `JSON.stringify` per store for a dataset that size, inside a
+ *  single request's `waitUntil`, is a cost with no ceiling and no cache
+ *  benefit proportional to it -- the fan-out exists so a SECOND call for a
+ *  neighbouring store is a hit, which pays for itself on an ordinary
+ *  dataset and not on a pathological one. Above the bound each store's
+ *  first call re-reads the parquet, which is the behaviour that existed
+ *  before the fan-out; the read itself is unchanged and still reported as
+ *  a miss. */
+export const MAX_STORE_FANOUT_ENTRIES = 2000;
+
 const eventRowsProjectionSchema = z.array(eventRowSchema);
 const eventsStoresSummarySchema = z.array(
   z.object({ zarr: z.string(), rowCount: z.number().int().nonnegative() }),
@@ -268,7 +287,8 @@ async function readWholeEventsParquet(
  *  pass on a miss (see module doc), including a `[]` placeholder for every
  *  store the recordings projection knows about that the parquet had no
  *  rows for -- so a repeat call for THAT store is a cache hit too, never a
- *  re-read of the whole file.
+ *  re-read of the whole file. Bounded by {@link MAX_STORE_FANOUT_ENTRIES};
+ *  above it only the requested store's entry is written.
  *
  *  `sourceCommit` gates the CACHE only (decision: the parquet is the data
  *  source whenever `eventsParquetUrl` is set, unconditionally) -- when it
@@ -311,14 +331,20 @@ async function loadEventsFromParquet(
   }
 
   if (sourceCommit) {
+    const fanOut = byStore.size <= MAX_STORE_FANOUT_ENTRIES;
     const storesSummary: EventsStoresSummaryEntry[] = [];
     for (const [zarr, rows] of byStore.entries()) {
-      writeJsonProjection(
-        deps.executionCtx,
-        deps.cache(),
-        projectionUrl(datasetId, sourceCommit, `events/${zarr}`),
-        rows,
-      );
+      // The requested store is always cached; the rest only below the
+      // fan-out bound. The summary is one entry either way, so it stays
+      // complete regardless.
+      if (fanOut || zarr === storeZarr) {
+        writeJsonProjection(
+          deps.executionCtx,
+          deps.cache(),
+          projectionUrl(datasetId, sourceCommit, `events/${zarr}`),
+          rows,
+        );
+      }
       storesSummary.push({ zarr, rowCount: rows.length });
     }
     writeJsonProjection(

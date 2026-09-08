@@ -29,6 +29,8 @@ import {
   listRecordingsOutputSchema,
 } from "../../shared/contract/mcp.js";
 import on003392MegSssSliceRaw from "../../test/fixtures/zarr-index-on003392-meg-sss-slice.json";
+import { projectionUrl } from "../src/mcp/projection-cache.js";
+import { MAX_STORE_FANOUT_ENTRIES } from "../src/mcp/tools/get-events.js";
 import { type McpRoutesDeps, createMcpRoutes } from "../src/routes/mcp.js";
 import { type CacheLike, createZarrDataRoutes } from "../src/routes/zarr-data.js";
 import type { Bindings } from "../src/types/bindings.js";
@@ -47,6 +49,12 @@ const ZERO_STORE_ID = "nm500602";
 const V1_ID = "nm000111";
 const V1_COMMIT = "510a05377459cf857e60b861ab377bc53b5b5b29";
 const PENDING_ID = "nm500601";
+// A dataset whose store count is deliberately above
+// `MAX_STORE_FANOUT_ENTRIES`: nm000329's real index with enough clones of
+// its own first store appended to cross the bound. The live catalog's
+// largest is nm000281 at 25,253 stores, so this shape is not hypothetical.
+const FANOUT_ID = "nm000330";
+const FANOUT_EXTRA_STORES = MAX_STORE_FANOUT_ENTRIES + 1;
 
 // The real on003392 MEG SSS store (`derived: true`, real `sss`), with its
 // group geometry overridden to a small SYNTHETIC size (8 channels, 8500
@@ -269,6 +277,32 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
       megChunk,
     );
 
+    // Over-the-bound fan-out fixture: the same real stores and the same
+    // events.parquet, with `FANOUT_EXTRA_STORES` clones of the first store
+    // appended under distinct paths so `byStore` crosses
+    // `MAX_STORE_FANOUT_ENTRIES`. Cloning a real store (rather than
+    // hand-writing one) keeps every synthetic entry valid against the v3
+    // index schema.
+    const realStores = (nm000329IndexRaw as { stores: Array<Record<string, unknown>> }).stores;
+    const template = realStores[0];
+    const fanoutStores = [...realStores];
+    for (let i = 0; i < FANOUT_EXTRA_STORES; i++) {
+      fanoutStores.push({
+        ...template,
+        path: `sub-syn${i}/eeg/sub-syn${i}_task-syn_eeg.set`,
+        zarr: `sub-syn${i}/eeg/sub-syn${i}_task-syn_eeg.zarr`,
+      });
+    }
+    fixtureServer.files.set(
+      `${FANOUT_ID}/zarr/index.json`,
+      encode({
+        ...rewrittenV3Index,
+        dataset_id: FANOUT_ID,
+        store_count: fanoutStores.length,
+        stores: fanoutStores,
+      }),
+    );
+
     cache = new InMemoryCache();
     const zarrRoutes = createZarrDataRoutes({
       cache: () => cache,
@@ -330,6 +364,11 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
       zarr_source_commit: null,
     });
     insertDataset(ZERO_STORE_ID, { zarr_status: "ready", zarr_store_count: 0 });
+    insertDataset(FANOUT_ID, {
+      zarr_status: "ready",
+      zarr_store_count: FANOUT_EXTRA_STORES,
+      zarr_source_commit: V3_COMMIT,
+    });
     insertDataset(MEG_ID, {
       zarr_status: "ready",
       zarr_store_count: 1,
@@ -799,6 +838,68 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
       expect(output.envelope).toBeDefined();
       expect(output.envelope?.derived).toBe(true);
       expect(output.envelope?.sss?.applied).toBe(true);
+    });
+  });
+
+  describe("the per-store cache fan-out is bounded", () => {
+    const stores = (nm000329IndexRaw as { stores: Array<{ zarr: string }> }).stores;
+    const requested = stores[0].zarr;
+    const neighbour = stores[1].zarr;
+
+    test("the two datasets really do sit either side of the bound", () => {
+      expect(stores.length).toBeLessThanOrEqual(MAX_STORE_FANOUT_ENTRIES);
+      expect(stores.length + FANOUT_EXTRA_STORES).toBeGreaterThan(MAX_STORE_FANOUT_ENTRIES);
+    });
+
+    test("under the bound: a neighbouring store's entry is written too", async () => {
+      await callTool(app, env(db), 1, "get_events", {
+        dataset_id: V3_ID,
+        recording: requested,
+      });
+      expect(
+        await cache.match(projectionUrl(V3_ID, V3_COMMIT, `events/${requested}`)),
+      ).toBeDefined();
+      expect(
+        await cache.match(projectionUrl(V3_ID, V3_COMMIT, `events/${neighbour}`)),
+      ).toBeDefined();
+    });
+
+    test("over the bound: only the requested store's entry, plus the summary", async () => {
+      await callTool(app, env(db), 1, "get_events", {
+        dataset_id: FANOUT_ID,
+        recording: requested,
+      });
+      expect(
+        await cache.match(projectionUrl(FANOUT_ID, V3_COMMIT, `events/${requested}`)),
+      ).toBeDefined();
+      expect(
+        await cache.match(projectionUrl(FANOUT_ID, V3_COMMIT, `events/${neighbour}`)),
+      ).toBeUndefined();
+      // One entry regardless of store count, so it stays complete.
+      expect(
+        await cache.match(projectionUrl(FANOUT_ID, V3_COMMIT, "events/_stores")),
+      ).toBeDefined();
+    });
+
+    test("over the bound: the requested store's own second call is still a hit", async () => {
+      await callTool(app, env(db), 1, "get_events", {
+        dataset_id: FANOUT_ID,
+        recording: requested,
+      });
+      const parquetReadsBefore = fixtureServer.requestLog.length;
+      const { body } = await callTool(app, env(db), 2, "get_events", {
+        dataset_id: FANOUT_ID,
+        recording: requested,
+      });
+      const output = structuredContentOf(body) as unknown as GetEventsOutput;
+      expect(output.events.length).toBeGreaterThan(0);
+      // The second call reads the index (cheap, edge-cached) but never the
+      // parquet again.
+      expect(
+        fixtureServer.requestLog
+          .slice(parquetReadsBefore)
+          .filter((r) => r.url.endsWith("events.parquet")).length,
+      ).toBe(0);
     });
   });
 });

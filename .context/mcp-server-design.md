@@ -601,6 +601,22 @@ concrete:
       miss for that commit (reading `events.parquet` once serves every
       recording's future call). `events/_stores` is a companion entry: the
       store list with per-store row counts.
+      **The per-store fan-out is bounded** by
+      `MAX_STORE_FANOUT_ENTRIES` (2000, in
+      `backend/src/mcp/tools/get-events.ts`): above it only the requested
+      store's entry is written, and each other store's first call re-reads
+      the parquet (the behaviour that existed before the fan-out).
+      Store counts in the catalog are not bounded by anything this code
+      controls -- nm000281 publishes 25,253 stores and on005873 10,944
+      (measured 2026-09-08 from `zarr.nemar.org/catalog.json`) -- so one
+      `Response` plus one `JSON.stringify` per store inside a single
+      request's `waitUntil` is an unbounded cost with no proportional
+      cache benefit. The `_stores` summary is one entry either way and
+      stays complete.
+      The whole-file parquet read itself is bounded only by the published
+      file (largest observed: nm000103 at 2.8 MB, 3,522 stores); its peak
+      isolate memory is measured with `read_window`'s in phase 4, whose
+      definition of done already carries that measurement.
     - `overview/<zarr>/<group>/<width_px>` -- the rendered PNG bytes,
       `Content-Type: image/png`, one entry per (recording, group, width)
       actually requested (per section 5.5, in practice one or two widths
