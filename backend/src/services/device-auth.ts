@@ -37,6 +37,7 @@ import {
   USER_CODE_ALPHABET,
   USER_CODE_LENGTH,
 } from "../../../shared/contract/device-auth.js";
+import type { AccountKind } from "../../../shared/contract/user.js";
 import { auditLogStatement } from "../db/audit-log";
 import { flag } from "../db/flag";
 import { ACTIVE_ACCOUNT_STATUS_SQL_LIST, isActiveAccountStatus } from "./account-tier";
@@ -151,15 +152,34 @@ export const HTTP_STATUS_FOR_REFUSAL: Record<DeviceAuthRefusalCode, 403 | 404 | 
 /**
  * The account columns {@link accountRefusal} and {@link accountLivenessRefusal}
  * read, exactly as {@link USER_STATUS_FOR_DEVICE_AUTH_SQL} returns them (epic
- * #1272 phase 4, #1284; ADR 0048). `identity_conflict` accepts `number |
- * boolean` because some callers have already normalised their row (`flag()`)
- * and others read the raw D1 column straight through.
+ * #1272 phase 4, #1284; ADR 0048). Every construction of this type is a raw
+ * D1 read (`.first<DeviceAuthAccountRow>()`, never a hand-built object), so
+ * `identity_conflict` is `number` -- literally what the D1 INTEGER column
+ * returns -- not `number | boolean`; `flag()` still accepts it unchanged
+ * (#1284 review).
  */
 export interface DeviceAuthAccountRow {
   status: string;
   deleted_at: string | null;
-  identity_conflict: number | boolean;
-  account_kind: string;
+  identity_conflict: number;
+  account_kind: AccountKind;
+}
+
+/**
+ * The prologue {@link accountLivenessRefusal} and {@link accountRefusal}
+ * both start with -- pending before revoked, so an unverified account is
+ * told to verify its email rather than "revoked" -- factored into one place
+ * so that ordering is structural rather than two functions kept in step by
+ * hand (#1284 review). Takes a non-null row: the `!row || row.deleted_at`
+ * check stays duplicated in each caller, both because that is what lets
+ * TypeScript narrow `row` to non-null before this helper is called, and
+ * because "no such row"/"a deleted row" is a different kind of absence than
+ * the status checks here.
+ */
+function livenessStatusRefusal(row: DeviceAuthAccountRow): DeviceAuthRefusalCode | null {
+  if (row.status === "pending") return "account_pending";
+  if (!isActiveAccountStatus(row.status)) return "account_revoked";
+  return null;
 }
 
 /**
@@ -181,8 +201,8 @@ export function accountLivenessRefusal(
   row: DeviceAuthAccountRow | null,
 ): DeviceAuthRefusalCode | null {
   if (!row || row.deleted_at) return "account_revoked";
-  if (row.status === "pending") return "account_pending";
-  if (!isActiveAccountStatus(row.status)) return "account_revoked";
+  const statusRefusal = livenessStatusRefusal(row);
+  if (statusRefusal) return statusRefusal;
   if (flag(row.identity_conflict)) return "identity_conflict";
   return null;
 }
@@ -212,8 +232,8 @@ export function accountLivenessRefusal(
  */
 export function accountRefusal(row: DeviceAuthAccountRow | null): DeviceAuthRefusalCode | null {
   if (!row || row.deleted_at) return "account_revoked";
-  if (row.status === "pending") return "account_pending";
-  if (!isActiveAccountStatus(row.status)) return "account_revoked";
+  const statusRefusal = livenessStatusRefusal(row);
+  if (statusRefusal) return statusRefusal;
   if (row.account_kind !== "person") return "service_account";
   if (flag(row.identity_conflict)) return "identity_conflict";
   return null;

@@ -23,6 +23,8 @@
  * gate can't be added to one endpoint and forgotten on another.
  */
 
+import type { AccountKind } from "../../../shared/contract/user.js";
+
 /**
  * `error` is the stable machine-readable half and must not change — the CLI
  * matches on it. `message` is the human half, and it has now been wrong twice
@@ -106,7 +108,7 @@ export function realDatasetCreateGate(
   user: {
     service_access: number;
     sandbox_completed: number;
-    account_kind: string;
+    account_kind: AccountKind;
   },
   channel: UploadChannel,
 ): UploadGateBody | null {

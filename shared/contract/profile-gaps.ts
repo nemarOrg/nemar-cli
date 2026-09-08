@@ -304,13 +304,17 @@ export interface ProfileGapAccount {
    * What exempts an account from the `orcid_verified` row, and nothing else
    * (epic #1272 phase 4, #1284; ADR 0048).
    *
-   * `undefined`/`null`/an unrecognised string counts as a regular `person` —
-   * a kind this build could not read is not a reason to skip a gap. Replaces
+   * `undefined`/`null` counts as a regular `person` — a kind this build
+   * could not read is not a reason to skip a gap. Closed to {@link
+   * AccountKind} rather than `| string` (#1284 review): every real caller
+   * reads this off a D1 column CHECK-constrained to the same three values
+   * (migration 0082), so a caller passing anything else is a bug this type
+   * should catch, not a shape this interface should accommodate. Replaces
    * the interim `role`-based exemption (ADR 0045): a role is a permission
    * level, not a fact about what an account is, and this matrix no longer
    * reads `role` at all.
    */
-  readonly account_kind?: AccountKind | string | null;
+  readonly account_kind?: AccountKind | null;
   readonly email_verified?: boolean | null;
   /**
    * `undefined` means the username could not be READ, which is not the same as

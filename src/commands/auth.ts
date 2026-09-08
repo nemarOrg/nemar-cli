@@ -199,8 +199,10 @@ function applyServerUser(user: {
   sandbox_completed?: boolean;
   sandbox_dataset_id?: string | null;
   orcid_verified?: boolean;
-  /** What this account IS (epic #1272 phase 4, #1284; ADR 0048). */
-  account_kind?: string;
+  /** What this account IS (epic #1272 phase 4, #1284; ADR 0048). Reuses
+   *  ContractUser's own field type (#1284 review) rather than a bare
+   *  `string`, matching `profile_gaps` above. */
+  account_kind?: ContractUser["account_kind"];
 }): void {
   if (user.username && renameActiveAccount(user.username) === "key_taken") {
     console.log(

@@ -8,6 +8,7 @@
 
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
+import type { AccountKind } from "../../../../shared/contract/user.js";
 import { authMiddleware } from "../../middleware/auth";
 import { cliVersionGuard } from "../../middleware/cliVersion";
 import { generateDatasetId, isValidDatasetId } from "../../services/datasetId";
@@ -268,7 +269,11 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         const userStatus = await db
           .prepare("SELECT service_access, sandbox_completed, account_kind FROM users WHERE id = ?")
           .bind(user.id)
-          .first<{ service_access: number; sandbox_completed: number; account_kind: string }>();
+          .first<{
+            service_access: number;
+            sandbox_completed: number;
+            account_kind: AccountKind;
+          }>();
 
         const gate = realDatasetCreateGate(
           {

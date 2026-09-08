@@ -44,6 +44,7 @@ import {
   resolveProfileGap,
   resolveWireProfileGaps,
 } from "../shared/contract/profile-gaps.js";
+import type { AccountKind } from "../shared/contract/user.js";
 
 interface TableRow {
   blocks: string[];
@@ -260,7 +261,12 @@ describe("computeProfileGaps over every field combination", () => {
     for (const account_kind of ["service", "test"] as const) {
       expect(profileGapFields({ ...unverified, account_kind })).toEqual([]);
     }
-    for (const account_kind of ["person", "member", null, undefined] as const) {
+    // "member" is not a real account_kind (#1284 review tightened the field
+    // to the closed AccountKind type, which this cast deliberately defeats)
+    // -- it stands in for a value this build could not read, proving the
+    // exemption still fails closed for that case now that the type alone
+    // can no longer let a bogus string through at the call site.
+    for (const account_kind of ["person", "member" as AccountKind, null, undefined] as const) {
       expect(profileGapFields({ ...unverified, account_kind })).toEqual(["orcid_verified"]);
     }
   });
