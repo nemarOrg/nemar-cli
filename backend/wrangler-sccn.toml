@@ -335,7 +335,13 @@ REPLY_TO = "info@nemar.org"
 # suspenders there, not the only thing standing between those fixtures and a
 # 503. Widen with a real tester's address (never a "@domain" for an external
 # provider) only for the duration of a manual test that needs delivery.
-DEV_EMAIL_ALLOWLIST = "@nemar.org,@nemar.test"
+# DEV_EMAIL_ALLOWLIST is a dev Worker SECRET, not a var: exact human addresses
+# only, never a domain. "@nemar.org" delivered every fixture notice to that
+# domain's catch-all (a real inbox: 52 mails in one CI day), and "@nemar.test"
+# fixtures never need delivery because their sign-in codes are echoed in the
+# response (nonProdCodeEchoAllowed). With no allow-list at all the fence fails
+# closed and the dev worker sends nothing, which is the safe default.
+# Set it with: bunx cfman wrangler --account sccn secret put DEV_EMAIL_ALLOWLIST --env dev -c wrangler-sccn.toml
 # Staging zarr cache host (epic #923). URL-scoped purges of zarr-test.* can't
 # touch prod cache entries; purge stays inert until CLOUDFLARE_ZONE_ID + a purge
 # token are provisioned on dev (/webhooks/zarr-ready logs "purge skipped").
