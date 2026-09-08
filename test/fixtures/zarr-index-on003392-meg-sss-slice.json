@@ -1,0 +1,86 @@
+{
+  "format": "nemar-zarr-index",
+  "format_version": 3,
+  "dataset_id": "on003392",
+  "contract_base": "https://zarr.nemar.org/on003392/zarr/",
+  "data_base": "https://nemar.s3.us-east-2.amazonaws.com/on003392/zarr/",
+  "data_base_kind": "s3-public",
+  "s3_uri": "s3://nemar/on003392/zarr/",
+  "s3_region": "us-east-2",
+  "s3_anonymous": true,
+  "source_commit": "1035360c2cbb5a349cc43a46a58543c5f02a4e38",
+  "engine_version": "3",
+  "biosigio_version": "1.2.7",
+  "updated_utc": "2026-09-06T23:21:25Z",
+  "doi": "10.82901/nemar.on003392",
+  "license": "CC0",
+  "citation": "Nicolas Zilber, Philippe Ciuciu, Alexandre Gramfort, Leila Azizi, Virginie van Wassenhove (2026) NeuroSpin hMT+ Localizer DATA (MEG & aMRI) (v1.0.0). NEMAR. https://doi.org/10.82901/nemar.on003392",
+  "hed_version": null,
+  "layout": {
+    "level0": "<zarr>/<group>/0",
+    "view": "<zarr>/<group>/view/<L>",
+    "view_levels": "1..n_view_levels from the group attrs",
+    "scale_offset": "level-0 array attrs scale[] and offset[]; physical = digital * scale + offset",
+    "events": "<data_base>events.parquet"
+  },
+  "discovered_count": 1,
+  "store_count": 1,
+  "n_recordings": 1,
+  "errors": 0,
+  "failure_count": 0,
+  "pending_count": 0,
+  "stores": [
+    {
+      "path": "sub-01/meg/sub-01_task-localizer_meg.fif",
+      "zarr": "sub-01/meg/sub-01_task-localizer_meg.zarr",
+      "updated_utc": "2026-09-06T23:21:25Z",
+      "source_tree": "raw",
+      "derived": true,
+      "modalities": [
+        "meg"
+      ],
+      "groups": [
+        {
+          "name": "meg_250hz",
+          "modality": "MEG",
+          "rate": 250.0,
+          "n_channels": 320,
+          "n_samples": 68250,
+          "duration_s": 273.0,
+          "n_view_levels": 4,
+          "view_chunk_columns": 1024,
+          "source_rate_hz": 2000.0,
+          "chunk_samples": 1000,
+          "shard_samples": 69000
+        }
+      ],
+      "power_line_frequency": 50.0,
+      "units_report": {
+        "converted": 0,
+        "relabelled": 0,
+        "kept_importer_unit": 0,
+        "units_column_present": true,
+        "sidecar": "sub-01/meg/sub-01_task-localizer_channels.tsv",
+        "sidecar_supplied": true
+      },
+      "n_events": 120,
+      "trial_types": {
+        "coherent/down": 30,
+        "coherent/up": 30,
+        "incoherent/down": 30,
+        "incoherent/up": 30
+      },
+      "sss": {
+        "applied": true,
+        "method": "maxwell_filter",
+        "calibration": "sub-01_acq-calibration_meg.dat",
+        "cross_talk": "sub-01_acq-crosstalk_meg.fif",
+        "mne_version": "1.12.1"
+      }
+    }
+  ],
+  "failures": [],
+  "pending": [],
+  "events_parquet": "https://nemar.s3.us-east-2.amazonaws.com/on003392/zarr/events.parquet",
+  "events_row_count": 1320
+}
