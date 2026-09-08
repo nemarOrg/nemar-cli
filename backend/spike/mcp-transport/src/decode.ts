@@ -86,6 +86,11 @@ function unshuffleBlock(shuffled: Uint8Array, typesize: number): Uint8Array {
  *  handle (memcpyed frames, bit-shuffle, or a non-zstd `versionlz`) rather
  *  than guessing. */
 export function decodePathB(bytes: Uint8Array): Int16Array {
+  if (bytes.length < 16) {
+    throw new Error(
+      `decode path (b): ${bytes.length} bytes is shorter than the 16-byte blosc2 header`,
+    );
+  }
   const header = parseBloscHeader(bytes);
   if (header.memcpyed) {
     throw new Error("decode path (b): memcpyed (uncompressed) blosc frames are not implemented");
@@ -93,18 +98,59 @@ export function decodePathB(bytes: Uint8Array): Int16Array {
   if (header.doBitShuffle) {
     throw new Error("decode path (b): bit-shuffle is not implemented (only byte shuffle)");
   }
+  // Every served level-0 and view array is int16 (typesize 2). A different
+  // typesize is a store this decoder was not written for, never something to
+  // reinterpret as int16 pairs.
+  if (header.typesize !== 2) {
+    throw new Error(
+      `decode path (b): typesize ${header.typesize} is not int16; refusing to reinterpret`,
+    );
+  }
+  // blosc2 signals a single block with blocksize == nbytes, never 0; a zero
+  // here is a corrupt header, and dividing by it would give Infinity blocks.
+  if (header.blocksize <= 0 || header.nbytes <= 0) {
+    throw new Error(
+      `decode path (b): invalid blosc2 header (nbytes ${header.nbytes}, blocksize ${header.blocksize})`,
+    );
+  }
+  if (header.nbytes % header.typesize !== 0) {
+    throw new Error(
+      `decode path (b): nbytes ${header.nbytes} is not a multiple of typesize ${header.typesize}`,
+    );
+  }
+  if (header.cbytes !== bytes.length) {
+    throw new Error(
+      `decode path (b): header cbytes ${header.cbytes} disagrees with the ${bytes.length} bytes supplied`,
+    );
+  }
   const nblocks = Math.ceil(header.nbytes / header.blocksize);
+  if (16 + nblocks * 4 > bytes.length) {
+    throw new Error(
+      `decode path (b): ${nblocks}-entry offset table does not fit in ${bytes.length} bytes`,
+    );
+  }
   const offsetsView = new DataView(bytes.buffer, bytes.byteOffset + 16, nblocks * 4);
   const offsets: number[] = [];
-  for (let i = 0; i < nblocks; i++) offsets.push(offsetsView.getInt32(i * 4, true));
+  for (let i = 0; i < nblocks; i++) offsets.push(offsetsView.getUint32(i * 4, true));
 
   const out = new Uint8Array(header.nbytes);
   let written = 0;
   for (let i = 0; i < nblocks; i++) {
     const blockStart = offsets[i];
+    if (blockStart + 4 > bytes.length) {
+      throw new Error(
+        `decode path (b): block ${i} offset ${blockStart} is past the end of the chunk`,
+      );
+    }
     const view = new DataView(bytes.buffer, bytes.byteOffset + blockStart, 4);
-    const compressedLen = view.getInt32(0, true);
+    const compressedLen = view.getUint32(0, true);
     const payloadStart = blockStart + 4;
+    if (compressedLen === 0 || payloadStart + compressedLen > bytes.length) {
+      throw new Error(
+        `decode path (b): block ${i} claims ${compressedLen} compressed bytes at ${payloadStart}, ` +
+          `but the chunk is ${bytes.length} bytes`,
+      );
+    }
     const payload = bytes.subarray(payloadStart, payloadStart + compressedLen);
     const decompressed = fzstdDecompress(payload);
     const blockNbytes = Math.min(header.blocksize, header.nbytes - written);
@@ -120,7 +166,18 @@ export function decodePathB(bytes: Uint8Array): Int16Array {
     written += blockNbytes;
   }
 
-  return new Int16Array(out.buffer, out.byteOffset, out.byteLength / 2);
+  return asInt16("(b)", out);
+}
+
+/** `new Int16Array(buf, off, byteLength / 2)` silently floors an odd byte
+ *  count and drops the last sample; refuse instead. */
+function asInt16(path: string, bytes: Uint8Array): Int16Array {
+  if (bytes.byteLength % 2 !== 0) {
+    throw new Error(
+      `decode path ${path}: decoded ${bytes.byteLength} bytes, not a whole number of int16`,
+    );
+  }
+  return new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
 }
 
 /** Path (a): the `numcodecs` JS package's WASM `Blosc` codec, called exactly
@@ -130,7 +187,13 @@ export function decodePathB(bytes: Uint8Array): Int16Array {
  *  itself, same as `numcodecs.Blosc().decode()` did on the Python side that
  *  produced `fixtures/chunk.expected.json`. */
 export async function decodePathA(bytes: Uint8Array): Promise<Int16Array> {
-  const codec = BloscCodec.fromConfig({ clevel: 5, cname: "zstd", shuffle: 1, blocksize: 0 });
+  const codec = BloscCodec.fromConfig({
+    id: "blosc",
+    clevel: 5,
+    cname: "zstd",
+    shuffle: 1,
+    blocksize: 0,
+  });
   const decoded = await codec.decode(bytes);
-  return new Int16Array(decoded.buffer, decoded.byteOffset, decoded.byteLength / 2);
+  return asInt16("(a)", decoded);
 }

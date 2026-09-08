@@ -30,11 +30,26 @@ echo "Starting wrangler dev on port ${PORT} (log: ${LOG})..."
 bunx wrangler dev --port "${PORT}" >"${LOG}" 2>&1 &
 WRANGLER_PID=$!
 
+TMPD=$(mktemp -d)
+
 cleanup() {
+  # wrangler dev spawns workerd as a child; take it down too, not just the parent.
+  pkill -TERM -P "${WRANGLER_PID}" >/dev/null 2>&1
   kill "${WRANGLER_PID}" >/dev/null 2>&1
   wait "${WRANGLER_PID}" 2>/dev/null
+  rm -rf "${TMPD}"
 }
 trap cleanup EXIT
+
+# post_modern <id> <method> <params-json-without-meta> [extra curl args...]
+# Prints the HTTP status; the body lands in ${TMPD}/<id>.json.
+post_modern() {
+  local id="$1" method="$2" params="$3"
+  shift 3
+  local body="{\"jsonrpc\":\"2.0\",\"id\":${id},\"method\":\"${method}\",\"params\":{${params}${MODERN_META}}}"
+  curl -s -o "${TMPD}/${id}.json" -w "%{http_code}" -X POST "${BASE}/mcp" \
+    -H "Content-Type: application/json" -H "Mcp-Method: ${method}" "$@" -d "${body}"
+}
 
 echo "Waiting for readiness..."
 for _ in $(seq 1 30); do
@@ -52,30 +67,29 @@ fi
 MODERN_META='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}'
 
 # --- server/discover ---
-DISCOVER_BODY="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{${MODERN_META}}}"
-DISCOVER_RESP=$(curl -s -X POST "${BASE}/mcp" -H "Content-Type: application/json" \
-  -H "Mcp-Method: server/discover" -d "${DISCOVER_BODY}")
-if echo "${DISCOVER_RESP}" | grep -q '"supportedVersions":\["2026-07-28"\]'; then
-  pass "server/discover reports supportedVersions [2026-07-28]"
+DISCOVER_STATUS=$(post_modern 1 "server/discover" "")
+DISCOVER_RESP=$(cat "${TMPD}/1.json")
+if [ "${DISCOVER_STATUS}" = "200" ] && echo "${DISCOVER_RESP}" | grep -q '"supportedVersions":\["2026-07-28"\]'; then
+  pass "server/discover answers 200 with supportedVersions [2026-07-28]"
 else
-  fail "server/discover: unexpected response: ${DISCOVER_RESP}"
+  fail "server/discover: expected 200 + supportedVersions, got HTTP ${DISCOVER_STATUS}: ${DISCOVER_RESP}"
 fi
 
 # --- tools/list ---
-LIST_BODY="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{${MODERN_META}}}"
-LIST_RESP=$(curl -s -X POST "${BASE}/mcp" -H "Content-Type: application/json" \
-  -H "Mcp-Method: tools/list" -d "${LIST_BODY}")
-if echo "${LIST_RESP}" | grep -q '"decode_chunk"' && echo "${LIST_RESP}" | grep -q '"describe_fixture"'; then
-  pass "tools/list lists describe_fixture and decode_chunk"
+LIST_STATUS=$(post_modern 2 "tools/list" "")
+LIST_RESP=$(cat "${TMPD}/2.json")
+if [ "${LIST_STATUS}" = "200" ] && echo "${LIST_RESP}" | grep -q '"decode_chunk"' && echo "${LIST_RESP}" | grep -q '"describe_fixture"'; then
+  pass "tools/list answers 200 listing describe_fixture and decode_chunk"
 else
-  fail "tools/list: unexpected response: ${LIST_RESP}"
+  fail "tools/list: expected 200 + both tools, got HTTP ${LIST_STATUS}: ${LIST_RESP}"
 fi
 
 # --- tools/call decode_chunk (modern envelope) ---
-DECODE_BODY="{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"decode_chunk\",\"arguments\":{},${MODERN_META}}}"
-DECODE_RESP=$(curl -s -X POST "${BASE}/mcp" -H "Content-Type: application/json" \
-  -H "Mcp-Method: tools/call" -H "Mcp-Name: decode_chunk" -d "${DECODE_BODY}")
-if echo "${DECODE_RESP}" | grep -q '"paths_agree":true'; then
+DECODE_STATUS=$(post_modern 3 "tools/call" '"name":"decode_chunk","arguments":{},' -H "Mcp-Name: decode_chunk")
+DECODE_RESP=$(cat "${TMPD}/3.json")
+if [ "${DECODE_STATUS}" != "200" ]; then
+  fail "decode_chunk: expected HTTP 200, got ${DECODE_STATUS}: ${DECODE_RESP}"
+elif echo "${DECODE_RESP}" | grep -q '"paths_agree":true'; then
   pass "decode_chunk: path (a) and path (b) agree"
 elif echo "${DECODE_RESP}" | grep -q '"path_b_pure_js":{"ok":true.*"matches_expected":true'; then
   pass "decode_chunk: path (b) matches the Python ground truth (path (a) did not agree/succeed -- see below)"
@@ -96,28 +110,30 @@ fi
 # --- legacy 2025-era initialize handshake ---
 ACCEPT_HEADER="Accept: application/json, text/event-stream"
 INIT_BODY='{"jsonrpc":"2.0","id":4,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke-legacy","version":"0.0.0"}}}'
-INIT_RESP=$(curl -s -X POST "${BASE}/mcp" -H "Content-Type: application/json" -H "${ACCEPT_HEADER}" -d "${INIT_BODY}")
-if echo "${INIT_RESP}" | grep -q '"protocolVersion":"2025-06-18"'; then
-  pass "legacy initialize handshake succeeds"
+INIT_STATUS=$(curl -s -o "${TMPD}/init.json" -w "%{http_code}" -X POST "${BASE}/mcp" -H "Content-Type: application/json" -H "${ACCEPT_HEADER}" -d "${INIT_BODY}")
+INIT_RESP=$(cat "${TMPD}/init.json")
+if [ "${INIT_STATUS}" = "200" ] && echo "${INIT_RESP}" | grep -q '"protocolVersion":"2025-06-18"'; then
+  pass "legacy initialize handshake answers 200"
 else
-  fail "legacy initialize: unexpected response: ${INIT_RESP}"
+  fail "legacy initialize: expected 200 + protocolVersion, got HTTP ${INIT_STATUS}: ${INIT_RESP}"
 fi
 
 # --- legacy tools/call (no _meta envelope at all) ---
 LEGACY_CALL_BODY='{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"describe_fixture","arguments":{}}}'
-LEGACY_CALL_RESP=$(curl -s -X POST "${BASE}/mcp" -H "Content-Type: application/json" -H "${ACCEPT_HEADER}" -d "${LEGACY_CALL_BODY}")
-if echo "${LEGACY_CALL_RESP}" | grep -q '"dataset_id":"on008083"'; then
-  pass "legacy tools/call (describe_fixture) succeeds with no _meta envelope"
+LEGACY_CALL_STATUS=$(curl -s -o "${TMPD}/legacy-call.json" -w "%{http_code}" -X POST "${BASE}/mcp" -H "Content-Type: application/json" -H "${ACCEPT_HEADER}" -d "${LEGACY_CALL_BODY}")
+LEGACY_CALL_RESP=$(cat "${TMPD}/legacy-call.json")
+if [ "${LEGACY_CALL_STATUS}" = "200" ] && echo "${LEGACY_CALL_RESP}" | grep -q '"dataset_id":"on008083"'; then
+  pass "legacy tools/call (describe_fixture) answers 200 with no _meta envelope"
 else
-  fail "legacy tools/call: unexpected response: ${LEGACY_CALL_RESP}"
+  fail "legacy tools/call: expected 200 + dataset_id, got HTTP ${LEGACY_CALL_STATUS}: ${LEGACY_CALL_RESP}"
 fi
 
 # --- header mismatch: Mcp-Name disagrees with body params.name -> -32020 ---
 MISMATCH_BODY="{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"decode_chunk\",\"arguments\":{},${MODERN_META}}}"
-MISMATCH_STATUS=$(curl -s -o /tmp/mcp-spike-mismatch-body.json -w "%{http_code}" -X POST "${BASE}/mcp" \
+MISMATCH_STATUS=$(curl -s -o "${TMPD}/mismatch.json" -w "%{http_code}" -X POST "${BASE}/mcp" \
   -H "Content-Type: application/json" -H "Mcp-Method: tools/call" -H "Mcp-Name: describe_fixture" \
   -d "${MISMATCH_BODY}")
-MISMATCH_RESP=$(cat /tmp/mcp-spike-mismatch-body.json)
+MISMATCH_RESP=$(cat "${TMPD}/mismatch.json")
 if [ "${MISMATCH_STATUS}" = "400" ] && echo "${MISMATCH_RESP}" | grep -q '"code":-32020'; then
   pass "Mcp-Name/body mismatch rejected with HTTP 400 / JSON-RPC -32020"
 else
@@ -126,9 +142,9 @@ fi
 
 # --- missing Mcp-Method header on an otherwise-modern request -> -32020 ---
 NOMETHOD_BODY="{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":{${MODERN_META}}}"
-NOMETHOD_STATUS=$(curl -s -o /tmp/mcp-spike-nomethod-body.json -w "%{http_code}" -X POST "${BASE}/mcp" \
+NOMETHOD_STATUS=$(curl -s -o "${TMPD}/nomethod.json" -w "%{http_code}" -X POST "${BASE}/mcp" \
   -H "Content-Type: application/json" -d "${NOMETHOD_BODY}")
-NOMETHOD_RESP=$(cat /tmp/mcp-spike-nomethod-body.json)
+NOMETHOD_RESP=$(cat "${TMPD}/nomethod.json")
 if [ "${NOMETHOD_STATUS}" = "400" ] && echo "${NOMETHOD_RESP}" | grep -q '"code":-32020'; then
   pass "missing Mcp-Method header rejected with HTTP 400 / JSON-RPC -32020"
 else
