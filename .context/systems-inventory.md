@@ -15,6 +15,7 @@ and re-verify on the host before acting on anything load-bearing.
 | API worker | `api.nemar.org` | `api-test.nemar.org` | Cloudflare Workers. Same codebase, `--env dev` for staging. |
 | Data plane | `data.nemar.org` | `data-test.nemar.org` | Serves dataset bytes and QA artifacts out of S3. |
 | Zarr plane | `zarr.nemar.org` | `zarr-test.nemar.org` | Serves the Zarr serving copy. |
+| MCP server | `mcp.nemar.org` | `mcp-test.nemar.org` | Streamable HTTP JSON-RPC at `/mcp` (epic #1065 phase 2). Same worker, same account. |
 | Website | `nemar.org` (`nemar-website` Pages) | `test.nemar.org` (`nemar-website-test` Pages) | Astro SSR, lives in `nemarOrg/website`. Staging deploys from that repo's `staging` branch. |
 | Database | `nemar-db` (D1) | `nemar-db-dev` (D1) | SQLite. Hourly backup of prod only, to `nemarOrg/nemar-db-backup`. |
 | Object storage | `s3://nemar` | `s3://nemar-dev` | us-east-2. |

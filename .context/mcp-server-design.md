@@ -53,22 +53,48 @@ this revision.
 `createMcpHandler`; `@modelcontextprotocol/hono@2.0.0` ships
 `createMcpHonoApp`, which wraps a Hono app with the DNS-rebinding and Origin
 validation the SDK's other framework adapters ship too.
-The wiring, taken verbatim from the SDK's own `examples/hono/server.ts` and
-verified against a real `wrangler dev` run in this phase's spike:
+
+**Phase 2 correction:** `createMcpHonoApp` builds a STANDALONE Hono app with
+its own localhost host/origin validation baked in.
+The real server does not live standalone; it lives inside the existing
+single worker behind `resolveHostRoute` (section 3), alongside `data`,
+`zarr`, and `api`.
+Wrapping a second, independent Hono app inside that arrangement would mean
+two disagreeing origin-validation layers (`createMcpHonoApp`'s own
+localhost-only defaults, wrong for a production custom domain, versus this
+worker's real NEMAR-origin allowlist) and would still need to be dispatched
+to from the outer fork by hand either way.
+So phase 2 uses `createMcpHandler` directly, inside a self-contained Hono
+sub-app modeled on `createZarrDataRoutes`
+(`backend/src/routes/zarr-data.ts`) rather than the api middleware stack,
+with the ORIGIN VALIDATION AND RATE LIMITING DONE HERE INSTEAD -- an origin
+gate mirroring the SDK's own middleware (`allowedOrigin`/`corsHeaders` from
+`zarr-data.ts`, reused rather than reinvented) and the same rate-limiter
+bridge the zarr sub-app uses.
+`@modelcontextprotocol/hono` is NOT a dependency of this repo.
+The wiring (`backend/src/routes/mcp.ts`, `backend/src/mcp/server.ts`):
 
 ```ts
-import { createMcpHonoApp } from "@modelcontextprotocol/hono";
-import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
+import { createMcpHandler } from "@modelcontextprotocol/server";
+import { buildMcpServer } from "../mcp/server.js";
 
-const handler = createMcpHandler(buildServer); // buildServer returns a fresh McpServer per request
-const app = createMcpHonoApp();
-app.all("/mcp", (c) => handler.fetch(c.req.raw));
+app.all("/mcp", async (c) => {
+  const handler = createMcpHandler(
+    (ctx) => buildMcpServer({ env: c.env, executionCtx: c.executionCtx, era: ctx.era }),
+    { onerror: deps.onerror },
+  );
+  const response = await handler.fetch(c.req.raw);
+  // ...corsHeaders(origin) merged onto the response...
+});
 ```
 
 `createMcpHandler`'s default `legacy: 'stateless'` serves BOTH eras from this
 one route: a 2026-07-28 client gets per-request envelope handling, and a
 2025-era client is served through the established stateless
-`initialize` + `tools/call` idiom, with no branching in `buildServer` at all.
+`initialize` + `tools/call` idiom, with no branching in `buildMcpServer` at
+all -- verified in phase 2 (`backend/test/mcp-route.test.ts`): the same
+`search_datasets`/`describe_dataset` tools answer both a modern `tools/call`
+and a legacy one built with no `_meta` envelope at all.
 Do not mount `@modelcontextprotocol/server-legacy` (the frozen v1 SSE/OAuth
 code; it is not a compatibility shim, it is the old package under a new
 name), and do not use `@hono/mcp` (peer-depends on SDK 1.x) or Cloudflare's
@@ -119,6 +145,19 @@ Confirmed against `@modelcontextprotocol/server@2.0.0`'s own classifier
   specifically; the spike found it holds for a dual-era server too, because
   neither era's transport defines a `GET`/`DELETE` semantics on this
   endpoint in the first place.
+- **A registered tool's own input-schema rejection is an in-band tool
+  result, not a JSON-RPC protocol error.** Phase 2 (`backend/test/mcp-route.test.ts`)
+  verified against the real SDK: `tools/call describe_dataset` with a
+  malformed `dataset_id` answers HTTP 200 with `isError: true` and a
+  `content[0].text` naming the failed field -- the SAME shape a tool's own
+  business-logic error (an unknown dataset id) uses -- NOT the bare
+  `{ error: { code, message } }` JSON-RPC envelope the `Mcp-Name`
+  header/body mismatch (`-32020`) or the origin gate (`-32000`) answer with.
+  Phase 1's plan and phase 2's own implementation plan both called this "a
+  JSON-RPC validation error"; that phrase describes the `-32020`/`-32000`
+  family, not `registerTool`'s own input validation. A caller (or a test)
+  checking for a tool-input rejection should read `result.isError`, never a
+  bare `response.error`.
 
 ### 2.2 Cache hints
 
@@ -136,7 +175,8 @@ that wire, not defaulted to zero on it.
 
 ## 3. Host and routing
 
-Phase 2 implements this section; phase 1 only specifies it.
+**Implemented in phase 2** (`backend/src/services/host-routing.ts`,
+`backend/src/routes/mcp.ts`, `backend/src/index.ts`).
 
 - A new `HostRoute` arm `"mcp"` in `backend/src/services/host-routing.ts`,
   alongside the existing `"data"` / `"zarr"` / `"api"` forks.
@@ -146,9 +186,21 @@ Phase 2 implements this section; phase 1 only specifies it.
   `MCP_HOSTNAME` vars in `backend/wrangler-sccn.toml` for both the
   production and `[env.dev]` sections.
 - A path mount `/mcp` on the `api` host fork, for the workers.dev fallback
-  and any client that cannot reach the custom domain.
+  and any client that cannot reach the custom domain: `app.all("/mcp", (c) =>
+  mcpRoutes.fetch(c.req.raw, c.env, c.executionCtx))`, a single-path forward
+  (not a `.route()` sub-tree mount like `/zarrproxy`), so the sub-app sees
+  the request at exactly `/mcp`. That means the sub-app's own `GET /`
+  descriptor (section 2.2 endpoint discovery) is reachable ONLY via the
+  hostname fork, never via the workers.dev/path-mount fallback -- a real,
+  observed asymmetry between the two entry points, not a gap: the fallback
+  exists for the transport endpoint, not the descriptor.
 - The canonical client URL is `https://mcp.nemar.org/mcp`.
   A client should never construct any other URL for this server.
+- Anonymous origin gate + rate limiting are done IN THE SUB-APP itself
+  (`allowedOrigin`/`corsHeaders`, reused from `zarr-data.ts`; the same
+  double-cast `rateLimiter` bridge zarr's sub-app uses), not delegated to
+  `@modelcontextprotocol/hono`'s standalone origin/host validation -- see
+  section 2's phase 2 correction for why.
 
 ## 4. Access
 
@@ -164,8 +216,25 @@ identity today.
 ## 5. Tool surface
 
 Six tools, ordered by cost.
-Every tool's OUTPUT includes a provenance envelope (`section 6.1`); this is
-not optional and not only present when the caller asks for it.
+
+**Phase 2 correction:** the provenance envelope (section 6.1) rides
+RECORDING-level tool responses only -- `list_recordings`, `get_events`,
+`render_overview`, `read_window` (phases 3 and 4) -- not optional and not
+only present when the caller asks for it, THERE.
+`search_datasets` and `describe_dataset` (this phase) never construct one:
+building an envelope means reading `index.json` (the envelope's `doi`
+fallback, `citation`, `source_commit`, `engine_version` all come from that
+document per section 6.1's source table), and `describe_dataset`'s entire
+point is answering from D1 plus `catalog.json` WITHOUT that read (section
+5.2's "never `index.json`" rule).
+Forcing an envelope onto a dataset-level tool would mean either paying for
+the index read this phase is designed to avoid, or fabricating envelope
+fields from data that was never fetched.
+So `search_datasets`'/`describe_dataset`'s own output schemas carry `doi`,
+`license`, (`describe_dataset` additionally: `citation`, `zarr_status`,
+`zarr_source_commit`, `zarr_verify_status`) directly as top-level fields
+instead -- see `shared/contract/mcp.ts`'s `describeDatasetOutputSchema` and
+`provenanceEnvelopeSchema`'s own updated module doc.
 Full input/output shapes live in `shared/contract/mcp.ts`; this section is
 the narrative each schema's JSDoc restates in code.
 
@@ -424,11 +493,32 @@ doubles: [elapsed_ms, upstream_bytes]
 projection cache at all (`search_datasets`, a `read_window` taste), so the
 dashboard can tell "cache was irrelevant here" apart from "cache was
 consulted and missed."
-Whether this rides the existing `ANALYTICS` binding under a new `source`
-value, or a dedicated AE dataset, is a phase 2 decision; this section fixes
-only the point shape, per decision 4's last bullet.
-Phase 2 also sets a p95 CPU budget per call as acceptance criteria, using
-this same point's `elapsed_ms` field as the measurement.
+**Phase 2 decision: a dedicated Analytics Engine dataset**, `ANALYTICS_MCP`
+(`nemar_mcp_metrics` prod, `nemar_mcp_metrics_dev` dev;
+`backend/src/services/mcp-metrics.ts`, `buildMcpDataPoint`/
+`recordMcpToolCall`), not the existing `ANALYTICS` binding under a new
+`source` value -- so a future MCP dashboard query can never collide with
+`buildAccessDataPoint`'s blob positions (`services/access-metrics.ts`,
+`[dataset_id, source, detail]`), which mean something entirely different.
+`indexes[0]`/`blobs[0]` is the tool name (not a dataset id, unlike
+`buildAccessDataPoint`): a fixed, small vocabulary (`search_datasets`,
+`describe_dataset`, ...) is the natural group/sample key for a per-tool
+dashboard, and `search_datasets` names no single dataset anyway.
+`blobs[1]` is the dataset id when the call named one, else `"-"`.
+Optional (`ANALYTICS_MCP?:`), no-ops when absent, same convention as every
+other Analytics Engine binding in this codebase.
+
+Every phase 2 tool call is wrapped in `withToolMetrics`
+(`backend/src/mcp/server.ts`): it times the callback with
+`performance.now()` and records exactly one point per call, on the success
+path AND the error path (a thrown exception, or a returned `isError: true`
+result) alike -- the point is the measurement, not the success.
+Both phase 2 tools report `cache_status: "none"` and `upstream_bytes: 0`:
+neither touches the phase 3 `list_recordings`/`get_events` projection cache
+(section 7) or a store byte; they read D1 only.
+A p95 CPU budget per call as acceptance criteria is still open -- the smoke
+run's per-call timings (section 10) are the first measurement toward that,
+not the budget itself.
 
 ## 9. Dependency table
 
@@ -445,12 +535,16 @@ this same point's `elapsed_ms` field as the measurement.
 | `fast-png` | `8.0.0` | PNG encoding for `render_overview`, pure JS via `fflate` | Not exercised by this spike (no image-producing tool in it). Chosen because it has no WASM dependency, consistent with this phase's decode-path finding. Phase 3 item. |
 | `zarrita` | `0.7.5` | Zarr store/array abstraction, FetchStore, sharding | **Not directly exercised by this spike.** The spike tested the codec layer (blosc/zstd decode) in isolation, which is the part decision 7 needed evidence on; zarrita's own store/array logic has no WASM dependency of its own (only the codec it would otherwise delegate to, which this phase replaces with the pure-JS path). Whether to use zarrita for chunk-key/shard-index bookkeeping or hand-roll it (as the spike does, see `README.md`'s shard-index derivation) is a phase 2 decision. |
 
-## 10. Spike results
+## 10. Spike results (phase 1) and the real bundle delta (phase 2)
 
-Full detail, including the exact failure message and the byte-level
-derivation of `fixtures/chunk.bin`, is in
-`backend/spike/mcp-transport/README.md`.
-Summary:
+Full detail of the phase 1 spike, including the exact failure message and
+the byte-level derivation of `fixtures/chunk.bin`, lived in
+`backend/spike/mcp-transport/README.md` -- deleted by phase 2 (decision 9);
+`fixtures/chunk.bin`/`chunk.expected.json` moved to
+`backend/test/fixtures/blosc/`, and the decode path itself was promoted to
+`backend/src/services/blosc-decode.ts` (`decodeBloscZstdInt16`), dropping
+path (a) (`numcodecs`) entirely.
+Summary of the phase 1 findings:
 
 | Measurement | Result |
 |---|---|
@@ -538,6 +632,45 @@ separate, standalone piece of work (introduce the preload hook, or move
 `extendZodWithOpenApi` earlier some other way) -- worth its own issue, not a
 silent side effect of this design phase.
 
+### 10.2 Phase 2's real bundle delta
+
+`bunx wrangler deploy -c wrangler-sccn.toml --env dev --dry-run`, measured
+at three points:
+
+| Measurement | Total Upload | gzip |
+|---|---|---|
+| Before this PR (dev's checked-out `dev` tip) | 1928.88 KiB | 399.98 KiB |
+| After adding the dependencies alone (`@modelcontextprotocol/server`, `zod4`, `fzstd`; no code importing them yet) | 1928.88 KiB | 399.98 KiB (unchanged) |
+| After the full phase 2 implementation | 2983.28 KiB | 606.34 KiB |
+| **Delta (the real cost of this phase)** | **+1054.40 KiB** | **+206.36 KiB** |
+
+The middle row is unchanged from the first: `wrangler deploy --dry-run`
+bundles only what is reachable from `src/index.ts`, and nothing imports the
+new dependencies until the route/tool/schema code lands, so adding an unused
+dependency to `package.json` costs nothing until something imports it.
+The real number is the last row's delta -- the SDK (`McpServer`,
+`createMcpHandler`, the wire-protocol codec for both eras) plus the zod 4
+registration mirrors (`backend/src/mcp/schemas.ts`) plus the two tools'
+own logic and the services they pull in (`dataset-search.ts`,
+`dataset-filters.ts`, `sweep-stamps.ts`).
+`fzstd` (promoted for `decodeBloscZstdInt16`) contributes nothing to this
+delta: no route or tool in phase 2 imports `blosc-decode.ts`, so it is
+tree-shaken out of the reachable graph entirely -- it only becomes part of
+the deployed bundle once phase 3/4 wires a tool that calls it.
+
+**`bun` did not hoist a single shared copy of zod 4.** Both
+`backend/node_modules/zod4/package.json` and
+`backend/node_modules/@modelcontextprotocol/server/node_modules/zod/package.json`
+exist, byte-identical content (`4.5.4`) but distinct inodes -- exactly the
+"two-copy risk" section 12 named. Harmless for correctness (the SDK's
+`registerTool` only ever sees the mirrors built against `zod4`, and the
+parity test -- `backend/test/mcp-schema-parity.test.ts` -- proves those
+mirrors agree with the zod 3 wire contract on every case in its table), but
+it is real, measurable bytes: not isolated here from the delta above, since
+Bun's install layout makes the two indistinguishable in the bundle without a
+dedicated dependency-graph diff, which was out of scope for this
+measurement.
+
 ## 11. Client compatibility
 
 | Client | Supports protocol revision 2026-07-28 |
@@ -550,12 +683,38 @@ silent side effect of this design phase.
 
 ## 12. Open items for phases 2 to 5
 
-- **Phase 2 (#1294):** the host fork (`HostRoute "mcp"`, `MCP_HOSTNAME`,
-  wrangler routes) and `search_datasets` / `describe_dataset` /
-  `server/discover` wiring against a real D1 binding.
-  Also: pick the exact TTL for the three synthetic-cache-URL projections
-  (section 7), and land the Analytics Engine point (section 8) with a p95
-  CPU budget as acceptance.
+- **Phase 2 (#1294): DONE.** The host fork (`HostRoute "mcp"`,
+  `MCP_HOSTNAME`, wrangler routes) and `search_datasets` / `describe_dataset`
+  / `server/discover` wiring against a real D1 binding are all implemented
+  and covered by `backend/test/mcp-*.test.ts` (real bun:sqlite D1, no
+  mocks). The three synthetic-cache-URL projections (section 7) and their
+  TTL remain open -- they belong to `list_recordings`/`get_events`/
+  `render_overview` (phases 3-4), which this phase does not touch. The
+  Analytics Engine point (section 8) landed as a dedicated `ANALYTICS_MCP`
+  dataset; the p95 CPU budget itself is still open, pending real traffic
+  once the host is live -- the smoke run's per-call timings are the
+  starting measurement.
+  **Blocker, not carried forward silently:** `bash backend/scripts/mcp-smoke.sh`
+  could not be run to completion in this phase's environment --
+  `wrangler dev --local` fails to even START the worker (`Uncaught
+  TypeError: Incorrect type for map entry 'NON_PROD_SANDBOX_CLEANUP_QUERY':
+  the provided value is not of type 'function or ExportedHandler'`),
+  reproduced identically on wrangler 4.85.0 (the repo's pin) and 4.130.0
+  (latest), both plain and via `cfman`, and on the UNMODIFIED epic-branch
+  `backend/src/index.ts` (i.e. it predates this PR and is unrelated to the
+  MCP work: `index.ts` has exported `NON_PROD_SANDBOX_CLEANUP_QUERY`/
+  `PROD_SANDBOX_CLEANUP_QUERY` as plain string constants since the epic #923
+  cron-safety work, and some local-workerd validation added between the
+  spike's wrangler version and this one rejects a non-function named export
+  on the entry module). `wrangler deploy --dry-run` (bundling only, no
+  runtime start) is unaffected and was used for the bundle measurement
+  above. The smoke script itself (`backend/scripts/mcp-smoke.sh`) is
+  written and, per a manual dry run of its assertions against the real
+  `@modelcontextprotocol/server` package under Bun (not workerd --
+  `backend/test/mcp-route.test.ts`, 18/18 passing, exercises the identical
+  request/response shapes), is expected to pass once this environment
+  blocker is cleared -- filing it (or fixing `index.ts`'s export shape) is
+  outside this phase's mandate.
 - **Phase 3 (#1295):** `list_recordings` and `get_events`, including the
   `hyparquet` + `hyparquet-compressors` wiring against real
   `events.parquet` objects, and the `events.tsv` fallback path.
@@ -570,23 +729,31 @@ silent side effect of this design phase.
   The decision text above (sections 2 to 4 and 7, and this section's decode
   verdict) stands in for it until phase 5, where ADR 0050 should be filed
   once ADR 0049 has landed and its final number is confirmed unclaimed.
-- **Tool registration under the two-copy zod split (phase 2).**
+- **Tool registration under the two-copy zod split: DONE for `search_datasets`/
+  `describe_dataset` (phase 2); `read_window`'s discriminated-union/
+  `superRefine` shapes remain a phase 4 item.**
   `registerTool` in `@modelcontextprotocol/server@2.0.0` takes a Standard
   Schema that also emits JSON Schema (`~standard.jsonSchema`), which zod 4
-  implements and zod 3 does not; its deprecated raw-shape overload takes a
-  flat object shape, which `readWindowInputSchema` (a `superRefine`) and
-  `readWindowOutputSchema` (a discriminated union) do not have.
+  implements and zod 3 does not.
   So the zod 3 schemas in `shared/contract/mcp.ts` are the WIRE contract and
   the test oracle, not what is handed to `registerTool`.
-  Phase 2 adds a `zod4` npm alias to `backend/package.json`
-  (`"zod4": "npm:zod@^4.2.0"`, which Bun resolves without touching the
-  repo-wide `zod` pin), authors registration mirrors of each tool's input
-  and output schema against it, and adds a drift test that compares the
-  JSON Schema each mirror emits with the contract's (zod 3 via
-  `zod-to-json-schema`, zod 4 via `z.toJSONSchema()`), so the two copies
-  cannot disagree silently.
-  The channel-seconds check stays in the input schema on both copies; it is
-  a `superRefine` in zod 3 and a `.check()` in zod 4.
+  Phase 2 added the `zod4` npm alias to `backend/package.json`
+  (`"zod4": "npm:zod@^4.2.0"`, which Bun resolved without touching the
+  repo-wide `zod` pin -- confirmed: `bun run typecheck` and the pure test
+  tier are unaffected), authored registration mirrors of both phase 2
+  tools' input and output schemas (`backend/src/mcp/schemas.ts`), and added
+  the drift test as **behavior parity, not JSON-Schema-generator
+  comparison**: `backend/test/mcp-schema-parity.test.ts` runs one shared
+  table of valid/invalid inputs (defaults, the cap, cap-plus-one, a
+  malformed id, an unknown passthrough key) through both copies'
+  `.safeParse` and asserts identical accept/reject verdicts and, on a shared
+  success, identical parsed values -- comparing two DIFFERENT JSON Schema
+  generators' output (`zod-to-json-schema` for zod 3, `z.toJSONSchema()` for
+  zod 4) would drift on shape even when the accept/reject behavior agrees,
+  which is what actually matters for a client. `read_window`'s
+  `superRefine`/discriminated-union shapes (the channel-seconds check, the
+  recipe/taste result union) are deferred to phase 4 along with the tool
+  itself.
 - **Whether `zarrita` is used as-is or replaced by hand-rolled chunk-key /
   shard-index logic** (as this phase's spike does for `decode_chunk`) is
   still open; either way, the codec underneath it is this phase's path (b),
