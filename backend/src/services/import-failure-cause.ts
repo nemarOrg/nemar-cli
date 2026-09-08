@@ -95,7 +95,13 @@ const RULES: {
     label: "branch-protection",
     summary:
       "A branch-protection ruleset on the published dataset repo rejected the push. See nemarOrg/nemar-cli#998.",
-    match: /GH0\d{2}:|Repository rule violations/i,
+    // Only the two GH0xx codes that actually mean protection: GH006 (protected
+    // branch update failed) and GH013 (repository rule violations). A bare
+    // `GH0\d{2}` would also swallow GH001/GH002 (file too large), GH003
+    // (force-push refused) and GH007 (private email blocked), none of which is a
+    // protection rule -- and each would then be handed the summary below, which
+    // would send triage to the wrong issue entirely.
+    match: /GH0(?:06|13):|Repository rule violations|protected branch/i,
   },
   {
     cause: "git_divergence",
@@ -158,5 +164,11 @@ export function classifyImportFailure(args: {
 /** Every label this module can apply, for the label-provisioning checklist. */
 export const IMPORT_FAILURE_CAUSE_LABELS: string[] = [...RULES.map((r) => r.label), UNKNOWN.label];
 
-/** Exported so a caller can special-case the upstream marker without re-typing it. */
+/**
+ * The private copy above, exposed so a test can assert it still equals
+ * `OPENNEURO_UPSTREAM_MARKER` in import-recovery.ts. Duplicating the literal keeps
+ * this module pure, but a drift between the copies would be silent -- upstream
+ * failures would quietly start classifying as `unknown` -- so the copies are pinned
+ * together in import-failure-cause.test.ts rather than merely hoped to match.
+ */
 export const IMPORT_UPSTREAM_MARKER_FOR_CLASSIFY = UPSTREAM_MARKER;
