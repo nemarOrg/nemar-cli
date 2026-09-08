@@ -116,6 +116,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "clearIdentityConflict",
     "createConceptDoi",
     "createExemplar",
+    "createKeyFor",
     "dataIntegritySweep",
     "dataIntegritySweepReset",
     "deleteDataset",
@@ -125,6 +126,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "doctorScan",
     "enforceBulk",
     "enforceDataset",
+    "getAdminUserByUsername",
     "getCiStatus",
     "getDoiInfo",
     "getEmailPreferences",
@@ -135,6 +137,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "hedSweep",
     "hedSweepReset",
     "importDataset",
+    "listKeysFor",
     "listUsers",
     "publishDataset",
     "publishVersionDoi",
@@ -148,10 +151,12 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "restoreDataset",
     "retryImport",
     "revalidateDataset",
+    "revokeKeyFor",
     "revokeUser",
     "revokeUserById",
     "rollbackImport",
     "sendBroadcast",
+    "setAccountKind",
     "signalDefaultsSweep",
     "signalDefaultsSweepReset",
     "syncCi",
@@ -192,16 +197,21 @@ const POST_SPLIT_ADDITIONS = [
   "checkOrcidName", // #1255, epic #1250: GET /auth/orcid-name pre-signup lookup
   "clearIdentityConflict", // #1254, ADR 0043: POST /admin/users/:id/clear-identity-conflict
   "createApiKey", // #1283, epic #1272 phase 3, ADR 0047: POST /auth/keys
+  "createKeyFor", // #1284, epic #1272 phase 4, ADR 0048: owner-mint POST /admin/users/:username/keys
   "doctorFix", // #1130, CLI wrapper for POST /admin/doctor/fix
   "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
+  "getAdminUserByUsername", // #1284 review, epic #1272 phase 4, ADR 0048: GET /admin/users/:username, read by `nemar admin doctor kinds`
   "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion
   "getUserDuplicates", // #1254, ADR 0043: GET /admin/users/duplicates
   "listApiKeys", // #1283, epic #1272 phase 3, ADR 0047: GET /auth/keys
+  "listKeysFor", // #1284, epic #1272 phase 4, ADR 0048: GET /admin/users/:username/keys
   "pollDeviceToken", // #1283, epic #1272 phase 3, ADR 0047: POST /auth/device/token
   "publishZarrCatalog", // #1062, epic #1181 phase 2: POST /admin/zarr-catalog/publish
   "requestEmailChange", // #1266, ADR 0044: POST /auth/email/change/request
   "revokeApiKey", // #1283, epic #1272 phase 3, ADR 0047: DELETE /auth/keys/:id|current
   "revokeApiKeyWithBearer", // #1289 review: DELETE /auth/keys/:id with an explicit bearer, for revoking a just-minted key whose write to disk failed
+  "revokeKeyFor", // #1284, epic #1272 phase 4, ADR 0048: DELETE /admin/users/:username/keys/:id
+  "setAccountKind", // #1284, epic #1272 phase 4, ADR 0048: POST /admin/users/:username/kind
   "startDeviceAuth", // #1283, epic #1272 phase 3, ADR 0047: POST /auth/device/start
   "startOrcidCliLink", // #1266, ADR 0044: POST /auth/orcid/cli-start
   "suggestUsername", // #1283, epic #1272 phase 3, ADR 0042/0047: GET /auth/profile/username-suggestion

@@ -46,7 +46,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
-import type { AccountStatus } from "../../../shared/contract/user.js";
+import type { AccountKind, AccountStatus } from "../../../shared/contract/user.js";
 import { auditLogStatement } from "../db/audit-log";
 import { flag } from "../db/flag";
 import { timingSafeEqual } from "../lib/constant-time";
@@ -178,6 +178,11 @@ function publicUser(row: {
   username_auto_assigned: boolean;
   service_access_granted_at: string | null;
   upload_access_requested_at: string | null;
+  /** What this account IS (epic #1272 phase 4, #1284; ADR 0048), read ONLY to
+   *  feed `profileGapsForRow` below -- it is deliberately NOT put on the
+   *  wire (webUserSchema carries no such field; that would force a website
+   *  change this phase does not need). */
+  account_kind: AccountKind;
 }) {
   return {
     id: row.id,
@@ -453,7 +458,7 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
                 given_name, family_name, orcid, orcid_verified,
                 github_username, city, country, affiliation, service_access,
                 username, username_auto_assigned,
-                service_access_granted_at, upload_access_requested_at
+                service_access_granted_at, upload_access_requested_at, account_kind
            FROM users WHERE email = ? COLLATE NOCASE AND deleted_at IS NULL LIMIT 1`,
       )
       .bind(email)
@@ -482,6 +487,9 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
         username_auto_assigned: number;
         service_access_granted_at: string | null;
         upload_access_requested_at: string | null;
+        // Closed by migration 0082's CHECK constraint (epic #1272 phase 4,
+        // #1284; ADR 0048).
+        account_kind: AccountKind;
       }>();
     if (!userRow) {
       // No live users row for a matched code. Normally impossible
@@ -685,6 +693,7 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       username_auto_assigned: usernameLanded || currentAutoAssigned,
       service_access_granted_at: userRow.service_access_granted_at,
       upload_access_requested_at: userRow.upload_access_requested_at,
+      account_kind: userRow.account_kind,
     };
 
     if (promoted) {
@@ -1262,7 +1271,7 @@ async function fetchPublicUserById(
               given_name, family_name, orcid, orcid_verified,
               github_username, city, country, affiliation, service_access,
               username, username_auto_assigned,
-              service_access_granted_at, upload_access_requested_at
+              service_access_granted_at, upload_access_requested_at, account_kind
          FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
     )
     .bind(userId)
@@ -1290,6 +1299,9 @@ async function fetchPublicUserById(
       username_auto_assigned: number;
       service_access_granted_at: string | null;
       upload_access_requested_at: string | null;
+      // Closed by migration 0082's CHECK constraint (epic #1272 phase 4,
+      // #1284; ADR 0048).
+      account_kind: AccountKind;
     }>();
   if (!row) return null;
   return publicUser({
@@ -1311,6 +1323,7 @@ async function fetchPublicUserById(
     username_auto_assigned: flag(row.username_auto_assigned),
     service_access_granted_at: row.service_access_granted_at,
     upload_access_requested_at: row.upload_access_requested_at,
+    account_kind: row.account_kind,
   });
 }
 

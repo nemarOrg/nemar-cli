@@ -30,11 +30,13 @@
  * ALSO changes is where the name is set (the `.orcid` set-on variants below),
  * and that is unchanged by any of this.
  *
- * **`admin` and `owner` are exempt from that one row**, because they predate
- * having a web-signup path of their own and the alternative is locking an
- * operator out of the account that runs the review queue. It is interim, until
- * the service-account kind of epic #1272 gives that population a real answer
- * rather than a role check standing in for one.
+ * **`service` and `test` accounts are exempt from that one row** (epic #1272
+ * phase 4, #1284; ADR 0048): a service account has no human signing in to it
+ * to prove an identity, and a test persona is a human's secondary account,
+ * not the identity a DOI would need to cite. This replaced an interim
+ * `admin`/`owner` role exemption — a role is a permission level, not a fact
+ * about what an account is — and `role` is no longer part of this matrix at
+ * all.
  *
  * **`why` is in the table and is not derivable.** It is part of the refused-
  * request vocabulary (`missing` on a 400 from
@@ -50,7 +52,7 @@
  */
 
 import { ACCOUNT_COPY, type AccountCopyKey, fillCopy } from "./account-copy.js";
-import type { AccountStatus } from "./user.js";
+import type { AccountKind, AccountStatus } from "./user.js";
 
 /**
  * What a missing field stops the account from doing.
@@ -194,10 +196,10 @@ export const PROFILE_GAP_MATRIX: Record<GapField, ProfileGapDefinition> = {
     // flag here is not "a caller that does not report it" -- every account this
     // rule can see carries the column (migration 0050, NOT NULL DEFAULT 0) --
     // so reading `undefined` as verified would silently exempt exactly the
-    // CLI-created rows the gap exists for. `admin`/`owner` are exempt
-    // regardless; an absent role is NOT, since it only means the role could not
-    // be read.
-    isMissing: (a) => a.orcid_verified !== true && !isExemptRole(a.role),
+    // CLI-created rows the gap exists for. `service`/`test` kinds are exempt
+    // regardless; an absent or unrecognised kind is NOT, since it only means
+    // the kind could not be read (ADR 0048: fails closed).
+    isMissing: (a) => a.orcid_verified !== true && !isExemptKind(a.account_kind),
   },
   github_username: {
     blocks: ["upload_access", "publication"],
@@ -268,13 +270,13 @@ function isBlank(value: string | null | undefined): boolean {
   return (value ?? "").trim().length === 0;
 }
 
-/** True for the two roles the `orcid_verified` gap does not apply to. See the
- *  module header for why: interim, until the service-account kind of epic
- *  #1272 replaces the role check with its own answer. Anything else — a member,
- *  an unreadable value, no role at all — is a regular user, so the exemption
- *  fails CLOSED and an operator is nagged rather than a member let through. */
-function isExemptRole(role: ProfileGapAccount["role"]): boolean {
-  return role === "admin" || role === "owner";
+/** True for the two kinds the `orcid_verified` gap does not apply to (epic
+ *  #1272 phase 4, #1284; ADR 0048). Anything else — a `person`, an
+ *  unreadable value, no kind at all — is a regular account, so the
+ *  exemption fails CLOSED and a real person is nagged rather than let
+ *  through. */
+function isExemptKind(kind: ProfileGapAccount["account_kind"]): boolean {
+  return kind === "service" || kind === "test";
 }
 
 /**
@@ -299,18 +301,20 @@ export interface ProfileGapAccount {
    */
   readonly status?: AccountStatus | null;
   /**
-   * What exempts an account from the `orcid_verified` row, and nothing else.
+   * What exempts an account from the `orcid_verified` row, and nothing else
+   * (epic #1272 phase 4, #1284; ADR 0048).
    *
-   * Typed as the union of BOTH surfaces' vocabularies rather than one of them:
-   * the backend passes the `users.role` column as it stands (owner / admin /
-   * member, migration 0009), while the website passes either an uncollapsed
-   * `AdminUserRole` from an admin detail row or its session's collapsed
-   * `"user" | "admin"`. Every spelling of "admin" and "owner" has to be the same
-   * spelling on both sides, which is the point of naming them here rather than
-   * at two call sites. `undefined`/`null` counts as a regular user — a role this
-   * build could not read is not a reason to skip a gap.
+   * `undefined`/`null` counts as a regular `person` — a kind this build
+   * could not read is not a reason to skip a gap. Closed to {@link
+   * AccountKind} rather than `| string` (#1284 review): every real caller
+   * reads this off a D1 column CHECK-constrained to the same three values
+   * (migration 0082), so a caller passing anything else is a bug this type
+   * should catch, not a shape this interface should accommodate. Replaces
+   * the interim `role`-based exemption (ADR 0045): a role is a permission
+   * level, not a fact about what an account is, and this matrix no longer
+   * reads `role` at all.
    */
-  readonly role?: "user" | "admin" | "owner" | "member" | null;
+  readonly account_kind?: AccountKind | null;
   readonly email_verified?: boolean | null;
   /**
    * `undefined` means the username could not be READ, which is not the same as
@@ -327,9 +331,9 @@ export interface ProfileGapAccount {
   readonly github_username?: string | null;
   readonly city?: string | null;
   readonly country?: string | null;
-  /** Raises the `orcid_verified` row when it is not `true` (and the role is not
-   *  exempt), and moves the name halves' `set_on` to the ORCID record when it
-   *  is. */
+  /** Raises the `orcid_verified` row when it is not `true` (and the kind is
+   *  not exempt), and moves the name halves' `set_on` to the ORCID record
+   *  when it is. */
   readonly orcid_verified?: boolean | null;
 }
 

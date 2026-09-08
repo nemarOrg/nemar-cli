@@ -47,12 +47,18 @@ beforeEach(() => {
 function seedUser(
   email: string,
   status: "pending" | "verified" | "approved" = "verified",
-  opts: { identityConflict?: boolean } = {},
+  opts: { identityConflict?: boolean; accountKind?: "person" | "service" | "test" } = {},
 ): number {
   db.run(
-    `INSERT INTO users (username, email, password_hash, status, role, signup_source, email_verified, identity_conflict)
-     VALUES (?, ?, 'x', ?, 'member', 'web', 1, ?)`,
-    [email.split("@")[0], email, status, opts.identityConflict ? 1 : 0],
+    `INSERT INTO users (username, email, password_hash, status, role, signup_source, email_verified, identity_conflict, account_kind)
+     VALUES (?, ?, 'x', ?, 'member', 'web', 1, ?, ?)`,
+    [
+      email.split("@")[0],
+      email,
+      status,
+      opts.identityConflict ? 1 : 0,
+      opts.accountKind ?? "person",
+    ],
   );
   const row = db.query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?").get(email);
   if (!row) throw new Error("seed failed");
@@ -237,6 +243,32 @@ describe("POST /auth/keys", () => {
     const res = await createKey(cookieHeaders(await sessionCookie(carol)), "carols-machine");
     expect(res.status).toBe(403);
     expect((await res.json()).error).toBe("identity_conflict");
+    const after = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM tokens").get()?.n ?? 0;
+    expect(after).toBe(before);
+  });
+
+  test("a service-kind account answers 403 service_account and mints no row", async () => {
+    // Epic #1272 phase 4 (ADR 0048): self-service minting is person-only;
+    // `KEY_MINT_SQL` itself also refuses via its own `account_kind = 'person'`
+    // predicate, but the route's own account-refusal check is what answers
+    // with the typed reason here.
+    const service = seedUser("service-self-mint@nemar.test", "verified", {
+      accountKind: "service",
+    });
+    const before = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM tokens").get()?.n ?? 0;
+    const res = await createKey(cookieHeaders(await sessionCookie(service)), "services-machine");
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe("service_account");
+    const after = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM tokens").get()?.n ?? 0;
+    expect(after).toBe(before);
+  });
+
+  test("a test-kind account also answers 403 service_account and mints no row", async () => {
+    const test = seedUser("test-persona-self-mint@nemar.test", "verified", { accountKind: "test" });
+    const before = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM tokens").get()?.n ?? 0;
+    const res = await createKey(cookieHeaders(await sessionCookie(test)), "personas-machine");
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe("service_account");
     const after = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM tokens").get()?.n ?? 0;
     expect(after).toBe(before);
   });

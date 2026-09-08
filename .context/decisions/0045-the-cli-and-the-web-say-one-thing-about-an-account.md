@@ -168,6 +168,12 @@ give that population a real answer rather than a role check standing in for one.
 Admin approval remains the override for everything here (ADR 0040): the gap
 blocks the ASK, never the grant.
 
+**Superseded in part by ADR 0048.** Epic #1272 phase 4 replaced this role-based
+exemption with `users.account_kind`: `ProfileGapAccount.role` is gone, and the
+`orcid_verified` row exempts `service`/`test` kinds instead of `admin`/`owner`
+roles. The rest of this ADR — the one matrix, one copy table, one gap function
+arrangement — stands unchanged.
+
 **The plumbing this needed is the shape the phase-8 design predicted.** Two
 columns onto `ProfileGapAccount` (`role`, and `orcid_verified` promoted from a
 set-on modifier to a predicate input), the same two onto the three SELECTs that

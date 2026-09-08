@@ -18,6 +18,7 @@ import {
 } from "../../../shared/contract/device-auth.js";
 import { IDENTITY_CONFLICT_CODES } from "../../../shared/contract/identity.js";
 import {
+  ACCOUNT_KIND_ERROR_CODES,
   PROFILE_EDIT_ERROR_CODES,
   UPLOAD_ACCESS_ERROR_CODES,
 } from "../../../shared/contract/user.js";
@@ -219,10 +220,18 @@ export async function request<T>(
       typeof data.error === "string" &&
       ((deviceGrantErrorSchema.options as readonly string[]).includes(data.error) ||
         DEVICE_AUTH_REFUSAL_CODES.includes(data.error));
+    // The account-kind change vocabulary (epic #1272 phase 4, #1284 review;
+    // ADR 0048): `POST /admin/users/:username/kind` answers `{ error: <code>,
+    // message }` from a closed set the same shape as the two families above,
+    // so it wins the same way -- `error` is a token (`orcid_linked`,
+    // `same_kind`, ...), not a sentence.
+    const isAccountKindCode =
+      typeof data.error === "string" && ACCOUNT_KIND_ERROR_CODES.includes(data.error);
     const prefersMessage =
       hasBlockReason ||
       isProfileEditCode ||
       isDeviceCode ||
+      isAccountKindCode ||
       (missing !== undefined &&
         typeof data.error === "string" &&
         UPLOAD_ACCESS_ERROR_CODES.includes(data.error));

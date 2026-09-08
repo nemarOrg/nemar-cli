@@ -12,9 +12,16 @@ import { zValidator } from "@hono/zod-validator";
 import type { Context } from "hono";
 import { z } from "zod";
 import { orcidIdSchema } from "../../../../shared/contract/publication.js";
+import {
+  ACCOUNT_KIND_ERROR_MESSAGES,
+  ACCOUNT_KIND_VALUES,
+  type AccountKind,
+  accountKindSchema,
+} from "../../../../shared/contract/user.js";
 import { ownerMiddleware } from "../../middleware/auth";
 
 import { auditLogStatement } from "../../db/audit-log";
+import { flag } from "../../db/flag";
 import { tombstoneUserStatement } from "../../db/user-tombstone";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import {
@@ -681,6 +688,25 @@ export async function resolveEmailPrefsTarget(
   return { id: target.id, username: target.username };
 }
 
+/**
+ * `POST /admin/users/:username/kind`'s account-kind change, guarded on the
+ * FROM kind so a race between two concurrent changes lands
+ * `kind_changed_concurrently` rather than one silently overwriting the
+ * other (epic #1272 phase 4, #1284 review; ADR 0048). Binds: newKind, id,
+ * currentKind.
+ *
+ * Exported (module scope, not the route closure) so
+ * admin-kind-route.test.ts can prove the guard's shape directly -- a
+ * matching from-kind updates, a stale one (the row changed underneath it)
+ * does not -- without hand-copying the statement (.rules/testing.md) and
+ * without needing a real concurrent requester, which bun:sqlite's
+ * single-writer test double cannot reliably produce (the same limitation
+ * backend/test/device-auth-routes.test.ts's header documents for its own
+ * conditional UPDATEs).
+ */
+export const KIND_CHANGE_GUARDED_UPDATE_SQL =
+  "UPDATE users SET account_kind = ?, updated_at = datetime('now') WHERE id = ? AND account_kind = ?";
+
 export function registerUsersRoutes(admin: AdminRouter): void {
   /**
    * GET /admin/users - List users with optional status filter
@@ -688,6 +714,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
   admin.get("/users", async (c) => {
     const status = c.req.query("status"); // pending, verified, approved, revoked
     const role = c.req.query("role"); // owner, admin, member
+    const kind = c.req.query("kind"); // person, service, test
     const db = c.env.DB;
 
     // service_access is what separates an uploader from a browse-only account
@@ -695,13 +722,14 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     // identity columns are here because a web/ORCID row has username = NULL
     // and is otherwise unidentifiable in the listing (#1251).
     // upload_access_requested_at is what makes "awaiting approval" a fact
-    // rather than an inference (ADR 0042, #1253).
+    // rather than an inference (ADR 0042, #1253). account_kind is what this
+    // account IS (epic #1272 phase 4, #1284; ADR 0048).
     let query = `
     SELECT
       id, username, email, github_username, status,
       email_verified, role, created_at, approved_at, revoked_at,
       signup_source, service_access, service_access_granted_at,
-      given_name, family_name, orcid, upload_access_requested_at
+      given_name, family_name, orcid, upload_access_requested_at, account_kind
     FROM users
   `;
     const conditions: string[] = [];
@@ -752,6 +780,14 @@ export function registerUsersRoutes(admin: AdminRouter): void {
         conditions.push("role = ?");
         params.push(role);
       }
+    }
+
+    if (kind) {
+      if (!(ACCOUNT_KIND_VALUES as readonly string[]).includes(kind)) {
+        return c.json({ error: `Invalid kind. Must be: ${ACCOUNT_KIND_VALUES.join(", ")}` }, 400);
+      }
+      conditions.push("account_kind = ?");
+      params.push(kind);
     }
 
     if (conditions.length > 0) {
@@ -925,6 +961,117 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       }
 
       return c.json(response);
+    },
+  );
+
+  const kindChangeSchema = z.object({
+    kind: accountKindSchema,
+  });
+
+  /**
+   * POST /admin/users/:username/kind - Change a user's account kind
+   * (owner only; epic #1272 phase 4, #1284; ADR 0048).
+   *
+   * Kinds are set only by an owner, never inferred. Mirrors the role route's
+   * self-change guard (a demoted/re-kinded owner locking themselves out is
+   * the same failure mode either way), but carries none of role's other
+   * machinery: a kind change never revokes tokens, and there is no "last
+   * owner" analogue to protect.
+   *
+   * Every refusal below (except "not found", the generic 404 every
+   * username-keyed admin route shares) answers `{ error: <code>, message }`
+   * from the closed `accountKindErrorCodeSchema` vocabulary
+   * (shared/contract/user.ts) -- `error` carries the code, `message` the
+   * sentence a person reads, no separate `code` field (epic #1272 phase 4,
+   * #1284 review).
+   */
+  admin.post(
+    "/users/:username/kind",
+    ownerMiddleware,
+    zValidator("json", kindChangeSchema),
+    async (c) => {
+      const username = c.req.param("username");
+      const { kind: newKind } = c.req.valid("json");
+      const db = c.env.DB;
+      const requestingUser = c.get("user");
+
+      if (requestingUser.username === username) {
+        return c.json(
+          { error: "own_account", message: ACCOUNT_KIND_ERROR_MESSAGES.own_account },
+          400,
+        );
+      }
+
+      const target = await db
+        .prepare(
+          "SELECT id, username, account_kind, orcid_verified FROM users WHERE username = ? AND deleted_at IS NULL",
+        )
+        .bind(username)
+        .first<{
+          id: number;
+          username: string;
+          account_kind: AccountKind;
+          orcid_verified: number;
+        }>();
+
+      if (!target) {
+        return c.json({ error: "User not found" }, 404);
+      }
+
+      if (target.account_kind === newKind) {
+        return c.json({ error: "same_kind", message: ACCOUNT_KIND_ERROR_MESSAGES.same_kind }, 409);
+      }
+
+      // An ORCID iD identifies a person (ADR 0043): a verified record is
+      // proof of an individual's identity, and a service/test account has no
+      // business holding proof of personhood. A person MAY lend a persona --
+      // moving `person` -> `test`/`service` on an account with no verified
+      // iD is fine -- but not one whose iD has already been proven.
+      if (newKind !== "person" && flag(target.orcid_verified)) {
+        return c.json(
+          { error: "orcid_linked", message: ACCOUNT_KIND_ERROR_MESSAGES.orcid_linked },
+          409,
+        );
+      }
+
+      const result = await db
+        .prepare(KIND_CHANGE_GUARDED_UPDATE_SQL)
+        .bind(newKind, target.id, target.account_kind)
+        .run();
+
+      if ((result.meta?.changes ?? 0) === 0) {
+        return c.json(
+          {
+            error: "kind_changed_concurrently",
+            message: ACCOUNT_KIND_ERROR_MESSAGES.kind_changed_concurrently,
+          },
+          409,
+        );
+      }
+
+      try {
+        await auditLogStatement(db, {
+          userId: requestingUser.id,
+          action: "account_kind_changed",
+          resourceType: "user",
+          resourceId: username,
+          details: JSON.stringify({
+            changed_by: requestingUser.username,
+            from: target.account_kind,
+            to: newKind,
+          }),
+        }).run();
+      } catch (error) {
+        console.error(
+          `Failed to write audit log for kind change ${username} ${target.account_kind}->${newKind}:`,
+          error,
+        );
+      }
+
+      return c.json({
+        message: `User ${username} account kind changed from '${target.account_kind}' to '${newKind}'`,
+        user: { username, account_kind: newKind },
+      });
     },
   );
 
@@ -1609,6 +1756,11 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     // authMiddleware accepts 'verified' as well as 'approved', so either
     // works for a fixture that only needs to authenticate.
     status: z.enum(["pending", "verified", "approved", "revoked"]).optional(),
+    // Optional. Defaults to 'person' (the column's own default). Lets route
+    // tests seed a service/test fixture directly rather than seeding a
+    // person and then calling the kind route (epic #1272 phase 4, #1284;
+    // ADR 0048).
+    kind: accountKindSchema.optional(),
     // Optional profile columns (#910) so the passwordless suite can
     // assert a populated /auth/me payload, not just the all-null
     // default. Applied via UPDATE after the insert, so they also stick
@@ -1667,7 +1819,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     if (!isNonProductionEnv(c.env)) {
       return c.json({ error: "Not available in production" }, 403);
     }
-    const { email, status, profile } = c.req.valid("json");
+    const { email, status, kind, profile } = c.req.valid("json");
     const desiredStatus = status ?? "pending";
     const db = c.env.DB;
 
@@ -1695,6 +1847,19 @@ export function registerUsersRoutes(admin: AdminRouter): void {
         if ((upd.meta?.changes ?? 0) === 0) {
           console.error("[seed-web-user] UPDATE matched 0 rows for email", email);
           return c.json({ error: "Failed to set requested status; row missing post-insert" }, 500);
+        }
+      }
+
+      // Same idempotent-UPDATE shape as `status` above (epic #1272 phase 4,
+      // #1284; ADR 0048).
+      if (kind) {
+        const upd = await db
+          .prepare("UPDATE users SET account_kind = ? WHERE email = ?")
+          .bind(kind, email)
+          .run();
+        if ((upd.meta?.changes ?? 0) === 0) {
+          console.error("[seed-web-user] kind UPDATE matched 0 rows for email", email);
+          return c.json({ error: "Failed to set requested kind; row missing post-insert" }, 500);
         }
       }
 

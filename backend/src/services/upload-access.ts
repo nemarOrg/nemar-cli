@@ -5,10 +5,11 @@
  * the asking half unbuilt; this is the asking half's rulebook. An admin
  * approving an upload request is performing an export-control review of a
  * person, so the request has to arrive with the person on it: a real name, a
- * username to approve them by, a verified ORCID iD (#1271; `admin`/`owner`
- * excepted), a GitHub account that exists, a location, and a sentence about
- * what they intend to deposit. A request missing any of that is refused HERE
- * rather than mailed to an admin who then has to chase it.
+ * username to approve them by, a verified ORCID iD (#1271; `service`/`test`
+ * account kinds excepted, ADR 0048), a GitHub account that exists, a
+ * location, and a sentence about what they intend to deposit. A request
+ * missing any of that is refused HERE rather than mailed to an admin who then
+ * has to chase it.
  *
  * Every refusal is `{ error, message, missing }` with a code from a closed
  * vocabulary, because both clients render it: the website turns `missing` into
@@ -25,11 +26,11 @@
 import type { z } from "zod";
 import { profileGapFields } from "../../../shared/contract/profile-gaps.js";
 import {
+  type AccountKind,
   UPLOAD_ACCESS_WHY_MAX_CHARS,
   UPLOAD_ACCESS_WHY_MIN_CHARS,
   type uploadAccessErrorCodeSchema,
 } from "../../../shared/contract/user.js";
-import { gapRole } from "./profile-gaps";
 
 /** Bounds on the why text. Re-exported from the wire contract so the rule, the
  *  CLI prompt and the website form cannot drift; they match CLI signup's
@@ -73,10 +74,10 @@ export interface UploadAccessProfile {
   /** Unverified iDs block the request, so an admin reviews a proven record
    *  (#1271). 0/1 INTEGER, migration 0050. */
   orcid_verified: number;
-  /** `admin`/`owner` are exempt from the `orcid_verified` row. The RAW column
-   *  (migration 0009): anything this build does not recognise is a regular
-   *  user, so the exemption fails closed. */
-  role: string | null;
+  /** `service`/`test` kinds are exempt from the `orcid_verified` row (epic
+   *  #1272 phase 4, #1284; ADR 0048). Closed by migration 0082's CHECK
+   *  constraint. */
+  account_kind: AccountKind;
   username: string | null;
   given_name: string | null;
   family_name: string | null;
@@ -137,7 +138,7 @@ export function checkUploadAccessRequest(
     // check of its own here (#1271): the row is in the matrix, and this list is
     // the matrix's output.
     orcid_verified: profile.orcid_verified === 1,
-    role: gapRole(profile.role),
+    account_kind: profile.account_kind,
     username: profile.username,
     given_name: profile.given_name,
     family_name: profile.family_name,

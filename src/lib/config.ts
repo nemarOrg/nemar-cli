@@ -22,6 +22,7 @@ import { join } from "node:path";
 import Conf from "conf";
 import { z } from "zod";
 import type { GapFieldsStayOptional } from "../../shared/contract/profile-gaps.js";
+import { accountKindSchema } from "../../shared/contract/user.js";
 import { dlog } from "./debug-log.js";
 
 export const DEFAULT_API_URL = "https://api.nemar.org";
@@ -172,6 +173,16 @@ const accountSchema = z.object({
    * report a role without an extra network call.
    */
   role: z.string().optional(),
+  /**
+   * Cached from `/auth/login` and `auth status --refresh` (epic #1272 phase
+   * 4, #1284; ADR 0048), the same way `role` is -- written on every refresh
+   * but, UNLIKE `role`, never read back from here: `nemar auth status`'s
+   * `Kind:` line is driven by the freshly-fetched value inside its own
+   * `--refresh` branch (`userKind` in src/commands/auth.ts), not by this
+   * cached field, so a plain `nemar auth status` prints no `Kind:` line
+   * regardless of what is cached here (#1284 review; T7).
+   */
+  accountKind: accountKindSchema.optional(),
   /**
    * The address `nemar auth profile set-email` last sent a code to (#1266).
    * Remembered so `verify-email <code>` needs only the code, the way the

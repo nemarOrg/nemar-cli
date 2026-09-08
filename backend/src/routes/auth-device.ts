@@ -64,7 +64,6 @@ import {
   KEY_BY_HASH_SQL,
   LIVE_KEY_COUNT_SQL,
   USER_BLOCK_FOR_DEVICE_TOKEN_SQL,
-  USER_STATUS_FOR_DEVICE_AUTH_SQL,
   accountRefusal,
   buildApiKeySummary,
   deviceRefusal,
@@ -73,6 +72,7 @@ import {
   hashDeviceCode,
   isLivePending,
   normalizeMachineName,
+  readDeviceAuthAccount,
   refusalForRow,
   sqliteUtcToIso,
   stampExpiredOnce,
@@ -421,31 +421,21 @@ authDeviceRoutes.post("/device/token", zValidator("json", deviceTokenBodySchema)
   }
 
   const userId = freshRow.user_id;
-  const userStatusRow = userId
-    ? await db.prepare(USER_STATUS_FOR_DEVICE_AUTH_SQL).bind(userId).first<{
-        status: string;
-        deleted_at: string | null;
-        identity_conflict: number;
-      }>()
-    : null;
+  const account = await readDeviceAuthAccount(db, userId);
 
-  if (!userStatusRow) {
-    if (userId) {
-      // `device_codes.user_id REFERENCES users(id) ON DELETE CASCADE` makes
-      // a confirmed row naming a user that no longer resolves impossible --
-      // deleting the user deletes this row along with it. A canary, not a
-      // silent `account_revoked`.
-      console.error(
-        `[auth-device] canary: confirmed device_codes row user_code=${freshRow.user_code} ` +
-          `names user_id=${userId}, which does not resolve to a user`,
-      );
-    }
-    return terminalTokenError(c, "access_denied", "account_revoked");
+  if (!account && userId) {
+    // `device_codes.user_id REFERENCES users(id) ON DELETE CASCADE` makes
+    // a confirmed row naming a user that no longer resolves impossible --
+    // deleting the user deletes this row along with it. A canary, not a
+    // silent `account_revoked`.
+    console.error(
+      `[auth-device] canary: confirmed device_codes row user_code=${freshRow.user_code} ` +
+        `names user_id=${userId}, which does not resolve to a user`,
+    );
   }
-  if (userStatusRow.deleted_at) {
-    return terminalTokenError(c, "access_denied", "account_revoked");
-  }
-  const accountIssue = accountRefusal(userStatusRow.status, flag(userStatusRow.identity_conflict));
+  // `accountRefusal(null)` answers `account_revoked`, the same terminal
+  // reason the canary case above already fell through to.
+  const accountIssue = accountRefusal(account);
   if (accountIssue) {
     return terminalTokenError(c, "access_denied", accountIssue);
   }
@@ -494,10 +484,8 @@ authDeviceRoutes.get("/device/lookup", webSessionMiddleware, async (c) => {
     return refusalResponse(c, refusalForRow(row) ?? "device_code_unknown");
   }
 
-  const identityRow = await c.env.DB.prepare("SELECT identity_conflict FROM users WHERE id = ?")
-    .bind(webUser.id)
-    .first<{ identity_conflict: number }>();
-  const accountCode = accountRefusal(webUser.status, flag(identityRow?.identity_conflict));
+  const account = await readDeviceAuthAccount(db, webUser.id);
+  const accountCode = accountRefusal(account);
 
   const body: DeviceLookupResponse = {
     user_code: formatUserCode(row.user_code),
@@ -538,11 +526,8 @@ authDeviceRoutes.post(
       return refusalResponse(c, "device_code_unknown");
     }
 
-    const identityRow = await db
-      .prepare("SELECT identity_conflict FROM users WHERE id = ?")
-      .bind(webUser.id)
-      .first<{ identity_conflict: number }>();
-    const accountCode = accountRefusal(webUser.status, flag(identityRow?.identity_conflict));
+    const account = await readDeviceAuthAccount(db, webUser.id);
+    const accountCode = accountRefusal(account);
     if (accountCode) {
       return refusalResponse(c, accountCode);
     }

@@ -103,10 +103,18 @@ export const DEVICE_GRANT_MESSAGES: Record<DeviceGrantError, string> = {
 };
 
 /**
- * Why a device code (or a key request riding one) could not be used.
- * `service_account` is reserved for phase 4's service/test account kinds and
- * is never emitted by this phase's routes -- declared now so the vocabulary
- * does not need a wire change later.
+ * Why a device code (or a key request riding one) could not be used, or why
+ * an owner's own key mint was refused (epic #1272 phase 4, #1284; ADR 0048).
+ *
+ * `service_account` covers BOTH non-person kinds (`service` and `test`): from
+ * the sign-in side, "a service account" and "a test persona" are the same
+ * fact -- a human is not meant to sign in this way -- and the CLI/website
+ * both already parse this as a closed enum, so widening what it means costs
+ * nothing a second `test_account` code would not also cost. `person_account`
+ * is the mint-side companion, answered only by
+ * `POST /admin/users/:username/keys` (routes/admin/user-keys.ts) when an
+ * owner targets a `person`: a person creates their own keys by signing in,
+ * never through the admin mint.
  */
 export const deviceAuthRefusalCodeSchema = z.enum([
   "device_code_unknown",
@@ -117,6 +125,7 @@ export const deviceAuthRefusalCodeSchema = z.enum([
   "account_revoked",
   "identity_conflict",
   "service_account",
+  "person_account",
   "too_many_keys",
   "key_not_found",
 ]);
@@ -142,7 +151,9 @@ export const DEVICE_AUTH_MESSAGES: Record<DeviceAuthRefusalCode, string> = {
   identity_conflict:
     "This account shares an identifier with another NEMAR account and cannot sign in until that is resolved. Fix it in Settings on nemar.org or contact the NEMAR team.",
   service_account:
-    "Service accounts cannot sign in this way. Ask an owner to create a key for it with `nemar admin`.",
+    "This is a service or test account, and it cannot sign in this way. Ask an owner to create a key for it with `nemar admin keys create`.",
+  person_account:
+    "This account belongs to a person. A person creates their own keys with `nemar auth login` or in Settings on nemar.org.",
   too_many_keys: `This account already has ${MAX_LIVE_API_KEYS} active keys. Revoke one in Settings on nemar.org or with \`nemar auth keys\`, then try again.`,
   key_not_found:
     "That key was not found on this account, or it is already revoked. Run `nemar auth keys` to see the active ones.",

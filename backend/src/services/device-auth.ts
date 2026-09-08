@@ -37,6 +37,7 @@ import {
   USER_CODE_ALPHABET,
   USER_CODE_LENGTH,
 } from "../../../shared/contract/device-auth.js";
+import type { AccountKind } from "../../../shared/contract/user.js";
 import { auditLogStatement } from "../db/audit-log";
 import { flag } from "../db/flag";
 import { ACTIVE_ACCOUNT_STATUS_SQL_LIST, isActiveAccountStatus } from "./account-tier";
@@ -130,9 +131,10 @@ export function deviceRefusal(code: DeviceAuthRefusalCode): {
  *  for "it existed and is gone", 409 for "it exists but is already resolved
  *  OR the account is at capacity" (a key cap is a conflict, the same status
  *  `POST /auth/keys` already answers with), 403 for "the account cannot do
- *  this for an identity reason". Every route in this file and
- *  `routes/auth-keys.ts` reads this map rather than hardcoding a status, so
- *  the mapping cannot drift between the two files. */
+ *  this for an identity reason". Every route in this file,
+ *  `routes/auth-keys.ts`, and `routes/admin/user-keys.ts` reads this map
+ *  rather than hardcoding a status, so the mapping cannot drift between
+ *  them. */
 export const HTTP_STATUS_FOR_REFUSAL: Record<DeviceAuthRefusalCode, 403 | 404 | 409 | 410> = {
   device_code_unknown: 404,
   device_code_expired: 410,
@@ -142,9 +144,68 @@ export const HTTP_STATUS_FOR_REFUSAL: Record<DeviceAuthRefusalCode, 403 | 404 | 
   account_revoked: 403,
   identity_conflict: 403,
   service_account: 403,
+  person_account: 403,
   too_many_keys: 409,
   key_not_found: 404,
 };
+
+/**
+ * The account columns {@link accountRefusal} and {@link accountLivenessRefusal}
+ * read, exactly as {@link USER_STATUS_FOR_DEVICE_AUTH_SQL} returns them (epic
+ * #1272 phase 4, #1284; ADR 0048). Every construction of this type is a raw
+ * D1 read (`.first<DeviceAuthAccountRow>()`, never a hand-built object), so
+ * `identity_conflict` is `number` -- literally what the D1 INTEGER column
+ * returns -- not `number | boolean`; `flag()` still accepts it unchanged
+ * (#1284 review).
+ */
+export interface DeviceAuthAccountRow {
+  status: string;
+  deleted_at: string | null;
+  identity_conflict: number;
+  account_kind: AccountKind;
+}
+
+/**
+ * The prologue {@link accountLivenessRefusal} and {@link accountRefusal}
+ * both start with -- pending before revoked, so an unverified account is
+ * told to verify its email rather than "revoked" -- factored into one place
+ * so that ordering is structural rather than two functions kept in step by
+ * hand (#1284 review). Takes a non-null row: the `!row || row.deleted_at`
+ * check stays duplicated in each caller, both because that is what lets
+ * TypeScript narrow `row` to non-null before this helper is called, and
+ * because "no such row"/"a deleted row" is a different kind of absence than
+ * the status checks here.
+ */
+function livenessStatusRefusal(row: DeviceAuthAccountRow): DeviceAuthRefusalCode | null {
+  if (row.status === "pending") return "account_pending";
+  if (!isActiveAccountStatus(row.status)) return "account_revoked";
+  return null;
+}
+
+/**
+ * Whether the ACCOUNT a device code names (or would be confirmed for) may
+ * proceed, independent of the code's own status -- everything
+ * {@link accountRefusal} checks EXCEPT the kind test. Exported for the owner
+ * key mint (`routes/admin/user-keys.ts`), which is the one caller that must
+ * NOT refuse a live `service`/`test` target on kind (minting for exactly
+ * those kinds is the route's whole job) while still refusing a dead,
+ * pending, or flagged one.
+ *
+ * Order is the point: `pending` is checked before the active-status test, so
+ * an unverified account is told to verify its email rather than "revoked";
+ * the identity-conflict flag is checked last, so a flagged pending account
+ * still gets the more useful `account_pending`. `null` means the account may
+ * proceed on every ground this function checks.
+ */
+export function accountLivenessRefusal(
+  row: DeviceAuthAccountRow | null,
+): DeviceAuthRefusalCode | null {
+  if (!row || row.deleted_at) return "account_revoked";
+  const statusRefusal = livenessStatusRefusal(row);
+  if (statusRefusal) return statusRefusal;
+  if (flag(row.identity_conflict)) return "identity_conflict";
+  return null;
+}
 
 /**
  * Whether the ACCOUNT a device code names (or would be confirmed for) may
@@ -152,12 +213,11 @@ export const HTTP_STATUS_FOR_REFUSAL: Record<DeviceAuthRefusalCode, 403 | 404 | 
  *
  * Order is the point: `pending` is checked before the active-status test, so
  * an unverified account is told to verify its email rather than "revoked";
- * the identity-conflict flag is checked only once the status test has
- * already passed, so a flagged pending account still gets the more useful
- * `account_pending` (verifying email is unconditionally the next step for
- * it, whereas identity_conflict names a problem someone with a live session
- * has to go fix in Settings). `null` means the account may proceed. Phase 4
- * adds a `service_account` branch here once a `kind` column exists.
+ * the kind test runs before `identity_conflict` (epic #1272 phase 4, #1284;
+ * ADR 0048) so a flagged `service`/`test` account is told the more useful
+ * `service_account` -- fixing an identity conflict is pointless advice for
+ * an account that can never sign in this way regardless. `null` means the
+ * account may proceed.
  *
  * `account_revoked` this function returns is UNREACHABLE at the session
  * routes (`lookup`/`confirm`/`deny`) for a reason that lives outside this
@@ -170,14 +230,27 @@ export const HTTP_STATUS_FOR_REFUSAL: Record<DeviceAuthRefusalCode, 403 | 404 | 
  * {@link isActiveAccountStatus} (from `ACTIVE_ACCOUNT_STATUSES`) describe
  * the same boundary from two files; if one changes, the other must.
  */
-export function accountRefusal(
-  status: string,
-  identityConflict: boolean,
-): DeviceAuthRefusalCode | null {
-  if (status === "pending") return "account_pending";
-  if (!isActiveAccountStatus(status)) return "account_revoked";
-  if (identityConflict) return "identity_conflict";
+export function accountRefusal(row: DeviceAuthAccountRow | null): DeviceAuthRefusalCode | null {
+  if (!row || row.deleted_at) return "account_revoked";
+  const statusRefusal = livenessStatusRefusal(row);
+  if (statusRefusal) return statusRefusal;
+  if (row.account_kind !== "person") return "service_account";
+  if (flag(row.identity_conflict)) return "identity_conflict";
   return null;
+}
+
+/**
+ * Read the account columns {@link accountRefusal} / {@link accountLivenessRefusal}
+ * need, in the one shape every caller reads them in (epic #1272 phase 4,
+ * #1284; ADR 0048). `null` userId (a device-codes row that never claimed an
+ * account) short-circuits to `null` -- there is no user to read.
+ */
+export async function readDeviceAuthAccount(
+  db: D1Database,
+  userId: number | null,
+): Promise<DeviceAuthAccountRow | null> {
+  if (userId === null) return null;
+  return db.prepare(USER_STATUS_FOR_DEVICE_AUTH_SQL).bind(userId).first<DeviceAuthAccountRow>();
 }
 
 /** Columns every `device_codes` row carries regardless of status, as read
@@ -394,7 +467,13 @@ export const DEVICE_DENY_SQL = `UPDATE device_codes SET status = 'denied'
  * (revoked, flagged, or already at the key cap): the row must still be
  * `confirmed` and unexpired, the user must be live and active
  * ({@link ACTIVE_ACCOUNT_STATUS_SQL_LIST}) and unflagged, and the account's
- * live key count must be under {@link MAX_LIVE_API_KEYS}. A zero-row
+ * live key count must be under {@link MAX_LIVE_API_KEYS}. `u.account_kind =
+ * 'person'` (epic #1272 phase 4, #1284; ADR 0048) is the SAME rule
+ * `accountRefusal` enforces above the mint via `service_account` -- a
+ * `service`/`test` account can only ever get here by a race with an owner's
+ * `POST /admin/users/:username/kind` landing between confirm and collect,
+ * and this predicate is what makes that unreachable rather than merely
+ * unlikely, the same reasoning the other gates already state. A zero-row
  * `INSERT ... SELECT` here is exactly the shape `last_insert_rowid()` cannot
  * be trusted after (ADR 0047: mint at collect) -- the caller resolves success from
  * {@link DEVICE_MINT_CONSUME_SQL}'s `changes`, never from this statement's
@@ -405,6 +484,7 @@ export const DEVICE_MINT_INSERT_SQL = `INSERT INTO tokens (user_id, api_key_hash
      FROM device_codes d JOIN users u ON u.id = d.user_id
     WHERE d.device_code_hash = ? AND d.status = 'confirmed' AND d.expires_at > datetime('now')
       AND u.deleted_at IS NULL AND u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST} AND u.identity_conflict = 0
+      AND u.account_kind = 'person'
       AND (SELECT COUNT(*) FROM tokens t WHERE t.user_id = d.user_id AND t.revoked_at IS NULL
              AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))) < ${MAX_LIVE_API_KEYS}`;
 
@@ -430,12 +510,13 @@ export const DEVICE_MINT_CONSUME_SQL = `UPDATE device_codes
 export const LIVE_KEY_COUNT_SQL = `SELECT COUNT(*) AS n FROM tokens
    WHERE user_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > datetime('now'))`;
 
-/** The account fields a mint-failure diagnosis needs to run
- *  {@link accountRefusal} outside of the mint statement's own WHERE clause.
- *  Binds: userId. A NULL row (no such user) is handled by the caller the
- *  same way as a deleted one. */
+/** The account fields {@link accountRefusal} / {@link accountLivenessRefusal}
+ *  need to run outside of a mint statement's own WHERE clause -- read by
+ *  {@link readDeviceAuthAccount}. Binds: userId. A NULL row (no such user) is
+ *  handled by the caller the same way as a deleted one. `account_kind` added
+ *  epic #1272 phase 4, #1284 (ADR 0048). */
 export const USER_STATUS_FOR_DEVICE_AUTH_SQL =
-  "SELECT status, deleted_at, identity_conflict FROM users WHERE id = ?";
+  "SELECT status, deleted_at, identity_conflict, account_kind FROM users WHERE id = ?";
 
 /** The user block for `POST /auth/device/token`'s success response,
  *  matching `POST /auth/login`'s shape (routes/auth.ts). Binds: userId. */
@@ -449,18 +530,57 @@ export const USER_BLOCK_FOR_DEVICE_TOKEN_SQL = `SELECT username, email, github_u
  *
  * Carries the SAME account gates as {@link DEVICE_MINT_INSERT_SQL} --
  * `deleted_at IS NULL`, `status IN` {@link ACTIVE_ACCOUNT_STATUS_SQL_LIST},
- * `identity_conflict = 0` -- plus the shared {@link MAX_LIVE_API_KEYS} cap.
- * A route mounted on `resolveActingAccount` already knows the account is
- * live at the time of the CALL, but "live at call time" is not "live at
- * mint time" for the same reason it is not for the device flow: nothing
- * stops an admin from revoking or flagging the account in between, and this
- * statement's WHERE clause is what makes that unreachable rather than
+ * `identity_conflict = 0`, `account_kind = 'person'` (epic #1272 phase 4,
+ * #1284; ADR 0048) -- plus the shared {@link MAX_LIVE_API_KEYS} cap. A route
+ * mounted on `resolveActingAccount` already knows the account is live at the
+ * time of the CALL, but "live at call time" is not "live at mint time" for
+ * the same reason it is not for the device flow: nothing stops an admin from
+ * revoking, flagging, or changing the kind of the account in between, and
+ * this statement's WHERE clause is what makes that unreachable rather than
  * merely unlikely.
  */
 export const KEY_MINT_SQL = `INSERT INTO tokens (user_id, api_key_hash, api_key_prefix, name)
    SELECT ?, ?, ?, ? FROM users u
     WHERE u.id = ? AND u.deleted_at IS NULL AND u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}
-      AND u.identity_conflict = 0
+      AND u.identity_conflict = 0 AND u.account_kind = 'person'
+      AND (SELECT COUNT(*) FROM tokens t WHERE t.user_id = u.id AND t.revoked_at IS NULL
+             AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))) < ${MAX_LIVE_API_KEYS}`;
+
+// ---------------------------------------------------------------------------
+// Owner key mint for non-person kinds (routes/admin/user-keys.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * Look up a mint/list/revoke target by username, for the three
+ * `routes/admin/user-keys.ts` routes (epic #1272 phase 4, #1284; ADR 0048).
+ * Binds: username. Every column {@link accountRefusal} /
+ * {@link accountLivenessRefusal} need, plus `id` (every route needs it to
+ * scope its own statement) -- so the SAME row this route reads for its 404
+ * also feeds the gate, rather than a second lookup that could disagree with
+ * the first about which account it found.
+ */
+export const ADMIN_KEY_TARGET_SQL =
+  "SELECT id, status, deleted_at, identity_conflict, account_kind FROM users WHERE username = ?";
+
+/**
+ * Owner-only mint for a `service`/`test` target's key (`POST
+ * /admin/users/:username/keys`, epic #1272 phase 4, #1284; ADR 0048). Binds:
+ * userId, hash, prefix, name, userId (same bind shape as {@link KEY_MINT_SQL}).
+ *
+ * Keeps every gate {@link KEY_MINT_SQL} carries EXCEPT the person predicate,
+ * which flips: this is the one mint that exists BECAUSE the target is not a
+ * person. `identity_conflict = 0` and the {@link MAX_LIVE_API_KEYS} cap stay
+ * -- an owner minting for a flagged or already-at-cap account is still worth
+ * refusing with a typed reason rather than a key that immediately fails
+ * other checks. The route itself refuses a `person` target BEFORE reaching
+ * this statement (403 `person_account`), so a `person` row can never satisfy
+ * this WHERE clause in practice -- the predicate is defense in depth, the
+ * same reasoning every other gate here already states for its own case.
+ */
+export const ADMIN_KEY_MINT_SQL = `INSERT INTO tokens (user_id, api_key_hash, api_key_prefix, name)
+   SELECT ?, ?, ?, ? FROM users u
+    WHERE u.id = ? AND u.deleted_at IS NULL AND u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}
+      AND u.identity_conflict = 0 AND u.account_kind IN ('service', 'test')
       AND (SELECT COUNT(*) FROM tokens t WHERE t.user_id = u.id AND t.revoked_at IS NULL
              AND (t.expires_at IS NULL OR t.expires_at > datetime('now'))) < ${MAX_LIVE_API_KEYS}`;
 

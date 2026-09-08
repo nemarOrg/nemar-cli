@@ -24,6 +24,7 @@ import { computeProfileGaps } from "../../shared/contract/profile-gaps.js";
 import { userMeResponseSchema, webUserSchema } from "../../shared/contract/user.js";
 import { authWebRoutes } from "../src/routes/auth-web";
 import { userRoutes } from "../src/routes/users";
+import { hashAuthCode } from "../src/services/auth-code";
 import { hashApiKey } from "../src/services/token";
 import { checkUploadAccessRequest } from "../src/services/upload-access";
 import { issueSession } from "../src/services/web-session";
@@ -80,11 +81,16 @@ interface Overrides {
   email_verified?: number;
   orcid_verified?: number;
   status?: string;
-  /** `member` by default. `admin`/`owner` are exempt from the `orcid_verified`
-   *  gap (#1271), which is the only thing this column changes here. `null` is
-   *  a real, seedable state: migration 0009's column has no CHECK constraint,
-   *  and a NULL row must be a regular user, never an exemption. */
+  /** `member` by default. Kept for the bearer-path-only case below (an
+   *  unrecognised role still causes `authMiddleware` to 500 the credential);
+   *  no longer read by the gap computation itself (epic #1272 phase 4,
+   *  #1284; ADR 0048 -- `role` left the gap matrix entirely). */
   role?: string | null;
+  /** `person` by default. `service`/`test` are exempt from the
+   *  `orcid_verified` gap (#1271, ADR 0048), which is the only thing this
+   *  column changes here. Closed by migration 0082's CHECK constraint, so
+   *  (unlike `role`) there is no seedable "unrecognised value" case. */
+  account_kind?: "person" | "service" | "test";
   /** 0 by default, so the upload-access request is answerable at all: a granted
    *  account 409s before any precondition is read. */
   service_access?: number;
@@ -104,6 +110,7 @@ async function seedUser(overrides: Overrides = {}): Promise<number> {
     orcid_verified: 1,
     status: "verified",
     role: "member",
+    account_kind: "person" as const,
     service_access: 0,
     username_auto_assigned: 0,
     ...overrides,
@@ -112,9 +119,9 @@ async function seedUser(overrides: Overrides = {}): Promise<number> {
     `INSERT INTO users (username, email, password_hash, status, role, email_verified,
                         given_name, family_name, github_username, city, country, affiliation,
                         orcid, orcid_verified, signup_source, service_access,
-                        username_auto_assigned)
+                        username_auto_assigned, account_kind)
      VALUES (?, ?, 'x', ?, ?, ?, ?, ?, ?, ?, ?, 'Swartz Center',
-             '0000-0002-1825-0097', ?, 'web', ?, ?)`,
+             '0000-0002-1825-0097', ?, 'web', ?, ?, ?)`,
   ).run(
     row.username,
     USER_EMAIL,
@@ -129,6 +136,7 @@ async function seedUser(overrides: Overrides = {}): Promise<number> {
     row.orcid_verified,
     row.service_access,
     row.username_auto_assigned,
+    row.account_kind,
   );
   const u = db
     .query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?")
@@ -312,7 +320,7 @@ describe("one row, three answers", () => {
       {
         email_verified: 0,
         orcid_verified: 1,
-        role: "member",
+        account_kind: "person",
         username: "arivers",
         given_name: "Ada",
         family_name: "Rivers",
@@ -361,11 +369,12 @@ describe("one row, three answers", () => {
     expect((await (await requestUploadAccess()).json()).error).toBe("already_approved");
   });
 
-  test("an owner with no verified iD is not asked for one, anywhere", async () => {
-    // Interim (epic #1272): these accounts predate having a web-signup path of
-    // their own. The exemption has to hold on all three answers, or an operator
-    // is told one thing by the terminal and another by the request.
-    const id = await seedUser({ orcid_verified: 0, role: "owner" });
+  test("a service-kind account with no verified iD is not asked for one, anywhere", async () => {
+    // Epic #1272 phase 4 (ADR 0048): the exemption has to hold on all three
+    // answers, or an operator is told one thing by the terminal and another
+    // by the request -- the same property the interim role-based exemption
+    // this replaced was built to hold.
+    const id = await seedUser({ orcid_verified: 0, account_kind: "service" });
     // Against the RAW parsed field, not allThree()'s `?? []` view: an empty
     // array here must mean "checked, exempt", not "the key was absent and the
     // helper defaulted it" -- the two are indistinguishable once defaulted.
@@ -377,8 +386,8 @@ describe("one row, three answers", () => {
     expect(answers.authMe).toEqual([]);
   });
 
-  test("an admin is exempt from that row and from nothing else", async () => {
-    const id = await seedUser({ orcid_verified: 0, role: "admin", city: null });
+  test("a test-kind account is exempt from that row and from nothing else", async () => {
+    const id = await seedUser({ orcid_verified: 0, account_kind: "test", city: null });
     // Same raw-field check: a non-empty list here also has to come from the
     // route, not from allThree()'s defaulting.
     const cli = userMeResponseSchema.parse(await (await usersMe()).json());
@@ -391,25 +400,15 @@ describe("one row, three answers", () => {
     expect(answers.authMe).toEqual(["city"]);
   });
 
-  test("a NULL role is a regular user, never an exemption", async () => {
-    // Unlike the unrecognised-string case below, a NULL role does not refuse
-    // the bearer credential (`parseRole` defaults it to "member" there); the
-    // gap computation reads the raw column regardless, and `gapRole(null)` is
-    // `null`, which `isExemptRole` never treats as `admin`/`owner`.
-    const id = await seedUser({ orcid_verified: 0, role: null });
-    const answers = await allThree(id);
-    expect(answers.missing).toEqual(["orcid_verified"]);
-    expect(answers.usersMe).toEqual(["orcid_verified"]);
-    expect(answers.authMe).toEqual(["orcid_verified"]);
-  });
-
-  test("a role the column should not hold is a regular user, not an exemption", async () => {
+  test("an unrecognised users.role no longer affects the ORCID gap either way", async () => {
     // `users.role` has no CHECK constraint (migration 0009), so an unreadable
-    // value is constructible. Only one surface can observe such a row: on the
-    // token path `parseRole` answers null and `authMiddleware` refuses the
-    // credential as an account configuration error, while a cookie session
-    // resolves with no role at all. There it must fail CLOSED -- skipping the
-    // check on a value nobody recognises is how an exemption becomes a hole.
+    // value is constructible; `users.account_kind` does (migration 0082), so
+    // there is no equivalent "unreadable kind" row to seed. What this proves
+    // instead is that the ORCID gap's answer no longer depends on `role` AT
+    // ALL (ADR 0048: role left the gap matrix entirely) -- a role bad enough
+    // to 500 the bearer credential (`parseRole` -> `authMiddleware`, an
+    // orthogonal, pre-existing failure mode) still leaves the cookie path's
+    // gap computation exactly what a default `person`-kind account gets.
     const id = await seedUser({ orcid_verified: 0, role: "Owner" });
     expect((await usersMe()).status).toBe(500);
     const web = webUserSchema.parse((await (await authMe(id)).json()).user);
@@ -433,7 +432,7 @@ describe("one row, three answers", () => {
       .query<
         {
           status: string;
-          role: string | null;
+          account_kind: string;
           email_verified: number;
           orcid_verified: number;
           username: string | null;
@@ -445,16 +444,18 @@ describe("one row, three answers", () => {
         },
         [string]
       >(
-        `SELECT status, role, email_verified, orcid_verified, username, given_name, family_name,
+        `SELECT status, account_kind, email_verified, orcid_verified, username, given_name, family_name,
                 github_username, city, country FROM users WHERE email = ?`,
       )
       .get(USER_EMAIL);
     if (!row) throw new Error("row vanished");
     const expected = computeProfileGaps({
       status: row.status,
-      // Narrowed here rather than imported, so the oracle does not borrow the
-      // production narrowing it is checking.
-      role: row.role === "owner" || row.role === "admin" || row.role === "member" ? row.role : null,
+      // Read straight off the row rather than imported, so the oracle does
+      // not borrow the production narrowing it is checking. Unlike the old
+      // `role` field, migration 0082's CHECK constraint means this is
+      // already closed -- there is no unrecognised value to fall back from.
+      account_kind: row.account_kind,
       email_verified: row.email_verified === 1,
       orcid_verified: row.orcid_verified === 1,
       username: row.username,
@@ -466,5 +467,119 @@ describe("one row, three answers", () => {
     });
     const body = userMeResponseSchema.parse(await (await usersMe()).json());
     expect(body.user.profile_gaps).toEqual(expected);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Two more readers of the same `account_kind` exemption (#1284 review): the
+// gap matrix's kind exemption was proven above only against GET /users/me,
+// GET /auth/me, and the upload-access refusal. `publicUser` (and so
+// `profileGapsForRow`) is also reached by POST /auth/code/verify (which
+// builds its own row inline) and by PATCH /auth/profile via
+// `fetchPublicUserById` -- two SEPARATE SELECTs in auth-web.ts that each
+// name `account_kind` by hand. Nothing forced those two to agree with the
+// SELECT `GET /auth/me` uses; these tests are what would have caught it if
+// one of them had dropped the column or mistyped its exemption.
+// ---------------------------------------------------------------------------
+
+describe("POST /auth/code/verify carries profile_gaps, exempting service/test kinds", () => {
+  /** A sign-in code is user_id NULL (0066); SIGNIN_CODE_LOOKUP_SQL in
+   *  auth-web.ts is the real statement this plants against. */
+  async function plantSigninCode(email: string, code: string): Promise<void> {
+    db.run(
+      `INSERT INTO auth_codes (email, code_hash, expires_at, user_id, attempts, created_at)
+       VALUES (?, ?, datetime('now', '+10 minutes'), NULL, 0, datetime('now'))`,
+      [email, await hashAuthCode(code, env())],
+    );
+  }
+
+  function verifyCode(code: string): Promise<Response> {
+    return app.request(
+      "/auth/code/verify",
+      {
+        method: "POST",
+        headers: { Origin: ORIGIN, "content-type": "application/json" },
+        body: JSON.stringify({ email: USER_EMAIL, code, remember: false }),
+      },
+      env(),
+    );
+  }
+
+  test("a service-kind account is not asked for a verified iD", async () => {
+    await seedUser({ orcid_verified: 0, account_kind: "service" });
+    await plantSigninCode(USER_EMAIL, "111222");
+    const res = await verifyCode("111222");
+    expect(res.status).toBe(200);
+    const body = webUserSchema.parse((await res.json()).user);
+    expect(body.profile_gaps).toEqual([]);
+  });
+
+  test("a test-kind account is exempt from that row and from nothing else", async () => {
+    await seedUser({ orcid_verified: 0, account_kind: "test", city: null });
+    await plantSigninCode(USER_EMAIL, "222333");
+    const res = await verifyCode("222333");
+    expect(res.status).toBe(200);
+    const body = webUserSchema.parse((await res.json()).user);
+    expect(body.profile_gaps.map((g) => g.field)).toEqual(["city"]);
+  });
+
+  test("an ordinary person account is still asked", async () => {
+    await seedUser({ orcid_verified: 0 });
+    await plantSigninCode(USER_EMAIL, "333444");
+    const res = await verifyCode("333444");
+    expect(res.status).toBe(200);
+    const body = webUserSchema.parse((await res.json()).user);
+    expect(body.profile_gaps.map((g) => g.field)).toEqual(["orcid_verified"]);
+  });
+});
+
+describe("PATCH /auth/profile carries profile_gaps via fetchPublicUserById, exempting service/test kinds", () => {
+  /** normalizeProfilePatch refuses a truly empty body (`empty_patch`), so
+   *  the way to reach the `sets.length === 0` branch in auth-web.ts -- which
+   *  answers directly from fetchPublicUserById(actor.id) without writing
+   *  anything -- is re-submitting the account's OWN current username: the
+   *  route drops it from the patch as a no-op (see the "Same handle" comment
+   *  in auth-web.ts) rather than refusing or writing it, matching seedUser's
+   *  default `username: "arivers"` above. */
+  async function patchProfile(userId: number): Promise<Response> {
+    const cookie = await sessionCookie(userId);
+    return app.request(
+      "/auth/profile",
+      {
+        method: "PATCH",
+        headers: { Origin: ORIGIN, Cookie: cookie, "content-type": "application/json" },
+        body: JSON.stringify({ username: "arivers" }),
+      },
+      env(),
+    );
+  }
+
+  async function sessionCookie(userId: number): Promise<string> {
+    const { cookieIdRaw } = await issueSession(env(), userId, false, null, null, "orcid");
+    return `nemar_session=${cookieIdRaw}`;
+  }
+
+  test("a service-kind account is not asked for a verified iD", async () => {
+    const id = await seedUser({ orcid_verified: 0, account_kind: "service" });
+    const res = await patchProfile(id);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { user: { profile_gaps: { field: string }[] } };
+    expect(body.user.profile_gaps).toEqual([]);
+  });
+
+  test("a test-kind account is exempt from that row and from nothing else", async () => {
+    const id = await seedUser({ orcid_verified: 0, account_kind: "test", city: null });
+    const res = await patchProfile(id);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { user: { profile_gaps: { field: string }[] } };
+    expect(body.user.profile_gaps.map((g) => g.field)).toEqual(["city"]);
+  });
+
+  test("an ordinary person account is still asked", async () => {
+    const id = await seedUser({ orcid_verified: 0 });
+    const res = await patchProfile(id);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { user: { profile_gaps: { field: string }[] } };
+    expect(body.user.profile_gaps.map((g) => g.field)).toEqual(["orcid_verified"]);
   });
 });

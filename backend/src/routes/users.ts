@@ -14,7 +14,7 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { z } from "zod";
-import type { AccountStatus } from "../../../shared/contract/user.js";
+import type { AccountKind, AccountStatus } from "../../../shared/contract/user.js";
 import { auditLogStatement } from "../db/audit-log";
 import { flag } from "../db/flag";
 import { authMiddleware } from "../middleware/auth";
@@ -53,7 +53,7 @@ userRoutes.get("/me", async (c) => {
       `
     SELECT
       status,
-      role,
+      account_kind,
       created_at,
       approved_at,
       email_verified,
@@ -79,11 +79,11 @@ userRoutes.get("/me", async (c) => {
       // Closed by migration 0001's CHECK constraint (shared/contract/user.ts).
       status: AccountStatus;
       // Read from the ROW rather than reused from the credential, for the same
-      // reason `username` below is: it is what exempts an `admin`/`owner` from
-      // the `orcid_verified` gap (#1271), and the gap list has to describe the
-      // account as it is now. Unconstrained TEXT (migration 0009), narrowed by
-      // services/profile-gaps.ts.
-      role: string | null;
+      // reason `username` below is: it is what exempts a `service`/`test`
+      // account from the `orcid_verified` gap (#1271, ADR 0048), and the gap
+      // list has to describe the account as it is now. Closed by migration
+      // 0082's CHECK constraint.
+      account_kind: AccountKind;
       created_at: string;
       approved_at: string;
       email_verified: number;
@@ -157,6 +157,9 @@ userRoutes.get("/me", async (c) => {
       // when the row itself could not be read.
       profile_gaps: userDetails ? profileGapsForRow(userDetails) : undefined,
       username_auto_assigned: flag(userDetails?.username_auto_assigned),
+      // What this account IS (epic #1272 phase 4, #1284; ADR 0048). Absent
+      // when the row could not be read, matching every other field above.
+      account_kind: userDetails?.account_kind,
     },
     token: tokenInfo
       ? {
@@ -350,7 +353,7 @@ userRoutes.post(
       const row = await db
         .prepare(
           `SELECT id, username, email, given_name, family_name, github_username,
-                  city, country, affiliation, orcid, description, role,
+                  city, country, affiliation, orcid, description, account_kind,
                   email_verified, orcid_verified, service_access,
                   upload_access_requested_at, upload_access_notified_at
              FROM users
@@ -369,9 +372,9 @@ userRoutes.post(
           affiliation: string | null;
           orcid: string | null;
           description: string | null;
-          // Both read for the profile check: an unverified iD is a gap, and an
-          // `admin`/`owner` row is exempt from it (#1271).
-          role: string | null;
+          // Both read for the profile check: an unverified iD is a gap, and a
+          // `service`/`test` row is exempt from it (#1271, ADR 0048).
+          account_kind: AccountKind;
           email_verified: number;
           orcid_verified: number;
           service_access: number;

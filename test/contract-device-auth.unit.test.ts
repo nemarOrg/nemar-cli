@@ -84,8 +84,11 @@ describe("device auth refusal messages", () => {
     }
   });
 
-  test("service_account is declared but reserved for phase 4", () => {
-    expect(DEVICE_AUTH_MESSAGES.service_account).toContain("Service accounts");
+  test("service_account's message names both kinds it covers", () => {
+    // Epic #1272 phase 4 (ADR 0048): one code answers for BOTH `service` and
+    // `test` account kinds, so the message must not read as if it names only
+    // one of them.
+    expect(DEVICE_AUTH_MESSAGES.service_account).toContain("service or test account");
   });
 });
 
