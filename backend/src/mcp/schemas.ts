@@ -274,7 +274,7 @@ function assertSssIffDerived4(
   }
 }
 
-const provenanceEnvelopeSchema4 = z4
+export const provenanceEnvelopeSchema4 = z4
   .object({
     dataset_id: z4.string().regex(DATASET_ID_RE).describe(DATASET_ID_DESCRIPTION),
     doi: z4.string().nullable().describe("Concept DOI, or null when none has been minted."),
@@ -391,8 +391,11 @@ const recordingSummarySchema4 = z4
     derived: z4.boolean(),
     groups: z4.array(recordingGroupSummarySchema4).optional(),
     n_events: z4.number().int().nonnegative().optional(),
+    sss: zarrSssSchema4.optional(),
+    units_report: zarrUnitsReportSchema4.optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine(assertSssIffDerived4);
 
 export const listRecordingsOutputSchema4 = z4
   .object({

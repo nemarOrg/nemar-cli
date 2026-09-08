@@ -1,7 +1,7 @@
 /**
  * `describe_dataset` (epic #1065 phase 2, issue #1294; design doc section
  * 5.2). Reads the one shared public-catalog row (`catalog-row.ts`, extracted
- * here in phase 3, issue #1295, decision 3) -- NOT `ZARR_CATALOG_CANDIDATE_SQL`
+ * here in phase 3, issue #1295) -- NOT `ZARR_CATALOG_CANDIDATE_SQL`
  * (`services/zarr-catalog.ts`), whose WHERE hardcodes `zarr_status = 'ready'`:
  * this tool must describe a PENDING dataset too, so only that query's column
  * list is borrowed. Never `index.json` -- the largest index in the catalog is
@@ -20,7 +20,6 @@ import {
   type DescribeDatasetInput,
   type DescribeDatasetOutput,
   ZARR_STATUS_VALUES,
-  ZARR_VERIFY_STATUS_VALUES,
   composeCitation,
   describeDatasetOutputSchema,
   flagToBoolean,
@@ -32,11 +31,11 @@ import {
   type PublicDatasetRow,
   datasetNotFoundResult,
   loadPublicDatasetRow,
+  narrowZarrVerifyStatus,
 } from "../catalog-row.js";
 import type { ToolOutcome } from "../tool-types.js";
 
 type ZarrStatusValue = (typeof ZARR_STATUS_VALUES)[number];
-type ZarrVerifyStatusValue = (typeof ZARR_VERIFY_STATUS_VALUES)[number];
 
 /** `d.zarr_status` is a plain TEXT column with no DB-enforced enum; narrow
  *  it to the closed set the contract declares, warning (not throwing) on a
@@ -49,26 +48,10 @@ function narrowZarrStatus(raw: string | null, datasetId: string): ZarrStatusValu
   return null;
 }
 
-/** `zarr_verify_status` comes from free-form `sweep_stamps` JSON (no DB
- *  enum at all, unlike `zarr_status`'s plain column) -- narrowed the same
- *  way, with the same warn-not-throw posture. */
-function narrowZarrVerifyStatus(
-  raw: string | null,
-  datasetId: string,
-): ZarrVerifyStatusValue | null {
-  if (raw === null) return null;
-  if ((ZARR_VERIFY_STATUS_VALUES as readonly string[]).includes(raw)) {
-    return raw as ZarrVerifyStatusValue;
-  }
-  console.warn(
-    `[describe_dataset] ${datasetId}: unrecognized zarr_verify_status "${raw}" (from sweep_stamps JSON)`,
-  );
-  return null;
-}
-
-/** `next_cheapest_tool` names `list_recordings` unconditionally at this
- *  phase (`get_events`/`render_overview`/`read_window` all land phases 3-4);
- *  `reason` states the actual zarr status so a caller does not read "zero
+/** `next_cheapest_tool` names `list_recordings` unconditionally: `get_events`
+ *  and `render_overview` already ship alongside it (epic #1065 phase 3);
+ *  only `read_window` remains a future phase. `reason` states the actual
+ *  zarr status so a caller does not read "zero
  *  recordings" as "this dataset has no data" (design doc section 5.2).
  *  Takes the ALREADY-NARROWED status, never the raw column, so this text
  *  and the output's own `zarr_status` field can never disagree about what
@@ -112,7 +95,11 @@ export async function describeDatasetTool(
   });
 
   const zarrStatus = narrowZarrStatus(row.zarr_status, row.dataset_id);
-  const zarrVerifyStatus = narrowZarrVerifyStatus(row.zarr_verify_status, row.dataset_id);
+  const zarrVerifyStatus = narrowZarrVerifyStatus(
+    row.zarr_verify_status,
+    row.dataset_id,
+    "describe_dataset",
+  );
 
   const output = describeDatasetOutputSchema.parse({
     dataset_id: row.dataset_id,

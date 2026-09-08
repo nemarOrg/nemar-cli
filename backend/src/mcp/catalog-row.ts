@@ -1,6 +1,6 @@
 /**
  * The public catalog row every MCP tool starts from (epic #1065 phase 3,
- * issue #1295; plan decision 3).
+ * issue #1295).
  *
  * `describe_dataset` (phase 2) wrote this query first; it is extracted here,
  * UNCHANGED (same public predicate, same column list), so `describe_dataset`
@@ -21,7 +21,10 @@
  */
 
 import type { CallToolResult } from "@modelcontextprotocol/server";
+import { ZARR_VERIFY_STATUS_VALUES } from "../../../shared/contract/mcp.js";
 import { ZARR_VERIFIED_AT_PATH, ZARR_VERIFY_STATUS_PATH } from "../services/sweep-stamps.js";
+
+export type ZarrVerifyStatusValue = (typeof ZARR_VERIFY_STATUS_VALUES)[number];
 
 export const PUBLIC_DATASET_ROW_SQL = `SELECT
     d.dataset_id, d.name, d.concept_doi, d.license, d.modalities, d.tasks,
@@ -88,6 +91,29 @@ export function datasetNotFoundResult(datasetId: string): CallToolResult {
       },
     ],
   };
+}
+
+/** `zarr_verify_status` comes from free-form `sweep_stamps` JSON (no DB
+ *  enum), narrowed to the closed set the contract declares -- warning (not
+ *  throwing) on an out-of-enum value, so a corrupt or forward-versioned
+ *  sweep stamp degrades to `null` rather than crashing the caller. Shared
+ *  by `describe_dataset` (which already used this narrowing before it was
+ *  extracted here) and `envelope.ts` (which used to cast the raw column
+ *  unsafely instead of narrowing it at all). `context` names the caller in
+ *  the warning, e.g. `"describe_dataset"` or `"envelope"`. */
+export function narrowZarrVerifyStatus(
+  raw: string | null,
+  datasetId: string,
+  context: string,
+): ZarrVerifyStatusValue | null {
+  if (raw === null) return null;
+  if ((ZARR_VERIFY_STATUS_VALUES as readonly string[]).includes(raw)) {
+    return raw as ZarrVerifyStatusValue;
+  }
+  console.warn(
+    `[${context}] ${datasetId}: unrecognized zarr_verify_status "${raw}" (from sweep_stamps JSON)`,
+  );
+  return null;
 }
 
 /** True when a dataset's catalog row reports a Zarr conversion with at least

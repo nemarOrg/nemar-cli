@@ -48,7 +48,7 @@ import { searchDatasetsTool } from "./tools/search-datasets.js";
  *  `McpRequestContext` shape.
  *
  *  `cache`/`fetch`/`zarrRoutes`/`rawGithubBase` (epic #1065 phase 3, issue
- *  #1295; plan decision 9) are the recording-level tools' dependency seam:
+ *  #1295) are the recording-level tools' dependency seam:
  *  `cache` is a thunk (never a bare value) for the same reason
  *  `ZarrDataDeps.cache` in `routes/zarr-data.ts` is -- `caches.default` must
  *  be read lazily per request, since it does not exist outside a Worker
@@ -116,6 +116,12 @@ function withToolMetrics<Args>(
       });
       return outcome.result;
     } catch (err) {
+      // Logged here, once, before the rethrow: the point below records the
+      // MEASUREMENT (an exception happened), but says nothing about WHAT
+      // failed -- an operator watching Analytics Engine alone has no error
+      // message to go on. The transport's own error handling still gets
+      // the unmodified error immediately after.
+      console.error("[mcp] tool exception", { tool: toolName, datasetId }, err);
       recordMcpToolCall(env, {
         tool: toolName,
         datasetId,
@@ -185,8 +191,8 @@ export function buildMcpServer(deps: BuildMcpServerDeps): McpServer {
     ),
   );
 
-  // Bundled once per request for the three recording-level tools (decision
-  // 9's RecordingToolDeps, `tool-types.ts`) -- one shape so every tool reads
+  // Bundled once per request for the three recording-level tools
+  // (`RecordingToolDeps`, `tool-types.ts`) -- one shape so every tool reads
   // env/executionCtx/cache/fetch/zarrRoutes/rawGithubBase the same way.
   const recordingDeps: RecordingToolDeps = {
     env: deps.env,
@@ -204,7 +210,9 @@ export function buildMcpServer(deps: BuildMcpServerDeps): McpServer {
       description:
         "List a converted dataset's recordings (Zarr stores) with their channel groups. Parses " +
         "index.json once per (dataset, source_commit) and caches the result -- repeat calls are " +
-        "cheap. A dataset that has not finished converting answers a tool error naming its " +
+        "cheap. A count of 0 is not an error -- an unrecognized modality value simply matches " +
+        "nothing; the response note lists the dataset's actual modality vocabulary when that " +
+        "happens. A dataset that has not finished converting answers a tool error naming its " +
         "actual zarr_status, never an empty list.",
       inputSchema: listRecordingsInputSchema4,
       outputSchema: listRecordingsOutputSchema4,

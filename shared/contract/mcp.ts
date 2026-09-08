@@ -647,8 +647,16 @@ export const recordingSummarySchema = z
      *  absent for v1 and for a v3 store the converter never parsed events
      *  for). */
     n_events: z.number().int().nonnegative().optional(),
+    /** ADR 0028 Signal-Space Separation record; present exactly when
+     *  `derived` is true. Carried here (not just on the provenance
+     *  envelope) so `list_recordings`/`get_events`/`render_overview` can
+     *  build a store's envelope straight from this cached projection entry
+     *  without a second `index.json` read. */
+    sss: zarrSssSchema.optional(),
+    units_report: zarrUnitsReportSchema.optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine(assertSssIffDerived);
 export type RecordingSummary = z.infer<typeof recordingSummarySchema>;
 
 export const listRecordingsOutputSchema = z
@@ -682,7 +690,7 @@ export const listRecordingsOutputSchema = z
      *  index, whose producer already drops these before publishing. */
     excluded_legacy_non_raw_count: z.number().int().nonnegative(),
     /** A short caveat the caller should surface verbatim, e.g. the legacy
-     *  index note (decision 5) or an unusable-commit note. Null when none. */
+     *  index note or an unusable-commit note. Null when none. */
     note: z.string().nullable().optional(),
     /** A dataset-level envelope built from the first listed recording, so a
      *  caller gets one provenance fact set without a second tool call.

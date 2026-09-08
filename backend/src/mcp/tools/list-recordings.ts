@@ -1,10 +1,9 @@
 /**
- * `list_recordings` (epic #1065 phase 3, issue #1295; plan decision 6), plus
- * the shared recordings-projection machinery `get-events.ts` and
- * `render-overview.ts` reuse (decision 4: `recordings` is one projection
- * shared by every recording-level tool, not `list_recordings`' alone --
- * a `list_recordings` call primes the same cache entry `get_events`/
- * `render_overview` read, and vice versa).
+ * `list_recordings` (epic #1065 phase 3, issue #1295), plus the shared
+ * recordings-projection machinery `get-events.ts` and `render-overview.ts`
+ * reuse: `recordings` is one projection shared by every recording-level
+ * tool, not `list_recordings`' alone -- a `list_recordings` call primes the
+ * same cache entry `get_events`/`render_overview` read, and vice versa.
  *
  * Every call starts with the shared public-catalog row (`catalog-row.ts`):
  * unknown/private/sandboxed answers the shared not-found error, and a
@@ -30,12 +29,14 @@
  * since the envelope builder (`envelope.ts`) refuses to describe one.
  */
 
+import { z } from "zod";
 import {
   type ListRecordingsInput,
   type ListRecordingsOutput,
   type RecordingGroupSummary,
   type RecordingSummary,
   listRecordingsOutputSchema,
+  recordingSummarySchema,
 } from "../../../../shared/contract/mcp.js";
 import { SOURCE_COMMIT_RE, type ZarrGroup } from "../../../../shared/contract/zarr-index.js";
 import {
@@ -56,31 +57,52 @@ import { type ZarrIndexDocument, isV3Index, readZarrIndex } from "../index-reade
 import { projectionUrl, readJsonProjection, writeJsonProjection } from "../projection-cache.js";
 import type { RecordingToolDeps, ToolOutcome } from "../tool-types.js";
 
-/** Cached verbatim (decision 4: the FULL, unfiltered recording list is what
- *  gets cached, keyed by `(dataset_id, source_commit)`). Carries the
- *  index-level facts (`indexFacts`) alongside the per-store rows so a cache
- *  HIT can still build a dataset-level envelope without a second
- *  `index.json` fetch -- see `envelope.ts`'s module doc. */
-export interface RecordingsProjection {
-  formatVersion: number;
-  sourceCommit: string;
-  indexEtag: string | null;
-  discoveredCount: number | null;
-  failureCount: number | null;
-  pendingCount: number | null;
-  excludedLegacyNonRawCount: number;
-  note: string | null;
-  indexFacts: EnvelopeIndexFacts;
+/** Zod mirror of {@link EnvelopeIndexFacts} (`envelope.ts`) -- kept here
+ *  rather than importing a schema from `envelope.ts` (which stays a plain
+ *  TS interface, read by every tool's call site) because this is the ONE
+ *  place that needs it as a validator, for the cached `recordings`
+ *  projection below. Must be kept in sync with `EnvelopeIndexFacts` by
+ *  hand; both are small and change together in practice (a new index-level
+ *  fact the envelope needs). */
+const envelopeIndexFactsSchema = z.object({
+  datasetId: z.string(),
+  engineVersion: z.string(),
+  doi: z.string().nullable(),
+  license: z.string().nullable(),
+  citation: z.string().nullable(),
+  isLegacy: z.boolean(),
+}) satisfies z.ZodType<EnvelopeIndexFacts>;
+
+/** The cached `recordings` projection's payload shape, validated on every
+ *  cache HIT (`projection-cache.ts`'s `readJsonProjection`) -- a mismatch
+ *  (e.g. a deploy changed this shape without bumping
+ *  `PROJECTION_SCHEMA_VERSION`) is a miss, not a crash. The FULL, unfiltered
+ *  recording list is what gets cached, keyed by `(dataset_id,
+ *  source_commit)`. Carries the index-level facts (`indexFacts`) alongside
+ *  the per-store rows so a cache HIT can still build a dataset-level
+ *  envelope without a second `index.json` fetch -- see `envelope.ts`'s
+ *  module doc. */
+export const recordingsProjectionSchema = z.object({
+  formatVersion: z.number().int(),
+  sourceCommit: z.string(),
+  indexEtag: z.string().nullable(),
+  discoveredCount: z.number().int().nullable(),
+  failureCount: z.number().int().nullable(),
+  pendingCount: z.number().int().nullable(),
+  excludedLegacyNonRawCount: z.number().int(),
+  note: z.string().nullable(),
+  indexFacts: envelopeIndexFactsSchema,
   /** `index.events_parquet` verbatim (v3 only; `null` for a legacy index,
    *  which never has one) -- `get-events.ts`'s primary-path gate, cached
    *  here so a cache HIT never has to re-derive it from a fresh index read. */
-  eventsParquetUrl: string | null;
+  eventsParquetUrl: z.string().nullable(),
   /** `index.data_base` verbatim (v3 only; `null` for legacy) --
    *  `render_overview`'s chunk-fetch base, cached here for the same
    *  cache-hit-avoids-index.json reason as `eventsParquetUrl`. */
-  dataBase: string | null;
-  recordings: RecordingSummary[];
-}
+  dataBase: z.string().nullable(),
+  recordings: z.array(recordingSummarySchema),
+});
+export type RecordingsProjection = z.infer<typeof recordingsProjectionSchema>;
 
 function projectGroup(
   g: Pick<
@@ -122,6 +144,13 @@ function buildProjection(
       groups: store.groups?.map(projectGroup),
       n_events: store.n_events,
       modalities: store.modalities,
+      // ADR 0028: present exactly when derived is true. Carried through so
+      // the envelope builder can describe a derived (SSS-filtered MEG)
+      // store from this cached projection alone -- dropping these here
+      // made computeProvenanceEnvelope's sss-iff-derived refinement throw
+      // for every derived store's envelope (found in PR review).
+      sss: store.sss,
+      units_report: store.units_report,
     }));
     return {
       formatVersion,
@@ -202,6 +231,24 @@ function maxGroupDuration(recording: RecordingSummary): number {
   return (recording.groups ?? []).reduce((max, g) => Math.max(max, g.duration_s ?? 0), 0);
 }
 
+/** The distinct modality vocabulary a dataset's recordings actually report
+ *  (group `modality` plus each store's own `modalities` array) -- surfaced
+ *  in `note` when a `modality` filter matches nothing, the same
+ *  "a count of 0 is not an error, here is the real vocabulary" teaching
+ *  `search_datasets` already gives a caller. */
+function collectKnownModalities(recordings: RecordingSummary[]): string[] {
+  const known = new Set<string>();
+  for (const recording of recordings) {
+    for (const group of recording.groups ?? []) {
+      if (group.modality) known.add(group.modality);
+    }
+    for (const modality of (recording as { modalities?: string[] }).modalities ?? []) {
+      known.add(modality);
+    }
+  }
+  return Array.from(known).sort();
+}
+
 function indexMissingResult(datasetId: string, row: PublicDatasetRow): ToolOutcome["result"] {
   return {
     isError: true,
@@ -244,7 +291,7 @@ export async function loadRecordingsProjection(
 
   if (commitUsable) {
     const cacheKey = projectionUrl(datasetId, row.zarr_source_commit as string, "recordings");
-    const cached = await readJsonProjection<RecordingsProjection>(deps.cache(), cacheKey);
+    const cached = await readJsonProjection(deps.cache(), cacheKey, recordingsProjectionSchema);
     if (cached.status === "hit") {
       return { ok: true, projection: cached.value, cacheStatus: "hit", upstreamBytes: 0 };
     }
@@ -289,6 +336,31 @@ export function resolveRecording(
   recording: string,
 ): RecordingSummary | undefined {
   return projection.recordings.find((r) => r.path === recording || r.zarr === recording);
+}
+
+/** The identical "unknown group" tool error `get_events` and
+ *  `render_overview` both answer: the group name the caller asked for does
+ *  not exist on this recording, alongside the recording's actual group
+ *  names -- shared here so the wording, and the resolution rule it
+ *  describes (an explicit `group` must match a real group name; omitted
+ *  means the first group), cannot drift between the two tools. */
+export function groupNotFoundResult(
+  datasetId: string,
+  recording: string,
+  wanted: string,
+  available: string[],
+): ToolOutcome["result"] {
+  return {
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text:
+          `Recording "${recording}" in dataset "${datasetId}" has no group named "${wanted}". ` +
+          `Available groups: ${available.join(", ") || "(none)"}.`,
+      },
+    ],
+  };
 }
 
 /** The identical "unknown recording" tool error `get_events` and
@@ -355,6 +427,11 @@ export async function listRecordingsTool(
   if (!sourceCommitFinal) {
     note = note ? `${note} ${NO_COMMIT_NOTE}` : NO_COMMIT_NOTE;
   }
+  if (args.modality && totalCount === 0) {
+    const known = collectKnownModalities(projection.recordings);
+    const modalityNote = `no recording matched modality "${args.modality}"; this dataset's groups report: ${known.join(", ") || "(none)"}.`;
+    note = note ? `${note} ${modalityNote}` : modalityNote;
+  }
 
   let envelope: ListRecordingsOutput["envelope"];
   if (page.length > 0 && sourceCommitFinal) {
@@ -364,7 +441,13 @@ export async function listRecordingsTool(
       sourceCommit: sourceCommitFinal,
       indexEtag: projection.indexEtag,
       row,
-      store: { path: first.path, source_tree: first.source_tree, derived: first.derived },
+      store: {
+        path: first.path,
+        source_tree: first.source_tree,
+        derived: first.derived,
+        sss: first.sss,
+        units_report: first.units_report,
+      },
       group: first.groups?.[0],
       dtype: null,
     });

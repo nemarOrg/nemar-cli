@@ -1,5 +1,5 @@
 /**
- * `render_overview` (epic #1065 phase 3, issue #1295; plan decision 8).
+ * `render_overview` (epic #1065 phase 3, issue #1295).
  *
  * Reads the `view/*` min-max pyramid, never level 0 and never `zarr.json`
  * -- every fact needed (level count, level-0 sample count, channel count,
@@ -49,6 +49,7 @@ import { projectionUrl, readBinaryProjection, writeBinaryProjection } from "../p
 import type { RecordingToolDeps, ToolOutcome } from "../tool-types.js";
 import {
   type RecordingsProjection,
+  groupNotFoundResult,
   loadRecordingsProjection,
   recordingNotFoundResult,
   resolveRecording,
@@ -62,18 +63,6 @@ function bytesToBase64(bytes: Uint8Array): string {
 
 function toolError(text: string): CallToolResult {
   return { isError: true, content: [{ type: "text", text }] };
-}
-
-function groupNotFoundResult(
-  datasetId: string,
-  recording: string,
-  wanted: string,
-  available: string[],
-): CallToolResult {
-  return toolError(
-    `Recording "${recording}" in dataset "${datasetId}" has no group named "${wanted}". ` +
-      `Available groups: ${available.join(", ") || "(none)"}.`,
-  );
 }
 
 /** Distinct from "group not found": the group exists but was converted
@@ -241,9 +230,19 @@ export async function renderOverviewTool(
     sourceCommit: sourceCommitFinal,
     indexEtag: projection.indexEtag,
     row,
-    store: { path: matched.path, source_tree: matched.source_tree, derived: matched.derived },
+    store: {
+      path: matched.path,
+      source_tree: matched.source_tree,
+      derived: matched.derived,
+      sss: matched.sss,
+      units_report: matched.units_report,
+    },
     group: targetGroup,
-    dtype: "int16",
+    // "int16" only when this call actually decoded a view array (a cache
+    // MISS); a cache HIT reused the already-rendered PNG and decoded
+    // nothing this call, so dtype must be null there -- the envelope's
+    // dtype field means "was read this call", not "is int16 in general".
+    dtype: cacheStatus === "miss" ? "int16" : null,
   });
 
   const metadata = renderOverviewOutputSchema.parse({

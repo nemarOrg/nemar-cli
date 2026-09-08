@@ -1,6 +1,6 @@
 /**
  * One centralized provenance-envelope builder for the three recording-level
- * MCP tools (epic #1065 phase 3, issue #1295; plan decision 5).
+ * MCP tools (epic #1065 phase 3, issue #1295).
  *
  * `computeProvenanceEnvelope` (`shared/contract/mcp.ts`) is the pure
  * assembly function; this file is the ONE place that decides what to feed
@@ -34,8 +34,8 @@
  * `derivatives/`, `sourcedata/`, or `code/` is never handed to this
  * function in the first place -- ADR 0027 made discovery raw-only for v3,
  * and phase 3's list/events/overview tools apply the identical exclusion to
- * a legacy index themselves (each counts the exclusion, per decision 5/6),
- * so by the time a store reaches here its path is already known-raw.
+ * a legacy index themselves (each counts the exclusion), so by the time a
+ * store reaches here its path is already known-raw.
  * `derived` is always `false` and `sss` is always absent -- ADR 0028's SSS
  * record is a v3-only concept; a legacy index predates it. Every legacy
  * envelope carries {@link LEGACY_ENVELOPE_NOTE}, since `source_tree`/
@@ -54,7 +54,7 @@ import {
   computeProvenanceEnvelope,
 } from "../../../shared/contract/mcp.js";
 import type { ZarrGroup, ZarrStore } from "../../../shared/contract/zarr-index.js";
-import type { PublicDatasetRow } from "./catalog-row.js";
+import { type PublicDatasetRow, narrowZarrVerifyStatus } from "./catalog-row.js";
 
 const LEGACY_NON_RAW_PREFIXES = ["derivatives/", "sourcedata/", "code/"];
 
@@ -103,8 +103,8 @@ export interface BuildEnvelopeForStoreInput {
   store: EnvelopeStoreInput;
   group?: Pick<ZarrGroup, "rate" | "source_rate_hz">;
   /** `"int16"` only when the caller actually decoded a view or level-0
-   *  array for this call (decision 5) -- `list_recordings` and `get_events`
-   *  never do, so they leave this `null`. */
+   *  array for this call -- `list_recordings` and `get_events` never do,
+   *  so they leave this `null`. */
   dtype?: string | null;
 }
 
@@ -131,8 +131,7 @@ export function buildEnvelopeForStore(input: BuildEnvelopeForStoreInput): Envelo
   const catalogEntry = {
     doi: row.concept_doi,
     license: row.license,
-    zarr_verify_status:
-      (row.zarr_verify_status as "verified" | "failed" | "unverifiable" | null) ?? null,
+    zarr_verify_status: narrowZarrVerifyStatus(row.zarr_verify_status, row.dataset_id, "envelope"),
   };
 
   if (!indexFacts.isLegacy) {
