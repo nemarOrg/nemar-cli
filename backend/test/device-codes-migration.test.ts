@@ -500,3 +500,25 @@ describe("foreign keys (PRAGMA foreign_keys = ON, matching D1)", () => {
     modernDb.close();
   });
 });
+
+describe("replaying the migration (CREATE ... IF NOT EXISTS)", () => {
+  test("re-running the raw migration text against an existing table leaves an existing row byte-identical", () => {
+    insertDeviceCode("hash-replay", "JJJJAAAA", "replay-machine");
+    const before = db
+      .query("SELECT * FROM device_codes WHERE device_code_hash = ?")
+      .get("hash-replay");
+
+    // The real migration text, never retyped (.rules/testing.md) -- `db`
+    // (freshDb()) already applied this file once when the suite's
+    // beforeEach ran every migration in order, so this is a genuine SECOND
+    // application against a database whose device_codes table already
+    // holds the row seeded above.
+    const migrationSql = readFileSync(join(MIGRATIONS_DIR, "0081_device_codes.sql"), "utf-8");
+    expect(() => db.exec(migrationSql)).not.toThrow();
+
+    const after = db
+      .query("SELECT * FROM device_codes WHERE device_code_hash = ?")
+      .get("hash-replay");
+    expect(after).toEqual(before);
+  });
+});
