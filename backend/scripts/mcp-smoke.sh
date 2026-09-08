@@ -52,10 +52,22 @@ fail() {
 }
 
 echo "Wiping this script's local D1 state (fresh migrate every run, like scripts/d1-migration-check.ts)..."
-# `find -delete` rather than `rm -rf`: this directory is re-created empty by
-# wrangler on demand, so removing its CONTENTS is equivalent and sidesteps
-# environments that refuse a recursive directory delete outright.
-find .wrangler/state/v3/d1 -mindepth 1 -delete 2>/dev/null || true
+D1_STATE_DIR=".wrangler/state/v3/d1"
+if [ -d "${D1_STATE_DIR}" ]; then
+  # `find -delete` rather than `rm -rf`: this directory is re-created empty
+  # by wrangler on demand, so removing its CONTENTS is equivalent and
+  # sidesteps environments that refuse a recursive directory delete
+  # outright. Exit status IS checked here -- a failed wipe must not
+  # silently leave stale D1 state for the migrations step below to land
+  # on top of (a false "already migrated" false negative, or a genuine
+  # schema collision), which swallowing this with `|| true` would risk.
+  if ! find "${D1_STATE_DIR}" -mindepth 1 -delete; then
+    echo "FAIL: could not wipe ${D1_STATE_DIR} (see the error above)"
+    exit 1
+  fi
+else
+  echo "${D1_STATE_DIR} does not exist yet (first run); nothing to wipe."
+fi
 
 echo "Applying local D1 migrations to ${DB_NAME} (--local; never touches Cloudflare)..."
 MIG_TMP=$(mktemp -d)
@@ -77,6 +89,28 @@ done
 rm -rf "${MIG_TMP}"
 echo "Applied ${mig_count} migrations."
 
+# WRANGLER_PID is set just below, right before the trap is registered --
+# empty here so an EXIT firing before that assignment (a failure in this
+# block itself) still runs cleanup() safely: `kill ""`/`pkill -P ""` are
+# no-ops under the >/dev/null 2>&1 guards inside cleanup(), not errors that
+# abort it.
+WRANGLER_PID=
+TMPD=$(mktemp -d)
+
+cleanup() {
+  # wrangler dev spawns workerd as a child; take it down too, not just the parent.
+  pkill -TERM -P "${WRANGLER_PID}" >/dev/null 2>&1
+  kill "${WRANGLER_PID}" >/dev/null 2>&1
+  wait "${WRANGLER_PID}" 2>/dev/null
+  rm -rf "${TMPD}"
+}
+# Registered BEFORE wrangler is spawned (PR #1323 review item H): if
+# anything between here and readiness fails or the script is interrupted,
+# cleanup() still runs and tears down whatever wrangler/workerd process is
+# currently running, rather than leaving an orphaned --local instance
+# holding the port and the D1 state lock.
+trap cleanup EXIT
+
 echo "Starting wrangler dev on port ${PORT} (log: ${LOG})..."
 WRANGLER_CMD=(bunx wrangler dev -c "${CONFIG}" --local --port "${PORT}")
 "${WRANGLER_CMD[@]}" >"${LOG}" 2>&1 &
@@ -93,17 +127,6 @@ if grep -qi "not logged in\|please log in\|authentication" "${LOG}" 2>/dev/null;
   "${WRANGLER_CMD[@]}" >"${LOG}" 2>&1 &
   WRANGLER_PID=$!
 fi
-
-TMPD=$(mktemp -d)
-
-cleanup() {
-  # wrangler dev spawns workerd as a child; take it down too, not just the parent.
-  pkill -TERM -P "${WRANGLER_PID}" >/dev/null 2>&1
-  kill "${WRANGLER_PID}" >/dev/null 2>&1
-  wait "${WRANGLER_PID}" 2>/dev/null
-  rm -rf "${TMPD}"
-}
-trap cleanup EXIT
 
 # post_modern <id> <method> <params-json-without-meta> [extra curl args...]
 # Prints the HTTP status; the body lands in ${TMPD}/<id>.json. Times the
