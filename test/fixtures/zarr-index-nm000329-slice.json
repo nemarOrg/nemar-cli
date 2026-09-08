@@ -1,0 +1,155 @@
+{
+  "format": "nemar-zarr-index",
+  "format_version": 3,
+  "dataset_id": "nm000329",
+  "contract_base": "https://zarr.nemar.org/nm000329/zarr/",
+  "data_base": "https://nemar.s3.us-east-2.amazonaws.com/nm000329/zarr/",
+  "data_base_kind": "s3-public",
+  "s3_uri": "s3://nemar/nm000329/zarr/",
+  "s3_region": "us-east-2",
+  "s3_anonymous": true,
+  "source_commit": "7172d2d492dad63650f80cdb83352a0e9d4420f7",
+  "engine_version": "3",
+  "biosigio_version": "1.2.7",
+  "updated_utc": "2026-09-05T04:54:42Z",
+  "doi": "10.82901/nemar.nm000329",
+  "license": "CC-BY-NC-ND-4.0",
+  "citation": "Stephanie Brandl, Benjamin Blankertz, Tobias Dahne (2026) Brandl et al. 2020 \u2014 Motor Imagery Under Distraction: An Open Access BCI Dataset (v1.0.7). NEMAR. https://doi.org/10.82901/nemar.nm000329",
+  "hed_version": "8.4.0",
+  "layout": {
+    "level0": "<zarr>/<group>/0",
+    "view": "<zarr>/<group>/view/<L>",
+    "view_levels": "1..n_view_levels from the group attrs",
+    "scale_offset": "level-0 array attrs scale[] and offset[]; physical = digital * scale + offset",
+    "events": "<data_base>events.parquet"
+  },
+  "discovered_count": 3,
+  "store_count": 3,
+  "n_recordings": 3,
+  "errors": 0,
+  "failure_count": 0,
+  "pending_count": 0,
+  "stores": [
+    {
+      "path": "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-calibration_run-0_eeg.bdf",
+      "zarr": "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-calibration_run-0_eeg.zarr",
+      "updated_utc": "2026-09-05T04:54:42Z",
+      "source_tree": "raw",
+      "derived": false,
+      "modalities": [
+        "eeg"
+      ],
+      "groups": [
+        {
+          "name": "eeg_250hz",
+          "modality": "EEG",
+          "rate": 250.0,
+          "n_channels": 63,
+          "n_samples": 138750,
+          "duration_s": 555.0,
+          "n_view_levels": 5,
+          "view_chunk_columns": 1024,
+          "source_rate_hz": 1000.0,
+          "chunk_samples": 1000,
+          "shard_samples": 75000
+        }
+      ],
+      "power_line_frequency": 50.0,
+      "units_report": {
+        "converted": 63,
+        "relabelled": 0,
+        "kept_importer_unit": 0,
+        "units_column_present": true,
+        "sidecar": "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-calibration_run-0_channels.tsv",
+        "sidecar_supplied": true
+      },
+      "n_events": 72,
+      "trial_types": {
+        "left_hand": 36,
+        "right_hand": 36
+      }
+    },
+    {
+      "path": "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-clean_run-1_eeg.bdf",
+      "zarr": "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-clean_run-1_eeg.zarr",
+      "updated_utc": "2026-09-05T04:54:42Z",
+      "source_tree": "raw",
+      "derived": false,
+      "modalities": [
+        "eeg"
+      ],
+      "groups": [
+        {
+          "name": "eeg_250hz",
+          "modality": "EEG",
+          "rate": 250.0,
+          "n_channels": 63,
+          "n_samples": 828750,
+          "duration_s": 3315.0,
+          "n_view_levels": 6,
+          "view_chunk_columns": 1024,
+          "source_rate_hz": 1000.0,
+          "chunk_samples": 1000,
+          "shard_samples": 75000
+        }
+      ],
+      "power_line_frequency": 50.0,
+      "units_report": {
+        "converted": 63,
+        "relabelled": 0,
+        "kept_importer_unit": 0,
+        "units_column_present": true,
+        "sidecar": "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-clean_run-1_channels.tsv",
+        "sidecar_supplied": true
+      },
+      "n_events": 72,
+      "trial_types": {
+        "left_hand": 36,
+        "right_hand": 36
+      }
+    },
+    {
+      "path": "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-eyesclosed_run-2_eeg.bdf",
+      "zarr": "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-eyesclosed_run-2_eeg.zarr",
+      "updated_utc": "2026-09-05T04:54:42Z",
+      "source_tree": "raw",
+      "derived": false,
+      "modalities": [
+        "eeg"
+      ],
+      "groups": [
+        {
+          "name": "eeg_250hz",
+          "modality": "EEG",
+          "rate": 250.0,
+          "n_channels": 63,
+          "n_samples": 828500,
+          "duration_s": 3314.0,
+          "n_view_levels": 6,
+          "view_chunk_columns": 1024,
+          "source_rate_hz": 1000.0,
+          "chunk_samples": 1000,
+          "shard_samples": 75000
+        }
+      ],
+      "power_line_frequency": 50.0,
+      "units_report": {
+        "converted": 63,
+        "relabelled": 0,
+        "kept_importer_unit": 0,
+        "units_column_present": true,
+        "sidecar": "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-eyesclosed_run-2_channels.tsv",
+        "sidecar_supplied": true
+      },
+      "n_events": 72,
+      "trial_types": {
+        "left_hand": 36,
+        "right_hand": 36
+      }
+    }
+  ],
+  "failures": [],
+  "pending": [],
+  "events_parquet": "https://nemar.s3.us-east-2.amazonaws.com/nm000329/zarr/events.parquet",
+  "events_row_count": 8058
+}

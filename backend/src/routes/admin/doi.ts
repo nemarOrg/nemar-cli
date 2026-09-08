@@ -955,6 +955,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
     version: z.literal("1.0"),
     authors: z
       .record(
+        z.string(),
         z.object({
           orcid: z.string().optional(),
           affiliation: z.string().optional(),
@@ -1004,6 +1005,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
       source_hash: z.string().optional(),
       authors: z
         .record(
+          z.string(),
           z.object({
             orcid: z.string().optional(),
             affiliations: z
