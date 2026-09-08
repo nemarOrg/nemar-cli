@@ -19,6 +19,8 @@ import type { CallToolResult } from "@modelcontextprotocol/server";
 import {
   type DescribeDatasetInput,
   type DescribeDatasetOutput,
+  ZARR_STATUS_VALUES,
+  ZARR_VERIFY_STATUS_VALUES,
   composeCitation,
   describeDatasetOutputSchema,
   flagToBoolean,
@@ -27,6 +29,7 @@ import { toVersionTag } from "../../../../shared/contract/version.js";
 import { splitCsv } from "../../services/data-router.js";
 import { ZARR_VERIFIED_AT_PATH, ZARR_VERIFY_STATUS_PATH } from "../../services/sweep-stamps.js";
 import type { Bindings } from "../../types/bindings.js";
+import type { ToolOutcome } from "../tool-types.js";
 
 const DESCRIBE_DATASET_SQL = `SELECT
     d.dataset_id, d.name, d.concept_doi, d.license, d.modalities, d.tasks,
@@ -68,11 +71,45 @@ interface DescribeDatasetRow {
   latest_version: string | null;
 }
 
+type ZarrStatusValue = (typeof ZARR_STATUS_VALUES)[number];
+type ZarrVerifyStatusValue = (typeof ZARR_VERIFY_STATUS_VALUES)[number];
+
+/** `d.zarr_status` is a plain TEXT column with no DB-enforced enum; narrow
+ *  it to the closed set the contract declares, warning (not throwing) on a
+ *  value outside it -- a `console.warn` for an operator to notice, not a
+ *  reason to fail the whole describe_dataset call. */
+function narrowZarrStatus(raw: string | null, datasetId: string): ZarrStatusValue | null {
+  if (raw === null) return null;
+  if ((ZARR_STATUS_VALUES as readonly string[]).includes(raw)) return raw as ZarrStatusValue;
+  console.warn(`[describe_dataset] ${datasetId}: unrecognized zarr_status "${raw}"`);
+  return null;
+}
+
+/** `zarr_verify_status` comes from free-form `sweep_stamps` JSON (no DB
+ *  enum at all, unlike `zarr_status`'s plain column) -- narrowed the same
+ *  way, with the same warn-not-throw posture. */
+function narrowZarrVerifyStatus(
+  raw: string | null,
+  datasetId: string,
+): ZarrVerifyStatusValue | null {
+  if (raw === null) return null;
+  if ((ZARR_VERIFY_STATUS_VALUES as readonly string[]).includes(raw)) {
+    return raw as ZarrVerifyStatusValue;
+  }
+  console.warn(
+    `[describe_dataset] ${datasetId}: unrecognized zarr_verify_status "${raw}" (from sweep_stamps JSON)`,
+  );
+  return null;
+}
+
 /** `next_cheapest_tool` names `list_recordings` unconditionally at this
  *  phase (`get_events`/`render_overview`/`read_window` all land phases 3-4);
  *  `reason` states the actual zarr status so a caller does not read "zero
- *  recordings" as "this dataset has no data" (design doc section 5.2). */
-function buildCostHint(zarrStatus: string | null): DescribeDatasetOutput["cost_hint"] {
+ *  recordings" as "this dataset has no data" (design doc section 5.2).
+ *  Takes the ALREADY-NARROWED status, never the raw column, so this text
+ *  and the output's own `zarr_status` field can never disagree about what
+ *  the dataset's status is. */
+function buildCostHint(zarrStatus: ZarrStatusValue | null): DescribeDatasetOutput["cost_hint"] {
   const reason =
     zarrStatus === "ready"
       ? "ready: one cached index parse lists recordings and groups."
@@ -92,23 +129,20 @@ function notFoundResult(datasetId: string): CallToolResult {
   };
 }
 
-export interface DescribeDatasetOutcome {
-  result: CallToolResult;
-  /** The requested id, reported even on the not-found path so that call is
-   *  still attributable in the metrics point. */
-  datasetId: string;
-}
-
 export async function describeDatasetTool(
   env: Pick<Bindings, "DB">,
   args: DescribeDatasetInput,
-): Promise<DescribeDatasetOutcome> {
+): Promise<ToolOutcome> {
   const row = await env.DB.prepare(DESCRIBE_DATASET_SQL)
     .bind(args.dataset_id)
     .first<DescribeDatasetRow>();
 
   if (!row) {
-    return { result: notFoundResult(args.dataset_id), datasetId: args.dataset_id };
+    // The dataset id for the metrics point comes from `withToolMetrics`'s
+    // own `getDatasetId(args)` now (server.ts), not from this return value
+    // -- captured before this tool even ran, so it is attributed correctly
+    // on this path too.
+    return { result: notFoundResult(args.dataset_id) };
   }
 
   // The same canonicalization routes/datasets/catalog.ts's
@@ -127,16 +161,8 @@ export async function describeDatasetTool(
     created_at: row.created_at,
   });
 
-  const zarrStatus =
-    row.zarr_status === "pending" || row.zarr_status === "ready" || row.zarr_status === "failed"
-      ? row.zarr_status
-      : null;
-  const zarrVerifyStatus =
-    row.zarr_verify_status === "verified" ||
-    row.zarr_verify_status === "failed" ||
-    row.zarr_verify_status === "unverifiable"
-      ? row.zarr_verify_status
-      : null;
+  const zarrStatus = narrowZarrStatus(row.zarr_status, row.dataset_id);
+  const zarrVerifyStatus = narrowZarrVerifyStatus(row.zarr_verify_status, row.dataset_id);
 
   const output = describeDatasetOutputSchema.parse({
     dataset_id: row.dataset_id,
@@ -155,7 +181,7 @@ export async function describeDatasetTool(
     zarr_verify_status: zarrVerifyStatus,
     zarr_source_commit: row.zarr_source_commit ?? null,
     zarr_store_count: row.zarr_store_count ?? null,
-    cost_hint: buildCostHint(row.zarr_status),
+    cost_hint: buildCostHint(zarrStatus),
   } satisfies DescribeDatasetOutput);
 
   return {
@@ -163,6 +189,5 @@ export async function describeDatasetTool(
       content: [{ type: "text", text: JSON.stringify(output) }],
       structuredContent: output,
     },
-    datasetId: args.dataset_id,
   };
 }
