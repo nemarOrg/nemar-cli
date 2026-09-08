@@ -69,6 +69,21 @@ function freshEmail(label: string): string {
   return `pl-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@nemar.test`;
 }
 
+/** A format-valid, NOT real, ORCID iD (shared/contract/publication.ts's
+ *  orcidIdSchema checks only the `\d{4}-\d{4}-\d{4}-\d{3}[\dX]` shape, never
+ *  the checksum), unique per call. Migration 0077's
+ *  `idx_users_orcid_live_unique` is a real UNIQUE index on live rows, so a
+ *  hardcoded literal like "0000-0002-1825-0097" is only good for the FIRST
+ *  run ever: every later run collides with the row a previous run left
+ *  behind and `seedWebUser` 500s with "Failed to seed user" (UNIQUE
+ *  constraint failed: users.orcid). Mirrors auth-device-cli-live.test.ts's
+ *  helper of the same name (#1301), which documents this exact file as one
+ *  of the fixtures that used to leave the shared literal behind. */
+function freshOrcid(): string {
+  const digits = (Date.now().toString() + Math.random().toString().slice(2)).slice(-16);
+  return `${digits.slice(0, 4)}-${digits.slice(4, 8)}-${digits.slice(8, 12)}-${digits.slice(12, 15)}${digits[15]}`;
+}
+
 async function postJson(path: string, body: unknown, extra: Record<string, string> = {}) {
   return fetch(`${API}${path}`, {
     method: "POST",
@@ -143,7 +158,16 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
     expect(v.status).toBe(200);
     expect(v.body.user).toBeTruthy();
     expect(v.body.user?.email).toBe(email);
-    expect(v.body.user?.status).toBe("pending"); // first-time email -> pending
+    // ADR 0040 phase 2: redeeming a code IS proof of the inbox, so
+    // /code/verify promotes a first-time `pending` row to `verified` in the
+    // same transaction that mints the session (applyEmailVerification,
+    // backend/src/services/email-verification.ts) -- a web session can never
+    // observe the DB's `pending` status through this path. The wire value
+    // is the dashboard's two-state mapping on top of that, not the raw DB
+    // status: `userStatusForDashboard` in auth-web.ts folds both `verified`
+    // and `approved` to "active", so a freshly-verified account reads
+    // "active" here, never "verified".
+    expect(v.body.user?.status).toBe("active");
     expect(v.setCookie).toBeTruthy();
 
     const cookieAttrs = v.setCookie?.toLowerCase() ?? "";
@@ -210,13 +234,14 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
 
   test("populated profile fields pass through /verify and /me (#910)", async () => {
     const email = freshEmail("profile");
-    // github_username is case-insensitively UNIQUE (0012); derive a
-    // per-run value so reruns (which mint a fresh email each time)
-    // don't collide with an earlier run's fixture row.
+    // github_username is case-insensitively UNIQUE (0012) and orcid is now
+    // UNIQUE on live rows too (migration 0077); derive a per-run value for
+    // both so reruns (which mint a fresh email each time) don't collide with
+    // an earlier run's fixture row.
     const profile = {
       given_name: "Grace",
       family_name: "Hopper",
-      orcid: "0000-0002-1825-0097",
+      orcid: freshOrcid(),
       orcid_verified: true,
       github_username: `gh-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
       city: "Arlington",
@@ -470,28 +495,40 @@ describe.skipIf(PROD_GUARD_ACTIVE)("passwordless email-code auth (#569)", () => 
   });
 
   test("cookie auth: pending cookie is rejected on /datasets?mine=true", async () => {
-    // The cookie path in `resolveCookieUser` hard-gates on
-    // status='approved'. Pending and verified users CAN still get a
-    // cookie out of /code/verify (the dashboard uses /auth/me to
-    // render the onboarding screen for them), but they must NOT be
-    // accepted on user-mutating routes. Without this test, a future
-    // refactor that relaxes the gate to also accept 'verified' or
-    // 'pending' would land silently.
+    // The cookie path in `resolveCookieUser` (backend/src/middleware/auth.ts)
+    // hard-gates on `isActiveAccountStatus`, which is `verified`/`approved`
+    // only (ACTIVE_ACCOUNT_STATUSES, services/account-tier.ts) — `pending`
+    // must NOT be accepted on user-mutating routes. Without this test, a
+    // future refactor that relaxes the gate to also accept 'pending' would
+    // land silently.
+    //
+    // Getting there via /code/verify no longer reaches a `pending` row: ADR
+    // 0040 phase 2 made redeeming a code itself the proof of the inbox, so
+    // applyEmailVerification (services/email-verification.ts) promotes a
+    // first-time `pending` row to `verified` in the SAME transaction that
+    // mints the session — a web session can never observe `status='pending'`
+    // through that path any more (confirmed by the "active" status assertion
+    // in the happy-path test above). So this seeds 'approved' (never
+    // re-tiered by that promotion) to mint a normal, valid cookie, then
+    // demotes the SAME row back to 'pending' via the fixture endpoint — a
+    // plain UPDATE that never touches the already-minted session row — to
+    // exercise the gate itself: does a live session whose account is
+    // CURRENTLY pending get refused, regardless of how it got that way.
     const email = freshEmail("cookie572-pending");
-    await seedWebUser(email, "pending");
+    await seedWebUser(email, "approved");
 
     const req = await requestCode(email);
     expect(req.status).toBe(200);
     const code = req.body.dev_code as string;
     expect(typeof code).toBe("string");
     const v = await verifyCode(email, code, true);
-    // /code/verify happily issues a session for a pending user (the
-    // dashboard's `/auth/me` reads it to render onboarding) — assert
-    // the cookie is set so the next step exercises a real session.
     expect(v.status).toBe(200);
     const m = v.setCookie?.match(/nemar_session=([^;]+)/);
     expect(m).toBeTruthy();
     const cookieValue = m?.[1] as string;
+
+    // Demote the account out from under the already-issued session.
+    await seedWebUser(email, "pending");
 
     const mine = await fetch(`${API}/datasets?mine=true`, {
       headers: { ...baseHeaders, Cookie: `nemar_session=${cookieValue}` },
@@ -734,13 +771,37 @@ describe.skipIf(PROD_GUARD_ACTIVE)("PATCH /auth/profile (#912)", () => {
     expect(badOrigin.status).toBe(403);
   });
 
-  test("name fields are not editable here (ORCID-canonical)", async () => {
-    // Unknown keys are not part of the schema; a body carrying ONLY name
-    // fields normalizes to an empty patch and is refused — proving the
-    // endpoint cannot be used to overwrite the ORCID-canonical name.
-    const r = await patchProfile(cookie, { given_name: "X", family_name: "Y" });
-    expect(r.status).toBe(400);
-    expect(r.body.error).toBe("empty_patch");
+  // ADR 0042 ("Names stay ORCID-canonical when, and only when, a verified
+  // ORCID is linked"): given_name/family_name are NOT unknown keys — since
+  // fa0b1b33 (epic #1250 phase #1253) they're part of profilePatchSchema and
+  // normalizeProfilePatch (services/profile.ts) — the ORCID-canonical rule
+  // is enforced by the route itself (auth-web.ts), keyed on orcid_verified,
+  // and only for the account that ORCID actually speaks for. Both tests use
+  // a fresh account rather than the shared PROFILE_EMAIL fixture above:
+  // unlike affiliation/github_username, given_name/family_name have no
+  // "clear to null" input (an empty string is refused as *_required, not
+  // treated as a clear), so there is no teardown path to leave the shared
+  // row as it was.
+  test("no verified ORCID: given_name/family_name are editable (#1253)", async () => {
+    const email = freshEmail("profile-name-noorcid");
+    await seedWebUser(email, "approved");
+    const noOrcidCookie = await signIn(email);
+
+    const r = await patchProfile(noOrcidCookie, { given_name: "Ada", family_name: "Lovelace" });
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(true);
+    expect(r.body.user?.given_name).toBe("Ada");
+    expect(r.body.user?.family_name).toBe("Lovelace");
+  });
+
+  test("verified ORCID: given_name/family_name refused 409 name_is_orcid_canonical", async () => {
+    const email = freshEmail("profile-name-orcid");
+    await seedWebUser(email, "approved", { orcid: freshOrcid(), orcid_verified: true });
+    const orcidCookie = await signIn(email);
+
+    const r = await patchProfile(orcidCookie, { given_name: "X", family_name: "Y" });
+    expect(r.status).toBe(409);
+    expect(r.body.error).toBe("name_is_orcid_canonical");
   });
 });
 
@@ -831,8 +892,14 @@ describe.skipIf(PROD_GUARD_ACTIVE)("email change flow (#911)", () => {
 
     // Session binding (migration 0066): a DIFFERENT signed-in user holding
     // the correct code — the shared-inbox scenario — cannot redeem it. The
-    // per-user lookup finds no row for them, and the code stays live for
-    // the legitimate requester below.
+    // per-user lookup (USER_BOUND_CODE_LOOKUP_SQL, bound to the bystander's
+    // own id) finds no row at all for them — the row exists but is bound to
+    // the legitimate requester's id, so it is invisible to this lookup — and
+    // auth-web.ts's `!row` branch answers the same CODE_EXPIRED_BODY it
+    // would for a truly expired or already-used code, not `code_incorrect`
+    // (that code is reserved for a row that WAS found but whose hash didn't
+    // match, e.g. the `wrong` case just above). The code itself stays live
+    // for the legitimate requester below.
     const bystanderEmail = freshEmail("emailchange-bystander");
     await seedWebUser(bystanderEmail, "approved");
     const bystanderCookie = await signIn(bystanderEmail);
@@ -841,7 +908,7 @@ describe.skipIf(PROD_GUARD_ACTIVE)("email change flow (#911)", () => {
       code,
     });
     expect(hijack.status).toBe(401);
-    expect(hijack.body.error).toBe("code_incorrect");
+    expect(hijack.body.error).toBe("code_expired");
 
     const ok = await post("/auth/email/change/verify", cookie, { email: newEmail, code });
     expect(ok.status).toBe(200);

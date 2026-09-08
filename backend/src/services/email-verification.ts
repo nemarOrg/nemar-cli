@@ -262,7 +262,7 @@ export async function notifyAdminsOfVerifiedAccount(
   user: { id: number; email: string; github_username: string | null; description: string },
 ): Promise<void> {
   try {
-    const adminEmails = await getAdminEmailsForCategory(env.DB, "user_approval");
+    const adminEmails = await getAdminEmailsForCategory(env.DB, "user_approval", env);
     if (adminEmails.length === 0) return;
     const { fromEmail, replyTo, isDev } = resolveEmailConfig(env);
     await sendAdminNotificationEmail(

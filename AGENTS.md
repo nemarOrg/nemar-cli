@@ -99,6 +99,13 @@ So a dev-side job that selects users by a generic predicate can still email real
 and a cascade delete can still destroy a real repo.
 The catalog purge removed one blast-radius vector; it did not remove the reason these fences exist.
 
+Admin-facing notification mail (new-user approval, upload-access and publication requests,
+import recovery, cron digests) is production-only by default,
+via `getAdminEmailsForCategory`'s fence in `backend/src/services/email.ts`.
+Set `DEV_ADMIN_NOTIFICATIONS=1` only for a deliberate staging test of admin mail.
+The dev worker's `DEV_EMAIL_ALLOWLIST` is a Worker secret holding exact human addresses, never a domain:
+`@nemar.org` has a catch-all that lands in a real inbox, and `@nemar.test` fixtures get their sign-in codes echoed in the response instead of delivered.
+
 `users.account_kind` (ADR 0048) is explicit on the seeded fixtures: `test-owner` and `test-admin`
 are `service` (operational, no human signs in to them directly); `test-user`, `test-pending`,
 `test-verified`, and `test-revoked` are `test` (a persona, not a real identity); `test-web` stays
@@ -313,6 +320,11 @@ bun run src/index.ts                             # run the CLI from source
 bun test                                         # real tests only, no mocks
 bun build src/index.ts --outdir dist --target node
 ```
+
+Wrangler on a dev machine runs through cfman, which holds the SCCN account token:
+`bunx cfman wrangler --account sccn <wrangler arguments>` (for example `... whoami`,
+`... d1 execute nemar-db-dev --remote --env dev -c wrangler-sccn.toml --file <sql>` from `backend/`).
+There is no plain `wrangler login` on these machines; a command that says "Not logged in" was run without cfman.
 
 ---
 
