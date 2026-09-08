@@ -14,12 +14,13 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { z } from "zod";
-import type { AccountStatus } from "../../../shared/contract/user.js";
+import type { AccountKind, AccountStatus } from "../../../shared/contract/user.js";
 import { auditLogStatement } from "../db/audit-log";
 import { flag } from "../db/flag";
 import { authMiddleware } from "../middleware/auth";
 import {
   getAdminEmailsForCategory,
+  isAdminNotificationAllowed,
   resolveEmailConfig,
   sendUploadAccessRequestEmail,
 } from "../services/email";
@@ -53,7 +54,7 @@ userRoutes.get("/me", async (c) => {
       `
     SELECT
       status,
-      role,
+      account_kind,
       created_at,
       approved_at,
       email_verified,
@@ -79,11 +80,11 @@ userRoutes.get("/me", async (c) => {
       // Closed by migration 0001's CHECK constraint (shared/contract/user.ts).
       status: AccountStatus;
       // Read from the ROW rather than reused from the credential, for the same
-      // reason `username` below is: it is what exempts an `admin`/`owner` from
-      // the `orcid_verified` gap (#1271), and the gap list has to describe the
-      // account as it is now. Unconstrained TEXT (migration 0009), narrowed by
-      // services/profile-gaps.ts.
-      role: string | null;
+      // reason `username` below is: it is what exempts a `service`/`test`
+      // account from the `orcid_verified` gap (#1271, ADR 0048), and the gap
+      // list has to describe the account as it is now. Closed by migration
+      // 0082's CHECK constraint.
+      account_kind: AccountKind;
       created_at: string;
       approved_at: string;
       email_verified: number;
@@ -157,6 +158,9 @@ userRoutes.get("/me", async (c) => {
       // when the row itself could not be read.
       profile_gaps: userDetails ? profileGapsForRow(userDetails) : undefined,
       username_auto_assigned: flag(userDetails?.username_auto_assigned),
+      // What this account IS (epic #1272 phase 4, #1284; ADR 0048). Absent
+      // when the row could not be read, matching every other field above.
+      account_kind: userDetails?.account_kind,
     },
     token: tokenInfo
       ? {
@@ -240,14 +244,20 @@ async function notifyAdminsOfUploadRequest(
 ): Promise<{ delivered: number; attempted: number }> {
   const db = c.env.DB;
   try {
-    const adminEmails = await getAdminEmailsForCategory(db, "user_approval");
+    const adminEmails = await getAdminEmailsForCategory(db, "user_approval", c.env);
     if (adminEmails.length === 0) {
-      // Not an error the USER can act on, so the request still succeeds -- but
-      // it is a misconfiguration an operator must see, and `admins_notified: 0`
-      // makes it visible in the response as well as the log.
-      console.error(
-        `[upload-access] no admin recipients for user_approval; request from id=${row.id} stored but nobody was told`,
-      );
+      // getAdminEmailsForCategory already logged (and returned []) when the
+      // production-only fence applied -- that is expected on a dev worker,
+      // not a misconfiguration, so only escalate to console.error when the
+      // fence was open and the admin table itself came back empty.
+      if (isAdminNotificationAllowed(c.env)) {
+        // Not an error the USER can act on, so the request still succeeds -- but
+        // it is a misconfiguration an operator must see, and `admins_notified: 0`
+        // makes it visible in the response as well as the log.
+        console.error(
+          `[upload-access] no admin recipients for user_approval; request from id=${row.id} stored but nobody was told`,
+        );
+      }
       return { delivered: 0, attempted: 0 };
     }
 
@@ -350,7 +360,7 @@ userRoutes.post(
       const row = await db
         .prepare(
           `SELECT id, username, email, given_name, family_name, github_username,
-                  city, country, affiliation, orcid, description, role,
+                  city, country, affiliation, orcid, description, account_kind,
                   email_verified, orcid_verified, service_access,
                   upload_access_requested_at, upload_access_notified_at
              FROM users
@@ -369,9 +379,9 @@ userRoutes.post(
           affiliation: string | null;
           orcid: string | null;
           description: string | null;
-          // Both read for the profile check: an unverified iD is a gap, and an
-          // `admin`/`owner` row is exempt from it (#1271).
-          role: string | null;
+          // Both read for the profile check: an unverified iD is a gap, and a
+          // `service`/`test` row is exempt from it (#1271, ADR 0048).
+          account_kind: AccountKind;
           email_verified: number;
           orcid_verified: number;
           service_access: number;

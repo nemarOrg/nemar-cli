@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   __resetStoreCacheForTesting,
+  findAccountKeyByEmail,
   getAccounts,
   getConfig,
   renameActiveAccount,
@@ -81,6 +82,7 @@ afterAll(() => {
   // `delete` when it was unset, because assigning undefined is what caused
   // this. The store cache is dropped after, so nothing keeps reading the old
   // directory.
+  // biome-ignore lint/performance/noDelete: assigning undefined instead is the exact bug this restores from
   if (previousConfigDir === undefined) delete process.env.NEMAR_CONFIG_DIR;
   else process.env.NEMAR_CONFIG_DIR = previousConfigDir;
   __resetStoreCacheForTesting();
@@ -130,5 +132,35 @@ describe("renameActiveAccount", () => {
     expect(renameActiveAccount("  ")).toBe("unchanged");
     expect(onDisk().activeAccount).toBe("harlow");
     expect(Object.keys(onDisk().accounts).sort()).toEqual(["alovelace", "harlow"]);
+  });
+});
+
+describe("findAccountKeyByEmail", () => {
+  test("returns the sole match, case-insensitively and trimmed", () => {
+    expect(findAccountKeyByEmail("ada@example.org")).toBe("alovelace");
+    expect(findAccountKeyByEmail("  ADA@Example.ORG  ")).toBe("alovelace");
+  });
+
+  test("returns undefined when nothing matches", () => {
+    expect(findAccountKeyByEmail("nobody@example.org")).toBeUndefined();
+  });
+
+  test("returns undefined -- not a guess -- when two entries share an email", () => {
+    // A state this build never writes on its own (hand-edited config.json,
+    // or a merge bug): guessing which one a re-login means risks merging the
+    // WRONG account's key and cached fields into it. upsertAccount's caller
+    // then lands the login as a fresh entry instead, same as "no match".
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        activeAccount: "harlow",
+        accounts: {
+          harlow: { apiKey: "harlow-key", username: "harlow", email: "shared@example.org" },
+          alovelace: { apiKey: "ada-key", username: "alovelace", email: "shared@example.org" },
+        },
+      }),
+    );
+    __resetStoreCacheForTesting();
+    expect(findAccountKeyByEmail("shared@example.org")).toBeUndefined();
   });
 });

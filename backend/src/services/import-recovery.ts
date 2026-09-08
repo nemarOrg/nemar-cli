@@ -157,7 +157,7 @@ async function alertAdmins(
 ): Promise<void> {
   if (!env.RESEND_API_KEY) return; // best-effort; audit_log is the durable record
   try {
-    const adminEmails = await getAdminEmailsForCategory(db, "publication_request");
+    const adminEmails = await getAdminEmailsForCategory(db, "publication_request", env);
     if (adminEmails.length === 0) return;
     const { fromEmail, replyTo, isDev } = resolveEmailConfig(env);
     await sendImportQuarantineEmail(

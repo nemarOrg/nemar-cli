@@ -34,6 +34,96 @@ export const accountStatusSchema = z.enum(["pending", "verified", "approved", "r
 export type AccountStatus = z.infer<typeof accountStatusSchema>;
 
 /**
+ * What `users.account_kind` holds — what an account IS, not what it may do
+ * (epic #1272 phase 4, #1284; ADR 0048).
+ *
+ * `person` (the default) is a human's own account. `service` is operational
+ * automation with no human signing in to it directly (`nemarOwner`,
+ * `nemarAdmin`); its keys are minted only by an owner. `test` is a human's
+ * secondary persona (`cool-vibers`, the seeded `test-*` fixtures) — it signs
+ * in and uploads like a person, but on production may only own `xx` sandbox
+ * datasets (`realDatasetCreateGate`, backend/src/services/upload-gate.ts),
+ * so a real DOI never attaches to it.
+ *
+ * CLOSED by migration 0082's `CHECK (account_kind IN ('person', 'service',
+ * 'test'))`, the same pattern {@link accountStatusSchema} documents above.
+ */
+export const accountKindSchema = z.enum(["person", "service", "test"]);
+export type AccountKind = z.infer<typeof accountKindSchema>;
+
+/** The three kinds as a plain array, for a runtime membership test or a
+ *  `--kind must be one of: ...` message -- the ONE place the literal set is
+ *  spelled, so validation call sites (`backend/src/routes/admin/users.ts`,
+ *  `src/commands/admin.ts`) stop hand-copying `["person", "service",
+ *  "test"]` (epic #1272 phase 4, #1284 review). */
+export const ACCOUNT_KIND_VALUES: readonly AccountKind[] = accountKindSchema.options;
+
+/** Runtime check AND type-narrow against {@link ACCOUNT_KIND_VALUES}, for a
+ *  caller holding a plain `string` (a CLI argument, a query param) that
+ *  needs to become an `AccountKind` without a cast at the call site. */
+export function isAccountKind(value: string): value is AccountKind {
+  return (ACCOUNT_KIND_VALUES as readonly string[]).includes(value);
+}
+
+/**
+ * The operational accounts migration 0082 moves off the `person` default,
+ * keyed by username (epic #1272 phase 4, #1284 review; ADR 0048). ONE
+ * shared source for what used to be three independent copies -- the
+ * migration's own data half, `scripts/seed-dev-db.sql`'s repeat of it for a
+ * database seeded fresh after that migration ran, and `nemar admin doctor
+ * kinds`' read-only check -- so the three cannot drift apart silently.
+ *
+ * The migration and the seed script are SQL and cannot import this
+ * (migration 0082's header says so); this is the source the migration's own
+ * test (`backend/test/account-kind-migration.test.ts`) and the doctor check
+ * both read, so at least those two stay in lockstep, and a change here is a
+ * loud reminder to update the two SQL files by hand.
+ */
+export const OPERATIONAL_ACCOUNT_KINDS: Readonly<Record<string, AccountKind>> = {
+  nemarOwner: "service",
+  nemarAdmin: "service",
+  "test-admin": "service",
+  "test-owner": "service",
+  "cool-vibers": "test",
+  "test-user": "test",
+  "test-pending": "test",
+  "test-verified": "test",
+  "test-revoked": "test",
+};
+
+/**
+ * Why `POST /admin/users/:username/kind` refused (epic #1272 phase 4, #1284
+ * review; ADR 0048). The route's OWN-account and not-found refusals use this
+ * same `{ error: <code>, message }` shape too, but "not found" is a generic
+ * 404 shared with every other username-keyed admin route and does not need
+ * its own vocabulary entry here.
+ */
+export const accountKindErrorCodeSchema = z.enum([
+  "same_kind",
+  "orcid_linked",
+  "own_account",
+  "kind_changed_concurrently",
+]);
+export type AccountKindErrorCode = z.infer<typeof accountKindErrorCodeSchema>;
+
+/** The kind-change refusal codes as a plain array, for `lib/api/client.ts`'s
+ *  `prefersMessage` runtime membership test. */
+export const ACCOUNT_KIND_ERROR_CODES: readonly string[] = accountKindErrorCodeSchema.options;
+
+/** One sentence plus one next step per refusal code, matching the
+ *  `DEVICE_AUTH_MESSAGES` convention (shared/contract/device-auth.ts): a
+ *  fact, then what to do about it. */
+export const ACCOUNT_KIND_ERROR_MESSAGES: Record<AccountKindErrorCode, string> = {
+  same_kind: "This account already has that kind. Pick a different kind, or leave it as it is.",
+  orcid_linked:
+    "An ORCID iD identifies a person, and this account has one verified and linked. Run `nemar auth profile orcid unlink` on that account first, then retry.",
+  own_account:
+    "You cannot change your own account kind. Ask another owner to make the change instead.",
+  kind_changed_concurrently:
+    "This account's kind changed between the read and the write. Re-check its current kind, then retry if the change is still needed.",
+};
+
+/**
  * What `/auth/me` reports as `status`, which is NOT {@link accountStatusSchema}.
  *
  * `userStatusForDashboard` (backend routes/auth-web.ts) collapses `approved`
@@ -143,6 +233,14 @@ export const userSchema = z
      * what lets a surface offer "we picked this, change it if you like".
      */
     username_auto_assigned: z.boolean().optional(),
+    /**
+     * What this account IS (epic #1272 phase 4, #1284; ADR 0048). Optional
+     * for the same reason `service_access` is: a backend deployed before
+     * this phase sends no such key, and absence must render as "unknown",
+     * not as a confident "person". `nemar auth status` prints a `Kind:`
+     * line only when this is present and not `"person"`.
+     */
+    account_kind: accountKindSchema.optional(),
   })
   .passthrough();
 export type ContractUser = z.infer<typeof userSchema>;
@@ -205,6 +303,11 @@ export const adminUserListItemSchema = z
      * admin approves, the stamp stays as the record of when they asked.
      */
     upload_access_requested_at: z.string().nullable().optional(),
+    /** What this account IS (epic #1272 phase 4, #1284; ADR 0048). Optional
+     *  for the same reason as the other post-#1251 additions above: a
+     *  backend deployed before this phase omits the key. `nemar admin
+     *  users --kind` and the `Kind:` row line both read this. */
+    account_kind: accountKindSchema.optional(),
   })
   .passthrough();
 export type AdminUserListItem = z.infer<typeof adminUserListItemSchema>;

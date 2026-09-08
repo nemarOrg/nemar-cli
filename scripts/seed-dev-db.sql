@@ -47,9 +47,16 @@ VALUES ('test-verified', 'test-verified@nemar.test', '$2b$10$JmaHDE03Q2pjaBgWB4j
 INSERT OR IGNORE INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)
 VALUES ('test-revoked', 'test-revoked@nemar.test', '$2b$10$JmaHDE03Q2pjaBgWB4jeN.mgLCp9WdSWRpicN4J5gAiJ/YZBRPWIi', 'test-revoked-gh', 'revoked', 'member', 1, NULL, datetime('now'));
 
--- API tokens (SHA-256 hashes of TEST_ADMIN_API_KEY and TEST_USER_API_KEY from test/.env.test)
+-- API tokens (SHA-256 hashes of TEST_ADMIN_API_KEY, TEST_OWNER_API_KEY, and
+-- TEST_USER_API_KEY from test/.env.test)
 INSERT OR IGNORE INTO tokens (user_id, api_key_hash, api_key_prefix)
 SELECT id, '95cd31011dac1cddee0bfdd6e2f01d231b6885908194b4c94c6657396e0c038e', 'nemar_test_9f57c' FROM users WHERE username = 'test-admin';
+
+-- test-owner's token (epic #1272 phase 4, #1284): the owner-role sibling of
+-- test-admin's, needed so test/admin-owner-key-mint-flow.test.ts's owner-path
+-- cases stop skipping. Same columns and conventions as the test-admin row.
+INSERT OR IGNORE INTO tokens (user_id, api_key_hash, api_key_prefix)
+SELECT id, 'fba69d2c7b8fe60b2c8379ef6226da23dae488905c1414078b96a63aad1f7839', 'nemar_test_53576' FROM users WHERE username = 'test-owner';
 
 INSERT OR IGNORE INTO tokens (user_id, api_key_hash, api_key_prefix)
 SELECT id, '7cd087c94ae729fafa05243282163c993306b173cfd88b83b32dd92c27ce14f9', 'nemar_test_aeef8' FROM users WHERE username = 'test-user';
@@ -91,6 +98,30 @@ UPDATE users
        sandbox_completed = 1,
        sandbox_completed_at = COALESCE(sandbox_completed_at, datetime('now'))
  WHERE username IN ('test-owner', 'test-admin', 'test-user');
+
+-- Account kinds (epic #1272 phase 4, #1284; ADR 0048; migration 0082's data
+-- half repeated here for a database seeded fresh AFTER that migration ran,
+-- same reasoning as the service_access UPDATE above). test-owner and
+-- test-admin are operational fixtures with no ORCID and never will be;
+-- test-user/test-pending/test-verified/test-revoked are a human's secondary
+-- persona. test-web stays 'person' (the default): it is the shared web-QA
+-- account (#1008) that has to reach the ORCID authorize page and the
+-- Settings key form like a real person.
+--
+-- Marker comments below (#1284 review) let
+-- backend/test/seed-dev-db-account-kind.test.ts slice out exactly these two
+-- statements with readFileSync and run them for real, rather than
+-- retyping them (.rules/testing.md).
+-- ACCOUNT-KIND-SEED:BEGIN
+UPDATE users
+   SET account_kind = 'service'
+ WHERE username IN ('test-owner', 'test-admin') AND account_kind = 'person';
+
+UPDATE users
+   SET account_kind = 'test'
+ WHERE username IN ('test-user', 'test-pending', 'test-verified', 'test-revoked')
+   AND account_kind = 'person';
+-- ACCOUNT-KIND-SEED:END
 
 -- Verification: confirm seed data exists (check counts manually if unexpected)
 SELECT 'users' AS tbl, COUNT(*) AS n FROM users WHERE username LIKE 'test-%';

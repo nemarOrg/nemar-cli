@@ -42,8 +42,17 @@ export async function webSessionMiddleware(c: WebSessionContext, next: Next) {
     }
   } catch (err) {
     // Cookie lookup failures are non-fatal: the route treats the user
-    // as unauthenticated. Log so persistent DB errors surface in logs.
-    console.error("[web-session-mw] lookup failed", err);
+    // as unauthenticated. Log so persistent DB errors surface in logs --
+    // a SCHEMA-shaped message (a column or table the query names does not
+    // exist, i.e. a migration has not landed on this environment yet) gets
+    // its own prefix so it is not indistinguishable from a transient D1
+    // blip (epic #1272 phase 4, #1284 review; ADR 0048).
+    const message = err instanceof Error ? err.message : String(err);
+    if (/no such column|no such table/i.test(message)) {
+      console.error("[web-session-mw] SCHEMA lookup failed (migration ordering?)", err);
+    } else {
+      console.error("[web-session-mw] lookup failed", err);
+    }
   }
 
   await next();

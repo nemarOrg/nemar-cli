@@ -24,6 +24,8 @@ import { maintenanceMode } from "./middleware/maintenance";
 import { rateLimiter } from "./middleware/rateLimit";
 import { adminRoutes } from "./routes/admin";
 import { authRoutes } from "./routes/auth";
+import { authDeviceRoutes } from "./routes/auth-device";
+import { authKeysRoutes } from "./routes/auth-keys";
 import { authOrcidRoutes } from "./routes/auth-orcid";
 import { authWebRoutes } from "./routes/auth-web";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
@@ -152,6 +154,13 @@ api.route("/auth", authRoutes);
 api.route("/auth", authWebRoutes);
 // ORCID SSO (#832). Same /auth prefix; new paths under /auth/orcid/*.
 api.route("/auth", authOrcidRoutes);
+// Device authorization grant (RFC 8628; epic #1272 phase 1, #1281; ADR
+// 0047). Same /auth prefix; new paths under /auth/device/*.
+api.route("/auth", authDeviceRoutes);
+// Named API key routes (#1281, ADR 0047): list/mint/revoke, plus the
+// device flow's paste-key fallback. Same /auth prefix; new paths under
+// /auth/keys*.
+api.route("/auth", authKeysRoutes);
 api.route("/users", userRoutes);
 api.route("/admin", adminRoutes);
 api.route("/datasets", datasetRoutes);
@@ -364,7 +373,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
         if (env.RESEND_API_KEY) {
           try {
             const emailCfg = resolveEmailConfig(env);
-            const adminEmails = await getAdminEmailsForCategory(db, "publication_request");
+            const adminEmails = await getAdminEmailsForCategory(db, "publication_request", env);
             if (adminEmails.length > 0) {
               await sendExemplarInvariantAlertEmail(
                 adminEmails,
@@ -518,7 +527,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
         let adminEmails: string[] = [];
         if (canEmail) {
           try {
-            adminEmails = await getAdminEmailsForCategory(db, "publication_request");
+            adminEmails = await getAdminEmailsForCategory(db, "publication_request", env);
           } catch (err) {
             console.error("Scheduled cleanup: failed to fetch admin emails:", err);
           }

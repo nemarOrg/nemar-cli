@@ -19,6 +19,13 @@
  *     stricter 10/60s cap and stay keyed by IP — those run pre-auth so
  *     a token isn't available, and they need to resist password
  *     guessing across IPs without any single bucket being unbounded.
+ *   - The device authorization grant (#1281, ADR 0047) is the one
+ *     exception INSIDE its own family: `start`/`lookup`/`confirm`/`deny`
+ *     and `/auth/keys` sit in the strict bucket, but `/auth/device/token`
+ *     does not -- a CLI polling every 5s fits 10 polls in the strict
+ *     bucket's 60s window and trips it on the 11th, about 50 seconds in,
+ *     so it rides the generic bucket plus its own per-row floor instead.
+ *     See the `AUTH_PATHS` comment for the detail.
  */
 
 import type { Context, Next } from "hono";
@@ -124,6 +131,26 @@ const AUTH_PATHS = [
   "/auth/orcid/cli-start",
   "/auth/orcid/cli-handoff",
   "/auth/orcid/unlink",
+  // Device authorization grant (RFC 8628; epic #1272 phase 1, #1281; ADR
+  // 0047). A person starts, looks up, confirms, or denies a sign-in a
+  // handful of times, not in a loop, so all four -- plus /auth/keys, the
+  // named-key routes the prefix match also covers (/auth/keys/:id) -- sit
+  // in the strict floor like every other identity mutation above.
+  // `/auth/device/token` is DELIBERATELY ABSENT: the CLI polls it roughly
+  // every 5 seconds while waiting (up to ~120 polls for one 10-minute
+  // code). At that cadence 10 polls fit inside the strict bucket's 60s
+  // window and the 11th trips it, about 50 seconds in -- not the "third
+  // poll" a looser count might suggest. In practice this route lands in
+  // the plain `ip` bucket (500/min), not `token`: the CLI has not
+  // collected a key yet while it is polling, so it holds no bearer to
+  // authenticate a request with. Its own per-row 5-second floor
+  // (`DEVICE_POLL_SQL`) answers `slow_down` to anything faster than that
+  // without ever 429ing the loop.
+  "/auth/device/start",
+  "/auth/device/lookup",
+  "/auth/device/confirm",
+  "/auth/device/deny",
+  "/auth/keys",
   // NOT an /auth path, and deliberately in this list anyway (ADR 0042, #1253):
   // POST /users/me/upload-access/request spends a live GitHub API call on the
   // shared installation token for every attempt, and a refused one writes

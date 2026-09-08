@@ -49,7 +49,9 @@ Load-bearing ones to know before touching the relevant area:
 0043 (one person, one account: an ORCID iD, an email or a GitHub handle backs at most one live account),
 0044 (identity self-service reaches the CLI; ORCID links through a browser handoff whose
 signed state names the account),
-0045 (the CLI and the web say one thing about an account).
+0045 (the CLI and the web say one thing about an account),
+0048 (account kinds are explicit: person, service, test; superseding 0045's role-based
+ORCID-gap exemption).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
@@ -97,13 +99,27 @@ So a dev-side job that selects users by a generic predicate can still email real
 and a cascade delete can still destroy a real repo.
 The catalog purge removed one blast-radius vector; it did not remove the reason these fences exist.
 
+Admin-facing notification mail (new-user approval, upload-access and publication requests,
+import recovery, cron digests) is production-only by default,
+via `getAdminEmailsForCategory`'s fence in `backend/src/services/email.ts`.
+Set `DEV_ADMIN_NOTIFICATIONS=1` only for a deliberate staging test of admin mail.
+The dev worker's `DEV_EMAIL_ALLOWLIST` is a Worker secret holding exact human addresses, never a domain:
+`@nemar.org` has a catch-all that lands in a real inbox, and `@nemar.test` fixtures get their sign-in codes echoed in the response instead of delivered.
+
+`users.account_kind` (ADR 0048) is explicit on the seeded fixtures: `test-owner` and `test-admin`
+are `service` (operational, no human signs in to them directly); `test-user`, `test-pending`,
+`test-verified`, and `test-revoked` are `test` (a persona, not a real identity); `test-web` stays
+`person`: it is the shared web-QA account and has to reach the ORCID authorize page and the
+Settings key form the way a real person would.
+
 **A new daily cron job is production-only BY DEFAULT.** The dev cron is governed by a fail-safe
 allowlist in `scheduled()`. Before adding a job to the non-prod set, confirm it cannot email a
 real user, dispatch GitHub work against `nemarDatasets`, or mutate a real DOI or prod-bucket object.
 
 Authentication against staging never uses production keys: use `TEST_ADMIN_API_KEY` from
 `test/.env.test` — it matches the `test-admin` token seeded by `scripts/seed-dev-db.sql` —
-with an isolated `NEMAR_CONFIG_DIR`, so the real `~/.config/nemar` is untouched.
+with an isolated `NEMAR_CONFIG_DIR`, so the real `~/.config/nemar` is untouched;
+`TEST_OWNER_API_KEY`, the seeded `test-owner` token, is its owner-role sibling.
 
 ### Never hand-bump the version
 
@@ -203,9 +219,11 @@ Four statuses, fixed meanings, one writer for upload access (**ADR 0040**):
 `pending` (email unverified) → `verified` (the base tier, no admin needed) →
 `approved` (an admin granted upload) → `revoked`.
 
-1. Sign up (CLI: username, email, password; web: ORCID + an email) → verify the email → `verified`
-2. `verified` needs no admin: browse, dashboard, settings, `nemar auth retrieve-key`,
-   `nemar sandbox`. Upload access is requested ONCE, when it is needed, from Settings
+1. Sign up (CLI and web both: ORCID sign-in. The CLI's device flow, ADR 0047, mints the
+   account through the same browser step web signup uses; `nemar auth signup` is that flow
+   plus guided completion of whatever `profile_gaps` still names) → verify the email → `verified`
+2. `verified` needs no admin: browse, dashboard, settings, `nemar sandbox`.
+   Upload access is requested ONCE, when it is needed, from Settings
    on nemar.org or `nemar auth request-upload-access`
    (`POST /users/me/upload-access/request`, **ADR 0042**). The request needs a username,
    a real name, a GitHub account that exists, a city and a country, and a sentence about
@@ -213,6 +231,13 @@ Four statuses, fixed meanings, one writer for upload access (**ADR 0040**):
 3. Admin approves the one-time upload request → `service_access` → user uploads
    → BIDS validation → private GitHub repo + S3 upload
 4. Admin creates concept DOI → user can version with new DOIs
+
+`users.account_kind` is a separate axis from status: `person` (the default), `service`
+(operational automation: no human signs in to it directly, keys are minted only by an owner
+via `nemar admin keys create`), `test` (a human's secondary persona: signs in and uploads like
+a person, but on production may only own `xx` sandbox datasets). `service`/`test` are exempt
+from the ORCID-verification profile gap; kinds are set only by an owner
+(`nemar admin kind <username> <kind>`), never inferred (**ADR 0048**).
 
 ### Web dashboard auth (#569)
 
@@ -232,6 +257,41 @@ Web-only signups land as `signup_source='web'`, `status='pending'`,
 with `username`/`github_username`/`password_hash` NULL until admin onboarding fills them in.
 Endpoints are defined in `backend/src/routes/auth-web.ts` (with `auth.ts` for the CLI path
 and `auth-orcid.ts` for ORCID); read those rather than trusting this summary.
+
+### CLI sign-in: device authorization (#1281, ADR 0047)
+
+`nemar auth login` obtains its API key through the device authorization grant (RFC 8628),
+the pattern `gh auth login` uses,
+because a terminal cannot receive an OAuth redirect.
+Five routes: `POST /auth/device/start` (CLI mints a device code + user code),
+`POST /auth/device/token` (CLI polls for the key),
+and `GET /auth/device/lookup`, `POST /auth/device/confirm`, `POST /auth/device/deny`
+(the browser, behind the existing web session).
+`lookup`/`confirm`/`deny` never talk to ORCID directly:
+they sit behind the same web session and identity checks every other cookie-authenticated route does (ADR 0022, 0043, 0044).
+**The key is minted only when the CLI collects it at `/token`, never when the browser confirms at `/confirm`** (ADR 0047):
+confirm records `user_id` and `status='confirmed'` only,
+so no plaintext key is ever at rest between the two steps.
+Every key is a named row for one machine (`tokens.name`),
+and a new sign-in never revokes another machine's key.
+`POST /auth/device/token` is the one route in this family deliberately OUTSIDE the strict `AUTH_PATHS` bucket:
+at a 5-second poll cadence,
+10 polls fit inside the strict bucket's 60-second window and the 11th trips it, about 50 seconds in,
+so the route rides the generic bucket instead, in practice `ip` (500/min),
+since the CLI holds no bearer until it has collected a key,
+plus its own per-row 5-second floor (`slow_down`).
+Every timestamp this flow writes or compares is SQL-side (`datetime('now', ...)`, `julianday`),
+never a JS `toISOString()` value,
+because the two compare unequally on the same day and silently break expiry.
+Named API keys (list/mint/revoke, plus the device flow's paste-key fallback) live alongside it at `GET/POST /auth/keys` and `DELETE /auth/keys/:id`.
+Three files: `backend/src/routes/auth-device.ts`, `backend/src/routes/auth-keys.ts`,
+and the shared SQL/helpers in `backend/src/services/device-auth.ts`.
+The CLI half (epic #1272 phase 3, #1283) is `src/lib/device-login.ts` plus `src/commands/auth.ts`:
+`nemar auth login`/`signup` run this flow by default (`login` alone also takes `-k`/`--key`
+to paste an existing key instead),
+a re-login on the same machine best-effort revokes its own previous device-sourced key,
+`nemar auth logout` revokes it back by default (never a pasted or password-era one),
+and `nemar auth keys` manages the whole set.
 
 ### Dataset deletion
 
@@ -260,6 +320,11 @@ bun run src/index.ts                             # run the CLI from source
 bun test                                         # real tests only, no mocks
 bun build src/index.ts --outdir dist --target node
 ```
+
+Wrangler on a dev machine runs through cfman, which holds the SCCN account token:
+`bunx cfman wrangler --account sccn <wrangler arguments>` (for example `... whoami`,
+`... d1 execute nemar-db-dev --remote --env dev -c wrangler-sccn.toml --file <sql>` from `backend/`).
+There is no plain `wrangler login` on these machines; a command that says "Not logged in" was run without cfman.
 
 ---
 
@@ -547,12 +612,12 @@ and what is historical. The entries worth knowing by name:
 
 | Group | Covers |
 |---|---|
-| `nemar auth` | login, signup, status/whoami, profile (plus `set-email`/`verify-email`, `set-github`, `set-username`, `set-name`, `set-location`, `orcid link\|relink\|unlink` — ADR 0044), request-upload-access, switch, logout, verification, SSH setup, key retrieval and regeneration |
+| `nemar auth` | login (browser device sign-in by default, `-k`/`--key` to paste a key instead — ADR 0047), signup (browser device sign-in, no `-k`/`--key`), status/whoami, keys (list/create/revoke this account's named API keys), profile (plus `set-email`/`verify-email`, `set-github`, `set-username`, `set-name`, `set-location`, `orcid link\|relink\|unlink` — ADR 0044), request-upload-access, switch, logout, verification, SSH setup, deprecated password-era key retrieval and regeneration |
 | `nemar dataset` | validate, upload, download, status (alias: view), list, search, release, update, clone, get, commit, push, drop, ci, manifest |
 | `nemar dataset publish` | request, status, resend |
 | `nemar dataset` (access) | request-access, access, invite, collaborators |
 | `nemar sandbox` | training run, status, reset — required before uploading |
-| `nemar admin` | users, approve, revoke, role, notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, recording-stats-sweep, signal-defaults-sweep, zarr-fidelity-sweep, doctor, summary, notice, email-preferences, backfill-names, backfill-usernames, duplicates, e2e-test |
+| `nemar admin` | users (`--kind`), approve, revoke, role, kind (account kind, owner-only — ADR 0048), keys (create/list/revoke a service/test account's API keys, owner-only), notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, recording-stats-sweep, signal-defaults-sweep, zarr-fidelity-sweep, doctor, summary, notice, email-preferences, backfill-names, backfill-usernames, duplicates, e2e-test |
 | `nemar admin import*` | OpenNeuro import, status, rollback, retry, verify, recover (issue #754, epic #967) |
 | `nemar admin fleet` | drift, enforce, revalidate — governance across dataset repos (epic #713) |
 | `nemar admin exemplar` | create, status, remint-dois — the staging exemplar fleet |

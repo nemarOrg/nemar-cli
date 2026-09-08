@@ -85,6 +85,8 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0044](0044-identity-self-service-reaches-the-cli.md) - Identity self-service reaches the CLI, and ORCID does it through the browser
 - [ADR 0045](0045-the-cli-and-the-web-say-one-thing-about-an-account.md) - The CLI and the web say one thing about an account: one matrix, one copy table, one gap function
 - [ADR 0046](0046-cross-repo-parity-compares-pre-release-branches.md) - Cross-repo parity compares pre-release branches, never `main`
+- [ADR 0047](0047-cli-sign-in-is-the-device-authorization-grant.md) - CLI sign-in is the device authorization grant, layered on the web ORCID session
+- [ADR 0048](0048-account-kinds-are-explicit.md) - Account kinds are explicit: person, service, test
 
 ## Backfill note (2026-07-31)
 

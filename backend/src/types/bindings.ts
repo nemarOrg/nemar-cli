@@ -74,6 +74,16 @@ export interface Bindings {
    *  sendBroadcast). Unset means nothing is allow-listed -- every
    *  non-production send is refused, fail-closed. Ignored in production. */
   DEV_EMAIL_ALLOWLIST?: string;
+  /** Opt-in escape hatch so a non-production worker can generate admin-facing
+   *  notification mail (new-user approval, publication requests, import
+   *  recovery, cron digests): set to exactly "1" for a deliberate staging
+   *  test. Unset/anything else keeps getAdminEmailsForCategory's fence
+   *  closed (services/email.ts). Distinct from DEV_EMAIL_ALLOWLIST above:
+   *  that fence gates WHO a send can reach, this one gates WHETHER an
+   *  admin-notification send is generated at all -- the dev worker's own
+   *  admin account is on DEV_EMAIL_ALLOWLIST, so the recipient fence alone
+   *  does not stop admin mail from reaching them. */
+  DEV_ADMIN_NOTIFICATIONS?: string;
   /** Domain attribute for the web-dashboard session cookie (#569).
    *  Set to "app.nemar.org" in production and left empty in dev so
    *  the cookie is host-only for *.workers.dev. The dashboard moves

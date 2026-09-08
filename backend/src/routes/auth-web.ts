@@ -46,7 +46,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
-import type { AccountStatus } from "../../../shared/contract/user.js";
+import type { AccountKind, AccountStatus } from "../../../shared/contract/user.js";
 import { auditLogStatement } from "../db/audit-log";
 import { flag } from "../db/flag";
 import { timingSafeEqual } from "../lib/constant-time";
@@ -178,6 +178,11 @@ function publicUser(row: {
   username_auto_assigned: boolean;
   service_access_granted_at: string | null;
   upload_access_requested_at: string | null;
+  /** What this account IS (epic #1272 phase 4, #1284; ADR 0048), read ONLY to
+   *  feed `profileGapsForRow` below -- it is deliberately NOT put on the
+   *  wire (webUserSchema carries no such field; that would force a website
+   *  change this phase does not need). */
+  account_kind: AccountKind;
 }) {
   return {
     id: row.id,
@@ -453,7 +458,7 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
                 given_name, family_name, orcid, orcid_verified,
                 github_username, city, country, affiliation, service_access,
                 username, username_auto_assigned,
-                service_access_granted_at, upload_access_requested_at
+                service_access_granted_at, upload_access_requested_at, account_kind
            FROM users WHERE email = ? COLLATE NOCASE AND deleted_at IS NULL LIMIT 1`,
       )
       .bind(email)
@@ -482,6 +487,9 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
         username_auto_assigned: number;
         service_access_granted_at: string | null;
         upload_access_requested_at: string | null;
+        // Closed by migration 0082's CHECK constraint (epic #1272 phase 4,
+        // #1284; ADR 0048).
+        account_kind: AccountKind;
       }>();
     if (!userRow) {
       // No live users row for a matched code. Normally impossible
@@ -685,6 +693,7 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       username_auto_assigned: usernameLanded || currentAutoAssigned,
       service_access_granted_at: userRow.service_access_granted_at,
       upload_access_requested_at: userRow.upload_access_requested_at,
+      account_kind: userRow.account_kind,
     };
 
     if (promoted) {
@@ -1262,7 +1271,7 @@ async function fetchPublicUserById(
               given_name, family_name, orcid, orcid_verified,
               github_username, city, country, affiliation, service_access,
               username, username_auto_assigned,
-              service_access_granted_at, upload_access_requested_at
+              service_access_granted_at, upload_access_requested_at, account_kind
          FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
     )
     .bind(userId)
@@ -1290,6 +1299,9 @@ async function fetchPublicUserById(
       username_auto_assigned: number;
       service_access_granted_at: string | null;
       upload_access_requested_at: string | null;
+      // Closed by migration 0082's CHECK constraint (epic #1272 phase 4,
+      // #1284; ADR 0048).
+      account_kind: AccountKind;
     }>();
   if (!row) return null;
   return publicUser({
@@ -1311,6 +1323,7 @@ async function fetchPublicUserById(
     username_auto_assigned: flag(row.username_auto_assigned),
     service_access_granted_at: row.service_access_granted_at,
     upload_access_requested_at: row.upload_access_requested_at,
+    account_kind: row.account_kind,
   });
 }
 
@@ -1847,17 +1860,28 @@ authWebRoutes.post(
  * either way, but a saturated base is an operational fact nobody would
  * otherwise see, so it is logged as well as reported.
  *
- * Cookie-authenticated like the rest of the /auth/profile family, and read-only,
- * so it carries no Origin check — same as GET /auth/me.
+ * Accepts either credential `resolveActingAccount` accepts (#1266, ADR 0044)
+ * -- the dashboard's `nemar_session` cookie, or the CLI's bearer token, added
+ * in epic #1272 phase 3 so `nemar auth signup`'s guided completion can offer
+ * the same default a brand-new ORCID account sees on the website. That
+ * widens what was "no Origin check, same as GET /auth/me" to the family's
+ * usual rule: the COOKIE half still requires an allow-listed Origin (a CSRF
+ * fence a bearer token needs, and has, no part of), while a bearer request
+ * carries none. `ActingAccount` has no name fields, so this reads them by
+ * `actor.id` rather than off `c.var.webUser`, which the bearer path never sets.
  */
 authWebRoutes.get("/profile/username-suggestion", webSessionMiddleware, async (c) => {
-  const webUser = c.var.webUser;
-  if (!webUser) {
-    return c.json({ error: "Authentication required" }, 401);
-  }
+  const resolved = await resolveActingAccount(c);
+  if (!resolved.ok) return resolved.response;
+  const actor = resolved.actor;
 
   try {
-    const base = suggestUsername(webUser.given_name, webUser.family_name);
+    const nameRow = await c.env.DB.prepare(
+      "SELECT given_name, family_name FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1",
+    )
+      .bind(actor.id)
+      .first<{ given_name: string | null; family_name: string | null }>();
+    const base = suggestUsername(nameRow?.given_name ?? null, nameRow?.family_name ?? null);
     if (!base) {
       return c.json({ suggestion: null, based_on: "unavailable" });
     }

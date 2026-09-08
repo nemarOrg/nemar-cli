@@ -117,9 +117,13 @@ export function redactHeaders(headers: Record<string, string>): Record<string, s
   return out;
 }
 
-/** JSON body keys whose values are always secrets, regardless of content. */
+/** JSON body keys whose values are always secrets, regardless of content.
+ *  `device[_-]?code` covers the device authorization grant's polling secret
+ *  (epic #1272 phase 3; ADR 0047): `device_code` is the bearer of
+ *  `POST /auth/device/token`, equivalent to holding the key it mints, and
+ *  the CLI's own request bodies carry it verbatim on every poll. */
 const SENSITIVE_BODY_KEY_RE =
-  /^(api[_-]?key|apikey|password|token|secret|access[_-]?key(_id)?|secret[_-]?access[_-]?key|session[_-]?token|authorization|ssh[_-]?key|private[_-]?key)$/i;
+  /^(api[_-]?key|apikey|password|token|secret|access[_-]?key(_id)?|secret[_-]?access[_-]?key|session[_-]?token|authorization|ssh[_-]?key|private[_-]?key|device[_-]?code)$/i;
 
 const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
 

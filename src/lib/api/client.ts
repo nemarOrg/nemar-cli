@@ -12,8 +12,13 @@
  */
 
 import type { ZodType } from "zod";
+import {
+  DEVICE_AUTH_REFUSAL_CODES,
+  deviceGrantErrorSchema,
+} from "../../../shared/contract/device-auth.js";
 import { IDENTITY_CONFLICT_CODES } from "../../../shared/contract/identity.js";
 import {
+  ACCOUNT_KIND_ERROR_CODES,
   PROFILE_EDIT_ERROR_CODES,
   UPLOAD_ACCESS_ERROR_CODES,
 } from "../../../shared/contract/user.js";
@@ -201,9 +206,32 @@ export async function request<T>(
       typeof data.error === "string" &&
       (PROFILE_EDIT_ERROR_CODES.includes(data.error) ||
         IDENTITY_CONFLICT_CODES.includes(data.error));
+    // The device authorization grant's two vocabularies (epic #1272 phase 3;
+    // ADR 0047): the RFC 8628 grant-error codes `POST /auth/device/token`
+    // answers 400 with (`authorization_pending`, `slow_down`,
+    // `expired_token`, ...), and the more general device-auth refusal codes
+    // `lookup`/`confirm`/`deny`/`/auth/keys` answer with (`too_many_keys`,
+    // `key_not_found`, `device_code_used`, ...). Neither is a human sentence
+    // on its own -- `message` is, so it wins here the same way the two
+    // families above already do. Cast off zod's literal-tuple type: this is
+    // a runtime membership test against caller-supplied JSON, not a narrowing
+    // of `data.error`'s type.
+    const isDeviceCode =
+      typeof data.error === "string" &&
+      ((deviceGrantErrorSchema.options as readonly string[]).includes(data.error) ||
+        DEVICE_AUTH_REFUSAL_CODES.includes(data.error));
+    // The account-kind change vocabulary (epic #1272 phase 4, #1284 review;
+    // ADR 0048): `POST /admin/users/:username/kind` answers `{ error: <code>,
+    // message }` from a closed set the same shape as the two families above,
+    // so it wins the same way -- `error` is a token (`orcid_linked`,
+    // `same_kind`, ...), not a sentence.
+    const isAccountKindCode =
+      typeof data.error === "string" && ACCOUNT_KIND_ERROR_CODES.includes(data.error);
     const prefersMessage =
       hasBlockReason ||
       isProfileEditCode ||
+      isDeviceCode ||
+      isAccountKindCode ||
       (missing !== undefined &&
         typeof data.error === "string" &&
         UPLOAD_ACCESS_ERROR_CODES.includes(data.error));
@@ -227,7 +255,7 @@ export async function request<T>(
       primary = `${data.message}. This NEMAR backend does not support this command yet.`;
     }
 
-    throw new ApiError(
+    const apiError = new ApiError(
       response.status,
       primary || "Request failed",
       data.details,
@@ -235,6 +263,13 @@ export async function request<T>(
       hasBlockReason ? (data.block_reason as string) : undefined,
       missing,
     );
+    // Assigned after construction (errors.ts), not constructor parameters:
+    // every existing `new ApiError(...)` call site (tests, retry
+    // classifiers) predates these two fields and passes neither.
+    if (typeof data.error === "string") apiError.code = data.error;
+    if (typeof data.reason === "string") apiError.reason = data.reason;
+    apiError.rawBody = data;
+    throw apiError;
   }
 
   if (schema) {

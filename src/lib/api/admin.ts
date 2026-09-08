@@ -7,13 +7,18 @@
  */
 
 import {
+  type AccountKind,
   type AdminUserListItem,
   type AdminUsersListResponse,
+  type ApiKeyCreateResponse,
+  type ApiKeyListResponse,
   type BackfillUsernameOutcome,
   type BackfillVerifyOutcome,
   type ClearIdentityConflictResponse,
   type DuplicateReport,
   adminUsersListResponseSchema,
+  apiKeyCreateResponseSchema,
+  apiKeyListResponseSchema,
   clearIdentityConflictResponseSchema,
   duplicateReportSchema,
 } from "../../../shared/contract/index.js";
@@ -58,11 +63,14 @@ export async function listUsers(
   // one is server-side because the timestamp it filters on is not something a
   // client can derive from the rest of the row.
   awaitingApproval?: boolean,
+  // What the account IS (epic #1272 phase 4, #1284; ADR 0048).
+  kind?: AccountKind,
 ): Promise<UsersListResponse> {
   const params = new URLSearchParams();
   if (status) params.set("status", status);
   if (role) params.set("role", role);
   if (awaitingApproval) params.set("awaiting_approval", "1");
+  if (kind) params.set("kind", kind);
   const query = params.toString() ? `?${params.toString()}` : "";
   return request(`/admin/users${query}`, {}, true, adminUsersListResponseSchema);
 }
@@ -165,6 +173,77 @@ export async function changeUserRole(
     },
     true,
   );
+}
+
+export interface ChangeKindResponse {
+  message: string;
+  user: { username: string; account_kind: AccountKind };
+}
+
+/**
+ * Change a user's account kind (owner only; epic #1272 phase 4, #1284; ADR
+ * 0048).
+ */
+export async function setAccountKind(
+  username: string,
+  kind: AccountKind,
+): Promise<ChangeKindResponse> {
+  return request<ChangeKindResponse>(
+    `/admin/users/${username}/kind`,
+    {
+      method: "POST",
+      body: JSON.stringify({ kind }),
+    },
+    true,
+  );
+}
+
+/** The fields `nemar admin doctor kinds` reads off `GET
+ *  /admin/users/:username` (epic #1272 phase 4, #1284 review; ADR 0048).
+ *  The route selects `u.*` plus two computed columns, so this is
+ *  deliberately narrow rather than a full mirror of the row -- everything
+ *  else is untyped here on purpose (`.passthrough()`-shaped, no contract
+ *  schema exists for this endpoint yet). */
+export interface AdminUserDetail {
+  username: string | null;
+  account_kind?: AccountKind;
+}
+
+/** `GET /admin/users/:username` (owner/admin; any kind). Throws `ApiError`
+ *  404 for an unknown username, same as every other username-keyed admin
+ *  route. */
+export async function getAdminUserByUsername(username: string): Promise<{ user: AdminUserDetail }> {
+  return request<{ user: AdminUserDetail }>(`/admin/users/${username}`, {}, true);
+}
+
+/**
+ * Mint a key for a non-person account (owner only; epic #1272 phase 4,
+ * #1284; ADR 0048) -- the one path that can mint a key for a `service`/`test`
+ * kind, which cannot self-mint (`nemar auth keys create` / the device flow
+ * both refuse them).
+ */
+export async function createKeyFor(username: string, name: string): Promise<ApiKeyCreateResponse> {
+  return request<ApiKeyCreateResponse>(
+    `/admin/users/${username}/keys`,
+    { method: "POST", body: JSON.stringify({ name }) },
+    true,
+    apiKeyCreateResponseSchema,
+  );
+}
+
+/** List a target account's live keys (owner only; any kind). */
+export async function listKeysFor(username: string): Promise<ApiKeyListResponse> {
+  return request<ApiKeyListResponse>(
+    `/admin/users/${username}/keys`,
+    {},
+    true,
+    apiKeyListResponseSchema,
+  );
+}
+
+/** Revoke one of a target account's keys by row id (owner only; any kind). */
+export async function revokeKeyFor(username: string, id: number): Promise<{ ok: true }> {
+  return request<{ ok: true }>(`/admin/users/${username}/keys/${id}`, { method: "DELETE" }, true);
 }
 
 // ============================================================================
