@@ -1,0 +1,104 @@
+{
+  "format": "nemar-zarr-index",
+  "format_version": 3,
+  "dataset_id": "on008083",
+  "contract_base": "https://zarr.nemar.org/on008083/zarr/",
+  "data_base": "https://nemar.s3.us-east-2.amazonaws.com/on008083/zarr/",
+  "data_base_kind": "s3-public",
+  "s3_uri": "s3://nemar/on008083/zarr/",
+  "s3_region": "us-east-2",
+  "s3_anonymous": true,
+  "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "engine_version": "2",
+  "biosigio_version": "1.2.6",
+  "updated_utc": "2026-09-02T00:00:00Z",
+  "doi": null,
+  "license": null,
+  "citation": null,
+  "hed_version": null,
+  "layout": {
+    "level0": "<zarr>/<group>/0",
+    "view": "<zarr>/<group>/view/<L>",
+    "view_levels": "1..n_view_levels from the group attrs",
+    "scale_offset": "level-0 array attrs scale[] and offset[]; physical = digital * scale + offset",
+    "events": "<data_base>events.parquet"
+  },
+  "discovered_count": 5,
+  "store_count": 2,
+  "n_recordings": 2,
+  "errors": 3,
+  "failure_count": 1,
+  "pending_count": 2,
+  "stores": [
+    {
+      "path": "sub-01/eeg/a_eeg.edf",
+      "zarr": "sub-01/eeg/a_eeg.zarr",
+      "source_tree": "raw",
+      "derived": false,
+      "groups": [
+        {
+          "name": "eeg_250hz",
+          "modality": "EEG",
+          "rate": 250,
+          "n_channels": 129,
+          "n_samples": 43000,
+          "duration_s": 172,
+          "n_view_levels": 4,
+          "view_chunk_columns": 1024,
+          "source_rate_hz": 500,
+          "chunk_samples": 1000,
+          "shard_samples": 75000
+        }
+      ]
+    },
+    {
+      "path": "sub-02/eeg/b_eeg.edf",
+      "zarr": "sub-02/eeg/b_eeg.zarr",
+      "source_tree": "raw",
+      "derived": false,
+      "groups": [
+        {
+          "name": "eeg_250hz",
+          "modality": "EEG",
+          "rate": 250,
+          "n_channels": 64,
+          "n_samples": 50000,
+          "duration_s": 200,
+          "n_view_levels": 4,
+          "view_chunk_columns": 1024,
+          "source_rate_hz": 500,
+          "chunk_samples": 1000,
+          "shard_samples": 75000
+        }
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "path": "sub-03/eeg/c_eeg.edf",
+      "zarr": "sub-03/eeg/c_eeg.zarr",
+      "code": "file_read_error",
+      "reason": "The recording could not be read.",
+      "detail": null,
+      "attempts": 0
+    }
+  ],
+  "pending": [
+    {
+      "path": "sub-04/eeg/d_eeg.edf",
+      "zarr": "sub-04/eeg/d_eeg.zarr",
+      "reason": "infra_failure",
+      "attempts": 2,
+      "last_error": "RuntimeError: boom",
+      "last_attempt_utc": "2026-09-01T00:00:00Z"
+    },
+    {
+      "path": "sub-05/eeg/e_eeg.edf",
+      "zarr": "sub-05/eeg/e_eeg.zarr",
+      "reason": "not_attempted",
+      "attempts": 0,
+      "last_error": null,
+      "last_attempt_utc": null
+    }
+  ]
+}
