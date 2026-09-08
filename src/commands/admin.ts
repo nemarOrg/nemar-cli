@@ -823,11 +823,16 @@ Examples:
       const result = await setAccountKind(username, kind);
       spinner.succeed(result.message);
     } catch (error) {
+      // No 409 hint here: the route's three 409 causes (same_kind,
+      // orcid_linked, kind_changed_concurrently) each set `error.message` to
+      // their own ACCOUNT_KIND_ERROR_MESSAGES sentence (shared/contract/
+      // user.ts), which handleCommandError's spinner.fail already prints as
+      // the primary line -- a static hint here would either repeat that or,
+      // for kind_changed_concurrently, name causes that did not happen.
       handleCommandError(error, spinner, "Failed to change account kind", {
         400: "Invalid request (check that you are not targeting your own account)",
         403: "Owner access required",
         404: "User not found",
-        409: "The account already has that kind, or a verified ORCID iD blocks the move",
       });
     }
   });
