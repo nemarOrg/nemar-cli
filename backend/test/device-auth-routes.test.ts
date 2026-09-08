@@ -917,6 +917,29 @@ describe("account state changes between confirm and collect", () => {
     expect(after).toBe(before);
   });
 
+  test("a kind change to test between confirm and collect answers service_account and mints no token row", async () => {
+    // Same diagnosis path as the service-kind case above, exercised for the
+    // OTHER non-person kind (#1284 review): ADR 0048 has `accountRefusal`
+    // answer the same `service_account` code for either `service` or `test`
+    // -- from the CLI's side of `nemar auth login`, the two are the same
+    // fact ("a human is not meant to sign in this way"), so this is proof
+    // the diagnosis path was not accidentally written to special-case only
+    // `service`.
+    const ada = seedUser("ada-kind-change-test-between@nemar.test");
+    const { deviceCode, userCode } = await startCode();
+    await confirm(userCode, await sessionCookie(ada));
+    db.run("UPDATE users SET account_kind = 'test' WHERE id = ?", [ada]);
+
+    const before = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM tokens").get()?.n ?? 0;
+    const res = await pollToken(deviceCode);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; reason?: string };
+    expect(body.error).toBe("access_denied");
+    expect(body.reason).toBe("service_account");
+    const after = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM tokens").get()?.n ?? 0;
+    expect(after).toBe(before);
+  });
+
   test("an account already at 25 live keys answers too_many_keys", async () => {
     const ada = seedUser("ada-cap-between@nemar.test");
     const { deviceCode, userCode } = await startCode();
