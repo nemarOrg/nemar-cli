@@ -13,10 +13,13 @@
   },
   "dependencies": {
     "@hono/zod-validator": "^0.4.0",
+    "@modelcontextprotocol/server": "2.0.0",
     "aws4fetch": "^1.0.20",
     "bcryptjs": "^3.0.3",
+    "fzstd": "0.1.1",
     "hono": "^4.11.4",
-    "zod": "^3.23.0"
+    "zod": "^3.23.0",
+    "zod4": "npm:zod@^4.2.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241112.0",

@@ -6,9 +6,10 @@
  * stateless, recipe-first broker on Cloudflare Workers.
  * The Worker never decodes signal data beyond a capped taste; bulk bytes go
  * direct to S3. This file is the zod vocabulary for that shape -- the
- * provenance envelope every tool response carries, the read recipe
- * `read_window` hands out by default, and one input/output schema pair per
- * tool.
+ * provenance envelope every RECORDING-level tool response carries (see the
+ * section 6.1 comment below for the phase 2 scoping correction), the read
+ * recipe `read_window` hands out by default, and one input/output schema
+ * pair per tool.
  *
  * `.passthrough()` throughout, matching `shared/contract/dataset.ts`'s
  * lower-bound convention: these schemas assert required fields and their
@@ -90,14 +91,93 @@ export function flagToBoolean(value: 0 | 1 | null | undefined): boolean | null {
 }
 
 // ---------------------------------------------------------------------------
-// Provenance envelope -- on every response, not optional, not only when asked
+// Citation composition (issue #1064 / #1294) -- a line-for-line TypeScript
+// port of `dataset_citation` in `scripts/zarr/generate_zarr.py` (lines 4456
+// to 4485), so `describe_dataset` and the Zarr index's own `citation` field
+// agree on the exact same string for the same row.
 // ---------------------------------------------------------------------------
+
+/** Matches `_CITATION_PUBLISHER` in `scripts/zarr/generate_zarr.py`, and
+ *  `publisher` in `backend/src/services/datacite.ts`, shortened to the form
+ *  a reference list actually carries. */
+const CITATION_PUBLISHER = "NEMAR";
+
+/** The subset of a `datasets` row (or the public `GET /datasets/:id`
+ *  response's `dataset` object) {@link composeCitation} reads. Every field
+ *  is optional/nullable: a row missing everything but `name` still composes
+ *  a (short) citation, and a row missing `name` entirely composes none. */
+export interface ComposeCitationInput {
+  name?: string | null;
+  authors?: string | null;
+  concept_doi?: string | null;
+  doi?: string | null;
+  /** Already the canonical `vX.Y.Z` tag (`toVersionTag`/`withCanonicalLatestVersion`
+   *  in `shared/contract/version.ts`) -- this function does not normalize it. */
+  latest_version?: string | null;
+  created_at?: string | null;
+}
+
+/**
+ * A ready-to-paste citation string for a dataset, or `null` when the row
+ * does not carry enough to make one honestly (no `name`).
+ *
+ * Port of `dataset_citation(row)` in `scripts/zarr/generate_zarr.py`: every
+ * part comes from the public row, and a missing part omits its segment
+ * instead of printing an empty one. `doi` prefers `concept_doi`, falling
+ * back to `doi` -- each candidate is trimmed BEFORE the fallback check, so a
+ * whitespace-only `concept_doi` (e.g. `"  "`, truthy in the Python `or` this
+ * ports but not what a human would call "present") correctly falls through
+ * to `doi` rather than winning empty; a leading `doi:` prefix (if either
+ * ever carries one) is stripped before building the `https://doi.org/...`
+ * segment. `created_at`'s year is its first four characters, included only
+ * when they are EXACTLY four digits -- stricter than the Python original
+ * (`year.isdigit()`, which also accepts a short prefix like `"20"` from a
+ * malformed `created_at`); tightening the TypeScript port is deliberate,
+ * not a drift from the source of truth, and is a converter-side follow-up
+ * to align `dataset_citation` itself, not scope for this file.
+ */
+export function composeCitation(row: ComposeCitationInput | null | undefined): string | null {
+  if (!row || typeof row !== "object") return null;
+  const name = (row.name ?? "").trim();
+  if (!name) return null;
+  const authors = (row.authors ?? "").trim();
+  const doi = (row.concept_doi ?? "").trim() || (row.doi ?? "").trim();
+  const version = (row.latest_version ?? "").trim();
+  const year = (row.created_at ?? "").slice(0, 4);
+  const parts: string[] = [];
+  if (authors) parts.push(authors);
+  if (/^\d{4}$/.test(year)) parts.push(`(${year})`);
+  parts.push(`${name}${version ? ` (${version})` : ""}.`);
+  parts.push(`${CITATION_PUBLISHER}.`);
+  if (doi) parts.push(`https://doi.org/${doi.startsWith("doi:") ? doi.slice(4) : doi}`);
+  return parts.join(" ");
+}
+
+// ---------------------------------------------------------------------------
+// Provenance envelope (design doc section 6.1) -- rides RECORDING-level tool
+// responses (`list_recordings`, `get_events`, `render_overview`,
+// `read_window`; phases 3 and 4), not optional and not only when asked,
+// there. Dataset-level tools (`search_datasets`, `describe_dataset`) never
+// construct one: they carry `doi`, `license`,
+// `citation`, `zarr_status`, `zarr_source_commit` and `zarr_verify_status`
+// directly on their own output schema instead -- an index-document read (what
+// this envelope is built from) is exactly the cost `describe_dataset` avoids
+// (see its schema's doc and `.context/mcp-server-design.md` section 5). Phase 1's
+// design doc said "every tool's output includes a provenance envelope"; this is
+// the phase 2 correction to that sentence.
+// ---------------------------------------------------------------------------
+
+/** The closed set the standing fidelity sweep stamps into `sweep_stamps`
+ *  (`services/sweep-stamps.ts`'s `ZARR_VERIFY_STATUS_PATH`). Exported so a
+ *  registration mirror (`backend/src/mcp/schemas.ts`) builds its own enum
+ *  from this array rather than hand-duplicating the three literals. */
+export const ZARR_VERIFY_STATUS_VALUES = ["verified", "failed", "unverifiable"] as const;
 
 /** `has_zarr` (the catalog filter) means converted; this rides separately and
  *  is never a filter default -- a fresh conversion answers `null` here until
  *  the daily fidelity sweep reaches it (ADR 0005: verification is reported,
  *  never a precondition for serving). */
-export const zarrVerifyStatusSchema = z.enum(["verified", "failed", "unverifiable"]).nullable();
+export const zarrVerifyStatusSchema = z.enum(ZARR_VERIFY_STATUS_VALUES).nullable();
 
 export const provenanceEnvelopeSchema = z
   .object({
@@ -427,12 +507,23 @@ export const searchDatasetsHitSchema = z
     has_zarr: z.boolean(),
   })
   .passthrough();
+export type SearchDatasetsHit = z.infer<typeof searchDatasetsHitSchema>;
 
 export const searchDatasetsOutputSchema = z
   .object({
     results: z.array(searchDatasetsHitSchema),
     count: z.number().int().nonnegative(),
     limit: z.number().int(),
+    /** A caveat the caller should surface verbatim -- e.g. the search index
+     *  degraded to a fallback, or a hit's license/Zarr status could not be
+     *  resolved. Null/absent when there is none. */
+    note: z.string().nullable().optional(),
+    /** True when more rows matched than this response's candidate window
+     *  could return (mirrors `executeDatasetSearch`'s own `truncated` on the
+     *  `query` path); absent when the tool cannot know (the no-`query`
+     *  catalog-list path always answers its own exact `count`, so this is
+     *  never set there). */
+    truncated: z.boolean().optional(),
   })
   .passthrough();
 export type SearchDatasetsOutput = z.infer<typeof searchDatasetsOutputSchema>;
@@ -444,12 +535,26 @@ export const describeDatasetInputSchema = z
   .passthrough();
 export type DescribeDatasetInput = z.infer<typeof describeDatasetInputSchema>;
 
+/** The closed set of tools `describe_dataset`'s `cost_hint.next_cheapest_tool`
+ *  may name. Exported for the same hand-duplication reason as
+ *  {@link ZARR_VERIFY_STATUS_VALUES}. */
+export const NEXT_CHEAPEST_TOOL_VALUES = [
+  "list_recordings",
+  "get_events",
+  "render_overview",
+  "read_window",
+] as const;
+
 export const describeDatasetCostHintSchema = z
   .object({
-    next_cheapest_tool: z.enum(["list_recordings", "get_events", "render_overview", "read_window"]),
+    next_cheapest_tool: z.enum(NEXT_CHEAPEST_TOOL_VALUES),
     reason: z.string(),
   })
   .passthrough();
+
+/** The closed set `datasets.zarr_status` holds. Exported for the same
+ *  hand-duplication reason as {@link ZARR_VERIFY_STATUS_VALUES}. */
+export const ZARR_STATUS_VALUES = ["pending", "ready", "failed"] as const;
 
 export const describeDatasetOutputSchema = z
   .object({
@@ -465,8 +570,18 @@ export const describeDatasetOutputSchema = z
     hed_version: z.string().nullable().optional(),
     recording_count: z.number().int().nullable().optional(),
     total_recording_duration_s: z.number().nullable().optional(),
-    zarr_status: z.enum(["pending", "ready", "failed"]).nullable().optional(),
+    zarr_status: z.enum(ZARR_STATUS_VALUES).nullable().optional(),
     zarr_verify_status: zarrVerifyStatusSchema.optional(),
+    /** Additive, phase 2 (#1294): the commit the catalog's `zarr_status`/
+     *  `zarr_verify_status` verdict was reached against -- present exactly
+     *  when the dataset has ever converted (null before a first conversion,
+     *  same nullability as `zarr_status` itself). */
+    zarr_source_commit: z.string().nullable().optional(),
+    /** Additive, phase 2 (#1294): store count backing `zarr_status`, the
+     *  same `>0` fact `has_zarr` on `search_datasets` tests for -- surfaced
+     *  here too so a caller does not have to re-derive "converted with data"
+     *  from `zarr_status` alone. */
+    zarr_store_count: z.number().int().nullable().optional(),
     cost_hint: describeDatasetCostHintSchema,
   })
   .passthrough();
