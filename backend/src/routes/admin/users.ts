@@ -976,7 +976,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
    * self-change guard (a demoted/re-kinded owner locking themselves out is
    * the same failure mode either way), but carries none of role's other
    * machinery: a kind change never revokes tokens, and there is no "last
-   * owner" analogue to protect.
+   * owner" analog to protect.
    *
    * Every refusal below (except "not found", the generic 404 every
    * username-keyed admin route shares) answers `{ error: <code>, message }`

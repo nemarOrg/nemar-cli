@@ -324,7 +324,7 @@ function getStore(): Conf<StoreSchema> {
 
   cachedStore = new Conf<StoreSchema>({
     projectName: "nemar",
-    // The config holds a live API key (epic #1272 phase 3): conf 13 honours
+    // The config holds a live API key (epic #1272 phase 3): conf 13 honors
     // this regardless of umask, writing through `atomically` (secureConfigFile
     // below migrates a file an OLDER build already wrote with conf's 0o666
     // default).

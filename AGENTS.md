@@ -102,7 +102,7 @@ The catalog purge removed one blast-radius vector; it did not remove the reason 
 `users.account_kind` (ADR 0048) is explicit on the seeded fixtures: `test-owner` and `test-admin`
 are `service` (operational, no human signs in to them directly); `test-user`, `test-pending`,
 `test-verified`, and `test-revoked` are `test` (a persona, not a real identity); `test-web` stays
-`person` — it is the shared web-QA account and has to reach the ORCID authorize page and the
+`person`: it is the shared web-QA account and has to reach the ORCID authorize page and the
 Settings key form the way a real person would.
 
 **A new daily cron job is production-only BY DEFAULT.** The dev cron is governed by a fail-safe
@@ -212,7 +212,7 @@ Four statuses, fixed meanings, one writer for upload access (**ADR 0040**):
 `pending` (email unverified) → `verified` (the base tier, no admin needed) →
 `approved` (an admin granted upload) → `revoked`.
 
-1. Sign up (CLI and web both: ORCID sign-in — the CLI's device flow, ADR 0047, mints the
+1. Sign up (CLI and web both: ORCID sign-in. The CLI's device flow, ADR 0047, mints the
    account through the same browser step web signup uses; `nemar auth signup` is that flow
    plus guided completion of whatever `profile_gaps` still names) → verify the email → `verified`
 2. `verified` needs no admin: browse, dashboard, settings, `nemar sandbox`.
@@ -226,8 +226,8 @@ Four statuses, fixed meanings, one writer for upload access (**ADR 0040**):
 4. Admin creates concept DOI → user can version with new DOIs
 
 `users.account_kind` is a separate axis from status: `person` (the default), `service`
-(operational automation — no human signs in to it directly, keys are minted only by an owner
-via `nemar admin keys create`), `test` (a human's secondary persona — signs in and uploads like
+(operational automation: no human signs in to it directly, keys are minted only by an owner
+via `nemar admin keys create`), `test` (a human's secondary persona: signs in and uploads like
 a person, but on production may only own `xx` sandbox datasets). `service`/`test` are exempt
 from the ORCID-verification profile gap; kinds are set only by an owner
 (`nemar admin kind <username> <kind>`), never inferred (**ADR 0048**).
@@ -260,7 +260,7 @@ Five routes: `POST /auth/device/start` (CLI mints a device code + user code),
 `POST /auth/device/token` (CLI polls for the key),
 and `GET /auth/device/lookup`, `POST /auth/device/confirm`, `POST /auth/device/deny`
 (the browser, behind the existing web session).
-`lookup`/`confirm`/`deny` never talk to ORCID directly —
+`lookup`/`confirm`/`deny` never talk to ORCID directly:
 they sit behind the same web session and identity checks every other cookie-authenticated route does (ADR 0022, 0043, 0044).
 **The key is minted only when the CLI collects it at `/token`, never when the browser confirms at `/confirm`** (ADR 0047):
 confirm records `user_id` and `status='confirmed'` only,
@@ -270,8 +270,8 @@ and a new sign-in never revokes another machine's key.
 `POST /auth/device/token` is the one route in this family deliberately OUTSIDE the strict `AUTH_PATHS` bucket:
 at a 5-second poll cadence,
 10 polls fit inside the strict bucket's 60-second window and the 11th trips it, about 50 seconds in,
-so the route rides the generic bucket instead — in practice `ip` (500/min),
-since the CLI holds no bearer until it has collected a key —
+so the route rides the generic bucket instead, in practice `ip` (500/min),
+since the CLI holds no bearer until it has collected a key,
 plus its own per-row 5-second floor (`slow_down`).
 Every timestamp this flow writes or compares is SQL-side (`datetime('now', ...)`, `julianday`),
 never a JS `toISOString()` value,

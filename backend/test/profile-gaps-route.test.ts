@@ -82,14 +82,14 @@ interface Overrides {
   orcid_verified?: number;
   status?: string;
   /** `member` by default. Kept for the bearer-path-only case below (an
-   *  unrecognised role still causes `authMiddleware` to 500 the credential);
+   *  unrecognized role still causes `authMiddleware` to 500 the credential);
    *  no longer read by the gap computation itself (epic #1272 phase 4,
    *  #1284; ADR 0048 -- `role` left the gap matrix entirely). */
   role?: string | null;
   /** `person` by default. `service`/`test` are exempt from the
    *  `orcid_verified` gap (#1271, ADR 0048), which is the only thing this
    *  column changes here. Closed by migration 0082's CHECK constraint, so
-   *  (unlike `role`) there is no seedable "unrecognised value" case. */
+   *  (unlike `role`) there is no seedable "unrecognized value" case. */
   account_kind?: "person" | "service" | "test";
   /** 0 by default, so the upload-access request is answerable at all: a granted
    *  account 409s before any precondition is read. */
@@ -400,7 +400,7 @@ describe("one row, three answers", () => {
     expect(answers.authMe).toEqual(["city"]);
   });
 
-  test("an unrecognised users.role no longer affects the ORCID gap either way", async () => {
+  test("an unrecognized users.role no longer affects the ORCID gap either way", async () => {
     // `users.role` has no CHECK constraint (migration 0009), so an unreadable
     // value is constructible; `users.account_kind` does (migration 0082), so
     // there is no equivalent "unreadable kind" row to seed. What this proves
@@ -454,7 +454,7 @@ describe("one row, three answers", () => {
       // Read straight off the row rather than imported, so the oracle does
       // not borrow the production narrowing it is checking. Unlike the old
       // `role` field, migration 0082's CHECK constraint means this is
-      // already closed -- there is no unrecognised value to fall back from.
+      // already closed -- there is no unrecognized value to fall back from.
       account_kind: row.account_kind,
       email_verified: row.email_verified === 1,
       orcid_verified: row.orcid_verified === 1,

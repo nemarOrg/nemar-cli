@@ -873,7 +873,7 @@ describe("nemar auth login: Ctrl-C during the poll", () => {
       const exitCode = await proc.exited;
 
       expect(exitCode).toBe(130);
-      expect(stdout + stderr).toContain("Sign-in cancelled. Run `nemar auth login` to try again.");
+      expect(stdout + stderr).toContain("Sign-in canceled. Run `nemar auth login` to try again.");
       expect(server.polls[0]?.aborted).toBe(true);
       expect(existsSync(configPath())).toBe(false);
       expect(stdout + stderr).not.toContain("Run again with --debug");

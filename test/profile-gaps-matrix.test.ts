@@ -255,8 +255,8 @@ describe("computeProfileGaps over every field combination", () => {
   test("service and test kinds are exempt from the ORCID row; nobody else is", () => {
     // Epic #1272 phase 4 (ADR 0048): a service account has no human signing
     // in to it, and a test persona is a human's secondary account -- neither
-    // is the identity a DOI would need to cite. An unrecognised or absent
-    // kind is NOT a licence to skip the check (fails closed).
+    // is the identity a DOI would need to cite. An unrecognized or absent
+    // kind is NOT a license to skip the check (fails closed).
     const unverified = { ...fullAccount(), orcid_verified: false };
     for (const account_kind of ["service", "test"] as const) {
       expect(profileGapFields({ ...unverified, account_kind })).toEqual([]);

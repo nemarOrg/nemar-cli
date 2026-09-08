@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS device_codes (
   -- retries on a collision (services/device-auth.ts).
   user_code TEXT NOT NULL UNIQUE,
   -- Client-supplied text (RFC 8628 section 5.4), shown back to the person
-  -- authorizing so they can recognise "did I just run this". The website
+  -- authorizing so they can recognize "did I just run this". The website
   -- (phase 2) must escape and frame it; this table stores it verbatim.
   machine_name TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending'

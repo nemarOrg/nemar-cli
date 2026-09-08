@@ -400,7 +400,7 @@ Examples:
           : result.users;
       // Same reasoning as the tier filter above, for `--kind` (epic #1272
       // phase 4, #1284 review; ADR 0048): `?kind=` is sent server-side too,
-      // but a backend that predates this phase ignores an unrecognised
+      // but a backend that predates this phase ignores an unrecognized
       // query param and would otherwise return every account unfiltered.
       // Re-narrowing here client-side means an older backend cannot produce
       // a listing mislabeled as "just the test accounts" when it is really
@@ -813,7 +813,7 @@ Examples:
 
     const confirmResult = await confirm(`Change ${username}'s account kind to '${kind}'?`, options);
     if (confirmResult !== "confirmed") {
-      console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Canceled"));
       return;
     }
 

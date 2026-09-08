@@ -118,7 +118,7 @@ since nothing was meaningfully replaced by revoking a key that was already dead.
 Left unbounded, a script that re-runs `nemar auth login` would otherwise mint a fresh row per invocation until the `MAX_LIVE_API_KEYS` cap (25).
 
 The CLI's config file now always holds a live API key rather than a password hash on every account it stores,
-so `getStore()` writes it `configFileMode: 0o600` (honoured by `conf` 13's `atomically` writer regardless of umask)
+so `getStore()` writes it `configFileMode: 0o600` (honored by `conf` 13's `atomically` writer regardless of umask)
 and migrates an existing file an older build left at `conf`'s default file mode (0o666, unrelated to the conf version) to 0600 on first use, non-Windows only.
 
 ## Alternatives considered

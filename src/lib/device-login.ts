@@ -106,7 +106,7 @@ export function describeDeviceOutcome(
       // Exit code 130 (128 + SIGINT), not a bare 1: `main().catch` and the
       // exit hook's bug-report nudge both special-case it.
       return {
-        lines: ["Sign-in cancelled. Run `nemar auth login` to try again."],
+        lines: ["Sign-in canceled. Run `nemar auth login` to try again."],
         exitCode: 130,
       };
     case "denied":
@@ -196,7 +196,7 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 
 /**
  * Poll `POST /auth/device/token` from a started device code until it
- * resolves, expires, is cancelled, or this machine gives up reaching NEMAR.
+ * resolves, expires, is canceled, or this machine gives up reaching NEMAR.
  *
  * A SIGINT handler is installed for exactly this stretch (`process.on`
  * before the loop, `process.off` in `finally`) and aborts both the sleep

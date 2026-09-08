@@ -197,7 +197,7 @@ export const PROFILE_GAP_MATRIX: Record<GapField, ProfileGapDefinition> = {
     // rule can see carries the column (migration 0050, NOT NULL DEFAULT 0) --
     // so reading `undefined` as verified would silently exempt exactly the
     // CLI-created rows the gap exists for. `service`/`test` kinds are exempt
-    // regardless; an absent or unrecognised kind is NOT, since it only means
+    // regardless; an absent or unrecognized kind is NOT, since it only means
     // the kind could not be read (ADR 0048: fails closed).
     isMissing: (a) => a.orcid_verified !== true && !isExemptKind(a.account_kind),
   },

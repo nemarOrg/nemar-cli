@@ -1,7 +1,7 @@
 /**
  * Pure-function unit tests for the device-flow login pieces that do not need
  * a subprocess or a network stand-in (epic #1272 phase 3, #1283; ADR 0047):
- * machine-name normalisation, the local poll deadline, and the accounts-map
+ * machine-name normalization, the local poll deadline, and the accounts-map
  * key a signed-in server user resolves to. The CLI-subprocess behavior these
  * feed into is covered end to end in test/auth-device-cli.test.ts.
  *
