@@ -22,7 +22,13 @@ import { readFileSync } from "node:fs";
 import type { Hono } from "hono";
 import type { ReadWindowOutput } from "../../shared/contract/mcp.js";
 import { READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES } from "../../shared/contract/mcp.js";
-import { exceedsChannelSamplesCap, roundToSignificantDigits } from "../src/mcp/taste.js";
+import {
+  MAX_TASTE_DECODE_SAMPLES,
+  exceedsChannelSamplesCap,
+  exceedsDecodeBudget,
+  maxTasteDurationS,
+  roundToSignificantDigits,
+} from "../src/mcp/taste.js";
 import { type McpRoutesDeps, createMcpRoutes } from "../src/routes/mcp.js";
 import { createZarrDataRoutes } from "../src/routes/zarr-data.js";
 import type { Bindings } from "../src/types/bindings.js";
@@ -55,6 +61,13 @@ const SHARD_ID = "nm099500";
 // carries full geometry, so neither refusal path had anything to exercise it.
 const NO_SHARD_GEOM_ID = "nm099501";
 const BAD_GEOM_ID = "nm099502";
+// A v3 index whose group is as WIDE and as FAST as the real outlier in the
+// catalog: on004696's `ieeg_1000hz`, 256 channels at 1000 Hz with
+// `chunk_samples` 4000. That shape passes every response-side taste cap and
+// then decodes 15.4 M int16 samples, about 31 MB retained, to return 500 KB.
+const WIDE_STORE_ID = "nm099503";
+const WIDE_N_CHANNELS = 256;
+const WIDE_RATE = 1000;
 const SHARD_COMMIT = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
 const SHARD_ZARR = "sub-synth/eeg/sub-synth_task-shardtest_eeg.zarr";
 const SHARD_GROUP = "eeg_250hz";
@@ -256,6 +269,35 @@ describe("read_window (route)", () => {
       }),
     );
 
+    // The decode-budget fixture. Geometry only -- no store objects are served
+    // for it, because the guard must refuse before any of them is fetched.
+    fixtureServer.files.set(
+      `${WIDE_STORE_ID}/zarr/index.json`,
+      encode({
+        ...rewrittenShardIndex,
+        dataset_id: WIDE_STORE_ID,
+        data_base: `${FIXTURE_PUBLIC_ORIGIN}/${WIDE_STORE_ID}/zarr/`,
+        contract_base: `${FIXTURE_PUBLIC_ORIGIN}/${WIDE_STORE_ID}/zarr/`,
+        stores: [
+          {
+            ...shardStore,
+            groups: [
+              {
+                ...shardGroup,
+                n_channels: WIDE_N_CHANNELS,
+                rate: WIDE_RATE,
+                source_rate_hz: WIDE_RATE,
+                n_samples: WIDE_RATE * 600,
+                duration_s: 600,
+                chunk_samples: 4000,
+                shard_samples: 300_000,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
     shard0Bytes = new Uint8Array(
       readFileSync(new URL("./fixtures/mcp/nm099500-shard-0.bin", import.meta.url)),
     );
@@ -335,6 +377,11 @@ describe("read_window (route)", () => {
       zarr_source_commit: SHARD_COMMIT,
     });
     insertDataset(BAD_GEOM_ID, {
+      zarr_status: "ready",
+      zarr_store_count: 1,
+      zarr_source_commit: SHARD_COMMIT,
+    });
+    insertDataset(WIDE_STORE_ID, {
       zarr_status: "ready",
       zarr_store_count: 1,
       zarr_source_commit: SHARD_COMMIT,
@@ -603,6 +650,56 @@ describe("read_window (route)", () => {
       expect(dataRequests.length).toBe(1);
     });
 
+    test("the DECODE budget refuses the on004696 shape before any store read", async () => {
+      // 256 channels at 1000 Hz for 60 s with ONE channel requested passes every
+      // response-side cap (60 <= 60, 1 <= 64, 60 <= 3840 channel-seconds,
+      // 60000 <= 65536 channel-samples) and then decodes 15.4 M samples, because
+      // a stored chunk holds every channel in the store. That is the gap this
+      // guard closes: the caps bounded the response, never the work.
+      fixtureServer.requestLog.length = 0;
+      const { body } = await callTool(app, env(db), 1, "read_window", {
+        dataset_id: WIDE_STORE_ID,
+        recording: SHARD_ZARR,
+        start_s: 0,
+        duration_s: 60,
+        channels: [0],
+        taste: true,
+      });
+      const text = errorTextOf(body);
+      expect(text).toContain("15360000");
+      expect(text).toContain(String(MAX_TASTE_DECODE_SAMPLES));
+      expect(text).toContain(`${WIDE_N_CHANNELS} channels in the store`);
+      // The refusal has to explain WHY fewer channels will not help, or the
+      // caller's obvious next move is the one that does not work.
+      expect(text).toContain("asking for fewer channels does not reduce this");
+
+      // Nothing was read but the index: no shard footer, no chunk.
+      const nonIndexRequests = fixtureServer.requestLog.filter(
+        (r) => !r.url.endsWith("index.json"),
+      );
+      expect(nonIndexRequests).toEqual([]);
+    });
+
+    test("the same store WITHIN the budget is not refused for the decode budget", async () => {
+      // The mirror: the guard must not be a blanket refusal of wide stores. At
+      // 4 s, 256 x 4000 = 1.02 M samples, comfortably under.
+      const { body } = await callTool(app, env(db), 2, "read_window", {
+        dataset_id: WIDE_STORE_ID,
+        recording: SHARD_ZARR,
+        start_s: 0,
+        duration_s: 4,
+        channels: [0],
+        taste: true,
+      });
+      // No store objects are served for this fixture, so this call fails at the
+      // FETCH, not at the budget -- which is exactly what proves the budget let
+      // it through.
+      const result = body.result as { isError?: boolean; content: Array<{ text: string }> };
+      const text = result.content.map((b) => b.text).join(" ");
+      expect(text).not.toContain(String(MAX_TASTE_DECODE_SAMPLES));
+      expect(text).not.toContain("channels in the store");
+    });
+
     test("the channel-samples cap rejects a request naming the rate and the two ways under it", async () => {
       const channels = Array.from({ length: 63 }, (_, i) => i);
       const { body } = await callTool(app, env(db), 1, "read_window", {
@@ -855,6 +952,49 @@ describe("read_window (route)", () => {
 // -------------------------------------------------------------------------
 // The one cap nothing in the schema enforces, asserted at its exact boundary
 // -------------------------------------------------------------------------
+
+describe("the decode budget (the store's channels, not the caller's)", () => {
+  test("boundary: exactly at the cap passes, one past it does not", () => {
+    const cap = 1000;
+    expect(exceedsDecodeBudget({ storeChannelCount: 10, windowSamples: 100, cap })).toBe(false);
+    expect(exceedsDecodeBudget({ storeChannelCount: 10, windowSamples: 101, cap })).toBe(true);
+  });
+
+  test("the caller's channel count is irrelevant: a stored chunk holds them all", () => {
+    // The whole reason this guard exists separately from the channel-samples
+    // cap. `channels: [0]` does not make the read one channel wide.
+    const windowSamples = WIDE_RATE * 60;
+    expect(
+      exceedsDecodeBudget({
+        storeChannelCount: WIDE_N_CHANNELS,
+        windowSamples,
+        cap: MAX_TASTE_DECODE_SAMPLES,
+      }),
+    ).toBe(true);
+    expect(WIDE_N_CHANNELS * windowSamples).toBe(15_360_000);
+  });
+
+  test("maxTasteDurationS names a duration that actually fits", () => {
+    const suggested = maxTasteDurationS({
+      storeChannelCount: WIDE_N_CHANNELS,
+      rate: WIDE_RATE,
+      cap: MAX_TASTE_DECODE_SAMPLES,
+    });
+    expect(suggested).toBeGreaterThan(0);
+    expect(
+      exceedsDecodeBudget({
+        storeChannelCount: WIDE_N_CHANNELS,
+        windowSamples: Math.floor(suggested * WIDE_RATE),
+        cap: MAX_TASTE_DECODE_SAMPLES,
+      }),
+    ).toBe(false);
+  });
+
+  test("a degenerate store (0 channels or 0 rate) suggests 0 rather than Infinity", () => {
+    expect(maxTasteDurationS({ storeChannelCount: 0, rate: 250, cap: 1000 })).toBe(0);
+    expect(maxTasteDurationS({ storeChannelCount: 4, rate: 0, cap: 1000 })).toBe(0);
+  });
+});
 
 describe("exceedsChannelSamplesCap", () => {
   const cap = READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES;

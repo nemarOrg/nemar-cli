@@ -94,10 +94,11 @@ sub-app (`createZarrDataRoutes`), whose own `isPublicDataset` gate calls
 `mcp-overview.test.ts`'s `nm5000xx`-band ids, which only ever reach tools that
 short-circuit before a real index.json fetch.
 
-USAGE. `uv run --with numcodecs python3 scripts/zarr/generate_mcp_test_fixture.py`
+USAGE. `uv run --with numcodecs --with pyarrow python3 scripts/zarr/generate_mcp_test_fixture.py`
 from the repo root. Writes
 `backend/test/fixtures/mcp/on003392-synthetic-meg-view3-c-0-0-0.bin`,
 `backend/test/fixtures/mcp/nm000329-synthetic-multichunk-view1-c-0-0-{0,1,2}.bin`,
+`backend/test/fixtures/mcp/oversized-events.parquet`,
 and the sharded level-0 fixture set above, printing each one's byte size.
 Re-run only if a fixture's geometry needs to change; the committed bytes are
 stable and this script is not part of the conversion pipeline.
@@ -386,6 +387,35 @@ def build_sharded_level0_fixture() -> None:
     print(f"wrote {zarr_json_path}")
 
 
+#: One row past `MAX_EVENTS_PARQUET_ROWS` in
+#: `backend/src/mcp/tools/get-events.ts`, so `get_events` must refuse to read it
+#: whole. Every column is a repeated constant, so dictionary encoding plus zstd
+#: brings 100,001 rows down to about 4.5 KB -- a real over-cap parquet that costs
+#: nothing to commit, rather than a 95 MB one like nm000104's.
+OVERSIZED_EVENTS_ROWS = 100_001
+
+
+def build_oversized_events_parquet() -> None:
+    """A parquet whose ROW COUNT crosses get_events' inline-read budget."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    n = OVERSIZED_EVENTS_ROWS
+    table = pa.table(
+        {
+            "store_path": pa.array(["sub-1/ses-0/eeg/x.zarr"] * n),
+            "group_name": pa.array(["eeg_250hz"] * n),
+            "onset_s": pa.array([1.5] * n, type=pa.float64()),
+            "duration_s": pa.array([0.5] * n, type=pa.float64()),
+            "sample_index": pa.array([375] * n, type=pa.int64()),
+            "trial_type": pa.array(["stim"] * n),
+        }
+    )
+    out = FIXTURES_DIR / "oversized-events.parquet"
+    pq.write_table(table, out, compression="zstd")
+    print(f"wrote {out} ({out.stat().st_size} bytes, {n} rows)")
+
+
 def main() -> None:
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
     # Byte-shuffle, zstd, one block per chunk (blocksize=0 lets c-blosc pick
@@ -418,6 +448,7 @@ def main() -> None:
             f"{chunk_data.shape}, {valid} valid columns)"
         )
 
+    build_oversized_events_parquet()
     build_sharded_level0_fixture()
 
 

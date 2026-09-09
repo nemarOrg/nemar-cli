@@ -175,3 +175,54 @@ export function exceedsChannelSamplesCap(opts: {
 }): boolean {
   return opts.channelCount * opts.windowSamples > opts.cap;
 }
+
+/**
+ * Budget on DECODED samples, expressed in the store's own channel count rather
+ * than the caller's.
+ *
+ * Every cap up to this point bounds the RESPONSE: `duration_s <= 60`,
+ * `channels.length <= 64`, their product `<= 3840` channel-seconds, and
+ * `channels.length * windowSamples <= 65536`. None of them bounds the DECODE,
+ * because a chunk holds every channel in the store: cost is
+ * `n_channels(store) * windowSamples` regardless of how few channels were asked
+ * for. `sharding.ts` says exactly this in prose ("Cost is driven by DURATION ...
+ * and the store's own channel count, never by how many channels the caller
+ * asked for") and no guard was added for it.
+ *
+ * The worst legal request in the catalog as of 2026-09-09, found by scanning all
+ * 108 meg/ieeg/emg indexes: on004696 group `ieeg_1000hz`, 256 channels at
+ * 1000 Hz with `chunk_samples` 4000. `{taste: true, channels: [0],
+ * duration_s: 60}` passes all four caps (60 <= 60, 1 <= 64, 60 <= 3840,
+ * 60000 <= 65536) and then decodes 15 chunks of 256 x 4000 = 15.4 M int16
+ * samples, about 31 MB retained until assembly, plus the compressed bytes
+ * fetched, to return roughly 500 KB of JSON. The 415-channel store in the
+ * archive would make it about 50 MB. The 128 MB limit is per ISOLATE, not per
+ * request, so two concurrent tastes take out every unrelated request in flight
+ * with them.
+ *
+ * 4 M samples is about 8 MB of int16 and is far more than a "taste" needs. Both
+ * inputs are known before any fetch, so this refuses rather than truncating,
+ * which is the same posture as every other cap here.
+ */
+export const MAX_TASTE_DECODE_SAMPLES = 4_000_000;
+
+export function exceedsDecodeBudget(opts: {
+  /** The STORE's channel count, not `channels.length`. */
+  storeChannelCount: number;
+  windowSamples: number;
+  cap: number;
+}): boolean {
+  return opts.storeChannelCount * opts.windowSamples > opts.cap;
+}
+
+/** The largest `duration_s` that would fit the decode budget for this store, so
+ *  a refusal can name a number the caller can actually use. Floored at 0. */
+export function maxTasteDurationS(opts: {
+  storeChannelCount: number;
+  rate: number;
+  cap: number;
+}): number {
+  if (opts.storeChannelCount <= 0 || opts.rate <= 0) return 0;
+  const samples = Math.floor(opts.cap / opts.storeChannelCount);
+  return Math.max(0, Math.floor((samples / opts.rate) * 10) / 10);
+}

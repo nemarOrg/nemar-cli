@@ -115,9 +115,12 @@ import {
 import {
   type DecodedSegment,
   type FilledRange,
+  MAX_TASTE_DECODE_SAMPLES,
   TASTE_SIGNIFICANT_DIGITS,
   assembleTasteValues,
   exceedsChannelSamplesCap,
+  exceedsDecodeBudget,
+  maxTasteDurationS,
 } from "../taste.js";
 import type { RecordingToolDeps, ToolOutcome } from "../tool-types.js";
 
@@ -241,6 +244,30 @@ function channelSamplesCapResult(opts: {
   const product = channelCount * windowSamples;
   return toolError(
     `read_window taste for group "${groupName}" of recording "${recording}" in dataset "${datasetId}" would decode ${product} channel-samples (${channelCount} channels x ${windowSamples} samples at ${rate} Hz), over the ${READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES} cap. Ask for fewer channels or a shorter window, or omit taste for a recipe.`,
+  );
+}
+
+/** The decode budget's refusal. Deliberately worded around the STORE's channel
+ *  count, because that is the number the caller cannot see from its own request
+ *  and would otherwise find inexplicable: asking for one channel does not make
+ *  the read small, since a chunk holds every channel in the store. */
+function decodeBudgetResult(opts: {
+  datasetId: string;
+  recording: string;
+  groupName: string;
+  storeChannelCount: number;
+  windowSamples: number;
+  rate: number;
+}): CallToolResult {
+  const { datasetId, recording, groupName, storeChannelCount, windowSamples, rate } = opts;
+  const product = storeChannelCount * windowSamples;
+  const maxDuration = maxTasteDurationS({
+    storeChannelCount,
+    rate,
+    cap: MAX_TASTE_DECODE_SAMPLES,
+  });
+  return toolError(
+    `read_window taste for group "${groupName}" of recording "${recording}" in dataset "${datasetId}" would DECODE ${product} samples (${storeChannelCount} channels in the store x ${windowSamples} samples at ${rate} Hz), over the ${MAX_TASTE_DECODE_SAMPLES} limit. A stored chunk holds every channel, so asking for fewer channels does not reduce this; shorten the window to about ${maxDuration} s or less, or omit taste for a recipe.`,
   );
 }
 
@@ -684,6 +711,30 @@ export async function readWindowTool(
         recording: args.recording,
         groupName: targetGroup.name,
         channelCount: channels.length,
+        windowSamples,
+        rate,
+      }),
+    };
+  }
+
+  // The decode budget, checked before any fetch. Distinct from the
+  // channel-samples cap above: that one bounds the RESPONSE (the caller's
+  // channels), this one bounds the WORK (the store's channels), and only the
+  // second is what the isolate's memory actually sees.
+  const storeChannelCount = targetGroup.n_channels ?? 0;
+  if (
+    exceedsDecodeBudget({
+      storeChannelCount,
+      windowSamples,
+      cap: MAX_TASTE_DECODE_SAMPLES,
+    })
+  ) {
+    return {
+      result: decodeBudgetResult({
+        datasetId: args.dataset_id,
+        recording: args.recording,
+        groupName: targetGroup.name,
+        storeChannelCount,
         windowSamples,
         rate,
       }),

@@ -211,6 +211,44 @@ interface EventsStoresSummaryEntry {
  *  a miss. */
 export const MAX_STORE_FANOUT_ENTRIES = 2000;
 
+/**
+ * Upper bounds on the `events.parquet` this tool will read WHOLE.
+ *
+ * The fan-out bound above reasoned correctly that "store counts in the live
+ * catalog are not bounded by anything this code controls" and then bounded only
+ * the cache WRITES, not the read that precedes them. The read is the bigger
+ * number. Measured 2026-09-09 against the live bucket: 285 public datasets
+ * publish an `events.parquet`; 13 are over 5 MB, 6 over 20 MB, and nm000104 is
+ * 99,863,763 bytes with 5,411,570 rows across 1131 stores.
+ *
+ * So `get_events(dataset_id: "nm000104", limit: 1)` -- anonymous, no auth --
+ * used to pull 95 MB through the Worker, zstd-decompress it in pure JS,
+ * materialize 5.4 M row objects, run 5.4 M zod parses, and only then apply
+ * `limit`/`offset`. That cannot fit in a 128 MB isolate, and the failure
+ * RE-AMPLIFIES: the isolate dies before `waitUntil` runs, so nothing is cached,
+ * so the next attempt repeats the whole read. At the anonymous 500/60s IP
+ * bucket that is tens of GB/min of S3 egress from one IP with zero cache
+ * progress.
+ *
+ * Refusing is the right answer rather than paging, because the rows for one
+ * store are not addressable without reading the file: `parquetReadObjects` can
+ * take `rowStart`/`rowEnd`, but a row's `store_path` is only known after it is
+ * read. And refusing costs the caller little: `index.json` publishes
+ * `events_parquet` as a PUBLIC URL, so a client that genuinely wants 5.4 M rows
+ * can fetch and query the file itself. Handing over a URL instead of streaming
+ * bytes is exactly the recipe-first posture ADR 0049 sets for signal data.
+ *
+ * Both bounds are checked from `parquetMetadataAsync`, which this path already
+ * fetches before the full read, so a refusal costs one footer read.
+ */
+export const MAX_EVENTS_PARQUET_BYTES = 16 * 1024 * 1024;
+export const MAX_EVENTS_PARQUET_ROWS = 100_000;
+
+/** Thrown by {@link readWholeEventsParquet} when a bound is exceeded. The
+ *  caller already turns a throw from this path into a typed tool error, so this
+ *  rides that seam rather than adding a second failure channel. */
+export class EventsParquetTooLargeError extends Error {}
+
 const eventRowsProjectionSchema = z.array(eventRowSchema);
 const eventsStoresSummarySchema = z.array(
   z.object({ zarr: z.string(), rowCount: z.number().int().nonnegative() }),
@@ -238,6 +276,18 @@ async function readWholeEventsParquet(
     requestInit: { headers: { "User-Agent": "nemar-mcp" } },
   });
   const metadata = await parquetMetadataAsync(file);
+
+  // Bounds BEFORE the read, from the footer this path already had to fetch.
+  // See MAX_EVENTS_PARQUET_BYTES for the measurements and why refusing beats
+  // paging here.
+  const rowCount = Number(metadata.num_rows ?? 0);
+  const byteLength = file.byteLength;
+  if (byteLength > MAX_EVENTS_PARQUET_BYTES || rowCount > MAX_EVENTS_PARQUET_ROWS) {
+    throw new EventsParquetTooLargeError(
+      `dataset "${datasetId}"'s events.parquet is too large for this server to read inline: ${byteLength} bytes and ${rowCount} rows, over the ${MAX_EVENTS_PARQUET_BYTES}-byte / ${MAX_EVENTS_PARQUET_ROWS}-row limit. The file is public at ${eventsParquetUrl} -- read it directly (it is one row per event and channel group, with a store_path column) rather than through this tool.`,
+    );
+  }
+
   // No `columns` filter: every column (the eight named on eventRowSchema
   // plus subject/session/task/run and any x_-prefixed extra) is wanted, so
   // `.passthrough()` on the wire schema has something real to pass through.
@@ -570,6 +620,12 @@ export async function getEventsTool(
         projection.recordings.map((r) => r.zarr),
       );
     } catch (err) {
+      // A size refusal is a deliberate decline with a workaround in it, not a
+      // read failure, so it says so in its own words rather than borrowing
+      // "could not read", which would read like an outage.
+      if (err instanceof EventsParquetTooLargeError) {
+        return { result: toolError(`get_events declines this request: ${err.message}`) };
+      }
       return {
         result: parquetReadFailedResult(
           args.dataset_id,

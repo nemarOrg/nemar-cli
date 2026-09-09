@@ -58,6 +58,10 @@ const PENDING_ID = "nm500601";
 // its own first store appended to cross the bound. The live catalog's
 // largest is nm000281 at 25,253 stores, so this shape is not hypothetical.
 const FANOUT_ID = "nm000330";
+// A dataset whose events.parquet crosses get_events' inline-read budget. The
+// real outlier is nm000104: 99,863,763 bytes and 5,411,570 rows across 1131
+// stores, which one anonymous call used to pull through the Worker whole.
+const OVERSIZED_EVENTS_ID = "nm000331";
 const FANOUT_EXTRA_STORES = MAX_STORE_FANOUT_ENTRIES + 1;
 
 // The real on003392 MEG SSS store (`derived: true`, real `sss`), with its
@@ -234,6 +238,22 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
     );
     fixtureServer.files.set(`${V3_ID}/zarr/events.parquet`, parquetBytes);
 
+    // 100,001 rows, one past MAX_EVENTS_PARQUET_ROWS, in 4.5 KB (every column a
+    // repeated constant, so dictionary encoding plus zstd collapses it). A real
+    // over-cap parquet that costs nothing to commit.
+    const oversizedIndex = {
+      ...rewrittenV3Index,
+      dataset_id: OVERSIZED_EVENTS_ID,
+      events_parquet: `${FIXTURE_PUBLIC_ORIGIN}/${OVERSIZED_EVENTS_ID}/zarr/events.parquet`,
+    };
+    fixtureServer.files.set(`${OVERSIZED_EVENTS_ID}/zarr/index.json`, encode(oversizedIndex));
+    fixtureServer.files.set(
+      `${OVERSIZED_EVENTS_ID}/zarr/events.parquet`,
+      new Uint8Array(
+        readFileSync(new URL("./fixtures/mcp/oversized-events.parquet", import.meta.url)),
+      ),
+    );
+
     const eventsTsv = new TextEncoder().encode(
       readFileSync(
         new URL("./fixtures/mcp/nm000111-sub-I003-events.tsv", import.meta.url),
@@ -398,6 +418,11 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
     insertDataset(FANOUT_ID, {
       zarr_status: "ready",
       zarr_store_count: FANOUT_EXTRA_STORES,
+      zarr_source_commit: V3_COMMIT,
+    });
+    insertDataset(OVERSIZED_EVENTS_ID, {
+      zarr_status: "ready",
+      zarr_store_count: (nm000329IndexRaw as { store_count: number }).store_count,
       zarr_source_commit: V3_COMMIT,
     });
     insertDataset(MEG_ID, {
@@ -900,6 +925,28 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
       expect(await cache.match(eventsKey(FANOUT_ID, neighbour))).toBeUndefined();
       // One entry regardless of store count, so it stays complete.
       expect(await cache.match(storesKey(FANOUT_ID))).toBeDefined();
+    });
+
+    test("an events.parquet over the row budget is DECLINED, naming the public URL", async () => {
+      // The bug: get_events read the whole file before applying limit/offset, so
+      // `limit: 1` against nm000104 pulled 95 MB through the Worker,
+      // zstd-decompressed it in pure JS, materialized 5.4 M row objects and ran
+      // 5.4 M zod parses. That cannot fit a 128 MB isolate, and the failure
+      // re-amplified: the isolate died before waitUntil ran, so nothing cached,
+      // so the next call repeated the whole read.
+      const { body } = await callTool(app, env(db), 1, "get_events", {
+        dataset_id: OVERSIZED_EVENTS_ID,
+        recording: (nm000329IndexRaw as { stores: Array<{ zarr: string }> }).stores[0].zarr,
+        limit: 1,
+      });
+      const text = errorTextOf(body);
+      expect(text).toContain("declines");
+      expect(text).toContain("100001 rows");
+      // The remedy travels with the refusal: the file is public, so a client
+      // that really wants every row can read it directly. Handing over a URL
+      // instead of streaming bytes is the recipe-first posture (ADR 0049).
+      expect(text).toContain("events.parquet");
+      expect(text).toContain("read it directly");
     });
 
     test("a re-conversion at an UNCHANGED commit does not serve the old entry", async () => {
