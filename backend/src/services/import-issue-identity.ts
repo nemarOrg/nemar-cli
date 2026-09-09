@@ -24,3 +24,17 @@ export const IMPORT_FAILURE_ISSUES_REPO = "nemarDatasets/.github";
 export function importFailureIssueTitle(datasetId: string, sourceId: string): string {
   return `Import failure: ${datasetId} (${sourceId})`;
 }
+
+/**
+ * Best-effort inverse: the dataset id an issue title appears to be about.
+ *
+ * Only ever used to FIND the candidate `import_jobs` row to check. It is
+ * deliberately not the authority on whether an issue is machine-filed -- that
+ * decision rebuilds the title from the D1 row via
+ * {@link importFailureIssueTitle} and compares, so a hand-written title that
+ * merely resembles the format cannot pass by parsing alone.
+ */
+export function parseImportFailureIssueTitle(title: string): string | null {
+  const match = /^Import failure: (on\d{6}) \(ds\d{6}\)$/.exec(title);
+  return match?.[1] ?? null;
+}
