@@ -89,7 +89,14 @@ export type {
   TreeEntry,
   TreeFile,
 } from "./github/contents";
-export { addIssueComment, createIssue, findOpenIssueByTitle } from "./github/issues";
+export {
+  addIssueComment,
+  closeIssue,
+  createIssue,
+  issueLabelNames,
+  listOpenIssuesByLabel,
+  setIssueLabels,
+} from "./github/issues";
 export type { GitHubIssue } from "./github/issues";
 export {
   buildBidsValidationDispatch,

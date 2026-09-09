@@ -47,6 +47,7 @@ import {
   type DoctorScanResponse,
   type EmailPreferences,
   type HedSweepBatchResponse,
+  type ImportIssueTriageResponse,
   type RecordingStatsSweepBatchResponse,
   type ReindexBulkOptions,
   type ReindexBulkResponse,
@@ -90,6 +91,7 @@ import {
   getUserDuplicates,
   hedSweep,
   hedSweepReset,
+  importIssueTriage,
   listKeysFor,
   listUsers,
   publishDataset,
@@ -6929,6 +6931,190 @@ backfillNamesCommand
   });
 
 adminCommand.addCommand(backfillNamesCommand);
+
+// ============================================================================
+// Import-failure issue triage (#1310, epic #1306)
+// ============================================================================
+
+/** The shape the route puts under `details` on its 502, narrowed rather than cast
+ *  so a body that drifted renders nothing instead of printing `undefined`. */
+function isTriageErrorList(
+  value: unknown,
+): value is { errors: ImportIssueTriageResponse["errors"] } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Array.isArray((value as { errors?: unknown }).errors)
+  );
+}
+
+const importIssueTriageCommand = new Command("import-issue-triage").description(
+  "Close recovered import-failure issues and retire stale cause labels (dry run by default)",
+);
+
+importIssueTriageCommand
+  .option("--apply", "Perform the changes (without this flag, only report what would change)")
+  .option("--limit <n>", "Issues per batch (server clamps to [1,30])", "15")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { apply?: boolean; limit?: string; json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    // Refused rather than coerced. `parseInt(...) || 15` turned `--limit abc` and
+    // `--limit 0` into 15 and `--limit -5` into a server-clamped 1, silently: the
+    // operator asked for something and got something else, on a command whose
+    // whole point is to bound how many issues it touches.
+    // `Number`, not `Number.parseInt`: parseInt stops at the first non-digit and
+    // returns what it has, so it still silently coerced `15abc` to 15, `3.9` to 3
+    // and `1e9` to 1 -- the same substitution this guard exists to refuse.
+    const limitRaw = options.limit ?? "15";
+    const limit = limitRaw.trim() === "" ? Number.NaN : Number(limitRaw);
+    if (!Number.isInteger(limit) || limit < 1) {
+      console.error(
+        chalk.red(`Invalid --limit ${JSON.stringify(limitRaw)}: expected an integer >= 1.`),
+      );
+      process.exitCode = 1;
+      return;
+    }
+
+    const apply = options.apply === true;
+    const spinner = ora(
+      apply ? "Triaging import-failure issues..." : "Checking import-failure issues...",
+    ).start();
+
+    let res: ImportIssueTriageResponse;
+    try {
+      res = await importIssueTriage({ apply, limit });
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Import-failure issue triage failed");
+      console.error(chalk.red(errorDetail(err)));
+      // The 502 "every attempt failed" body carries the per-issue causes, and the
+      // message tells the reader to see errors[] -- so dropping the body here left
+      // a count with no reasons in the one case where the reasons ARE the point.
+      // `request()` keeps the body on the error, so recover it.
+      const details = err instanceof ApiError ? err.details : undefined;
+      const errors = isTriageErrorList(details) ? details.errors : [];
+      if (options.json) {
+        // A scripted caller must still get parseable stdout on the interesting
+        // outcome; without this the --json contract holds only on success.
+        console.log(
+          JSON.stringify(
+            err instanceof ApiError ? (err.rawBody ?? { errors }) : { errors },
+            null,
+            2,
+          ),
+        );
+      } else {
+        for (const e of errors) {
+          console.error(
+            `${chalk.red("ERROR".padEnd(15))} #${e.issue} ${e.dataset_id ?? ""}  ${e.stage}: ${e.error}`,
+          );
+        }
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    // Computed before the --json branch returns so a scripted caller sees the
+    // same verdict as someone reading the summary. A per-issue error leaves
+    // that issue untouched and still a candidate; it is not fatal, but it must
+    // not read as a clean run.
+    if (res.errors.length > 0) process.exitCode = 1;
+
+    if (options.json) {
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    console.log();
+    if (!res.applied) {
+      console.log(chalk.yellow("DRY RUN \u2014 nothing was written. Re-run with --apply."));
+    }
+    for (const e of res.plan) {
+      // From the entry, not from res.applied: an applied run whose close failed
+      // must not print CLOSE as though it had happened.
+      const verb = e.failed ? "FAILED " : res.applied ? "" : "WOULD ";
+      const who = `#${e.issueNumber} ${e.datasetId ?? "(unknown)"}`;
+      if (e.kind === "close") {
+        const label = `${verb}CLOSE`.padEnd(15);
+        console.log(
+          `${e.failed ? chalk.red(label) : chalk.green(label)} ${who}  ${chalk.dim(e.reason)}`,
+        );
+      } else if (e.kind === "relabel") {
+        const label = `${verb}RELABEL`.padEnd(15);
+        console.log(
+          `${e.failed ? chalk.red(label) : chalk.yellow(label)} ${who}  ${chalk.dim(e.reason)}`,
+        );
+      } else {
+        console.log(`${chalk.dim("KEEP".padEnd(15))} ${who}  ${chalk.dim(e.reason)}`);
+      }
+    }
+    for (const r of res.rollups) {
+      // From the rollup's own outcome, not from res.applied: a release whose
+      // close failed must not print RELEASE.
+      const verb =
+        r.outcome === "failed"
+          ? "FAILED RELEASE"
+          : r.outcome === "released"
+            ? "RELEASE"
+            : res.mode === "per-dataset"
+              ? "WOULD RELEASE"
+              : "ROLLUP";
+      const label = verb.padEnd(15);
+      console.log(
+        `${r.outcome === "failed" ? chalk.red(label) : chalk.magenta(label)} #${r.number} ${chalk.dim(r.title)}`,
+      );
+    }
+    for (const e of res.errors) {
+      console.log(
+        `${chalk.red("ERROR".padEnd(15))} #${e.issue} ${e.dataset_id ?? ""}  ${e.stage}: ${e.error}`,
+      );
+    }
+
+    console.log();
+    console.log(
+      chalk.cyan(
+        `open=${res.openIssues} mode=${res.mode} examined=${res.examined} ` +
+          `attempted=${res.attempted} ` +
+          `${res.applied ? "closed" : "would_close"}=${res.closed} ` +
+          `${res.applied ? "relabelled" : "would_relabel"}=${res.relabelled} ` +
+          `kept=${res.kept} errors=${res.errors.length} remaining=${res.remaining}`,
+      ),
+    );
+    if (res.remaining > 0) {
+      console.log(
+        chalk.dim(
+          `  ${res.remaining} candidate(s) outside this run's window; the window rotates daily.`,
+        ),
+      );
+    }
+    if (res.mode === "rollup") {
+      console.log(
+        chalk.dim(
+          "  Rollup mode: new failures with a cause that already has a rollup join it instead of opening their own issue.",
+        ),
+      );
+    }
+    if (res.rollupsReleased > 0) {
+      console.log(
+        chalk.dim(
+          `  ${res.applied ? "Released" : "Would release"} ${res.rollupsReleased} rollup(s): the backlog has drained, so per-dataset filing resumes.`,
+        ),
+      );
+    }
+    if (res.audit_failed) {
+      console.log(
+        chalk.yellow(
+          `  Changes were applied but the audit row failed to write: ${res.audit_failed}`,
+        ),
+      );
+    }
+    if (!res.applied && (res.closed > 0 || res.relabelled > 0 || res.rollupsReleased > 0)) {
+      console.log(chalk.dim("  Re-run with --apply to perform these changes."));
+    }
+  });
+
+adminCommand.addCommand(importIssueTriageCommand);
 
 // ============================================================================
 // Username backfill (ADR 0042, #1253, epic #1250)

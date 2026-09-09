@@ -1,5 +1,6 @@
 /**
- * GitHub Issues API: list-by-label (used for dedup lookup), create, comment.
+ * GitHub Issues API: list-by-label (for dedup lookup and for the triage sweep),
+ * create, comment, close, and label replacement.
  *
  * First consumer is the import-failure auto-filer (services/import-failure-issue.ts,
  * epic #967 follow-up), which files issues on the central `nemarDatasets/.github`
@@ -8,6 +9,17 @@
  * behind writes (eventual consistency), and the import-failure label's volume
  * is small enough that paging the label listing is cheap and immediately
  * consistent.
+ *
+ * The endpoint returns pull requests as well as issues -- every PR is an issue
+ * to this API -- but only if they carry the requested label, which none of the
+ * labels here is ever applied to a PR. `listOpenIssuesByLabel` is therefore not
+ * filtered on `pull_request`; a caller using a label a human also puts on PRs
+ * would need to.
+ *
+ * `closeIssue`/`setIssueLabels` arrived with epic #1306 phase 2, which gave the
+ * tracker a way to drain: before them nothing could close an issue or retire a
+ * stale cause label, so issues accumulated and none was ever closed (ADR 0050
+ * records the count and the date it was measured).
  */
 
 import { GITHUB_API, ghHeaders } from "./shared";
@@ -18,25 +30,42 @@ export interface GitHubIssue {
   html_url: string;
   state: string;
   title: string;
+  /** Present on list/get responses. Optional because callers that only need the
+   *  number or title must not be forced to care, and because a hand-built
+   *  fixture should not have to invent one. */
+  labels?: { name: string }[];
+}
+
+/** The label names on an issue, tolerating a response that omitted them. */
+export function issueLabelNames(issue: GitHubIssue): string[] {
+  return (issue.labels ?? []).map((l) => l.name);
 }
 
 /**
- * Find an OPEN issue in `repo` carrying `label` whose title exactly matches
- * `title`. Pages through the label listing (state=open) until a match is
- * found or the listing is exhausted. Returns null on no match.
+ * Every OPEN issue in `repo` carrying `label`, paged.
+ *
+ * This module's only listing primitive -- `services/enrich-dataset.ts` has its
+ * own uncapped inline `fetch` for the `metadata` label, so the page cap below is
+ * not a property of issue listing in general. A `findOpenIssueByTitle` used to
+ * sit beside this one, stopping early at a title match; epic #1306 phase 2
+ * removed it, because every caller now needs the whole set anyway (to count it
+ * and decide the filing mode) and a title match over the returned array is one
+ * line.
+ *
+ * Pagination is capped, so a backlog of open labelled issues cannot turn a
+ * lookup into an unbounded scan -- each page is a GitHub subrequest. 20 pages x
+ * 100 = 2000 open issues of one label, far beyond any realistic backlog.
+ * Hitting the cap THROWS rather than reporting what it has: a truncated listing
+ * would undercount, which could wrongly release the rollup mode or miss an
+ * existing issue and duplicate it. Refusing to answer is the honest failure.
  */
-export async function findOpenIssueByTitle(
+export async function listOpenIssuesByLabel(
   repo: string,
   label: string,
-  title: string,
   pat: string,
-): Promise<GitHubIssue | null> {
-  // Cap pagination: a growing backlog of open (un-triaged) labeled issues must
-  // not turn every dedup lookup into an unbounded scan -- each page is a GitHub
-  // subrequest. 20 pages x 100 = 2000 open issues of one label, far beyond any
-  // realistic backlog. If no match within the cap, treat as not-found; the
-  // worst case is a duplicate issue, which is preferable to an unbounded scan.
+): Promise<GitHubIssue[]> {
   const MAX_PAGES = 20;
+  const all: GitHubIssue[] = [];
   for (let page = 1; page <= MAX_PAGES; page++) {
     const response = await githubFetchWithRetry(
       `${GITHUB_API()}/repos/${repo}/issues?state=open&labels=${encodeURIComponent(label)}&per_page=100&page=${page}`,
@@ -47,14 +76,67 @@ export async function findOpenIssueByTitle(
       throw new Error(`Failed to list issues on ${repo}: HTTP ${response.status} - ${error}`);
     }
     const issues = await response.json<GitHubIssue[]>();
-    const match = issues.find((issue) => issue.title === title);
-    if (match) return match;
-    if (issues.length < 100) return null; // last page
+    all.push(...issues);
+    if (issues.length < 100) return all;
   }
-  console.warn(
-    `[github/issues] findOpenIssueByTitle hit MAX_PAGES=${MAX_PAGES} on ${repo} for "${title}"; treating as not-found (may create a duplicate)`,
+  throw new Error(
+    `Listing ${label} issues on ${repo} exceeded ${MAX_PAGES} pages; refusing to report a truncated set`,
   );
-  return null;
+}
+
+/**
+ * Close an issue. Idempotent on GitHub's side: closing a closed issue is a no-op
+ * 200.
+ *
+ * That is a property of THIS call, not of a caller's whole sequence --
+ * `addIssueComment` is not idempotent, so a caller that pairs the two has to
+ * order them so a retry cannot duplicate the comment. `applyOneIssue` in
+ * services/import-issue-sweep.ts closes first for exactly that reason.
+ */
+export async function closeIssue(repo: string, issueNumber: number, pat: string): Promise<void> {
+  const response = await githubFetchWithRetry(
+    `${GITHUB_API()}/repos/${repo}/issues/${issueNumber}`,
+    {
+      method: "PATCH",
+      headers: { ...ghHeaders(pat), "Content-Type": "application/json" },
+      body: JSON.stringify({ state: "closed" }),
+    },
+  );
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to close ${repo}#${issueNumber}: HTTP ${response.status} - ${error}`);
+  }
+}
+
+/**
+ * REPLACE an issue's labels with `labels`.
+ *
+ * A full replace, not an add: the caller decides the whole set, because
+ * relabelling means retiring the old cause label as well as applying the new
+ * one. Callers must therefore include every label they intend to keep --
+ * `computeLabelUpdate` in services/import-issue-accrual.ts is what builds that
+ * set, preserving labels it does not own.
+ */
+export async function setIssueLabels(
+  repo: string,
+  issueNumber: number,
+  labels: string[],
+  pat: string,
+): Promise<void> {
+  const response = await githubFetchWithRetry(
+    `${GITHUB_API()}/repos/${repo}/issues/${issueNumber}/labels`,
+    {
+      method: "PUT",
+      headers: { ...ghHeaders(pat), "Content-Type": "application/json" },
+      body: JSON.stringify({ labels }),
+    },
+  );
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(
+      `Failed to set labels on ${repo}#${issueNumber}: HTTP ${response.status} - ${error}`,
+    );
+  }
 }
 
 /** Create an issue on `repo` with `labels`. */

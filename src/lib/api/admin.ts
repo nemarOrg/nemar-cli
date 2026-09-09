@@ -1576,6 +1576,78 @@ export async function zarrFidelitySweep(options?: {
 }
 
 // ============================================================================
+// Import-failure issue triage (#1310, epic #1306)
+// ============================================================================
+
+export interface ImportIssueTriageEntry {
+  issueNumber: number;
+  datasetId: string | null;
+  title: string;
+  kind: "close" | "relabel" | "keep";
+  reason: string;
+  labels?: string[];
+  /** The action was attempted and did not land. Excluded from the counts. */
+  failed?: boolean;
+}
+
+/** One batch of the import-failure issue triage
+ *  (`POST /admin/imports/issue-triage`). `applied` is false on a dry run, which
+ *  is the default: nothing is written to GitHub unless `--apply` is passed. */
+export interface ImportIssueTriageResponse {
+  applied: boolean;
+  /** Open per-dataset issues (rollups excluded). */
+  openIssues: number;
+  /** Aggregate filing mode across causes. Not per-cause: the filer asks the same
+   *  question of ONE cause's rollup, so inside the hysteresis band a cause with
+   *  no rollup of its own still files per-dataset. */
+  mode: "per-dataset" | "rollup";
+  /** Open per-cause rollup issues seen this run. `outcome` is set only on an
+   *  applied run that tried to release them. */
+  rollups: { number: number; title: string; outcome?: "released" | "failed" }[];
+  /** Rollups closed (or, on a dry run, that would be) because the mode released. */
+  rollupsReleased: number;
+  examined: number;
+  /** WRITES tried: non-keep entries plus rollup releases, on an applied run only.
+   *  Zero on a dry run, which attempts nothing. Decision failures are not
+   *  attempts; they appear in `errors` with `stage: "plan"`. */
+  attempted: number;
+  closed: number;
+  relabelled: number;
+  kept: number;
+  plan: ImportIssueTriageEntry[];
+  errors: {
+    issue: number;
+    dataset_id: string | null;
+    /** `comment` means the state change LANDED and only its comment failed. */
+    stage: "plan" | "apply" | "comment";
+    error: string;
+  }[];
+  /** Candidates outside this run's window; the window rotates daily. */
+  remaining: number;
+  ok: boolean;
+  /** Present when the run applied changes but its audit row could not be written.
+   *  The changes still happened -- this is not a failure of the run. */
+  audit_failed?: string;
+}
+
+/** Triage the open import-failure issues (server default 15 per run, max 30).
+ *  Dry run unless `apply` is set. */
+export async function importIssueTriage(options?: {
+  limit?: number;
+  apply?: boolean;
+}): Promise<ImportIssueTriageResponse> {
+  const params = new URLSearchParams();
+  if (options?.limit != null) params.set("limit", String(options.limit));
+  if (options?.apply) params.set("apply", "1");
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return request<ImportIssueTriageResponse>(
+    `/admin/imports/issue-triage${query}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+// ============================================================================
 // Researcher-name backfill (#1255, epic #1250)
 // ============================================================================
 

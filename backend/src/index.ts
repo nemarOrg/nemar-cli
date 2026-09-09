@@ -55,6 +55,7 @@ import {
 import { isNonProductionEnv } from "./services/environment";
 import { resolveHostRoute } from "./services/host-routing";
 import { isGenericImportError, lastErrorAssignmentSql } from "./services/import-error";
+import { importIssueSweepLogLines, runImportIssueSweepCron } from "./services/import-issue-sweep";
 import { runImportRecovery } from "./services/import-recovery";
 import { sweepImportRetries } from "./services/import-retry";
 import { manifestIntegritySweep } from "./services/manifest-sweep";
@@ -863,6 +864,45 @@ export default {
             err instanceof Error ? (err.stack ?? err.message) : err,
           ),
         ),
+      );
+      // #1310 (epic #1306): drain the import-failure tracking issues. Closes the
+      // ones whose dataset now verifies complete against S3, and retires stale
+      // cause labels. Before this the tracker only accumulated -- a backlog of
+      // open issues, none ever closed (ADR 0050 has the count and the date it was
+      // measured) -- so it could not distinguish a live problem from one that
+      // healed weeks ago.
+      //
+      // PROD-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it closes and
+      // relabels real issues on the shared nemarDatasets org, which a dev worker
+      // must never do.
+      ctx.waitUntil(
+        runImportIssueSweepCron(env)
+          .then((r) => {
+            // null means the wrapper's own guard skipped this run (non-prod);
+            // it already logged why, so there is nothing to summarise.
+            if (!r) return;
+            console.log(
+              `[import-issue-sweep] open=${r.openIssues} mode=${r.mode} examined=${r.examined} ` +
+                `attempted=${r.attempted} closed=${r.closed} relabelled=${r.relabelled} ` +
+                `kept=${r.kept} errors=${r.errors.length} remaining=${r.remaining}`,
+            );
+            // The aggregate line cannot say WHICH issues moved, which is what an
+            // operator reads this log for. Bounded by the sweep's own limit.
+            for (const line of importIssueSweepLogLines(r)) {
+              console.log(`[import-issue-sweep] ${line}`);
+            }
+            for (const e of r.errors) {
+              console.error(
+                `[import-issue-sweep] #${e.issue} (${e.dataset_id}) ${e.stage}: ${e.error}`,
+              );
+            }
+          })
+          .catch((err) =>
+            console.error(
+              "[import-issue-sweep] sweep failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
       );
       // #1041 (epic #1044): drain datasets whose per-file availability report is
       // stale. The archive-ready callback clears availability_report_at on every
