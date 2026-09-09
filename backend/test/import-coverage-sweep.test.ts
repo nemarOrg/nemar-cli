@@ -26,6 +26,7 @@ import {
 } from "../src/services/import-coverage";
 import {
   COVERAGE_LAST_DISPATCH_QUERY,
+  COVERAGE_SCAN_SANITY_MIN_IMPORTED,
   type ImportCoverageSweepDeps,
   importCoverageSweepSummary,
   runImportCoverageSweep,
@@ -385,33 +386,99 @@ describe("a degraded read is not a drained backlog", () => {
     expect(result.issue).toBeNull();
   });
 
-  test("a scan smaller than the catalogue is unknown even without an open issue", async () => {
+  /**
+   * The floor measures how many of OUR MIRRORS the scan still returns, not the two
+   * totals. Review showed the totals comparison rested on a false invariant --
+   * `discovered` is what is in scope on the latest snapshot, `imported` is whatever
+   * we ever mirrored -- so ordinary drift (upstream deletion, an unreadable
+   * snapshot, a modality retag) ate the margin and would have latched the floor ON
+   * permanently, leaving the monitor dark with no operator escape.
+   */
+  test("ordinary drift does not trip the floor", async () => {
     const db = freshDb();
     for (const d of discovered(30)) seedImported(db, d.id);
-    const deps = recordingDeps(discovered(29));
+    seedDispatch(db, 1);
+    // 25 of our 30 mirrors still in scope, 5 gone: well within tolerance, and a
+    // strictly smaller scan than the catalogue -- which the old rule refused.
+    const deps = recordingDeps(discovered(25));
+
+    const result = await runImportCoverageSweep(envFor(db), {}, deps);
+
+    expect(result.status).toBe("healthy");
+    expect(result.importedInScan).toBe(25);
+    expect(result.importedNotInScan).toBe(5);
+  });
+
+  test("losing more than half the catalogue from the scan is unknown", async () => {
+    const db = freshDb();
+    for (const d of discovered(30)) seedImported(db, d.id);
+    const deps = recordingDeps(discovered(14));
 
     const result = await runImportCoverageSweep(envFor(db), {}, deps);
 
     expect(result.status).toBe("unknown");
-    expect(result.imported).toBe(30);
-    expect(result.discovered).toBe(29);
+    expect(result.errors[0]?.error).toContain("only 14 of the 30");
   });
 
-  test("a scan exactly the size of the catalogue is plausible", async () => {
+  test("the floor is inert below the minimum baseline, so fixtures and cold starts pass", async () => {
     const db = freshDb();
-    for (const d of discovered(30)) seedImported(db, d.id);
+    // Fewer mirrors than COVERAGE_SCAN_SANITY_MIN_IMPORTED: no meaningful baseline.
+    for (const d of discovered(COVERAGE_SCAN_SANITY_MIN_IMPORTED - 1)) seedImported(db, d.id);
     seedDispatch(db, 1);
-    const deps = recordingDeps(discovered(30));
-
-    expect((await runImportCoverageSweep(envFor(db), {}, deps)).status).toBe("healthy");
+    const result = await runImportCoverageSweep(envFor(db), {}, recordingDeps([]));
+    expect(result.status).toBe("healthy");
+    expect(result.errors).toEqual([]);
   });
 
-  test("the floor is inert on an empty catalogue, so a cold start is not an alarm", async () => {
-    // imported === 0, so there is no baseline to be implausible against.
+  test("an empty catalogue is inert too", async () => {
     const db = freshDb();
     const result = await runImportCoverageSweep(envFor(db), {}, recordingDeps([]));
     expect(result.status).toBe("healthy");
     expect(result.errors).toEqual([]);
+  });
+
+  /**
+   * The bug the balance line had: `POST /admin/datasets/import` writes the `datasets`
+   * row AND the `preparing` `import_jobs` row in one handler, so every in-flight
+   * import is in `imported` and `inFlight` at once. Summing D1's set sizes therefore
+   * over-counted and the report declared itself unreliable on every healthy run.
+   * Counted over the scan, the terms are a partition and the totals agree.
+   */
+  test("a mid-import dataset is counted once, so the totals still balance", async () => {
+    const db = freshDb();
+    seedImported(db, "ds000001");
+    seedImportJob(db, "ds000001", { status: "copying" });
+    seedDispatch(db, 1);
+    const deps = recordingDeps(discovered(1));
+
+    const result = await runImportCoverageSweep(envFor(db), {}, deps);
+
+    // In both D1 sets, counted once against the scan.
+    expect(result.importedInScan).toBe(1);
+    expect(result.inFlight).toBe(0);
+    const accounted =
+      result.importedInScan +
+      result.inFlight +
+      result.terminal +
+      result.backlog.neverAttempted.length +
+      result.backlog.untracked.length +
+      result.backlog.tracked.length +
+      result.backlog.blocklisted.length;
+    expect(accounted).toBe(result.discovered);
+  });
+
+  test("a quarantined dataset that kept its datasets row is also counted once", async () => {
+    const db = freshDb();
+    seedImported(db, "ds000001");
+    seedImportJob(db, "ds000001", { status: "quarantined" });
+    seedDispatch(db, 1);
+    const deps = recordingDeps(discovered(1));
+
+    const result = await runImportCoverageSweep(envFor(db), {}, deps);
+
+    expect(result.importedInScan).toBe(1);
+    expect(result.terminal).toBe(0);
+    expect(result.status).toBe("healthy");
   });
 });
 
@@ -475,9 +542,28 @@ describe("a switched-off importer is never a recovery", () => {
 
     expect(result.status).toBe("healthy");
     expect(deps.closed).toEqual([]);
-    // Refreshed instead, so the fact that it is off survives.
-    expect(result.issue).toEqual({ number: 700, action: "refreshed" });
+    // Kept open, so the fact that it is off survives -- and the stand-down is
+    // announced ONCE, because the body flipping from ALARM to HEALTHY is a material
+    // change a watcher must not have to notice for themselves.
+    expect(result.issue?.action).toBe("relabelled");
     expect(deps.updated[0]?.n).toBe(700);
+    expect(deps.comments[0]?.body).toContain("Alarm stood down, issue kept open");
+    // The kind label is cleared, which is what makes it fire once rather than daily.
+    expect(deps.labelled[0]?.labels).toEqual(["import-coverage"]);
+  });
+
+  test("a SECOND still-off run is silent: the kind label is already cleared", async () => {
+    const db = freshDb();
+    seedDispatch(db, 24 * 60);
+    // No kind label: yesterday's run already stood the alarm down.
+    const deps = recordingDeps([], [coverageIssue(700)]);
+
+    const result = await runImportCoverageSweep(envFor(db, false), { apply: true }, deps);
+
+    expect(result.issue).toEqual({ number: 700, action: "refreshed" });
+    expect(deps.comments).toEqual([]);
+    expect(deps.labelled).toEqual([]);
+    expect(deps.closed).toEqual([]);
   });
 
   test("healthy with the importer ENABLED does close it", async () => {

@@ -119,6 +119,8 @@ const HEALTHY = {
   lastDispatchSourceId: "ds007763",
   dispatchLost: false,
   imported: 760,
+  importedInScan: 760,
+  importedNotInScan: 0,
   inFlight: 0,
   terminal: 0,
   backlog: {
@@ -140,6 +142,7 @@ const ALARM = {
   enabled: false,
   dispatchAgeHours: 24 * 49,
   imported: 745,
+  importedInScan: 745,
   backlog: {
     neverAttempted: Array.from({ length: 19 }, (_, i) => `ds${String(i + 1).padStart(6, "0")}`),
     untracked: [],
@@ -199,6 +202,7 @@ describe("nemar admin import-coverage: the exit code is the verdict", () => {
     const server = startCaptureServer({
       ...HEALTHY,
       imported: 761,
+      importedInScan: 761,
       backlog: {
         neverAttempted: ["ds000001"],
         untracked: [],
@@ -223,6 +227,7 @@ describe("nemar admin import-coverage: the exit code is the verdict", () => {
     const server = startCaptureServer({
       ...HEALTHY,
       imported: 714,
+      importedInScan: 714,
       backlog: {
         neverAttempted: Array.from({ length: 50 }, (_, i) => `ds${String(i + 1).padStart(6, "0")}`),
         untracked: [],

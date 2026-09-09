@@ -44,10 +44,15 @@ alarm, because it gets muted, and then the real one is muted too.
 
 ## Decision
 
-**An alarm requires a backlog. Silence alone is never enough.** Every alarming branch is gated on
-the count of in-scope OpenNeuro datasets that NEMAR has never attempted; dispatch age only
-converts an existing backlog into an alarm. In steady state with an empty backlog the sweep is
+**An alarm requires outstanding work. Silence alone is never enough.** Dispatch age only converts
+existing outstanding work into an alarm; in steady state with nothing outstanding the sweep is
 `healthy` no matter how old the last dispatch is.
+
+The three count-driven kinds are gated at `COVERAGE_BACKLOG_ALARM`. `dispatch-lost` is the one
+exception and is gated at ONE, deliberately: it is not a statement about volume but about a specific
+dataset the importer picked and then failed to hand off, so a second instance adds no information
+and waiting for five would mean waiting weeks. It still cannot fire on a quiet week, because it
+requires a dispatch to have happened and its dataset to still be outstanding.
 
 **A disabled importer with a backlog alarms, and the report names the flag.** `AUTO_IMPORT_ENABLED`
 was not `"true"` for the entire outage -- that is exactly what #1308 flipped back -- so a rule that
@@ -62,8 +67,9 @@ distinction that matters is not enabled-versus-disabled, it is whether anything 
 (could not check). `unknown` is load-bearing: the healthy branch CLOSES the tracking issue, so
 rendering a discovery or D1 failure as healthy would close a live alarm and leave nothing behind.
 A failed read returns before touching GitHub at all, the route answers 502 for it, and the CLI
-exits non-zero. "I do not know" and "everything is fine" are different answers all the way out to
-the exit code.
+exits **2** where an alarm exits 1. "I do not know", "the pipeline is broken" and "everything is
+fine" are three different answers all the way out to the exit code, because a script polling
+pipeline health has to be able to tell a broken pipeline from a broken check.
 
 **A fresh dispatch row is not proof of life, so the picked id is cross-checked.** The audit row is
 written to reserve the slot, before `getDatasetsToken` and `triggerOpenNeuroOnboard`. If the
@@ -94,18 +100,30 @@ would be permanently empty anyway, because a withdrawn dataset genuinely was imp
 **Thresholds:**
 
 ```
-COVERAGE_DISPATCH_STALE_HOURS = 24   // ~48 missed ticks, well outside jitter
-COVERAGE_BACKLOG_ALARM        = 5    // ~2 weeks of accrual at the measured 2.7 in-scope/week
-COVERAGE_BACKLOG_ALARM_ALONE  = 20   // alarms even if dispatch looks recent: alive but falling behind
+COVERAGE_DISPATCH_STALE_HOURS     = 24   // ~48 missed ticks, well outside jitter
+COVERAGE_DISPATCH_LOST_HOURS      =  6   // the onboard workflow writes its row within minutes
+COVERAGE_BACKLOG_ALARM            =  5   // ~2 weeks of accrual at the measured 2.7 in-scope/week
+COVERAGE_BACKLOG_ALARM_ALONE      = 20   // alarms even if dispatch looks recent: falling behind
+COVERAGE_SCAN_SANITY_MIN_IMPORTED = 20   // below this there is no baseline; the floor is inert
 ```
+
+**The report's counts balance by construction, and every term is counted over the SCAN.** The same
+discipline the Zarr index uses: an upstream scan that returned an empty in-scope set would otherwise
+render as an ordinary drained backlog, so a total that does not add up is how a degraded read becomes
+visible on the document that explains the verdict. Summing D1's set sizes instead does not work --
+`POST /admin/datasets/import` writes the `datasets` row and the `preparing` `import_jobs` row in one
+handler, so every in-flight import is in two sets at once, and quarantine keeps the `datasets` row --
+which made the report declare itself unreliable on every healthy run. A balance line that cries wolf
+is worse than none, because it teaches the reader to discount the report.
 
 **One standing issue, rewritten in place.** Coverage is a property of the pipeline, not of a
 dataset, so the title is constant and is the dedup key. The body is overwritten every alarming run
 and states that it describes the present rather than a history; a comment is written **only when
 the kind changes**. A comment per run would be one notification per day forever, which is the
 accrual ADR 0050 exists to prevent, one level up. The live kind is read off the issue's own labels
-(`coverage-backlog` / `coverage-silence` / `coverage-disabled`) rather than stored, the same
-observable-not-flag discipline as `rollupOpen` in ADR 0050.
+(`coverage-backlog` / `coverage-silence` / `coverage-disabled` / `coverage-dispatch-lost`) rather
+than stored, the same observable-not-flag discipline as `rollupOpen` in ADR 0050. Clearing the kind
+label is also what makes the alarm-stood-down comment fire once rather than daily.
 
 ## Consequences
 
@@ -125,16 +143,28 @@ The scan's page cap and its `MIN_COVERAGE` refusal stop a *pagination* truncatio
 shrinking backlog, but they do NOT cover field-level degradation: `MIN_COVERAGE` measures raw edge
 count, and a snapshot resolver that nulls `summary.modalities` fleet-wide makes every dataset fall
 out of the modality filter while coverage still reads 100 percent. That returns an empty in-scope
-set with no error, which would have read as a drained backlog. So the sweep additionally refuses a
-scan that reports fewer in-scope datasets than D1 has already imported -- a plausibility floor
-against its own input, since a real OpenNeuro cannot have fewer in-scope datasets than we have
-mirrored from it.
+set with no error, which would have read as a drained backlog.
+
+So the sweep applies a plausibility floor to its own input, measured as **how many of our existing
+mirrors the scan still returns**. Under that failure the number goes to zero while the mirror count
+stays large, which is the sharpest available signal and needs no threshold guesswork; it refuses
+below half, with a minimum baseline so fixtures and cold starts stay inert.
+
+Note what it deliberately does NOT compare: `discovered` against `imported`. That reading is
+intuitive and wrong, because `discovered` is what is in scope on the LATEST snapshot while
+`imported` is whatever was ever mirrored and still has a row. Upstream deletion, a per-dataset
+snapshot resolver failure, and a modality retag each move an id permanently out of the first set
+without touching the second, so the margin was ordinary drift -- about 4 percent when measured --
+and a few dozen such mirrors would have latched the floor ON for good: a permanent `unknown` with no
+acknowledgement path, the monitor dark in exactly the way this phase exists to prevent, and a
+recovered pipeline unable to close its own alarm. Drift is reported on its own line instead.
 
 No per-dataset work, so there is no batch limit and no window to rotate -- unlike ADR 0050's sweep.
 
-**No new schema.** The dispatch signal is the audit row the importer already writes, read through
-the importer's own `AUTO_IMPORT_GATE_QUERY` so the two cannot disagree about when the last dispatch
-was. ADR 0034 and 0035 are satisfied without a column or a stamp: the verdict is fleet-level, so
+**No new schema.** The dispatch signal is the audit row the importer already writes. The sweep needs
+one more column than the importer's gate does -- the picked id, for the cross-check -- so it has its
+own `COVERAGE_LAST_DISPATCH_QUERY` with an identical predicate, and a test asserts the two select
+the same row rather than relying on a shared constant to guarantee it. ADR 0034 and 0035 are satisfied without a column or a stamp: the verdict is fleet-level, so
 `audit_log` plus the GitHub issue is the whole durable state.
 
 **A DISABLED importer never closes the issue.** Recovery means the pipeline is working again, and a

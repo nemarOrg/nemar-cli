@@ -85,7 +85,9 @@ export function registerImportCoverageRoutes(
           // The resource is the tracking ISSUE, not a dataset: coverage is a
           // property of the pipeline, so there is no dataset to point at.
           resourceType: "issue",
-          resourceId: result.issue.number === null ? "pending" : `#${result.issue.number}`,
+          // Always a real number here: `number` is null only on the dry-run create
+          // path, and this gate requires `apply`.
+          resourceId: `#${result.issue.number}`,
           details: JSON.stringify({
             status: result.status,
             kind: result.kind,

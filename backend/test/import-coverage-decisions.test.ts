@@ -25,6 +25,7 @@ import {
   buildCoverageIssueBody,
   buildCoverageKindChangeComment,
   buildCoverageRecoveryComment,
+  buildCoverageStandDownComment,
   decideCoverageVerdict,
   dispatchPhrase,
   hoursSince,
@@ -492,7 +493,9 @@ describe("the issue body", () => {
     lastDispatchAt: "2026-07-06 02:31:15",
     lastDispatchSourceId: "ds007763",
     discovered: 764,
-    imported: 731,
+    imported: 764,
+    importedInScan: 731,
+    importedNotInScan: 33,
     inFlight: 0,
     terminal: 0,
     backlog: backlog({
@@ -533,18 +536,36 @@ describe("the issue body", () => {
    * the document that explains the verdict.
    */
   test("the counts balance, and the body says so", () => {
+    // 731 in-scan imported + 19 never-attempted + 3 tracked + 11 blocklisted = 764.
     const body = buildCoverageIssueBody(args);
     expect(body).toContain("| total accounted for | 764 |");
     expect(body).toContain("Those two totals agree");
   });
 
-  test("a total that does not balance is called out as unreliable", () => {
+  /**
+   * Drift gets its own row rather than being folded into a mismatch. An earlier
+   * version summed D1's set SIZES, which double-counted every in-flight import
+   * (`POST /admin/datasets/import` writes both rows in one handler) and every
+   * quarantined dataset, so the body declared itself unreliable on every healthy
+   * run -- teaching the reader to discount the report, which is the muting failure
+   * ADR 0051 is written against.
+   */
+  test("mirrors no longer in the scan are reported as drift, not as a mismatch", () => {
+    const body = buildCoverageIssueBody(args);
+    expect(body).toContain("33 are no longer in the scan");
+    expect(body).toContain("drift rather than a coverage gap");
+    expect(body).not.toContain("They do not agree");
+  });
+
+  /** Now only reachable if the sweep's own bookkeeping is wrong, since the terms are
+   *  a partition of the scan -- so the message says that rather than blaming upstream. */
+  test("a total that does not balance is called out as the sweep's own fault", () => {
     const body = buildCoverageIssueBody({
       ...args,
       facts: { ...facts, discovered: 900 },
     });
     expect(body).toContain("They do not agree");
-    expect(body).toContain("treat the verdict above as unreliable");
+    expect(body).toContain("the sweep's own bookkeeping is wrong");
     expect(body).not.toContain("Those two totals agree");
   });
 
@@ -634,5 +655,37 @@ describe("the transition comments", () => {
     const v = decideCoverageVerdict({ enabled: true, dispatchAgeHours: 1, backlog: backlog() });
     const c = buildCoverageRecoveryComment(v, "2026-09-09T00:00:00Z");
     expect(c).toContain("not a claim that every dataset");
+  });
+});
+
+describe("the dispatch-lost reason is actionable", () => {
+  /** The commonest cause is one wedged dataset, which the PAT and workflow advice
+   *  cannot explain -- and the reader cannot act without knowing which id. */
+  test("it names the dataset and the wedged-picker cause first", () => {
+    const v = decideCoverageVerdict({
+      enabled: true,
+      lastDispatchSourceId: "ds008123",
+      dispatchAgeHours: 10,
+      dispatchLost: true,
+      backlog: backlog({ neverAttempted: ["ds008123"] }),
+    });
+    expect(v.reason).toContain("ds008123");
+    expect(v.reason).toContain("wedging the picker");
+    expect(v.reason).toContain("PAT");
+    expect(v.reason).toContain("onboard-openneuro.yml");
+  });
+});
+
+describe("the stand-down comment", () => {
+  test("says why the issue is staying open, and how it closes", () => {
+    const v = decideCoverageVerdict({
+      enabled: false,
+      dispatchAgeHours: 100,
+      backlog: backlog(),
+    });
+    const c = buildCoverageStandDownComment(v, "2026-09-09T00:00:00Z");
+    expect(c).toContain("Alarm stood down, issue kept open");
+    expect(c).toContain("only durable record");
+    expect(c).toContain("closes automatically once the importer is enabled");
   });
 });

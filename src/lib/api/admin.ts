@@ -1675,7 +1675,12 @@ export interface ImportCoverageResponse {
   dispatchLost: boolean;
   /** In-scope datasets OpenNeuro reported this run. */
   discovered: number;
+  /** Managed mirrors in D1, however many the scan still returns. */
   imported: number;
+  /** Of `discovered`: already imported. The first term of the balance. */
+  importedInScan: number;
+  /** Mirrors the scan no longer returns: drift, not a coverage gap. */
+  importedNotInScan: number;
   inFlight: number;
   terminal: number;
   /** `neverAttempted` + `untracked` is the outstanding work that drives the

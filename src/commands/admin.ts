@@ -7217,7 +7217,15 @@ importCoverageCommand
     console.log(
       chalk.cyan(
         `auto_import=${res.enabled ? "enabled" : chalk.red("DISABLED")} ` +
-          `last_dispatch=${res.dispatchAgeHours === null ? "never" : `${res.dispatchAgeHours}h ago`}` +
+          // Mirrors the backend's dispatchPhrase: a negative age is a clock anomaly,
+          // and "-10h ago" would read as freshness.
+          `last_dispatch=${
+            res.dispatchAgeHours === null
+              ? "never"
+              : res.dispatchAgeHours < 0
+                ? "dated in the future"
+                : `${res.dispatchAgeHours}h ago`
+          }` +
           `${res.lastDispatchSourceId ? ` (${res.lastDispatchSourceId})` : ""} ` +
           `dispatch_lost=${res.dispatchLost}`,
       ),
@@ -7225,7 +7233,7 @@ importCoverageCommand
     // The counts balance against `discovered` by construction; a line that does
     // not add up means the run did not get a complete view of the catalogue.
     const accounted =
-      res.imported +
+      res.importedInScan +
       res.inFlight +
       res.terminal +
       outstanding +
@@ -7233,7 +7241,7 @@ importCoverageCommand
       b.blocklisted.length;
     console.log(
       chalk.cyan(
-        `discovered=${res.discovered} imported=${res.imported} in_flight=${res.inFlight} ` +
+        `discovered=${res.discovered} in_scan=${res.importedInScan} in_flight=${res.inFlight} ` +
           `terminal=${res.terminal} tracked=${b.tracked.length} blocklisted=${b.blocklisted.length}`,
       ),
     );
@@ -7242,6 +7250,13 @@ importCoverageCommand
         `outstanding=${outstanding} (never_attempted=${b.neverAttempted.length} untracked=${b.untracked.length})`,
       ),
     );
+    if (res.importedNotInScan > 0) {
+      console.log(
+        chalk.dim(
+          `  ${res.importedNotInScan} of ${res.imported} mirror(s) are no longer in the scan (upstream removal, unreadable snapshot, or a modality retag). Drift, not a gap.`,
+        ),
+      );
+    }
     if (accounted !== res.discovered) {
       console.log(
         chalk.yellow(

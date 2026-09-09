@@ -62,6 +62,7 @@ import {
   buildCoverageIssueBody,
   buildCoverageKindChangeComment,
   buildCoverageRecoveryComment,
+  buildCoverageStandDownComment,
   decideCoverageVerdict,
   dispatchPhrase,
   hoursSince,
@@ -124,9 +125,17 @@ export interface ImportCoverageSweepResult {
   dispatchLost: boolean;
   /** In-scope datasets the scan reported. */
   discovered: number;
-  /** Already imported as a managed mirror. Also the plausibility floor's baseline. */
+  /** Managed mirrors in D1, however many the scan still returns. */
   imported: number;
+  /** Of `discovered`: already imported. The plausibility floor's numerator, and the
+   *  first term of the report's balance. */
+  importedInScan: number;
+  /** Mirrors D1 holds that the scan no longer returns -- upstream deletion, a failed
+   *  snapshot resolver, or a modality retag. Reported, never an error. */
+  importedNotInScan: number;
+  /** Of `discovered`: mid-import, and not already counted as imported. */
   inFlight: number;
+  /** Of `discovered`: quarantined or rolled back, and not already counted above. */
   terminal: number;
   backlog: ImportCoverageBacklog;
   issue: {
@@ -171,20 +180,39 @@ export interface ImportCoverageSweepDeps {
   token?: (env: Bindings) => Promise<string>;
 }
 
+/** Below this many mirrors there is no meaningful baseline, so the sanity check is
+ *  inert -- a fresh deployment and the test fixtures must not trip it. */
+export const COVERAGE_SCAN_SANITY_MIN_IMPORTED = 20;
+
 /**
- * Is this scan too small to be a view of OpenNeuro?
+ * Is this scan a degraded read rather than a view of OpenNeuro?
  *
- * Every dataset D1 has imported was in scope when it was imported, and OpenNeuro
- * does not un-publish at that scale, so a scan reporting fewer in-scope datasets
- * than we already mirror is a degraded read rather than a drained backlog. The
- * failure direction is deliberately `unknown`, not `alarm`: a false trigger costs
- * an operator a look, whereas trusting the number costs a closed alarm.
+ * Measured as: of the datasets we have already mirrored, how many does the scan
+ * still return? Under the failure this exists for -- a resolver nulling
+ * `summary.modalities` fleet-wide, so every dataset falls out of `keepByModality`
+ * with 100 percent edge coverage and no error -- that number goes to ZERO while
+ * `imported` stays large. It is the sharpest available signal and it needs no
+ * threshold guesswork.
  *
- * `imported > 0` keeps it inert on an empty database, so a fresh deployment and
- * the test fixtures are unaffected.
+ * An earlier version compared `discovered < imported` instead, and review showed
+ * that invariant is false: `discovered` is what is in scope on the LATEST snapshot,
+ * `imported` is whatever we ever mirrored and still hold a row for. Three
+ * mechanisms move an id permanently out of the first set without touching the
+ * second -- upstream deletion, a per-dataset `latestSnapshot` resolver returning
+ * Not Found (which `openneuro-discovery.ts` documents as observed in production),
+ * and an upstream modality retag out of scope. The margin being eaten was
+ * `discovered - imported`, about 4 percent, so a few dozen out-of-scan mirrors
+ * would have latched the floor ON for good: a permanent `unknown` with no
+ * acknowledgement path, leaving the monitor dark in exactly the way this phase
+ * exists to prevent, and a recovered pipeline unable to close its own alarm.
+ *
+ * Half is deliberately generous. Individual datasets leaving scope move this by
+ * one each; only a systemic upstream change moves it by half. The failure direction
+ * is `unknown`, never `alarm`: a false trigger costs an operator a look, whereas
+ * trusting a degraded number costs a closed alarm.
  */
-export function implausibleScan(discovered: number, imported: number): boolean {
-  return imported > 0 && discovered < imported;
+export function implausibleScan(importedStillInScan: number, imported: number): boolean {
+  return imported >= COVERAGE_SCAN_SANITY_MIN_IMPORTED && importedStillInScan * 2 < imported;
 }
 
 export async function runImportCoverageSweep(
@@ -215,6 +243,8 @@ export async function runImportCoverageSweep(
     dispatchLost: false,
     discovered: 0,
     imported: 0,
+    importedInScan: 0,
+    importedNotInScan: 0,
     inFlight: 0,
     terminal: 0,
     backlog: { neverAttempted: [], untracked: [], tracked: [], blocklisted: [] },
@@ -240,21 +270,39 @@ export async function runImportCoverageSweep(
   try {
     const imported = await getImportedSourceIds(env.DB);
     result.imported = imported.size;
+    const { inFlight, terminal } = await getActiveImportSourceIds(env.DB);
 
-    // Before anything is concluded: is the scan even plausible? See implausibleScan.
-    if (implausibleScan(discovered.length, imported.size)) {
+    // Counted OVER THE SCAN and mutually exclusive, in the same precedence
+    // `diffNewDatasets` filters by. That is what makes the report's totals balance
+    // exactly: these three plus the four backlog buckets are a partition of
+    // `discovered`.
+    //
+    // Counting D1's set sizes instead double-counted, because a dataset can be in
+    // two of them at once: `POST /admin/datasets/import` writes the `datasets` row
+    // and the `preparing` `import_jobs` row in one handler, so every in-flight
+    // import is `imported` AND `inFlight`, and quarantine keeps the `datasets` row
+    // too. The report then declared itself unreliable on every healthy run.
+    for (const d of discovered) {
+      if (imported.has(d.id)) result.importedInScan++;
+      else if (inFlight.has(d.id)) result.inFlight++;
+      else if (terminal.has(d.id)) result.terminal++;
+    }
+    // Mirrors we hold that the scan no longer returns: upstream deleted them, their
+    // snapshot resolver failed, or their modalities were retagged out of scope. Not
+    // an error, and reported as its own number rather than folded into a mismatch.
+    result.importedNotInScan = imported.size - result.importedInScan;
+
+    // Before anything is concluded: is the scan even a view of OpenNeuro?
+    if (implausibleScan(result.importedInScan, imported.size)) {
       result.errors.push({
         stage: "discovery",
-        error: `scan returned ${discovered.length} in-scope dataset(s) but D1 holds ${imported.size} imported one(s); refusing to read that as a drained backlog`,
+        error: `scan returned only ${result.importedInScan} of the ${imported.size} dataset(s) D1 has already mirrored; refusing to read that as a drained backlog`,
       });
       result.reason =
         "OpenNeuro discovery returned an implausibly small in-scope set, so coverage could not be determined this run.";
       return result;
     }
 
-    const { inFlight, terminal } = await getActiveImportSourceIds(env.DB);
-    result.inFlight = inFlight.size;
-    result.terminal = terminal.size;
     const diff = diffNewDatasets(discovered, imported, inFlight, terminal).map((d) => d.id);
     const jobs = await loadBacklogJobs(env);
     backlog = partitionBacklog(diff, jobs);
@@ -310,6 +358,7 @@ export async function runImportCoverageSweep(
   const verdict = decideCoverageVerdict({
     enabled,
     enabledBindingPresent,
+    lastDispatchSourceId: result.lastDispatchSourceId,
     dispatchAgeHours: result.dispatchAgeHours,
     dispatchLost: result.dispatchLost,
     backlog,
@@ -370,10 +419,13 @@ function kindsFromLabels(issue: GitHubIssue): ImportCoverageKind[] {
 
 /** The full label set the issue should carry for `kind`, preserving anything this
  *  module does not own -- `setIssueLabels` is a full replace. */
-function labelsForKind(issue: GitHubIssue | null, kind: ImportCoverageKind): string[] {
+function labelsForKind(issue: GitHubIssue | null, kind: ImportCoverageKind | null): string[] {
   const owned = new Set<string>(Object.values(IMPORT_COVERAGE_KIND_LABELS));
   const kept = (issue ? issueLabelNames(issue) : []).filter((l) => !owned.has(l));
-  return [...new Set([...kept, IMPORT_COVERAGE_ISSUE_LABEL, IMPORT_COVERAGE_KIND_LABELS[kind]])];
+  const next = [...kept, IMPORT_COVERAGE_ISSUE_LABEL];
+  // `null` clears the kind: the alarm stood down but the issue stays open.
+  if (kind !== null) next.push(IMPORT_COVERAGE_KIND_LABELS[kind]);
+  return [...new Set(next)];
 }
 
 /**
@@ -435,6 +487,8 @@ async function reportCoverage(
     lastDispatchSourceId: result.lastDispatchSourceId,
     discovered: result.discovered,
     imported: result.imported,
+    importedInScan: result.importedInScan,
+    importedNotInScan: result.importedNotInScan,
     inFlight: result.inFlight,
     terminal: result.terminal,
     backlog: result.backlog,
@@ -446,12 +500,51 @@ async function reportCoverage(
     // Rule 3: a switched-off importer is not a recovery. Refresh the record and
     // leave it open, so the fact that it is off survives.
     if (!result.enabled) {
-      if (!ctx.apply) return { number: existing.number, action: "refreshed" };
+      // Was it alarming until now? The kind labels are the observable, exactly as
+      // elsewhere: if any is present this run is the alarm -> kept-open transition,
+      // which is a material change a watcher must not have to notice for themselves.
+      // Clearing them makes the transition fire once rather than every day.
+      const clearing = kindsFromLabels(existing);
+      if (!ctx.apply) {
+        return {
+          number: existing.number,
+          action: clearing.length > 0 ? "relabelled" : "refreshed",
+        };
+      }
       await update(IMPORT_FAILURE_ISSUES_REPO, existing.number, { body }, pat);
+      if (clearing.length === 0) {
+        console.log(
+          `[import-coverage] refreshed ${IMPORT_FAILURE_ISSUES_REPO}#${existing.number}: still off, nothing accruing`,
+        );
+        return { number: existing.number, action: "refreshed" };
+      }
+      const out: NonNullable<ImportCoverageSweepResult["issue"]> = {
+        number: existing.number,
+        action: "relabelled",
+      };
+      try {
+        await setLabels(
+          IMPORT_FAILURE_ISSUES_REPO,
+          existing.number,
+          labelsForKind(existing, null),
+          pat,
+        );
+      } catch (err) {
+        out.labelError = errText(err);
+        return out;
+      }
       console.log(
         `[import-coverage] kept ${IMPORT_FAILURE_ISSUES_REPO}#${existing.number} open: nothing accruing, but the importer is still off`,
       );
-      return { number: existing.number, action: "refreshed" };
+      return {
+        ...out,
+        ...(await commentAfter(
+          comment,
+          existing.number,
+          buildCoverageStandDownComment(verdict, nowIso),
+          pat,
+        )),
+      };
     }
     if (!ctx.apply) return { number: existing.number, action: "closed" };
     await close(IMPORT_FAILURE_ISSUES_REPO, existing.number, pat);
@@ -602,6 +695,7 @@ export function importCoverageSweepSummary(result: ImportCoverageSweepResult): s
     `enabled=${result.enabled} dispatch=${dispatchPhrase(result.dispatchAgeHours)} ` +
     `dispatch_lost=${result.dispatchLost} ` +
     `discovered=${result.discovered} imported=${result.imported} ` +
+    `in_scan=${result.importedInScan} not_in_scan=${result.importedNotInScan} ` +
     `outstanding=${outstandingCount(b)} (never_attempted=${b.neverAttempted.length} untracked=${b.untracked.length}) ` +
     `tracked=${b.tracked.length} blocklisted=${b.blocklisted.length} ` +
     `issue=${result.issue ? `${result.issue.number === null ? "would" : `#${result.issue.number}`}:${result.issue.action}` : "none"} ` +

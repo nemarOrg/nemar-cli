@@ -239,6 +239,9 @@ export function dispatchPhrase(hours: number | null): string {
  */
 export function decideCoverageVerdict(args: {
   enabled: boolean;
+  /** Named in the dispatch-lost reason: one wedged dataset is the likeliest cause,
+   *  and the reader cannot act without knowing which. */
+  lastDispatchSourceId?: string | null;
   /** False when the binding is absent entirely, which is a config fault rather
    *  than a decision, and is worth saying differently. */
   enabledBindingPresent?: boolean;
@@ -271,10 +274,11 @@ export function decideCoverageVerdict(args: {
   }
 
   if (args.dispatchLost === true) {
+    const which = args.lastDispatchSourceId ? ` (${args.lastDispatchSourceId})` : "";
     return {
       status: "alarm",
       kind: "dispatch-lost",
-      reason: `The importer is picking datasets but the work is not landing: the dataset named by the last dispatch (${clock}) still has no import_jobs row after ${COVERAGE_DISPATCH_LOST_HOURS} hours. The audit row is written before the GitHub hand-off, so a fresh row does not prove the hand-off succeeded. Check the datasets PAT and that onboard-openneuro.yml still exists.`,
+      reason: `The importer is picking datasets but the work is not landing: the dataset named by the last dispatch${which}, ${clock}, still has no import_jobs row after ${COVERAGE_DISPATCH_LOST_HOURS} hours. The audit row is written to reserve the slot BEFORE the GitHub hand-off, so a fresh row does not prove the hand-off succeeded. Three causes, most likely first: that one dataset is wedging the picker (a never-attempted id is always "fresh" to pickNextDataset, so a run that dies before its first callback is re-picked every tick forever); the datasets PAT can no longer dispatch; or onboard-openneuro.yml was renamed or removed.`,
     };
   }
 
@@ -336,11 +340,16 @@ export interface CoverageReportFacts {
   lastDispatchSourceId: string | null;
   /** In-scope datasets the scan reported. */
   discovered: number;
-  /** Already imported as a managed mirror. */
+  /** Managed mirrors in D1, however many the scan still returns. */
   imported: number;
-  /** Mid-import. */
+  /** Of `discovered`: already imported. The first term of the balance. */
+  importedInScan: number;
+  /** Mirrors D1 holds that the scan no longer returns. Reported on its own line
+   *  because it is drift, not a gap and not an error. */
+  importedNotInScan: number;
+  /** Of `discovered`, excluding the above: mid-import. */
   inFlight: number;
-  /** `quarantined` / `rolled_back`. */
+  /** Of `discovered`, excluding the above: quarantined or rolled back. */
   terminal: number;
   backlog: ImportCoverageBacklog;
 }
@@ -353,10 +362,22 @@ export interface CoverageReportFacts {
  * and a reader has to know which.
  *
  * **The counts balance by construction**, and that is not decoration. The same
- * discipline the Zarr index uses (`discovered == stores + failures + pending`)
- * is what makes a degraded read visible: an upstream scan that returns an empty
- * in-scope set would otherwise render as an ordinary drained backlog. If the
- * balance line does not add up, do not trust the verdict.
+ * discipline the Zarr index uses (`discovered == stores + failures + pending`) is
+ * what makes a degraded read visible: an upstream scan that returns an empty
+ * in-scope set would otherwise render as an ordinary drained backlog.
+ *
+ * Every term is counted OVER THE SCAN, and they are mutually exclusive in the same
+ * precedence `diffNewDatasets` filters by, so the sum is exactly `discovered`. An
+ * earlier version summed D1's set SIZES, which double-counted -- a dataset is
+ * `imported` and `inFlight` for the whole duration of every import, and quarantine
+ * keeps the `datasets` row -- so the report declared itself unreliable on every
+ * healthy run. A balance line that cries wolf is worse than none: it teaches the
+ * reader to discount the report, which is the muting failure ADR 0051 is written
+ * against.
+ *
+ * Mirrors the scan no longer returns get their OWN row. They are drift, not a gap:
+ * upstream deleted them, their snapshot resolver failed, or their modalities were
+ * retagged out of scope.
  */
 export function buildCoverageIssueBody(args: {
   verdict: ImportCoverageVerdict;
@@ -366,7 +387,7 @@ export function buildCoverageIssueBody(args: {
   const f = args.facts;
   const b = f.backlog;
   const accounted =
-    f.imported +
+    f.importedInScan +
     f.inFlight +
     f.terminal +
     b.neverAttempted.length +
@@ -394,7 +415,7 @@ export function buildCoverageIssueBody(args: {
     "",
     "| bucket | count | outstanding? |",
     "|---|---|---|",
-    `| imported | ${f.imported} | no |`,
+    `| imported | ${f.importedInScan} | no |`,
     `| mid-import | ${f.inFlight} | no |`,
     `| quarantined or rolled back | ${f.terminal} | no |`,
     `| failed, tracked by its own issue | ${b.tracked.length} | no |`,
@@ -405,8 +426,10 @@ export function buildCoverageIssueBody(args: {
     `| in-scope on OpenNeuro | ${f.discovered} | |`,
     "",
     balances
-      ? "Those two totals agree, so this is a complete view of the catalogue."
-      : `**They do not agree (${accounted} vs ${f.discovered}).** That means this run did not get a complete view, so treat the verdict above as unreliable and re-run before acting on it.`,
+      ? "Those two totals agree, so this is a complete view of what OpenNeuro currently offers."
+      : `**They do not agree (${accounted} vs ${f.discovered}).** These are counted as a partition of the scan, so they can only disagree if the sweep's own bookkeeping is wrong -- treat the verdict above as unreliable and re-run before acting on it.`,
+    "",
+    `Separately, D1 holds ${f.imported} managed mirror(s), of which ${f.importedNotInScan} are no longer in the scan at all: upstream removed them, their snapshot could not be read, or their modalities were retagged out of scope. That is drift rather than a coverage gap, and it is expected to be non-zero.`,
     "",
     "Only the two bold rows drive this issue. Withdrawn datasets do not appear at all: a withdrawal keeps the imported row, so it is not a coverage gap.",
     "",
@@ -443,6 +466,28 @@ export function buildCoverageKindChangeComment(
     reason,
     "",
     "The body above has been updated to the current numbers.",
+  ].join("\n");
+}
+
+/**
+ * Comment left when the alarm stands down but the issue stays open, because the
+ * importer is still switched off.
+ *
+ * A material change -- the body flips from ALARM to HEALTHY -- and the close path's
+ * comment does not cover it, so without this a watcher would see the state change
+ * with no notification. Fires once, not per run: the kind labels are cleared at the
+ * same time, so the next run sees no kind and takes the silent refresh path.
+ */
+export function buildCoverageStandDownComment(
+  verdict: ImportCoverageVerdict,
+  nowIso: string,
+): string {
+  return [
+    `Alarm stood down, issue kept open (${nowIso}).`,
+    "",
+    verdict.reason,
+    "",
+    "Nothing is accruing any more, so this is no longer an alarm -- but the importer is still off, and closing this would delete the only durable record of that. It closes automatically once the importer is enabled and coverage is healthy. Close it by hand if the importer is meant to stay off.",
   ].join("\n");
 }
 

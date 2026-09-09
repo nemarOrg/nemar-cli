@@ -46,6 +46,8 @@ function result(over: Partial<ImportCoverageSweepResult> = {}): ImportCoverageSw
     lastDispatchSourceId: null,
     dispatchLost: false,
     imported: 0,
+    importedInScan: 0,
+    importedNotInScan: 0,
     inFlight: 0,
     terminal: 0,
     backlog: { neverAttempted: [], untracked: [], tracked: [], blocklisted: [] },
