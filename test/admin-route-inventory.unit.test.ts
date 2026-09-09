@@ -136,6 +136,9 @@ const EXPECTED_ENTRIES: Record<string, number> = {
 
   // Zarr fidelity verification sweep (issue #1068, epic #1181 phase 8)
   "POST /datasets/zarr-fidelity-sweep": 1,
+
+  // Import coverage sweep (issue #1311, epic #1306 phase 3)
+  "POST /imports/coverage-sweep": 1,
 };
 
 describe("admin route inventory", () => {
@@ -168,7 +171,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(114);
+    expect(adminRoutes.routes.length).toBe(115);
   });
 
   // The count pin above can't see a SWAP of the two router-level middleware

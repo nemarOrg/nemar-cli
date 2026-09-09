@@ -1,6 +1,6 @@
 /**
- * Identity of an import-failure tracking issue: where it lives, the label that
- * marks it, and the title that doubles as its dedup key.
+ * Identity of the import tracking issues: where they live, the labels that mark
+ * them, and the titles that double as their dedup keys.
  *
  * Split out of `import-failure-issue.ts` in epic #1306 phase 2 purely to break a
  * cycle. `import-issue-accrual.ts` decides what to do with an existing issue and
@@ -11,6 +11,18 @@
  * `import-failure-issue.ts` re-exports the three the pre-split call sites used,
  * so every existing import keeps working. `parseImportFailureIssueTitle` arrived
  * with the split and has no legacy call site, so it is imported from here.
+ *
+ * Phase 3 (#1311) added the COVERAGE issue's identity alongside the failure
+ * one. Two different questions, deliberately two different labels: a failure
+ * issue says "this dataset broke", a coverage issue says "the pipeline as a
+ * whole has stopped keeping up".
+ *
+ * They must never share a label. Not because the failure sweep would try to
+ * verify the coverage issue as a dataset -- `planOneIssue` already refuses a
+ * title it cannot parse -- but because the sweep's listing is keyed on
+ * `import-failure`, so a shared label would put the coverage issue in
+ * `perDataset`: it would inflate `openPerDatasetCount`, which is what drives
+ * `decideIssueMode`'s rollup cap, and consume a slot in the rotation window.
  */
 
 export const IMPORT_FAILURE_ISSUE_LABEL = "import-failure";
@@ -39,3 +51,40 @@ export function parseImportFailureIssueTitle(title: string): string | null {
   const match = /^Import failure: (on\d{6}) \(ds\d{6}\)$/.exec(title);
   return match?.[1] ?? null;
 }
+
+// ============================================================================
+// Coverage issue (epic #1306 phase 3, #1311)
+// ============================================================================
+
+/** Marks the ONE standing import-coverage issue. Deliberately not
+ *  `import-failure`: see the note at the top of this file. */
+export const IMPORT_COVERAGE_ISSUE_LABEL = "import-coverage";
+
+/**
+ * The coverage issue's title, and therefore its dedup key.
+ *
+ * Takes no arguments ON PURPOSE. There is exactly one coverage issue at a time
+ * -- coverage is a property of the pipeline, not of a dataset -- so the title
+ * must be constant across runs or the dedup lookup would miss the issue it
+ * opened yesterday and file a second one every day. Everything that varies (the
+ * counts, the verdict, the timestamp) lives in the body, which is rewritten in
+ * place.
+ */
+export function importCoverageIssueTitle(): string {
+  return "Import coverage: backlog or dispatch silence";
+}
+
+/**
+ * Labels naming WHICH coverage problem is live, so the current kind is readable
+ * off the issue instead of stored anywhere.
+ *
+ * Same discipline as `decideIssueMode`'s `rollupOpen` in phase 2: the state is an
+ * observation of a document that exists, not a flag that can drift. It is what
+ * lets the sweep comment only when the kind CHANGES rather than once per day.
+ */
+export const IMPORT_COVERAGE_KIND_LABELS = {
+  backlog: "coverage-backlog",
+  silence: "coverage-silence",
+  disabled: "coverage-disabled",
+  "dispatch-lost": "coverage-dispatch-lost",
+} as const;

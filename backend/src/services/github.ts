@@ -96,6 +96,7 @@ export {
   issueLabelNames,
   listOpenIssuesByLabel,
   setIssueLabels,
+  updateIssue,
 } from "./github/issues";
 export type { GitHubIssue } from "./github/issues";
 export {

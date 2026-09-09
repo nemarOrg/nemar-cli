@@ -97,6 +97,7 @@ const EXPECTED_EXPORTS = [
   "triggerOpenNeuroOnboard",
   "triggerPrescreenRun",
   "triggerVersionDoiRun",
+  "updateIssue",
   "validateDeployedWorkflows",
   "validateGitHubUsername",
   "verifyManifestCallbackToken",

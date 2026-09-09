@@ -47,6 +47,7 @@ import {
   type DoctorScanResponse,
   type EmailPreferences,
   type HedSweepBatchResponse,
+  type ImportCoverageResponse,
   type ImportIssueTriageResponse,
   type RecordingStatsSweepBatchResponse,
   type ReindexBulkOptions,
@@ -91,6 +92,7 @@ import {
   getUserDuplicates,
   hedSweep,
   hedSweepReset,
+  importCoverageSweep,
   importIssueTriage,
   listKeysFor,
   listUsers,
@@ -6948,6 +6950,18 @@ function isTriageErrorList(
   );
 }
 
+/** The shape the coverage route puts under `details` on its 502. Narrowed rather
+ *  than cast so a drifted body renders nothing instead of `undefined`. */
+function isCoverageErrorList(
+  value: unknown,
+): value is { errors: ImportCoverageResponse["errors"] } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Array.isArray((value as { errors?: unknown }).errors)
+  );
+}
+
 const importIssueTriageCommand = new Command("import-issue-triage").description(
   "Close recovered import-failure issues and retire stale cause labels (dry run by default)",
 );
@@ -7115,6 +7129,191 @@ importIssueTriageCommand
   });
 
 adminCommand.addCommand(importIssueTriageCommand);
+
+// ============================================================================
+// Import coverage (#1311, epic #1306 phase 3)
+// ============================================================================
+
+const importCoverageCommand = new Command("import-coverage").description(
+  "Check whether the import pipeline is keeping up with OpenNeuro (dry run by default)",
+);
+
+/**
+ * How many outstanding ids to list before falling back to a count.
+ *
+ * Must equal `MAX_LISTED_IDS` in backend/src/services/import-coverage.ts, so the
+ * CLI and the GitHub issue truncate at the same place. The CLI cannot import from
+ * backend/src, so `test/import-coverage-cli.test.ts` asserts the two are equal
+ * rather than leaving them free to drift.
+ */
+const COVERAGE_MAX_LISTED_IDS = 20;
+
+/** Actions rendered in the conditional. `would created` was ungrammatical, and a
+ *  dry run is the DEFAULT invocation, so it is the string most operators see. */
+const COVERAGE_ACTION_VERB: Record<string, string> = {
+  created: "create",
+  refreshed: "refresh",
+  relabelled: "relabel",
+  closed: "close",
+};
+
+importCoverageCommand
+  .option("--apply", "File, update or close the tracking issue (production only)")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { apply?: boolean; json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const apply = options.apply === true;
+    const spinner = ora("Checking import coverage...").start();
+
+    let res: ImportCoverageResponse;
+    try {
+      res = await importCoverageSweep({ apply });
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Import coverage check failed");
+      console.error(chalk.red(errorDetail(err)));
+      // A 502 means the verdict is UNKNOWN, and its body carries the stage that
+      // failed. Printing "failed" with no stage would leave the operator unable to
+      // tell an OpenNeuro outage from a D1 one.
+      const details = err instanceof ApiError ? err.details : undefined;
+      const errors = isCoverageErrorList(details) ? details.errors : [];
+      if (options.json) {
+        console.log(
+          JSON.stringify(
+            err instanceof ApiError ? (err.rawBody ?? { errors }) : { errors },
+            null,
+            2,
+          ),
+        );
+      } else {
+        for (const e of errors) {
+          console.error(`${chalk.red("ERROR".padEnd(12))} ${e.stage}: ${e.error}`);
+        }
+      }
+      // 2, not 1: "could not determine" is a different answer from "not healthy",
+      // and a script polling pipeline health has to be able to tell them apart.
+      process.exitCode = err instanceof ApiError && err.statusCode === 502 ? 2 : 1;
+      return;
+    }
+
+    // Set before the --json return so both output modes agree on the verdict. An
+    // alarm is a successful RUN but an unhealthy STATE, so it is non-zero.
+    if (res.status === "unknown") process.exitCode = 2;
+    else if (res.status !== "healthy" || res.errors.length > 0) process.exitCode = 1;
+
+    if (options.json) {
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    const b = res.backlog;
+    const outstanding = b.neverAttempted.length + b.untracked.length;
+    console.log();
+    const verdict = `${res.status.toUpperCase()}${res.kind ? ` (${res.kind})` : ""}`;
+    console.log(res.status === "healthy" ? chalk.green(verdict) : chalk.red(chalk.bold(verdict)));
+    console.log(res.reason);
+    console.log();
+    console.log(
+      chalk.cyan(
+        `auto_import=${res.enabled ? "enabled" : chalk.red("DISABLED")} ` +
+          // Mirrors the backend's dispatchPhrase: a negative age is a clock anomaly,
+          // and "-10h ago" would read as freshness.
+          `last_dispatch=${
+            res.dispatchAgeHours === null
+              ? "never"
+              : res.dispatchAgeHours < 0
+                ? "dated in the future"
+                : `${res.dispatchAgeHours}h ago`
+          }` +
+          `${res.lastDispatchSourceId ? ` (${res.lastDispatchSourceId})` : ""} ` +
+          `dispatch_lost=${res.dispatchLost}`,
+      ),
+    );
+    // The counts balance against `discovered` by construction; a line that does
+    // not add up means the run did not get a complete view of the catalogue.
+    const accounted =
+      res.importedInScan +
+      res.inFlight +
+      res.terminal +
+      outstanding +
+      b.tracked.length +
+      b.blocklisted.length;
+    console.log(
+      chalk.cyan(
+        `discovered=${res.discovered} in_scan=${res.importedInScan} in_flight=${res.inFlight} ` +
+          `terminal=${res.terminal} tracked=${b.tracked.length} blocklisted=${b.blocklisted.length}`,
+      ),
+    );
+    console.log(
+      chalk.cyan(
+        `outstanding=${outstanding} (never_attempted=${b.neverAttempted.length} untracked=${b.untracked.length})`,
+      ),
+    );
+    if (res.importedNotInScan > 0) {
+      console.log(
+        chalk.dim(
+          `  ${res.importedNotInScan} of ${res.imported} mirror(s) are no longer in the scan (upstream removal, unreadable snapshot, or a modality retag). Drift, not a gap.`,
+        ),
+      );
+    }
+    if (accounted !== res.discovered) {
+      console.log(
+        chalk.yellow(
+          `  Counts do not balance (${accounted} accounted for vs ${res.discovered} discovered): this run did not get a complete view, so treat the verdict as unreliable.`,
+        ),
+      );
+    }
+    if (b.neverAttempted.length > 0) {
+      const shown = b.neverAttempted.slice(0, COVERAGE_MAX_LISTED_IDS).join(", ");
+      const extra = b.neverAttempted.length - COVERAGE_MAX_LISTED_IDS;
+      console.log(
+        chalk.dim(`  never attempted: ${shown}${extra > 0 ? ` ... and ${extra} more` : ""}`),
+      );
+    }
+    if (b.untracked.length > 0) {
+      const shown = b.untracked.slice(0, COVERAGE_MAX_LISTED_IDS).join(", ");
+      const extra = b.untracked.length - COVERAGE_MAX_LISTED_IDS;
+      console.log(
+        chalk.dim(`  stale row nothing owns: ${shown}${extra > 0 ? ` ... and ${extra} more` : ""}`),
+      );
+    }
+    for (const e of res.errors) {
+      const line = `${e.stage}: ${e.error}`;
+      console.log(
+        e.stage === "anomaly"
+          ? `${chalk.yellow("ANOMALY".padEnd(12))} ${line}`
+          : `${chalk.red("ERROR".padEnd(12))} ${line}`,
+      );
+    }
+    if (res.issue) {
+      const verb = res.applied
+        ? res.issue.action
+        : `would ${COVERAGE_ACTION_VERB[res.issue.action] ?? res.issue.action}`;
+      const where = res.issue.number === null ? "" : ` #${res.issue.number}`;
+      console.log(chalk.dim(`  Issue: ${verb}${where} on nemarDatasets/.github`));
+      if (res.issue.labelError) {
+        console.log(
+          chalk.yellow(`  The body was updated but its labels were not: ${res.issue.labelError}`),
+        );
+      }
+      if (res.issue.commentError) {
+        console.log(
+          chalk.yellow(`  The issue changed but its comment failed: ${res.issue.commentError}`),
+        );
+      }
+    }
+    if (res.audit_failed) {
+      console.log(
+        chalk.yellow(`  Changes applied but the audit row failed to write: ${res.audit_failed}`),
+      );
+    }
+    if (!res.applied && res.issue) {
+      console.log(chalk.dim("  Re-run with --apply to perform this change."));
+    }
+  });
+
+adminCommand.addCommand(importCoverageCommand);
 
 // ============================================================================
 // Username backfill (ADR 0042, #1253, epic #1250)
