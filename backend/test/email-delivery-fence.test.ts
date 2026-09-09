@@ -20,14 +20,25 @@
  *     applied per-recipient to a batch before any chunk is built, so
  *     `nemar admin notify` -- the highest-blast-radius manual flow -- gets
  *     the identical guarantee as a single transactional send.
+ *   - isAdminNotificationAllowed / getAdminEmailsForCategory: a SEPARATE,
+ *     stricter fence for admin-facing notification mail (new-user approval,
+ *     upload-access/publication requests, import recovery, cron digests).
+ *     The dev worker's own admin account is on DEV_EMAIL_ALLOWLIST above (so
+ *     staging sign-in codes reach it), which means the recipient-level fence
+ *     alone does NOT stop admin notifications from reaching it outside
+ *     production -- this fence stops them being generated at all. Real D1
+ *     (freshDb/realD1) for getAdminEmailsForCategory's own query.
  */
 
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { sendBroadcast } from "../src/services/broadcast";
 import {
+  type AdminNotificationEnv,
   DevEmailFenceError,
   type EmailDeliveryEnv,
+  getAdminEmailsForCategory,
+  isAdminNotificationAllowed,
   isEmailDeliveryAllowed,
   isRecipientAllowlisted,
   redactRecipient,
@@ -325,5 +336,89 @@ describe("sendBroadcast delivery fence", () => {
       expect(result.recipient_count).toBe(2);
       expect(calls.length).toBe(1);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isAdminNotificationAllowed -- the pure predicate, exhaustively. Mirrors the
+// isEmailDeliveryAllowed block above in shape, but the opt-in is
+// DEV_ADMIN_NOTIFICATIONS (exact string "1"), not an allow-list of
+// recipients: this fence is about whether admin-notification mail is
+// generated at all, not about who it may reach.
+// ---------------------------------------------------------------------------
+
+describe("isAdminNotificationAllowed", () => {
+  test("production always allows, opt-in or not", () => {
+    expect(isAdminNotificationAllowed({ ENVIRONMENT: "production" })).toBe(true);
+    expect(
+      isAdminNotificationAllowed({ ENVIRONMENT: "PRODUCTION", DEV_ADMIN_NOTIFICATIONS: "0" }),
+    ).toBe(true);
+  });
+
+  for (const environment of ["development", "staging", "test", "", undefined]) {
+    test(`ENVIRONMENT=${JSON.stringify(environment)} requires DEV_ADMIN_NOTIFICATIONS="1"`, () => {
+      const env: AdminNotificationEnv = { ENVIRONMENT: environment };
+      expect(isAdminNotificationAllowed(env)).toBe(false);
+      expect(isAdminNotificationAllowed({ ...env, DEV_ADMIN_NOTIFICATIONS: "1" })).toBe(true);
+      // Anything other than the literal "1" stays closed -- "true" is a
+      // plausible typo for the same intent and must not accidentally open
+      // the fence.
+      expect(isAdminNotificationAllowed({ ...env, DEV_ADMIN_NOTIFICATIONS: "true" })).toBe(false);
+    });
+  }
+
+  test("a wholly unset env (undefined) refuses -- fails toward suppressing, not allowing", () => {
+    expect(isAdminNotificationAllowed(undefined)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getAdminEmailsForCategory -- the chokepoint every admin-notification call
+// site funnels through. Real D1 (freshDb/realD1), so a false positive here
+// would mean the actual production query disagrees with the fence, not a
+// hand-copied re-implementation of either.
+// ---------------------------------------------------------------------------
+
+function seedApprovedAdmin(db: Database): void {
+  db.run(
+    `INSERT INTO users (username, email, password_hash, github_username, status, role, email_verified)
+     VALUES ('fenceadmin', 'fenceadmin@nemar.org', 'x', 'fenceadmin-gh', 'approved', 'admin', 1)`,
+  );
+}
+
+describe("getAdminEmailsForCategory", () => {
+  test("production returns the seeded admin addresses", async () => {
+    const db = freshDb();
+    seedApprovedAdmin(db);
+    const emails = await getAdminEmailsForCategory(realD1(db), "user_approval", {
+      ENVIRONMENT: "production",
+    });
+    expect(emails).toEqual(["fenceadmin@nemar.org"]);
+  });
+
+  test("development returns [] -- the fence applies before the D1 query runs", async () => {
+    const db = freshDb();
+    seedApprovedAdmin(db);
+    const emails = await getAdminEmailsForCategory(realD1(db), "user_approval", {
+      ENVIRONMENT: "development",
+    });
+    expect(emails).toEqual([]);
+  });
+
+  test("an unset ENVIRONMENT returns [] -- fails toward suppressing, not allowing", async () => {
+    const db = freshDb();
+    seedApprovedAdmin(db);
+    const emails = await getAdminEmailsForCategory(realD1(db), "user_approval", {});
+    expect(emails).toEqual([]);
+  });
+
+  test("development + DEV_ADMIN_NOTIFICATIONS=1 opts back in for a deliberate staging test", async () => {
+    const db = freshDb();
+    seedApprovedAdmin(db);
+    const emails = await getAdminEmailsForCategory(realD1(db), "user_approval", {
+      ENVIRONMENT: "development",
+      DEV_ADMIN_NOTIFICATIONS: "1",
+    });
+    expect(emails).toEqual(["fenceadmin@nemar.org"]);
   });
 });

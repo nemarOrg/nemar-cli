@@ -373,7 +373,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
         if (env.RESEND_API_KEY) {
           try {
             const emailCfg = resolveEmailConfig(env);
-            const adminEmails = await getAdminEmailsForCategory(db, "publication_request");
+            const adminEmails = await getAdminEmailsForCategory(db, "publication_request", env);
             if (adminEmails.length > 0) {
               await sendExemplarInvariantAlertEmail(
                 adminEmails,
@@ -527,7 +527,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
         let adminEmails: string[] = [];
         if (canEmail) {
           try {
-            adminEmails = await getAdminEmailsForCategory(db, "publication_request");
+            adminEmails = await getAdminEmailsForCategory(db, "publication_request", env);
           } catch (err) {
             console.error("Scheduled cleanup: failed to fetch admin emails:", err);
           }

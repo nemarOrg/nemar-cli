@@ -53,6 +53,13 @@ function env(): Bindings {
     WEB_SESSION_COOKIE_DOMAIN: "",
     RESEND_API_KEY: "fake-resend-key",
     DEV_EMAIL_ALLOWLIST: "@nemar.test",
+    // Admin notifications are production-only by default
+    // (getAdminEmailsForCategory's fence in services/email.ts); this suite is
+    // about WHEN the admin notification fires (once, on the pending->verified
+    // transition, through either road), not about that fence, so it opts back
+    // in deliberately. The fence itself is covered in tier-emails.test.ts and
+    // email-delivery-fence.test.ts.
+    DEV_ADMIN_NOTIFICATIONS: "1",
     FROM_EMAIL: "NEMAR <noreply@nemar.org>",
   } as unknown as Bindings;
 }

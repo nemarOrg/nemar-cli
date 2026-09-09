@@ -3,6 +3,12 @@
  * Replay every D1 migration through REAL D1 and diff the result against
  * bun:sqlite (#1254 review; ADR 0043).
  *
+ * NOT SAFE TO RUN CONCURRENTLY in one worktree: every invocation wipes and
+ * rebuilds the local D1 state under backend/.wrangler/state/v3/d1, so two
+ * overlapping runs race each other and fail on unrelated early migrations
+ * ("no such table"). Run it sequentially; a spurious failure clears by
+ * deleting that directory and rerunning.
+ *
  * WHY THIS EXISTS. Every migration test in this repo runs on bun:sqlite, and
  * bun:sqlite is more permissive than the SQLite build D1 ships. Migration 0077
  * was written with one character-class GLOB per digit -- 79 characters -- which

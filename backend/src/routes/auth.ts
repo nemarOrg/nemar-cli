@@ -710,7 +710,7 @@ authRoutes.get("/verify", async (c) => {
 
   // Notify admins who have user_approval notifications enabled
   try {
-    const adminEmails = await getAdminEmailsForCategory(db, "user_approval");
+    const adminEmails = await getAdminEmailsForCategory(db, "user_approval", c.env);
     if (adminEmails.length > 0) {
       const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
       await sendAdminNotificationEmail(

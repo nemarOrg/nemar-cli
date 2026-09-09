@@ -395,7 +395,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
 
     // Notify admins who have publication_request notifications enabled
     try {
-      const adminEmails = await getAdminEmailsForCategory(db, "publication_request");
+      const adminEmails = await getAdminEmailsForCategory(db, "publication_request", c.env);
       if (adminEmails.length > 0) {
         const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
         await sendPublicationRequestEmail(
@@ -597,7 +597,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
 
     // Resend notification to admins who have publication_request notifications enabled
     try {
-      const adminEmails = await getAdminEmailsForCategory(db, "publication_request");
+      const adminEmails = await getAdminEmailsForCategory(db, "publication_request", c.env);
       if (adminEmails.length > 0) {
         const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
         await sendPublicationRequestEmail(

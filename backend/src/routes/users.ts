@@ -20,6 +20,7 @@ import { flag } from "../db/flag";
 import { authMiddleware } from "../middleware/auth";
 import {
   getAdminEmailsForCategory,
+  isAdminNotificationAllowed,
   resolveEmailConfig,
   sendUploadAccessRequestEmail,
 } from "../services/email";
@@ -243,14 +244,20 @@ async function notifyAdminsOfUploadRequest(
 ): Promise<{ delivered: number; attempted: number }> {
   const db = c.env.DB;
   try {
-    const adminEmails = await getAdminEmailsForCategory(db, "user_approval");
+    const adminEmails = await getAdminEmailsForCategory(db, "user_approval", c.env);
     if (adminEmails.length === 0) {
-      // Not an error the USER can act on, so the request still succeeds -- but
-      // it is a misconfiguration an operator must see, and `admins_notified: 0`
-      // makes it visible in the response as well as the log.
-      console.error(
-        `[upload-access] no admin recipients for user_approval; request from id=${row.id} stored but nobody was told`,
-      );
+      // getAdminEmailsForCategory already logged (and returned []) when the
+      // production-only fence applied -- that is expected on a dev worker,
+      // not a misconfiguration, so only escalate to console.error when the
+      // fence was open and the admin table itself came back empty.
+      if (isAdminNotificationAllowed(c.env)) {
+        // Not an error the USER can act on, so the request still succeeds -- but
+        // it is a misconfiguration an operator must see, and `admins_notified: 0`
+        // makes it visible in the response as well as the log.
+        console.error(
+          `[upload-access] no admin recipients for user_approval; request from id=${row.id} stored but nobody was told`,
+        );
+      }
       return { delivered: 0, attempted: 0 };
     }
 
