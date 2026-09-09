@@ -46,11 +46,15 @@ lets the subject rotate between runs and between hosts.
 Exits non-zero on a failed check. Notes do not fail the run, but they are counted
 and the closing line says how many there were.
 
-NOT CI-GATED, on purpose and worth knowing. `scripts/mcp/` matches no path
-filter in `.github/workflows/test.yml`, so nothing here is linted or executed by
-CI -- the same footing as `backend/scripts/mcp-smoke.sh` and
-`backend/scripts/read-window-memory.ts`. It is an operational script whose whole
-job is to talk to a live host, which CI has none of.
+NOT RUN BY CI, and it cannot be: its whole job is to talk to a live host, which
+CI has none of -- the same footing as `backend/scripts/mcp-smoke.sh` and
+`backend/scripts/read-window-memory.ts`. It IS linted, though. `scripts/mcp/**`
+rides the `zarr` paths filter in `.github/workflows/test.yml`, and the
+`zarr-python-test` job runs `ruff` over this directory with the same flags this
+docstring records. That was added after the first production run, on the same
+reasoning as that job's shellcheck step: this file shipped a default URL missing
+the `/mcp` transport path, so it could not connect at all, and nothing in the
+repo would have said a word.
 
 SO IT WAS VALIDATED BY HAND, and here is the method, because a gate nobody has
 seen fail is not a gate. A local `MCPServer` stand-in implemented all six tools
