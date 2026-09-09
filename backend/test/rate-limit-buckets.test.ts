@@ -22,6 +22,7 @@ import {
   __selectBucket,
   rateLimiter,
 } from "../src/middleware/rateLimit";
+import { createMcpRoutes } from "../src/routes/mcp";
 import type { Bindings, Variables } from "../src/types/bindings";
 
 type AppEnv = { Bindings: Bindings; Variables: Variables };
@@ -258,6 +259,26 @@ describe("__selectBucket", () => {
     expect(__selectBucket("/datasets", "", "1.2.3.4").keyKind).toBe("ip");
   });
 
+  test("the MCP transport is IP-bucketed even WITH a bearer (epic #1065)", () => {
+    // `/mcp` matches neither AUTH_PATHS nor the data-plane patterns, so on the
+    // raw path the bearer branch wins -- documented here because it is exactly
+    // why `anonymousSurface` exists rather than a path pattern.
+    const withHeader = __selectBucket("/mcp", `Bearer ${VALID_TOKEN}`, "10.0.0.3");
+    expect(withHeader.keyKind).toBe("token");
+
+    // The MCP sub-app passes `anonymousSurface: true`, which the limiter
+    // implements by withholding the header from this function. Nothing in that
+    // sub-app validates a bearer, so honoring one let a caller rotate a fresh
+    // 32-character string per request for a fresh 1000/min bucket, bypassing
+    // the 500/min IP floor, and drove a D1 tokens-to-users lookup per novel
+    // token. Keying on the IP is what closes both.
+    const anonymous = __selectBucket("/mcp", undefined, "10.0.0.3");
+    expect(anonymous.keyKind).toBe("ip");
+    expect(anonymous.rawKey).toBe("10.0.0.3");
+    expect(anonymous.maxRequests).toBe(__limits.MAX_REQUESTS);
+    expect(anonymous.maxRequests).toBeLessThan(__limits.TOKEN_MAX_REQUESTS_AUTHED);
+  });
+
   test("admin paths use the token bucket (not exempt)", () => {
     // Pre-#275 the middleware exempted /admin/* entirely. The new
     // behavior is "still bounded, just with a higher cap" — verify the
@@ -342,6 +363,46 @@ async function hit(
 ): Promise<Response> {
   return app.fetch(new Request(`http://localhost${path}`, { method: "GET", headers }), env);
 }
+
+describe("the MCP sub-app really passes anonymousSurface (epic #1065)", () => {
+  // Driven through the REAL sub-app, not by calling __selectBucket again: the
+  // whole point of the option is the WIRING, and a helper-level test passes
+  // just as happily when nothing passes the flag. The descriptor at `/` is the
+  // cheapest route that still goes through the limiter and needs no D1.
+  test("a bearer on the MCP descriptor is bucketed on IP, not on the token", async () => {
+    const app = createMcpRoutes();
+    const res = await app.fetch(
+      new Request("http://mcp.nemar.org/", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${VALID_TOKEN}`, "CF-Connecting-IP": "10.77.0.1" },
+      }),
+      PROD_ENV,
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-RateLimit-Bucket")).toBe("ip");
+    expect(res.headers.get("X-RateLimit-Limit")).toBe(String(__limits.MAX_REQUESTS));
+  });
+
+  test("two different rotated bearers from one IP share ONE bucket", async () => {
+    // The exploit the option closes: a fresh 32-character string per request
+    // used to mint a fresh 1000/min bucket. Sharing a bucket is visible as the
+    // remaining count decreasing across requests that carry different bearers.
+    const app = createMcpRoutes();
+    const remaining: number[] = [];
+    for (const bearer of ["a".repeat(40), "b".repeat(40), "c".repeat(40)]) {
+      const res = await app.fetch(
+        new Request("http://mcp.nemar.org/", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${bearer}`, "CF-Connecting-IP": "10.77.0.2" },
+        }),
+        PROD_ENV,
+      );
+      remaining.push(Number(res.headers.get("X-RateLimit-Remaining")));
+    }
+    expect(remaining[1]).toBe(remaining[0] - 1);
+    expect(remaining[2]).toBe(remaining[0] - 2);
+  });
+});
 
 describe("rateLimiter end-to-end", () => {
   test("authenticated client survives 150 requests (used to 429 at 100)", async () => {

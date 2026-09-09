@@ -1,0 +1,95 @@
+{
+  "format": "nemar-zarr-catalog",
+  "format_version": 1,
+  "generated_utc": "2026-09-08T03:00:46.508Z",
+  "contract_base": "https://zarr.nemar.org/",
+  "count": 3,
+  "datasets": [
+    {
+      "dataset_id": "nm000103",
+      "name": "Healthy Brain Network EEG - Not for Commercial Use",
+      "doi": "10.82901/nemar.nm000103",
+      "license": "CC-BY-NC-SA 4.0",
+      "modalities": [
+        "eeg"
+      ],
+      "tasks": [
+        "DespicableMe",
+        "DiaryOfAWimpyKid",
+        "FunwithFractals",
+        "RestingState",
+        "ThePresent",
+        "contrastChangeDetection",
+        "seqLearning6target",
+        "seqLearning8target",
+        "surroundSupp",
+        "symbolSearch"
+      ],
+      "subject_count": 447,
+      "has_hed": 1,
+      "hed_version": "8.3.0",
+      "store_count": 3522,
+      "recording_count": 3522,
+      "recordings_unavailable": 0,
+      "total_recording_duration": 1026054.144000001,
+      "zarr_converted_at": "2026-09-05 02:04:15",
+      "zarr_source_commit": "d14ae5eb3881e368ee328bc1312d3fa51f7e70a9",
+      "zarr_errors": 0,
+      "zarr_verify_status": "verified",
+      "zarr_verified_at": "2026-09-04 03:00:41",
+      "index_url": "https://zarr.nemar.org/nm000103/zarr/index.json"
+    },
+    {
+      "dataset_id": "nm000329",
+      "name": "Brandl et al. 2020 \u2014 Motor Imagery Under Distraction: An Open Access BCI Dataset",
+      "doi": "10.82901/nemar.nm000329",
+      "license": "CC-BY-NC-ND-4.0",
+      "modalities": [
+        "eeg"
+      ],
+      "tasks": [
+        "imagery"
+      ],
+      "subject_count": 16,
+      "has_hed": 1,
+      "hed_version": "8.4.0",
+      "store_count": 112,
+      "recording_count": 112,
+      "recordings_unavailable": 0,
+      "total_recording_duration": 349602,
+      "zarr_converted_at": "2026-09-05 05:16:37",
+      "zarr_source_commit": "7172d2d492dad63650f80cdb83352a0e9d4420f7",
+      "zarr_errors": 0,
+      "zarr_verify_status": null,
+      "zarr_verified_at": null,
+      "index_url": "https://zarr.nemar.org/nm000329/zarr/index.json"
+    },
+    {
+      "dataset_id": "on003392",
+      "name": "NeuroSpin hMT+ Localizer DATA (MEG & aMRI)",
+      "doi": "10.82901/nemar.on003392",
+      "license": "CC0",
+      "modalities": [
+        "anat",
+        "meg"
+      ],
+      "tasks": [
+        "localizer",
+        "noise"
+      ],
+      "subject_count": 12,
+      "has_hed": 0,
+      "hed_version": null,
+      "store_count": 11,
+      "recording_count": 22,
+      "recordings_unavailable": 11,
+      "total_recording_duration": 3001.496,
+      "zarr_converted_at": "2026-09-06 23:25:33",
+      "zarr_source_commit": "1035360c2cbb5a349cc43a46a58543c5f02a4e38",
+      "zarr_errors": 11,
+      "zarr_verify_status": null,
+      "zarr_verified_at": null,
+      "index_url": "https://zarr.nemar.org/on003392/zarr/index.json"
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 {
   "name": "nemar-cli",
-  "version": "0.10.0",
+  "version": "0.10.1-dev2",
   "description": "CLI for NEMAR (Neuroelectromagnetic Data Archive and Tools Resource) dataset management",
   "type": "module",
   "main": "dist/index.js",
@@ -13,6 +13,7 @@
     "test": "bun test",
     "lint": "biome check src/",
     "migrations:d1-check": "bun run scripts/d1-migration-check.ts",
+    "zarr:geometry-check": "bun run backend/scripts/zarr-geometry-conformance.ts",
     "lint:fix": "biome check --fix src/",
     "format": "biome format --write src/",
     "typecheck": "tsc --noEmit && tsc --noEmit -p backend",

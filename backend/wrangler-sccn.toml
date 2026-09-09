@@ -19,7 +19,11 @@ routes = [
   # zarr.nemar.org: authoritative browser gateway for the Zarr serving copies
   # (epic #684). Self-contained sub-app with restricted-origin CORS + Range +
   # edge cache; dev reaches the same handlers at <workers.dev>/zarrproxy/*.
-  { pattern = "zarr.nemar.org", custom_domain = true }
+  { pattern = "zarr.nemar.org", custom_domain = true },
+  # mcp.nemar.org: the NEMAR MCP server (epic #1065 phase 2). Self-contained
+  # sub-app (backend/src/routes/mcp.ts); dev/workers.dev fallback reaches the
+  # same handlers at the path mount `/mcp` on the api host.
+  { pattern = "mcp.nemar.org", custom_domain = true }
 ]
 # workers.dev fallback hostname so the worker stays reachable if the
 # custom domain ever misbehaves.
@@ -68,6 +72,13 @@ dataset = "nemar_access_metrics"
 binding = "ANALYTICS_LLM"
 dataset = "nemar_llm_metrics"
 
+# MCP server per-tool-call metrics (epic #1065 phase 2). One data point per
+# tools/call, dedicated dataset so blob positions never collide with
+# ANALYTICS's buildAccessDataPoint shape.
+[[analytics_engine_datasets]]
+binding = "ANALYTICS_MCP"
+dataset = "nemar_mcp_metrics"
+
 # Workers Observability (Workers Paid plan).
 # Captures invocation logs (inbound request shape, response status, duration,
 # subrequest count) and console.log output for searchable runtime telemetry.
@@ -112,6 +123,10 @@ S3_BUCKET = "nemar"
 # built-in defaults, so prod routing is unchanged.
 DATA_HOSTNAME = "data.nemar.org"
 ZARR_HOSTNAME = "zarr.nemar.org"
+# MCP server host fork (epic #1065 phase 2). Set explicitly for parity with
+# the other data-plane hostnames above; equals the built-in default, so prod
+# routing is unchanged.
+MCP_HOSTNAME = "mcp.nemar.org"
 # Sandbox (xx) dataset-ID partition (epic #923). Prod caps sandbox allocation at
 # xx089999 so the dev/test staging worker (SANDBOX_ID_FLOOR="90001") owns
 # xx090001-xx099999 without repo-name collisions in the shared nemarDatasets org.
@@ -235,7 +250,8 @@ workers_dev = true
 routes = [
   { pattern = "api-test.nemar.org", custom_domain = true },
   { pattern = "data-test.nemar.org", custom_domain = true },
-  { pattern = "zarr-test.nemar.org", custom_domain = true }
+  { pattern = "zarr-test.nemar.org", custom_domain = true },
+  { pattern = "mcp-test.nemar.org", custom_domain = true }
 ]
 
 [[env.dev.d1_databases]]
@@ -262,6 +278,10 @@ dataset = "nemar_access_metrics_dev"
 [[env.dev.analytics_engine_datasets]]
 binding = "ANALYTICS_LLM"
 dataset = "nemar_llm_metrics_dev"
+
+[[env.dev.analytics_engine_datasets]]
+binding = "ANALYTICS_MCP"
+dataset = "nemar_mcp_metrics_dev"
 
 # Observability for dev (not inherited from top-level)
 [env.dev.observability]
@@ -309,6 +329,9 @@ APP_BASE_URL = "https://test.nemar.org"
 # prod hosts; served by this same worker via the routes above.
 DATA_HOSTNAME = "data-test.nemar.org"
 ZARR_HOSTNAME = "zarr-test.nemar.org"
+# MCP server host fork (epic #1065 phase 2). The -test mirror of the prod
+# MCP_HOSTNAME, served by this same worker via the routes above.
+MCP_HOSTNAME = "mcp-test.nemar.org"
 # Origin embedded in served-manifest bytes_url links (epic #923). Points at the
 # -test data host so dev-bucket-only datasets embed reachable durable links.
 # Prod leaves this unset -> buildBytesUrl defaults to https://data.nemar.org, so

@@ -132,7 +132,7 @@ describe("zarrFidelityStoreDuration: max across groups", () => {
   });
 });
 
-describe("zarrFidelitySelectSample: decision 1's sampling rule", () => {
+describe("zarrFidelitySelectSample: the bounded sampling rule", () => {
   function store(path: string, nChannels?: number) {
     return {
       path,

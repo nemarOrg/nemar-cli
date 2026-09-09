@@ -30,6 +30,7 @@ import { authOrcidRoutes } from "./routes/auth-orcid";
 import { authWebRoutes } from "./routes/auth-web";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
+import { mcpRoutes } from "./routes/mcp";
 import { openApiRoutes } from "./routes/openapi";
 import { sandboxRoutes } from "./routes/sandbox";
 import { schemaRoutes } from "./routes/schemas";
@@ -276,12 +277,27 @@ app.use("*", async (c, next) => {
   if (route === "zarr") {
     return zarrDataRoutes.fetch(c.req.raw, c.env, c.executionCtx);
   }
+  // mcp.nemar.org (or mcp-test.nemar.org in staging): the NEMAR MCP server
+  // (epic #1065 phase 2). Same reasoning as the zarr fork above -- its own
+  // self-contained sub-app (origin gate + rate-limit bridge scoped to the
+  // Streamable HTTP transport's own headers) rather than the api middleware
+  // stack.
+  if (route === "mcp") {
+    return mcpRoutes.fetch(c.req.raw, c.env, c.executionCtx);
+  }
   return next();
 });
 
 // Dev / workers.dev access to the zarr proxy (prod uses the zarr.nemar.org host
 // fork above). Must precede the catch-all api mount.
 app.route("/zarrproxy", zarrDataRoutes);
+// Dev / workers.dev access to the MCP server (prod uses the mcp.nemar.org host
+// fork above). A single-path forward (not a `.route()` sub-tree mount, unlike
+// /zarrproxy above): mcpRoutes' own routing then sees the request at exactly
+// `/mcp`, so only the Streamable HTTP transport endpoint is reachable this
+// way -- the descriptor at `/` is host-fork only. Must precede the catch-all
+// api mount.
+app.all("/mcp", (c) => mcpRoutes.fetch(c.req.raw, c.env, c.executionCtx));
 app.route("/nemar", api);
 app.route("/", api);
 
