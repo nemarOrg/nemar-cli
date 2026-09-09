@@ -782,3 +782,68 @@ describe("describe_dataset zarr_status failed; search_datasets index-unavailable
     expect(result.content[0].text.toLowerCase()).toContain("search index");
   });
 });
+
+// The taste caps live in `readWindowInputSchema`'s `superRefine`, and
+// `mcp-schema-parity.test.ts` already proves the schema accepts 60 and rejects
+// 61. What it cannot prove is what a CLIENT sees, and that is what
+// `scripts/mcp/verify_streamable_http.py` asserts on when it verifies a live
+// deploy: it requires the refusal text to name a cap. If the SDK ever reports a
+// zod `custom` issue as a bare "Invalid arguments" without the message, that
+// script starts failing against a perfectly healthy server, and the failure
+// would look like a broken cap rather than a changed error format. This test is
+// the wire-level half of that contract.
+describe("read_window taste caps refuse over the wire, naming the cap (phase 5)", () => {
+  let db: Database;
+  let app: App;
+  const ID = "nm500060";
+
+  beforeEach(() => {
+    db = freshDb();
+    app = createMcpRoutes();
+    insertDataset(db, ID, { name: "Taste Cap Fixture", zarr_status: "ready" });
+  });
+
+  test("one second past the duration_s cap is refused, and the text names the cap", async () => {
+    // One channel keeps the 3840 channel-second product cap satisfied (61 x 1),
+    // so `duration_s` is the ONLY cap crossed and the message can only be its.
+    // This is refused by the input schema before the tool body runs, so it needs
+    // no store, no index and no S3.
+    const { res, body } = await callTool(app, env(db), 1, "read_window", {
+      dataset_id: ID,
+      recording: "sub-01/eeg/sub-01_task-x_eeg.zarr",
+      group: "eeg",
+      duration_s: 61,
+      channels: [0],
+      taste: true,
+    });
+    expect(res.status).toBe(200);
+    const result = body.result as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    const text = result.content.map((block) => block.text).join(" ");
+    expect(text.toLowerCase()).toContain("cap");
+    expect(text).toContain("duration_s");
+    // The remedy travels with the refusal: a client that hits the cap should be
+    // told what to do instead, not merely told no.
+    expect(text).toContain("recipe");
+  });
+
+  test("at the cap (60) it is NOT refused for a cap reason", async () => {
+    // The mirror of the above, and the reason the probe in the Python script
+    // uses 61 rather than 60: every cap compares with `>`, so 60 is accepted by
+    // the schema and any refusal here comes from the data path instead. Asserted
+    // as "not a cap refusal" rather than "succeeds", because this fixture has no
+    // store behind it.
+    const { res, body } = await callTool(app, env(db), 2, "read_window", {
+      dataset_id: ID,
+      recording: "sub-01/eeg/sub-01_task-x_eeg.zarr",
+      group: "eeg",
+      duration_s: 60,
+      channels: [0],
+      taste: true,
+    });
+    expect(res.status).toBe(200);
+    const result = body.result as { isError?: boolean; content: Array<{ text: string }> };
+    const text = result.content.map((block) => block.text).join(" ");
+    expect(text).not.toContain("exceeds the 60 s cap");
+  });
+});
