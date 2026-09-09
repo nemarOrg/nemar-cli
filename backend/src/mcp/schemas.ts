@@ -31,6 +31,11 @@ import {
   LIST_RECORDINGS_DEFAULT_LIMIT,
   LIST_RECORDINGS_MAX_LIMIT,
   NEXT_CHEAPEST_TOOL_VALUES,
+  READ_WINDOW_TASTE_MAX_CHANNELS,
+  READ_WINDOW_TASTE_MAX_CHANNEL_SECONDS,
+  READ_WINDOW_TASTE_MAX_DURATION_S,
+  RECIPE_SANITY_MAX_CHANNELS,
+  RECIPE_SANITY_MAX_DURATION_S,
   RENDER_OVERVIEW_DEFAULT_WIDTH_PX,
   RENDER_OVERVIEW_MAX_WIDTH_PX,
   SEARCH_DATASETS_DEFAULT_LIMIT,
@@ -521,3 +526,159 @@ export const renderOverviewOutputSchema4 = z4
     envelope: provenanceEnvelopeSchema4.optional(),
   })
   .passthrough();
+
+// ---------------------------------------------------------------------------
+// read_window (epic #1065 phase 4, issue #1296)
+// ---------------------------------------------------------------------------
+
+const rangeSchema4 = z4
+  .object({
+    start: z4.number().int().nonnegative(),
+    end: z4.number().int().nonnegative(),
+  })
+  .passthrough()
+  .refine((v) => v.end >= v.start, { message: "end must be >= start", path: ["end"] });
+
+const readRecipeHowToSchema4 = z4
+  .object({
+    python_zarr: z4.string().describe("Ready-to-run Python: zarr + anonymous S3, slice, done."),
+    zarrita: z4.string().describe("The TypeScript/JS equivalent using zarrita, browser-safe."),
+  })
+  .passthrough();
+
+const readRecipeSchema4 = z4
+  .object({
+    contract_base: z4.string(),
+    data_base: z4.string(),
+    s3_uri: z4.string(),
+    s3_region: z4.string(),
+    s3_anonymous: z4.boolean(),
+    zarr: z4.string().describe("The store's zarr path."),
+    group: z4.string().describe("The channel group name."),
+    level: z4
+      .union([z4.literal("0"), z4.number().int().positive()])
+      .describe('"0" for the level-0 signal array, or a positive integer view level.'),
+    array_path: z4.string().describe("Absolute URL: contract_base plus the array's own path."),
+    dtype: z4
+      .string()
+      .nullable()
+      .describe("Zarr's data_type from the array's zarr.json; null when that fetch was not made."),
+    codecs: z4.array(z4.unknown()).optional(),
+    chunk_samples: z4.number().int().positive().nullable(),
+    shard_samples: z4.number().int().positive().nullable(),
+    n_channels: z4.number().int().nonnegative().nullable(),
+    sample_slice: rangeSchema4.optional().describe("Half-open [start, end) sample range."),
+    channel_slice: rangeSchema4.optional().describe("Half-open [start, end) channel range."),
+    scale_offset: z4
+      .string()
+      .describe("Where to find the physical-units conversion (not the values themselves)."),
+    how_to: readRecipeHowToSchema4,
+  })
+  .passthrough();
+
+export const readWindowInputSchema4 = z4
+  .object({
+    dataset_id: z4.string().regex(DATASET_ID_RE).describe(DATASET_ID_DESCRIPTION),
+    recording: z4
+      .string()
+      .describe("A store's path or zarr field -- either identifies the recording."),
+    group: z4
+      .string()
+      .optional()
+      .describe("Which channel group to read; defaults to the first group."),
+    start_s: z4.number().nonnegative().default(0).describe("Window start, in seconds."),
+    duration_s: z4
+      .number()
+      .positive()
+      .max(RECIPE_SANITY_MAX_DURATION_S)
+      .default(10)
+      .describe(
+        `Window length in seconds. Recipe mode's ceiling is generous (${RECIPE_SANITY_MAX_DURATION_S} s); ` +
+          `a taste (taste: true) is additionally capped at ${READ_WINDOW_TASTE_MAX_DURATION_S} s.`,
+      ),
+    channels: z4
+      .array(z4.number().int().nonnegative())
+      .max(RECIPE_SANITY_MAX_CHANNELS)
+      .optional()
+      .describe(
+        `Channel indices; REQUIRED when taste is true (list_recordings reports each group's n_channels). Recipe mode's ceiling is generous (${RECIPE_SANITY_MAX_CHANNELS}); a taste is additionally capped at ${READ_WINDOW_TASTE_MAX_CHANNELS} channels.`,
+      ),
+    taste: z4
+      .boolean()
+      .default(false)
+      .describe(
+        "false (default): return a read recipe, zero signal bytes touched. true: decode a small, " +
+          "capped window inline and return the physical values.",
+      ),
+  })
+  .passthrough()
+  .superRefine((val, ctx) => {
+    if (!val.taste) return;
+    if (val.channels === undefined) {
+      ctx.addIssue({
+        code: z4.ZodIssueCode.custom,
+        message:
+          "taste requires channels: name the channel indices you want " +
+          "(list_recordings reports each group's n_channels), or omit taste for a recipe",
+        path: ["channels"],
+      });
+      return;
+    }
+    if (val.duration_s > READ_WINDOW_TASTE_MAX_DURATION_S) {
+      ctx.addIssue({
+        code: z4.ZodIssueCode.custom,
+        message: `taste duration_s (${val.duration_s}) exceeds the ${READ_WINDOW_TASTE_MAX_DURATION_S} s cap; omit taste for a recipe instead`,
+        path: ["duration_s"],
+      });
+    }
+    if (val.channels.length > READ_WINDOW_TASTE_MAX_CHANNELS) {
+      ctx.addIssue({
+        code: z4.ZodIssueCode.custom,
+        message: `taste channels (${val.channels.length}) exceeds the ${READ_WINDOW_TASTE_MAX_CHANNELS}-channel cap; omit taste for a recipe instead`,
+        path: ["channels"],
+      });
+    }
+    const channelSeconds = val.duration_s * val.channels.length;
+    if (channelSeconds > READ_WINDOW_TASTE_MAX_CHANNEL_SECONDS) {
+      ctx.addIssue({
+        code: z4.ZodIssueCode.custom,
+        message:
+          `taste exceeds the cap of ${READ_WINDOW_TASTE_MAX_CHANNEL_SECONDS} channel-seconds ` +
+          `(duration_s x channels = ${channelSeconds}); omit taste for a recipe instead`,
+        path: ["duration_s"],
+      });
+    }
+  });
+
+const readWindowRecipeResultSchema4 = z4
+  .object({
+    mode: z4.literal("recipe"),
+    recipe: readRecipeSchema4,
+    envelope: provenanceEnvelopeSchema4,
+  })
+  .passthrough();
+
+const readWindowTasteResultSchema4 = z4
+  .object({
+    mode: z4.literal("taste"),
+    start_s: z4.number(),
+    duration_s: z4.number(),
+    channels: z4.array(z4.number().int()),
+    sample_rate_hz: z4.number(),
+    values: z4
+      .array(z4.array(z4.number()))
+      .describe("[channel][sample], already scaled to physical units."),
+    recipe: readRecipeSchema4.describe(
+      "A fully-populated recipe -- this taste already fetched the array metadata.",
+    ),
+    chunks_read: z4.number().int().nonnegative(),
+    bytes_read: z4.number().int().nonnegative(),
+    note: z4.string().nullable().optional(),
+    envelope: provenanceEnvelopeSchema4,
+  })
+  .passthrough();
+
+export const readWindowOutputSchema4 = z4.discriminatedUnion("mode", [
+  readWindowRecipeResultSchema4,
+  readWindowTasteResultSchema4,
+]);

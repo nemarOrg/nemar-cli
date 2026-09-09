@@ -30,6 +30,8 @@ import {
   getEventsOutputSchema4,
   listRecordingsInputSchema4,
   listRecordingsOutputSchema4,
+  readWindowInputSchema4,
+  readWindowOutputSchema4,
   renderOverviewInputSchema4,
   renderOverviewOutputSchema4,
   searchDatasetsInputSchema4,
@@ -39,6 +41,7 @@ import type { RecordingToolDeps, ToolOutcome } from "./tool-types.js";
 import { describeDatasetTool } from "./tools/describe-dataset.js";
 import { getEventsTool } from "./tools/get-events.js";
 import { listRecordingsTool } from "./tools/list-recordings.js";
+import { readWindowTool } from "./tools/read-window.js";
 import { renderOverviewTool } from "./tools/render-overview.js";
 import { searchDatasetsTool } from "./tools/search-datasets.js";
 
@@ -73,7 +76,9 @@ const INSTRUCTIONS = [
   "Start with search_datasets to find a dataset by keyword or facet, then describe_dataset for",
   "its metadata, license, DOI, citation, and Zarr conversion status. list_recordings, get_events,",
   "and render_overview describe a converted dataset's recordings, events, and a quick visual",
-  "overview; read_window (full signal reads) arrives in a later phase.",
+  "overview. read_window reads the actual signal: by default it returns a read recipe (zarr/S3",
+  "coordinates, zero bytes touched); pass taste: true for a small, capped, inline-decoded window",
+  "of physical values instead.",
 ].join(" ");
 
 /**
@@ -260,6 +265,29 @@ export function buildMcpServer(deps: BuildMcpServerDeps): McpServer {
       "render_overview",
       (args) => args.dataset_id,
       (args) => renderOverviewTool(recordingDeps, args),
+    ),
+  );
+
+  server.registerTool(
+    "read_window",
+    {
+      title: "Read window",
+      description:
+        "Read a window of one recording's actual signal. By default (taste: false) returns a " +
+        "read recipe -- zarr/zarrita/S3 coordinates and how-to snippets -- with zero signal bytes " +
+        "touched. Pass taste: true (and channels, required) for a small, capped, inline-decoded " +
+        "window of physical values instead: at most 60 s, 64 channels, and 65,536 channel-samples " +
+        "(channels x samples) -- ask for fewer channels or a shorter window, or omit taste, past " +
+        "that. Needs a v3-format-converted dataset; a dataset still on index format v1 answers a " +
+        "typed error (list_recordings and get_events still work on it).",
+      inputSchema: readWindowInputSchema4,
+      outputSchema: readWindowOutputSchema4,
+    },
+    withToolMetrics(
+      deps.env,
+      "read_window",
+      (args) => args.dataset_id,
+      (args) => readWindowTool(recordingDeps, args),
     ),
   );
 
