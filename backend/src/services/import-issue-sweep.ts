@@ -68,6 +68,7 @@
  * `attempted` is zero on a dry run by definition.
  */
 
+import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
@@ -594,7 +595,48 @@ export async function runImportIssueSweepCron(
     console.log("[import-issue-sweep] skipped (non-production)");
     return null;
   }
-  return runImportIssueSweep(env, { apply: true }, deps);
+  const result = await runImportIssueSweep(env, { apply: true }, deps);
+  await recordCronActivity(env, result);
+  return result;
+}
+
+/**
+ * Persist what the CRON did, which nothing used to record.
+ *
+ * The admin route has always written an `import_issue_triage` audit row, but a cron
+ * run has no acting user, so the daily path wrote nothing: the only trace of an
+ * automated close was a Worker log line with finite retention. That made "how many
+ * issues recovered this week" unanswerable from D1 -- which phase 4's weekly report
+ * needs, and which is also just a gap in the durable record of a job that closes
+ * real issues.
+ *
+ * `userId: null` marks it system-initiated, the same convention `import-retry.ts`
+ * uses. Best-effort: this is bookkeeping about work that already happened, so a
+ * failed write must not turn a successful sweep into an error.
+ */
+async function recordCronActivity(env: Bindings, result: ImportIssueSweepResult): Promise<void> {
+  if (result.closed === 0 && result.relabelled === 0 && result.rollupsReleased === 0) return;
+  try {
+    await auditLogStatement(env.DB, {
+      userId: null,
+      action: "import_issue_triage",
+      resourceType: "issue",
+      resourceId: result.plan
+        .filter((e) => e.kind !== "keep" && !e.failed)
+        .map((e) => e.datasetId ?? `#${e.issueNumber}`)
+        .join(","),
+      details: JSON.stringify({
+        source: "cron",
+        closed: result.closed,
+        relabelled: result.relabelled,
+        kept: result.kept,
+        rollups_released: result.rollupsReleased,
+        errors: result.errors.length,
+      }),
+    }).run();
+  } catch (err) {
+    console.error("[import-issue-sweep] audit row failed after applying:", err);
+  }
 }
 
 /**

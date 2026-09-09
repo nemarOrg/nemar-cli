@@ -62,6 +62,11 @@ import { isGenericImportError, lastErrorAssignmentSql } from "./services/import-
 import { importIssueSweepLogLines, runImportIssueSweepCron } from "./services/import-issue-sweep";
 import { runImportRecovery } from "./services/import-recovery";
 import { sweepImportRetries } from "./services/import-retry";
+import { shouldRunWeeklySummary, weeklyHeadline } from "./services/import-weekly-summary";
+import {
+  runWeeklyImportSummaryCron,
+  weeklySummaryCronLine,
+} from "./services/import-weekly-summary-sweep";
 import { manifestIntegritySweep } from "./services/manifest-sweep";
 import { getActiveNotices } from "./services/notices";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
@@ -941,6 +946,46 @@ export default {
             ),
           ),
       );
+      // #1312 (epic #1306): the weekly summary. Rides the DAILY tick behind a
+      // day-of-week guard rather than a new cron trigger, because `event.cron` is
+      // compared against AUTO_IMPORT_CRON by exact string equality above and a
+      // third trigger would risk that branch. Monday UTC, matching the repo's two
+      // existing weekly Actions.
+      //
+      // The guard is a pure exported function on purpose: nothing in this repo
+      // invokes `scheduled()`, so a condition written inline here would be
+      // untestable by construction (the reason services/cron-sweep-log.ts exists).
+      //
+      // Unconditional by design -- it posts whether or not anything is wrong,
+      // because a report that only appears on breakage cannot tell a healthy week
+      // from a broken reporter. The once-per-week gate lives in the service.
+      //
+      // PROD-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it files and closes
+      // real issues on the shared nemarDatasets org.
+      if (shouldRunWeeklySummary(new Date())) {
+        ctx.waitUntil(
+          runWeeklyImportSummaryCron(env)
+            .then((r) => {
+              // null means the wrapper's own guard skipped this run (non-prod).
+              if (!r) return;
+              const line = weeklySummaryCronLine(r);
+              // At error level when the week needs attention, so it does not sit at
+              // the same level as every routine summary. `posted === false` is a
+              // gate refusal, which is routine.
+              if (r.posted && weeklyHeadline(r.facts).attention) console.error(line);
+              else console.log(line);
+              for (const e of r.facts.errors) {
+                console.error(`[import-weekly] ${e.stage}: ${e.error}`);
+              }
+            })
+            .catch((err) =>
+              console.error(
+                "[import-weekly] summary failed:",
+                err instanceof Error ? (err.stack ?? err.message) : err,
+              ),
+            ),
+        );
+      }
       // #1041 (epic #1044): drain datasets whose per-file availability report is
       // stale. The archive-ready callback clears availability_report_at on every
       // 'ready' build, which is the enqueue; without a drain those rows would

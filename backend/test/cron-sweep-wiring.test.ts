@@ -90,6 +90,7 @@ const SWEEP_WIRING: Record<string, "prod-only" | "all-envs" | "cron-wrapped" | "
   runImportIssueSweepCron: "prod-only",
   runImportCoverageSweep: "cron-wrapped",
   runImportCoverageSweepCron: "prod-only",
+  runWeeklyImportSummaryCron: "prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
   importIssueSweepLogLines: "helper",
   importCoverageSweepSummary: "helper",
@@ -112,6 +113,15 @@ function discoverSweepExports(): string[] {
   const patterns = [
     /^export\s+(?:async\s+)?function\s+(\w*[Ss]weep\w*)\s*\(/gm,
     /^export\s+const\s+(\w*[Ss]weep\w*)\s*=/gm,
+    // ...and anything named *Cron, which by construction IS a cron entry point.
+    // Added for #1312, whose job is a weekly REPORT rather than a sweep and so
+    // carries no "sweep" in any of its names -- exactly the #1164 shape this test
+    // exists to catch, arriving from a different direction. Deliberately narrower
+    // than matching "Summary", which would pull in buildApiKeySummary,
+    // integrityAuditSummary, probeSummary and loadSummary: four unrelated exports
+    // to declare as helpers, which is the dilution that makes a trip-wire stop
+    // being read.
+    /^export\s+(?:async\s+)?function\s+(\w*Cron)\s*\(/gm,
   ];
   for (const file of readdirSync(SERVICES_DIR).filter((f) => f.endsWith(".ts"))) {
     const src = readFileSync(join(SERVICES_DIR, file), "utf-8");
