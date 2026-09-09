@@ -88,6 +88,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0047](0047-cli-sign-in-is-the-device-authorization-grant.md) - CLI sign-in is the device authorization grant, layered on the web ORCID session
 - [ADR 0048](0048-account-kinds-are-explicit.md) - Account kinds are explicit: person, service, test
 - [ADR 0049](0049-compute-runs-in-the-browser-osa-owns-the-runtime-only-hpc-is-gated.md) - Compute runs in the browser by default, OSA owns the execution runtime, and only HPC submission is gated
+- [ADR 0050](0050-no-wasm-in-the-worker-bundle.md) - No WebAssembly in the MCP Worker bundle, and real workerd is the only gate that proves it
 
 ## Backfill note (2026-07-31)
 

@@ -35,6 +35,7 @@ jobs:
       email: ${{ steps.filter.outputs.email }}
       zarr: ${{ steps.filter.outputs.zarr }}
       shared: ${{ steps.filter.outputs.shared }}
+      decisions: ${{ steps.filter.outputs.decisions }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -78,6 +79,19 @@ jobs:
               - 'backend/src/db/migrations/0015_email_preferences.sql'
               - 'backend/src/db/migrations/0017_broadcast_emails.sql'
               - 'test/auth-passwordless.test.ts'
+              - '.github/workflows/test.yml'
+            # ADRs and the index that lists them. `test/adr-index.unit.test.ts`
+            # exists to validate exactly these files -- gapless numbering, every
+            # file present in README.md and vice versa, a superseded ADR naming a
+            # target that exists -- and until this filter it NEVER RAN when they
+            # changed, because .context/** matched nothing. Two ADR pull requests
+            # in a row (#1292, #1330) therefore showed a fully green check list
+            # while the one test that could have failed was skipped; both were
+            # verified by hand instead. Same shape as the `shared:` gap above,
+            # same fix.
+            decisions:
+              - '.context/decisions/**'
+              - 'test/adr-index.unit.test.ts'
               - '.github/workflows/test.yml'
             # Zarr conversion engine (epic #1108 Phase 1 / #1109). Repatriated
             # from nemarDatasets/.github, where test-generate-zarr.yml used to
@@ -263,7 +277,7 @@ jobs:
     needs: changes
     # Matches unit-pure's trigger so that, as a required check, lint never
     # "skips" on a backend-only PR (a skipped required check blocks merges).
-    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true' || needs.changes.outputs.shared == 'true'
+    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true' || needs.changes.outputs.shared == 'true' || needs.changes.outputs.decisions == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

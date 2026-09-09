@@ -178,8 +178,8 @@ describe("nemar dataset search --has-zarr", () => {
 });
 
 // Issue #1068, epic #1181 phase 8: --has-zarr-verified is a SEPARATE,
-// stricter filter alongside --has-zarr above (decision 2: has_zarr keeps
-// its existing meaning; has_zarr_verified is additive, not a replacement).
+// stricter filter alongside --has-zarr above: has_zarr keeps its existing
+// meaning, and has_zarr_verified is additive, not a replacement.
 describe("nemar dataset list --has-zarr-verified", () => {
   test("maps to ?has_zarr_verified=1 on the real request", async () => {
     const server = startCaptureServer(EMPTY_LIST_ENVELOPE);

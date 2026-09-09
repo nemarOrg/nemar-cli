@@ -13,6 +13,7 @@
     "test": "bun test",
     "lint": "biome check src/",
     "migrations:d1-check": "bun run scripts/d1-migration-check.ts",
+    "zarr:geometry-check": "bun run backend/scripts/zarr-geometry-conformance.ts",
     "lint:fix": "biome check --fix src/",
     "format": "biome format --write src/",
     "typecheck": "tsc --noEmit && tsc --noEmit -p backend",

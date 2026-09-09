@@ -1,0 +1,23 @@
+# Throwaway config for the MCP smoke script (epic #1065 phase 2, issue
+# #1294; issue #1324). Points at mcp-smoke-entry.ts (not backend/src/index.ts
+# -- see that file's header comment for why), so `wrangler dev --local` can
+# start under real workerd without the unrelated NON_PROD_SANDBOX_CLEANUP_QUERY
+# export-shape blocker. Never deployed; --local never contacts Cloudflare, so
+# database_id below is a placeholder, not a real D1 database.
+
+name = "nemar-mcp-smoke"
+main = "mcp-smoke-entry.ts"
+# Same as wrangler-sccn.toml -- the point of this smoke run is to prove the
+# real backend/wrangler-sccn.toml config works under workerd, so these two
+# fields must never drift from it.
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "nemar-mcp-smoke-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "../src/db/migrations"
+
+[vars]
+ENVIRONMENT = "development"
