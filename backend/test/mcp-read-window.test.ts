@@ -21,12 +21,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { readFileSync } from "node:fs";
 import type { Hono } from "hono";
 import type { ReadWindowOutput } from "../../shared/contract/mcp.js";
-import { roundToSignificantDigits } from "../src/mcp/taste.js";
+import { READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES } from "../../shared/contract/mcp.js";
+import { exceedsChannelSamplesCap, roundToSignificantDigits } from "../src/mcp/taste.js";
 import { type McpRoutesDeps, createMcpRoutes } from "../src/routes/mcp.js";
 import { createZarrDataRoutes } from "../src/routes/zarr-data.js";
 import type { Bindings } from "../src/types/bindings.js";
 import nm000111IndexV1Raw from "./fixtures/mcp/nm000111-index-v1.json";
 import nm000329IndexRaw from "./fixtures/mcp/nm000329-index.json";
+import nm099500ExpectedRaw from "./fixtures/mcp/nm099500-expected.json";
 import nm099500IndexRaw from "./fixtures/mcp/nm099500-index-v3.json";
 import { InMemoryCache } from "./helpers/cache.js";
 import { freshDb, realD1 } from "./helpers/d1.js";
@@ -48,15 +50,52 @@ const ZERO_STORE_ID = "nm500701";
 const UNKNOWN_ID = "nm599998";
 
 const SHARD_ID = "nm099500";
+// Two variants of the synthetic index, built in beforeAll by REMOVING fields
+// rather than committing near-duplicate fixtures: every v3 index in the repo
+// carries full geometry, so neither refusal path had anything to exercise it.
+const NO_SHARD_GEOM_ID = "nm099501";
+const BAD_GEOM_ID = "nm099502";
 const SHARD_COMMIT = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
 const SHARD_ZARR = "sub-synth/eeg/sub-synth_task-shardtest_eeg.zarr";
 const SHARD_GROUP = "eeg_250hz";
-const SHARD_N_CHANNELS = 4;
-const SHARD_CHUNK_SAMPLES = 1000;
-const SHARD_SCALE = [0.5, 1.0, 1.5, 2.0];
-const SHARD_OFFSET = [10.0, 20.0, 30.0, 40.0];
+/**
+ * Ground truth for the synthetic sharded fixture, read from the generator's
+ * own emitted `nm099500-expected.json` rather than re-implemented here.
+ *
+ * These numbers used to be a hand-written TypeScript mirror of the Python
+ * generator's `digital_value`, kept in sync by a comment. Two independent
+ * implementations agreeing is a real cross-language check, but nothing failed
+ * if they drifted -- the assertions would simply have started checking
+ * different, equally plausible values with both sides agreeing. The generator
+ * now emits its parameters and a set of spot checks as data, so there is one
+ * source of truth; `expectedSpotChecks` below is the authority, and the
+ * derived helpers read their constants from the same document.
+ */
+const EXPECTED = nm099500ExpectedRaw as {
+  n_channels: number;
+  n_samples: number;
+  chunk_samples: number;
+  shard_samples: number;
+  n_inner_per_shard: number;
+  fill_value: number;
+  scale: number[];
+  offset: number[];
+  absent_sample_spans: Array<{ start: number; end: number }>;
+  spot_checks: Array<{
+    channel: number;
+    global_sample: number;
+    digital: number;
+    physical: number;
+    fill_value_substituted: boolean;
+    addressable_via_read_window: boolean;
+  }>;
+};
 
-/** Mirrors the fixture generator's `digital_value`. */
+const SHARD_N_CHANNELS = EXPECTED.n_channels;
+const SHARD_CHUNK_SAMPLES = EXPECTED.chunk_samples;
+const SHARD_SCALE = EXPECTED.scale;
+const SHARD_OFFSET = EXPECTED.offset;
+
 function digitalValue(channel: number, globalSample: number): number {
   return channel * 100 + (globalSample % SHARD_CHUNK_SAMPLES);
 }
@@ -67,7 +106,10 @@ function expectedPhysical(channel: number, globalSample: number): number {
 }
 
 function expectedFillPhysical(channel: number): number {
-  return roundToSignificantDigits(0 * SHARD_SCALE[channel] + SHARD_OFFSET[channel], 6);
+  return roundToSignificantDigits(
+    EXPECTED.fill_value * SHARD_SCALE[channel] + SHARD_OFFSET[channel],
+    6,
+  );
 }
 
 const ctx = {
@@ -184,6 +226,36 @@ describe("read_window (route)", () => {
     };
     fixtureServer.files.set(`${SHARD_ID}/zarr/index.json`, encode(rewrittenShardIndex));
 
+    // A v3 index whose group carries no `chunk_samples`/`shard_samples`: a
+    // recipe is still computable (with those fields null), but a taste is not.
+    const shardStore = (rewrittenShardIndex as { stores: Array<Record<string, unknown>> })
+      .stores[0];
+    const shardGroup = (shardStore.groups as Array<Record<string, unknown>>)[0];
+    const { chunk_samples: _cs, shard_samples: _ss, ...groupWithoutGeometry } = shardGroup;
+    fixtureServer.files.set(
+      `${NO_SHARD_GEOM_ID}/zarr/index.json`,
+      encode({
+        ...rewrittenShardIndex,
+        dataset_id: NO_SHARD_GEOM_ID,
+        data_base: `${FIXTURE_PUBLIC_ORIGIN}/${NO_SHARD_GEOM_ID}/zarr/`,
+        contract_base: `${FIXTURE_PUBLIC_ORIGIN}/${NO_SHARD_GEOM_ID}/zarr/`,
+        stores: [{ ...shardStore, groups: [groupWithoutGeometry] }],
+      }),
+    );
+
+    // A v3 index whose group has no usable rate at all -- the malformed-index
+    // defensive path, distinct from "no sharding geometry".
+    fixtureServer.files.set(
+      `${BAD_GEOM_ID}/zarr/index.json`,
+      encode({
+        ...rewrittenShardIndex,
+        dataset_id: BAD_GEOM_ID,
+        data_base: `${FIXTURE_PUBLIC_ORIGIN}/${BAD_GEOM_ID}/zarr/`,
+        contract_base: `${FIXTURE_PUBLIC_ORIGIN}/${BAD_GEOM_ID}/zarr/`,
+        stores: [{ ...shardStore, groups: [{ ...shardGroup, rate: 0, n_samples: 0 }] }],
+      }),
+    );
+
     shard0Bytes = new Uint8Array(
       readFileSync(new URL("./fixtures/mcp/nm099500-shard-0.bin", import.meta.url)),
     );
@@ -253,6 +325,16 @@ describe("read_window (route)", () => {
       zarr_source_commit: V1_COMMIT,
     });
     insertDataset(SHARD_ID, {
+      zarr_status: "ready",
+      zarr_store_count: 1,
+      zarr_source_commit: SHARD_COMMIT,
+    });
+    insertDataset(NO_SHARD_GEOM_ID, {
+      zarr_status: "ready",
+      zarr_store_count: 1,
+      zarr_source_commit: SHARD_COMMIT,
+    });
+    insertDataset(BAD_GEOM_ID, {
       zarr_status: "ready",
       zarr_store_count: 1,
       zarr_source_commit: SHARD_COMMIT,
@@ -613,5 +695,194 @@ describe("read_window (route)", () => {
       const output = structuredContentOf(body);
       expect(() => readWindowOutputSchema.parse(output)).not.toThrow();
     });
+
+    test("an unknown recording against a ready dataset lists known identifiers", async () => {
+      const { body } = await callTool(app, env(db), 1, "read_window", {
+        dataset_id: SHARD_ID,
+        recording: "sub-nope/eeg/sub-nope_task-nope_eeg.zarr",
+      });
+      const text = errorTextOf(body);
+      expect(text).toContain("sub-nope");
+      // The error teaches: it names at least one real identifier to use instead.
+      expect(text).toContain(SHARD_ZARR);
+    });
+
+    test("an unknown group against a known recording lists the real group names", async () => {
+      const { body } = await callTool(app, env(db), 1, "read_window", {
+        dataset_id: SHARD_ID,
+        recording: SHARD_ZARR,
+        group: "bogus_group",
+      });
+      const text = errorTextOf(body);
+      expect(text).toContain("bogus_group");
+      expect(text).toContain(SHARD_GROUP);
+    });
+
+    test("a group with no sharding geometry refuses a taste but still serves a recipe", async () => {
+      const { body: tasteBody } = await callTool(app, env(db), 1, "read_window", {
+        dataset_id: NO_SHARD_GEOM_ID,
+        recording: SHARD_ZARR,
+        duration_s: 1,
+        channels: [0],
+        taste: true,
+      });
+      const text = errorTextOf(tasteBody);
+      expect(text.toLowerCase()).toContain("taste");
+      // A typed refusal that names the way forward, never a silent downgrade
+      // to recipe mode: a caller who asked for numbers must not have to notice
+      // that the mode discriminator changed under them.
+      expect(shardObjectRequests(NO_SHARD_GEOM_ID).length).toBe(0);
+
+      const { body: recipeBody } = await callTool(app, env(db), 2, "read_window", {
+        dataset_id: NO_SHARD_GEOM_ID,
+        recording: SHARD_ZARR,
+        duration_s: 1,
+      });
+      const recipe = structuredContentOf(recipeBody);
+      expect(recipe.mode).toBe("recipe");
+      if (recipe.mode !== "recipe") return;
+      expect(recipe.recipe.chunk_samples).toBeNull();
+      expect(recipe.recipe.shard_samples).toBeNull();
+    });
+
+    test("a group with no usable rate answers the missing-geometry error", async () => {
+      const { body } = await callTool(app, env(db), 1, "read_window", {
+        dataset_id: BAD_GEOM_ID,
+        recording: SHARD_ZARR,
+        duration_s: 1,
+        channels: [0],
+        taste: true,
+      });
+      const text = errorTextOf(body);
+      expect(text.length).toBeGreaterThan(0);
+      expect(shardObjectRequests(BAD_GEOM_ID).length).toBe(0);
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // Ground truth read from the generator's own emitted expectations
+  // ---------------------------------------------------------------------
+
+  describe("fixture spot checks (one source of truth for expected values)", () => {
+    test("every addressable spot check matches what the tool returns", async () => {
+      const addressable = EXPECTED.spot_checks.filter((c) => c.addressable_via_read_window);
+      expect(addressable.length).toBeGreaterThan(0);
+      for (const check of addressable) {
+        // One single-sample window per spot check, so a failure names the
+        // exact (channel, sample) pair rather than an index into a big array.
+        const startS = check.global_sample / 250;
+        const { body } = await callTool(app, env(db), 1, "read_window", {
+          dataset_id: SHARD_ID,
+          recording: SHARD_ZARR,
+          start_s: startS,
+          duration_s: 1 / 250,
+          channels: [check.channel],
+          taste: true,
+        });
+        const output = structuredContentOf(body);
+        expect(output.mode).toBe("taste");
+        if (output.mode !== "taste") return;
+        expect(output.values[0].length).toBe(1);
+        expect(output.values[0][0]).toBeCloseTo(roundToSignificantDigits(check.physical, 6), 9);
+        // A padded or absent-chunk sample must also be REPORTED as filled,
+        // never handed back looking like recorded signal.
+        const filled = output.filled_ranges.some(
+          (r) => r.start_sample <= check.global_sample && check.global_sample < r.end_sample,
+        );
+        expect(filled).toBe(check.fill_value_substituted);
+      }
+    });
+
+    test("a sample in the boundary chunk's fill padding is refused, not served", async () => {
+      // The generator marks these `addressable_via_read_window: false`. The
+      // padding is real stored bytes, but a window past the array's extent is
+      // a bounds error: padding must never be handed back as if it were
+      // recorded signal.
+      const unaddressable = EXPECTED.spot_checks.filter((c) => !c.addressable_via_read_window);
+      expect(unaddressable.length).toBeGreaterThan(0);
+      for (const check of unaddressable) {
+        expect(check.global_sample).toBeGreaterThanOrEqual(EXPECTED.n_samples);
+        const { body } = await callTool(app, env(db), 1, "read_window", {
+          dataset_id: SHARD_ID,
+          recording: SHARD_ZARR,
+          start_s: check.global_sample / 250,
+          duration_s: 1 / 250,
+          channels: [check.channel],
+          taste: true,
+        });
+        expect(errorTextOf(body).length).toBeGreaterThan(0);
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // A Range-ignoring origin must be refused, not mis-sliced
+  // ---------------------------------------------------------------------
+
+  describe("a non-compliant origin", () => {
+    test("a 200 + full body in answer to a Range request is refused, never sliced", async () => {
+      // Without this check the whole-object body would be sliced at
+      // `entry.offset - runStart`, which for a run that does not start at byte
+      // 0 lands on the shard's EARLIER chunks. Those decode cleanly and have
+      // the same shape, so nothing downstream notices: the caller would get
+      // real, plausible signal from the wrong point in the recording.
+      const key = `${SHARD_ID}/zarr/${SHARD_ZARR}/${SHARD_GROUP}/0/c/0/0`;
+      fixtureServer.ignoreRangeForKeys.add(key);
+      try {
+        const { body } = await callTool(app, env(db), 1, "read_window", {
+          dataset_id: SHARD_ID,
+          recording: SHARD_ZARR,
+          start_s: 4, // startSample 1000: a run that does NOT start at byte 0
+          duration_s: 1,
+          channels: [0, 1, 2, 3],
+          taste: true,
+        });
+        const text = errorTextOf(body);
+        // Assert the PROTOCOL reason, not merely that something was refused.
+        // Tolerating a bare 200 here still trips the byte-length check further
+        // down (a whole shard is longer than the requested run), so a looser
+        // assertion passes even with the status check removed -- which is the
+        // downstream coincidence this check exists to stop relying on.
+        expect(text).toContain("expected 206");
+        expect(text).toContain("ignored Range");
+      } finally {
+        fixtureServer.ignoreRangeForKeys.delete(key);
+      }
+    });
+  });
+});
+
+// -------------------------------------------------------------------------
+// The one cap nothing in the schema enforces, asserted at its exact boundary
+// -------------------------------------------------------------------------
+
+describe("exceedsChannelSamplesCap", () => {
+  const cap = READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES;
+
+  test("the cap is 65536", () => {
+    expect(cap).toBe(65_536);
+  });
+
+  test("exactly at the cap is allowed", () => {
+    expect(exceedsChannelSamplesCap({ channelCount: 64, windowSamples: 1024, cap })).toBe(false);
+    expect(exceedsChannelSamplesCap({ channelCount: 1, windowSamples: cap, cap })).toBe(false);
+  });
+
+  test("one channel-sample past the cap is rejected", () => {
+    // The boundary the end-to-end test cannot reach: its request is ~14x the
+    // cap, so `>` vs `>=` there is indistinguishable.
+    expect(exceedsChannelSamplesCap({ channelCount: 1, windowSamples: cap + 1, cap })).toBe(true);
+    expect(exceedsChannelSamplesCap({ channelCount: 64, windowSamples: 1025, cap })).toBe(true);
+  });
+
+  test("it is a product, not a sum", () => {
+    // 2 x 40000 = 80000 exceeds the cap; 2 + 40000 = 40002 does not. A
+    // sum-instead-of-product bug would wrongly ALLOW this request, and the
+    // existing end-to-end test (~14x over the cap on both readings) cannot
+    // tell the two apart.
+    expect(exceedsChannelSamplesCap({ channelCount: 2, windowSamples: 40_000, cap })).toBe(true);
+    // The converse: 1 x 65536 is exactly at the cap and allowed, while
+    // 1 + 65536 would exceed it, so a sum would wrongly REJECT this one.
+    expect(exceedsChannelSamplesCap({ channelCount: 1, windowSamples: cap, cap })).toBe(false);
   });
 });

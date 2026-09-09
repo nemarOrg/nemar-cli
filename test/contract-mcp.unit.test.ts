@@ -345,14 +345,19 @@ describe("readWindowInputSchema", () => {
   });
 
   test("rejects a taste request over the channel-second cap (duration_s x channels)", () => {
-    // duration_s just over READ_WINDOW_TASTE_MAX_DURATION_S at the max channel
-    // count -- neither field alone exceeds a generous sanity ceiling, so this
-    // input is rejected ONLY by the combined channel-seconds check, not by an
-    // incidental per-field .max(). (A prior version of this test used a
-    // channels array one element over READ_WINDOW_TASTE_MAX_CHANNELS, which
-    // turned out to be rejected by that field's own .max() regardless of
-    // whether the channel-seconds refinement ran at all -- caught by
-    // mutating the refinement out and watching every test stay green.)
+    // NOTE ON WHAT THIS TEST NOW PROVES. It asserts the OUTCOME (a taste one
+    // second past the duration cap at the maximum channel count is refused),
+    // which is still correct and worth pinning. It no longer isolates the
+    // combined channel-seconds check, and an earlier version of this comment
+    // wrongly claimed it did: since the hard per-field caps landed, the two
+    // maxima multiply to exactly READ_WINDOW_TASTE_MAX_CHANNEL_SECONDS
+    // (asserted in backend/test/mcp-schema-parity.test.ts), so no input that
+    // satisfies both hard caps can reach the product check at all -- and this
+    // input trips the hard duration cap on its way past. Deleting the product
+    // clause leaves every test green, which is expected and disclosed in
+    // `.context/mcp-server-design.md`; it is kept as cheap defense for the day
+    // a hard cap is raised, and the parity file's multiplication assertion is
+    // what will tell whoever raises one that the relationship changed.
     const channels = Array.from({ length: READ_WINDOW_TASTE_MAX_CHANNELS }, (_, i) => i);
     const result = readWindowInputSchema.safeParse({
       dataset_id: "on008083",
@@ -362,6 +367,25 @@ describe("readWindowInputSchema", () => {
       taste: true,
     });
     expect(result.success).toBe(false);
+  });
+
+  test("a taste request with an EMPTY channels array is refused like an omitted one", () => {
+    // An empty array is not `undefined`, so a guard written only against
+    // `undefined` let it through -- and it clears both caps trivially
+    // (`0 > 64` is false, `duration_s * 0` is always under the product cap).
+    // Downstream, `Math.min(...[])` / `Math.max(...[])` are +/-Infinity, which
+    // reached `readRecipeSchema.parse` and threw a raw ZodError naming a field
+    // the caller never supplied, AFTER a real Range GET had already been spent.
+    const result = readWindowInputSchema.safeParse({
+      dataset_id: "on008083",
+      recording: "sub-01/eeg/a_eeg.zarr",
+      duration_s: 1,
+      channels: [],
+      taste: true,
+    });
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(JSON.stringify(result.error.issues)).toContain("taste requires channels");
   });
 
   test("a taste request that omits channels is refused: the schema cannot bound it", () => {
@@ -390,7 +414,7 @@ describe("readWindowOutputSchema", () => {
     expect(parsed.mode).toBe("recipe");
   });
 
-  test("a taste result parses (phase 4: recipe, chunks_read, bytes_read, note are also required/present)", () => {
+  test("a taste result parses (phase 4: recipe, chunks_read, bytes_read, filled_ranges, note)", () => {
     const parsed = readWindowOutputSchema.parse({
       mode: "taste",
       start_s: 0,
@@ -401,6 +425,7 @@ describe("readWindowOutputSchema", () => {
       recipe,
       chunks_read: 2,
       bytes_read: 4096,
+      filled_ranges: [],
       note: "values are rounded to six significant digits; see recipe for the exact byte-level read",
       envelope,
     });
@@ -408,6 +433,26 @@ describe("readWindowOutputSchema", () => {
     if (parsed.mode !== "taste") return;
     expect(parsed.chunks_read).toBe(2);
     expect(parsed.recipe.zarr).toBe(recipe.zarr);
+    expect(parsed.filled_ranges).toEqual([]);
+  });
+
+  test("filled_ranges is REQUIRED, not optional: a taste that omits it is refused", () => {
+    // The whole point of the field is that a caller never has to distinguish
+    // "no gaps" from "this build does not report gaps", so an absent array is
+    // not a valid taste result.
+    const withoutFilledRanges = {
+      mode: "taste",
+      start_s: 0,
+      duration_s: 1,
+      channels: [0],
+      sample_rate_hz: 250,
+      values: [Array(250).fill(0)],
+      recipe,
+      chunks_read: 1,
+      bytes_read: 1024,
+      envelope,
+    };
+    expect(readWindowOutputSchema.safeParse(withoutFilledRanges).success).toBe(false);
   });
 
   test("an unknown mode, a taste without values, or a taste missing recipe/chunks_read/bytes_read is refused", () => {
