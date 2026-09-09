@@ -54,6 +54,10 @@ import {
 } from "./services/email";
 import { isNonProductionEnv } from "./services/environment";
 import { resolveHostRoute } from "./services/host-routing";
+import {
+  importCoverageSweepSummary,
+  runImportCoverageSweepCron,
+} from "./services/import-coverage-sweep";
 import { isGenericImportError, lastErrorAssignmentSql } from "./services/import-error";
 import { importIssueSweepLogLines, runImportIssueSweepCron } from "./services/import-issue-sweep";
 import { runImportRecovery } from "./services/import-recovery";
@@ -900,6 +904,39 @@ export default {
           .catch((err) =>
             console.error(
               "[import-issue-sweep] sweep failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
+      );
+      // #1311 (epic #1306): report the pipeline's own silence. Diffs OpenNeuro
+      // against D1 and alarms when in-scope datasets are accruing while the
+      // importer has stopped dispatching -- or is switched off and forgotten,
+      // which is what happened for seven weeks from 2026-07-20 with nothing in
+      // the system able to say so. Every other sweep here reports on work that
+      // was attempted; this one is the only thing that notices work that never
+      // started.
+      //
+      // PROD-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it files and
+      // closes a real issue on the shared nemarDatasets org, the same reason
+      // runImportIssueSweepCron is excluded.
+      ctx.waitUntil(
+        runImportCoverageSweepCron(env)
+          .then((r) => {
+            // null means the wrapper's own guard skipped this run (non-prod).
+            if (!r) return;
+            // Logged at error level when it is an alarm: this is the one sweep
+            // whose whole purpose is to be noticed, and a console.log would sit
+            // at the same level as every routine summary.
+            const line = `[import-coverage] ${importCoverageSweepSummary(r)}`;
+            if (r.status === "healthy") console.log(line);
+            else console.error(`${line} reason="${r.reason}"`);
+            for (const e of r.errors) {
+              console.error(`[import-coverage] ${e.stage}: ${e.error}`);
+            }
+          })
+          .catch((err) =>
+            console.error(
+              "[import-coverage] sweep failed:",
               err instanceof Error ? (err.stack ?? err.message) : err,
             ),
           ),
