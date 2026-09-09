@@ -1576,6 +1576,55 @@ export async function zarrFidelitySweep(options?: {
 }
 
 // ============================================================================
+// Import-failure issue triage (#1310, epic #1306)
+// ============================================================================
+
+export interface ImportIssueTriageEntry {
+  issueNumber: number;
+  datasetId: string | null;
+  title: string;
+  kind: "close" | "relabel" | "keep";
+  reason: string;
+  labels?: string[];
+}
+
+/** One batch of the import-failure issue triage
+ *  (`POST /admin/imports/issue-triage`). `applied` is false on a dry run, which
+ *  is the default: nothing is written to GitHub unless `--apply` is passed. */
+export interface ImportIssueTriageResponse {
+  applied: boolean;
+  /** Open per-dataset issues (rollups excluded). */
+  openIssues: number;
+  /** What a NEW failure would do right now, given that count. */
+  mode: "per-dataset" | "rollup";
+  examined: number;
+  closed: number;
+  relabelled: number;
+  kept: number;
+  plan: ImportIssueTriageEntry[];
+  errors: { issue: number; dataset_id: string | null; error: string }[];
+  remaining: number;
+  ok: boolean;
+}
+
+/** Triage the open import-failure issues (server default 15 per run, max 30).
+ *  Dry run unless `apply` is set. */
+export async function importIssueTriage(options?: {
+  limit?: number;
+  apply?: boolean;
+}): Promise<ImportIssueTriageResponse> {
+  const params = new URLSearchParams();
+  if (options?.limit != null) params.set("limit", String(options.limit));
+  if (options?.apply) params.set("apply", "1");
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return request<ImportIssueTriageResponse>(
+    `/admin/imports/issue-triage${query}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+// ============================================================================
 // Researcher-name backfill (#1255, epic #1250)
 // ============================================================================
 

@@ -71,8 +71,9 @@ const INDEX_PATH = join(import.meta.dir, "../src/index.ts");
  *                   and a same-module `<name>Cron` wrapper -- itself declared
  *                   `prod-only` above -- carries the guard and is what
  *                   `scheduled()` actually calls.
- *  - `helper`       not a sweep at all: a SQL/query builder that happens to
- *                   carry the word in its name
+ *  - `helper`       not a sweep at all: a SQL/query builder, or an output
+ *                   formatter for a sweep's result, that happens to carry the
+ *                   word in its name
  */
 const SWEEP_WIRING: Record<string, "prod-only" | "all-envs" | "cron-wrapped" | "helper"> = {
   archiveRetrySweep: "prod-only",
@@ -85,7 +86,10 @@ const SWEEP_WIRING: Record<string, "prod-only" | "all-envs" | "cron-wrapped" | "
   runSignalDefaultsSweep: "cron-wrapped",
   runSignalDefaultsSweepCron: "prod-only",
   runZarrFidelitySweep: "all-envs",
+  runImportIssueSweep: "cron-wrapped",
+  runImportIssueSweepCron: "prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
+  importIssueSweepLogLines: "helper",
   availabilityReportSweepWhere: "helper",
   availabilityReportSweepCandidateQuery: "helper",
   availabilityReportSweepRemainingQuery: "helper",
@@ -158,11 +162,18 @@ const prodOnlyCode = codeLines(prodOnlyBlockLines(indexLines)).join("\n");
  *  `ctx.waitUntil` can be cancelled when the handler returns, so a bare
  *  statement is not a wired sweep even though the name is present. */
 function isScheduled(code: string, name: string): boolean {
-  return new RegExp(`ctx\\.waitUntil\\(\\s*${name}\\(env\\)`).test(code);
+  return new RegExp(`ctx\\.waitUntil\\(\\s*${name}\\(env[),]`).test(code);
 }
 
+/**
+ * Calls of the form `name(env)` or `name(env, ...)`. The trailing delimiter is
+ * matched rather than a bare `(env)` so a sweep that takes options -- as
+ * `runImportIssueSweep(env, { apply: true })` does -- still counts. `env` must
+ * still be the first argument, so this is no weaker: it cannot match a
+ * same-named call on some other value.
+ */
 function callCount(code: string, name: string): number {
-  return code.split(`${name}(env)`).length - 1;
+  return [...code.matchAll(new RegExp(`\\b${name}\\(env[),]`, "g"))].length;
 }
 
 /**
@@ -258,7 +269,10 @@ describe("every sweep service is declared and driven", () => {
       // other assertion in this file.
       const code = serviceFileCodeLinesDefining(cronName)?.join("\n") ?? null;
       expect(code).not.toBeNull();
-      expect(code).toContain(`${name}(env)`);
+      // `callCount` rather than a literal `name(env)` substring, so a wrapper
+      // that passes options through -- the cron's `apply` flag, say -- still
+      // counts as delegating.
+      expect(callCount(code ?? "", name)).toBeGreaterThanOrEqual(1);
     });
   }
 });

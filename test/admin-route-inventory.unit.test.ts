@@ -116,6 +116,7 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /imports/:id/retry": 1,
   "POST /imports/:id/verify": 1,
   "POST /imports/dispatch-cooldown": 2,
+  "POST /imports/issue-triage": 1,
 
   // Staging exemplars (epic #923, Phase 5)
   "POST /datasets/exemplar": 2,
@@ -167,7 +168,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(113);
+    expect(adminRoutes.routes.length).toBe(114);
   });
 
   // The count pin above can't see a SWAP of the two router-level middleware

@@ -34,6 +34,7 @@
  */
 
 import type { Bindings } from "../types/bindings.js";
+import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import {
   type GitHubIssue,
@@ -285,6 +286,25 @@ async function applyOneIssue(
       `[import-issue-sweep] relabelled ${IMPORT_FAILURE_ISSUES_REPO}#${issue.number} -> ${entry.labels.join(",")}`,
     );
   }
+}
+
+/**
+ * The cron's entry point: apply the changes, and refuse outside production.
+ *
+ * Split from {@link runImportIssueSweep} the same way `runRecordingStatsSweepCron`
+ * is (issue #1166, Option 2). The raw sweep stays unguarded so the admin route
+ * can dry-run it on staging; this wrapper carries both the `apply` and the
+ * environment guard, so a dev worker cannot close or relabel real issues on the
+ * shared nemarDatasets org even if the caller's own guard were wrong.
+ */
+export async function runImportIssueSweepCron(
+  env: Bindings,
+): Promise<ImportIssueSweepResult | null> {
+  if (isNonProductionEnv(env)) {
+    console.log("[import-issue-sweep] skipped (non-production)");
+    return null;
+  }
+  return runImportIssueSweep(env, { apply: true });
 }
 
 /** One-line-per-issue summary for the CLI and the cron log. */

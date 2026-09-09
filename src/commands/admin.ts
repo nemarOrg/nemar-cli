@@ -47,6 +47,7 @@ import {
   type DoctorScanResponse,
   type EmailPreferences,
   type HedSweepBatchResponse,
+  type ImportIssueTriageResponse,
   type RecordingStatsSweepBatchResponse,
   type ReindexBulkOptions,
   type ReindexBulkResponse,
@@ -90,6 +91,7 @@ import {
   getUserDuplicates,
   hedSweep,
   hedSweepReset,
+  importIssueTriage,
   listKeysFor,
   listUsers,
   publishDataset,
@@ -6929,6 +6931,89 @@ backfillNamesCommand
   });
 
 adminCommand.addCommand(backfillNamesCommand);
+
+// ============================================================================
+// Import-failure issue triage (#1310, epic #1306)
+// ============================================================================
+
+const importIssueTriageCommand = new Command("import-issue-triage").description(
+  "Close recovered import-failure issues and retire stale cause labels (dry run by default)",
+);
+
+importIssueTriageCommand
+  .option("--apply", "Perform the changes (without this flag, only report what would change)")
+  .option("--limit <n>", "Issues per batch (server clamps to [1,30])", "15")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { apply?: boolean; limit?: string; json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const limit = Number.parseInt(options.limit ?? "15", 10) || 15;
+    const apply = options.apply === true;
+    const spinner = ora(
+      apply ? "Triaging import-failure issues..." : "Checking import-failure issues...",
+    ).start();
+
+    let res: ImportIssueTriageResponse;
+    try {
+      res = await importIssueTriage({ apply, limit });
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Import-failure issue triage failed");
+      console.error(chalk.red(errorDetail(err)));
+      process.exit(1);
+      return;
+    }
+
+    // Computed before the --json branch returns so a scripted caller sees the
+    // same verdict as someone reading the summary. A per-issue error leaves
+    // that issue untouched and still a candidate; it is not fatal, but it must
+    // not read as a clean run.
+    if (res.errors.length > 0) process.exitCode = 1;
+
+    if (options.json) {
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    console.log();
+    if (!res.applied) {
+      console.log(chalk.yellow("DRY RUN \u2014 nothing was written. Re-run with --apply."));
+    }
+    for (const e of res.plan) {
+      const verb = res.applied ? "" : "WOULD ";
+      const who = `#${e.issueNumber} ${e.datasetId ?? "(unknown)"}`;
+      if (e.kind === "close") {
+        console.log(`${chalk.green(`${verb}CLOSE`.padEnd(14))} ${who}  ${chalk.dim(e.reason)}`);
+      } else if (e.kind === "relabel") {
+        console.log(`${chalk.yellow(`${verb}RELABEL`.padEnd(14))} ${who}  ${chalk.dim(e.reason)}`);
+      } else {
+        console.log(`${chalk.dim("KEEP".padEnd(14))} ${who}  ${chalk.dim(e.reason)}`);
+      }
+    }
+    for (const e of res.errors) {
+      console.log(`${chalk.red("ERROR".padEnd(14))} #${e.issue} ${e.dataset_id ?? ""}  ${e.error}`);
+    }
+
+    console.log();
+    console.log(
+      chalk.cyan(
+        `open=${res.openIssues} mode=${res.mode} examined=${res.examined} ` +
+          `${res.applied ? "closed" : "would_close"}=${res.closed} ` +
+          `${res.applied ? "relabelled" : "would_relabel"}=${res.relabelled} ` +
+          `kept=${res.kept} errors=${res.errors.length} remaining=${res.remaining}`,
+      ),
+    );
+    if (res.mode === "rollup") {
+      console.log(
+        chalk.dim("  Rollup mode: new failures join one issue per cause until the backlog drains."),
+      );
+    }
+    if (!res.applied && (res.closed > 0 || res.relabelled > 0)) {
+      console.log(chalk.dim("  Re-run with --apply to perform these changes."));
+    }
+  });
+
+adminCommand.addCommand(importIssueTriageCommand);
 
 // ============================================================================
 // Username backfill (ADR 0042, #1253, epic #1250)
