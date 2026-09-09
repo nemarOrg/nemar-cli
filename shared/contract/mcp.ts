@@ -824,6 +824,27 @@ export const READ_WINDOW_TASTE_MAX_CHANNEL_SECONDS =
   READ_WINDOW_TASTE_MAX_DURATION_S * READ_WINDOW_TASTE_MAX_CHANNELS;
 
 /**
+ * Phase 4 (issue #1296) correction to the phase 1 cap above: measured
+ * against the real sharded geometry, `duration_s x channels.length` bounds
+ * neither bytes moved nor response size. `duration_s` alone determines chunk
+ * fanout (an inner chunk always spans every channel, so a taste of one
+ * channel still decodes all of them), and the RESPONSE is what
+ * `channels.length x n_samples` actually bounds -- so both
+ * {@link READ_WINDOW_TASTE_MAX_DURATION_S} and
+ * {@link READ_WINDOW_TASTE_MAX_CHANNELS} become HARD per-field caps (below,
+ * inside the taste branch of `readWindowInputSchema`'s `superRefine`),
+ * alongside this new product cap. `READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES`
+ * cannot be schema-enforced -- the schema does not know a group's sample
+ * rate, so it cannot turn `duration_s` into a sample count -- and is instead
+ * checked by `read-window.ts` AFTER the index read, once the group's rate is
+ * known. 65,536 values round-tripped at six significant digits is under
+ * about 900 KB; at 250 Hz it buys 64 channels x 4 s or 8 channels x 32 s, at
+ * 1000 Hz (the modality-rate ceiling) 2 channels x 32 s. A taste is a
+ * sanity check on the numbers, not an analysis window, and the tool error
+ * this cap produces says so. */
+export const READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES = 65_536;
+
+/**
  * Field-level sanity ceilings for the RECIPE path (`taste: false`, the
  * default), which never decodes anything -- these exist only to reject a
  * garbage request early, not to bound cost. They are deliberately far above
@@ -835,8 +856,8 @@ export const READ_WINDOW_TASTE_MAX_CHANNEL_SECONDS =
  * `superRefine` body left every existing test green, because the two field
  * maxes were already doing 100% of the rejecting.
  */
-const RECIPE_SANITY_MAX_DURATION_S = 24 * 60 * 60;
-const RECIPE_SANITY_MAX_CHANNELS = 4096;
+export const RECIPE_SANITY_MAX_DURATION_S = 24 * 60 * 60;
+export const RECIPE_SANITY_MAX_CHANNELS = 4096;
 
 /** `read_window` returns a recipe by default (`taste: false`, the documented
  *  default). Setting `taste: true` asks for inline decoded values instead,
@@ -857,7 +878,15 @@ export const readWindowInputSchema = z
   .passthrough()
   .superRefine((val, ctx) => {
     if (!val.taste) return;
-    if (val.channels === undefined) {
+    // An EMPTY array is not `undefined` -- it used to slip past this guard
+    // (and both hard caps below: `0 > 64` is false, `duration_s * 0` is
+    // always under the product cap), reaching the tool with nothing to
+    // decode. `buildReadRecipe`'s `channelSlice` then computed
+    // `Math.min(...[])` / `Math.max(...[])` (`Infinity`/`-Infinity`) and
+    // threw a raw ZodError past `withToolMetrics`, AFTER a real upstream
+    // Range read had already been issued -- found by review, reproduced
+    // against this repo's own test harness.
+    if (!val.channels || val.channels.length === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message:
@@ -866,6 +895,29 @@ export const readWindowInputSchema = z
         path: ["channels"],
       });
       return;
+    }
+    // Phase 4 (issue #1296): two HARD per-field caps, in addition to the
+    // channel-seconds product check below -- neither the raw shard-read cost
+    // (bounded by duration_s alone) nor the response size (bounded by
+    // channels.length x n_samples) is a product of the two fields, so a cap
+    // on their product alone under-constrains either one taken to its
+    // extreme (see READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES's doc). These stay
+    // INSIDE the taste branch, never promoted to the fields' own `.max()`
+    // (which would also constrain the recipe path) -- the exact distinction
+    // the mutation-check note above already explains for the product check.
+    if (val.duration_s > READ_WINDOW_TASTE_MAX_DURATION_S) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `taste duration_s (${val.duration_s}) exceeds the ${READ_WINDOW_TASTE_MAX_DURATION_S} s cap; omit taste for a recipe instead`,
+        path: ["duration_s"],
+      });
+    }
+    if (val.channels.length > READ_WINDOW_TASTE_MAX_CHANNELS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `taste channels (${val.channels.length}) exceeds the ${READ_WINDOW_TASTE_MAX_CHANNELS}-channel cap; omit taste for a recipe instead`,
+        path: ["channels"],
+      });
     }
     const channelSeconds = val.duration_s * val.channels.length;
     if (channelSeconds > READ_WINDOW_TASTE_MAX_CHANNEL_SECONDS) {
@@ -895,8 +947,43 @@ export const readWindowTasteResultSchema = z
     duration_s: z.number(),
     channels: z.array(z.number().int()),
     sample_rate_hz: z.number(),
-    /** `[channel][sample]`, already scaled to physical units. */
+    /** `[channel][sample]`, already scaled to physical units, rounded to six
+     *  significant digits (`note` says so). */
     values: z.array(z.array(z.number())),
+    /** The exact read this taste performed -- the array-metadata fetch this
+     *  taste already made means `dtype`/`codecs` come for free,
+     *  so a taste response carries a fully-populated recipe, not just
+     *  decoded numbers. */
+    recipe: readRecipeSchema,
+    /** How many inner chunks were actually fetched and decoded (an absent,
+     *  fill-valued chunk contributes 0 -- nothing was read for it). */
+    chunks_read: z.number().int().nonnegative(),
+    /** TOTAL upstream bytes fetched for this call: the array-metadata GET
+     *  (a plain full GET, not a Range read -- 0 when it was a cache hit)
+     *  plus every shard-footer Range read plus every inner-chunk Range
+     *  read (each individually 0 on a cache hit). Not exclusively
+     *  Range-read bytes -- the array-metadata fetch is the one full GET
+     *  folded into this same total. */
+    bytes_read: z.number().int().nonnegative(),
+    /** Every GLOBAL sample span (in both sample and second form, clipped to
+     *  this window) that had no stored inner chunk and was fill-substituted
+     *  with the channel's own baseline `offset[channel]` (digital 0) rather
+     *  than read from a real recorded chunk (ADR 0005: partial data is
+     *  reported, never silently substituted -- a fill value is otherwise
+     *  indistinguishable from real near-flat signal). Always an array, even
+     *  when empty -- a caller must not have to distinguish "no gaps" from
+     *  "this build does not report gaps". */
+    filled_ranges: z.array(
+      z
+        .object({
+          start_sample: z.number().int().nonnegative(),
+          end_sample: z.number().int().nonnegative(),
+          start_s: z.number(),
+          end_s: z.number(),
+        })
+        .passthrough(),
+    ),
+    note: z.string().nullable().optional(),
     envelope: provenanceEnvelopeSchema,
   })
   .passthrough();

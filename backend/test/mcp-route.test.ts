@@ -223,7 +223,7 @@ describe("MCP sub-app: full protocol + tool surface (epic #1065 phase 2)", () =>
     expect(body.result?.supportedVersions).toEqual(["2026-07-28"]);
   });
 
-  test("tools/list returns exactly the five phase 2+3 tools, with the cache hint", async () => {
+  test("tools/list returns exactly the six phase 2+3+4 tools, with the cache hint", async () => {
     const { res, body } = await postModern(app, env(db), 2, "tools/list");
     expect(res.status).toBe(200);
     const tools = body.result?.tools as Array<{ name: string }>;
@@ -231,6 +231,7 @@ describe("MCP sub-app: full protocol + tool surface (epic #1065 phase 2)", () =>
       "describe_dataset",
       "get_events",
       "list_recordings",
+      "read_window",
       "render_overview",
       "search_datasets",
     ]);

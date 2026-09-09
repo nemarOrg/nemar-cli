@@ -16,6 +16,12 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  READ_WINDOW_TASTE_MAX_CHANNELS,
+  READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES,
+  READ_WINDOW_TASTE_MAX_CHANNEL_SECONDS,
+  READ_WINDOW_TASTE_MAX_DURATION_S,
+  buildReadRecipe,
+  computeProvenanceEnvelope,
   describeDatasetInputSchema,
   describeDatasetOutputSchema,
   getEventsInputSchema,
@@ -23,11 +29,15 @@ import {
   listRecordingsInputSchema,
   listRecordingsOutputSchema,
   provenanceEnvelopeSchema,
+  readWindowInputSchema,
+  readWindowOutputSchema,
   renderOverviewInputSchema,
   renderOverviewOutputSchema,
   searchDatasetsInputSchema,
   searchDatasetsOutputSchema,
 } from "../../shared/contract/mcp.js";
+import { zarrIndexSchema } from "../../shared/contract/zarr-index.js";
+import v3Fixture from "../../test/fixtures/zarr-index-v3.json";
 import {
   describeDatasetInputSchema4,
   describeDatasetOutputSchema4,
@@ -36,6 +46,8 @@ import {
   listRecordingsInputSchema4,
   listRecordingsOutputSchema4,
   provenanceEnvelopeSchema4,
+  readWindowInputSchema4,
+  readWindowOutputSchema4,
   renderOverviewInputSchema4,
   renderOverviewOutputSchema4,
   searchDatasetsInputSchema4,
@@ -531,4 +543,123 @@ describe("envelope embedded in the three recording-level tools' outputs (item 24
       "renderOverviewOutputSchema with a derived envelope",
     );
   });
+});
+
+// ---------------------------------------------------------------------------
+// read_window (epic #1065 phase 4, issue #1296)
+// ---------------------------------------------------------------------------
+
+describe("readWindowInputSchema parity", () => {
+  const base = { dataset_id: "nm000329", recording: "sub-1/eeg/sub-1_task-x_eeg.zarr" };
+  const channels64 = Array.from({ length: READ_WINDOW_TASTE_MAX_CHANNELS }, (_, i) => i);
+
+  const cases: Array<[string, unknown]> = [
+    ["defaults (recipe mode, taste omitted)", base],
+    ["taste without channels -- rejected", { ...base, taste: true, duration_s: 10 }],
+    [
+      "taste at the duration_s cap (60) -- accepted",
+      { ...base, taste: true, duration_s: READ_WINDOW_TASTE_MAX_DURATION_S, channels: [0] },
+    ],
+    [
+      "taste one past the duration_s cap (61) -- rejected",
+      { ...base, taste: true, duration_s: READ_WINDOW_TASTE_MAX_DURATION_S + 1, channels: [0] },
+    ],
+    [
+      "taste at the channels cap (64) -- accepted (duration_s 1 keeps the product cap satisfied)",
+      { ...base, taste: true, duration_s: 1, channels: channels64 },
+    ],
+    [
+      "taste one past the channels cap (65) -- rejected",
+      { ...base, taste: true, duration_s: 1, channels: [...channels64, 64] },
+    ],
+    [
+      // Both hard per-field caps (60 s, 64 channels) at once: the largest
+      // channel-seconds product either cap alone allows is exactly
+      // READ_WINDOW_TASTE_MAX_CHANNEL_SECONDS (60 x 64 = 3840) -- the product
+      // check can therefore never fire on an input that already satisfies
+      // both hard caps (there is no way to exceed 3840 without first
+      // exceeding one of them). It stays in the schema per the lead's
+      // decision (cheap, rate-free, and correct even though now provably
+      // redundant given the two hard caps), so this case exercises the
+      // boundary it WOULD have guarded, confirming it still accepts there.
+      "taste exactly at the channel-seconds product cap (60 x 64) -- accepted",
+      { ...base, taste: true, duration_s: READ_WINDOW_TASTE_MAX_DURATION_S, channels: channels64 },
+    ],
+    ["negative start_s -- rejected", { ...base, start_s: -1 }],
+    ["unknown top-level key -- passthrough keeps it", { ...base, future_field: "x" }],
+    ["malformed dataset id -- rejected", { ...base, dataset_id: "not-an-id" }],
+  ];
+  for (const [label, input] of cases) {
+    test(label, () => assertParity(readWindowInputSchema, readWindowInputSchema4, input, label));
+  }
+
+  test(`READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES stays ${READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES} (runtime-only cap; no schema field to test parity on)`, () => {
+    // Documents the constant's presence for a reader of this parity file --
+    // the cap itself is enforced in read-window.ts after the index read, not
+    // by either zod schema (see the contract's own doc comment).
+    expect(READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES).toBe(65_536);
+  });
+
+  test("READ_WINDOW_TASTE_MAX_CHANNEL_SECONDS is duration x channels caps multiplied", () => {
+    expect(READ_WINDOW_TASTE_MAX_CHANNEL_SECONDS).toBe(
+      READ_WINDOW_TASTE_MAX_DURATION_S * READ_WINDOW_TASTE_MAX_CHANNELS,
+    );
+  });
+});
+
+describe("readWindowOutputSchema parity", () => {
+  const index = zarrIndexSchema.parse(v3Fixture);
+  const store = index.stores[0];
+  const group = store.groups?.[0];
+  const envelope = computeProvenanceEnvelope({ index, store, group });
+  const recipe = buildReadRecipe({ index, store, groupName: "eeg_250hz" });
+
+  const recipeResult = { mode: "recipe" as const, recipe, envelope };
+  const tasteResult = {
+    mode: "taste" as const,
+    start_s: 1,
+    duration_s: 2,
+    channels: [0, 1],
+    sample_rate_hz: 250,
+    values: [
+      [1, 2],
+      [3, 4],
+    ],
+    recipe,
+    chunks_read: 1,
+    bytes_read: 512,
+    note: "values are rounded to six significant digits; see recipe for the exact byte-level read",
+    envelope,
+  };
+
+  const cases: Array<[string, unknown]> = [
+    ["a recipe result", recipeResult],
+    ["a taste result", tasteResult],
+    [
+      "a taste result missing recipe -- rejected",
+      (() => {
+        const { recipe: _recipe, ...rest } = tasteResult;
+        return rest;
+      })(),
+    ],
+    [
+      "a taste result missing chunks_read -- rejected",
+      (() => {
+        const { chunks_read: _chunksRead, ...rest } = tasteResult;
+        return rest;
+      })(),
+    ],
+    [
+      "a taste result missing bytes_read -- rejected",
+      (() => {
+        const { bytes_read: _bytesRead, ...rest } = tasteResult;
+        return rest;
+      })(),
+    ],
+    ["a taste result with note: null -- accepted", { ...tasteResult, note: null }],
+    ["an unrecognized mode -- rejected", { mode: "bytes", envelope }],
+  ];
+  for (const [label, input] of cases) {
+    test(label, () => assertParity(readWindowOutputSchema, readWindowOutputSchema4, input, label));
+  }
 });

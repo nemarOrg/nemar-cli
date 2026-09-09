@@ -41,18 +41,73 @@ level). nm000329's own real `view/3` (the smallest level actually needing 3
 chunks) is ~490 KB across its three chunks -- over the fixture budget -- so
 this is synthetic too, same codec configuration.
 
+GEOMETRY (sharded level-0 fixture, epic #1065 phase 4, issue #1296). A THIRD,
+separate synthetic store for `read_window` taste mode: a small sharded LEVEL-0
+signal array (not a view pyramid chunk) using the SAME `sharding_indexed`
+codec configuration real level-0 arrays use (`test/fixtures/zarr-array-level0.zarr.json`,
+nm000329's real `eeg_250hz` level-0 `zarr.json`) -- `bytes` + `blosc`
+(zstd/clevel 5/shuffle/typesize 2) inner codecs, `bytes` + `crc32c` index
+codecs, `index_location: "end"`. 4 channels, `chunk_samples` 1000,
+`shard_samples` 4000, `n_samples` 6500.
+
+EVERY shard's footer carries `shard_samples // chunk_samples` == 4 entries,
+including the boundary shard: the entry count is a property of the chunk grid,
+not of how much real data lands in that particular shard. An earlier version
+of this generator wrote shard 1 with only THREE entries, matching a reader bug
+that computed the count from the remaining extent; because generator and
+reader agreed, the whole suite was green while production data was being
+misread by 11 chunks (see `sharding.ts`'s module doc for the measured
+evidence). The rule here is now the spec's: a chunk whose nominal span lies
+entirely past `n_samples` is an ABSENT ENTRY, never an omitted one.
+
+So shard 0 covers samples [0, 4000) with 4 entries and shard 1 covers
+[4000, 8000) with 4 entries, of which local index 3 ([7000, 8000)) is absent
+because it is wholly past `n_samples`. Local index 2 ([6000, 7000)) STRADDLES
+the array's real end and is present and stored FULL SIZE (1000 columns), with
+columns past sample 6500 written as `fill_value` 0 -- Zarr never emits a
+narrower chunk, verified against nm000329's own final present chunk, which
+decodes to 63 x 1000 for 750 real samples. Shard 0's
+local index 2 ([2000, 3000)) is deliberately marked ABSENT (both footer fields
+`2**64 - 1`) so the mid-array fill-value path is exercised too, and because
+its neighbours' byte offsets skip straight past it, it is what exercises
+`planShardReads`' "do not coalesce across an absent entry" rule at the route
+level, not just the pure-function level. Every present
+chunk's digital value is `channel * 100 + (global_sample % chunk_samples)` --
+deterministic and hand-computable from the sample index alone, so a test can
+assert an exact physical value (`digital * scale[channel] + offset[channel]`)
+without re-implementing the encoder. `scale`/`offset` are `[0.5, 1.0, 1.5,
+2.0]` / `[10.0, 20.0, 30.0, 40.0]`, real-shaped per-channel arrays matching
+the live fixture's `attributes.scale`/`attributes.offset` convention. Writes
+`backend/test/fixtures/mcp/nm099500-shard-0.bin`,
+`backend/test/fixtures/mcp/nm099500-shard-1.bin` (each a full shard object:
+concatenated inner-chunk blosc frames, in local-index order, immediately
+followed by its own `n_inner * 16 + 4`-byte footer -- `n_inner` little-endian
+uint64 `(offset, nbytes)` pairs plus a 4-byte crc32c placeholder, never
+verified by the reader), and
+`backend/test/fixtures/mcp/nm099500-level0-zarr.json` (the array's own
+`zarr.json`, `attributes.scale`/`attributes.offset` included). The dataset id
+`nm099500` is fictitious -- test-fixture-only, chosen INSIDE the dataset id
+band `isValidDatasetId` (`backend/src/services/datasetId.ts`) accepts (numeric
+part `<= 99999`): this fixture's index.json is read through the real zarr
+sub-app (`createZarrDataRoutes`), whose own `isPublicDataset` gate calls
+`isValidDatasetId` before touching D1 at all, unlike `mcp-route.test.ts`'s/
+`mcp-overview.test.ts`'s `nm5000xx`-band ids, which only ever reach tools that
+short-circuit before a real index.json fetch.
+
 USAGE. `uv run --with numcodecs python3 scripts/zarr/generate_mcp_test_fixture.py`
 from the repo root. Writes
-`backend/test/fixtures/mcp/on003392-synthetic-meg-view3-c-0-0-0.bin` and
+`backend/test/fixtures/mcp/on003392-synthetic-meg-view3-c-0-0-0.bin`,
 `backend/test/fixtures/mcp/nm000329-synthetic-multichunk-view1-c-0-0-{0,1,2}.bin`,
-printing each one's byte size. Re-run only if a fixture's geometry needs to
-change; the committed bytes are stable and this script is not part of the
-conversion pipeline.
+and the sharded level-0 fixture set above, printing each one's byte size.
+Re-run only if a fixture's geometry needs to change; the committed bytes are
+stable and this script is not part of the conversion pipeline.
 """
 
 from __future__ import annotations
 
+import json
 import math
+import struct
 from pathlib import Path
 
 import numpy as np
@@ -64,6 +119,17 @@ LEVEL = 3
 
 MULTI_N_CHANNELS = 4
 MULTI_CHUNK_COLUMNS = (50, 50, 17)
+
+# Sharded level-0 fixture (epic #1065 phase 4, issue #1296) -- see the module
+# docstring's "GEOMETRY (sharded level-0 fixture...)" section.
+SHARD_DATASET_ID = "nm099500"
+SHARD_N_CHANNELS = 4
+SHARD_CHUNK_SAMPLES = 1000
+SHARD_SAMPLES = 4000
+SHARD_N_SAMPLES = 6500
+SHARD_SCALE = [0.5, 1.0, 1.5, 2.0]
+SHARD_OFFSET = [10.0, 20.0, 30.0, 40.0]
+SHARD_ABSENT_MARKER = (1 << 64) - 1
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES_DIR = REPO_ROOT / "backend" / "test" / "fixtures" / "mcp"
@@ -104,6 +170,210 @@ def build_multichunk_envelope(n_columns: int, column_offset: int) -> np.ndarray:
     return data
 
 
+def digital_value(channel: int, global_sample: int) -> int:
+    """`channel * 100 + (global_sample % SHARD_CHUNK_SAMPLES)` -- see the
+    module docstring's sharded-fixture geometry section for why this
+    particular formula (hand-computable, distinguishes every channel, and
+    -- because `SHARD_CHUNK_SAMPLES` divides `SHARD_SAMPLES` evenly -- the
+    result for a non-boundary chunk depends only on the LOCAL sample offset
+    within that chunk, never on which chunk it is)."""
+    return channel * 100 + (global_sample % SHARD_CHUNK_SAMPLES)
+
+
+def build_shard(shard_index: int, absent_local: set[int]) -> bytes:
+    """Build one complete shard object for `shard_index`: concatenated
+    present-chunk blosc frames in local-index order, followed by the
+    `n_inner * 16 + 4`-byte footer (`sharding.ts`'s `footerByteLength`) --
+    `n_inner` little-endian uint64 `(offset, nbytes)` pairs, absent entries as
+    `(SHARD_ABSENT_MARKER, SHARD_ABSENT_MARKER)`, plus a 4-byte crc32c
+    placeholder the reader never verifies.
+
+    `n_inner` is derived here, from `SHARD_SAMPLES // SHARD_CHUNK_SAMPLES`, and
+    is the same for every shard -- the caller cannot pass a per-shard count,
+    because there is no such thing. `absent_local` names chunks to mark absent
+    ON PURPOSE (the mid-array fill-value case); a chunk whose nominal span
+    starts at or past `SHARD_N_SAMPLES` is marked absent automatically, and a
+    chunk that merely straddles `SHARD_N_SAMPLES` is written FULL SIZE with the
+    out-of-extent columns left at `fill_value` 0."""
+    codec = Blosc(cname="zstd", clevel=5, shuffle=Blosc.SHUFFLE, blocksize=0)
+    n_inner = SHARD_SAMPLES // SHARD_CHUNK_SAMPLES
+    body = bytearray()
+    footer_pairs: list[tuple[int, int]] = []
+    for local in range(n_inner):
+        start = shard_index * SHARD_SAMPLES + local * SHARD_CHUNK_SAMPLES
+        if local in absent_local or start >= SHARD_N_SAMPLES:
+            footer_pairs.append((SHARD_ABSENT_MARKER, SHARD_ABSENT_MARKER))
+            continue
+        data = np.zeros((SHARD_N_CHANNELS, SHARD_CHUNK_SAMPLES), dtype=np.int16)
+        for ch in range(SHARD_N_CHANNELS):
+            for col in range(SHARD_CHUNK_SAMPLES):
+                global_sample = start + col
+                if global_sample < SHARD_N_SAMPLES:
+                    data[ch, col] = digital_value(ch, global_sample)
+                # else: left at fill_value 0, the out-of-extent padding
+        encoded = codec.encode(data)
+        footer_pairs.append((len(body), len(encoded)))
+        body.extend(encoded)
+
+    out = bytearray(body)
+    for off, nb in footer_pairs:
+        out += struct.pack("<QQ", off, nb)
+    out += b"\x00\x00\x00\x00"  # crc32c placeholder -- never verified
+    return bytes(out)
+
+
+def build_expected_values() -> dict:
+    """Ground truth for the JS route tests, emitted as DATA so the expected
+    physical values have exactly one source of truth.
+
+    The tests used to re-implement `digital_value` in TypeScript and keep the
+    two in sync by comment; nothing failed if they drifted, the assertions just
+    quietly started checking different, equally plausible numbers. The spot
+    checks below are the authority: each carries the channel, the global sample,
+    the digital value, and the physical value the reader must produce, covering
+    the first sample, a mid-chunk sample, a sample inside the deliberately
+    absent mid-array chunk, the last REAL sample of the straddling boundary
+    chunk, and a padded column past `n_samples`."""
+    absent_shard0_local2 = 2 * SHARD_CHUNK_SAMPLES + 17  # inside [2000, 3000)
+    spot_samples = [
+        (0, 0),
+        (1, 0),
+        (3, 1500),
+        (0, absent_shard0_local2),
+        (2, absent_shard0_local2),
+        (0, 4000),
+        (3, 5999),
+        (0, SHARD_N_SAMPLES - 1),
+        (3, SHARD_N_SAMPLES - 1),
+        (0, SHARD_N_SAMPLES),
+        (1, SHARD_N_SAMPLES + 250),
+    ]
+    absent_spans = [(2000, 3000), (7000, 8000)]
+
+    def is_filled(global_sample: int) -> bool:
+        if global_sample >= SHARD_N_SAMPLES:
+            return True
+        return any(lo <= global_sample < hi for lo, hi in absent_spans)
+
+    checks = []
+    for channel, global_sample in spot_samples:
+        filled = is_filled(global_sample)
+        digital = 0 if filled else digital_value(channel, global_sample)
+        checks.append(
+            {
+                "channel": channel,
+                "global_sample": global_sample,
+                "digital": digital,
+                "physical": digital * SHARD_SCALE[channel] + SHARD_OFFSET[channel],
+                "fill_value_substituted": filled,
+                # A sample at or past `n_samples` describes real stored bytes
+                # (the boundary chunk's fill padding) but is NOT reachable
+                # through `read_window`: the tool's bounds check refuses a
+                # window past the array's extent rather than returning padding
+                # as if it were signal. Route-level tests must skip these; they
+                # exist so the padding itself is pinned as data.
+                "addressable_via_read_window": global_sample < SHARD_N_SAMPLES,
+            }
+        )
+    return {
+        "note": (
+            "Ground truth for backend/test/mcp-read-window.test.ts. Generated by "
+            "scripts/zarr/generate_mcp_test_fixture.py; do not hand-edit."
+        ),
+        "dataset_id": SHARD_DATASET_ID,
+        "n_channels": SHARD_N_CHANNELS,
+        "n_samples": SHARD_N_SAMPLES,
+        "chunk_samples": SHARD_CHUNK_SAMPLES,
+        "shard_samples": SHARD_SAMPLES,
+        "n_inner_per_shard": SHARD_SAMPLES // SHARD_CHUNK_SAMPLES,
+        "fill_value": 0,
+        "scale": SHARD_SCALE,
+        "offset": SHARD_OFFSET,
+        "absent_sample_spans": [{"start": lo, "end": hi} for lo, hi in absent_spans],
+        "spot_checks": checks,
+    }
+
+
+def build_sharded_level0_fixture() -> None:
+    n_inner = SHARD_SAMPLES // SHARD_CHUNK_SAMPLES
+    shard0 = build_shard(0, absent_local={2})
+    shard0_path = FIXTURES_DIR / f"{SHARD_DATASET_ID}-shard-0.bin"
+    shard0_path.write_bytes(shard0)
+    print(f"wrote {shard0_path} ({len(shard0)} bytes, {n_inner} entries, local index 2 absent)")
+
+    # No hand-listed absences: local index 3 ([7000, 8000)) is past n_samples,
+    # so build_shard marks it absent on its own, and local index 2 straddles
+    # n_samples and is written full size with fill padding.
+    shard1 = build_shard(1, absent_local=set())
+    shard1_path = FIXTURES_DIR / f"{SHARD_DATASET_ID}-shard-1.bin"
+    shard1_path.write_bytes(shard1)
+    print(
+        f"wrote {shard1_path} ({len(shard1)} bytes, {n_inner} entries, "
+        "local index 3 absent as wholly past n_samples, local index 2 full size with fill padding)"
+    )
+
+    expected_path = FIXTURES_DIR / f"{SHARD_DATASET_ID}-expected.json"
+    expected_path.write_text(json.dumps(build_expected_values(), indent=2) + "\n")
+    print(f"wrote {expected_path}")
+
+    level0_zarr_json = {
+        "shape": [SHARD_N_CHANNELS, SHARD_N_SAMPLES],
+        "data_type": "int16",
+        "chunk_grid": {
+            "name": "regular",
+            "configuration": {"chunk_shape": [SHARD_N_CHANNELS, SHARD_SAMPLES]},
+        },
+        "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
+        "fill_value": 0,
+        "codecs": [
+            {
+                "name": "sharding_indexed",
+                "configuration": {
+                    "chunk_shape": [SHARD_N_CHANNELS, SHARD_CHUNK_SAMPLES],
+                    "codecs": [
+                        {"name": "bytes", "configuration": {"endian": "little"}},
+                        {
+                            "name": "blosc",
+                            "configuration": {
+                                "typesize": 2,
+                                "cname": "zstd",
+                                "clevel": 5,
+                                "shuffle": "shuffle",
+                                "blocksize": 0,
+                            },
+                        },
+                    ],
+                    "index_codecs": [
+                        {"name": "bytes", "configuration": {"endian": "little"}},
+                        {"name": "crc32c"},
+                    ],
+                    "index_location": "end",
+                },
+            }
+        ],
+        "attributes": {
+            "level": 0,
+            "rate": 250.0,
+            "source_rate_hz": 1000.0,
+            "downsample_factor": 1,
+            "kind": "signal",
+            "chunk_samples": SHARD_CHUNK_SAMPLES,
+            "shard_samples": SHARD_SAMPLES,
+            "anti_aliased": True,
+            "usable_for_inference": True,
+            "scale": SHARD_SCALE,
+            "offset": SHARD_OFFSET,
+            "physical_formula": "physical = digital * scale + offset",
+        },
+        "zarr_format": 3,
+        "node_type": "array",
+        "storage_transformers": [],
+    }
+    zarr_json_path = FIXTURES_DIR / f"{SHARD_DATASET_ID}-level0-zarr.json"
+    zarr_json_path.write_text(json.dumps(level0_zarr_json, indent=2) + "\n")
+    print(f"wrote {zarr_json_path}")
+
+
 def main() -> None:
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
     # Byte-shuffle, zstd, one block per chunk (blocksize=0 lets c-blosc pick
@@ -131,6 +401,8 @@ def main() -> None:
         chunk_path.write_bytes(chunk_encoded)
         print(f"wrote {chunk_path} ({len(chunk_encoded)} bytes, decoded shape {chunk_data.shape})")
         offset += n_columns
+
+    build_sharded_level0_fixture()
 
 
 if __name__ == "__main__":
