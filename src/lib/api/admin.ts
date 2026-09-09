@@ -1662,26 +1662,39 @@ export async function importIssueTriage(options?: {
 export interface ImportCoverageResponse {
   applied: boolean;
   status: "healthy" | "alarm" | "unknown";
-  kind: "backlog" | "silence" | "disabled" | null;
+  kind: "backlog" | "silence" | "disabled" | "dispatch-lost" | null;
   reason: string;
   /** Whether `AUTO_IMPORT_ENABLED` is the exact string `"true"`. */
   enabled: boolean;
   lastDispatchAt: string | null;
   dispatchAgeHours: number | null;
+  /** The dataset the last dispatch row named. */
+  lastDispatchSourceId: string | null;
+  /** The last dispatch picked a dataset that never acquired an import row: the
+   *  hand-off is failing after the audit row is written. */
+  dispatchLost: boolean;
   /** In-scope datasets OpenNeuro reported this run. */
   discovered: number;
-  /** Only `neverAttempted` drives the verdict; the rest are tracked elsewhere. */
+  imported: number;
+  inFlight: number;
+  terminal: number;
+  /** `neverAttempted` + `untracked` is the outstanding work that drives the
+   *  verdict; `tracked` and `blocklisted` are owned by something else. The counts
+   *  balance against `discovered` -- if they do not, the read was degraded. */
   backlog: {
     neverAttempted: string[];
-    failedTracked: string[];
+    untracked: string[];
+    tracked: string[];
     blocklisted: string[];
   };
   issue: {
-    number: number;
-    action: "created" | "updated" | "closed" | "unchanged";
+    /** null on a dry run that would create the issue. */
+    number: number | null;
+    action: "created" | "refreshed" | "relabelled" | "closed";
     commentError?: string;
+    labelError?: string;
   } | null;
-  errors: { stage: "discovery" | "d1" | "report"; error: string }[];
+  errors: { stage: "discovery" | "d1" | "report" | "anomaly"; error: string }[];
   ok: boolean;
   audit_failed?: string;
 }

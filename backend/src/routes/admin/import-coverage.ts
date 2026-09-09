@@ -36,7 +36,7 @@ export function registerImportCoverageRoutes(
   /**
    * POST /admin/imports/coverage-sweep?apply=1
    *
-   * No `limit`: the sweep is fleet-level, one GraphQL scan plus three D1 reads,
+   * No `limit`: the sweep is fleet-level -- one GraphQL scan plus four D1 reads --
    * so there is nothing to batch.
    *
    * **`status: "unknown"` answers 502.** A 200 there would read as "coverage
@@ -70,23 +70,30 @@ export function registerImportCoverageRoutes(
       return c.json({ error: `Import coverage sweep failed before it could report: ${msg}` }, 500);
     }
 
-    // Only a run that actually changed the issue is worth an audit row; a dry run
-    // is a read, and an alarming run that merely refreshed the body is routine.
+    // Only a run that actually changed the issue's STATE is worth an audit row. A
+    // dry run is a read, and `refreshed` is the routine daily body rewrite on an
+    // alarm that has not changed kind -- auditing that would write a row every day
+    // saying nothing happened. `created`, `relabelled` and `closed` are real
+    // transitions.
     let auditFailed: string | undefined;
-    const changed = apply && result.issue !== null && result.issue.action !== "unchanged";
+    const changed = apply && result.issue !== null && result.issue.action !== "refreshed";
     if (changed && result.issue) {
       try {
         await auditLogStatement(c.env.DB, {
           userId: c.get("user").id,
           action: "import_coverage_sweep",
-          resourceType: "dataset",
-          resourceId: `#${result.issue.number}`,
+          // The resource is the tracking ISSUE, not a dataset: coverage is a
+          // property of the pipeline, so there is no dataset to point at.
+          resourceType: "issue",
+          resourceId: result.issue.number === null ? "pending" : `#${result.issue.number}`,
           details: JSON.stringify({
             status: result.status,
             kind: result.kind,
             issue_action: result.issue.action,
             never_attempted: result.backlog.neverAttempted.length,
+            untracked: result.backlog.untracked.length,
             dispatch_age_hours: result.dispatchAgeHours,
+            dispatch_lost: result.dispatchLost,
             enabled: result.enabled,
           }),
         }).run();

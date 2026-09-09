@@ -7138,6 +7138,25 @@ const importCoverageCommand = new Command("import-coverage").description(
   "Check whether the import pipeline is keeping up with OpenNeuro (dry run by default)",
 );
 
+/**
+ * How many outstanding ids to list before falling back to a count.
+ *
+ * Must equal `MAX_LISTED_IDS` in backend/src/services/import-coverage.ts, so the
+ * CLI and the GitHub issue truncate at the same place. The CLI cannot import from
+ * backend/src, so `test/import-coverage-cli.test.ts` asserts the two are equal
+ * rather than leaving them free to drift.
+ */
+const COVERAGE_MAX_LISTED_IDS = 20;
+
+/** Actions rendered in the conditional. `would created` was ungrammatical, and a
+ *  dry run is the DEFAULT invocation, so it is the string most operators see. */
+const COVERAGE_ACTION_VERB: Record<string, string> = {
+  created: "create",
+  refreshed: "refresh",
+  relabelled: "relabel",
+  closed: "close",
+};
+
 importCoverageCommand
   .option("--apply", "File, update or close the tracking issue (production only)")
   .option("--json", "Output raw JSON instead of the human summary")
@@ -7172,14 +7191,16 @@ importCoverageCommand
           console.error(`${chalk.red("ERROR".padEnd(12))} ${e.stage}: ${e.error}`);
         }
       }
-      process.exitCode = 1;
+      // 2, not 1: "could not determine" is a different answer from "not healthy",
+      // and a script polling pipeline health has to be able to tell them apart.
+      process.exitCode = err instanceof ApiError && err.statusCode === 502 ? 2 : 1;
       return;
     }
 
     // Set before the --json return so both output modes agree on the verdict. An
-    // alarm is a successful RUN but an unsuccessful STATE, and a script checking
-    // pipeline health wants a non-zero exit for it.
-    if (res.status !== "healthy" || res.errors.length > 0) process.exitCode = 1;
+    // alarm is a successful RUN but an unhealthy STATE, so it is non-zero.
+    if (res.status === "unknown") process.exitCode = 2;
+    else if (res.status !== "healthy" || res.errors.length > 0) process.exitCode = 1;
 
     if (options.json) {
       console.log(JSON.stringify(res, null, 2));
@@ -7187,6 +7208,7 @@ importCoverageCommand
     }
 
     const b = res.backlog;
+    const outstanding = b.neverAttempted.length + b.untracked.length;
     console.log();
     const verdict = `${res.status.toUpperCase()}${res.kind ? ` (${res.kind})` : ""}`;
     console.log(res.status === "healthy" ? chalk.green(verdict) : chalk.red(chalk.bold(verdict)));
@@ -7195,33 +7217,71 @@ importCoverageCommand
     console.log(
       chalk.cyan(
         `auto_import=${res.enabled ? "enabled" : chalk.red("DISABLED")} ` +
-          `last_dispatch=${res.dispatchAgeHours === null ? "never" : `${res.dispatchAgeHours}h ago`} ` +
-          `discovered=${res.discovered}`,
+          `last_dispatch=${res.dispatchAgeHours === null ? "never" : `${res.dispatchAgeHours}h ago`}` +
+          `${res.lastDispatchSourceId ? ` (${res.lastDispatchSourceId})` : ""} ` +
+          `dispatch_lost=${res.dispatchLost}`,
+      ),
+    );
+    // The counts balance against `discovered` by construction; a line that does
+    // not add up means the run did not get a complete view of the catalogue.
+    const accounted =
+      res.imported +
+      res.inFlight +
+      res.terminal +
+      outstanding +
+      b.tracked.length +
+      b.blocklisted.length;
+    console.log(
+      chalk.cyan(
+        `discovered=${res.discovered} imported=${res.imported} in_flight=${res.inFlight} ` +
+          `terminal=${res.terminal} tracked=${b.tracked.length} blocklisted=${b.blocklisted.length}`,
       ),
     );
     console.log(
       chalk.cyan(
-        `never_attempted=${b.neverAttempted.length} failed_tracked=${b.failedTracked.length} ` +
-          `blocklisted=${b.blocklisted.length}`,
+        `outstanding=${outstanding} (never_attempted=${b.neverAttempted.length} untracked=${b.untracked.length})`,
       ),
     );
-    if (b.neverAttempted.length > 0) {
-      // The only bucket that drives the verdict, so it is the only one listed.
-      const shown = b.neverAttempted.slice(0, 20).join(", ");
-      const more =
-        b.neverAttempted.length > 20 ? ` ... and ${b.neverAttempted.length - 20} more` : "";
-      console.log(chalk.dim(`  never attempted: ${shown}${more}`));
-    }
-    for (const e of res.errors) {
-      console.log(`${chalk.red("ERROR".padEnd(12))} ${e.stage}: ${e.error}`);
-    }
-    if (res.issue) {
-      const verb = res.applied ? res.issue.action : `would ${res.issue.action}`;
+    if (accounted !== res.discovered) {
       console.log(
-        chalk.dim(
-          `  Issue: ${verb}${res.issue.number > 0 ? ` #${res.issue.number}` : ""} on nemarDatasets/.github`,
+        chalk.yellow(
+          `  Counts do not balance (${accounted} accounted for vs ${res.discovered} discovered): this run did not get a complete view, so treat the verdict as unreliable.`,
         ),
       );
+    }
+    if (b.neverAttempted.length > 0) {
+      const shown = b.neverAttempted.slice(0, COVERAGE_MAX_LISTED_IDS).join(", ");
+      const extra = b.neverAttempted.length - COVERAGE_MAX_LISTED_IDS;
+      console.log(
+        chalk.dim(`  never attempted: ${shown}${extra > 0 ? ` ... and ${extra} more` : ""}`),
+      );
+    }
+    if (b.untracked.length > 0) {
+      const shown = b.untracked.slice(0, COVERAGE_MAX_LISTED_IDS).join(", ");
+      const extra = b.untracked.length - COVERAGE_MAX_LISTED_IDS;
+      console.log(
+        chalk.dim(`  stale row nothing owns: ${shown}${extra > 0 ? ` ... and ${extra} more` : ""}`),
+      );
+    }
+    for (const e of res.errors) {
+      const line = `${e.stage}: ${e.error}`;
+      console.log(
+        e.stage === "anomaly"
+          ? `${chalk.yellow("ANOMALY".padEnd(12))} ${line}`
+          : `${chalk.red("ERROR".padEnd(12))} ${line}`,
+      );
+    }
+    if (res.issue) {
+      const verb = res.applied
+        ? res.issue.action
+        : `would ${COVERAGE_ACTION_VERB[res.issue.action] ?? res.issue.action}`;
+      const where = res.issue.number === null ? "" : ` #${res.issue.number}`;
+      console.log(chalk.dim(`  Issue: ${verb}${where} on nemarDatasets/.github`));
+      if (res.issue.labelError) {
+        console.log(
+          chalk.yellow(`  The body was updated but its labels were not: ${res.issue.labelError}`),
+        );
+      }
       if (res.issue.commentError) {
         console.log(
           chalk.yellow(`  The issue changed but its comment failed: ${res.issue.commentError}`),

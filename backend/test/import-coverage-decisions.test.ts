@@ -18,19 +18,23 @@ import {
   type BacklogJobState,
   COVERAGE_BACKLOG_ALARM,
   COVERAGE_BACKLOG_ALARM_ALONE,
+  COVERAGE_DISPATCH_LOST_HOURS,
   COVERAGE_DISPATCH_STALE_HOURS,
   type ImportCoverageBacklog,
+  MAX_LISTED_IDS,
   buildCoverageIssueBody,
   buildCoverageKindChangeComment,
   buildCoverageRecoveryComment,
   decideCoverageVerdict,
+  dispatchPhrase,
   hoursSince,
+  outstandingCount,
   partitionBacklog,
 } from "../src/services/import-coverage";
 
 /** `n` never-attempted ids, plus whatever else the case needs. */
 function backlog(over: Partial<ImportCoverageBacklog> = {}): ImportCoverageBacklog {
-  return { neverAttempted: [], failedTracked: [], blocklisted: [], ...over };
+  return { neverAttempted: [], untracked: [], tracked: [], blocklisted: [], ...over };
 }
 
 function ids(n: number, start = 1): string[] {
@@ -45,7 +49,7 @@ describe("partitionBacklog", () => {
   test("no import_jobs row at all is the only thing that counts as never attempted", () => {
     const out = partitionBacklog(["ds000001"], new Map());
     expect(out.neverAttempted).toEqual(["ds000001"]);
-    expect(out.failedTracked).toEqual([]);
+    expect(out.tracked).toEqual([]);
     expect(out.blocklisted).toEqual([]);
   });
 
@@ -55,7 +59,7 @@ describe("partitionBacklog", () => {
     ]);
     const out = partitionBacklog(["ds000001"], jobs);
     expect(out.neverAttempted).toEqual([]);
-    expect(out.failedTracked).toEqual(["ds000001"]);
+    expect(out.tracked).toEqual(["ds000001"]);
   });
 
   /**
@@ -71,7 +75,7 @@ describe("partitionBacklog", () => {
     ]);
     const out = partitionBacklog(["ds000001"], jobs);
     expect(out.blocklisted).toEqual(["ds000001"]);
-    expect(out.failedTracked).toEqual([]);
+    expect(out.tracked).toEqual([]);
   });
 
   test("order within each bucket follows the diff, which is discovery order", () => {
@@ -82,9 +86,9 @@ describe("partitionBacklog", () => {
     expect(out.neverAttempted).toEqual(["ds000003", "ds000001"]);
   });
 
-  test("an empty diff partitions to three empty buckets, not to a fabricated one", () => {
+  test("an empty diff partitions to empty buckets, not to a fabricated one", () => {
     const out = partitionBacklog([], new Map());
-    expect(out).toEqual({ neverAttempted: [], failedTracked: [], blocklisted: [] });
+    expect(out).toEqual({ neverAttempted: [], untracked: [], tracked: [], blocklisted: [] });
   });
 });
 
@@ -100,9 +104,25 @@ describe("hoursSince", () => {
     expect(hoursSince(Date.parse("2026-09-07T12:00:00Z"), now)).toBe(48);
   });
 
-  test("a future timestamp clamps to 0 rather than going negative", () => {
+  /**
+   * SIGNED, deliberately. An earlier version clamped at 0, which turned any
+   * future-dated dispatch row -- a skewed clock, a replayed fixture -- into
+   * "dispatched 0 hours ago" and so made `stale` false forever, silently confining
+   * the sweep to its standalone-backlog backstop.
+   */
+  test("a future timestamp is negative, not clamped to fresh", () => {
     const now = Date.parse("2026-09-09T12:00:00Z");
-    expect(hoursSince(Date.parse("2026-09-09T13:00:00Z"), now)).toBe(0);
+    expect(hoursSince(Date.parse("2026-09-09T13:00:00Z"), now)).toBe(-1);
+  });
+
+  test("a future-dated dispatch still reads as stale, so it cannot suppress the alarm", () => {
+    const v = decideCoverageVerdict({
+      enabled: true,
+      dispatchAgeHours: -5,
+      backlog: backlog({ neverAttempted: ids(COVERAGE_BACKLOG_ALARM) }),
+    });
+    expect(v.status).toBe("alarm");
+    expect(v.kind).toBe("silence");
   });
 });
 
@@ -167,7 +187,7 @@ describe("steady state is healthy, however old the last dispatch is", () => {
     const v = decideCoverageVerdict({
       enabled: true,
       dispatchAgeHours: 24 * 60,
-      backlog: backlog({ failedTracked: ids(50), blocklisted: ids(50, 100) }),
+      backlog: backlog({ tracked: ids(50), blocklisted: ids(50, 100) }),
     });
     expect(v.status).toBe("healthy");
   });
@@ -196,7 +216,7 @@ describe("the incident this phase exists for", () => {
     expect(v.kind).toBe("disabled");
     // The reason has to send the reader to the flag, not to the pipeline.
     expect(v.reason).toContain("AUTO_IMPORT_ENABLED");
-    expect(v.reason).toContain("switched off, not broken");
+    expect(v.reason).toContain("off, not broken");
   });
 
   test("switched off with nothing accruing is reported, not alarmed", () => {
@@ -208,7 +228,8 @@ describe("the incident this phase exists for", () => {
     });
     expect(v.status).toBe("healthy");
     expect(v.kind).toBeNull();
-    expect(v.reason).toContain("deliberately off");
+    expect(v.reason).toContain("switched off");
+    expect(v.reason).toContain("nothing is accruing");
   });
 
   test("enabled but silent with a backlog alarms as silence", () => {
@@ -294,24 +315,193 @@ describe("the thresholds are boundaries, and inclusive", () => {
 // Report bodies
 // ---------------------------------------------------------------------------
 
-describe("the issue body", () => {
-  const args = {
-    verdict: decideCoverageVerdict({
+/**
+ * The threshold VALUES, not just the boundary shape.
+ *
+ * Every other assertion here is written relative to the constants
+ * (`ids(COVERAGE_BACKLOG_ALARM)`, `... - 1`), which pins the inclusive boundary and
+ * is invariant to the value. Review proved the gap by mutation: changing
+ * COVERAGE_BACKLOG_ALARM from 5 to 1 left all 2668 backend tests green. The value
+ * is the alarm's credibility -- at 1 this becomes the thing that gets muted, which
+ * `COVERAGE_BACKLOG_ALARM`'s own docstring says it must not -- so it is pinned
+ * literally, and moving it means visiting ADR 0051's calibration argument.
+ */
+describe("the calibration is pinned, not just the shape", () => {
+  test("the thresholds are the values ADR 0051 argues for", () => {
+    expect(COVERAGE_BACKLOG_ALARM).toBe(5);
+    expect(COVERAGE_BACKLOG_ALARM_ALONE).toBe(20);
+    expect(COVERAGE_DISPATCH_STALE_HOURS).toBe(24);
+    expect(COVERAGE_DISPATCH_LOST_HOURS).toBe(6);
+  });
+
+  test("the standalone threshold is above the gated one, or it would be unreachable", () => {
+    expect(COVERAGE_BACKLOG_ALARM_ALONE).toBeGreaterThan(COVERAGE_BACKLOG_ALARM);
+  });
+
+  test("the lost-hand-off window is well inside the staleness window", () => {
+    // Otherwise `silence` would always fire first and `dispatch-lost` -- the more
+    // specific diagnosis -- would be unreachable.
+    expect(COVERAGE_DISPATCH_LOST_HOURS).toBeLessThan(COVERAGE_DISPATCH_STALE_HOURS);
+  });
+});
+
+describe("outstanding work is both untracked buckets", () => {
+  test("never-attempted and untracked both count; tracked and blocklisted do not", () => {
+    expect(
+      outstandingCount(
+        backlog({
+          neverAttempted: ids(2),
+          untracked: ids(3, 100),
+          tracked: ids(50, 200),
+          blocklisted: ids(50, 300),
+        }),
+      ),
+    ).toBe(5);
+  });
+
+  /**
+   * A `complete` row with no `datasets` row is real outstanding work:
+   * `deleteDatasetCascade` leaves `import_jobs` behind, and `loadFailedJobInfo`
+   * only loads `failed`, so the importer WILL re-dispatch it. An earlier draft
+   * filed it under "already tracked", which under-counted the alarm and told the
+   * reader a failure issue existed for it when none did.
+   */
+  test("a complete row whose dataset was deleted is outstanding, not tracked", () => {
+    const jobs = new Map([["ds000001", { status: "complete", blocklisted: false }]]);
+    const out = partitionBacklog(["ds000001"], jobs);
+    expect(out.untracked).toEqual(["ds000001"]);
+    expect(out.tracked).toEqual([]);
+    expect(outstandingCount(out)).toBe(1);
+  });
+
+  test("an unrecognised status is untracked rather than silently trusted", () => {
+    const jobs = new Map([["ds000001", { status: "something-new", blocklisted: false }]]);
+    expect(partitionBacklog(["ds000001"], jobs).untracked).toEqual(["ds000001"]);
+  });
+
+  test("incomplete is tracked: the retry engine owns it", () => {
+    const jobs = new Map([["ds000001", { status: "incomplete", blocklisted: false }]]);
+    expect(partitionBacklog(["ds000001"], jobs).tracked).toEqual(["ds000001"]);
+  });
+});
+
+describe("dispatchPhrase is complete on its own", () => {
+  /** An earlier version returned a bare "never" that callers appended " ago" to,
+   *  producing "Last dispatch: never ago" in four operator-facing reasons. */
+  test("null reads as never recorded, not as never ago", () => {
+    expect(dispatchPhrase(null)).toBe("never recorded");
+    const v = decideCoverageVerdict({
+      enabled: true,
+      dispatchAgeHours: null,
+      backlog: backlog({ neverAttempted: ids(COVERAGE_BACKLOG_ALARM) }),
+    });
+    expect(v.reason).toContain("never recorded");
+    expect(v.reason).not.toContain("never ago");
+  });
+
+  test("a future-dated dispatch is named as an anomaly, not as freshness", () => {
+    expect(dispatchPhrase(-5)).toContain("future");
+  });
+
+  test("singular and plural hours, then days past 48", () => {
+    expect(dispatchPhrase(1)).toBe("1 hour ago");
+    expect(dispatchPhrase(2)).toBe("2 hours ago");
+    expect(dispatchPhrase(47)).toBe("47 hours ago");
+    expect(dispatchPhrase(48)).toBe("2 days ago");
+  });
+});
+
+describe("a fresh dispatch row is not proof the hand-off landed", () => {
+  /**
+   * The audit row is written to reserve the slot, eighteen lines BEFORE
+   * `triggerOpenNeuroOnboard`. So if the PAT expires or the workflow is renamed,
+   * rows keep appearing while nothing imports -- the clock looks fresh, so
+   * `silence` can never fire, and an earlier version reported that as healthy with
+   * the reason "is working through them" for weeks.
+   */
+  test("a lost hand-off alarms even with a fresh clock and a small backlog", () => {
+    const v = decideCoverageVerdict({
+      enabled: true,
+      dispatchAgeHours: COVERAGE_DISPATCH_LOST_HOURS,
+      dispatchLost: true,
+      backlog: backlog({ neverAttempted: ids(1) }),
+    });
+    expect(v.status).toBe("alarm");
+    expect(v.kind).toBe("dispatch-lost");
+    expect(v.reason).toContain("not landing");
+    // Names the two things to check, since neither is guessable from the symptom.
+    expect(v.reason).toContain("PAT");
+    expect(v.reason).toContain("onboard-openneuro.yml");
+  });
+
+  test("a disabled importer is reported as disabled, not as a lost hand-off", () => {
+    // Of course nothing landed: the importer is off. Naming the symptom would hide
+    // the cause.
+    const v = decideCoverageVerdict({
       enabled: false,
-      dispatchAgeHours: 24 * 49,
-      backlog: backlog({ neverAttempted: ids(19) }),
-    }),
+      dispatchAgeHours: 100,
+      dispatchLost: true,
+      backlog: backlog({ neverAttempted: ids(COVERAGE_BACKLOG_ALARM) }),
+    });
+    expect(v.kind).toBe("disabled");
+  });
+
+  test("dispatch-lost takes precedence over a large backlog, being the specific cause", () => {
+    const v = decideCoverageVerdict({
+      enabled: true,
+      dispatchAgeHours: 10,
+      dispatchLost: true,
+      backlog: backlog({ neverAttempted: ids(COVERAGE_BACKLOG_ALARM_ALONE) }),
+    });
+    expect(v.kind).toBe("dispatch-lost");
+  });
+});
+
+describe("a missing binding is not a decision", () => {
+  test('an absent AUTO_IMPORT_ENABLED says so, rather than "switched off"', () => {
+    const v = decideCoverageVerdict({
+      enabled: false,
+      enabledBindingPresent: false,
+      dispatchAgeHours: 100,
+      backlog: backlog({ neverAttempted: ids(COVERAGE_BACKLOG_ALARM) }),
+    });
+    expect(v.reason).toContain("not set at all");
+    expect(v.reason).toContain("by omission rather than by decision");
+  });
+
+  test("an explicit false says switched off", () => {
+    const v = decideCoverageVerdict({
+      enabled: false,
+      enabledBindingPresent: true,
+      dispatchAgeHours: 100,
+      backlog: backlog({ neverAttempted: ids(COVERAGE_BACKLOG_ALARM) }),
+    });
+    expect(v.reason).toContain("switched off");
+  });
+});
+
+describe("the issue body", () => {
+  const verdict = decideCoverageVerdict({
+    enabled: false,
+    dispatchAgeHours: 24 * 49,
+    backlog: backlog({ neverAttempted: ids(19) }),
+  });
+  const facts = {
     enabled: false,
     dispatchAgeHours: 24 * 49,
     lastDispatchAt: "2026-07-06 02:31:15",
+    lastDispatchSourceId: "ds007763",
     discovered: 764,
+    imported: 731,
+    inFlight: 0,
+    terminal: 0,
     backlog: backlog({
       neverAttempted: ids(19),
-      failedTracked: ids(3, 100),
+      tracked: ids(3, 100),
       blocklisted: ids(11, 200),
     }),
-    nowIso: "2026-09-09T12:00:00Z",
   };
+  const args = { verdict, facts, nowIso: "2026-09-09T12:00:00Z" };
 
   test("states the verdict, the numbers and the never-attempted ids", () => {
     const body = buildCoverageIssueBody(args);
@@ -319,6 +509,9 @@ describe("the issue body", () => {
     expect(body).toContain("2026-07-06 02:31:15");
     expect(body).toContain("764");
     expect(body).toContain("ds000001");
+    // The dataset the last dispatch picked, which is what makes dispatch-lost
+    // diagnosable from the issue alone.
+    expect(body).toContain("ds007763");
   });
 
   /**
@@ -332,31 +525,89 @@ describe("the issue body", () => {
     expect(body).toContain("right now");
   });
 
+  /**
+   * The balance line is the reader's defence against a degraded read. 731 + 19 + 3
+   * + 11 = 764 here, so it agrees. Without it, an upstream scan that returned an
+   * empty in-scope set would render as an ordinary drained backlog -- the exact
+   * false all-clear the plausibility floor exists to stop, invisible on the face of
+   * the document that explains the verdict.
+   */
+  test("the counts balance, and the body says so", () => {
+    const body = buildCoverageIssueBody(args);
+    expect(body).toContain("| total accounted for | 764 |");
+    expect(body).toContain("Those two totals agree");
+  });
+
+  test("a total that does not balance is called out as unreliable", () => {
+    const body = buildCoverageIssueBody({
+      ...args,
+      facts: { ...facts, discovered: 900 },
+    });
+    expect(body).toContain("They do not agree");
+    expect(body).toContain("treat the verdict above as unreliable");
+    expect(body).not.toContain("Those two totals agree");
+  });
+
   test("explains why the other buckets do not drive the alarm", () => {
     const body = buildCoverageIssueBody(args);
-    expect(body).toContain("Only the never-attempted count drives this issue");
+    expect(body).toContain("Only the two bold rows drive this issue");
     // And why withdrawals are absent entirely, which a reader of #1311 will ask.
     expect(body).toContain("Withdrawn datasets do not appear");
   });
 
-  test("a long id list is truncated with a count, not dumped (ADR 0036)", () => {
+  test("the untracked section appears only when there is something in it", () => {
+    expect(buildCoverageIssueBody(args)).not.toContain("Has a stale row nothing owns\n");
+    const withUntracked = buildCoverageIssueBody({
+      ...args,
+      facts: { ...facts, untracked: undefined, backlog: backlog({ untracked: ids(2, 500) }) },
+    });
+    expect(withUntracked).toContain("ds000500");
+  });
+
+  test("a long id list is truncated with a count (ADR 0036)", () => {
     const body = buildCoverageIssueBody({
       ...args,
-      backlog: backlog({ neverAttempted: ids(200) }),
+      facts: { ...facts, backlog: backlog({ neverAttempted: ids(200) }) },
     });
-    expect(body).toContain("and 180 more");
+    expect(body).toContain(`and ${200 - MAX_LISTED_IDS} more`);
     expect(body).not.toContain("ds000199");
   });
 
+  test("exactly MAX_LISTED_IDS is not truncated; one more is", () => {
+    const at = buildCoverageIssueBody({
+      ...args,
+      facts: { ...facts, backlog: backlog({ neverAttempted: ids(MAX_LISTED_IDS) }) },
+    });
+    expect(at).not.toContain("more");
+    const over = buildCoverageIssueBody({
+      ...args,
+      facts: { ...facts, backlog: backlog({ neverAttempted: ids(MAX_LISTED_IDS + 1) }) },
+    });
+    expect(over).toContain("and 1 more");
+  });
+
   test("an empty never-attempted list renders as none, not as an empty line", () => {
-    const body = buildCoverageIssueBody({ ...args, backlog: backlog() });
+    const body = buildCoverageIssueBody({ ...args, facts: { ...facts, backlog: backlog() } });
     expect(body).toContain("_none_");
   });
 
-  test("points at the three things worth checking, including the exact-string trap", () => {
+  test("points at the things worth checking, including the exact-string trap", () => {
     const body = buildCoverageIssueBody(args);
     expect(body).toContain("Only the exact string counts");
     expect(body).toContain("nemar admin import-coverage");
+    // The hand-off check, which is the one a reader could not derive themselves.
+    expect(body).toContain("the hand-off is failing after the audit row is written");
+  });
+
+  /**
+   * An earlier draft promised "or the importer resumes dispatching", which is false
+   * for the `backlog` kind -- that kind means the importer IS dispatching. A close
+   * condition stated on a public issue has to hold for every kind that can carry it.
+   */
+  test("the close condition it promises is true for every alarm kind", () => {
+    const body = buildCoverageIssueBody(args);
+    expect(body).toContain(`fewer than ${COVERAGE_BACKLOG_ALARM} datasets are outstanding`);
+    expect(body).not.toContain("or the importer resumes dispatching");
   });
 });
 

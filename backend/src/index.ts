@@ -913,8 +913,7 @@ export default {
       // importer has stopped dispatching -- or is switched off and forgotten,
       // which is what happened for seven weeks from 2026-07-20 with nothing in
       // the system able to say so. Every other sweep here reports on work that
-      // was attempted; this one is the only thing that notices work that never
-      // started.
+      // was attempted; this one notices work that never started.
       //
       // PROD-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it files and
       // closes a real issue on the shared nemarDatasets org, the same reason
@@ -924,9 +923,10 @@ export default {
           .then((r) => {
             // null means the wrapper's own guard skipped this run (non-prod).
             if (!r) return;
-            // Logged at error level when it is an alarm: this is the one sweep
-            // whose whole purpose is to be noticed, and a console.log would sit
-            // at the same level as every routine summary.
+            // Logged at error level for anything that is not healthy -- an alarm
+            // or an unreadable verdict. This is the one sweep whose whole purpose
+            // is to be noticed, and console.log would sit at the same level as
+            // every routine summary.
             const line = `[import-coverage] ${importCoverageSweepSummary(r)}`;
             if (r.status === "healthy") console.log(line);
             else console.error(`${line} reason="${r.reason}"`);

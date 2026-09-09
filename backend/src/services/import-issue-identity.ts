@@ -15,9 +15,14 @@
  * Phase 3 (#1311) added the COVERAGE issue's identity alongside the failure
  * one. Two different questions, deliberately two different labels: a failure
  * issue says "this dataset broke", a coverage issue says "the pipeline as a
- * whole has stopped keeping up". They must never share a label, because the
- * failure sweep's listing is keyed on `import-failure` and would then try to
- * verify the coverage issue as though it named a dataset.
+ * whole has stopped keeping up".
+ *
+ * They must never share a label. Not because the failure sweep would try to
+ * verify the coverage issue as a dataset -- `planOneIssue` already refuses a
+ * title it cannot parse -- but because the sweep's listing is keyed on
+ * `import-failure`, so a shared label would put the coverage issue in
+ * `perDataset`: it would inflate `openPerDatasetCount`, which is what drives
+ * `decideIssueMode`'s rollup cap, and consume a slot in the rotation window.
  */
 
 export const IMPORT_FAILURE_ISSUE_LABEL = "import-failure";
@@ -81,4 +86,5 @@ export const IMPORT_COVERAGE_KIND_LABELS = {
   backlog: "coverage-backlog",
   silence: "coverage-silence",
   disabled: "coverage-disabled",
+  "dispatch-lost": "coverage-dispatch-lost",
 } as const;

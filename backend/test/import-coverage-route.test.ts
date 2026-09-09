@@ -43,7 +43,12 @@ function result(over: Partial<ImportCoverageSweepResult> = {}): ImportCoverageSw
     lastDispatchAt: "2026-09-09 10:00:00",
     dispatchAgeHours: 2,
     discovered: 764,
-    backlog: { neverAttempted: [], failedTracked: [], blocklisted: [] },
+    lastDispatchSourceId: null,
+    dispatchLost: false,
+    imported: 0,
+    inFlight: 0,
+    terminal: 0,
+    backlog: { neverAttempted: [], untracked: [], tracked: [], blocklisted: [] },
     issue: null,
     errors: [],
     ...over,
@@ -144,7 +149,7 @@ describe("the verdict decides the status code", () => {
         status: "alarm",
         kind: "silence",
         reason: "5 never attempted and no dispatch for 60 hours",
-        backlog: { neverAttempted: ["ds000001"], failedTracked: [], blocklisted: [] },
+        backlog: { neverAttempted: ["ds000001"], untracked: [], tracked: [], blocklisted: [] },
       }),
     );
     const res = await post(app, "/imports/coverage-sweep");
@@ -246,7 +251,7 @@ describe("the audit row", () => {
         status: "alarm",
         kind: "disabled",
         issue: { number: 900, action: "created" },
-        backlog: { neverAttempted: ["ds000001"], failedTracked: [], blocklisted: [] },
+        backlog: { neverAttempted: ["ds000001"], untracked: [], tracked: [], blocklisted: [] },
       }),
     );
     const res = await post(app, "/imports/coverage-sweep?apply=1");
@@ -271,6 +276,41 @@ describe("the audit row", () => {
     );
     await post(app, "/imports/coverage-sweep");
     expect(auditRows()).toEqual([]);
+  });
+
+  /**
+   * `refreshed` is the routine daily body rewrite on an alarm whose kind has not
+   * changed. An earlier draft's guard tested for a `"unchanged"` action the service
+   * never produced, so this branch was inert and every daily refresh wrote a row --
+   * the opposite of what the comment beside it promised.
+   */
+  test("a routine body refresh writes no audit row", async () => {
+    const { app } = newApp(() =>
+      result({
+        applied: true,
+        status: "alarm",
+        kind: "silence",
+        issue: { number: 900, action: "refreshed" },
+      }),
+    );
+    const res = await post(app, "/imports/coverage-sweep?apply=1");
+    expect(res.status).toBe(200);
+    expect(auditRows()).toEqual([]);
+  });
+
+  test("a relabel IS a transition and does write one", async () => {
+    const { app } = newApp(() =>
+      result({
+        applied: true,
+        status: "alarm",
+        kind: "disabled",
+        issue: { number: 900, action: "relabelled" },
+      }),
+    );
+    await post(app, "/imports/coverage-sweep?apply=1");
+    const rows = auditRows();
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0]?.details ?? "{}")).toMatchObject({ issue_action: "relabelled" });
   });
 
   test("an applied run that touched no issue writes no row", async () => {

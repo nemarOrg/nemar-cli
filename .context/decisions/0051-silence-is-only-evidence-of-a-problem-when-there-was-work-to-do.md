@@ -6,7 +6,7 @@
 
 ## Context
 
-Auto-import was disabled on 2026-07-20 and stayed off for seven weeks. Every component behaved
+Auto-import was disabled on 2026-07-21 UTC (committed 2026-07-20 local) and stayed off for seven weeks. Every component behaved
 correctly. No component's job was to notice that **nothing was happening**. ADR 0049 and ADR 0050
 improved how a failure is described and how its tracking issue drains; neither would have detected
 this, because there were no failures to describe.
@@ -25,10 +25,18 @@ Two facts from that, both of which constrain the rule:
 1. **Catalog growth is not evidence the importer works.** `nm000281` arrived during the outage
    through the ordinary upload path. Anything that keys "is the pipeline alive?" on the catalog
    getting bigger would have read that as health.
-2. **`auto_import_dispatch` rows exist only when a dataset was actually dispatched.**
-   `autoImportTick` returns at `if (!picked)` *before* its `INSERT INTO audit_log`. OpenNeuro
-   publishes a few in-scope datasets a week against a `*/30` tick, so in a healthy steady state the
-   overwhelming majority of ticks write nothing at all and the last dispatch ages without limit.
+2. **`auto_import_dispatch` rows exist only when a dataset was PICKED.** `autoImportTick` returns
+   at `if (!picked)` *before* its `INSERT INTO audit_log`. OpenNeuro publishes a few in-scope
+   datasets a week against a `*/30` tick, so in a healthy steady state the overwhelming majority of
+   ticks write nothing at all and the last dispatch ages without limit.
+
+   The row is written to reserve the slot, which means it lands **before** the hand-off it stands
+   for: `getDatasetsToken` and `triggerOpenNeuroOnboard` are eighteen lines later. So a fresh row
+   proves the tick ran and chose something, not that GitHub accepted the work. Treating it as proof
+   of dispatch leaves a blind spot exactly the size of this epic's founding incident -- if the PAT
+   expires or the workflow is renamed, rows keep appearing every 90 minutes while nothing is ever
+   imported. That is why the verdict cross-checks the picked id (below) rather than trusting the
+   timestamp alone.
 
 Fact 2 is the trap. The obvious rule -- alarm when the last dispatch is older than some threshold
 -- would fire on every quiet week. An alarm that fires when nothing is wrong is worse than no
@@ -57,22 +65,36 @@ A failed read returns before touching GitHub at all, the route answers 502 for i
 exits non-zero. "I do not know" and "everything is fine" are different answers all the way out to
 the exit code.
 
-**Only never-attempted datasets count as backlog.** A dataset with an `import_jobs` row is already
+**A fresh dispatch row is not proof of life, so the picked id is cross-checked.** The audit row is
+written to reserve the slot, before `getDatasetsToken` and `triggerOpenNeuroOnboard`. If the
+datasets PAT expires or the onboard workflow is renamed, rows keep appearing every ~30 minutes
+while nothing is imported: the clock looks fresh, so `silence` can never fire, and the backlog
+would take weeks to cross its standalone threshold. So the dataset the last row NAMES must have
+acquired an `import_jobs` row within `COVERAGE_DISPATCH_LOST_HOURS`; if it has not, and it is still
+outstanding, the verdict is `dispatch-lost`. That is the most specific diagnosis available and it
+names the two things to check, neither of which is guessable from the symptom.
+
+**Only outstanding datasets count as backlog.** A dataset with an `import_jobs` row is already
 tracked -- by its own failure issue (ADR 0050) or by the retry engine's blocklist -- so counting it
 would make the alarm permanent on a set nobody intends to import. Blocklisted is checked
 explicitly rather than through `status`, because `import-retry.ts` blocklists a row **without**
 changing its status, so a status-only partition misses every blocked row.
 
+But "has a row" is not the same as "is tracked". A `complete` row whose `datasets` row was deleted
+(`deleteDatasetCascade` leaves `import_jobs` behind) has no tracker at all, and the importer WILL
+re-dispatch it, so it is outstanding work. It goes in a separate `untracked` bucket that counts
+toward the alarm, and the report names it honestly rather than claiming a failure issue exists.
+
 **Withdrawals are invisible to this sweep, by construction.** Withdrawal stamps
 `datasets.withdrawn_at` rather than deleting the row, so a withdrawn dataset still satisfies
-`IMPORTED_SOURCE_IDS_QUERY` and never reaches the diff. #1311's text asks for a withdrawn
-partition; it would be permanently empty, and a withdrawn dataset genuinely was imported, so there
-is no bucket for it.
+`IMPORTED_SOURCE_IDS_QUERY` and never reaches the diff. #1311 mentions withdrawals only in a
+measurement row ("known-blocked/withdrawn by #967"), not as a requested bucket -- and a bucket
+would be permanently empty anyway, because a withdrawn dataset genuinely was imported.
 
 **Thresholds:**
 
 ```
-COVERAGE_DISPATCH_STALE_HOURS = 24   // ~48 missed ticks; catches a 7-week outage on day 1
+COVERAGE_DISPATCH_STALE_HOURS = 24   // ~48 missed ticks, well outside jitter
 COVERAGE_BACKLOG_ALARM        = 5    // ~2 weeks of accrual at the measured 2.7 in-scope/week
 COVERAGE_BACKLOG_ALARM_ALONE  = 20   // alarms even if dispatch looks recent: alive but falling behind
 ```
@@ -96,8 +118,18 @@ Harder: the alarm is deliberately slow. Five never-attempted datasets is roughly
 accrual, so a stall is caught in days rather than hours. That is the price of an alarm that never
 fires on a quiet week, and the trade is right for a pipeline whose normal cadence is weekly.
 
-**Bounded and cheap:** one GraphQL scan (already page-capped, and it throws rather than truncating
-so a partial scan cannot read as a shrinking backlog), three D1 reads, at most three GitHub calls.
+**Bounded and cheap:** one GraphQL scan, four D1 reads, and at most four GitHub calls (list, body
+PATCH, labels, comment -- three on the recovery path).
+
+The scan's page cap and its `MIN_COVERAGE` refusal stop a *pagination* truncation from reading as a
+shrinking backlog, but they do NOT cover field-level degradation: `MIN_COVERAGE` measures raw edge
+count, and a snapshot resolver that nulls `summary.modalities` fleet-wide makes every dataset fall
+out of the modality filter while coverage still reads 100 percent. That returns an empty in-scope
+set with no error, which would have read as a drained backlog. So the sweep additionally refuses a
+scan that reports fewer in-scope datasets than D1 has already imported -- a plausibility floor
+against its own input, since a real OpenNeuro cannot have fewer in-scope datasets than we have
+mirrored from it.
+
 No per-dataset work, so there is no batch limit and no window to rotate -- unlike ADR 0050's sweep.
 
 **No new schema.** The dispatch signal is the audit row the importer already writes, read through
@@ -105,13 +137,28 @@ the importer's own `AUTO_IMPORT_GATE_QUERY` so the two cannot disagree about whe
 was. ADR 0034 and 0035 are satisfied without a column or a stamp: the verdict is fleet-level, so
 `audit_log` plus the GitHub issue is the whole durable state.
 
+**A DISABLED importer never closes the issue.** Recovery means the pipeline is working again, and a
+switched-off importer is not working. Without this, manually importing a few datasets drops the
+outstanding count below the threshold and the monitor closes the only durable record that the
+importer is still off -- the founding incident, re-enacted by its own alarm. The record is refreshed
+and left open instead.
+
 **Production-only, and not on the dev-cron allowlist.** It files and closes a real issue on the
 shared `nemarDatasets` org, so `runImportCoverageSweepCron` carries an `isNonProductionEnv` refusal
 and the admin route refuses `apply` outside production independently. The dry run stays available
 everywhere, because reading production's coverage from staging is useful and harmless.
 
 Whoever changes the thresholds should know they were set from a measured accrual rate, not chosen
-round: re-measure before moving them.
+round (the 19-in-seven-weeks figure is #1311's own measurement table): re-measure before moving
+them, and note the values are pinned literally in
+`backend/test/import-coverage-decisions.test.ts` precisely so a change has to come here first.
+
+**One calibration risk to settle with the first production dry run.** At measurement time the
+outstanding count would have included the 19 accrued datasets plus however many of #1311's "23
+older, absent for other reasons" carry no `import_jobs` row -- plausibly above
+`COVERAGE_BACKLOG_ALARM_ALONE`. If so the first run alarms `backlog` and cannot reach "fewer than 5
+outstanding", so the issue would never close on its own: the muting risk this ADR is most worried
+about, arriving on day one. Run the dry run before the cron does and read the partition.
 
 ## Alternatives considered
 

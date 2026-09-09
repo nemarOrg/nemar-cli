@@ -18,12 +18,14 @@
 
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { AUTO_IMPORT_GATE_QUERY } from "../src/services/auto-import";
 import type { GitHubIssue } from "../src/services/github/issues";
 import {
   COVERAGE_BACKLOG_ALARM,
   COVERAGE_DISPATCH_STALE_HOURS,
 } from "../src/services/import-coverage";
 import {
+  COVERAGE_LAST_DISPATCH_QUERY,
   type ImportCoverageSweepDeps,
   importCoverageSweepSummary,
   runImportCoverageSweep,
@@ -34,7 +36,10 @@ import {
   IMPORT_COVERAGE_KIND_LABELS,
   importCoverageIssueTitle,
 } from "../src/services/import-issue-identity";
-import type { DiscoveredDataset } from "../src/services/openneuro-discovery";
+import {
+  type DiscoveredDataset,
+  discoverOpenNeuroDatasets,
+} from "../src/services/openneuro-discovery";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
@@ -79,11 +84,13 @@ function seedImportJob(
 
 /** An `auto_import_dispatch` audit row `hoursAgo` in the past, written through the
  *  same column the real gate reads. */
-function seedDispatch(db: Database, hoursAgo: number): void {
+function seedDispatch(db: Database, hoursAgo: number, sourceId = "ds999999"): void {
   db.query(
     `INSERT INTO audit_log (action, resource_id, details, timestamp)
-     VALUES ('auto_import_dispatch', 'ds000001', '{}', datetime('now', ?))`,
-  ).run(`-${hoursAgo} hours`);
+     VALUES ('auto_import_dispatch', ?, '{}', datetime('now', ?))`,
+    // A negative `hoursAgo` seeds a FUTURE row, for the clock-anomaly case;
+    // `datetime('now', '--10 hours')` is not valid SQLite, so the sign is explicit.
+  ).run(sourceId, hoursAgo >= 0 ? `-${hoursAgo} hours` : `+${-hoursAgo} hours`);
 }
 
 function envFor(db: Database, enabled = true): Bindings {
@@ -232,8 +239,10 @@ describe("silence is never reported as health", () => {
     const result = await runImportCoverageSweep(envFor(db), {}, deps);
 
     expect(result.status).toBe("unknown");
-    expect(result.discovered).toBe(0);
-    expect(result.backlog.neverAttempted).toEqual([]);
+    // The MESSAGE is what makes this case distinct from any other throw; without
+    // it this test was a second copy of its neighbour. (The guard itself is pinned
+    // in openneuro-discovery.test.ts, which drives the real pagination.)
+    expect(result.errors[0]?.error).toContain("truncated");
   });
 
   test("a D1 failure is unknown, not healthy", async () => {
@@ -301,7 +310,7 @@ describe("a quiet pipeline stays quiet", () => {
     const result = await runImportCoverageSweep(envFor(db), {}, deps);
 
     expect(result.status).toBe("healthy");
-    expect(result.backlog.failedTracked).toHaveLength(30);
+    expect(result.backlog.tracked).toHaveLength(30);
     expect(result.backlog.neverAttempted).toEqual([]);
   });
 
@@ -315,7 +324,7 @@ describe("a quiet pipeline stays quiet", () => {
     const result = await runImportCoverageSweep(envFor(db), {}, deps);
 
     expect(result.backlog.blocklisted).toHaveLength(11);
-    expect(result.backlog.failedTracked).toEqual([]);
+    expect(result.backlog.tracked).toEqual([]);
     expect(result.status).toBe("healthy");
   });
 
@@ -329,9 +338,16 @@ describe("a quiet pipeline stays quiet", () => {
 
     const result = await runImportCoverageSweep(envFor(db), {}, deps);
 
-    // diffNewDatasets already removes in-flight rows, so they never reach the
-    // partition at all.
-    expect(result.backlog.neverAttempted).toEqual([]);
+    // The claim is that they never reach the partition -- so EVERY bucket is empty,
+    // not just neverAttempted. Asserting only neverAttempted held whichever way the
+    // rows were classified, so dropping "copying" from the in-flight set left this
+    // test green while five rows silently became `tracked`.
+    expect(result.backlog).toEqual({
+      neverAttempted: [],
+      untracked: [],
+      tracked: [],
+      blocklisted: [],
+    });
     expect(result.status).toBe("healthy");
   });
 });
@@ -339,6 +355,350 @@ describe("a quiet pipeline stays quiet", () => {
 // ---------------------------------------------------------------------------
 // The standing issue's lifecycle
 // ---------------------------------------------------------------------------
+
+describe("a degraded read is not a drained backlog", () => {
+  /**
+   * The subtlest way to a false all-clear, and the one no `unknown` path could see
+   * before the plausibility floor.
+   *
+   * `discoverOpenNeuroDatasets` refuses a TRUNCATED scan, but `MIN_COVERAGE` counts
+   * raw edges: if OpenNeuro's snapshot resolver nulls `summary.modalities`
+   * fleet-wide, every dataset falls out of `keepByModality` and the scan returns an
+   * empty in-scope set with 100 percent coverage and NO error. Reviewed and
+   * reproduced: that read as healthy and closed the live alarm, commenting
+   * "Coverage recovered", with the cron logging at console.log and the CLI exiting 0.
+   */
+  test("an empty in-scope scan against a populated catalogue is unknown, not healthy", async () => {
+    const db = freshDb();
+    for (const d of discovered(30)) seedImported(db, d.id);
+    seedDispatch(db, 1);
+    const deps = recordingDeps([], [coverageIssue(700, "silence")]);
+
+    const result = await runImportCoverageSweep(envFor(db), { apply: true }, deps);
+
+    expect(result.status).toBe("unknown");
+    expect(result.errors[0]?.stage).toBe("discovery");
+    expect(result.errors[0]?.error).toContain("refusing to read that as a drained backlog");
+    // The live alarm survives: not closed, not commented.
+    expect(deps.closed).toEqual([]);
+    expect(deps.comments).toEqual([]);
+    expect(result.issue).toBeNull();
+  });
+
+  test("a scan smaller than the catalogue is unknown even without an open issue", async () => {
+    const db = freshDb();
+    for (const d of discovered(30)) seedImported(db, d.id);
+    const deps = recordingDeps(discovered(29));
+
+    const result = await runImportCoverageSweep(envFor(db), {}, deps);
+
+    expect(result.status).toBe("unknown");
+    expect(result.imported).toBe(30);
+    expect(result.discovered).toBe(29);
+  });
+
+  test("a scan exactly the size of the catalogue is plausible", async () => {
+    const db = freshDb();
+    for (const d of discovered(30)) seedImported(db, d.id);
+    seedDispatch(db, 1);
+    const deps = recordingDeps(discovered(30));
+
+    expect((await runImportCoverageSweep(envFor(db), {}, deps)).status).toBe("healthy");
+  });
+
+  test("the floor is inert on an empty catalogue, so a cold start is not an alarm", async () => {
+    // imported === 0, so there is no baseline to be implausible against.
+    const db = freshDb();
+    const result = await runImportCoverageSweep(envFor(db), {}, recordingDeps([]));
+    expect(result.status).toBe("healthy");
+    expect(result.errors).toEqual([]);
+  });
+});
+
+describe("a fresh dispatch row is not proof the hand-off landed", () => {
+  /**
+   * The audit row is written to reserve the slot, BEFORE `triggerOpenNeuroOnboard`.
+   * If the PAT expires the row still appears every ~30 minutes while nothing is
+   * imported, so the clock looks fresh and `silence` can never fire. Before this
+   * cross-check that reported healthy until the standalone backlog threshold, i.e.
+   * weeks -- a blind spot the size of the incident the phase was written for.
+   */
+  test("a picked dataset that never acquired an import row alarms as dispatch-lost", async () => {
+    const db = freshDb();
+    seedDispatch(db, 8, "ds000001");
+    const deps = recordingDeps(discovered(1));
+
+    const result = await runImportCoverageSweep(envFor(db), {}, deps);
+
+    expect(result.dispatchLost).toBe(true);
+    expect(result.status).toBe("alarm");
+    expect(result.kind).toBe("dispatch-lost");
+    expect(result.lastDispatchSourceId).toBe("ds000001");
+  });
+
+  test("a dispatch whose dataset DID acquire a row is not lost", async () => {
+    const db = freshDb();
+    seedDispatch(db, 8, "ds000001");
+    seedImportJob(db, "ds000001", { status: "failed" });
+    const deps = recordingDeps(discovered(1));
+
+    const result = await runImportCoverageSweep(envFor(db), {}, deps);
+
+    expect(result.dispatchLost).toBe(false);
+    expect(result.status).toBe("healthy");
+  });
+
+  test("a dispatch too recent to judge is not called lost", async () => {
+    // The onboard workflow needs time to write its row; judging at once would alarm
+    // on every normal dispatch.
+    const db = freshDb();
+    seedDispatch(db, 1, "ds000001");
+    const result = await runImportCoverageSweep(envFor(db), {}, recordingDeps(discovered(1)));
+    expect(result.dispatchLost).toBe(false);
+    expect(result.status).toBe("healthy");
+  });
+});
+
+describe("a switched-off importer is never a recovery", () => {
+  /**
+   * The failure this gate exists for: an operator manually imports the most-wanted
+   * datasets, outstanding work drops below the threshold, and the monitor closes the
+   * only durable record that the importer is still off -- the incident, re-enacted
+   * by its own alarm.
+   */
+  test("healthy-because-drained does NOT close the issue while the importer is off", async () => {
+    const db = freshDb();
+    seedDispatch(db, 24 * 60);
+    const deps = recordingDeps([], [coverageIssue(700, "disabled")]);
+
+    const result = await runImportCoverageSweep(envFor(db, false), { apply: true }, deps);
+
+    expect(result.status).toBe("healthy");
+    expect(deps.closed).toEqual([]);
+    // Refreshed instead, so the fact that it is off survives.
+    expect(result.issue).toEqual({ number: 700, action: "refreshed" });
+    expect(deps.updated[0]?.n).toBe(700);
+  });
+
+  test("healthy with the importer ENABLED does close it", async () => {
+    const db = freshDb();
+    seedDispatch(db, 1);
+    const deps = recordingDeps([], [coverageIssue(700, "silence")]);
+
+    const result = await runImportCoverageSweep(envFor(db), { apply: true }, deps);
+
+    expect(deps.closed).toEqual([700]);
+    expect(result.issue?.action).toBe("closed");
+  });
+});
+
+describe("a write that lands is always counted", () => {
+  /**
+   * The body PATCH lands, then the label write fails. An earlier version let that
+   * throw out of `reportCoverage`, so `result.issue` stayed null: the summary said
+   * `issue=none`, the route's audit gate saw no change and wrote no row, and the CLI
+   * printed nothing -- for a run that had just rewritten a real issue. Same
+   * "counts describe what landed" rule as phase 2, one level up.
+   */
+  test("a label write that fails after the body landed still reports the action", async () => {
+    const db = freshDb();
+    seedDispatch(db, 24 * 3);
+    const deps = recordingDeps(
+      discovered(COVERAGE_BACKLOG_ALARM),
+      [coverageIssue(700, "silence")],
+      { setLabels: new Error("HTTP 502 - bad gateway") },
+    );
+
+    // Switched off, so the kind changes from silence to disabled.
+    const result = await runImportCoverageSweep(envFor(db, false), { apply: true }, deps);
+
+    expect(deps.updated[0]?.n).toBe(700);
+    expect(result.issue?.action).toBe("relabelled");
+    expect(result.issue?.labelError).toContain("502");
+    // No comment: the label write is the state change, and it did not land.
+    expect(deps.comments).toEqual([]);
+  });
+
+  test("a close that fails is a report error, and the action is not claimed", async () => {
+    const db = freshDb();
+    seedDispatch(db, 1);
+    const deps = recordingDeps([], [coverageIssue(700, "silence")], {
+      close: new Error("HTTP 403 - forbidden"),
+    });
+
+    const result = await runImportCoverageSweep(envFor(db), { apply: true }, deps);
+
+    expect(result.status).toBe("healthy");
+    expect(result.errors[0]?.stage).toBe("report");
+    expect(result.issue).toBeNull();
+    expect(deps.comments).toEqual([]);
+  });
+
+  test("a body update that fails is a report error", async () => {
+    const db = freshDb();
+    seedDispatch(db, 24 * 3);
+    const deps = recordingDeps(
+      discovered(COVERAGE_BACKLOG_ALARM),
+      [coverageIssue(700, "silence")],
+      { update: new Error("HTTP 422") },
+    );
+
+    const result = await runImportCoverageSweep(envFor(db), { apply: true }, deps);
+
+    expect(result.errors[0]?.stage).toBe("report");
+    expect(result.issue).toBeNull();
+  });
+});
+
+describe("two kind labels are corrected, not trusted", () => {
+  /**
+   * `kindsFromLabels` returns every match rather than the first. Taking the first
+   * could equal the current kind, short-circuit to a body-only refresh, and leave
+   * the contradictory label in place forever -- quietly falsifying the "read the
+   * live kind off the document" property the whole design rests on.
+   */
+  test("an issue carrying two kind labels is relabelled even when one matches", async () => {
+    const db = freshDb();
+    seedDispatch(db, 24 * 3);
+    const issue = coverageIssue(700, "silence");
+    issue.labels = [...(issue.labels ?? []), { name: IMPORT_COVERAGE_KIND_LABELS.backlog }];
+    const deps = recordingDeps(discovered(COVERAGE_BACKLOG_ALARM), [issue]);
+
+    const result = await runImportCoverageSweep(envFor(db), { apply: true }, deps);
+
+    expect(result.kind).toBe("silence");
+    expect(result.issue?.action).toBe("relabelled");
+    const applied = deps.labelled[0]?.labels ?? [];
+    expect(applied).toContain(IMPORT_COVERAGE_KIND_LABELS.silence);
+    expect(applied).not.toContain(IMPORT_COVERAGE_KIND_LABELS.backlog);
+  });
+
+  test("an issue carrying no kind label is relabelled rather than read as settled", async () => {
+    const db = freshDb();
+    seedDispatch(db, 24 * 3);
+    const deps = recordingDeps(discovered(COVERAGE_BACKLOG_ALARM), [coverageIssue(700)]);
+
+    const result = await runImportCoverageSweep(envFor(db), { apply: true }, deps);
+
+    expect(result.issue?.action).toBe("relabelled");
+    expect(deps.labelled[0]?.labels).toContain(IMPORT_COVERAGE_KIND_LABELS.silence);
+  });
+});
+
+describe("anomalies are surfaced without invalidating the verdict", () => {
+  test("an unparseable dispatch timestamp is reported and reads as stale", async () => {
+    const db = freshDb();
+    db.query(
+      `INSERT INTO audit_log (action, resource_id, details, timestamp)
+       VALUES ('auto_import_dispatch', 'ds000001', '{}', 'not-a-timestamp')`,
+    ).run();
+    const deps = recordingDeps(discovered(COVERAGE_BACKLOG_ALARM));
+
+    const result = await runImportCoverageSweep(envFor(db), {}, deps);
+
+    expect(result.errors.some((e) => e.stage === "anomaly")).toBe(true);
+    expect(result.dispatchAgeHours).toBeNull();
+    // Conservative direction: unreadable reads as stale, so with work outstanding it
+    // alarms rather than passing as fresh.
+    expect(result.status).toBe("alarm");
+    expect(result.kind).toBe("silence");
+  });
+
+  test("a future-dated dispatch is reported and cannot suppress the alarm", async () => {
+    const db = freshDb();
+    seedDispatch(db, -10, "ds000001");
+    const deps = recordingDeps(discovered(COVERAGE_BACKLOG_ALARM));
+
+    const result = await runImportCoverageSweep(envFor(db), {}, deps);
+
+    expect(result.errors.some((e) => e.error.includes("future"))).toBe(true);
+    expect(result.status).toBe("alarm");
+  });
+});
+
+describe("the sweep binds the real collaborators", () => {
+  /**
+   * Every other test injects `discover`, so nothing pinned that the sweep calls the
+   * real scan at all -- review confirmed that replacing the default with
+   * `async () => []` left 153 tests green. This one drives the REAL
+   * `discoverOpenNeuroDatasets` with only its documented `fetchImpl` seam redirected
+   * at a local server, so scan -> modality filter -> diff -> partition -> verdict
+   * runs as one piece, the way `zarr-fidelity-sweep-route.test.ts` does it.
+   */
+  test("the real scan, filter, diff and verdict compose", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({
+          data: {
+            datasets: {
+              pageInfo: { count: 3, hasNextPage: false, endCursor: null },
+              edges: [
+                // In scope.
+                {
+                  node: {
+                    id: "ds000001",
+                    latestSnapshot: { tag: "1.0.0", summary: { modalities: ["eeg"] } },
+                  },
+                },
+                // Out of scope: the real modality filter must drop this.
+                {
+                  node: {
+                    id: "ds000002",
+                    latestSnapshot: { tag: "1.0.0", summary: { modalities: ["mri"] } },
+                  },
+                },
+                // No snapshot at all: dropped too, and the reason the plausibility
+                // floor exists.
+                { node: { id: "ds000003", latestSnapshot: null } },
+              ],
+            },
+          },
+        });
+      },
+    });
+    try {
+      const db = freshDb();
+      seedDispatch(db, 1);
+      const base = recordingDeps([]);
+      const url = `http://localhost:${server.port}`;
+      const result = await runImportCoverageSweep(
+        envFor(db),
+        {},
+        {
+          ...base,
+          discover: () =>
+            discoverOpenNeuroDatasets({
+              fetchImpl: ((_input: unknown, init?: RequestInit) =>
+                fetch(url, init)) as unknown as typeof fetch,
+            }),
+        },
+      );
+
+      // One of three survived the real filter, and it is a real coverage gap.
+      expect(result.discovered).toBe(1);
+      expect(result.backlog.neverAttempted).toEqual(["ds000001"]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("the widened dispatch query selects the same row as the importer's gate", async () => {
+    // The sweep needs `resource_id` as well as the clock, so it has its own query. A
+    // drift in the predicate would make the sweep and the importer disagree about
+    // when the importer last moved.
+    const db = freshDb();
+    seedDispatch(db, 5, "ds000001");
+    seedDispatch(db, 1, "ds000002");
+    const gate = db.query(AUTO_IMPORT_GATE_QUERY).get() as { timestamp: string };
+    const mine = db.query(COVERAGE_LAST_DISPATCH_QUERY).get() as {
+      timestamp: string;
+      resource_id: string;
+    };
+    expect(mine.timestamp).toBe(gate.timestamp);
+    expect(mine.resource_id).toBe("ds000002");
+  });
+});
 
 describe("one issue, updated in place", () => {
   function alarmingDb(): Database {
@@ -371,7 +731,7 @@ describe("one issue, updated in place", () => {
 
     const result = await runImportCoverageSweep(envFor(db), { apply: true }, deps);
 
-    expect(result.issue).toEqual({ number: 700, action: "updated" });
+    expect(result.issue).toEqual({ number: 700, action: "refreshed" });
     expect(deps.updated).toHaveLength(1);
     expect(deps.updated[0]?.n).toBe(700);
     expect(deps.updated[0]?.body).toContain("ALARM (silence)");
@@ -388,7 +748,7 @@ describe("one issue, updated in place", () => {
 
     const result = await runImportCoverageSweep(envFor(db, false), { apply: true }, deps);
 
-    expect(result.issue?.action).toBe("updated");
+    expect(result.issue?.action).toBe("relabelled");
     expect(deps.labelled[0]?.labels).toContain(IMPORT_COVERAGE_KIND_LABELS.disabled);
     expect(deps.labelled[0]?.labels).not.toContain(IMPORT_COVERAGE_KIND_LABELS.silence);
     expect(deps.comments).toHaveLength(1);
@@ -559,6 +919,7 @@ describe("the summary line", () => {
 
     expect(line).toContain("status=alarm");
     expect(line).toContain("kind=silence");
+    expect(line).toContain(`outstanding=${COVERAGE_BACKLOG_ALARM}`);
     expect(line).toContain(`never_attempted=${COVERAGE_BACKLOG_ALARM}`);
     expect(line).toContain("errors=0");
   });
@@ -567,6 +928,6 @@ describe("the summary line", () => {
     const db = freshDb();
     const deps = recordingDeps([], []);
     const result = await runImportCoverageSweep(envFor(db), {}, deps);
-    expect(importCoverageSweepSummary(result)).toContain("dispatch_age_h=never");
+    expect(importCoverageSweepSummary(result)).toContain("dispatch=never recorded");
   });
 });

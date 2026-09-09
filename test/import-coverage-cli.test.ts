@@ -5,11 +5,12 @@
  * Harness mirrors test/import-issue-triage-cli.test.ts: a real subprocess CLI
  * invocation pointed at a real local HTTP server via TEST_API_URL, no mocks.
  *
- * The property worth a subprocess is the EXIT CODE. This is the command an
- * operator or a cron wrapper runs to ask "is the importer keeping up?", so exit 0
- * has to mean healthy and nothing else. An alarm is a successful run but an
- * unhealthy state, and a 502 unknown is neither -- all three must be
- * distinguishable from a script.
+ * The property worth a subprocess is the EXIT CODE. This is the command an operator
+ * or a cron wrapper runs to ask "is the importer keeping up?", so the three answers
+ * have to be three codes: 0 healthy, 1 alarm (the sweep ran and the pipeline is
+ * unhealthy), 2 unknown (the sweep could not tell). An earlier version gave alarm
+ * and unknown both 1, which collapsed "the pipeline is broken" and "the check is
+ * broken" into one signal -- the precise confusion this phase exists to prevent.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -115,7 +116,17 @@ const HEALTHY = {
   lastDispatchAt: "2026-09-09 10:00:00",
   dispatchAgeHours: 2,
   discovered: 764,
-  backlog: { neverAttempted: ["ds000001", "ds000002"], failedTracked: [], blocklisted: [] },
+  lastDispatchSourceId: "ds007763",
+  dispatchLost: false,
+  imported: 760,
+  inFlight: 0,
+  terminal: 0,
+  backlog: {
+    neverAttempted: ["ds000001", "ds000002"],
+    untracked: [],
+    tracked: [],
+    blocklisted: [],
+  },
   issue: null,
   errors: [],
   ok: true,
@@ -128,9 +139,11 @@ const ALARM = {
   reason: 'AUTO_IMPORT_ENABLED is not "true" and 19 in-scope dataset(s) have never been attempted.',
   enabled: false,
   dispatchAgeHours: 24 * 49,
+  imported: 745,
   backlog: {
     neverAttempted: Array.from({ length: 19 }, (_, i) => `ds${String(i + 1).padStart(6, "0")}`),
-    failedTracked: [],
+    untracked: [],
+    tracked: [],
     blocklisted: [],
   },
   issue: { number: 900, action: "created" },
@@ -185,9 +198,11 @@ describe("nemar admin import-coverage: the exit code is the verdict", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer({
       ...HEALTHY,
+      imported: 761,
       backlog: {
         neverAttempted: ["ds000001"],
-        failedTracked: ["ds000900"],
+        untracked: [],
+        tracked: ["ds000900"],
         blocklisted: ["ds000901"],
       },
     });
@@ -196,7 +211,7 @@ describe("nemar admin import-coverage: the exit code is the verdict", () => {
       expect(result.stdout).toContain("never attempted: ds000001");
       expect(result.stdout).not.toContain("ds000900");
       // ...but the counts are all reported.
-      expect(result.stdout).toContain("failed_tracked=1");
+      expect(result.stdout).toContain("tracked=1");
       expect(result.stdout).toContain("blocklisted=1");
     } finally {
       server.stop();
@@ -207,9 +222,11 @@ describe("nemar admin import-coverage: the exit code is the verdict", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer({
       ...HEALTHY,
+      imported: 714,
       backlog: {
         neverAttempted: Array.from({ length: 50 }, (_, i) => `ds${String(i + 1).padStart(6, "0")}`),
-        failedTracked: [],
+        untracked: [],
+        tracked: [],
         blocklisted: [],
       },
     });
@@ -229,7 +246,7 @@ describe("nemar admin import-coverage: dry run is the default", () => {
     try {
       const result = await runCli(["admin", "import-coverage"], server.url);
       expect(server.requests[0]?.searchParams.get("apply")).toBeNull();
-      expect(result.stdout).toContain("would created");
+      expect(result.stdout).toContain("would create");
       expect(result.stdout).toContain("Re-run with --apply");
     } finally {
       server.stop();
@@ -261,12 +278,12 @@ describe("nemar admin import-coverage: an unknown verdict is not a healthy one",
     details: { errors: [{ stage: "discovery", error: "GraphQL 502 Bad Gateway" }] },
   };
 
-  test("the 502 exits 1 and names the stage that failed", async () => {
+  test("the 502 exits 2 -- could not tell, which is not the same as unhealthy", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(UNKNOWN, 502);
     try {
       const result = await runCli(["admin", "import-coverage"], server.url);
-      expect(result.exitCode).toBe(1);
+      expect(result.exitCode).toBe(2);
       // An operator has to be able to tell an OpenNeuro outage from a D1 one.
       expect(result.stderr).toContain("discovery");
       expect(result.stderr).toContain("GraphQL 502");
@@ -280,7 +297,7 @@ describe("nemar admin import-coverage: an unknown verdict is not a healthy one",
     const server = startCaptureServer(UNKNOWN, 502);
     try {
       const result = await runCli(["admin", "import-coverage", "--json"], server.url);
-      expect(result.exitCode).toBe(1);
+      expect(result.exitCode).toBe(2);
       const parsed = JSON.parse(result.stdout) as { errors?: { stage?: string }[] };
       expect(parsed.errors?.[0]?.stage).toBe("discovery");
     } finally {
@@ -346,5 +363,51 @@ describe("nemar admin import-coverage: partial failures are surfaced", () => {
     } finally {
       server.stop();
     }
+  });
+});
+
+describe("nemar admin import-coverage: the balance line", () => {
+  /**
+   * The counts balance against `discovered` by construction. A line that does not
+   * add up means the run did not see the whole catalogue, which is the one thing a
+   * reader cannot infer from the verdict itself.
+   */
+  test("counts that do not add up are called out", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer({ ...HEALTHY, discovered: 900 });
+    try {
+      const result = await runCli(["admin", "import-coverage"], server.url);
+      expect(result.stdout).toContain("Counts do not balance");
+      expect(result.stdout).toContain("treat the verdict as unreliable");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("counts that add up say nothing", async () => {
+    seedAuthenticatedConfig();
+    // 760 imported + 2 never-attempted = 762 discovered.
+    const server = startCaptureServer({ ...HEALTHY, discovered: 762 });
+    try {
+      const result = await runCli(["admin", "import-coverage"], server.url);
+      expect(result.stdout).not.toContain("Counts do not balance");
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("nemar admin import-coverage: truncation matches the backend", () => {
+  /**
+   * The CLI cannot import from backend/src, so it carries its own copy of the
+   * truncation width. Pinned against the backend's constant here rather than left
+   * free to drift, so the terminal and the GitHub issue never disagree about where
+   * a list stops.
+   */
+  test("the CLI truncates at the same width as the issue body", async () => {
+    const { MAX_LISTED_IDS } = await import("../backend/src/services/import-coverage");
+    const src = await Bun.file(join(import.meta.dir, "..", "src", "commands", "admin.ts")).text();
+    const match = /const COVERAGE_MAX_LISTED_IDS = (\d+);/.exec(src);
+    expect(match?.[1]).toBe(String(MAX_LISTED_IDS));
   });
 });

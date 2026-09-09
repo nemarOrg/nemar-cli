@@ -14,42 +14,67 @@
  * some threshold -- false-alarms permanently, and the reason is subtle enough to
  * be worth stating where the rule lives. `autoImportTick` returns at
  * `if (!picked)` BEFORE it writes its audit row, so a dispatch row exists only
- * when a dataset was actually dispatched. OpenNeuro publishes a few in-scope
- * datasets a week and the tick runs every 30 minutes, so in a healthy steady
- * state the vast majority of ticks write nothing and the last dispatch ages
- * without limit.
+ * when a dataset was actually picked. OpenNeuro publishes a few in-scope datasets
+ * a week and the tick runs every 30 minutes, so in a healthy steady state the
+ * vast majority of ticks write nothing and the last dispatch ages without limit.
  *
- * So silence is only evidence of a problem WHEN THERE WAS WORK TO DO. Every
- * alarm here is gated on a real backlog. That is also what makes the alarm
+ * So silence is only evidence of a problem WHEN THERE WAS WORK TO DO. Every alarm
+ * here is gated on real outstanding work. That is also what makes the alarm
  * trustworthy enough to act on: it cannot fire on a quiet week.
+ *
+ * ## Why a fresh dispatch row is not proof of life either
+ *
+ * The row is written to reserve the slot, so it lands BEFORE the hand-off it
+ * stands for -- `getDatasetsToken` and `triggerOpenNeuroOnboard` are eighteen
+ * lines later in `autoImportTick`. A fresh row therefore proves the tick ran and
+ * chose something, not that GitHub accepted the work. If the datasets PAT expires
+ * or the onboard workflow is renamed, rows keep appearing every ~30 minutes while
+ * nothing is ever imported, and a rule that trusted the timestamp would report
+ * that as healthy for weeks. `dispatchLost` is the cross-check: the dataset the
+ * last row NAMES should have acquired an `import_jobs` row shortly afterwards, and
+ * if it has not, the hand-off is evaporating.
  *
  * ## Why a disabled importer can still alarm
  *
- * `AUTO_IMPORT_ENABLED` was `"false"` for the whole outage -- that is what #1308
- * flipped back. A rule that never alarms on a disabled importer would therefore
- * miss the exact incident this phase was written for. The distinction that
- * actually matters is not enabled-vs-disabled, it is whether anything is
- * accruing: off with an empty backlog is a maintenance window, off with a
- * backlog is "deliberately off and forgotten". Both are reported; only the second
- * alarms, and its reason names the flag so the reader knows the fix is a config
- * change rather than a bug hunt.
+ * `AUTO_IMPORT_ENABLED` was not `"true"` for the whole outage -- that is what
+ * #1308 flipped back. A rule that never alarms on a disabled importer would
+ * therefore miss the exact incident this phase was written for. The distinction
+ * that actually matters is not enabled-versus-disabled, it is whether anything is
+ * accruing: off with no outstanding work is a maintenance window, off with work
+ * outstanding is "deliberately off and forgotten". Both are reported; only the
+ * second alarms, and its reason names the flag so the reader knows the fix is a
+ * config change rather than a bug hunt.
  *
  * Thresholds are exported so tests and the report body reference them instead of
  * repeating literals.
  */
 
 /**
- * Hours without a dispatch, WITH a backlog, before that reads as stalled.
+ * Hours without a dispatch, WITH work outstanding, before that reads as stalled.
  *
- * The tick runs every 30 minutes and its own gate lets it through every ~25, so a
- * healthy importer with anything to do dispatches within roughly 90 minutes. 24
- * hours is ~48 missed ticks: far outside normal jitter, and still catches a
- * seven-week outage on its first full day.
+ * The tick runs every 30 minutes and its own gate lets it through every ~25 (so the
+ * gate never blocks a tick), meaning a healthy importer with anything to do
+ * dispatches within roughly 30 minutes, or ~60 on bad alignment. 24 hours is ~48
+ * missed ticks: far outside normal jitter.
+ *
+ * Note this is not the detection latency. The sweep runs once daily, and the
+ * alarm also needs {@link COVERAGE_BACKLOG_ALARM} datasets outstanding, so the
+ * real latency from a stall is days -- see ADR 0051's consequences.
  */
 export const COVERAGE_DISPATCH_STALE_HOURS = 24;
 
 /**
- * Never-attempted in-scope datasets before a stale dispatch counts as an alarm.
+ * Hours after a dispatch row before the dataset it names must have an
+ * `import_jobs` row, or the hand-off is presumed lost.
+ *
+ * The onboard workflow upserts `preparing` early, well inside an hour. Six hours
+ * is generous enough that a slow queue or a re-run cannot trip it, and still far
+ * short of the weeks the backlog thresholds would take to notice the same fault.
+ */
+export const COVERAGE_DISPATCH_LOST_HOURS = 6;
+
+/**
+ * Outstanding in-scope datasets before a stale dispatch counts as an alarm.
  *
  * In-scope datasets accrued at roughly 2.7/week during the measured outage (19
  * over seven weeks), so 5 is about two weeks of accrual. Deliberately not 1: a
@@ -60,16 +85,15 @@ export const COVERAGE_DISPATCH_STALE_HOURS = 24;
 export const COVERAGE_BACKLOG_ALARM = 5;
 
 /**
- * Never-attempted count that alarms on its own, whatever the dispatch clock says.
+ * Outstanding count that alarms on its own, whatever the dispatch clock says.
  *
  * Covers the case the dispatch signal cannot see: the importer is dispatching --
- * so it looks alive -- but is falling behind faster than it drains, or is
- * dispatching the same few datasets repeatedly while the rest accrue.
+ * so it looks alive -- but is falling behind faster than it drains.
  */
 export const COVERAGE_BACKLOG_ALARM_ALONE = 20;
 
 /** Which coverage problem is live. `null` when the verdict is not an alarm. */
-export type ImportCoverageKind = "backlog" | "silence" | "disabled";
+export type ImportCoverageKind = "backlog" | "silence" | "disabled" | "dispatch-lost";
 
 export type ImportCoverageStatus = "healthy" | "alarm" | "unknown";
 
@@ -81,50 +105,63 @@ export interface ImportCoverageVerdict {
 }
 
 /**
- * The backlog, split by what is already tracked elsewhere.
+ * The backlog, split by whether anything is already tracking each dataset.
  *
- * Only `neverAttempted` is evidence of a coverage problem. The other two are
- * datasets the system already knows about: a per-dataset failure issue exists for
- * them (phases 1-2), or the retry engine has blocklisted them. Counting those as
- * backlog would make the alarm fire forever on a set nobody intends to import,
- * which is the fastest way to train an operator to ignore it.
+ * `neverAttempted` and `untracked` are OUTSTANDING WORK and drive the verdict.
+ * `tracked` and `blocklisted` do not: a per-dataset failure issue exists for the
+ * first (ADR 0050) and the retry engine owns the second, so counting them would
+ * make the alarm permanent on a set nobody intends to import -- the fastest way
+ * to train an operator to ignore it.
  *
- * **There is deliberately no `withdrawn` bucket**, though #1311's own text
- * mentions withdrawals. Withdrawal STAMPS `datasets.withdrawn_at`
- * (`services/withdraw.ts`) rather than deleting the row, so a withdrawn dataset
- * still satisfies `IMPORTED_SOURCE_IDS_QUERY` and `diffNewDatasets` removes it
- * from the diff before this function ever sees it. A withdrawn bucket here would
- * be permanently empty; withdrawal is invisible to a coverage sweep by
+ * **There is deliberately no `withdrawn` bucket**, though #1311's text mentions
+ * withdrawals. Withdrawal STAMPS `datasets.withdrawn_at` (`services/withdraw.ts`)
+ * rather than deleting the row, so a withdrawn dataset still satisfies
+ * `IMPORTED_SOURCE_IDS_QUERY` and `diffNewDatasets` removes it before this
+ * function ever sees it. Withdrawal is invisible to a coverage sweep by
  * construction, because a withdrawn dataset genuinely was imported.
  *
  * Every array holds upstream `ds######` ids, matching `datasets.source_id` and
  * `import_jobs.source_id`.
  */
 export interface ImportCoverageBacklog {
+  /** No `import_jobs` row at all: nothing has ever tried. */
   neverAttempted: string[];
-  failedTracked: string[];
+  /**
+   * Has a row, but one no tracker owns -- `complete` with no `datasets` row (an
+   * admin deleted the dataset and `deleteDatasetCascade` leaves `import_jobs`
+   * behind), or an unrecognised status. The importer WILL re-dispatch these
+   * (`loadFailedJobInfo` only loads `failed`), so they are outstanding work, and
+   * filing them under "already tracked" would have quietly under-counted.
+   */
+  untracked: string[];
+  /** `failed` or `incomplete`: a failure issue or the retry engine owns it. */
+  tracked: string[];
+  /** `import_jobs.blocklisted`, which the retry engine sets WITHOUT changing
+   *  `status` -- so a partition keyed on status alone misses every blocked row. */
   blocklisted: string[];
 }
 
 /** The `import_jobs` state one backlog id can be in. */
 export interface BacklogJobState {
   status: string;
-  /** `import_jobs.blocklisted`, which the retry engine sets WITHOUT changing
-   *  `status` -- so a partition keyed on status alone misses every blocked row. */
   blocklisted: boolean;
 }
 
+/** Statuses for which something else is already tracking the dataset. Anything
+ *  else with a row is `untracked` -- see {@link ImportCoverageBacklog}. */
+const TRACKED_STATUSES: ReadonlySet<string> = new Set(["failed", "incomplete"]);
+
 /**
- * Split the upstream-minus-D1 diff by what the system already knows.
+ * Split the upstream-minus-D1 diff by whether anything is already tracking it.
  *
  * `diffNewDatasets` has already removed everything with a managed `datasets` row
- * and everything in-flight or terminal (`quarantined`/`rolled_back`). What can
- * still be in `diff` is: nothing at all in `import_jobs` (never attempted), a
- * plain `failed`/`incomplete` row (tracked by a failure issue), or a blocklisted
- * row (tracked by the retry engine, and possibly still `status = 'failed'`).
+ * and everything in-flight or terminal (`quarantined`/`rolled_back`), so what can
+ * still be here is: no row at all, a `failed`/`incomplete` row, a blocklisted
+ * row, or a `complete` row whose dataset was deleted.
  *
- * Blocklisted is checked before "has a row at all" because it is the more
- * specific statement about why nobody is retrying it.
+ * Blocklisted is checked before the status buckets because it is the more specific
+ * statement about why nobody is retrying it -- a blocked row is commonly `failed`
+ * too, since `import-retry.ts` does not change `status` when it blocklists.
  */
 export function partitionBacklog(
   diff: readonly string[],
@@ -132,90 +169,132 @@ export function partitionBacklog(
 ): ImportCoverageBacklog {
   const out: ImportCoverageBacklog = {
     neverAttempted: [],
-    failedTracked: [],
+    untracked: [],
+    tracked: [],
     blocklisted: [],
   };
   for (const sourceId of diff) {
     const job = jobs.get(sourceId);
-    if (!job) {
-      out.neverAttempted.push(sourceId);
-    } else if (job.blocklisted) {
-      out.blocklisted.push(sourceId);
-    } else {
-      out.failedTracked.push(sourceId);
-    }
+    if (!job) out.neverAttempted.push(sourceId);
+    else if (job.blocklisted) out.blocklisted.push(sourceId);
+    else if (TRACKED_STATUSES.has(job.status)) out.tracked.push(sourceId);
+    else out.untracked.push(sourceId);
   }
   return out;
 }
 
-/** Whole hours between `then` and `now`, or null when `then` is unknown. */
-export function hoursSince(thenMs: number | null, nowMs: number): number | null {
-  if (thenMs === null) return null;
-  return Math.max(0, Math.floor((nowMs - thenMs) / 3_600_000));
+/** Datasets nothing is working on: the number every alarm is gated against. */
+export function outstandingCount(backlog: ImportCoverageBacklog): number {
+  return backlog.neverAttempted.length + backlog.untracked.length;
 }
 
-/** Rendered as "3 days" / "5 hours" rather than a raw number, because the report
- *  is read by a human deciding whether to act. */
-function humanAge(hours: number | null): string {
-  if (hours === null) return "never";
-  if (hours < 48) return `${hours} hour${hours === 1 ? "" : "s"}`;
-  return `${Math.floor(hours / 24)} days`;
+/**
+ * Whole hours between `then` and `now`, or null when `then` is unknown.
+ *
+ * SIGNED on purpose. An earlier version clamped at 0, which turned any
+ * future-dated dispatch row -- a skewed clock, a replayed fixture -- into
+ * "dispatched 0 hours ago" and so made `stale` false forever, silently confining
+ * the sweep to its standalone-backlog backstop. A negative value is an anomaly
+ * the caller reports rather than a freshness the caller believes.
+ */
+export function hoursSince(thenMs: number | null, nowMs: number): number | null {
+  if (thenMs === null) return null;
+  return Math.floor((nowMs - thenMs) / 3_600_000);
+}
+
+/**
+ * The dispatch clock as a phrase, complete on its own.
+ *
+ * Not a bare number with " ago" appended by the caller: `null` rendered that way
+ * produced "Last dispatch: never ago" in four operator-facing reason strings.
+ */
+export function dispatchPhrase(hours: number | null): string {
+  if (hours === null) return "never recorded";
+  if (hours < 0) return "dated in the future (clock anomaly)";
+  if (hours < 48) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  return `${Math.floor(hours / 24)} days ago`;
 }
 
 /**
  * The coverage verdict.
  *
- * `dispatchAgeHours === null` means no dispatch has ever been recorded. That is
- * NOT automatically stale: a freshly deployed worker with nothing to import is
- * healthy, and treating "never" as infinitely old would alarm on it. It is only
- * stale in the presence of a backlog -- the same fail-open reasoning
- * `decideAutoImportGate` applies to the same value.
+ * `dispatchAgeHours === null` means no dispatch has ever been recorded, or the
+ * stored timestamp could not be read. It DOES read as stale -- the conservative
+ * direction -- but stale alone is not an alarm: a freshly deployed worker with
+ * nothing to import is healthy, and treating "never" as an alarm on its own would
+ * fire on a correct cold start. Note this fails the opposite way from
+ * `decideAutoImportGate`, which fails open toward ACTING on the same value; here
+ * the safe direction is toward alarming.
  *
- * Ordering matters. The disabled branch comes first because when the importer is
- * off, the dispatch clock says nothing useful: of course nothing has dispatched.
- * Reporting that as `silence` would name the symptom and hide the cause.
+ * Ordering is load-bearing:
+ *
+ *   1. **disabled** first, because when the importer is off the dispatch clock
+ *      says nothing useful -- of course nothing dispatched. Reporting that as
+ *      `silence` would name the symptom and hide the cause.
+ *   2. **dispatch-lost** next, because it is the most specific diagnosis: rows
+ *      are being written and the work is not landing, which no other branch can
+ *      see (the clock looks fresh, so `silence` cannot fire).
+ *   3. **backlog** before **silence**, because a backlog this large is a problem
+ *      whether or not the importer looks alive.
  */
 export function decideCoverageVerdict(args: {
   enabled: boolean;
+  /** False when the binding is absent entirely, which is a config fault rather
+   *  than a decision, and is worth saying differently. */
+  enabledBindingPresent?: boolean;
   dispatchAgeHours: number | null;
+  /** The dataset the last dispatch row names still has no `import_jobs` row, well
+   *  after it should have. Computed by the sweep; see the module note. */
+  dispatchLost?: boolean;
   backlog: ImportCoverageBacklog;
 }): ImportCoverageVerdict {
-  const pending = args.backlog.neverAttempted.length;
-  const age = humanAge(args.dispatchAgeHours);
+  const pending = outstandingCount(args.backlog);
+  const clock = dispatchPhrase(args.dispatchAgeHours);
 
   if (!args.enabled) {
+    const how =
+      args.enabledBindingPresent === false
+        ? "AUTO_IMPORT_ENABLED is not set at all, so the importer is off by omission rather than by decision"
+        : 'AUTO_IMPORT_ENABLED is not "true", so the importer is switched off';
     if (pending >= COVERAGE_BACKLOG_ALARM) {
       return {
         status: "alarm",
         kind: "disabled",
-        reason: `AUTO_IMPORT_ENABLED is not "true" and ${pending} in-scope dataset(s) have never been attempted. Last dispatch: ${age} ago. The importer is switched off, not broken: re-enable it rather than debugging the pipeline.`,
+        reason: `${how}, and ${pending} in-scope dataset(s) are outstanding. Last dispatch: ${clock}. The importer is off, not broken: re-enable it rather than debugging the pipeline.`,
       };
     }
     return {
       status: "healthy",
       kind: null,
-      reason: `AUTO_IMPORT_ENABLED is not "true", so the importer is deliberately off, but nothing is accruing (${pending} never-attempted). Last dispatch: ${age} ago.`,
+      reason: `${how}, but nothing is accruing (${pending} outstanding). Last dispatch: ${clock}.`,
     };
   }
 
-  // Checked before the silence rule: a backlog this large is a problem whether or
-  // not the importer looks alive, and saying "silence" about a dispatching
-  // importer would be wrong.
+  if (args.dispatchLost === true) {
+    return {
+      status: "alarm",
+      kind: "dispatch-lost",
+      reason: `The importer is picking datasets but the work is not landing: the dataset named by the last dispatch (${clock}) still has no import_jobs row after ${COVERAGE_DISPATCH_LOST_HOURS} hours. The audit row is written before the GitHub hand-off, so a fresh row does not prove the hand-off succeeded. Check the datasets PAT and that onboard-openneuro.yml still exists.`,
+    };
+  }
+
   if (pending >= COVERAGE_BACKLOG_ALARM_ALONE) {
     return {
       status: "alarm",
       kind: "backlog",
-      reason: `${pending} in-scope dataset(s) have never been attempted, at or above the standalone threshold of ${COVERAGE_BACKLOG_ALARM_ALONE}. Last dispatch: ${age} ago. The importer is dispatching but not keeping up.`,
+      reason: `${pending} in-scope dataset(s) are outstanding, at or above the standalone threshold of ${COVERAGE_BACKLOG_ALARM_ALONE}. Last dispatch: ${clock}. The importer is not keeping up.`,
     };
   }
 
   const stale =
-    args.dispatchAgeHours === null || args.dispatchAgeHours >= COVERAGE_DISPATCH_STALE_HOURS;
+    args.dispatchAgeHours === null ||
+    args.dispatchAgeHours < 0 ||
+    args.dispatchAgeHours >= COVERAGE_DISPATCH_STALE_HOURS;
   if (pending >= COVERAGE_BACKLOG_ALARM && stale) {
     return {
       status: "alarm",
       kind: "silence",
-      reason: `${pending} in-scope dataset(s) have never been attempted and the last auto-import dispatch was ${age} ago, at or beyond the ${COVERAGE_DISPATCH_STALE_HOURS}-hour threshold. The importer is enabled but has stopped moving.`,
+      reason: `${pending} in-scope dataset(s) are outstanding and the last auto-import dispatch was ${clock}, at or beyond the ${COVERAGE_DISPATCH_STALE_HOURS}-hour threshold. The importer is enabled but has stopped moving.`,
     };
   }
 
@@ -223,14 +302,14 @@ export function decideCoverageVerdict(args: {
     return {
       status: "healthy",
       kind: null,
-      reason: `${pending} in-scope dataset(s) are waiting, but the importer dispatched ${age} ago and is working through them.`,
+      reason: `${pending} in-scope dataset(s) are outstanding, and the importer dispatched ${clock}, so it appears to be working through them.`,
     };
   }
 
   return {
     status: "healthy",
     kind: null,
-    reason: `${pending} in-scope dataset(s) never attempted, below the alarm threshold of ${COVERAGE_BACKLOG_ALARM}. Last dispatch: ${age} ago.`,
+    reason: `${pending} in-scope dataset(s) outstanding, below the alarm threshold of ${COVERAGE_BACKLOG_ALARM}. Last dispatch: ${clock}.`,
   };
 }
 
@@ -241,7 +320,7 @@ export function decideCoverageVerdict(args: {
 
 /** How many ids to name before falling back to a count. ADR 0036: an
  *  operational record carries counts and pointers, not an unbounded dump. */
-const MAX_LISTED_IDS = 20;
+export const MAX_LISTED_IDS = 20;
 
 function idList(ids: readonly string[]): string {
   if (ids.length === 0) return "_none_";
@@ -249,27 +328,53 @@ function idList(ids: readonly string[]): string {
   return `${ids.slice(0, MAX_LISTED_IDS).join(", ")} ... and ${ids.length - MAX_LISTED_IDS} more`;
 }
 
+/** Everything the report needs beyond the verdict itself. */
+export interface CoverageReportFacts {
+  enabled: boolean;
+  dispatchAgeHours: number | null;
+  lastDispatchAt: string | null;
+  lastDispatchSourceId: string | null;
+  /** In-scope datasets the scan reported. */
+  discovered: number;
+  /** Already imported as a managed mirror. */
+  imported: number;
+  /** Mid-import. */
+  inFlight: number;
+  /** `quarantined` / `rolled_back`. */
+  terminal: number;
+  backlog: ImportCoverageBacklog;
+}
+
 /**
  * The coverage issue's body, rewritten in place on every alarming run.
  *
  * Authoritative-as-of its own timestamp, and it says so: unlike a per-dataset
  * failure issue, this body is the current state rather than a historical record,
- * and a reader has to know which. It states no running total and no history --
- * phase 2 froze a body at "1 dataset(s) affected" while a dozen comments
- * accumulated below it, and the lesson is that a body written once must never
- * imply it accumulates. This one is not written once, so it can state totals, but
- * only about NOW.
+ * and a reader has to know which.
+ *
+ * **The counts balance by construction**, and that is not decoration. The same
+ * discipline the Zarr index uses (`discovered == stores + failures + pending`)
+ * is what makes a degraded read visible: an upstream scan that returns an empty
+ * in-scope set would otherwise render as an ordinary drained backlog. If the
+ * balance line does not add up, do not trust the verdict.
  */
 export function buildCoverageIssueBody(args: {
   verdict: ImportCoverageVerdict;
-  enabled: boolean;
-  dispatchAgeHours: number | null;
-  lastDispatchAt: string | null;
-  discovered: number;
-  backlog: ImportCoverageBacklog;
+  facts: CoverageReportFacts;
   nowIso: string;
 }): string {
-  const b = args.backlog;
+  const f = args.facts;
+  const b = f.backlog;
+  const accounted =
+    f.imported +
+    f.inFlight +
+    f.terminal +
+    b.neverAttempted.length +
+    b.untracked.length +
+    b.tracked.length +
+    b.blocklisted.length;
+  const balances = accounted === f.discovered;
+
   return [
     `**${args.verdict.status.toUpperCase()}${args.verdict.kind ? ` (${args.verdict.kind})` : ""}** as of ${args.nowIso}.`,
     "",
@@ -281,26 +386,45 @@ export function buildCoverageIssueBody(args: {
     "",
     "| | |",
     "|---|---|",
-    `| \`AUTO_IMPORT_ENABLED\` | ${args.enabled ? "`true`" : "not `true`"} |`,
-    `| Last auto-import dispatch | ${args.lastDispatchAt ?? "never recorded"}${args.dispatchAgeHours === null ? "" : ` (${humanAge(args.dispatchAgeHours)} ago)`} |`,
-    `| In-scope datasets on OpenNeuro | ${args.discovered} |`,
-    `| **Never attempted** | **${b.neverAttempted.length}** |`,
-    `| Failed, already tracked | ${b.failedTracked.length} |`,
-    `| Blocklisted by the retry engine | ${b.blocklisted.length} |`,
+    `| \`AUTO_IMPORT_ENABLED\` | ${f.enabled ? "`true`" : "not `true`"} |`,
+    `| Last auto-import dispatch | ${f.lastDispatchAt ?? "never recorded"} (${dispatchPhrase(f.dispatchAgeHours)}) |`,
+    `| ...which picked | ${f.lastDispatchSourceId ?? "n/a"} |`,
     "",
-    "Only the never-attempted count drives this issue. The other two are already tracked: a per-dataset failure issue exists for them, or the retry engine has blocklisted them. Withdrawn datasets do not appear at all -- a withdrawal keeps the imported row, so it is not a coverage gap.",
+    "### Where every in-scope OpenNeuro dataset is",
+    "",
+    "| bucket | count | outstanding? |",
+    "|---|---|---|",
+    `| imported | ${f.imported} | no |`,
+    `| mid-import | ${f.inFlight} | no |`,
+    `| quarantined or rolled back | ${f.terminal} | no |`,
+    `| failed, tracked by its own issue | ${b.tracked.length} | no |`,
+    `| blocklisted by the retry engine | ${b.blocklisted.length} | no |`,
+    `| **never attempted** | **${b.neverAttempted.length}** | **yes** |`,
+    `| **has a stale row nothing owns** | **${b.untracked.length}** | **yes** |`,
+    `| total accounted for | ${accounted} | |`,
+    `| in-scope on OpenNeuro | ${f.discovered} | |`,
+    "",
+    balances
+      ? "Those two totals agree, so this is a complete view of the catalogue."
+      : `**They do not agree (${accounted} vs ${f.discovered}).** That means this run did not get a complete view, so treat the verdict above as unreliable and re-run before acting on it.`,
+    "",
+    "Only the two bold rows drive this issue. Withdrawn datasets do not appear at all: a withdrawal keeps the imported row, so it is not a coverage gap.",
     "",
     "### Never attempted",
     "",
     idList(b.neverAttempted),
+    ...(b.untracked.length > 0
+      ? ["", "### Has a stale row nothing owns", "", idList(b.untracked)]
+      : []),
     "",
     "## What to check",
     "",
-    `1. Is \`AUTO_IMPORT_ENABLED\` \`"true"\` in \`backend/wrangler-sccn.toml\`? Only the exact string counts.`,
-    "2. Are the `*/30 * * * *` cron triggers still registered on the deployed worker?",
-    "3. Does `nemar admin import-coverage` reproduce this? It runs the same sweep on demand.",
+    '1. Is `AUTO_IMPORT_ENABLED` `"true"` on the deployed worker? Only the exact string counts.',
+    "2. Are the `*/30 * * * *` cron triggers still registered?",
+    "3. Does the last dispatch name a dataset that never acquired an import row? Then the hand-off is failing after the audit row is written: check the datasets PAT and the onboard workflow.",
+    "4. `nemar admin import-coverage` runs this same sweep on demand.",
     "",
-    `Closed automatically once the never-attempted count falls below ${COVERAGE_BACKLOG_ALARM} or the importer resumes dispatching. Filed by the import coverage sweep (nemarOrg/nemar-cli#1311).`,
+    `Closed automatically once fewer than ${COVERAGE_BACKLOG_ALARM} datasets are outstanding and the importer is enabled. Filed by the import coverage sweep (nemarOrg/nemar-cli#1311).`,
   ].join("\n");
 }
 
