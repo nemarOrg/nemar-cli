@@ -109,6 +109,45 @@ export async function closeIssue(repo: string, issueNumber: number, pat: string)
 }
 
 /**
+ * Rewrite an issue's title and/or body in place.
+ *
+ * Arrived with epic #1306 phase 3 (#1311), for the ONE standing coverage issue
+ * whose numbers change every run. A comment per run would be the unbounded
+ * accrual this epic exists to stop, so the current state lives in the body and is
+ * overwritten there; comments are reserved for transitions.
+ *
+ * Only the fields actually supplied are sent, so this cannot blank a body by
+ * omission. An empty patch throws rather than spending a request that changes
+ * nothing -- it would mean the caller's own diffing is broken.
+ */
+export async function updateIssue(
+  repo: string,
+  issueNumber: number,
+  fields: { title?: string; body?: string },
+  pat: string,
+): Promise<void> {
+  const payload: { title?: string; body?: string } = {};
+  if (fields.title !== undefined) payload.title = fields.title;
+  if (fields.body !== undefined) payload.body = fields.body;
+  if (Object.keys(payload).length === 0) {
+    throw new Error(`updateIssue called for ${repo}#${issueNumber} with no fields to change`);
+  }
+
+  const response = await githubFetchWithRetry(
+    `${GITHUB_API()}/repos/${repo}/issues/${issueNumber}`,
+    {
+      method: "PATCH",
+      headers: { ...ghHeaders(pat), "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to update ${repo}#${issueNumber}: HTTP ${response.status} - ${error}`);
+  }
+}
+
+/**
  * REPLACE an issue's labels with `labels`.
  *
  * A full replace, not an add: the caller decides the whole set, because
