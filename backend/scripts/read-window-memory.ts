@@ -64,6 +64,11 @@ interface CaseSpec {
   nChannelsInStore: number;
   channels: number[];
   durationS: number;
+  /** Window start. Defaults to 0; a case that sets this deliberately lands in
+   *  a specific shard (see the boundary-shard case below). */
+  startS?: number;
+  /** What this case is here to exercise, printed alongside the numbers. */
+  why?: string;
 }
 
 // Real, live-verified per the plan's own "what I already verified against
@@ -90,6 +95,27 @@ const CASES: CaseSpec[] = [
     nChannelsInStore: 320,
     channels: Array.from({ length: 64 }, (_, i) => i), // READ_WINDOW_TASTE_MAX_CHANNELS
     durationS: 4.08, // -> 1020 samples; 64 x 1020 = 65,280 channel-samples
+  },
+  {
+    // The BOUNDARY shard. nm000329's array is [63, 138750] with
+    // shard_samples 75000, so shard 1 is the truncated one: it covers
+    // nominal samples [75000, 150000) with only 63750 real. Starting at
+    // exactly sample 75000 (300 s) reads local chunk 0 of that shard, which
+    // is the precise request the footer-entry-count defect misread -- it
+    // returned local index 11, i.e. sample 86000, 44 s later, with no error.
+    // Keeping it in this script means the fixed path is exercised against
+    // live production bytes on every run, not just in a one-off check.
+    label:
+      "nm000329 sub-1 at the BOUNDARY shard (start 300 s = sample 75000, shard 1 local chunk 0)",
+    datasetId: "nm000329",
+    recording: "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-calibration_run-0_eeg.zarr",
+    group: "eeg_250hz",
+    sourceCommit: "7172d2d492dad63650f80cdb83352a0e9d4420f7",
+    nChannelsInStore: 63,
+    channels: [0],
+    startS: 300,
+    durationS: 4,
+    why: "the truncated last shard, where a per-shard entry count silently shifted every chunk by 11",
   },
 ];
 
@@ -135,7 +161,7 @@ async function measureCase(spec: CaseSpec): Promise<void> {
     dataset_id: spec.datasetId,
     recording: spec.recording,
     group: spec.group,
-    start_s: 0,
+    start_s: spec.startS ?? 0,
     duration_s: spec.durationS,
     channels: spec.channels,
     taste: true,
@@ -151,6 +177,7 @@ async function measureCase(spec: CaseSpec): Promise<void> {
   console.log(`\n=== ${spec.label} ===`);
   console.log(`recording: ${spec.recording}  group: ${spec.group}`);
   console.log(`requested: ${spec.channels.length} channels x ${spec.durationS} s`);
+  if (spec.why) console.log(`exercises: ${spec.why}`);
 
   if (outcome.result.isError) {
     console.error("FAILED -- tool returned isError:true:");

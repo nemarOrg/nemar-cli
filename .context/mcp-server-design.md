@@ -506,8 +506,12 @@ n_samples]`, outer chunk (shard) `[n_channels, shard_samples]`, inner chunk
 (the `sharding_indexed` codec's own `chunk_shape`) `[n_channels,
 chunk_samples]`, `index_location: "end"`. Confirmed on nm000329's
 `eeg_250hz` (63 channels, shard 75000, chunk 1000) and on003392's
-`meg_250hz` (320 channels, shard 68000-69000 depending on the store, chunk
-1000) -- `test/fixtures/zarr-array-level0.zarr.json` is nm000329's real
+`meg_250hz` (320 channels, chunk 1000; shard 68000 on the `sub-06` store
+measured here, 69000 on the `sub-01` store
+`test/fixtures/zarr-index-on003392-meg-sss-slice.json` captures -- both real,
+because `shard_samples` is a per-STORE property and this code reads it from
+the specific store's own group entry rather than assuming one figure per
+dataset or per group name) -- `test/fixtures/zarr-array-level0.zarr.json` is nm000329's real
 level-0 `zarr.json`, attributes included. An inner chunk always spans EVERY
 channel, so the chunk grid is always `1 x ceil(n_samples / shard_samples)`
 and a shard's object key is always `<zarr>/<group>/0/c/0/<j>` -- a taste of
@@ -523,12 +527,48 @@ shard (`backend/test/fixtures/mcp/nm000329-shard-index-c-0-0.bin`, captured
 present, offsets chaining from 0, `sum(nbytes) + 1204 == 8_970_760`, the
 shard's real `Content-Length`. An absent inner chunk is marked `2^64 - 1`
 in both fields and reads as `fill_value` (0 digital) with NO byte fetch at
-all. Both the shard grid and the inner-chunk grid follow Zarr's ordinary
-"last chunk may be shorter" rule: a boundary shard or boundary inner chunk
-is truncated to the array's real extent, never padded, so
-`nInnerForShard`/`chunkSampleSpan` (`backend/src/mcp/sharding.ts`) compute
-a shorter span there and the blosc frame's own header already carries the
-correspondingly shorter decoded length.
+all.
+
+**A shard's footer entry count is CONSTANT across every shard, including the
+final one: it is `shard_samples / chunk_samples`, never a function of how
+many samples fall inside that particular shard.** This is the one thing this
+phase got wrong at first, and it is worth stating at length because the
+failure was silent. `nInnerForShard` originally computed
+`ceil(min(shard_samples, n_samples - shard_start) / chunk_samples)`, which
+is smaller for a boundary shard. For nm000329's shard 1 that is 64 instead
+of 75, so the reader Range-read the last `footerByteLength(64)` = 1028 bytes
+instead of the real 1204. That slice begins 176 bytes -- exactly 11 entries
+-- into the true footer, so every local index it parsed was the wrong entry,
+shifted by 11 chunks: a request for sample 75,000 returned sample 86,000, 44
+seconds of drift at 250 Hz. Nothing errored, because every misread entry
+still pointed at a real, full-size, cleanly decoding chunk. It was caught by
+capturing the real BOUNDARY shard's footer
+(`backend/test/fixtures/mcp/nm000329-shard-index-c-0-1.bin`, `Content-Length`
+7,651,790): 75 entries, local indices 0-63 present and chaining contiguously
+with `sum(nbytes) == 7_650_586`, and 64-74 marked absent because they lie
+wholly past the array's extent. Per the Zarr v3 sharding spec, a chunk past
+the array's real data is an ABSENT ENTRY, not an omitted one.
+
+**A present chunk that merely straddles `n_samples` is stored FULL SIZE and
+fill-padded.** Zarr never emits a narrower chunk. Verified on that same
+shard's final present entry (local index 63, offset 7,560,477, nbytes
+90,109, nominally covering [138000, 139000) with only [138000, 138750)
+real): those exact bytes decode to 63,000 values, 63 channels x 1000
+columns, not 63 x 750. So a decoded chunk's STRIDE (always `chunk_samples`)
+and its VALID SPAN (truncated at `n_samples`) are two different quantities.
+`chunkSampleSpan` reports the valid span; `DecodedSegment.stride`
+(`backend/src/mcp/taste.ts`) carries the stride separately, and indexing
+with `end - start` instead would mis-stride every channel above the first.
+The fill padding is real stored data but is NOT addressable through
+`read_window`: a window past the array's extent is a bounds error, never
+padding returned as if it were signal.
+
+Both fixtures encode these rules now. The synthetic generator briefly wrote
+a three-entry boundary footer -- matching the reader's bug rather than the
+spec -- so generator and reader agreed and the whole suite was green while
+production data was being misread; it now derives the entry count from the
+chunk grid and pads the straddling chunk, and the committed real boundary
+footer is what pins the rule against the actual producer.
 
 **Three caps, not the phase-1 product alone.** The original
 `duration_s x channels.length <= 3840` check does not bound either cost it
@@ -625,7 +665,10 @@ nbytes]` pairs, `[-1, -1]` for absent). Decoded WINDOWS are never cached --
 a taste is an inline decode of a specific window on demand. The metrics
 `cacheStatus` is `"hit"` only when every projection the call consulted
 (the array metadata and every shard footer touched) was a hit;
-`upstreamBytes` sums the footer and chunk bytes actually fetched.
+`upstreamBytes` is the total upstream bytes fetched for the call: the
+array-metadata `zarr.json` GET when it was not a cache hit (a plain full
+GET, not a Range read) plus every shard-footer Range read plus every
+inner-chunk Range read.
 
 **The taste response is not duplicated into `content`.** Every other tool
 puts `JSON.stringify(output)` in both `content` and `structuredContent`;
@@ -737,7 +780,7 @@ concrete:
       `MAX_STORE_FANOUT_ENTRIES` (2000, in
       `backend/src/mcp/tools/get-events.ts`): above it only the requested
       store's entry is written, and each other store's first call re-reads
-      the parquet (the behaviour that existed before the fan-out).
+      the parquet (the behavior that existed before the fan-out).
       Store counts in the catalog are not bounded by anything this code
       controls -- nm000281 publishes 25,253 stores and on005873 10,944
       (measured 2026-09-08 from `zarr.nemar.org/catalog.json`) -- so one
@@ -1068,14 +1111,32 @@ it, to avoid a float-rounding rejection at the boundary:
 
 | Case | Requested | Window | Channel-samples | `chunks_read` | `bytes_read` (upstream) | Bun `heapUsed` delta | Analytic bound |
 |---|---|---|---|---|---|---|---|
-| nm000329 `sub-1` (63 ch store) | 63 channels x 4.12 s | 1030 samples | 64,890 | 2 | 245,312 B | 3,295,454 B (~3.14 MiB) | 645,120 B (~630 KiB) |
-| on003392 `sub-06` (320 ch store, taste capped at 64) | 64 of 320 channels x 4.08 s | 1020 samples | 65,280 | 2 | 1,215,811 B | 5,680,543 B (~5.42 MiB) | 1,162,240 B (~1.11 MiB) |
+| nm000329 `sub-1` (63 ch store) | 63 channels x 4.12 s | 1030 samples | 64,890 | 2 | 245,312 B | 1,781,470 B (~1.70 MiB) | 645,120 B (~630 KiB) |
+| on003392 `sub-06` (320 ch store, taste capped at 64) | 64 of 320 channels x 4.08 s | 1020 samples | 65,280 | 2 | 1,215,811 B | 5,816,249 B (~5.55 MiB) | 1,162,240 B (~1.11 MiB) |
+| nm000329 `sub-1` at the BOUNDARY shard (start 300 s = sample 75,000) | 1 channel x 4 s | 1000 samples | 1,000 | 1 | 126,776 B | 506,501 B (~495 KiB) | 134,000 B (~131 KiB) |
+
+The third case is not about memory. It exists because the first two both start
+at sample 0 and so never touch the truncated last shard, which is precisely
+where the footer-entry-count defect lived: a request for sample 75,000
+returned sample 86,000, 44 seconds later, and both readings decoded cleanly
+into plausible EEG. Measured directly against the live bytes, channel 0 at
+sample 75,000 begins `[12889, 14040, 13530, 12743, ...]` under the constant
+entry count, and `[-2135, -2040, -2880, -3742, ...]` under the old per-shard
+one -- the latter being local chunk 11 of that shard. Keeping the case in the
+script means the fixed path is re-exercised against production on every run
+rather than in a one-off check.
+
+The `heapUsed` deltas are noisy run to run (the nm000329 case measured
+3,295,454 B on an earlier run of the same code and window), so read them as an
+order of magnitude, not a figure to regress against; `bytes_read` and
+`chunks_read` are the stable, production-observable numbers.
 
 Both cases span exactly 2 inner chunks (a `~4 s` window at 250 Hz, `chunk_samples`
 1000, crosses one chunk boundary), confirming the "at most a handful of
 subrequests, never one per inner chunk" claim in section 5.6 at these sizes.
 `bytes_read` (the tool's own reported figure, observable in production via
-the Analytics Engine point, section 8) is upstream Range-read bytes --
+the Analytics Engine point, section 8) is total upstream bytes fetched,
+which is the array-metadata GET plus the footer and chunk Range reads --
 larger for on003392 because its inner chunks are 320-channel-wide, over 5x
 nm000329's 63.
 
@@ -1261,11 +1322,17 @@ measured figures above, and reproducible with `bun run backend/scripts/read-wind
   script). Real-route tests: `backend/test/mcp-read-window.test.ts` (real
   D1, a real `Bun.serve()` fixture upstream serving a synthetic sharded
   store -- `nm099500`, generated by `scripts/zarr/generate_mcp_test_fixture.py`'s
-  `build_sharded_level0_fixture`, 4 channels, one deliberately absent inner
-  chunk, one truncated boundary inner chunk -- plus the REAL nm000329
-  `c/0/0` shard footer, captured live); `backend/test/mcp-sharding.test.ts`
-  (pure footer/planning tests, including the real captured footer: 75
-  entries, `sum(nbytes) + 1204 == 8_970_760`). Bundle delta +41.37 KiB /
+  `build_sharded_level0_fixture`, 4 channels, a deliberately absent
+  mid-array inner chunk, a straddling boundary chunk stored full size with
+  fill padding, and a trailing entry marked absent as wholly past
+  `n_samples`; expected values emitted alongside as
+  `nm099500-expected.json` so the tests read ground truth from data rather
+  than re-implementing the generator's formula -- plus BOTH REAL nm000329
+  shard footers, `c/0/0` and the boundary `c/0/1`, captured live);
+  `backend/test/mcp-sharding.test.ts` (pure footer/planning tests against
+  both: 75 entries each, `sum(nbytes) + 1204 == 8_970_760` for `c/0/0`, and
+  75 entries with 64 present and 11 absent, `sum(nbytes) + 1204 ==
+  7_651_790`, for the boundary shard that pins the constant entry count). Bundle delta +41.37 KiB /
   +8.88 KiB gzip, no new dependencies; taste-mode memory measured against
   live nm000329 and on003392 -- see section 10.4 for both, including the
   Bun-heap-vs-analytic-bound honesty note.
