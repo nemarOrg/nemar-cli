@@ -9,9 +9,12 @@
  * **Dry run by default.** `apply` must be sent explicitly, because the write
  * side closes and relabels real issues on nemarDatasets/.github. That matches
  * `backfill-names`, the other admin operation that changes many rows at once.
+ * `apply` additionally refuses outside production, because that repo is shared
+ * with production rather than environment-scoped.
  */
 
 import { auditLogStatement } from "../../db/audit-log";
+import { isNonProductionEnv } from "../../services/environment";
 import {
   IMPORT_ISSUE_SWEEP_DEFAULT_LIMIT,
   IMPORT_ISSUE_SWEEP_MAX_LIMIT,
@@ -22,7 +25,10 @@ import type { AdminRouter } from "./shared";
 /**
  * `deps.sweep` defaults to the real `runImportIssueSweep` and exists so a route
  * test can register this exact route with the GitHub/S3 boundaries substituted,
- * the same DI-seam idiom `registerZarrFidelitySweepRoutes` uses.
+ * the same DI-seam idiom `registerZarrFidelitySweepRoutes` uses. Exercised by
+ * `backend/test/import-issue-triage-route.test.ts`, which is what covers the
+ * production guard, the 502 predicate, the audit gate and the query parsing --
+ * none of which the service tests can reach.
  */
 export function registerImportIssueTriageRoutes(
   admin: AdminRouter,
@@ -37,7 +43,7 @@ export function registerImportIssueTriageRoutes(
    * {@link IMPORT_ISSUE_SWEEP_MAX_LIMIT}). Without `apply`, reports the plan
    * and writes nothing.
    *
-   * A run in which EVERY examined issue errored answers 502: a 200 there would
+   * A run in which every ATTEMPTED issue failed answers 502: a 200 there would
    * read as "triage ran cleanly and found nothing to do", which is the opposite
    * of what happened. A partial result is a successful run and stays 200, as is
    * an empty candidate set.
@@ -47,18 +53,52 @@ export function registerImportIssueTriageRoutes(
     const limit = Number.isFinite(limitRaw) ? limitRaw : undefined;
     const apply = c.req.query("apply") === "1" || c.req.query("apply") === "true";
 
-    try {
-      const result = await sweep(c.env, { limit, apply });
+    // `IMPORT_FAILURE_ISSUES_REPO` is hardcoded and `nemarDatasets` is SHARED
+    // between production and dev (AGENTS.md), so an `apply` from a staging
+    // worker closes and relabels real production issues. `runImportIssueSweepCron`
+    // carries this guard for the cron; the route needs its own, because a
+    // `TEST_ADMIN_API_KEY` reaches here. The dry run stays available everywhere:
+    // it is a read, and reading the production tracker from staging is the point.
+    if (apply && isNonProductionEnv(c.env)) {
+      return c.json(
+        {
+          error:
+            "apply is production-only: the import-failure tracker is a single repo shared with production, so a staging apply would write to it. Re-run without apply for the plan.",
+        },
+        403,
+      );
+    }
 
-      // Only a run that actually changed something is worth an audit row; a dry
-      // run is a read.
-      if (apply && (result.closed > 0 || result.relabelled > 0)) {
+    let result: Awaited<ReturnType<typeof runImportIssueSweep>>;
+    try {
+      result = await sweep(c.env, { limit, apply });
+    } catch (err) {
+      // The sweep threw before it could report, so there is no honest count and
+      // nothing was written. Deliberately NOT described as a listing failure:
+      // `getDatasetsToken` throwing on a misconfigured App is the other likely
+      // cause and sends an operator looking at labels instead of credentials.
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[import-issue-triage] sweep failed before it could report:", err);
+      return c.json({ error: `Import-issue triage failed before it could report: ${msg}` }, 500);
+    }
+
+    // Only a run that actually changed something is worth an audit row; a dry
+    // run is a read. `closed`/`relabelled` count landed writes, so this cannot
+    // fire for a run whose every write failed.
+    //
+    // Outside the try above on purpose: an audit failure must not turn a run
+    // that really did close issues into a 500 that reads as "nothing happened"
+    // while up to `limit` issues are closed on GitHub and the result is
+    // discarded. It is reported instead, as `audit_failed`.
+    let auditFailed: string | undefined;
+    if (apply && (result.closed > 0 || result.relabelled > 0)) {
+      try {
         await auditLogStatement(c.env.DB, {
           userId: c.get("user").id,
           action: "import_issue_triage",
           resourceType: "dataset",
           resourceId: result.plan
-            .filter((e) => e.kind !== "keep")
+            .filter((e) => e.kind !== "keep" && !e.failed)
             .map((e) => e.datasetId ?? `#${e.issueNumber}`)
             .join(","),
           details: JSON.stringify({
@@ -68,26 +108,35 @@ export function registerImportIssueTriageRoutes(
             errors: result.errors.length,
           }),
         }).run();
+      } catch (err) {
+        auditFailed = err instanceof Error ? err.message : String(err);
+        console.error("[import-issue-triage] audit row failed after applying:", err);
       }
-
-      const totalFailure = result.examined > 0 && result.errors.length === result.examined;
-      if (totalFailure) {
-        return c.json(
-          {
-            ...result,
-            ok: false,
-            error: `All ${result.examined} examined issue(s) errored; see errors[]`,
-          },
-          502,
-        );
-      }
-      return c.json({ ...result, ok: true });
-    } catch (err) {
-      // Reaching here means the issue LISTING failed, so there is no honest
-      // count to report and nothing was touched.
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error("[import-issue-triage] sweep failed:", msg);
-      return c.json({ error: `Failed to list import-failure issues: ${msg}` }, 500);
     }
+
+    // Measured over ATTEMPTS, not over `examined`: a `keep` attempts nothing and
+    // so can never error, and counting keeps in the denominator is what let the
+    // realistic write outage -- PAT lost `issues: write`, repo archived, secondary
+    // rate limit -- answer 200 with 10 keeps and 5 failed writes. A comment-stage
+    // error does not count: its state change landed.
+    const failedAttempts = result.errors.filter((e) => e.stage !== "comment").length;
+    const totalFailure = result.attempted > 0 && failedAttempts >= result.attempted;
+    if (totalFailure) {
+      return c.json(
+        {
+          ...result,
+          ok: false,
+          error: `All ${result.attempted} attempted issue(s) failed; see errors[]`,
+          // Under `details` as well as at the top level: the CLI's `request()`
+          // turns any non-2xx into an ApiError that keeps `details`, so this is
+          // what makes the causes reachable from the thrown error rather than
+          // printing a count with no reasons.
+          details: { errors: result.errors },
+          ...(auditFailed ? { audit_failed: auditFailed } : {}),
+        },
+        502,
+      );
+    }
+    return c.json({ ...result, ok: true, ...(auditFailed ? { audit_failed: auditFailed } : {}) });
   });
 }

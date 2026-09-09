@@ -20,6 +20,7 @@ import {
   type IssueVerifyState,
   buildRecoveryCloseComment,
   buildRollupIssueBody,
+  buildRollupReleaseComment,
   computeLabelUpdate,
   decideIssueAction,
   decideIssueMode,
@@ -65,10 +66,10 @@ describe("decideIssueMode", () => {
     expect(decideIssueMode({ openPerDatasetCount: IMPORT_ISSUE_CAP, rollupOpen: false })).toBe(
       "rollup",
     );
-    // The real 2026-07-22 burst: 14 at once.
-    expect(decideIssueMode({ openPerDatasetCount: 14, rollupOpen: true })).toBe("rollup");
-    // And the 28 open when this phase was written.
-    expect(decideIssueMode({ openPerDatasetCount: 28, rollupOpen: true })).toBe("rollup");
+    // The real 2026-07-22 burst: 15 at once (#68-#82).
+    expect(decideIssueMode({ openPerDatasetCount: 15, rollupOpen: true })).toBe("rollup");
+    // And the backlog open when this phase was written.
+    expect(decideIssueMode({ openPerDatasetCount: 29, rollupOpen: true })).toBe("rollup");
   });
 
   test("per-dataset filing resumes only at or below the resume mark", () => {
@@ -88,6 +89,11 @@ describe("decideIssueMode", () => {
     }
   });
 
+  /**
+   * Do not delete this as trivial. It is what stops the loop above from going
+   * vacuous: narrow the band to adjacent constants and that `for` body never
+   * executes, silently disarming the only assertion of the anti-thrash property.
+   */
   test("the band is non-empty, or there is no hysteresis at all", () => {
     expect(IMPORT_ISSUE_RESUME).toBeLessThan(IMPORT_ISSUE_CAP - 1);
   });
@@ -125,6 +131,23 @@ describe("decideIssueAction", () => {
     const action = decideIssueAction({ ...base, verify: noManifest });
     expect(action.kind).toBe("keep");
     expect(action.reason).toContain("completeness unknown");
+  });
+
+  /**
+   * The third refusal, and the subtlest. `complete` upstream is `missingKeys
+   * .length === 0` over the manifest's annex-keyed entries, so a manifest with
+   * none of them -- `files: {}` (which `parseManifestFiles` accepts, it only
+   * rejects a MISSING key), or every entry `git:`-keyed -- yields `complete:
+   * true` having compared nothing at all. Closing on that writes "0 of 0
+   * annex-keyed objects are present" as a recovery claim over an empty set.
+   */
+  test("complete over ZERO declared objects verified nothing -- never closes", () => {
+    const action = decideIssueAction({
+      ...base,
+      verify: { complete: true, version: "1.0.0", expectedCount: 0, presentCount: 0 },
+    });
+    expect(action.kind).toBe("keep");
+    expect(action.reason).toContain("no annex-keyed objects");
   });
 
   test("failed verification is kept, never closed (fail-open)", () => {
@@ -267,5 +290,40 @@ describe("content builders", () => {
     expect(body).toContain("https://example/1");
     expect(body).toContain("on000002 (ds000002)");
     expect(body).toContain(String(IMPORT_ISSUE_RESUME));
+  });
+
+  /**
+   * The body is written once, at creation, and later datasets join as comments.
+   * So it must not state a running total: an earlier version opened with "1
+   * dataset(s) affected" and that line stayed frozen at 1 while a dozen comments
+   * accumulated below it. The old test asserted only that the dataset lines were
+   * present, which is why the frozen count was invisible to it.
+   */
+  test("the rollup body states no total, because it is never rewritten", () => {
+    const body = buildRollupIssueBody(
+      "auth_invalid",
+      "GitHub rejected the credential.",
+      [{ datasetId: "on000001", sourceId: "ds000001", workflowRunUrl: null }],
+      "2026-09-09T00:00:00Z",
+    );
+    expect(body).not.toContain("dataset(s) affected");
+    // ...and says where the rest of the set actually lives.
+    expect(body).toContain("appended as a comment");
+  });
+
+  test("the rollup body says the cap is a floor, not a strict threshold", () => {
+    // The rule is `>= CAP`, so the rollup opens exactly when the count REACHES
+    // the cap. "more than 10" was false in precisely the case that creates it.
+    const body = buildRollupIssueBody("auth_invalid", "s", [], "2026-09-09T00:00:00Z");
+    expect(body).toContain(`${IMPORT_ISSUE_CAP} or more`);
+  });
+
+  test("the release comment disclaims being a verdict on the datasets", () => {
+    const body = buildRollupReleaseComment(3, "2026-09-09T00:00:00Z");
+    expect(body).toContain(String(IMPORT_ISSUE_RESUME));
+    expect(body).toContain("NOT a verdict on the datasets");
+    // Closing a GitHub issue does not delete it, and a reader needs to know the
+    // records are still there.
+    expect(body).toContain("Nothing here is deleted");
   });
 });

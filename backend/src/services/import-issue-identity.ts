@@ -8,14 +8,15 @@
  * needs the accrual rules. Both depending on this leaf module keeps the
  * dependency one-directional, the same discipline `import-error.ts` follows.
  *
- * `import-failure-issue.ts` re-exports all three, so every existing import site
- * keeps working and there is still one obvious place to import them from.
+ * `import-failure-issue.ts` re-exports the three the pre-split call sites used,
+ * so every existing import keeps working. `parseImportFailureIssueTitle` arrived
+ * with the split and has no legacy call site, so it is imported from here.
  */
 
 export const IMPORT_FAILURE_ISSUE_LABEL = "import-failure";
 
-/** Central repo the failure-tracking issue template + triage doc live on
- *  (nemarDatasets/.github#83) -- same repo the onboard workflow itself is
+/** Central repo the failure-tracking issue template + triage doc live on (added
+ *  by nemarDatasets/.github PR #83) -- same repo the onboard workflow itself is
  *  deployed to (github/dispatch.ts CENTRAL_WORKFLOW_REPO). */
 export const IMPORT_FAILURE_ISSUES_REPO = "nemarDatasets/.github";
 

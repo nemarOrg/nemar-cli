@@ -215,6 +215,14 @@ export async function fileImportFailureIssueIfNeeded(
     .bind(args.datasetId)
     .first<{ is_sandbox: number | null; is_exemplar: number | null }>();
 
+  // The STORED error, not `args.errorMessage`, is what the cause is classified
+  // from (see the note on classifiedCause below). Read here, next to the other
+  // gate read, because the caller has already upserted it.
+  const jobRow = await db
+    .prepare("SELECT last_error FROM import_jobs WHERE dataset_id = ?")
+    .bind(args.datasetId)
+    .first<{ last_error: string | null }>();
+
   const shouldFile = shouldFileImportFailureIssue({
     datasetId: args.datasetId,
     resultingStatus: args.resultingStatus,
@@ -250,9 +258,29 @@ export async function fileImportFailureIssueIfNeeded(
   // (services/import-issue-sweep.ts) also cleans these up on recovery.
   const open = await listOpenIssues(IMPORT_FAILURE_ISSUES_REPO, IMPORT_FAILURE_ISSUE_LABEL, pat);
   const existing = open.find((i) => i.title === title) ?? null;
+
+  // Classified from the STORED `last_error`, never from `args.errorMessage`.
+  //
+  // The caller (routes/callbacks/import-state.ts) deliberately refuses to let a
+  // GENERIC incoming message overwrite a SPECIFIC stored one -- ADR 0049's rule,
+  // enforced in SQL by `lastErrorAssignmentSql`. Classifying from the raw
+  // incoming value applied that rule to D1 and ignored it for the issue: a second
+  // `failed` callback carrying `terminal: prepare=failure copy=failure
+  // finalize=failure` (which is what the shard legs running under `if:
+  // !cancelled()` post, and what every issue between 2026-07-22 and 2026-09-08
+  // recorded) classified as UNKNOWN, and `computeLabelUpdate` then STRIPPED the
+  // correct cause label back to `needs-triage`, silently and with no comment
+  // saying why. It also set up a two-writer fight with the triage sweep, which
+  // reads the protected stored value: sweep relabels to the real cause, next
+  // generic callback flips it back, once per run, forever.
+  //
+  // Reading the stored value makes both writers agree because they read the same
+  // column. `args.errorMessage` is still what the issue BODY and the comment
+  // quote -- that is this callback's own report and belongs verbatim -- but it no
+  // longer decides a label.
   const classified = classifyImportFailure({
     stage: args.stage,
-    lastError: args.errorMessage,
+    lastError: jobRow?.last_error ?? args.errorMessage,
   });
 
   if (existing) {
@@ -281,17 +309,33 @@ export async function fileImportFailureIssueIfNeeded(
   // -- they are greppable and keep per-dataset history -- so this is a pressure
   // valve, not the normal mode. See services/import-issue-accrual.ts.
   if (shouldRollUp(open, classified.cause)) {
-    await appendToRollup(
-      pat,
-      classified,
-      {
-        datasetId: args.datasetId,
-        sourceId: args.sourceId,
-        workflowRunUrl: args.workflowRunUrl,
-      },
-      open,
-      { create, comment },
-    );
+    try {
+      await appendToRollup(
+        pat,
+        classified,
+        {
+          datasetId: args.datasetId,
+          sourceId: args.sourceId,
+          workflowRunUrl: args.workflowRunUrl,
+        },
+        open,
+        { create, comment },
+      );
+    } catch (err) {
+      // Rollup mode makes a lost write strictly costlier than per-dataset mode:
+      // no per-dataset issue was opened (that IS the mode) and the rollup comment
+      // did not land, so this dataset's failure is recorded nowhere, and the
+      // triage sweep cannot recover it because it walks existing ISSUES, never
+      // `import_jobs` rows. Phase 3's coverage sweep (#1311) reconciles rows
+      // against issues and is the durable fix; until it lands this line is the
+      // only trace, so it names the dataset, the source and the cause and is
+      // greppable as one string.
+      console.error(
+        `[import-failure-issue] UNTRACKED FAILURE ${args.datasetId} (${args.sourceId}) cause=${classified.label}: rollup write failed:`,
+        err,
+      );
+      throw err;
+    }
     return;
   }
 

@@ -14,9 +14,16 @@
  *     roll-up the orchestration chooses once past the gate, with the GitHub
  *     transport injected. That branch used to be unreachable in a test, because
  *     the only way to get past the gate was to let getDatasetsToken throw.
+ *   - which VALUE the cause label is classified from: the stored `last_error`,
+ *     never the raw incoming callback message. See the generic-callback tests.
  *
- * The HTTP calls themselves (services/github/issues.ts) are I/O and stay
- * untested here, same constraint as every other github.ts consumer.
+ * The HTTP calls themselves (services/github/issues.ts) are covered separately in
+ * `github-issues-listing.test.ts`, against a local `Bun.serve()` GitHub through
+ * the `NEMAR_GITHUB_API_URL` override -- an earlier version of this comment
+ * claimed they "stay untested, same constraint as every other github.ts
+ * consumer", which was not true of this codebase: six suites already use that
+ * override. What is injected HERE is the transport, so this file stays about the
+ * orchestration's choices rather than about paging.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -442,6 +449,71 @@ describe("a re-failure comments, and relabels when the cause changed", () => {
     expect(deps.labelled[0]?.labels).toContain("no-import-row");
   });
 
+  /**
+   * The label comes from the STORED `last_error`, never from the raw incoming
+   * message.
+   *
+   * `routes/callbacks/import-state.ts` refuses to let a GENERIC message overwrite
+   * a SPECIFIC stored one (ADR 0049's rule, in SQL). Classifying the label from
+   * the incoming value applied that rule to D1 and ignored it for the issue: the
+   * `report` job's `terminal: ...` callback -- which every issue in the incident
+   * window recorded -- classified as UNKNOWN and STRIPPED the correct cause label
+   * back to `needs-triage`, with no comment saying why. It also fought the triage
+   * sweep, which reads the protected stored column: sweep relabels to the real
+   * cause, next generic callback flips it back, once per run, forever.
+   */
+  test("a generic follow-up callback does NOT downgrade a correctly classified issue", async () => {
+    const db = freshDb();
+    const d1 = realD1(db);
+    // The specific cause the pipeline already diagnosed and stored.
+    db.query(
+      `INSERT INTO import_jobs (dataset_id, source, source_id, stage, status, last_error)
+       VALUES ('on000123', 'openneuro', 'ds000123', 'prepare', 'failed', ?)`,
+    ).run(AUTH_ERROR);
+    const deps = recordingDeps([
+      openIssue(75, TITLE, [IMPORT_FAILURE_ISSUE_LABEL, "auth-invalid"]),
+    ]);
+
+    // The report job's own summary: bookkeeping, no diagnosis.
+    await fileImportFailureIssueIfNeeded(
+      d1,
+      prodEnv(d1),
+      baseArgs({
+        stage: "copy",
+        errorMessage: "terminal: prepare=failure copy=failure finalize=failure",
+      }),
+      deps,
+    );
+
+    // Commented, because a re-failure is worth recording...
+    expect(deps.comments).toHaveLength(1);
+    // ...but the cause label is untouched, so nothing was downgraded.
+    expect(deps.labelled).toEqual([]);
+  });
+
+  test("the stored cause wins even when the issue carries a stale label", async () => {
+    const db = freshDb();
+    const d1 = realD1(db);
+    db.query(
+      `INSERT INTO import_jobs (dataset_id, source, source_id, stage, status, last_error)
+       VALUES ('on000123', 'openneuro', 'ds000123', 'prepare', 'failed', ?)`,
+    ).run(ANNEX_ERROR);
+    const deps = recordingDeps([
+      openIssue(75, TITLE, [IMPORT_FAILURE_ISSUE_LABEL, "upstream-403"]),
+    ]);
+
+    await fileImportFailureIssueIfNeeded(
+      d1,
+      prodEnv(d1),
+      baseArgs({ stage: "copy", errorMessage: "terminal: prepare=failure" }),
+      deps,
+    );
+
+    // Relabelled from the STORED annex-uuid error, not from the generic callback.
+    expect(deps.labelled[0]?.labels).toContain("annex-uuid-conflict");
+    expect(deps.labelled[0]?.labels).not.toContain("upstream-403");
+  });
+
   test("an unchanged cause comments without a pointless label write", async () => {
     const db = freshDb();
     const d1 = realD1(db);
@@ -592,6 +664,63 @@ describe("a burst rolls up instead of opening dozens of issues", () => {
         "auth-invalid",
       ]),
     ]);
+
+    await fileImportFailureIssueIfNeeded(
+      d1,
+      prodEnv(d1),
+      baseArgs({ stage: "prepare", errorMessage: AUTH_ERROR }),
+      deps,
+    );
+
+    expect(deps.created[0]?.title).toBe(TITLE);
+    expect(deps.comments).toEqual([]);
+  });
+
+  /**
+   * The anti-thrash property, pinned at the ENTRY POINT rather than only on the
+   * pure function -- which is the whole reason the two thresholds exist.
+   *
+   * Review proved this was missing by mutation: replacing `shouldRollUp`'s
+   * `rollupOpen` computation with `false` -- i.e. deleting the hysteresis and
+   * leaving a bare `>= CAP` threshold -- left the entire suite green, because
+   * every orchestration test sat at 9, 10 or 5 open issues, exactly the counts
+   * where a one-threshold and a two-threshold rule AGREE. Inside the band with the
+   * rollup open is the one place they differ, and it is the case that matters: as
+   * a backlog drains from 10 to 9 with the rollup still open, a single threshold
+   * flips filing back to per-dataset and the flapping begins.
+   */
+  test("inside the band with the rollup open, filing stays rolled up", async () => {
+    const db = freshDb();
+    const d1 = realD1(db);
+    const deps = recordingDeps([
+      // 9: below the cap, above the resume mark.
+      ...backlog(IMPORT_ISSUE_CAP - 1),
+      openIssue(900, rollupIssueTitle("auth_invalid"), [
+        IMPORT_FAILURE_ISSUE_LABEL,
+        IMPORT_ROLLUP_ISSUE_LABEL,
+        "auth-invalid",
+      ]),
+    ]);
+
+    await fileImportFailureIssueIfNeeded(
+      d1,
+      prodEnv(d1),
+      baseArgs({ stage: "prepare", errorMessage: AUTH_ERROR }),
+      deps,
+    );
+
+    // Joined the rollup; opened nothing. A single-threshold rule would have
+    // created a per-dataset issue here.
+    expect(deps.created).toEqual([]);
+    expect(deps.comments[0]?.n).toBe(900);
+  });
+
+  test("inside the band with NO rollup open, filing stays per-dataset", async () => {
+    const db = freshDb();
+    const d1 = realD1(db);
+    // Same count, opposite prior state: the band holds whichever mode is in
+    // effect, so this must go the other way.
+    const deps = recordingDeps(backlog(IMPORT_ISSUE_CAP - 1));
 
     await fileImportFailureIssueIfNeeded(
       d1,

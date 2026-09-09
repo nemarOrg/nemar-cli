@@ -18,7 +18,8 @@
  *
  * `closeIssue`/`setIssueLabels` arrived with epic #1306 phase 2, which gave the
  * tracker a way to drain: before them nothing could close an issue or retire a
- * stale cause label, so 28 issues accumulated and none was ever closed.
+ * stale cause label, so issues accumulated and none was ever closed (ADR 0050
+ * records the count and the date it was measured).
  */
 
 import { GITHUB_API, ghHeaders } from "./shared";
@@ -43,10 +44,13 @@ export function issueLabelNames(issue: GitHubIssue): string[] {
 /**
  * Every OPEN issue in `repo` carrying `label`, paged.
  *
- * This is the only listing primitive. A `findOpenIssueByTitle` used to sit
- * beside it, stopping early at a title match; epic #1306 phase 2 removed it,
- * because every caller now needs the whole set anyway (to count it and decide
- * the filing mode) and a title match over the returned array is one line.
+ * This module's only listing primitive -- `services/enrich-dataset.ts` has its
+ * own uncapped inline `fetch` for the `metadata` label, so the page cap below is
+ * not a property of issue listing in general. A `findOpenIssueByTitle` used to
+ * sit beside this one, stopping early at a title match; epic #1306 phase 2
+ * removed it, because every caller now needs the whole set anyway (to count it
+ * and decide the filing mode) and a title match over the returned array is one
+ * line.
  *
  * Pagination is capped, so a backlog of open labelled issues cannot turn a
  * lookup into an unbounded scan -- each page is a GitHub subrequest. 20 pages x
@@ -80,8 +84,15 @@ export async function listOpenIssuesByLabel(
   );
 }
 
-/** Close an issue. Idempotent on GitHub's side -- closing a closed issue is a
- *  no-op 200, so a re-run after a partial failure is safe. */
+/**
+ * Close an issue. Idempotent on GitHub's side: closing a closed issue is a no-op
+ * 200.
+ *
+ * That is a property of THIS call, not of a caller's whole sequence --
+ * `addIssueComment` is not idempotent, so a caller that pairs the two has to
+ * order them so a retry cannot duplicate the comment. `applyOneIssue` in
+ * services/import-issue-sweep.ts closes first for exactly that reason.
+ */
 export async function closeIssue(repo: string, issueNumber: number, pat: string): Promise<void> {
   const response = await githubFetchWithRetry(
     `${GITHUB_API()}/repos/${repo}/issues/${issueNumber}`,

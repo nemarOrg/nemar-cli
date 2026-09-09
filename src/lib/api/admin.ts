@@ -1586,6 +1586,8 @@ export interface ImportIssueTriageEntry {
   kind: "close" | "relabel" | "keep";
   reason: string;
   labels?: string[];
+  /** The action was attempted and did not land. Excluded from the counts. */
+  failed?: boolean;
 }
 
 /** One batch of the import-failure issue triage
@@ -1595,16 +1597,34 @@ export interface ImportIssueTriageResponse {
   applied: boolean;
   /** Open per-dataset issues (rollups excluded). */
   openIssues: number;
-  /** What a NEW failure would do right now, given that count. */
+  /** Aggregate filing mode across causes. Not per-cause: the filer asks the same
+   *  question of ONE cause's rollup, so inside the hysteresis band a cause with
+   *  no rollup of its own still files per-dataset. */
   mode: "per-dataset" | "rollup";
+  /** Open per-cause rollup issues seen this run. */
+  rollups: { number: number; title: string }[];
+  /** Rollups closed (or, on a dry run, that would be) because the mode released. */
+  rollupsReleased: number;
   examined: number;
+  /** Rows where a write was attempted. `examined` minus the keeps, plus releases. */
+  attempted: number;
   closed: number;
   relabelled: number;
   kept: number;
   plan: ImportIssueTriageEntry[];
-  errors: { issue: number; dataset_id: string | null; error: string }[];
+  errors: {
+    issue: number;
+    dataset_id: string | null;
+    /** `comment` means the state change LANDED and only its comment failed. */
+    stage: "plan" | "apply" | "comment";
+    error: string;
+  }[];
+  /** Candidates outside this run's window; the window rotates daily. */
   remaining: number;
   ok: boolean;
+  /** Present when the run applied changes but its audit row could not be written.
+   *  The changes still happened -- this is not a failure of the run. */
+  audit_failed?: string;
 }
 
 /** Triage the open import-failure issues (server default 15 per run, max 30).

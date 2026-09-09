@@ -1,9 +1,16 @@
 /**
  * Triage sweep for import-failure tracking issues (epic #1306, issue #1310).
  *
- * Walks the open `import-failure` issues on `nemarDatasets/.github`, verifies
- * each one's dataset against S3, and closes the recovered ones / relabels the
- * ones whose cause has changed. Dry run by default.
+ * Walks the open PER-DATASET `import-failure` issues on `nemarDatasets/.github`,
+ * verifies each one's dataset against S3, and closes the recovered ones /
+ * relabels the ones whose cause has changed. Dry run by default.
+ *
+ * Per-cause ROLLUP issues are not verified row-by-row -- they are filtered out
+ * before the loop, because a rollup covers many datasets and no single verdict
+ * applies to it. They get the other half of the lifecycle instead: this sweep is
+ * what CLOSES a rollup, once the backlog has drained enough that
+ * `decideIssueMode` releases. That close is what gives the hysteresis a writer;
+ * see the note on `decideIssueMode`.
  *
  * ## Why a sweep, and not a hook on the success callback
  *
@@ -11,26 +18,46 @@
  * only side-effect block is gated on `status === "failed"`. A `complete` hook
  * would be the responsive option, but it would only ever catch recoveries that
  * pass through that webhook. A manual `nemar admin recover`, an operator's
- * forced verify, and every one of the 28 issues that accumulated before this
- * existed would all be missed. One sweep covers all of them through one tested
- * path, and keeps GitHub I/O off a webhook route that already carries two
- * `waitUntil` calls. The cost is up to a day's latency before a healed issue
- * closes, which does not matter for a tracker.
+ * forced verify, and every one of the issues that accumulated before this existed
+ * (ADR 0050 records the count and the date) would all be missed. One sweep covers
+ * all of them through one tested path, and keeps GitHub I/O off a webhook route
+ * that already carries two `waitUntil` calls. The cost is up to a day's latency
+ * before a healed issue closes, which does not matter for a tracker.
  *
  * ## Fail-open on the row, never on the verdict
  *
  * Mirrors `zarr-fidelity-sweep`: a transient S3, D1 or GitHub error aborts THAT
- * issue only. It lands in `errors`, the issue is left exactly as it was, and it
- * is still a candidate next run. The failure mode this protects against is
- * closing an issue for a dataset that is actually still broken, which would
- * discard a live problem silently -- so every uncertainty resolves to "keep".
+ * issue only. It lands in `errors` and is still a candidate next run. The
+ * failure mode this protects against is closing an issue for a dataset that is
+ * actually still broken, which would discard a live problem silently -- so every
+ * uncertainty resolves to "keep".
  *
- * ## Bounds
+ * A DECIDING failure (D1, S3) leaves the issue byte-for-byte as it was, because
+ * nothing has been written yet. An ACTING failure cannot promise that, and this
+ * module does not pretend otherwise -- see the ordering note on
+ * {@link applyOneIssue}.
+ *
+ * ## The counts describe what happened, not what was planned
+ *
+ * `closed` / `relabelled` / `kept` are incremented only after the state change
+ * has landed, so a run whose writes all 403'd reports `closed: 0` with the rows
+ * in `errors`. An earlier draft counted from the plan and reported `closed: 15,
+ * errors: 15` for a run that closed nothing -- and `importIssueSweepLogLines`
+ * printed `CLOSE #105` for each. `errors[].stage` says which half broke, and a
+ * plan entry that did not land is marked `failed`.
+ *
+ * ## Bounds, and why the window rotates
  *
  * `verifyDatasetVersionS3` does one fully-paginated `listObjectSizes` walk per
  * dataset, i.e. O(pages) Worker subrequests. The existing `data-integrity-sweep`
  * bounds itself to 15 per request (max 30) for exactly that reason and this uses
- * the same numbers. A backlog therefore drains over several runs, which is fine.
+ * the same numbers.
+ *
+ * A bounded window over a fresh listing does NOT drain a backlog on its own,
+ * which an earlier draft of this comment claimed: only a CLOSE removes an issue
+ * from the candidate set, so `slice(0, limit)` re-examines the same head every
+ * run and a permanently-broken head starves the tail forever. `windowStart`
+ * rotates the window by the calendar day instead -- see its note.
  */
 
 import type { Bindings } from "../types/bindings.js";
@@ -53,6 +80,7 @@ import {
   type IssueVerifyState,
   buildRecoveryCloseComment,
   buildRelabelComment,
+  buildRollupReleaseComment,
   decideIssueAction,
   decideIssueMode,
 } from "./import-issue-accrual.js";
@@ -77,6 +105,26 @@ export interface ImportIssueSweepPlanEntry {
   verify?: IssueVerifyState;
   /** The classified cause's one-line explanation, for the relabel comment. */
   causeSummary?: string;
+  /** Set when this entry's action was attempted and did NOT land. The counts
+   *  exclude it, and the log line reads `FAILED CLOSE` rather than `CLOSE`. */
+  failed?: boolean;
+}
+
+export interface ImportIssueSweepError {
+  issue: number;
+  dataset_id: string | null;
+  /**
+   * Which half broke, because the three are operationally different:
+   *
+   * - `plan`  -- deciding failed (D1 or S3). Nothing was written; the issue is
+   *   byte-for-byte as it was.
+   * - `apply` -- the state change itself failed. The issue is unchanged, and it
+   *   is not counted as closed or relabelled.
+   * - `comment` -- the state change LANDED and only its explanatory comment did
+   *   not. The action IS counted, because it happened.
+   */
+  stage: "plan" | "apply" | "comment";
+  error: string;
 }
 
 export interface ImportIssueSweepResult {
@@ -84,15 +132,36 @@ export interface ImportIssueSweepResult {
   applied: boolean;
   /** Open per-dataset issues seen (excludes rollups). */
   openIssues: number;
-  /** Filing mode implied by that count -- what NEW failures would do. */
+  /**
+   * Filing mode implied by that count, AGGREGATE across causes.
+   *
+   * Not quite "what a new failure would do": the filer asks the same question
+   * per cause (`rollupOpen` there is *this cause's* rollup), so inside the
+   * hysteresis band a cause with no rollup of its own still files per-dataset
+   * while this reports `rollup`. Reported as the repo's pressure reading, which
+   * is what an operator wants from a triage run.
+   */
   mode: ImportIssueMode;
+  /** Open per-cause rollup issues seen this run, reported so they are visible
+   *  rather than invisible. Closed by this sweep once the mode releases. */
+  rollups: { number: number; title: string }[];
+  /** Rollups closed because the mode released. On a dry run, would be closed. */
+  rollupsReleased: number;
   examined: number;
+  /**
+   * Rows where the sweep TRIED to do something: every row whose plan could not
+   * be computed (a verify was attempted), plus, on an applied run, every
+   * non-keep entry. A `keep` cannot fail, so counting it as an attempt is what
+   * made an all-writes-403 run answer 200 (`errors.length !== examined`).
+   */
+  attempted: number;
   closed: number;
   relabelled: number;
   kept: number;
   plan: ImportIssueSweepPlanEntry[];
-  errors: { issue: number; dataset_id: string | null; error: string }[];
-  /** Candidates left unexamined because the limit was reached. */
+  errors: ImportIssueSweepError[];
+  /** Candidates outside this run's window. They are examined by a later run: the
+   *  window rotates daily, so this is a deferral rather than an exclusion. */
   remaining: number;
 }
 
@@ -110,6 +179,32 @@ export interface ImportIssueSweepDeps {
   comment?: typeof addIssueComment;
   verify?: (env: Bindings, datasetId: string) => Promise<DatasetVersionIntegrityResult>;
   token?: (env: Bindings) => Promise<string>;
+}
+
+/**
+ * Where this run's window starts inside the candidate list.
+ *
+ * The window has to move, and there is nothing to move it. `GET /issues` sorts
+ * newest-first and offers no cursor this sweep could keep; only a CLOSE removes a
+ * candidate, so a `keep` or a `relabel` leaves the issue exactly where it was.
+ * Take the first `limit` every run and a head of permanently-broken issues pins
+ * the window: with 29 open and a limit of 15, the 14 oldest -- which is where the
+ * 2026-07-22 burst sits -- would never be examined again.
+ *
+ * Storing a cursor is the obvious fix and the wrong one here: ADR 0034 says
+ * derive rather than store, and a cursor in D1 is a second source of truth that
+ * drifts against a list this sweep does not own. The calendar day is already a
+ * monotonic counter both callers share, and the cron runs daily, so the window
+ * advances by `limit` per day and every candidate is reached within
+ * `ceil(count / limit)` days. Two consequences worth knowing: a run examines a
+ * window, not a prefix, and two runs on the SAME day examine the same window
+ * (deliberate -- an operator re-running the route after a fix sees the batch they
+ * just looked at, not a different one).
+ */
+export function windowStart(count: number, limit: number, now: Date): number {
+  if (count <= limit) return 0;
+  const daysSinceEpoch = Math.floor(now.getTime() / 86_400_000);
+  return (daysSinceEpoch * limit) % count;
 }
 
 /** The `import_jobs` fields the sweep needs to judge one issue. */
@@ -143,16 +238,42 @@ export async function runImportIssueSweep(
   // there is nothing to iterate and no honest count to report.
   const open = await listOpenIssues(IMPORT_FAILURE_ISSUES_REPO, IMPORT_FAILURE_ISSUE_LABEL, pat);
 
+  // Every one of these was fetched BY label, so a response in which not one of
+  // them reports a label cannot be true of the real world -- it means the shape
+  // changed, or a proxy stripped fields. `issueLabelNames` tolerating a missing
+  // `labels` is right for a single hand-built fixture and wrong here: left
+  // tolerated, this degrades the whole run into a clean-looking "nothing to do",
+  // because every issue then reads as human-authored (no `import-failure` label)
+  // and every rollup counts as a per-dataset issue, which shifts the mode too.
+  if (open.length > 0 && open.every((i) => issueLabelNames(i).length === 0)) {
+    throw new Error(
+      `Listed ${open.length} ${IMPORT_FAILURE_ISSUE_LABEL} issue(s) on ${IMPORT_FAILURE_ISSUES_REPO} but none reported any labels; refusing to triage on a response that cannot be right`,
+    );
+  }
+
   // A rollup carries the tracking label too, so it would otherwise count itself
   // and latch the mode on forever.
-  const perDataset = open.filter((i) => !issueLabelNames(i).includes(IMPORT_ROLLUP_ISSUE_LABEL));
-  const rollupOpen = open.length !== perDataset.length;
+  const rollups = open
+    .filter((i) => issueLabelNames(i).includes(IMPORT_ROLLUP_ISSUE_LABEL))
+    .map((i) => ({ number: i.number, title: i.title }));
+  // Sorted by issue number, i.e. oldest first, so the candidate order is this
+  // sweep's own and not GitHub's default `sort=created&direction=desc`. The
+  // rotation below is only meaningful over a stable order.
+  const perDataset = open
+    .filter((i) => !issueLabelNames(i).includes(IMPORT_ROLLUP_ISSUE_LABEL))
+    .sort((a, b) => a.number - b.number);
 
   const result: ImportIssueSweepResult = {
     applied: apply,
     openIssues: perDataset.length,
-    mode: decideIssueMode({ openPerDatasetCount: perDataset.length, rollupOpen }),
+    mode: decideIssueMode({
+      openPerDatasetCount: perDataset.length,
+      rollupOpen: rollups.length > 0,
+    }),
+    rollups,
+    rollupsReleased: 0,
     examined: 0,
+    attempted: 0,
     closed: 0,
     relabelled: 0,
     kept: 0,
@@ -161,25 +282,90 @@ export async function runImportIssueSweep(
     remaining: Math.max(perDataset.length - limit, 0),
   };
 
-  for (const issue of perDataset.slice(0, limit)) {
+  const start = windowStart(perDataset.length, limit, new Date());
+  const rotated = [...perDataset.slice(start), ...perDataset.slice(0, start)];
+
+  for (const issue of rotated.slice(0, limit)) {
     result.examined++;
     const datasetId = parseImportFailureIssueTitle(issue.title);
+    let entry: ImportIssueSweepPlanEntry | null = null;
     try {
-      const entry = await planOneIssue(env, issue, datasetId, verify);
+      entry = await planOneIssue(env, issue, datasetId, verify);
       result.plan.push(entry);
 
+      if (apply && entry.kind !== "keep") {
+        result.attempted++;
+        const outcome = await applyOneIssue(issue, entry, { close, setLabels, comment }, pat);
+        if (outcome.commentError) {
+          result.errors.push({
+            issue: issue.number,
+            dataset_id: datasetId,
+            stage: "comment",
+            error: outcome.commentError,
+          });
+        }
+      }
+
+      // After the write, never before: see the counts note in the file header.
       if (entry.kind === "close") result.closed++;
       else if (entry.kind === "relabel") result.relabelled++;
       else result.kept++;
-
-      if (apply) await applyOneIssue(issue, entry, { close, setLabels, comment }, pat);
     } catch (err) {
-      // Fail open on this row: nothing is written, the issue stays a candidate.
+      // Fail open on this row: the issue is unchanged and stays a candidate.
+      if (entry) entry.failed = true;
+      else result.attempted++;
       result.errors.push({
         issue: issue.number,
         dataset_id: datasetId,
+        stage: entry ? "apply" : "plan",
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+  }
+
+  // Release the valve. `mode` is `decideIssueMode`'s verdict for this listing, so
+  // "per-dataset" with a rollup open means the backlog has drained to RESUME or
+  // fewer and the rollup is no longer suppressing per-dataset filing. Closing it
+  // is what gives `rollupOpen` a writer; without one the mode latches on for good
+  // and the cap quietly becomes RESUME (see decideIssueMode's note).
+  //
+  // Counted after the write like every other action, and a failure is a row error
+  // rather than fatal: the per-dataset work above already happened and must still
+  // be reported.
+  if (result.mode === "per-dataset") {
+    for (const rollup of rollups) {
+      result.rollupsReleased++;
+      if (!apply) continue;
+      result.attempted++;
+      try {
+        await close(IMPORT_FAILURE_ISSUES_REPO, rollup.number, pat);
+        console.log(
+          `[import-issue-sweep] released rollup ${IMPORT_FAILURE_ISSUES_REPO}#${rollup.number}`,
+        );
+        const commented = await commentAfter(
+          comment,
+          rollup.number,
+          buildRollupReleaseComment(perDataset.length, new Date().toISOString()),
+          pat,
+          "close",
+        );
+        if (commented.commentError) {
+          result.errors.push({
+            issue: rollup.number,
+            dataset_id: null,
+            stage: "comment",
+            error: commented.commentError,
+          });
+        }
+      } catch (err) {
+        result.rollupsReleased--;
+        result.errors.push({
+          issue: rollup.number,
+          dataset_id: null,
+          stage: "apply",
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
 
@@ -196,8 +382,12 @@ async function planOneIssue(
 ): Promise<ImportIssueSweepPlanEntry> {
   const base = { issueNumber: issue.number, datasetId, title: issue.title };
 
-  // A title that does not parse cannot be matched to a row, so it is somebody's
-  // hand-written issue. Left alone, without spending an S3 walk on it.
+  // The title did not match `Import failure: on###### (ds######)`, so it cannot
+  // be matched to a row: somebody's hand-written issue. Left alone, without
+  // spending an S3 walk on it. This rests on the same invariant
+  // `fileImportFailureIssueIfNeeded` already relies on -- the filer only ever
+  // writes `on`/`ds` ids -- so an id outside those shapes would be skipped here
+  // forever rather than triaged.
   if (!datasetId) {
     return { ...base, kind: "keep", reason: "title is not machine-generated" };
   }
@@ -241,8 +431,36 @@ async function planOneIssue(
   };
 }
 
-/** Perform a planned action. Comment first, so an issue is never closed or
- *  relabelled without the record of why alongside it. */
+/**
+ * Perform a planned action. Called only for `close` and `relabel`.
+ *
+ * ## The state change is the commit point, and it goes FIRST
+ *
+ * An earlier draft commented first, so that no issue was ever closed without the
+ * record of why alongside it. That reads well and is wrong, because the two
+ * writes are not a transaction: a comment that lands ahead of a close that 403s
+ * leaves an OPEN issue carrying a bot comment reading "Recovered: closing
+ * automatically" -- a permanent lie a human triaging it has to disbelieve. Worse,
+ * the decision is recomputed from world state every run and the world state did
+ * not change, so it re-comments daily. The realistic trigger is not a blip: an
+ * expired or de-scoped PAT (the incident this epic came from), an archived
+ * `.github` repo, or a sustained secondary rate limit all leave reads working
+ * while writes 403, which is 15 issues x 30 days of comments asserting a state
+ * change that never happened.
+ *
+ * Mutating first inverts every one of those properties, because both mutations
+ * are idempotent AND self-healing:
+ *
+ *   - `closeIssue` on a closed issue is a no-op 200, and a closed issue is no
+ *     longer in `listOpenIssuesByLabel`, so it leaves the candidate set and
+ *     cannot be re-commented.
+ *   - after a successful relabel, `computeLabelUpdate` returns null, so the row
+ *     decides `keep` next run and attempts nothing.
+ *
+ * So the worst case flips from "a permanent false claim, repeated daily" to "a
+ * correct state change whose explanation is missing, once" -- which is reported
+ * as a `comment`-stage error and logged with the issue number.
+ */
 async function applyOneIssue(
   issue: GitHubIssue,
   entry: ImportIssueSweepPlanEntry,
@@ -252,39 +470,64 @@ async function applyOneIssue(
     comment: typeof addIssueComment;
   },
   pat: string,
-): Promise<void> {
+): Promise<{ commentError?: string }> {
   const nowIso = new Date().toISOString();
 
   if (entry.kind === "close") {
     // entry.verify is always set on a close: decideIssueAction cannot return
     // "close" without a verdict to base it on.
     if (!entry.verify) throw new Error(`close planned for #${issue.number} with no verdict`);
-    await io.comment(
-      IMPORT_FAILURE_ISSUES_REPO,
+    await io.close(IMPORT_FAILURE_ISSUES_REPO, issue.number, pat);
+    console.log(`[import-issue-sweep] closed ${IMPORT_FAILURE_ISSUES_REPO}#${issue.number}`);
+    return commentAfter(
+      io.comment,
       issue.number,
       buildRecoveryCloseComment(entry.verify, nowIso),
       pat,
+      "close",
     );
-    await io.close(IMPORT_FAILURE_ISSUES_REPO, issue.number, pat);
-    console.log(`[import-issue-sweep] closed ${IMPORT_FAILURE_ISSUES_REPO}#${issue.number}`);
-    return;
   }
 
-  if (entry.kind === "relabel" && entry.labels) {
-    await io.comment(
-      IMPORT_FAILURE_ISSUES_REPO,
-      issue.number,
-      buildRelabelComment(
-        { kind: "relabel", reason: entry.reason },
-        entry.causeSummary ?? "",
-        nowIso,
-      ),
-      pat,
+  // Symmetrical with the close branch's guard rather than a silent `if
+  // (entry.labels)`: unreachable today, but a decision that ever returned
+  // "relabel" without labels would otherwise be a clean-looking no-op that
+  // still counted as relabelled.
+  if (!entry.labels) throw new Error(`relabel planned for #${issue.number} with no label set`);
+  await io.setLabels(IMPORT_FAILURE_ISSUES_REPO, issue.number, entry.labels, pat);
+  console.log(
+    `[import-issue-sweep] relabelled ${IMPORT_FAILURE_ISSUES_REPO}#${issue.number} -> ${entry.labels.join(",")}`,
+  );
+  return commentAfter(
+    io.comment,
+    issue.number,
+    buildRelabelComment(
+      { kind: "relabel", reason: entry.reason },
+      entry.causeSummary ?? "",
+      nowIso,
+    ),
+    pat,
+    "relabel",
+  );
+}
+
+/** Write the explanation for a state change that already landed. Reported, never
+ *  thrown: throwing would un-count an action that really happened. */
+async function commentAfter(
+  comment: typeof addIssueComment,
+  issueNumber: number,
+  body: string,
+  pat: string,
+  what: "close" | "relabel",
+): Promise<{ commentError?: string }> {
+  try {
+    await comment(IMPORT_FAILURE_ISSUES_REPO, issueNumber, body, pat);
+    return {};
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[import-issue-sweep] ${what} landed on ${IMPORT_FAILURE_ISSUES_REPO}#${issueNumber} but its comment did not: ${msg}`,
     );
-    await io.setLabels(IMPORT_FAILURE_ISSUES_REPO, issue.number, entry.labels, pat);
-    console.log(
-      `[import-issue-sweep] relabelled ${IMPORT_FAILURE_ISSUES_REPO}#${issue.number} -> ${entry.labels.join(",")}`,
-    );
+    return { commentError: `${what} landed; explanatory comment failed: ${msg}` };
   }
 }
 
@@ -295,24 +538,45 @@ async function applyOneIssue(
  * is (issue #1166, Option 2). The raw sweep stays unguarded so the admin route
  * can dry-run it on staging; this wrapper carries both the `apply` and the
  * environment guard, so a dev worker cannot close or relabel real issues on the
- * shared nemarDatasets org even if the caller's own guard were wrong.
+ * shared nemarDatasets org even if the caller's own guard were wrong. The route
+ * carries its own `apply` guard too -- two independent fences, because the repo is
+ * shared with production rather than environment-scoped.
+ *
+ * `deps` is threaded through so a test can assert the guard in BOTH directions:
+ * without it the production half is unreachable, and a guard whose polarity is
+ * inverted or whose environment list is narrowed silently returns the tracker to
+ * accumulate-only, which is the exact regression this epic exists to fix.
  */
 export async function runImportIssueSweepCron(
   env: Bindings,
+  deps: ImportIssueSweepDeps = {},
 ): Promise<ImportIssueSweepResult | null> {
   if (isNonProductionEnv(env)) {
     console.log("[import-issue-sweep] skipped (non-production)");
     return null;
   }
-  return runImportIssueSweep(env, { apply: true });
+  return runImportIssueSweep(env, { apply: true }, deps);
 }
 
-/** One-line-per-issue summary for the CLI and the cron log. */
+/**
+ * One-line-per-issue summary for the CLI and the cron log.
+ *
+ * The verb comes from what happened to THIS entry, not from `result.applied`: an
+ * applied run whose close 403'd prints `FAILED CLOSE`, because printing `CLOSE`
+ * for it asserted an action that did not happen. Open rollups are listed after
+ * the plan, since nothing else in the output mentions them.
+ */
 export function importIssueSweepLogLines(result: ImportIssueSweepResult): string[] {
-  const verb = result.applied ? "" : "WOULD ";
-  return result.plan.map((e) => {
+  const lines = result.plan.map((e) => {
+    const verb = e.failed ? "FAILED " : result.applied ? "" : "WOULD ";
     const action =
       e.kind === "close" ? `${verb}CLOSE` : e.kind === "relabel" ? `${verb}RELABEL` : "KEEP";
-    return `${action.padEnd(14)} #${e.issueNumber} ${e.datasetId ?? "(unknown)"}  ${e.reason}`;
+    return `${action.padEnd(15)} #${e.issueNumber} ${e.datasetId ?? "(unknown)"}  ${e.reason}`;
   });
+  for (const r of result.rollups) {
+    const verb =
+      result.mode === "per-dataset" ? (result.applied ? "RELEASE" : "WOULD RELEASE") : "ROLLUP";
+    lines.push(`${verb.padEnd(15)} #${r.number} ${r.title}`);
+  }
+  return lines;
 }
