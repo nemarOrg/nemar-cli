@@ -1648,6 +1648,58 @@ export async function importIssueTriage(options?: {
 }
 
 // ============================================================================
+// Import coverage sweep (#1311, epic #1306 phase 3)
+// ============================================================================
+
+/**
+ * One run of the import coverage sweep (`POST /admin/imports/coverage-sweep`).
+ *
+ * `status` is the verdict and the three values are genuinely different answers:
+ * `healthy` (checked, fine), `alarm` (checked, not fine), `unknown` (could not
+ * check). The third is why the route answers 502 for it -- an unreadable pipeline
+ * reported as a healthy one is the failure this sweep exists to detect.
+ */
+export interface ImportCoverageResponse {
+  applied: boolean;
+  status: "healthy" | "alarm" | "unknown";
+  kind: "backlog" | "silence" | "disabled" | null;
+  reason: string;
+  /** Whether `AUTO_IMPORT_ENABLED` is the exact string `"true"`. */
+  enabled: boolean;
+  lastDispatchAt: string | null;
+  dispatchAgeHours: number | null;
+  /** In-scope datasets OpenNeuro reported this run. */
+  discovered: number;
+  /** Only `neverAttempted` drives the verdict; the rest are tracked elsewhere. */
+  backlog: {
+    neverAttempted: string[];
+    failedTracked: string[];
+    blocklisted: string[];
+  };
+  issue: {
+    number: number;
+    action: "created" | "updated" | "closed" | "unchanged";
+    commentError?: string;
+  } | null;
+  errors: { stage: "discovery" | "d1" | "report"; error: string }[];
+  ok: boolean;
+  audit_failed?: string;
+}
+
+/** Run the import coverage sweep. Dry run unless `apply` is set; `apply` is
+ *  refused by the backend outside production. */
+export async function importCoverageSweep(options?: {
+  apply?: boolean;
+}): Promise<ImportCoverageResponse> {
+  const query = options?.apply ? "?apply=1" : "";
+  return request<ImportCoverageResponse>(
+    `/admin/imports/coverage-sweep${query}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+// ============================================================================
 // Researcher-name backfill (#1255, epic #1250)
 // ============================================================================
 

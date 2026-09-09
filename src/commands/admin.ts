@@ -47,6 +47,7 @@ import {
   type DoctorScanResponse,
   type EmailPreferences,
   type HedSweepBatchResponse,
+  type ImportCoverageResponse,
   type ImportIssueTriageResponse,
   type RecordingStatsSweepBatchResponse,
   type ReindexBulkOptions,
@@ -91,6 +92,7 @@ import {
   getUserDuplicates,
   hedSweep,
   hedSweepReset,
+  importCoverageSweep,
   importIssueTriage,
   listKeysFor,
   listUsers,
@@ -6948,6 +6950,18 @@ function isTriageErrorList(
   );
 }
 
+/** The shape the coverage route puts under `details` on its 502. Narrowed rather
+ *  than cast so a drifted body renders nothing instead of `undefined`. */
+function isCoverageErrorList(
+  value: unknown,
+): value is { errors: ImportCoverageResponse["errors"] } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Array.isArray((value as { errors?: unknown }).errors)
+  );
+}
+
 const importIssueTriageCommand = new Command("import-issue-triage").description(
   "Close recovered import-failure issues and retire stale cause labels (dry run by default)",
 );
@@ -7115,6 +7129,116 @@ importIssueTriageCommand
   });
 
 adminCommand.addCommand(importIssueTriageCommand);
+
+// ============================================================================
+// Import coverage (#1311, epic #1306 phase 3)
+// ============================================================================
+
+const importCoverageCommand = new Command("import-coverage").description(
+  "Check whether the import pipeline is keeping up with OpenNeuro (dry run by default)",
+);
+
+importCoverageCommand
+  .option("--apply", "File, update or close the tracking issue (production only)")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { apply?: boolean; json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const apply = options.apply === true;
+    const spinner = ora("Checking import coverage...").start();
+
+    let res: ImportCoverageResponse;
+    try {
+      res = await importCoverageSweep({ apply });
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Import coverage check failed");
+      console.error(chalk.red(errorDetail(err)));
+      // A 502 means the verdict is UNKNOWN, and its body carries the stage that
+      // failed. Printing "failed" with no stage would leave the operator unable to
+      // tell an OpenNeuro outage from a D1 one.
+      const details = err instanceof ApiError ? err.details : undefined;
+      const errors = isCoverageErrorList(details) ? details.errors : [];
+      if (options.json) {
+        console.log(
+          JSON.stringify(
+            err instanceof ApiError ? (err.rawBody ?? { errors }) : { errors },
+            null,
+            2,
+          ),
+        );
+      } else {
+        for (const e of errors) {
+          console.error(`${chalk.red("ERROR".padEnd(12))} ${e.stage}: ${e.error}`);
+        }
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    // Set before the --json return so both output modes agree on the verdict. An
+    // alarm is a successful RUN but an unsuccessful STATE, and a script checking
+    // pipeline health wants a non-zero exit for it.
+    if (res.status !== "healthy" || res.errors.length > 0) process.exitCode = 1;
+
+    if (options.json) {
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    const b = res.backlog;
+    console.log();
+    const verdict = `${res.status.toUpperCase()}${res.kind ? ` (${res.kind})` : ""}`;
+    console.log(res.status === "healthy" ? chalk.green(verdict) : chalk.red(chalk.bold(verdict)));
+    console.log(res.reason);
+    console.log();
+    console.log(
+      chalk.cyan(
+        `auto_import=${res.enabled ? "enabled" : chalk.red("DISABLED")} ` +
+          `last_dispatch=${res.dispatchAgeHours === null ? "never" : `${res.dispatchAgeHours}h ago`} ` +
+          `discovered=${res.discovered}`,
+      ),
+    );
+    console.log(
+      chalk.cyan(
+        `never_attempted=${b.neverAttempted.length} failed_tracked=${b.failedTracked.length} ` +
+          `blocklisted=${b.blocklisted.length}`,
+      ),
+    );
+    if (b.neverAttempted.length > 0) {
+      // The only bucket that drives the verdict, so it is the only one listed.
+      const shown = b.neverAttempted.slice(0, 20).join(", ");
+      const more =
+        b.neverAttempted.length > 20 ? ` ... and ${b.neverAttempted.length - 20} more` : "";
+      console.log(chalk.dim(`  never attempted: ${shown}${more}`));
+    }
+    for (const e of res.errors) {
+      console.log(`${chalk.red("ERROR".padEnd(12))} ${e.stage}: ${e.error}`);
+    }
+    if (res.issue) {
+      const verb = res.applied ? res.issue.action : `would ${res.issue.action}`;
+      console.log(
+        chalk.dim(
+          `  Issue: ${verb}${res.issue.number > 0 ? ` #${res.issue.number}` : ""} on nemarDatasets/.github`,
+        ),
+      );
+      if (res.issue.commentError) {
+        console.log(
+          chalk.yellow(`  The issue changed but its comment failed: ${res.issue.commentError}`),
+        );
+      }
+    }
+    if (res.audit_failed) {
+      console.log(
+        chalk.yellow(`  Changes applied but the audit row failed to write: ${res.audit_failed}`),
+      );
+    }
+    if (!res.applied && res.issue) {
+      console.log(chalk.dim("  Re-run with --apply to perform this change."));
+    }
+  });
+
+adminCommand.addCommand(importCoverageCommand);
 
 // ============================================================================
 // Username backfill (ADR 0042, #1253, epic #1250)
