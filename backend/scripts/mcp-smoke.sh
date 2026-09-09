@@ -191,10 +191,11 @@ if [ "${LIST_STATUS}" = "200" ] \
   && echo "${LIST_RESP}" | grep -q '"describe_dataset"' \
   && echo "${LIST_RESP}" | grep -q '"list_recordings"' \
   && echo "${LIST_RESP}" | grep -q '"get_events"' \
-  && echo "${LIST_RESP}" | grep -q '"render_overview"'; then
-  pass "tools/list answers 200 listing all five tools (phase 2+3)"
+  && echo "${LIST_RESP}" | grep -q '"render_overview"' \
+  && echo "${LIST_RESP}" | grep -q '"read_window"'; then
+  pass "tools/list answers 200 listing all six tools (phase 2+3+4)"
 else
-  fail "tools/list: expected 200 + all five tools, got HTTP ${LIST_STATUS}: ${LIST_RESP}"
+  fail "tools/list: expected 200 + all six tools, got HTTP ${LIST_STATUS}: ${LIST_RESP}"
 fi
 if echo "${LIST_RESP}" | grep -q '"ttlMs":86400000' && echo "${LIST_RESP}" | grep -q '"cacheScope":"public"'; then
   pass "tools/list carries the 24h public cache hint (ttlMs/cacheScope on the result)"
@@ -229,6 +230,18 @@ if [ "${LIST_RECORDINGS_STATUS}" = "200" ] && echo "${LIST_RECORDINGS_RESP}" | g
   pass "list_recordings(xx000000): tool error, not found in the public catalog"
 else
   fail "list_recordings(xx000000): expected isError naming 'not found', got HTTP ${LIST_RECORDINGS_STATUS}: ${LIST_RECORDINGS_RESP}"
+fi
+
+# --- tools/call read_window for an id absent from the migrated-but-empty local D1 ---
+# (epic #1065 phase 4, issue #1296): the shared catalog-row not-found error,
+# same wording as list_recordings(xx000000) above -- proves the tool is wired
+# and reaches the shared error path under real workerd.
+READ_WINDOW_STATUS=$(post_modern 11 "tools/call" '"name":"read_window","arguments":{"dataset_id":"xx000000","recording":"x.zarr"},' -H "Mcp-Name: read_window")
+READ_WINDOW_RESP=$(cat "${TMPD}/11.json")
+if [ "${READ_WINDOW_STATUS}" = "200" ] && echo "${READ_WINDOW_RESP}" | grep -q '"isError":true' && echo "${READ_WINDOW_RESP}" | grep -qi 'not found'; then
+  pass "read_window(xx000000): tool error, not found in the public catalog"
+else
+  fail "read_window(xx000000): expected isError naming 'not found', got HTTP ${READ_WINDOW_STATUS}: ${READ_WINDOW_RESP}"
 fi
 
 # --- tools/call describe_dataset with a malformed dataset_id ---
