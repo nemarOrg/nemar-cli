@@ -1384,17 +1384,20 @@ measured figures above, and reproducible with `bun run backend/scripts/read-wind
 
   **Sequencing, which is forced rather than chosen.** `mcp.nemar.org` and
   `mcp-test.nemar.org` are `custom_domain = true` routes, so neither hostname
-  EXISTS until a deploy provisions it (confirmed: neither resolves today).
+  EXISTS until a deploy provisions it (confirmed: neither resolves today, while
+  the sibling staging hosts `api-test`, `data-test` and `zarr-test` all do).
   Nothing can be verified until the epic reaches `dev`, and production waits on
   the release. So: this phase lands in-repo, the epic merges to `dev`, staging is
   verified, and only then are the docs and OSA pull requests written.
+  One caveat on "the deploy provisions it", flagged in that same route block in
+  `backend/wrangler-sccn.toml`: attaching a Workers Custom Domain needs a token
+  with zone edit, so if the cfman/CI token is Workers-only the two hostnames have
+  to be attached once in the Cloudflare dashboard before the first deploy that
+  carries this config. The whole phase hangs on that step, so check it rather
+  than assuming the deploy did it.
 
-  **Two assumptions in #1297's own text turned out to be wrong**, and the work
+  **One assumption in #1297's own text turned out to be wrong**, and the work
   changes shape accordingly:
-  - There is no "For-agents guide" to add an MCP section to. Neither
-    `nemarOrg/docs` nor `nemarOrg/website` has such a page. The docs work is a
-    NEW page, modeled on `docs`'s own `develop/zarr-contract.md`, which is the
-    right precedent: a consumer-facing contract for a machine surface.
   - OSA cannot consume an MCP server at all yet. It has no `mcp` dependency, no
     client code, and nothing reads `mcp_servers` outside the config model in
     `src/core/config/community.py`, whose docstring still says "(Phase 2)". So
@@ -1404,6 +1407,36 @@ measured figures above, and reproducible with `bun run backend/scripts/read-wind
     `nemar.org/api/dataexplorer/datapipeline/...`, which returns **404** -- the
     legacy site is gone. This server REPLACES them rather than supplementing
     them, and `search_datasets`/`describe_dataset` map onto them almost exactly.
+
+  **The docs target, corrected.** An earlier draft of this entry claimed there was
+  no "For-agents guide" to add an MCP section to, and that the docs work was
+  therefore a new page modeled on `develop/zarr-contract.md`. Both halves were
+  wrong, and both errors came from reading a stale local checkout instead of
+  `origin/main`:
+  - The guide #1297 names exists and is published:
+    `nemarOrg/docs` `src/content/docs/platform/for-agents.md` ("For Agents and
+    Tools"), in the sidebar in `astro.config.mjs`, and linked from the website's
+    `llms.txt` (`src/lib/llms-txt.ts`). It landed in docs PR #16 on 2026-09-03.
+    It carries no MCP mention, which is exactly the gap #1297 describes. So the
+    docs work is an MCP section ON THAT PAGE, and #1297's premise was right.
+  - `develop/zarr-contract.md` no longer exists. It was split into a directory,
+    and `origin/main` publishes six pages under `src/content/docs/platform/zarr/`
+    (`index.md`, `store-contract.md`, `index-contract.md`, `access.md`,
+    `cost-ladder.md`, `format-stability.md`). That set is still the right
+    precedent, `index-contract.md` and `store-contract.md` in particular: a
+    consumer-facing contract for a machine surface.
+  - A follow-up for the docs repo, outside this epic: `platform/zarr/`'s
+    `cost-ladder.md`, `index-contract.md` and `store-contract.md` all cite
+    **ADR 0025**, which ADR 0049 supersedes. `cost-ladder.md`'s
+    "Recipe-first guidance for agents (ADR 0025)" heading promises that "any
+    future NEMAR tool server returns a recipe", which makes it the natural place
+    to link the MCP section from and the place whose ADR pointer needs moving
+    to 0049.
+
+  The general lesson, which is the same one phase 4's sharding defect taught in a
+  different register: a claim about another repo is only as good as the command
+  that checked it against that repo's `origin`, and a local working tree is not
+  that command.
 - **ADR 0050: FILED** as
   [`.context/decisions/0050-no-wasm-in-the-worker-bundle.md`](decisions/0050-no-wasm-in-the-worker-bundle.md)
   in phase 5, once ADR 0049 had landed on `dev` (PR #1292) and 0050's number
