@@ -1,7 +1,7 @@
 # ADR 0025: Inference compute runs on the user's device; the MCP is a stateless broker
 
-**Status:** accepted
-**Date:** 2026-08-16
+**Status:** superseded by ADR-0049
+**Date:** 2026-08-16 (superseded 2026-09-08)
 **Owner:** Yahya
 
 ## Context
@@ -17,7 +17,7 @@ or a local `uvx` process with no server at all.
 Meanwhile eegprep depends on `oct2py` (Octave), so it cannot run in a browser,
 and `osc/osa` already ships a persistent LangGraph/FastAPI assistant platform with a NEMAR assistant.
 
-## Decision
+## Decision (at the time)
 
 NEMAR serves bytes and understanding; it does not run the science.
 The MCP server is a **stateless, recipe-first broker on Cloudflare Workers**:
@@ -29,6 +29,20 @@ eegprep or MNE on desktop/HPC (eegprep preferred where we control the pipeline),
 and MNE/numpy under Pyodide for the browser lane.
 Stateful conversational surfaces (the first-party chatbot) are OSA assistants
 hosted on nemarring.ucsd.edu, not Workers and not new products.
+
+## Why it was superseded
+
+- The eegprep premise was wrong.
+  eegprep 0.3.0 is a pure-Python wheel whose only `oct2py` import is a lazy import inside the EEGLAB comparison bridge;
+  the browser blocker is the dependency declaration, which the owner controls.
+  ADR 0049 makes eegprep the default engine in every lane and drops the accepted drift.
+- The chatbot hosting statement was wrong. OSA runs at `api.osc.earth`, not nemarring,
+  and OSA now owns a browser-side execution runtime that is generic across communities.
+- The product vision became three stages with a login boundary only at HPC submission.
+  0025 said nothing about where assisted execution runs or which stage needs identity;
+  0049 does.
+- What 0025 got right is carried forward verbatim in 0049:
+  the MCP is a stateless, recipe-first broker on Workers, and bulk bytes go direct to S3.
 
 ## Consequences
 
