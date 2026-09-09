@@ -21,6 +21,18 @@
  * stores' own values, which is exactly why this code reads the figure per
  * store rather than assuming one number for a whole dataset or group name.
  *
+ * **Those two stores are samples, not the shape of the archive.** Measured
+ * across all 314 v3 indexes and 90,966 groups (`bun run zarr:geometry-check`,
+ * `backend/scripts/zarr-geometry-conformance.ts`, 2026-09-09): `chunk_samples`
+ * takes 33 distinct values (1000 on 76,775 groups, but also 4000, 800, 640,
+ * 512, 400, 2048, 250, down to 10) and `shard_samples` takes 256, from 2000 to
+ * 300,000; the widest store is 415 channels, not the 320 of the sample above.
+ * Nothing here may treat any of those as a constant. The ONE geometric fact
+ * that is universal is the divisibility invariant {@link nInnerForShard}
+ * enforces, and it is universal because it was checked, not because it was
+ * assumed: 0 violations in those 90,966 groups. Re-run that script rather than
+ * trusting this paragraph if the converter's chunking ever changes.
+ *
  * An inner chunk always spans every channel, so the chunk grid is always
  * `1 x ceil(n_samples / shard_samples)` and a shard's object key is always
  * `<zarr>/<group>/0/c/0/<j>` -- a taste of one channel still decodes every

@@ -6,7 +6,8 @@
  * Drives the REAL tool code (`readWindowTool`, `backend/src/mcp/tools/read-window.ts`)
  * against the two LIVE datasets named in the phase's verified-geometry facts:
  * nm000329 (63 channels, the smallest live store this phase measured) and
- * on003392's `sub-06` store (320 channels, the catalog's widest -- but a
+ * on003392's `sub-06` store (320 channels; wide, though not the archive's
+ * widest, which is 415 -- see the note in design doc section 10.4 -- but a
  * taste can request at most `READ_WINDOW_TASTE_MAX_CHANNELS` of them, so the
  * case below asks for 64, the hard cap). Each case's `duration_s`/`channels`
  * sit just under `READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES` (65,536) -- close to
@@ -87,7 +88,7 @@ const CASES: CaseSpec[] = [
     durationS: 4.12, // -> 1030 samples; 63 x 1030 = 64,890 channel-samples
   },
   {
-    label: "on003392 sub-06 (320 ch store, the catalog's widest MEG; taste capped at 64 channels)",
+    label: "on003392 sub-06 (320 ch MEG store; taste capped at 64 channels)",
     datasetId: "on003392",
     recording: "sub-06/meg/sub-06_task-localizer_meg.zarr",
     group: "meg_250hz",

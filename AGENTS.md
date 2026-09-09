@@ -536,6 +536,20 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   to the back catalogue**, and the units change is why that bump needed the
   1.2.7 floor: below it the streaming exporter could not apply the sidecar at
   all, so the two paths would have disagreed.
+  **A claim about the on-disk geometry is only as good as the command that
+  re-checks it: `bun run zarr:geometry-check`.** Phase 4 of the MCP epic
+  shipped a reader that returned signal from the wrong place in the recording
+  because a shard-index rule was measured on two stores, written into a design
+  doc, and then trusted by the code, the tests, the fixture and five reviewers
+  alike. `backend/scripts/zarr-geometry-conformance.ts` checks the invariants
+  the readers depend on against every index the catalog publishes (footer
+  entry-count divisibility, the index agreeing with the array it describes,
+  inner chunks spanning every channel, the codec chain and dtype, per-channel
+  `scale`/`offset`, and every `events.parquet` column being ZSTD). Run it when
+  the converter's chunking or events schema changes and when
+  `ZARR_ENGINE_VERSION` is bumped; it is an on-demand gate like
+  `migrations:d1-check`, not per-PR CI. A transient 5xx from the host is
+  reported separately and never counted as a violation.
   **A widening of discovery reaches the back catalog only through the engine
   stamp** (ADR 0033): `reconcile` re-queues on a version change, and an engine
   upgrade bumps no version, so `zarr_queue.py`'s `ZARR_ENGINE_VERSION` is what

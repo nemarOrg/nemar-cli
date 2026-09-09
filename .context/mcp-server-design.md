@@ -395,7 +395,9 @@ just the one this request named. **Codec: hand-rolled ZSTD-only, not
 WASM-compiles its `SNAPPY` entry (the `hysnappy` dependency) at module
 load, which crashes isolate startup under real workerd regardless of
 whether any dataset's parquet ever uses SNAPPY (none in the live catalog
-does; every column sampled is ZSTD). `get-events.ts` builds
+does: `bun run zarr:geometry-check` reads every published `events.parquet`
+footer and found all 13,023 columns across 285 files ZSTD, 2026-09-09).
+`get-events.ts` builds
 `{ ZSTD: (input) => decompress(input) }` from `fzstd` directly instead --
 functionally identical to what the package supplied for ZSTD. See section
 9's `hyparquet-compressors` row and section 10.3.
@@ -506,12 +508,21 @@ n_samples]`, outer chunk (shard) `[n_channels, shard_samples]`, inner chunk
 (the `sharding_indexed` codec's own `chunk_shape`) `[n_channels,
 chunk_samples]`, `index_location: "end"`. Confirmed on nm000329's
 `eeg_250hz` (63 channels, shard 75000, chunk 1000) and on003392's
-`meg_250hz` (320 channels, chunk 1000; shard 68000 on the `sub-06` store
-measured here, 69000 on the `sub-01` store
-`test/fixtures/zarr-index-on003392-meg-sss-slice.json` captures -- both real,
-because `shard_samples` is a per-STORE property and this code reads it from
-the specific store's own group entry rather than assuming one figure per
-dataset or per group name) -- `test/fixtures/zarr-array-level0.zarr.json` is nm000329's real
+`meg_250hz` (320 channels on `sub-06`, chunk 1000; shard 68000 there and
+69000 on the `sub-01` store `test/fixtures/zarr-index-on003392-meg-sss-slice.json`
+captures -- both real, because `shard_samples` is a per-STORE property)
+
+**Do not generalise those two samples, and the code does not.** Measured
+archive-wide (`bun run zarr:geometry-check`, 2026-09-09: all 314 v3 indexes,
+90,966 groups), `chunk_samples` takes **33 distinct values** -- 1000 dominates
+at 76,775 groups, but 4000, 800, 640, 512, 400, 2048, 250 and others appear,
+down to 10 -- and `shard_samples` takes **256**, from 2000 to 300,000. The
+widest store is **415 channels** (`on002761`, `sub-320/meg/..._meg.zarr`), not
+the 320 an earlier draft of this section called the widest. Every one of these
+figures is read per store from the index's own group entry; none is a constant
+anywhere in the code. The value of the sweep is that it says which claims are
+safe to rely on, and the only geometric one that is universal is the
+divisibility invariant below. -- `test/fixtures/zarr-array-level0.zarr.json` is nm000329's real
 level-0 `zarr.json`, attributes included. An inner chunk always spans EVERY
 channel, so the chunk grid is always `1 x ceil(n_samples / shard_samples)`
 and a shard's object key is always `<zarr>/<group>/0/c/0/<j>` -- a taste of
@@ -531,7 +542,13 @@ all.
 
 **A shard's footer entry count is CONSTANT across every shard, including the
 final one: it is `shard_samples / chunk_samples`, never a function of how
-many samples fall inside that particular shard.** This is the one thing this
+many samples fall inside that particular shard.** That division is exact for
+every group the archive publishes -- 0 violations across 90,966 groups,
+measured by `bun run zarr:geometry-check` on 2026-09-09 -- which matters
+because `nInnerForShard` THROWS on a non-exact pair rather than flooring, so
+one violating group anywhere would be a hard failure of `read_window` for
+that dataset. That is a measured guarantee re-checkable on demand, not an
+assumption; re-run the script whenever the converter's chunking changes. This is the one thing this
 phase got wrong at first, and it is worth stating at length because the
 failure was silent. `nInnerForShard` originally computed
 `ceil(min(shard_samples, n_samples - shard_start) / chunk_samples)`, which
@@ -900,7 +917,7 @@ not the budget itself.
 | `numcodecs` | `0.3.2` | JS Blosc/Zstd/GZip/LZ4/Zlib codecs, WASM-backed | **Does not run under workerd.** `numcodecs/blosc` loads its WASM module via a runtime `fetch()` + `WebAssembly.instantiate()` on the fetched bytes -- dynamic code generation, which workerd's embedder disallows by default. The npm package ships no `.wasm` file to statically import as a workaround either. Not a dependency of the real server; kept only as the spike's path (a) for the record. |
 | `fzstd` | `0.1.1` | Pure-JS zstd decompressor, no WASM | **Works under workerd**, and is the chosen decode primitive (section 10's spike verdict). **Phase 3: also the codec `get_events` uses directly for `events.parquet`** (see the `hyparquet-compressors` row below) -- one decoder serves `render_overview`'s pyramid chunks AND `get_events`'s parquet rows. |
 | `hyparquet` | `1.30.0` | Parquet reader (`asyncBufferFromUrl`, `parquetReadObjects`) | **Phase 3: works under workerd on its own.** Confirmed via `bunx wrangler dev --local` against the throwaway smoke entry (bundled and started cleanly with `hyparquet` in the graph). `hyparquet`'s own built-in SNAPPY path (`src/snappy.js`) is a pure-JS port (`snappyjs`), not WASM -- the incompatibility is entirely in the `hyparquet-compressors` package, next row. |
-| `hyparquet-compressors` | matching `hyparquet` | zstd codec for `hyparquet` | **REMOVED from `package.json` (phase 3). Does not run under workerd.** Its `compressors` export EAGERLY constructs `SNAPPY: snappyUncompressor()` (the `hysnappy` dependency) at MODULE LOAD, which synchronously compiles a WASM module -- `WebAssembly.Module(): Wasm code generation disallowed by embedder`, reproduced under real workerd (`bunx wrangler dev --local` against `mcp-smoke-entry.ts`; the exact failure class this table's `numcodecs` row already documents for `blosc-decode.ts`). This crashes isolate startup for EVERY request, not only a `get_events` call, regardless of whether any dataset's parquet actually uses SNAPPY (none in the live catalog does -- every column sampled, nm000329 included, is ZSTD). The package's own `ZSTD` entry was exactly `fzstd`'s `decompress`, already a pinned dependency, so `backend/src/mcp/tools/get-events.ts` now builds a one-entry `{ ZSTD: (input) => decompress(input) }` compressors map itself instead of importing the package -- functionally identical for every dataset that exists, none of `hysnappy`'s baggage. A dataset whose parquet ever used a non-ZSTD codec would throw here (hyparquet's own missing-compressor error) rather than silently mis-decode. |
+| `hyparquet-compressors` | matching `hyparquet` | zstd codec for `hyparquet` | **REMOVED from `package.json` (phase 3). Does not run under workerd.** Its `compressors` export EAGERLY constructs `SNAPPY: snappyUncompressor()` (the `hysnappy` dependency) at MODULE LOAD, which synchronously compiles a WASM module -- `WebAssembly.Module(): Wasm code generation disallowed by embedder`, reproduced under real workerd (`bunx wrangler dev --local` against `mcp-smoke-entry.ts`; the exact failure class this table's `numcodecs` row already documents for `blosc-decode.ts`). This crashes isolate startup for EVERY request, not only a `get_events` call, regardless of whether any dataset's parquet actually uses SNAPPY. None in the live catalog does, and that is now MEASURED rather than sampled: `bun run zarr:geometry-check` reads every published `events.parquet` footer and reports the codec of every column, 13,023 of them across 285 files, all ZSTD (2026-09-09). It also checks that every file carries the columns `eventRowSchema` requires, since a file missing one would have every row silently dropped by validation rather than erroring. The package's own `ZSTD` entry was exactly `fzstd`'s `decompress`, already a pinned dependency, so `backend/src/mcp/tools/get-events.ts` now builds a one-entry `{ ZSTD: (input) => decompress(input) }` compressors map itself instead of importing the package -- functionally identical for every dataset that exists, none of `hysnappy`'s baggage. A dataset whose parquet ever used a non-ZSTD codec would throw here (hyparquet's own missing-compressor error) rather than silently mis-decode. |
 | `fast-png` | `8.0.0` | PNG encoding for `render_overview`, pure JS via `fflate` | **Phase 3: works under workerd**, confirmed by the smoke script's `tools/list` registering `render_overview` and by `mcp-overview.test.ts`'s route-level PNG round-trip (encode here, decode back with the same package in the test). No WASM dependency, consistent with the decode-path finding. |
 | `zarrita` | `0.7.5` | Zarr store/array abstraction, FetchStore, sharding | **Not directly exercised by this spike.** The spike tested the codec layer (blosc/zstd decode) in isolation, which is the part the spike needed evidence on (section 10); zarrita's own store/array logic has no WASM dependency of its own (only the codec it would otherwise delegate to, which this phase replaces with the pure-JS path). Whether to use zarrita for chunk-key/shard-index bookkeeping or hand-roll it (as the spike does, see `README.md`'s shard-index derivation) is a phase 2 decision. |
 
@@ -1125,6 +1142,16 @@ entry count, and `[-2135, -2040, -2880, -3742, ...]` under the old per-shard
 one -- the latter being local chunk 11 of that shard. Keeping the case in the
 script means the fixed path is re-exercised against production on every run
 rather than in a one-off check.
+
+on003392's `sub-06` is a 320-channel store, but it is NOT the archive's
+widest: `bun run zarr:geometry-check` reports 415 channels on `on002761`
+(2026-09-09). Since a taste decodes every channel of each inner chunk it
+touches, the analytic per-chunk term scales with the STORE's channel count,
+so the worst case is `415 x chunk_samples x 2` bytes rather than the 320 the
+measured rows show -- about 830 KB per decoded chunk at `chunk_samples` 1000,
+and about 3.3 MB at the 4000 that 5,353 groups use. Both stay far inside a
+Worker isolate's budget, which is why the cap is expressed in channel-samples
+of OUTPUT rather than in store channels.
 
 The `heapUsed` deltas are noisy run to run (the nm000329 case measured
 3,295,454 B on an earlier run of the same code and window), so read them as an
@@ -1431,3 +1458,59 @@ measured figures above, and reproducible with `bun run backend/scripts/read-wind
   `nemar.org` get proxied `zarr.nemar.org` access for a browser-executed
   OSA widget, per ADR 0049) is explicitly out of scope for this phase and
   the epic's later phases.
+
+## 13. Keeping the spec honest: the conformance gate
+
+Phase 4 shipped a defect that returned wrong signal data, and the reason is
+worth writing down, because it was not a coding mistake. A factual claim about
+the on-disk format was measured on two stores, written into section 5.6 as
+prose, and then relied on by the code, the tests, the synthetic fixture and
+five independent reviewers. Everything downstream agreed with the prose;
+the prose disagreed with production. The bug was invisible precisely because
+the whole system was internally consistent.
+
+So the rule for this subsystem: **a claim about a format someone else produces
+is only as good as the command that re-checks it.** Prose is where the claim is
+explained; a script is where it is true.
+
+`bun run zarr:geometry-check` (`backend/scripts/zarr-geometry-conformance.ts`)
+is that command. It reads every index the catalog publishes and checks the
+invariants the reading code would be wrong without: the shard footer entry
+count's divisibility rule, the index agreeing with the array it describes,
+inner chunks spanning every channel, the codec chain and dtype, per-channel
+`scale`/`offset` lengths, and every `events.parquet` column being ZSTD with the
+columns `eventRowSchema` requires. It reports the observed distributions too,
+because the figures most likely to be over-generalised are the ones a small
+sample makes look constant.
+
+Two design points in it are deliberate:
+
+- **A transient 429 or 5xx is not a conformance finding.** It is retried with
+  backoff, then reported in its own bucket, and it does not fail the run. A
+  checker that cried wolf on a flaky minute would train its reader to ignore
+  it. Only a document that really contradicts an invariant fails.
+- **It is a guest on production infrastructure.** Concurrency is 4. An earlier
+  version at 12, with a parquet footer read per dataset, drew a run of 500s
+  from the host that serves real users.
+
+Current state, 2026-09-09: 314 v3 indexes, 90,966 groups, 285 parquet footers,
+13,023 columns. Zero violations. `chunk_samples` takes 33 distinct values and
+`shard_samples` 256, which is the sharp end of the lesson: had the geometry
+been read as the constant the original two-store sample suggested, the code
+would have been wrong for tens of thousands of groups instead of one shard.
+
+Run it when the converter's chunking or events schema changes, when
+`ZARR_ENGINE_VERSION` is bumped, and before trusting any geometry figure quoted
+in this document. It is not in per-PR CI for the same reason
+`bun run migrations:d1-check` is not: it takes minutes and talks to the live
+archive.
+
+The same discipline already covers the two spec surfaces that describe the
+index document itself. `shared/zarr-index.schema.json` (what the converter
+validates against and what `GET /schemas/zarr-index-v3.json` serves) and
+`shared/contract/zarr-index.ts` (what every consumer here parses with) are
+hand-synced, so `test/zarr-schema-contract.test.ts` now drives both off the
+same fixture and requires them to agree on required-ness field by field, with
+the one deliberate asymmetry -- the producer's gate refuses an undeclared
+field, consumers tolerate it -- asserted as a difference so nobody "fixes" it
+by accident.
