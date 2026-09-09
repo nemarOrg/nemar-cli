@@ -89,6 +89,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0048](0048-account-kinds-are-explicit.md) - Account kinds are explicit: person, service, test
 - [ADR 0049](0049-a-specific-import-error-is-never-overwritten-by-a-generic-one.md) - A specific import error is never overwritten by a generic one
 - [ADR 0050](0050-a-tracking-issue-closes-on-verified-state-and-a-burst-rolls-up.md) - An import-failure tracking issue closes on verified state, and a burst rolls up
+- [ADR 0051](0051-silence-is-only-evidence-of-a-problem-when-there-was-work-to-do.md) - Silence is only evidence of a problem when there was work to do
 
 ## Backfill note (2026-07-31)
 
