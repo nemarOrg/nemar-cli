@@ -1718,6 +1718,74 @@ export async function importCoverageSweep(options?: {
 }
 
 // ============================================================================
+// Weekly import summary (#1312, epic #1306 phase 4)
+// ============================================================================
+
+/** One blocklisted dataset in the weekly report. `parkedDays` is null when the
+ *  anchor column is NULL -- genuinely unknown, not zero days. */
+export interface WeeklyParkedDataset {
+  datasetId: string;
+  reason: string | null;
+  parkedDays: number | null;
+}
+
+/**
+ * The weekly import summary (`POST /admin/imports/weekly-summary`).
+ *
+ * **Every count is `number | null`, and `null` means the sweep could not determine
+ * it.** Rendering an unknown as 0 is how the original incident stayed invisible, so
+ * a consumer must not coalesce these.
+ */
+export interface WeeklySummaryResponse {
+  applied: boolean;
+  /** False when the once-per-week gate refused, or on a dry run. `facts` is still
+   *  populated so the report can be read. */
+  posted: boolean;
+  gateReason: string;
+  facts: {
+    week: string;
+    windowStart: string;
+    windowEnd: string;
+    importedThisWeek: number | null;
+    importedTotal: number | null;
+    coverageStatus: "healthy" | "alarm" | "unknown" | null;
+    coverageReason: string | null;
+    outstanding: number | null;
+    discovered: number | null;
+    importedNotInScan: number | null;
+    autoImportEnabled: boolean | null;
+    dispatchPhrase: string | null;
+    dispatchLost: boolean | null;
+    failuresByCause: Record<string, number> | null;
+    openFailureTotal: number | null;
+    parked: WeeklyParkedDataset[] | null;
+    issuesClosed: number | null;
+    issuesRelabelled: number | null;
+    errors: { stage: string; error: string }[];
+  };
+  issue: { number: number | null; action: "created" | "would-create" } | null;
+  closedPrevious: number | null;
+  /** The body exactly as it would be, or was, posted -- so a dry run can be
+   *  reviewed before it becomes an issue. */
+  renderedBody: string | null;
+  ok: boolean;
+  audit_failed?: string;
+}
+
+/** Produce the weekly import summary. Dry run unless `apply` is set; a dry run also
+ *  bypasses the once-per-week gate, since it files nothing. */
+export async function importWeeklySummary(options?: {
+  apply?: boolean;
+}): Promise<WeeklySummaryResponse> {
+  const query = options?.apply ? "?apply=1" : "";
+  return request<WeeklySummaryResponse>(
+    `/admin/imports/weekly-summary${query}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+// ============================================================================
 // Researcher-name backfill (#1255, epic #1250)
 // ============================================================================
 
