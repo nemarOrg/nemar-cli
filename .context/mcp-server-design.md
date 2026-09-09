@@ -1192,7 +1192,7 @@ measured figures above, and reproducible with `bun run backend/scripts/read-wind
 | Claude Code | Yes (v2 runtime) |
 | Claude Desktop | Stated supported by Anthropic; version unverified in this phase |
 | Cursor | Unverified; likely not yet |
-| Python `mcp` (PyPI) | Yes, from 2.2.0 |
+| Python `mcp` (PyPI) | Yes. **Verified 2026-09-09 on 2.2.0** (the current release): its high-level `Client("<url>")` speaks Streamable HTTP and negotiated `2026-07-28` against a local server. `scripts/mcp/verify_streamable_http.py` is that client. Note for anyone porting v1 code: `FastMCP` was renamed `MCPServer` in 2.x, and result fields are snake_case on the Python side (`structured_content`) while the wire keeps `structuredContent`. |
 | `langchain-mcp-adapters` | No -- pins `mcp<2.0.0`. OSA's own consumer (ADR 0049) must therefore speak `mcp` 2.x directly, not through `langchain-mcp-adapters`, to reach this server's 2026-07-28 features. A 2025-era fallback still works against `langchain-mcp-adapters`, since this server serves both eras from the same endpoint. |
 
 ## 12. Open items for phases 2 to 5
@@ -1373,47 +1373,51 @@ measured figures above, and reproducible with `bun run backend/scripts/read-wind
   explicit "no silent mode-discriminator downgrade" reasoning for the
   taste-cap rejection). The error text names the fact that a recipe IS
   computable by retrying without `taste`.
-- **Phase 5 (#1297):** docs site coverage, the OSA tool-registration wiring
-  ADR 0049 anticipates, and the release.
-- **ADR 0050:** `origin/dev` did not yet carry ADR 0049 when this PR was
-  opened (PR #1292 was still open), and the ADR index test enforces
-  gapless numbering, so this PR omits the ADR file and the README index
-  entry -- filing 0050 now would either collide with 0049's number or
-  leave a gap the index test rejects. It should be filed once ADR 0049 has
-  landed on `dev` and its final number is confirmed unclaimed (expected in
-  phase 5). Its content, staged here in the meantime:
+- **Phase 5 (#1297): IN PROGRESS.** ADR 0050 filed (see the entry below).
+  `scripts/mcp/verify_streamable_http.py` added: an end-to-end check that drives
+  a target host with the official Python SDK, chaining search to describe to
+  list_recordings and then the three recording tools plus both `read_window`
+  modes against a recording it discovers rather than one hardcoded here. It
+  exists because `mcp-smoke.sh` drives our own framing with `curl` and says
+  nothing about whether a real MCP SDK can talk to us, and because the docs page
+  must copy its examples from a real session rather than from this document.
 
-  **The rule ADR 0050 will formalize: no WASM in the Worker bundle,
-  ever, for a package this server depends on.** Two independent
-  dependencies hit the identical failure, caught only under real
-  workerd, never under `bun test`:
-  - **Phase 1:** `numcodecs`'s Blosc codec loads its WASM module via a
-    runtime `fetch()` + `WebAssembly.instantiate()` on the fetched bytes
-    (dynamic code generation) -- `RuntimeError: Aborted(CompileError:
-    WebAssembly.instantiate(): Wasm code generation disallowed by
-    embedder)`. See section 10's decode-path table.
-  - **Phase 3:** `hyparquet-compressors`'s `compressors` export eagerly
-    constructs `hysnappy`'s `snappyUncompressor()` at MODULE LOAD, which
-    synchronously compiles a WASM module -- `WebAssembly.Module(): Wasm
-    code generation disallowed by embedder`, crashing isolate startup for
-    EVERY request regardless of whether any call actually needed SNAPPY.
-    See section 9's `hyparquet-compressors` row and section 10.3.
-  Both were only caught by `bunx wrangler dev --local` against a real
-  workerd instance (the throwaway smoke entry this section's tables
-  measure); `bun test` alone stayed green in both cases, because bun's own
-  JS runtime has no equivalent restriction on WASM code generation. The
-  fix pattern in both cases was the same: replace the WASM-eager package
-  with a hand-rolled subset built on an already-proven pure-JS codec
-  (`fzstd`), never a mock or a stub -- the resulting code still really
-  decodes the real byte format, just without the disallowed compile step.
-  **The actionable rule for phase 4 and beyond:** before adding any new
-  dependency that touches binary decode/encode (codecs, compression,
-  image or audio formats), check whether it ships a WASM artifact and, if
-  so, whether it is loaded eagerly (module load / import time) or lazily
-  behind a call a request path can avoid -- eager WASM loading is
-  disqualifying under workerd's embedder restriction regardless of
-  whether the WASM would otherwise work, and `bun test` will not catch
-  it; only a real `wrangler dev --local` (or deployed) run will.
+  **Sequencing, which is forced rather than chosen.** `mcp.nemar.org` and
+  `mcp-test.nemar.org` are `custom_domain = true` routes, so neither hostname
+  EXISTS until a deploy provisions it (confirmed: neither resolves today).
+  Nothing can be verified until the epic reaches `dev`, and production waits on
+  the release. So: this phase lands in-repo, the epic merges to `dev`, staging is
+  verified, and only then are the docs and OSA pull requests written.
+
+  **Two assumptions in #1297's own text turned out to be wrong**, and the work
+  changes shape accordingly:
+  - There is no "For-agents guide" to add an MCP section to. Neither
+    `nemarOrg/docs` nor `nemarOrg/website` has such a page. The docs work is a
+    NEW page, modeled on `docs`'s own `develop/zarr-contract.md`, which is the
+    right precedent: a consumer-facing contract for a machine surface.
+  - OSA cannot consume an MCP server at all yet. It has no `mcp` dependency, no
+    client code, and nothing reads `mcp_servers` outside the config model in
+    `src/core/config/community.py`, whose docstring still says "(Phase 2)". So
+    the wiring ADR 0049 anticipates is not a config edit; it is a runtime to
+    build. Worse and more useful: OSA's TWO existing NEMAR tools
+    (`search_nemar_datasets`, `get_nemar_dataset_details`) call
+    `nemar.org/api/dataexplorer/datapipeline/...`, which returns **404** -- the
+    legacy site is gone. This server REPLACES them rather than supplementing
+    them, and `search_datasets`/`describe_dataset` map onto them almost exactly.
+- **ADR 0050: FILED** as
+  [`.context/decisions/0050-no-wasm-in-the-worker-bundle.md`](decisions/0050-no-wasm-in-the-worker-bundle.md)
+  in phase 5, once ADR 0049 had landed on `dev` (PR #1292) and 0050's number
+  was confirmed unclaimed -- the ADR index test enforces gapless numbering, so
+  it could not be filed while 0049 was still open. The content that was staged
+  here now lives in the ADR: no WASM in the Worker bundle ever, both measured
+  failures (phase 1 `numcodecs` via a runtime `fetch()` +
+  `WebAssembly.instantiate()`, phase 3 `hyparquet-compressors` eagerly
+  constructing `hysnappy`'s `snappyUncompressor()` at MODULE LOAD and so
+  crashing isolate startup for every request), and the corollary that
+  `bun test` cannot observe this class at all, which makes
+  `backend/scripts/mcp-smoke.sh` under real workerd the only gate that proves
+  it. Read the ADR rather than this section for the rule; sections 9, 10 and
+  10.3 keep the measurements it cites.
 - **Tool registration under the two-copy zod split: DONE, all six tools,
   including `read_window`'s discriminated-union/`superRefine` shapes
   (phase 4).**
