@@ -7152,6 +7152,12 @@ const COVERAGE_MAX_LISTED_IDS = 20;
 
 /** Actions rendered in the conditional. `would created` was ungrammatical, and a
  *  dry run is the DEFAULT invocation, so it is the string most operators see. */
+/** Parked rows the CLI lists before falling back to a count. Fewer than the issue
+ *  body's, because a terminal is scrolled rather than searched -- but the "and N
+ *  more" line below is not optional: a report that stops at N without saying so
+ *  under-counts, and an under-count reads as good news. */
+const WEEKLY_CLI_PARKED_ROWS = 5;
+
 const COVERAGE_ACTION_VERB: Record<string, string> = {
   created: "create",
   refreshed: "refresh",
@@ -7333,8 +7339,30 @@ const importWeeklyCommand = new Command("import-weekly").description(
  * not a ternary per field -- a per-field ternary is how one field eventually prints
  * "0" for something nobody measured.
  */
-function weeklyCount(n: number | null): string {
-  return n === null ? chalk.yellow("unknown") : String(n);
+/**
+ * Does this week need a person to look?
+ *
+ * Mirrors `weeklyHeadline` in backend/src/services/import-weekly-summary.ts. The CLI
+ * cannot import it, so the rule is restated -- and because a restated rule drifts,
+ * the exit-code tests assert each branch rather than only the aggregate.
+ */
+function weeklyNeedsAttention(f: NonNullable<WeeklySummaryResponse["facts"]>): boolean {
+  return (
+    f.coverageStatus === "alarm" ||
+    f.coverageStatus === "unknown" ||
+    f.autoImportEnabled === false ||
+    f.dispatchLost === true ||
+    // An absence of sweep rows is itself unknown: the crons record every run, so no
+    // rows means they did not run.
+    f.issuesClosed === null ||
+    f.errors.length > 0
+  );
+}
+
+function weeklyCount(n: number | null | undefined): string {
+  // `== null` catches an absent key as well as an explicit null: a backend that ever
+  // drops a field must not have it render as "undefined" (or, worse, coalesce to 0).
+  return n == null ? chalk.yellow("unknown") : String(n);
 }
 
 importWeeklyCommand
@@ -7359,13 +7387,29 @@ importWeeklyCommand
     }
 
     const f = res.facts;
-    // Set before the --json return so both output modes agree. A report with
-    // unknowns in it is not a clean run: something could not be measured, and the
-    // whole point of this phase is that that is different from a zero.
-    if (f.errors.length > 0) process.exitCode = 1;
+
+    // Exit codes mirror `nemar admin import-coverage`, so one rule works across the
+    // family: 2 = could not determine, 1 = determined and not healthy, 0 = healthy.
+    // An earlier version set 1 only when a section failed to READ, so a week with
+    // auto-import switched off exited 0 -- the exact condition this epic exists to
+    // detect, reported as success. Set before the --json return so both output modes
+    // agree on the verdict.
+    if (f === null)
+      process.exitCode = 0; // the gate declined; nothing was measured
+    else if (f.errors.length > 0) process.exitCode = 2;
+    else if (weeklyNeedsAttention(f)) process.exitCode = 1;
 
     if (options.json) {
       console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    if (f === null) {
+      // Not "every count is unknown" -- nothing was gathered at all. Rendering the
+      // table here would be indistinguishable from a totally blind report.
+      console.log();
+      console.log(chalk.yellow(`Nothing computed: ${res.gateReason}`));
+      console.log(chalk.dim("  The report is built once a week; --apply files it."));
       return;
     }
 
@@ -7407,12 +7451,16 @@ importWeeklyCommand
       }
     }
     if (f.parked !== null && f.parked.length > 0) {
-      for (const p of f.parked.slice(0, 5)) {
+      for (const p of f.parked.slice(0, WEEKLY_CLI_PARKED_ROWS)) {
         console.log(
           chalk.dim(
-            `  parked ${p.datasetId} (${p.reason ?? "unknown"}): ${p.parkedDays === null ? "unknown" : `${p.parkedDays} days`}`,
+            `  parked ${p.datasetId} (${p.reason ?? "unknown"}): ${p.parkedDays == null ? "unknown" : `${p.parkedDays} days`}`,
           ),
         );
+      }
+      const hiddenParked = f.parked.length - WEEKLY_CLI_PARKED_ROWS;
+      if (hiddenParked > 0) {
+        console.log(chalk.dim(`  ... and ${hiddenParked} more parked`));
       }
     }
     for (const e of f.errors) {

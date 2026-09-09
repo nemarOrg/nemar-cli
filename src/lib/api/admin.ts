@@ -1742,6 +1742,9 @@ export interface WeeklySummaryResponse {
    *  populated so the report can be read. */
   posted: boolean;
   gateReason: string;
+  /** NULL when the once-per-week gate refused: nothing was gathered, so this is "we
+   *  did not look", which is a different answer from "we looked and could not tell".
+   *  Do not render it as a page of unknowns. */
   facts: {
     week: string;
     windowStart: string;
@@ -1762,14 +1765,13 @@ export interface WeeklySummaryResponse {
     issuesClosed: number | null;
     issuesRelabelled: number | null;
     errors: { stage: string; error: string }[];
-  };
-  issue: { number: number | null; action: "created" | "would-create" } | null;
+  } | null;
+  issue: { number: number | null; action: "created" | "would-create" | "already-filed" } | null;
   closedPrevious: number | null;
   /** The body exactly as it would be, or was, posted -- so a dry run can be
    *  reviewed before it becomes an issue. */
   renderedBody: string | null;
   ok: boolean;
-  audit_failed?: string;
 }
 
 /** Produce the weekly import summary. Dry run unless `apply` is set; a dry run also

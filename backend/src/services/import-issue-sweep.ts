@@ -610,12 +610,19 @@ export async function runImportIssueSweepCron(
  * needs, and which is also just a gap in the durable record of a job that closes
  * real issues.
  *
+ * **Written on EVERY run, including one that changed nothing.** Gating it on change
+ * looks tidier and destroys the signal: a week in which the cron ran seven times with
+ * nothing to close would produce zero rows, which is exactly what a cron that never
+ * ran produces. The weekly report (#1312) cannot then tell a quiet week from a dead
+ * job -- the discrimination this epic exists to provide, absent from the one place
+ * that shows the daily jobs are alive. A row a day is 365 rows a year, which is
+ * nothing next to being able to prove liveness.
+ *
  * `userId: null` marks it system-initiated, the same convention `import-retry.ts`
  * uses. Best-effort: this is bookkeeping about work that already happened, so a
  * failed write must not turn a successful sweep into an error.
  */
 async function recordCronActivity(env: Bindings, result: ImportIssueSweepResult): Promise<void> {
-  if (result.closed === 0 && result.relabelled === 0 && result.rollupsReleased === 0) return;
   try {
     await auditLogStatement(env.DB, {
       userId: null,

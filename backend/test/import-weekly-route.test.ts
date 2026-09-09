@@ -68,6 +68,18 @@ function result(over: Partial<WeeklySummaryResult> = {}): WeeklySummaryResult {
   };
 }
 
+/** What a gate refusal really returns: no facts, because nothing was gathered. */
+function refused(reason: string): WeeklySummaryResult {
+  return {
+    ...result(),
+    applied: true,
+    posted: false,
+    gateReason: reason,
+    facts: null,
+    renderedBody: null,
+  };
+}
+
 function newApp(
   fn: (
     ...args: Parameters<typeof runWeeklyImportSummary>
@@ -246,12 +258,14 @@ describe("a report with unknowns in it is still a successful run", () => {
 });
 
 describe("a summary that throws", () => {
-  test("answers 502, because the service is written not to throw", async () => {
+  test("answers 500, matching the sibling routes", async () => {
     const { app } = newApp(() => {
       throw new Error("env.DB is undefined");
     });
     const res = await post(app, "/imports/weekly-summary");
-    expect(res.status).toBe(502);
+    // 500, matching both sibling routes, which reserve 502 for a completed run with an
+    // unusable verdict.
+    expect(res.status).toBe(500);
     expect(await res.json()).toMatchObject({
       error: expect.stringContaining("env.DB is undefined"),
     });

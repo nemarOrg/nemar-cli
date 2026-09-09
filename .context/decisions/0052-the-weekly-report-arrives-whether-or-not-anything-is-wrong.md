@@ -53,10 +53,25 @@ until the value was fixed -- the notification fatigue this epic exists to preven
 tool built to prevent it. A skipped week costs one report and is visible as a gap, because the titles
 are week-labelled and sortable.
 
-Two mechanisms, both kept: the **week-labelled title** is the dedup (immune to the read-then-write
-race the audit gate has, because GitHub is what would have to hold two issues with one title), and
-the **audit row** is the record. The row is reserved BEFORE the GitHub call, per `autoImportTick`'s
-rule: a failed reservation means no post.
+Two mechanisms, both kept: the **week-labelled title** is the dedup and the **audit row** is the
+record. Neither is atomic -- the title check is itself a read-then-write, and GitHub permits
+duplicate titles, so a manual `apply` fired while the Monday cron is mid-scan could produce two
+issues for one week. What actually caps the damage is the Monday-only day guard, which allows one
+cron attempt per week; the two mechanisms are defence in depth against ordinary repetition, not a
+distributed lock. Do not describe them as one.
+
+The audit row is written before the GitHub call, and **deleted again if the post fails**. Reserving
+first is `autoImportTick`'s rule, but that rule assumes a caller that retries every 30 minutes; here
+the day guard already prevents repetition, so an un-released reservation would burn the whole week
+and leave no operator path to re-file. Release-on-failure keeps the anti-duplicate property without
+the trap.
+
+**The title names the week the data COVERS, not the week the run happens in.** The cron fires Monday
+03:00 UTC over the preceding seven days, so deriving the label from the run instant titled an issue
+with the week that had just started while carrying the previous week's numbers -- and the heading, the
+headline sentence and the rollover comment all inherited it. The gate still compares run instants,
+which is a different question and stays correct, so the two notions are named apart in the code and
+the tests.
 
 **The ISO week label is the dedup key, so it is computed properly.** The ISO year is not the calendar
 year at boundaries -- 2027-01-01 belongs to 2026-W53, 2024-12-30 to 2025-W01 -- and deriving the
@@ -88,20 +103,38 @@ record of jobs that close real issues regardless of this report.
 
 Easier: the pipeline's health becomes something a person receives rather than something they must
 remember to go and check, and the absence of a report is itself a signal. `nemar admin import-weekly`
-renders the same report on demand, with `--body` showing exactly what would be filed.
+renders the same report on demand, with `--body` showing exactly what would be filed, and its exit
+code matches `import-coverage`'s -- 0 healthy, 1 unhealthy, 2 could-not-determine -- so one rule works
+across the family.
+
+**Why `@nemarAdmin` and not a person's handle.** `shared/contract/user.ts` declares that account
+`service`, and ADR 0048 says nothing signs in to a service account as a person -- so the mention looks
+like it routes nowhere. It does not: the account's email reaches the maintainers who own it, which is
+the delivery path this report relies on. Worth stating because the contract reads the other way.
 
 Harder: 52 issues a year on a shared repo, mitigated by closing the previous week's. And the report
 is only as good as its inputs -- it aggregates ADRs 0049-0051 rather than measuring anything new, so
 a wrong number upstream is a wrong number here. That is why every section names its source and why
 `unknown` is preserved rather than smoothed.
 
-**One extra OpenNeuro scan per week.** The report calls ADR 0051's sweep read-only rather than
-threading the daily run's result through, so the two jobs stay independent: a coverage failure must
-not stop the weekly report, and vice versa. ~52 extra scans a year is the price of that
-independence, and it is worth it.
+**One extra OpenNeuro scan per week, and it races the one it duplicates.** The report calls ADR 0051's
+sweep read-only rather than threading the daily run's result through, so the two jobs stay
+independent: a coverage failure must not stop the weekly report, and vice versa. ~52 extra scans a
+year is a fair price for that.
 
-**Week one reports `unknown` for sweep activity**, because the cron audit rows do not exist yet. That
-is the correct answer and not a bug -- it is the rule working.
+What the cost is NOT is free of interaction. Both jobs launch under `ctx.waitUntil` in the same tick,
+so on Mondays two full paginated scans run concurrently, and `discoverOpenNeuroDatasets` has no
+retry or backoff. If that trips an upstream limit the weekly report is the run most likely to lose
+its coverage section -- on the one day it exists. Accepted rather than sequenced, because sequencing
+would couple the two jobs' failure modes back together, which is the thing independence bought. If it
+proves a problem in practice, sequence it and say so here.
+
+**The daily crons write a heartbeat row, not only a row when something changed.** Gating the write on
+change made a quiet week (the cron ran seven times with nothing to close) indistinguishable from a
+dead cron (it never ran) -- both produce zero rows. That is the exact discrimination this phase
+exists to provide, absent from the one section whose job is to show the daily jobs are alive. So the
+triage cron records every run, and the weekly report reads an absence of rows as `unknown` **and as
+needing attention**, rather than as a quiet week.
 
 **Production-only, and not on the dev-cron allowlist**, for the same reason as ADRs 0050 and 0051: it
 files and closes real issues on the `nemarDatasets` org that dev shares with production. Two fences,

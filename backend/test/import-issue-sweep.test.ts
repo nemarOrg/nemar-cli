@@ -863,7 +863,14 @@ describe("the cron wrapper records what it did", () => {
     expect(JSON.parse(rows[0]?.details ?? "{}")).toMatchObject({ source: "cron", closed: 1 });
   });
 
-  test("a cron run that changed nothing writes no row", async () => {
+  /**
+   * Changed to a heartbeat by #1312. Gating the write on change made a quiet week
+   * (the cron ran and had nothing to close) produce zero rows -- identical to a cron
+   * that never ran -- so the weekly report could not tell a healthy pipeline from a
+   * dead job. That is the discrimination the epic exists to provide, so the row is
+   * now written every run and its absence is meaningful.
+   */
+  test("a cron run that changed nothing STILL writes a row, so absence means it did not run", async () => {
     const db = freshDb();
     seedImportJob(db, "on005279");
     const deps = recordingDeps(
@@ -874,9 +881,16 @@ describe("the cron wrapper records what it did", () => {
     await runImportIssueSweepCron({ ...envFor(db), ENVIRONMENT: "production" } as Bindings, deps);
 
     const rows = db
-      .query<{ id: number }, []>("SELECT id FROM audit_log WHERE action = 'import_issue_triage'")
+      .query<{ details: string | null }, []>(
+        "SELECT details FROM audit_log WHERE action = 'import_issue_triage'",
+      )
       .all();
-    expect(rows).toEqual([]);
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0]?.details ?? "{}")).toMatchObject({
+      source: "cron",
+      closed: 0,
+      relabelled: 0,
+    });
   });
 
   test("a failed audit write does not fail the sweep", async () => {

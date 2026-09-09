@@ -6,8 +6,12 @@
  * pointed at a real local HTTP server via TEST_API_URL, no mocks.
  *
  * The property worth a subprocess is that **an unknown never prints as a zero**. The
- * CLI carries its own renderer (it cannot import from backend/src), so the rule has
- * to hold twice -- and the second copy is exactly where it would rot unnoticed.
+ * CLI has its own renderer -- by convention rather than necessity, since `shared/` is
+ * importable by both halves -- so the rule holds twice, and a restated rule is exactly
+ * where it rots unnoticed.
+ *
+ * The exit code is the other reason: 0 healthy, 1 unhealthy, 2 could-not-determine,
+ * matching `nemar admin import-coverage` so one rule works across the family.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -327,7 +331,7 @@ describe("nemar admin import-weekly: an unknown never prints as a zero", () => {
     }
   });
 
-  test("a report with unknowns exits 1, because something could not be measured", async () => {
+  test("a report with unknowns exits 2 -- could not determine, not merely unhealthy", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer({
       ...HEALTHY,
@@ -339,7 +343,9 @@ describe("nemar admin import-weekly: an unknown never prints as a zero", () => {
     });
     try {
       const result = await runCli(["admin", "import-weekly"], server.url);
-      expect(result.exitCode).toBe(1);
+      // 2, matching `import-coverage`: a section that could not be read is a different
+      // answer from a week that is merely unhealthy.
+      expect(result.exitCode).toBe(2);
       expect(result.stdout).toContain("UNKNOWN");
       expect(result.stdout).toContain("parked: D1 timeout");
     } finally {
@@ -358,6 +364,99 @@ describe("nemar admin import-weekly: an unknown never prints as a zero", () => {
       const parsed = JSON.parse(result.stdout) as { facts: { importedThisWeek: number | null } };
       // A consumer must be able to tell them apart too, so this must not coalesce.
       expect(parsed.facts.importedThisWeek).toBeNull();
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("nemar admin import-weekly: the exit code mirrors the sibling command", () => {
+  /**
+   * `nemar admin import-coverage` uses 0 healthy / 1 unhealthy / 2 cannot-determine, so
+   * one rule works across the family. An earlier version of this command set 1 only
+   * when a section failed to READ, so a week with auto-import switched off exited 0 --
+   * the exact condition the epic exists to detect, reported as success.
+   */
+  for (const [label, facts, code] of [
+    ["a clean week", {}, 0],
+    ["auto-import off", { autoImportEnabled: false }, 1],
+    ["a coverage alarm", { coverageStatus: "alarm" }, 1],
+    ["dispatches not landing", { dispatchLost: true }, 1],
+    ["no recorded sweep activity", { issuesClosed: null }, 1],
+    ["a section that could not be read", { errors: [{ stage: "parked", error: "boom" }] }, 2],
+  ] as const) {
+    test(`${label} exits ${code}`, async () => {
+      seedAuthenticatedConfig();
+      const server = startCaptureServer({ ...HEALTHY, facts: { ...HEALTHY.facts, ...facts } });
+      try {
+        const r = await runCli(["admin", "import-weekly"], server.url);
+        expect(r.exitCode).toBe(code);
+      } finally {
+        server.stop();
+      }
+    });
+  }
+});
+
+describe("nemar admin import-weekly: a gate refusal is not a blind report", () => {
+  test("null facts print 'nothing computed', not a page of unknowns", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer({
+      ...HEALTHY,
+      applied: true,
+      posted: false,
+      gateReason: "already posted for 2026-W37",
+      facts: null,
+      renderedBody: null,
+    });
+    try {
+      const r = await runCli(["admin", "import-weekly", "--apply"], server.url);
+      expect(r.stdout).toContain("Nothing computed: already posted for 2026-W37");
+      // The table must NOT be rendered: an all-unknown table is indistinguishable from
+      // a report where every section failed.
+      expect(r.stdout).not.toContain("imported_this_week=");
+      expect(r.exitCode).toBe(0);
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("nemar admin import-weekly: the request-failure path", () => {
+  test("a non-2xx exits 1 and reports the error", async () => {
+    seedAuthenticatedConfig();
+    // The harness accepted a status all along; no call site had ever passed one, so the
+    // spinner-fail branch was unreachable in the suite.
+    const server = startCaptureServer({ error: "boom" }, 500);
+    try {
+      const r = await runCli(["admin", "import-weekly"], server.url);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout + r.stderr).toContain("Weekly import summary failed");
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("nemar admin import-weekly: parked truncation says how many are hidden", () => {
+  test("more parked rows than the CLI lists produces an and-N-more line", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer({
+      ...HEALTHY,
+      facts: {
+        ...HEALTHY.facts,
+        parked: Array.from({ length: 9 }, (_, i) => ({
+          datasetId: `on${String(i).padStart(6, "0")}`,
+          reason: "no_source",
+          parkedDays: i,
+        })),
+      },
+    });
+    try {
+      const r = await runCli(["admin", "import-weekly"], server.url);
+      // A report that stops at N without saying so under-counts, and an under-count
+      // reads as good news.
+      expect(r.stdout).toContain("... and 4 more parked");
     } finally {
       server.stop();
     }

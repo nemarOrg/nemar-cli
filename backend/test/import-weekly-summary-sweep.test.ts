@@ -17,6 +17,8 @@
 
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { GitHubIssue } from "../src/services/github/issues";
 import type { ImportCoverageSweepResult } from "../src/services/import-coverage-sweep";
 import {
@@ -36,7 +38,20 @@ import { freshDb, realD1 } from "./helpers/d1";
 
 /** A Monday, so the calendar is never the thing under test here. */
 const NOW = new Date("2026-09-07T03:00:00Z");
-const THIS_WEEK = isoWeekLabel(NOW);
+const WEEK_MS = 7 * 86_400_000;
+
+/**
+ * There are TWO week notions here and conflating them is the trap.
+ *
+ * `coveredWeekOf` is the week the data describes -- what the title and body carry --
+ * and `runWeekOf` is the calendar week the run happens in, which is what the
+ * once-per-week gate compares. They differ by one, because the cron fires Monday
+ * 03:00 UTC over the preceding seven days. Named separately so an assertion has to
+ * say which one it means.
+ */
+const coveredWeekOf = (d: Date): string => isoWeekLabel(new Date(d.getTime() - WEEK_MS));
+const runWeekOf = (d: Date): string => isoWeekLabel(d);
+const THIS_WEEK = coveredWeekOf(NOW);
 
 function envFor(db: Database, environment = "test"): Bindings {
   return { DB: realD1(db), ENVIRONMENT: environment } as unknown as Bindings;
@@ -192,8 +207,8 @@ describe("the report is produced from real queries", () => {
 
     const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, deps);
 
-    expect(r.facts.importedThisWeek).toBe(3);
-    expect(r.facts.importedTotal).toBe(4);
+    expect(r.facts?.importedThisWeek).toBe(3);
+    expect(r.facts?.importedTotal).toBe(4);
   });
 
   test("a folded legacy shadow row counts as neither", async () => {
@@ -205,8 +220,8 @@ describe("the report is produced from real queries", () => {
        VALUES ('ds000001', 'shadow', -1, 'openneuro', 'ds000001', 'active', 'public')`,
     ).run();
     const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
-    expect(r.facts.importedTotal).toBe(0);
-    expect(r.facts.importedThisWeek).toBe(0);
+    expect(r.facts?.importedTotal).toBe(0);
+    expect(r.facts?.importedThisWeek).toBe(0);
   });
 
   test("open failures are grouped by classified cause, zero-filled", async () => {
@@ -225,21 +240,21 @@ describe("the report is produced from real queries", () => {
 
     const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
 
-    expect(r.facts.openFailureTotal).toBe(3);
-    expect(r.facts.failuresByCause?.["auth-invalid"]).toBe(1);
-    expect(r.facts.failuresByCause?.["annex-uuid-conflict"]).toBe(1);
-    expect(r.facts.failuresByCause?.["needs-triage"]).toBe(1);
+    expect(r.facts?.openFailureTotal).toBe(3);
+    expect(r.facts?.failuresByCause?.["auth-invalid"]).toBe(1);
+    expect(r.facts?.failuresByCause?.["annex-uuid-conflict"]).toBe(1);
+    expect(r.facts?.failuresByCause?.["needs-triage"]).toBe(1);
     // Zero-filled: a cause absent from the map is indistinguishable from a cause at
     // zero, which is the same unknown-vs-zero confusion one level down.
-    expect(r.facts.failuresByCause?.timeout).toBe(0);
+    expect(r.facts?.failuresByCause?.timeout).toBe(0);
   });
 
   test("a blocklisted row is not double-counted as an open failure", async () => {
     const db = freshDb();
     seedImportJob(db, "on000001", { status: "failed", blocklisted: true, reason: "no_source" });
     const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
-    expect(r.facts.openFailureTotal).toBe(0);
-    expect(r.facts.parked).toHaveLength(1);
+    expect(r.facts?.openFailureTotal).toBe(0);
+    expect(r.facts?.parked).toHaveLength(1);
   });
 
   /**
@@ -255,8 +270,8 @@ describe("the report is produced from real queries", () => {
       firstIncompleteDaysAgo: 64,
     });
     const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
-    expect(r.facts.parked?.[0]?.parkedDays).toBe(64);
-    expect(r.facts.parked?.[0]?.reason).toBe("upstream_403_after_window");
+    expect(r.facts?.parked?.[0]?.parkedDays).toBe(64);
+    expect(r.facts?.parked?.[0]?.reason).toBe("upstream_403_after_window");
   });
 
   test("a blocklisted row with no anchor is unknown, not zero days", async () => {
@@ -264,7 +279,7 @@ describe("the report is produced from real queries", () => {
     const db = freshDb();
     seedImportJob(db, "on005279", { blocklisted: true, reason: "no_source" });
     const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
-    expect(r.facts.parked?.[0]?.parkedDays).toBeNull();
+    expect(r.facts?.parked?.[0]?.parkedDays).toBeNull();
     expect(r.renderedBody).toContain("| on005279 | no_source | unknown |");
   });
 
@@ -273,7 +288,7 @@ describe("the report is produced from real queries", () => {
     seedImportJob(db, "on000001", { blocklisted: true, firstIncompleteDaysAgo: 5 });
     seedImportJob(db, "on000002", { blocklisted: true, firstIncompleteDaysAgo: 50 });
     const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
-    expect(r.facts.parked?.map((p) => p.datasetId)).toEqual(["on000002", "on000001"]);
+    expect(r.facts?.parked?.map((p) => p.datasetId)).toEqual(["on000002", "on000001"]);
   });
 
   test("sweep activity is summed from the cron's audit rows", async () => {
@@ -285,16 +300,16 @@ describe("the report is produced from real queries", () => {
 
     const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
 
-    expect(r.facts.issuesClosed).toBe(5);
-    expect(r.facts.issuesRelabelled).toBe(1);
+    expect(r.facts?.issuesClosed).toBe(5);
+    expect(r.facts?.issuesRelabelled).toBe(1);
   });
 
   test("no audit rows at all is unknown, not zero", async () => {
     // Genuinely ambiguous: nothing happened, or the crons have not started writing.
     const db = freshDb();
     const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
-    expect(r.facts.issuesClosed).toBeNull();
-    expect(r.facts.issuesRelabelled).toBeNull();
+    expect(r.facts?.issuesClosed).toBeNull();
+    expect(r.facts?.issuesRelabelled).toBeNull();
   });
 
   test("coverage numbers come from phase 3's sweep, run read-only", async () => {
@@ -311,8 +326,8 @@ describe("the report is produced from real queries", () => {
     // Read-only: the weekly report must never file or close the coverage issue as a
     // side effect of writing a report.
     expect(sawApply).toBe(false);
-    expect(r.facts.discovered).toBe(766);
-    expect(r.facts.importedNotInScan).toBe(4);
+    expect(r.facts?.discovered).toBe(766);
+    expect(r.facts?.importedNotInScan).toBe(4);
   });
 });
 
@@ -331,11 +346,11 @@ describe("a failure in one section does not zero it or abort the report", () => 
 
     const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, deps);
 
-    expect(r.facts.outstanding).toBeNull();
-    expect(r.facts.discovered).toBeNull();
-    expect(r.facts.errors.some((e) => e.stage === "coverage")).toBe(true);
+    expect(r.facts?.outstanding).toBeNull();
+    expect(r.facts?.discovered).toBeNull();
+    expect(r.facts?.errors?.some((e) => e.stage === "coverage")).toBe(true);
     // The rest of the report still arrives.
-    expect(r.facts.importedThisWeek).toBe(1);
+    expect(r.facts?.importedThisWeek).toBe(1);
   });
 
   test("a coverage throw is listed and the report still arrives", async () => {
@@ -345,9 +360,9 @@ describe("a failure in one section does not zero it or abort the report", () => 
 
     const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, deps);
 
-    expect(r.facts.coverageStatus).toBeNull();
-    expect(r.facts.errors[0]?.stage).toBe("coverage");
-    expect(r.facts.importedThisWeek).toBe(1);
+    expect(r.facts?.coverageStatus).toBeNull();
+    expect(r.facts?.errors?.[0]?.stage).toBe("coverage");
+    expect(r.facts?.importedThisWeek).toBe(1);
     expect(r.renderedBody).toContain("**unknown**, not zero");
   });
 
@@ -358,12 +373,12 @@ describe("a failure in one section does not zero it or abort the report", () => 
 
     const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
 
-    expect(r.facts.failuresByCause).toBeNull();
-    expect(r.facts.openFailureTotal).toBeNull();
-    expect(r.facts.parked).toBeNull();
+    expect(r.facts?.failuresByCause).toBeNull();
+    expect(r.facts?.openFailureTotal).toBeNull();
+    expect(r.facts?.parked).toBeNull();
     // ...and the sections that could be read are intact.
-    expect(r.facts.importedThisWeek).toBe(1);
-    expect(r.facts.errors.map((e) => e.stage).sort()).toEqual(["failures", "parked"]);
+    expect(r.facts?.importedThisWeek).toBe(1);
+    expect(r.facts?.errors?.map((e) => e.stage).sort()).toEqual(["failures", "parked"]);
   });
 
   test("an unknown anywhere marks the week as needing attention", async () => {
@@ -403,7 +418,7 @@ describe("the same week is never posted twice", () => {
     const r = await runWeeklyImportSummary(envFor(db), { apply: true, now: NOW }, second);
 
     expect(r.posted).toBe(false);
-    expect(r.gateReason).toContain(`already posted for ${THIS_WEEK}`);
+    expect(r.gateReason).toContain(`already posted for ${runWeekOf(NOW)}`);
     expect(second.created).toEqual([]);
     expect(auditRows(db)).toHaveLength(1);
   });
@@ -428,13 +443,13 @@ describe("the same week is never posted twice", () => {
   test("the following week proceeds", async () => {
     const db = freshDb();
     await runWeeklyImportSummary(envFor(db), { apply: true, now: NOW }, recordingDeps());
-    const next = new Date(NOW.getTime() + 7 * 86_400_000);
+    const next = new Date(NOW.getTime() + WEEK_MS);
     const deps = recordingDeps();
 
     const r = await runWeeklyImportSummary(envFor(db), { apply: true, now: next }, deps);
 
     expect(r.posted).toBe(true);
-    expect(deps.created[0]?.title).toContain(isoWeekLabel(next));
+    expect(deps.created[0]?.title).toContain(coveredWeekOf(next));
   });
 
   test("an unreadable gate timestamp refuses rather than posting", async () => {
@@ -452,8 +467,21 @@ describe("the same week is never posted twice", () => {
     expect(deps.created).toEqual([]);
   });
 
-  test("a gate query that throws refuses rather than posting", async () => {
+  /**
+   * The gate must fail CLOSED, and this test used to pass for the wrong reason.
+   *
+   * Dropping `audit_log` breaks the gate SELECT *and* the reservation INSERT, so with
+   * the gate wrongly proceeding the post was still blocked -- by the reservation --
+   * and every assertion held either way. Review proved it: flipping the catch to
+   * `proceed: true` left the whole suite green.
+   *
+   * `facts === null` is the witness that distinguishes them: it can only be null if
+   * the function returned BEFORE `gatherImports`, which is what fail-closed means
+   * here. With a seeded dataset, a gate that wrongly proceeded would report 1.
+   */
+  test("a gate query that throws refuses BEFORE gathering anything", async () => {
     const db = freshDb();
+    seedImported(db, "ds000001", { daysAgo: 1 });
     db.run("DROP TABLE audit_log");
     const deps = recordingDeps();
 
@@ -462,6 +490,9 @@ describe("the same week is never posted twice", () => {
     expect(r.posted).toBe(false);
     expect(r.gateReason).toContain("gate query failed");
     expect(deps.created).toEqual([]);
+    // The witness: nothing was gathered, so nothing can be reported.
+    expect(r.facts).toBeNull();
+    expect(r.renderedBody).toBeNull();
   });
 
   /**
@@ -480,7 +511,34 @@ describe("the same week is never posted twice", () => {
     const r = await runWeeklyImportSummary(envFor(db), { apply: true, now: NOW }, deps);
 
     expect(deps.created).toEqual([]);
-    expect(r.facts.errors.some((e) => e.stage === "post")).toBe(true);
+    expect(r.facts?.errors?.some((e) => e.stage === "post")).toBe(true);
+  });
+
+  /**
+   * A failed post must not burn the week. Reserve-before-acting is autoImportTick's
+   * rule, but that rule assumes a caller retrying every 30 minutes; here the
+   * Monday-only guard means the next attempt is seven days away, and the route forces
+   * past the gate only on a DRY run -- so an un-released reservation would leave no
+   * way to re-file at all.
+   */
+  test("a failed post releases its reservation, so the week can be re-attempted", async () => {
+    const db = freshDb();
+    const failing = recordingDeps([], coverageResult(), {
+      create: new Error("HTTP 502 from GitHub"),
+    });
+
+    const first = await runWeeklyImportSummary(envFor(db), { apply: true, now: NOW }, failing);
+
+    expect(first.posted).toBe(false);
+    expect(first.facts?.errors.some((e) => e.stage === "post")).toBe(true);
+    // Released: no reservation is left behind.
+    expect(auditRows(db)).toEqual([]);
+
+    // ...so a retry in the same week works, rather than waiting until next Monday.
+    const retry = recordingDeps();
+    const second = await runWeeklyImportSummary(envFor(db), { apply: true, now: NOW }, retry);
+    expect(second.posted).toBe(true);
+    expect(retry.created).toHaveLength(1);
   });
 
   test("force bypasses the gate but still writes nothing on a dry run", async () => {
@@ -505,7 +563,7 @@ describe("the same week is never posted twice", () => {
 describe("filing this week closes last week", () => {
   test("the previous week is closed and commented, close first", async () => {
     const db = freshDb();
-    const previous = isoWeekLabel(new Date(NOW.getTime() - 7 * 86_400_000));
+    const previous = isoWeekLabel(new Date(NOW.getTime() - 2 * WEEK_MS));
     const order: string[] = [];
     const deps = recordingDeps([weeklyIssue(700, previous)]);
     const wrappedClose = deps.close;
@@ -529,8 +587,8 @@ describe("filing this week closes last week", () => {
 
   test("the OLDEST is not closed when several are open -- only the latest previous", async () => {
     const db = freshDb();
-    const w35 = isoWeekLabel(new Date(NOW.getTime() - 14 * 86_400_000));
-    const w36 = isoWeekLabel(new Date(NOW.getTime() - 7 * 86_400_000));
+    const w35 = isoWeekLabel(new Date(NOW.getTime() - 3 * WEEK_MS));
+    const w36 = isoWeekLabel(new Date(NOW.getTime() - 2 * WEEK_MS));
     const deps = recordingDeps([weeklyIssue(600, w35), weeklyIssue(700, w36)]);
 
     const r = await runWeeklyImportSummary(envFor(db), { apply: true, now: NOW }, deps);
@@ -541,9 +599,26 @@ describe("filing this week closes last week", () => {
     expect(deps.closed).toEqual([700]);
   });
 
+  /**
+   * A clock-skewed or hand-filed issue labelled with a LATER week used to win the
+   * descending sort, so the rollover closed it, commented a false supersession, and
+   * left the real previous week open forever.
+   */
+  test("a future-labelled issue is never closed, and last week still is", async () => {
+    const db = freshDb();
+    const previous = isoWeekLabel(new Date(NOW.getTime() - 2 * WEEK_MS));
+    const future = isoWeekLabel(new Date(NOW.getTime() + 3 * WEEK_MS));
+    const deps = recordingDeps([weeklyIssue(700, previous), weeklyIssue(800, future)]);
+
+    const r = await runWeeklyImportSummary(envFor(db), { apply: true, now: NOW }, deps);
+
+    expect(r.closedPrevious).toBe(700);
+    expect(deps.closed).toEqual([700]);
+  });
+
   test("a rollover failure does not undo this week's report", async () => {
     const db = freshDb();
-    const previous = isoWeekLabel(new Date(NOW.getTime() - 7 * 86_400_000));
+    const previous = isoWeekLabel(new Date(NOW.getTime() - 2 * WEEK_MS));
     const deps = recordingDeps([weeklyIssue(700, previous)], coverageResult(), {
       close: new Error("HTTP 403"),
     });
@@ -554,7 +629,7 @@ describe("filing this week closes last week", () => {
     expect(r.posted).toBe(true);
     expect(deps.created).toHaveLength(1);
     expect(r.closedPrevious).toBeNull();
-    expect(r.facts.errors.some((e) => e.stage === "rollover")).toBe(true);
+    expect(r.facts?.errors?.some((e) => e.stage === "rollover")).toBe(true);
   });
 
   test("an unrelated issue carrying the label is not mistaken for a weekly one", async () => {
@@ -645,12 +720,103 @@ describe("weeklySummaryCronLine", () => {
 
   test("a posted run names the week, the issue and the rollover", async () => {
     const db = freshDb();
-    const previous = isoWeekLabel(new Date(NOW.getTime() - 7 * 86_400_000));
+    const previous = isoWeekLabel(new Date(NOW.getTime() - 2 * WEEK_MS));
     const deps = recordingDeps([weeklyIssue(700, previous)]);
     const r = await runWeeklyImportSummary(envFor(db), { apply: true, now: NOW }, deps);
     const line = weeklySummaryCronLine(r);
     expect(line).toContain(`week=${THIS_WEEK}`);
     expect(line).toContain("issue=#900");
     expect(line).toContain("closed_previous=#700");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Boundaries and malformed inputs
+// ---------------------------------------------------------------------------
+
+describe("the import window boundary is inclusive", () => {
+  /** `>=` vs `>` survived mutation because every fixture straddled the boundary by
+   *  days. A dataset imported exactly at the edge belongs to the window it names. */
+  test("a dataset at exactly the window edge is counted", async () => {
+    const db = freshDb();
+    // datetime('now','-7 days') to the second, which is the query's own boundary.
+    db.query(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, source, source_id, status, visibility, created_at)
+       VALUES ('on000001', 'edge', 1, 'openneuro', 'ds000001', 'active', 'public', datetime('now', '-7 days'))`,
+    ).run();
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+    expect(r.facts?.importedThisWeek).toBe(1);
+  });
+
+  test("a dataset just outside it is not", async () => {
+    const db = freshDb();
+    db.query(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, source, source_id, status, visibility, created_at)
+       VALUES ('on000001', 'outside', 1, 'openneuro', 'ds000001', 'active', 'public', datetime('now', '-7 days', '-1 second'))`,
+    ).run();
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+    expect(r.facts?.importedThisWeek).toBe(0);
+    // ...but it still counts toward the total, which has no window.
+    expect(r.facts?.importedTotal).toBe(1);
+  });
+});
+
+describe("malformed audit rows do not corrupt the section", () => {
+  test("a row whose details is not JSON is reported, not silently dropped", async () => {
+    const db = freshDb();
+    db.query(
+      `INSERT INTO audit_log (action, details, timestamp)
+       VALUES ('import_issue_triage', '{"source":"cron","closed":2}', datetime('now','-1 days'))`,
+    ).run();
+    db.query(
+      `INSERT INTO audit_log (action, details, timestamp)
+       VALUES ('import_issue_triage', 'not json at all', datetime('now','-1 days'))`,
+    ).run();
+
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+
+    // The readable row still counts; the unreadable one is surfaced rather than
+    // quietly treated as a zero.
+    expect(r.facts?.issuesClosed).toBe(2);
+    expect(r.facts?.errors.some((e) => e.stage === "sweep-activity")).toBe(true);
+  });
+
+  test("a manual admin run is not reported as daily sweep activity", async () => {
+    // The admin route writes the same action with the same keys and no `source`, so
+    // without the filter a hand-run triage would be published as something the cron
+    // did.
+    const db = freshDb();
+    db.query(
+      `INSERT INTO audit_log (user_id, action, details, timestamp)
+       VALUES (1, 'import_issue_triage', '{"closed":9,"relabelled":9}', datetime('now','-1 days'))`,
+    ).run();
+
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+
+    expect(r.facts?.issuesClosed).toBeNull();
+  });
+});
+
+describe("the default coverage collaborator is the read-only sweep", () => {
+  /**
+   * Every other test injects `coverage`, so the `??` default is never evaluated --
+   * review confirmed that swapping it for `runImportCoverageSweepCron`, which forces
+   * `apply: true` and would file/close the coverage issue as a side effect of writing
+   * a report, left the whole suite green.
+   *
+   * Pinned statically rather than behaviourally on purpose: exercising the real
+   * default means a live OpenNeuro call, and a test that reaches the network is a test
+   * that fails for reasons unrelated to the thing it names. The identity of the
+   * default is exactly what needs guarding, and it is visible in the source.
+   */
+  test("the default is the raw sweep, never the apply-forcing cron wrapper", () => {
+    const src = readFileSync(
+      join(import.meta.dir, "..", "src", "services", "import-weekly-summary-sweep.ts"),
+      "utf-8",
+    );
+    expect(src).toContain("deps.coverage ?? runImportCoverageSweep;");
+    expect(src).not.toContain("deps.coverage ?? runImportCoverageSweepCron");
+    // And the call site must ask for a read.
+    expect(src).toContain("coverage(env, { apply: false })");
   });
 });

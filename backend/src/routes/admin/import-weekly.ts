@@ -35,8 +35,9 @@ export function registerImportWeeklyRoutes(
    *
    * Always 200 when the report was produced, even if the week needs attention: an
    * unhealthy week is a successful RUN, and a monitoring caller has to be able to
-   * tell "the pipeline is unwell" from "the report is broken". 502 is reserved for a
-   * report that could not be produced at all.
+   * tell "the pipeline is unwell" from "the report is broken". 500 is for a report
+   * that could not be produced at all, matching the sibling routes' use of 500 for a
+   * throw.
    *
    * A report with `facts.errors` in it is still a 200: those are the parts that came
    * back unknown, which the body states as unknown rather than as zero. That is the
@@ -63,7 +64,11 @@ export function registerImportWeeklyRoutes(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[import-weekly] summary threw:", err);
-      return c.json({ error: `Weekly import summary failed before it could report: ${msg}` }, 502);
+      // 500, not 502, matching both sibling routes: they use 500 for "the service
+      // threw before it could report" and reserve 502 for a run that completed with
+      // an unusable verdict. Inverting that would mean a monitoring caller could not
+      // use one rule across the three.
+      return c.json({ error: `Weekly import summary failed before it could report: ${msg}` }, 500);
     }
 
     return c.json({ ...result, ok: true });

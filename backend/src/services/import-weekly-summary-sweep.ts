@@ -32,6 +32,7 @@
  */
 
 import { auditLogStatement } from "../db/audit-log.js";
+import { SYSTEM_USER_ID } from "../lib/constants.js";
 import type { Bindings } from "../types/bindings.js";
 import { parseSqliteUtc } from "./auto-import.js";
 import { isNonProductionEnv } from "./environment.js";
@@ -69,13 +70,17 @@ export const WEEKLY_SUMMARY_AUDIT_ACTION = "import_weekly_summary";
 /** The last posted summary, for the once-per-week gate. `ORDER BY id DESC` rather
  *  than by timestamp, matching `AUTO_IMPORT_GATE_QUERY`: `id` is insertion order and
  *  is immune to a clock skew that `timestamp` is not. */
+/** Releases a reservation whose post then failed. Keyed on the week label, which is
+ *  what `resourceId` carries, so it cannot delete another week's row. */
+export const WEEKLY_SUMMARY_RELEASE_SQL = `DELETE FROM audit_log WHERE action = '${WEEKLY_SUMMARY_AUDIT_ACTION}' AND resource_id = ?`;
+
 export const WEEKLY_SUMMARY_GATE_QUERY = `SELECT timestamp FROM audit_log WHERE action = '${WEEKLY_SUMMARY_AUDIT_ACTION}' ORDER BY id DESC LIMIT 1`;
 
 /**
  * OpenNeuro mirrors created inside the window.
  *
  * Predicate matches `IMPORTED_SOURCE_IDS_QUERY`'s, including the
- * `owner_user_id != -1` clause that excludes the folded legacy shadow rows --
+ * `owner_user_id != SYSTEM_USER_ID` clause that excludes the folded legacy shadow rows --
  * un-imported browse pointers whose inclusion caused the 2026-06-20 stall.
  *
  * Plain `created_at`, deliberately NOT `COALESCE(publish_date, created_at)` as
@@ -85,19 +90,19 @@ export const WEEKLY_SUMMARY_GATE_QUERY = `SELECT timestamp FROM audit_log WHERE 
  * about when NEMAR imported something.
  */
 export const IMPORTED_THIS_WEEK_QUERY = `SELECT COUNT(*) AS n FROM datasets
-   WHERE source = 'openneuro' AND source_id IS NOT NULL AND owner_user_id != -1
+   WHERE source = 'openneuro' AND source_id IS NOT NULL AND owner_user_id != ${SYSTEM_USER_ID}
      AND created_at >= datetime('now', ?)`;
 
 /** Same predicate, no window: the `on*` total. */
 export const IMPORTED_TOTAL_QUERY = `SELECT COUNT(*) AS n FROM datasets
-   WHERE source = 'openneuro' AND source_id IS NOT NULL AND owner_user_id != -1`;
+   WHERE source = 'openneuro' AND source_id IS NOT NULL AND owner_user_id != ${SYSTEM_USER_ID}`;
 
 /**
  * Open failures, with the `last_error` needed to classify each one.
  *
  * Unbounded on purpose. Every existing classifier call site is single-row keyed by
- * `dataset_id`, and the one fleet-wide read (`BACKLOG_JOBS_QUERY`) omits
- * `last_error` so it cannot classify. `IMPORT_RETRY_CANDIDATES_QUERY` has the
+ * `dataset_id`; `BACKLOG_JOBS_QUERY` reads the fleet but omits `last_error`, so it
+ * cannot classify, and `GET /admin/imports` selects `last_error` but does not group. `IMPORT_RETRY_CANDIDATES_QUERY` has the
  * column but is `LIMIT`-ed and excludes blocklisted rows, which is the wrong
  * population for a report: a report that silently stops at N is a report that
  * under-counts.
@@ -111,37 +116,79 @@ export const OPEN_FAILURES_QUERY = `SELECT dataset_id, stage, last_error FROM im
 /**
  * Blocklisted datasets and their parked anchor.
  *
- * `first_incomplete_at` is the only write-once anchor: it is set with
- * `COALESCE(first_incomplete_at, datetime('now'))` and cleared only on recovery, so
- * it survives the slow blocklist re-check. `updated_at` would be wrong -- the
- * re-check bumps it, so a row parked two months but probed yesterday looks one day
- * old -- and `next_retry_at` would be wrong because it is in the future.
+ * `first_incomplete_at` is the anchor because it is WRITE-ONCE: set with
+ * `COALESCE(first_incomplete_at, datetime('now'))` and cleared only on recovery, so it
+ * dates from when the row first went bad and cannot creep forward.
+ *
+ * `updated_at` is the tempting alternative and it is the wrong shape rather than the
+ * wrong value: it means "when this row was last written", which happens to coincide
+ * with the blocklisting today but is not a promise about anything. (An earlier version
+ * of this comment claimed the slow re-check bumps it; it does not -- the re-check
+ * writes only `next_retry_at` and `integrity_checked_at`.) `next_retry_at` is
+ * straightforwardly wrong: it is a future timestamp.
  *
  * Unbounded, and unlike `BLOCKLIST_RECHECK_QUERY` it does NOT filter on
  * `next_retry_at`, which would exclude every row currently in backoff, i.e. most of
  * them.
+ *
+ * `first_incomplete_at IS NULL` leads the ORDER BY because SQLite sorts NULL before
+ * every value in ASC. Without it, rows whose duration is UNKNOWN sort ahead of the
+ * genuinely oldest and can consume the whole truncation budget -- so the section
+ * built to surface the longest-parked datasets would hide exactly those. Written as
+ * an expression rather than `NULLS LAST`, which bun:sqlite accepts and D1 may not.
  */
 export const PARKED_QUERY = `SELECT dataset_id, blocklist_reason, first_incomplete_at FROM import_jobs
    WHERE blocklisted = 1
-   ORDER BY first_incomplete_at ASC`;
+   ORDER BY first_incomplete_at IS NULL, first_incomplete_at ASC`;
 
 /**
- * What the daily sweeps did in the window, from the audit rows their cron wrappers
- * write. Phase 4 added those writes; before it, only the admin routes wrote them
- * and a cron run has no user, so this is `unknown` until the first full week.
+ * What the daily TRIAGE cron did in the window.
+ *
+ * Rows are filtered to `source: "cron"` in JS, NOT with `json_extract` in the SQL.
+ * The filter itself is required: the admin ROUTE has always written the same action
+ * with the same `closed`/`relabelled` keys, so without it a manual
+ * `nemar admin import-issue-triage --apply` is reported as something the daily sweep
+ * did -- which makes the `source` key load-bearing in both writers. But doing it in
+ * SQL meant one malformed `details` payload raised "malformed JSON" and aborted the
+ * whole SELECT, blinding the entire section over a single bad row. In JS that row is
+ * skipped AND reported, which is the behaviour this phase is about.
+ *
+ * Deliberately singular. `import_coverage_sweep` rows exist too, but coverage is
+ * reported as CURRENT STATE by `gatherCoverage`, so summing its transitions here
+ * would report the same thing twice in two tenses.
  */
 export const SWEEP_ACTIVITY_QUERY = `SELECT details FROM audit_log
    WHERE action = 'import_issue_triage' AND timestamp >= datetime('now', ?)`;
 
+/**
+ * What happened to this week's issue.
+ *
+ * `already-filed` is its own value rather than a reused `would-create` because the
+ * two mean different things to a reader: a dry run declined to write, whereas
+ * already-filed means the title dedup caught a week the audit gate had APPROVED --
+ * i.e. a lost gate row or a race, which is worth noticing.
+ */
+export type WeeklyIssueAction = "created" | "would-create" | "already-filed";
+
 export interface WeeklySummaryResult {
   /** False on a dry run: nothing was written to GitHub. */
   applied: boolean;
-  /** False when the gate refused -- already posted, or a timestamp it would not
-   *  guess at. `facts` is still populated so a dry run can show the report. */
+  /** False when the gate refused, when this is a dry run, or when the week's issue
+   *  already exists. */
   posted: boolean;
   gateReason: string;
-  facts: WeeklySummaryFacts;
-  issue: { number: number | null; action: "created" | "would-create" } | null;
+  /**
+   * NULL when the gate refused, because nothing was gathered -- the gate is read
+   * before any query so a refusal costs nothing.
+   *
+   * Deliberately not an all-null `facts`: that is indistinguishable from a report
+   * where every section failed to read, and "we did not look" is a different answer
+   * from "we looked and could not tell". An earlier version returned the
+   * initialiser here, so a Tuesday `?apply=1` rendered a full page of `unknown`
+   * with exit code 0.
+   */
+  facts: WeeklySummaryFacts | null;
+  issue: { number: number | null; action: WeeklyIssueAction } | null;
   /** The previous week's issue, closed as this one is filed. */
   closedPrevious: number | null;
   /**
@@ -153,7 +200,6 @@ export interface WeeklySummaryResult {
    * is already on the tracker.
    */
   renderedBody: string | null;
-  auditFailed?: string;
 }
 
 /**
@@ -172,10 +218,19 @@ export interface WeeklySummaryDeps {
   coverage?: typeof runImportCoverageSweep;
 }
 
-/** Seven days, as a SQLite modifier. One place, so the window in the body and the
- *  window in the queries cannot drift apart. */
-const WINDOW_MODIFIER = "-7 days";
-const WINDOW_MS = 7 * 86_400_000;
+/**
+ * The window, in the two forms the two consumers need: a SQLite modifier for the
+ * queries and milliseconds for the label and the reported bounds.
+ *
+ * They are derived from one number so they cannot disagree about the length. They can
+ * still disagree about the INSTANT, because each `datetime('now', ?)` is evaluated when
+ * its query runs while the reported bounds are fixed at the start -- minutes apart,
+ * across an OpenNeuro scan. The body states the bounds it was given, so treat those as
+ * the authority to within a few minutes rather than to the second.
+ */
+const WINDOW_DAYS = 7;
+const WINDOW_MODIFIER = `-${WINDOW_DAYS} days`;
+const WINDOW_MS = WINDOW_DAYS * 86_400_000;
 
 export async function runWeeklyImportSummary(
   env: Bindings,
@@ -185,7 +240,16 @@ export async function runWeeklyImportSummary(
   const apply = opts.apply === true;
   const now = opts.now ?? new Date();
   const nowIso = now.toISOString();
-  const week = isoWeekLabel(now);
+  // The week the data COVERS, not the week the run happens in. The cron fires Monday
+  // 03:00 UTC and the window is the preceding seven days, so `isoWeekLabel(now)`
+  // named the week that had just started: an issue titled 2026-W37 carried W36's
+  // numbers, and the headline, the heading and the rollover comment all inherited the
+  // lie. Deriving it from the window start makes the title mean what it says.
+  //
+  // The gate is unaffected: it compares labels of RUN instants, and both this and
+  // that are stable within a calendar week, so they cannot disagree about which week
+  // has been posted.
+  const week = isoWeekLabel(new Date(now.getTime() - WINDOW_MS));
 
   const facts: WeeklySummaryFacts = {
     week,
@@ -213,7 +277,7 @@ export async function runWeeklyImportSummary(
     applied: apply,
     posted: false,
     gateReason: "",
-    facts,
+    facts: null,
     issue: null,
     closedPrevious: null,
     renderedBody: null,
@@ -239,7 +303,10 @@ export async function runWeeklyImportSummary(
     }
   }
   result.gateReason = gate.reason;
+  // `facts` stays null: nothing has been gathered, and saying "unknown" for
+  // everything would claim we looked.
   if (!gate.proceed) return result;
+  result.facts = facts;
 
   // ---- Gather. Each fact independently; a failure is a reported unknown. ----
   await gatherImports(env, facts);
@@ -263,7 +330,6 @@ export async function runWeeklyImportSummary(
     result.issue = outcome.issue;
     result.closedPrevious = outcome.closedPrevious;
     result.posted = outcome.posted;
-    if (outcome.auditFailed) result.auditFailed = outcome.auditFailed;
   } catch (err) {
     facts.errors.push({ stage: "post", error: errText(err) });
   }
@@ -300,8 +366,9 @@ async function gatherImports(env: Bindings, facts: WeeklySummaryFacts): Promise<
  * through so the two jobs stay independent: a coverage failure must not stop the
  * weekly report, and vice versa.
  *
- * An `unknown` coverage verdict leaves every coverage field null, so the report says
- * unknown rather than zero -- the whole point of the phase.
+ * An `unknown` coverage verdict leaves every DERIVED coverage field null, so the
+ * report says unknown rather than zero -- the whole point of the phase. Only
+ * `enabled` survives, because it is read from the binding rather than derived.
  */
 async function gatherCoverage(
   env: Bindings,
@@ -313,15 +380,25 @@ async function gatherCoverage(
     const c = await coverage(env, { apply: false });
     facts.coverageStatus = c.status;
     facts.coverageReason = c.reason;
+    // `enabled` is the ONE field safe to publish on any verdict: it is
+    // `env.AUTO_IMPORT_ENABLED === "true"`, a synchronous binding read taken before
+    // the sweep does any I/O, so it cannot be an unmeasured initialiser.
     facts.autoImportEnabled = c.enabled;
-    facts.dispatchPhrase = dispatchPhrase(c.dispatchAgeHours);
-    facts.dispatchLost = c.dispatchLost;
     if (c.status === "unknown") {
-      // The sweep could not see. Its numbers are initialisers, not measurements, so
-      // publishing them would be exactly the zero-for-unknown mistake.
+      // The sweep could not see, so NOTHING it derived may be published -- and that
+      // includes the dispatch fields, which is where an earlier version of this
+      // function got it wrong. On the discovery-failure path the sweep returns
+      // before `COVERAGE_LAST_DISPATCH_QUERY` runs at all, so `dispatchAgeHours` is
+      // still the initialiser `null` and `dispatchLost` still `false`. Assigning
+      // them above this guard published "Last dispatch: never recorded" and
+      // "Dispatches landing: yes" as measured fact on a week when the dispatch row
+      // was never read -- a reassuring invention in the one artifact this phase
+      // exists to keep from inventing reassurance.
       facts.errors.push({ stage: "coverage", error: c.reason });
       return;
     }
+    facts.dispatchPhrase = dispatchPhrase(c.dispatchAgeHours);
+    facts.dispatchLost = c.dispatchLost;
     facts.outstanding = outstandingCount(c.backlog);
     facts.discovered = c.discovered;
     facts.importedNotInScan = c.importedNotInScan;
@@ -391,28 +468,38 @@ async function gatherSweepActivity(env: Bindings, facts: WeeklySummaryFacts): Pr
       .bind(WINDOW_MODIFIER)
       .all<{ details: string | null }>();
     if (!rows.results) throw new Error("D1 returned null results");
-    if (rows.results.length === 0) {
-      // No rows is genuinely ambiguous: either nothing happened, or the crons have
-      // not started writing yet. Left as null (unknown) rather than 0, and the body
-      // explains the ambiguity.
-      return;
-    }
     let closed = 0;
     let relabelled = 0;
+    let cronRows = 0;
     for (const r of rows.results) {
-      if (!r.details) continue;
-      try {
-        const d = JSON.parse(r.details) as { closed?: number; relabelled?: number };
-        closed += typeof d.closed === "number" ? d.closed : 0;
-        relabelled += typeof d.relabelled === "number" ? d.relabelled : 0;
-      } catch {
-        // A malformed payload is one row's problem, not the report's.
+      if (!r.details) {
+        // Cannot be attributed to the cron or counted. Reported rather than skipped,
+        // because treating it as a zero is the mistake this phase is about.
         facts.errors.push({
           stage: "sweep-activity",
-          error: "an audit row's details was not JSON",
+          error: "an import_issue_triage audit row had no details payload",
         });
+        continue;
       }
+      let d: { source?: string; closed?: number; relabelled?: number };
+      try {
+        d = JSON.parse(r.details);
+      } catch {
+        facts.errors.push({
+          stage: "sweep-activity",
+          error: "an import_issue_triage audit row's details was not JSON",
+        });
+        continue;
+      }
+      // The cron's own rows only: see the note on SWEEP_ACTIVITY_QUERY.
+      if (d.source !== "cron") continue;
+      cronRows++;
+      closed += typeof d.closed === "number" ? d.closed : 0;
+      relabelled += typeof d.relabelled === "number" ? d.relabelled : 0;
     }
+    // No CRON rows at all leaves both null. The crons write one per run, so an absence
+    // means they did not run -- unknown, not zero.
+    if (cronRows === 0) return;
     facts.issuesClosed = closed;
     facts.issuesRelabelled = relabelled;
   } catch (err) {
@@ -428,9 +515,12 @@ async function gatherSweepActivity(env: Bindings, facts: WeeklySummaryFacts): Pr
  * shape). A rewrite would restate the window's numbers from a different instant
  * than the window it claims to describe.
  *
- * Dedup is by the week-labelled title, which is immune to the D1 race the audit gate
- * has. Both are used: the title is the mechanism, the audit row is the record and
- * the input to next week's "what did the sweeps do" section.
+ * Dedup is the week-labelled title; the audit row is the record and next week's input
+ * for "what the daily sweeps did". NEITHER is atomic -- the title check is itself a
+ * read-then-write and GitHub permits duplicate titles -- so they are defence in depth
+ * against ordinary repetition, not a lock. What actually caps repetition is the
+ * Monday-only day guard in `scheduled()`. The title's real advantage over the audit row
+ * is durability: it survives a lost or purged row.
  *
  * The audit row is reserved BEFORE the GitHub write, per `autoImportTick`'s rule: if
  * the reservation fails we never post, and if the post fails after it we simply miss
@@ -445,7 +535,6 @@ async function postWeeklySummary(
   issue: WeeklySummaryResult["issue"];
   closedPrevious: number | null;
   posted: boolean;
-  auditFailed?: string;
 }> {
   const listOpenIssues = deps.listOpenIssues ?? listOpenIssuesByLabel;
   const create = deps.create ?? createIssue;
@@ -471,7 +560,6 @@ async function postWeeklySummary(
   const body = ctx.body;
 
   // Reserve first. A failure here means no post, which is the safe direction.
-  let auditFailed: string | undefined;
   try {
     await auditLogStatement(env.DB, {
       userId: null,
@@ -494,13 +582,34 @@ async function postWeeklySummary(
     throw new Error(`weekly summary gate reservation failed, not posting: ${errText(err)}`);
   }
 
-  const created = await create(
-    IMPORT_FAILURE_ISSUES_REPO,
-    title,
-    body,
-    [IMPORT_WEEKLY_ISSUE_LABEL],
-    pat,
-  );
+  let created: GitHubIssue;
+  try {
+    created = await create(
+      IMPORT_FAILURE_ISSUES_REPO,
+      title,
+      body,
+      [IMPORT_WEEKLY_ISSUE_LABEL],
+      pat,
+    );
+  } catch (err) {
+    // RELEASE the reservation. Reserve-before-acting is autoImportTick's rule, but
+    // that rule assumes a caller retrying every 30 minutes; here the Monday-only day
+    // guard already prevents repetition, so an un-released row would burn the whole
+    // week -- and there is no operator override, because the route forces past the
+    // gate only on a DRY run. Releasing keeps the anti-duplicate property without
+    // the trap.
+    try {
+      await env.DB.prepare(WEEKLY_SUMMARY_RELEASE_SQL).bind(facts.week).run();
+    } catch (releaseErr) {
+      // Now the week really is burnt, so say so loudly: this is the one state an
+      // operator must know about, since the next attempt is seven days away.
+      console.error(
+        `[import-weekly] post failed AND the reservation for ${facts.week} could not be released; this week will not be re-attempted:`,
+        releaseErr,
+      );
+    }
+    throw err;
+  }
   console.log(
     `[import-weekly] filed ${IMPORT_FAILURE_ISSUES_REPO}#${created.number} for ${facts.week}`,
   );
@@ -526,12 +635,7 @@ async function postWeeklySummary(
     }
   }
 
-  return {
-    issue: { number: created.number, action: "created" },
-    closedPrevious,
-    posted: true,
-    auditFailed,
-  };
+  return { issue: { number: created.number, action: "created" }, closedPrevious, posted: true };
 }
 
 /**
@@ -545,10 +649,13 @@ async function postWeeklySummary(
 function findPreviousWeekly(open: readonly GitHubIssue[], thisWeek: string): GitHubIssue | null {
   const candidates = open
     .map((i) => ({ issue: i, week: parseWeeklySummaryIssueTitle(i.title) }))
-    .filter(
-      (c): c is { issue: GitHubIssue; week: string } => c.week !== null && c.week !== thisWeek,
-    )
-    .sort((a, b) => (a.week < b.week ? 1 : -1));
+    // Strictly EARLIER, not merely different. Filtering on `!== thisWeek` let a
+    // future-labelled issue win the sort -- clock-skewed or hand-filed -- so the
+    // rollover closed it, commented a false supersession, and left the real previous
+    // week open forever: the accumulating tracker this epic is about.
+    .filter((c): c is { issue: GitHubIssue; week: string } => c.week !== null && c.week < thisWeek)
+    // Consistent comparator: returning -1 for equal weeks is not a valid ordering.
+    .sort((a, b) => (a.week < b.week ? 1 : a.week > b.week ? -1 : 0));
   return candidates[0]?.issue ?? null;
 }
 
@@ -578,7 +685,19 @@ export async function runWeeklyImportSummaryCron(
 
 /** One-line cron summary. */
 export function weeklySummaryCronLine(result: WeeklySummaryResult): string {
-  if (!result.posted) return `[import-weekly] not posted: ${result.gateReason}`;
+  // Three different non-posts, and an earlier version reported all of them as a gate
+  // refusal by printing `gateReason` unconditionally -- so a failed post logged "no
+  // weekly summary has ever been posted", and a title-dedup hit logged the gate's
+  // APPROVAL string as its reason for refusing. Each now says what actually happened.
+  if (result.facts === null) return `[import-weekly] not posted: ${result.gateReason}`;
+  const failed = result.facts.errors.find((e) => e.stage === "post");
+  if (failed) return `[import-weekly] POST FAILED for ${result.facts.week}: ${failed.error}`;
+  if (result.issue?.action === "already-filed") {
+    return `[import-weekly] ${result.facts.week} was already filed as #${result.issue.number}; the gate had approved it, so a run was lost or raced`;
+  }
+  if (!result.posted) {
+    return `[import-weekly] not posted (dry run) for ${result.facts.week}`;
+  }
   return `[import-weekly] ${weeklySummaryLogLine(result.facts, result.issue?.number ?? null)}${
     result.closedPrevious === null ? "" : ` closed_previous=#${result.closedPrevious}`
   }`;

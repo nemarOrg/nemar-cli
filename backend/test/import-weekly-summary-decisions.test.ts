@@ -276,7 +276,8 @@ describe("a zero and an unknown never render the same way", () => {
       facts({ issuesClosed: null, issuesRelabelled: null }),
       "2026-09-09T00:00:00Z",
     );
-    expect(body).toContain("does not mean nothing happened");
+    expect(body).toContain("unknown rather than zero");
+    expect(body).toContain("not that they ran and found nothing");
   });
 });
 
@@ -446,4 +447,136 @@ describe("weeklySummaryLogLine", () => {
     expect(line).toContain("attention=true");
     expect(line).toContain("issue=none");
   });
+});
+
+// ---------------------------------------------------------------------------
+// The fields that are NOT counts, and so bypass `count()`
+// ---------------------------------------------------------------------------
+
+describe("the non-count fields also distinguish unknown from a value", () => {
+  /**
+   * `count()` is well defended, but the body renders four fields through their own
+   * inline ternaries -- dispatchLost, autoImportEnabled, dispatchPhrase, parkedDays.
+   * Review mutated each and three survived, so the module header's "exactly ONE
+   * renderer" was aspirational for exactly the fields where a wrong answer is a
+   * positive health claim: `dispatchLost === null` rendering as `yes` is "the reporter
+   * could not see, and said everything is fine".
+   */
+  test("dispatchLost null is unknown, false is yes, true is a bolded no", () => {
+    const nul = buildWeeklySummaryBody(facts({ dispatchLost: null }), "t");
+    const ok = buildWeeklySummaryBody(facts({ dispatchLost: false }), "t");
+    const bad = buildWeeklySummaryBody(facts({ dispatchLost: true }), "t");
+    expect(nul).toContain("| Dispatches landing | unknown |");
+    expect(ok).toContain("| Dispatches landing | yes |");
+    expect(bad).toContain("| Dispatches landing | **no** |");
+    // The three must be mutually distinct: an unknown that rendered as `yes` is the
+    // founding failure.
+    expect(new Set([nul, ok, bad]).size).toBe(3);
+  });
+
+  test("autoImportEnabled null is unknown, not `not true`", () => {
+    expect(buildWeeklySummaryBody(facts({ autoImportEnabled: null }), "t")).toContain(
+      "| `AUTO_IMPORT_ENABLED` | unknown |",
+    );
+    expect(buildWeeklySummaryBody(facts({ autoImportEnabled: false }), "t")).toContain(
+      "**not `true`**",
+    );
+  });
+
+  test("a null dispatchPhrase is unknown, distinct from a real never-recorded", () => {
+    // "never recorded" means we read the row and there was none; null means we never
+    // read it. Two different facts.
+    expect(buildWeeklySummaryBody(facts({ dispatchPhrase: null }), "t")).toContain(
+      "| Last dispatch | unknown |",
+    );
+    expect(buildWeeklySummaryBody(facts({ dispatchPhrase: "never recorded" }), "t")).toContain(
+      "| Last dispatch | never recorded |",
+    );
+  });
+
+  test("a null parkedDays is unknown, not 0 days", () => {
+    const body = buildWeeklySummaryBody(
+      facts({ parked: [{ datasetId: "on1", reason: "no_source", parkedDays: null }] }),
+      "t",
+    );
+    expect(body).toContain("| on1 | no_source | unknown |");
+    expect(body).not.toContain("0 days");
+  });
+});
+
+describe("no sweep activity escalates the headline", () => {
+  /**
+   * The one null that arrives WITHOUT an `errors` entry, so the errors check cannot
+   * see it. The crons write a row on every run, so an absence means they did not run
+   * -- which is the silence this epic is about, and an earlier version printed
+   * "Nothing needs attention" directly above the section saying it could not see.
+   */
+  test("issuesClosed null needs attention", () => {
+    const h = weeklyHeadline(facts({ issuesClosed: null, errors: [] }));
+    expect(h.attention).toBe(true);
+    expect(h.line).toContain("daily jobs may not be running");
+  });
+
+  test("a recorded zero does NOT need attention", () => {
+    // The whole point of the heartbeat: a real zero is a quiet week, not a silence.
+    const h = weeklyHeadline(facts({ issuesClosed: 0, issuesRelabelled: 0 }));
+    expect(h.attention).toBe(false);
+  });
+
+  test("the body says an absence means the crons did not run", () => {
+    // Both nulls, since the section is only unknown when neither was measured.
+    const body = buildWeeklySummaryBody(
+      facts({ issuesClosed: null, issuesRelabelled: null }),
+      "t",
+    );
+    expect(body).toContain("an absence of rows means they did not run");
+  });
+});
+
+describe("the truncation boundary", () => {
+  function parkedRows(n: number) {
+    return Array.from({ length: n }, (_, i) => ({
+      datasetId: `on${String(i).padStart(6, "0")}`,
+      reason: "no_source",
+      parkedDays: i,
+    }));
+  }
+
+  test("exactly the limit is not truncated", () => {
+    const body = buildWeeklySummaryBody(facts({ parked: parkedRows(WEEKLY_MAX_LISTED_IDS) }), "t");
+    expect(body).not.toContain("more.");
+  });
+
+  test("one over the limit says exactly how many are hidden", () => {
+    // The off-by-one that matters: a report that stops at N without saying so
+    // under-counts, and an under-count reads as good news.
+    const body = buildWeeklySummaryBody(
+      facts({ parked: parkedRows(WEEKLY_MAX_LISTED_IDS + 1) }),
+      "t",
+    );
+    expect(body).toContain("...and 1 more.");
+  });
+});
+
+describe("the UTC boundary holds regardless of the host timezone", () => {
+  /**
+   * `the label is UTC, not local` is vacuous on CI, which runs UTC -- review proved it
+   * by mutating the UTC getters to local ones and seeing 0 failures under TZ=UTC. So
+   * the timezone is set explicitly here, on both sides of UTC, and the assertions are
+   * the same instants either way.
+   */
+  for (const tz of ["Asia/Tokyo", "America/Los_Angeles"]) {
+    test(`still UTC under ${tz}`, () => {
+      const original = process.env.TZ;
+      try {
+        process.env.TZ = tz;
+        expect(isoWeekLabel(new Date("2026-09-06T23:59:59Z"))).toBe("2026-W36");
+        expect(isoWeekLabel(new Date("2026-09-07T00:00:00Z"))).toBe("2026-W37");
+        expect(shouldRunWeeklySummary(new Date("2026-09-06T23:59:59Z"))).toBe(false);
+        expect(shouldRunWeeklySummary(new Date("2026-09-07T00:00:00Z"))).toBe(true);
+      } finally {
+        process.env.TZ = original;
+      }
+    });
+  }
 });

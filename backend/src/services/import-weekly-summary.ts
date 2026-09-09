@@ -15,16 +15,28 @@
  *
  * ## Unknown is a value, and it is not zero
  *
- * The rule this phase turns on. "0 imports" and "no data about imports" looked
- * alike, and that is how the original incident stayed invisible: a dashboard full
- * of zeroes reads as a quiet week. So every count here is `number | null`, `null`
- * renders as `unknown`, and there is exactly ONE renderer ({@link count}) rather
- * than a ternary per field -- a per-field ternary is how one of them eventually
- * renders `0`.
+ * The rule this phase turns on. "0 imports" and "no data about imports" looked alike,
+ * and that is how the original incident stayed invisible: a dashboard full of zeroes
+ * reads as a quiet week. So every count here is `number | null`, and `null` renders as
+ * `unknown`.
+ *
+ * Every COUNT goes through one renderer ({@link count}), because a ternary per field is
+ * how one of them eventually renders `0`. The handful of non-count fields -- the two
+ * booleans and the dispatch phrase -- necessarily have their own three-way rendering,
+ * and review found three of them unpinned, so each now has its own test: a
+ * `dispatchLost === null` that rendered as `yes` is "the reporter could not see, and
+ * said everything is fine", which is the founding failure exactly.
  */
 
-/** Datasets/ids to name before falling back to a count (ADR 0036: an operational
- *  record carries counts and pointers, not an unbounded dump). */
+/**
+ * Rows to name before falling back to a count.
+ *
+ * The spirit of ADR 0036 -- an operational record carries counts and pointers, not an
+ * unbounded dump -- though note 0036 is stricter than this about truncation
+ * specifically. What it forbids is inlining detail that belongs elsewhere; a bounded
+ * list plus an explicit "and N more" is a pointer, and the count above it is never
+ * truncated.
+ */
 export const WEEKLY_MAX_LISTED_IDS = 20;
 
 /**
@@ -97,8 +109,9 @@ export function shouldRunWeeklySummary(now: Date): boolean {
 export function decideWeeklySummaryGate(args: {
   /** `audit_log.timestamp` of the last posted summary, or null if never. */
   lastRunAt: string | null;
-  /** Parsed form of the same, or null when it could not be read. Passed
-   *  separately so this stays pure -- the caller owns `parseSqliteUtc`. */
+  /** Parsed form of the same, or null when it could not be read. Passed separately so
+   *  this module needs no import from `auto-import.ts`, which is where `parseSqliteUtc`
+   *  lives -- the function is pure, so purity is not the reason. */
   lastRunMs: number | null;
   now: Date;
 }): { proceed: boolean; reason: string } {
@@ -195,12 +208,6 @@ export interface WeeklySummaryFacts {
   errors: { stage: string; error: string }[];
 }
 
-function idList(ids: readonly string[]): string {
-  if (ids.length === 0) return "_none_";
-  if (ids.length <= WEEKLY_MAX_LISTED_IDS) return ids.join(", ");
-  return `${ids.slice(0, WEEKLY_MAX_LISTED_IDS).join(", ")} ... and ${ids.length - WEEKLY_MAX_LISTED_IDS} more`;
-}
-
 /**
  * Is anything in this report worth a human's attention?
  *
@@ -214,11 +221,21 @@ export function weeklyHeadline(f: WeeklySummaryFacts): { attention: boolean; lin
   if (f.coverageStatus === "unknown") problems.push("coverage could not be determined");
   if (f.autoImportEnabled === false) problems.push("auto-import is OFF");
   if (f.dispatchLost === true) problems.push("dispatches are not landing");
+  // An absence of sweep rows is an unknown that arrives WITHOUT an error entry, so it
+  // is the one null the errors check below cannot see. The crons record every run, so
+  // no rows means they did not run -- which is precisely the silence this epic is
+  // about, and an earlier version printed "Nothing needs attention" above it.
+  if (f.issuesClosed === null) {
+    problems.push("no daily sweep activity was recorded, so the daily jobs may not be running");
+  }
   if (f.errors.length > 0) problems.push(`${f.errors.length} part(s) of this report failed`);
   if (problems.length === 0) {
     return {
       attention: false,
-      line: `**Nothing needs attention this week.** Imports, coverage and dispatch all look normal for ${f.week}.`,
+      // Names what was actually checked. It deliberately does not speak for open
+      // failures or the blocklist: phases 2 and 3 own those, and a report that claimed
+      // "all normal" while 40 failures sat below it would be overclaiming.
+      line: `**Nothing needs attention this week.** Auto-import, coverage, dispatch and the daily sweeps all look normal for ${f.week}.`,
     };
   }
   return {
@@ -297,7 +314,7 @@ export function buildWeeklySummaryBody(f: WeeklySummaryFacts, nowIso: string): s
     "## What the daily sweeps did this week",
     "",
     f.issuesClosed === null && f.issuesRelabelled === null
-      ? "No sweep activity recorded for this window. If the crons have only just started writing their audit rows, this reads **unknown** until the first full week -- it does not mean nothing happened."
+      ? "**No sweep activity was recorded at all for this window, which is unknown rather than zero.** The daily crons write a row on every run, so an absence of rows means they did not run -- not that they ran and found nothing. (In the first week after this report shipped it also just means the rows did not exist yet.)"
       : `Tracking issues closed on recovery: ${count(f.issuesClosed)}. Relabelled after a cause change: ${count(f.issuesRelabelled)}.`,
     "",
     "## Blocklisted datasets",

@@ -947,9 +947,10 @@ export default {
           ),
       );
       // #1312 (epic #1306): the weekly summary. Rides the DAILY tick behind a
-      // day-of-week guard rather than a new cron trigger, because `event.cron` is
-      // compared against AUTO_IMPORT_CRON by exact string equality above and a
-      // third trigger would risk that branch. Monday UTC, matching the repo's two
+      // day-of-week guard rather than a new cron trigger. `event.cron` is compared
+      // against AUTO_IMPORT_CRON by exact string equality above and the daily work is
+      // the implicit else, so a third trigger would not disturb that comparison -- it
+      // would fall straight through it and re-run EVERY daily job on the new schedule. Monday UTC, matching the repo's two
       // existing weekly Actions.
       //
       // The guard is a pure exported function on purpose: nothing in this repo
@@ -972,9 +973,14 @@ export default {
               // At error level when the week needs attention, so it does not sit at
               // the same level as every routine summary. `posted === false` is a
               // gate refusal, which is routine.
-              if (r.posted && weeklyHeadline(r.facts).attention) console.error(line);
+              // `facts` is null when the gate refused, i.e. nothing was gathered.
+              // Escalate on attention OR on a post that failed after the gate let it
+              // through -- an earlier version gated the escalation on `r.posted`, so
+              // a failed post logged at info level.
+              const attention = r.facts !== null && weeklyHeadline(r.facts).attention;
+              if (attention || (r.facts !== null && !r.posted)) console.error(line);
               else console.log(line);
-              for (const e of r.facts.errors) {
+              for (const e of r.facts?.errors ?? []) {
                 console.error(`[import-weekly] ${e.stage}: ${e.error}`);
               }
             })
