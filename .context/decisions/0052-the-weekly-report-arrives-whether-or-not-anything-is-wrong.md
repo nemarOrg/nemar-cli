@@ -1,0 +1,145 @@
+# ADR 0052: The weekly report arrives whether or not anything is wrong, and unknown is not zero
+
+**Status:** accepted
+**Date:** 2026-09-09
+**Owner:** Seyed Yahya Shirazi
+
+## Context
+
+Auto-import was off for seven weeks and nothing reported it. ADR 0049 made a failure describable,
+ADR 0050 made its tracking issue drain, ADR 0051 made the pipeline's silence detectable. All three
+are conditional: they act when something is wrong.
+
+That leaves one hole, and it is the one the incident actually fell through. **An alarm and a broken
+alarm look identical from the outside.** A monitor that speaks only on breakage cannot distinguish a
+healthy week from a monitor that has stopped running, because both produce no messages. The seven
+weeks produced no alarm not because the alarms failed but because none existed, and the same
+silence would have followed if they had existed and failed.
+
+The second half of the context is narrower and sharper. The original incident was invisible partly
+because **a zero and an unknown rendered the same way**: "0 imports this week" and "no data about
+imports this week" are the same three characters on a dashboard, and the first is a quiet week while
+the second is a broken pipeline.
+
+## Decision
+
+**The weekly summary is unconditional.** One issue per ISO week on `nemarDatasets/.github`,
+mentioning `@nemarAdmin`, filed whether or not anything is wrong. A boring report every week is what
+makes "no news" mean something: its absence becomes evidence, which is exactly what was missing.
+
+**Unknown is a first-class value and never renders as zero.** Every count in the report is
+`number | null`; `null` renders as `unknown`; and there is exactly ONE renderer (`count`) rather than
+a ternary per field, because a per-field ternary is how one field eventually prints `0` for something
+nobody measured. The same rule is enforced twice, since the CLI cannot import from `backend/src` and
+therefore carries its own renderer -- the second copy is where the rule would rot unnoticed, so it is
+tested independently.
+
+Consequences of that rule which are decisions in their own right:
+
+- **A section that could not be read is stated as unknown, not omitted.** A missing section reads as
+  "nothing to report", which is the same mistake in a different shape.
+- **An unknown counts as needing attention.** A report that cannot see is not a report that found
+  nothing, so the headline says so. This is what stops a broken reporter from reading as a healthy
+  week -- the founding failure, one level up.
+- **Each fact is gathered independently and a failure degrades only that fact.** This is the OPPOSITE
+  trade from ADR 0051's sweep, and deliberately: there a failed read must not produce a verdict,
+  because the verdict CLOSES an issue. Here nothing is closed on the strength of a number, so a
+  partial report is worth more than none -- provided the gaps say so.
+
+**The once-per-week gate fails CLOSED.** The reverse of `decideAutoImportGate`, which fails open on
+an unreadable timestamp because a skipped import is worse than an early one. The daily cron evaluates
+this gate once a day, so failing open on a bad value would post a duplicate weekly issue *every day*
+until the value was fixed -- the notification fatigue this epic exists to prevent, arriving from the
+tool built to prevent it. A skipped week costs one report and is visible as a gap, because the titles
+are week-labelled and sortable.
+
+Two mechanisms, both kept: the **week-labelled title** is the dedup (immune to the read-then-write
+race the audit gate has, because GitHub is what would have to hold two issues with one title), and
+the **audit row** is the record. The row is reserved BEFORE the GitHub call, per `autoImportTick`'s
+rule: a failed reservation means no post.
+
+**The ISO week label is the dedup key, so it is computed properly.** The ISO year is not the calendar
+year at boundaries -- 2027-01-01 belongs to 2026-W53, 2024-12-30 to 2025-W01 -- and deriving the
+label from `getUTCFullYear()` would mislabel both, letting two weeks claim one title or one week be
+filed twice under two. Zero-padded, because the rollover finds last week by sorting labels and
+`2026-W9` sorts after `2026-W10`.
+
+**The body is written once and never rewritten.** This is a historical record of a closed window,
+which is ADR 0050's rollup shape rather than ADR 0051's current-state shape. A rewrite would restate
+the window's numbers from a different instant than the window it claims to describe.
+
+**Filing week N closes week N-1.** Content survives closing, so the series stays readable while the
+open count stays at one; a tracker that accumulates is what this epic is about.
+
+**No new cron trigger.** `scheduled()` compares `event.cron === AUTO_IMPORT_CRON` by exact string, so
+a third trigger risks that branch. The report rides the existing daily tick behind a pure
+`shouldRunWeeklySummary(now)` -- Monday UTC, matching the repo's two existing weekly Actions. Every
+decision lives in a pure exported function, because nothing in this repo invokes `scheduled()` and a
+condition written inline in a `.then()` is untestable by construction.
+
+**The daily crons now record what they did.** `runImportIssueSweepCron` and
+`runImportCoverageSweepCron` write an audit row with `userId: null`, the convention `import-retry.ts`
+uses for system-initiated rows. Previously only the admin ROUTES wrote those rows and a cron run has
+no acting user, so an automated close left nothing queryable -- only a Worker log line with finite
+retention. That made "how many issues recovered this week" unanswerable, and was a gap in the durable
+record of jobs that close real issues regardless of this report.
+
+## Consequences
+
+Easier: the pipeline's health becomes something a person receives rather than something they must
+remember to go and check, and the absence of a report is itself a signal. `nemar admin import-weekly`
+renders the same report on demand, with `--body` showing exactly what would be filed.
+
+Harder: 52 issues a year on a shared repo, mitigated by closing the previous week's. And the report
+is only as good as its inputs -- it aggregates ADRs 0049-0051 rather than measuring anything new, so
+a wrong number upstream is a wrong number here. That is why every section names its source and why
+`unknown` is preserved rather than smoothed.
+
+**One extra OpenNeuro scan per week.** The report calls ADR 0051's sweep read-only rather than
+threading the daily run's result through, so the two jobs stay independent: a coverage failure must
+not stop the weekly report, and vice versa. ~52 extra scans a year is the price of that
+independence, and it is worth it.
+
+**Week one reports `unknown` for sweep activity**, because the cron audit rows do not exist yet. That
+is the correct answer and not a bug -- it is the rule working.
+
+**Production-only, and not on the dev-cron allowlist**, for the same reason as ADRs 0050 and 0051: it
+files and closes real issues on the `nemarDatasets` org that dev shares with production. Two fences,
+the cron wrapper's `isNonProductionEnv` and the route's own `apply` refusal. The route's DRY RUN also
+forces past the weekly gate, since it writes nothing and an operator asking to read the report should
+not be told to wait for Monday.
+
+## Alternatives considered
+
+- **Report only when something is wrong.** The obvious design and the one this ADR exists to reject:
+  it cannot distinguish a healthy week from a broken reporter, which is the founding incident.
+- **Render an unknown as zero** (or omit it). Simpler output, and it recreates the exact confusion
+  that hid the outage. Declined at every layer, including the CLI's separate renderer.
+- **Email instead of an issue.** Reaches a person without them visiting GitHub, and leaves no durable
+  searchable record, no thread to comment on, and no way to see last week's next to this week's.
+  Also the dev worker holds a live `RESEND_API_KEY` against ~609 real addresses (ADR 0009's fence),
+  so an emailing job is a much larger blast radius than an issue-filing one.
+- **A new weekly cron trigger.** Declarative and obvious, and it puts a third string next to a branch
+  that is selected by exact string equality. Declined for a pure day-of-week guard.
+- **A GitHub Action on a weekly cron**, like `check-summary-drift.yml`. No scheduling guard needed and
+  the cadence is declared in one place, but the data lives behind admin auth in D1 and the report
+  would have to re-fetch it over HTTP, duplicating logic that already exists in the Worker.
+- **Store the last-run week in D1 as a column.** Declined per ADR 0034: `audit_log` already answers
+  it, and a column is a second source of truth that drifts.
+- **Read closed GitHub issues to count recoveries.** Needs a new listing primitive and makes GitHub
+  rather than D1 the authority for a time-windowed count. Declined in favour of making the crons
+  record what they did, which is useful independently.
+
+## Receipts
+
+- Issue #1312 (phase 4 of epic #1306); ADR 0049 (the classifier), ADR 0050 (the tracking issue's
+  lifecycle, and the mutate-before-comment rule reused here), ADR 0051 (coverage and the
+  healthy/alarm/unknown split this extends)
+- Rules and body: `backend/src/services/import-weekly-summary.ts` (pure), applied by
+  `import-weekly-summary-sweep.ts`
+- The gate idiom and its opposite failure direction: `decideAutoImportGate` and
+  `AUTO_IMPORT_GATE_QUERY` in `backend/src/services/auto-import.ts`
+- Counts-and-pointers truncation: ADR 0036
+- Derive rather than store, the reason the week is computed and not persisted: ADR 0034
+- Operator entry point: `POST /admin/imports/weekly-summary`, `nemar admin import-weekly`
+  (dry run by default, and forced past the gate; `apply` production-only)
