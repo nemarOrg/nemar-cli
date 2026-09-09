@@ -93,7 +93,6 @@ export {
   addIssueComment,
   closeIssue,
   createIssue,
-  findOpenIssueByTitle,
   issueLabelNames,
   listOpenIssuesByLabel,
   setIssueLabels,

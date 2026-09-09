@@ -58,7 +58,6 @@ const EXPECTED_EXPORTS = [
   "ensureMainBranch",
   "ensureRepoToSpec",
   "ensureWorkflowsDeployed",
-  "findOpenIssueByTitle",
   "getBidsTreeStats",
   "getBlobContent",
   "getBranchRulesetInfo",

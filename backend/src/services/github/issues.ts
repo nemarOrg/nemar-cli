@@ -10,6 +10,12 @@
  * is small enough that paging the label listing is cheap and immediately
  * consistent.
  *
+ * The endpoint returns pull requests as well as issues -- every PR is an issue
+ * to this API -- but only if they carry the requested label, which none of the
+ * labels here is ever applied to a PR. `listOpenIssuesByLabel` is therefore not
+ * filtered on `pull_request`; a caller using a label a human also puts on PRs
+ * would need to.
+ *
  * `closeIssue`/`setIssueLabels` arrived with epic #1306 phase 2, which gave the
  * tracker a way to drain: before them nothing could close an issue or retire a
  * stale cause label, so 28 issues accumulated and none was ever closed.
@@ -35,52 +41,19 @@ export function issueLabelNames(issue: GitHubIssue): string[] {
 }
 
 /**
- * Find an OPEN issue in `repo` carrying `label` whose title exactly matches
- * `title`. Pages through the label listing (state=open) until a match is
- * found or the listing is exhausted. Returns null on no match.
- */
-export async function findOpenIssueByTitle(
-  repo: string,
-  label: string,
-  title: string,
-  pat: string,
-): Promise<GitHubIssue | null> {
-  // Cap pagination: a growing backlog of open (un-triaged) labeled issues must
-  // not turn every dedup lookup into an unbounded scan -- each page is a GitHub
-  // subrequest. 20 pages x 100 = 2000 open issues of one label, far beyond any
-  // realistic backlog. If no match within the cap, treat as not-found; the
-  // worst case is a duplicate issue, which is preferable to an unbounded scan.
-  const MAX_PAGES = 20;
-  for (let page = 1; page <= MAX_PAGES; page++) {
-    const response = await githubFetchWithRetry(
-      `${GITHUB_API()}/repos/${repo}/issues?state=open&labels=${encodeURIComponent(label)}&per_page=100&page=${page}`,
-      { headers: ghHeaders(pat) },
-    );
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Failed to list issues on ${repo}: HTTP ${response.status} - ${error}`);
-    }
-    const issues = await response.json<GitHubIssue[]>();
-    const match = issues.find((issue) => issue.title === title);
-    if (match) return match;
-    if (issues.length < 100) return null; // last page
-  }
-  console.warn(
-    `[github/issues] findOpenIssueByTitle hit MAX_PAGES=${MAX_PAGES} on ${repo} for "${title}"; treating as not-found (may create a duplicate)`,
-  );
-  return null;
-}
-
-/**
  * Every OPEN issue in `repo` carrying `label`, paged.
  *
- * Same endpoint and page cap as {@link findOpenIssueByTitle}, but returns the
- * whole set rather than stopping at a title match -- the triage sweep needs to
- * see all of them to count them and decide the filing mode.
+ * This is the only listing primitive. A `findOpenIssueByTitle` used to sit
+ * beside it, stopping early at a title match; epic #1306 phase 2 removed it,
+ * because every caller now needs the whole set anyway (to count it and decide
+ * the filing mode) and a title match over the returned array is one line.
  *
- * Unlike the dedup lookup, hitting the cap here is NOT silently treated as "no
- * more": a truncated listing would undercount and could wrongly release the
- * rollup mode, so it throws.
+ * Pagination is capped, so a backlog of open labelled issues cannot turn a
+ * lookup into an unbounded scan -- each page is a GitHub subrequest. 20 pages x
+ * 100 = 2000 open issues of one label, far beyond any realistic backlog.
+ * Hitting the cap THROWS rather than reporting what it has: a truncated listing
+ * would undercount, which could wrongly release the rollup mode or miss an
+ * existing issue and duplicate it. Refusing to answer is the honest failure.
  */
 export async function listOpenIssuesByLabel(
   repo: string,

@@ -34,9 +34,9 @@ import { isSandboxDatasetId } from "./datasetId.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import {
+  type GitHubIssue,
   addIssueComment,
   createIssue,
-  findOpenIssueByTitle,
   issueLabelNames,
   listOpenIssuesByLabel,
   setIssueLabels,
@@ -163,6 +163,26 @@ export interface FileImportFailureIssueArgs {
 }
 
 /**
+ * Injection seams for tests. The one real caller
+ * (routes/callbacks/import-state.ts) omits them.
+ *
+ * TRANSPORT only -- the GitHub client calls and the token fetch -- exactly as
+ * `ImportIssueSweepDeps` does. The gate, the D1 read, the classification, the
+ * mode decision and every content body still run for real, so a test drives the
+ * same code production does (`.rules/testing.md`). Before this existed the
+ * create/comment/relabel/rollup branch could only be reached by letting
+ * `getDatasetsToken` throw, which meant the branch that CHOOSES between them was
+ * never executed at all.
+ */
+export interface ImportFailureIssueDeps {
+  listOpenIssues?: typeof listOpenIssuesByLabel;
+  create?: typeof createIssue;
+  comment?: typeof addIssueComment;
+  setLabels?: typeof setIssueLabels;
+  token?: (env: Bindings) => Promise<string>;
+}
+
+/**
  * Decide + (best-effort) act: look up the dataset's sandbox/exemplar flags,
  * run the pure gate, and on a genuine prod failure either comment on an
  * existing open issue or create a new one. Returns without touching GitHub
@@ -174,7 +194,14 @@ export async function fileImportFailureIssueIfNeeded(
   db: D1Database,
   env: Bindings,
   args: FileImportFailureIssueArgs,
+  deps: ImportFailureIssueDeps = {},
 ): Promise<void> {
+  const listOpenIssues = deps.listOpenIssues ?? listOpenIssuesByLabel;
+  const create = deps.create ?? createIssue;
+  const comment = deps.comment ?? addIssueComment;
+  const setLabels = deps.setLabels ?? setIssueLabels;
+  const token = deps.token ?? getDatasetsToken;
+
   // A missing datasets row defaults is_sandbox/is_exemplar to false below, i.e.
   // the sandbox/exemplar gate "fails open" (it WILL file). Safe today only via
   // an invariant enforced elsewhere: OpenNeuro imports always mint on###### ids
@@ -197,7 +224,7 @@ export async function fileImportFailureIssueIfNeeded(
   });
   if (!shouldFile) return;
 
-  const pat = await getDatasetsToken(env);
+  const pat = await token(env);
   const title = importFailureIssueTitle(args.datasetId, args.sourceId);
   const details: ImportFailureIssueDetails = {
     datasetId: args.datasetId,
@@ -207,27 +234,29 @@ export async function fileImportFailureIssueIfNeeded(
     workflowRunUrl: args.workflowRunUrl,
   };
 
+  // ONE listing answers all three questions this function asks of GitHub: is
+  // there already an issue for this dataset, how many per-dataset issues are
+  // open (the mode), and is this cause's rollup already open. Rollups carry the
+  // tracking label too, so they are in the same listing -- paging it once per
+  // question would be three identical walks of the same pages.
+  //
   // Dedup is check-then-act (find open issue by title, else create) with no
   // lock/idempotency key. Within one workflow run the report job posts
   // status=failed exactly once per dataset, so no self-race. The only race is
   // two near-simultaneous FIRST failures for the same dataset from two
   // different workflow runs (e.g. overlapping manual + auto dispatch): both see
   // "no open issue" and both create one. Worst case = a cosmetic duplicate
-  // issue, never data loss or a masked failure. Accepted; a close-on-recovery
-  // pass (see file header) would also clean these up.
-  const existing = await findOpenIssueByTitle(
-    IMPORT_FAILURE_ISSUES_REPO,
-    IMPORT_FAILURE_ISSUE_LABEL,
-    title,
-    pat,
-  );
+  // issue, never data loss or a masked failure. Accepted; the triage sweep
+  // (services/import-issue-sweep.ts) also cleans these up on recovery.
+  const open = await listOpenIssues(IMPORT_FAILURE_ISSUES_REPO, IMPORT_FAILURE_ISSUE_LABEL, pat);
+  const existing = open.find((i) => i.title === title) ?? null;
   const classified = classifyImportFailure({
     stage: args.stage,
     lastError: args.errorMessage,
   });
 
   if (existing) {
-    await addIssueComment(
+    await comment(
       IMPORT_FAILURE_ISSUES_REPO,
       existing.number,
       buildImportFailureIssueComment(details, new Date().toISOString()),
@@ -239,7 +268,7 @@ export async function fileImportFailureIssueIfNeeded(
     // while every label this module does not own is preserved.
     const relabel = computeLabelUpdate(issueLabelNames(existing), classified.label);
     if (relabel) {
-      await setIssueLabels(IMPORT_FAILURE_ISSUES_REPO, existing.number, relabel, pat);
+      await setLabels(IMPORT_FAILURE_ISSUES_REPO, existing.number, relabel, pat);
     }
     console.log(
       `[import-failure-issue] commented on ${IMPORT_FAILURE_ISSUES_REPO}#${existing.number} for ${args.datasetId}${relabel ? ` (relabelled -> ${classified.label})` : ""}`,
@@ -251,18 +280,24 @@ export async function fileImportFailureIssueIfNeeded(
   // dozens of near-identical ones. Below it, per-dataset issues stay the default
   // -- they are greppable and keep per-dataset history -- so this is a pressure
   // valve, not the normal mode. See services/import-issue-accrual.ts.
-  if (await shouldRollUp(pat, classified.cause)) {
-    await appendToRollup(pat, classified, {
-      datasetId: args.datasetId,
-      sourceId: args.sourceId,
-      workflowRunUrl: args.workflowRunUrl,
-    });
+  if (shouldRollUp(open, classified.cause)) {
+    await appendToRollup(
+      pat,
+      classified,
+      {
+        datasetId: args.datasetId,
+        sourceId: args.sourceId,
+        workflowRunUrl: args.workflowRunUrl,
+      },
+      open,
+      { create, comment },
+    );
     return;
   }
 
   // The cause label rides alongside the tracking label so the repo can be
   // filtered by what actually failed, not just that something did.
-  const created = await createIssue(
+  const created = await create(
     IMPORT_FAILURE_ISSUES_REPO,
     title,
     buildImportFailureIssueBody(details),
@@ -274,6 +309,11 @@ export async function fileImportFailureIssueIfNeeded(
   );
 }
 
+/** Whether an issue in the tracking listing is a per-cause rollup. */
+function isRollup(issue: GitHubIssue): boolean {
+  return issueLabelNames(issue).includes(IMPORT_ROLLUP_ISSUE_LABEL);
+}
+
 /**
  * Whether this failure should join a rollup instead of opening its own issue.
  *
@@ -282,38 +322,28 @@ export async function fileImportFailureIssueIfNeeded(
  * asks {@link decideIssueMode}. Whether this cause's rollup is already open is
  * what supplies the hysteresis, so no stored flag can drift out of sync.
  */
-async function shouldRollUp(pat: string, cause: string): Promise<boolean> {
-  const open = await listOpenIssuesByLabel(
-    IMPORT_FAILURE_ISSUES_REPO,
-    IMPORT_FAILURE_ISSUE_LABEL,
-    pat,
-  );
-  const perDataset = open.filter((i) => !issueLabelNames(i).includes(IMPORT_ROLLUP_ISSUE_LABEL));
-  const rollupOpen = open.some(
-    (i) =>
-      issueLabelNames(i).includes(IMPORT_ROLLUP_ISSUE_LABEL) && i.title === rollupIssueTitle(cause),
-  );
-  return decideIssueMode({ openPerDatasetCount: perDataset.length, rollupOpen }) === "rollup";
+function shouldRollUp(open: readonly GitHubIssue[], cause: string): boolean {
+  const perDatasetCount = open.filter((i) => !isRollup(i)).length;
+  const rollupOpen = open.some((i) => isRollup(i) && i.title === rollupIssueTitle(cause));
+  return decideIssueMode({ openPerDatasetCount: perDatasetCount, rollupOpen }) === "rollup";
 }
 
 /** Add this dataset to its cause's rollup, opening the rollup if it is the
- *  first one. Deduped by the rollup title, exactly as per-dataset issues are. */
+ *  first one. Deduped by the rollup title, exactly as per-dataset issues are,
+ *  and out of the same listing the caller already fetched. */
 async function appendToRollup(
   pat: string,
   classified: ClassifiedImportFailure,
   entry: RollupEntry,
+  open: readonly GitHubIssue[],
+  io: { create: typeof createIssue; comment: typeof addIssueComment },
 ): Promise<void> {
   const title = rollupIssueTitle(classified.cause);
   const nowIso = new Date().toISOString();
-  const existing = await findOpenIssueByTitle(
-    IMPORT_FAILURE_ISSUES_REPO,
-    IMPORT_ROLLUP_ISSUE_LABEL,
-    title,
-    pat,
-  );
+  const existing = open.find((i) => isRollup(i) && i.title === title);
 
   if (existing) {
-    await addIssueComment(
+    await io.comment(
       IMPORT_FAILURE_ISSUES_REPO,
       existing.number,
       buildRollupUpdateComment(entry, nowIso),
@@ -325,7 +355,7 @@ async function appendToRollup(
     return;
   }
 
-  const created = await createIssue(
+  const created = await io.create(
     IMPORT_FAILURE_ISSUES_REPO,
     title,
     buildRollupIssueBody(classified.cause, classified.summary, [entry], nowIso),

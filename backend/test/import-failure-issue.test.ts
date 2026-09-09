@@ -10,16 +10,21 @@
  *     relying on getDatasetsToken throwing when no GitHub auth is configured
  *     (a genuine failure that reaches that point rejects; a gated-out case
  *     resolves cleanly without ever getting there).
+ *   - accrual control (epic #1306 phase 2): which of create / comment+relabel /
+ *     roll-up the orchestration chooses once past the gate, with the GitHub
+ *     transport injected. That branch used to be unreachable in a test, because
+ *     the only way to get past the gate was to let getDatasetsToken throw.
  *
- * The live GitHub API calls (createIssue/findOpenIssueByTitle/addIssueComment
- * in services/github/issues.ts) are I/O and stay untested here, same
- * constraint as every other github.ts consumer in this codebase.
+ * The HTTP calls themselves (services/github/issues.ts) are I/O and stay
+ * untested here, same constraint as every other github.ts consumer.
  */
 
 import { describe, expect, test } from "bun:test";
+import type { GitHubIssue } from "../src/services/github/issues";
 import {
   type FileImportFailureIssueArgs,
   type ImportFailureIssueContext,
+  type ImportFailureIssueDeps,
   type ImportFailureIssueDetails,
   buildImportFailureIssueBody,
   buildImportFailureIssueComment,
@@ -27,6 +32,13 @@ import {
   importFailureIssueTitle,
   shouldFileImportFailureIssue,
 } from "../src/services/import-failure-issue";
+import {
+  IMPORT_ISSUE_CAP,
+  IMPORT_ISSUE_RESUME,
+  IMPORT_ROLLUP_ISSUE_LABEL,
+  rollupIssueTitle,
+} from "../src/services/import-issue-accrual";
+import { IMPORT_FAILURE_ISSUE_LABEL } from "../src/services/import-issue-identity";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
@@ -213,7 +225,10 @@ describe("buildImportFailureIssueComment", () => {
   test("names the cause the same way the create body does", () => {
     const errorMessage =
       "Failed to configure S3 remote: The bucket already exists, and its annex-uuid file indicates it is used by a different special remote.";
-    const comment = buildImportFailureIssueComment(details({ stage: "prepare", errorMessage }), nowIso);
+    const comment = buildImportFailureIssueComment(
+      details({ stage: "prepare", errorMessage }),
+      nowIso,
+    );
     expect(comment).toContain("Cause: annex_uuid_conflict");
     // A re-failure whose cause is undiagnosable still says so explicitly.
     expect(buildImportFailureIssueComment(details({ stage: "finalize" }), nowIso)).toContain(
@@ -314,5 +329,278 @@ describe("fileImportFailureIssueIfNeeded (real D1, no network)", () => {
     const d1 = realD1(db);
     const env = { ENVIRONMENT: "development", DB: d1 } as unknown as Bindings;
     await expect(fileImportFailureIssueIfNeeded(d1, env, baseArgs())).resolves.toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Accrual control (epic #1306 phase 2, issue #1310)
+//
+// Everything above proves the gate. These prove what happens once past it:
+// which of create / comment+relabel / roll-up is chosen, and with what content.
+// Only the GitHub transport and the token fetch are injected, so the gate, the
+// D1 read, the classification, the mode decision and every body still run for
+// real.
+// ---------------------------------------------------------------------------
+
+/** A real failing message from the incident window: the expired PAT. */
+const AUTH_ERROR =
+  "Failed to push: remote: Invalid username or token. Password authentication is not supported for Git operations.";
+/** ...and the annex-uuid collision, a DIFFERENT cause on the same pipeline. */
+const ANNEX_ERROR =
+  "Failed to configure S3 remote: The bucket already exists, and its annex-uuid file indicates it is used by a different special remote.";
+
+function openIssue(number: number, title: string, labels: string[]): GitHubIssue {
+  return {
+    number,
+    html_url: `https://github.com/nemarDatasets/.github/issues/${number}`,
+    state: "open",
+    title,
+    labels: labels.map((name) => ({ name })),
+  };
+}
+
+/** `count` per-dataset tracking issues for unrelated datasets, to set the mode. */
+function backlog(count: number): GitHubIssue[] {
+  return Array.from({ length: count }, (_, i) =>
+    openIssue(500 + i, importFailureIssueTitle(`on00900${i}`, `ds00900${i}`), [
+      IMPORT_FAILURE_ISSUE_LABEL,
+      "auth-invalid",
+    ]),
+  );
+}
+
+/** Records every write attempted, so the choice of branch is observable. */
+function recordingDeps(open: GitHubIssue[]): ImportFailureIssueDeps & {
+  created: { title: string; body: string; labels: string[] }[];
+  comments: { n: number; body: string }[];
+  labelled: { n: number; labels: string[] }[];
+} {
+  const created: { title: string; body: string; labels: string[] }[] = [];
+  const comments: { n: number; body: string }[] = [];
+  const labelled: { n: number; labels: string[] }[] = [];
+  return {
+    created,
+    comments,
+    labelled,
+    token: async () => "test-token",
+    listOpenIssues: async () => open,
+    create: async (_repo, title, body, labels) => {
+      created.push({ title, body, labels });
+      return openIssue(1000 + created.length, title, labels);
+    },
+    comment: async (_repo, n, body) => {
+      comments.push({ n, body });
+    },
+    setLabels: async (_repo, n, labels) => {
+      labelled.push({ n, labels });
+    },
+  };
+}
+
+const TITLE = importFailureIssueTitle("on000123", "ds000123");
+
+describe("a re-failure comments, and relabels when the cause changed", () => {
+  test("the stale cause label is retired for the real one", async () => {
+    const db = freshDb();
+    const d1 = realD1(db);
+    // Filed as upstream-403 back when that was the theory; it was the PAT.
+    const deps = recordingDeps([
+      openIssue(75, TITLE, [IMPORT_FAILURE_ISSUE_LABEL, "upstream-403"]),
+    ]);
+
+    await fileImportFailureIssueIfNeeded(
+      d1,
+      prodEnv(d1),
+      baseArgs({ stage: "prepare", errorMessage: AUTH_ERROR }),
+      deps,
+    );
+
+    expect(deps.created).toEqual([]);
+    expect(deps.comments[0]?.n).toBe(75);
+    expect(deps.labelled).toHaveLength(1);
+    expect(deps.labelled[0]?.labels).toContain("auth-invalid");
+    expect(deps.labelled[0]?.labels).not.toContain("upstream-403");
+    // The tracking label is what every lookup keys off; losing it would orphan
+    // the issue from the whole mechanism.
+    expect(deps.labelled[0]?.labels).toContain(IMPORT_FAILURE_ISSUE_LABEL);
+  });
+
+  test("a human triage label survives the relabel", async () => {
+    const db = freshDb();
+    const d1 = realD1(db);
+    const deps = recordingDeps([
+      openIssue(75, TITLE, [IMPORT_FAILURE_ISSUE_LABEL, "git-divergence", "no-import-row"]),
+    ]);
+
+    await fileImportFailureIssueIfNeeded(
+      d1,
+      prodEnv(d1),
+      baseArgs({ stage: "prepare", errorMessage: AUTH_ERROR }),
+      deps,
+    );
+
+    expect(deps.labelled[0]?.labels).toContain("no-import-row");
+  });
+
+  test("an unchanged cause comments without a pointless label write", async () => {
+    const db = freshDb();
+    const d1 = realD1(db);
+    const deps = recordingDeps([
+      openIssue(75, TITLE, [IMPORT_FAILURE_ISSUE_LABEL, "auth-invalid"]),
+    ]);
+
+    await fileImportFailureIssueIfNeeded(
+      d1,
+      prodEnv(d1),
+      baseArgs({ stage: "prepare", errorMessage: AUTH_ERROR }),
+      deps,
+    );
+
+    expect(deps.comments).toHaveLength(1);
+    expect(deps.labelled).toEqual([]);
+  });
+});
+
+describe("a burst rolls up instead of opening dozens of issues", () => {
+  test("below the cap, a per-dataset issue is what gets opened", async () => {
+    const db = freshDb();
+    const d1 = realD1(db);
+    const deps = recordingDeps(backlog(IMPORT_ISSUE_CAP - 1));
+
+    await fileImportFailureIssueIfNeeded(
+      d1,
+      prodEnv(d1),
+      baseArgs({ stage: "prepare", errorMessage: AUTH_ERROR }),
+      deps,
+    );
+
+    expect(deps.created).toHaveLength(1);
+    expect(deps.created[0]?.title).toBe(TITLE);
+    expect(deps.created[0]?.labels).toEqual([IMPORT_FAILURE_ISSUE_LABEL, "auth-invalid"]);
+  });
+
+  test("at the cap, the first of a cause opens that cause's rollup", async () => {
+    const db = freshDb();
+    const d1 = realD1(db);
+    const deps = recordingDeps(backlog(IMPORT_ISSUE_CAP));
+
+    await fileImportFailureIssueIfNeeded(
+      d1,
+      prodEnv(d1),
+      baseArgs({ stage: "prepare", errorMessage: AUTH_ERROR }),
+      deps,
+    );
+
+    expect(deps.created).toHaveLength(1);
+    expect(deps.created[0]?.title).toBe(rollupIssueTitle("auth_invalid"));
+    expect(deps.created[0]?.labels).toContain(IMPORT_ROLLUP_ISSUE_LABEL);
+    // The affected dataset has to be findable from the rollup, or the rollup
+    // trades noise for lost information.
+    expect(deps.created[0]?.body).toContain("on000123");
+  });
+
+  test("a second dataset joins the existing rollup rather than opening another", async () => {
+    const db = freshDb();
+    const d1 = realD1(db);
+    const deps = recordingDeps([
+      ...backlog(IMPORT_ISSUE_CAP),
+      openIssue(900, rollupIssueTitle("auth_invalid"), [
+        IMPORT_FAILURE_ISSUE_LABEL,
+        IMPORT_ROLLUP_ISSUE_LABEL,
+        "auth-invalid",
+      ]),
+    ]);
+
+    await fileImportFailureIssueIfNeeded(
+      d1,
+      prodEnv(d1),
+      baseArgs({ stage: "prepare", errorMessage: AUTH_ERROR }),
+      deps,
+    );
+
+    expect(deps.created).toEqual([]);
+    expect(deps.comments).toHaveLength(1);
+    expect(deps.comments[0]?.n).toBe(900);
+    expect(deps.comments[0]?.body).toContain("on000123");
+  });
+
+  test("another cause's open rollup does not absorb this one", async () => {
+    const db = freshDb();
+    const d1 = realD1(db);
+    const deps = recordingDeps([
+      ...backlog(IMPORT_ISSUE_CAP),
+      openIssue(900, rollupIssueTitle("auth_invalid"), [
+        IMPORT_FAILURE_ISSUE_LABEL,
+        IMPORT_ROLLUP_ISSUE_LABEL,
+        "auth-invalid",
+      ]),
+    ]);
+
+    await fileImportFailureIssueIfNeeded(
+      d1,
+      prodEnv(d1),
+      baseArgs({ stage: "prepare", errorMessage: ANNEX_ERROR }),
+      deps,
+    );
+
+    // One rollup per cause: rolling annex_uuid_conflict into the auth rollup
+    // would put two unrelated problems under one title.
+    expect(deps.comments).toEqual([]);
+    expect(deps.created[0]?.title).toBe(rollupIssueTitle("annex_uuid_conflict"));
+  });
+
+  test("rollups do not count themselves toward the cap", async () => {
+    const db = freshDb();
+    const d1 = realD1(db);
+    // Nine per-dataset issues plus two rollups is eleven open issues, but only
+    // nine of them are what the cap is about. A rollup that counted itself
+    // would latch rollup mode on and never release it.
+    const deps = recordingDeps([
+      ...backlog(IMPORT_ISSUE_CAP - 1),
+      openIssue(900, rollupIssueTitle("timeout"), [
+        IMPORT_FAILURE_ISSUE_LABEL,
+        IMPORT_ROLLUP_ISSUE_LABEL,
+        "timeout",
+      ]),
+      openIssue(901, rollupIssueTitle("rate_limit"), [
+        IMPORT_FAILURE_ISSUE_LABEL,
+        IMPORT_ROLLUP_ISSUE_LABEL,
+        "rate-limit",
+      ]),
+    ]);
+
+    await fileImportFailureIssueIfNeeded(
+      d1,
+      prodEnv(d1),
+      baseArgs({ stage: "prepare", errorMessage: AUTH_ERROR }),
+      deps,
+    );
+
+    expect(deps.created[0]?.title).toBe(TITLE);
+  });
+
+  test("per-dataset filing resumes once the backlog drains to the resume mark", async () => {
+    const db = freshDb();
+    const d1 = realD1(db);
+    // The rollup is still open -- nobody closed it -- but the tracker has
+    // drained, so the pressure valve releases on its own.
+    const deps = recordingDeps([
+      ...backlog(IMPORT_ISSUE_RESUME),
+      openIssue(900, rollupIssueTitle("auth_invalid"), [
+        IMPORT_FAILURE_ISSUE_LABEL,
+        IMPORT_ROLLUP_ISSUE_LABEL,
+        "auth-invalid",
+      ]),
+    ]);
+
+    await fileImportFailureIssueIfNeeded(
+      d1,
+      prodEnv(d1),
+      baseArgs({ stage: "prepare", errorMessage: AUTH_ERROR }),
+      deps,
+    );
+
+    expect(deps.created[0]?.title).toBe(TITLE);
+    expect(deps.comments).toEqual([]);
   });
 });
