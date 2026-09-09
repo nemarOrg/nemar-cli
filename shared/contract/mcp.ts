@@ -878,7 +878,15 @@ export const readWindowInputSchema = z
   .passthrough()
   .superRefine((val, ctx) => {
     if (!val.taste) return;
-    if (val.channels === undefined) {
+    // An EMPTY array is not `undefined` -- it used to slip past this guard
+    // (and both hard caps below: `0 > 64` is false, `duration_s * 0` is
+    // always under the product cap), reaching the tool with nothing to
+    // decode. `buildReadRecipe`'s `channelSlice` then computed
+    // `Math.min(...[])` / `Math.max(...[])` (`Infinity`/`-Infinity`) and
+    // threw a raw ZodError past `withToolMetrics`, AFTER a real upstream
+    // Range read had already been issued -- found by review, reproduced
+    // against this repo's own test harness.
+    if (!val.channels || val.channels.length === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message:
@@ -950,10 +958,31 @@ export const readWindowTasteResultSchema = z
     /** How many inner chunks were actually fetched and decoded (an absent,
      *  fill-valued chunk contributes 0 -- nothing was read for it). */
     chunks_read: z.number().int().nonnegative(),
-    /** Total upstream bytes fetched for this call: every shard-footer Range
-     *  read plus every inner-chunk Range read (0 on a full cache hit for
-     *  both the array metadata and every shard footer consulted). */
+    /** TOTAL upstream bytes fetched for this call: the array-metadata GET
+     *  (a plain full GET, not a Range read -- 0 when it was a cache hit)
+     *  plus every shard-footer Range read plus every inner-chunk Range
+     *  read (each individually 0 on a cache hit). Not exclusively
+     *  Range-read bytes -- the array-metadata fetch is the one full GET
+     *  folded into this same total. */
     bytes_read: z.number().int().nonnegative(),
+    /** Every GLOBAL sample span (in both sample and second form, clipped to
+     *  this window) that had no stored inner chunk and was fill-substituted
+     *  with the channel's own baseline `offset[channel]` (digital 0) rather
+     *  than read from a real recorded chunk (ADR 0005: partial data is
+     *  reported, never silently substituted -- a fill value is otherwise
+     *  indistinguishable from real near-flat signal). Always an array, even
+     *  when empty -- a caller must not have to distinguish "no gaps" from
+     *  "this build does not report gaps". */
+    filled_ranges: z.array(
+      z
+        .object({
+          start_sample: z.number().int().nonnegative(),
+          end_sample: z.number().int().nonnegative(),
+          start_s: z.number(),
+          end_s: z.number(),
+        })
+        .passthrough(),
+    ),
     note: z.string().nullable().optional(),
     envelope: provenanceEnvelopeSchema,
   })

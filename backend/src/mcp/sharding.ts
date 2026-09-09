@@ -5,12 +5,21 @@
  * Level 0 of every served store is a SHARDED array: shape `[n_channels,
  * n_samples]`, outer chunk (the "shard") `[n_channels, shard_samples]`,
  * inner chunk (the codec's own `sharding_indexed.configuration.chunk_shape`)
- * `[n_channels, chunk_samples]`, `index_location: "end"`. Verified live on
- * nm000329's `eeg_250hz` (shard 75000, chunk 1000) and on003392's `meg_250hz`
- * (shard 68000, chunk 1000) -- see `test/fixtures/zarr-array-level0.zarr.json`
- * and `backend/test/fixtures/mcp/nm000329-shard-index-c-0-0.bin` (the REAL
- * captured footer, 75 entries, offsets chaining contiguously from 0,
- * `sum(nbytes) + 1204 == 8_970_760`, the shard's own `Content-Length`).
+ * `[n_channels, chunk_samples]`, `index_location: "end"`. `shard_samples`/
+ * `chunk_samples` are per-STORE properties (read from the specific store's
+ * own group entry, `targetGroup.shard_samples` in `read-window.ts` -- never
+ * hardcoded or assumed constant across a dataset or group name): verified
+ * live on nm000329's `sub-1` store `eeg_250hz` group (shard 75000, chunk
+ * 1000) and on003392's `sub-06` store `meg_250hz` group (shard 68000, chunk
+ * 1000) -- see `test/fixtures/zarr-array-level0.zarr.json` and
+ * `backend/test/fixtures/mcp/nm000329-shard-index-c-0-0.bin`/
+ * `nm000329-shard-index-c-0-1.bin` (REAL captured footers, both stores'
+ * own shards). A DIFFERENT on003392 store (`sub-01`, the one
+ * `test/fixtures/zarr-index-on003392-meg-sss-slice.json` captures) reports
+ * `shard_samples: 69000` for the identical group NAME at the identical
+ * `source_commit` -- both numbers are real; they are simply two different
+ * stores' own values, which is exactly why this code reads the figure per
+ * store rather than assuming one number for a whole dataset or group name.
  *
  * An inner chunk always spans every channel, so the chunk grid is always
  * `1 x ceil(n_samples / shard_samples)` and a shard's object key is always
@@ -19,24 +28,50 @@
  * (how many inner chunks) and the store's own channel count, never by how
  * many channels the caller asked for.
  *
+ * **A shard's footer entry count is CONSTANT across every shard of the
+ * array, including the final (boundary) one -- it is `shard_samples /
+ * chunk_samples`, full stop, never a function of how many samples actually
+ * fall inside that shard.** This was gotten wrong in an earlier version of
+ * this file (`nInnerForShard` computed `ceil(min(shardSamples, remaining) /
+ * chunkSamples)`, which is SMALLER for a boundary shard) and caught only by
+ * checking the REAL captured footer for nm000329's shard 1 (`c/0/1`, not
+ * just `c/0/0`): its `Content-Length` is 7,651,790; the real 1204-byte
+ * footer parses to 75 entries -- the SAME 75 as the non-boundary shard 0 --
+ * with local indices 0-63 present (offsets chaining contiguously from 0,
+ * `sum(nbytes) == 7_650_586`) and 64-74 marked absent (`2^64 - 1` in both
+ * fields, per the spec: a chunk entirely past the array's real extent is
+ * absent, not omitted from the index). The old formula computed `nInner =
+ * 64` for this shard, so it Range-read only the LAST 1028 bytes of the
+ * footer (`footerByteLength(64)`) instead of the real 1204 -- a slice that
+ * starts 176 bytes (11 entries) into the true footer, so every local index
+ * it parsed was the WRONG entry, shifted by 11 chunks (44 s at 250 Hz).
+ * Nothing errored: every misread entry still pointed at a real, full-size,
+ * cleanly-decoding chunk, so the caller got plausible-looking signal from
+ * the wrong point in the recording. `nInnerForShard` below computes the
+ * constant directly from `shard_samples`/`chunk_samples` and does not take
+ * `nSamples` (or even a shard index) as an argument at all -- there is
+ * nothing about a specific shard that could change the answer.
+ *
  * The shard footer is the last `n_inner * 16 + 4` bytes: `n_inner` pairs of
  * little-endian uint64 `(offset, nbytes)` (each pair's `offset` is a byte
- * offset INTO THE SHARD OBJECT, so entries chain contiguously from 0 for a
- * shard with no absent chunk) plus a trailing crc32c word -- this module
- * never verifies that checksum, only strips it. An absent inner chunk is
- * marked `2^64 - 1` in BOTH fields (`SHARD_ABSENT_MARKER`) and contributes no
- * bytes to the shard at all -- the byte offsets of the entries around it
- * simply do not advance for it.
+ * offset INTO THE SHARD OBJECT, so PRESENT entries chain contiguously from
+ * 0) plus a trailing crc32c word -- this module never verifies that
+ * checksum, only strips it. An absent inner chunk is marked `2^64 - 1` in
+ * BOTH fields (`SHARD_ABSENT_MARKER`) and contributes no bytes to the shard
+ * at all -- the byte offsets of the entries around it simply do not advance
+ * for it.
  *
- * Both the shard (outer) grid and the inner-chunk grid are Zarr's ordinary
- * "last chunk may be shorter" regular grid: the LAST shard of an array (or
- * the last inner chunk of the last shard) is truncated to fit the array's
- * actual extent rather than padded, so `nInnerForShard` computes a smaller
- * entry count for a boundary shard, and this module's callers must expect a
- * correspondingly shorter decoded sample count for a boundary inner chunk
- * (the blosc frame's own header carries its true `nbytes`, so
- * `decodeBloscZstdInt16` already returns the right length; nothing here
- * assumes every inner chunk decodes to a full `chunk_samples`).
+ * A PRESENT boundary chunk (a chunk whose nominal span crosses the array's
+ * real `n_samples`) is still stored FULL SIZE (`chunk_samples` columns wide)
+ * and fill-padded past the array's real extent -- Zarr never emits a
+ * narrower chunk. Verified against nm000329 shard 1's own final present
+ * entry (local index 63, footer offset 7,560,477, nbytes 90,109, nominally
+ * covering samples [138000, 139000) though only [138000, 138750) is real):
+ * `decodeBloscZstdInt16` on those exact bytes returns 63,000 values (63 x
+ * 1000), not 63 x 750. `chunkSampleSpan` below reports the chunk's VALID
+ * span (truncated at `n_samples`) SEPARATELY from its decoded STRIDE
+ * (always `chunk_samples`) for exactly this reason -- see `taste.ts`'s
+ * `DecodedSegment` doc for the conflation this separation prevents.
  *
  * No I/O in this file -- `read-window.ts` does the fetching and decoding;
  * this file only computes which shards, which local chunk indices, and
@@ -50,14 +85,14 @@
  *  downstream of {@link parseShardFooter} ever sees this value as a Number. */
 export const SHARD_ABSENT_MARKER = 0xffffffffffffffffn;
 
-export interface ShardIndexEntry {
-  /** Byte offset into the shard object. `0` (meaningless) for an absent
-   *  entry -- check `present` first. */
-  offset: number;
-  /** Compressed byte length of this inner chunk. `0` for an absent entry. */
-  nbytes: number;
-  present: boolean;
-}
+/** A discriminated union rather than a flat `{ offset, nbytes, present }`
+ *  shape: `{ offset: 500, nbytes: 200, present: false }` used to typecheck,
+ *  which made "check `present` before trusting `offset`" a comment rather
+ *  than a rule the compiler enforces. Reading `.offset` off an unnarrowed
+ *  entry is now a compile error. */
+export type ShardIndexEntry =
+  | { present: true; offset: number; nbytes: number }
+  | { present: false };
 
 /** `n_inner * 16 + 4`: `n_inner` `(offset, nbytes)` uint64 pairs (16 bytes
  *  each) plus the trailing crc32c word. */
@@ -68,26 +103,24 @@ export function footerByteLength(nInner: number): number {
   return nInner * 16 + 4;
 }
 
-/** How many inner-chunk entries a shard's OWN footer carries -- the
- *  boundary (last) shard of an array is truncated to the array's actual
- *  remaining extent, so its inner-chunk grid is over a SHORTER span than a
- *  full `shard_samples`, per the module doc's "last chunk may be shorter"
- *  paragraph. */
-export function nInnerForShard(opts: {
-  shardIndex: number;
-  shardSamples: number;
-  chunkSamples: number;
-  nSamples: number;
-}): number {
-  const { shardIndex, shardSamples, chunkSamples, nSamples } = opts;
-  const shardStart = shardIndex * shardSamples;
-  const remaining = Math.min(shardSamples, nSamples - shardStart);
-  if (remaining <= 0) {
+/** How many inner-chunk entries a shard's footer carries -- CONSTANT across
+ *  every shard of the array (`shard_samples / chunk_samples`), including
+ *  the final (boundary) one. Deliberately takes neither a shard index nor
+ *  `nSamples`: nothing about which shard, or the array's real extent,
+ *  changes this count -- a chunk beyond the array's real data is still an
+ *  ENTRY in the footer, just one marked absent. Throws if `shard_samples`
+ *  is not an exact multiple of `chunk_samples`: every store measured
+ *  divides evenly (75000/1000, 68000/1000, 69000/1000, 4000/1000), so a
+ *  non-integer result means the index document misdescribes the array,
+ *  which is worth raising loudly rather than silently flooring. */
+export function nInnerForShard(opts: { shardSamples: number; chunkSamples: number }): number {
+  const { shardSamples, chunkSamples } = opts;
+  if (shardSamples % chunkSamples !== 0) {
     throw new Error(
-      `nInnerForShard: shardIndex ${shardIndex} starts at or past nSamples ${nSamples} (shardSamples ${shardSamples})`,
+      `nInnerForShard: shard_samples ${shardSamples} is not an exact multiple of chunk_samples ${chunkSamples} -- the index misdescribes the array`,
     );
   }
-  return Math.ceil(remaining / chunkSamples);
+  return shardSamples / chunkSamples;
 }
 
 /**
@@ -109,23 +142,26 @@ export function parseShardFooter(bytes: Uint8Array, nInner: number): ShardIndexE
     const offsetBig = view.getBigUint64(i * 16, true);
     const nbytesBig = view.getBigUint64(i * 16 + 8, true);
     const present = offsetBig !== SHARD_ABSENT_MARKER && nbytesBig !== SHARD_ABSENT_MARKER;
-    entries.push({
-      offset: present ? Number(offsetBig) : 0,
-      nbytes: present ? Number(nbytesBig) : 0,
-      present,
-    });
+    entries.push(
+      present
+        ? { present: true, offset: Number(offsetBig), nbytes: Number(nbytesBig) }
+        : { present: false },
+    );
   }
   return entries;
 }
 
 /** Which shard (outer chunk) indices `[startSample, endSampleExclusive)`
  *  spans, ascending. Half-open: a window ending exactly on a shard boundary
- *  never includes the next shard. */
-export function shardsForWindow(
-  startSample: number,
-  endSampleExclusive: number,
-  shardSamples: number,
-): number[] {
+ *  never includes the next shard. Named-object parameters -- three
+ *  positional sample-index/length numbers is exactly the shape a future
+ *  call site could transpose and still compile clean. */
+export function shardsForWindow(opts: {
+  startSample: number;
+  endSampleExclusive: number;
+  shardSamples: number;
+}): number[] {
+  const { startSample, endSampleExclusive, shardSamples } = opts;
   if (endSampleExclusive <= startSample) return [];
   const first = Math.floor(startSample / shardSamples);
   const last = Math.floor((endSampleExclusive - 1) / shardSamples);
@@ -136,8 +172,11 @@ export function shardsForWindow(
 
 /** Which LOCAL inner-chunk indices (0-based within one shard) a window
  *  intersects, ascending. Half-open on both the window and each candidate
- *  chunk's own nominal span, so a window ending exactly on a chunk boundary
- *  never pulls in the next chunk. */
+ *  chunk's own NOMINAL span (`chunkSamples` wide, regardless of whether the
+ *  array's real extent truncates its valid data), so a window ending
+ *  exactly on a chunk boundary never pulls in the next chunk, and a window
+ *  reaching the array's real end correctly still selects a boundary chunk
+ *  by its full nominal footprint. */
 export function innerIndicesForWindowInShard(opts: {
   shardIndex: number;
   shardSamples: number;
@@ -158,17 +197,19 @@ export function innerIndicesForWindowInShard(opts: {
   const out: number[] = [];
   for (let local = 0; local < nInnerThisShard; local++) {
     const chunkStart = shardStart + local * chunkSamples;
-    const chunkEnd = chunkStart + chunkSamples; // nominal; fine even when truncated, see module doc
+    const chunkEnd = chunkStart + chunkSamples; // nominal, always chunkSamples wide
     if (chunkStart < endSampleExclusive && chunkEnd > startSample) out.push(local);
   }
   return out;
 }
 
-/** The exact sample span (global, half-open) one local inner-chunk index
- *  covers, truncated at the array's actual `nSamples` and at the shard's own
- *  boundary -- correct for a mid-array absent chunk (full `chunkSamples`
- *  long) and a boundary/truncated chunk alike, without depending on any
- *  decoded byte length (the absent case has none). */
+/** The VALID sample span (global, half-open) one local inner-chunk index
+ *  covers -- truncated at the array's actual `nSamples`, correct for a
+ *  mid-array absent chunk (full `chunkSamples` nominal span) and a boundary
+ *  chunk alike. This is NOT the same thing as the chunk's decoded STRIDE
+ *  (always `chunkSamples` for a present chunk, per the module doc) -- a
+ *  caller building a `DecodedSegment` (`taste.ts`) must set `stride`
+ *  separately, never derive it from `end - start`. */
 export function chunkSampleSpan(opts: {
   shardIndex: number;
   localIndex: number;
@@ -177,21 +218,20 @@ export function chunkSampleSpan(opts: {
   nSamples: number;
 }): { start: number; end: number } {
   const { shardIndex, localIndex, shardSamples, chunkSamples, nSamples } = opts;
-  const shardStart = shardIndex * shardSamples;
-  const shardEnd = Math.min(nSamples, shardStart + shardSamples);
-  const start = shardStart + localIndex * chunkSamples;
-  const end = Math.min(shardEnd, start + chunkSamples);
+  const start = shardIndex * shardSamples + localIndex * chunkSamples;
+  const end = Math.min(nSamples, start + chunkSamples);
   return { start, end };
 }
 
-export interface ChunkRead {
-  kind: "range" | "absent";
-  /** Local chunk indices covered, ascending, contiguous by index. */
-  localIndices: number[];
-  /** Byte range within the shard object, inclusive end -- only for `"range"`. */
-  start?: number;
-  end?: number;
-}
+/** A discriminated union, like {@link ShardIndexEntry}: `{ kind: "range",
+ *  start: undefined, end: undefined }` used to typecheck, which is why
+ *  `read-window.ts` needed an `as number` cast on `read.start`. The absent
+ *  variant carries a SINGULAR `localIndex` (it is always constructed for
+ *  exactly one local index, and was always read back as
+ *  `localIndices[0]`) rather than a one-element array. */
+export type ChunkRead =
+  | { kind: "range"; localIndices: number[]; start: number; end: number }
+  | { kind: "absent"; localIndex: number };
 
 /**
  * Coalesce a shard's wanted local chunk indices into the fewest HTTP Range
@@ -217,7 +257,7 @@ export function planShardReads(
       );
     }
     if (!entry.present) {
-      reads.push({ kind: "absent", localIndices: [idx] });
+      reads.push({ kind: "absent", localIndex: idx });
       i++;
       continue;
     }
@@ -244,7 +284,11 @@ export function planShardReads(
 // Cache serialization for the `shardidx/<zarr>/<group>/0/<j>` projection kind
 // (`read-window.ts`) -- a compact `[offset, nbytes]` pair per entry, `[-1,
 // -1]` for an absent one (real offsets/nbytes are always non-negative, so
-// this sentinel is unambiguous).
+// this sentinel is unambiguous). The cache-entry SCHEMA
+// (`shardIndexPairSchema`, `read-window.ts`) is what rejects a malformed
+// pair (e.g. `[-1, 240]`) as a cache miss -- these two functions trust their
+// input is already well-formed, which holds for anything that passed that
+// schema or came straight from `parseShardFooter`.
 // ---------------------------------------------------------------------------
 
 export function shardEntriesToPairs(entries: ShardIndexEntry[]): Array<[number, number]> {
@@ -253,8 +297,6 @@ export function shardEntriesToPairs(entries: ShardIndexEntry[]): Array<[number, 
 
 export function shardEntriesFromPairs(pairs: Array<[number, number]>): ShardIndexEntry[] {
   return pairs.map(([offset, nbytes]) =>
-    offset === -1 && nbytes === -1
-      ? { offset: 0, nbytes: 0, present: false }
-      : { offset, nbytes, present: true },
+    offset === -1 && nbytes === -1 ? { present: false } : { present: true, offset, nbytes },
   );
 }

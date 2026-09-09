@@ -93,6 +93,10 @@ export async function loadLevel0ArrayMetadata(
         ok: true,
         metadata: {
           dataType: cached.value.dataType,
+          // Safe: `zarrArrayMetadataSchema` already validated `codecs` once,
+          // on the WRITE side, below; this cache entry is immutable per
+          // `source_commit`, so nothing between here and there can have
+          // changed its shape.
           codecs: cached.value.codecs as ZarrArrayMetadata["codecs"],
           scale: cached.value.scale,
           offset: cached.value.offset,
@@ -116,10 +120,25 @@ export async function loadLevel0ArrayMetadata(
   if (!response.ok) {
     return { ok: false, detail: `HTTP ${response.status} fetching ${url}` };
   }
-  const bytes = Number(response.headers.get("content-length")) || 0;
+  // Prefer Content-Length when present, but never let its absence under-
+  // report a real fetch as 0 bytes -- fall back to the actual decoded body
+  // length, the same pattern `get-events.ts`'s tsv fallback already uses.
+  const contentLengthHeader = response.headers.get("content-length");
+  let text: string;
+  try {
+    text = await response.text();
+  } catch (err) {
+    return {
+      ok: false,
+      detail: `${url} could not be read as text: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  const bytes = contentLengthHeader
+    ? Number(contentLengthHeader)
+    : new TextEncoder().encode(text).length;
   let doc: unknown;
   try {
-    doc = await response.json();
+    doc = JSON.parse(text);
   } catch (err) {
     return {
       ok: false,

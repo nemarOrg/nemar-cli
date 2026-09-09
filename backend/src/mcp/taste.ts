@@ -7,14 +7,32 @@
  */
 
 /** One inner chunk's contribution to the requested window, in GLOBAL sample
- *  coordinates (not yet trimmed to the window -- {@link assembleTasteValues}
- *  computes the overlap itself, so a caller can hand over whole chunks
- *  without pre-slicing). `data` is `null` for an absent (fill-value) chunk;
- *  otherwise channel-major (`data[ch * length + localCol]`, C order, per the
- *  live-verified decode shape), where `length = end - start`. */
+ *  coordinates. Two DELIBERATELY SEPARATE quantities live here, never
+ *  conflated (a real production bug, caught against nm000329's live shard 1:
+ *  a boundary chunk decodes to a FULL `chunk_samples`-wide buffer, fill-
+ *  padded past the array's real extent -- Zarr never emits a narrower
+ *  chunk, even for an array's final boundary chunk):
+ *
+ *   - `start`/`end`: the chunk's VALID sample span -- how much of it is
+ *     real, in-array data, truncated at the array's `n_samples` for a
+ *     boundary chunk. This is what {@link assembleTasteValues} uses to
+ *     decide which GLOBAL sample positions this segment actually answers
+ *     for.
+ *   - `stride`: the decoded buffer's actual per-channel COLUMN COUNT --
+ *     always the group's nominal `chunk_samples` for a present chunk,
+ *     regardless of how much of that is "valid" per `start`/`end`. This is
+ *     what indexes INTO `data` (`data[ch * stride + localCol]`). Using
+ *     `end - start` (the valid width) as the stride instead is exactly the
+ *     bug: it works by coincidence for channel 0 (offset 0 either way) and
+ *     silently reads every other channel's samples from the wrong byte
+ *     offset.
+ *
+ *  `data` is `null` for an absent (fill-value) chunk -- `stride` is still
+ *  set (to `chunk_samples`) for shape symmetry, but unused. */
 export interface DecodedSegment {
   start: number;
   end: number;
+  stride: number;
   data: Int16Array | null;
 }
 
@@ -32,6 +50,17 @@ export function roundToSignificantDigits(value: number, digits: number): number 
 }
 
 export const TASTE_SIGNIFICANT_DIGITS = 6;
+
+/** A GLOBAL sample range, half-open, that was fill-substituted (no stored
+ *  inner chunk) rather than read from a real recorded chunk -- ADR 0005's
+ *  "partial data is reported, never silently substituted" applied to a
+ *  taste's per-sample gaps, which are otherwise indistinguishable from real
+ *  near-flat signal (a fill value is exactly the channel's own baseline
+ *  `offset[ch]`). */
+export interface FilledRange {
+  start: number;
+  end: number;
+}
 
 export interface AssembleTasteValuesInput {
   /** The requested output channels, in the ORDER requested -- each is an
@@ -55,13 +84,22 @@ export interface AssembleTasteValuesInput {
   significantDigits?: number;
 }
 
+export interface AssembleTasteValuesResult {
+  /** `[channel][sample]`, physical units, rounded. */
+  values: number[][];
+  /** GLOBAL sample ranges (clipped to the requested window) that were
+   *  fill-substituted, ascending, adjacent ranges merged into one. */
+  filledRanges: FilledRange[];
+}
+
 /**
- * Assemble `channels.length` rows of `nSamples` physical values each. Throws
- * if `segments` does not fully cover `[startSample, startSample + nSamples)`
- * -- a caller bug (an incomplete chunk plan), not a data condition to degrade
- * around silently.
+ * Assemble `channels.length` rows of `nSamples` physical values each, plus
+ * the fill-substituted ranges within the window. Throws if `segments` does
+ * not fully cover `[startSample, startSample + nSamples)` -- a caller bug
+ * (an incomplete chunk plan), not a data condition to degrade around
+ * silently.
  */
-export function assembleTasteValues(input: AssembleTasteValuesInput): number[][] {
+export function assembleTasteValues(input: AssembleTasteValuesInput): AssembleTasteValuesResult {
   const {
     channels,
     startSample,
@@ -76,12 +114,21 @@ export function assembleTasteValues(input: AssembleTasteValuesInput): number[][]
   const endSample = startSample + nSamples;
   const out: number[][] = channels.map(() => new Array<number>(nSamples));
   const covered = new Uint8Array(nSamples);
+  const filledRanges: FilledRange[] = [];
 
   for (const segment of segments) {
     const overlapStart = Math.max(segment.start, startSample);
     const overlapEnd = Math.min(segment.end, endSample);
     if (overlapEnd <= overlapStart) continue;
-    const segmentLength = segment.end - segment.start;
+
+    if (!segment.data) {
+      const last = filledRanges[filledRanges.length - 1];
+      if (last && last.end === overlapStart) {
+        last.end = overlapEnd;
+      } else {
+        filledRanges.push({ start: overlapStart, end: overlapEnd });
+      }
+    }
 
     for (let outIdx = 0; outIdx < channels.length; outIdx++) {
       const ch = channels[outIdx];
@@ -89,7 +136,7 @@ export function assembleTasteValues(input: AssembleTasteValuesInput): number[][]
       const chOffset = offset[ch];
       for (let globalSample = overlapStart; globalSample < overlapEnd; globalSample++) {
         const digital = segment.data
-          ? segment.data[ch * segmentLength + (globalSample - segment.start)]
+          ? segment.data[ch * segment.stride + (globalSample - segment.start)]
           : fillValue;
         const physical = digital * chScale + chOffset;
         out[outIdx][globalSample - startSample] = roundToSignificantDigits(
@@ -109,5 +156,22 @@ export function assembleTasteValues(input: AssembleTasteValuesInput): number[][]
     }
   }
 
-  return out;
+  return { values: out, filledRanges };
+}
+
+/** Whether `channelCount x windowSamples` exceeds `cap` -- `read_window`'s
+ *  ONE runtime (non-schema) taste bound, the actual response-size limit
+ *  (`READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES`, `shared/contract/mcp.ts`).
+ *  Extracted as its own pure, exported predicate (mirroring this
+ *  package's `sharding.ts` precedent of keeping planning arithmetic pure
+ *  and directly boundary-testable) so "exactly at the cap" and "one past
+ *  it" can be asserted directly, rather than only through a much larger
+ *  end-to-end tool call -- this is the one cap nothing else in the schema
+ *  enforces. */
+export function exceedsChannelSamplesCap(opts: {
+  channelCount: number;
+  windowSamples: number;
+  cap: number;
+}): boolean {
+  return opts.channelCount * opts.windowSamples > opts.cap;
 }

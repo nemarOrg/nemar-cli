@@ -3,16 +3,30 @@
  * #1296). No I/O -- these are footer arithmetic, footer parsing, and window
  * planning only.
  *
- * The real-footer test parses `backend/test/fixtures/mcp/nm000329-shard-index-c-0-0.bin`,
- * captured live and unmodified:
+ * TWO real footers are committed and parsed here, both captured live and
+ * unmodified from the same array (nm000329's `sub-1` store, `eeg_250hz`,
+ * shape [63, 138750], shard_samples 75000, chunk_samples 1000):
  *
- *   curl -s -A "nemar-cli/mcp-phase4" -H "Range: bytes=-1204" \
- *     -o backend/test/fixtures/mcp/nm000329-shard-index-c-0-0.bin \
- *     "https://nemar.s3.us-east-2.amazonaws.com/nm000329/zarr/sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-calibration_run-0_eeg.zarr/eeg_250hz/0/c/0/0"
+ *   BASE=https://nemar.s3.us-east-2.amazonaws.com/nm000329/zarr/sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-calibration_run-0_eeg.zarr/eeg_250hz/0
+ *   for J in 0 1; do
+ *     curl -s -A "nemar-cli/mcp-phase4" -H "Range: bytes=-1204" \
+ *       -o backend/test/fixtures/mcp/nm000329-shard-index-c-0-$J.bin "$BASE/c/0/$J"
+ *   done
  *
- * S3 answered `Content-Range: bytes 8969556-8970759/8970760` (captured
- * 2026-09-08) -- the shard's real total size is 8,970,760 bytes, confirmed
- * again below via `sum(nbytes) + 1204`.
+ * `c/0/0` is a FULL shard: 75 entries, all present, `Content-Length`
+ * 8,970,760, confirmed below via `sum(nbytes) + 1204`.
+ *
+ * `c/0/1` is the BOUNDARY shard, and it is the one that matters most. It
+ * covers nominal samples [75000, 150000) while the array really ends at
+ * 138750, and it carries the SAME 75 entries -- 64 present, 11 absent --
+ * because a shard's entry count is a property of the chunk grid, not of how
+ * much real data lands in that shard. Its `Content-Length` is 7,651,790,
+ * confirmed via `sum(nbytes) + 1204`. Reading it with an entry count derived
+ * from the remaining extent (`ceil(63750/1000) = 64`) is the defect this
+ * fixture exists to pin: the reader would take the last 1028 bytes instead of
+ * 1204, beginning 11 entries into the true footer, and every chunk it served
+ * from this shard would be 11,000 samples (44 s) later than asked for, with
+ * nothing erroring.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -46,27 +60,118 @@ describe("footerByteLength", () => {
 
 describe("nInnerForShard", () => {
   // nm000329 eeg_250hz: shape [63, 138750], shard_samples 75000, chunk_samples 1000.
-  const NM000329 = { shardSamples: 75000, chunkSamples: 1000, nSamples: 138750 };
+  const NM000329 = { shardSamples: 75000, chunkSamples: 1000 };
 
-  test("a full shard (shard 0) has ceil(75000/1000) = 75 inner chunks", () => {
-    expect(nInnerForShard({ shardIndex: 0, ...NM000329 })).toBe(75);
+  test("shard_samples / chunk_samples, for every shard of the array", () => {
+    expect(nInnerForShard(NM000329)).toBe(75);
   });
 
-  test("the boundary (last) shard is truncated: ceil(63750/1000) = 64", () => {
-    // shard 1 covers [75000, 138750) -- only 63750 samples remain.
-    expect(nInnerForShard({ shardIndex: 1, ...NM000329 })).toBe(64);
+  test("takes no shard index and no nSamples: nothing about a shard can change it", () => {
+    // A regression guard on the SIGNATURE, not just the arithmetic. The bug
+    // this replaces computed ceil(min(shardSamples, nSamples - shardStart) /
+    // chunkSamples), which returns 64 for nm000329's boundary shard 1 -- see
+    // the real-shard-1 footer test below for what that misread does. Passing
+    // extra keys is harmless at runtime; what matters is that the function
+    // cannot consult them, so no caller can reintroduce a per-shard count.
+    expect(nInnerForShard.length).toBe(1);
+    const withNoise = { ...NM000329, shardIndex: 1, nSamples: 138750 } as Parameters<
+      typeof nInnerForShard
+    >[0];
+    expect(nInnerForShard(withNoise)).toBe(75);
   });
 
-  test("a partial last shard with a non-round remainder still ceils correctly", () => {
-    // A synthetic geometry: shard_samples 4000, chunk_samples 1000, nSamples
-    // 6500 -- shard 1 covers [4000, 6500), 2500 samples, ceil(2500/1000) = 3.
+  test("the synthetic fixture geometry: 4000/1000 = 4 entries per shard", () => {
+    expect(nInnerForShard({ shardSamples: 4000, chunkSamples: 1000 })).toBe(4);
+  });
+
+  test("throws when shard_samples is not an exact multiple of chunk_samples", () => {
+    // A non-integer result means the index document misdescribes the array,
+    // which is worth raising loudly rather than silently flooring.
+    expect(() => nInnerForShard({ shardSamples: 4500, chunkSamples: 1000 })).toThrow(
+      /not an exact multiple/,
+    );
+  });
+});
+
+describe("parseShardFooter against the REAL captured nm000329 BOUNDARY shard footer", () => {
+  // This is the test that pins the defect. `c/0/1` is the LAST shard of
+  // nm000329's eeg_250hz level-0 array: it covers nominal samples [75000,
+  // 150000) while the array really ends at 138750, so only 63750 samples of
+  // it are real. Captured live and unmodified:
+  //
+  //   curl -s -A "nemar-cli/mcp-phase4" -H "Range: bytes=-1204" \
+  //     -o backend/test/fixtures/mcp/nm000329-shard-index-c-0-1.bin \
+  //     "https://nemar.s3.us-east-2.amazonaws.com/nm000329/zarr/sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-calibration_run-0_eeg.zarr/eeg_250hz/0/c/0/1"
+  //
+  // The shard's own Content-Length is 7,651,790 (captured 2026-09-08).
+  const bytes = new Uint8Array(
+    readFileSync(new URL("./fixtures/mcp/nm000329-shard-index-c-0-1.bin", import.meta.url)),
+  );
+  const N_INNER = nInnerForShard({ shardSamples: 75000, chunkSamples: 1000 });
+  const SHARD_CONTENT_LENGTH = 7_651_790;
+
+  test("the boundary shard's footer carries the SAME 75 entries as a full shard", () => {
+    // The whole defect in one assertion: an entry count derived from the
+    // remaining extent would be ceil(63750/1000) = 64, so the reader would
+    // Range-read footerByteLength(64) = 1028 bytes instead of 1204. That
+    // slice begins 176 bytes -- exactly 11 entries -- into the real footer,
+    // so every local index it parsed was the wrong entry, shifted by 11
+    // chunks (11,000 samples, 44 s at 250 Hz), and nothing errored because
+    // every misread entry still pointed at a real, full-size, cleanly
+    // decoding chunk.
+    expect(N_INNER).toBe(75);
+    expect(bytes.byteLength).toBe(footerByteLength(75));
+    expect(bytes.byteLength).toBe(1204);
+    expect(() => parseShardFooter(bytes, 64)).toThrow();
+  });
+
+  test("64 present entries, 11 absent, in that order", () => {
+    const entries = parseShardFooter(bytes, N_INNER);
+    expect(entries.length).toBe(75);
+    const presentCount = entries.filter((e) => e.present).length;
+    expect(presentCount).toBe(64);
+    // 75000 + 64 * 1000 == 139000 > 138750: local index 63 is the last one
+    // holding real data, and 64 through 74 lie wholly past the array's
+    // extent, so the producer marks them absent rather than omitting them.
+    expect(entries.slice(0, 64).every((e) => e.present)).toBe(true);
+    expect(entries.slice(64).every((e) => !e.present)).toBe(true);
+  });
+
+  test("present offsets chain contiguously from 0 and sum to the real object size", () => {
+    const entries = parseShardFooter(bytes, N_INNER);
+    let expected = 0;
+    let total = 0;
+    for (const entry of entries) {
+      if (!entry.present) continue;
+      expect(entry.offset).toBe(expected);
+      expected = entry.offset + entry.nbytes;
+      total += entry.nbytes;
+    }
+    expect(total).toBe(7_650_586);
+    expect(total + bytes.byteLength).toBe(SHARD_CONTENT_LENGTH);
+  });
+
+  test("the final present entry is the straddling boundary chunk, stored FULL SIZE", () => {
+    const entries = parseShardFooter(bytes, N_INNER);
+    const last = entries[63];
+    if (!last.present) throw new Error("local index 63 must be present");
+    expect(last.offset).toBe(7_560_477);
+    expect(last.nbytes).toBe(90_109);
+    // Nominally [138000, 139000), really only [138000, 138750) -- 750
+    // samples. Fetching these exact bytes and decoding them returns 63,000
+    // values (63 channels x 1000 columns), NOT 63 x 750: Zarr stores a
+    // straddling chunk full size and fill-pads it. That is why a decoded
+    // segment's STRIDE and its VALID SPAN are separate quantities in
+    // `taste.ts`'s DecodedSegment.
     expect(
-      nInnerForShard({ shardIndex: 1, shardSamples: 4000, chunkSamples: 1000, nSamples: 6500 }),
-    ).toBe(3);
-  });
-
-  test("throws for a shard index entirely past nSamples", () => {
-    expect(() => nInnerForShard({ shardIndex: 2, ...NM000329 })).toThrow();
+      chunkSampleSpan({
+        shardIndex: 1,
+        localIndex: 63,
+        shardSamples: 75000,
+        chunkSamples: 1000,
+        nSamples: 138750,
+      }),
+    ).toEqual({ start: 138000, end: 138750 });
   });
 });
 
@@ -103,7 +208,7 @@ describe("parseShardFooter against the REAL captured nm000329 footer", () => {
 
   test("the first entry is offset 0, nbytes 119327 (the chunk render_overview's precedent decodes)", () => {
     const entries = parseShardFooter(bytes, 75);
-    expect(entries[0]).toEqual({ offset: 0, nbytes: 119327, present: true });
+    expect(entries[0]).toEqual({ present: true, offset: 0, nbytes: 119327 });
   });
 
   test("refuses a byte length that does not match footerByteLength(nInner)", () => {
@@ -131,9 +236,9 @@ describe("parseShardFooter: the 2^64 - 1 absent marker", () => {
       { offset: 100n, nbytes: 50n },
     ]);
     const entries = parseShardFooter(bytes, 3);
-    expect(entries[0]).toEqual({ offset: 0, nbytes: 100, present: true });
+    expect(entries[0]).toEqual({ present: true, offset: 0, nbytes: 100 });
     expect(entries[1].present).toBe(false);
-    expect(entries[2]).toEqual({ offset: 100, nbytes: 50, present: true });
+    expect(entries[2]).toEqual({ present: true, offset: 100, nbytes: 50 });
   });
 
   test("a marker in only ONE of the two fields is still treated as absent (defensive)", () => {
@@ -147,23 +252,45 @@ describe("shardsForWindow", () => {
   const SHARD_SAMPLES = 75000;
 
   test("a window inside one shard", () => {
-    expect(shardsForWindow(1000, 2000, SHARD_SAMPLES)).toEqual([0]);
+    expect(
+      shardsForWindow({ startSample: 1000, endSampleExclusive: 2000, shardSamples: SHARD_SAMPLES }),
+    ).toEqual([0]);
   });
 
   test("a window spanning two shards", () => {
-    expect(shardsForWindow(74000, 76000, SHARD_SAMPLES)).toEqual([0, 1]);
+    expect(
+      shardsForWindow({
+        startSample: 74000,
+        endSampleExclusive: 76000,
+        shardSamples: SHARD_SAMPLES,
+      }),
+    ).toEqual([0, 1]);
   });
 
   test("a window ending exactly on a shard boundary excludes the next shard", () => {
-    expect(shardsForWindow(70000, 75000, SHARD_SAMPLES)).toEqual([0]);
+    expect(
+      shardsForWindow({
+        startSample: 70000,
+        endSampleExclusive: 75000,
+        shardSamples: SHARD_SAMPLES,
+      }),
+    ).toEqual([0]);
   });
 
   test("a window starting exactly on a shard boundary excludes the previous shard", () => {
-    expect(shardsForWindow(75000, 76000, SHARD_SAMPLES)).toEqual([1]);
+    expect(
+      shardsForWindow({
+        startSample: 75000,
+        endSampleExclusive: 76000,
+        shardSamples: SHARD_SAMPLES,
+      }),
+    ).toEqual([1]);
   });
 
   test("an empty (end <= start) window spans no shards", () => {
-    expect(shardsForWindow(1000, 1000, SHARD_SAMPLES)).toEqual([]);
+    expect(
+      shardsForWindow({ startSample: 1000, endSampleExclusive: 1000, shardSamples: SHARD_SAMPLES }),
+    ).toEqual([]);
   });
 });
 
@@ -241,7 +368,7 @@ describe("planShardReads: coalescing", () => {
   function present(offset: number, nbytes: number): ShardIndexEntry {
     return { offset, nbytes, present: true };
   }
-  const absent: ShardIndexEntry = { offset: 0, nbytes: 0, present: false };
+  const absent: ShardIndexEntry = { present: false };
 
   test("a run of byte-adjacent, index-consecutive present entries coalesces into one range read", () => {
     const entries = [present(0, 100), present(100, 50), present(150, 75)];
@@ -264,7 +391,7 @@ describe("planShardReads: coalescing", () => {
     const reads = planShardReads(entries, [0, 1, 2]);
     expect(reads).toEqual([
       { kind: "range", localIndices: [0], start: 0, end: 99 },
-      { kind: "absent", localIndices: [1] },
+      { kind: "absent", localIndex: 1 },
       { kind: "range", localIndices: [2], start: 100, end: 149 },
     ]);
   });
@@ -313,9 +440,9 @@ describe("planShardReads: coalescing", () => {
 describe("shardEntriesToPairs / shardEntriesFromPairs (cache serialization)", () => {
   test("round-trips present and absent entries", () => {
     const entries: ShardIndexEntry[] = [
-      { offset: 0, nbytes: 100, present: true },
-      { offset: 0, nbytes: 0, present: false },
-      { offset: 100, nbytes: 50, present: true },
+      { present: true, offset: 0, nbytes: 100 },
+      { present: false },
+      { present: true, offset: 100, nbytes: 50 },
     ];
     const pairs = shardEntriesToPairs(entries);
     expect(pairs).toEqual([

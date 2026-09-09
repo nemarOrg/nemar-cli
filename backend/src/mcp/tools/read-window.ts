@@ -39,11 +39,23 @@
  * zarr sub-app). Adjacent, byte-contiguous chunks within one shard coalesce
  * into one `Range` request (`sharding.ts`'s `planShardReads`); an absent
  * inner chunk (the Zarr `2^64 - 1` marker) contributes the fill value with
- * no fetch at all. Two projection-cache kinds back this
+ * no fetch at all, and its span is reported in the response's
+ * `filled_ranges` (ADR 0005: partial data is reported, never silently
+ * substituted). Two projection-cache kinds back this
  * (`array/<zarr>/<group>/0` for the level-0 `zarr.json`,
  * `shardidx/<zarr>/<group>/0/<j>` for one shard's parsed footer), both
  * immutable per `(dataset_id, source_commit)`; decoded WINDOWS are never
  * cached -- a taste is an inline decode of a specific window on demand.
+ *
+ * **Every `Range` fetch is validated, not just trusted.** `fetchRangeBytes`
+ * is the ONE call site both the footer read and the chunk read go through:
+ * a response to a `Range` request MUST be `206` (a compliant origin never
+ * answers `200` to one), and its body length must equal exactly what was
+ * asked for. An origin that silently ignores `Range` and returns the whole
+ * object would otherwise decode cleanly (the object's leading bytes are
+ * still real, full-length chunks -- just the WRONG ones) and hand back
+ * plausible signal from the wrong point in the recording; this is checked,
+ * not assumed.
  *
  * **Three caps guard a taste**, none of them the phase 1 product-only check
  * alone (see `shared/contract/mcp.ts`'s `READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES`
@@ -51,17 +63,18 @@
  * `READ_WINDOW_TASTE_MAX_CHANNELS` (64) are schema-level hard caps
  * (`readWindowInputSchema`'s `superRefine`); `READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES`
  * (65,536) cannot be schema-enforced (the schema does not know a group's
- * rate) and is checked here, right after the group's rate is known, naming
- * the rate, the computed `channels.length x n_samples`, the cap, and the two
- * ways to get under it.
+ * rate) and is checked here, right after the group's rate is known
+ * (`exceedsChannelSamplesCap`, `taste.ts`), naming the rate, the computed
+ * `channels.length x n_samples`, the cap, and the two ways to get under it.
  *
  * **The taste response is not duplicated into `content`.** Every other tool
  * puts `JSON.stringify(output)` in both `content` and `structuredContent`;
  * for a taste at the cap that would put ~900 KB of numbers in `content`
  * twice. Taste mode's `content` is a compact one-line summary instead
- * (shape, rate, sample range, bytes/chunks read, the first few values of the
- * first channel); `structuredContent` still carries the full object. Recipe
- * mode keeps the both-places convention -- it is small.
+ * (shape, rate, sample range, bytes/chunks read, filled-range count, the
+ * first few values of the first channel); `structuredContent` still carries
+ * the full object. Recipe mode keeps the both-places convention -- it is
+ * small.
  */
 
 import type { CallToolResult } from "@modelcontextprotocol/server";
@@ -99,7 +112,13 @@ import {
   shardEntriesToPairs,
   shardsForWindow,
 } from "../sharding.js";
-import { type DecodedSegment, TASTE_SIGNIFICANT_DIGITS, assembleTasteValues } from "../taste.js";
+import {
+  type DecodedSegment,
+  type FilledRange,
+  TASTE_SIGNIFICANT_DIGITS,
+  assembleTasteValues,
+  exceedsChannelSamplesCap,
+} from "../taste.js";
 import type { RecordingToolDeps, ToolOutcome } from "../tool-types.js";
 
 function toolError(text: string): CallToolResult {
@@ -166,6 +185,20 @@ function durationOutOfRangeResult(opts: {
   );
 }
 
+function zeroSampleWindowResult(opts: {
+  datasetId: string;
+  recording: string;
+  groupName: string;
+  durationS: number;
+  rate: number;
+}): CallToolResult {
+  const { datasetId, recording, groupName, durationS, rate } = opts;
+  return toolError(
+    `duration_s (${durationS} s) rounds to 0 samples at ${rate} Hz for group "${groupName}" of ` +
+      `recording "${recording}" in dataset "${datasetId}". Use a longer duration_s.`,
+  );
+}
+
 function channelOutOfRangeResult(opts: {
   datasetId: string;
   recording: string;
@@ -190,6 +223,12 @@ function noShardingGeometryResult(
   );
 }
 
+function channelsRequiredResult(): CallToolResult {
+  return toolError(
+    "taste requires channels: name the channel indices you want (list_recordings reports each group's n_channels), or omit taste for a recipe",
+  );
+}
+
 function channelSamplesCapResult(opts: {
   datasetId: string;
   recording: string;
@@ -206,13 +245,61 @@ function channelSamplesCapResult(opts: {
 }
 
 /** Cached shard-footer payload shape: `[offset, nbytes]` pairs, `[-1, -1]`
- *  meaning absent (`sharding.ts`'s `shardEntriesToPairs`/`shardEntriesFromPairs`). */
-const shardIndexProjectionSchema = z.array(z.tuple([z.number(), z.number()]));
+ *  meaning absent (`sharding.ts`'s `shardEntriesToPairs`/`shardEntriesFromPairs`).
+ *  A pair that is NEITHER `[-1, -1]` NOR both non-negative (e.g. a corrupt
+ *  `[-1, 240]`) fails this schema outright -- `readJsonProjection` then
+ *  treats the whole cache entry as a miss rather than handing
+ *  `shardEntriesFromPairs` a value it would otherwise trust blindly
+ *  (`subarray` clamps a negative index rather than throwing). */
+const shardIndexPairSchema = z
+  .tuple([z.number(), z.number()])
+  .refine(([offset, nbytes]) => (offset === -1 && nbytes === -1) || (offset >= 0 && nbytes >= 0), {
+    message: "a shard-index pair must be [-1, -1] (absent) or both non-negative (present)",
+  });
+const shardIndexProjectionSchema = z.array(shardIndexPairSchema);
 
 interface ShardFooterLoaded {
   entries: ShardIndexEntry[];
   cacheStatus: "hit" | "miss";
   bytes: number;
+}
+
+/**
+ * Fetch and validate ONE `Range` response -- the single call site both
+ * {@link loadShardFooter} and {@link fetchAndDecodeRangeRead} go through, so
+ * they cannot drift apart on what "a valid Range response" means. A
+ * compliant origin ALWAYS answers `206` to a `Range` request; a bare `200`
+ * means the origin ignored `Range` and returned the whole object, which
+ * would silently misalign every downstream byte offset (see the module
+ * doc). The body length is asserted against `expectedLength` too -- a `206`
+ * with the wrong slice is just as wrong as a `200`.
+ */
+async function fetchRangeBytes(
+  deps: RecordingToolDeps,
+  url: string,
+  rangeHeader: string,
+  expectedLength: number,
+): Promise<{ buf: Uint8Array } | { error: string }> {
+  let response: Response;
+  try {
+    response = await deps.fetch(url, { headers: { Range: rangeHeader } });
+  } catch (err) {
+    return {
+      error: `network error fetching ${url}: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  if (response.status !== 206) {
+    return {
+      error: `HTTP ${response.status} fetching ${url} with Range ${rangeHeader} (expected 206; a bare 200 means the origin ignored Range and would misalign every byte offset)`,
+    };
+  }
+  const buf = new Uint8Array(await response.arrayBuffer());
+  if (buf.length !== expectedLength) {
+    return {
+      error: `${url} (Range ${rangeHeader}) returned ${buf.length} bytes, expected exactly ${expectedLength}`,
+    };
+  }
+  return { buf };
 }
 
 async function loadShardFooter(
@@ -237,31 +324,20 @@ async function loadShardFooter(
 
   const footerLen = footerByteLength(nInner);
   const url = `${dataBase}${zarr}/${groupName}/0/c/0/${shardIndex}`;
-  let response: Response;
-  try {
-    response = await deps.fetch(url, { headers: { Range: `bytes=-${footerLen}` } });
-  } catch (err) {
-    return {
-      error: `network error fetching shard footer ${url}: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
-  if (response.status !== 206 && response.status !== 200) {
-    return { error: `HTTP ${response.status} fetching shard footer ${url}` };
-  }
-  const buf = new Uint8Array(await response.arrayBuffer());
-  if (buf.length !== footerLen) {
-    return { error: `shard footer ${url} returned ${buf.length} bytes, expected ${footerLen}` };
+  const fetched = await fetchRangeBytes(deps, url, `bytes=-${footerLen}`, footerLen);
+  if ("error" in fetched) {
+    return { error: fetched.error };
   }
   let entries: ShardIndexEntry[];
   try {
-    entries = parseShardFooter(buf, nInner);
+    entries = parseShardFooter(fetched.buf, nInner);
   } catch (err) {
     return {
       error: `shard footer ${url} failed to parse: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
   writeJsonProjection(deps.executionCtx, deps.cache(), cacheKey, shardEntriesToPairs(entries));
-  return { entries, cacheStatus: "miss", bytes: buf.length };
+  return { entries, cacheStatus: "miss", bytes: fetched.buf.length };
 }
 
 interface RangeReadResult {
@@ -271,14 +347,19 @@ interface RangeReadResult {
 
 /** Fetch and decode one coalesced `"range"` read -- one HTTP `Range` GET,
  *  possibly covering several inner chunks, sliced apart per {@link entries}'
- *  own recorded byte offsets and decoded individually. */
+ *  own recorded byte offsets and decoded individually. The decoded-length
+ *  check asserts against `nChannelsInStore x chunkSamples` -- the NOMINAL
+ *  stride every present chunk decodes to, never the chunk's truncated VALID
+ *  span (`chunkSampleSpan`'s `end - start`), which is narrower than the
+ *  stride for exactly one chunk per array (the final boundary one) and was
+ *  the source of a real corruption bug (`sharding.ts`'s module doc). */
 async function fetchAndDecodeRangeRead(opts: {
   deps: RecordingToolDeps;
   dataBase: string;
   zarr: string;
   groupName: string;
   shardIndex: number;
-  read: ChunkRead;
+  read: Extract<ChunkRead, { kind: "range" }>;
   entries: ShardIndexEntry[];
   nChannelsInStore: number;
   shardSamples: number;
@@ -299,22 +380,27 @@ async function fetchAndDecodeRangeRead(opts: {
     nSamplesTotal,
   } = opts;
   const url = `${dataBase}${zarr}/${groupName}/0/c/0/${shardIndex}`;
-  let response: Response;
-  try {
-    response = await deps.fetch(url, { headers: { Range: `bytes=${read.start}-${read.end}` } });
-  } catch (err) {
-    return {
-      error: `network error fetching ${url}: ${err instanceof Error ? err.message : String(err)}`,
-    };
+  const expectedLength = read.end - read.start + 1;
+  const fetched = await fetchRangeBytes(
+    deps,
+    url,
+    `bytes=${read.start}-${read.end}`,
+    expectedLength,
+  );
+  if ("error" in fetched) {
+    return { error: fetched.error };
   }
-  if (response.status !== 206 && response.status !== 200) {
-    return { error: `HTTP ${response.status} fetching ${url}` };
-  }
-  const buf = new Uint8Array(await response.arrayBuffer());
-  const runStart = read.start as number;
+  const buf = fetched.buf;
+  const runStart = read.start;
   const segments: DecodedSegment[] = [];
   for (const localIndex of read.localIndices) {
     const entry = entries[localIndex];
+    if (!entry?.present) {
+      // planShardReads only ever puts a PRESENT entry's local index into a
+      // "range" read's localIndices -- reaching here with an absent one
+      // would be a caller/planner bug, not a data condition.
+      return { error: `shard ${shardIndex} chunk ${localIndex}: footer entry is not present` };
+    }
     const relStart = entry.offset - runStart;
     const chunkBytes = buf.subarray(relStart, relStart + entry.nbytes);
     let decoded: Int16Array;
@@ -325,6 +411,14 @@ async function fetchAndDecodeRangeRead(opts: {
         error: `shard ${shardIndex} chunk ${localIndex} failed to decode: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
+    const expectedLen = nChannelsInStore * chunkSamples;
+    if (decoded.length !== expectedLen) {
+      return {
+        error:
+          `shard ${shardIndex} chunk ${localIndex} decoded to ${decoded.length} values, expected ` +
+          `${expectedLen} (${nChannelsInStore} channels x ${chunkSamples} chunk_samples)`,
+      };
+    }
     const span = chunkSampleSpan({
       shardIndex,
       localIndex,
@@ -332,15 +426,7 @@ async function fetchAndDecodeRangeRead(opts: {
       chunkSamples,
       nSamples: nSamplesTotal,
     });
-    const expectedLen = nChannelsInStore * (span.end - span.start);
-    if (decoded.length !== expectedLen) {
-      return {
-        error:
-          `shard ${shardIndex} chunk ${localIndex} decoded to ${decoded.length} values, expected ` +
-          `${expectedLen} (${nChannelsInStore} channels x ${span.end - span.start} samples)`,
-      };
-    }
-    segments.push({ start: span.start, end: span.end, data: decoded });
+    segments.push({ start: span.start, end: span.end, stride: chunkSamples, data: decoded });
   }
   return { segments, bytes: buf.length };
 }
@@ -366,14 +452,42 @@ function envelopeStoreInput(store: ZarrStore) {
   };
 }
 
-function buildTasteSummary(output: Extract<ReadWindowOutput, { mode: "taste" }>): string {
+/** Accepts a minimal STRUCTURAL type (only the fields this function reads)
+ *  rather than `ReadWindowOutput` (or a narrowed slice of it) -- there is
+ *  then nothing to narrow or cast at the call site: the freshly-built taste
+ *  object already has this shape before it is ever handed to
+ *  `readWindowOutputSchema.parse`. */
+function buildTasteSummary(output: {
+  channels: number[];
+  values: number[][];
+  sample_rate_hz: number;
+  start_s: number;
+  duration_s: number;
+  bytes_read: number;
+  chunks_read: number;
+  filled_ranges: unknown[];
+}): string {
   const nSamples = output.values[0]?.length ?? 0;
   const head = output.values[0]?.slice(0, 5) ?? [];
+  const filledNote =
+    output.filled_ranges.length > 0 ? ` filled_ranges=${output.filled_ranges.length}` : "";
   return (
     `read_window taste: shape=[${output.channels.length},${nSamples}] rate_hz=${output.sample_rate_hz} ` +
     `start_s=${output.start_s} duration_s=${output.duration_s} bytes_read=${output.bytes_read} ` +
-    `chunks_read=${output.chunks_read} first_channel_head=${JSON.stringify(head)}`
+    `chunks_read=${output.chunks_read}${filledNote} first_channel_head=${JSON.stringify(head)}`
   );
+}
+
+function toWireFilledRanges(
+  ranges: FilledRange[],
+  rate: number,
+): Array<{ start_sample: number; end_sample: number; start_s: number; end_s: number }> {
+  return ranges.map((r) => ({
+    start_sample: r.start,
+    end_sample: r.end,
+    start_s: r.start / rate,
+    end_s: r.end / rate,
+  }));
 }
 
 export async function readWindowTool(
@@ -458,6 +572,18 @@ export async function readWindowTool(
       }),
     };
   }
+  const windowSamples = endSample - startSample;
+  if (windowSamples < 1) {
+    return {
+      result: zeroSampleWindowResult({
+        datasetId: args.dataset_id,
+        recording: args.recording,
+        groupName: targetGroup.name,
+        durationS: args.duration_s,
+        rate,
+      }),
+    };
+  }
   if (args.channels) {
     const badChannel = args.channels.find((c) => c >= nChannelsGroup);
     if (badChannel !== undefined) {
@@ -519,16 +645,30 @@ export async function readWindowTool(
     };
   }
 
-  // Taste mode from here.
-  const channels = args.channels as number[]; // schema guarantees presence when taste is true
+  // Taste mode from here. The schema already requires a non-empty `channels`
+  // when `taste` is true, but zod's `superRefine` does not narrow the
+  // INFERRED type, so `args.channels` still types as optional here -- this
+  // is a real, cheap guard (not a redundant cast) against ever reaching
+  // `channels.length` on `undefined` if the SDK's own validation were ever
+  // bypassed.
+  if (!args.channels || args.channels.length === 0) {
+    return { result: channelsRequiredResult() };
+  }
+  const channels = args.channels;
+
   if (!targetGroup.chunk_samples || !targetGroup.shard_samples) {
     return { result: noShardingGeometryResult(args.dataset_id, args.recording, targetGroup.name) };
   }
   const chunkSamples = targetGroup.chunk_samples;
   const shardSamples = targetGroup.shard_samples;
 
-  const windowSamples = endSample - startSample;
-  if (channels.length * windowSamples > READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES) {
+  if (
+    exceedsChannelSamplesCap({
+      channelCount: channels.length,
+      windowSamples,
+      cap: READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES,
+    })
+  ) {
     return {
       result: channelSamplesCapResult({
         datasetId: args.dataset_id,
@@ -571,14 +711,13 @@ export async function readWindowTool(
   let chunksRead = 0;
   const segments: DecodedSegment[] = [];
 
-  const shardIndices = shardsForWindow(startSample, endSample, shardSamples);
+  const shardIndices = shardsForWindow({
+    startSample,
+    endSampleExclusive: endSample,
+    shardSamples,
+  });
   for (const shardIndex of shardIndices) {
-    const nInner = nInnerForShard({
-      shardIndex,
-      shardSamples,
-      chunkSamples,
-      nSamples: nSamplesGroup,
-    });
+    const nInner = nInnerForShard({ shardSamples, chunkSamples });
     const footer = await loadShardFooter(
       deps,
       args.dataset_id,
@@ -611,15 +750,14 @@ export async function readWindowTool(
     const reads = planShardReads(footer.entries, localIndices);
     for (const read of reads) {
       if (read.kind === "absent") {
-        const localIndex = read.localIndices[0];
         const span = chunkSampleSpan({
           shardIndex,
-          localIndex,
+          localIndex: read.localIndex,
           shardSamples,
           chunkSamples,
           nSamples: nSamplesGroup,
         });
-        segments.push({ start: span.start, end: span.end, data: null });
+        segments.push({ start: span.start, end: span.end, stride: chunkSamples, data: null });
         continue;
       }
       const fetched = await fetchAndDecodeRangeRead({
@@ -649,9 +787,9 @@ export async function readWindowTool(
     }
   }
 
-  let values: number[][];
+  let assembled: { values: number[][]; filledRanges: FilledRange[] };
   try {
-    values = assembleTasteValues({
+    assembled = assembleTasteValues({
       channels,
       startSample,
       nSamples: windowSamples,
@@ -669,6 +807,8 @@ export async function readWindowTool(
       ),
     };
   }
+  const { values, filledRanges } = assembled;
+  const wireFilledRanges = toWireFilledRanges(filledRanges, rate);
 
   const channelSlice = { start: Math.min(...channels), end: Math.max(...channels) + 1 };
   const recipe = buildReadRecipe({
@@ -698,8 +838,18 @@ export async function readWindowTool(
     };
   }
 
-  const output = readWindowOutputSchema.parse({
-    mode: "taste",
+  const notes = [
+    "values are rounded to six significant digits; see recipe for the exact byte-level read",
+  ];
+  if (wireFilledRanges.length > 0) {
+    const totalFilled = filledRanges.reduce((sum, r) => sum + (r.end - r.start), 0);
+    notes.push(
+      `${wireFilledRanges.length} span(s) totalling ${totalFilled} sample(s) had no stored chunk and were filled with the channel's baseline offset rather than recorded signal -- see filled_ranges.`,
+    );
+  }
+
+  const tasteOutput = {
+    mode: "taste" as const,
     start_s: startSample / rate,
     duration_s: windowSamples / rate,
     channels,
@@ -708,18 +858,15 @@ export async function readWindowTool(
     recipe,
     chunks_read: chunksRead,
     bytes_read: bytesRead,
-    note: "values are rounded to six significant digits; see recipe for the exact byte-level read",
+    filled_ranges: wireFilledRanges,
+    note: notes.join(" "),
     envelope: built.envelope,
-  } satisfies ReadWindowOutput);
+  };
+  const output = readWindowOutputSchema.parse(tasteOutput satisfies ReadWindowOutput);
 
   return {
     result: {
-      content: [
-        {
-          type: "text",
-          text: buildTasteSummary(output as Extract<ReadWindowOutput, { mode: "taste" }>),
-        },
-      ],
+      content: [{ type: "text", text: buildTasteSummary(tasteOutput) }],
       structuredContent: output,
     },
     metrics: { cacheStatus: cacheHitEverywhere ? "hit" : "miss", upstreamBytes: bytesRead },

@@ -614,7 +614,9 @@ export const readWindowInputSchema4 = z4
   .passthrough()
   .superRefine((val, ctx) => {
     if (!val.taste) return;
-    if (val.channels === undefined) {
+    // Mirrors the zod 3 contract's identical fix: an EMPTY array is not
+    // `undefined` and used to slip past this guard.
+    if (!val.channels || val.channels.length === 0) {
       ctx.addIssue({
         code: z4.ZodIssueCode.custom,
         message:
@@ -667,13 +669,51 @@ const readWindowTasteResultSchema4 = z4
     sample_rate_hz: z4.number(),
     values: z4
       .array(z4.array(z4.number()))
-      .describe("[channel][sample], already scaled to physical units."),
+      .describe(
+        "[channel][sample], already scaled to physical units and rounded to six significant digits.",
+      ),
     recipe: readRecipeSchema4.describe(
       "A fully-populated recipe -- this taste already fetched the array metadata.",
     ),
-    chunks_read: z4.number().int().nonnegative(),
-    bytes_read: z4.number().int().nonnegative(),
-    note: z4.string().nullable().optional(),
+    chunks_read: z4
+      .number()
+      .int()
+      .nonnegative()
+      .describe(
+        "How many inner chunks were actually fetched and decoded; an absent, fill-valued chunk contributes 0.",
+      ),
+    bytes_read: z4
+      .number()
+      .int()
+      .nonnegative()
+      .describe(
+        "Total upstream bytes fetched for this call: the array-metadata GET (0 on a cache hit) " +
+          "plus every shard-footer Range read plus every inner-chunk Range read (each 0 on a cache hit).",
+      ),
+    filled_ranges: z4
+      .array(
+        z4
+          .object({
+            start_sample: z4.number().int().nonnegative(),
+            end_sample: z4.number().int().nonnegative(),
+            start_s: z4.number(),
+            end_s: z4.number(),
+          })
+          .passthrough(),
+      )
+      .describe(
+        "Every sample span (clipped to this window) that had no stored inner chunk and was " +
+          "fill-substituted with the channel's baseline offset rather than real recorded data. " +
+          "Always present, even when empty.",
+      ),
+    note: z4
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        "A caveat to surface verbatim -- always names the six-significant-digit rounding; also " +
+          "names filled_ranges when non-empty.",
+      ),
     envelope: provenanceEnvelopeSchema4,
   })
   .passthrough();

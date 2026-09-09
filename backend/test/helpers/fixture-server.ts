@@ -21,6 +21,15 @@
  * exactly which keys the code under test actually fetched -- the "reads
  * only `view/<L>/` keys" evidence `render_overview`'s definition of done
  * asks for.
+ *
+ * `ignoreRangeForKeys` (epic #1065 phase 4, issue #1296 PR review item 2):
+ * an OPT-IN, off-by-default `Set`, mutable on the returned server like
+ * `files` -- a key added to it makes the server answer a `Range` request
+ * with a bare `200` and the FULL body instead of `206`, standing in for a
+ * non-compliant (or Range-stripping) origin. Exists so `read_window`'s
+ * "reject a Range-ignoring response outright" behavior is tested against a
+ * real server producing that exact shape, not asserted from reading the
+ * code alone.
  */
 
 export interface FixtureRequestLogEntry {
@@ -41,6 +50,9 @@ export interface FixtureServer {
    *  known. */
   files: Map<string, Uint8Array>;
   requestLog: FixtureRequestLogEntry[];
+  /** Keys in this set answer any `Range` request with a bare `200` + the
+   *  full body instead of `206` -- off (empty) by default. */
+  ignoreRangeForKeys: Set<string>;
   stop(): void;
 }
 
@@ -72,6 +84,7 @@ function parseSingleRange(header: string, length: number): { start: number; end:
 export function startFixtureServer(initialFiles: Record<string, Uint8Array> = {}): FixtureServer {
   const files = new Map<string, Uint8Array>(Object.entries(initialFiles));
   const requestLog: FixtureRequestLogEntry[] = [];
+  const ignoreRangeForKeys = new Set<string>();
 
   const server = Bun.serve({
     port: 0,
@@ -89,7 +102,7 @@ export function startFixtureServer(initialFiles: Record<string, Uint8Array> = {}
       // sent" rather than fabricating one.
       const etag = `"fixture-${key.length}-${bytes.length}"`;
 
-      if (range) {
+      if (range && !ignoreRangeForKeys.has(key)) {
         const parsed = parseSingleRange(range, bytes.length);
         if (!parsed) {
           return new Response(null, {
@@ -125,6 +138,7 @@ export function startFixtureServer(initialFiles: Record<string, Uint8Array> = {}
     url: `http://localhost:${server.port}`,
     files,
     requestLog,
+    ignoreRangeForKeys,
     stop: () => server.stop(true),
   };
 }
