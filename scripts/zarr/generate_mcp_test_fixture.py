@@ -118,7 +118,16 @@ N_COLUMNS = 132
 LEVEL = 3
 
 MULTI_N_CHANNELS = 4
-MULTI_CHUNK_COLUMNS = (50, 50, 17)
+# Nominal chunk stride and the level's real column count. THREE chunks of 50,
+# the last carrying 17 real columns and 33 of `fill_value` 0 -- because that is
+# what Zarr writes. This used to be `(50, 50, 17)`, a genuinely truncated tail
+# chunk that no store contains, and that fixture is why the suite stayed green
+# while `render_overview` threw a RangeError on nm000329's DEFAULT width: the
+# reassembler inferred each chunk's width from its decoded length, so a padded
+# boundary chunk pushed every later column past the end. Same trap as the
+# level-0 shard footer above, one axis over.
+MULTI_CHUNK_STRIDE = 50
+MULTI_TOTAL_COLUMNS = 117
 
 # Sharded level-0 fixture (epic #1065 phase 4, issue #1296) -- see the module
 # docstring's "GEOMETRY (sharded level-0 fixture...)" section.
@@ -153,20 +162,23 @@ def build_minmax_envelope() -> np.ndarray:
     return data
 
 
-def build_multichunk_envelope(n_columns: int, column_offset: int) -> np.ndarray:
-    """[2, MULTI_N_CHANNELS, n_columns] int16 for one chunk of the
-    multi-chunk fixture -- `column_offset` shifts the sine phase so
-    consecutive chunks visibly continue one another rather than each
-    starting the wave over."""
-    data = np.zeros((2, MULTI_N_CHANNELS, n_columns), dtype=np.int16)
-    columns = np.arange(column_offset, column_offset + n_columns)
+def build_multichunk_envelope(valid_columns: int, column_offset: int) -> np.ndarray:
+    """[2, MULTI_N_CHANNELS, MULTI_CHUNK_STRIDE] int16 for one chunk of the
+    multi-chunk fixture. ALWAYS the full stride: only the first
+    `valid_columns` hold signal, the rest stay at `fill_value` 0, which is how
+    Zarr stores a boundary chunk. `column_offset` shifts the sine phase so
+    consecutive chunks visibly continue one another rather than each starting
+    the wave over."""
+    data = np.zeros((2, MULTI_N_CHANNELS, MULTI_CHUNK_STRIDE), dtype=np.int16)
+    columns = np.arange(column_offset, column_offset + valid_columns)
     for ch in range(MULTI_N_CHANNELS):
         amplitude = 300 * (ch + 1)
         period = 15 + ch * 4
         center = np.sin(2 * math.pi * columns / period) * amplitude
         spread = 30 + ch * 5
-        data[0, ch, :] = (center - spread).astype(np.int16)
-        data[1, ch, :] = (center + spread).astype(np.int16)
+        data[0, ch, :valid_columns] = (center - spread).astype(np.int16)
+        data[1, ch, :valid_columns] = (center + spread).astype(np.int16)
+        # columns valid_columns: left at fill_value 0
     return data
 
 
@@ -393,14 +405,18 @@ def main() -> None:
     OUT_PATH.write_bytes(encoded)
     print(f"wrote {OUT_PATH} ({len(encoded)} bytes, decoded shape {data.shape})")
 
-    offset = 0
-    for k, n_columns in enumerate(MULTI_CHUNK_COLUMNS):
-        chunk_data = build_multichunk_envelope(n_columns, offset)
+    n_multi_chunks = math.ceil(MULTI_TOTAL_COLUMNS / MULTI_CHUNK_STRIDE)
+    for k in range(n_multi_chunks):
+        offset = k * MULTI_CHUNK_STRIDE
+        valid = min(MULTI_CHUNK_STRIDE, MULTI_TOTAL_COLUMNS - offset)
+        chunk_data = build_multichunk_envelope(valid, offset)
         chunk_encoded = codec.encode(chunk_data)
         chunk_path = FIXTURES_DIR / f"nm000329-synthetic-multichunk-view1-c-0-0-{k}.bin"
         chunk_path.write_bytes(chunk_encoded)
-        print(f"wrote {chunk_path} ({len(chunk_encoded)} bytes, decoded shape {chunk_data.shape})")
-        offset += n_columns
+        print(
+            f"wrote {chunk_path} ({len(chunk_encoded)} bytes, decoded shape "
+            f"{chunk_data.shape}, {valid} valid columns)"
+        )
 
     build_sharded_level0_fixture()
 

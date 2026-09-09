@@ -139,14 +139,22 @@ export function createMcpRoutes(deps: McpRoutesDeps = defaultDeps): Hono<{ Bindi
   // for the full rationale) -- this sub-app dispatches straight from the
   // host fork in index.ts, bypassing the api middleware stack (and its
   // rate limiter) the same way the zarr sub-app does. No redirect/observe-only
-  // concept here (MCP has none), so this is the bridge alone: default
-  // buckets, so an anonymous caller lands in `ip`.
+  // concept here (MCP has none).
+  //
+  // `anonymousSurface` is REQUIRED here, not a tuning knob. This server has no
+  // authentication whatsoever, but `/mcp` matches none of the limiter's path
+  // patterns, so without it any caller sending a 32-character `Authorization`
+  // bearer -- which nothing here validates -- selected the token bucket instead
+  // of the IP one: a fresh 1000/min allowance per rotated string, and a D1
+  // `tokens`-to-`users` lookup per novel token. See RateLimiterOptions.
   app.use("*", async (c, next) => {
     if (c.req.method === "OPTIONS") return next();
     // SAFETY: see zarr-data.ts's identical cast for the full justification --
     // rateLimiter only touches c.env, c.req, and c.json, all present on any
     // Hono context regardless of the static Variables generic.
-    const res = await rateLimiter(c as unknown as Parameters<typeof rateLimiter>[0], next);
+    const res = await rateLimiter(c as unknown as Parameters<typeof rateLimiter>[0], next, {
+      anonymousSurface: true,
+    });
     if (res && res.status === 429) {
       for (const [k, v] of Object.entries(mcpCorsHeaders(c.req.header("origin") ?? null))) {
         res.headers.set(k, v);

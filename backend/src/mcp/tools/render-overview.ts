@@ -206,17 +206,35 @@ export async function renderOverviewTool(
       };
     }
 
-    const reassembled = reassembleViewChunks({
-      nChannels,
-      totalColumns: levelColumns,
-      chunks: decodedChunks,
-    });
-    const rendered = renderOverviewPng({
-      nChannels,
-      totalColumns: levelColumns,
-      widthPx: args.width_px,
-      data: reassembled,
-    });
+    // Inside the try, not after it. `reassembleViewChunks` throws when a store's
+    // real geometry disagrees with what the index reported, and that is a
+    // fidelity problem about someone else's data, not a bug in this request --
+    // so it has to come back as this file's typed tool error like every other
+    // failure here. Left outside, it escaped as an opaque JSON-RPC internal
+    // error, which is how the padded-boundary-chunk defect presented.
+    let rendered: { png: Uint8Array };
+    try {
+      const reassembled = reassembleViewChunks({
+        nChannels,
+        totalColumns: levelColumns,
+        chunkColumns: chunkPlan.chunkColumns,
+        chunks: decodedChunks,
+      });
+      rendered = renderOverviewPng({
+        nChannels,
+        totalColumns: levelColumns,
+        widthPx: args.width_px,
+        data: reassembled,
+      });
+    } catch (err) {
+      return {
+        result: chunkFetchFailedResult(
+          args.dataset_id,
+          args.recording,
+          err instanceof Error ? err.message : String(err),
+        ),
+      };
+    }
     pngBytes = rendered.png;
     columnsRead = levelColumns;
     chunksRead = chunkPlan.chunkKeys.length;

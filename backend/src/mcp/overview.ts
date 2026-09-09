@@ -69,19 +69,29 @@ export interface ChunkPlan {
 }
 
 /** `chunkColumns` defaults to 1024 (the producer's own default) when the
- *  group carries no `view_chunk_columns`. A level whose own column count is
- *  <= `chunkColumns` naturally produces exactly one key covering the whole
- *  level -- no special-casing "is this the last level" is needed; the
- *  `ceil` below already does the right thing for nm000329's level 5 (135
- *  columns, one chunk of `chunk_columns: 135`) and level 4 (541 columns,
- *  also one chunk) alike. */
+ *  group carries no `view_chunk_columns`, and is then CLAMPED to the level's
+ *  own column count, because that is the chunk shape the producer actually
+ *  writes. Measured against nm000329's `eeg_250hz` view arrays, whose
+ *  `zarr.json` chunk grids are:
+ *
+ *      view/1  shape [2, 63, 34687]  chunk [2, 63, 1024]
+ *      view/2  shape [2, 63,  8671]  chunk [2, 63, 1024]
+ *      view/3  shape [2, 63,  2167]  chunk [2, 63, 1024]
+ *      view/4  shape [2, 63,   541]  chunk [2, 63,  541]   <- clamped
+ *      view/5  shape [2, 63,   135]  chunk [2, 63,  135]   <- clamped
+ *
+ *  So a level at or below `view_chunk_columns` is one chunk whose shape IS the
+ *  level, and `chunkColumns` has to say 541 rather than 1024 for level 4 --
+ *  {@link reassembleViewChunks} uses it as the per-chunk stride, and an
+ *  unclamped 1024 there would reject a perfectly good single-chunk level. */
 export function buildChunkPlan(opts: {
   level: number;
   levelColumns: number;
   viewChunkColumns?: number | null;
 }): ChunkPlan {
-  const chunkColumns =
+  const configured =
     opts.viewChunkColumns && opts.viewChunkColumns > 0 ? opts.viewChunkColumns : 1024;
+  const chunkColumns = Math.max(1, Math.min(configured, opts.levelColumns));
   const nChunks = Math.max(1, Math.ceil(opts.levelColumns / chunkColumns));
   const chunkKeys = Array.from({ length: nChunks }, (_, k) => `view/${opts.level}/c/0/0/${k}`);
   return { level: opts.level, levelColumns: opts.levelColumns, chunkColumns, chunkKeys };
@@ -92,34 +102,76 @@ export function buildChunkPlan(opts: {
 // ---------------------------------------------------------------------------
 
 /**
- * Reassemble decoded chunks (each `[2, nChannels, chunkCols]`, C order --
+ * Reassemble decoded chunks (each `[2, nChannels, chunkColumns]`, C order --
  * axis0 (min/max) slowest, then channel, then column) into one
- * `[2, nChannels, totalColumns]` buffer. Chunks must arrive in `k` order
- * (column-ascending); the last chunk may be shorter than `chunkColumns`.
+ * `[2, nChannels, totalColumns]` buffer. Chunks must arrive in `k` order,
+ * column-ascending.
+ *
+ * `chunkColumns` IS THE STRIDE OF EVERY CHUNK, INCLUDING THE LAST ONE, and it
+ * is passed in rather than derived from a chunk's length. That distinction is
+ * the whole point of this signature. An earlier version computed
+ * `chunk.length / (2 * nChannels)` per chunk and documented "the last chunk may
+ * be shorter than `chunkColumns`", which is false: Zarr never emits a narrower
+ * chunk. A boundary chunk is stored FULL SIZE and fill-padded, so its decoded
+ * length is the nominal stride while only `totalColumns - colOffset` of its
+ * columns are real. Trusting the length as the width therefore advanced
+ * `colOffset` past the end and wrote each channel's slice over the NEXT
+ * channel's region, then ran off the end of `out` with a `RangeError`.
+ *
+ * Verified against nm000329's `eeg_250hz` level 3 (2167 columns, chunk 1024):
+ * all three real objects carry blosc `nbytes` 258048 = 2 x 63 x 1024 int16, so
+ * the third holds 1024 columns of which 119 are real. That is the `width_px:
+ * 800` default for that recording, i.e. this was the ordinary path, not an edge
+ * case. It is the same nominal-stride versus valid-span split that
+ * `sharding.ts` documents for level 0 (see its "A PRESENT boundary chunk is
+ * still stored FULL SIZE" note); the trap simply had not been carried across to
+ * the view path.
+ *
+ * The tests could not catch it either: both real captured fixtures are
+ * single-chunk levels where the chunk shape equals the level shape, and the one
+ * multi-chunk fixture was synthetic with a genuinely truncated tail.
  */
 export function reassembleViewChunks(opts: {
   nChannels: number;
   totalColumns: number;
+  chunkColumns: number;
   chunks: Int16Array[];
 }): Int16Array {
-  const { nChannels, totalColumns, chunks } = opts;
+  const { nChannels, totalColumns, chunkColumns, chunks } = opts;
+  if (!Number.isInteger(chunkColumns) || chunkColumns <= 0) {
+    throw new Error(
+      `reassembleViewChunks: chunkColumns must be a positive integer, got ${chunkColumns}`,
+    );
+  }
   const out = new Int16Array(2 * nChannels * totalColumns);
+  const expectedLength = 2 * nChannels * chunkColumns;
   let colOffset = 0;
-  for (const chunk of chunks) {
-    const chunkCols = chunk.length / (2 * nChannels);
-    if (!Number.isInteger(chunkCols)) {
+  for (const [k, chunk] of chunks.entries()) {
+    // Every chunk, boundary included, must decode to exactly the nominal size.
+    // A short chunk means the store does not match the geometry the index
+    // reported, which is a fidelity problem to surface rather than to paper
+    // over by inferring a width from it -- inferring was the original bug.
+    if (chunk.length !== expectedLength) {
       throw new Error(
-        `reassembleViewChunks: chunk length ${chunk.length} is not a multiple of 2 * n_channels (${2 * nChannels})`,
+        `reassembleViewChunks: chunk ${k} decoded to ${chunk.length} values, expected ` +
+          `${expectedLength} (2 x ${nChannels} channels x ${chunkColumns} columns)`,
+      );
+    }
+    const validColumns = Math.min(chunkColumns, totalColumns - colOffset);
+    if (validColumns <= 0) {
+      throw new Error(
+        `reassembleViewChunks: chunk ${k} starts at column ${colOffset}, at or past the ` +
+          `level's ${totalColumns} columns`,
       );
     }
     for (let axis0 = 0; axis0 < 2; axis0++) {
       for (let ch = 0; ch < nChannels; ch++) {
-        const srcStart = (axis0 * nChannels + ch) * chunkCols;
+        const srcStart = (axis0 * nChannels + ch) * chunkColumns;
         const dstStart = (axis0 * nChannels + ch) * totalColumns + colOffset;
-        out.set(chunk.subarray(srcStart, srcStart + chunkCols), dstStart);
+        out.set(chunk.subarray(srcStart, srcStart + validColumns), dstStart);
       }
     }
-    colOffset += chunkCols;
+    colOffset += validColumns;
   }
   if (colOffset !== totalColumns) {
     throw new Error(

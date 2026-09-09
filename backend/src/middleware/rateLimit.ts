@@ -321,6 +321,31 @@ export interface RateLimiterOptions {
    * per-request log the zarr sub-app used to emit for every exempted hit).
    */
   observeOnly?: boolean;
+
+  /**
+   * This surface has NO authentication, so ignore any `Authorization` header
+   * when picking the bucket and key on the IP like an anonymous caller.
+   *
+   * Built for the MCP sub-app (epic #1065), where the default behavior was a
+   * real hole rather than a nuisance. `/mcp` matches neither `AUTH_PATHS` nor
+   * the data-plane patterns, so the bearer branch below used to win, and the
+   * MCP sub-app registers no auth middleware at all -- nothing ever validates
+   * that bearer. Two consequences, both reachable by an anonymous caller:
+   *
+   *  1. The bucket is keyed on the raw bearer, so rotating a fresh 32-character
+   *     string per request minted a fresh 1000/min bucket every time and the
+   *     500/min IP floor was bypassed entirely.
+   *  2. Every novel token reached {@link isPrivilegedToken}, which is a cache
+   *     miss plus a D1 `SELECT` joining `tokens` to `users` -- an
+   *     unauthenticated D1-query amplifier, one query per request, from one IP.
+   *
+   * The zarr and data planes are immune by accident of ordering: their path
+   * patterns are tested BEFORE the bearer branch. This option is the explicit
+   * version of that, for a sub-app whose own paths (`/mcp`, and the descriptor
+   * at `/`) cannot be pattern-matched from here without colliding with the api
+   * root.
+   */
+  anonymousSurface?: boolean;
 }
 
 export async function rateLimiter(
@@ -347,7 +372,15 @@ export async function rateLimiter(
   const ip =
     c.req.header("CF-Connecting-IP") || c.req.header("X-Forwarded-For") || crypto.randomUUID();
 
-  const { keyKind, rawKey, maxRequests } = __selectBucket(path, c.req.header("Authorization"), ip);
+  // An anonymous surface's bearer is meaningless (nothing validates it), so it
+  // must not select the bucket. Withholding the header here rather than adding a
+  // path pattern keeps the whole sub-app covered, descriptor included, and skips
+  // the privileged-token D1 lookup as a consequence of never being `token`.
+  const { keyKind, rawKey, maxRequests } = __selectBucket(
+    path,
+    options.anonymousSurface ? undefined : c.req.header("Authorization"),
+    ip,
+  );
 
   // Token buckets hash the raw bearer; the auth middleware later
   // re-hashes the same value to look the user up in D1. IP buckets use

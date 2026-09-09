@@ -76,10 +76,21 @@ describe("pickViewLevel (nm000329 eeg_250hz: 138750 samples, 5 levels)", () => {
 });
 
 describe("buildChunkPlan", () => {
-  test("the last level (135 columns, chunk_columns 135) is one chunk", () => {
+  test("the last level (135 columns) is one chunk whose stride is CLAMPED to 135", () => {
+    // Read from the real store: `view/5/zarr.json` declares
+    // `shape [2, 63, 135]` with `chunk [2, 63, 135]`, and `view/4` likewise
+    // clamps to 541. So the producer's `view_chunk_columns: 1024` is an upper
+    // bound, not the chunk shape, and reporting 1024 here would make
+    // reassembleViewChunks reject a perfectly good single-chunk level.
     const plan = buildChunkPlan({ level: 5, levelColumns: 135, viewChunkColumns: 1024 });
-    expect(plan.chunkColumns).toBe(1024);
+    expect(plan.chunkColumns).toBe(135);
     expect(plan.chunkKeys).toEqual(["view/5/c/0/0/0"]);
+  });
+
+  test("a level ABOVE the configured width keeps the configured stride", () => {
+    // `view/3/zarr.json`: shape [2, 63, 2167], chunk [2, 63, 1024]. Unclamped.
+    const plan = buildChunkPlan({ level: 3, levelColumns: 2167, viewChunkColumns: 1024 });
+    expect(plan.chunkColumns).toBe(1024);
   });
 
   test("a middle level (2167 columns, chunk 1024) spans three chunks", () => {
@@ -94,46 +105,64 @@ describe("buildChunkPlan", () => {
   });
 });
 
-describe("reassembleViewChunks with three synthetic chunks, a short last one (item 15)", () => {
-  // 2 channels, chunk column counts 400 + 400 + 167 (the last deliberately
-  // shorter than the other two) -- every value is `channel * 100000 +
-  // axis0 * 10000 + globalColumn`, so a wrong offset anywhere shows up as a
-  // wrong number rather than a coincidentally-plausible one.
+describe("reassembleViewChunks with a FILL-PADDED boundary chunk (the real Zarr shape)", () => {
+  // 2 channels, three chunks of nominal stride 400, and a level of 967 columns.
+  // So the third chunk carries 400 columns of which only 167 are real and 233
+  // are padding -- which is what Zarr actually writes. The previous version of
+  // this test used widths 400 + 400 + 167, a genuinely truncated tail that no
+  // store contains, and that is why the suite stayed green while
+  // render_overview threw a RangeError on nm000329's default width.
+  //
+  // Every value is `axis0 * 1000 + channel * 100 + (globalColumn % 100)`, and
+  // the padding is a sentinel that appears nowhere in the valid range, so a
+  // wrong offset shows up as a wrong number rather than a plausible one, and
+  // copied padding is unmistakable.
   const N_CHANNELS = 2;
-  const CHUNK_SIZES = [400, 400, 167];
-  const TOTAL_COLUMNS = CHUNK_SIZES.reduce((a, b) => a + b, 0);
+  const CHUNK_COLUMNS = 400;
+  const TOTAL_COLUMNS = 967;
+  const PAD = 31337 - 65536; // a distinctive negative int16, never a valid value
 
-  function buildChunk(startColumn: number, columns: number): Int16Array {
-    const chunk = new Int16Array(2 * N_CHANNELS * columns);
+  /** A full-stride chunk: `validColumns` real values then fill padding. */
+  function buildChunk(startColumn: number, validColumns: number): Int16Array {
+    const chunk = new Int16Array(2 * N_CHANNELS * CHUNK_COLUMNS);
     for (let axis0 = 0; axis0 < 2; axis0++) {
       for (let ch = 0; ch < N_CHANNELS; ch++) {
-        for (let col = 0; col < columns; col++) {
-          const globalCol = startColumn + col;
-          // Small enough to stay in int16 range for these test sizes.
-          chunk[(axis0 * N_CHANNELS + ch) * columns + col] =
-            axis0 * 1000 + ch * 100 + (globalCol % 100);
+        for (let col = 0; col < CHUNK_COLUMNS; col++) {
+          const at = (axis0 * N_CHANNELS + ch) * CHUNK_COLUMNS + col;
+          if (col < validColumns) {
+            const globalCol = startColumn + col;
+            chunk[at] = axis0 * 1000 + ch * 100 + (globalCol % 100);
+          } else {
+            chunk[at] = PAD;
+          }
         }
       }
     }
     return chunk;
   }
 
-  test("every value lands in its correct global column after reassembly", () => {
-    let offset = 0;
-    const chunks = CHUNK_SIZES.map((size) => {
-      const chunk = buildChunk(offset, size);
-      offset += size;
-      return chunk;
-    });
+  function realChunks(): Int16Array[] {
+    const chunks: Int16Array[] = [];
+    for (let start = 0; start < TOTAL_COLUMNS; start += CHUNK_COLUMNS) {
+      chunks.push(buildChunk(start, Math.min(CHUNK_COLUMNS, TOTAL_COLUMNS - start)));
+    }
+    return chunks;
+  }
+
+  test("every value lands in its correct global column, and no padding is copied", () => {
+    const chunks = realChunks();
+    expect(chunks.length).toBe(3);
+    expect(chunks[2].length).toBe(2 * N_CHANNELS * CHUNK_COLUMNS); // full size, padded
+
     const reassembled = reassembleViewChunks({
       nChannels: N_CHANNELS,
       totalColumns: TOTAL_COLUMNS,
+      chunkColumns: CHUNK_COLUMNS,
       chunks,
     });
     expect(reassembled.length).toBe(2 * N_CHANNELS * TOTAL_COLUMNS);
 
-    // Spot-check columns at and around every chunk boundary, plus the very
-    // first and last columns overall.
+    // Columns at and around every boundary, plus the first and last overall.
     const checkColumns = [0, 399, 400, 799, 800, TOTAL_COLUMNS - 1];
     for (const globalCol of checkColumns) {
       for (let axis0 = 0; axis0 < 2; axis0++) {
@@ -144,6 +173,41 @@ describe("reassembleViewChunks with three synthetic chunks, a short last one (it
         }
       }
     }
+    // The whole point: not one padding value survived into the output. Before
+    // the fix, the third chunk's padding was written over channel 1's columns.
+    expect(Array.from(reassembled).includes(PAD)).toBe(false);
+  });
+
+  test("the exact production shape that used to throw RangeError", () => {
+    // nm000329 eeg_250hz level 3: 63 channels, 2167 columns, chunk 1024, three
+    // real objects all carrying blosc nbytes 258048 = 2 x 63 x 1024 int16. This
+    // is the `width_px: 800` default for that recording, so it was the ordinary
+    // path. The old code advanced colOffset by 1024 three times (3072 > 2167)
+    // and ran off the end of the output buffer.
+    const chunks = [0, 1, 2].map(() => new Int16Array(2 * 63 * 1024));
+    const reassembled = reassembleViewChunks({
+      nChannels: 63,
+      totalColumns: 2167,
+      chunkColumns: 1024,
+      chunks,
+    });
+    expect(reassembled.length).toBe(2 * 63 * 2167);
+  });
+
+  test("a SHORT chunk is refused, naming both lengths", () => {
+    // The old code inferred a width from a short chunk. Now a store whose real
+    // geometry disagrees with the index is surfaced instead of silently
+    // reassembled at the wrong offsets.
+    const chunks = realChunks();
+    chunks[2] = chunks[2].subarray(0, 2 * N_CHANNELS * 167);
+    expect(() =>
+      reassembleViewChunks({
+        nChannels: N_CHANNELS,
+        totalColumns: TOTAL_COLUMNS,
+        chunkColumns: CHUNK_COLUMNS,
+        chunks,
+      }),
+    ).toThrow(/chunk 2 decoded to 668 values, expected 1600/);
   });
 });
 
@@ -160,9 +224,12 @@ describe("renderOverviewPng on the real decoded level-5 chunk", () => {
   });
 
   test("reassembleViewChunks accepts a single chunk unchanged", () => {
+    // The real chunk shape for this level IS the level (chunk [2, 63, 135]),
+    // which is what buildChunkPlan's clamp reports, so nothing is padded here.
     const reassembled = reassembleViewChunks({
       nChannels: N_CHANNELS,
       totalColumns: TOTAL_COLUMNS,
+      chunkColumns: TOTAL_COLUMNS,
       chunks: [decoded],
     });
     expect(reassembled.length).toBe(decoded.length);
