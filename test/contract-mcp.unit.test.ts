@@ -390,7 +390,7 @@ describe("readWindowOutputSchema", () => {
     expect(parsed.mode).toBe("recipe");
   });
 
-  test("a taste result parses", () => {
+  test("a taste result parses (phase 4: recipe, chunks_read, bytes_read, note are also required/present)", () => {
     const parsed = readWindowOutputSchema.parse({
       mode: "taste",
       start_s: 0,
@@ -398,12 +398,19 @@ describe("readWindowOutputSchema", () => {
       channels: [0, 1],
       sample_rate_hz: 250,
       values: [Array(250).fill(0), Array(250).fill(0)],
+      recipe,
+      chunks_read: 2,
+      bytes_read: 4096,
+      note: "values are rounded to six significant digits; see recipe for the exact byte-level read",
       envelope,
     });
     expect(parsed.mode).toBe("taste");
+    if (parsed.mode !== "taste") return;
+    expect(parsed.chunks_read).toBe(2);
+    expect(parsed.recipe.zarr).toBe(recipe.zarr);
   });
 
-  test("an unknown mode, or a taste without values, is refused", () => {
+  test("an unknown mode, a taste without values, or a taste missing recipe/chunks_read/bytes_read is refused", () => {
     expect(readWindowOutputSchema.safeParse({ mode: "bytes", envelope }).success).toBe(false);
     expect(
       readWindowOutputSchema.safeParse({
@@ -412,6 +419,20 @@ describe("readWindowOutputSchema", () => {
         duration_s: 1,
         channels: [0],
         sample_rate_hz: 250,
+        recipe,
+        chunks_read: 0,
+        bytes_read: 0,
+        envelope,
+      }).success,
+    ).toBe(false);
+    expect(
+      readWindowOutputSchema.safeParse({
+        mode: "taste",
+        start_s: 0,
+        duration_s: 1,
+        channels: [0],
+        sample_rate_hz: 250,
+        values: [[0]],
         envelope,
       }).success,
     ).toBe(false);
