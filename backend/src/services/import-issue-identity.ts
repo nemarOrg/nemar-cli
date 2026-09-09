@@ -88,3 +88,48 @@ export const IMPORT_COVERAGE_KIND_LABELS = {
   disabled: "coverage-disabled",
   "dispatch-lost": "coverage-dispatch-lost",
 } as const;
+
+// ============================================================================
+// Weekly summary issue (epic #1306 phase 4, #1312)
+// ============================================================================
+
+/**
+ * Marks a weekly summary issue.
+ *
+ * A third label, not a reuse of either existing one, for the reason spelled out at
+ * the top of this file: the phase 2 sweep lists by `import-failure`, so a shared
+ * label would put a foreign issue into `perDataset` and inflate the count that
+ * drives the rollup cap. `import-coverage` is likewise the coverage sweep's own
+ * listing key.
+ */
+export const IMPORT_WEEKLY_ISSUE_LABEL = "import-weekly";
+
+/**
+ * The weekly summary's title, and therefore its dedup key.
+ *
+ * Takes the ISO week, which is what gives this series ONE ISSUE PER WEEK -- the
+ * opposite cardinality from the coverage issue's no-argument constant title, and
+ * from the per-dataset title's two arguments. Arity is the cardinality in this
+ * module.
+ *
+ * The week label is zero-padded (`2026-W07`, not `2026-W7`) so the series sorts
+ * lexicographically in chronological order, which is what lets the rollover find
+ * last week's issue without trusting issue numbers.
+ */
+export function importWeeklySummaryIssueTitle(week: string): string {
+  return `Import weekly summary: ${week}`;
+}
+
+/**
+ * The week a weekly-summary title is for, or null if it is not one.
+ *
+ * Used to find the previous week's issue for the rollover. Like
+ * {@link parseImportFailureIssueTitle}, it is deliberately not the authority on
+ * whether an issue is machine-filed -- the anchored pattern makes a hand-written
+ * lookalike unlikely, but the filing path compares against a rebuilt title rather
+ * than trusting a parse.
+ */
+export function parseWeeklySummaryIssueTitle(title: string): string | null {
+  const match = /^Import weekly summary: (\d{4}-W\d{2})$/.exec(title);
+  return match?.[1] ?? null;
+}
