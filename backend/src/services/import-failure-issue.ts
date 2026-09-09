@@ -18,16 +18,39 @@
  * dedup key -- a re-failure finds the existing OPEN issue by title (scoped to
  * the import-failure label) and comments instead of opening a duplicate.
  *
- * No close-on-recovery here (follow-up; a recovered import currently leaves
- * its issue open for a human to close).
+ * Accrual control (epic #1306 phase 2) rides on top of that dedup: a re-failure
+ * whose CAUSE changed is relabelled rather than left filed as something it no
+ * longer is, and past a cap a burst joins one rollup issue per cause instead of
+ * opening dozens. The rules are in services/import-issue-accrual.ts.
+ *
+ * Closing on recovery is deliberately NOT here. It belongs to a sweep
+ * (services/import-issue-sweep.ts), because a recovery does not necessarily
+ * pass through this code path at all -- a manual `nemar admin recover` or an
+ * operator's forced verify would never reach it.
  */
 
 import type { Bindings } from "../types/bindings.js";
 import { isSandboxDatasetId } from "./datasetId.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
-import { addIssueComment, createIssue, findOpenIssueByTitle } from "./github.js";
-import { classifyImportFailure } from "./import-failure-cause.js";
+import {
+  addIssueComment,
+  createIssue,
+  findOpenIssueByTitle,
+  issueLabelNames,
+  listOpenIssuesByLabel,
+  setIssueLabels,
+} from "./github.js";
+import { type ClassifiedImportFailure, classifyImportFailure } from "./import-failure-cause.js";
+import {
+  IMPORT_ROLLUP_ISSUE_LABEL,
+  type RollupEntry,
+  buildRollupIssueBody,
+  buildRollupUpdateComment,
+  computeLabelUpdate,
+  decideIssueMode,
+  rollupIssueTitle,
+} from "./import-issue-accrual.js";
 import {
   IMPORT_FAILURE_ISSUES_REPO,
   IMPORT_FAILURE_ISSUE_LABEL,
@@ -198,6 +221,11 @@ export async function fileImportFailureIssueIfNeeded(
     title,
     pat,
   );
+  const classified = classifyImportFailure({
+    stage: args.stage,
+    lastError: args.errorMessage,
+  });
+
   if (existing) {
     await addIssueComment(
       IMPORT_FAILURE_ISSUES_REPO,
@@ -205,21 +233,35 @@ export async function fileImportFailureIssueIfNeeded(
       buildImportFailureIssueComment(details, new Date().toISOString()),
       pat,
     );
+    // A re-failure whose cause CHANGED used to comment under the original
+    // label, leaving the issue filed as something it no longer is. The label
+    // set is recomputed rather than appended to, so the stale cause is retired
+    // while every label this module does not own is preserved.
+    const relabel = computeLabelUpdate(issueLabelNames(existing), classified.label);
+    if (relabel) {
+      await setIssueLabels(IMPORT_FAILURE_ISSUES_REPO, existing.number, relabel, pat);
+    }
     console.log(
-      `[import-failure-issue] commented on ${IMPORT_FAILURE_ISSUES_REPO}#${existing.number} for ${args.datasetId}`,
+      `[import-failure-issue] commented on ${IMPORT_FAILURE_ISSUES_REPO}#${existing.number} for ${args.datasetId}${relabel ? ` (relabelled -> ${classified.label})` : ""}`,
     );
     return;
   }
 
+  // Past the cap, a burst joins one rollup issue per cause instead of opening
+  // dozens of near-identical ones. Below it, per-dataset issues stay the default
+  // -- they are greppable and keep per-dataset history -- so this is a pressure
+  // valve, not the normal mode. See services/import-issue-accrual.ts.
+  if (await shouldRollUp(pat, classified.cause)) {
+    await appendToRollup(pat, classified, {
+      datasetId: args.datasetId,
+      sourceId: args.sourceId,
+      workflowRunUrl: args.workflowRunUrl,
+    });
+    return;
+  }
+
   // The cause label rides alongside the tracking label so the repo can be
-  // filtered by what actually failed, not just that something did. Only applied
-  // at creation: GitHub's issues API surface here has no label-mutation helper,
-  // so a re-failure whose cause CHANGES currently comments under the original
-  // label -- relabelling lands with close-on-recovery in epic #1306 phase 2.
-  const classified = classifyImportFailure({
-    stage: args.stage,
-    lastError: args.errorMessage,
-  });
+  // filtered by what actually failed, not just that something did.
   const created = await createIssue(
     IMPORT_FAILURE_ISSUES_REPO,
     title,
@@ -229,5 +271,68 @@ export async function fileImportFailureIssueIfNeeded(
   );
   console.log(
     `[import-failure-issue] filed ${IMPORT_FAILURE_ISSUES_REPO}#${created.number} for ${args.datasetId}`,
+  );
+}
+
+/**
+ * Whether this failure should join a rollup instead of opening its own issue.
+ *
+ * Counts the OPEN per-dataset issues (rollups carry the tracking label too, so
+ * they are excluded or they would count themselves and latch the cap on), and
+ * asks {@link decideIssueMode}. Whether this cause's rollup is already open is
+ * what supplies the hysteresis, so no stored flag can drift out of sync.
+ */
+async function shouldRollUp(pat: string, cause: string): Promise<boolean> {
+  const open = await listOpenIssuesByLabel(
+    IMPORT_FAILURE_ISSUES_REPO,
+    IMPORT_FAILURE_ISSUE_LABEL,
+    pat,
+  );
+  const perDataset = open.filter((i) => !issueLabelNames(i).includes(IMPORT_ROLLUP_ISSUE_LABEL));
+  const rollupOpen = open.some(
+    (i) =>
+      issueLabelNames(i).includes(IMPORT_ROLLUP_ISSUE_LABEL) && i.title === rollupIssueTitle(cause),
+  );
+  return decideIssueMode({ openPerDatasetCount: perDataset.length, rollupOpen }) === "rollup";
+}
+
+/** Add this dataset to its cause's rollup, opening the rollup if it is the
+ *  first one. Deduped by the rollup title, exactly as per-dataset issues are. */
+async function appendToRollup(
+  pat: string,
+  classified: ClassifiedImportFailure,
+  entry: RollupEntry,
+): Promise<void> {
+  const title = rollupIssueTitle(classified.cause);
+  const nowIso = new Date().toISOString();
+  const existing = await findOpenIssueByTitle(
+    IMPORT_FAILURE_ISSUES_REPO,
+    IMPORT_ROLLUP_ISSUE_LABEL,
+    title,
+    pat,
+  );
+
+  if (existing) {
+    await addIssueComment(
+      IMPORT_FAILURE_ISSUES_REPO,
+      existing.number,
+      buildRollupUpdateComment(entry, nowIso),
+      pat,
+    );
+    console.log(
+      `[import-failure-issue] rolled ${entry.datasetId} into ${IMPORT_FAILURE_ISSUES_REPO}#${existing.number}`,
+    );
+    return;
+  }
+
+  const created = await createIssue(
+    IMPORT_FAILURE_ISSUES_REPO,
+    title,
+    buildRollupIssueBody(classified.cause, classified.summary, [entry], nowIso),
+    [IMPORT_FAILURE_ISSUE_LABEL, IMPORT_ROLLUP_ISSUE_LABEL, classified.label],
+    pat,
+  );
+  console.log(
+    `[import-failure-issue] opened rollup ${IMPORT_FAILURE_ISSUES_REPO}#${created.number} for cause ${classified.cause}`,
   );
 }

@@ -58,7 +58,6 @@ import {
 import {
   IMPORT_FAILURE_ISSUES_REPO,
   IMPORT_FAILURE_ISSUE_LABEL,
-  importFailureIssueTitle,
   parseImportFailureIssueTitle,
 } from "./import-issue-identity.js";
 
