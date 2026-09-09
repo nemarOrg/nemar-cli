@@ -202,10 +202,31 @@ describe("nemar admin import-issue-triage: dry run is the default", () => {
       server.stop();
     }
   });
+
+  /** These ARE integers, so they are honest requests, forwarded at full value for
+   *  the server to clamp to [1,30]. `Number` is what makes them honest: parseInt
+   *  read `1e9` as 1, which is a silent substitution rather than a clamp. */
+  test("an exotic but integral limit is forwarded at its real value", async () => {
+    seedAuthenticatedConfig();
+    for (const [input, sent] of [
+      ["1e9", "1000000000"],
+      ["0x20", "32"],
+    ] as const) {
+      const server = startCaptureServer(DRY_RUN);
+      try {
+        await runCli(["admin", "import-issue-triage", "--limit", input], server.url);
+        expect(server.requests[0]?.searchParams.get("limit")).toBe(sent);
+      } finally {
+        server.stop();
+      }
+    }
+  });
 });
 
 describe("nemar admin import-issue-triage: a bad --limit is refused, not coerced", () => {
-  for (const bad of ["abc", "0", "-5", ""]) {
+  // parseInt stopped at the first non-digit and returned what it had, so `15abc`
+  // became 15 and `3.9` became 3 -- a different batch size than the one asked for.
+  for (const bad of ["abc", "0", "-5", "", "15abc", "3.9", " ", "Infinity"]) {
     test(`--limit ${JSON.stringify(bad)} sends nothing and exits 1`, async () => {
       seedAuthenticatedConfig();
       const server = startCaptureServer(DRY_RUN);
@@ -324,6 +345,28 @@ describe("nemar admin import-issue-triage: the 502 body is not discarded", () =>
 });
 
 describe("nemar admin import-issue-triage: rollups are visible", () => {
+  test("a release whose close failed prints FAILED RELEASE", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer({
+      ...DRY_RUN,
+      applied: true,
+      attempted: 1,
+      closed: 0,
+      rollupsReleased: 0,
+      rollups: [
+        { number: 900, title: "Import failures (rollup): auth_invalid", outcome: "failed" },
+      ],
+      errors: [{ issue: 900, dataset_id: null, stage: "apply", error: "HTTP 403 - forbidden" }],
+    });
+    try {
+      const result = await runCli(["admin", "import-issue-triage", "--apply"], server.url);
+      expect(result.stdout).toContain("FAILED RELEASE");
+      expect(result.exitCode).toBe(1);
+    } finally {
+      server.stop();
+    }
+  });
+
   test("an open rollup that would be released is reported", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer({

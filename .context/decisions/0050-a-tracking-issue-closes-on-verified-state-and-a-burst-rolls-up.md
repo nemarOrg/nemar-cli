@@ -74,11 +74,18 @@ self-healing in the other order (a closed issue leaves the candidate set; a corr
 an unbounded stream of false ones. A comment that fails after its mutation landed is reported
 as a `comment`-stage error, and the action still counts, because it happened.
 
-**A count means it happened.** `closed` / `relabelled` are incremented after the write lands,
-never from the plan, and the 502 predicate is measured over ATTEMPTS rather than over issues
-examined. Counting from the plan reported `closed: 15, errors: 15` for a run that closed
-nothing; measuring over `examined` let the realistic write outage -- a PAT that lost
-`issues: write` still lists fine -- answer HTTP 200 with ten keeps and five failed writes.
+**On an applied run, a count means it happened.** `closed` / `relabelled` are incremented after
+the write lands, never from the plan; on a dry run they are "would" counts, and `applied` is what
+distinguishes the two readings. Counting from the plan reported `closed: 15, errors: 15` for a run
+that closed nothing.
+
+**Total failure has two denominators, because there are two halves that fail wholesale.** Every
+WRITE failing is measured over attempts: over `examined` -- which counts keeps, and a keep cannot
+fail -- the realistic write outage answered HTTP 200 with ten keeps and five failed writes.
+Nothing being JUDGED is measured over decision failures alone, and is the only total failure a dry
+run can have. Keeping them separate matters: folding decision failures into the write denominator
+made every dry run with a single transient S3 error a 502 that discarded the rest of the plan,
+because a dry run attempts no writes at all, so failures and attempts were the same set.
 
 **Closing is a sweep, not a webhook hook.** A recovery does not necessarily pass through
 `POST /webhooks/import-state` at all -- a manual `nemar admin recover`, an operator's forced
@@ -148,13 +155,20 @@ matching `data-integrity-sweep`.
 
 **A bounded window does not drain a backlog by itself, so the window rotates by the calendar
 day.** Only a close removes a candidate, so taking the first `limit` off a fresh listing
-re-examines the same head every run: with 29 open and a limit of 15, the 14 oldest -- which is
-where the 2026-07-22 burst sits -- would never be examined again. A stored cursor is the obvious
-fix and the wrong one (ADR 0034: derive rather than store; a cursor is a second source of truth
-against a list this sweep does not own). The day is already a monotonic counter both callers
-share, and the cron runs daily, so the window advances by `limit` per day and every candidate is
-reached within `ceil(count / limit)` days. Two runs on the same day examine the same window,
-which is what an operator re-running the route after a fix wants.
+re-examines the same slice every run. Candidates are sorted oldest-first, so with 29 open and a
+limit of 15 it is the 14 NEWEST that would never be examined again -- and a fresh failure files
+at the tail, so those are the ones most likely to still be actionable. A stored cursor is the
+obvious fix and the wrong one (ADR 0034: derive rather than store; a cursor is a second source of
+truth against a list this sweep does not own). The day is already a monotonic counter both
+callers share, and the cron runs daily, so the window advances by `limit` per day:
+`start_{d+1} = (start_d + limit) mod count`, which tiles contiguously and reaches everything
+within `ceil(count / limit)` days.
+
+That bound assumes a stable `count`, and `count` is the modulus, so it is approximate rather
+than guaranteed: closes shrink the candidate list and new failures grow it, which means two runs
+on the same calendar day over a changed backlog get different windows. **The property bought is
+that no candidate is permanently excluded**, which is what a fixed prefix got wrong. An exact
+schedule is not available without the cursor this deliberately avoids, and is not worth one.
 
 **Production-only, and not on the dev-cron allowlist.** The tracker is ONE repo shared between
 production and dev -- `IMPORT_FAILURE_ISSUES_REPO` is hardcoded, not environment-scoped -- so a

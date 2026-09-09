@@ -1601,12 +1601,15 @@ export interface ImportIssueTriageResponse {
    *  question of ONE cause's rollup, so inside the hysteresis band a cause with
    *  no rollup of its own still files per-dataset. */
   mode: "per-dataset" | "rollup";
-  /** Open per-cause rollup issues seen this run. */
-  rollups: { number: number; title: string }[];
+  /** Open per-cause rollup issues seen this run. `outcome` is set only on an
+   *  applied run that tried to release them. */
+  rollups: { number: number; title: string; outcome?: "released" | "failed" }[];
   /** Rollups closed (or, on a dry run, that would be) because the mode released. */
   rollupsReleased: number;
   examined: number;
-  /** Rows where a write was attempted. `examined` minus the keeps, plus releases. */
+  /** WRITES tried: non-keep entries plus rollup releases, on an applied run only.
+   *  Zero on a dry run, which attempts nothing. Decision failures are not
+   *  attempts; they appear in `errors` with `stage: "plan"`. */
   attempted: number;
   closed: number;
   relabelled: number;

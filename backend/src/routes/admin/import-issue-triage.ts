@@ -90,21 +90,27 @@ export function registerImportIssueTriageRoutes(
     // that really did close issues into a 500 that reads as "nothing happened"
     // while up to `limit` issues are closed on GitHub and the result is
     // discarded. It is reported instead, as `audit_failed`.
+    // Releasing a rollup closes and comments on a real issue, so it counts as a
+    // change: without it in the gate, a run whose only writes were releases left
+    // no durable record of them at all.
     let auditFailed: string | undefined;
-    if (apply && (result.closed > 0 || result.relabelled > 0)) {
+    if (apply && (result.closed > 0 || result.relabelled > 0 || result.rollupsReleased > 0)) {
       try {
         await auditLogStatement(c.env.DB, {
           userId: c.get("user").id,
           action: "import_issue_triage",
           resourceType: "dataset",
-          resourceId: result.plan
-            .filter((e) => e.kind !== "keep" && !e.failed)
-            .map((e) => e.datasetId ?? `#${e.issueNumber}`)
-            .join(","),
+          resourceId: [
+            ...result.plan
+              .filter((e) => e.kind !== "keep" && !e.failed)
+              .map((e) => e.datasetId ?? `#${e.issueNumber}`),
+            ...result.rollups.filter((r) => r.outcome === "released").map((r) => `#${r.number}`),
+          ].join(","),
           details: JSON.stringify({
             closed: result.closed,
             relabelled: result.relabelled,
             kept: result.kept,
+            rollups_released: result.rollupsReleased,
             errors: result.errors.length,
           }),
         }).run();
@@ -114,19 +120,30 @@ export function registerImportIssueTriageRoutes(
       }
     }
 
-    // Measured over ATTEMPTS, not over `examined`: a `keep` attempts nothing and
-    // so can never error, and counting keeps in the denominator is what let the
-    // realistic write outage -- PAT lost `issues: write`, repo archived, secondary
-    // rate limit -- answer 200 with 10 keeps and 5 failed writes. A comment-stage
-    // error does not count: its state change landed.
-    const failedAttempts = result.errors.filter((e) => e.stage !== "comment").length;
-    const totalFailure = result.attempted > 0 && failedAttempts >= result.attempted;
-    if (totalFailure) {
+    // Two independent total failures, because there are two halves that can fail
+    // wholesale and each has its own denominator:
+    //
+    //   - every WRITE failed. Measured over attempts, not over `examined`: a
+    //     `keep` attempts nothing and so cannot fail, and counting keeps is what
+    //     let the realistic write outage -- PAT lost `issues: write`, repo
+    //     archived, secondary rate limit -- answer 200 with 10 keeps and 5 failed
+    //     writes. A `comment`-stage error is excluded: its state change landed.
+    //   - nothing could be JUDGED. Every examined row failed to decide, which is
+    //     the original zarr-shaped predicate and the only total failure a dry run
+    //     can have. It must be measured over plan failures alone: `>= attempted`
+    //     over a dry run's zero attempts would make any single error fatal.
+    const failedWrites = result.errors.filter((e) => e.stage === "apply").length;
+    const failedPlans = result.errors.filter((e) => e.stage === "plan").length;
+    const everyWriteFailed = result.attempted > 0 && failedWrites >= result.attempted;
+    const nothingCouldBeJudged = result.examined > 0 && failedPlans >= result.examined;
+    if (everyWriteFailed || nothingCouldBeJudged) {
       return c.json(
         {
           ...result,
           ok: false,
-          error: `All ${result.attempted} attempted issue(s) failed; see errors[]`,
+          error: everyWriteFailed
+            ? `All ${result.attempted} attempted write(s) failed; see errors[]`
+            : `None of the ${result.examined} examined issue(s) could be verified; see errors[]`,
           // Under `details` as well as at the top level: the CLI's `request()`
           // turns any non-2xx into an ApiError that keeps `details`, so this is
           // what makes the causes reachable from the thrown error rather than

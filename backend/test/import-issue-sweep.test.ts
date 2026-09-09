@@ -147,6 +147,17 @@ function envFor(db: Database): Bindings {
   return { DB: realD1(db), ENVIRONMENT: "test" } as unknown as Bindings;
 }
 
+/** An open per-cause rollup, carrying the tracking label as the real ones do. */
+function rollupIssue(number = 999): GitHubIssue {
+  return {
+    number,
+    html_url: `https://example/${number}`,
+    state: "open",
+    title: "Import failures (rollup): auth_invalid",
+    labels: [{ name: IMPORT_FAILURE_ISSUE_LABEL }, { name: IMPORT_ROLLUP_ISSUE_LABEL }],
+  };
+}
+
 /** `n` seeded per-dataset issues, all still incomplete and already carrying the
  *  right cause label, so nothing in them decides anything but "keep". */
 function backlog(
@@ -314,6 +325,35 @@ describe("a write that fails is never counted as having happened", () => {
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]?.stage).toBe("comment");
     expect(result.errors[0]?.error).toContain("close landed");
+  });
+
+  /**
+   * A DECISION failure is not an attempt. Folding plan failures into `attempted`
+   * made the ratio degenerate on a dry run, where nothing is ever attempted: every
+   * error was a plan error and every plan error also incremented `attempted`, so
+   * "all attempts failed" held identically and one transient S3 error turned a
+   * read-only run into a 502 (see the route test).
+   */
+  test("a plan failure is not counted as an attempted write", async () => {
+    const db = freshDb();
+    seedImportJob(db, "on005279");
+    seedImportJob(db, "on006136");
+    const deps = recordingDeps(
+      [
+        issue(97, "on005279", [IMPORT_FAILURE_ISSUE_LABEL, "auth-invalid"]),
+        issue(105, "on006136", [IMPORT_FAILURE_ISSUE_LABEL, "auth-invalid"]),
+      ],
+      { on005279: INCOMPLETE, on006136: new Error("S3 5xx") },
+    );
+
+    const dry = await runImportIssueSweep(envFor(db), {}, deps);
+    expect(dry.attempted).toBe(0);
+    expect(dry.errors[0]?.stage).toBe("plan");
+    expect(dry.kept).toBe(1);
+
+    // Same on an applied run: the failing row never reached a write.
+    const applied = await runImportIssueSweep(envFor(db), { apply: true }, deps);
+    expect(applied.attempted).toBe(0);
   });
 
   test("a keep is never an attempt, so a run of keeps cannot look like a failed run", async () => {
@@ -651,16 +691,6 @@ describe("windowStart rotates a bounded window over an unbounded backlog", () =>
 // ---------------------------------------------------------------------------
 
 describe("a rollup is released once the backlog drains", () => {
-  function rollupIssue(number = 999): GitHubIssue {
-    return {
-      number,
-      html_url: `https://example/${number}`,
-      state: "open",
-      title: "Import failures (rollup): auth_invalid",
-      labels: [{ name: IMPORT_FAILURE_ISSUE_LABEL }, { name: IMPORT_ROLLUP_ISSUE_LABEL }],
-    };
-  }
-
   test("closed when the mode has released, with a comment saying it is not a verdict", async () => {
     const db = freshDb();
     seedImportJob(db, "on000001");
@@ -704,6 +734,47 @@ describe("a rollup is released once the backlog drains", () => {
     expect(result.rollupsReleased).toBe(1);
     expect(deps.closed).toEqual([]);
     expect(importIssueSweepLogLines(result).some((l) => l.startsWith("WOULD RELEASE"))).toBe(true);
+  });
+
+  test("a release whose close fails prints FAILED RELEASE and is not counted", async () => {
+    const db = freshDb();
+    seedImportJob(db, "on000001");
+    const deps = recordingDeps(
+      [issue(1, "on000001", [IMPORT_FAILURE_ISSUE_LABEL, "auth-invalid"]), rollupIssue()],
+      { on000001: INCOMPLETE },
+      { close: new Error("HTTP 403 - forbidden") },
+    );
+
+    const result = await runImportIssueSweep(envFor(db), { apply: true }, deps);
+
+    // Decremented back: the count describes what landed, exactly as for a close.
+    expect(result.rollupsReleased).toBe(0);
+    expect(result.rollups[0]?.outcome).toBe("failed");
+    expect(result.errors.some((e) => e.issue === 999 && e.stage === "apply")).toBe(true);
+    // The verb comes from the rollup's own outcome, not from mode/applied.
+    expect(importIssueSweepLogLines(result).some((l) => l.startsWith("FAILED RELEASE"))).toBe(true);
+  });
+
+  test("the release comment quotes the count AFTER this run's closes", async () => {
+    const db = freshDb();
+    // Two issues, both recovered, so both close and the true post-run count is 0.
+    seedImportJob(db, "on000001");
+    seedImportJob(db, "on000002");
+    const deps = recordingDeps(
+      [
+        issue(1, "on000001", [IMPORT_FAILURE_ISSUE_LABEL, "auth-invalid"]),
+        issue(2, "on000002", [IMPORT_FAILURE_ISSUE_LABEL, "auth-invalid"]),
+        rollupIssue(),
+      ],
+      { on000001: COMPLETE, on000002: COMPLETE },
+    );
+
+    const result = await runImportIssueSweep(envFor(db), { apply: true }, deps);
+
+    expect(result.closed).toBe(2);
+    const release = deps.comments.find((c) => c.n === 999);
+    // 2 open minus 2 closed, not the stale pre-loop 2.
+    expect(release?.body).toContain("down to 0");
   });
 
   test("a rollup is never verified as though it were a dataset issue", async () => {

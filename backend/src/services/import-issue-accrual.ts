@@ -194,6 +194,11 @@ export function decideIssueAction(args: {
       reason: "manifest declares no annex-keyed objects; nothing was verified",
     };
   }
+  // Note that this refusal and the two above suppress the RELABEL below as well,
+  // not just the close -- an issue whose completeness cannot be established is
+  // left entirely alone. Deliberate: a relabel is a claim about the current cause,
+  // and these are exactly the states in which the current cause is not known to be
+  // current. The sweep re-examines the issue next run either way.
   if (args.verify.complete) {
     return {
       kind: "close",

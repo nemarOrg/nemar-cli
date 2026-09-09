@@ -6963,8 +6963,11 @@ importIssueTriageCommand
     // `--limit 0` into 15 and `--limit -5` into a server-clamped 1, silently: the
     // operator asked for something and got something else, on a command whose
     // whole point is to bound how many issues it touches.
+    // `Number`, not `Number.parseInt`: parseInt stops at the first non-digit and
+    // returns what it has, so it still silently coerced `15abc` to 15, `3.9` to 3
+    // and `1e9` to 1 -- the same substitution this guard exists to refuse.
     const limitRaw = options.limit ?? "15";
-    const limit = Number.parseInt(limitRaw, 10);
+    const limit = limitRaw.trim() === "" ? Number.NaN : Number(limitRaw);
     if (!Number.isInteger(limit) || limit < 1) {
       console.error(
         chalk.red(`Invalid --limit ${JSON.stringify(limitRaw)}: expected an integer >= 1.`),
@@ -7047,9 +7050,20 @@ importIssueTriageCommand
       }
     }
     for (const r of res.rollups) {
+      // From the rollup's own outcome, not from res.applied: a release whose
+      // close failed must not print RELEASE.
       const verb =
-        res.mode === "per-dataset" ? (res.applied ? "RELEASE" : "WOULD RELEASE") : "ROLLUP";
-      console.log(`${chalk.magenta(verb.padEnd(15))} #${r.number} ${chalk.dim(r.title)}`);
+        r.outcome === "failed"
+          ? "FAILED RELEASE"
+          : r.outcome === "released"
+            ? "RELEASE"
+            : res.mode === "per-dataset"
+              ? "WOULD RELEASE"
+              : "ROLLUP";
+      const label = verb.padEnd(15);
+      console.log(
+        `${r.outcome === "failed" ? chalk.red(label) : chalk.magenta(label)} #${r.number} ${chalk.dim(r.title)}`,
+      );
     }
     for (const e of res.errors) {
       console.log(

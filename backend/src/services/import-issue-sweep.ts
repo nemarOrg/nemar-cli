@@ -56,8 +56,16 @@
  * A bounded window over a fresh listing does NOT drain a backlog on its own,
  * which an earlier draft of this comment claimed: only a CLOSE removes an issue
  * from the candidate set, so `slice(0, limit)` re-examines the same head every
- * run and a permanently-broken head starves the tail forever. `windowStart`
- * rotates the window by the calendar day instead -- see its note.
+ * run and a permanently-broken head starves the rest forever. `windowStart`
+ * rotates the window by the calendar day instead -- see its note for what that
+ * does and does not guarantee.
+ *
+ * ## The counts on a dry run are "would" counts
+ *
+ * `closed` / `relabelled` / `kept` are incremented from the plan when nothing is
+ * being written, because on a dry run the plan IS the answer. `applied` is what
+ * distinguishes the two readings, and the CLI renames the fields accordingly.
+ * `attempted` is zero on a dry run by definition.
  */
 
 import type { Bindings } from "../types/bindings.js";
@@ -142,17 +150,27 @@ export interface ImportIssueSweepResult {
    * is what an operator wants from a triage run.
    */
   mode: ImportIssueMode;
-  /** Open per-cause rollup issues seen this run, reported so they are visible
-   *  rather than invisible. Closed by this sweep once the mode releases. */
-  rollups: { number: number; title: string }[];
+  /**
+   * Open per-cause rollup issues seen this run, reported so they are visible
+   * rather than invisible. Closed by this sweep once the mode releases.
+   *
+   * `outcome` carries what actually happened, for the same reason plan entries
+   * carry `failed`: deriving the printed verb from `mode`/`applied` alone made a
+   * release whose `close` 403'd still print `RELEASE`.
+   */
+  rollups: { number: number; title: string; outcome?: "released" | "failed" }[];
   /** Rollups closed because the mode released. On a dry run, would be closed. */
   rollupsReleased: number;
   examined: number;
   /**
-   * Rows where the sweep TRIED to do something: every row whose plan could not
-   * be computed (a verify was attempted), plus, on an applied run, every
-   * non-keep entry. A `keep` cannot fail, so counting it as an attempt is what
-   * made an all-writes-403 run answer 200 (`errors.length !== examined`).
+   * WRITES tried: on an applied run, every non-keep entry plus every rollup
+   * release. Zero on a dry run, which attempts nothing by definition.
+   *
+   * The denominator for "did everything we tried to change fail?". A `keep`
+   * attempts nothing and so cannot fail, which is why it is excluded: counting
+   * keeps is what let an all-writes-403 run answer 200. Decision failures are
+   * excluded too -- they are counted per stage in `errors` and judged separately,
+   * because folding them in here made every dry-run error a total failure.
    */
   attempted: number;
   closed: number;
@@ -184,22 +202,28 @@ export interface ImportIssueSweepDeps {
 /**
  * Where this run's window starts inside the candidate list.
  *
- * The window has to move, and there is nothing to move it. `GET /issues` sorts
- * newest-first and offers no cursor this sweep could keep; only a CLOSE removes a
- * candidate, so a `keep` or a `relabel` leaves the issue exactly where it was.
- * Take the first `limit` every run and a head of permanently-broken issues pins
- * the window: with 29 open and a limit of 15, the 14 oldest -- which is where the
- * 2026-07-22 burst sits -- would never be examined again.
+ * The window has to move, and there is nothing to move it. There is no cursor
+ * this sweep could keep, and only a CLOSE removes a candidate, so a `keep` or a
+ * `relabel` leaves the issue exactly where it was. Take the first `limit` every
+ * run and a head of permanently-broken issues pins the window: the caller sorts
+ * oldest-first, so with 29 open and a limit of 15 it is the 14 NEWEST that would
+ * never be examined again -- and since a fresh failure files a new issue at the
+ * tail, the newest are the ones most likely to still be actionable.
  *
  * Storing a cursor is the obvious fix and the wrong one here: ADR 0034 says
  * derive rather than store, and a cursor in D1 is a second source of truth that
  * drifts against a list this sweep does not own. The calendar day is already a
  * monotonic counter both callers share, and the cron runs daily, so the window
- * advances by `limit` per day and every candidate is reached within
- * `ceil(count / limit)` days. Two consequences worth knowing: a run examines a
- * window, not a prefix, and two runs on the SAME day examine the same window
- * (deliberate -- an operator re-running the route after a fix sees the batch they
- * just looked at, not a different one).
+ * advances by `limit` per day: `start_{d+1} = (start_d + limit) mod count`, which
+ * tiles the circle contiguously and reaches every candidate within
+ * `ceil(count / limit)` days.
+ *
+ * **That bound assumes a stable `count`, and `count` is the modulus.** It is not
+ * stable: closes shrink it and new failures grow it, so two runs on the same
+ * calendar day over a changed backlog get DIFFERENT windows, and the deadline is
+ * approximate rather than guaranteed. The property being bought is that no
+ * candidate is permanently excluded, which is what a fixed prefix got wrong;
+ * an exact schedule is not on offer without the cursor this deliberately avoids.
  */
 export function windowStart(count: number, limit: number, now: Date): number {
   if (count <= limit) return 0;
@@ -253,7 +277,9 @@ export async function runImportIssueSweep(
 
   // A rollup carries the tracking label too, so it would otherwise count itself
   // and latch the mode on forever.
-  const rollups = open
+  // Typed from the result rather than inferred, because the release loop below
+  // stamps `outcome` onto these same objects.
+  const rollups: ImportIssueSweepResult["rollups"] = open
     .filter((i) => issueLabelNames(i).includes(IMPORT_ROLLUP_ISSUE_LABEL))
     .map((i) => ({ number: i.number, title: i.title }));
   // Sorted by issue number, i.e. oldest first, so the candidate order is this
@@ -312,8 +338,14 @@ export async function runImportIssueSweep(
       else result.kept++;
     } catch (err) {
       // Fail open on this row: the issue is unchanged and stays a candidate.
+      //
+      // A plan failure is deliberately NOT an attempt. `attempted` counts writes
+      // tried, and adding decision failures to it made the ratio degenerate on a
+      // dry run, where no write is ever tried: every error was a plan error and
+      // every plan error also incremented `attempted`, so `failedAttempts ===
+      // attempted` held identically and ONE transient S3 error turned a read-only
+      // run into a 502 that discarded the other fourteen rows' plan.
       if (entry) entry.failed = true;
-      else result.attempted++;
       result.errors.push({
         issue: issue.number,
         dataset_id: datasetId,
@@ -333,19 +365,25 @@ export async function runImportIssueSweep(
   // rather than fatal: the per-dataset work above already happened and must still
   // be reported.
   if (result.mode === "per-dataset") {
+    // The count the release comment quotes is the POST-run one: this loop runs
+    // after the per-dataset loop, which may itself have closed issues, so
+    // `perDataset.length` alone would quote a number that was already stale by
+    // the time the comment was written.
+    const openAfterRun = perDataset.length - result.closed;
     for (const rollup of rollups) {
       result.rollupsReleased++;
       if (!apply) continue;
       result.attempted++;
       try {
         await close(IMPORT_FAILURE_ISSUES_REPO, rollup.number, pat);
+        rollup.outcome = "released";
         console.log(
           `[import-issue-sweep] released rollup ${IMPORT_FAILURE_ISSUES_REPO}#${rollup.number}`,
         );
         const commented = await commentAfter(
           comment,
           rollup.number,
-          buildRollupReleaseComment(perDataset.length, new Date().toISOString()),
+          buildRollupReleaseComment(openAfterRun, new Date().toISOString()),
           pat,
           "close",
         );
@@ -359,6 +397,7 @@ export async function runImportIssueSweep(
         }
       } catch (err) {
         result.rollupsReleased--;
+        rollup.outcome = "failed";
         result.errors.push({
           issue: rollup.number,
           dataset_id: null,
@@ -574,8 +613,16 @@ export function importIssueSweepLogLines(result: ImportIssueSweepResult): string
     return `${action.padEnd(15)} #${e.issueNumber} ${e.datasetId ?? "(unknown)"}  ${e.reason}`;
   });
   for (const r of result.rollups) {
+    // From the rollup's own outcome where there is one, exactly as the plan
+    // entries' verb comes from `failed` rather than from `result.applied`.
     const verb =
-      result.mode === "per-dataset" ? (result.applied ? "RELEASE" : "WOULD RELEASE") : "ROLLUP";
+      r.outcome === "failed"
+        ? "FAILED RELEASE"
+        : r.outcome === "released"
+          ? "RELEASE"
+          : result.mode === "per-dataset"
+            ? "WOULD RELEASE"
+            : "ROLLUP";
     lines.push(`${verb.padEnd(15)} #${r.number} ${r.title}`);
   }
   return lines;

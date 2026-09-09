@@ -222,6 +222,57 @@ describe("the 502 is measured over attempts, not over examined", () => {
    * so keeps succeed and only the writes fail. Measured over `examined` (10 keeps
    * + 5 failed writes = 5 errors of 15 examined) this answered 200 `ok: true`.
    */
+  /**
+   * The regression this predicate shape exists to prevent. On a DRY RUN nothing
+   * is ever attempted, so an earlier `failedAttempts >= attempted` over a
+   * denominator built from plan failures held identically: one transient S3 error
+   * turned a read-only run into a 502 and discarded the other fourteen rows'
+   * plan, which is the whole output the operator asked for.
+   */
+  test("a dry run with one transient plan error is still a successful run", async () => {
+    const { app } = newApp(() =>
+      result({
+        examined: 15,
+        attempted: 0,
+        kept: 14,
+        plan: Array.from({ length: 14 }, (_, i) => ({
+          issueNumber: 100 + i,
+          datasetId: `on00000${i}`,
+          title: "t",
+          kind: "keep" as const,
+          reason: "still incomplete",
+        })),
+        errors: [{ issue: 115, dataset_id: "on000015", stage: "plan", error: "S3 5xx" }],
+      }),
+    );
+    const res = await post(app, "/imports/issue-triage");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; plan: unknown[] };
+    expect(body.ok).toBe(true);
+    // ...and the plan survives, which is the point of running it.
+    expect(body.plan).toHaveLength(14);
+  });
+
+  /** The other total failure, and the only one a dry run can have: nothing could
+   *  be judged at all. Measured over plan failures, not over attempts. */
+  test("every examined issue failing to verify is a 502 even on a dry run", async () => {
+    const { app } = newApp(() =>
+      result({
+        examined: 3,
+        attempted: 0,
+        errors: [
+          { issue: 1, dataset_id: "on000001", stage: "plan", error: "S3 5xx" },
+          { issue: 2, dataset_id: "on000002", stage: "plan", error: "S3 5xx" },
+          { issue: 3, dataset_id: "on000003", stage: "plan", error: "S3 5xx" },
+        ],
+      }),
+    );
+    const res = await post(app, "/imports/issue-triage");
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("None of the 3 examined");
+  });
+
   test("every attempted write failing is a 502 even when keeps succeeded", async () => {
     const { app } = newApp(() =>
       result({
@@ -245,7 +296,7 @@ describe("the 502 is measured over attempts, not over examined", () => {
       details: { errors: unknown[] };
     };
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("All 5 attempted");
+    expect(body.error).toContain("All 5 attempted write(s) failed");
     // Carried under `details` so the CLI's ApiError keeps the causes: the message
     // says "see errors[]", so there has to be an errors[] to see.
     expect(body.details.errors).toHaveLength(5);
@@ -357,6 +408,49 @@ describe("the audit row", () => {
     );
     await post(app, "/imports/issue-triage?apply=1");
     expect(auditRows()[0]?.resource_id).toBe("on006136");
+  });
+
+  test("a run whose only change was releasing rollups still writes a row", async () => {
+    const { app } = newApp(() =>
+      result({
+        applied: true,
+        examined: 3,
+        attempted: 2,
+        kept: 3,
+        rollupsReleased: 2,
+        rollups: [
+          { number: 900, title: "Import failures (rollup): auth_invalid", outcome: "released" },
+          { number: 901, title: "Import failures (rollup): git_divergence", outcome: "released" },
+        ],
+      }),
+    );
+    await post(app, "/imports/issue-triage?apply=1");
+
+    // Closing a rollup closes and comments on a real issue; without it in the
+    // gate this run left no durable record at all.
+    const rows = auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.resource_id).toBe("#900,#901");
+    expect(JSON.parse(rows[0]?.details ?? "{}")).toMatchObject({ rollups_released: 2 });
+  });
+
+  test("a rollup whose release FAILED is not named in the audit row", async () => {
+    const { app } = newApp(() =>
+      result({
+        applied: true,
+        examined: 1,
+        attempted: 2,
+        kept: 1,
+        rollupsReleased: 1,
+        rollups: [
+          { number: 900, title: "r", outcome: "released" },
+          { number: 901, title: "r", outcome: "failed" },
+        ],
+        errors: [{ issue: 901, dataset_id: null, stage: "apply", error: "403" }],
+      }),
+    );
+    await post(app, "/imports/issue-triage?apply=1");
+    expect(auditRows()[0]?.resource_id).toBe("#900");
   });
 
   test("a dry run is a read: no audit row", async () => {
