@@ -29,7 +29,7 @@ export type ZarrVerifyStatusValue = (typeof ZARR_VERIFY_STATUS_VALUES)[number];
 export const PUBLIC_DATASET_ROW_SQL = `SELECT
     d.dataset_id, d.name, d.concept_doi, d.license, d.modalities, d.tasks,
     d.subject_count, d.has_hed, d.hed_version, d.zarr_status, d.zarr_store_count,
-    d.zarr_source_commit, d.recording_count, d.total_recording_duration,
+    d.zarr_source_commit, d.zarr_converted_at, d.recording_count, d.total_recording_duration,
     d.authors, d.created_at,
     json_extract(d.sweep_stamps, '${ZARR_VERIFY_STATUS_PATH}') AS zarr_verify_status,
     json_extract(d.sweep_stamps, '${ZARR_VERIFIED_AT_PATH}') AS zarr_verified_at,
@@ -57,6 +57,13 @@ export interface PublicDatasetRow {
   zarr_status: string | null;
   zarr_store_count: number | null;
   zarr_source_commit: string | null;
+  /** Set to `datetime('now')` by every conversion, so it is the one CONVERSION
+   *  identity available without fetching anything. The projection cache keys on
+   *  it: `zarr_source_commit` is the dataset repo's HEAD and an engine bump
+   *  re-converts without changing it (ADR 0033), so a commit-only key served
+   *  stale byte offsets and quantization constants. See
+   *  `projection-cache.ts`'s module doc. */
+  zarr_converted_at: string | null;
   recording_count: number | null;
   total_recording_duration: number | null;
   authors: string | null;

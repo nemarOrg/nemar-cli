@@ -301,6 +301,9 @@ async function loadEventsFromParquet(
   deps: RecordingToolDeps,
   datasetId: string,
   sourceCommit: string | null,
+  /** D1's `zarr_converted_at`, part of every cache key here: a re-conversion
+   *  republishes `events.parquet` and can do so at an unchanged commit. */
+  convertedAt: string | null,
   eventsParquetUrl: string,
   storeZarr: string,
   allStoreZarrs: string[],
@@ -314,7 +317,13 @@ async function loadEventsFromParquet(
   invalidRowCount: number;
 }> {
   if (sourceCommit) {
-    const cacheKey = projectionUrl(datasetId, sourceCommit, `events/${storeZarr}`);
+    const cacheKey = projectionUrl({
+      env: deps.env,
+      datasetId,
+      sourceCommit,
+      convertedAt,
+      projection: `events/${storeZarr}`,
+    });
     const cached = await readJsonProjection(deps.cache(), cacheKey, eventRowsProjectionSchema);
     if (cached.status === "hit") {
       return { rows: cached.value, cacheStatus: "hit", upstreamBytes: 0, invalidRowCount: 0 };
@@ -341,7 +350,13 @@ async function loadEventsFromParquet(
         writeJsonProjection(
           deps.executionCtx,
           deps.cache(),
-          projectionUrl(datasetId, sourceCommit, `events/${zarr}`),
+          projectionUrl({
+            env: deps.env,
+            datasetId,
+            sourceCommit,
+            convertedAt,
+            projection: `events/${zarr}`,
+          }),
           rows,
         );
       }
@@ -350,7 +365,13 @@ async function loadEventsFromParquet(
     writeJsonProjection(
       deps.executionCtx,
       deps.cache(),
-      projectionUrl(datasetId, sourceCommit, "events/_stores"),
+      projectionUrl({
+        env: deps.env,
+        datasetId,
+        sourceCommit,
+        convertedAt,
+        projection: "events/_stores",
+      }),
       storesSummary,
     );
   }
@@ -543,6 +564,7 @@ export async function getEventsTool(
         deps,
         args.dataset_id,
         sourceCommitFinal,
+        row.zarr_converted_at,
         eventsParquetUrl,
         matched.zarr,
         projection.recordings.map((r) => r.zarr),

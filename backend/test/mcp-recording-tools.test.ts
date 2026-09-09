@@ -44,6 +44,10 @@ type App = Hono<{ Bindings: Bindings }>;
 
 const V3_ID = "nm000329";
 const V3_COMMIT = "7172d2d492dad63650f80cdb83352a0e9d4420f7";
+/** `datasets.zarr_converted_at` on every fixture: the CONVERSION identity in the
+ *  projection cache key. A commit alone is not enough, because an engine bump
+ *  re-converts a dataset at an unchanged HEAD (ADR 0033). */
+const CONVERTED_AT = "2026-09-01 12:00:00";
 const EMPTY_COMMIT_ID = "nm000112";
 const ZERO_STORE_ID = "nm500602";
 const V1_ID = "nm000111";
@@ -333,12 +337,39 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
       visibility: "public",
       status: "active",
       is_sandbox: 0,
+      // Every fixture carries a conversion stamp, because it is part of the
+      // projection cache key: `zarr_source_commit` is the dataset repo's HEAD
+      // and an engine bump re-converts without changing it, so the key needs
+      // something that moves per conversion.
+      zarr_converted_at: CONVERTED_AT,
       ...cols,
     };
     const keys = Object.keys(merged);
     db.query(
       `INSERT INTO datasets (dataset_id, ${keys.join(", ")}) VALUES (?, ${keys.map(() => "?").join(", ")})`,
     ).run(datasetId, ...(keys.map((k) => merged[k]) as never[]));
+  }
+
+  /** The same key the tools build, so a test can assert on a real entry
+   *  instead of restating the key format. */
+  function eventsKey(datasetId: string, zarr: string, convertedAt: string = CONVERTED_AT): string {
+    return projectionUrl({
+      env: env(db),
+      datasetId,
+      sourceCommit: V3_COMMIT,
+      convertedAt,
+      projection: `events/${zarr}`,
+    });
+  }
+
+  function storesKey(datasetId: string, convertedAt: string = CONVERTED_AT): string {
+    return projectionUrl({
+      env: env(db),
+      datasetId,
+      sourceCommit: V3_COMMIT,
+      convertedAt,
+      projection: "events/_stores",
+    });
   }
 
   beforeEach(() => {
@@ -856,12 +887,8 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
         dataset_id: V3_ID,
         recording: requested,
       });
-      expect(
-        await cache.match(projectionUrl(V3_ID, V3_COMMIT, `events/${requested}`)),
-      ).toBeDefined();
-      expect(
-        await cache.match(projectionUrl(V3_ID, V3_COMMIT, `events/${neighbour}`)),
-      ).toBeDefined();
+      expect(await cache.match(eventsKey(V3_ID, requested))).toBeDefined();
+      expect(await cache.match(eventsKey(V3_ID, neighbour))).toBeDefined();
     });
 
     test("over the bound: only the requested store's entry, plus the summary", async () => {
@@ -869,16 +896,46 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
         dataset_id: FANOUT_ID,
         recording: requested,
       });
-      expect(
-        await cache.match(projectionUrl(FANOUT_ID, V3_COMMIT, `events/${requested}`)),
-      ).toBeDefined();
-      expect(
-        await cache.match(projectionUrl(FANOUT_ID, V3_COMMIT, `events/${neighbour}`)),
-      ).toBeUndefined();
+      expect(await cache.match(eventsKey(FANOUT_ID, requested))).toBeDefined();
+      expect(await cache.match(eventsKey(FANOUT_ID, neighbour))).toBeUndefined();
       // One entry regardless of store count, so it stays complete.
-      expect(
-        await cache.match(projectionUrl(FANOUT_ID, V3_COMMIT, "events/_stores")),
-      ).toBeDefined();
+      expect(await cache.match(storesKey(FANOUT_ID))).toBeDefined();
+    });
+
+    test("a re-conversion at an UNCHANGED commit does not serve the old entry", async () => {
+      // The bug this key shape exists to prevent. `source_commit` is the dataset
+      // repo's HEAD, not a conversion identity, and the documented back-catalog
+      // mechanism re-converts without touching it: an engine bump re-queues a
+      // `done` row and bumps no dataset version (ADR 0033), and a --clean
+      // rebuild or a retry after an infra failure are the same shape. Keyed on
+      // the commit alone, the stale entry stayed readable for its full 7-day TTL
+      // while index.json itself refreshed in 5 minutes, and nothing purges these
+      // synthetic keys.
+      await callTool(app, env(db), 1, "get_events", {
+        dataset_id: V3_ID,
+        recording: requested,
+      });
+      const beforeKey = eventsKey(V3_ID, requested);
+      expect(await cache.match(beforeKey)).toBeDefined();
+
+      // Same commit, new conversion.
+      const RECONVERTED_AT = "2026-09-08 03:30:00";
+      db.query("UPDATE datasets SET zarr_converted_at = ? WHERE dataset_id = ?").run(
+        RECONVERTED_AT,
+        V3_ID,
+      );
+      await callTool(app, env(db), 2, "get_events", {
+        dataset_id: V3_ID,
+        recording: requested,
+      });
+
+      const afterKey = eventsKey(V3_ID, requested, RECONVERTED_AT);
+      expect(afterKey).not.toBe(beforeKey);
+      // The new conversion has its own entry...
+      expect(await cache.match(afterKey)).toBeDefined();
+      // ...and the pre-re-conversion entry is still sitting there under its own
+      // key, which is exactly why it must not be the key that gets read.
+      expect(await cache.match(beforeKey)).toBeDefined();
     });
 
     test("over the bound: the requested store's own second call is still a hit", async () => {

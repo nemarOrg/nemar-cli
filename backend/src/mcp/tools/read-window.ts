@@ -306,17 +306,26 @@ async function loadShardFooter(
   deps: RecordingToolDeps,
   datasetId: string,
   sourceCommit: string,
+  /** D1's `zarr_converted_at`, part of the cache key. Load-bearing here above
+   *  all: this entry holds parsed BYTE OFFSETS, replayed as Range reads against
+   *  whatever object lives at that key today. A re-conversion at an unchanged
+   *  commit (an engine bump, ADR 0033) would have this replaying stale offsets
+   *  into a new shard, and every 206 and length check still passes because the
+   *  origin returns exactly the bytes asked for -- just the wrong ones. */
+  convertedAt: string | null,
   dataBase: string,
   zarr: string,
   groupName: string,
   shardIndex: number,
   nInner: number,
 ): Promise<ShardFooterLoaded | { error: string }> {
-  const cacheKey = projectionUrl(
+  const cacheKey = projectionUrl({
+    env: deps.env,
     datasetId,
     sourceCommit,
-    `shardidx/${zarr}/${groupName}/0/${shardIndex}`,
-  );
+    convertedAt,
+    projection: `shardidx/${zarr}/${groupName}/0/${shardIndex}`,
+  });
   const cached = await readJsonProjection(deps.cache(), cacheKey, shardIndexProjectionSchema);
   if (cached.status === "hit") {
     return { entries: shardEntriesFromPairs(cached.value), cacheStatus: "hit", bytes: 0 };
@@ -685,6 +694,7 @@ export async function readWindowTool(
     deps,
     args.dataset_id,
     index.source_commit,
+    row.zarr_converted_at,
     index.data_base,
     store.zarr,
     targetGroup.name,
@@ -722,6 +732,7 @@ export async function readWindowTool(
       deps,
       args.dataset_id,
       index.source_commit,
+      row.zarr_converted_at,
       index.data_base,
       store.zarr,
       targetGroup.name,

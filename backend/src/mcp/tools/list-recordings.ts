@@ -290,7 +290,13 @@ export async function loadRecordingsProjection(
   );
 
   if (commitUsable) {
-    const cacheKey = projectionUrl(datasetId, row.zarr_source_commit as string, "recordings");
+    const cacheKey = projectionUrl({
+      env: deps.env,
+      datasetId,
+      sourceCommit: row.zarr_source_commit as string,
+      convertedAt: row.zarr_converted_at,
+      projection: "recordings",
+    });
     const cached = await readJsonProjection(deps.cache(), cacheKey, recordingsProjectionSchema);
     if (cached.status === "hit") {
       return { ok: true, projection: cached.value, cacheStatus: "hit", upstreamBytes: 0 };
@@ -323,7 +329,13 @@ export async function loadRecordingsProjection(
     indexResult.sourceCommit ?? "",
   );
   if (commitUsable && indexResult.sourceCommit) {
-    const cacheKey = projectionUrl(datasetId, indexResult.sourceCommit, "recordings");
+    const cacheKey = projectionUrl({
+      env: deps.env,
+      datasetId,
+      sourceCommit: indexResult.sourceCommit,
+      convertedAt: row.zarr_converted_at,
+      projection: "recordings",
+    });
     writeJsonProjection(deps.executionCtx, deps.cache(), cacheKey, projection);
   }
   return { ok: true, projection, cacheStatus: "miss", upstreamBytes: indexResult.bytes };

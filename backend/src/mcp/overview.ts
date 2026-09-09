@@ -57,6 +57,34 @@ export function pickViewLevel(nSamples: number, nViewLevels: number, widthPx: nu
 }
 
 // ---------------------------------------------------------------------------
+// Served width quantization
+// ---------------------------------------------------------------------------
+
+/** The widths this tool actually renders at. Ascending, and the last entry is
+ *  `RENDER_OVERVIEW_MAX_WIDTH_PX`, so every accepted request has a bucket. */
+export const OVERVIEW_WIDTH_BUCKETS = [200, 400, 800, 1200, 1600, 2000, 2400, 3200, 4000] as const;
+
+/**
+ * Round a requested `width_px` UP to the next served bucket.
+ *
+ * Rounding up rather than to the nearest is deliberate: the caller always gets
+ * at least the detail it asked for, never less. The response reports the SERVED
+ * width, so nothing is misdescribed -- `width_px` on the output has always
+ * meant the PNG's actual width.
+ *
+ * This exists because the render cache was keyed on the raw `width_px`, which a
+ * caller can vary 1..4000: up to 4000 distinct renders and cache writes per
+ * (recording, group), every one of them re-fetching the same view chunks
+ * straight from S3 with no edge cache in front. Nine buckets bound it.
+ */
+export function quantizeWidthPx(widthPx: number): number {
+  for (const bucket of OVERVIEW_WIDTH_BUCKETS) {
+    if (widthPx <= bucket) return bucket;
+  }
+  return OVERVIEW_WIDTH_BUCKETS[OVERVIEW_WIDTH_BUCKETS.length - 1];
+}
+
+// ---------------------------------------------------------------------------
 // Chunk planning
 // ---------------------------------------------------------------------------
 
@@ -67,6 +95,25 @@ export interface ChunkPlan {
   /** Relative object keys under the store/group, e.g. `"view/5/c/0/0/0"`. */
   chunkKeys: string[];
 }
+
+/**
+ * Hard ceiling on how many view chunks one `render_overview` call may fetch.
+ *
+ * In today's catalog the real figure is 1 to about 16, because `pickViewLevel`
+ * returns a level whose column count is within roughly 4x of `width_px` and
+ * `width_px` is capped at 4000. But the chunk count is `ceil(levelColumns /
+ * chunkColumns)` and `levelColumns` comes from the INDEX, not from anything this
+ * code controls: a group publishing a shallow pyramid (`n_view_levels: 1`) for a
+ * long recording -- a converter regression, or a future widening of the pyramid
+ * rule -- makes level 1 the only candidate no matter how small `width_px` is,
+ * and one anonymous call then fans out to tens of thousands of simultaneous
+ * fetches. Past Cloudflare's 1000-subrequest ceiling that surfaces as an opaque
+ * exception rather than an answer.
+ *
+ * 64 is comfortably above every legitimate plan and far below any platform
+ * limit. The same reasoning as `MAX_STORE_FANOUT_ENTRIES` in `get-events.ts`.
+ */
+export const MAX_OVERVIEW_CHUNKS = 64;
 
 /** `chunkColumns` defaults to 1024 (the producer's own default) when the
  *  group carries no `view_chunk_columns`, and is then CLAMPED to the level's

@@ -13,7 +13,12 @@
  * image needs.
  *
  * The rendered PNG is cached whole under
- * `overview/<zarr>/<group>/<width_px>`; a cache HIT skips the chunk fetch,
+ * `overview/<zarr>/<group>/<level>/<served width>`, where the served width is
+ * the request's `width_px` rounded UP to the next render bucket
+ * (`quantizeWidthPx`). Keyed on the raw `width_px` instead, a caller walking
+ * 1..4000 forced up to 4000 distinct renders and cache writes per
+ * (recording, group), each one re-fetching the same view chunks straight from
+ * S3 with no edge cache in front. A cache HIT skips the chunk fetch,
  * the blosc decode, and the PNG encode entirely -- `level`/`width_px`/
  * `height_px` are still recomputed (cheap, no I/O: pure functions of
  * already-cached group metadata) so the response metadata is always
@@ -38,10 +43,12 @@ import {
 } from "../catalog-row.js";
 import { buildEnvelopeForStore } from "../envelope.js";
 import {
+  MAX_OVERVIEW_CHUNKS,
   buildChunkPlan,
   computeRowPx,
   computeViewLevelColumns,
   pickViewLevel,
+  quantizeWidthPx,
   reassembleViewChunks,
   renderOverviewPng,
 } from "../overview.js";
@@ -87,6 +94,22 @@ function missingGeometryResult(
 function missingIndexFactsResult(datasetId: string): CallToolResult {
   return toolError(
     `Dataset "${datasetId}"'s index.json carries no usable source_commit or data_base; render_overview cannot fetch pyramid chunks for it.`,
+  );
+}
+
+/** The plan would fan out past {@link MAX_OVERVIEW_CHUNKS}. Names the pyramid
+ *  rather than the request, because a shallow pyramid is not something a smaller
+ *  `width_px` can work around: `pickViewLevel` returns level 1 regardless when
+ *  that is the only level published. */
+function chunkPlanTooLargeResult(
+  datasetId: string,
+  recording: string,
+  groupName: string,
+  chunkCount: number,
+  level: number,
+): CallToolResult {
+  return toolError(
+    `render_overview declines recording "${recording}" group "${groupName}" in dataset "${datasetId}": the chosen view level ${level} would need ${chunkCount} chunk reads, over the ${MAX_OVERVIEW_CHUNKS}-chunk limit. This group's pyramid is too shallow for a recording this long, so a smaller width_px does not reduce the read (level ${level} is the only candidate); the store needs re-converting with more view levels.`,
   );
 }
 
@@ -153,14 +176,33 @@ export async function renderOverviewTool(
     return { result: missingIndexFactsResult(args.dataset_id) };
   }
 
+  // Level selection uses the caller's RAW width, deliberately. Choosing the
+  // level from the rounded-up width would read a FINER level than asked for --
+  // width_px 100 on nm000329 would jump from level 5 (135 columns) to level 4
+  // (541), quadrupling the read to satisfy a request that got smaller. The
+  // rounding exists to bound cache keys, not to change what gets read.
   const level = pickViewLevel(nSamples, nViewLevels, args.width_px);
   const levelColumns = computeViewLevelColumns(nSamples, nViewLevels)[level - 1];
+  // ...and the served width is floored at the level's own column count, so it
+  // is always a pure downsample of what was read, never an upscale, and two
+  // requests that resolve to the same level and bucket share one entry.
+  const servedWidthPx = Math.min(quantizeWidthPx(args.width_px), levelColumns);
 
-  const cacheKey = projectionUrl(
-    args.dataset_id,
-    sourceCommitFinal,
-    `overview/${matched.zarr}/${targetGroup.name}/${args.width_px}`,
-  );
+  // The key carries the LEVEL and a QUANTIZED width, not the caller's raw
+  // `width_px`. Keyed on the raw value, a caller walking width_px 1..4000
+  // forced up to 4000 distinct renders and 4000 Cache API writes per
+  // (recording, group), each re-fetching the identical view chunks straight
+  // from S3 with no edge cache in front -- a write amplifier and an S3
+  // amplifier over the same bytes. The ladder bounds that to one entry per
+  // (level, bucket). The level belongs in the key too: it is what determines
+  // which chunks were read.
+  const cacheKey = projectionUrl({
+    env: deps.env,
+    datasetId: args.dataset_id,
+    sourceCommit: sourceCommitFinal,
+    convertedAt: row.zarr_converted_at,
+    projection: `overview/${matched.zarr}/${targetGroup.name}/${level}/${servedWidthPx}`,
+  });
   const cached = await readBinaryProjection(deps.cache(), cacheKey);
 
   const rowPx = computeRowPx(nChannels);
@@ -181,6 +223,18 @@ export async function renderOverviewTool(
       levelColumns,
       viewChunkColumns: targetGroup.view_chunk_columns,
     });
+
+    if (chunkPlan.chunkKeys.length > MAX_OVERVIEW_CHUNKS) {
+      return {
+        result: chunkPlanTooLargeResult(
+          args.dataset_id,
+          args.recording,
+          targetGroup.name,
+          chunkPlan.chunkKeys.length,
+          level,
+        ),
+      };
+    }
 
     let decodedChunks: Int16Array[];
     try {
@@ -223,7 +277,7 @@ export async function renderOverviewTool(
       rendered = renderOverviewPng({
         nChannels,
         totalColumns: levelColumns,
-        widthPx: args.width_px,
+        widthPx: servedWidthPx,
         data: reassembled,
       });
     } catch (err) {
@@ -268,7 +322,10 @@ export async function renderOverviewTool(
     recording: args.recording,
     group: targetGroup.name,
     level,
-    width_px: args.width_px,
+    // The SERVED width, which is the requested one rounded UP to the next
+    // render bucket -- always >= what was asked for, and always the PNG's real
+    // width, which is what this field has always meant.
+    width_px: servedWidthPx,
     height_px: heightPx,
     mime_type: "image/png",
     columns_read: columnsRead,

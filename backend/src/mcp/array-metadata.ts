@@ -77,13 +77,23 @@ export async function loadLevel0ArrayMetadata(
   deps: RecordingToolDeps,
   datasetId: string,
   sourceCommit: string,
+  /** D1's `zarr_converted_at`, part of the cache key: this entry holds the
+   *  `scale[]`/`offset[]` a taste multiplies by, and a re-conversion can
+   *  re-quantize at an unchanged commit. See projection-cache.ts. */
+  convertedAt: string | null,
   dataBase: string,
   zarr: string,
   group: string,
 ): Promise<LoadLevel0ArrayMetadataResult> {
   const commitUsable = SOURCE_COMMIT_RE.test(sourceCommit);
   const cacheKey = commitUsable
-    ? projectionUrl(datasetId, sourceCommit, `array/${zarr}/${group}/0`)
+    ? projectionUrl({
+        env: deps.env,
+        datasetId,
+        sourceCommit,
+        convertedAt,
+        projection: `array/${zarr}/${group}/0`,
+      })
     : null;
 
   if (cacheKey) {

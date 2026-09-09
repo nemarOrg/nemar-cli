@@ -615,9 +615,16 @@ describe("render_overview (route)", () => {
     expect(image?.data.length).toBeGreaterThan(0);
 
     const metadata = JSON.parse(text?.text ?? "{}");
+    // Level selection still uses the RAW width, so asking for 100px reads level
+    // 5 and one chunk exactly as before -- the render-cache bucketing must not
+    // pull in a finer level.
     expect(metadata.level).toBe(5);
     expect(metadata.chunks_read).toBe(1);
-    expect(metadata.width_px).toBe(100);
+    // `width_px` is the SERVED width: 100 rounds up to the 200 bucket, then
+    // floors at level 5's own 135 columns, so it is a pure downsample of what
+    // was read and never an upscale. Rounding is what bounds the render cache to
+    // one entry per (level, bucket) instead of one per distinct integer width.
+    expect(metadata.width_px).toBe(135);
     expect(metadata.envelope?.dtype).toBe("int16");
 
     const objectRequests = fixtureServer.requestLog.filter((r) => r.url.includes(`${V3_ID}/zarr/`));
