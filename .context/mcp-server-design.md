@@ -480,38 +480,161 @@ found."
 
 ### 5.6 `read_window`
 
+**Landed in phase 4, #1296.** Section 5.6 as originally written (phase 1)
+capped a taste at `duration_s x channels.length <= 3840` alone, inferred
+before the real on-disk geometry was checked. It was wrong on both axes it
+was meant to bound (below); this section is the corrected, as-shipped
+version.
+
 **Inputs:** `dataset_id`, `recording`, `group?`, `start_s` (default 0),
 `duration_s` (default 10), `channels?` (an array of channel indices;
 REQUIRED when `taste` is true), `taste` (default `false`).
 **Outputs (recipe mode, the default):** `{ mode: "recipe", recipe,
 envelope }`, where `recipe` is `shared/contract/mcp.ts`'s
-`readRecipeSchema` (section 6.2).
+`readRecipeSchema` (section 6.2), `dtype: null`, `codecs` absent (no
+array-metadata fetch was made).
 **Outputs (taste mode, opt-in):** `{ mode: "taste", start_s, duration_s,
-channels, sample_rate_hz, values, envelope }`, `values` already scaled to
-physical units.
-**Cost class (recipe):** one `index.json` read (cached) plus zero S3
-reads; the Worker never touches a signal byte.
-**Cost class (taste):** decodes exactly the inner chunks the requested
-window spans, capped at `duration_s x channels.length <= 3840` (60 s x 64
-channels; see the spike's decode-path verdict in section 10 below).
-A taste requires `channels`: the schema cannot know a recording's channel
+channels, sample_rate_hz, values, recipe, chunks_read, bytes_read, note,
+envelope }` -- `values` (`[channel][sample]`) already scaled to physical
+units and rounded to six significant digits (`note` says so); `recipe` is
+FULLY populated (`dtype`/`codecs` present) since a taste already fetched
+the array metadata a bare recipe would have needed a second call for.
+
+**The real on-disk geometry (verified live, not inferred).** Level 0 of
+every served store is a SHARDED Zarr v3 array: shape `[n_channels,
+n_samples]`, outer chunk (shard) `[n_channels, shard_samples]`, inner chunk
+(the `sharding_indexed` codec's own `chunk_shape`) `[n_channels,
+chunk_samples]`, `index_location: "end"`. Confirmed on nm000329's
+`eeg_250hz` (63 channels, shard 75000, chunk 1000) and on003392's
+`meg_250hz` (320 channels, shard 68000-69000 depending on the store, chunk
+1000) -- `test/fixtures/zarr-array-level0.zarr.json` is nm000329's real
+level-0 `zarr.json`, attributes included. An inner chunk always spans EVERY
+channel, so the chunk grid is always `1 x ceil(n_samples / shard_samples)`
+and a shard's object key is always `<zarr>/<group>/0/c/0/<j>` -- a taste of
+one channel still decodes every channel of every inner chunk the window
+spans. **Cost is driven by duration (how many inner chunks) and the
+store's own channel count, never by how many channels the caller asked
+for.** The shard footer is the shard object's last `n_inner * 16 + 4`
+bytes: `n_inner` little-endian uint64 `(offset, nbytes)` pairs (chaining
+contiguously from 0 whenever nothing is absent) plus a crc32c word this
+reader strips but never verifies. Verified against nm000329's real `c/0/0`
+shard (`backend/test/fixtures/mcp/nm000329-shard-index-c-0-0.bin`, captured
+`curl -A "nemar-cli/mcp-phase4" -H "Range: bytes=-1204"`): 75 entries, all
+present, offsets chaining from 0, `sum(nbytes) + 1204 == 8_970_760`, the
+shard's real `Content-Length`. An absent inner chunk is marked `2^64 - 1`
+in both fields and reads as `fill_value` (0 digital) with NO byte fetch at
+all. Both the shard grid and the inner-chunk grid follow Zarr's ordinary
+"last chunk may be shorter" rule: a boundary shard or boundary inner chunk
+is truncated to the array's real extent, never padded, so
+`nInnerForShard`/`chunkSampleSpan` (`backend/src/mcp/sharding.ts`) compute
+a shorter span there and the blosc frame's own header already carries the
+correspondingly shorter decoded length.
+
+**Three caps, not the phase-1 product alone.** The original
+`duration_s x channels.length <= 3840` check does not bound either cost it
+was meant to: `3840 s x 1 channel` satisfies it, but at 250 Hz that is
+960,000 samples and roughly 614 MB decoded on a 320-channel store (duration
+alone drives chunk count, and every chunk carries every channel); and
+`3840` channel-SECONDS at 1000 Hz is 3,840,000 channel-SAMPLES in the
+response, tens of megabytes of JSON. So:
+  1. `READ_WINDOW_TASTE_MAX_DURATION_S` (60) and
+     `READ_WINDOW_TASTE_MAX_CHANNELS` (64) are now HARD per-field caps,
+     enforced inside the taste branch of `readWindowInputSchema`'s
+     `superRefine` (never promoted to the fields' own `.max()`, which would
+     also constrain the zero-cost recipe path).
+  2. The original channel-seconds product check
+     (`READ_WINDOW_TASTE_MAX_CHANNEL_SECONDS = 60 x 64 = 3840`) stays, per
+     the lead's decision, though it is now mathematically dominated by the
+     two hard caps above (their own product is exactly 3840, so no input
+     satisfying both can ever exceed it) -- harmless, kept for the boundary
+     case it was written for.
+  3. **`READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES` (65,536) is the real
+     response-size bound** (`channels.length x n_samples`, the WINDOW's
+     sample count): 65,536 values round-tripped at six significant digits
+     is under about 900 KB. It cannot be schema-enforced (the schema does
+     not know a group's sampling rate, so it cannot turn `duration_s` into
+     a sample count) and is checked in `read-window.ts` right after the
+     group's rate is known, naming the rate, the computed product, the
+     cap, and the two ways under it (fewer channels, a shorter window) or
+     the recipe. At 250 Hz it buys 64 channels x 4 s or 8 channels x 32 s;
+     at 1000 Hz (the modality-rate ceiling), 2 channels x 32 s.
+A taste REQUIRES `channels`: the schema cannot know a recording's channel
 count, and a MEG store already in the live catalog (on003392) has 320, so
 treating an omitted list as "all channels" would pass a request five times
-over the cap.
-Past the cap, `read_window` never truncates silently: the input schema
-rejects the request with a validation error that names the cap and tells
-the caller to omit `taste` for a recipe, because a caller asking for a
-window this large almost certainly wants the S3 path anyway.
-The rejection is deliberate over a silent downgrade to recipe mode; a
+over the 64-channel cap. Past any of the three caps, `read_window` never
+truncates silently -- an error names the cap and points at the recipe
+(omit `taste`), deliberately over a silent downgrade to recipe mode: a
 caller who asked for numbers and got a recipe would have to notice the
 `mode` discriminator changed, whereas an error is impossible to misread.
-**Cache behavior:** none across calls (a taste is an inline decode of
-specific inner chunks on demand); the recipe path's inputs (`index.json`,
-chunk geometry) are the same cached projection every other tool reads.
-**Error that teaches:** a `channels` list naming an index past the group's
-`n_channels`, or a `start_s + duration_s` past the group's `duration_s`,
-answers a tool error naming the actual bound, not a truncated or
-zero-padded result.
+
+**Taste reads inner chunks only, never a whole shard.** Per requested
+window: resolve the recording/group exactly as the other recording tools
+do (unknown recording lists identifiers; unknown group lists names); `+ 0.5`-floor
+`start_s`/`duration_s` into `[startSample, endSample)` against the group's
+own `rate` (the converter's own `sample_index_for` rounding -- ties round
+UP, deliberately not `Math.round`'s banker's rounding); a window past the
+group's `duration_s`, or a channel index at or past `n_channels`, is a tool
+error naming the actual bound, never a truncated or zero-padded result.
+Compute the spanned shard indices (`shardsForWindow`) and, per shard, the
+spanned LOCAL inner-chunk indices (`innerIndicesForWindowInShard`); fetch
+each shard's footer with a single suffix `Range: bytes=-<n_inner*16+4>`
+request (cached, below), parse it, and **coalesce** the wanted local
+indices into the fewest HTTP Range reads: a run of index-consecutive,
+byte-adjacent PRESENT entries becomes one `Range: bytes=a-b` request
+(`planShardReads`); an absent entry is always its own no-fetch read and
+breaks any run around it. A 60 s window at 1000 Hz spans at most two
+shards, so the worst case is a handful of subrequests, never one per inner
+chunk. Each fetched range is decoded per inner chunk with the existing
+`decodeBloscZstdInt16` (no new codec work); an absent chunk contributes
+`fill_value` (0 digital, i.e. `offset[channel]` physical) for its span with
+no fetch. `physical = digital * scale[channel] + offset[channel]`, both
+per-channel arrays read once from the level-0 array's own `zarr.json`
+attributes (`array-metadata.ts`) -- the SAME fetch that fills the embedded
+recipe's `dtype`/`codecs` for free.
+
+**A v1/v2 index is a typed refusal, not degraded service.** No legacy
+document carries `layout`, `data_base`, or per-group `chunk_samples`/
+`shard_samples`, so no recipe -- let alone a taste -- is computable at all;
+`list_recordings`/`get_events` still work against that dataset's current
+index, and the error says so. A v3 group missing `chunk_samples`/
+`shard_samples` on its OWN entry answers the same typed-refusal shape when
+`taste` is requested (never a silent downgrade): the error text says a
+recipe is still computable for that group (with those two fields null) by
+retrying without `taste`.
+
+**Recipe mode makes no reads beyond `index.json`, and does not touch the
+`recordings` projection cache the other three tools share.**
+`buildReadRecipe` needs the FULL index document (`contract_base`,
+`data_base`, `s3_uri`, `layout`, per-group `chunk_samples`/`shard_samples`),
+none of which the compact `recordings` projection (section 7) carries, so
+this tool calls `readZarrIndex` directly -- the same function
+`loadRecordingsProjection` calls internally on ITS OWN cache miss --
+relying on the zarr sub-app's own edge cache for `index.json` rather than
+adding a fourth projection kind that would just duplicate it. `dtype` is
+null and `codecs` absent (no array-metadata fetch); the envelope's `dtype`
+is null too. The metrics point reports `cacheStatus: "none"` and
+`upstreamBytes: 0` for recipe mode (the index read is accounted for by the
+zarr sub-app's own layer, not this tool's projection-cache facts).
+
+**Cache.** Two projection kinds (section 7), both consulted only by taste
+mode, both immutable per `(dataset_id, source_commit)` and bypassed when
+the commit is not 40-hex: `array/<zarr>/<group>/0` (the level-0 `zarr.json`
+-- `data_type`, `codecs`, `scale[]`, `offset[]`) and
+`shardidx/<zarr>/<group>/0/<j>` (one shard's parsed footer, as `[offset,
+nbytes]` pairs, `[-1, -1]` for absent). Decoded WINDOWS are never cached --
+a taste is an inline decode of a specific window on demand. The metrics
+`cacheStatus` is `"hit"` only when every projection the call consulted
+(the array metadata and every shard footer touched) was a hit;
+`upstreamBytes` sums the footer and chunk bytes actually fetched.
+
+**The taste response is not duplicated into `content`.** Every other tool
+puts `JSON.stringify(output)` in both `content` and `structuredContent`;
+for a taste near the channel-samples cap that would put roughly 900 KB of
+numbers in `content` twice. Taste mode's `content` is a compact one-line
+summary instead (shape, rate, sample range, bytes/chunks read, the first
+few values of the first channel); `structuredContent` still carries the
+full object. Recipe mode keeps the both-places convention -- it stays
+small.
 
 ## 6. Envelope and recipe field tables
 
@@ -567,6 +690,15 @@ Verified against the on008083 fixture in
 `https://zarr.nemar.org/on008083/zarr/sub-01/eeg/a_eeg.zarr/eeg_250hz/0`,
 and for view level 1 to the matching `.../eeg_250hz/view/1`.
 
+**`read_window` (phase 4, section 5.6) is the one caller that sometimes
+supplies `arrayMetadata`.** Recipe mode never does (zero reads beyond
+`index.json`, so `dtype`/`codecs` stay null/absent); a TASTE already fetches
+the level-0 array's `zarr.json` for its own reason (the `scale[]`/`offset[]`
+physical-units conversion), so it passes that same document's `data_type`/
+`codecs` into `buildReadRecipe` too -- `dtype`/`codecs` come along for free,
+and a taste response's embedded recipe is always fully populated where a
+bare recipe-mode response is not.
+
 ## 7. Compute-minimization rules and cache key scheme
 
 The rule of never re-doing work an existing cache already paid for, made
@@ -615,12 +747,26 @@ concrete:
       stays complete.
       The whole-file parquet read itself is bounded only by the published
       file (largest observed: nm000103 at 2.8 MB, 3,522 stores); its peak
-      isolate memory is measured with `read_window`'s in phase 4, whose
-      definition of done already carries that measurement.
+      isolate memory is a separate, still-open measurement -- phase 4's
+      `read_window` memory script (section 10.4) measures ONLY the
+      `read_window` taste path (issue #1296's own definition of done), not
+      `get_events`' parquet read, which this paragraph had anticipated
+      lumping in. Correcting the forward reference here rather than leaving
+      it stale.
     - `overview/<zarr>/<group>/<width_px>` -- the rendered PNG bytes,
       `Content-Type: image/png`, one entry per (recording, group, width)
       actually requested (per section 5.5, in practice one or two widths
       per recording).
+    - **Phase 4 (#1296) adds two kinds, consulted only by `read_window`
+      taste mode:** `array/<zarr>/<group>/0` -- the level-0 array's `zarr.json`
+      (`data_type`, `codecs`, `scale[]`, `offset[]`) -- and
+      `shardidx/<zarr>/<group>/0/<j>` -- one shard's parsed footer, stored
+      compactly as `[offset, nbytes]` number pairs (`[-1, -1]` marking an
+      absent inner chunk), never the raw ~1.2 KB footer bytes. Decoded
+      WINDOWS are never cached -- a taste is an inline decode of a specific
+      window on demand (section 5.6). Recipe mode touches neither kind
+      (and does not touch `recordings` either -- it reads `index.json`
+      directly via `readZarrIndex`, section 5.6).
   A dataset whose D1 `zarr_source_commit` is missing or not 40-hex bypasses
   this cache entirely for every projection kind (never read, never
   written) rather than being keyed on a guess -- every such call reports
@@ -881,6 +1027,76 @@ compile). `compatibility_date` is unchanged (`2024-12-01`); the smoke
 script's compatibility-date check still passes, twice consecutively, after
 the fix.
 
+### 10.4 Phase 4's real bundle delta and taste-mode memory measurement
+
+Same measurement (`bunx wrangler deploy -c wrangler-sccn.toml --dry-run`,
+`wrangler 4.85.0` both times), before phase 4's code landed versus after:
+
+| Measurement | Total Upload | gzip |
+|---|---|---|
+| Before this PR (epic branch tip, phase 3 already merged) | 3243.99 KiB | 664.88 KiB |
+| After the full phase 4 implementation | 3285.36 KiB | 673.76 KiB |
+| **Delta (the real cost of this phase)** | **+41.37 KiB** | **+8.88 KiB** |
+
+(The "before" row here is a few epic-branch commits ahead of section 10.3's
+own "after" row for phase 3 -- 3235.64 KiB there versus 3243.99 KiB here --
+the same "unrelated `dev` syncs merged into the epic branch between the two
+measurements" pattern section 10.3 already notes for its own before/after
+pair, not anything in this phase.)
+
+**Phase 4 adds NO new dependencies** (`package.json` is untouched by this
+phase): the delta above is entirely new first-party TypeScript --
+`sharding.ts`, `array-metadata.ts`, `taste.ts`,
+`tools/read-window.ts`, the `read_window` zod 4 registration mirror in
+`schemas.ts`, and the contract additions in `shared/contract/mcp.ts`. An
+order of magnitude smaller than phase 3's `+248.92 KiB` (which added three
+whole dependencies -- `hyparquet`, `fast-png`, and the codec work) is exactly
+what "no new dependencies, mostly pure planning/decode logic reusing the
+existing blosc decoder" predicts.
+
+**Taste-mode memory measurement**, per issue #1296's definition of done:
+`backend/scripts/read-window-memory.ts` (committed) drives the REAL
+`readWindowTool` -- not a route-level HTTP call, but the same function
+`server.ts` registers -- against the two LIVE datasets this phase's geometry
+facts were verified against, with a local bun:sqlite D1 standing in for
+Cloudflare D1 (the only non-production piece; every `index.json`/`zarr.json`/
+shard fetch is a real network call to `zarr.nemar.org` /
+`nemar.s3.us-east-2.amazonaws.com`, named User-Agent per this repo's
+api/zarr-host convention). Each case sits just under
+`READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES` (65,536) without landing exactly on
+it, to avoid a float-rounding rejection at the boundary:
+
+| Case | Requested | Window | Channel-samples | `chunks_read` | `bytes_read` (upstream) | Bun `heapUsed` delta | Analytic bound |
+|---|---|---|---|---|---|---|---|
+| nm000329 `sub-1` (63 ch store) | 63 channels x 4.12 s | 1030 samples | 64,890 | 2 | 245,312 B | 3,295,454 B (~3.14 MiB) | 645,120 B (~630 KiB) |
+| on003392 `sub-06` (320 ch store, taste capped at 64) | 64 of 320 channels x 4.08 s | 1020 samples | 65,280 | 2 | 1,215,811 B | 5,680,543 B (~5.42 MiB) | 1,162,240 B (~1.11 MiB) |
+
+Both cases span exactly 2 inner chunks (a `~4 s` window at 250 Hz, `chunk_samples`
+1000, crosses one chunk boundary), confirming the "at most a handful of
+subrequests, never one per inner chunk" claim in section 5.6 at these sizes.
+`bytes_read` (the tool's own reported figure, observable in production via
+the Analytics Engine point, section 8) is upstream Range-read bytes --
+larger for on003392 because its inner chunks are 320-channel-wide, over 5x
+nm000329's 63.
+
+**Honesty note (read before trusting the `heapUsed` column):**
+`process.memoryUsage().heapUsed` is a Bun (V8) heap measurement standing in
+for a real Cloudflare Workers `workerd` isolate -- Bun's GC pacing, object
+layout, and heap growth policy are not workerd's, and this single Bun
+process never pays a fresh isolate's own baseline either. The `heapUsed`
+delta is roughly 5x the analytic bound in both cases here, consistent with
+that gap being real V8/Bun overhead (module graph, JSON parsing of a
+larger-than-strictly-needed `index.json`, HTTP client bookkeeping) rather
+than anything read_window itself retains. **The number to actually trust
+for isolate sizing is the analytic bound**:
+`n_channels_in_store x chunk_samples x 2` bytes for ONE decoded inner
+chunk held at a time (the code never holds a second one until the first has
+been copied out and released -- `read-window.ts`'s fetch-decode-copy loop,
+`taste.ts`'s `assembleTasteValues`) plus
+`channels.length x window_samples x 8` bytes for the output `number[][]`
+(a plain JS array of doubles) -- both printed by the script alongside the
+measured figures above, and reproducible with `bun run backend/scripts/read-window-memory.ts`.
+
 ## 11. Client compatibility
 
 | Client | Supports protocol revision 2026-07-28 |
@@ -1032,10 +1248,37 @@ the fix.
   `backend/test/mcp-overview.test.ts` instead of a dedicated smoke check,
   the same division phase 2 drew between `search_datasets`/
   `describe_dataset`'s smoke coverage and their broader route-test suites.
-- **Phase 4 (#1296):** `read_window` (the recipe builder wired to live
-  `index.json` data, plus the capped taste using this phase's chosen decode
-  path). `render_overview` is no longer phase 4's scope (moved to phase 3,
-  see section 5.5's header note; landed in phase 3 instead).
+- **Phase 4 (#1296): DONE.** `read_window` landed in both modes: recipe
+  (the default, zero signal bytes touched, reading `index.json` directly
+  rather than through the `recordings` projection cache the other three
+  tools share) and taste (a capped inline decode reading real sharded
+  Zarr v3 geometry -- see section 5.6's rewrite for the corrected caps and
+  the shard/footer/coalescing mechanics, `backend/src/mcp/sharding.ts`,
+  `array-metadata.ts`, `taste.ts`). `render_overview` was never this
+  phase's scope (moved to phase 3, see section 5.5's header note; landed
+  there instead). Six tools now registered
+  (`backend/test/mcp-route.test.ts`'s `tools/list` assertion, the smoke
+  script). Real-route tests: `backend/test/mcp-read-window.test.ts` (real
+  D1, a real `Bun.serve()` fixture upstream serving a synthetic sharded
+  store -- `nm099500`, generated by `scripts/zarr/generate_mcp_test_fixture.py`'s
+  `build_sharded_level0_fixture`, 4 channels, one deliberately absent inner
+  chunk, one truncated boundary inner chunk -- plus the REAL nm000329
+  `c/0/0` shard footer, captured live); `backend/test/mcp-sharding.test.ts`
+  (pure footer/planning tests, including the real captured footer: 75
+  entries, `sum(nbytes) + 1204 == 8_970_760`). Bundle delta +41.37 KiB /
+  +8.88 KiB gzip, no new dependencies; taste-mode memory measured against
+  live nm000329 and on003392 -- see section 10.4 for both, including the
+  Bun-heap-vs-analytic-bound honesty note.
+  **One interpretation call worth flagging:** the approved plan's text for
+  a v3 group missing `chunk_samples`/`shard_samples` when `taste` is
+  requested reads "a recipe is still computable there... and is returned".
+  Taken fully literally that could mean silently downgrading to a recipe
+  result rather than erroring; implemented instead as a typed tool error
+  (matching the "same shape" -- i.e. same KIND of response, a refusal -- as
+  the v1 case immediately before it, and consistent with this same section's
+  explicit "no silent mode-discriminator downgrade" reasoning for the
+  taste-cap rejection). The error text names the fact that a recipe IS
+  computable by retrying without `taste`.
 - **Phase 5 (#1297):** docs site coverage, the OSA tool-registration wiring
   ADR 0049 anticipates, and the release.
 - **ADR 0050:** `origin/dev` did not yet carry ADR 0049 when this PR was
@@ -1077,9 +1320,9 @@ the fix.
   disqualifying under workerd's embedder restriction regardless of
   whether the WASM would otherwise work, and `bun test` will not catch
   it; only a real `wrangler dev --local` (or deployed) run will.
-- **Tool registration under the two-copy zod split: DONE for `search_datasets`/
-  `describe_dataset` (phase 2); `read_window`'s discriminated-union/
-  `superRefine` shapes remain a phase 4 item.**
+- **Tool registration under the two-copy zod split: DONE, all six tools,
+  including `read_window`'s discriminated-union/`superRefine` shapes
+  (phase 4).**
   `registerTool` in `@modelcontextprotocol/server@2.0.0` takes a Standard
   Schema that also emits JSON Schema (`~standard.jsonSchema`), which zod 4
   implements and zod 3 does not.
@@ -1098,10 +1341,14 @@ the fix.
   success, identical parsed values -- comparing two DIFFERENT JSON Schema
   generators' output (`zod-to-json-schema` for zod 3, `z.toJSONSchema()` for
   zod 4) would drift on shape even when the accept/reject behavior agrees,
-  which is what actually matters for a client. `read_window`'s
-  `superRefine`/discriminated-union shapes (the channel-seconds check, the
-  recipe/taste result union) are deferred to phase 4 along with the tool
-  itself.
+  which is what actually matters for a client. Phase 4 extended the table
+  with `read_window`'s own cases: defaults, taste without `channels`, each
+  hard cap (`duration_s` 60/61, `channels.length` 64/65) and the
+  channel-seconds product cap, unknown keys, a malformed id, and a negative
+  `start_s` -- `readWindowInputSchema4`/`readWindowOutputSchema4` in
+  `backend/src/mcp/schemas.ts`, including its own `superRefine` mirroring
+  the three taste-mode checks and a `discriminatedUnion` for the
+  recipe/taste result shapes.
 - **CLOSED (phase 3): `zarrita` is never used in the Worker.**
   `render_overview`'s chunk keys (`view/<L>/c/0/0/<k>`) and its chunk plan
   (`Math.ceil(levelColumns / (view_chunk_columns ?? 1024))`) are hand-rolled
