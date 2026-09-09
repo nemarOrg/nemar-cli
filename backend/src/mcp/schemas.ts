@@ -305,7 +305,9 @@ export const provenanceEnvelopeSchema4 = z4
     dtype: z4
       .string()
       .nullable()
-      .describe("From the array-metadata fetch; null until a view or level-0 array was read."),
+      .describe(
+        "The level-0 array's dtype, from that array's own zarr.json. Null when the answering tool did not read that document, so in practice only read_window populates it: render_overview reads the view pyramid, never zarr.json.",
+      ),
     effective_rate_hz: z4
       .number()
       .nullable()

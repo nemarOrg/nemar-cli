@@ -200,8 +200,21 @@ export const provenanceEnvelopeSchema = z
      *  a constant fact about the serving copy, not a per-store measurement
      *  (the honesty layer E4 in the draft ecosystem plan asked for). */
     lossy: z.boolean(),
-    /** From the array-metadata fetch (`zarr.json`), not index.json -- null
-     *  until a caller has actually read that document. */
+    /** The LEVEL-0 array's dtype, as read from that array's own metadata
+     *  document (`zarr.json`). Null whenever the answering tool did not read
+     *  that document, which is the only thing that makes this field knowable.
+     *
+     *  So in practice only `read_window` ever populates it. `render_overview`
+     *  reads the `view/*` pyramid and never `zarr.json`, so it sends null even
+     *  though the view arrays it decodes happen to be int16 -- reporting that
+     *  would be answering a different question (the view array's dtype) under
+     *  the same field name. `list_recordings` and `get_events` read no array at
+     *  all.
+     *
+     *  It deliberately does NOT mean "was read on THIS call": `read_window`
+     *  reports the value on a projection-cache hit too, because the dtype is a
+     *  fact about the array, and the cache entry came from a real read of that
+     *  document. Use `chunks_read`/`bytes_read` to tell a hit from a miss. */
     dtype: z.string().nullable(),
     /** The SERVING rate after the NEMAR modality cap (group.rate). */
     effective_rate_hz: z.number().nullable(),

@@ -625,7 +625,11 @@ describe("render_overview (route)", () => {
     // was read and never an upscale. Rounding is what bounds the render cache to
     // one entry per (level, bucket) instead of one per distinct integer width.
     expect(metadata.width_px).toBe(135);
-    expect(metadata.envelope?.dtype).toBe("int16");
+    // Null, always. `dtype` is the LEVEL-0 array's dtype from its own zarr.json,
+    // and this tool reads the view pyramid and never zarr.json. It used to send
+    // "int16" on a cache miss and null on a hit, which made one field mean three
+    // different things across the three tools that carry it.
+    expect(metadata.envelope?.dtype).toBeNull();
 
     const objectRequests = fixtureServer.requestLog.filter((r) => r.url.includes(`${V3_ID}/zarr/`));
     const chunkOrMetaRequests = objectRequests.filter((r) => r.url !== `${V3_ID}/zarr/index.json`);
@@ -745,7 +749,11 @@ describe("render_overview (route)", () => {
       expect(metadata.chunks_read).toBe(1);
       expect(metadata.envelope?.derived).toBe(true);
       expect(metadata.envelope?.sss?.method).toBe("maxwell_filter");
-      expect(metadata.envelope?.dtype).toBe("int16");
+      // Null, always. `dtype` is the LEVEL-0 array's dtype from its own zarr.json,
+    // and this tool reads the view pyramid and never zarr.json. It used to send
+    // "int16" on a cache miss and null on a hit, which made one field mean three
+    // different things across the three tools that carry it.
+    expect(metadata.envelope?.dtype).toBeNull();
     });
   });
 });

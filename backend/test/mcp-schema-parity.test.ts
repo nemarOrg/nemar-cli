@@ -68,6 +68,23 @@ function assertParity(zod3: SafeParseable, zod4: SafeParseable, input: unknown, 
   if (r3.success && r4.success) {
     expect(r4.data, `${label}: parsed value`).toEqual(r3.data);
   }
+  // Parity alone is not enough, and the gap was real. A case BOTH copies reject
+  // satisfies the check above trivially, so a fixture that is simply invalid --
+  // the read_window taste fixture was, for want of a required `filled_ranges` --
+  // makes its own case vacuous AND every "field removed, still rejected" case
+  // built from it vacuous too, since the base was already rejected. Four cases
+  // in this file passed that way, one of them labeled "accepted" while both
+  // copies rejected it.
+  //
+  // So the verdict is asserted, taken from the label by the file's own
+  // convention: a case ending "-- rejected" must be rejected, anything else must
+  // be accepted.
+  // Matches "-- rejected" anywhere after the dashes, since several labels carry
+  // a parenthetical reason after it ("-- rejected (must be positive)").
+  const expectRejected = /--\s*rejected/.test(label);
+  expect(r3.success, `${label}: expected the schema to ${expectRejected ? "REJECT" : "ACCEPT"}`).toBe(
+    !expectRejected,
+  );
 }
 
 describe("searchDatasetsInputSchema parity", () => {
@@ -628,6 +645,10 @@ describe("readWindowOutputSchema parity", () => {
     recipe,
     chunks_read: 1,
     bytes_read: 512,
+    // REQUIRED on both copies, and its absence is what made this whole block
+    // vacuous. Non-empty on purpose, so the nested
+    // {start_sample,end_sample,start_s,end_s} shape is actually compared.
+    filled_ranges: [{ start_sample: 250, end_sample: 500, start_s: 1, end_s: 2 }],
     note: "values are rounded to six significant digits; see recipe for the exact byte-level read",
     envelope,
   };
@@ -656,7 +677,19 @@ describe("readWindowOutputSchema parity", () => {
         return rest;
       })(),
     ],
-    ["a taste result with note: null -- accepted", { ...tasteResult, note: null }],
+    ["a taste result with note: null", { ...tasteResult, note: null }],
+    [
+      "a taste result missing filled_ranges -- rejected",
+      (() => {
+        const { filled_ranges: _filled, ...rest } = tasteResult;
+        return rest;
+      })(),
+    ],
+    [
+      "a taste result whose filled_ranges entry lacks end_s -- rejected",
+      { ...tasteResult, filled_ranges: [{ start_sample: 0, end_sample: 1, start_s: 0 }] },
+    ],
+    ["a taste result with an EMPTY filled_ranges", { ...tasteResult, filled_ranges: [] }],
     ["an unrecognized mode -- rejected", { mode: "bytes", envelope }],
   ];
   for (const [label, input] of cases) {

@@ -310,11 +310,13 @@ export async function renderOverviewTool(
       units_report: matched.units_report,
     },
     group: targetGroup,
-    // "int16" only when this call actually decoded a view array (a cache
-    // MISS); a cache HIT reused the already-rendered PNG and decoded
-    // nothing this call, so dtype must be null there -- the envelope's
-    // dtype field means "was read this call", not "is int16 in general".
-    dtype: cacheStatus === "miss" ? "int16" : null,
+    // ALWAYS null. `dtype` is the LEVEL-0 array's dtype as read from its own
+    // zarr.json, and this tool reads the view/* pyramid and never zarr.json --
+    // its own module doc says so. The view arrays it decodes are int16, but
+    // reporting that here would answer a different question under the same
+    // field name, and it made the field mean one thing on a cache miss, another
+    // on a hit, and a third in read_window. Only read_window can populate it.
+    dtype: null,
   });
 
   const metadata = renderOverviewOutputSchema.parse({
