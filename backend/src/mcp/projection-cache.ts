@@ -77,16 +77,16 @@ const PROJECTION_HOST_FALLBACK = "mcp.invalid";
  *  never read an entry a previous deploy wrote for it -- the entry simply
  *  lives at a different key and the old one ages out on its own 7-day TTL,
  *  never mixing an old and a new shape under one key. Bump this alongside
- *  any change to `RecordingsProjection`, the events row shape, or the
- *  `_stores` summary shape. */
-export const PROJECTION_SCHEMA_VERSION = 1;
+ *  any change to `RecordingsProjection` or the cached events payload (bumped to
+ *  2 when the per-store entry became `{rows, invalidRowCount}` rather than a
+ *  bare row array). */
+export const PROJECTION_SCHEMA_VERSION = 2;
 
 /** Synthetic cache key for a projection:
  *  `https://<mcp host>/_cache/<id>/<identity>/<projection>/v<schema version>`,
  *  where `<identity>` is `<commit>.<conversion id>` (see the module doc for why
  *  the commit alone is not enough, and why the host is environment-derived).
  *  `projection` is one of `"recordings"`, `` `events/${zarr}` ``,
- *  `"events/_stores"`, `` `array/${zarr}/${group}/0` ``,
  *  `` `shardidx/${zarr}/${group}/0/${j}` ``, or
  *  `` `overview/${zarr}/${group}/${level}/${widthBucket}` `` -- see the tool
  *  files for how each builds its own string. */
@@ -130,8 +130,9 @@ export type ProjectionReadResult<T> = { status: "hit"; value: T } | { status: "m
 
 /** The minimal Standard-Schema-shaped validator every payload schema this
  *  file accepts must implement -- zod's own `.safeParse` already is one, so
- *  callers pass a real zod schema (`recordingsProjectionSchema`, an
- *  `z.array(eventRowSchema)`, the `_stores` schema) with no adapter. */
+ *  callers pass a real zod schema (`recordingsProjectionSchema`,
+ *  `eventRowsProjectionSchema`, `shardIndexProjectionSchema`) with no
+ *  adapter. */
 export interface ProjectionPayloadSchema<T> {
   safeParse: (input: unknown) => { success: boolean; data?: T };
 }

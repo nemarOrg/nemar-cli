@@ -68,6 +68,11 @@ const BAD_GEOM_ID = "nm099502";
 const WIDE_STORE_ID = "nm099503";
 const WIDE_N_CHANNELS = 256;
 const WIDE_RATE = 1000;
+// A v3 index whose shard_samples is NOT an exact multiple of chunk_samples. The
+// footer entry count is shard_samples / chunk_samples exactly, so this geometry
+// is unplannable -- and it is a fact about someone else's published index, so it
+// has to come back as a typed tool error rather than an internal error.
+const BAD_DIVISOR_ID = "nm099504";
 const SHARD_COMMIT = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
 const SHARD_ZARR = "sub-synth/eeg/sub-synth_task-shardtest_eeg.zarr";
 const SHARD_GROUP = "eeg_250hz";
@@ -269,6 +274,22 @@ describe("read_window (route)", () => {
       }),
     );
 
+    fixtureServer.files.set(
+      `${BAD_DIVISOR_ID}/zarr/index.json`,
+      encode({
+        ...rewrittenShardIndex,
+        dataset_id: BAD_DIVISOR_ID,
+        data_base: `${FIXTURE_PUBLIC_ORIGIN}/${BAD_DIVISOR_ID}/zarr/`,
+        contract_base: `${FIXTURE_PUBLIC_ORIGIN}/${BAD_DIVISOR_ID}/zarr/`,
+        stores: [
+          {
+            ...shardStore,
+            groups: [{ ...shardGroup, chunk_samples: 1000, shard_samples: 4500 }],
+          },
+        ],
+      }),
+    );
+
     // The decode-budget fixture. Geometry only -- no store objects are served
     // for it, because the guard must refuse before any of them is fetched.
     fixtureServer.files.set(
@@ -377,6 +398,11 @@ describe("read_window (route)", () => {
       zarr_source_commit: SHARD_COMMIT,
     });
     insertDataset(BAD_GEOM_ID, {
+      zarr_status: "ready",
+      zarr_store_count: 1,
+      zarr_source_commit: SHARD_COMMIT,
+    });
+    insertDataset(BAD_DIVISOR_ID, {
       zarr_status: "ready",
       zarr_store_count: 1,
       zarr_source_commit: SHARD_COMMIT,
@@ -648,6 +674,35 @@ describe("read_window (route)", () => {
       expect(footerRequests.length).toBe(0);
       const dataRequests = shardObjectRequests(SHARD_ID);
       expect(dataRequests.length).toBe(1);
+    });
+
+    test("an unplannable geometry is a TYPED error, not an internal one", async () => {
+      // shard_samples 4500 / chunk_samples 1000 is not an exact multiple, so
+      // nInnerForShard throws. Every other failure in this tool is a typed
+      // isError result; this one used to escape as an opaque JSON-RPC internal
+      // error, which reads like a server bug rather than a data problem.
+      fixtureServer.requestLog.length = 0;
+      const { res, body } = await callTool(app, env(db), 1, "read_window", {
+        dataset_id: BAD_DIVISOR_ID,
+        recording: SHARD_ZARR,
+        start_s: 0,
+        duration_s: 1,
+        channels: [0],
+        taste: true,
+      });
+      expect(res.status).toBe(200);
+      // A typed tool result, NOT a JSON-RPC error object.
+      expect(body.error).toBeUndefined();
+      const text = errorTextOf(body);
+      expect(text).toContain("cannot plan a read");
+      expect(text).toContain("4500");
+      expect(text).toContain("1000");
+      // And it costs no I/O beyond the index: the geometry is knowable from
+      // index.json alone, so this refuses before even the array-metadata read.
+      const nonIndexRequests = fixtureServer.requestLog.filter(
+        (r) => !r.url.endsWith("index.json"),
+      );
+      expect(nonIndexRequests).toEqual([]);
     });
 
     test("the DECODE budget refuses the on004696 shape before any store read", async () => {

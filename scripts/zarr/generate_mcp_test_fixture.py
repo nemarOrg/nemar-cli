@@ -99,6 +99,8 @@ from the repo root. Writes
 `backend/test/fixtures/mcp/on003392-synthetic-meg-view3-c-0-0-0.bin`,
 `backend/test/fixtures/mcp/nm000329-synthetic-multichunk-view1-c-0-0-{0,1,2}.bin`,
 `backend/test/fixtures/mcp/oversized-events.parquet`,
+`backend/test/fixtures/mcp/two-group-events.parquet`,
+`backend/test/fixtures/mcp/invalid-row-events.parquet`,
 and the sharded level-0 fixture set above, printing each one's byte size.
 Re-run only if a fixture's geometry needs to change; the committed bytes are
 stable and this script is not part of the conversion pipeline.
@@ -416,6 +418,80 @@ def build_oversized_events_parquet() -> None:
     print(f"wrote {out} ({out.stat().st_size} bytes, {n} rows)")
 
 
+def build_two_group_events_parquet() -> None:
+    """A parquet with rows for TWO channel groups of ONE store.
+
+    `events.parquet` is one row per (event, channel group), so a store with two
+    groups carries every event twice. `get_events` used to return both when no
+    `group` was named, reporting `total_count` as the sum while its envelope
+    described only the first group -- this fixture is what makes that
+    double-counting visible in a test rather than only in prose.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    store = "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-calibration_run-0_eeg.zarr"
+    onsets = [1.0, 2.0, 3.0, 4.0]
+    rows: dict[str, list] = {
+        "store_path": [],
+        "group_name": [],
+        "onset_s": [],
+        "duration_s": [],
+        "sample_index": [],
+        "trial_type": [],
+    }
+    for group, rate in (("eeg_250hz", 250), ("eeg_500hz", 500)):
+        for onset in onsets:
+            rows["store_path"].append(store)
+            rows["group_name"].append(group)
+            rows["onset_s"].append(onset)
+            rows["duration_s"].append(0.5)
+            rows["sample_index"].append(int(onset * rate + 0.5))
+            rows["trial_type"].append("stim")
+
+    table = pa.table(
+        {
+            "store_path": pa.array(rows["store_path"]),
+            "group_name": pa.array(rows["group_name"]),
+            "onset_s": pa.array(rows["onset_s"], type=pa.float64()),
+            "duration_s": pa.array(rows["duration_s"], type=pa.float64()),
+            "sample_index": pa.array(rows["sample_index"], type=pa.int64()),
+            "trial_type": pa.array(rows["trial_type"]),
+        }
+    )
+    out = FIXTURES_DIR / "two-group-events.parquet"
+    pq.write_table(table, out, compression="zstd")
+    print(f"wrote {out} ({out.stat().st_size} bytes, {len(rows['store_path'])} rows, 2 groups)")
+
+
+def build_invalid_row_events_parquet() -> None:
+    """Three valid rows plus one `eventRowSchema` rejects (negative
+    `sample_index`), so the dropped-row count has something real to report.
+
+    The count used to live only in the miss path's return value, so it reached
+    the one caller that happened to miss and no one else; every later call for
+    the store was a cache hit reporting 0 dropped rows.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    store = "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-calibration_run-0_eeg.zarr"
+    table = pa.table(
+        {
+            "store_path": pa.array([store] * 4),
+            "group_name": pa.array(["eeg_250hz"] * 4),
+            "onset_s": pa.array([1.0, 2.0, 3.0, 4.0], type=pa.float64()),
+            "duration_s": pa.array([0.5] * 4, type=pa.float64()),
+            # The last one is invalid: sample_index must be a non-negative int.
+            "sample_index": pa.array([250, 500, 750, -5], type=pa.int64()),
+            "trial_type": pa.array(["stim"] * 4),
+        }
+    )
+    out = FIXTURES_DIR / "invalid-row-events.parquet"
+    pq.write_table(table, out, compression="zstd")
+    print(f"wrote {out} ({out.stat().st_size} bytes, 4 rows, 1 invalid)")
+
+
 def main() -> None:
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
     # Byte-shuffle, zstd, one block per chunk (blocksize=0 lets c-blosc pick
@@ -449,6 +525,8 @@ def main() -> None:
         )
 
     build_oversized_events_parquet()
+    build_two_group_events_parquet()
+    build_invalid_row_events_parquet()
     build_sharded_level0_fixture()
 
 

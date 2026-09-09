@@ -92,7 +92,32 @@ export type IndexReadResult =
   | { status: "not_found" }
   /** index.json fetched but did not parse as JSON, or parsed but matched
    *  neither `zarrIndexSchema` nor `zarrIndexLegacySchema`. */
-  | { status: "invalid"; detail: string };
+  | { status: "invalid"; detail: string }
+  /** The document is larger than {@link MAX_INDEX_BYTES}. Distinct from
+   *  `invalid`: the document is presumably fine, this server just declines to
+   *  parse it inline. Carries the figures and the public URL so the refusal is
+   *  actionable. */
+  | { status: "too_large"; detail: string };
+
+/**
+ * Upper bound on an `index.json` this server will parse inline.
+ *
+ * The document's size is not bounded by anything this code controls: it grows
+ * with a dataset's store count, and store counts in the live catalog run to
+ * 25,253 (nm000281, whose index.json is 12,846,915 bytes). Parsing that costs a
+ * `JSON.parse` plus a full zod validation, and up to four copies are alive at
+ * peak (raw text, parsed document, validated clone, and the projection about to
+ * be serialized). The warm path is not free either: the cached projection for
+ * nm000281 is 9.9 MB of JSON, and every later call re-parses and re-validates
+ * it, so the cache removes the S3 fetch but not the parse.
+ *
+ * 24 MiB clears today's largest with meaningful headroom and still refuses a
+ * document twice that size, which is the point: `describe_dataset`'s own tool
+ * description already advertises that it never reads index.json because "the
+ * largest index in the catalog is 12.8 MB", so the risk was recognized for one
+ * tool and left unbounded for the three that do read it.
+ */
+export const MAX_INDEX_BYTES = 24 * 1024 * 1024;
 
 /** True when a raw parsed JSON value's own `format_version` field is
  *  exactly the number `3` -- checked BEFORE schema selection so a broken
@@ -139,10 +164,37 @@ export async function readZarrIndex(
   }
 
   const etag = response.headers.get("etag");
-  const bytes = Number(response.headers.get("content-length")) || 0;
+  const declaredBytes = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredBytes) && declaredBytes > MAX_INDEX_BYTES) {
+    return {
+      status: "too_large",
+      detail: `dataset "${datasetId}"'s index.json is ${declaredBytes} bytes, over this server's ${MAX_INDEX_BYTES}-byte inline-parse limit. It is public at ${zarrBase}/${datasetId}/zarr/index.json -- read it directly.`,
+    };
+  }
+
+  // Read the body as TEXT first, so the size is known even when the header was
+  // absent or unparseable, and so a document that lies about its length cannot
+  // get past the bound above by omitting the header.
+  let raw: string;
+  try {
+    raw = await response.text();
+  } catch (err) {
+    return {
+      status: "invalid",
+      detail: `index.json body could not be read: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  const bytes = Number.isFinite(declaredBytes) && declaredBytes > 0 ? declaredBytes : raw.length;
+  if (raw.length > MAX_INDEX_BYTES) {
+    return {
+      status: "too_large",
+      detail: `dataset "${datasetId}"'s index.json is ${raw.length} bytes, over this server's ${MAX_INDEX_BYTES}-byte inline-parse limit. It is public at ${zarrBase}/${datasetId}/zarr/index.json -- read it directly.`,
+    };
+  }
+
   let doc: unknown;
   try {
-    doc = await response.json();
+    doc = JSON.parse(raw);
   } catch (err) {
     return {
       status: "invalid",

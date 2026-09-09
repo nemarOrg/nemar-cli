@@ -355,7 +355,19 @@ async function loadShardFooter(
   });
   const cached = await readJsonProjection(deps.cache(), cacheKey, shardIndexProjectionSchema);
   if (cached.status === "hit") {
-    return { entries: shardEntriesFromPairs(cached.value), cacheStatus: "hit", bytes: 0 };
+    // The entry count is a CONSTANT for a given geometry (shard_samples /
+    // chunk_samples), so a hit that does not carry exactly `nInner` pairs came
+    // from a different geometry than this call computed. Treated as a miss --
+    // re-read the footer -- rather than handed on: `planShardReads` would throw
+    // "local index N has no footer entry" out of a path that otherwise produces
+    // only typed tool errors.
+    if (cached.value.length === nInner) {
+      return { entries: shardEntriesFromPairs(cached.value), cacheStatus: "hit", bytes: 0 };
+    }
+    console.warn(
+      `[read_window] ${datasetId} ${zarr}/${groupName} shard ${shardIndex}: cached footer has ` +
+        `${cached.value.length} entries, expected ${nInner}; re-reading`,
+    );
   }
 
   const footerLen = footerByteLength(nInner);
@@ -553,6 +565,9 @@ export async function readWindowTool(
       ),
     };
   }
+  if (indexResult.status === "too_large") {
+    return { result: toolError(`read_window declines: ${indexResult.detail}`) };
+  }
   if (!isV3Index(indexResult.index)) {
     return { result: v1RefusalResult(args.dataset_id, indexResult.formatVersion) };
   }
@@ -741,6 +756,24 @@ export async function readWindowTool(
     };
   }
 
+  // The footer entry count, computed once and BEFORE any fetch. It throws when a
+  // v3 index reports a `shard_samples` that is not an exact multiple of
+  // `chunk_samples`, which is a statement about someone else's published
+  // geometry -- so it belongs in this file's typed-error vocabulary rather than
+  // escaping as an opaque JSON-RPC internal error, and it is knowable from the
+  // index alone, so it should not cost an array-metadata read first.
+  let nInner: number;
+  try {
+    nInner = nInnerForShard({ shardSamples, chunkSamples });
+  } catch (err) {
+    return {
+      result: toolError(
+        `read_window cannot plan a read for group "${targetGroup.name}" of recording ` +
+          `"${args.recording}" in dataset "${args.dataset_id}": ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    };
+  }
+
   const arrayMeta = await loadLevel0ArrayMetadata(
     deps,
     args.dataset_id,
@@ -778,7 +811,6 @@ export async function readWindowTool(
     shardSamples,
   });
   for (const shardIndex of shardIndices) {
-    const nInner = nInnerForShard({ shardSamples, chunkSamples });
     const footer = await loadShardFooter(
       deps,
       args.dataset_id,
@@ -809,7 +841,20 @@ export async function readWindowTool(
       startSample,
       endSampleExclusive: endSample,
     });
-    const reads = planShardReads(footer.entries, localIndices);
+    // Also wrapped: it throws when the footer has no entry for a planned local
+    // index, which after the count check above means the footer disagrees with
+    // the geometry the index published.
+    let reads: ReturnType<typeof planShardReads>;
+    try {
+      reads = planShardReads(footer.entries, localIndices);
+    } catch (err) {
+      return {
+        result: toolError(
+          `read_window could not plan the shard read for recording "${args.recording}" in dataset ` +
+            `"${args.dataset_id}": ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      };
+    }
     for (const read of reads) {
       if (read.kind === "absent") {
         const span = chunkSampleSpan({

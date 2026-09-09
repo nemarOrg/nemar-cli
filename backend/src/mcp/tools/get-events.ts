@@ -6,8 +6,8 @@
  * `hyparquet` on a per-store cache miss, groups rows by `store_path` (the
  * producer's own name for the store's `zarr` path --
  * `scripts/zarr/generate_zarr.py`'s `events_schema`), and writes EVERY
- * store's rows (`events/<zarr>`) plus a store-list summary
- * (`events/_stores`) to the projection cache in one pass -- one dataset-wide
+ * store's rows (`events/<zarr>`) to the projection cache in one pass -- one
+ * dataset-wide
  * parquet read serves every recording's future `get_events` call, not just
  * the one this request named, up to {@link MAX_STORE_FANOUT_ENTRIES}
  * stores. `sample_index` comes back from hyparquet as a
@@ -55,7 +55,7 @@
  * **A store the parquet has no rows for** (the converter never found or
  * parsed its events.tsv, distinct from a store with a genuinely empty
  * events.tsv, which is indistinguishable from this on the wire either way)
- * still gets a `rowCount: 0` row in `events/_stores` and, below the
+ * still gets, below the
  * {@link MAX_STORE_FANOUT_ENTRIES} bound, a `[]` cache entry written in the
  * SAME pass as every other store -- so a repeat call for that store is a
  * cache hit, never a re-read of the whole file. Either way the response
@@ -123,8 +123,9 @@ const NO_EVENTS_FILE_NOTE =
   "no events file was found next to this recording (BIDS inheritance -- walking up to a " +
   "session/subject/root-level events.tsv -- is out of scope; only the exact sibling path was tried)";
 const NO_RATE_NOTE =
-  "the resolved recording/group has no known sampling rate, so a sample_index could not be " +
-  "computed from events.tsv";
+  "the resolved recording/group has no known sampling rate, so events.tsv was NOT fetched at " +
+  "all: every event row requires a sample_index and none could be computed. This is not a " +
+  "statement that the recording has no events";
 const NO_PARQUET_ROWS_NOTE =
   "events.parquet has no rows for this store (the converter may not have found or parsed its " +
   "events.tsv); the result may be incomplete";
@@ -183,11 +184,6 @@ function toSafeSampleIndex(value: unknown, datasetId: string, storeZarr: string)
 const EVENTS_PARQUET_COMPRESSORS: Compressors = {
   ZSTD: (input) => fzstdDecompress(input),
 };
-
-interface EventsStoresSummaryEntry {
-  zarr: string;
-  rowCount: number;
-}
 
 /** Cached payload schemas (`projection-cache.ts`'s `readJsonProjection`
  *  validates every hit against one), declared next to the payload types
@@ -249,10 +245,16 @@ export const MAX_EVENTS_PARQUET_ROWS = 100_000;
  *  rides that seam rather than adding a second failure channel. */
 export class EventsParquetTooLargeError extends Error {}
 
-const eventRowsProjectionSchema = z.array(eventRowSchema);
-const eventsStoresSummarySchema = z.array(
-  z.object({ zarr: z.string(), rowCount: z.number().int().nonnegative() }),
-);
+/** The cached per-store payload. The dropped-row COUNT travels with the rows,
+ *  which it did not use to: the entry held a bare `EventRow[]`, so
+ *  `invalidRowCount` was reported only to the one caller that happened to MISS,
+ *  and every later call for that store was a hit reporting 0 dropped rows with
+ *  `note: null` and a `total_count` that quietly omitted them. ADR 0005 wants
+ *  the gap reported, not `console.warn`ed once on somebody else's request. */
+const eventRowsProjectionSchema = z.object({
+  rows: z.array(eventRowSchema),
+  invalidRowCount: z.number().int().nonnegative(),
+});
 
 async function readWholeEventsParquet(
   deps: RecordingToolDeps,
@@ -266,8 +268,17 @@ async function readWholeEventsParquet(
   let bytesFetched = 0;
   const countingFetch: typeof fetch = async (input, init) => {
     const res = await deps.fetch(input, init);
-    const len = Number(res.headers.get("content-length") ?? 0);
-    bytesFetched += len;
+    // `content-length` first, but fall back to the body's own byte length when
+    // the header is absent or unparseable -- the same thing `array-metadata.ts`
+    // does, and for the same reason: this figure is what would reveal an
+    // oversized read, so it must not silently report 0.
+    const header = Number(res.headers.get("content-length"));
+    if (Number.isFinite(header) && header > 0) {
+      bytesFetched += header;
+      return res;
+    }
+    const buf = await res.clone().arrayBuffer();
+    bytesFetched += buf.byteLength;
     return res;
   };
   const file = await asyncBufferFromUrl({
@@ -361,9 +372,13 @@ async function loadEventsFromParquet(
   rows: EventRow[];
   cacheStatus: "hit" | "miss";
   upstreamBytes: number;
-  /** Rows dropped for THIS store by `eventRowSchema` validation, this call.
-   *  Always `0` on a cache hit -- the cached rows already passed validation
-   *  when they were written, so there is nothing new to report. */
+  /** Rows dropped for THIS store by `eventRowSchema` validation. Reported on a
+   *  cache HIT as well as a miss, because the count is stored in the entry
+   *  alongside the rows. It used to be `0` on a hit, reasoned as "the cached
+   *  rows already passed validation, so there is nothing new to report" -- but
+   *  the thing worth reporting is that rows were DROPPED, which stays true for
+   *  the life of the entry, and only the caller who happened to miss ever heard
+   *  about it. */
   invalidRowCount: number;
 }> {
   if (sourceCommit) {
@@ -376,7 +391,13 @@ async function loadEventsFromParquet(
     });
     const cached = await readJsonProjection(deps.cache(), cacheKey, eventRowsProjectionSchema);
     if (cached.status === "hit") {
-      return { rows: cached.value, cacheStatus: "hit", upstreamBytes: 0, invalidRowCount: 0 };
+      return {
+        rows: cached.value.rows,
+        cacheStatus: "hit",
+        upstreamBytes: 0,
+        // Carried in the entry, so a hit reports the same omission a miss did.
+        invalidRowCount: cached.value.invalidRowCount,
+      };
     }
   }
 
@@ -390,12 +411,16 @@ async function loadEventsFromParquet(
   }
 
   if (sourceCommit) {
+    // The requested store is always cached; the rest only below the fan-out
+    // bound.
+    //
+    // There used to be an `events/_stores` summary written here too, one entry
+    // per parquet miss listing every store and its row count. Nothing ever read
+    // it -- only a test did -- so it was a cache write and a schema per miss
+    // buying nothing. Removed rather than kept for a hypothetical future
+    // reader; it is three lines to reinstate against a real caller.
     const fanOut = byStore.size <= MAX_STORE_FANOUT_ENTRIES;
-    const storesSummary: EventsStoresSummaryEntry[] = [];
     for (const [zarr, rows] of byStore.entries()) {
-      // The requested store is always cached; the rest only below the
-      // fan-out bound. The summary is one entry either way, so it stays
-      // complete regardless.
       if (fanOut || zarr === storeZarr) {
         writeJsonProjection(
           deps.executionCtx,
@@ -407,23 +432,10 @@ async function loadEventsFromParquet(
             convertedAt,
             projection: `events/${zarr}`,
           }),
-          rows,
+          { rows, invalidRowCount: invalidRowCountByStore.get(zarr) ?? 0 },
         );
       }
-      storesSummary.push({ zarr, rowCount: rows.length });
     }
-    writeJsonProjection(
-      deps.executionCtx,
-      deps.cache(),
-      projectionUrl({
-        env: deps.env,
-        datasetId,
-        sourceCommit,
-        convertedAt,
-        projection: "events/_stores",
-      }),
-      storesSummary,
-    );
   }
 
   return {
@@ -639,12 +651,13 @@ export async function getEventsTool(
     estimated = false;
     cacheStatus = result.cacheStatus;
     upstreamBytes = result.upstreamBytes;
-    const notes: string[] = [];
-    if (rows.length === 0) notes.push(NO_PARQUET_ROWS_NOTE);
+    // The "no rows" note is NOT computed here. It used to be, on the PRE-filter
+    // rows, so a group that exists but has no events answered `events: []`,
+    // `total_count: 0`, `note: null` -- indistinguishable from a confident "this
+    // group has no events". It is computed after the group filter below.
     if (result.invalidRowCount > 0) {
-      notes.push(`${result.invalidRowCount} row(s) failed validation and were omitted`);
+      note = `${result.invalidRowCount} row(s) failed validation and were omitted`;
     }
-    if (notes.length > 0) note = notes.join(" ");
   } else {
     const ref =
       sourceCommitFinal && SOURCE_COMMIT_RE.test(sourceCommitFinal) ? sourceCommitFinal : "main";
@@ -679,13 +692,48 @@ export async function getEventsTool(
     cacheStatus = "miss";
   }
 
-  if (args.group) {
-    // Filter by the RESOLVED group name, not the raw `args.group` string --
-    // identical today (a match was required above), but this is the
-    // correct source of truth going forward.
-    const resolvedName = (targetGroup as (typeof groups)[number]).name;
-    rows = rows.filter((r) => r.group_name === resolvedName);
+  // Filter by the RESOLVED group whether or not the caller named one.
+  //
+  // Defaulting to the first group is what `render_overview` and `read_window`
+  // already do, and what this tool's own envelope already describes. Not
+  // filtering was the outlier and it double-counted: `events.parquet` carries
+  // one row per (event, CHANNEL GROUP), so a two-group store returned every
+  // event twice and reported `total_count` as double, with no note, while the
+  // envelope described only the first group's rates.
+  const resolvedGroupName = targetGroup?.name ?? null;
+  const notes: string[] = note ? [note] : [];
+  if (resolvedGroupName) {
+    rows = rows.filter((r) => r.group_name === resolvedGroupName);
+    if (!args.group && groups.length > 1) {
+      // Say which group answered, and how to ask for another. Silently picking
+      // one of several is the part that would surprise a caller.
+      notes.push(
+        `group not specified, so these events are group "${resolvedGroupName}" only; ` +
+          `this recording also has ${groups
+            .filter((g) => g.name !== resolvedGroupName)
+            .map((g) => `"${g.name}"`)
+            .join(", ")}`,
+      );
+    }
+  } else {
+    // No group at all in the projection: nothing to filter by, so every row for
+    // the store is returned. Rare (a malformed index), and worth saying.
+    notes.push(
+      "this recording's index entry names no channel groups, so these events are unfiltered " +
+        "across whatever groups the events file contains",
+    );
   }
+
+  // Now that the rows are the ones being answered with, an empty result can be
+  // described honestly, naming the group it was empty FOR.
+  if (rows.length === 0) {
+    notes.push(
+      source === "events_parquet"
+        ? `${NO_PARQUET_ROWS_NOTE}${resolvedGroupName ? ` (group "${resolvedGroupName}")` : ""}`
+        : `no events.tsv rows resolved for this recording${resolvedGroupName ? ` (group "${resolvedGroupName}")` : ""}`,
+    );
+  }
+  note = notes.length > 0 ? notes.join(" ") : null;
 
   const totalCount = rows.length;
   const page = rows.slice(args.offset, args.offset + args.limit);
@@ -743,7 +791,3 @@ export async function getEventsTool(
     metrics: { cacheStatus, upstreamBytes: upstreamBytes + recordingsBytes },
   };
 }
-
-/** Re-exported for tests that need to assert on the `_stores` summary
- *  schema shape directly. */
-export { eventsStoresSummarySchema };

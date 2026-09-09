@@ -48,9 +48,11 @@ function narrowZarrStatus(raw: string | null, datasetId: string): ZarrStatusValu
   return null;
 }
 
-/** `next_cheapest_tool` names `list_recordings` unconditionally: `get_events`
- *  and `render_overview` already ship alongside it (epic #1065 phase 3);
- *  only `read_window` remains a future phase. `reason` states the actual
+/** `next_cheapest_tool` names `list_recordings` unconditionally, and that is a
+ *  cost statement rather than a completeness one: every other recording-level
+ *  tool needs a recording path, and `list_recordings` is the cheapest way to
+ *  learn one. All six tools ship now, `read_window` included (phase 4). `reason`
+ *  states the actual
  *  zarr status so a caller does not read "zero
  *  recordings" as "this dataset has no data" (design doc section 5.2).
  *  Takes the ALREADY-NARROWED status, never the raw column, so this text

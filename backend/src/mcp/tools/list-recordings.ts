@@ -321,6 +321,17 @@ export async function loadRecordingsProjection(
       },
     };
   }
+  if (indexResult.status === "too_large") {
+    // A deliberate decline with the public URL in it, not a read failure -- the
+    // document is fine, this server just will not parse it inline.
+    return {
+      ok: false,
+      result: {
+        isError: true,
+        content: [{ type: "text", text: `list_recordings declines: ${indexResult.detail}` }],
+      },
+    };
+  }
 
   const projection = buildProjection(
     indexResult.index,

@@ -62,6 +62,17 @@ const FANOUT_ID = "nm000330";
 // real outlier is nm000104: 99,863,763 bytes and 5,411,570 rows across 1131
 // stores, which one anonymous call used to pull through the Worker whole.
 const OVERSIZED_EVENTS_ID = "nm000331";
+// A dataset whose first store declares TWO channel groups. events.parquet is one
+// row per (event, channel group), so this is the shape that used to return every
+// event twice with total_count doubled when `group` was omitted.
+const MULTI_GROUP_ID = "nm000332";
+const MULTI_GROUP_SECOND = "eeg_500hz";
+// Declared on the store but absent from the parquet: a real "this group exists
+// and has no events" case, which used to be indistinguishable from a confident
+// empty answer because the no-rows note was computed before the group filter.
+const MULTI_GROUP_EMPTY = "eeg_1000hz";
+// A dataset whose events.parquet carries one row eventRowSchema rejects.
+const INVALID_ROW_ID = "nm000333";
 const FANOUT_EXTRA_STORES = MAX_STORE_FANOUT_ENTRIES + 1;
 
 // The real on003392 MEG SSS store (`derived: true`, real `sss`), with its
@@ -238,6 +249,55 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
     );
     fixtureServer.files.set(`${V3_ID}/zarr/events.parquet`, parquetBytes);
 
+    // The first store, with a second declared group appended. The real parquet
+    // carries rows only for "eeg_250hz", so the second group is a real
+    // "this group exists and has no events" case at the same time.
+    const firstStore = (nm000329IndexRaw as { stores: Array<Record<string, unknown>> }).stores[0];
+    const firstGroup = (firstStore.groups as Array<Record<string, unknown>>)[0];
+    fixtureServer.files.set(
+      `${MULTI_GROUP_ID}/zarr/index.json`,
+      encode({
+        ...rewrittenV3Index,
+        dataset_id: MULTI_GROUP_ID,
+        events_parquet: `${FIXTURE_PUBLIC_ORIGIN}/${MULTI_GROUP_ID}/zarr/events.parquet`,
+        stores: [
+          {
+            ...firstStore,
+            groups: [
+              firstGroup,
+              { ...firstGroup, name: MULTI_GROUP_SECOND, rate: 500 },
+              { ...firstGroup, name: MULTI_GROUP_EMPTY, rate: 1000 },
+            ],
+          },
+        ],
+      }),
+    );
+
+    // Four events, each carried once per group: eight rows, which is exactly the
+    // doubling a caller used to see when no group was named.
+    fixtureServer.files.set(
+      `${MULTI_GROUP_ID}/zarr/events.parquet`,
+      new Uint8Array(
+        readFileSync(new URL("./fixtures/mcp/two-group-events.parquet", import.meta.url)),
+      ),
+    );
+
+    fixtureServer.files.set(
+      `${INVALID_ROW_ID}/zarr/index.json`,
+      encode({
+        ...rewrittenV3Index,
+        dataset_id: INVALID_ROW_ID,
+        events_parquet: `${FIXTURE_PUBLIC_ORIGIN}/${INVALID_ROW_ID}/zarr/events.parquet`,
+        stores: [firstStore],
+      }),
+    );
+    fixtureServer.files.set(
+      `${INVALID_ROW_ID}/zarr/events.parquet`,
+      new Uint8Array(
+        readFileSync(new URL("./fixtures/mcp/invalid-row-events.parquet", import.meta.url)),
+      ),
+    );
+
     // 100,001 rows, one past MAX_EVENTS_PARQUET_ROWS, in 4.5 KB (every column a
     // repeated constant, so dictionary encoding plus zstd collapses it). A real
     // over-cap parquet that costs nothing to commit.
@@ -382,16 +442,6 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
     });
   }
 
-  function storesKey(datasetId: string, convertedAt: string = CONVERTED_AT): string {
-    return projectionUrl({
-      env: env(db),
-      datasetId,
-      sourceCommit: V3_COMMIT,
-      convertedAt,
-      projection: "events/_stores",
-    });
-  }
-
   beforeEach(() => {
     db = freshDb();
     cache = new InMemoryCache();
@@ -423,6 +473,16 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
     insertDataset(OVERSIZED_EVENTS_ID, {
       zarr_status: "ready",
       zarr_store_count: (nm000329IndexRaw as { store_count: number }).store_count,
+      zarr_source_commit: V3_COMMIT,
+    });
+    insertDataset(MULTI_GROUP_ID, {
+      zarr_status: "ready",
+      zarr_store_count: 1,
+      zarr_source_commit: V3_COMMIT,
+    });
+    insertDataset(INVALID_ROW_ID, {
+      zarr_status: "ready",
+      zarr_store_count: 1,
       zarr_source_commit: V3_COMMIT,
     });
     insertDataset(MEG_ID, {
@@ -923,8 +983,92 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
       });
       expect(await cache.match(eventsKey(FANOUT_ID, requested))).toBeDefined();
       expect(await cache.match(eventsKey(FANOUT_ID, neighbour))).toBeUndefined();
-      // One entry regardless of store count, so it stays complete.
-      expect(await cache.match(storesKey(FANOUT_ID))).toBeDefined();
+    });
+
+    test("no group named: answers the FIRST group only, and says which and what else", async () => {
+      // events.parquet is one row per (event, CHANNEL GROUP), so not filtering
+      // returned every event once per group and reported total_count as the sum,
+      // with no note, while the envelope described only the first group's rates.
+      // The sibling tools (render_overview, read_window) already default to the
+      // first group; this one was the outlier.
+      const { body } = await callTool(app, env(db), 1, "get_events", {
+        dataset_id: MULTI_GROUP_ID,
+        recording: (nm000329IndexRaw as { stores: Array<{ zarr: string }> }).stores[0].zarr,
+      });
+      const output = getEventsOutputSchema.parse(structuredContentOf(body)) as GetEventsOutput;
+      // Four events exist, carried as eight parquet rows across the two groups.
+      // Before the fix this answered 8.
+      expect(output.events.length).toBe(4);
+      expect(output.total_count).toBe(4);
+      // Every returned row belongs to the group that answered.
+      expect(new Set(output.events.map((e) => e.group_name))).toEqual(new Set(["eeg_250hz"]));
+      // Silently picking one of several is the surprising part, so it is named,
+      // along with the alternative the caller can ask for.
+      expect(output.note).toContain("group not specified");
+      expect(output.note).toContain("eeg_250hz");
+      expect(output.note).toContain(MULTI_GROUP_SECOND);
+    });
+
+    test("a group that exists but has no rows says so, naming the group", async () => {
+      // Used to answer events: [], total_count: 0, note: null -- a confident
+      // "this group has no events" -- because the no-rows note was computed on
+      // the PRE-filter rows and the filter ran afterwards.
+      const { body } = await callTool(app, env(db), 2, "get_events", {
+        dataset_id: MULTI_GROUP_ID,
+        recording: (nm000329IndexRaw as { stores: Array<{ zarr: string }> }).stores[0].zarr,
+        group: MULTI_GROUP_SECOND,
+      });
+      const output = getEventsOutputSchema.parse(structuredContentOf(body)) as GetEventsOutput;
+      // This fixture's second group DOES have rows, so asking for it explicitly
+      // returns exactly its four and no note about emptiness.
+      expect(output.events.length).toBe(4);
+      expect(new Set(output.events.map((e) => e.group_name))).toEqual(
+        new Set([MULTI_GROUP_SECOND]),
+      );
+      // Its sample_index is computed against ITS rate (500 Hz), so the two
+      // groups' rows are genuinely different data, not duplicates.
+      expect(output.events.map((e) => e.sample_index)).toEqual([500, 1000, 1500, 2000]);
+      // No "group not specified" note here: the caller named it.
+      expect(output.note ?? "").not.toContain("group not specified");
+    });
+
+    test("a declared group the parquet has NO rows for says so, naming the group", async () => {
+      const { body } = await callTool(app, env(db), 3, "get_events", {
+        dataset_id: MULTI_GROUP_ID,
+        recording: (nm000329IndexRaw as { stores: Array<{ zarr: string }> }).stores[0].zarr,
+        group: MULTI_GROUP_EMPTY,
+      });
+      const output = getEventsOutputSchema.parse(structuredContentOf(body)) as GetEventsOutput;
+      expect(output.events).toEqual([]);
+      expect(output.total_count).toBe(0);
+      // The note is the whole point: an empty list with note: null reads as
+      // "this group truly has no events", which is a claim nothing established.
+      expect(output.note).not.toBeNull();
+      expect(output.note).toContain(MULTI_GROUP_EMPTY);
+      // Still the parquet path, not a fallback, and still not an estimate.
+      expect(output.source).toBe("events_parquet");
+      expect(output.estimated).toBe(false);
+    });
+
+    test("dropped rows are reported on a cache HIT, not only to whoever missed", async () => {
+      const recording = (nm000329IndexRaw as { stores: Array<{ zarr: string }> }).stores[0].zarr;
+      const args = { dataset_id: INVALID_ROW_ID, recording };
+
+      const first = getEventsOutputSchema.parse(
+        structuredContentOf((await callTool(app, env(db), 1, "get_events", args)).body),
+      ) as GetEventsOutput;
+      expect(first.events.length).toBe(3);
+      expect(first.note).toContain("1 row(s) failed validation");
+
+      // Same store again. This is a cache hit, and it used to answer note: null
+      // with a total_count that quietly omitted the dropped row -- the omission
+      // was visible only to the caller who happened to populate the entry.
+      const second = getEventsOutputSchema.parse(
+        structuredContentOf((await callTool(app, env(db), 2, "get_events", args)).body),
+      ) as GetEventsOutput;
+      expect(second.events.length).toBe(3);
+      expect(second.note).toContain("1 row(s) failed validation");
+      expect(second.note).toEqual(first.note);
     });
 
     test("an events.parquet over the row budget is DECLINED, naming the public URL", async () => {

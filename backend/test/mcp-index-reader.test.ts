@@ -9,7 +9,7 @@
 
 import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { readZarrIndex } from "../src/mcp/index-reader.js";
+import { MAX_INDEX_BYTES, readZarrIndex } from "../src/mcp/index-reader.js";
 import { createZarrDataRoutes } from "../src/routes/zarr-data.js";
 import type { Bindings } from "../src/types/bindings.js";
 import nm000111IndexV1 from "./fixtures/mcp/nm000111-index-v1.json";
@@ -119,6 +119,83 @@ describe("index-reader", () => {
 
     const after = await readZarrIndex({ zarrRoutes: zarrApp }, env, ctx, V3_ID);
     expect(after.status).toBe("not_found");
+  });
+
+  describe("the inline-parse size bound", () => {
+    // A stand-in for the zarr sub-app that answers whatever this test wants,
+    // because the bound is about the RESPONSE, not about any dataset's real
+    // document. Not a mock of business logic: readZarrIndex's own contract is
+    // "fetch through zarrRoutes and interpret the response", and that
+    // interpretation is exactly what is under test.
+    function respondingWith(init: { body: string; contentLength?: string }): {
+      fetch: () => Response;
+    } {
+      const headers = new Headers({ "content-type": "application/json", etag: '"x"' });
+      if (init.contentLength !== undefined) headers.set("content-length", init.contentLength);
+      return { fetch: () => new Response(init.body, { status: 200, headers }) };
+    }
+
+    test("an oversized content-length is refused WITHOUT reading the body", async () => {
+      // The important branch: the header alone is enough to decline, so a
+      // pathological document costs no parse and no allocation.
+      //
+      // Proven by making the body UNREADABLE. If the bound were checked after
+      // reading, this would come back "invalid" ("body could not be read")
+      // instead of "too_large" -- so the verdict itself distinguishes the two
+      // code paths, rather than relying on a stream-pull probe, which Bun may
+      // invoke on its own schedule.
+      const routes = {
+        fetch: () => {
+          const headers = new Headers({
+            "content-type": "application/json",
+            "content-length": String(MAX_INDEX_BYTES + 1),
+          });
+          const body = new ReadableStream<Uint8Array>({
+            pull() {
+              throw new Error("body must not be read once the header is over the bound");
+            },
+          });
+          return new Response(body, { status: 200, headers });
+        },
+      };
+      const result = await readZarrIndex({ zarrRoutes: routes }, env, ctx, V3_ID);
+      expect(result.status).toBe("too_large");
+      if (result.status !== "too_large") throw new Error("unreachable");
+      expect(result.detail).toContain(String(MAX_INDEX_BYTES));
+      // The refusal is actionable: the document is public.
+      expect(result.detail).toContain("index.json");
+      expect(result.detail).toContain("read it directly");
+    });
+
+    test("a body over the bound with NO content-length is still refused", async () => {
+      // Otherwise the bound is trivially bypassed by omitting the header.
+      const oversized = `{"pad":"${"x".repeat(MAX_INDEX_BYTES + 16)}"}`;
+      const result = await readZarrIndex(
+        { zarrRoutes: respondingWith({ body: oversized }) },
+        env,
+        ctx,
+        V3_ID,
+      );
+      expect(result.status).toBe("too_large");
+    });
+
+    test("a document just UNDER the bound is read normally", async () => {
+      // The bound must not be a blanket refusal: nm000281's real index.json is
+      // 12,846,915 bytes and has to keep working, so this checks the near edge
+      // rather than only the far one.
+      const realIndex = JSON.stringify(nm000329Index);
+      const result = await readZarrIndex(
+        { zarrRoutes: respondingWith({ body: realIndex }) },
+        env,
+        ctx,
+        V3_ID,
+      );
+      expect(result.status).toBe("ok");
+      if (result.status !== "ok") throw new Error("unreachable");
+      // With no content-length header, `bytes` falls back to the body length
+      // rather than reporting a misleading 0.
+      expect(result.bytes).toBe(realIndex.length);
+    });
   });
 
   test("an unknown dataset id (never inserted) is not_found", async () => {
