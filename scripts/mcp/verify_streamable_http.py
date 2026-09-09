@@ -142,9 +142,26 @@ ENVELOPE_REQUIRED = (
     "zarr_verify_status",
 )
 
-#: Of those, the ones the contract does not allow to be null. The rest are
-#: `.nullable()` -- a dataset with no DOI is a real, valid state -- so `None`
-#: there must not fail.
+#: Of those, the ones the contract does not allow to be null, read field by field
+#: off `provenanceEnvelopeSchema` rather than from memory. Everything else is
+#: `.nullable()`, and each nullable one has a legitimate reason to be null that a
+#: gate must not call a failure:
+#:
+#:   doi/license/citation   a dataset without a DOI or a stated license is real
+#:   index_etag             null when the fetch did not keep the header; the
+#:                          contract says "never fabricated"
+#:   dtype                  null unless the answering tool read the array's own
+#:                          zarr.json, so null on every tool but read_window
+#:   effective_rate_hz      null when the group reports no rate
+#:   source_rate_hz         same
+#:   zarr_verify_status     null until the daily fidelity sweep reaches a fresh
+#:                          conversion (ADR 0005: verification is REPORTED, never
+#:                          a precondition for serving)
+#:
+#: `zarr_verify_status` is in that list the hard way: an earlier version of this
+#: script asserted it non-null, and the first production run failed on nm000329 --
+#: a false failure against a server behaving exactly as its contract says, which
+#: is the precise mode this whole file is written to avoid.
 ENVELOPE_NON_NULL = (
     "dataset_id",
     "source_commit",
@@ -152,12 +169,19 @@ ENVELOPE_NON_NULL = (
     "source_tree",
     "derived",
     "lossy",
-    "zarr_verify_status",
 )
 
 #: How many search hits to consider when hunting for a subject the v3-only tools
 #: can actually be driven against.
-CANDIDATE_LIMIT = 8
+#:
+#: 8 was not enough, measured against production: `has_zarr: true` means CONVERTED,
+#: not "index v3", and the first eight hits were all legacy v1 indexes
+#: (re-conversion pending), so discovery gave up having tried nothing usable. The
+#: archive is roughly half v3, but the ordering is not in this script's control and
+#: nothing in `search_datasets` filters on index version. 25 is a bound on the
+#: `list_recordings` calls this scan will make, not a promise -- for a release gate,
+#: pass `--dataset` and skip the scan entirely.
+CANDIDATE_LIMIT = 25
 
 #: Caveats the server volunteered during the run. Printed again at the end.
 NOTES: list[str] = []
