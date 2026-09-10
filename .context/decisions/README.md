@@ -93,6 +93,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0052](0052-a-tracking-issue-closes-on-verified-state-and-a-burst-rolls-up.md) - An import-failure tracking issue closes on verified state, and a burst rolls up
 - [ADR 0053](0053-silence-is-only-evidence-of-a-problem-when-there-was-work-to-do.md) - Silence is only evidence of a problem when there was work to do
 - [ADR 0054](0054-the-weekly-report-arrives-whether-or-not-anything-is-wrong.md) - The weekly report arrives whether or not anything is wrong, and unknown is not zero
+- [ADR 0055](0055-a-reconcile-reports-a-disagreement-and-files-nothing.md) - A reconcile reports a disagreement and files nothing, and coverage is looser than ownership
 
 ## Backfill note (2026-07-31)
 

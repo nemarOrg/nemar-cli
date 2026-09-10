@@ -852,6 +852,111 @@ describe("a rollup is released once the backlog drains", () => {
 // The cron wrapper's guard, in BOTH directions
 // ---------------------------------------------------------------------------
 
+describe("the reconcile rides the triage sweep's issue list (#1352)", () => {
+  /**
+   * It lives inside this sweep because the sweep already has the full open issue
+   * list, so the comparison costs no extra GitHub call. These cases drive it through
+   * the REAL sweep against real D1, so `RECONCILE_ROWS_QUERY` is exercised as SQL
+   * rather than as a string.
+   */
+  test("a failed row with no issue is reported as untracked", async () => {
+    const db = freshDb();
+    // Tracked: has its own machine-filed issue. Untracked: nothing at all.
+    seedImportJob(db, "on000001");
+    seedImportJob(db, "on000777");
+    const deps = recordingDeps([issue(1, "on000001")], { on000001: INCOMPLETE });
+
+    const r = await runImportIssueSweep(envFor(db), {}, deps);
+
+    expect(r.reconcileError).toBeNull();
+    expect(r.reconcile?.rowsWithoutIssue.map((x) => x.datasetId)).toEqual(["on000777"]);
+    // Classified through the real classifier, so the report names a cause.
+    expect(r.reconcile?.rowsWithoutIssue[0]?.cause).toBe("auth_invalid");
+  });
+
+  test("an open issue whose dataset has no import row is reported", async () => {
+    const db = freshDb();
+    // No seedImportJob at all for on004148.
+    const deps = recordingDeps([issue(77, "on004148")], {});
+
+    const r = await runImportIssueSweep(envFor(db), {}, deps);
+
+    expect(r.reconcile?.issuesWithoutRow).toEqual([
+      { number: 77, datasetId: "on004148", title: "Import failure: on004148 (ds004148)" },
+    ]);
+  });
+
+  test("rollup mode does not make every failed row look untracked", async () => {
+    // The false positive that would matter most: with the rollup engaged, per-dataset
+    // issues are deliberately absent, and reporting all of them as untracked would
+    // turn ADR 0052's flood control into the flood.
+    const db = freshDb();
+    for (let i = 1; i <= 12; i++) {
+      seedImportJob(db, `on${String(i).padStart(6, "0")}`);
+    }
+    const deps = recordingDeps([rollupIssue()], {});
+
+    const r = await runImportIssueSweep(envFor(db), {}, deps);
+
+    expect(r.reconcile?.rowsWithoutIssue).toEqual([]);
+    expect(r.reconcile?.rowsExamined).toBe(12);
+  });
+
+  test("the reconcile reads the FULL open list, not this run's window", async () => {
+    // The rotation window is a write-safety bound. Inheriting it here would report
+    // every issue outside today's window as missing its row.
+    const db = freshDb();
+    const issues = [];
+    for (let i = 1; i <= 20; i++) {
+      const id = `on${String(i).padStart(6, "0")}`;
+      seedImportJob(db, id);
+      issues.push(issue(i, id));
+    }
+    const deps = recordingDeps(issues, {});
+
+    const r = await runImportIssueSweep(envFor(db), { limit: 3 }, deps);
+
+    // Only 3 examined for triage...
+    expect(r.examined).toBe(3);
+    expect(r.remaining).toBe(17);
+    // ...but all 20 issues counted as coverage, so nothing is falsely orphaned.
+    expect(r.reconcile?.issuesExamined).toBe(20);
+    expect(r.reconcile?.rowsWithoutIssue).toEqual([]);
+    expect(r.reconcile?.issuesWithoutRow).toEqual([]);
+  });
+
+  test("a D1 failure leaves the verdict null and does not fail the triage run", async () => {
+    // Fail open on the section, never on the verdict: an empty verdict would say
+    // "they agree" about a comparison that never happened.
+    const db = freshDb();
+    seedImportJob(db, "on000001");
+    db.run("DROP TABLE import_jobs");
+    const deps = recordingDeps([issue(1, "on000001")], {});
+
+    const r = await runImportIssueSweep(envFor(db), {}, deps);
+
+    expect(r.reconcile).toBeNull();
+    expect(r.reconcileError).toContain("import_jobs");
+    // The triage half still answered: dropping the table breaks verification too,
+    // so the issue is kept rather than closed, and the run is not a total failure.
+    expect(r.closed).toBe(0);
+  });
+
+  test("agreement is reported with its denominator, not as silence", async () => {
+    const db = freshDb();
+    seedImportJob(db, "on000001");
+    const deps = recordingDeps([issue(1, "on000001")], { on000001: INCOMPLETE });
+
+    const r = await runImportIssueSweep(envFor(db), {}, deps);
+
+    expect(r.reconcile?.rowsWithoutIssue).toEqual([]);
+    expect(r.reconcile?.issuesWithoutRow).toEqual([]);
+    // "They agree over 1 row" and "they agree over 0 rows" are different statements.
+    expect(r.reconcile?.rowsExamined).toBe(1);
+    expect(r.reconcile?.reason).toContain("agree");
+  });
+});
+
 describe("runImportIssueSweepCron refuses outside production", () => {
   for (const environment of ["development", "staging", "test"]) {
     test(`${environment} skips without touching the sweep`, async () => {

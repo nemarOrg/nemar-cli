@@ -99,6 +99,11 @@ import {
   IMPORT_FAILURE_ISSUE_LABEL,
   parseImportFailureIssueTitle,
 } from "./import-issue-identity.js";
+import {
+  type ImportReconcileVerdict,
+  type ReconcileJobRow,
+  decideReconcile,
+} from "./import-reconcile.js";
 
 export const IMPORT_ISSUE_SWEEP_DEFAULT_LIMIT = 15;
 export const IMPORT_ISSUE_SWEEP_MAX_LIMIT = 30;
@@ -136,6 +141,21 @@ export interface ImportIssueSweepError {
   stage: "plan" | "apply" | "comment";
   error: string;
 }
+
+/**
+ * Every unresolved import, for the reconcile (#1352).
+ *
+ * Unbounded on purpose. The sweep's rotation window bounds how many issues it will
+ * ACT on per run, which is a write-safety bound; a reconcile that inherited it would
+ * report the rest of the fleet as untracked every day. The table is one row per
+ * dataset ever imported (UNIQUE(dataset_id), migration 0044) and the predicate keeps
+ * only the two unresolved statuses, so the result set is the size of the current
+ * problem rather than of the catalogue.
+ */
+export const RECONCILE_ROWS_QUERY = `SELECT dataset_id, source_id, status, stage, last_error, updated_at
+   FROM import_jobs
+   WHERE status IN ('failed', 'quarantined')
+   ORDER BY updated_at DESC`;
 
 export interface ImportIssueSweepResult {
   /** False on a dry run: nothing was written to GitHub. */
@@ -183,6 +203,27 @@ export interface ImportIssueSweepResult {
   /** Candidates outside this run's window. They are examined by a later run: the
    *  window rotates daily, so this is a deferral rather than an exclusion. */
   remaining: number;
+  /**
+   * Whether the failures and the tracking issues describe the same set (#1352).
+   *
+   * `null` when the reconcile could not be computed -- its D1 read failed -- and
+   * NOT an empty verdict, which would say "they agree" about a comparison that never
+   * happened. Report-only: it names the disagreements and files nothing, because
+   * filing the missing issues is the action most likely to flood a shared repo,
+   * which is what ADR 0052's rollup exists to prevent.
+   */
+  reconcile: ImportReconcileVerdict | null;
+  /**
+   * Why the reconcile has no verdict, when it has none.
+   *
+   * Its own field rather than an entry in `errors`, because that array is
+   * per-ISSUE -- `{issue, dataset_id, stage}` answering "which half of this issue's
+   * triage broke" -- and a fleet-level comparison failing is a different kind of
+   * fact. Folding it in would have meant inventing an issue number for it, and it
+   * would then be counted against `attempted`, which is the denominator for
+   * "did every write fail?".
+   */
+  reconcileError: string | null;
 }
 
 /**
@@ -314,7 +355,24 @@ export async function runImportIssueSweep(
     plan: [],
     errors: [],
     remaining: Math.max(perDataset.length - limit, 0),
+    reconcile: null,
+    reconcileError: null,
   };
+
+  // The reconcile reads the FULL open list (`open`, not the rotation window) and
+  // costs no extra GitHub call, which is why it lives here rather than in a sweep of
+  // its own. Its failure is contained: a verdict of `null` degrades this one section
+  // and never the triage run, which is doing the writes.
+  try {
+    const rows = await env.DB.prepare(RECONCILE_ROWS_QUERY).all<ReconcileJobRow>();
+    if (!rows.results) throw new Error("D1 returned null results");
+    result.reconcile = decideReconcile({ rows: rows.results, openIssues: open });
+  } catch (err) {
+    // Fail open on the section, never on the verdict: `reconcile` stays null, which
+    // reads as "not computed" rather than as "they agree".
+    result.reconcileError = err instanceof Error ? err.message : String(err);
+    console.warn("[import-issue-sweep] reconcile could not be computed:", err);
+  }
 
   const start = windowStart(perDataset.length, limit, new Date());
   const rotated = [...perDataset.slice(start), ...perDataset.slice(0, start)];

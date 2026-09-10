@@ -1624,6 +1624,29 @@ export interface ImportIssueTriageResponse {
   }[];
   /** Candidates outside this run's window; the window rotates daily. */
   remaining: number;
+  /**
+   * Whether the failures and their tracking issues describe the same set (#1352).
+   *
+   * `null` means the comparison could not be made, NOT that they agree -- see
+   * `reconcileError`. Report-only: it files nothing.
+   */
+  reconcile: {
+    rowsWithoutIssue: {
+      datasetId: string;
+      sourceId: string;
+      status: string;
+      stage: string;
+      cause: string;
+      label: string;
+      updatedAt: string | null;
+    }[];
+    issuesWithoutRow: { number: number; datasetId: string; title: string }[];
+    rowsExamined: number;
+    issuesExamined: number;
+    reason: string;
+  } | null;
+  /** Why `reconcile` is null, when it is. */
+  reconcileError: string | null;
   ok: boolean;
   /** Present when the run applied changes but its audit row could not be written.
    *  The changes still happened -- this is not a failure of the run. */
