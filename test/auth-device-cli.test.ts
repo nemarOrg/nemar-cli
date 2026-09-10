@@ -338,6 +338,9 @@ interface RunOptions {
   pathPrefix?: string;
   debug?: boolean;
   stdin?: "ignore" | "inherit";
+  /** Extra child env, applied last. `undefined` for a key deletes it, which is how
+   *  the empty-`NEMAR_API_KEY` case below is set up. */
+  env?: Record<string, string | undefined>;
 }
 
 function runCli(args: string[], apiUrl: string, options: RunOptions = {}) {
@@ -352,6 +355,7 @@ function runCli(args: string[], apiUrl: string, options: RunOptions = {}) {
   if (options.pathPrefix) env.PATH = `${options.pathPrefix}:${process.env.PATH ?? ""}`;
   env.FORCE_COLOR = undefined;
   env.CLICOLOR_FORCE = undefined;
+  if (options.env) Object.assign(env, options.env);
   return spawn({
     cmd: ["bun", "run", CLI_ENTRY, ...args, ...(options.debug ? ["--debug"] : [])],
     cwd: REPO_ROOT,
@@ -414,6 +418,86 @@ async function markerAppears(marker: string): Promise<boolean> {
 // ---------------------------------------------------------------------------
 // 1-2: printed URL/code, the browser attempt
 // ---------------------------------------------------------------------------
+
+describe("nemar auth login: an empty --key is refused, not a silent browser sign-in", () => {
+  /**
+   * `-k ""` used to be indistinguishable from no `-k` at all
+   * (`options.key || process.env.NEMAR_API_KEY` treats `""` as absent), so it fell
+   * through to the device flow: a browser opened and an account sign-in began that
+   * nobody asked for.
+   *
+   * This was not hypothetical. `test/cli.test.ts` passes `TEST_CONFIG.adminApiKey`,
+   * which is `""` when `test/.env.test` is absent -- and because the harness also
+   * defaulted `TEST_API_URL` to production, the suite minted a real device code on
+   * the live backend and opened the developer's browser on production's authorize
+   * page, which asks for an ORCID sign-in. Two fences now, independently: this one,
+   * and `test/live-target.ts`.
+   *
+   * The properties: nothing is SENT, nothing is OPENED, and the exit code is 1.
+   */
+  for (const empty of ["", "   ", "\t"]) {
+    test(`--key ${JSON.stringify(empty)} exits 1 without contacting the backend`, async () => {
+      const opener = makeFakeOpener();
+      const server = startDeviceServer({ token: [{ kind: "success" }] });
+      try {
+        const result = await run(["auth", "login", "-k", empty], server.url, {
+          // Browser deliberately ALLOWED, so the test proves the refusal is what
+          // stops the opener rather than the suite's own NEMAR_NO_BROWSER default.
+          allowBrowser: true,
+          pathPrefix: opener.dir,
+        });
+        expect(result.exitCode).toBe(1);
+        expect(result.out).toContain("--key was given but is empty");
+        // The two things that must not have happened.
+        expect(server.calls).toEqual([]);
+        expect(await markerAppears(opener.marker)).toBe(false);
+      } finally {
+        server.stop();
+        rmSync(opener.dir, { recursive: true, force: true });
+      }
+    }, 40000);
+  }
+
+  test("it says how to proceed, both ways", async () => {
+    const server = startDeviceServer({ token: [{ kind: "success" }] });
+    try {
+      const result = await run(["auth", "login", "-k", ""], server.url);
+      expect(result.out).toContain("Pass the key itself");
+      expect(result.out).toContain("drop --key");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("an empty NEMAR_API_KEY still falls through to the browser flow", async () => {
+    // Deliberately different from the flag: an empty env var is conventionally the
+    // same as an unset one, and someone with `NEMAR_API_KEY=` exported in a shell
+    // profile must still be able to sign in. Only an explicit flag is an error.
+    const server = startDeviceServer({ token: [{ kind: "success" }] });
+    try {
+      const result = await run(["auth", "login", "--no-open"], server.url, {
+        env: { NEMAR_API_KEY: "" },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(server.starts.length).toBe(1);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a non-empty --key is unaffected", async () => {
+    // The guard must not eat the path it is guarding.
+    const server = startDeviceServer({ token: [{ kind: "success" }] });
+    try {
+      const result = await run(["auth", "login", "-k", "nm_a_real_looking_key"], server.url);
+      expect(result.out).not.toContain("--key was given but is empty");
+      // Validated against /auth/login, and the device flow never started.
+      expect(server.starts.length).toBe(0);
+    } finally {
+      server.stop();
+    }
+  });
+});
 
 describe("nemar auth login: the device-flow prompt", () => {
   test("--no-open: URL line, then the code line, then the 'if the page asks' note", async () => {

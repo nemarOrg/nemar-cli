@@ -2,11 +2,16 @@
  * Test Setup
  *
  * Loads test environment and provides test utilities.
+ *
+ * Two fences live here rather than in each suite, because the opt-in version of
+ * both had already failed: a live tier that defaulted to production, and a CLI
+ * that could reach for a browser. See `test/live-target.ts` for what that cost.
  */
 
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { blockedTargetMessage, decideLiveTarget } from "./live-target";
 
 // Force every test process to use an isolated config dir before any module
 // (notably src/lib/config.ts) can capture the user's real ~/.config/nemar/
@@ -33,9 +38,53 @@ if (existsSync(envPath)) {
   }
 }
 
+/**
+ * No test may reach for a browser unless it says so.
+ *
+ * `openInBrowser` (src/lib/browser.ts) honours `NEMAR_NO_BROWSER=1`, and the two
+ * tests that exercise the opener on purpose set it to `undefined` in the child env
+ * -- which deletes it for that child -- and put a fake `open`/`xdg-open` first on
+ * PATH. So this default costs those tests nothing, and it means a NEW test that
+ * happens to reach a browser-opening code path cannot take over the developer's
+ * screen or start a sign-in. Set before any suite can spawn the CLI.
+ */
+if (process.env.NEMAR_NO_BROWSER === undefined) {
+  process.env.NEMAR_NO_BROWSER = "1";
+}
+
+/**
+ * Which backend the live tier may talk to, and the enforcement.
+ *
+ * When blocked, `TEST_API_URL` is REWRITTEN to a dead loopback address before any
+ * suite runs. That is what actually stops the traffic: every CLI-spawning suite
+ * inherits the variable, and `getApiUrl()` (src/lib/api/client.ts) prefers it over
+ * both the stored config and the production default, so no child process can reach
+ * production even though none of them asked to be protected.
+ *
+ * `TEST_CONFIG.apiUrl` deliberately keeps the DECLARED url, so the six suites that
+ * grew their own `POINTS_AT_PROD` check keep skipping on exactly the condition they
+ * skip on today rather than un-skipping against loopback and failing.
+ */
+const liveTarget = decideLiveTarget({
+  testApiUrl: process.env.TEST_API_URL,
+  allowProd: process.env.TEST_ALLOW_PROD,
+  defaultApiUrl: "https://api.nemar.org",
+});
+
+if (liveTarget.blocked) {
+  process.env.TEST_API_URL = liveTarget.effectiveApiUrl;
+  console.warn(blockedTargetMessage(liveTarget.declaredApiUrl));
+}
+
+/** True when a live request must not be made: the target is production and
+ *  `TEST_ALLOW_PROD` was not set. A live suite should `describe.skipIf` on this
+ *  (test/contract-live.test.ts is the pattern) rather than fail against the dead
+ *  address the harness substitutes. */
+export const LIVE_TARGET_BLOCKED = liveTarget.blocked;
+
 // Test configuration
 export const TEST_CONFIG = {
-  apiUrl: process.env.TEST_API_URL || "https://api.nemar.org",
+  apiUrl: liveTarget.declaredApiUrl,
   password: process.env.TEST_PASSWORD || "TestPassword123!",
   adminApiKey: process.env.TEST_ADMIN_API_KEY || "",
   userApiKey: process.env.TEST_USER_API_KEY || "",
@@ -79,6 +128,13 @@ export async function testRequest<T>(
   options: RequestInit = {},
   apiKey?: string,
 ): Promise<{ status: number; data: T }> {
+  // Throw rather than quietly hitting the dead loopback address: a suite that
+  // reaches here is one that has no skip guard, and `ECONNREFUSED` × 36 does not
+  // tell anyone why. The message names both ways out.
+  if (LIVE_TARGET_BLOCKED) {
+    throw new Error(blockedTargetMessage(liveTarget.declaredApiUrl));
+  }
+
   const url = `${TEST_CONFIG.apiUrl}${path}`;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",

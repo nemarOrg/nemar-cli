@@ -32,8 +32,22 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawn } from "bun";
-import { TEST_CONFIG, sleep } from "./setup";
+import { LIVE_TARGET_BLOCKED, TEST_CONFIG, sleep } from "./setup";
 
+/**
+ * `test.skipIf(LIVE_TARGET_BLOCKED)` marks a case that cannot pass without a live
+ * backend. Blocked means `TEST_API_URL` is unset or names production, so the
+ * harness has pointed the run at a dead address (test/live-target.ts).
+ *
+ * These are skips rather than failures because "you have no dev backend
+ * configured" is not a defect in the code under test, and a suite that always
+ * fails locally teaches people to ignore failures. CI sets TEST_API_URL, so they
+ * all still run there.
+ *
+ * Several of them USED TO PASS by querying production directly -- an invalid key
+ * getting a real 401, a non-existent dataset getting a real 404. That is what this
+ * annotation is really recording.
+ */
 // Standardized config path: ~/.config/nemar/ on all platforms
 function getConfigDir(): string {
   const home = process.env.HOME || "";
@@ -193,7 +207,7 @@ describe("CLI Auth Commands", () => {
       expect(stdout).toContain("Not authenticated");
     });
 
-    test("shows authenticated when credentials exist", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("shows authenticated when credentials exist", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
         apiKey: TEST_CONFIG.adminApiKey,
@@ -212,7 +226,7 @@ describe("CLI Auth Commands", () => {
   });
 
   describe("nemar auth login", () => {
-    test("login with valid API key via -k flag", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("login with valid API key via -k flag", async () => {
       const ctx = createTestContext();
 
       const { stdout, exitCode } = await runCli(
@@ -231,7 +245,7 @@ describe("CLI Auth Commands", () => {
       expect(stdout).toContain("test-admin");
     });
 
-    test("login with invalid API key shows error", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("login with invalid API key shows error", async () => {
       const ctx = createTestContext();
 
       const { stdout, exitCode } = await runCli(
@@ -253,7 +267,7 @@ describe("CLI Auth Commands", () => {
       expect(stdout).toContain("Not currently authenticated");
     });
 
-    test("logout when authenticated clears credentials", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("logout when authenticated clears credentials", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
         apiKey: TEST_CONFIG.userApiKey,
@@ -283,7 +297,7 @@ describe("CLI Admin Commands", () => {
       expect(stdout).toContain("Not authenticated");
     });
 
-    test("lists users when authenticated as admin", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("lists users when authenticated as admin", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
         apiKey: TEST_CONFIG.adminApiKey,
@@ -298,7 +312,7 @@ describe("CLI Admin Commands", () => {
       expect(stdout).toContain("test-admin");
     });
 
-    test("non-admin cannot list users", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("non-admin cannot list users", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
         apiKey: TEST_CONFIG.userApiKey,
@@ -311,7 +325,7 @@ describe("CLI Admin Commands", () => {
       expect(stdout).toContain("requires admin privileges");
     });
 
-    test("lists users with --approved filter", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("lists users with --approved filter", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
         apiKey: TEST_CONFIG.adminApiKey,
@@ -326,7 +340,7 @@ describe("CLI Admin Commands", () => {
       expect(stdout).toContain("test-user");
     });
 
-    test("lists users with --verified filter", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("lists users with --verified filter", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
         apiKey: TEST_CONFIG.adminApiKey,
@@ -562,7 +576,7 @@ describe("CLI Dataset Upload", () => {
     expect(stdout).toContain("nemar auth login");
   });
 
-  test("nemar dataset upload requires sandbox completion", async () => {
+  test.skipIf(LIVE_TARGET_BLOCKED)("nemar dataset upload requires sandbox completion", async () => {
     const ctx = createTestContext();
     setTestConfig(ctx, {
       apiKey: TEST_CONFIG.userApiKey,
@@ -580,20 +594,23 @@ describe("CLI Dataset Upload", () => {
     expect(stdout).toContain("nemar sandbox");
   });
 
-  test("nemar dataset upload with non-existent path fails", async () => {
-    const ctx = createTestContext();
-    setTestConfig(ctx, {
-      apiKey: TEST_CONFIG.userApiKey,
-      apiUrl: TEST_CONFIG.apiUrl,
-      username: "test-user",
-      sandboxCompleted: true, // Skip sandbox check to test path validation
-    });
+  test.skipIf(LIVE_TARGET_BLOCKED)(
+    "nemar dataset upload with non-existent path fails",
+    async () => {
+      const ctx = createTestContext();
+      setTestConfig(ctx, {
+        apiKey: TEST_CONFIG.userApiKey,
+        apiUrl: TEST_CONFIG.apiUrl,
+        username: "test-user",
+        sandboxCompleted: true, // Skip sandbox check to test path validation
+      });
 
-    const { stdout, exitCode } = await runCli(["dataset", "upload", "/nonexistent/path"], ctx);
+      const { stdout, exitCode } = await runCli(["dataset", "upload", "/nonexistent/path"], ctx);
 
-    expect(exitCode).toBe(1);
-    expect(stdout).toContain("Path does not exist");
-  });
+      expect(exitCode).toBe(1);
+      expect(stdout).toContain("Path does not exist");
+    },
+  );
 });
 
 describe("CLI Dataset Download", () => {
@@ -661,12 +678,15 @@ describe("CLI Dataset Status", () => {
     expect(stdout).toContain("--json");
   });
 
-  test("nemar dataset status with non-existent dataset shows error", async () => {
-    // Valid format within MAX_NUMBER=99999 cap, but unlikely to be allocated.
-    const { stdout, exitCode } = await runCli(["dataset", "status", "nm099998"]);
+  test.skipIf(LIVE_TARGET_BLOCKED)(
+    "nemar dataset status with non-existent dataset shows error",
+    async () => {
+      // Valid format within MAX_NUMBER=99999 cap, but unlikely to be allocated.
+      const { stdout, exitCode } = await runCli(["dataset", "status", "nm099998"]);
 
-    expect(stdout).toContain("not found");
-  });
+      expect(stdout).toContain("not found");
+    },
+  );
 
   test("nemar dataset status --json outputs JSON format", async () => {
     // Use nm099999 (seeded managed dataset) directly; the list endpoint
@@ -713,11 +733,14 @@ describe("CLI Dataset Status", () => {
     expect(stdout).toContain("status|view");
   });
 
-  test("nemar dataset view with non-existent dataset behaves like status", async () => {
-    const { stdout, exitCode } = await runCli(["dataset", "view", "nm099998"]);
+  test.skipIf(LIVE_TARGET_BLOCKED)(
+    "nemar dataset view with non-existent dataset behaves like status",
+    async () => {
+      const { stdout, exitCode } = await runCli(["dataset", "view", "nm099998"]);
 
-    expect(stdout).toContain("not found");
-  });
+      expect(stdout).toContain("not found");
+    },
+  );
 });
 
 describe("CLI Dataset List", () => {
@@ -856,7 +879,7 @@ describe("CLI Dataset Collaborator Commands", () => {
       expect(stdout).toContain("Not authenticated");
     });
 
-    test("non-existent dataset shows error", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("non-existent dataset shows error", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
         apiKey: TEST_CONFIG.userApiKey,
@@ -909,23 +932,26 @@ describe("CLI Dataset Collaborator Commands", () => {
       expect(stdout).toContain("Not authenticated");
     });
 
-    test("list rejects an invalid --status value before any network call", async () => {
-      const ctx = createTestContext();
-      setTestConfig(ctx, {
-        apiKey: TEST_CONFIG.userApiKey,
-        apiUrl: TEST_CONFIG.apiUrl,
-        username: "test-user",
-      });
+    test.skipIf(LIVE_TARGET_BLOCKED)(
+      "list rejects an invalid --status value before any network call",
+      async () => {
+        const ctx = createTestContext();
+        setTestConfig(ctx, {
+          apiKey: TEST_CONFIG.userApiKey,
+          apiUrl: TEST_CONFIG.apiUrl,
+          username: "test-user",
+        });
 
-      const { stdout, stderr, exitCode } = await runCli(
-        ["dataset", "access", "list", "nm000001", "--status", "bogus"],
-        ctx,
-      );
+        const { stdout, stderr, exitCode } = await runCli(
+          ["dataset", "access", "list", "nm000001", "--status", "bogus"],
+          ctx,
+        );
 
-      expect(exitCode).not.toBe(0);
-      const output = (stdout + stderr).toLowerCase();
-      expect(output).toContain("status must be one of");
-    });
+        expect(exitCode).not.toBe(0);
+        const output = (stdout + stderr).toLowerCase();
+        expect(output).toContain("status must be one of");
+      },
+    );
   });
 
   describe("nemar dataset invite", () => {
@@ -946,7 +972,7 @@ describe("CLI Dataset Collaborator Commands", () => {
       expect(stdout).toContain("Not authenticated");
     });
 
-    test("non-admin non-owner cannot invite", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("non-admin non-owner cannot invite", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
         apiKey: TEST_CONFIG.userApiKey,
@@ -987,7 +1013,7 @@ describe("CLI Dataset Collaborator Commands", () => {
       expect(stdout).toContain("Not authenticated");
     });
 
-    test("non-admin non-owner cannot list collaborators", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("non-admin non-owner cannot list collaborators", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
         apiKey: TEST_CONFIG.userApiKey,

@@ -398,6 +398,25 @@ function printDeviceOutcomeFailure(
 export async function loginAction(
   options: { key?: string; open?: boolean } & ConfirmOptions,
 ): Promise<void> {
+  // `-k ""` is a REFUSAL, not a fall-through to the browser. `options.key || ...`
+  // treats an explicitly-passed empty key as "no key given", so `-k "$VAR"` with
+  // an unset VAR used to silently start a device sign-in against whatever backend
+  // was configured -- opening a browser and beginning an account sign-in nobody
+  // asked for. Found by test/cli.test.ts, which passes an empty TEST_ADMIN_API_KEY
+  // when test/.env.test is absent and so opened the production authorize page.
+  //
+  // The flag and the env var are deliberately treated differently: passing a flag
+  // is an intent to use THIS key, so an empty value is an error; an empty env var
+  // is conventionally the same as an unset one, and still falls through.
+  if (options.key !== undefined && options.key.trim() === "") {
+    console.log(chalk.red("--key was given but is empty."));
+    console.log(
+      chalk.dim("  Pass the key itself, or drop --key to sign in with your browser instead."),
+    );
+    process.exitCode = 1;
+    return;
+  }
+
   const pastedKey = options.key || process.env.NEMAR_API_KEY;
 
   // Check for existing authentication. isAuthenticated() only proves a key

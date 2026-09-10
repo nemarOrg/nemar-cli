@@ -23,8 +23,22 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
-import { TEST_CONFIG } from "./setup";
+import { LIVE_TARGET_BLOCKED, TEST_CONFIG } from "./setup";
 
+/**
+ * `test.skipIf(LIVE_TARGET_BLOCKED)` marks a case that cannot pass without a live
+ * backend. Blocked means `TEST_API_URL` is unset or names production, so the
+ * harness has pointed the run at a dead address (test/live-target.ts).
+ *
+ * These are skips rather than failures because "you have no dev backend
+ * configured" is not a defect in the code under test, and a suite that always
+ * fails locally teaches people to ignore failures. CI sets TEST_API_URL, so they
+ * all still run there.
+ *
+ * Several of them USED TO PASS by querying production directly -- an invalid key
+ * getting a real 401, a non-existent dataset getting a real 404. That is what this
+ * annotation is really recording.
+ */
 // Test dataset directory
 const TEST_DIR = "/tmp/test-bids-upload";
 const TEST_CONFIG_DIR = join(import.meta.dir, ".e2e-config");
@@ -248,49 +262,53 @@ describe("E2E Upload Tests", () => {
     expect(output).toContain("Dry run mode");
   }, 30_000);
 
-  test("upload with missing prerequisites shows helpful errors", async () => {
-    // This test only runs if SOME prereqs are missing
-    if (allPrereqsMet) {
-      console.log("   Skipping: All prerequisites met (test needs missing prereqs)");
-      return;
-    }
+  test.skipIf(LIVE_TARGET_BLOCKED)(
+    "upload with missing prerequisites shows helpful errors",
+    async () => {
+      // This test only runs if SOME prereqs are missing
+      if (allPrereqsMet) {
+        console.log("   Skipping: All prerequisites met (test needs missing prereqs)");
+        return;
+      }
 
-    // Need at least git-annex for the prereqs check to run
-    if (!prereqs.gitAnnex) {
-      console.log("   Skipping: Need git-annex to test prereq error messages");
-      return;
-    }
+      // Need at least git-annex for the prereqs check to run
+      if (!prereqs.gitAnnex) {
+        console.log("   Skipping: Need git-annex to test prereq error messages");
+        return;
+      }
 
-    // Create test dataset
-    createTestBidsDataset(TEST_DIR);
+      // Create test dataset
+      createTestBidsDataset(TEST_DIR);
 
-    // Set up auth config (sandboxCompleted: true to reach prereq check)
-    setTestConfig({
-      apiKey: TEST_CONFIG.userApiKey,
-      apiUrl: TEST_CONFIG.apiUrl,
-      username: "test-user",
-      sandboxCompleted: true,
-    });
+      // Set up auth config (sandboxCompleted: true to reach prereq check)
+      setTestConfig({
+        apiKey: TEST_CONFIG.userApiKey,
+        apiUrl: TEST_CONFIG.apiUrl,
+        username: "test-user",
+        sandboxCompleted: true,
+      });
 
-    // Run upload - should show prereq errors for missing items
-    const { stdout, exitCode } = await runCli([
-      "dataset",
-      "upload",
-      TEST_DIR,
-      "--skip-validation",
-      "-y", // Skip confirmation
-    ]);
+      // Run upload - should show prereq errors for missing items
+      const { stdout, exitCode } = await runCli([
+        "dataset",
+        "upload",
+        TEST_DIR,
+        "--skip-validation",
+        "-y", // Skip confirmation
+      ]);
 
-    // Should fail with prereq errors
-    expect(exitCode).toBe(1);
-    // Check for any of the known prereq error messages
-    const hasPrereqError =
-      stdout.includes("GitHub SSH") ||
-      stdout.includes("AWS") ||
-      stdout.includes("git-annex") ||
-      stdout.includes("Prerequisites");
-    expect(hasPrereqError).toBe(true);
-  }, 30_000);
+      // Should fail with prereq errors
+      expect(exitCode).toBe(1);
+      // Check for any of the known prereq error messages
+      const hasPrereqError =
+        stdout.includes("GitHub SSH") ||
+        stdout.includes("AWS") ||
+        stdout.includes("git-annex") ||
+        stdout.includes("Prerequisites");
+      expect(hasPrereqError).toBe(true);
+    },
+    30_000,
+  );
 
   test("full upload flow with dry-run (requires all prerequisites)", async () => {
     if (!allPrereqsMet) {
