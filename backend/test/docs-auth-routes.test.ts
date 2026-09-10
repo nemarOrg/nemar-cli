@@ -608,6 +608,46 @@ describe("logout purges outstanding grants", () => {
     expect(rows?.n).toBe(0);
   });
 
+  test("a failed cascade leaves nothing revoked, so the retry can still finish it", async () => {
+    // Why this is one `db.batch` and not two round trips. The app-row revoke and
+    // the docs cascade constrain each other: the account can only be resolved
+    // from an UNREVOKED row (or a signed-out cookie value would stay a revoke
+    // handle forever), so revoking first and failing second used to leave docs
+    // access live with the app row already gone -- and then retrying the same
+    // request resolved nothing and did nothing. Unrecoverable through the route,
+    // which is the shape `finalizeRevocation` orders its own statements to avoid.
+    //
+    // The fault is real rather than injected: `docs_grants` is renamed out from
+    // under the last statement, so D1's batch -- one transaction -- rolls the
+    // whole thing back. Renaming it back is the "D1 recovered" half.
+    const userId = seedUser("admin-atomic@nemar.test", "admin");
+    const appCookie = await appSession(userId);
+    const { code } = (await (await grant(appCookie)).json()) as { code: string };
+    const { session } = (await (await exchange(code)).json()) as { session: string };
+    const logout = () =>
+      app.request(
+        "/auth/logout",
+        { method: "POST", headers: { Cookie: `nemar_session=${appCookie}`, Origin: APP } },
+        env(),
+      );
+
+    db.run("ALTER TABLE docs_grants RENAME TO docs_grants_broken");
+    expect((await logout()).status).toBe(200);
+    // Nothing landed: the app row is still live, which is what keeps the retry
+    // able to resolve the account.
+    const live = db
+      .query<{ n: number }, [number]>(
+        "SELECT COUNT(*) AS n FROM web_sessions WHERE user_id = ? AND scope = 'app' AND revoked_at IS NULL",
+      )
+      .get(userId);
+    expect(live?.n).toBe(1);
+    expect((await verify(session)).status).toBe(200);
+
+    db.run("ALTER TABLE docs_grants_broken RENAME TO docs_grants");
+    expect((await logout()).status).toBe(200);
+    expect((await verify(session)).status).toBe(401);
+  });
+
   test("a REVOKED cookie cannot tear down the session signed in after it", async () => {
     // The other side of resolving the account from the cookie: the lookup keeps
     // `revoked_at IS NULL`, so a value that has already been signed out confers
@@ -768,8 +808,13 @@ describe("the non-admin 404 is the same 404 an unrouted path gets", () => {
 
   test("the two responses agree on every header the gate itself controls", async () => {
     // Under the rate-limit bypass this is a total header match, which is the
-    // narrow claim: nothing in the refusal path adds a header of its own -- no
-    // `Cache-Control`, no differing content type.
+    // narrow claim: nothing on the refusal path adds a header of its OWN. Note
+    // which examples that does and does not cover -- `Cache-Control` is not one
+    // of them, because global middleware already puts `no-store` on both
+    // responses, so adding it here would be a no-op. What it does catch is a
+    // header only the refusal carries (an `X-Docs-Gate`, a differing content
+    // type), which is what the hand-built version of this response was at risk
+    // of growing.
     const userId = seedUser("member-404b@nemar.test", "member");
     const refused = await workerPost("/auth/docs/grant", await appSession(userId));
     const unrouted = await workerPost("/auth/docs/grxnt");
