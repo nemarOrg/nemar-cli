@@ -19,7 +19,7 @@
 
 import { describe, expect, test } from "bun:test";
 import "./setup";
-import { EXEMPLAR_ID_RE, IS_PRODUCTION_TARGET, TEST_CONFIG } from "./setup";
+import { EXEMPLAR_ID_RE, IS_PRODUCTION_TARGET, LIVE_TARGET_BLOCKED, TEST_CONFIG } from "./setup";
 
 const TEST_DATASET = process.env.TEST_DATA_DATASET ?? "nm099999";
 const API = TEST_CONFIG.apiUrl;

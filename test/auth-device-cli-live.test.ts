@@ -33,7 +33,7 @@ import { join } from "node:path";
 import { spawn } from "bun";
 import { machineName } from "../src/lib/device-login";
 import "./setup";
-import { TEST_CONFIG } from "./setup";
+import { LIVE_TARGET_BLOCKED, TEST_CONFIG } from "./setup";
 
 const API = TEST_CONFIG.apiUrl;
 const ORIGIN = "https://app.nemar.org";

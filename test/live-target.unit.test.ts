@@ -168,6 +168,50 @@ describe("the message tells the person what to do", () => {
   });
 });
 
+describe("a file that uses the blocked flag imports it", () => {
+  /**
+   * A static pin for a mistake this file's own change made: five live suites were
+   * switched to `LIVE_TARGET_BLOCKED` by a script whose "already imported?" check
+   * asked whether the identifier appeared ANYWHERE above the use site -- and the
+   * explanatory comment inserted directly above it contained the name. So the import
+   * was never added and five files died at module scope with a ReferenceError.
+   *
+   * Running the suite did surface it, as four unnamed errors; what it did not do was
+   * name the file, and the summary counter moving from 7 to 12 was explained away
+   * instead of read. `test/` is outside tsconfig's `include` (adding it pulls in
+   * backend/** and its Workers types -- 351 pre-existing errors, a separate change),
+   * so nothing type-checks these files. Hence a cheap static check here.
+   */
+  test("every test file naming LIVE_TARGET_BLOCKED also imports it", async () => {
+    const { readdirSync, readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const dir = import.meta.dir;
+    const FLAG = "LIVE_TARGET_BLOCKED";
+
+    const offenders: string[] = [];
+    let users = 0;
+    for (const f of readdirSync(dir)) {
+      // This file itself names the flag in a string literal (the check below) and in
+      // test titles, and has no reason to import it.
+      const SELF = "live-target.unit.test.ts";
+      if (!f.endsWith(".ts") || f === "setup.ts" || f === "live-target.ts" || f === SELF) continue;
+      const src = readFileSync(join(dir, f), "utf8");
+      // Uses it as a VALUE, i.e. outside comments. Cheap approximation: strip line
+      // and block comments first, which is what the buggy script failed to do.
+      const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+      if (!code.includes(FLAG)) continue;
+      users++;
+      const imports = new RegExp(`import \\{[^}]*\\b${FLAG}\\b[^}]*\\} from "\\./setup"`).test(
+        code,
+      );
+      if (!imports) offenders.push(f);
+    }
+    // Guards against the check silently matching nothing.
+    expect(users).toBeGreaterThan(3);
+    expect(offenders).toEqual([]);
+  });
+});
+
 describe("the example env file stays in step with what the harness reads", () => {
   /**
    * A drift pin, in the spirit of the repo's other surface pins. The example file
