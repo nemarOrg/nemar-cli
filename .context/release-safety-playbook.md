@@ -60,7 +60,11 @@ Do NOT merge until every box is checked.
 - [ ] **Deploy path self-consistent.** If `shared/` or the deploy workflow changed, confirm the prod deploy install resolves `shared/` (root `bun install` before backend install).
 - [ ] **Env-gating is prod-safe.** All `isNonProductionEnv` / `is_exemplar` carve-outs are fail-CLOSED (`!isNonProductionEnv(env)`, never `env.ENVIRONMENT === "production"`); with `is_exemplar=0` everywhere in prod they behave identically to pre-epic. No staging-only path (exemplar endpoints, webhook forwarder, band deletes) can fire in prod.
 - [ ] **Scoped prod-safety review done** (deploy/migration/contract, env fences, cross-epic seams, silent failures). Findings addressed or consciously accepted.
-- [ ] **Fresh prod D1 snapshot** confirmed (the hourly/daily backup at `nemarOrg/nemar-db-backup`, or a manual export) so rollback has a floor. Additive migrations lower the need but do it anyway.
+- [ ] **Fresh prod D1 restore floor** confirmed, two ways: the latest commit in `nemarOrg/nemar-db-backup` (check its timestamp, do not assume the cron ran), and a Time Travel bookmark captured by hand. Additive migrations lower the need but do it anyway. **`wrangler d1 export` cannot be the answer** and never could: `nemar-db` holds the `datasets_fts` FTS5 virtual table, and export refuses any database containing one (`cannot export databases with Virtual Tables (fts5)`). Capture the bookmark instead, from `backend/`:
+
+      bunx cfman wrangler --account sccn d1 time-travel info nemar-db -c wrangler-sccn.toml
+
+  It prints the current bookmark and the exact `time-travel restore` command to undo to it. Paste the bookmark into the release PR, where a rollback would go looking for it.
 - [ ] **Rollback plan understood** (below).
 - [ ] **A human is watching the deploy** (see post-merge). Do not merge-and-walk-away.
 
@@ -77,7 +81,7 @@ Do NOT merge until every box is checked.
 
 - **Worker code:** `npx cfman wrangler --account sccn -c backend/wrangler-sccn.toml rollback` (or redeploy the previous tag's commit).
   Fast, no data change.
-- **Migrations:** D1 has no down-migrations. The release migrations are ADDITIVE, so rolling back the *code* is safe on its own — old code ignores the new column/index. Only a destructive migration would need the D1 snapshot restore (`scripts/restore-remote.sh` in `nemar-db-backup`, `--force-prod`).
+- **Migrations:** D1 has no down-migrations. The release migrations are ADDITIVE, so rolling back the *code* is safe on its own — old code ignores the new column/index. **Check that claim per release rather than inheriting it**: an additive migration that also REWRITES existing rows (0084 rewrote `web_sessions.expires_at`) is not undone by a code rollback, so its data half needs a restore or nothing. Two restore paths, and they are not equivalent: Time Travel (`wrangler d1 time-travel restore nemar-db --bookmark=…`) returns the whole database to an instant and needs no dump, while `scripts/restore-remote.sh` in `nemar-db-backup` (`--force-prod`) replays a row-level snapshot. Prefer Time Travel for "undo the last hour"; the snapshot is the floor for anything older than its retention.
 - **The merge itself:** if the release is fundamentally bad, revert the merge commit on `main` and let the pipeline redeploy the prior version; then investigate on `dev`.
 - **npm:** a bad published version is corrected forward with a patch release, not unpublished.
 - **Website:** redeploy the previous `main`/`staging` Pages deployment from the Cloudflare dashboard or by pushing the prior commit.
@@ -86,5 +90,5 @@ Do NOT merge until every box is checked.
 
 - **/health smoke is an alarm, not a hard gate on tagging.** `auto-tag`/`npm-publish`/`sync-dev` are separate workflows not gated on `deploy-backend` success, so a red smoke surfaces a bad prod deploy loudly but does not by itself stop the tag/publish. Watch the smoke.
 - **`contract-live` (CLI<->backend contract) is warn-only** until it is flipped to hard-fail. Verify the contract manually on a release that changes wire shapes.
-- **D1 backup runs ~daily, not hourly** as older docs claim (`nemarOrg/nemar-db-backup`). Take a manual snapshot before a schema-changing release.
+- **The D1 backup cron is hourly and skips hours.** Measured 2026-09-10: commits at 08:18, 13:13 and 14:13 UTC, so the schedule is hourly and a five-hour gap is a thing that happens. An earlier version of this line said "~daily, not hourly as older docs claim", which under-sold it in the other direction. Either way the rule is the same: **read the latest commit's timestamp rather than assuming a cadence.** It survives the FTS5 tables because it is a row-level dump, not `d1 export`.
 - **No automatic "does this new CLI command have staging coverage" gate.** New CLI features should get an `integration-dev` test that routes to the dev worker.
