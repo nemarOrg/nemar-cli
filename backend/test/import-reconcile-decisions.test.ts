@@ -54,23 +54,32 @@ describe("a failure with nothing tracking it is reported", () => {
     // Classified, so triage reads a cause rather than a table row.
     expect(v.rowsWithoutIssue[0]?.cause).toBe("auth_invalid");
     expect(v.reason).toContain("no tracking issue");
+    // And the all-empty issue list is annotated as a hypothesis, not substituted for
+    // the finding.
+    expect(v.reason).toContain("check the label before the fleet");
   });
 
-  test("quarantined counts, rolled_back does not", () => {
-    // `rolled_back` IS the resolution -- the orphan was cleaned up. Counting it
-    // would make the report permanently non-empty on a set nobody intends to act
-    // on, which is how an operator learns to ignore it.
+  test("only `failed` is a gap; quarantined is counted, the rest are not examined", () => {
+    // `failed` is the ONLY status the filer acts on, so "failed with no issue" is a
+    // statement about a mechanism that should have fired. `quarantined` has its own
+    // channel (an admin email, an audit row, `GET /admin/imports?status=quarantined`)
+    // and most of its reasons can never re-enter the retry lane, so listing it would
+    // be a permanent line item claiming nothing surfaces it. `rolled_back` is the
+    // resolution; `complete` and `copying` are not problems.
     const v = decideReconcile({
       rows: [
-        row({ dataset_id: "on000001", source_id: "ds000001", status: "quarantined" }),
-        row({ dataset_id: "on000002", source_id: "ds000002", status: "rolled_back" }),
-        row({ dataset_id: "on000003", source_id: "ds000003", status: "complete" }),
-        row({ dataset_id: "on000004", source_id: "ds000004", status: "copying" }),
+        row({ dataset_id: "on000001", source_id: "ds000001", status: "failed" }),
+        row({ dataset_id: "on000002", source_id: "ds000002", status: "quarantined" }),
+        row({ dataset_id: "on000003", source_id: "ds000003", status: "rolled_back" }),
+        row({ dataset_id: "on000004", source_id: "ds000004", status: "complete" }),
+        row({ dataset_id: "on000005", source_id: "ds000005", status: "copying" }),
       ],
       openIssues: [],
     });
     expect(v.rowsWithoutIssue.map((r) => r.datasetId)).toEqual(["on000001"]);
-    expect(v.rowsExamined).toBe(1);
+    expect(v.quarantined).toBe(1);
+    // Examined covers both unresolved statuses, so the arithmetic is explainable.
+    expect(v.rowsExamined).toBe(2);
   });
 
   test("the exact machine-filed issue counts as coverage", () => {
@@ -200,7 +209,7 @@ describe("a row the retry engine has parked is not untracked", () => {
       openIssues: [],
     });
     expect(v.rowsWithoutIssue).toEqual([]);
-    expect(v.reason).toContain("1 parked by the retry engine and reported weekly");
+    expect(v.reason).toContain("1 parked by the retry engine");
   });
 
   test("a null blocklisted column is treated as not parked", () => {
@@ -268,6 +277,9 @@ describe("both directions at once, and the counts", () => {
     expect(v.issuesWithoutRow.map((i) => i.datasetId)).toEqual(["on004148"]);
     expect(v.reason).toContain("no tracking issue");
     expect(v.reason).toContain("no import_jobs row");
+    // The issue list is NOT empty here, so the label hypothesis must not appear:
+    // it is only useful when there are no open issues at all.
+    expect(v.reason).not.toContain("check the label");
   });
 
   test("examined counts distinguish an agreement from an empty input", () => {

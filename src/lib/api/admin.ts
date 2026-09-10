@@ -1644,6 +1644,12 @@ export interface ImportIssueTriageResponse {
     /** Unresolved rows the retry engine parked; already reported by the weekly
      *  summary, so not counted as untracked here. */
     parked: number;
+    /** Quarantined rows: their own channel (admin email, audit row,
+     *  `GET /admin/imports?status=quarantined`), so counted and never listed. */
+    quarantined: number;
+    /** True when failures exist but NO open import-failure issue was found at all --
+     *  suspect a renamed label before suspecting the fleet. */
+    issueListEmpty: boolean;
     rowsExamined: number;
     issuesExamined: number;
     reason: string;

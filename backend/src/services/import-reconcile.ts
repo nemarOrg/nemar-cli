@@ -10,11 +10,10 @@
  *
  * Two ways they can disagree, and they fail in opposite directions:
  *
- *   - **A row with no issue.** `import_jobs` says `failed` or `quarantined` and
- *     nothing on `nemarDatasets/.github` is tracking it. The dataset is broken and
- *     INVISIBLE: not in the sweep's candidate list, because that list comes from
- *     the issues, and not in the weekly report's cause counts, because those count
- *     issues. This is the direction that loses work silently.
+ *   - **A failure with no issue.** `import_jobs` says `failed` and nothing on
+ *     `nemarDatasets/.github` names it. It is outside the sweep's candidate list, so
+ *     nothing will ever verify or close it, and it appears in the weekly counts only
+ *     as an anonymous increment. This is the direction that loses work.
  *   - **An issue with no row.** An open machine-filed issue whose dataset has no
  *     `import_jobs` row at all. ADR 0051's taxonomy already names this
  *     (`no_import_row`), which is evidence it happens. The sweep cannot answer it:
@@ -50,11 +49,33 @@ import {
   parseImportFailureIssueTitle,
 } from "./import-issue-identity.js";
 
-/** Import statuses that mean "this needs a human and is not resolved". Deliberately
- *  NOT `rolled_back`: that orphan was cleaned up, which is the resolution, and
- *  counting it would make the report permanently non-empty on a set nobody intends
- *  to act on -- the fastest way to teach an operator to ignore it (ADR 0053's rule,
- *  reused). */
+/**
+ * The one status whose absence of an issue is a real gap: `failed`.
+ *
+ * `shouldFileImportFailureIssue` requires `resultingStatus === "failed"`, so `failed`
+ * is the only status the filer ever acts on -- which makes "failed with no issue" a
+ * statement about a mechanism that should have fired and did not.
+ *
+ * The others are deliberately NOT gaps:
+ *
+ *   - `quarantined` has its OWN channel. Recovery emails an admin, writes an
+ *     `import_quarantined` audit row, and the row is listable at
+ *     `GET /admin/imports?status=quarantined`. Worse, most quarantine reasons
+ *     (`has_doi`, `made_public`, `reached_complete`, `system_owned`, ...) are excluded
+ *     from the retry candidate set forever, so no machine action could ever clear the
+ *     entry: it would be a permanent line item saying "nothing surfaces this" about
+ *     something three things surface. Counted as {@link ImportReconcileVerdict.quarantined}.
+ *   - `incomplete` is the retry engine's, by the same argument the weekly report's
+ *     `OPEN_FAILURES_QUERY` uses when it lists it and this does not: a row in the
+ *     retry lane has an owner and a next attempt.
+ *   - `rolled_back` is the resolution, not a problem. Counting it would make the
+ *     report permanently non-empty on a set nobody intends to act on, which is how an
+ *     operator learns to ignore a report (ADR 0053's rule, reused).
+ */
+export const RECONCILE_GAP_STATUS = "failed";
+
+/** Statuses examined, so the denominator covers what was looked at rather than only
+ *  what was reported. */
 export const RECONCILE_UNRESOLVED_STATUSES = ["failed", "quarantined"] as const;
 
 /** A `failed`/`quarantined` import with nothing tracking it. */
@@ -93,10 +114,30 @@ export interface ImportReconcileVerdict {
    * the raw failure count.
    */
   parked: number;
+  /**
+   * Unresolved rows in `quarantined`, reported as a count and never as a gap.
+   *
+   * They have their own channel -- the admin quarantine email, the
+   * `import_quarantined` audit row, `GET /admin/imports?status=quarantined` -- and
+   * most quarantine reasons can never re-enter the retry lane, so listing them here
+   * would be a permanent line item claiming nothing surfaces them.
+   */
+  quarantined: number;
   /** Rows examined, so a zero verdict can be told from an empty input. */
   rowsExamined: number;
   /** Open issues examined, same reason. */
   issuesExamined: number;
+  /**
+   * True when there were failures to check but the issue list came back EMPTY.
+   *
+   * `listOpenIssuesByLabel` throws on any non-2xx and refuses a truncated set, so
+   * this is not a swallowed transport error -- but a renamed or deleted label yields
+   * a legitimate 200 with no issues, and then every failure looks untracked at once.
+   * The sweep's own "listed issues but none had labels" guard cannot see it either,
+   * because it only fires when the list is non-empty. Reported so a reader suspects
+   * the label before they suspect the fleet.
+   */
+  issueListEmpty: boolean;
   /** One line for a human, naming both directions. */
   reason: string;
 }
@@ -118,7 +159,15 @@ export interface ReconcileIssue {
   number: number;
   title: string;
   labels?: { name: string }[];
+  /** Optional, and load-bearing when present: a rollup lists its datasets in the
+   *  body, so scanning it is what makes rollup coverage independent of the row's
+   *  CURRENT classification. See the note in `decideReconcile`. */
+  body?: string | null;
 }
+
+/** The label a human applies once they have confirmed an issue has no import row.
+ *  Preserved by `decideIssueAction`, so it is a durable "already triaged" marker. */
+export const NO_IMPORT_ROW_LABEL = "no-import-row";
 
 function labelNames(issue: ReconcileIssue): string[] {
   return (issue.labels ?? []).map((l) => l.name);
@@ -147,6 +196,15 @@ export function decideReconcile(args: {
     // A hand-written title mentioning the id counts as coverage too: see the note
     // at the top. Bounded to `on######`, so a stray six digits cannot match.
     for (const m of issue.title.matchAll(/\bon\d{6}\b/g)) namedByAnyIssue.add(m[0]);
+    // And the BODY, which is how a rollup names its datasets.
+    //
+    // Without this, rollup coverage depended on the row's CURRENT cause matching the
+    // rollup's title -- and the cause is re-derived from `last_error` on every run, so
+    // a new classifier rule shipped in a deploy could move a row to a cause whose
+    // rollup is not open and report it untracked while it sits listed in the old
+    // rollup. Reading the body makes coverage a fact about what is written down rather
+    // than about today's classification.
+    for (const m of (issue.body ?? "").matchAll(/\bon\d{6}\b/g)) namedByAnyIssue.add(m[0]);
   }
 
   // Open rollup titles, so a cause covered by a rollup is not reported per dataset.
@@ -154,11 +212,17 @@ export function decideReconcile(args: {
 
   const rowsWithoutIssue: ImportRowWithoutIssue[] = [];
   let parked = 0;
+  let quarantined = 0;
   for (const row of unresolved) {
     // Parked by the retry engine: reported by the weekly summary already. See the
     // note on `parked`.
     if (row.blocklisted === 1) {
       parked++;
+      continue;
+    }
+    // Quarantined: its own channel, and mostly unclearable. See RECONCILE_GAP_STATUS.
+    if (row.status !== RECONCILE_GAP_STATUS) {
+      quarantined++;
       continue;
     }
     const classified = classifyImportFailure({ stage: row.stage, lastError: row.last_error });
@@ -192,8 +256,14 @@ export function decideReconcile(args: {
   for (const issue of args.openIssues) {
     const datasetId = parseImportFailureIssueTitle(issue.title);
     if (!datasetId) continue;
-    if (!labelNames(issue).includes(IMPORT_FAILURE_ISSUE_LABEL)) continue;
+    const labels = labelNames(issue);
+    if (!labels.includes(IMPORT_FAILURE_ISSUE_LABEL)) continue;
     if (rowIds.has(datasetId)) continue;
+    // Already triaged. `no-import-row` is a label a HUMAN applies from exactly this
+    // finding, and `decideIssueAction` deliberately preserves it. Re-reporting it
+    // every day would make the list mean "rows are missing" rather than "rows are
+    // missing and nobody has looked yet" -- and the second is the actionable one.
+    if (labels.includes(NO_IMPORT_ROW_LABEL)) continue;
     issuesWithoutRow.push({ number: issue.number, datasetId, title: issue.title });
   }
 
@@ -201,35 +271,59 @@ export function decideReconcile(args: {
     rowsWithoutIssue,
     issuesWithoutRow,
     parked,
+    quarantined,
+    issueListEmpty: args.openIssues.length === 0 && unresolved.length > 0,
     rowsExamined: unresolved.length,
     issuesExamined: args.openIssues.length,
-    reason: reconcileReason(
-      rowsWithoutIssue.length,
-      issuesWithoutRow.length,
-      unresolved.length,
+    reason: reconcileReason({
+      rows: rowsWithoutIssue.length,
+      issues: issuesWithoutRow.length,
+      examined: unresolved.length,
       parked,
-    ),
+      quarantined,
+      issuesExamined: args.openIssues.length,
+      issueListEmpty: args.openIssues.length === 0 && unresolved.length > 0,
+    }),
   };
 }
 
-function reconcileReason(rows: number, issues: number, examined: number, parked: number): string {
-  const parkedNote =
-    parked === 0 ? "" : `, ${parked} parked by the retry engine and reported weekly`;
-  if (rows === 0 && issues === 0) {
-    return `Failures and tracking issues agree (${examined} unresolved import row(s) examined${parkedNote}).`;
+function reconcileReason(args: {
+  rows: number;
+  issues: number;
+  examined: number;
+  parked: number;
+  quarantined: number;
+  issuesExamined: number;
+  issueListEmpty: boolean;
+}): string {
+  const aside: string[] = [];
+  if (args.parked > 0) aside.push(`${args.parked} parked by the retry engine`);
+  if (args.quarantined > 0) aside.push(`${args.quarantined} quarantined`);
+  const asideNote = aside.length === 0 ? "" : `, ${aside.join(" and ")} and reported elsewhere`;
+
+  // An ANNOTATION, not a replacement. The first version returned early here, which
+  // meant that whenever there were failures and no open issues -- which IS the gap,
+  // in its largest form -- the report talked about the label instead of about the
+  // untracked rows. The label is a hypothesis; the disagreement is the finding.
+  const emptyNote = args.issueListEmpty
+    ? " No open import-failure issues were found AT ALL, so check the label before the fleet: a renamed or deleted label returns an empty list without an error."
+    : "";
+
+  if (args.rows === 0 && args.issues === 0) {
+    return `Failures and tracking issues agree (${args.examined} unresolved import row(s) and ${args.issuesExamined} open issue(s) examined${asideNote}).`;
   }
   const parts: string[] = [];
-  if (rows > 0) {
+  if (args.rows > 0) {
     parts.push(
-      `${rows} unresolved import(s) have no tracking issue, so nothing surfaces them to triage`,
+      `${args.rows} failed import(s) have no tracking issue, so the triage sweep will never reach them`,
     );
   }
-  if (issues > 0) {
+  if (args.issues > 0) {
     parts.push(
-      `${issues} open issue(s) have no import_jobs row, so the sweep can never verify or close them`,
+      `${args.issues} open issue(s) have no import_jobs row, so the sweep can never verify or close them`,
     );
   }
-  return `${parts.join("; ")}${parkedNote}.`;
+  return `${parts.join("; ")}${asideNote}.${emptyNote}`;
 }
 
 /** Truncation cap for the reported lists, matching the rest of the epic (ADR 0036):

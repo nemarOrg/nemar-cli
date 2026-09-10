@@ -147,6 +147,8 @@ const DRY_RUN = {
     rowsWithoutIssue: [],
     issuesWithoutRow: [],
     parked: 0,
+    quarantined: 0,
+    issueListEmpty: false,
     rowsExamined: 2,
     issuesExamined: 2,
     reason: "Failures and tracking issues agree (2 unresolved import row(s) examined).",
@@ -428,6 +430,8 @@ describe("nemar admin import-issue-triage: the reconcile section (#1352)", () =>
         ],
         issuesWithoutRow: [],
         parked: 0,
+        quarantined: 0,
+        issueListEmpty: false,
         rowsExamined: 3,
         issuesExamined: 2,
         reason:
@@ -455,6 +459,9 @@ describe("nemar admin import-issue-triage: the reconcile section (#1352)", () =>
         issuesWithoutRow: [
           { number: 77, datasetId: "on004148", title: "Import failure: on004148 (ds004148)" },
         ],
+        parked: 0,
+        quarantined: 0,
+        issueListEmpty: false,
         rowsExamined: 2,
         issuesExamined: 3,
         reason:
@@ -494,7 +501,10 @@ describe("nemar admin import-issue-triage: the reconcile section (#1352)", () =>
     const server = startCaptureServer({
       ...DRY_RUN,
       reconcile: {
-        rowsWithoutIssue: Array.from({ length: 14 }, (_, i) => ({
+        // 24 against a budget of 20. Deliberately expressed as budget + 4 in the
+        // assertion below rather than as a bare number, since the budget moved once
+        // already (10 -> 20, to match the backend's single cap).
+        rowsWithoutIssue: Array.from({ length: 24 }, (_, i) => ({
           datasetId: `on${String(i).padStart(6, "0")}`,
           sourceId: `ds${String(i).padStart(6, "0")}`,
           status: "failed",
@@ -505,7 +515,9 @@ describe("nemar admin import-issue-triage: the reconcile section (#1352)", () =>
         })),
         issuesWithoutRow: [],
         parked: 0,
-        rowsExamined: 14,
+        quarantined: 0,
+        issueListEmpty: false,
+        rowsExamined: 24,
         issuesExamined: 2,
         reason:
           "14 unresolved import(s) have no tracking issue, so nothing surfaces them to triage.",
@@ -516,7 +528,7 @@ describe("nemar admin import-issue-triage: the reconcile section (#1352)", () =>
       // A list that stops without saying so under-counts, and an under-count reads
       // as good news.
       expect(r.stdout).toContain("... and 4 more untracked");
-      expect(r.stdout).toContain("rows_without_issue=14");
+      expect(r.stdout).toContain("rows_without_issue=24");
     } finally {
       server.stop();
     }

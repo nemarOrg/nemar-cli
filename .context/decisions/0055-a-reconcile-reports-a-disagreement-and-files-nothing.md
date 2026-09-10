@@ -6,19 +6,20 @@
 
 ## Context
 
-Epic #1306 built four mechanisms and every one of them reads a single side of a correspondence and
-trusts the other. The triage sweep (ADR 0052) starts from the open issues and asks whether each
-dataset has recovered. The weekly report (ADR 0054) counts issues by cause. ADR 0051's classifier
-describes whatever message arrives. Nothing asked whether the failures and the issues describe the
-same set.
+Epic #1306 built four mechanisms and none of them compares the two sides. The triage sweep (ADR 0052)
+starts from the OPEN ISSUES and asks whether each named dataset has recovered, so a failure with no
+issue is outside its candidate list entirely.
+
+Being precise about the weekly report, because the first draft of this ADR got it wrong:
+`gatherFailures` classifies ROWS from `import_jobs`, so an untracked failure *is* already in the
+weekly cause counts. What nothing does is NAME it or act on it — it is one anonymous increment in a
+histogram, indistinguishable from a failure that has an issue and an owner.
 
 Two disagreements are possible, and they fail in opposite directions:
 
-- **A row with no issue.** `import_jobs` says `failed` or `quarantined` and nothing on
-  `nemarDatasets/.github` tracks it. The dataset is broken and *invisible*: absent from the sweep's
-  candidate list, because that list is built from the issues, and absent from the weekly report's
-  counts, because those count issues. This direction loses work silently, which is the epic's
-  founding failure wearing different clothes.
+- **A failure with no issue.** `import_jobs` says `failed` and nothing on `nemarDatasets/.github`
+  names it. It is outside the sweep's candidate list, so nothing will ever verify or close it, and it
+  reaches the weekly report only as an anonymous increment. This direction loses work.
 - **An issue with no row.** An open machine-filed issue whose dataset has no `import_jobs` row at
   all. ADR 0051's taxonomy already contains `no_import_row`, which is evidence this happens. The
   sweep cannot resolve it: with no row there is nothing to verify, so `decideIssueAction` returns
@@ -67,16 +68,72 @@ a set nobody intends to act on gets muted, and then the real one is muted with i
 (`parked`) rather than dropped, so a reader can see why the untracked number is smaller than the raw
 failure count. A NULL in that column reads as not-parked, which reports rather than hides.
 
-**`rolled_back` is resolved, not unresolved.** Only `failed` and `quarantined` count. A rolled-back
-import is an orphan that was cleaned up; counting it would make the report permanently non-empty on
-a set nobody intends to act on, which is how an operator learns to ignore a report (ADR 0053's rule
-about `tracked`/`blocklisted`, reused).
+**Only `failed` is a gap.** `shouldFileImportFailureIssue` requires `resultingStatus === "failed"`,
+so `failed` is the only status the filer ever acts on — which makes "failed with no issue" a statement
+about a mechanism that should have fired and did not. The others are counted, not listed:
+
+- `quarantined` has its OWN channel: recovery emails an admin, writes an `import_quarantined` audit
+  row, and the row is listable at `GET /admin/imports?status=quarantined`. Worse, most quarantine
+  reasons (`has_doi`, `made_public`, `reached_complete`, `system_owned`) are excluded from the retry
+  candidate set forever, so no machine action could ever clear the entry: it would be a permanent
+  line item saying "nothing surfaces this" about something three things surface. There are real
+  instances — eight rows quarantined with an upstream reason that the retry candidate query cannot
+  match.
+- `incomplete` belongs to the retry engine, which has an owner and a next attempt for it. The weekly
+  report's `OPEN_FAILURES_QUERY` includes it and this deliberately does not, for that reason.
+- `rolled_back` is the resolution, not a problem. Counting it would make the report permanently
+  non-empty on a set nobody intends to act on (ADR 0053's rule, reused).
+
+**Closing an issue now HEALS the row, rather than leaving a disagreement to report.** The sweep
+closed on the S3 verdict and never wrote `import_jobs.status`, so a dataset it had just certified
+complete kept a `failed`/`quarantined` row — and this reconcile then reported that row as an
+untracked live failure every day, permanently, since most quarantine reasons can never re-enter the
+retry lane. A monitor manufacturing its own findings is worse than no monitor. An applied close now
+calls `recoverRow`, which is exactly what `POST /admin/imports/:id/verify` calls on the same verdict,
+unconditionally and regardless of prior status. Best-effort and after the close: the close has
+landed, so a failure to heal must not undo it — it leaves the disagreement to be reported, which is
+where we were before.
+
+**It is not computed outside production.** Both sides have to come from the same world and outside
+production they cannot: the issue list is always production's (`IMPORT_FAILURE_ISSUES_REPO` is
+hardcoded on a shared org) while the rows are the local D1's, and a non-production worker can never
+create an `import_jobs` row because `POST /admin/datasets/import` refuses outside production. A
+staging dry run would therefore report every open production issue as missing its row and any stale
+dev row as untracked: fiction in both directions. The verdict is `null` with a reason, so it reads as
+"not computed" rather than as agreement.
+
+**The daily cron reports it, and the heartbeat row persists the counts.** The first version computed
+the verdict and discarded it — the log carried the aggregate line and the plan and never mentioned
+the reconcile, so its only voice was a human typing the CLI command, for a comparison whose whole
+justification is that it rides the daily sweep. Counts only in the audit row, not the id lists: that
+row is read by the weekly report's activity section, and a fleet-sized array in `details` would bloat
+every row for a section that wants a number.
 
 **It rides the triage sweep rather than being its own job.** That sweep already fetches the full open
 issue list, so the comparison costs no additional GitHub call and cannot add to the shared
 subrequest budget ADR 0054 records as unbudgeted. It reads the FULL list, never the sweep's rotation
 window: the window is a bound on how many issues a run may WRITE to, and inheriting it here would
 report every issue outside today's window as missing its row.
+
+**An issue a human has already triaged is not re-reported.** `no-import-row` is a label a person
+applies from exactly this finding, and `decideIssueAction` deliberately preserves it. Without the
+skip, the list would mean "rows are missing"; with it, the list means "rows are missing and nobody has
+looked yet", which is the actionable one.
+
+**Rollup coverage reads the issue BODY, not only the title's cause.** A rollup names its datasets in
+its body, and the title carries only the cause. Matching on the title alone made coverage depend on
+the row's CURRENT classification, which is re-derived from `last_error` on every run — so a new
+classifier rule shipped in a deploy could move a row to a cause whose rollup is not open and report it
+untracked while it sat listed in the old rollup. Reading the body makes coverage a fact about what is
+written down.
+
+**No open issues at all is annotated, not substituted.** When failures exist and the issue list comes
+back empty, the likeliest cause is a renamed or deleted label: `listOpenIssuesByLabel` throws on any
+non-2xx, so this is not a swallowed transport error, but a label rename yields a legitimate 200 with
+no issues, and the sweep's own "listed issues but none had labels" guard cannot see it because it only
+fires on a non-empty list. The first version *returned early* with that hypothesis, which meant the
+largest form of the real gap was reported as a label problem. The label is a hypothesis; the
+disagreement is the finding, so the note is appended to it.
 
 **A failure leaves the verdict null, never an empty one.** `reconcile: null` plus a `reconcileError`
 means the comparison did not happen; `reconcile: {rowsWithoutIssue: [], ...}` means it happened and
@@ -95,6 +152,10 @@ Easier: a failed import can no longer be invisible to both the sweep and the wee
 permanently-unresolvable issue is named instead of being `keep`-ed forever. `nemar admin
 import-issue-triage` shows both directions with the cause per row, so the output is actionable
 without a query.
+
+The lists are ordered OLDEST FIRST and truncated at one shared cap (20, in both the backend report
+and the CLI). Ordering newest-first hid exactly the longest-abandoned failures, which are the ones
+worth naming; two different caps for one list is how a reader learns to trust neither.
 
 Harder: the reconcile is only as good as `import_jobs`. `deleteDatasetCascade` deliberately does not
 touch that table (migration 0044), so a deleted dataset leaves its row behind and would report as
