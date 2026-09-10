@@ -977,6 +977,34 @@ describe("the reconcile rides the triage sweep's issue list (#1352)", () => {
     ]);
   });
 
+  test("a row in a RESOLVED status still counts as the row existing", async () => {
+    // The false positive review found, and it could only ever be found here.
+    // `RECONCILE_ROWS_QUERY` is filtered to the two unresolved statuses, and
+    // existence used to be derived from that same slice -- so an issue for a
+    // dataset whose import had since completed, rolled back, or was still running
+    // was reported as having "no `import_jobs` row", which ADR 0055 defines as no
+    // row AT ALL. It is report-only, but the statement is false and the remedy a
+    // human applies for it (`no-import-row`) then suppresses that issue from the
+    // report permanently.
+    //
+    // The pure-function test for this case passes either way, because it hands
+    // `decideReconcile` rows the real query can never return. Only the sweep can
+    // falsify it.
+    for (const status of ["complete", "rolled_back", "incomplete", "copying"]) {
+      const db = freshDb();
+      seedImportJob(db, "on004148");
+      db.run("UPDATE import_jobs SET status = ? WHERE dataset_id = 'on004148'", [status]);
+      const deps = recordingDeps([issue(77, "on004148")], {});
+
+      const r = await runImportIssueSweep(prodEnvFor(db), {}, deps);
+
+      expect(r.reconcileError).toBeNull();
+      expect(r.reconcile?.issuesWithoutRow).toEqual([]);
+      // And the row is not in the untracked direction either: it is not unresolved.
+      expect(r.reconcile?.rowsWithoutIssue).toEqual([]);
+    }
+  });
+
   test("rollup mode does not make every failed row look untracked", async () => {
     // The false positive that would matter most: with the rollup engaged, per-dataset
     // issues are deliberately absent, and reporting all of them as untracked would
