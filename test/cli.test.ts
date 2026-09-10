@@ -668,7 +668,12 @@ describe("CLI Dataset Download", () => {
   test.skipIf(LIVE_TARGET_BLOCKED)(
     "nemar dataset download with non-existent dataset shows error",
     async () => {
-      const { stdout, stderr, exitCode } = await runCli(["dataset", "download", "nm999999"]);
+      // `nm099998`, not `nm999999`: the latter is outside the 0-99999 id cap, so the
+      // backend answers 400 "Invalid dataset ID format" -- and this case passed only
+      // because the CLI called EVERY lookup failure "Dataset not found". Now that a
+      // 400 is reported as a 400, the id has to be genuinely ABSENT rather than
+      // malformed, which is what the sibling status/view cases already use.
+      const { stdout, stderr, exitCode } = await runCli(["dataset", "download", "nm099998"]);
 
       // Should fail with dataset not found (after prereq check)
       const output = stdout + stderr;
