@@ -478,3 +478,30 @@ describe("nemar admin import-weekly: parked truncation says how many are hidden"
     }
   });
 });
+
+describe("nemar admin import-weekly: a reported verdict is not a bug to file", () => {
+  /**
+   * The exit code IS the answer here -- 1 unhealthy, 2 could-not-determine -- and a
+   * monitoring caller reads it. The exit hook used to print "Run again with --debug
+   * and attach the log to a new issue" underneath a correct report, which was
+   * observed on the first real production run of `import-weekly`, whose
+   * `closed_this_week=unknown` is the designed first-week answer. Inviting a bug
+   * report for a working command teaches people to ignore the hint that matters.
+   */
+  test("a non-zero verdict does not print the file-a-bug nudge", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer({
+      ...HEALTHY,
+      facts: { ...HEALTHY.facts, errors: [{ stage: "parked", error: "D1 timeout" }] },
+    });
+    try {
+      const r = await runCli(["admin", "import-weekly"], server.url);
+      expect(r.exitCode).not.toBe(0);
+      const out = r.stdout + r.stderr;
+      expect(out).not.toContain("attach the log to a new issue");
+      expect(out).not.toContain("Debug log:");
+    } finally {
+      server.stop();
+    }
+  });
+});

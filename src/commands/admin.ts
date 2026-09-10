@@ -160,6 +160,7 @@ import {
   confirm,
   confirmWithInput,
 } from "../lib/confirm.js";
+import { markReportedExit } from "../lib/debug-log.js";
 import { CLI_LIVE_DATASETS, selectRevalidateTargets } from "../lib/fleet.js";
 import {
   cloneDataset,
@@ -7137,7 +7138,15 @@ importIssueTriageCommand
     // Reconcile (#1352). Printed after the triage summary because it describes a
     // different question -- whether the two sides agree -- and answering it changes
     // nothing on GitHub.
-    if (res.reconcile === null) {
+    // `== null`, so an OLDER BACKEND that omits the field entirely is handled too.
+    // `=== null` crashed against production the day this shipped: the reconcile went
+    // to dev after the release, so the response had no `reconcile` key at all,
+    // `undefined !== null` took the else branch, and the command died on
+    // `rec.rowsWithoutIssue` AFTER printing a complete, correct triage report. The
+    // CLI is published to npm independently of the Worker, so it is routinely newer
+    // or older than the backend it talks to; a field added on one side must never be
+    // load-bearing on the other.
+    if (res.reconcile == null) {
       // Never silence: "could not compare" and "they agree" are the confusion this
       // epic exists to remove, one level down.
       console.log();
@@ -7256,6 +7265,9 @@ importCoverageCommand
     // alarm is a successful RUN but an unhealthy STATE, so it is non-zero.
     if (res.status === "unknown") process.exitCode = 2;
     else if (res.status !== "healthy" || res.errors.length > 0) process.exitCode = 1;
+    // The code is the verdict, so suppress the "file a bug" nudge: an alarm is this
+    // command working, and 2 means it could not determine -- both are answers.
+    if (process.exitCode !== 0) markReportedExit();
 
     if (options.json) {
       console.log(JSON.stringify(res, null, 2));
@@ -7445,6 +7457,8 @@ importWeeklyCommand
       process.exitCode = 0; // the gate declined; nothing was measured
     else if (f.errors.length > 0) process.exitCode = 2;
     else if (weeklyNeedsAttention(f)) process.exitCode = 1;
+    // Same as import-coverage: 1 and 2 are answers, not failures to report.
+    if (process.exitCode !== 0) markReportedExit();
 
     if (options.json) {
       console.log(JSON.stringify(res, null, 2));
