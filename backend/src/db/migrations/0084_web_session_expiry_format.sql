@@ -1,0 +1,40 @@
+-- Rewrite web_sessions.expires_at into SQLite's own datetime spelling
+-- (epic #1336 phase 0 review).
+--
+-- WHAT WAS WRONG. `prepareSessionInsert` wrote a JS `toISOString()` value --
+-- '2026-09-10T11:07:21.484Z' -- while every reader compares
+-- `expires_at > datetime('now')`, which produces '2026-09-10 12:07:21'. SQLite
+-- compares those as TEXT, and byte 11 decides it: 'T' is 0x54, ' ' is 0x20, so
+-- an ISO expiry bearing the same calendar date as the comparison ALWAYS sorts
+-- greater. An expired session therefore kept authenticating until the next UTC
+-- midnight -- up to a day past a 24-hour session's nominal end, with nothing
+-- anywhere reporting it. `maybeSlideExpiry` wrote the same format, so a
+-- long-lived session refreshed itself back into it.
+--
+-- This is precisely the trap ADR 0047 records for the device flow ("the two
+-- compare unequally on the same day and silently break expiry"), in the table
+-- the docs gate's `DOCS_GRANT_INSERT_SQL` re-proves an app session against.
+-- The code half is fixed in services/web-session.ts; this is the data half, for
+-- the rows that were already written.
+--
+-- WHY THE REWRITE IS SAFE AND EXACT. Every affected value came from
+-- `toISOString()`, which is always UTC and always
+-- 'YYYY-MM-DDTHH:MM:SS.sssZ' -- fixed width, no timezone offset to reason
+-- about. `substr(...,1,19)` keeps 'YYYY-MM-DDTHH:MM:SS' and drops the
+-- milliseconds and the 'Z'; replacing 'T' with a space yields exactly what
+-- `datetime()` produces. Truncating rather than rounding the milliseconds moves
+-- an expiry at most 999 ms EARLIER, which is the harmless direction.
+--
+-- Rows already in the new format contain no 'T' and are left alone, so this is
+-- idempotent and re-running it is a no-op. Only `expires_at` is touched:
+-- `created_at`, `last_used_at` and `revoked_at` were always written SQL-side.
+--
+-- GLOB, NOT LIKE, so the selection and the rewrite agree on case. SQLite's LIKE
+-- is case-insensitive for ASCII while `replace()` is case-sensitive, so a
+-- lowercase `t` would be SELECTED and then rewritten to itself -- left broken by
+-- a statement that reported having handled it. No such row can exist
+-- (`toISOString()` is always uppercase), which is exactly why the mismatch would
+-- never have shown up in a test; the statement should still mean what it says.
+UPDATE web_sessions
+   SET expires_at = replace(substr(expires_at, 1, 19), 'T', ' ')
+ WHERE expires_at GLOB '*T*';

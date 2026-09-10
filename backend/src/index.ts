@@ -19,12 +19,14 @@ import { secureHeaders } from "hono/secure-headers";
 // keeps both in lockstep and asserts equality post-bump, so drift between
 // the two manifests fails the bump rather than silently shipping.
 import pkg from "../../package.json" with { type: "json" };
+import { notFoundResponse } from "./lib/not-found";
 import { optionalAuthMiddleware } from "./middleware/auth";
 import { maintenanceMode } from "./middleware/maintenance";
 import { rateLimiter } from "./middleware/rateLimit";
 import { adminRoutes } from "./routes/admin";
 import { authRoutes } from "./routes/auth";
 import { authDeviceRoutes } from "./routes/auth-device";
+import { authDocsRoutes } from "./routes/auth-docs";
 import { authKeysRoutes } from "./routes/auth-keys";
 import { authOrcidRoutes } from "./routes/auth-orcid";
 import { authWebRoutes } from "./routes/auth-web";
@@ -176,6 +178,11 @@ api.route("/auth", authDeviceRoutes);
 // device flow's paste-key fallback. Same /auth prefix; new paths under
 // /auth/keys*.
 api.route("/auth", authKeysRoutes);
+// Docs admin gate (epic #1336 phase 0, issue #1338). Same /auth prefix; new
+// paths under /auth/docs/*. The docs host cannot read the app's session cookie
+// (it is scoped to app.nemar.org on purpose), so these three routes are the
+// handoff that gives docs.nemar.org a credential of its own.
+api.route("/auth", authDocsRoutes);
 api.route("/users", userRoutes);
 api.route("/admin", adminRoutes);
 api.route("/datasets", datasetRoutes);
@@ -211,16 +218,10 @@ api.route("/data", dataRoutes);
 // requests via the custom domain hit the sub-app form.)
 api.get("/data/", (c) => catalogIndexResponse(c.env, c.req.raw));
 
-// 404 handler
-api.notFound((c) => {
-  return c.json(
-    {
-      error: "Not Found",
-      message: `Route ${c.req.method} ${c.req.path} not found`,
-    },
-    404,
-  );
-});
+// 404 handler. Registered on `app` as well, further down: this one alone only
+// ever fires for the data.nemar.org fork, which re-enters `api.fetch`
+// directly. See lib/not-found.ts.
+api.notFound(notFoundResponse);
 
 // Global error handler
 api.onError((err, c) => {
@@ -314,6 +315,15 @@ app.route("/zarrproxy", zarrDataRoutes);
 app.all("/mcp", (c) => mcpRoutes.fetch(c.req.raw, c.env, c.executionCtx));
 app.route("/nemar", api);
 app.route("/", api);
+
+// `app` needs its own 404, and this is not a duplicate of the one on `api`.
+// Hono's `route()` copies a sub-app's ROUTES and not its notFound handler, and
+// `app` is the worker's entry point, so before this line every unrouted request
+// to api.nemar.org got Hono's plain-text default while the data.nemar.org fork
+// (which calls `api.fetch` directly) got the JSON one. One shared handler, both
+// apps: `POST /auth/docs/grant` answers 404 for a signed-in non-admin, and a
+// 404 that does not look like the others is a 404 that identifies itself.
+app.notFound(notFoundResponse);
 
 /**
  * Scheduled cleanup handler (Cloudflare Workers cron trigger).

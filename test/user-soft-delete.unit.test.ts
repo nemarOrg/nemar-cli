@@ -105,8 +105,14 @@ function seed(db: Database) {
   );
 }
 
-// Mirrors the endpoint's tombstone batch (routes/admin/users.ts). Uses the SHARED mask SQL so
-// the security-critical statement can't drift from production.
+// Mirrors PART of the endpoint's tombstone batch (routes/admin/users.ts), and being a mirror is
+// its limitation as well as its point: the shared mask SQL cannot drift, but the surrounding
+// statements are a hand copy, so a statement ADDED to the endpoint does not appear here and
+// nothing fails. That is what happened when the docs-gate work added a `docs_grants` purge to
+// that batch (epic #1336 phase 0). The schema slice below has no `docs_grants` table, so this
+// file deliberately does not grow a copy of it; the authority for the batch's CONTENTS is
+// `backend/test/admin-credential-cascade.test.ts`, which drives the real route. What this file
+// still owns is the masking and re-signup properties below.
 function tombstone(db: Database, id: number, originalEmail = "real@example.com") {
   db.query(USER_TOMBSTONE_MASK_SQL).run(maskedDeletedEmail(id), id);
   db.query(

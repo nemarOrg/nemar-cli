@@ -24,9 +24,30 @@ import { type Bindings, type UserRole, parseRole } from "../types/bindings";
 
 export const COOKIE_NAME = "nemar_session";
 
+/** Which host's credential a `web_sessions` row is. `app` is every session the
+ *  dashboard issues; `docs` is the short-lived admin credential the docs host
+ *  holds (epic #1336 phase 0, migration 0083).
+ *
+ *  One table, two scopes, and the scope is a REQUIRED argument to every lookup
+ *  rather than an optional filter, defaulted to `app` so existing callers keep
+ *  their exact behaviour. That default is the safe direction: a caller that
+ *  forgets the argument authenticates app sessions only, which is what every
+ *  pre-existing route wants.
+ *
+ *  This function is not the only reader, and that is the part worth remembering:
+ *  `middleware/auth.ts` carries a second copy of the same SELECT for the
+ *  management API, and it needs the predicate just as much. Review found it
+ *  missing there after this one had it, and the docs credential authenticated
+ *  `/admin/*` as a result. Prefer routing a new reader through this function over
+ *  writing a third copy. */
+export type SessionScope = "app" | "docs";
+
 /** Server-side cap on non-remember-me sessions. Browser drops session
- *  cookies on close already; the cap keeps the DB row from outliving
- *  any reasonable session and bounds the cleanup-table size. */
+ *  cookies on close already; the cap keeps the DB row from outliving any
+ *  reasonable session. It does NOT bound the table: nothing prunes expired
+ *  `web_sessions` rows anywhere in this worker (an earlier version of this
+ *  comment credited a cleanup that does not exist), so the row survives its
+ *  own expiry -- inert, because every reader compares against it. */
 const NON_REMEMBER_TTL_MS = 24 * 60 * 60 * 1000;
 const REMEMBER_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -145,7 +166,11 @@ export interface WebSessionRow {
    *  at the read boundary in `findSessionByCookieId` so consumers
    *  never have to remember the SQLite convention. */
   remember: boolean;
-  expires_at: string; // ISO-ish
+  /** SQLite's own `datetime()` spelling, `'YYYY-MM-DD HH:MM:SS'` in UTC, which
+   *  is what every reader's `> datetime('now')` compares against. NOT an ISO
+   *  string, and do not hand one to `new Date()` without appending a `Z` --
+   *  see `maybeSlideExpiry`. */
+  expires_at: string;
   last_used_at: string;
 }
 
@@ -212,6 +237,7 @@ export interface WebSessionUser {
 export async function findSessionByCookieId(
   env: Bindings,
   cookieIdRaw: string,
+  scope: SessionScope = "app",
 ): Promise<{ session: WebSessionRow; user: WebSessionUser } | null> {
   if (!cookieIdRaw) return null;
   const cookieHash = await hashCookieId(cookieIdRaw);
@@ -229,13 +255,14 @@ export async function findSessionByCookieId(
        FROM web_sessions ws
        JOIN users u ON u.id = ws.user_id
       WHERE ws.cookie_id_hash = ?
+        AND ws.scope = ?
         AND ws.revoked_at IS NULL
         AND ws.expires_at > datetime('now')
         AND u.status != 'revoked'
         AND u.deleted_at IS NULL
       LIMIT 1`,
   )
-    .bind(cookieHash)
+    .bind(cookieHash, scope)
     .first<{
       id: number;
       user_id: number;
@@ -325,11 +352,29 @@ export type AuthMethod = "email_code" | "orcid";
 export interface PreparedSession {
   cookieIdRaw: string;
   maxAgeSeconds: number | undefined;
-  expiresAt: string;
   statement: D1PreparedStatement;
 }
 
-/** Build (but do not run) the web_sessions INSERT for a new session. */
+/**
+ * Build (but do not run) the web_sessions INSERT for a new session.
+ *
+ * THE EXPIRY IS WRITTEN SQL-SIDE, and that is a fix rather than a style choice.
+ * This used to bind `new Date(...).toISOString()` while every reader compares
+ * `expires_at > datetime('now')`, and SQLite compares those two spellings as
+ * TEXT: `'2026-09-10T11:07:21.484Z'` against `'2026-09-10 12:07:21'` is decided
+ * by byte 11, where `'T'` (0x54) sorts after `' '` (0x20). So an ISO expiry
+ * bearing the same calendar date as the moment of comparison ALWAYS compared
+ * greater, and a session stayed live until the next UTC midnight past its
+ * nominal expiry -- up to a day of extra life on a 24-hour session, silently.
+ * This is the trap ADR 0047 records for the device flow, in the table the docs
+ * gate's own `DOCS_GRANT_INSERT_SQL` re-proves an app session against.
+ * Migration 0084 rewrites the rows the old code left behind. Never reintroduce
+ * a JS timestamp here.
+ *
+ * `expiresAt` is deliberately no longer returned: no caller ever read it, and
+ * the only honest value would now have to be read back from the row, since the
+ * database's clock is the one that set it.
+ */
 export async function prepareSessionInsert(
   env: Bindings,
   userId: number,
@@ -340,21 +385,19 @@ export async function prepareSessionInsert(
 ): Promise<PreparedSession> {
   const cookieIdRaw = generateCookieId();
   const cookieIdHash = await hashCookieId(cookieIdRaw);
-  const ttlMs = remember ? REMEMBER_TTL_MS : NON_REMEMBER_TTL_MS;
-  const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+  const ttlSeconds = Math.floor((remember ? REMEMBER_TTL_MS : NON_REMEMBER_TTL_MS) / 1000);
   const ipHash = await hashIp(ip);
 
   return {
     cookieIdRaw,
     // Browser-session cookies (no Max-Age) for non-remember; explicit
     // Max-Age for remember-me so reloads survive a browser restart.
-    maxAgeSeconds: remember ? Math.floor(ttlMs / 1000) : undefined,
-    expiresAt,
+    maxAgeSeconds: remember ? ttlSeconds : undefined,
     statement: env.DB.prepare(
       `INSERT INTO web_sessions (
        user_id, cookie_id_hash, remember, expires_at, user_agent, ip_hash, auth_method
-     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(userId, cookieIdHash, remember ? 1 : 0, expiresAt, userAgent, ipHash, authMethod),
+     ) VALUES (?, ?, ?, datetime('now', '+' || ? || ' seconds'), ?, ?, ?)`,
+    ).bind(userId, cookieIdHash, remember ? 1 : 0, ttlSeconds, userAgent, ipHash, authMethod),
   };
 }
 
@@ -368,11 +411,49 @@ export async function issueSession(
   userAgent: string | null,
   ip: string | null,
   authMethod: AuthMethod = "email_code",
-): Promise<{ cookieIdRaw: string; maxAgeSeconds: number | undefined; expiresAt: string }> {
+): Promise<{ cookieIdRaw: string; maxAgeSeconds: number | undefined }> {
   const prepared = await prepareSessionInsert(env, userId, remember, userAgent, ip, authMethod);
   await prepared.statement.run();
-  const { cookieIdRaw, maxAgeSeconds, expiresAt } = prepared;
-  return { cookieIdRaw, maxAgeSeconds, expiresAt };
+  const { cookieIdRaw, maxAgeSeconds } = prepared;
+  return { cookieIdRaw, maxAgeSeconds };
+}
+
+/**
+ * The account a session cookie belongs to, WITHOUT asking whether that session
+ * is still usable.
+ *
+ * One caller: `/auth/logout`'s cascade into the docs credential, and only
+ * because dropping the liveness predicates is the entire point. A docs session
+ * runs eight hours from its mint while a non-remember app session runs 24 hours
+ * from sign-in, so the two windows do not nest -- review found sign-out
+ * skipping the cascade whenever the app row had already lapsed, answering `ok`
+ * and clearing the cookie while the docs session and any outstanding grant
+ * stayed spendable. Scope is unconstrained for the same reason: whichever of
+ * this account's cookies was presented, the account asked to be signed out.
+ *
+ * NEVER use this to authenticate anything. It answers "whose row is this" and
+ * says nothing about whether the row may still be used.
+ */
+export async function userIdForCookieId(
+  env: Bindings,
+  cookieIdRaw: string | null,
+): Promise<number | null> {
+  if (!cookieIdRaw) return null;
+  const cookieHash = await hashCookieId(cookieIdRaw);
+  const row = await env.DB.prepare(
+    // `revoked_at IS NULL` STAYS, and only the expiry and account predicates go.
+    // The case being fixed is a LAPSED session, which is unrevoked by
+    // definition, so keeping this costs the fix nothing -- while dropping it
+    // turned a revoked cookie into a permanent handle for tearing down that
+    // account's docs access: sign out, sign back in, replay the old value, and
+    // the NEW docs session and grant are destroyed. Nothing prunes this table,
+    // so that handle would never stop working. A revoked credential has to
+    // confer nothing, including the power to revoke.
+    "SELECT user_id FROM web_sessions WHERE cookie_id_hash = ? AND revoked_at IS NULL LIMIT 1",
+  )
+    .bind(cookieHash)
+    .first<{ user_id: number }>();
+  return row?.user_id ?? null;
 }
 
 /** Mark the row backing this cookie as revoked. Idempotent. */
@@ -388,20 +469,37 @@ export async function revokeSession(env: Bindings, cookieIdRaw: string | null): 
 }
 
 /** If a remember-me session is in the final ${SLIDING_REFRESH_THRESHOLD_MS}
- *  of its lifetime, extend it by REMEMBER_TTL_MS. Returns the new
- *  expires_at (and a fresh Max-Age the route can put in Set-Cookie),
- *  or null if no refresh was needed.
+ *  of its lifetime, extend it by REMEMBER_TTL_MS. Returns a fresh Max-Age for
+ *  the route to put in Set-Cookie, or null if no refresh was needed.
+ *
+ *  BOTH THE TEST AND THE WRITE ARE SQL-SIDE, for two different reasons that
+ *  point the same way. The write, because a JS `toISOString()` value does not
+ *  compare correctly against `datetime('now')` (see `prepareSessionInsert`) --
+ *  sliding a session used to reintroduce the very format the insert had just
+ *  been fixed to stop writing. The test, because reading `expires_at` back into
+ *  `new Date(...)` is the mirror-image trap: `'YYYY-MM-DD HH:MM:SS'` has no
+ *  timezone designator, so JS parses it as LOCAL time, and this code runs under
+ *  UTC on Workers but under the developer's zone in tests. One UPDATE whose
+ *  WHERE clause carries the threshold avoids both; `changes` reports whether it
+ *  fired.
  */
 export async function maybeSlideExpiry(
   env: Bindings,
   session: WebSessionRow,
-): Promise<{ expiresAt: string; maxAgeSeconds: number } | null> {
+): Promise<{ maxAgeSeconds: number } | null> {
   if (!session.remember) return null;
-  const remaining = new Date(session.expires_at).getTime() - Date.now();
-  if (remaining > SLIDING_REFRESH_THRESHOLD_MS) return null;
-  const newExpiresAt = new Date(Date.now() + REMEMBER_TTL_MS).toISOString();
-  await env.DB.prepare("UPDATE web_sessions SET expires_at = ? WHERE id = ?")
-    .bind(newExpiresAt, session.id)
+  const ttlSeconds = Math.floor(REMEMBER_TTL_MS / 1000);
+  const thresholdSeconds = Math.floor(SLIDING_REFRESH_THRESHOLD_MS / 1000);
+  const result = await env.DB.prepare(
+    `UPDATE web_sessions
+        SET expires_at = datetime('now', '+' || ? || ' seconds')
+      WHERE id = ?
+        AND remember = 1
+        AND revoked_at IS NULL
+        AND expires_at < datetime('now', '+' || ? || ' seconds')`,
+  )
+    .bind(ttlSeconds, session.id, thresholdSeconds)
     .run();
-  return { expiresAt: newExpiresAt, maxAgeSeconds: Math.floor(REMEMBER_TTL_MS / 1000) };
+  if ((result.meta?.changes ?? 0) === 0) return null;
+  return { maxAgeSeconds: ttlSeconds };
 }
