@@ -38,6 +38,7 @@
  * per-dataset work, so there is no limit to clamp and no window to rotate.
  */
 
+import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { AUTO_IMPORT_GATE_QUERY, parseSqliteUtc } from "./auto-import.js";
 import { isNonProductionEnv } from "./environment.js";
@@ -683,7 +684,44 @@ export async function runImportCoverageSweepCron(
     console.log("[import-coverage] skipped (non-production)");
     return null;
   }
-  return runImportCoverageSweep(env, { apply: true }, deps);
+  const result = await runImportCoverageSweep(env, { apply: true }, deps);
+  await recordCronActivity(env, result);
+  return result;
+}
+
+/**
+ * Persist what the CRON did to the coverage issue.
+ *
+ * The admin route writes an `import_coverage_sweep` row; a cron run has no acting
+ * user, so the daily path wrote nothing and an automated file-or-close left only a
+ * Worker log line. `userId: null` marks it system-initiated, as `import-retry.ts`
+ * does. Skipped for `refreshed`, the routine daily body rewrite, so this does not
+ * write a row a day saying nothing changed.
+ *
+ * Best-effort: bookkeeping about work that already happened must not turn a
+ * successful sweep into an error.
+ */
+async function recordCronActivity(env: Bindings, result: ImportCoverageSweepResult): Promise<void> {
+  if (result.issue === null || result.issue.action === "refreshed") return;
+  try {
+    await auditLogStatement(env.DB, {
+      userId: null,
+      action: "import_coverage_sweep",
+      resourceType: "issue",
+      resourceId: result.issue.number === null ? result.status : `#${result.issue.number}`,
+      details: JSON.stringify({
+        source: "cron",
+        status: result.status,
+        kind: result.kind,
+        issue_action: result.issue.action,
+        outstanding: outstandingCount(result.backlog),
+        dispatch_lost: result.dispatchLost,
+        enabled: result.enabled,
+      }),
+    }).run();
+  } catch (err) {
+    console.error("[import-coverage] audit row failed after applying:", err);
+  }
 }
 
 /** One-line summary for the cron log. The CLI renders its own output from the HTTP

@@ -832,3 +832,81 @@ describe("runImportIssueSweepCron refuses outside production", () => {
     });
   }
 });
+
+// ---------------------------------------------------------------------------
+// The cron leaves a durable record (#1312 needed this; the gap predates it)
+// ---------------------------------------------------------------------------
+
+describe("the cron wrapper records what it did", () => {
+  /**
+   * Before phase 4 only the ADMIN ROUTE wrote an `import_issue_triage` audit row, and
+   * a cron run has no acting user -- so the daily path's only trace of an automated
+   * close was a Worker log line with finite retention. That made "how many issues
+   * recovered this week" unanswerable from D1, which the weekly summary needs, and
+   * was a gap in the durable record of a job that closes real issues.
+   */
+  test("an applied cron run that closed something writes a system audit row", async () => {
+    const db = freshDb();
+    seedImportJob(db, "on006136");
+    const deps = recordingDeps([issue(105, "on006136")], { on006136: COMPLETE });
+
+    await runImportIssueSweepCron({ ...envFor(db), ENVIRONMENT: "production" } as Bindings, deps);
+
+    const rows = db
+      .query<{ user_id: number | null; details: string | null }, []>(
+        "SELECT user_id, details FROM audit_log WHERE action = 'import_issue_triage'",
+      )
+      .all();
+    expect(rows).toHaveLength(1);
+    // userId null marks it system-initiated, the convention import-retry.ts uses.
+    expect(rows[0]?.user_id).toBeNull();
+    expect(JSON.parse(rows[0]?.details ?? "{}")).toMatchObject({ source: "cron", closed: 1 });
+  });
+
+  /**
+   * Changed to a heartbeat by #1312. Gating the write on change made a quiet week
+   * (the cron ran and had nothing to close) produce zero rows -- identical to a cron
+   * that never ran -- so the weekly report could not tell a healthy pipeline from a
+   * dead job. That is the discrimination the epic exists to provide, so the row is
+   * now written every run and its absence is meaningful.
+   */
+  test("a cron run that changed nothing STILL writes a row, so absence means it did not run", async () => {
+    const db = freshDb();
+    seedImportJob(db, "on005279");
+    const deps = recordingDeps(
+      [issue(97, "on005279", [IMPORT_FAILURE_ISSUE_LABEL, "auth-invalid"])],
+      { on005279: INCOMPLETE },
+    );
+
+    await runImportIssueSweepCron({ ...envFor(db), ENVIRONMENT: "production" } as Bindings, deps);
+
+    const rows = db
+      .query<{ details: string | null }, []>(
+        "SELECT details FROM audit_log WHERE action = 'import_issue_triage'",
+      )
+      .all();
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0]?.details ?? "{}")).toMatchObject({
+      source: "cron",
+      closed: 0,
+      relabelled: 0,
+    });
+  });
+
+  test("a failed audit write does not fail the sweep", async () => {
+    // Bookkeeping about work that already happened must not turn a successful sweep
+    // into an error.
+    const db = freshDb();
+    seedImportJob(db, "on006136");
+    db.run("DROP TABLE audit_log");
+    const deps = recordingDeps([issue(105, "on006136")], { on006136: COMPLETE });
+
+    const r = await runImportIssueSweepCron(
+      { ...envFor(db), ENVIRONMENT: "production" } as Bindings,
+      deps,
+    );
+
+    expect(r?.closed).toBe(1);
+    expect(deps.closed).toEqual([105]);
+  });
+});

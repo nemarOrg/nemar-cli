@@ -57,6 +57,7 @@ import {
   type ReindexResponse,
   type SignalDefaultsSweepBatchResponse,
   type SummaryVersionCoverage,
+  type WeeklySummaryResponse,
   type ZarrFidelitySweepBatchResponse,
   addCi,
   approveUser,
@@ -94,6 +95,7 @@ import {
   hedSweepReset,
   importCoverageSweep,
   importIssueTriage,
+  importWeeklySummary,
   listKeysFor,
   listUsers,
   publishDataset,
@@ -7150,6 +7152,12 @@ const COVERAGE_MAX_LISTED_IDS = 20;
 
 /** Actions rendered in the conditional. `would created` was ungrammatical, and a
  *  dry run is the DEFAULT invocation, so it is the string most operators see. */
+/** Parked rows the CLI lists before falling back to a count. Fewer than the issue
+ *  body's, because a terminal is scrolled rather than searched -- but the "and N
+ *  more" line below is not optional: a report that stops at N without saying so
+ *  under-counts, and an under-count reads as good news. */
+const WEEKLY_CLI_PARKED_ROWS = 5;
+
 const COVERAGE_ACTION_VERB: Record<string, string> = {
   created: "create",
   refreshed: "refresh",
@@ -7314,6 +7322,175 @@ importCoverageCommand
   });
 
 adminCommand.addCommand(importCoverageCommand);
+
+// ============================================================================
+// Weekly import summary (#1312, epic #1306 phase 4)
+// ============================================================================
+
+const importWeeklyCommand = new Command("import-weekly").description(
+  "Read this week's import summary (dry run by default; the cron posts it on Mondays)",
+);
+
+/**
+ * Render a count that may be unknown.
+ *
+ * Mirrors `count` in backend/src/services/import-weekly-summary.ts, and exists for
+ * the same reason: a zero and an unknown must never look the same. One renderer,
+ * not a ternary per field -- a per-field ternary is how one field eventually prints
+ * "0" for something nobody measured.
+ */
+/**
+ * Does this week need a person to look?
+ *
+ * Mirrors `weeklyHeadline` in backend/src/services/import-weekly-summary.ts. The CLI
+ * cannot import it, so the rule is restated -- and because a restated rule drifts,
+ * the exit-code tests assert each branch rather than only the aggregate.
+ */
+function weeklyNeedsAttention(f: NonNullable<WeeklySummaryResponse["facts"]>): boolean {
+  return (
+    f.coverageStatus === "alarm" ||
+    f.coverageStatus === "unknown" ||
+    f.autoImportEnabled === false ||
+    f.dispatchLost === true ||
+    // An absence of sweep rows is itself unknown: the crons record every run, so no
+    // rows means they did not run.
+    f.issuesClosed === null ||
+    f.errors.length > 0
+  );
+}
+
+function weeklyCount(n: number | null | undefined): string {
+  // `== null` catches an absent key as well as an explicit null: a backend that ever
+  // drops a field must not have it render as "undefined" (or, worse, coalesce to 0).
+  return n == null ? chalk.yellow("unknown") : String(n);
+}
+
+importWeeklyCommand
+  .option("--apply", "Actually file the issue (production only; the cron normally does this)")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .option("--body", "Also print the issue body exactly as it would be posted")
+  .action(async (options: { apply?: boolean; json?: boolean; body?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const apply = options.apply === true;
+    const spinner = ora("Building the weekly import summary...").start();
+
+    let res: WeeklySummaryResponse;
+    try {
+      res = await importWeeklySummary({ apply });
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Weekly import summary failed");
+      console.error(chalk.red(errorDetail(err)));
+      process.exitCode = 1;
+      return;
+    }
+
+    const f = res.facts;
+
+    // Exit codes mirror `nemar admin import-coverage`, so one rule works across the
+    // family: 2 = could not determine, 1 = determined and not healthy, 0 = healthy.
+    // An earlier version set 1 only when a section failed to READ, so a week with
+    // auto-import switched off exited 0 -- the exact condition this epic exists to
+    // detect, reported as success. Set before the --json return so both output modes
+    // agree on the verdict.
+    if (f === null)
+      process.exitCode = 0; // the gate declined; nothing was measured
+    else if (f.errors.length > 0) process.exitCode = 2;
+    else if (weeklyNeedsAttention(f)) process.exitCode = 1;
+
+    if (options.json) {
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    if (f === null) {
+      // Not "every count is unknown" -- nothing was gathered at all. Rendering the
+      // table here would be indistinguishable from a totally blind report.
+      console.log();
+      console.log(chalk.yellow(`Nothing computed: ${res.gateReason}`));
+      console.log(chalk.dim("  The report is built once a week; --apply files it."));
+      return;
+    }
+
+    console.log();
+    console.log(chalk.bold(`Import summary ${f.week}`));
+    console.log(chalk.dim(`${f.windowStart} to ${f.windowEnd} (UTC)`));
+    console.log();
+    console.log(
+      chalk.cyan(
+        `imported_this_week=${weeklyCount(f.importedThisWeek)} total=${weeklyCount(f.importedTotal)} ` +
+          `in_scope=${weeklyCount(f.discovered)} not_in_scope=${weeklyCount(f.importedNotInScan)}`,
+      ),
+    );
+    const coverage =
+      f.coverageStatus === null
+        ? chalk.yellow("unknown")
+        : f.coverageStatus === "healthy"
+          ? chalk.green(f.coverageStatus)
+          : chalk.red(f.coverageStatus);
+    console.log(chalk.cyan(`coverage=${coverage} outstanding=${weeklyCount(f.outstanding)}`));
+    console.log(
+      chalk.cyan(
+        `auto_import=${f.autoImportEnabled === null ? chalk.yellow("unknown") : f.autoImportEnabled ? "enabled" : chalk.red("DISABLED")} ` +
+          `last_dispatch=${f.dispatchPhrase ?? chalk.yellow("unknown")} ` +
+          `dispatch_lost=${f.dispatchLost === null ? chalk.yellow("unknown") : f.dispatchLost}`,
+      ),
+    );
+    console.log(
+      chalk.cyan(
+        `open_failures=${weeklyCount(f.openFailureTotal)} parked=${f.parked === null ? chalk.yellow("unknown") : f.parked.length} ` +
+          `closed_this_week=${weeklyCount(f.issuesClosed)} relabelled=${weeklyCount(f.issuesRelabelled)}`,
+      ),
+    );
+
+    if (f.failuresByCause !== null) {
+      const nonZero = Object.entries(f.failuresByCause).filter(([, n]) => n > 0);
+      for (const [label, n] of nonZero) {
+        console.log(chalk.dim(`  ${label}: ${n}`));
+      }
+    }
+    if (f.parked !== null && f.parked.length > 0) {
+      for (const p of f.parked.slice(0, WEEKLY_CLI_PARKED_ROWS)) {
+        console.log(
+          chalk.dim(
+            `  parked ${p.datasetId} (${p.reason ?? "unknown"}): ${p.parkedDays == null ? "unknown" : `${p.parkedDays} days`}`,
+          ),
+        );
+      }
+      const hiddenParked = f.parked.length - WEEKLY_CLI_PARKED_ROWS;
+      if (hiddenParked > 0) {
+        console.log(chalk.dim(`  ... and ${hiddenParked} more parked`));
+      }
+    }
+    for (const e of f.errors) {
+      console.log(`${chalk.yellow("UNKNOWN".padEnd(10))} ${e.stage}: ${e.error}`);
+    }
+
+    console.log();
+    if (!res.posted && !apply) {
+      // NOT `Not posted: ${gateReason}` -- a dry run forces past the gate, so the
+      // reason is the literal string "forced", which reads as a refusal that never
+      // happened. Nothing was attempted, so say that instead.
+      console.log(chalk.dim("Dry run: nothing was filed."));
+      console.log(chalk.dim("  Re-run with --apply to file it (production only)."));
+    } else if (!res.posted) {
+      console.log(chalk.yellow(`Not posted: ${res.gateReason}`));
+    } else {
+      console.log(
+        chalk.green(
+          `Posted${res.issue?.number ? ` #${res.issue.number}` : ""}${res.closedPrevious ? `, closed #${res.closedPrevious}` : ""}`,
+        ),
+      );
+    }
+    if (options.body) {
+      console.log();
+      console.log(chalk.dim("--- rendered issue body ---"));
+      console.log(res.renderedBody ?? chalk.yellow("(no body was rendered)"));
+    }
+  });
+
+adminCommand.addCommand(importWeeklyCommand);
 
 // ============================================================================
 // Username backfill (ADR 0042, #1253, epic #1250)

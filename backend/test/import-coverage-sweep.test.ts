@@ -1017,3 +1017,50 @@ describe("the summary line", () => {
     expect(importCoverageSweepSummary(result)).toContain("dispatch=never recorded");
   });
 });
+
+// ---------------------------------------------------------------------------
+// The cron leaves a durable record (#1312 needed this; the gap predates it)
+// ---------------------------------------------------------------------------
+
+describe("the cron wrapper records what it did", () => {
+  test("an applied cron run that filed the issue writes a system audit row", async () => {
+    const db = freshDb();
+    seedDispatch(db, COVERAGE_DISPATCH_STALE_HOURS * 3);
+    const deps = recordingDeps(discovered(COVERAGE_BACKLOG_ALARM), []);
+
+    await runImportCoverageSweepCron(
+      { ...envFor(db), ENVIRONMENT: "production" } as Bindings,
+      deps,
+    );
+
+    const rows = db
+      .query<{ user_id: number | null; details: string | null }, []>(
+        "SELECT user_id, details FROM audit_log WHERE action = 'import_coverage_sweep'",
+      )
+      .all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.user_id).toBeNull();
+    expect(JSON.parse(rows[0]?.details ?? "{}")).toMatchObject({
+      source: "cron",
+      issue_action: "created",
+    });
+  });
+
+  /** `refreshed` is the routine daily body rewrite. Auditing it would write a row a
+   *  day saying nothing changed, which is the accrual this epic fights. */
+  test("a routine refresh writes no row", async () => {
+    const db = freshDb();
+    seedDispatch(db, COVERAGE_DISPATCH_STALE_HOURS * 3);
+    const deps = recordingDeps(discovered(COVERAGE_BACKLOG_ALARM), [coverageIssue(700, "silence")]);
+
+    await runImportCoverageSweepCron(
+      { ...envFor(db), ENVIRONMENT: "production" } as Bindings,
+      deps,
+    );
+
+    const rows = db
+      .query<{ id: number }, []>("SELECT id FROM audit_log WHERE action = 'import_coverage_sweep'")
+      .all();
+    expect(rows).toEqual([]);
+  });
+});

@@ -90,6 +90,7 @@ const SWEEP_WIRING: Record<string, "prod-only" | "all-envs" | "cron-wrapped" | "
   runImportIssueSweepCron: "prod-only",
   runImportCoverageSweep: "cron-wrapped",
   runImportCoverageSweepCron: "prod-only",
+  runWeeklyImportSummaryCron: "prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
   importIssueSweepLogLines: "helper",
   importCoverageSweepSummary: "helper",
@@ -112,6 +113,15 @@ function discoverSweepExports(): string[] {
   const patterns = [
     /^export\s+(?:async\s+)?function\s+(\w*[Ss]weep\w*)\s*\(/gm,
     /^export\s+const\s+(\w*[Ss]weep\w*)\s*=/gm,
+    // ...and anything named *Cron, which by construction IS a cron entry point.
+    // Added for #1312, whose job is a weekly REPORT rather than a sweep and so
+    // carries no "sweep" in any of its names -- exactly the #1164 shape this test
+    // exists to catch, arriving from a different direction. Deliberately narrower
+    // than matching "Summary", which would pull in buildApiKeySummary,
+    // integrityAuditSummary, probeSummary and loadSummary: four unrelated exports
+    // to declare as helpers, which is the dilution that makes a trip-wire stop
+    // being read.
+    /^export\s+(?:async\s+)?function\s+(\w*Cron)\s*\(/gm,
   ];
   for (const file of readdirSync(SERVICES_DIR).filter((f) => f.endsWith(".ts"))) {
     const src = readFileSync(join(SERVICES_DIR, file), "utf-8");
@@ -378,5 +388,41 @@ describe("runZarrFidelitySweep is wired into the daily cron (outside the sweep f
     // more code between the call and its `.catch(`.
     const window = allCode.slice(idx, idx + 2000);
     expect(window).toContain(".catch(");
+  });
+});
+
+describe("the weekly summary's UNGUARDED entry point is never called from scheduled()", () => {
+  /**
+   * `runWeeklyImportSummary` has the same shape as every raw sweep -- unguarded, with
+   * the `isNonProductionEnv` fence living in its `*Cron` wrapper -- but its name is
+   * neither sweep-shaped nor `*Cron`-suffixed, so `SWEEP_WIRING`'s symmetry check
+   * cannot declare it and the "cron-wrapped" assertion never reaches it.
+   *
+   * Review proved the consequence: adding `ctx.waitUntil(runWeeklyImportSummary(env,
+   * { apply: true }))` OUTSIDE the prod-only guard left all 2832 tests green. That is
+   * a change which would make the dev worker file and close real issues on the shared
+   * nemarDatasets org every day, invisible to the entire suite.
+   *
+   * Declaring it in SWEEP_WIRING would break the discovery trip-wire, so this uses the
+   * same standalone form as the publishZarrCatalog and runZarrFidelitySweep blocks
+   * above.
+   */
+  test("only the guarded wrapper is called", () => {
+    // callCount matches `name(` exactly, so the wrapper's own calls do not count
+    // toward the raw name -- verified by the second assertion below being non-zero
+    // while this one is zero.
+    expect(callCount(allCode, "runWeeklyImportSummary")).toBe(0);
+    expect(callCount(allCode, "runWeeklyImportSummaryCron")).toBeGreaterThanOrEqual(1);
+  });
+
+  test("the wrapper is inside the prod-only block, not merely in the file", () => {
+    // It files and closes real issues on an org dev shares with production, so it
+    // must never ride the non-prod daily tick.
+    expect(callCount(prodOnlyCode, "runWeeklyImportSummaryCron")).toBeGreaterThanOrEqual(1);
+  });
+
+  test("it is NOT in DEV_CRON_ALLOWLIST", () => {
+    const allowlist = /DEV_CRON_ALLOWLIST[^;]*;/s.exec(allCode)?.[0] ?? "";
+    expect(allowlist).not.toContain("WeeklyImportSummary");
   });
 });
