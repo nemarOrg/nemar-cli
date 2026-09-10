@@ -183,6 +183,24 @@ function labelNames(issue: ReconcileIssue): string[] {
 export function decideReconcile(args: {
   rows: readonly ReconcileJobRow[];
   openIssues: readonly ReconcileIssue[];
+  /**
+   * Every `import_jobs.dataset_id` that EXISTS, in any status.
+   *
+   * Separate from `rows` because the two answer different questions and one set
+   * cannot serve both. `rows` is the unresolved slice -- that is what the
+   * untracked direction is about -- while this direction asks whether the table
+   * has a row at all, and deriving that from the slice reported "no
+   * `import_jobs` row" about every dataset whose import had since completed,
+   * rolled back, or was still running. ADR 0055 says the finding is an issue
+   * whose dataset has no row AT ALL, and it says so because the remedy
+   * (`no-import-row`, applied by a human) then suppresses that issue from the
+   * report permanently.
+   *
+   * Optional so a caller that genuinely has the whole table in `rows` need not
+   * pass it twice; when absent, existence falls back to `rows`, which is the old
+   * behavior and is correct only for such a caller.
+   */
+  allDatasetIds?: ReadonlySet<string>;
 }): ImportReconcileVerdict {
   const unresolved = args.rows.filter((r) =>
     (RECONCILE_UNRESOLVED_STATUSES as readonly string[]).includes(r.status),
@@ -251,7 +269,7 @@ export function decideReconcile(args: {
   // The other direction. Machine-filed only: a human's issue about a dataset with
   // no import row is a legitimate thing for a human to have written, and telling
   // them it is inconsistent with a table they did not know about is noise.
-  const rowIds = new Set(args.rows.map((r) => r.dataset_id));
+  const rowIds = args.allDatasetIds ?? new Set(args.rows.map((r) => r.dataset_id));
   const issuesWithoutRow: ImportIssueWithoutRow[] = [];
   for (const issue of args.openIssues) {
     const datasetId = parseImportFailureIssueTitle(issue.title);

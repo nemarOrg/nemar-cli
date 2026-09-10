@@ -162,6 +162,21 @@ export const RECONCILE_ROWS_QUERY = `SELECT dataset_id, source_id, status, stage
    -- naming.
    ORDER BY updated_at IS NULL, updated_at ASC`;
 
+/**
+ * Every dataset that HAS an import row, in any status (#1352 follow-up).
+ *
+ * The companion to the query above, and separate from it because the status
+ * filter there is right for its own direction and wrong for this one. The
+ * issues-without-a-row finding is about a dataset with no row AT ALL (ADR 0055);
+ * asking the filtered slice instead answered "no row" for every dataset whose
+ * import had completed, rolled back, or was still running, and a human's remedy
+ * for that finding suppresses the issue from the report permanently.
+ *
+ * One column, one row per dataset ever imported (UNIQUE(dataset_id), migration
+ * 0044), no ORDER BY: it is only ever read into a Set.
+ */
+export const RECONCILE_DATASET_IDS_QUERY = "SELECT dataset_id FROM import_jobs";
+
 export interface ImportIssueSweepResult {
   /** False on a dry run: nothing was written to GitHub. */
   applied: boolean;
@@ -383,7 +398,21 @@ export async function runImportIssueSweep(
     try {
       const rows = await env.DB.prepare(RECONCILE_ROWS_QUERY).all<ReconcileJobRow>();
       if (!rows.results) throw new Error("D1 returned null results");
-      result.reconcile = decideReconcile({ rows: rows.results, openIssues: open });
+      // A SECOND query, one column wide, because existence is not the same
+      // question as unresolvedness. `RECONCILE_ROWS_QUERY` is deliberately
+      // filtered to the two unresolved statuses, and deriving "has a row at all"
+      // from that slice reported "no `import_jobs` row" for every dataset whose
+      // import had since completed or rolled back -- permanently, for a
+      // `rolled_back` row, and the human remedy for that finding then suppresses
+      // the issue from the report for good. One column over one row per dataset
+      // is cheap; being wrong here is not.
+      const ids = await env.DB.prepare(RECONCILE_DATASET_IDS_QUERY).all<{ dataset_id: string }>();
+      if (!ids.results) throw new Error("D1 returned null results");
+      result.reconcile = decideReconcile({
+        rows: rows.results,
+        openIssues: open,
+        allDatasetIds: new Set(ids.results.map((r) => r.dataset_id)),
+      });
     } catch (err) {
       // Fail open on the section, never on the verdict: `reconcile` stays null, which
       // reads as "not computed" rather than as "they agree".
