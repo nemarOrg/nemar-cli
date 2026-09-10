@@ -32,8 +32,22 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawn } from "bun";
-import { TEST_CONFIG, sleep } from "./setup";
+import { LIVE_TARGET_BLOCKED, TEST_CONFIG, sleep } from "./setup";
 
+/**
+ * `test.skipIf(LIVE_TARGET_BLOCKED)` marks a case that cannot pass without a live
+ * backend. Blocked means `TEST_API_URL` is unset or names production, so the
+ * harness has pointed the run at a dead address (test/live-target.ts).
+ *
+ * These are skips rather than failures because "you have no dev backend
+ * configured" is not a defect in the code under test, and a suite that always
+ * fails locally teaches people to ignore failures. CI sets TEST_API_URL, so they
+ * all still run there.
+ *
+ * Several of them USED TO PASS by querying production directly -- an invalid key
+ * getting a real 401, a non-existent dataset getting a real 404. That is what this
+ * annotation is really recording.
+ */
 // Standardized config path: ~/.config/nemar/ on all platforms
 function getConfigDir(): string {
   const home = process.env.HOME || "";
@@ -95,6 +109,19 @@ async function runCli(
 }
 
 // Helper to set config for a test context
+/**
+ * Keys for the fixture config. `isAuthenticated()` is `!!getConfig().apiKey`, so an
+ * empty key makes the CLI stop at `requireAuth()` -- which means a test asserting a
+ * LOCAL gate (sandbox training, a missing path, an invalid flag value) failed for
+ * want of a key rather than for want of a backend. That is a different axis from
+ * `LIVE_TARGET_BLOCKED`, and conflating them cost five local gates their coverage.
+ *
+ * When `test/.env.test` IS present these are the real keys, so nothing about the
+ * live tier changes; the fallback only ever applies to a keyless clone.
+ */
+const FIXTURE_ADMIN_KEY = TEST_CONFIG.adminApiKey || "offline-fixture-admin-key";
+const FIXTURE_USER_KEY = TEST_CONFIG.userApiKey || "offline-fixture-user-key";
+
 function setTestConfig(ctx: TestContext, config: Record<string, unknown>) {
   writeFileSync(ctx.configFile, JSON.stringify(config));
 }
@@ -196,7 +223,7 @@ describe("CLI Auth Commands", () => {
     test("shows authenticated when credentials exist", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
-        apiKey: TEST_CONFIG.adminApiKey,
+        apiKey: FIXTURE_ADMIN_KEY,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-admin",
         email: "testAdmin@nemar.org",
@@ -212,7 +239,7 @@ describe("CLI Auth Commands", () => {
   });
 
   describe("nemar auth login", () => {
-    test("login with valid API key via -k flag", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("login with valid API key via -k flag", async () => {
       const ctx = createTestContext();
 
       const { stdout, exitCode } = await runCli(
@@ -231,7 +258,7 @@ describe("CLI Auth Commands", () => {
       expect(stdout).toContain("test-admin");
     });
 
-    test("login with invalid API key shows error", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("login with invalid API key shows error", async () => {
       const ctx = createTestContext();
 
       const { stdout, exitCode } = await runCli(
@@ -256,7 +283,7 @@ describe("CLI Auth Commands", () => {
     test("logout when authenticated clears credentials", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
-        apiKey: TEST_CONFIG.userApiKey,
+        apiKey: FIXTURE_USER_KEY,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-user",
       });
@@ -283,10 +310,10 @@ describe("CLI Admin Commands", () => {
       expect(stdout).toContain("Not authenticated");
     });
 
-    test("lists users when authenticated as admin", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("lists users when authenticated as admin", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
-        apiKey: TEST_CONFIG.adminApiKey,
+        apiKey: FIXTURE_ADMIN_KEY,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-admin",
       });
@@ -298,10 +325,10 @@ describe("CLI Admin Commands", () => {
       expect(stdout).toContain("test-admin");
     });
 
-    test("non-admin cannot list users", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("non-admin cannot list users", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
-        apiKey: TEST_CONFIG.userApiKey,
+        apiKey: FIXTURE_USER_KEY,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-user",
       });
@@ -311,10 +338,10 @@ describe("CLI Admin Commands", () => {
       expect(stdout).toContain("requires admin privileges");
     });
 
-    test("lists users with --approved filter", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("lists users with --approved filter", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
-        apiKey: TEST_CONFIG.adminApiKey,
+        apiKey: FIXTURE_ADMIN_KEY,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-admin",
       });
@@ -326,10 +353,10 @@ describe("CLI Admin Commands", () => {
       expect(stdout).toContain("test-user");
     });
 
-    test("lists users with --verified filter", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("lists users with --verified filter", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
-        apiKey: TEST_CONFIG.adminApiKey,
+        apiKey: FIXTURE_ADMIN_KEY,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-admin",
       });
@@ -565,7 +592,7 @@ describe("CLI Dataset Upload", () => {
   test("nemar dataset upload requires sandbox completion", async () => {
     const ctx = createTestContext();
     setTestConfig(ctx, {
-      apiKey: TEST_CONFIG.userApiKey,
+      apiKey: FIXTURE_USER_KEY,
       apiUrl: TEST_CONFIG.apiUrl,
       username: "test-user",
       sandboxCompleted: false,
@@ -583,7 +610,7 @@ describe("CLI Dataset Upload", () => {
   test("nemar dataset upload with non-existent path fails", async () => {
     const ctx = createTestContext();
     setTestConfig(ctx, {
-      apiKey: TEST_CONFIG.userApiKey,
+      apiKey: FIXTURE_USER_KEY,
       apiUrl: TEST_CONFIG.apiUrl,
       username: "test-user",
       sandboxCompleted: true, // Skip sandbox check to test path validation
@@ -638,18 +665,26 @@ describe("CLI Dataset Download", () => {
     expect(output).not.toContain("--no-data cannot be combined with BIDS filters");
   });
 
-  test("nemar dataset download with non-existent dataset shows error", async () => {
-    const { stdout, stderr, exitCode } = await runCli(["dataset", "download", "nm999999"]);
+  test.skipIf(LIVE_TARGET_BLOCKED)(
+    "nemar dataset download with non-existent dataset shows error",
+    async () => {
+      // `nm099998`, not `nm999999`: the latter is outside the 0-99999 id cap, so the
+      // backend answers 400 "Invalid dataset ID format" -- and this case passed only
+      // because the CLI called EVERY lookup failure "Dataset not found". Now that a
+      // 400 is reported as a 400, the id has to be genuinely ABSENT rather than
+      // malformed, which is what the sibling status/view cases already use.
+      const { stdout, stderr, exitCode } = await runCli(["dataset", "download", "nm099998"]);
 
-    // Should fail with dataset not found (after prereq check)
-    const output = stdout + stderr;
-    // Either fails at prereq check (DataLad not installed) or at dataset lookup
-    expect(
-      output.includes("Prerequisites") ||
-        output.includes("not found") ||
-        output.includes("DataLad"),
-    ).toBe(true);
-  });
+      // Should fail with dataset not found (after prereq check)
+      const output = stdout + stderr;
+      // Either fails at prereq check (DataLad not installed) or at dataset lookup
+      expect(
+        output.includes("Prerequisites") ||
+          output.includes("not found") ||
+          output.includes("DataLad"),
+      ).toBe(true);
+    },
+  );
 });
 
 describe("CLI Dataset Status", () => {
@@ -661,19 +696,22 @@ describe("CLI Dataset Status", () => {
     expect(stdout).toContain("--json");
   });
 
-  test("nemar dataset status with non-existent dataset shows error", async () => {
-    // Valid format within MAX_NUMBER=99999 cap, but unlikely to be allocated.
-    const { stdout, exitCode } = await runCli(["dataset", "status", "nm099998"]);
+  test.skipIf(LIVE_TARGET_BLOCKED)(
+    "nemar dataset status with non-existent dataset shows error",
+    async () => {
+      // Valid format within MAX_NUMBER=99999 cap, but unlikely to be allocated.
+      const { stdout, exitCode } = await runCli(["dataset", "status", "nm099998"]);
 
-    expect(stdout).toContain("not found");
-  });
+      expect(stdout).toContain("not found");
+    },
+  );
 
   test("nemar dataset status --json outputs JSON format", async () => {
     // Use nm099999 (seeded managed dataset) directly; the list endpoint
     // may return catalog-only datasets that don't exist in D1.
     const ctx = createTestContext();
     setTestConfig(ctx, {
-      apiKey: TEST_CONFIG.adminApiKey,
+      apiKey: FIXTURE_ADMIN_KEY,
       apiUrl: TEST_CONFIG.apiUrl,
       username: "test-admin",
     });
@@ -713,11 +751,14 @@ describe("CLI Dataset Status", () => {
     expect(stdout).toContain("status|view");
   });
 
-  test("nemar dataset view with non-existent dataset behaves like status", async () => {
-    const { stdout, exitCode } = await runCli(["dataset", "view", "nm099998"]);
+  test.skipIf(LIVE_TARGET_BLOCKED)(
+    "nemar dataset view with non-existent dataset behaves like status",
+    async () => {
+      const { stdout, exitCode } = await runCli(["dataset", "view", "nm099998"]);
 
-    expect(stdout).toContain("not found");
-  });
+      expect(stdout).toContain("not found");
+    },
+  );
 });
 
 describe("CLI Dataset List", () => {
@@ -810,32 +851,37 @@ describe("CLI Admin Revert", () => {
     expect(stdout).toContain("Not authenticated");
   });
 
-  test("nemar admin revert with nonexistent dataset shows error", async () => {
-    const ctx = createTestContext();
-    setTestConfig(ctx, {
-      apiKey: TEST_CONFIG.adminApiKey,
-      apiUrl: TEST_CONFIG.apiUrl,
-      username: "test-admin",
-    });
+  test.skipIf(LIVE_TARGET_BLOCKED)(
+    "nemar admin revert with nonexistent dataset shows error",
+    async () => {
+      const ctx = createTestContext();
+      setTestConfig(ctx, {
+        apiKey: FIXTURE_ADMIN_KEY,
+        apiUrl: TEST_CONFIG.apiUrl,
+        username: "test-admin",
+      });
 
-    const { stdout, stderr, exitCode } = await runCli(
-      ["admin", "revert", "nm999999", "--list"],
-      ctx,
-    );
+      const { stdout, stderr, exitCode } = await runCli(
+        ["admin", "revert", "nm999999", "--list"],
+        ctx,
+      );
 
-    // Three valid failure modes depending on environment; each covers a real
-    // code path and no outcome silently passes when all three are absent.
-    // - "not found":        auth OK, prereqs OK, dataset does not exist (exitCode != 0 via process.exit)
-    // - "prerequisites":   git-annex/datalad missing (standard CI without e2e tools)
-    // - "not authenticated": TEST_ADMIN_API_KEY is empty (local dev, no .env);
-    //   requireAuth() returns false without calling process.exit, so exitCode is 0 in this path.
-    const output = (stdout + stderr).toLowerCase();
-    const matched =
-      output.includes("not found") ||
-      output.includes("prerequisites") ||
-      output.includes("not authenticated");
-    expect(matched, `unexpected output:\n${stdout}${stderr}`).toBe(true);
-  });
+      // Three valid failure modes depending on environment; each covers a real
+      // code path and no outcome silently passes when all three are absent.
+      // - "not found":        auth OK, prereqs OK, dataset does not exist (exitCode != 0 via process.exit)
+      // - "prerequisites":   git-annex/datalad missing (standard CI without e2e tools)
+      // - "not authenticated": no longer reachable -- the fixture now always carries a
+      //   key (see FIXTURE_ADMIN_KEY), so this branch is kept only to describe history.
+      //   Both of these cases were green against PRODUCTION before the live tier was
+      //   fenced off, which is why they are now annotated as needing a live backend.
+      const output = (stdout + stderr).toLowerCase();
+      const matched =
+        output.includes("not found") ||
+        output.includes("prerequisites") ||
+        output.includes("not authenticated");
+      expect(matched, `unexpected output:\n${stdout}${stderr}`).toBe(true);
+    },
+  );
 });
 
 describe("CLI Dataset Collaborator Commands", () => {
@@ -856,10 +902,10 @@ describe("CLI Dataset Collaborator Commands", () => {
       expect(stdout).toContain("Not authenticated");
     });
 
-    test("non-existent dataset shows error", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("non-existent dataset shows error", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
-        apiKey: TEST_CONFIG.userApiKey,
+        apiKey: FIXTURE_USER_KEY,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-user",
       });
@@ -912,7 +958,7 @@ describe("CLI Dataset Collaborator Commands", () => {
     test("list rejects an invalid --status value before any network call", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
-        apiKey: TEST_CONFIG.userApiKey,
+        apiKey: FIXTURE_USER_KEY,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-user",
       });
@@ -946,10 +992,10 @@ describe("CLI Dataset Collaborator Commands", () => {
       expect(stdout).toContain("Not authenticated");
     });
 
-    test("non-admin non-owner cannot invite", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("non-admin non-owner cannot invite", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
-        apiKey: TEST_CONFIG.userApiKey,
+        apiKey: FIXTURE_USER_KEY,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-user",
       });
@@ -987,10 +1033,10 @@ describe("CLI Dataset Collaborator Commands", () => {
       expect(stdout).toContain("Not authenticated");
     });
 
-    test("non-admin non-owner cannot list collaborators", async () => {
+    test.skipIf(LIVE_TARGET_BLOCKED)("non-admin non-owner cannot list collaborators", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
-        apiKey: TEST_CONFIG.userApiKey,
+        apiKey: FIXTURE_USER_KEY,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-user",
       });
@@ -1012,7 +1058,7 @@ describe("CLI Dataset Collaborator Commands", () => {
     test("admin can list collaborators with --json", async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
-        apiKey: TEST_CONFIG.adminApiKey,
+        apiKey: FIXTURE_ADMIN_KEY,
         apiUrl: TEST_CONFIG.apiUrl,
         username: "test-admin",
       });

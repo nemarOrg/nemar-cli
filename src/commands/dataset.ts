@@ -209,6 +209,24 @@ import {
   uploadDataToS3,
 } from "../lib/upload/transfer.js";
 
+/**
+ * What to call a failed dataset lookup.
+ *
+ * Only a real 404 is "not found". Everything else -- a connection failure, a 500, a
+ * 401 -- is a request that produced no answer about the dataset, and reporting it as
+ * absence is the CLI inventing a fact. A 403 is named separately because "no access"
+ * and "does not exist" are different things to the person reading it, and the backend
+ * deliberately distinguishes them.
+ */
+export function datasetLookupFailure(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.statusCode === 404) return "Dataset not found";
+    if (error.statusCode === 403) return "Dataset not accessible";
+    return `Could not read the dataset (HTTP ${error.statusCode})`;
+  }
+  return "Could not reach the backend";
+}
+
 export const datasetCommand = new Command("dataset").description("Dataset management").addHelpText(
   "after",
   `
@@ -1047,7 +1065,13 @@ Examples:
       datasetInfo = await getDataset(effectiveId);
       spinner.succeed(`Found dataset: ${datasetInfo.name}`);
     } catch (error) {
-      spinner.fail("Dataset not found");
+      // Branch on the error KIND. This used to say "Dataset not found" for anything
+      // that threw, so an unreachable backend was reported as a 404: the CLI
+      // asserting a fact about the dataset from a request that never got an answer.
+      // Surfaced while fencing the test suite off from production -- the surviving
+      // output under a connection failure was "Dataset not found" immediately
+      // followed by "Network error: Could not connect".
+      spinner.fail(datasetLookupFailure(error));
       if (error instanceof ApiError) {
         console.log(chalk.red(`  ${error.message}`));
       } else {
@@ -1445,7 +1469,9 @@ Examples:
       datasetInfo = await getDataset(datasetId);
       spinner.stop();
     } catch (error) {
-      spinner.fail("Dataset not found");
+      // Same shape, same rule as `dataset clone` above: only a real 404 may be
+      // called "not found".
+      spinner.fail(datasetLookupFailure(error));
       if (error instanceof ApiError) {
         console.log(chalk.red(`  ${error.message}`));
       } else {

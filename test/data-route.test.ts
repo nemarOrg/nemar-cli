@@ -19,7 +19,7 @@
 
 import { describe, expect, test } from "bun:test";
 import "./setup";
-import { EXEMPLAR_ID_RE, IS_PRODUCTION_TARGET, TEST_CONFIG } from "./setup";
+import { EXEMPLAR_ID_RE, IS_PRODUCTION_TARGET, LIVE_TARGET_BLOCKED, TEST_CONFIG } from "./setup";
 
 const TEST_DATASET = process.env.TEST_DATA_DATASET ?? "nm099999";
 const API = TEST_CONFIG.apiUrl;
@@ -27,7 +27,11 @@ const headers: Record<string, string> = TEST_CONFIG.bypassToken
   ? { "X-Test-Bypass": TEST_CONFIG.bypassToken }
   : {};
 const POINTS_AT_PROD = API.includes("api.nemar.org") || API.includes("data.nemar.org");
-const PROD_GUARD_ACTIVE = POINTS_AT_PROD && !process.env.TEST_ALLOW_PROD;
+// `LIVE_TARGET_BLOCKED` rather than a local `!process.env.TEST_ALLOW_PROD`: raw
+// truthiness disarms this guard for `TEST_ALLOW_PROD=0`, which is someone saying NO
+// and used to send MORE traffic to production than leaving it unset. The shared flag
+// is the strict opt-in (test/live-target.ts), so the two halves cannot disagree.
+const PROD_GUARD_ACTIVE = LIVE_TARGET_BLOCKED;
 
 async function fetchNoRedirect(path: string): Promise<Response> {
   return fetch(`${API}${path}`, { redirect: "manual", headers });
