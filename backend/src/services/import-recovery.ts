@@ -18,6 +18,7 @@ import {
   resolveEmailConfig,
   sendImportQuarantineEmail,
 } from "./email.js";
+import { isGenericImportError, lastErrorAssignmentSql } from "./import-error.js";
 
 export type ImportStatus =
   | "preparing"
@@ -189,11 +190,21 @@ async function markImportStatus(
   // Never throw out of recovery: on a D1 hiccup the row stays visible as
   // `failed` in the admin view (not a silent orphan), and the audit/alert
   // writes below still run.
+  //
+  // `lastError` here is bookkeeping (`quarantined: <reason>` / `auto-rollback:
+  // <reason>`), never a diagnosis, so it must not erase a specific message the
+  // failing job recorded (ADR 0051). This used to be a plain overwrite, and it
+  // destroyed the `[openneuro-upstream-inaccessible]` marker that
+  // IMPORT_RETRY_CANDIDATES_QUERY requires to re-select a quarantined row --
+  // stranding exactly the datasets the retry engine exists to recover. The
+  // decision itself is not lost: the caller writes it to audit_log.
   try {
     await db
       .prepare(
         `UPDATE import_jobs
-           SET status = ?, last_error = ?, completed_at = datetime('now'), updated_at = datetime('now')
+           SET status = ?,
+               last_error = ${lastErrorAssignmentSql(isGenericImportError(lastError), "last_error", "?")},
+               completed_at = datetime('now'), updated_at = datetime('now')
          WHERE dataset_id = ?`,
       )
       .bind(status, lastError, datasetId)

@@ -51,7 +51,12 @@ Load-bearing ones to know before touching the relevant area:
 signed state names the account),
 0045 (the CLI and the web say one thing about an account),
 0048 (account kinds are explicit: person, service, test; superseding 0045's role-based
-ORCID-gap exemption).
+ORCID-gap exemption),
+0051 (a specific import error is never overwritten by a generic one),
+0052 (an import-failure tracking issue closes on verified state, and a burst rolls up),
+0053 (silence is only evidence of a problem when there was work to do),
+0054 (the weekly import report arrives whether or not anything is wrong, and unknown is
+never rendered as zero).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
@@ -631,7 +636,7 @@ and what is historical. The entries worth knowing by name:
 | `nemar dataset publish` | request, status, resend |
 | `nemar dataset` (access) | request-access, access, invite, collaborators |
 | `nemar sandbox` | training run, status, reset — required before uploading |
-| `nemar admin` | users (`--kind`), approve, revoke, role, kind (account kind, owner-only — ADR 0048), keys (create/list/revoke a service/test account's API keys, owner-only), notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, recording-stats-sweep, signal-defaults-sweep, zarr-fidelity-sweep, doctor, summary, notice, email-preferences, backfill-names, backfill-usernames, duplicates, e2e-test |
+| `nemar admin` | users (`--kind`), approve, revoke, role, kind (account kind, owner-only — ADR 0048), keys (create/list/revoke a service/test account's API keys, owner-only), notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, recording-stats-sweep, signal-defaults-sweep, zarr-fidelity-sweep, import-issue-triage, import-coverage, import-weekly, doctor, summary, notice, email-preferences, backfill-names, backfill-usernames, duplicates, e2e-test |
 | `nemar admin import*` | OpenNeuro import, status, rollback, retry, verify, recover (issue #754, epic #967) |
 | `nemar admin fleet` | drift, enforce, revalidate — governance across dataset repos (epic #713) |
 | `nemar admin exemplar` | create, status, remint-dois — the staging exemplar fleet |

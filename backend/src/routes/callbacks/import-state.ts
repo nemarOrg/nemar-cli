@@ -8,11 +8,11 @@
 
 import { timingSafeEqual } from "../../lib/constant-time.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
+import { isGenericImportError, lastErrorAssignmentSql } from "../../services/import-error.js";
 import { fileImportFailureIssueIfNeeded } from "../../services/import-failure-issue.js";
 import {
   IMPORT_STATUSES,
   type ImportStatus,
-  OPENNEURO_UPSTREAM_MARKER,
   runImportRecovery,
 } from "../../services/import-recovery.js";
 import type { WebhookRouter } from "../webhooks/shared.js";
@@ -139,19 +139,22 @@ export function registerImportStateRoutes(webhooks: WebhookRouter): void {
              stage = excluded.stage, status = excluded.status,
              shards_total = COALESCE(excluded.shards_total, import_jobs.shards_total),
              workflow_run_url = COALESCE(excluded.workflow_run_url, import_jobs.workflow_run_url),
-             -- Sticky upstream marker (#808): once a prepare leg records the
-             -- OpenNeuro-inaccessible marker, the doomed copy/finalize legs that
-             -- still run under \`if: !cancelled()\` MUST NOT clobber it with their
-             -- generic terminal error (or the finalizing POST's NULL). classifyRecovery
-             -- reads last_error, so keeping the marker guarantees the quarantine is
-             -- classified \`upstream_inaccessible\` regardless of POST ordering vs the
-             -- async waitUntil recovery. A fresh attempt clears it via the 'preparing'
-             -- branch above ([ ] are literal in SQLite LIKE, not wildcards).
-             last_error = CASE
-               WHEN import_jobs.last_error LIKE '%${OPENNEURO_UPSTREAM_MARKER}%'
-                    AND COALESCE(excluded.last_error, '') NOT LIKE '%${OPENNEURO_UPSTREAM_MARKER}%'
-               THEN import_jobs.last_error
-               ELSE excluded.last_error END,
+             -- A specific error is never overwritten by a generic one (ADR 0051).
+             -- Originally this protected only the OpenNeuro-inaccessible marker
+             -- (#808); the rule is broader. The doomed copy/finalize legs that still
+             -- run under \`if: !cancelled()\`, and the report job that runs after all
+             -- of them, can only post the stage roll-up (or the finalizing POST's
+             -- NULL) -- so without this the least informative message would always
+             -- be the one that survives. classifyRecovery reads last_error, so
+             -- keeping the specific message also keeps an upstream failure
+             -- classified \`upstream_inaccessible\` regardless of POST ordering vs
+             -- the async waitUntil recovery. A fresh attempt clears it via the
+             -- 'preparing' branch above.
+             last_error = ${lastErrorAssignmentSql(
+               isGenericImportError(errorMsg),
+               "import_jobs.last_error",
+               "excluded.last_error",
+             )},
              completed_at = CASE WHEN excluded.status IN ('complete','failed','quarantined','rolled_back')
                                  THEN datetime('now') ELSE import_jobs.completed_at END,
              updated_at = datetime('now')

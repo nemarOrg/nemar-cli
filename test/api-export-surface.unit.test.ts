@@ -136,7 +136,10 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getUserDuplicates",
     "hedSweep",
     "hedSweepReset",
+    "importCoverageSweep",
     "importDataset",
+    "importIssueTriage",
+    "importWeeklySummary",
     "listKeysFor",
     "listUsers",
     "publishDataset",
@@ -198,6 +201,9 @@ const POST_SPLIT_ADDITIONS = [
   "clearIdentityConflict", // #1254, ADR 0043: POST /admin/users/:id/clear-identity-conflict
   "createApiKey", // #1283, epic #1272 phase 3, ADR 0047: POST /auth/keys
   "createKeyFor", // #1284, epic #1272 phase 4, ADR 0048: owner-mint POST /admin/users/:username/keys
+  "importCoverageSweep", // #1311, epic #1306 phase 3: POST /admin/imports/coverage-sweep
+  "importIssueTriage", // #1310, epic #1306: POST /admin/imports/issue-triage
+  "importWeeklySummary", // #1312, epic #1306 phase 4: POST /admin/imports/weekly-summary
   "doctorFix", // #1130, CLI wrapper for POST /admin/doctor/fix
   "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
   "getAdminUserByUsername", // #1284 review, epic #1272 phase 4, ADR 0048: GET /admin/users/:username, read by `nemar admin doctor kinds`

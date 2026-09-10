@@ -71,8 +71,9 @@ const INDEX_PATH = join(import.meta.dir, "../src/index.ts");
  *                   and a same-module `<name>Cron` wrapper -- itself declared
  *                   `prod-only` above -- carries the guard and is what
  *                   `scheduled()` actually calls.
- *  - `helper`       not a sweep at all: a SQL/query builder that happens to
- *                   carry the word in its name
+ *  - `helper`       not a sweep at all: a SQL/query builder, or an output
+ *                   formatter for a sweep's result, that happens to carry the
+ *                   word in its name
  */
 const SWEEP_WIRING: Record<string, "prod-only" | "all-envs" | "cron-wrapped" | "helper"> = {
   archiveRetrySweep: "prod-only",
@@ -85,7 +86,14 @@ const SWEEP_WIRING: Record<string, "prod-only" | "all-envs" | "cron-wrapped" | "
   runSignalDefaultsSweep: "cron-wrapped",
   runSignalDefaultsSweepCron: "prod-only",
   runZarrFidelitySweep: "all-envs",
+  runImportIssueSweep: "cron-wrapped",
+  runImportIssueSweepCron: "prod-only",
+  runImportCoverageSweep: "cron-wrapped",
+  runImportCoverageSweepCron: "prod-only",
+  runWeeklyImportSummaryCron: "prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
+  importIssueSweepLogLines: "helper",
+  importCoverageSweepSummary: "helper",
   availabilityReportSweepWhere: "helper",
   availabilityReportSweepCandidateQuery: "helper",
   availabilityReportSweepRemainingQuery: "helper",
@@ -100,14 +108,47 @@ const SWEEP_WIRING: Record<string, "prod-only" | "all-envs" | "cron-wrapped" | "
  * sweeps, one of which exists to prevent recurrence of the nm000225 incident.
  * Deleting any of their call sites left the suite green.
  */
+/**
+ * Every service file, RECURSIVELY.
+ *
+ * The scan used to be one `readdirSync` of `services/`, so
+ * `backend/src/services/github/*.ts` -- a directory this epic edits -- was invisible
+ * to both the discovery above and the wiring check below. A `*Cron` export placed in
+ * a subdirectory left the whole suite green.
+ */
+function serviceFiles(): string[] {
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.isDirectory()) walk(join(dir, e.name));
+      else if (e.name.endsWith(".ts")) out.push(join(dir, e.name));
+    }
+  };
+  walk(SERVICES_DIR);
+  return out;
+}
+
 function discoverSweepExports(): string[] {
   const names = new Set<string>();
   const patterns = [
     /^export\s+(?:async\s+)?function\s+(\w*[Ss]weep\w*)\s*\(/gm,
     /^export\s+const\s+(\w*[Ss]weep\w*)\s*=/gm,
+    // ...and anything named *Cron, which by construction IS a cron entry point.
+    // Added for #1312, whose job is a weekly REPORT rather than a sweep and so
+    // carries no "sweep" in any of its names -- exactly the #1164 shape this test
+    // exists to catch, arriving from a different direction. Deliberately narrower
+    // than matching "Summary", which would pull in buildApiKeySummary,
+    // integrityAuditSummary, probeSummary and loadSummary: four unrelated exports
+    // to declare as helpers, which is the dilution that makes a trip-wire stop
+    // being read.
+    /^export\s+(?:async\s+)?function\s+(\w*Cron)\s*\(/gm,
+    // The `export const` counterpart, which the two sweep patterns have and this one
+    // did not: `export const newThingCron = async (env) => ...` was invisible, so the
+    // trip-wire could be walked past by choosing an arrow function.
+    /^export\s+const\s+(\w*Cron)\s*=/gm,
   ];
-  for (const file of readdirSync(SERVICES_DIR).filter((f) => f.endsWith(".ts"))) {
-    const src = readFileSync(join(SERVICES_DIR, file), "utf-8");
+  for (const file of serviceFiles()) {
+    const src = readFileSync(file, "utf-8");
     for (const re of patterns) {
       for (const m of src.matchAll(re)) names.add(m[1]);
     }
@@ -158,11 +199,18 @@ const prodOnlyCode = codeLines(prodOnlyBlockLines(indexLines)).join("\n");
  *  `ctx.waitUntil` can be cancelled when the handler returns, so a bare
  *  statement is not a wired sweep even though the name is present. */
 function isScheduled(code: string, name: string): boolean {
-  return new RegExp(`ctx\\.waitUntil\\(\\s*${name}\\(env\\)`).test(code);
+  return new RegExp(`ctx\\.waitUntil\\(\\s*${name}\\(env[),]`).test(code);
 }
 
+/**
+ * Calls of the form `name(env)` or `name(env, ...)`. The trailing delimiter is
+ * matched rather than a bare `(env)` so a sweep that takes options -- as
+ * `runImportIssueSweep(env, { apply: true })` does -- still counts. `env` must
+ * still be the first argument, so this is no weaker: it cannot match a
+ * same-named call on some other value.
+ */
 function callCount(code: string, name: string): number {
-  return code.split(`${name}(env)`).length - 1;
+  return [...code.matchAll(new RegExp(`\\b${name}\\(env[),]`, "g"))].length;
 }
 
 /**
@@ -178,8 +226,8 @@ function serviceFileCodeLinesDefining(exportName: string): string[] | null {
     new RegExp(`^export\\s+(?:async\\s+)?function\\s+${exportName}\\s*\\(`),
     new RegExp(`^export\\s+const\\s+${exportName}\\s*=`),
   ];
-  for (const file of readdirSync(SERVICES_DIR).filter((f) => f.endsWith(".ts"))) {
-    const lines = readFileSync(join(SERVICES_DIR, file), "utf-8").split("\n");
+  for (const file of serviceFiles()) {
+    const lines = readFileSync(file, "utf-8").split("\n");
     if (lines.some((l) => patterns.some((re) => re.test(l.trim())))) {
       return codeLines(lines);
     }
@@ -258,7 +306,10 @@ describe("every sweep service is declared and driven", () => {
       // other assertion in this file.
       const code = serviceFileCodeLinesDefining(cronName)?.join("\n") ?? null;
       expect(code).not.toBeNull();
-      expect(code).toContain(`${name}(env)`);
+      // `callCount` rather than a literal `name(env)` substring, so a wrapper
+      // that passes options through -- the cron's `apply` flag, say -- still
+      // counts as delegating.
+      expect(callCount(code ?? "", name)).toBeGreaterThanOrEqual(1);
     });
   }
 });
@@ -361,5 +412,56 @@ describe("runZarrFidelitySweep is wired into the daily cron (outside the sweep f
     // more code between the call and its `.catch(`.
     const window = allCode.slice(idx, idx + 2000);
     expect(window).toContain(".catch(");
+  });
+});
+
+describe("the weekly summary's UNGUARDED entry point is never called from scheduled()", () => {
+  /**
+   * `runWeeklyImportSummary` has the same shape as every raw sweep -- unguarded, with
+   * the `isNonProductionEnv` fence living in its `*Cron` wrapper -- but its name is
+   * neither sweep-shaped nor `*Cron`-suffixed, so `SWEEP_WIRING`'s symmetry check
+   * cannot declare it and the "cron-wrapped" assertion never reaches it.
+   *
+   * Review proved the consequence: adding `ctx.waitUntil(runWeeklyImportSummary(env,
+   * { apply: true }))` OUTSIDE the prod-only guard left all 2832 tests green. That is
+   * a change which would make the dev worker file and close real issues on the shared
+   * nemarDatasets org every day, invisible to the entire suite.
+   *
+   * Declaring it in SWEEP_WIRING would break the discovery trip-wire, so this uses the
+   * same standalone form as the publishZarrCatalog and runZarrFidelitySweep blocks
+   * above.
+   */
+  test("only the guarded wrapper is called", () => {
+    // callCount matches `name(` exactly, so the wrapper's own calls do not count
+    // toward the raw name -- verified by the second assertion below being non-zero
+    // while this one is zero.
+    expect(callCount(allCode, "runWeeklyImportSummary")).toBe(0);
+    expect(callCount(allCode, "runWeeklyImportSummaryCron")).toBeGreaterThanOrEqual(1);
+  });
+
+  test("the wrapper is inside the prod-only block, not merely in the file", () => {
+    // It files and closes real issues on an org dev shares with production, so it
+    // must never ride the non-prod daily tick.
+    expect(callCount(prodOnlyCode, "runWeeklyImportSummaryCron")).toBeGreaterThanOrEqual(1);
+  });
+
+  test("it is NOT in DEV_CRON_ALLOWLIST", () => {
+    const allowlist = /DEV_CRON_ALLOWLIST[^;]*;/s.exec(allCode)?.[0] ?? "";
+    expect(allowlist).not.toContain("WeeklyImportSummary");
+  });
+
+  /**
+   * The day guard is the ONLY thing making this weekly rather than daily -- the
+   * service's own gate is week-based and would happily allow Tue-Sun -- and nothing
+   * pinned it at the call site. Rewriting `if (shouldRunWeeklySummary(new Date()))`
+   * to `if (true)` left the whole suite green, which would file a report every day
+   * until the gate row caught up.
+   */
+  test("the call is guarded by shouldRunWeeklySummary at the call site", () => {
+    const idx = allCode.indexOf("runWeeklyImportSummaryCron(");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    // Look backwards from the call to the enclosing condition.
+    const before = allCode.slice(Math.max(0, idx - 600), idx);
+    expect(before).toContain("shouldRunWeeklySummary(");
   });
 });

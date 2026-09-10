@@ -51,21 +51,25 @@ import { Hono } from "hono";
 import { rateLimiter } from "../middleware/rateLimit.js";
 import { recordAccess, zarrObjectType } from "../services/access-metrics";
 import { ZARR_DATASET_DOCUMENTS } from "../services/cloudflare.js";
+import { isNemarWebOrigin } from "../services/cors-origins";
 import { normalizeBidsPath } from "../services/data-router";
 import { isValidDatasetId } from "../services/datasetId";
 import { ZarrCatalogForbiddenError, fetchZarrCatalogObject } from "../services/zarr-catalog";
 import type { Bindings } from "../types/bindings.js";
 
 /** Origins allowed to read zarr chunks cross-origin in a browser: the NEMAR
- *  web properties (+ localhost for dev). Anything else gets no
- *  Access-Control-Allow-Origin and is blocked by the browser -- which is what
- *  makes zarr.nemar.org the authoritative browser gateway. */
+ *  web properties, including the website's Pages preview URLs (#1346), plus
+ *  localhost for dev. Anything else gets no Access-Control-Allow-Origin and is
+ *  blocked by the browser -- which is what makes zarr.nemar.org the
+ *  authoritative browser gateway.
+ *
+ *  Deliberately still tighter than the api fork's `cors()`, which also allows
+ *  `*.osc.earth`; `isNemarWebOrigin` is only the part the two must agree on. */
 export function allowedOrigin(origin: string | null): string | null {
   if (!origin) return null;
   try {
     const { hostname } = new URL(origin);
-    if (hostname === "localhost" || hostname === "127.0.0.1") return origin;
-    if (hostname === "nemar.org" || hostname.endsWith(".nemar.org")) return origin;
+    if (isNemarWebOrigin(hostname)) return origin;
   } catch {
     return null;
   }

@@ -13,12 +13,31 @@
 
 import { beforeAll, describe, expect, test } from "bun:test";
 import { version as cliVersion } from "../package.json";
-import { EXPECTED_S3_BUCKET, TEST_CONFIG, testRequest as baseTestRequest } from "./setup";
+import {
+  EXPECTED_S3_BUCKET,
+  LIVE_TARGET_BLOCKED,
+  TEST_CONFIG,
+  testRequest as baseTestRequest,
+} from "./setup";
 
 const adminKey = TEST_CONFIG.adminApiKey;
 const userKey = TEST_CONFIG.userApiKey;
 
+/**
+ * Every suite here needs a live backend, so all of them skip together when the
+ * target is blocked (#1343's `LIVE_TARGET_BLOCKED`).
+ *
+ * The `beforeAll` below is why this file needed its own guard rather than
+ * inheriting one: a file-scope hook runs even when every `describe` in the file
+ * is skipped, so its `throw` was the single remaining failure in a bare
+ * `bun test` after #1343 landed. It stays a throw, because a MISCONFIGURED live
+ * run should be loud -- it just no longer fires when nobody asked for a live run
+ * at all.
+ */
+const describeLive = describe.skipIf(LIVE_TARGET_BLOCKED);
+
 beforeAll(() => {
+  if (LIVE_TARGET_BLOCKED) return;
   if (!adminKey) {
     throw new Error(
       "TEST_ADMIN_API_KEY not configured. Create test/.env.test with the required keys. " +
@@ -72,7 +91,7 @@ function postJson(body: unknown = {}): RequestInit {
 
 // -- Tests -----------------------------------------------------------------
 
-describe("IAM Removal: Upload credentials (STS tokens)", () => {
+describeLive("IAM Removal: Upload credentials (STS tokens)", () => {
   test("dataset owner gets upload credentials for nm099999", async () => {
     const { status, data } = await testRequest<UploadCredentialsResponse>(
       "/datasets/nm099999/upload-credentials",
@@ -111,7 +130,7 @@ describe("IAM Removal: Upload credentials (STS tokens)", () => {
   });
 });
 
-describe("IAM Removal: Presigned upload URLs", () => {
+describeLive("IAM Removal: Presigned upload URLs", () => {
   test("presigned URLs use valid AWS signatures", async () => {
     const { status, data } = await testRequest<UploadUrlsResponse>(
       "/datasets/nm099999/upload-urls",
@@ -146,7 +165,7 @@ describe("IAM Removal: Presigned upload URLs", () => {
   });
 });
 
-describe("IAM Removal: Collaborator access", () => {
+describeLive("IAM Removal: Collaborator access", () => {
   test("collaborator (test-user) can get upload credentials for nm099999", async () => {
     const { status, data } = await testRequest<UploadCredentialsResponse>(
       "/datasets/nm099999/upload-credentials",
@@ -170,7 +189,7 @@ describe("IAM Removal: Collaborator access", () => {
   });
 });
 
-describe("IAM Removal: Authorization enforcement", () => {
+describeLive("IAM Removal: Authorization enforcement", () => {
   test("unauthenticated request gets 401", async () => {
     const { status } = await testRequest("/datasets/nm099999/upload-credentials", postJson());
 
@@ -189,7 +208,7 @@ describe("IAM Removal: Authorization enforcement", () => {
   });
 });
 
-describe("IAM Removal: Download credentials", () => {
+describeLive("IAM Removal: Download credentials", () => {
   test("dataset owner gets download credentials for private dataset", async () => {
     const { status, data } = await testRequest<{
       credentials: StsCredentials;
@@ -209,7 +228,7 @@ describe("IAM Removal: Download credentials", () => {
   });
 });
 
-describe("IAM Removal: Deprecated endpoints", () => {
+describeLive("IAM Removal: Deprecated endpoints", () => {
   test("regenerate-iam returns 410 Gone", async () => {
     const { status, data } = await testRequest<{ status: string; message: string }>(
       "/admin/regenerate-iam/test-user",
@@ -223,7 +242,7 @@ describe("IAM Removal: Deprecated endpoints", () => {
   });
 });
 
-describe("IAM Removal: User approval (no IAM setup)", () => {
+describeLive("IAM Removal: User approval (no IAM setup)", () => {
   // Note: We do NOT actually approve test-verified here because it would
   // change shared DB state and break other tests (e.g., cli.test.ts expects
   // test-verified to remain in "verified" status). Instead, we verify the

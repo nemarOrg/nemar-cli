@@ -98,6 +98,13 @@ jobs:
             # run these; that workflow is retired and this filter replaces it.
             zarr:
               - 'scripts/zarr/**'
+              # scripts/mcp/ rides this filter rather than getting its own: it is
+              # the repo's other operational Python, and this is the only job
+              # with uv set up. It cannot be RUN in CI (its whole purpose is to
+              # talk to a live host), but it can be linted, which is the same
+              # reasoning as the shellcheck step below -- a file in the repo that
+              # nothing checks is where an infinite loop shipped last time.
+              - 'scripts/mcp/**'
               # patch_duration.py imports generate_zarr (_run,
               # materialize_recording), so it moved here with it (#1109).
               - 'scripts/patch_duration.py'
@@ -144,6 +151,15 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           bash -n scripts/zarr/hallu-zarr.sh
           shellcheck --severity=warning scripts/zarr/hallu-zarr.sh
+
+      # scripts/mcp/verify_streamable_http.py talks to a live MCP host, so CI
+      # cannot run it. Linting it is still worth a few seconds: it shipped a
+      # default URL missing the transport path, which no test could have caught
+      # and which made the script unable to connect at all. Ruff parses the file,
+      # so this covers syntax as well as lint. The flags match the ones its own
+      # docstring records, and py312 is the version its shebang pins.
+      - name: Lint the MCP operational scripts
+        run: uvx ruff check --target-version py312 --line-length 100 --extend-select E501,I,UP,B scripts/mcp/
 
       # jsonschema + pyarrow ONLY -- deliberately not the whole requirements.txt.
       # This job is the fast, pure-Python tier: it has no biosigIO/MNE/zarr and
@@ -305,7 +321,12 @@ jobs:
   unit-pure:
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true' || needs.changes.outputs.shared == 'true'
+    # `decisions` is here, not only on `lint`: test/adr-index.unit.test.ts is the
+    # thing that checks an ADR against the index, and `unit-pure` is the only job
+    # that runs test/*.test.ts at all -- `lint` runs tsc and biome. Adding the
+    # filter to `lint` alone left the index test still skipped on an ADR-only PR,
+    # which is the gap it was added to close.
+    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true' || needs.changes.outputs.shared == 'true' || needs.changes.outputs.decisions == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

@@ -338,6 +338,10 @@ interface RunOptions {
   pathPrefix?: string;
   debug?: boolean;
   stdin?: "ignore" | "inherit";
+  /** Extra child env, applied last so it can override the defaults above. A value of
+   *  `""` is passed through as present-and-empty (what the empty-`NEMAR_API_KEY` case
+   *  needs); `undefined` DELETES the key, even if the parent had it. */
+  env?: Record<string, string | undefined>;
 }
 
 function runCli(args: string[], apiUrl: string, options: RunOptions = {}) {
@@ -352,6 +356,7 @@ function runCli(args: string[], apiUrl: string, options: RunOptions = {}) {
   if (options.pathPrefix) env.PATH = `${options.pathPrefix}:${process.env.PATH ?? ""}`;
   env.FORCE_COLOR = undefined;
   env.CLICOLOR_FORCE = undefined;
+  if (options.env) Object.assign(env, options.env);
   return spawn({
     cmd: ["bun", "run", CLI_ENTRY, ...args, ...(options.debug ? ["--debug"] : [])],
     cwd: REPO_ROOT,
@@ -414,6 +419,161 @@ async function markerAppears(marker: string): Promise<boolean> {
 // ---------------------------------------------------------------------------
 // 1-2: printed URL/code, the browser attempt
 // ---------------------------------------------------------------------------
+
+describe("nemar auth login: an empty --key is refused, not a silent browser sign-in", () => {
+  /**
+   * `-k ""` used to be indistinguishable from no `-k` at all
+   * (`options.key || process.env.NEMAR_API_KEY` treats `""` as absent), so it fell
+   * through to the device flow: a browser opened and an account sign-in began that
+   * nobody asked for.
+   *
+   * This was not hypothetical. `test/cli.test.ts` passes `TEST_CONFIG.adminApiKey`,
+   * which is `""` when `test/.env.test` is absent -- and because the harness also
+   * defaulted `TEST_API_URL` to production, the suite minted a real device code on
+   * the live backend and opened the developer's browser on production's authorize
+   * page, which asks for an ORCID sign-in. Two fences now, independently: this one,
+   * and `test/live-target.ts`.
+   *
+   * The properties: no device flow is STARTED, nothing is OPENED, and the exit code
+   * is 1. Not "no request at all" -- the root command's preAction hook does an
+   * unconditional anonymous `GET /notices` before any action runs, which is outside
+   * `loginAction` entirely.
+   *
+   * Only `-k ""` reached the device flow before the fix. `-k "   "` and `-k "\t"` are
+   * truthy, so they took the pasted-key path and were rejected by the backend; the
+   * guard turns those into a local refusal too, which is an improvement rather than
+   * the same hazard.
+   */
+  for (const empty of ["", "   ", "\t"]) {
+    test(`--key ${JSON.stringify(empty)} exits 1 without starting a device flow`, async () => {
+      const opener = makeFakeOpener();
+      const server = startDeviceServer({ token: [{ kind: "success" }] });
+      try {
+        const result = await run(["auth", "login", "-k", empty], server.url, {
+          // Browser deliberately ALLOWED, so the test proves the refusal is what
+          // stops the opener rather than the suite's own NEMAR_NO_BROWSER default.
+          allowBrowser: true,
+          pathPrefix: opener.dir,
+        });
+        expect(result.exitCode).toBe(1);
+        expect(result.out).toContain("--key was given but is empty");
+        // The two things that must not have happened. `starts`/`polls`, NOT `calls`:
+        // the stub records /auth/device/start into `starts` and /auth/device/token
+        // into `polls` only, so asserting an empty `calls` passed even with the fix
+        // reverted -- it was watching a collection the device flow never writes to.
+        expect(server.starts).toEqual([]);
+        expect(server.polls).toEqual([]);
+        expect(await markerAppears(opener.marker)).toBe(false);
+      } finally {
+        server.stop();
+        rmSync(opener.dir, { recursive: true, force: true });
+      }
+    }, 40000);
+  }
+
+  test("it says how to proceed, both ways", async () => {
+    const server = startDeviceServer({ token: [{ kind: "success" }] });
+    try {
+      const result = await run(["auth", "login", "-k", ""], server.url);
+      expect(result.out).toContain("Pass the key itself");
+      expect(result.out).toContain("drop --key");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("an empty NEMAR_API_KEY still falls through to the browser flow", async () => {
+    // Deliberately different from the flag: an empty env var is conventionally the
+    // same as an unset one, and someone with `NEMAR_API_KEY=` exported in a shell
+    // profile must still be able to sign in. Only an explicit flag is an error.
+    const server = startDeviceServer({ token: [{ kind: "success" }] });
+    try {
+      const result = await run(["auth", "login", "--no-open"], server.url, {
+        env: { NEMAR_API_KEY: "" },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(server.starts.length).toBe(1);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("NEMAR_API_KEY with a real value signs in, per the documented equivalence", async () => {
+    // `--key (alternative: NEMAR_API_KEY)` is in the command's own help text, and
+    // nothing tested the env half -- so the carve-out that keeps an EMPTY env var
+    // falling through was guarding a path with no coverage at all.
+    const server = startDeviceServer({ token: [{ kind: "success" }] });
+    try {
+      const result = await run(["auth", "login"], server.url, {
+        env: { NEMAR_API_KEY: "nm_env_key_456" },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.out).toContain("Welcome back");
+      expect(server.starts.length).toBe(0);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a non-empty --key is unaffected", async () => {
+    // The guard must not eat the path it is guarding.
+    const server = startDeviceServer({ token: [{ kind: "success" }] });
+    try {
+      const result = await run(["auth", "login", "-k", "nm_a_real_looking_key"], server.url);
+      expect(result.out).not.toContain("--key was given but is empty");
+      // Positively: the key was VALIDATED and the account written. The earlier
+      // version asserted only a missing string and an empty `starts`, both of which
+      // held even with the guard absent, so it proved nothing about this path.
+      expect(result.exitCode).toBe(0);
+      expect(result.out).toContain("Welcome back");
+      expect(server.starts.length).toBe(0);
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("nemar switch: an empty account name is refused, not the interactive picker", () => {
+  /**
+   * The same falsy-empty class as `-k ""`, one command over: `if (identifier)` is
+   * false for `""`, so `nemar switch "$VAR"` with an unset VAR skipped the
+   * "Account not found" branch and opened the INTERACTIVE PICKER -- a hanging prompt
+   * in a script, where a wrong-but-non-empty name correctly refuses and exits.
+   *
+   * No server: the guard runs before any network call, which is part of the point.
+   */
+  function seedTwoAccounts(): void {
+    seedConfig({
+      activeAccount: "ada",
+      accounts: {
+        ada: { apiKey: "nm_ada_key_0123456789abcdefgh", username: "ada" },
+        grace: { apiKey: "nm_grace_key_0123456789abcdef", username: "grace" },
+      },
+    });
+  }
+
+  for (const argv of [
+    ["switch", ""],
+    ["auth", "switch", ""],
+  ]) {
+    test(`\`nemar ${argv.join(" ")}\` exits 1 and names the fix`, async () => {
+      seedTwoAccounts();
+      const result = await run(argv, "http://127.0.0.1:1");
+      expect(result.exitCode).toBe(1);
+      expect(result.out).toContain("Account name was given but is empty");
+      // Crucially NOT the picker, which would sit there waiting for input.
+      expect(result.out).not.toContain("Select an account");
+    });
+  }
+
+  test("a wrong-but-non-empty name still refuses by name, and no account changes", async () => {
+    seedTwoAccounts();
+    const result = await run(["switch", "nobody"], "http://127.0.0.1:1");
+    expect(result.exitCode).not.toBe(0);
+    expect(result.out).toContain("nobody");
+    expect(JSON.parse(readFileSync(configPath(), "utf8")).activeAccount).toBe("ada");
+  });
+});
 
 describe("nemar auth login: the device-flow prompt", () => {
   test("--no-open: URL line, then the code line, then the 'if the page asks' note", async () => {
