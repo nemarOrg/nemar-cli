@@ -1641,6 +1641,9 @@ export interface ImportIssueTriageResponse {
       updatedAt: string | null;
     }[];
     issuesWithoutRow: { number: number; datasetId: string; title: string }[];
+    /** Unresolved rows the retry engine parked; already reported by the weekly
+     *  summary, so not counted as untracked here. */
+    parked: number;
     rowsExamined: number;
     issuesExamined: number;
     reason: string;

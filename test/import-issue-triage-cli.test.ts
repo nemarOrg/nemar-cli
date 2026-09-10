@@ -146,6 +146,7 @@ const DRY_RUN = {
   reconcile: {
     rowsWithoutIssue: [],
     issuesWithoutRow: [],
+    parked: 0,
     rowsExamined: 2,
     issuesExamined: 2,
     reason: "Failures and tracking issues agree (2 unresolved import row(s) examined).",
@@ -426,6 +427,7 @@ describe("nemar admin import-issue-triage: the reconcile section (#1352)", () =>
           },
         ],
         issuesWithoutRow: [],
+        parked: 0,
         rowsExamined: 3,
         issuesExamined: 2,
         reason:
@@ -502,6 +504,7 @@ describe("nemar admin import-issue-triage: the reconcile section (#1352)", () =>
           updatedAt: null,
         })),
         issuesWithoutRow: [],
+        parked: 0,
         rowsExamined: 14,
         issuesExamined: 2,
         reason:

@@ -152,7 +152,7 @@ export interface ImportIssueSweepError {
  * only the two unresolved statuses, so the result set is the size of the current
  * problem rather than of the catalogue.
  */
-export const RECONCILE_ROWS_QUERY = `SELECT dataset_id, source_id, status, stage, last_error, updated_at
+export const RECONCILE_ROWS_QUERY = `SELECT dataset_id, source_id, status, stage, last_error, updated_at, blocklisted
    FROM import_jobs
    WHERE status IN ('failed', 'quarantined')
    ORDER BY updated_at DESC`;

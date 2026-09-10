@@ -33,6 +33,7 @@ function row(over: Partial<ReconcileJobRow> = {}): ReconcileJobRow {
     stage: "prepare",
     last_error: "Failed to clone: fatal: Authentication failed for https://github.com/x",
     updated_at: "2026-09-01 03:00:00",
+    blocklisted: 0,
     ...over,
   };
 }
@@ -167,6 +168,47 @@ describe("rollup mode is not a gap", () => {
     expect(
       decideReconcile({ rows: [unresolvable], openIssues: [unknownRollup] }).rowsWithoutIssue,
     ).toEqual([]);
+  });
+});
+
+describe("a row the retry engine has parked is not untracked", () => {
+  /**
+   * It is already reported: the weekly summary lists every `blocklisted = 1` row in
+   * its parked section with the reason and the duration (ADR 0054). Calling it
+   * "untracked, so nothing surfaces it to triage" would be false about a set that IS
+   * surfaced -- and it is the same rule ADR 0053 applies when it keeps blocklisted
+   * datasets out of its backlog, for the same reason: an alarm that is permanent on a
+   * set nobody intends to act on gets muted, and then the real one is muted too.
+   */
+  test("a blocklisted failure is counted as parked, not reported", () => {
+    const v = decideReconcile({
+      rows: [
+        row({ dataset_id: "on004148", source_id: "ds004148", blocklisted: 1 }),
+        row({ dataset_id: "on000777", source_id: "ds000777", blocklisted: 0 }),
+      ],
+      openIssues: [],
+    });
+    expect(v.rowsWithoutIssue.map((r) => r.datasetId)).toEqual(["on000777"]);
+    expect(v.parked).toBe(1);
+    // Both still counted as examined, so the arithmetic is explainable.
+    expect(v.rowsExamined).toBe(2);
+  });
+
+  test("the reason says how many were parked, so a smaller number is explainable", () => {
+    const v = decideReconcile({
+      rows: [row({ blocklisted: 1 })],
+      openIssues: [],
+    });
+    expect(v.rowsWithoutIssue).toEqual([]);
+    expect(v.reason).toContain("1 parked by the retry engine and reported weekly");
+  });
+
+  test("a null blocklisted column is treated as not parked", () => {
+    // The column is nullable in older rows; the safe reading is "not parked", which
+    // reports rather than hides.
+    const v = decideReconcile({ rows: [row({ blocklisted: null })], openIssues: [] });
+    expect(v.rowsWithoutIssue).toHaveLength(1);
+    expect(v.parked).toBe(0);
   });
 });
 

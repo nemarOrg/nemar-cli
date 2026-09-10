@@ -874,6 +874,21 @@ describe("the reconcile rides the triage sweep's issue list (#1352)", () => {
     expect(r.reconcile?.rowsWithoutIssue[0]?.cause).toBe("auth_invalid");
   });
 
+  test("a blocklisted row is parked, not reported as untracked", async () => {
+    // Driven through the real SQL, so `blocklisted` is actually selected: the weekly
+    // report already lists these, and reporting them here would contradict it.
+    const db = freshDb();
+    seedImportJob(db, "on004148");
+    db.run("UPDATE import_jobs SET blocklisted = 1 WHERE dataset_id = 'on004148'");
+    seedImportJob(db, "on000777");
+    const deps = recordingDeps([], {});
+
+    const r = await runImportIssueSweep(envFor(db), {}, deps);
+
+    expect(r.reconcile?.rowsWithoutIssue.map((x) => x.datasetId)).toEqual(["on000777"]);
+    expect(r.reconcile?.parked).toBe(1);
+  });
+
   test("an open issue whose dataset has no import row is reported", async () => {
     const db = freshDb();
     // No seedImportJob at all for on004148.

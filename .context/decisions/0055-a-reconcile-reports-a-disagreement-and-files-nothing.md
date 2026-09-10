@@ -58,6 +58,15 @@ prevents notification fatigue into its largest source. The rollup title is built
 `cause` (`auth_invalid`), not from the hyphenated label (`auth-invalid`); the first implementation
 used the label, matched no rollup that exists, and would have shipped that storm.
 
+**A row the retry engine has PARKED is not untracked.** `blocklisted = 1` rows are already surfaced:
+the weekly summary lists every one of them in its parked section with the reason and how long it has
+been there (`PARKED_QUERY`, ADR 0054). Reporting them here as "untracked, so nothing surfaces them to
+triage" would be a false statement about a set that is reported every Monday, and it is the same rule
+ADR 0053 applies when it keeps blocklisted datasets out of its backlog: an alarm that is permanent on
+a set nobody intends to act on gets muted, and then the real one is muted with it. They are COUNTED
+(`parked`) rather than dropped, so a reader can see why the untracked number is smaller than the raw
+failure count. A NULL in that column reads as not-parked, which reports rather than hides.
+
 **`rolled_back` is resolved, not unresolved.** Only `failed` and `quarantined` count. A rolled-back
 import is an orphan that was cleaned up; counting it would make the report permanently non-empty on
 a set nobody intends to act on, which is how an operator learns to ignore a report (ADR 0053's rule

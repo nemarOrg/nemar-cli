@@ -80,6 +80,19 @@ export interface ImportIssueWithoutRow {
 export interface ImportReconcileVerdict {
   rowsWithoutIssue: ImportRowWithoutIssue[];
   issuesWithoutRow: ImportIssueWithoutRow[];
+  /**
+   * Unresolved rows the retry engine has parked, and which are therefore NOT
+   * reported as untracked.
+   *
+   * They are already surfaced: the weekly report lists every `blocklisted = 1` row
+   * in its parked section with the reason and how long it has been there
+   * (`PARKED_QUERY`, ADR 0054). Calling them "untracked, so nothing surfaces them to
+   * triage" would be a false statement about a set that IS reported, and the same
+   * rule ADR 0053 applies when it keeps blocklisted datasets out of its backlog.
+   * Counted rather than dropped, so a reader can see why a number is smaller than
+   * the raw failure count.
+   */
+  parked: number;
   /** Rows examined, so a zero verdict can be told from an empty input. */
   rowsExamined: number;
   /** Open issues examined, same reason. */
@@ -96,6 +109,8 @@ export interface ReconcileJobRow {
   stage: string;
   last_error: string | null;
   updated_at: string | null;
+  /** 1 when the retry engine has parked this row. Load-bearing: see `parked` below. */
+  blocklisted: number | null;
 }
 
 /** The issue shape this needs, matching `listOpenIssuesByLabel`'s output. */
@@ -138,7 +153,14 @@ export function decideReconcile(args: {
   const openTitles = new Set(args.openIssues.map((i) => i.title));
 
   const rowsWithoutIssue: ImportRowWithoutIssue[] = [];
+  let parked = 0;
   for (const row of unresolved) {
+    // Parked by the retry engine: reported by the weekly summary already. See the
+    // note on `parked`.
+    if (row.blocklisted === 1) {
+      parked++;
+      continue;
+    }
     const classified = classifyImportFailure({ stage: row.stage, lastError: row.last_error });
     const exactTitle = importFailureIssueTitle(row.dataset_id, row.source_id);
     const covered =
@@ -178,15 +200,23 @@ export function decideReconcile(args: {
   return {
     rowsWithoutIssue,
     issuesWithoutRow,
+    parked,
     rowsExamined: unresolved.length,
     issuesExamined: args.openIssues.length,
-    reason: reconcileReason(rowsWithoutIssue.length, issuesWithoutRow.length, unresolved.length),
+    reason: reconcileReason(
+      rowsWithoutIssue.length,
+      issuesWithoutRow.length,
+      unresolved.length,
+      parked,
+    ),
   };
 }
 
-function reconcileReason(rows: number, issues: number, examined: number): string {
+function reconcileReason(rows: number, issues: number, examined: number, parked: number): string {
+  const parkedNote =
+    parked === 0 ? "" : `, ${parked} parked by the retry engine and reported weekly`;
   if (rows === 0 && issues === 0) {
-    return `Failures and tracking issues agree (${examined} unresolved import row(s) examined).`;
+    return `Failures and tracking issues agree (${examined} unresolved import row(s) examined${parkedNote}).`;
   }
   const parts: string[] = [];
   if (rows > 0) {
@@ -199,7 +229,7 @@ function reconcileReason(rows: number, issues: number, examined: number): string
       `${issues} open issue(s) have no import_jobs row, so the sweep can never verify or close them`,
     );
   }
-  return `${parts.join("; ")}.`;
+  return `${parts.join("; ")}${parkedNote}.`;
 }
 
 /** Truncation cap for the reported lists, matching the rest of the epic (ADR 0036):

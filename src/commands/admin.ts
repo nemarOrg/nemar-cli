@@ -7150,7 +7150,7 @@ importIssueTriageCommand
         chalk.cyan(
           `reconcile rows_without_issue=${rec.rowsWithoutIssue.length} ` +
             `issues_without_row=${rec.issuesWithoutRow.length} ` +
-            `rows_examined=${rec.rowsExamined}`,
+            `parked=${rec.parked} rows_examined=${rec.rowsExamined}`,
         ),
       );
       for (const r of rec.rowsWithoutIssue.slice(0, RECONCILE_CLI_ROWS)) {
