@@ -6964,6 +6964,11 @@ function isCoverageErrorList(
   );
 }
 
+/** Untracked rows and row-less issues listed before truncating. One budget, matching
+ *  the backend's `RECONCILE_MAX_LISTED`: two different numbers for the same list is
+ *  how a reader learns not to trust either. */
+const RECONCILE_LISTED_ROWS = 20;
+
 const importIssueTriageCommand = new Command("import-issue-triage").description(
   "Close recovered import-failure issues and retire stale cause labels (dry run by default)",
 );
@@ -7127,6 +7132,48 @@ importIssueTriageCommand
     }
     if (!res.applied && (res.closed > 0 || res.relabelled > 0 || res.rollupsReleased > 0)) {
       console.log(chalk.dim("  Re-run with --apply to perform these changes."));
+    }
+
+    // Reconcile (#1352). Printed after the triage summary because it describes a
+    // different question -- whether the two sides agree -- and answering it changes
+    // nothing on GitHub.
+    if (res.reconcile === null) {
+      // Never silence: "could not compare" and "they agree" are the confusion this
+      // epic exists to remove, one level down.
+      console.log();
+      console.log(
+        chalk.yellow(`reconcile=unknown${res.reconcileError ? `: ${res.reconcileError}` : ""}`),
+      );
+    } else {
+      const rec = res.reconcile;
+      console.log();
+      console.log(
+        chalk.cyan(
+          `reconcile rows_without_issue=${rec.rowsWithoutIssue.length} ` +
+            `issues_without_row=${rec.issuesWithoutRow.length} ` +
+            `parked=${rec.parked} quarantined=${rec.quarantined} ` +
+            `rows_examined=${rec.rowsExamined} issues_examined=${rec.issuesExamined}`,
+        ),
+      );
+      for (const r of rec.rowsWithoutIssue.slice(0, RECONCILE_LISTED_ROWS)) {
+        console.log(
+          `${chalk.yellow("UNTRACKED".padEnd(15))} ${r.datasetId} (${r.sourceId}) ${r.status} at ${r.stage}  ${chalk.dim(r.cause)}`,
+        );
+      }
+      const hiddenRows = rec.rowsWithoutIssue.length - RECONCILE_LISTED_ROWS;
+      if (hiddenRows > 0) console.log(chalk.dim(`  ... and ${hiddenRows} more untracked`));
+      for (const i of rec.issuesWithoutRow.slice(0, RECONCILE_LISTED_ROWS)) {
+        console.log(`${chalk.yellow("NO IMPORT ROW".padEnd(15))} #${i.number} ${i.datasetId}`);
+      }
+      const hiddenIssues = rec.issuesWithoutRow.length - RECONCILE_LISTED_ROWS;
+      if (hiddenIssues > 0) console.log(chalk.dim(`  ... and ${hiddenIssues} more`));
+      // Always printed, not only on a disagreement: the reason is where the `parked`
+      // and `quarantined` glosses live, so a clean run otherwise showed a bare
+      // `parked=3` with nothing saying what it means or where those are reported.
+      console.log(chalk.dim(`  ${rec.reason}`));
+      if (rec.rowsWithoutIssue.length > 0 || rec.issuesWithoutRow.length > 0) {
+        console.log(chalk.dim("  Reported only: this command files and closes nothing for these."));
+      }
     }
   });
 

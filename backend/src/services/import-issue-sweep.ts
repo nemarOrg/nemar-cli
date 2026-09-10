@@ -99,6 +99,13 @@ import {
   IMPORT_FAILURE_ISSUE_LABEL,
   parseImportFailureIssueTitle,
 } from "./import-issue-identity.js";
+import {
+  type ImportReconcileVerdict,
+  RECONCILE_MAX_LISTED,
+  type ReconcileJobRow,
+  decideReconcile,
+} from "./import-reconcile.js";
+import { recoverRow } from "./import-retry.js";
 
 export const IMPORT_ISSUE_SWEEP_DEFAULT_LIMIT = 15;
 export const IMPORT_ISSUE_SWEEP_MAX_LIMIT = 30;
@@ -136,6 +143,24 @@ export interface ImportIssueSweepError {
   stage: "plan" | "apply" | "comment";
   error: string;
 }
+
+/**
+ * Every unresolved import, for the reconcile (#1352).
+ *
+ * Unbounded on purpose. The sweep's rotation window bounds how many issues it will
+ * ACT on per run, which is a write-safety bound; a reconcile that inherited it would
+ * report the rest of the fleet as untracked every day. The table is one row per
+ * dataset ever imported (UNIQUE(dataset_id), migration 0044) and the predicate keeps
+ * only the two unresolved statuses, so the result set is the size of the current
+ * problem rather than of the catalogue.
+ */
+export const RECONCILE_ROWS_QUERY = `SELECT dataset_id, source_id, status, stage, last_error, updated_at, blocklisted
+   FROM import_jobs
+   WHERE status IN ('failed', 'quarantined')
+   -- Oldest first, matching PARKED_QUERY. Both renderers truncate the head, so a
+   -- DESC order hid exactly the longest-abandoned failures -- the ones most worth
+   -- naming.
+   ORDER BY updated_at IS NULL, updated_at ASC`;
 
 export interface ImportIssueSweepResult {
   /** False on a dry run: nothing was written to GitHub. */
@@ -183,6 +208,27 @@ export interface ImportIssueSweepResult {
   /** Candidates outside this run's window. They are examined by a later run: the
    *  window rotates daily, so this is a deferral rather than an exclusion. */
   remaining: number;
+  /**
+   * Whether the failures and the tracking issues describe the same set (#1352).
+   *
+   * `null` when the reconcile could not be computed -- its D1 read failed -- and
+   * NOT an empty verdict, which would say "they agree" about a comparison that never
+   * happened. Report-only: it names the disagreements and files nothing, because
+   * filing the missing issues is the action most likely to flood a shared repo,
+   * which is what ADR 0052's rollup exists to prevent.
+   */
+  reconcile: ImportReconcileVerdict | null;
+  /**
+   * Why the reconcile has no verdict, when it has none.
+   *
+   * Its own field rather than an entry in `errors`, because that array is
+   * per-ISSUE -- `{issue, dataset_id, stage}` answering "which half of this issue's
+   * triage broke" -- and a fleet-level comparison failing is a different kind of
+   * fact. Folding it in would have meant inventing an issue number for it, and it
+   * would then be counted against `attempted`, which is the denominator for
+   * "did every write fail?".
+   */
+  reconcileError: string | null;
 }
 
 /**
@@ -314,7 +360,37 @@ export async function runImportIssueSweep(
     plan: [],
     errors: [],
     remaining: Math.max(perDataset.length - limit, 0),
+    reconcile: null,
+    reconcileError: null,
   };
+
+  // The reconcile reads the FULL open list (`open`, not the rotation window) and
+  // costs no extra GitHub call, which is why it lives here rather than in a sweep of
+  // its own. Its failure is contained: a verdict of `null` degrades this one section
+  // and never the triage run, which is doing the writes.
+  if (isNonProductionEnv(env)) {
+    // Both sides must come from the same world, and outside production they cannot.
+    // The issue list is always production's (`IMPORT_FAILURE_ISSUES_REPO` is
+    // hardcoded on a shared org) while the rows come from the local D1 -- and a
+    // non-production worker can never create an `import_jobs` row, because
+    // `POST /admin/datasets/import` refuses outside production. So a staging dry run
+    // would report every open production issue as missing its row, and any stale dev
+    // row as untracked: fiction in both directions. `null`, so it reads as "not
+    // computed" rather than as agreement.
+    result.reconcileError =
+      "not computed outside production: the issue list is production's while the rows are this environment's, so both directions would be fiction";
+  } else {
+    try {
+      const rows = await env.DB.prepare(RECONCILE_ROWS_QUERY).all<ReconcileJobRow>();
+      if (!rows.results) throw new Error("D1 returned null results");
+      result.reconcile = decideReconcile({ rows: rows.results, openIssues: open });
+    } catch (err) {
+      // Fail open on the section, never on the verdict: `reconcile` stays null, which
+      // reads as "not computed" rather than as "they agree".
+      result.reconcileError = err instanceof Error ? err.message : String(err);
+      console.warn("[import-issue-sweep] reconcile could not be computed:", err);
+    }
+  }
 
   const start = windowStart(perDataset.length, limit, new Date());
   const rotated = [...perDataset.slice(start), ...perDataset.slice(0, start)];
@@ -336,6 +412,37 @@ export async function runImportIssueSweep(
             dataset_id: datasetId,
             stage: "comment",
             error: outcome.commentError,
+          });
+        }
+      }
+
+      // Heal the ROW, not just the issue (#1352).
+      //
+      // Closing the issue left `import_jobs.status` at `failed`/`quarantined`
+      // forever: nothing in this sweep writes that column, and most quarantine
+      // reasons can never re-enter the retry lane, so the row stayed unresolved for
+      // a dataset this run had just certified complete. The reconcile below then
+      // reported it as an untracked live failure every day, permanently -- a
+      // falsehood the sweep itself created.
+      //
+      // `recoverRow` is exactly what `POST /admin/imports/:id/verify` calls on the
+      // same verdict, unconditionally and regardless of prior status, and the verdict
+      // here is the same per-key S3 verification. Best-effort and AFTER the close:
+      // the close has already landed, so a failure here must not undo it or fail the
+      // row -- it leaves the disagreement for the reconcile to report, which is the
+      // state we were in before.
+      if (apply && entry.kind === "close" && datasetId) {
+        try {
+          await recoverRow(env.DB, datasetId);
+        } catch (healErr) {
+          result.errors.push({
+            issue: issue.number,
+            dataset_id: datasetId,
+            // `comment`, because it shares that stage's meaning exactly: the state
+            // change landed and only the bookkeeping after it did not, so the close
+            // still counts.
+            stage: "comment",
+            error: `issue closed but import_jobs could not be healed: ${healErr instanceof Error ? healErr.message : String(healErr)}`,
           });
         }
       }
@@ -685,6 +792,12 @@ async function recordCronActivity(
               kept: result.kept,
               rollups_released: result.rollupsReleased,
               errors: result.errors.length,
+              // Counts only, not the id lists: this row is read by the weekly
+              // report's activity section, and a fleet-sized array in `details`
+              // would bloat every row for a section that wants a number. `null`
+              // when the comparison did not happen, never 0.
+              reconcile_rows_without_issue: result.reconcile?.rowsWithoutIssue.length ?? null,
+              reconcile_issues_without_row: result.reconcile?.issuesWithoutRow.length ?? null,
             },
       ),
     }).run();
@@ -720,6 +833,35 @@ export function importIssueSweepLogLines(result: ImportIssueSweepResult): string
             ? "WOULD RELEASE"
             : "ROLLUP";
     lines.push(`${verb.padEnd(15)} #${r.number} ${r.title}`);
+  }
+  // The reconcile, in the CRON's own voice (#1352).
+  //
+  // Without this the daily run computed the verdict and threw it away: the only way
+  // to see it was a human typing the CLI command, for a comparison whose whole
+  // justification is that it rides the daily sweep. `null` is rendered as unknown
+  // rather than omitted, for the same reason every other section of this epic does.
+  if (result.reconcile === null) {
+    lines.push(
+      `${"RECONCILE".padEnd(15)} unknown${result.reconcileError ? `: ${result.reconcileError}` : ""}`,
+    );
+  } else {
+    const rec = result.reconcile;
+    lines.push(
+      `${"RECONCILE".padEnd(15)} rows_without_issue=${rec.rowsWithoutIssue.length} ` +
+        `issues_without_row=${rec.issuesWithoutRow.length} parked=${rec.parked} ` +
+        `quarantined=${rec.quarantined} rows_examined=${rec.rowsExamined} ` +
+        `issues_examined=${rec.issuesExamined}`,
+    );
+    for (const r of rec.rowsWithoutIssue.slice(0, RECONCILE_MAX_LISTED)) {
+      lines.push(`${"UNTRACKED".padEnd(15)} ${r.datasetId} (${r.sourceId}) ${r.cause}`);
+    }
+    const hiddenRows = rec.rowsWithoutIssue.length - RECONCILE_MAX_LISTED;
+    if (hiddenRows > 0) lines.push(`${"UNTRACKED".padEnd(15)} ... and ${hiddenRows} more`);
+    for (const i of rec.issuesWithoutRow.slice(0, RECONCILE_MAX_LISTED)) {
+      lines.push(`${"NO IMPORT ROW".padEnd(15)} #${i.number} ${i.datasetId}`);
+    }
+    const hiddenIssues = rec.issuesWithoutRow.length - RECONCILE_MAX_LISTED;
+    if (hiddenIssues > 0) lines.push(`${"NO IMPORT ROW".padEnd(15)} ... and ${hiddenIssues} more`);
   }
   return lines;
 }

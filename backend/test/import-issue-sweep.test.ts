@@ -147,6 +147,12 @@ function envFor(db: Database): Bindings {
   return { DB: realD1(db), ENVIRONMENT: "test" } as unknown as Bindings;
 }
 
+/** The reconcile (#1352) only computes in production -- outside it, the issue list is
+ *  production's while the rows are local, so both directions would be fiction. */
+function prodEnvFor(db: Database): Bindings {
+  return { DB: realD1(db), ENVIRONMENT: "production" } as unknown as Bindings;
+}
+
 /** An open per-cause rollup, carrying the tracking label as the real ones do. */
 function rollupIssue(number = 999): GitHubIssue {
   return {
@@ -851,6 +857,245 @@ describe("a rollup is released once the backlog drains", () => {
 // ---------------------------------------------------------------------------
 // The cron wrapper's guard, in BOTH directions
 // ---------------------------------------------------------------------------
+
+describe("closing an issue heals the row it was about (#1352)", () => {
+  /**
+   * The sweep closed the issue on the S3 verdict and left `import_jobs.status` at
+   * `failed`/`quarantined` -- nothing here wrote that column, and most quarantine
+   * reasons can never re-enter the retry lane. So the row stayed unresolved for a
+   * dataset this very run had certified complete, and the reconcile then reported it
+   * as an untracked live failure every day, forever: a falsehood the sweep created
+   * about its own work.
+   *
+   * `recoverRow` is what `POST /admin/imports/:id/verify` calls on the same verdict,
+   * unconditionally and regardless of prior status.
+   */
+  test("an applied close marks the row complete, so it stops looking untracked", async () => {
+    const db = freshDb();
+    seedImportJob(db, "on006136");
+    const deps = recordingDeps([issue(105, "on006136")], { on006136: COMPLETE });
+
+    const r = await runImportIssueSweep(prodEnvFor(db), { apply: true }, deps);
+
+    expect(r.closed).toBe(1);
+    const row = db
+      .query<{ status: string; blocklisted: number }, []>(
+        "SELECT status, blocklisted FROM import_jobs WHERE dataset_id = 'on006136'",
+      )
+      .get();
+    expect(row?.status).toBe("complete");
+    expect(row?.blocklisted).toBe(0);
+    // And therefore the reconcile does not report it.
+    expect(r.reconcile?.rowsWithoutIssue).toEqual([]);
+  });
+
+  test("a DRY RUN heals nothing, because it closed nothing", async () => {
+    const db = freshDb();
+    seedImportJob(db, "on006136");
+    const deps = recordingDeps([issue(105, "on006136")], { on006136: COMPLETE });
+
+    await runImportIssueSweep(prodEnvFor(db), { apply: false }, deps);
+
+    const row = db
+      .query<{ status: string }, []>("SELECT status FROM import_jobs WHERE dataset_id = 'on006136'")
+      .get();
+    expect(row?.status).toBe("failed");
+  });
+
+  test("a keep does not heal the row", async () => {
+    // Only a CLOSE means "verified complete". A kept issue is still a live failure.
+    const db = freshDb();
+    seedImportJob(db, "on005279");
+    const deps = recordingDeps([issue(97, "on005279")], { on005279: INCOMPLETE });
+
+    await runImportIssueSweep(prodEnvFor(db), { apply: true }, deps);
+
+    const row = db
+      .query<{ status: string }, []>("SELECT status FROM import_jobs WHERE dataset_id = 'on005279'")
+      .get();
+    expect(row?.status).toBe("failed");
+  });
+});
+
+describe("the reconcile rides the triage sweep's issue list (#1352)", () => {
+  /**
+   * It lives inside this sweep because the sweep already has the full open issue
+   * list, so the comparison costs no extra GitHub call. These cases drive it through
+   * the REAL sweep against real D1, so `RECONCILE_ROWS_QUERY` is exercised as SQL
+   * rather than as a string.
+   */
+  test("a failed row with no issue is reported as untracked", async () => {
+    const db = freshDb();
+    // Tracked: has its own machine-filed issue. Untracked: nothing at all.
+    seedImportJob(db, "on000001");
+    seedImportJob(db, "on000777");
+    const deps = recordingDeps([issue(1, "on000001")], { on000001: INCOMPLETE });
+
+    const r = await runImportIssueSweep(prodEnvFor(db), {}, deps);
+
+    expect(r.reconcileError).toBeNull();
+    expect(r.reconcile?.rowsWithoutIssue.map((x) => x.datasetId)).toEqual(["on000777"]);
+    // Classified through the real classifier, so the report names a cause.
+    expect(r.reconcile?.rowsWithoutIssue[0]?.cause).toBe("auth_invalid");
+  });
+
+  test("a blocklisted row is parked, not reported as untracked", async () => {
+    // Driven through the real SQL, so `blocklisted` is actually selected: the weekly
+    // report already lists these, and reporting them here would contradict it.
+    const db = freshDb();
+    seedImportJob(db, "on004148");
+    db.run("UPDATE import_jobs SET blocklisted = 1 WHERE dataset_id = 'on004148'");
+    seedImportJob(db, "on000777");
+    const deps = recordingDeps([], {});
+
+    const r = await runImportIssueSweep(prodEnvFor(db), {}, deps);
+
+    expect(r.reconcile?.rowsWithoutIssue.map((x) => x.datasetId)).toEqual(["on000777"]);
+    expect(r.reconcile?.parked).toBe(1);
+  });
+
+  test("outside production it is not computed at all, and says so", async () => {
+    // Fiction in both directions otherwise: the issue list is always production's
+    // (hardcoded shared org) while the rows are this environment's, and a non-prod
+    // worker can never create an import_jobs row.
+    const db = freshDb();
+    seedImportJob(db, "on000777");
+    const r = await runImportIssueSweep(envFor(db), {}, recordingDeps([], {}));
+    expect(r.reconcile).toBeNull();
+    expect(r.reconcileError).toContain("outside production");
+  });
+
+  test("an open issue whose dataset has no import row is reported", async () => {
+    const db = freshDb();
+    // No seedImportJob at all for on004148.
+    const deps = recordingDeps([issue(77, "on004148")], {});
+
+    const r = await runImportIssueSweep(prodEnvFor(db), {}, deps);
+
+    expect(r.reconcile?.issuesWithoutRow).toEqual([
+      { number: 77, datasetId: "on004148", title: "Import failure: on004148 (ds004148)" },
+    ]);
+  });
+
+  test("rollup mode does not make every failed row look untracked", async () => {
+    // The false positive that would matter most: with the rollup engaged, per-dataset
+    // issues are deliberately absent, and reporting all of them as untracked would
+    // turn ADR 0052's flood control into the flood.
+    const db = freshDb();
+    for (let i = 1; i <= 12; i++) {
+      seedImportJob(db, `on${String(i).padStart(6, "0")}`);
+    }
+    const deps = recordingDeps([rollupIssue()], {});
+
+    const r = await runImportIssueSweep(prodEnvFor(db), {}, deps);
+
+    expect(r.reconcile?.rowsWithoutIssue).toEqual([]);
+    expect(r.reconcile?.rowsExamined).toBe(12);
+  });
+
+  test("the reconcile reads the FULL open list, not this run's window", async () => {
+    // The rotation window is a write-safety bound. Inheriting it here would report
+    // every issue outside today's window as missing its row.
+    const db = freshDb();
+    const issues = [];
+    for (let i = 1; i <= 20; i++) {
+      const id = `on${String(i).padStart(6, "0")}`;
+      seedImportJob(db, id);
+      issues.push(issue(i, id));
+    }
+    const deps = recordingDeps(issues, {});
+
+    const r = await runImportIssueSweep(prodEnvFor(db), { limit: 3 }, deps);
+
+    // Only 3 examined for triage...
+    expect(r.examined).toBe(3);
+    expect(r.remaining).toBe(17);
+    // ...but all 20 issues counted as coverage, so nothing is falsely orphaned.
+    expect(r.reconcile?.issuesExamined).toBe(20);
+    expect(r.reconcile?.rowsWithoutIssue).toEqual([]);
+    expect(r.reconcile?.issuesWithoutRow).toEqual([]);
+  });
+
+  test("a D1 failure leaves the verdict null and does not fail the triage run", async () => {
+    // Fail open on the section, never on the verdict: an empty verdict would say
+    // "they agree" about a comparison that never happened.
+    const db = freshDb();
+    seedImportJob(db, "on000001");
+    db.run("DROP TABLE import_jobs");
+    const deps = recordingDeps([issue(1, "on000001")], {});
+
+    const r = await runImportIssueSweep(prodEnvFor(db), {}, deps);
+
+    expect(r.reconcile).toBeNull();
+    expect(r.reconcileError).toContain("import_jobs");
+    // The triage half still answered: dropping the table breaks verification too,
+    // so the issue is kept rather than closed, and the run is not a total failure.
+    expect(r.closed).toBe(0);
+  });
+
+  test("agreement is reported with its denominator, not as silence", async () => {
+    const db = freshDb();
+    seedImportJob(db, "on000001");
+    const deps = recordingDeps([issue(1, "on000001")], { on000001: INCOMPLETE });
+
+    const r = await runImportIssueSweep(prodEnvFor(db), {}, deps);
+
+    expect(r.reconcile?.rowsWithoutIssue).toEqual([]);
+    expect(r.reconcile?.issuesWithoutRow).toEqual([]);
+    // "They agree over 1 row" and "they agree over 0 rows" are different statements.
+    expect(r.reconcile?.rowsExamined).toBe(1);
+    expect(r.reconcile?.reason).toContain("agree");
+  });
+});
+
+describe("the cron reports the reconcile rather than discarding it (#1352)", () => {
+  /**
+   * The first version computed the verdict and threw it away: the daily log carried
+   * the aggregate line and the plan, and nothing mentioned the reconcile. Its only
+   * voice was a human typing the CLI command -- for a comparison whose whole
+   * justification is that it rides the daily sweep for free.
+   */
+  test("the log lines carry the counts and name the untracked datasets", async () => {
+    const db = freshDb();
+    seedImportJob(db, "on000777");
+    const r = await runImportIssueSweep(prodEnvFor(db), {}, recordingDeps([], {}));
+
+    const lines = importIssueSweepLogLines(r).join("\n");
+    expect(lines).toContain("RECONCILE");
+    expect(lines).toContain("rows_without_issue=1");
+    expect(lines).toContain("issues_examined=0");
+    expect(lines).toContain("UNTRACKED");
+    expect(lines).toContain("on000777");
+  });
+
+  test("a verdict that could not be computed logs unknown, not zeros", async () => {
+    const db = freshDb();
+    seedImportJob(db, "on000777");
+    // Non-production: not computed at all.
+    const r = await runImportIssueSweep(envFor(db), {}, recordingDeps([], {}));
+
+    const lines = importIssueSweepLogLines(r).join("\n");
+    expect(lines).toMatch(/RECONCILE\s+unknown/);
+    expect(lines).toContain("outside production");
+    expect(lines).not.toContain("rows_without_issue=0");
+  });
+
+  test("the heartbeat row persists the counts, and null when not computed", async () => {
+    const db = freshDb();
+    seedImportJob(db, "on000777");
+    await runImportIssueSweepCron(prodEnvFor(db), recordingDeps([], {}));
+
+    const details = JSON.parse(
+      db
+        .query<{ details: string }, []>(
+          "SELECT details FROM audit_log WHERE action = 'import_issue_triage'",
+        )
+        .get()?.details ?? "{}",
+    );
+    expect(details.reconcile_rows_without_issue).toBe(1);
+    expect(details.reconcile_issues_without_row).toBe(0);
+  });
+});
 
 describe("runImportIssueSweepCron refuses outside production", () => {
   for (const environment of ["development", "staging", "test"]) {
