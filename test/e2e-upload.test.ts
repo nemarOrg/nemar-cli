@@ -262,6 +262,10 @@ describe("E2E Upload Tests", () => {
     expect(output).toContain("Dry run mode");
   }, 30_000);
 
+  // NOTE: this case asserts nothing in CI either -- its body returns early when all
+  // prerequisites ARE met, and the one job that runs this file installs them. So the
+  // annotation makes a locally-failing test skip; it does not hide working coverage.
+  // Pre-existing dead weight, flagged rather than quietly deleted.
   test.skipIf(LIVE_TARGET_BLOCKED)(
     "upload with missing prerequisites shows helpful errors",
     async () => {

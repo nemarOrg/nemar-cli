@@ -76,7 +76,7 @@ import {
   YES_OPTION,
   confirm,
 } from "../lib/confirm.js";
-import { recordStep } from "../lib/debug-log.js";
+import { markUsageExit, recordStep } from "../lib/debug-log.js";
 import {
   type DeviceLoginOutcome,
   describeDeviceOutcome,
@@ -413,6 +413,12 @@ export async function loginAction(
     console.log(
       chalk.dim("  Pass the key itself, or drop --key to sign in with your browser instead."),
     );
+    // This is a usage error, so suppress the exit hook's "attach the log to a new
+    // issue" nudge (src/index.ts): inviting a bug report for someone's own typo
+    // wastes their time and ours. Commander sets this itself for the errors it
+    // raises -- `-k` with no value at all already prints no nudge -- so marking it
+    // here keeps the two spellings of the same mistake consistent.
+    markUsageExit();
     process.exitCode = 1;
     return;
   }
@@ -1080,6 +1086,18 @@ export async function switchAction(identifier?: string): Promise<void> {
     }
   }
 
+  // Same falsy-empty class as `auth login -k ""`, found by the same review: an
+  // explicitly-passed empty identifier is falsy, so `nemar switch "$VAR"` with an
+  // unset VAR fell through to the INTERACTIVE PICKER instead of refusing -- a
+  // hanging prompt in a script, where `switch nobody` correctly says so and exits.
+  if (identifier !== undefined && identifier.trim() === "") {
+    console.log(chalk.red("Account name was given but is empty."));
+    console.log(chalk.dim("  Name an account, or run 'nemar switch' with no argument to choose."));
+    markUsageExit();
+    process.exitCode = 1;
+    return;
+  }
+
   let target: string;
 
   if (identifier) {
@@ -1119,6 +1137,11 @@ export async function switchAction(identifier?: string): Promise<void> {
     console.log(chalk.red(`Account not found: ${target}`));
     console.log(chalk.dim("  Provide a NEMAR username or GitHub username"));
     console.log(chalk.dim(`  Available: ${accounts.map((a) => a.username ?? a.key).join(", ")}`));
+    // Exit code, not just a message: a named account that does not exist is a
+    // failure, and this returning 0 meant `nemar switch "$NAME" && do-something`
+    // carried on against whichever account was already active. The empty-name guard
+    // above exits 1, so 0 here would also make the weaker mistake the louder one.
+    process.exitCode = 1;
     return;
   }
 

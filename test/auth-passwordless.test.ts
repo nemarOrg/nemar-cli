@@ -30,7 +30,11 @@ import { TEST_CONFIG } from "./setup";
 const API = TEST_CONFIG.apiUrl;
 const ORIGIN = "https://app.nemar.org";
 const POINTS_AT_PROD = API.includes("api.nemar.org") || API.includes("data.nemar.org");
-const PROD_GUARD_ACTIVE = POINTS_AT_PROD && !process.env.TEST_ALLOW_PROD;
+// `LIVE_TARGET_BLOCKED` rather than a local `!process.env.TEST_ALLOW_PROD`: raw
+// truthiness disarms this guard for `TEST_ALLOW_PROD=0`, which is someone saying NO
+// and used to send MORE traffic to production than leaving it unset. The shared flag
+// is the strict opt-in (test/live-target.ts), so the two halves cannot disagree.
+const PROD_GUARD_ACTIVE = LIVE_TARGET_BLOCKED;
 
 const baseHeaders: Record<string, string> = TEST_CONFIG.bypassToken
   ? { "X-Test-Bypass": TEST_CONFIG.bypassToken }

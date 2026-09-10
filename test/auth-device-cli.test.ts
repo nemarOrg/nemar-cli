@@ -338,8 +338,9 @@ interface RunOptions {
   pathPrefix?: string;
   debug?: boolean;
   stdin?: "ignore" | "inherit";
-  /** Extra child env, applied last. `undefined` for a key deletes it, which is how
-   *  the empty-`NEMAR_API_KEY` case below is set up. */
+  /** Extra child env, applied last so it can override the defaults above. A value of
+   *  `""` is passed through as present-and-empty (what the empty-`NEMAR_API_KEY` case
+   *  needs); `undefined` DELETES the key, even if the parent had it. */
   env?: Record<string, string | undefined>;
 }
 
@@ -433,10 +434,18 @@ describe("nemar auth login: an empty --key is refused, not a silent browser sign
    * page, which asks for an ORCID sign-in. Two fences now, independently: this one,
    * and `test/live-target.ts`.
    *
-   * The properties: nothing is SENT, nothing is OPENED, and the exit code is 1.
+   * The properties: no device flow is STARTED, nothing is OPENED, and the exit code
+   * is 1. Not "no request at all" -- the root command's preAction hook does an
+   * unconditional anonymous `GET /notices` before any action runs, which is outside
+   * `loginAction` entirely.
+   *
+   * Only `-k ""` reached the device flow before the fix. `-k "   "` and `-k "\t"` are
+   * truthy, so they took the pasted-key path and were rejected by the backend; the
+   * guard turns those into a local refusal too, which is an improvement rather than
+   * the same hazard.
    */
   for (const empty of ["", "   ", "\t"]) {
-    test(`--key ${JSON.stringify(empty)} exits 1 without contacting the backend`, async () => {
+    test(`--key ${JSON.stringify(empty)} exits 1 without starting a device flow`, async () => {
       const opener = makeFakeOpener();
       const server = startDeviceServer({ token: [{ kind: "success" }] });
       try {
@@ -448,8 +457,12 @@ describe("nemar auth login: an empty --key is refused, not a silent browser sign
         });
         expect(result.exitCode).toBe(1);
         expect(result.out).toContain("--key was given but is empty");
-        // The two things that must not have happened.
-        expect(server.calls).toEqual([]);
+        // The two things that must not have happened. `starts`/`polls`, NOT `calls`:
+        // the stub records /auth/device/start into `starts` and /auth/device/token
+        // into `polls` only, so asserting an empty `calls` passed even with the fix
+        // reverted -- it was watching a collection the device flow never writes to.
+        expect(server.starts).toEqual([]);
+        expect(server.polls).toEqual([]);
         expect(await markerAppears(opener.marker)).toBe(false);
       } finally {
         server.stop();
@@ -485,17 +498,80 @@ describe("nemar auth login: an empty --key is refused, not a silent browser sign
     }
   });
 
+  test("NEMAR_API_KEY with a real value signs in, per the documented equivalence", async () => {
+    // `--key (alternative: NEMAR_API_KEY)` is in the command's own help text, and
+    // nothing tested the env half -- so the carve-out that keeps an EMPTY env var
+    // falling through was guarding a path with no coverage at all.
+    const server = startDeviceServer({ token: [{ kind: "success" }] });
+    try {
+      const result = await run(["auth", "login"], server.url, {
+        env: { NEMAR_API_KEY: "nm_env_key_456" },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.out).toContain("Welcome back");
+      expect(server.starts.length).toBe(0);
+    } finally {
+      server.stop();
+    }
+  });
+
   test("a non-empty --key is unaffected", async () => {
     // The guard must not eat the path it is guarding.
     const server = startDeviceServer({ token: [{ kind: "success" }] });
     try {
       const result = await run(["auth", "login", "-k", "nm_a_real_looking_key"], server.url);
       expect(result.out).not.toContain("--key was given but is empty");
-      // Validated against /auth/login, and the device flow never started.
+      // Positively: the key was VALIDATED and the account written. The earlier
+      // version asserted only a missing string and an empty `starts`, both of which
+      // held even with the guard absent, so it proved nothing about this path.
+      expect(result.exitCode).toBe(0);
+      expect(result.out).toContain("Welcome back");
       expect(server.starts.length).toBe(0);
     } finally {
       server.stop();
     }
+  });
+});
+
+describe("nemar switch: an empty account name is refused, not the interactive picker", () => {
+  /**
+   * The same falsy-empty class as `-k ""`, one command over: `if (identifier)` is
+   * false for `""`, so `nemar switch "$VAR"` with an unset VAR skipped the
+   * "Account not found" branch and opened the INTERACTIVE PICKER -- a hanging prompt
+   * in a script, where a wrong-but-non-empty name correctly refuses and exits.
+   *
+   * No server: the guard runs before any network call, which is part of the point.
+   */
+  function seedTwoAccounts(): void {
+    seedConfig({
+      activeAccount: "ada",
+      accounts: {
+        ada: { apiKey: "nm_ada_key_0123456789abcdefgh", username: "ada" },
+        grace: { apiKey: "nm_grace_key_0123456789abcdef", username: "grace" },
+      },
+    });
+  }
+
+  for (const argv of [
+    ["switch", ""],
+    ["auth", "switch", ""],
+  ]) {
+    test(`\`nemar ${argv.join(" ")}\` exits 1 and names the fix`, async () => {
+      seedTwoAccounts();
+      const result = await run(argv, "http://127.0.0.1:1");
+      expect(result.exitCode).toBe(1);
+      expect(result.out).toContain("Account name was given but is empty");
+      // Crucially NOT the picker, which would sit there waiting for input.
+      expect(result.out).not.toContain("Select an account");
+    });
+  }
+
+  test("a wrong-but-non-empty name still refuses by name, and no account changes", async () => {
+    seedTwoAccounts();
+    const result = await run(["switch", "nobody"], "http://127.0.0.1:1");
+    expect(result.exitCode).not.toBe(0);
+    expect(result.out).toContain("nobody");
+    expect(JSON.parse(readFileSync(configPath(), "utf8")).activeAccount).toBe("ada");
   });
 });
 

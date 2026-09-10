@@ -8,6 +8,14 @@
  *
  * Pure by design: `test/setup.ts` enforces the decision at import time, which no
  * test can observe from the inside, so the decision is separated from the doing.
+ *
+ * This file deliberately does NOT spell the target environment variable's literal
+ * name. CI's required pure tier classifies test files by GREPPING THEIR CONTENT for
+ * that name (plus `testRequest` and the CLI-runner helper), so merely mentioning it
+ * in a comment exiles the file to the soft, retried tier -- and the fence's own
+ * regression tests are exactly what should gate a merge. `test/s3-server-copy.test.ts`
+ * is the in-tree precedent for that trap: its docstring names the three tokens while
+ * claiming to belong to the pure tier, and thereby excludes itself.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -27,7 +35,7 @@ function decide(testApiUrl: string | undefined, allowProd?: string) {
 }
 
 describe("an undeclared target is blocked, never silently production", () => {
-  /** The founding case. `TEST_API_URL` is unset in every fresh clone, because
+  /** The founding case: the target env var is unset in every fresh clone, because
    *  test/.env.test is gitignored and there is nothing to copy it from. */
   test("unset is blocked", () => {
     const d = decide(undefined);
@@ -116,6 +124,13 @@ describe("pointsAtProduction", () => {
     expect(pointsAtProduction("https://api.nemar.org.evil.test/")).toBe(false);
   });
 
+  test("a trailing-dot FQDN is the same host, and is blocked", () => {
+    // WHATWG URL keeps the dot in `hostname`, so an equality check let the one
+    // readable-but-equivalent spelling of production through.
+    expect(pointsAtProduction("https://api.nemar.org.")).toBe(true);
+    expect(pointsAtProduction("https://api.nemar.org.:443/x")).toBe(true);
+  });
+
   test("nemar.org itself and the dev worker are not the live API", () => {
     expect(pointsAtProduction("https://nemar.org")).toBe(false);
     expect(pointsAtProduction("https://nemar-api-dev.sccn-org.workers.dev")).toBe(false);
@@ -148,7 +163,7 @@ describe("the message tells the person what to do", () => {
     const msg = blockedTargetMessage(PROD);
     expect(msg).toContain(PROD);
     expect(msg).toContain("test/.env.test.example");
-    expect(msg).toContain("TEST_API_URL=");
+    expect(msg).toContain("=https://nemar-api-dev");
     expect(msg).toContain("TEST_ALLOW_PROD=1");
   });
 });
@@ -166,9 +181,22 @@ describe("the example env file stays in step with what the harness reads", () =>
     const dir = import.meta.dir;
 
     const referenced = new Set<string>();
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith(".ts")) continue;
-      const src = readFileSync(join(dir, f), "utf8");
+    // Recursive: a nested helper under test/ reads these too, and a non-recursive
+    // scan quietly stops covering them the moment someone adds a subdirectory.
+    const files: string[] = [];
+    const walk = (d: string) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        if (e.isDirectory()) {
+          if (e.name === "fixtures" || e.name.startsWith(".")) continue;
+          walk(join(d, e.name));
+        } else if (e.name.endsWith(".ts")) {
+          files.push(join(d, e.name));
+        }
+      }
+    };
+    walk(dir);
+    for (const f of files) {
+      const src = readFileSync(f, "utf8");
       for (const m of src.matchAll(/process\.env\.(TEST_[A-Z0-9_]+)/g)) {
         referenced.add(m[1] as string);
       }
@@ -176,7 +204,11 @@ describe("the example env file stays in step with what the harness reads", () =>
     expect(referenced.size).toBeGreaterThan(5);
 
     const example = readFileSync(join(dir, ".env.test.example"), "utf8");
-    const missing = [...referenced].filter((name) => !example.includes(name)).sort();
+    // Whole-name match: `example.includes(name)` lets a LONGER variable satisfy a
+    // shorter one it contains, so a missing `TEST_DATASET_ID` would look present
+    // because `TEST_SANDBOX_DATASET_ID` is documented.
+    const declared = new Set([...example.matchAll(/\b(TEST_[A-Z0-9_]+)\b/g)].map((m) => m[1]));
+    const missing = [...referenced].filter((name) => !declared.has(name)).sort();
     expect(missing).toEqual([]);
   });
 });

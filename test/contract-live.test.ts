@@ -38,7 +38,7 @@ import {
   compileNeuroschemaDatasetValidator,
   formatAjvErrors,
 } from "./contract/neuroschema-validator.js";
-import { TEST_CONFIG } from "./setup";
+import { LIVE_TARGET_BLOCKED, TEST_CONFIG } from "./setup";
 
 const API = TEST_CONFIG.apiUrl;
 const TEST_DATASET = process.env.TEST_DATA_DATASET ?? "nm099999";
@@ -46,7 +46,11 @@ const headers: Record<string, string> = TEST_CONFIG.bypassToken
   ? { "X-Test-Bypass": TEST_CONFIG.bypassToken }
   : {};
 const POINTS_AT_PROD = API.includes("api.nemar.org") || API.includes("data.nemar.org");
-const ACTIVE = !!process.env.TEST_API_URL && !(POINTS_AT_PROD && !process.env.TEST_ALLOW_PROD);
+// See the note in the sibling live suites: `!process.env.TEST_ALLOW_PROD` treats
+// `TEST_ALLOW_PROD=0` as an opt-IN. `LIVE_TARGET_BLOCKED` is the strict version.
+// The declared-target check stays: this suite additionally requires a target to have
+// been named explicitly, which blocked-ness alone does not tell it.
+const ACTIVE = !!process.env.TEST_API_URL && !LIVE_TARGET_BLOCKED;
 const d = ACTIVE ? describe : describe.skip;
 
 async function getJson(path: string, auth?: string): Promise<{ status: number; body: unknown }> {
@@ -74,7 +78,8 @@ async function resolveDataPlaneDataset(): Promise<string> {
   if (process.env.TEST_DATA_DATASET) return process.env.TEST_DATA_DATASET;
   const { status, body } = await getJson("/datasets?limit=1");
   if (status === 200) {
-    const first = (body as { datasets?: Array<{ dataset_id?: unknown }> }).datasets?.[0]?.dataset_id;
+    const first = (body as { datasets?: Array<{ dataset_id?: unknown }> }).datasets?.[0]
+      ?.dataset_id;
     if (typeof first === "string" && first) return first;
   }
   return TEST_DATASET;
@@ -172,9 +177,7 @@ d("live wire contract", () => {
     // real regression rather than known drift.
     const r = neuroschemaDatasetSchema.safeParse(body);
     if (!r.success)
-      throw new Error(
-        `data-plane metadata drift: ${JSON.stringify(r.error.issues.slice(0, 6))}`,
-      );
+      throw new Error(`data-plane metadata drift: ${JSON.stringify(r.error.issues.slice(0, 6))}`);
     expect(r.success).toBe(true);
 
     // Still WARN-only: the FULL JSON-Schema conformance check. Unlike the

@@ -36,6 +36,16 @@ export const PRODUCTION_API_HOSTS = ["api.nemar.org", "data.nemar.org"] as const
  */
 export const BLOCKED_API_URL = "http://127.0.0.1:1";
 
+/**
+ * WHAT THIS FENCE DOES NOT COVER, so nobody over-trusts it.
+ *
+ * It governs the NEMAR API url and nothing else. A test that talks to S3, to
+ * `api.resend.com`, or to GitHub with ambient credentials is outside it entirely --
+ * `test/import-openneuro-s3-copy.integration.test.ts` writes to the PRODUCTION
+ * bucket whenever AWS session credentials happen to be exported, which is a state
+ * AGENTS.md actively tells people to be in. Those need their own guards.
+ */
+
 export interface LiveTargetDecision {
   /** The DECLARED target: what suites should use to decide whether to skip.
    *  Stays the production URL when blocked, so the existing `POINTS_AT_PROD`
@@ -87,7 +97,10 @@ export function pointsAtProduction(url: string): boolean {
   const readable =
     (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname !== "";
   if (!readable) return true;
-  const host = parsed.hostname.toLowerCase();
+  // A single trailing dot is stripped: `api.nemar.org.` is the same DNS name, and
+  // WHATWG `URL` keeps the dot in `hostname`, so an equality check would have let
+  // the one readable-but-equivalent spelling through.
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
   return PRODUCTION_API_HOSTS.some((h) => host === h);
 }
 
@@ -128,7 +141,7 @@ export function decideLiveTarget(args: {
 }
 
 /** The message the harness prints once when it blocks, and the one `testRequest`
- *  throws. Names the two ways out, because the fence is worthless if the person
+ *  throws. Names all three ways out, because the fence is worthless if the person
  *  who hits it cannot tell what to do next. */
 export function blockedTargetMessage(declaredApiUrl: string): string {
   return [
@@ -138,5 +151,7 @@ export function blockedTargetMessage(declaredApiUrl: string): string {
     "    - create test/.env.test (see test/.env.test.example) so TEST_API_URL names a dev backend",
     "    - export TEST_API_URL=https://nemar-api-dev.sccn-org.workers.dev for one run",
     "    - export TEST_ALLOW_PROD=1 if you genuinely mean to test against production",
+    "  A dev target alone is not enough for most live suites: they also need the seeded",
+    "  TEST_ADMIN_API_KEY / TEST_USER_API_KEY, or they will fail on the auth gate.",
   ].join("\n");
 }
