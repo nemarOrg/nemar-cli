@@ -428,9 +428,19 @@ describe("buildWeeklySummaryBody", () => {
 
 describe("buildWeeklyRolloverComment", () => {
   test("points forward and says the numbers are frozen", () => {
-    const c = buildWeeklyRolloverComment("2026-W38", "2026-09-14T03:00:00Z");
+    const c = buildWeeklyRolloverComment("2026-W38", 901, "2026-09-14T03:00:00Z");
     expect(c).toContain("2026-W38");
     expect(c).toContain("are not updated");
+  });
+
+  /**
+   * A week label alone is not navigable: a reader on the closed issue has to search
+   * the repo for a title, and the whole point of the rollover comment is that the
+   * series reads in both directions. The successor's NUMBER is the link.
+   */
+  test("carries the successor's issue number as a link", () => {
+    const c = buildWeeklyRolloverComment("2026-W38", 901, "2026-09-14T03:00:00Z");
+    expect(c).toContain("#901");
   });
 });
 
@@ -525,10 +535,7 @@ describe("no sweep activity escalates the headline", () => {
 
   test("the body says an absence means the crons did not run", () => {
     // Both nulls, since the section is only unknown when neither was measured.
-    const body = buildWeeklySummaryBody(
-      facts({ issuesClosed: null, issuesRelabelled: null }),
-      "t",
-    );
+    const body = buildWeeklySummaryBody(facts({ issuesClosed: null, issuesRelabelled: null }), "t");
     expect(body).toContain("an absence of rows means they did not run");
   });
 });

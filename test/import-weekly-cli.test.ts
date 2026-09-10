@@ -212,6 +212,21 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
     }
   });
 
+  test("a dry run says nothing was filed, not that the gate refused", async () => {
+    seedAuthenticatedConfig();
+    // A dry run forces past the gate, so `gateReason` is the literal "forced" -- and
+    // printing it as "Not posted: forced" reads like a refusal that never happened.
+    const server = startCaptureServer(HEALTHY);
+    try {
+      const result = await runCli(["admin", "import-weekly"], server.url);
+      expect(result.stdout).toContain("Dry run: nothing was filed");
+      expect(result.stdout).not.toContain("Not posted");
+      expect(result.stdout).toContain("Re-run with --apply");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("a gate refusal is reported, not treated as a failure", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer({
@@ -232,9 +247,10 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
 
 describe("nemar admin import-weekly: an unknown never prints as a zero", () => {
   /**
-   * THE property, checked in the CLI's own renderer. The CLI cannot import from
-   * backend/src, so it carries a second copy of the unknown-vs-zero rule -- and a
-   * second copy is exactly where the rule rots without a test.
+   * THE property, checked in the CLI's own renderer. The CLI carries a second copy of
+   * the unknown-vs-zero rule -- by convention, not necessity: `shared/` is importable
+   * by both halves, and the copy was kept because the report is rendered for two very
+   * different surfaces. A second copy is exactly where the rule rots without a test.
    */
   test("null counts print as unknown, not 0", async () => {
     seedAuthenticatedConfig();

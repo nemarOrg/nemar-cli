@@ -355,9 +355,16 @@ export function buildWeeklySummaryBody(f: WeeklySummaryFacts, nowIso: string): s
 
 /** Comment left on the previous week's issue as it is closed, so the series is
  *  navigable in both directions. */
-export function buildWeeklyRolloverComment(nextWeek: string, nowIso: string): string {
+export function buildWeeklyRolloverComment(
+  nextWeek: string,
+  nextIssue: number,
+  nowIso: string,
+): string {
   return [
-    `Superseded by the ${nextWeek} summary (${nowIso}).`,
+    // A bare `#N`, not `owner/repo#N`: the comment is posted on the same repo the
+    // successor was filed on, so GitHub renders it as a link either way, and leaving
+    // the repo name out keeps this module with no imports at all.
+    `Superseded by the ${nextWeek} summary, #${nextIssue} (${nowIso}).`,
     "",
     "Closed automatically. The numbers above describe the window in the title and are not updated.",
   ].join("\n");

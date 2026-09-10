@@ -627,7 +627,7 @@ async function postWeeklySummary(
       await comment(
         IMPORT_FAILURE_ISSUES_REPO,
         previous.number,
-        buildWeeklyRolloverComment(facts.week, nowIso),
+        buildWeeklyRolloverComment(facts.week, created.number, nowIso),
         pat,
       );
     } catch (err) {

@@ -30,9 +30,13 @@ makes "no news" mean something: its absence becomes evidence, which is exactly w
 **Unknown is a first-class value and never renders as zero.** Every count in the report is
 `number | null`; `null` renders as `unknown`; and there is exactly ONE renderer (`count`) rather than
 a ternary per field, because a per-field ternary is how one field eventually prints `0` for something
-nobody measured. The same rule is enforced twice, since the CLI cannot import from `backend/src` and
-therefore carries its own renderer -- the second copy is where the rule would rot unnoticed, so it is
-tested independently.
+nobody measured. The same rule is enforced twice, because the CLI carries its own
+renderer -- by convention rather than necessity. `shared/` is importable by both halves, so the rule
+COULD be declared once there, the way `shared/contract/account-copy.ts` declares account copy; it was
+not, because the two renderers target very different surfaces (a GitHub issue body and a terminal) and
+share only the null-handling. That is a real duplication and the second copy is where the rule would
+rot unnoticed, so it is tested independently. If a third surface ever needs it, move `count` to
+`shared/` instead of copying it again.
 
 Consequences of that rule which are decisions in their own right:
 
@@ -83,8 +87,13 @@ filed twice under two. Zero-padded, because the rollover finds last week by sort
 which is ADR 0050's rollup shape rather than ADR 0051's current-state shape. A rewrite would restate
 the window's numbers from a different instant than the window it claims to describe.
 
-**Filing week N closes week N-1.** Content survives closing, so the series stays readable while the
-open count stays at one; a tracker that accumulates is what this epic is about.
+**Filing a week's summary closes the most recent EARLIER open weekly**, which is usually the
+preceding week but is not defined as it: a skipped week (the gate fails closed, so skipping is a
+designed outcome) would otherwise leave an issue open forever. Strictly earlier, by sorted week label
+rather than issue number, so a clock-skewed or hand-filed future label cannot be closed as though it
+were the past. Content survives closing, so the series stays readable while the open count stays at
+one; a tracker that accumulates is what this epic is about. The closing comment names the successor's
+issue number, so the series is navigable forward as well as back.
 
 **No new cron trigger.** `scheduled()` compares `event.cron === AUTO_IMPORT_CRON` by exact string, so
 a third trigger risks that branch. The report rides the existing daily tick behind a pure
@@ -112,7 +121,8 @@ across the family.
 like it routes nowhere. It does not: the account's email reaches the maintainers who own it, which is
 the delivery path this report relies on. Worth stating because the contract reads the other way.
 
-Harder: 52 issues a year on a shared repo, mitigated by closing the previous week's. And the report
+Harder: 52 issues a year on a shared repo (53 in an ISO long year), mitigated by closing the
+previous week's. And the report
 is only as good as its inputs -- it aggregates ADRs 0049-0051 rather than measuring anything new, so
 a wrong number upstream is a wrong number here. That is why every section names its source and why
 `unknown` is preserved rather than smoothed.

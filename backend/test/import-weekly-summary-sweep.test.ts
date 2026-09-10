@@ -583,6 +583,9 @@ describe("filing this week closes last week", () => {
     // ADR 0050: mutate then comment, so a failed close cannot leave a claim behind.
     expect(order).toEqual(["close", "comment"]);
     expect(deps.comments[0]?.body).toContain(THIS_WEEK);
+    // And it points at the issue that was actually filed, so the closed one is
+    // navigable forward without searching the repo for a title.
+    expect(deps.comments[0]?.body).toContain(`#${r.issue?.number}`);
   });
 
   test("the OLDEST is not closed when several are open -- only the latest previous", async () => {

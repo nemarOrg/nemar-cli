@@ -7468,9 +7468,14 @@ importWeeklyCommand
     }
 
     console.log();
-    if (!res.posted) {
+    if (!res.posted && !apply) {
+      // NOT `Not posted: ${gateReason}` -- a dry run forces past the gate, so the
+      // reason is the literal string "forced", which reads as a refusal that never
+      // happened. Nothing was attempted, so say that instead.
+      console.log(chalk.dim("Dry run: nothing was filed."));
+      console.log(chalk.dim("  Re-run with --apply to file it (production only)."));
+    } else if (!res.posted) {
       console.log(chalk.yellow(`Not posted: ${res.gateReason}`));
-      if (!apply) console.log(chalk.dim("  Re-run with --apply to file it (production only)."));
     } else {
       console.log(
         chalk.green(
