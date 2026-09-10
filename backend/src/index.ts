@@ -41,6 +41,7 @@ import { archiveRetrySweep } from "./services/archive-retry";
 import { AUTO_IMPORT_CRON, autoImportTick } from "./services/auto-import";
 import { runAvailabilityReportSweepCron } from "./services/availability-report";
 import { fetchAndSyncCitationCounts } from "./services/citation-counts-sync";
+import { isNemarWebOrigin } from "./services/cors-origins";
 import { sweepLogLines } from "./services/cron-sweep-log";
 import { drainEmbeddingDirty } from "./services/dataset-search";
 import { DEV_EPHEMERAL_BAND_END, DEV_EPHEMERAL_BAND_START } from "./services/datasetId";
@@ -86,10 +87,12 @@ api.use(
       if (!origin) return null;
       try {
         const { hostname } = new URL(origin);
-        // Allow localhost for development
-        if (hostname === "localhost" || hostname === "127.0.0.1") return origin;
-        // Allow nemar.org and osc.earth domains
-        if (hostname === "nemar.org" || hostname.endsWith(".nemar.org")) return origin;
+        // The NEMAR web surfaces: nemar.org hosts, the website's Pages preview
+        // URLs (#1346), and loopback for development. Shared with the zarr
+        // fork's `allowedOrigin` so the two cannot disagree about which of our
+        // own surfaces count.
+        if (isNemarWebOrigin(hostname)) return origin;
+        // Legacy: the pre-cutover OSC properties. Api fork only.
         if (hostname === "osc.earth" || hostname.endsWith(".osc.earth")) return origin;
       } catch (err) {
         console.warn(`CORS: rejected unparseable origin: ${origin}`, err);
