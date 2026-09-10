@@ -20,6 +20,7 @@
  * flow.
  */
 
+import { ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "./account-tier";
 import { generateCookieId, hashCookieId } from "./web-session";
 
 /** A one-time grant code: 256 random bits, URL-safe. Reuses the cookie-id
@@ -89,10 +90,12 @@ export const DOCS_GRANT_INSERT_SQL = `INSERT INTO docs_grants (code_hash, user_i
  *   - `dg.expires_at > datetime('now')` - the grant is still claimable.
  *   - `u.role IN ('admin','owner')`     - re-read at mint, not trusted from
  *                                         the grant.
- *   - `u.status != 'revoked'`, `u.deleted_at IS NULL` - the same two
- *     predicates `findSessionByCookieId` applies to every app session, so a
- *     revoked account cannot acquire a docs session it would then be refused
- *     for holding.
+ *   - `u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}` plus `deleted_at IS NULL`
+ *     - the SAME status rule the API's own cookie path applies
+ *     (`isActiveAccountStatus` in `middleware/auth.ts`), not a hand-rolled
+ *     `!= 'revoked'`. The looser spelling admitted `pending`, which the API
+ *     refuses, and an admin-only surface must never be easier to enter than the
+ *     API it documents.
  *
  * `remember` is hard-coded 0: a docs session is never a remember-me session.
  * `scope` is hard-coded 'docs' so this statement cannot mint an app session
@@ -113,7 +116,7 @@ export const DOCS_MINT_INSERT_SQL = `INSERT INTO web_sessions
     WHERE dg.code_hash = ?
       AND dg.expires_at > datetime('now')
       AND u.role IN ('admin', 'owner')
-      AND u.status != 'revoked'
+      AND u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}
       AND u.deleted_at IS NULL`;
 
 /**
@@ -144,3 +147,15 @@ export const DOCS_REVOKE_ALL_SQL = `UPDATE web_sessions
     WHERE user_id = ?
       AND scope = 'docs'
       AND revoked_at IS NULL`;
+
+/**
+ * Delete every outstanding grant for one account. Binds: userId.
+ *
+ * Called by `/auth/logout` alongside {@link DOCS_REVOKE_ALL_SQL}. Revoking live
+ * sessions is not enough on its own: a grant is a 60-second licence to create a
+ * new eight-hour session, held by whoever has the code, and the mint checks the
+ * ACCOUNT rather than the app session that authorized it. So a code captured from
+ * the callback URL survived sign-out and could still be spent. Signing out must
+ * end what can still create access, not only the access that exists.
+ */
+export const DOCS_GRANTS_PURGE_SQL = "DELETE FROM docs_grants WHERE user_id = ?";

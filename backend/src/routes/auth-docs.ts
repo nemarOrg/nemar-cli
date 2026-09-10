@@ -101,7 +101,14 @@ authDocsRoutes.post("/docs/grant", webSessionMiddleware, async (c) => {
     );
   }
   if (!isDocsAdmin(user.role)) {
-    return c.json({ error: "not_found", message: DOCS_AUTH_MESSAGES.not_found }, 404, NO_STORE);
+    // Byte-identical to what `api.notFound` builds for an unrouted path, headers
+    // included. A distinct body or a stray `Cache-Control` would tell a signed-in
+    // non-admin that this route exists, which is the single inference answering
+    // 404 instead of 403 was chosen to prevent.
+    return c.json(
+      { error: "Not Found", message: `Route ${c.req.method} ${c.req.path} not found` },
+      404,
+    );
   }
 
   const code = generateGrantCode();

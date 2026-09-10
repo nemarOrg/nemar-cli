@@ -6,12 +6,18 @@
  * session issuance via `issueSession()`, real SHA-256 hashing of the one-time
  * code. No mocks.
  *
- * THE TEST THAT MATTERS MOST is "an app cookie is refused by verify". Both
- * scopes live in one `web_sessions` table, so the only thing standing between a
- * dashboard cookie and the gated documentation is the `ws.scope = ?` predicate
- * added to `findSessionByCookieId` in migration 0083's change. That is a
- * privilege crossing rather than a cosmetic mix-up, so it is asserted in both
- * directions.
+ * THE TESTS THAT MATTER MOST are the two scope-crossing ones, and the second was
+ * added after review found the hole it covers. Both scopes live in one
+ * `web_sessions` table, so the only thing keeping them apart is a `scope`
+ * predicate at every reader -- and there are TWO readers:
+ * `findSessionByCookieId`, and a second copy of the same SELECT in
+ * `middleware/auth.ts` that backs the whole management API. The first version of
+ * this change put the predicate on the first reader only, so the docs credential
+ * authenticated `/admin/*`: a read-only documentation session was an owner-grade
+ * API session. So the crossing is asserted in BOTH directions here, the
+ * docs-to-app direction against the real `authMiddleware`, not against
+ * `webSessionMiddleware` -- testing the wrong middleware is exactly how that hole
+ * survived a suite that claimed to cover it.
  *
  * WHAT THIS FILE CANNOT EXERCISE, BY CONSTRUCTION (`.rules/testing.md`: say so
  * when real data cannot falsify a rule). The actual concurrent race that
@@ -30,6 +36,7 @@ import {
   DOCS_SESSION_HEADER,
   DOCS_SESSION_TTL_SECONDS,
 } from "../../shared/contract/docs-auth.js";
+import { authMiddleware } from "../src/middleware/auth";
 import { authDocsRoutes } from "../src/routes/auth-docs";
 import { authWebRoutes } from "../src/routes/auth-web";
 import { hashGrantCode } from "../src/services/docs-auth";
@@ -208,11 +215,13 @@ describe("POST /auth/docs/grant", () => {
 
   test("answers 404, not 403, for a signed-in non-admin", async () => {
     // Mirrors adminGate on the website: someone who does not already know the
-    // operations documentation exists must not learn it from a status code.
+    // operations documentation exists must not learn it from a status code. The
+    // body is the global handler's, not a distinct one -- see the
+    // indistinguishability tests at the end of this file for why.
     const userId = seedUser("member@nemar.test", "member");
     const res = await grant(await appSession(userId));
     expect(res.status).toBe(404);
-    expect(((await res.json()) as { error: string }).error).toBe("not_found");
+    expect(((await res.json()) as { error: string }).error).toBe("Not Found");
   });
 
   test("writes no grant row for a non-admin", async () => {
@@ -476,5 +485,146 @@ describe("logout cascades to docs sessions", () => {
 
     expect((await verify(secondDocs)).status).toBe(401);
     expect((await verify(firstDocs)).status).toBe(200);
+  });
+});
+
+// --------------------------------------------------------------------------
+// Scope crossing in the docs-to-app direction: the management API
+// --------------------------------------------------------------------------
+
+describe("a docs session is not an API session", () => {
+  /** The real middleware the management API is mounted behind. */
+  function apiApp(): Hono<{ Bindings: Bindings; Variables: Variables }> {
+    const api = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+    api.use("*", authMiddleware);
+    api.get("/probe", (c) => c.json({ reached: true, user: c.var.user?.username ?? null }));
+    return api;
+  }
+
+  test("REFUSES a docs session presented as the app cookie", async () => {
+    // The critical case. Before the fix this answered 200, so the eight-hour
+    // credential the docs host holds was a full API session: read every user's
+    // email, promote an account, delete a dataset.
+    const userId = seedUser("admin-crossing@nemar.test", "admin");
+    const docsSession = await signInToDocs(userId);
+    const res = await apiApp().request(
+      "/probe",
+      { headers: { Cookie: `nemar_session=${docsSession}` } },
+      env(),
+    );
+    expect(res.status).toBe(401);
+  });
+
+  test("still accepts an ordinary app session on the same route", async () => {
+    // The other half: the fix must not have broken cookie auth for the API.
+    const userId = seedUser("admin-appcookie@nemar.test", "admin");
+    const cookie = await appSession(userId);
+    const res = await apiApp().request(
+      "/probe",
+      { headers: { Cookie: `nemar_session=${cookie}` } },
+      env(),
+    );
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { reached: boolean }).reached).toBe(true);
+  });
+});
+
+// --------------------------------------------------------------------------
+// Sign-out ends what can still create access
+// --------------------------------------------------------------------------
+
+describe("logout purges outstanding grants", () => {
+  test("a code minted before sign-out cannot be spent after it", async () => {
+    // A grant is a 60-second licence to create a new eight-hour session, held by
+    // whoever has the code, and the mint checks the account rather than the app
+    // session that authorized it. So revoking sessions alone left a captured code
+    // redeemable after sign-out.
+    const userId = seedUser("admin-grantlogout@nemar.test", "admin");
+    const cookie = await appSession(userId);
+    const granted = await grant(cookie);
+    const { code } = (await granted.json()) as { code: string };
+
+    const out = await app.request(
+      "/auth/logout",
+      { method: "POST", headers: { Cookie: `nemar_session=${cookie}`, Origin: APP } },
+      env(),
+    );
+    expect(out.status).toBe(200);
+
+    expect((await exchange(code)).status).toBe(400);
+    expect(docsSessionCount(userId)).toBe(0);
+  });
+
+  test("no grant row survives sign-out", async () => {
+    const userId = seedUser("admin-grantrows@nemar.test", "admin");
+    const cookie = await appSession(userId);
+    await grant(cookie);
+    await app.request(
+      "/auth/logout",
+      { method: "POST", headers: { Cookie: `nemar_session=${cookie}`, Origin: APP } },
+      env(),
+    );
+    const row = db
+      .query<{ n: number }, [number]>("SELECT COUNT(*) AS n FROM docs_grants WHERE user_id = ?")
+      .get(userId);
+    expect(row?.n).toBe(0);
+  });
+
+  test("one account's sign-out leaves another's grant alone", async () => {
+    const first = seedUser("admin-g1@nemar.test", "admin");
+    const second = seedUser("admin-g2@nemar.test", "admin");
+    const firstGrant = (await (await grant(await appSession(first))).json()) as { code: string };
+    const secondCookie = await appSession(second);
+    await grant(secondCookie);
+    await app.request(
+      "/auth/logout",
+      { method: "POST", headers: { Cookie: `nemar_session=${secondCookie}`, Origin: APP } },
+      env(),
+    );
+    expect((await exchange(firstGrant.code)).status).toBe(200);
+  });
+});
+
+// --------------------------------------------------------------------------
+// The status gate matches the API's own
+// --------------------------------------------------------------------------
+
+describe("account status", () => {
+  test("a pending account cannot mint a docs session", async () => {
+    // The gate used to be a hand-rolled `!= 'revoked'`, which admitted `pending` --
+    // a status the API's own cookie path refuses. An admin-only surface must not be
+    // easier to enter than the API it documents.
+    const userId = seedUser("admin-pending@nemar.test", "admin");
+    db.run("UPDATE users SET status = 'pending' WHERE id = ?", [userId]);
+    const cookie = await appSession(userId);
+    const granted = await grant(cookie);
+    expect(granted.status).toBe(200);
+    const { code } = (await granted.json()) as { code: string };
+    expect((await exchange(code)).status).toBe(400);
+    expect(docsSessionCount(userId)).toBe(0);
+  });
+});
+
+// --------------------------------------------------------------------------
+// Non-disclosure of the route itself
+// --------------------------------------------------------------------------
+
+describe("the non-admin 404 is indistinguishable from a real one", () => {
+  test("it carries the same body an unrouted path gets", async () => {
+    // Comparing bodies otherwise tells a signed-in non-admin that this route
+    // exists, which is the one inference answering 404 instead of 403 prevents.
+    const userId = seedUser("member-404@nemar.test", "member");
+    const res = await grant(await appSession(userId));
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({
+      error: "Not Found",
+      message: "Route POST /auth/docs/grant not found",
+    });
+  });
+
+  test("and no Cache-Control that a real 404 would not have", async () => {
+    const userId = seedUser("member-404b@nemar.test", "member");
+    const res = await grant(await appSession(userId));
+    expect(res.headers.get("Cache-Control")).toBeNull();
   });
 });

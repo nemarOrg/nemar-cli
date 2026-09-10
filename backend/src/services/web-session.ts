@@ -32,9 +32,14 @@ export const COOKIE_NAME = "nemar_session";
  *  rather than an optional filter, defaulted to `app` so existing callers keep
  *  their exact behaviour. That default is the safe direction: a caller that
  *  forgets the argument authenticates app sessions only, which is what every
- *  pre-existing route wants. Without the predicate a docs cookie would
- *  authenticate the dashboard, which is a privilege crossing rather than a
- *  cosmetic mix-up. */
+ *  pre-existing route wants.
+ *
+ *  This function is not the only reader, and that is the part worth remembering:
+ *  `middleware/auth.ts` carries a second copy of the same SELECT for the
+ *  management API, and it needs the predicate just as much. Review found it
+ *  missing there after this one had it, and the docs credential authenticated
+ *  `/admin/*` as a result. Prefer routing a new reader through this function over
+ *  writing a third copy. */
 export type SessionScope = "app" | "docs";
 
 /** Server-side cap on non-remember-me sessions. Browser drops session

@@ -30,9 +30,18 @@
 -- of those predicates, and a copy is what drifts.
 --
 -- The DEFAULT is what makes this safe to add to a live table: every existing
--- row is an app session and must keep authenticating the app. Readers pass
--- the scope they want (`findSessionByCookieId` defaults to 'app'), so a docs
--- cookie can never authenticate an app route, or the reverse.
+-- row is an app session and must keep authenticating the app.
+--
+-- SEPARATION IS ENFORCED AT EVERY READER, AND THERE ARE TWO. `web_sessions` is
+-- read by cookie hash in `services/web-session.ts` (`findSessionByCookieId`,
+-- which defaults to 'app') and again in `middleware/auth.ts`
+-- (`resolveCookieUser`, which backs the bearer/cookie middleware on the whole
+-- management API). The first version of this change added the predicate to only
+-- the first, and review found the consequence: the docs credential authenticated
+-- `/admin/*`, so a read-only documentation session was an owner-grade API
+-- session. A scope column is worth nothing unless every reader names the scope it
+-- wants, so a third reader must do the same -- or go through
+-- `findSessionByCookieId`.
 ALTER TABLE web_sessions ADD COLUMN scope TEXT NOT NULL DEFAULT 'app';
 
 -- Partial index: docs sessions are a tiny minority of this table, and the one

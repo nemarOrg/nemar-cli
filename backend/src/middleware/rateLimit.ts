@@ -156,10 +156,11 @@ const AUTH_PATHS = [
   // person passes through both once per eight-hour docs session, so the strict
   // floor is the right home for the pair.
   //
-  // Both are called by a Cloudflare Worker (the website's server-side render),
-  // not by a browser, so they arrive from a small pool of egress addresses and
-  // share one per-IP bucket with every other visitor's `/auth/logout` and
-  // `/auth/profile`. That is a pre-existing property of this bucket rather than
+  // Neither is called by a browser, and they are called by DIFFERENT workers:
+  // `grant` by the website's server-side render, `exchange` by the docs site's
+  // Pages Function. Both therefore arrive from a small pool of egress addresses
+  // rather than from a person, and `grant` shares its bucket with every other
+  // visitor's `/auth/logout` and `/auth/profile`. That is a pre-existing property of this bucket rather than
   // something these two introduce -- see the note on MAX_REQUESTS below, and
   // issue #1354, which proposes keying Worker-originated requests on something
   // other than the egress address. They stay here because a person passes

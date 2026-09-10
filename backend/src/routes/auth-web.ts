@@ -65,7 +65,7 @@ import {
   nonProdCodeEchoAllowed,
   nonProdCodeRequestAllowed,
 } from "../services/auth-code";
-import { DOCS_REVOKE_ALL_SQL } from "../services/docs-auth";
+import { DOCS_GRANTS_PURGE_SQL, DOCS_REVOKE_ALL_SQL } from "../services/docs-auth";
 import {
   resolveEmailConfig,
   sendEmailChangeCodeEmail,
@@ -757,7 +757,18 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
   const userId = c.var.webUser?.id;
   if (userId) {
     try {
-      await c.env.DB.prepare(DOCS_REVOKE_ALL_SQL).bind(userId).run();
+      await c.env.DB.batch([
+        c.env.DB.prepare(DOCS_REVOKE_ALL_SQL).bind(userId),
+        // Outstanding GRANTS die too, not just live sessions. A grant is spendable
+        // for 60 seconds by whoever holds the code, and the mint deliberately
+        // re-checks the account rather than the app session that authorized it --
+        // there is nothing on the row to re-check against. So without this a code
+        // captured from the callback URL (browser history, a `Referer`, a log) was
+        // still redeemable AFTER sign-out, for a fresh eight-hour session. Signing
+        // out has to end the thing that can still create access, not only the
+        // access that already exists.
+        c.env.DB.prepare(DOCS_GRANTS_PURGE_SQL).bind(userId),
+      ]);
     } catch (err) {
       console.error("[auth-web] /logout: docs session revoke failed", err);
     }
