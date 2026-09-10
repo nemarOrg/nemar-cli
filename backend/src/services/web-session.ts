@@ -24,6 +24,19 @@ import { type Bindings, type UserRole, parseRole } from "../types/bindings";
 
 export const COOKIE_NAME = "nemar_session";
 
+/** Which host's credential a `web_sessions` row is. `app` is every session the
+ *  dashboard issues; `docs` is the short-lived admin credential the docs host
+ *  holds (epic #1336 phase 0, migration 0083).
+ *
+ *  One table, two scopes, and the scope is a REQUIRED argument to every lookup
+ *  rather than an optional filter, defaulted to `app` so existing callers keep
+ *  their exact behaviour. That default is the safe direction: a caller that
+ *  forgets the argument authenticates app sessions only, which is what every
+ *  pre-existing route wants. Without the predicate a docs cookie would
+ *  authenticate the dashboard, which is a privilege crossing rather than a
+ *  cosmetic mix-up. */
+export type SessionScope = "app" | "docs";
+
 /** Server-side cap on non-remember-me sessions. Browser drops session
  *  cookies on close already; the cap keeps the DB row from outliving
  *  any reasonable session and bounds the cleanup-table size. */
@@ -212,6 +225,7 @@ export interface WebSessionUser {
 export async function findSessionByCookieId(
   env: Bindings,
   cookieIdRaw: string,
+  scope: SessionScope = "app",
 ): Promise<{ session: WebSessionRow; user: WebSessionUser } | null> {
   if (!cookieIdRaw) return null;
   const cookieHash = await hashCookieId(cookieIdRaw);
@@ -229,13 +243,14 @@ export async function findSessionByCookieId(
        FROM web_sessions ws
        JOIN users u ON u.id = ws.user_id
       WHERE ws.cookie_id_hash = ?
+        AND ws.scope = ?
         AND ws.revoked_at IS NULL
         AND ws.expires_at > datetime('now')
         AND u.status != 'revoked'
         AND u.deleted_at IS NULL
       LIMIT 1`,
   )
-    .bind(cookieHash)
+    .bind(cookieHash, scope)
     .first<{
       id: number;
       user_id: number;
