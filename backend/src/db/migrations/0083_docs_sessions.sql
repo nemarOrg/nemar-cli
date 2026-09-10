@@ -24,10 +24,25 @@
 -- there is no cookie value at rest for a read of this table to steal.
 
 -- Docs sessions are ordinary web_sessions rows, distinguished by scope, so
--- revocation, expiry, the `users.status != 'revoked'` join and the
--- `deleted_at` guard in findSessionByCookieId all apply unchanged. That reuse
--- is the point: a separate table would have needed its own copy of every one
--- of those predicates, and a copy is what drifts.
+-- revocation, expiry and the `deleted_at` guard in findSessionByCookieId all
+-- apply unchanged. That reuse is the point: a separate table would have needed
+-- its own copy of every one of those predicates, and a copy is what drifts.
+--
+-- ONE PREDICATE IS NOT INHERITED, and the docs gate adds it itself. That
+-- reader stops at `users.status != 'revoked'` because it must: a `pending`
+-- account reaches Settings through it to correct the mistyped address that is
+-- the reason it is pending. The docs mint applies the stricter
+-- `ACTIVE_ACCOUNT_STATUSES` rule, so `/auth/docs/verify` re-applies it on every
+-- page view -- otherwise the standing check would be looser than the entry
+-- check, which is the shape review found and is worth naming here because the
+-- reuse above is what makes it easy to assume.
+--
+-- The CHECK is what keeps 'app'/'docs' the only two values. Every reader names
+-- the scope it wants, so a third value would create rows no reader ever matches
+-- -- a credential that silently authenticates nothing, or worse, one someone
+-- later "fixes" by loosening a predicate. Same construction as `account_kind`
+-- in 0082: SQLite accepts a CHECK on an ADD COLUMN, and the default satisfies
+-- it, so this stays rewrite-free.
 --
 -- The DEFAULT is what makes this safe to add to a live table: every existing
 -- row is an app session and must keep authenticating the app.
@@ -42,7 +57,8 @@
 -- session. A scope column is worth nothing unless every reader names the scope it
 -- wants, so a third reader must do the same -- or go through
 -- `findSessionByCookieId`.
-ALTER TABLE web_sessions ADD COLUMN scope TEXT NOT NULL DEFAULT 'app';
+ALTER TABLE web_sessions ADD COLUMN scope TEXT NOT NULL DEFAULT 'app'
+  CHECK (scope IN ('app', 'docs'));
 
 -- Partial index: docs sessions are a tiny minority of this table, and the one
 -- query that scans by user rather than by cookie hash (logout's revoke-all)
