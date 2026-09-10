@@ -2,11 +2,16 @@
  * Test Setup
  *
  * Loads test environment and provides test utilities.
+ *
+ * Two fences live here rather than in each suite, because the opt-in version of
+ * both had already failed: a live tier that defaulted to production, and a CLI
+ * that could reach for a browser. See `test/live-target.ts` for what that cost.
  */
 
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { blockedTargetMessage, decideLiveTarget } from "./live-target";
 
 // Force every test process to use an isolated config dir before any module
 // (notably src/lib/config.ts) can capture the user's real ~/.config/nemar/
@@ -33,9 +38,63 @@ if (existsSync(envPath)) {
   }
 }
 
+/**
+ * No test may reach for a browser unless it says so.
+ *
+ * `openInBrowser` (src/lib/browser.ts) honours `NEMAR_NO_BROWSER=1`, and the two
+ * tests that exercise the opener on purpose set it to `undefined` in the child env
+ * -- which deletes it for that child -- and put a fake `open`/`xdg-open` first on
+ * PATH. So this default costs those tests nothing, and it means a NEW test that
+ * happens to reach a browser-opening code path cannot take over the developer's
+ * screen or start a sign-in. Set before any suite can spawn the CLI.
+ */
+// Empty counts as unset, matching the two other empty-means-unset rules this file
+// relies on (an undeclared target, an empty NEMAR_API_KEY). Guarding on `undefined`
+// alone left an ambient `NEMAR_NO_BROWSER=""` in place, and the consumer requires
+// exactly "1" -- so browser attempts came back on from a value that looks like it
+// switched them off.
+if ((process.env.NEMAR_NO_BROWSER ?? "").trim() === "") {
+  process.env.NEMAR_NO_BROWSER = "1";
+}
+
+/**
+ * Which backend the live tier may talk to, and the enforcement.
+ *
+ * When blocked, `TEST_API_URL` is REWRITTEN to a dead loopback address before any
+ * suite runs. That is what actually stops the traffic: every CLI-spawning suite
+ * inherits the variable, and `getApiUrl()` (src/lib/api/client.ts) prefers it over
+ * both the stored config and the production default, so no child process can reach
+ * production even though none of them asked to be protected.
+ *
+ * `TEST_CONFIG.apiUrl` deliberately keeps the DECLARED url, so the suites that check
+ * the target themselves keep seeing what was asked for rather than the substitute.
+ *
+ * The rewrite protects children that INHERIT the variable, which is all of them bar
+ * one: `test/manifest.test.ts` clears it on purpose so the CLI falls back to the
+ * stored config, whose schema default is production. That file pins its own urls, so
+ * it is safe -- but the rewrite is not a universal guarantee, and a new suite that
+ * overrides `TEST_API_URL` for its children is outside it.
+ */
+const liveTarget = decideLiveTarget({
+  testApiUrl: process.env.TEST_API_URL,
+  allowProd: process.env.TEST_ALLOW_PROD,
+  defaultApiUrl: "https://api.nemar.org",
+});
+
+if (liveTarget.blocked) {
+  process.env.TEST_API_URL = liveTarget.effectiveApiUrl;
+  console.warn(blockedTargetMessage(liveTarget.declaredApiUrl));
+}
+
+/** True when a live request must not be made: the target is production and
+ *  `TEST_ALLOW_PROD` was not set. A live suite should `describe.skipIf` on this
+ *  (test/contract-live.test.ts is the pattern) rather than fail against the dead
+ *  address the harness substitutes. */
+export const LIVE_TARGET_BLOCKED = liveTarget.blocked;
+
 // Test configuration
 export const TEST_CONFIG = {
-  apiUrl: process.env.TEST_API_URL || "https://api.nemar.org",
+  apiUrl: liveTarget.declaredApiUrl,
   password: process.env.TEST_PASSWORD || "TestPassword123!",
   adminApiKey: process.env.TEST_ADMIN_API_KEY || "",
   userApiKey: process.env.TEST_USER_API_KEY || "",
@@ -58,7 +117,22 @@ export const TEST_CONFIG = {
  * live-backend test asserting on the bucket stays correct whichever environment
  * `TEST_API_URL` points at.
  */
-export const IS_PRODUCTION_TARGET = new URL(TEST_CONFIG.apiUrl).hostname === "api.nemar.org";
+export const IS_PRODUCTION_TARGET = (() => {
+  // Not a bare `new URL(...)`: an unparseable target (a scheme-less
+  // `host:port`, say) is routed into the BLOCKED path two lines up and then used
+  // to be handed to the URL constructor here, which threw -- so every suite that
+  // imports this file failed to LOAD rather than skipping, turning a
+  // misconfiguration into a broken run.
+  try {
+    return (
+      new URL(TEST_CONFIG.apiUrl).hostname.toLowerCase().replace(/\.$/, "") === "api.nemar.org"
+    );
+  } catch {
+    // Unreadable: not the production API, and the bucket expectation below should
+    // be the non-production one. The live tier is blocked in this case anyway.
+    return false;
+  }
+})();
 
 export const EXPECTED_S3_BUCKET = IS_PRODUCTION_TARGET ? "nemar" : "nemar-dev";
 
@@ -79,7 +153,17 @@ export async function testRequest<T>(
   options: RequestInit = {},
   apiKey?: string,
 ): Promise<{ status: number; data: T }> {
-  const url = `${TEST_CONFIG.apiUrl}${path}`;
+  // Throw rather than quietly hitting the dead loopback address: a suite that
+  // reaches here is one that has no skip guard, and `ECONNREFUSED` × 36 does not
+  // tell anyone why. The message names both ways out.
+  if (LIVE_TARGET_BLOCKED) {
+    throw new Error(blockedTargetMessage(liveTarget.declaredApiUrl));
+  }
+
+  // The EFFECTIVE target, not the declared one. Unreachable today because the throw
+  // above covers the only case where they differ -- belt and braces, so a future
+  // caller that swallows the throw still cannot reach production through here.
+  const url = `${liveTarget.effectiveApiUrl}${path}`;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
