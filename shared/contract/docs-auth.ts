@@ -3,10 +3,19 @@
  *
  * `docs.nemar.org/admin/*` is gated by NEMAR's own ORCID-backed session, not
  * by Cloudflare Access, so `users.role` stays the single source of truth for
- * who is an admin. Three parties share the literals below and none of them can
- * import each other's code: this backend, the website's authorize page
- * (`nemarOrg/website`), and a Cloudflare Pages Function in `nemarOrg/docs`.
- * That is exactly why they are declared once here.
+ * who is an admin (ADR 0056). Three parties share the literals below and none
+ * of them can import each other's code: this backend, the website's authorize
+ * page (`nemarOrg/website`), and a Cloudflare Pages Function in `nemarOrg/docs`.
+ *
+ * SO THIS FILE IS THE REFERENCE DECLARATION, NOT YET AN ENFORCED CONTRACT, and
+ * the difference matters when reading a value here. `account-copy.ts` has a
+ * drift test on each side plus a CI sparse checkout; this file has neither, and
+ * neither other repo transcribes it — they spell their own copies. Epic #1336's
+ * drift-guard phase owns closing that. Until it does, a value here can be
+ * stale, and one already was: an earlier version named the cookie
+ * `nemar_docs_session` while the deployed Pages Function set
+ * `__Host-nemar_docs_session`, and nothing noticed because nothing in this
+ * repository reads that constant at all.
  *
  * The flow, and which party does what:
  *
@@ -21,11 +30,20 @@
  * value it buys never travels in a URL at all.
  */
 
-/** Cookie the docs host sets for itself. A DIFFERENT name from the app's
- *  `nemar_session` on purpose: two host-scoped cookies with one name is a
- *  debugging trap, and the distinct name makes a mix-up visible in a request
- *  dump rather than silent. */
-export const DOCS_SESSION_COOKIE_NAME = "nemar_docs_session";
+/** Cookie the docs host sets for itself, matching what the Pages Function
+ *  actually sets (`nemarOrg/docs`, `functions/__docs-auth/callback.ts`).
+ *
+ *  A DIFFERENT name from the app's `nemar_session` on purpose: two host-scoped
+ *  cookies with one name is a debugging trap, and the distinct name makes a
+ *  mix-up visible in a request dump rather than silent.
+ *
+ *  The `__Host-` prefix is the part that is load-bearing rather than cosmetic:
+ *  it makes host-only scope BROWSER-ENFORCED. A cookie so named is refused
+ *  unless it is `Secure`, `Path=/` and carries no `Domain` attribute, so no
+ *  sibling host can plant one and no misconfiguration can widen it to
+ *  `.nemar.org` — which is the whole reason this credential is separate from
+ *  the app session (ADR 0056). */
+export const DOCS_SESSION_COOKIE_NAME = "__Host-nemar_docs_session";
 
 /** Header the docs Pages Function presents the session value in when it calls
  *  `verify`. A header rather than a `Cookie`, because that call is
