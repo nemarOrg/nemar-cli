@@ -22,7 +22,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifyImportFailure } from "../src/services/import-failure-cause";
 
@@ -165,5 +166,116 @@ describe("the deployable copy keeps the properties capture depends on", () => {
 
   test("the marker check uses grep -F, so the brackets are not a character class", () => {
     expect(workflow()).toContain('grep -qF "[openneuro-upstream-inaccessible]"');
+  });
+});
+
+/**
+ * The reporters RUN here, rather than being asserted as text.
+ *
+ * Every test above reads the file, and that is what let issue #1364 ship: the
+ * fallback assertion was `expect(workflow()).toContain(fallback)`, which passed
+ * over dead code. Actions runs a `run:` step under `bash -e {0}` and these steps
+ * add `pipefail`, so a log with no `✖` made `grep` exit 1, pipefail promoted it to
+ * the pipeline's status, and `-e` killed the step at the assignment -- before the
+ * fallback that the test was busy confirming the existence of. Nothing was posted,
+ * and the stage roll-up this epic replaced is what landed, for exactly the failure
+ * modes the fallback exists for: an OOM, an evicted runner, a cancellation, or a
+ * failure early enough that the log was never written.
+ *
+ * The script is extracted from the file and executed up to the point where `msg` is
+ * final; the `jq` payload and the `curl` POST are cut off, so nothing here needs jq
+ * and nothing can reach `api.nemar.org`. `bash -e` is passed explicitly because
+ * that is what Actions does and it is the whole point.
+ */
+describe("the reporters survive a log with no failure marker", () => {
+  /** The `run:` body of one reporter step, dedented, cut where `msg` is final. */
+  function reporterScript(stage: "prepare" | "copy" | "finalize"): string {
+    const src = workflow();
+    const start = src.indexOf(`- name: Report ${stage} failure`);
+    expect(start).toBeGreaterThan(-1);
+    const runAt = src.indexOf("run: |", start);
+    expect(runAt).toBeGreaterThan(-1);
+    const body = src.slice(src.indexOf("\n", runAt) + 1);
+    const lines: string[] = [];
+    for (const line of body.split("\n")) {
+      // The step's body is indented under `run: |`; the first line at or below the
+      // step's own indentation ends it.
+      if (line.trim() !== "" && !line.startsWith("          ")) break;
+      lines.push(line.replace(/^ {10}/, ""));
+      if (line.includes('payload="$(jq -nc')) break;
+    }
+    const cut = lines.findIndex((l) => l.includes('payload="$(jq -nc'));
+    const kept = (cut === -1 ? lines : lines.slice(0, cut)).join("\n");
+    // `${{ matrix.shard }}` is an Actions expression, not shell: the copy reporter
+    // interpolates it into its log path. Substituted with a literal so the script
+    // runs, exactly as Actions would have substituted it before bash saw it.
+    return `${kept.replace(/\$\{\{ matrix\.shard \}\}/g, "0")}\nprintf '%s\\n' "$msg"\n`;
+  }
+
+  async function runReporter(
+    stage: "prepare" | "copy" | "finalize",
+    logContents: string | null,
+  ): Promise<{ code: number; out: string }> {
+    const dir = mkdtempSync(join(tmpdir(), "reporter-"));
+    const datasetId = "ds000001";
+    if (logContents !== null) {
+      const name = stage === "copy" ? `copy-${datasetId}-0.log` : `${stage}-${datasetId}.log`;
+      writeFileSync(join(dir, name), logContents);
+    }
+    const script = join(dir, "reporter.sh");
+    // The reporters hardcode /tmp; point them at the scratch directory instead so a
+    // parallel test (or a real /tmp file) cannot feed them.
+    writeFileSync(script, reporterScript(stage).replaceAll('"/tmp/', `"${dir}/`));
+    const proc = Bun.spawn(["bash", "-e", script], {
+      env: { ...process.env, DATASET_ID: datasetId, RUN_URL: "https://example/run/1" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [out, err] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    return { code: await proc.exited, out: out + err };
+  }
+
+  for (const stage of ["prepare", "copy", "finalize"] as const) {
+    test(`${stage}: a log with no marker yields the named fallback`, async () => {
+      const { code, out } = await runReporter(stage, "cloning...\nsome output\nno marker here\n");
+      expect(code).toBe(0);
+      expect(out).toContain(`${stage} failed with no CLI failure line captured`);
+    });
+
+    test(`${stage}: a MISSING log yields the named fallback`, async () => {
+      // The OOM and evicted-runner case: the step that would have written the log
+      // never got far enough to create it.
+      const { code, out } = await runReporter(stage, null);
+      expect(code).toBe(0);
+      expect(out).toContain(`${stage} failed with no CLI failure line captured`);
+    });
+
+    test(`${stage}: a real CLI failure line still wins over the fallback`, async () => {
+      // The fix must not have turned every report into the fallback.
+      const { code, out } = await runReporter(
+        stage,
+        `some output\n[31m✖[39m Failed to push: remote: Invalid username or token.\nmore\n`,
+      );
+      expect(code).toBe(0);
+      expect(out).toContain("Failed to push");
+      expect(out).not.toContain("no CLI failure line captured");
+      // ANSI stripped, marker removed, collapsed to one line.
+      expect(out).not.toContain("[");
+      expect(out).not.toContain("✖");
+    });
+  }
+
+  test("prepare still prefers the upstream-inaccessible marker when present", async () => {
+    // Its own branch, and the one case whose wording the classifier keys on.
+    const { code, out } = await runReporter(
+      "prepare",
+      "[openneuro-upstream-inaccessible] some detail\n",
+    );
+    expect(code).toBe(0);
+    expect(out).toContain("[openneuro-upstream-inaccessible]");
+    expect(out).toContain("not anonymously readable");
   });
 });
