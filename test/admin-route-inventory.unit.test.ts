@@ -116,6 +116,7 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /imports/:id/retry": 1,
   "POST /imports/:id/verify": 1,
   "POST /imports/dispatch-cooldown": 2,
+  "POST /imports/issue-triage": 1,
 
   // Staging exemplars (epic #923, Phase 5)
   "POST /datasets/exemplar": 2,
@@ -135,6 +136,12 @@ const EXPECTED_ENTRIES: Record<string, number> = {
 
   // Zarr fidelity verification sweep (issue #1068, epic #1181 phase 8)
   "POST /datasets/zarr-fidelity-sweep": 1,
+
+  // Import coverage sweep (issue #1311, epic #1306 phase 3)
+  "POST /imports/coverage-sweep": 1,
+
+  // Weekly import summary (issue #1312, epic #1306 phase 4)
+  "POST /imports/weekly-summary": 1,
 };
 
 describe("admin route inventory", () => {
@@ -167,7 +174,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(113);
+    expect(adminRoutes.routes.length).toBe(116);
   });
 
   // The count pin above can't see a SWAP of the two router-level middleware

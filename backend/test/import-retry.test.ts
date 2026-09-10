@@ -354,7 +354,15 @@ describe("IMPORT_RETRY_CANDIDATES_QUERY", () => {
     insertJob(db, {
       dataset_id: "on000001",
       status: "quarantined",
-      last_error: `quarantined: ${OPENNEURO_UPSTREAM_MARKER}`,
+      // The message production actually stores: the CLI's own marker line,
+      // preserved through recovery by the ADR 0051 rule. This fixture used to
+      // read `quarantined: ${OPENNEURO_UPSTREAM_MARKER}` -- a string no writer
+      // ever produced -- which let this test pass green while the real recovery
+      // path wrote "quarantined: upstream_inaccessible", dropped the bracketed
+      // marker, and left such rows permanently un-retryable. That end-to-end
+      // behaviour is now pinned in import-error.test.ts against the real
+      // runImportRecovery; this test covers the query predicate alone.
+      last_error: `${OPENNEURO_UPSTREAM_MARKER} OpenNeuro objects not anonymously readable; NEMAR has no signed OpenNeuro login (see run log)`,
     });
     insertJob(db, {
       dataset_id: "on000002",

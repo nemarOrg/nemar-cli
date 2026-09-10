@@ -321,7 +321,12 @@ jobs:
   unit-pure:
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true' || needs.changes.outputs.shared == 'true'
+    # `decisions` is here, not only on `lint`: test/adr-index.unit.test.ts is the
+    # thing that checks an ADR against the index, and `unit-pure` is the only job
+    # that runs test/*.test.ts at all -- `lint` runs tsc and biome. Adding the
+    # filter to `lint` alone left the index test still skipped on an ADR-only PR,
+    # which is the gap it was added to close.
+    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true' || needs.changes.outputs.shared == 'true' || needs.changes.outputs.decisions == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
