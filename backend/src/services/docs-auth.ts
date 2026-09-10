@@ -17,11 +17,30 @@
  * **Every timestamp is SQL-side.** `datetime('now', ...)` throughout, never a
  * JS `toISOString()` value. The two compare unequally on the same day and
  * silently break expiry, which is the trap ADR 0047 records for the device
- * flow.
+ * flow. That rule is not local to this file, and reviewing this one found where
+ * it was already broken: `web_sessions.expires_at` was written from JS, so an
+ * app session stayed live until the next UTC midnight past its expiry -- and
+ * `DOCS_GRANT_INSERT_SQL` below leans on exactly that column. Fixed in
+ * `services/web-session.ts` with migration 0084 for the rows already written.
  */
 
+import { DOCS_ADMIN_ROLES } from "../../../shared/contract/docs-auth.js";
 import { ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "./account-tier";
 import { generateCookieId, hashCookieId } from "./web-session";
+
+/**
+ * `DOCS_ADMIN_ROLES` as a SQL list, rendered from the constant rather than
+ * hand-spelled beside it -- the same construction (and the same reason)
+ * as `ACTIVE_ACCOUNT_STATUS_SQL_LIST`.
+ *
+ * The two spellings agreed when this was written, so this is about the drift
+ * rather than a live bug, and the drift is unusually nasty: adding a role to the
+ * constant while the SQL kept the old pair would make `grant` mint a code (200)
+ * that `exchange` then refuses (400 `invalid_grant`) -- a dead end with nothing
+ * in either answer to explain it. The values are compile-time constants from a
+ * contract module, never user input.
+ */
+const DOCS_ADMIN_ROLES_SQL_LIST = `(${DOCS_ADMIN_ROLES.map((role) => `'${role}'`).join(", ")})`;
 
 /** A one-time grant code: 256 random bits, URL-safe. Reuses the cookie-id
  *  generator rather than introducing a second random-token primitive, since
@@ -61,6 +80,13 @@ export const DOCS_GRANT_PRUNE_SQL = `DELETE FROM docs_grants
  * session the exchange later mints records that the identity behind it was
  * proven by ORCID rather than resetting that history at the host boundary.
  *
+ * The re-proof is only ever as strong as the row it reads, which is why the
+ * expiry-format fix in `services/web-session.ts` belongs to this feature and not
+ * to some tidy-up later: while that column held JS ISO strings, `ws.expires_at >
+ * datetime('now')` was satisfied by an app session that had expired earlier the
+ * same day, and this statement would mint a fresh eight-hour docs session off
+ * it.
+ *
  * `ws.scope = 'app'` is load-bearing: without it a docs session could be used
  * to mint another docs session, which would let one eight-hour grant renew
  * itself indefinitely without ever revisiting the app host.
@@ -88,8 +114,9 @@ export const DOCS_GRANT_INSERT_SQL = `INSERT INTO docs_grants (code_hash, user_i
  *
  * The gates, and why each is here rather than in the route:
  *   - `dg.expires_at > datetime('now')` - the grant is still claimable.
- *   - `u.role IN ('admin','owner')`     - re-read at mint, not trusted from
- *                                         the grant.
+ *   - `u.role IN ${DOCS_ADMIN_ROLES_SQL_LIST}` - re-read at mint, not trusted
+ *                                         from the grant, and rendered from the
+ *                                         one declaration of that rule.
  *   - `u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}` plus `deleted_at IS NULL`
  *     - the SAME status rule the API's own cookie path applies
  *     (`isActiveAccountStatus` in `middleware/auth.ts`), not a hand-rolled
@@ -115,7 +142,7 @@ export const DOCS_MINT_INSERT_SQL = `INSERT INTO web_sessions
      JOIN users u ON u.id = dg.user_id
     WHERE dg.code_hash = ?
       AND dg.expires_at > datetime('now')
-      AND u.role IN ('admin', 'owner')
+      AND u.role IN ${DOCS_ADMIN_ROLES_SQL_LIST}
       AND u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}
       AND u.deleted_at IS NULL`;
 
@@ -137,10 +164,16 @@ export const DOCS_MINT_CONSUME_SQL = `DELETE FROM docs_grants
 /**
  * Revoke every docs session belonging to one account. Binds: userId.
  *
- * Called by `/auth/logout`. Without it, signing out of nemar.org would leave
- * docs access live for up to eight hours, which is not what anyone means by
- * signing out, and it is the specific failure the core principle about
- * revocation cascading to linked credentials is meant to prevent.
+ * Called by `/auth/logout` and by an admin role demotion. Without it, signing
+ * out of nemar.org would leave docs access live for up to eight hours, which is
+ * not what anyone means by signing out, and it is the specific failure the core
+ * principle about revocation cascading to linked credentials is meant to
+ * prevent.
+ *
+ * The other two callers that end a credential do NOT use this one, and should
+ * not: `finalizeRevocation` and the owner-only soft delete revoke every session
+ * of every scope for the account, which is a superset. This statement is for the
+ * cases where the app session legitimately survives.
  */
 export const DOCS_REVOKE_ALL_SQL = `UPDATE web_sessions
       SET revoked_at = datetime('now')
@@ -151,11 +184,17 @@ export const DOCS_REVOKE_ALL_SQL = `UPDATE web_sessions
 /**
  * Delete every outstanding grant for one account. Binds: userId.
  *
- * Called by `/auth/logout` alongside {@link DOCS_REVOKE_ALL_SQL}. Revoking live
- * sessions is not enough on its own: a grant is a 60-second licence to create a
- * new eight-hour session, held by whoever has the code, and the mint checks the
- * ACCOUNT rather than the app session that authorized it. So a code captured from
- * the callback URL survived sign-out and could still be spent. Signing out must
- * end what can still create access, not only the access that exists.
+ * Revoking live sessions is not enough on its own: a grant is a 60-second
+ * licence to create a new eight-hour session, held by whoever has the code, and
+ * the mint checks the ACCOUNT rather than the app session that authorized it. So
+ * a code captured from the callback URL (browser history, a `Referer`, a log)
+ * survived sign-out and could still be spent. Ending access has to end what can
+ * still create access, not only the access that exists.
+ *
+ * FOUR CALLERS, and the count is the point: every path that ends or downgrades
+ * this credential runs this statement -- `/auth/logout`, `finalizeRevocation`, a
+ * role demotion, and the owner-only soft delete. The FK's `ON DELETE CASCADE`
+ * covers none of them, because none of them deletes the `users` row. A fifth
+ * path that ends a credential needs this line too.
  */
 export const DOCS_GRANTS_PURGE_SQL = "DELETE FROM docs_grants WHERE user_id = ?";

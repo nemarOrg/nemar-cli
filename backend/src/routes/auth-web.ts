@@ -110,6 +110,7 @@ import {
   maybeSlideExpiry,
   prepareSessionInsert,
   revokeSession,
+  userIdForCookieId,
 } from "../services/web-session";
 import { type Bindings, type UserRole, type Variables, parseRole } from "../types/bindings";
 
@@ -754,7 +755,23 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
   // prevent. Best-effort and logged, for the same reason the revoke above is:
   // the person asked to sign out, so a D1 blip must not turn that into an
   // error response.
-  const userId = c.var.webUser?.id;
+  //
+  // THE ACCOUNT IS RESOLVED FROM THE PRESENTED COOKIE, NOT FROM `webUser`, and
+  // that distinction is the whole fix. `webUser` exists only when the app
+  // session is still live, while a docs session runs eight hours from its mint
+  // and a non-remember app session 24 hours from sign-in -- so the windows do
+  // not nest, and review found the case: signing out with a lapsed app cookie
+  // answered `ok`, cleared the cookie, and left the docs session and its
+  // outstanding grants fully spendable. `userIdForCookieId` drops exactly the
+  // predicates that made that happen.
+  let userId = c.var.webUser?.id ?? null;
+  if (!userId) {
+    try {
+      userId = await userIdForCookieId(c.env, cookieIdRaw);
+    } catch (err) {
+      console.error("[auth-web] /logout: could not resolve account for docs revoke", err);
+    }
+  }
   if (userId) {
     try {
       await c.env.DB.batch([
