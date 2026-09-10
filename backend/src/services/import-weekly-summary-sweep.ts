@@ -70,9 +70,16 @@ export const WEEKLY_SUMMARY_AUDIT_ACTION = "import_weekly_summary";
 /** The last posted summary, for the once-per-week gate. `ORDER BY id DESC` rather
  *  than by timestamp, matching `AUTO_IMPORT_GATE_QUERY`: `id` is insertion order and
  *  is immune to a clock skew that `timestamp` is not. */
-/** Releases a reservation whose post then failed. Keyed on the week label, which is
- *  what `resourceId` carries, so it cannot delete another week's row. */
-export const WEEKLY_SUMMARY_RELEASE_SQL = `DELETE FROM audit_log WHERE action = '${WEEKLY_SUMMARY_AUDIT_ACTION}' AND resource_id = ?`;
+/**
+ * Releases a reservation whose post then failed, BY ROW ID.
+ *
+ * Keyed on the week label it would also delete a reservation from an EARLIER,
+ * successful post of the same week -- a manual re-file, say -- destroying the durable
+ * record of that post, in a table the rest of the system treats as append-only. The
+ * id comes from the insert's own `meta.last_row_id`, so exactly the row this run
+ * wrote is removed, or nothing is.
+ */
+export const WEEKLY_SUMMARY_RELEASE_SQL = "DELETE FROM audit_log WHERE id = ?";
 
 export const WEEKLY_SUMMARY_GATE_QUERY = `SELECT timestamp FROM audit_log WHERE action = '${WEEKLY_SUMMARY_AUDIT_ACTION}' ORDER BY id DESC LIMIT 1`;
 
@@ -157,8 +164,23 @@ export const PARKED_QUERY = `SELECT dataset_id, blocklist_reason, first_incomple
  * reported as CURRENT STATE by `gatherCoverage`, so summing its transitions here
  * would report the same thing twice in two tenses.
  */
+/**
+ * The window is bound EXPLICITLY, not `datetime('now', ?)`.
+ *
+ * SQL-side `now` is evaluated when the query runs, which here is minutes into the
+ * tick -- after the gate, after `gatherImports`, and after `gatherCoverage`'s full
+ * paginated OpenNeuro scan, whose duration varies a lot. So consecutive weekly
+ * reports did not tile: when this week's query ran later than last week's, the rows
+ * in between appeared in NEITHER report; when it ran earlier, they appeared in both.
+ * Monday's own triage row sits exactly on that boundary, so it was the row most
+ * likely to be dropped -- and dropping it under-reports recoveries, which reads as
+ * good news.
+ *
+ * Bound from the same `now` the report already fixes for `facts.windowStart`, so the
+ * window the numbers cover is the window the report claims.
+ */
 export const SWEEP_ACTIVITY_QUERY = `SELECT details FROM audit_log
-   WHERE action = 'import_issue_triage' AND timestamp >= datetime('now', ?)`;
+   WHERE action = 'import_issue_triage' AND timestamp >= ? AND timestamp < ?`;
 
 /**
  * What happened to this week's issue.
@@ -228,6 +250,18 @@ export interface WeeklySummaryDeps {
  * across an OpenNeuro scan. The body states the bounds it was given, so treat those as
  * the authority to within a few minutes rather than to the second.
  */
+/**
+ * A JS instant in SQLite's `datetime()` shape: "YYYY-MM-DD HH:MM:SS", UTC, no zone.
+ *
+ * Required because `audit_log.timestamp` is written by `datetime('now')` and string
+ * comparison is what the index uses. An ISO string with the `T` and the `Z` sorts
+ * differently from SQLite's own format on the same instant, which is the mistake
+ * ADR 0047 records for the device flow -- the same trap, one table over.
+ */
+function toSqliteUtc(d: Date): string {
+  return d.toISOString().slice(0, 19).replace("T", " ");
+}
+
 const WINDOW_DAYS = 7;
 const WINDOW_MODIFIER = `-${WINDOW_DAYS} days`;
 const WINDOW_MS = WINDOW_DAYS * 86_400_000;
@@ -313,7 +347,7 @@ export async function runWeeklyImportSummary(
   await gatherCoverage(env, facts, deps);
   await gatherFailures(env, facts);
   await gatherParked(env, facts, now);
-  await gatherSweepActivity(env, facts);
+  await gatherSweepActivity(env, facts, now);
 
   // Rendered before posting, and returned whether or not the post happens: a dry
   // run's whole value is seeing this.
@@ -462,15 +496,22 @@ async function gatherParked(env: Bindings, facts: WeeklySummaryFacts, now: Date)
  * admin routes wrote them, so this is `unknown` for the first week -- which is the
  * honest answer, not a bug.
  */
-async function gatherSweepActivity(env: Bindings, facts: WeeklySummaryFacts): Promise<void> {
+async function gatherSweepActivity(
+  env: Bindings,
+  facts: WeeklySummaryFacts,
+  now: Date,
+): Promise<void> {
   try {
+    // The same instant `facts.windowStart` was derived from, so consecutive reports
+    // tile exactly instead of drifting by however long the OpenNeuro scan took.
     const rows = await env.DB.prepare(SWEEP_ACTIVITY_QUERY)
-      .bind(WINDOW_MODIFIER)
+      .bind(toSqliteUtc(new Date(now.getTime() - WINDOW_MS)), toSqliteUtc(now))
       .all<{ details: string | null }>();
     if (!rows.results) throw new Error("D1 returned null results");
     let closed = 0;
     let relabelled = 0;
     let cronRows = 0;
+    let failedRuns = 0;
     for (const r of rows.results) {
       if (!r.details) {
         // Cannot be attributed to the cron or counted. Reported rather than skipped,
@@ -481,7 +522,13 @@ async function gatherSweepActivity(env: Bindings, facts: WeeklySummaryFacts): Pr
         });
         continue;
       }
-      let d: { source?: string; closed?: number; relabelled?: number };
+      let d: {
+        source?: string;
+        closed?: number | null;
+        relabelled?: number | null;
+        failed?: boolean;
+        error?: string;
+      };
       try {
         d = JSON.parse(r.details);
       } catch {
@@ -494,12 +541,28 @@ async function gatherSweepActivity(env: Bindings, facts: WeeklySummaryFacts): Pr
       // The cron's own rows only: see the note on SWEEP_ACTIVITY_QUERY.
       if (d.source !== "cron") continue;
       cronRows++;
+      // A row from a run that THREW proves the cron ran -- which is why it counts
+      // toward `cronRows` -- but measured nothing, so it contributes no counts and is
+      // surfaced instead. Without this the week would read as quiet when in fact
+      // every run failed, and "the token expired" is the likeliest cause.
+      if (d.failed === true) {
+        failedRuns++;
+        facts.errors.push({
+          stage: "sweep-activity",
+          error: `a daily triage run failed: ${d.error ?? "no reason recorded"}`,
+        });
+        continue;
+      }
       closed += typeof d.closed === "number" ? d.closed : 0;
       relabelled += typeof d.relabelled === "number" ? d.relabelled : 0;
     }
     // No CRON rows at all leaves both null. The crons write one per run, so an absence
     // means they did not run -- unknown, not zero.
     if (cronRows === 0) return;
+    // Every row we found was a failure: the cron ran and never once completed, so
+    // there is no measurement to report. Null, not zero, and the per-run errors above
+    // say why.
+    if (failedRuns === cronRows) return;
     facts.issuesClosed = closed;
     facts.issuesRelabelled = relabelled;
   } catch (err) {
@@ -547,10 +610,22 @@ async function postWeeklySummary(
   const pat = await token(env);
   const open = await listOpenIssues(IMPORT_FAILURE_ISSUES_REPO, IMPORT_WEEKLY_ISSUE_LABEL, pat);
 
-  if (open.some((i) => i.title === title)) {
+  const existing = open.find((i) => i.title === title);
+  if (existing) {
     // The title dedup caught what the audit gate did not -- a D1 gate row lost, or
     // two invocations racing. Not an error: the week is already reported.
-    return { issue: { number: null, action: "would-create" }, closedPrevious: null, posted: false };
+    //
+    // `already-filed`, NOT `would-create`. The type declared this value and the log
+    // formatter branched on it, but nothing ever returned it, so an APPLIED run that
+    // landed here logged "not posted (dry run)" -- and `index.ts` escalates that line
+    // to console.error, making the loudest line of the week a false one. The issue
+    // number is carried too: an operator asking why nothing was posted wants the
+    // thing that already exists.
+    return {
+      issue: { number: existing.number, action: "already-filed" },
+      closedPrevious: null,
+      posted: false,
+    };
   }
 
   if (!ctx.apply) {
@@ -560,8 +635,9 @@ async function postWeeklySummary(
   const body = ctx.body;
 
   // Reserve first. A failure here means no post, which is the safe direction.
+  let reservationId: number | null = null;
   try {
-    await auditLogStatement(env.DB, {
+    const written = await auditLogStatement(env.DB, {
       userId: null,
       action: WEEKLY_SUMMARY_AUDIT_ACTION,
       resourceType: "issue",
@@ -576,6 +652,11 @@ async function postWeeklySummary(
         errors: facts.errors.length,
       }),
     }).run();
+    // D1 reports the inserted rowid here. If a future driver stops doing so this
+    // stays null and the release below simply does not fire, which fails in the
+    // burn-the-week direction rather than deleting the wrong row.
+    const rowId = (written as { meta?: { last_row_id?: number } }).meta?.last_row_id;
+    reservationId = typeof rowId === "number" ? rowId : null;
   } catch (err) {
     // Refuse to post without the reservation: posting anyway risks one issue per
     // day for as long as the write keeps failing.
@@ -599,7 +680,10 @@ async function postWeeklySummary(
     // gate only on a DRY run. Releasing keeps the anti-duplicate property without
     // the trap.
     try {
-      await env.DB.prepare(WEEKLY_SUMMARY_RELEASE_SQL).bind(facts.week).run();
+      if (reservationId === null) {
+        throw new Error("the reservation row id was not reported, so it cannot be released");
+      }
+      await env.DB.prepare(WEEKLY_SUMMARY_RELEASE_SQL).bind(reservationId).run();
     } catch (releaseErr) {
       // Now the week really is burnt, so say so loudly: this is the one state an
       // operator must know about, since the next attempt is seven days away.

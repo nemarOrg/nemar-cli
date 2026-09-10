@@ -92,6 +92,7 @@ import {
   buildRollupReleaseComment,
   decideIssueAction,
   decideIssueMode,
+  isMachineWrittenRollupTitle,
 } from "./import-issue-accrual.js";
 import {
   IMPORT_FAILURE_ISSUES_REPO,
@@ -280,8 +281,14 @@ export async function runImportIssueSweep(
   // and latch the mode on forever.
   // Typed from the result rather than inferred, because the release loop below
   // stamps `outcome` onto these same objects.
+  // Label AND title. The label alone let this loop close anything carrying
+  // `import-rollup` -- see `isMachineWrittenRollupTitle` for what that cost.
   const rollups: ImportIssueSweepResult["rollups"] = open
-    .filter((i) => issueLabelNames(i).includes(IMPORT_ROLLUP_ISSUE_LABEL))
+    .filter(
+      (i) =>
+        issueLabelNames(i).includes(IMPORT_ROLLUP_ISSUE_LABEL) &&
+        isMachineWrittenRollupTitle(i.title),
+    )
     .map((i) => ({ number: i.number, title: i.title }));
   // Sorted by issue number, i.e. oldest first, so the candidate order is this
   // sweep's own and not GitHub's default `sort=created&direction=desc`. The
@@ -595,7 +602,19 @@ export async function runImportIssueSweepCron(
     console.log("[import-issue-sweep] skipped (non-production)");
     return null;
   }
-  const result = await runImportIssueSweep(env, { apply: true }, deps);
+  // A run that THREW must still leave a row, or phase 4 reads zero rows and reports
+  // "the daily jobs may not be running" -- pointing an operator at cron wiring for
+  // what is, most often, an expired token. `runImportIssueSweep` throws outright when
+  // it cannot mint a token, cannot list issues, or gets a labelless response, so
+  // "ran and broke" is a realistic weekly state and it must not read as "did not
+  // run". That distinction is this phase's whole thesis.
+  let result: ImportIssueSweepResult;
+  try {
+    result = await runImportIssueSweep(env, { apply: true }, deps);
+  } catch (err) {
+    await recordCronActivity(env, null, err);
+    throw err;
+  }
   await recordCronActivity(env, result);
   return result;
 }
@@ -622,24 +641,52 @@ export async function runImportIssueSweepCron(
  * uses. Best-effort: this is bookkeeping about work that already happened, so a
  * failed write must not turn a successful sweep into an error.
  */
-async function recordCronActivity(env: Bindings, result: ImportIssueSweepResult): Promise<void> {
+/**
+ * The heartbeat row. `result === null` means the run threw before producing one.
+ *
+ * A row on EVERY run, including a failed one, is what lets phase 4 tell three states
+ * apart: the cron ran and closed things, the cron ran and found nothing to do, and
+ * the cron did not run. Gating the write on "something changed" collapsed the middle
+ * two; gating it on "the run succeeded" collapses a broken token into "not running".
+ * The counts are null on the failed path rather than 0, for the same reason
+ * everything else in this epic distinguishes them.
+ */
+async function recordCronActivity(
+  env: Bindings,
+  result: ImportIssueSweepResult | null,
+  failure?: unknown,
+): Promise<void> {
   try {
     await auditLogStatement(env.DB, {
       userId: null,
       action: "import_issue_triage",
       resourceType: "issue",
-      resourceId: result.plan
-        .filter((e) => e.kind !== "keep" && !e.failed)
-        .map((e) => e.datasetId ?? `#${e.issueNumber}`)
-        .join(","),
-      details: JSON.stringify({
-        source: "cron",
-        closed: result.closed,
-        relabelled: result.relabelled,
-        kept: result.kept,
-        rollups_released: result.rollupsReleased,
-        errors: result.errors.length,
-      }),
+      resourceId:
+        result === null
+          ? ""
+          : result.plan
+              .filter((e) => e.kind !== "keep" && !e.failed)
+              .map((e) => e.datasetId ?? `#${e.issueNumber}`)
+              .join(","),
+      details: JSON.stringify(
+        result === null
+          ? {
+              source: "cron",
+              ran: true,
+              failed: true,
+              error: failure instanceof Error ? failure.message : String(failure),
+              closed: null,
+              relabelled: null,
+            }
+          : {
+              source: "cron",
+              closed: result.closed,
+              relabelled: result.relabelled,
+              kept: result.kept,
+              rollups_released: result.rollupsReleased,
+              errors: result.errors.length,
+            },
+      ),
     }).run();
   } catch (err) {
     console.error("[import-issue-sweep] audit row failed after applying:", err);

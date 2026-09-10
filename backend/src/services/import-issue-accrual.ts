@@ -77,8 +77,27 @@ export function decideIssueMode(args: {
 
 /** Deterministic per-cause rollup title -- doubles as its dedup key, exactly as
  *  {@link importFailureIssueTitle} does for the per-dataset issues. */
+export const ROLLUP_TITLE_PREFIX = "Import failures (rollup): ";
+
 export function rollupIssueTitle(cause: string): string {
-  return `Import failures (rollup): ${cause}`;
+  return `${ROLLUP_TITLE_PREFIX}${cause}`;
+}
+
+/**
+ * Is this title one THIS code writes?
+ *
+ * The release loop used to select rollups by label alone, so any issue carrying
+ * `import-rollup` was closed and commented as "a release of the rollup mode" --
+ * including a hand-written consolidation issue, a triage meta-issue, a mislabel, or
+ * (since `listOpenIssuesByLabel` does not filter them) a pull request. Every other
+ * mutation in this epic is title-guarded: a per-dataset close needs an exact
+ * rebuilt-title match, the coverage sweep matches a constant title, and the weekly
+ * rollover parses its week label. This was the one path without that guard, and the
+ * comment it leaves is a false statement about a document the automation did not
+ * write -- unrecoverable by re-running.
+ */
+export function isMachineWrittenRollupTitle(title: string): boolean {
+  return title.startsWith(ROLLUP_TITLE_PREFIX);
 }
 
 /**

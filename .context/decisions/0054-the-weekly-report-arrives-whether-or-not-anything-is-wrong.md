@@ -64,11 +64,33 @@ issues for one week. What actually caps the damage is the Monday-only day guard,
 cron attempt per week; the two mechanisms are defence in depth against ordinary repetition, not a
 distributed lock. Do not describe them as one.
 
+**The window is bound from the report's own `now`, not from SQL's.** `datetime('now', '-7 days')` is
+evaluated when the query runs, which is minutes into the tick and after a full paginated OpenNeuro
+scan whose duration varies -- so consecutive reports did not tile. A row in the gap appeared in
+neither week; with the drift the other way, in both. Monday's own triage row sits exactly on that
+boundary, and under-reporting recoveries reads as good news. Both bounds are now bound explicitly
+from the same instant `windowStart` is derived from, formatted in SQLite's own zone-less shape --
+comparing an ISO string against `datetime('now')` output is the trap ADR 0047 records for the device
+flow, one table over.
+
+**A daily cron writes its heartbeat even when it THROWS.** Three states have to be distinguishable,
+not two: the job ran and did things, the job ran and had nothing to do, and the job did not run.
+Gating the write on "something changed" collapsed the middle two; gating it on "the run succeeded"
+collapses a broken token into "did not run" -- and `runImportIssueSweep` throws outright when it
+cannot mint a token, cannot list issues, or gets a labelless response, so a week of failed runs is
+a realistic state whose likeliest cause is an expired PAT. A failed row carries `failed: true` with
+null counts, proves the cron ran, contributes nothing to the totals, and puts its reason in the
+report's errors. A week where EVERY run failed leaves the counts unknown rather than zero.
+
 The audit row is written before the GitHub call, and **deleted again if the post fails**. Reserving
 first is `autoImportTick`'s rule, but that rule assumes a caller that retries every 30 minutes; here
 the day guard already prevents repetition, so an un-released reservation would burn the whole week
 and leave no operator path to re-file. Release-on-failure keeps the anti-duplicate property without
-the trap.
+the trap. The delete is **by row id**, taken from the insert's own `meta.last_row_id`: keyed on the
+week label it would also delete a reservation from an earlier, successful post of the same week --
+a manual re-file -- destroying that record in a table the rest of the system treats as append-only.
+If the driver ever stops reporting the id, the release does not fire, which errs toward burning the
+week rather than deleting the wrong row.
 
 **The title names the week the data COVERS, not the week the run happens in.** The cron fires Monday
 03:00 UTC over the preceding seven days, so deriving the label from the run instant titled an issue
@@ -145,6 +167,32 @@ dead cron (it never ran) -- both produce zero rows. That is the exact discrimina
 exists to provide, absent from the one section whose job is to show the daily jobs are alive. So the
 triage cron records every run, and the weekly report reads an absence of rows as `unknown` **and as
 needing attention**, rather than as a quiet week.
+
+**The TOCTOU window is as wide as an OpenNeuro scan, and the day guard is what actually caps
+repetition.** The gate is read first and the reservation is written last, after `gatherCoverage`, so
+"neither mechanism is a lock" is wider than it sounds: a manual `apply` fired during the Monday tick
+passes the gate, misses the title dedup because neither run has created yet, and files a second issue
+for the week. The title dedup now reports `already-filed` when it catches this, so the state is at
+least legible after the fact. Accepted rather than locked, because the Monday-only guard allows one
+cron attempt per week and a distributed lock in D1 is a much larger commitment than the failure
+justifies.
+
+**Losing the Monday tick loses the week, with no catch-up.** `shouldRunWeeklySummary` is stricter
+than the gate, which is week-based and would allow Tue-Sun. So a missed invocation -- a deploy, a
+platform hiccup, an exhausted subrequest budget -- produces no report and no other signal, in the
+phase whose thesis is that absence is invisible. Monday is also the tick carrying the most work.
+Accepted for now because a Mon-or-later guard widens the race above; if a week is ever actually lost,
+prefer widening the guard over adding a lock, and say so here.
+
+**Three jobs on one tick share an unbudgeted subrequest and wall-clock allowance.** `scheduled()`
+issues 16 `ctx.waitUntil` calls, and this epic adds three of them. On Mondays that includes two full
+paginated OpenNeuro scans (plus a third from the concurrent 30-minute tick), four paginated GitHub
+issue listings, and up to 15 manifest-plus-listing round trips from the triage sweep -- alongside the
+zarr fidelity sweep, which reserves 600 fetches by itself. Nothing sums them. The failure direction
+is mostly right: an exhausted budget surfaces as a per-row error or as `unknown`, both of which this
+epic states rather than hides. The exception is a throw between the weekly reservation and its
+release, where the release is itself another D1 call; that is the realistic path into a burnt week,
+and it is likeliest on the one day the report is due.
 
 **Production-only, and not on the dev-cron allowlist**, for the same reason as ADRs 0052 and 0053: it
 files and closes real issues on the `nemarDatasets` org that dev shares with production. Two fences,

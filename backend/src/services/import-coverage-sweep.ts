@@ -101,6 +101,30 @@ export const BACKLOG_JOBS_QUERY = "SELECT source_id, status, blocklisted FROM im
 export const COVERAGE_LAST_DISPATCH_QUERY =
   "SELECT resource_id, timestamp FROM audit_log WHERE action = 'auto_import_dispatch' ORDER BY id DESC LIMIT 1";
 
+/**
+ * The FIRST time we dispatched the id the latest row names, and how many times.
+ *
+ * This exists because the obvious reading -- age the latest dispatch row -- makes
+ * `dispatch-lost` unreachable in the deployed configuration, which is the opposite
+ * of what ADR 0053 claims for it.
+ *
+ * The chain: a dataset with no `import_jobs` row is ALWAYS pickable
+ * (`pickNextDataset`'s `if (!j) return true; // fresh`), the audit row is written
+ * BEFORE the GitHub hand-off (deliberately, so a crash cannot double-dispatch), and
+ * production runs a 30-minute tick with a 25-minute gate. So a wedged dataset is
+ * re-picked and re-stamped every ~30 minutes, and the age of the LATEST row is
+ * always ~0 -- it can never reach {@link COVERAGE_DISPATCH_LOST_HOURS}. The two
+ * conditions were mutually exclusive: "we have been picking this id for six hours"
+ * and "the newest row for it is six hours old" are not the same statement, and only
+ * the first is the one worth alarming on.
+ *
+ * `attempts` is reported alongside, because "picked 47 times, still untracked" is
+ * the sentence that makes the fault obvious to whoever reads the issue.
+ */
+export const COVERAGE_ID_DISPATCH_HISTORY_QUERY = `SELECT MIN(timestamp) AS first_at, COUNT(*) AS attempts
+   FROM audit_log
+   WHERE action = 'auto_import_dispatch' AND resource_id = ?`;
+
 /** What happened to the standing issue. `refreshed` is a body rewrite with no
  *  change of kind, i.e. the routine daily case; `relabelled` is a kind change. */
 export type CoverageIssueAction = "created" | "refreshed" | "relabelled" | "closed";
@@ -124,6 +148,14 @@ export interface ImportCoverageSweepResult {
   /** The last dispatch named a dataset that still has no `import_jobs` row long
    *  after it should have: the hand-off is failing after the audit row is written. */
   dispatchLost: boolean;
+  /** How long we have been dispatching the id the latest row names, measured from
+   *  the FIRST such row -- null when that id is not an untracked backlog entry, so
+   *  the question does not arise. Not the latest row's age (`dispatchAgeHours`),
+   *  which is ~0 for a wedged dataset by construction. */
+  dispatchStuckHours: number | null;
+  /** How many times that id has been dispatched. "Picked 47 times, still untracked"
+   *  is what makes the fault legible in the issue. */
+  dispatchAttempts: number | null;
   /** In-scope datasets the scan reported. */
   discovered: number;
   /** Managed mirrors in D1, however many the scan still returns. */
@@ -242,6 +274,8 @@ export async function runImportCoverageSweep(
     dispatchAgeHours: null,
     lastDispatchSourceId: null,
     dispatchLost: false,
+    dispatchStuckHours: null,
+    dispatchAttempts: null,
     discovered: 0,
     imported: 0,
     importedInScan: 0,
@@ -344,11 +378,30 @@ export async function runImportCoverageSweep(
     // upstream, or out of scope since -- and neither says anything about the
     // hand-off. Being in `neverAttempted` is the precise statement: we picked it,
     // nothing is tracking it, and it is still missing.
-    result.dispatchLost =
+    //
+    // Aged from the FIRST dispatch naming this id, not the latest row: see
+    // COVERAGE_ID_DISPATCH_HISTORY_QUERY for why the latest row's age is always ~0
+    // for exactly the dataset this check is about. Re-dispatching the same id only
+    // makes the first-seen instant older, which is the correct direction.
+    if (
       result.lastDispatchSourceId !== null &&
-      result.dispatchAgeHours !== null &&
-      result.dispatchAgeHours >= COVERAGE_DISPATCH_LOST_HOURS &&
-      backlog.neverAttempted.includes(result.lastDispatchSourceId);
+      backlog.neverAttempted.includes(result.lastDispatchSourceId)
+    ) {
+      const history = await env.DB.prepare(COVERAGE_ID_DISPATCH_HISTORY_QUERY)
+        .bind(result.lastDispatchSourceId)
+        .first<{ first_at: string | null; attempts: number }>();
+      const firstMs = history?.first_at == null ? null : parseSqliteUtc(history.first_at);
+      if (history?.first_at != null && firstMs === null) {
+        result.errors.push({
+          stage: "anomaly",
+          error: `first auto_import_dispatch timestamp for ${result.lastDispatchSourceId} is unparseable: ${JSON.stringify(history.first_at)}`,
+        });
+      }
+      const stuckHours = hoursSince(firstMs, now.getTime());
+      result.dispatchStuckHours = stuckHours;
+      result.dispatchAttempts = history?.attempts ?? null;
+      result.dispatchLost = stuckHours !== null && stuckHours >= COVERAGE_DISPATCH_LOST_HOURS;
+    }
   } catch (err) {
     result.errors.push({ stage: "d1", error: errText(err) });
     result.reason = "D1 read failed, so coverage could not be determined this run.";
@@ -362,6 +415,8 @@ export async function runImportCoverageSweep(
     lastDispatchSourceId: result.lastDispatchSourceId,
     dispatchAgeHours: result.dispatchAgeHours,
     dispatchLost: result.dispatchLost,
+    dispatchStuckHours: result.dispatchStuckHours,
+    dispatchAttempts: result.dispatchAttempts,
     backlog,
   });
   result.status = verdict.status;

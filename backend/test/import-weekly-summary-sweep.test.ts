@@ -102,12 +102,20 @@ function sqliteUtc(d: Date): string {
   return d.toISOString().slice(0, 19).replace("T", " ");
 }
 
-/** An `import_issue_triage` audit row, as phase 2's cron now writes. */
+/**
+ * An `import_issue_triage` audit row, as phase 2's cron now writes.
+ *
+ * Dated relative to the INJECTED clock, not SQLite's `datetime('now')`. The window
+ * is now bound from the same `now` the report fixes `windowStart` from -- the whole
+ * point of that change -- so a fixture anchored to the real wall clock lands outside
+ * a window centred on 2026-09-07 and the row silently does not count. Same
+ * two-clocks trap the `first_incomplete_at` fixtures hit earlier.
+ */
 function seedTriageAudit(db: Database, details: Record<string, unknown>, daysAgo = 1): void {
   db.query(
     `INSERT INTO audit_log (action, resource_type, resource_id, details, timestamp)
-     VALUES ('import_issue_triage', 'issue', 'x', ?, datetime('now', ?))`,
-  ).run(JSON.stringify(details), `-${daysAgo} days`);
+     VALUES ('import_issue_triage', 'issue', 'x', ?, ?)`,
+  ).run(JSON.stringify(details), sqliteUtc(new Date(NOW.getTime() - daysAgo * 86_400_000)));
 }
 
 function coverageResult(over: Partial<ImportCoverageSweepResult> = {}): ImportCoverageSweepResult {
@@ -764,17 +772,185 @@ describe("the import window boundary is inclusive", () => {
   });
 });
 
+describe("a week of FAILED cron runs is not a quiet week", () => {
+  /**
+   * The third state, from the report's side. A failed heartbeat proves the cron ran,
+   * so it must not trigger "the daily jobs may not be running" -- but it measured
+   * nothing, so it must not read as "0 recovered" either. An expired PAT is the
+   * likeliest way to get a week of these, and both wrong answers point the operator
+   * away from it.
+   */
+  test("all runs failed: counts stay unknown and the reason is surfaced", async () => {
+    const db = freshDb();
+    for (const daysAgo of [1, 2, 3]) {
+      seedTriageAudit(
+        db,
+        { source: "cron", ran: true, failed: true, error: "Bad credentials" },
+        daysAgo,
+      );
+    }
+
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+
+    expect(r.facts?.issuesClosed).toBeNull();
+    expect(r.facts?.issuesRelabelled).toBeNull();
+    const said = r.facts?.errors.filter((e) => e.stage === "sweep-activity") ?? [];
+    expect(said).toHaveLength(3);
+    expect(said[0]?.error).toContain("Bad credentials");
+  });
+
+  test("a mix of failed and successful runs reports the successful counts", async () => {
+    const db = freshDb();
+    seedTriageAudit(db, { source: "cron", ran: true, failed: true, error: "HTTP 502" }, 3);
+    seedTriageAudit(db, { source: "cron", closed: 2, relabelled: 1 }, 2);
+    seedTriageAudit(db, { source: "cron", closed: 1, relabelled: 0 }, 1);
+
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+
+    // The failure does not zero the week, and the successes are not hidden by it.
+    expect(r.facts?.issuesClosed).toBe(3);
+    expect(r.facts?.issuesRelabelled).toBe(1);
+    expect(r.facts?.errors.some((e) => e.error.includes("HTTP 502"))).toBe(true);
+  });
+});
+
+describe("the window tiles between consecutive weeks", () => {
+  /**
+   * The window used to be `datetime('now', '-7 days')`, evaluated when the query ran
+   * -- minutes into the tick, after a full paginated OpenNeuro scan whose duration
+   * varies. So week N's window started later or earlier than week N-1's ended, and
+   * rows in the gap appeared in NEITHER report (or, the other way, in both). Monday's
+   * own triage row sits exactly on that boundary, and under-reporting recoveries
+   * reads as good news.
+   */
+  test("a row exactly at the window start is counted", async () => {
+    const db = freshDb();
+    seedTriageAudit(db, { source: "cron", closed: 3 }, 7);
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+    expect(r.facts?.issuesClosed).toBe(3);
+  });
+
+  test("a row just before the window start is not", async () => {
+    const db = freshDb();
+    seedTriageAudit(db, { source: "cron", closed: 3 }, 7.001);
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+    // NULL, not 0: no cron rows in the window means the section could not see, which
+    // this phase reports as unknown and treats as needing attention. A 0 here would
+    // be the founding confusion -- "nothing recovered" versus "nothing recorded".
+    expect(r.facts?.issuesClosed).toBeNull();
+  });
+
+  test("a row after `now` is excluded, so next week's report owns it", async () => {
+    // The upper bound is what makes the windows tile rather than overlap: without it
+    // a row written between this query and the report's own `now` would be counted
+    // twice, once here and once next week.
+    const db = freshDb();
+    seedTriageAudit(db, { source: "cron", closed: 5 }, -0.5);
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+    expect(r.facts?.issuesClosed).toBeNull();
+  });
+
+  test("two consecutive weeks partition the rows exactly once each", async () => {
+    // The property, stated directly: sum over both weeks equals the number seeded,
+    // with no row counted twice and none dropped.
+    const db = freshDb();
+    for (const daysAgo of [0.5, 3, 6.5, 7.5, 10, 13.5]) {
+      seedTriageAudit(db, { source: "cron", closed: 1 }, daysAgo);
+    }
+    const thisWeek = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+    const lastWeek = await runWeeklyImportSummary(
+      envFor(db),
+      { now: new Date(NOW.getTime() - 7 * 86_400_000) },
+      recordingDeps(),
+    );
+    expect(thisWeek.facts?.issuesClosed).toBe(3);
+    expect(lastWeek.facts?.issuesClosed).toBe(3);
+  });
+});
+
+describe("the title dedup reports already-filed, not would-create", () => {
+  /**
+   * `already-filed` was declared, documented at length, and consumed by the log
+   * formatter -- but nothing returned it, so an APPLIED run that hit the dedup logged
+   * "not posted (dry run)", and index.ts escalates that line to console.error. The
+   * loudest line of the week was a false one.
+   */
+  test("an applied run that finds the week already open says so, with the number", async () => {
+    const db = freshDb();
+    const week = isoWeekLabel(new Date(NOW.getTime() - WEEK_MS));
+    const deps = recordingDeps([weeklyIssue(881, week)]);
+
+    const r = await runWeeklyImportSummary(envFor(db), { apply: true, now: NOW }, deps);
+
+    expect(r.posted).toBe(false);
+    expect(r.issue?.action).toBe("already-filed");
+    // The number matters: an operator asking why nothing was posted wants the issue
+    // that already exists, not a bare "no".
+    expect(r.issue?.number).toBe(881);
+    expect(deps.created).toEqual([]);
+    // And the log line says what happened rather than claiming a dry run.
+    expect(weeklySummaryCronLine(r)).toContain("already filed as #881");
+    expect(weeklySummaryCronLine(r)).not.toContain("dry run");
+  });
+});
+
+describe("a failed post releases only its own reservation", () => {
+  /**
+   * The release was keyed on (action, week), so a second attempt at a week that had
+   * ALREADY been posted once would delete both rows -- destroying the durable record
+   * of the successful post, in a table the rest of the system treats as append-only.
+   */
+  test("an earlier successful reservation for the same week survives", async () => {
+    const db = freshDb();
+    const week = isoWeekLabel(new Date(NOW.getTime() - WEEK_MS));
+    // A prior, successful post of this same week.
+    db.query(
+      `INSERT INTO audit_log (action, resource_type, resource_id, details, timestamp)
+       VALUES ('import_weekly_summary', 'issue', ?, '{"note":"earlier good post"}', ?)`,
+    ).run(week, sqliteUtc(new Date(NOW.getTime() - 60_000)));
+
+    const deps = recordingDeps([], coverageResult(), { create: new Error("GitHub 502") });
+
+    // The post failure is caught and reported as a `post`-stage error, not rethrown
+    // (the report is the deliverable; ADR 0054), so `force` is needed to get past the
+    // gate that the earlier row would otherwise close.
+    const r = await runWeeklyImportSummary(
+      envFor(db),
+      { apply: true, force: true, now: NOW },
+      deps,
+    );
+    expect(r.posted).toBe(false);
+    expect(r.facts?.errors.some((e) => e.stage === "post")).toBe(true);
+
+    const rows = db
+      .query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM audit_log WHERE action = 'import_weekly_summary'",
+      )
+      .get();
+    // Exactly the earlier row remains: this run's was released, that one was not.
+    expect(rows?.n).toBe(1);
+    const kept = db
+      .query<{ details: string }, []>(
+        "SELECT details FROM audit_log WHERE action = 'import_weekly_summary'",
+      )
+      .get();
+    expect(kept?.details).toContain("earlier good post");
+  });
+});
+
 describe("malformed audit rows do not corrupt the section", () => {
   test("a row whose details is not JSON is reported, not silently dropped", async () => {
     const db = freshDb();
+    // Dated from the injected clock, like every other audit fixture here.
+    const inWindow = sqliteUtc(new Date(NOW.getTime() - 86_400_000));
     db.query(
       `INSERT INTO audit_log (action, details, timestamp)
-       VALUES ('import_issue_triage', '{"source":"cron","closed":2}', datetime('now','-1 days'))`,
-    ).run();
+       VALUES ('import_issue_triage', '{"source":"cron","closed":2}', ?)`,
+    ).run(inWindow);
     db.query(
       `INSERT INTO audit_log (action, details, timestamp)
-       VALUES ('import_issue_triage', 'not json at all', datetime('now','-1 days'))`,
-    ).run();
+       VALUES ('import_issue_triage', 'not json at all', ?)`,
+    ).run(inWindow);
 
     const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
 

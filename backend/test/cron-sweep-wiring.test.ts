@@ -108,6 +108,26 @@ const SWEEP_WIRING: Record<string, "prod-only" | "all-envs" | "cron-wrapped" | "
  * sweeps, one of which exists to prevent recurrence of the nm000225 incident.
  * Deleting any of their call sites left the suite green.
  */
+/**
+ * Every service file, RECURSIVELY.
+ *
+ * The scan used to be one `readdirSync` of `services/`, so
+ * `backend/src/services/github/*.ts` -- a directory this epic edits -- was invisible
+ * to both the discovery above and the wiring check below. A `*Cron` export placed in
+ * a subdirectory left the whole suite green.
+ */
+function serviceFiles(): string[] {
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.isDirectory()) walk(join(dir, e.name));
+      else if (e.name.endsWith(".ts")) out.push(join(dir, e.name));
+    }
+  };
+  walk(SERVICES_DIR);
+  return out;
+}
+
 function discoverSweepExports(): string[] {
   const names = new Set<string>();
   const patterns = [
@@ -122,9 +142,13 @@ function discoverSweepExports(): string[] {
     // to declare as helpers, which is the dilution that makes a trip-wire stop
     // being read.
     /^export\s+(?:async\s+)?function\s+(\w*Cron)\s*\(/gm,
+    // The `export const` counterpart, which the two sweep patterns have and this one
+    // did not: `export const newThingCron = async (env) => ...` was invisible, so the
+    // trip-wire could be walked past by choosing an arrow function.
+    /^export\s+const\s+(\w*Cron)\s*=/gm,
   ];
-  for (const file of readdirSync(SERVICES_DIR).filter((f) => f.endsWith(".ts"))) {
-    const src = readFileSync(join(SERVICES_DIR, file), "utf-8");
+  for (const file of serviceFiles()) {
+    const src = readFileSync(file, "utf-8");
     for (const re of patterns) {
       for (const m of src.matchAll(re)) names.add(m[1]);
     }
@@ -202,8 +226,8 @@ function serviceFileCodeLinesDefining(exportName: string): string[] | null {
     new RegExp(`^export\\s+(?:async\\s+)?function\\s+${exportName}\\s*\\(`),
     new RegExp(`^export\\s+const\\s+${exportName}\\s*=`),
   ];
-  for (const file of readdirSync(SERVICES_DIR).filter((f) => f.endsWith(".ts"))) {
-    const lines = readFileSync(join(SERVICES_DIR, file), "utf-8").split("\n");
+  for (const file of serviceFiles()) {
+    const lines = readFileSync(file, "utf-8").split("\n");
     if (lines.some((l) => patterns.some((re) => re.test(l.trim())))) {
       return codeLines(lines);
     }
@@ -424,5 +448,20 @@ describe("the weekly summary's UNGUARDED entry point is never called from schedu
   test("it is NOT in DEV_CRON_ALLOWLIST", () => {
     const allowlist = /DEV_CRON_ALLOWLIST[^;]*;/s.exec(allCode)?.[0] ?? "";
     expect(allowlist).not.toContain("WeeklyImportSummary");
+  });
+
+  /**
+   * The day guard is the ONLY thing making this weekly rather than daily -- the
+   * service's own gate is week-based and would happily allow Tue-Sun -- and nothing
+   * pinned it at the call site. Rewriting `if (shouldRunWeeklySummary(new Date()))`
+   * to `if (true)` left the whole suite green, which would file a report every day
+   * until the gate row caught up.
+   */
+  test("the call is guarded by shouldRunWeeklySummary at the call site", () => {
+    const idx = allCode.indexOf("runWeeklyImportSummaryCron(");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    // Look backwards from the call to the enclosing condition.
+    const before = allCode.slice(Math.max(0, idx - 600), idx);
+    expect(before).toContain("shouldRunWeeklySummary(");
   });
 });

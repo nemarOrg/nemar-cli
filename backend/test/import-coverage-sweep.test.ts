@@ -503,6 +503,64 @@ describe("a fresh dispatch row is not proof the hand-off landed", () => {
     expect(result.lastDispatchSourceId).toBe("ds000001");
   });
 
+  /**
+   * THE case, and the one the first version could not see. A wedged dataset is
+   * re-picked every ~30 minutes -- `pickNextDataset` treats an id with no
+   * `import_jobs` row as always "fresh", and the audit row is written BEFORE the
+   * GitHub hand-off -- so the LATEST row for it is always minutes old. Aging the
+   * latest row therefore made `dispatch-lost` unreachable in the deployed
+   * configuration (30-minute tick, 25-minute gate): the two conditions
+   * "age >= 6h" and "the id is still untracked" excluded each other.
+   *
+   * With the old predicate this test reports dispatchLost === false and a healthy
+   * verdict, which is exactly the seven-week silence the epic exists to end.
+   */
+  test("a dataset re-dispatched every 30 minutes for 8 hours IS lost, though its newest row is minutes old", async () => {
+    const db = freshDb();
+    // 8h ago through 10 minutes ago, same id, as the real tick would leave it.
+    for (const hoursAgo of [8, 7.5, 7, 6.5, 6, 3, 1, 0.5, 10 / 60]) {
+      seedDispatch(db, hoursAgo, "ds000001");
+    }
+    const deps = recordingDeps(discovered(1));
+
+    const result = await runImportCoverageSweep(envFor(db), {}, deps);
+
+    expect(result.dispatchLost).toBe(true);
+    expect(result.kind).toBe("dispatch-lost");
+    // The newest row is minutes old, so the OLD predicate saw a healthy clock.
+    expect(result.dispatchAgeHours).toBeLessThan(1);
+    // And the new one measures the right thing.
+    expect(result.dispatchStuckHours).toBeGreaterThanOrEqual(7.9);
+    expect(result.dispatchAttempts).toBe(9);
+  });
+
+  test("the reason names how long and how many times, so the fault is legible", async () => {
+    const db = freshDb();
+    for (const hoursAgo of [9, 5, 2, 0.2]) seedDispatch(db, hoursAgo, "ds000001");
+    const deps = recordingDeps(discovered(1));
+
+    const result = await runImportCoverageSweep(envFor(db), {}, deps);
+
+    expect(result.reason).toContain("dispatching it for 9h");
+    expect(result.reason).toContain("across 4 dispatches");
+  });
+
+  test("history for a DIFFERENT id does not age this one", async () => {
+    // MIN(timestamp) is per-resource_id. A long-running healthy importer has old
+    // rows for many ids; only the one the latest row names is being judged.
+    const db = freshDb();
+    seedDispatch(db, 40, "ds000002");
+    seedDispatch(db, 0.2, "ds000001");
+    const deps = recordingDeps(discovered(2));
+
+    const result = await runImportCoverageSweep(envFor(db), {}, deps);
+
+    expect(result.lastDispatchSourceId).toBe("ds000001");
+    // ds000001 was first picked 12 minutes ago, so it is too recent to judge --
+    // ds000002's 40-hour-old row must not be borrowed to condemn it.
+    expect(result.dispatchLost).toBe(false);
+  });
+
   test("a dispatch whose dataset DID acquire a row is not lost", async () => {
     const db = freshDb();
     seedDispatch(db, 8, "ds000001");

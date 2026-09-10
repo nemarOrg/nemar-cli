@@ -76,9 +76,29 @@ written to reserve the slot, before `getDatasetsToken` and `triggerOpenNeuroOnbo
 datasets PAT expires or the onboard workflow is renamed, rows keep appearing every ~30 minutes
 while nothing is imported: the clock looks fresh, so `silence` can never fire, and the backlog
 would take weeks to cross its standalone threshold. So the dataset the last row NAMES must have
-acquired an `import_jobs` row within `COVERAGE_DISPATCH_LOST_HOURS`; if it has not, and it is still
-outstanding, the verdict is `dispatch-lost`. That is the most specific diagnosis available and it
-names the two things to check, neither of which is guessable from the symptom.
+been under dispatch for less than `COVERAGE_DISPATCH_LOST_HOURS`; if it has been longer and it is
+still outstanding, the verdict is `dispatch-lost`. That is the most specific diagnosis available and
+it names the two things to check, neither of which is guessable from the symptom.
+
+**The clock for that check runs from the FIRST dispatch of the id, not the latest row**, and getting
+this wrong made the whole check unreachable in the deployed configuration. Three facts compose:
+`pickNextDataset` treats a dataset with no `import_jobs` row as always pickable
+(`if (!j) return true; // fresh`), the audit row is written BEFORE the hand-off, and production runs
+a 30-minute tick with a 25-minute gate. So the wedged dataset is re-picked and re-stamped every
+half hour, and the age of the newest row naming it is permanently near zero: "the newest row for
+this id is six hours old" and "this id is still untracked" excluded each other, so `dispatch-lost`
+could never fire and the sweep fell through to the standalone backlog threshold -- weeks, which is
+the latency this branch was written to remove. `COVERAGE_ID_DISPATCH_HISTORY_QUERY` takes
+`MIN(timestamp)` for that id instead; a re-dispatch only makes the first-seen instant older, which
+is the correct direction. The attempt count is reported with it, because "picked 47 times, still
+untracked" is the sentence that makes the fault obvious.
+
+**A staging dry run of this sweep is not informative, and the route invites one anyway.** It diffs
+the real OpenNeuro against dev D1, which was purged to the curated fixtures (ADR 0009), so
+`imported` is far below `COVERAGE_SCAN_SANITY_MIN_IMPORTED`: the plausibility floor is inert and the
+verdict is `alarm/backlog` with thousands of never-attempted ids. Nothing is written, so it is safe
+rather than wrong -- but read the partition, not the verdict, and do the calibration read against
+production.
 
 **Only outstanding datasets count as backlog.** A dataset with an `import_jobs` row is already
 tracked -- by its own failure issue (ADR 0052) or by the retry engine's blocklist -- so counting it

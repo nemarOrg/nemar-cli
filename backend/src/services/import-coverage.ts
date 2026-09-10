@@ -249,6 +249,11 @@ export function decideCoverageVerdict(args: {
   /** The dataset the last dispatch row names still has no `import_jobs` row, well
    *  after it should have. Computed by the sweep; see the module note. */
   dispatchLost?: boolean;
+  /** Hours since the FIRST dispatch of the still-untracked id, and how many times it
+   *  has been picked. Both only for the reason string: the predicate is decided by
+   *  the sweep, which is where the audit history lives. */
+  dispatchStuckHours?: number | null;
+  dispatchAttempts?: number | null;
   backlog: ImportCoverageBacklog;
 }): ImportCoverageVerdict {
   const pending = outstandingCount(args.backlog);
@@ -275,10 +280,17 @@ export function decideCoverageVerdict(args: {
 
   if (args.dispatchLost === true) {
     const which = args.lastDispatchSourceId ? ` (${args.lastDispatchSourceId})` : "";
+    const stuck =
+      args.dispatchStuckHours == null
+        ? ""
+        : ` We have been dispatching it for ${Math.floor(args.dispatchStuckHours)}h`;
+    const tries =
+      args.dispatchAttempts == null ? "" : ` across ${args.dispatchAttempts} dispatches`;
+    const history = stuck === "" ? "" : `${stuck}${tries}.`;
     return {
       status: "alarm",
       kind: "dispatch-lost",
-      reason: `The importer is picking datasets but the work is not landing: the dataset named by the last dispatch${which}, ${clock}, still has no import_jobs row after ${COVERAGE_DISPATCH_LOST_HOURS} hours. The audit row is written to reserve the slot BEFORE the GitHub hand-off, so a fresh row does not prove the hand-off succeeded. Three causes, most likely first: that one dataset is wedging the picker (a never-attempted id is always "fresh" to pickNextDataset, so a run that dies before its first callback is re-picked every tick forever); the datasets PAT can no longer dispatch; or onboard-openneuro.yml was renamed or removed.`,
+      reason: `The importer is picking datasets but the work is not landing: the dataset named by the last dispatch${which}, ${clock}, still has no import_jobs row after ${COVERAGE_DISPATCH_LOST_HOURS} hours.${history} The audit row is written to reserve the slot BEFORE the GitHub hand-off, so a fresh row does not prove the hand-off succeeded. Three causes, most likely first: that one dataset is wedging the picker (a never-attempted id is always "fresh" to pickNextDataset, so a run that dies before its first callback is re-picked every tick forever); the datasets PAT can no longer dispatch; or onboard-openneuro.yml was renamed or removed.`,
     };
   }
 

@@ -709,6 +709,61 @@ describe("a rollup is released once the backlog drains", () => {
     expect(release?.body).toContain("NOT a verdict on the datasets");
   });
 
+  /**
+   * The release loop selected rollups by LABEL alone, so anything carrying
+   * `import-rollup` was closed with a comment calling it "a release of the rollup
+   * mode" -- a hand-written consolidation issue, a triage meta-issue, a mislabel, or
+   * a pull request (`listOpenIssuesByLabel` does not filter those out). Every other
+   * mutation in this epic is title-guarded; this was the one that was not, and both
+   * the close and the false comment survive a re-run.
+   */
+  test("a human-authored issue carrying the label is left alone", async () => {
+    const db = freshDb();
+    seedImportJob(db, "on000001");
+    const human: GitHubIssue = {
+      number: 555,
+      html_url: "https://example/555",
+      state: "open",
+      title: "Tracking: consolidate the import failures before the release",
+      labels: [{ name: IMPORT_FAILURE_ISSUE_LABEL }, { name: IMPORT_ROLLUP_ISSUE_LABEL }],
+    };
+    const deps = recordingDeps(
+      [issue(1, "on000001", [IMPORT_FAILURE_ISSUE_LABEL, "auth-invalid"]), human],
+      { on000001: INCOMPLETE },
+    );
+
+    const result = await runImportIssueSweep(envFor(db), { apply: true }, deps);
+
+    // The mode still releases -- that part is about the per-dataset count.
+    expect(result.mode).toBe("per-dataset");
+    // But nothing is closed or commented on the human's issue.
+    expect(result.rollupsReleased).toBe(0);
+    expect(deps.closed).not.toContain(555);
+    expect(deps.comments.some((c) => c.n === 555)).toBe(false);
+  });
+
+  test("a machine-written rollup alongside a human one: only the machine's closes", async () => {
+    const db = freshDb();
+    seedImportJob(db, "on000001");
+    const human: GitHubIssue = {
+      number: 555,
+      html_url: "https://example/555",
+      state: "open",
+      title: "Meta: import failure cleanup",
+      labels: [{ name: IMPORT_FAILURE_ISSUE_LABEL }, { name: IMPORT_ROLLUP_ISSUE_LABEL }],
+    };
+    const deps = recordingDeps(
+      [issue(1, "on000001", [IMPORT_FAILURE_ISSUE_LABEL, "auth-invalid"]), rollupIssue(), human],
+      { on000001: INCOMPLETE },
+    );
+
+    const result = await runImportIssueSweep(envFor(db), { apply: true }, deps);
+
+    expect(deps.closed).toContain(999);
+    expect(deps.closed).not.toContain(555);
+    expect(result.rollupsReleased).toBe(1);
+  });
+
   test("kept open while the backlog is still above the resume threshold", async () => {
     const db = freshDb();
     const { issues, verdicts } = backlog(db, 12);
@@ -861,6 +916,38 @@ describe("the cron wrapper records what it did", () => {
     // userId null marks it system-initiated, the convention import-retry.ts uses.
     expect(rows[0]?.user_id).toBeNull();
     expect(JSON.parse(rows[0]?.details ?? "{}")).toMatchObject({ source: "cron", closed: 1 });
+  });
+
+  /**
+   * The third state. A row on a SUCCESSFUL run separates "closed things" from
+   * "nothing to close"; a row on a FAILED run separates both from "did not run".
+   * `runImportIssueSweep` throws outright when it cannot mint a token, cannot list
+   * issues, or gets a labelless response -- so a week of expired-PAT runs used to
+   * produce zero rows, and the weekly report told the operator the daily jobs might
+   * not be running. Wrong diagnosis, and the most likely one in practice.
+   */
+  test("a run that THREW still writes a row, marked failed, and rethrows", async () => {
+    const db = freshDb();
+    const deps = recordingDeps();
+    deps.token = async () => {
+      throw new Error("Bad credentials");
+    };
+
+    await expect(
+      runImportIssueSweepCron({ ...envFor(db), ENVIRONMENT: "production" } as Bindings, deps),
+    ).rejects.toThrow("Bad credentials");
+
+    const rows = db
+      .query<{ details: string | null }, []>(
+        "SELECT details FROM audit_log WHERE action = 'import_issue_triage'",
+      )
+      .all();
+    expect(rows).toHaveLength(1);
+    const details = JSON.parse(rows[0]?.details ?? "{}");
+    expect(details).toMatchObject({ source: "cron", ran: true, failed: true });
+    expect(details.error).toContain("Bad credentials");
+    // Counts are NULL, not 0: nothing was measured, and a 0 would read as a quiet day.
+    expect(details.closed).toBeNull();
   });
 
   /**
