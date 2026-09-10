@@ -268,6 +268,40 @@ describe("POST /admin/users/:username/role cascades on demotion", () => {
     expect(liveSessionCount(userId, "app")).toBe(1);
   });
 
+  test("the audit row counts the two revocations in the right order", async () => {
+    // Both counts come out of one `db.batch` by INDEX, so a reordered batch
+    // would silently swap `tokens_revoked` and `docs_sessions_revoked` in the
+    // security record of a demotion. Reviewed and found unasserted: swapping the
+    // two indices passed the entire suite. Two tokens and one docs session, so
+    // the numbers cannot be confused with each other.
+    const userId = seedTarget();
+    for (const key of ["tok-a", "tok-b"]) {
+      db.run("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)", [
+        userId,
+        key,
+        key.slice(0, 8),
+      ]);
+    }
+    await signInToDocs(userId);
+
+    expect((await ownerPost("/admin/users/cascadetarget/role", { role: "member" })).status).toBe(
+      200,
+    );
+
+    const audit = db
+      .query<{ details: string }, []>(
+        "SELECT details FROM audit_log WHERE action = 'role_changed' ORDER BY id DESC LIMIT 1",
+      )
+      .get();
+    if (!audit) throw new Error("no role_changed audit row");
+    const details = JSON.parse(audit.details) as {
+      tokens_revoked: number;
+      docs_sessions_revoked: number;
+    };
+    expect(details.tokens_revoked).toBe(2);
+    expect(details.docs_sessions_revoked).toBe(1);
+  });
+
   test("a PROMOTION leaves the account's credentials alone", async () => {
     // The cascade is keyed on demotion, so this pins that an upgrade is not
     // quietly signing people out of the documentation.
@@ -278,5 +312,54 @@ describe("POST /admin/users/:username/role cascades on demotion", () => {
     );
     expect((await verify(session)).status).toBe(200);
     expect(grantCount(userId)).toBe(1);
+  });
+});
+
+describe("DELETE /admin/users/by-id/:id cascades too", () => {
+  /** The tombstone route is the third caller of the grants purge, and the one
+   *  the first version of this PR added without a test: deleting that statement
+   *  from the batch left the whole suite green. `test/user-soft-delete.unit.test.ts`
+   *  reimplements the batch by hand rather than driving the route, so it cannot
+   *  catch this either -- and it is now one statement behind production, which is
+   *  what that pattern costs. */
+  test("a tombstone revokes every session and destroys the grants", async () => {
+    const userId = seedTarget();
+    const { session, unspentCode } = await signInToDocs(userId);
+    expect((await verify(session)).status).toBe(200);
+
+    const res = await app.request(
+      `/admin/users/by-id/${userId}`,
+      { method: "DELETE", headers: { Authorization: `Bearer ${OWNER_KEY}` } },
+      env(),
+    );
+    expect(res.status).toBe(200);
+
+    expect(liveSessionCount(userId)).toBe(0);
+    expect(grantCount(userId)).toBe(0);
+    expect((await verify(session)).status).toBe(401);
+    expect((await exchange(unspentCode)).status).toBe(400);
+  });
+
+  test("the audit row's session count is the session count, not the grant count", async () => {
+    // `sessions_revoked` is read out of the batch by index, and the new grants
+    // purge went in one slot ahead of it. Two sessions and one grant, so an
+    // off-by-one in either direction shows up as a wrong number.
+    const userId = seedTarget();
+    await signInToDocs(userId);
+
+    await app.request(
+      `/admin/users/by-id/${userId}`,
+      { method: "DELETE", headers: { Authorization: `Bearer ${OWNER_KEY}` } },
+      env(),
+    );
+
+    const audit = db
+      .query<{ details: string }, []>(
+        "SELECT details FROM audit_log WHERE action = 'user_deleted' ORDER BY id DESC LIMIT 1",
+      )
+      .get();
+    if (!audit) throw new Error("no user_deleted audit row");
+    const details = JSON.parse(audit.details) as { sessions_revoked: number };
+    expect(details.sessions_revoked).toBe(2);
   });
 });

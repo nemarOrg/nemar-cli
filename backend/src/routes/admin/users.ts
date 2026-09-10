@@ -481,10 +481,16 @@ async function finalizeRevocation(
   // loudly, exactly as the token revoke above does.
   //
   // BEFORE the status write, not after, and the order is load-bearing. If this
-  // throws here, the account is still `approved` and the admin's retry re-runs
-  // the whole revocation. After the status write, a retry would hit the
-  // "User already revoked" 409 and the sessions and grants would never be
-  // reached at all -- the failure would be unrecoverable through the route.
+  // throws here, the account is still `approved`, so the admin's retry re-enters
+  // the route and reaches this cascade again. After the status write, a retry
+  // would hit the "User already revoked" 409 and the sessions and grants would
+  // never be reached at all -- the failure would be unrecoverable through the
+  // route. (The retry is not a perfect replay of the FIRST attempt: the IAM
+  // block above nulls `aws_iam_username` even when revocation failed, so a
+  // second pass skips IAM and lands plain `revoked`, with the
+  // `iam_revocation_failures` row as the surviving signal. That is pre-existing
+  // and orthogonal; what matters here is that the credential cascade is
+  // reachable on the retry.)
   await db.batch([
     db
       .prepare(

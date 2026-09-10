@@ -28,6 +28,13 @@
 -- Rows already in the new format contain no 'T' and are left alone, so this is
 -- idempotent and re-running it is a no-op. Only `expires_at` is touched:
 -- `created_at`, `last_used_at` and `revoked_at` were always written SQL-side.
+--
+-- GLOB, NOT LIKE, so the selection and the rewrite agree on case. SQLite's LIKE
+-- is case-insensitive for ASCII while `replace()` is case-sensitive, so a
+-- lowercase `t` would be SELECTED and then rewritten to itself -- left broken by
+-- a statement that reported having handled it. No such row can exist
+-- (`toISOString()` is always uppercase), which is exactly why the mismatch would
+-- never have shown up in a test; the statement should still mean what it says.
 UPDATE web_sessions
    SET expires_at = replace(substr(expires_at, 1, 19), 'T', ' ')
- WHERE expires_at LIKE '%T%';
+ WHERE expires_at GLOB '*T*';

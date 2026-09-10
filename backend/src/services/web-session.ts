@@ -441,7 +441,15 @@ export async function userIdForCookieId(
   if (!cookieIdRaw) return null;
   const cookieHash = await hashCookieId(cookieIdRaw);
   const row = await env.DB.prepare(
-    "SELECT user_id FROM web_sessions WHERE cookie_id_hash = ? LIMIT 1",
+    // `revoked_at IS NULL` STAYS, and only the expiry and account predicates go.
+    // The case being fixed is a LAPSED session, which is unrevoked by
+    // definition, so keeping this costs the fix nothing -- while dropping it
+    // turned a revoked cookie into a permanent handle for tearing down that
+    // account's docs access: sign out, sign back in, replay the old value, and
+    // the NEW docs session and grant are destroyed. Nothing prunes this table,
+    // so that handle would never stop working. A revoked credential has to
+    // confer nothing, including the power to revoke.
+    "SELECT user_id FROM web_sessions WHERE cookie_id_hash = ? AND revoked_at IS NULL LIMIT 1",
   )
     .bind(cookieHash)
     .first<{ user_id: number }>();

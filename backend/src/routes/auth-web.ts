@@ -736,6 +736,30 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
   }
 
   const cookieIdRaw = c.var.webSessionCookieId ?? null;
+
+  // WHOSE ACCOUNT THIS IS, RESOLVED BEFORE ANYTHING IS REVOKED. Two reasons,
+  // and they pull in opposite directions until the order is right.
+  //
+  // Not from `webUser`, because that exists only while the app session is live:
+  // a docs session runs eight hours from its mint and a non-remember app session
+  // 24 hours from sign-in, so the windows do not nest, and review found sign-out
+  // with a lapsed app cookie answering `ok`, clearing the cookie, and leaving
+  // the docs session and its grants fully spendable.
+  //
+  // And before `revokeSession`, because `userIdForCookieId` keeps
+  // `revoked_at IS NULL` -- so that a REVOKED cookie value confers nothing,
+  // including the power to revoke somebody's later session. Revoking first would
+  // make the lookup miss its own row and skip the cascade, which is the bug
+  // above wearing different clothes.
+  let userId = c.var.webUser?.id ?? null;
+  if (!userId) {
+    try {
+      userId = await userIdForCookieId(c.env, cookieIdRaw);
+    } catch (err) {
+      console.error("[auth-web] /logout: could not resolve account for docs revoke", err);
+    }
+  }
+
   // Always clear the cookie client-side, even if the server-side
   // revoke fails (D1 transient, etc.). The user asked to sign out;
   // we honour that locally and log the server-side failure so an
@@ -755,23 +779,6 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
   // prevent. Best-effort and logged, for the same reason the revoke above is:
   // the person asked to sign out, so a D1 blip must not turn that into an
   // error response.
-  //
-  // THE ACCOUNT IS RESOLVED FROM THE PRESENTED COOKIE, NOT FROM `webUser`, and
-  // that distinction is the whole fix. `webUser` exists only when the app
-  // session is still live, while a docs session runs eight hours from its mint
-  // and a non-remember app session 24 hours from sign-in -- so the windows do
-  // not nest, and review found the case: signing out with a lapsed app cookie
-  // answered `ok`, cleared the cookie, and left the docs session and its
-  // outstanding grants fully spendable. `userIdForCookieId` drops exactly the
-  // predicates that made that happen.
-  let userId = c.var.webUser?.id ?? null;
-  if (!userId) {
-    try {
-      userId = await userIdForCookieId(c.env, cookieIdRaw);
-    } catch (err) {
-      console.error("[auth-web] /logout: could not resolve account for docs revoke", err);
-    }
-  }
   if (userId) {
     try {
       await c.env.DB.batch([

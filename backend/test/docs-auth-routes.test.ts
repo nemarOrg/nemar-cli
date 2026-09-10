@@ -39,6 +39,7 @@ import {
 import worker from "../src/index";
 import { notFoundBody } from "../src/lib/not-found";
 import { authMiddleware } from "../src/middleware/auth";
+import { __selectBucket } from "../src/middleware/rateLimit";
 import { authDocsRoutes } from "../src/routes/auth-docs";
 import { authWebRoutes } from "../src/routes/auth-web";
 import { hashGrantCode } from "../src/services/docs-auth";
@@ -607,6 +608,37 @@ describe("logout purges outstanding grants", () => {
     expect(rows?.n).toBe(0);
   });
 
+  test("a REVOKED cookie cannot tear down the session signed in after it", async () => {
+    // The other side of resolving the account from the cookie: the lookup keeps
+    // `revoked_at IS NULL`, so a value that has already been signed out confers
+    // nothing -- including the power to revoke. Without that predicate, an old
+    // cookie value became a permanent handle for ending this account's docs
+    // access on demand, and nothing prunes `web_sessions`, so it would never
+    // stop working.
+    const userId = seedUser("admin-replay@nemar.test", "admin");
+    const firstCookie = await appSession(userId);
+    const logout = (cookie: string) =>
+      app.request(
+        "/auth/logout",
+        { method: "POST", headers: { Cookie: `nemar_session=${cookie}`, Origin: APP } },
+        env(),
+      );
+    await logout(firstCookie);
+
+    // Sign in again: new app session, new docs session, new grant.
+    const secondCookie = await appSession(userId);
+    const { code } = (await (await grant(secondCookie)).json()) as { code: string };
+    const { session } = (await (await exchange(code)).json()) as { session: string };
+    const { code: unspent } = (await (await grant(secondCookie)).json()) as { code: string };
+    expect((await verify(session)).status).toBe(200);
+
+    // Replay the dead cookie.
+    expect((await logout(firstCookie)).status).toBe(200);
+
+    expect((await verify(session)).status).toBe(200);
+    expect((await exchange(unspent)).status).toBe(200);
+  });
+
   test("one account's sign-out leaves another's grant alone", async () => {
     const first = seedUser("admin-g1@nemar.test", "admin");
     const second = seedUser("admin-g2@nemar.test", "admin");
@@ -694,22 +726,22 @@ describe("the non-admin 404 is the same 404 an unrouted path gets", () => {
     passThroughOnException: () => {},
   } as unknown as ExecutionContext;
 
-  function workerEnv(): Bindings {
+  function workerEnv(environment = "development"): Bindings {
     return {
       DB: realD1(db),
-      ENVIRONMENT: "development",
+      ENVIRONMENT: environment,
       APP_BASE_URL: APP,
       WEB_SESSION_COOKIE_DOMAIN: "",
     } as unknown as Bindings;
   }
 
-  function workerPost(path: string, cookie?: string): Promise<Response> {
+  function workerPost(path: string, cookie?: string, environment?: string): Promise<Response> {
     return worker.fetch(
       new Request(`https://api.nemar.org${path}`, {
         method: "POST",
         headers: { Origin: APP, ...(cookie ? { Cookie: `nemar_session=${cookie}` } : {}) },
       }),
-      workerEnv(),
+      workerEnv(environment),
       ctx,
     );
   }
@@ -734,17 +766,45 @@ describe("the non-admin 404 is the same 404 an unrouted path gets", () => {
     expect(await res.json()).toEqual(notFoundBody("POST", "/auth/docs/grant-not-a-route"));
   });
 
-  test("the two responses agree header for header", async () => {
+  test("the two responses agree on every header the gate itself controls", async () => {
+    // Under the rate-limit bypass this is a total header match, which is the
+    // narrow claim: nothing in the refusal path adds a header of its own -- no
+    // `Cache-Control`, no differing content type.
     const userId = seedUser("member-404b@nemar.test", "member");
-    // Equal-length paths, so even `content-length` matches: the refused route
-    // and the unrouted one differ by one character. Anything that made the
-    // refusal distinctive -- a `Cache-Control`, a different content type -- shows
-    // up as a diff here rather than needing its own assertion.
     const refused = await workerPost("/auth/docs/grant", await appSession(userId));
     const unrouted = await workerPost("/auth/docs/grxnt");
     expect(refused.status).toBe(unrouted.status);
     const headers = (res: Response) =>
       [...res.headers.entries()].map(([k, v]) => `${k}: ${v}`).sort();
     expect(headers(refused)).toEqual(headers(unrouted));
+  });
+
+  test("but in production the rate-limit bucket gives the route away regardless", async () => {
+    // The header match above holds only under the rate-limit bypass, and the
+    // first version of this block generalised from that to production. It does
+    // not hold there: `/auth/docs/grant` is in `AUTH_PATHS`, so it answers from
+    // the strict `auth-ip` bucket while an unrouted neighbour falls to the
+    // generic `ip` bucket, and `rateLimiter` puts the bucket name and its limit
+    // in `X-RateLimit-*` on both. So the refusal is distinguishable by anyone
+    // who looks, without a session.
+    //
+    // Asserted through `__selectBucket` rather than by driving the worker in a
+    // rate-limited environment, because `caches.default` does not exist under
+    // `bun test` -- the limiter logs a cache failure, fails open, and sets no
+    // headers at all, so a worker-driven version of this test would "pass" by
+    // finding no difference whatsoever. The classification is the fact worth
+    // pinning anyway.
+    //
+    // Pinned rather than fixed, deliberately: hiding it would mean taking this
+    // route out of the strict bucket, a real protection, to buy a disguise the
+    // family already gives up (`exchange` answers 400 to a malformed body,
+    // `verify` 401 to any caller, neither needing a session). The 404 is there
+    // for parity with `adminGate`, not for non-disclosure, and this is the
+    // evidence for saying so out loud.
+    const refused = __selectBucket("/auth/docs/grant", undefined, "203.0.113.7");
+    const unrouted = __selectBucket("/auth/docs/grxnt", undefined, "203.0.113.7");
+    expect(refused.keyKind).toBe("auth-ip");
+    expect(unrouted.keyKind).toBe("ip");
+    expect(refused.maxRequests).not.toBe(unrouted.maxRequests);
   });
 });
