@@ -156,6 +156,17 @@ const AUTH_PATHS = [
   // person passes through both once per eight-hour docs session, so the strict
   // floor is the right home for the pair.
   //
+  // Both are called by a Cloudflare Worker (the website's server-side render),
+  // not by a browser, so they arrive from a small pool of egress addresses and
+  // share one per-IP bucket with every other visitor's `/auth/logout` and
+  // `/auth/profile`. That is a pre-existing property of this bucket rather than
+  // something these two introduce -- see the note on MAX_REQUESTS below, and
+  // issue #1354, which proposes keying Worker-originated requests on something
+  // other than the egress address. They stay here because a person passes
+  // through them once per eight-hour docs session, so they add almost nothing
+  // to the pressure; moving one route would hide the general problem rather
+  // than fix it.
+  //
   // `/auth/docs/verify` is DELIBERATELY ABSENT, for the same reason
   // `/auth/device/token` is. It is called once per gated page view, and the
   // caller is a Cloudflare Pages Function, so every admin in the organization
