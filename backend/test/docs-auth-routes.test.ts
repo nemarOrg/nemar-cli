@@ -36,6 +36,8 @@ import {
   DOCS_SESSION_HEADER,
   DOCS_SESSION_TTL_SECONDS,
 } from "../../shared/contract/docs-auth.js";
+import worker from "../src/index";
+import { notFoundBody } from "../src/lib/not-found";
 import { authMiddleware } from "../src/middleware/auth";
 import { authDocsRoutes } from "../src/routes/auth-docs";
 import { authWebRoutes } from "../src/routes/auth-web";
@@ -570,6 +572,41 @@ describe("logout purges outstanding grants", () => {
     expect(row?.n).toBe(0);
   });
 
+  test("an app session that has already lapsed still ends docs access", async () => {
+    // The gap review found: the cascade was keyed off `c.var.webUser`, which
+    // exists only while the app session is live. A docs session runs eight hours
+    // from its mint and a non-remember app session 24 hours from sign-in, so the
+    // windows do not nest and this state is ordinary rather than contrived --
+    // sign out the next morning and it is exactly what you have. Sign-out then
+    // answered `ok`, cleared the cookie, and left both the docs session and an
+    // unspent grant fully usable.
+    const userId = seedUser("admin-lapsed@nemar.test", "admin");
+    const appCookie = await appSession(userId);
+    const { code } = (await (await grant(appCookie)).json()) as { code: string };
+    const { session } = (await (await exchange(code)).json()) as { session: string };
+    const { code: unspent } = (await (await grant(appCookie)).json()) as { code: string };
+    expect((await verify(session)).status).toBe(200);
+
+    db.run(
+      "UPDATE web_sessions SET expires_at = datetime('now', '-1 hour') WHERE user_id = ? AND scope = 'app'",
+      [userId],
+    );
+
+    const out = await app.request(
+      "/auth/logout",
+      { method: "POST", headers: { Cookie: `nemar_session=${appCookie}`, Origin: APP } },
+      env(),
+    );
+    expect(out.status).toBe(200);
+
+    expect((await verify(session)).status).toBe(401);
+    expect((await exchange(unspent)).status).toBe(400);
+    const rows = db
+      .query<{ n: number }, [number]>("SELECT COUNT(*) AS n FROM docs_grants WHERE user_id = ?")
+      .get(userId);
+    expect(rows?.n).toBe(0);
+  });
+
   test("one account's sign-out leaves another's grant alone", async () => {
     const first = seedUser("admin-g1@nemar.test", "admin");
     const second = seedUser("admin-g2@nemar.test", "admin");
@@ -603,28 +640,111 @@ describe("account status", () => {
     expect((await exchange(code)).status).toBe(400);
     expect(docsSessionCount(userId)).toBe(0);
   });
+
+  test("a LIVE docs session stops verifying when the account leaves that status", async () => {
+    // The other half of the same rule, and the half that was missing: the mint
+    // applied `ACTIVE_ACCOUNT_STATUSES` while the standing check inherited
+    // `findSessionByCookieId`'s looser `!= 'revoked'`, so the entry gate was
+    // stricter than the gate on every subsequent page view. That reader has to
+    // stay loose (a `pending` account reaches Settings through it to fix the
+    // address that made it pending), so `verify` applies the rule itself.
+    const userId = seedUser("admin-statusdrop@nemar.test", "admin");
+    const session = await signInToDocs(userId);
+    expect((await verify(session)).status).toBe(200);
+
+    db.run("UPDATE users SET status = 'pending' WHERE id = ?", [userId]);
+    const res = await verify(session);
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe("invalid_session");
+  });
+
+  test("`verified` still verifies, so the rule is the API's and not approved-only", async () => {
+    // ADR 0040's base tier. Refusing it here would lock out an admin whose
+    // account is perfectly able to authenticate against the API.
+    const userId = seedUser("admin-verified@nemar.test", "admin");
+    const session = await signInToDocs(userId);
+    db.run("UPDATE users SET status = 'verified' WHERE id = ?", [userId]);
+    expect((await verify(session)).status).toBe(200);
+  });
 });
 
 // --------------------------------------------------------------------------
-// Non-disclosure of the route itself
+// The non-admin 404 against the 404 the worker really produces
 // --------------------------------------------------------------------------
 
-describe("the non-admin 404 is indistinguishable from a real one", () => {
-  test("it carries the same body an unrouted path gets", async () => {
-    // Comparing bodies otherwise tells a signed-in non-admin that this route
-    // exists, which is the one inference answering 404 instead of 403 prevents.
+/**
+ * WHY THIS DRIVES `worker.fetch` AND NOT THE LOCAL `app`. The first version of
+ * these tests built a bare Hono app with two sub-apps and no notFound handler,
+ * then asserted a hand-TYPED copy of the body it expected. It never compared the
+ * two responses, so it could not see what review found: `api.notFound` in
+ * index.ts is unreachable from the worker entry, because Hono's `route()` copies
+ * a sub-app's routes and not its notFound handler. Every genuinely unrouted
+ * request to api.nemar.org was answering Hono's plain-text default while this
+ * route answered JSON, so the 404 announced itself by content type. A
+ * transcription cannot catch that; only the real entry point can.
+ *
+ * `ENVIRONMENT: "development"` is the documented rate-limit bypass, the same
+ * infrastructure concession `mcp-fork.test.ts` makes to drive this entry point.
+ */
+describe("the non-admin 404 is the same 404 an unrouted path gets", () => {
+  const ctx = {
+    waitUntil: (p: Promise<unknown>) => {
+      p.catch(() => {});
+    },
+    passThroughOnException: () => {},
+  } as unknown as ExecutionContext;
+
+  function workerEnv(): Bindings {
+    return {
+      DB: realD1(db),
+      ENVIRONMENT: "development",
+      APP_BASE_URL: APP,
+      WEB_SESSION_COOKIE_DOMAIN: "",
+    } as unknown as Bindings;
+  }
+
+  function workerPost(path: string, cookie?: string): Promise<Response> {
+    return worker.fetch(
+      new Request(`https://api.nemar.org${path}`, {
+        method: "POST",
+        headers: { Origin: APP, ...(cookie ? { Cookie: `nemar_session=${cookie}` } : {}) },
+      }),
+      workerEnv(),
+      ctx,
+    );
+  }
+
+  test("the body comes from the shared builder rather than a copy of it", async () => {
     const userId = seedUser("member-404@nemar.test", "member");
-    const res = await grant(await appSession(userId));
+    const res = await workerPost("/auth/docs/grant", await appSession(userId));
     expect(res.status).toBe(404);
-    expect(await res.json()).toEqual({
-      error: "Not Found",
-      message: "Route POST /auth/docs/grant not found",
-    });
+    // `notFoundBody` is what `app.notFound` is registered with, imported here
+    // instead of retyped: a test that retypes the body passes whatever the
+    // production 404 later becomes.
+    expect(await res.json()).toEqual(notFoundBody("POST", "/auth/docs/grant"));
   });
 
-  test("and no Cache-Control that a real 404 would not have", async () => {
+  test("an actually-unrouted neighbour answers in the same format", async () => {
+    // The assertion that failed before `app.notFound` existed: this path
+    // returned `text/plain` with the body `404 Not Found`, so the two were
+    // trivially distinguishable.
+    const res = await workerPost("/auth/docs/grant-not-a-route");
+    expect(res.status).toBe(404);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toEqual(notFoundBody("POST", "/auth/docs/grant-not-a-route"));
+  });
+
+  test("the two responses agree header for header", async () => {
     const userId = seedUser("member-404b@nemar.test", "member");
-    const res = await grant(await appSession(userId));
-    expect(res.headers.get("Cache-Control")).toBeNull();
+    // Equal-length paths, so even `content-length` matches: the refused route
+    // and the unrouted one differ by one character. Anything that made the
+    // refusal distinctive -- a `Cache-Control`, a different content type -- shows
+    // up as a diff here rather than needing its own assertion.
+    const refused = await workerPost("/auth/docs/grant", await appSession(userId));
+    const unrouted = await workerPost("/auth/docs/grxnt");
+    expect(refused.status).toBe(unrouted.status);
+    const headers = (res: Response) =>
+      [...res.headers.entries()].map(([k, v]) => `${k}: ${v}`).sort();
+    expect(headers(refused)).toEqual(headers(unrouted));
   });
 });

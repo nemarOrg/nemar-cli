@@ -41,7 +41,9 @@ import {
   type DocsGrantResponse,
   type DocsVerifyResponse,
 } from "../../../shared/contract/docs-auth.js";
+import { notFoundResponse } from "../lib/not-found";
 import { webSessionMiddleware } from "../middleware/webSession";
+import { isActiveAccountStatus } from "../services/account-tier";
 import {
   DOCS_GRANT_INSERT_SQL,
   DOCS_GRANT_PRUNE_SQL,
@@ -101,14 +103,22 @@ authDocsRoutes.post("/docs/grant", webSessionMiddleware, async (c) => {
     );
   }
   if (!isDocsAdmin(user.role)) {
-    // Byte-identical to what `api.notFound` builds for an unrouted path, headers
-    // included. A distinct body or a stray `Cache-Control` would tell a signed-in
-    // non-admin that this route exists, which is the single inference answering
-    // 404 instead of 403 was chosen to prevent.
-    return c.json(
-      { error: "Not Found", message: `Route ${c.req.method} ${c.req.path} not found` },
-      404,
-    );
+    // The SAME handler `app.notFound` is registered with (lib/not-found.ts),
+    // called rather than transcribed: the first version of this hand-built a
+    // JSON body and claimed byte-identity, while an actually-unrouted path was
+    // answering Hono's plain-text default, so the disguise was distinguishable
+    // by content type alone.
+    //
+    // WHAT THIS 404 DOES AND DOES NOT BUY, because the first version of this
+    // comment overclaimed. It buys parity with `adminGate` on the website, so
+    // the two surfaces answer a signed-in non-admin the same way instead of one
+    // of them confirming that their account was checked and found wanting. It
+    // does NOT hide the route family: `exchange` answers 400 to a malformed
+    // body and `verify` answers 401 to any caller, both without a session at
+    // all, so existence is already public -- as are the documentation pages
+    // themselves, in a public repo. Do not build anything on top of this that
+    // needs the stronger property.
+    return notFoundResponse(c);
   }
 
   const code = generateGrantCode();
@@ -222,6 +232,24 @@ authDocsRoutes.get("/docs/verify", async (c) => {
 
   const found = await findSessionByCookieId(c.env, presented, "docs");
   if (!found) {
+    return c.json(
+      { ok: false, error: "invalid_session", message: DOCS_AUTH_MESSAGES.invalid_session },
+      401,
+      NO_STORE,
+    );
+  }
+  // The account rule, applied HERE rather than inherited, because
+  // `findSessionByCookieId` deliberately admits more than this gate may.
+  // That reader stops at `u.status != 'revoked'`, and it has to: a `pending`
+  // account reaches Settings through it to fix the mistyped address that is the
+  // reason it is pending (see `resolveActingAccount`). The mint refuses
+  // anything outside `ACTIVE_ACCOUNT_STATUSES`, so without this line the
+  // standing check would be LOOSER than the entry check -- a live docs session
+  // whose account moved to a non-authenticating status would keep serving pages
+  // the API itself would refuse. `invalid_session` rather than
+  // `not_authorized`: the gate clears the cookie on a 401 and sends the visitor
+  // back through the website, which is where a status problem gets explained.
+  if (!isActiveAccountStatus(found.user.status)) {
     return c.json(
       { ok: false, error: "invalid_session", message: DOCS_AUTH_MESSAGES.invalid_session },
       401,
