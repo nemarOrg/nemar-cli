@@ -25,6 +25,7 @@ import { rateLimiter } from "./middleware/rateLimit";
 import { adminRoutes } from "./routes/admin";
 import { authRoutes } from "./routes/auth";
 import { authDeviceRoutes } from "./routes/auth-device";
+import { authDocsRoutes } from "./routes/auth-docs";
 import { authKeysRoutes } from "./routes/auth-keys";
 import { authOrcidRoutes } from "./routes/auth-orcid";
 import { authWebRoutes } from "./routes/auth-web";
@@ -162,6 +163,11 @@ api.route("/auth", authDeviceRoutes);
 // device flow's paste-key fallback. Same /auth prefix; new paths under
 // /auth/keys*.
 api.route("/auth", authKeysRoutes);
+// Docs admin gate (epic #1336 phase 0, issue #1338). Same /auth prefix; new
+// paths under /auth/docs/*. The docs host cannot read the app's session cookie
+// (it is scoped to app.nemar.org on purpose), so these three routes are the
+// handoff that gives docs.nemar.org a credential of its own.
+api.route("/auth", authDocsRoutes);
 api.route("/users", userRoutes);
 api.route("/admin", adminRoutes);
 api.route("/datasets", datasetRoutes);

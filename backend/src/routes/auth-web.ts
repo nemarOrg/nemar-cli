@@ -65,6 +65,7 @@ import {
   nonProdCodeEchoAllowed,
   nonProdCodeRequestAllowed,
 } from "../services/auth-code";
+import { DOCS_REVOKE_ALL_SQL } from "../services/docs-auth";
 import {
   resolveEmailConfig,
   sendEmailChangeCodeEmail,
@@ -742,6 +743,24 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
     await revokeSession(c.env, cookieIdRaw);
   } catch (err) {
     console.error("[auth-web] /logout: revokeSession failed; clearing cookie anyway", err);
+  }
+
+  // Signing out of nemar.org also signs the account out of the gated
+  // documentation (epic #1336 phase 0). Those sessions live on
+  // docs.nemar.org, so this response cannot clear their cookie -- revoking the
+  // rows is what makes the next page view there refuse. Without it, "sign out"
+  // would leave admin docs open for up to eight more hours, which is the exact
+  // failure the rule about revocation cascading to linked credentials exists to
+  // prevent. Best-effort and logged, for the same reason the revoke above is:
+  // the person asked to sign out, so a D1 blip must not turn that into an
+  // error response.
+  const userId = c.var.webUser?.id;
+  if (userId) {
+    try {
+      await c.env.DB.prepare(DOCS_REVOKE_ALL_SQL).bind(userId).run();
+    } catch (err) {
+      console.error("[auth-web] /logout: docs session revoke failed", err);
+    }
   }
 
   c.header("Set-Cookie", buildClearedSessionCookie(c.env.WEB_SESSION_COOKIE_DOMAIN || undefined));
