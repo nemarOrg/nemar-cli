@@ -2,7 +2,7 @@
  * Accrual control for import-failure tracking issues (epic #1306, issue #1310).
  *
  * `nemarDatasets/.github` had a backlog of open import-failure issues and zero
- * closed ones, because nothing ever closed one (ADR 0050 records the count and
+ * closed ones, because nothing ever closed one (ADR 0052 records the count and
  * the date, which is why it is not restated here -- it changes daily). A tracker
  * that only accumulates cannot tell a live problem from one that healed weeks
  * ago, which is a large part of why a seven-week pipeline outage went unnoticed:
@@ -88,7 +88,7 @@ export function rollupIssueTitle(cause: string): string {
  * the pre-#1309 code produced the hint text "possible upstream-403/shard-gap"
  * and a human applied the label from that hint, so the five issues carrying it
  * are hand-labelled guesses rather than a prior spelling of
- * `upstream-inaccessible`. ADR 0049 establishes what those failures actually
+ * `upstream-inaccessible`. ADR 0051 establishes what those failures actually
  * were -- an expired PAT, an annex-uuid collision, a branch-protection ruleset
  * and a failed rebase. Owning the label here is what lets the relabel pass
  * retire a misattribution instead of leaving it on the issue forever.

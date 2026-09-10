@@ -51,7 +51,12 @@ Load-bearing ones to know before touching the relevant area:
 signed state names the account),
 0045 (the CLI and the web say one thing about an account),
 0048 (account kinds are explicit: person, service, test; superseding 0045's role-based
-ORCID-gap exemption).
+ORCID-gap exemption),
+0051 (a specific import error is never overwritten by a generic one),
+0052 (an import-failure tracking issue closes on verified state, and a burst rolls up),
+0053 (silence is only evidence of a problem when there was work to do),
+0054 (the weekly import report arrives whether or not anything is wrong, and unknown is
+never rendered as zero).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
@@ -536,6 +541,20 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   to the back catalogue**, and the units change is why that bump needed the
   1.2.7 floor: below it the streaming exporter could not apply the sidecar at
   all, so the two paths would have disagreed.
+  **A claim about the on-disk geometry is only as good as the command that
+  re-checks it: `bun run zarr:geometry-check`.** Phase 4 of the MCP epic
+  shipped a reader that returned signal from the wrong place in the recording
+  because a shard-index rule was measured on two stores, written into a design
+  doc, and then trusted by the code, the tests, the fixture and five reviewers
+  alike. `backend/scripts/zarr-geometry-conformance.ts` checks the invariants
+  the readers depend on against every index the catalog publishes (footer
+  entry-count divisibility, the index agreeing with the array it describes,
+  inner chunks spanning every channel, the codec chain and dtype, per-channel
+  `scale`/`offset`, and every `events.parquet` column being ZSTD). Run it when
+  the converter's chunking or events schema changes and when
+  `ZARR_ENGINE_VERSION` is bumped; it is an on-demand gate like
+  `migrations:d1-check`, not per-PR CI. A transient 5xx from the host is
+  reported separately and never counted as a violation.
   **A widening of discovery reaches the back catalog only through the engine
   stamp** (ADR 0033): `reconcile` re-queues on a version change, and an engine
   upgrade bumps no version, so `zarr_queue.py`'s `ZARR_ENGINE_VERSION` is what

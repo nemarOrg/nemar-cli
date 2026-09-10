@@ -874,7 +874,7 @@ describe("one issue, updated in place", () => {
 
     expect(result.status).toBe("healthy");
     expect(result.issue?.action).toBe("closed");
-    // ADR 0050: a comment ahead of a failed close is a permanent lie that repeats
+    // ADR 0052: a comment ahead of a failed close is a permanent lie that repeats
     // every run. closeIssue is idempotent, so this order self-heals.
     expect(order).toEqual(["close", "comment"]);
   });

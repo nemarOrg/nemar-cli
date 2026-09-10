@@ -1,4 +1,4 @@
-# ADR 0052: The weekly report arrives whether or not anything is wrong, and unknown is not zero
+# ADR 0054: The weekly report arrives whether or not anything is wrong, and unknown is not zero
 
 **Status:** accepted
 **Date:** 2026-09-09
@@ -6,8 +6,8 @@
 
 ## Context
 
-Auto-import was off for seven weeks and nothing reported it. ADR 0049 made a failure describable,
-ADR 0050 made its tracking issue drain, ADR 0051 made the pipeline's silence detectable. All three
+Auto-import was off for seven weeks and nothing reported it. ADR 0051 made a failure describable,
+ADR 0052 made its tracking issue drain, ADR 0053 made the pipeline's silence detectable. All three
 are conditional: they act when something is wrong.
 
 That leaves one hole, and it is the one the incident actually fell through. **An alarm and a broken
@@ -46,7 +46,7 @@ Consequences of that rule which are decisions in their own right:
   nothing, so the headline says so. This is what stops a broken reporter from reading as a healthy
   week -- the founding failure, one level up.
 - **Each fact is gathered independently and a failure degrades only that fact.** This is the OPPOSITE
-  trade from ADR 0051's sweep, and deliberately: there a failed read must not produce a verdict,
+  trade from ADR 0053's sweep, and deliberately: there a failed read must not produce a verdict,
   because the verdict CLOSES an issue. Here nothing is closed on the strength of a number, so a
   partial report is worth more than none -- provided the gaps say so.
 
@@ -84,7 +84,7 @@ filed twice under two. Zero-padded, because the rollover finds last week by sort
 `2026-W9` sorts after `2026-W10`.
 
 **The body is written once and never rewritten.** This is a historical record of a closed window,
-which is ADR 0050's rollup shape rather than ADR 0051's current-state shape. A rewrite would restate
+which is ADR 0052's rollup shape rather than ADR 0053's current-state shape. A rewrite would restate
 the window's numbers from a different instant than the window it claims to describe.
 
 **Filing a week's summary closes the most recent EARLIER open weekly**, which is usually the
@@ -123,11 +123,11 @@ the delivery path this report relies on. Worth stating because the contract read
 
 Harder: 52 issues a year on a shared repo (53 in an ISO long year), mitigated by closing the
 previous week's. And the report
-is only as good as its inputs -- it aggregates ADRs 0049-0051 rather than measuring anything new, so
+is only as good as its inputs -- it aggregates ADRs 0051-0053 rather than measuring anything new, so
 a wrong number upstream is a wrong number here. That is why every section names its source and why
 `unknown` is preserved rather than smoothed.
 
-**One extra OpenNeuro scan per week, and it races the one it duplicates.** The report calls ADR 0051's
+**One extra OpenNeuro scan per week, and it races the one it duplicates.** The report calls ADR 0053's
 sweep read-only rather than threading the daily run's result through, so the two jobs stay
 independent: a coverage failure must not stop the weekly report, and vice versa. ~52 extra scans a
 year is a fair price for that.
@@ -146,7 +146,7 @@ exists to provide, absent from the one section whose job is to show the daily jo
 triage cron records every run, and the weekly report reads an absence of rows as `unknown` **and as
 needing attention**, rather than as a quiet week.
 
-**Production-only, and not on the dev-cron allowlist**, for the same reason as ADRs 0050 and 0051: it
+**Production-only, and not on the dev-cron allowlist**, for the same reason as ADRs 0052 and 0053: it
 files and closes real issues on the `nemarDatasets` org that dev shares with production. Two fences,
 the cron wrapper's `isNonProductionEnv` and the route's own `apply` refusal. The route's DRY RUN also
 forces past the weekly gate, since it writes nothing and an operator asking to read the report should
@@ -175,8 +175,8 @@ not be told to wait for Monday.
 
 ## Receipts
 
-- Issue #1312 (phase 4 of epic #1306); ADR 0049 (the classifier), ADR 0050 (the tracking issue's
-  lifecycle, and the mutate-before-comment rule reused here), ADR 0051 (coverage and the
+- Issue #1312 (phase 4 of epic #1306); ADR 0051 (the classifier), ADR 0052 (the tracking issue's
+  lifecycle, and the mutate-before-comment rule reused here), ADR 0053 (coverage and the
   healthy/alarm/unknown split this extends)
 - Rules and body: `backend/src/services/import-weekly-summary.ts` (pure), applied by
   `import-weekly-summary-sweep.ts`

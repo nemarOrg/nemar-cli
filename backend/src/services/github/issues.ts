@@ -18,7 +18,7 @@
  *
  * `closeIssue`/`setIssueLabels` arrived with epic #1306 phase 2, which gave the
  * tracker a way to drain: before them nothing could close an issue or retire a
- * stale cause label, so issues accumulated and none was ever closed (ADR 0050
+ * stale cause label, so issues accumulated and none was ever closed (ADR 0052
  * records the count and the date it was measured).
  */
 

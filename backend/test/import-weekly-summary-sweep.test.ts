@@ -580,7 +580,7 @@ describe("filing this week closes last week", () => {
     const r = await runWeeklyImportSummary(envFor(db), { apply: true, now: NOW }, deps);
 
     expect(r.closedPrevious).toBe(700);
-    // ADR 0050: mutate then comment, so a failed close cannot leave a claim behind.
+    // ADR 0052: mutate then comment, so a failed close cannot leave a claim behind.
     expect(order).toEqual(["close", "comment"]);
     expect(deps.comments[0]?.body).toContain(THIS_WEEK);
     // And it points at the issue that was actually filed, so the closed one is

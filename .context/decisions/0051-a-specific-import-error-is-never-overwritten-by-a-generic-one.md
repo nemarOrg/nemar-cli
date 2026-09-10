@@ -1,4 +1,4 @@
-# ADR 0049: A specific import error is never overwritten by a generic one
+# ADR 0051: A specific import error is never overwritten by a generic one
 
 **Status:** accepted
 **Date:** 2026-09-08

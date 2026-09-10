@@ -29,6 +29,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { Ajv2020 } from "ajv/dist/2020";
+import { zarrIndexSchema } from "../shared/contract/zarr-index.js";
 import indexSchema from "../shared/zarr-index.schema.json";
 import manifestSchema from "../shared/zarr-manifest.schema.json";
 import indexFixture from "./fixtures/zarr-index-v3.json";
@@ -126,5 +127,109 @@ describe("shared/zarr-manifest.schema.json", () => {
     const doc = structuredClone(manifestFixture) as { files: { name: string }[] };
     doc.files[0].name = "index.json";
     expect(validate(doc)).toBe(false);
+  });
+});
+
+/**
+ * The published JSON Schema and the zod contract describe the SAME document,
+ * and nothing has been enforcing that.
+ *
+ * `shared/zarr-index.schema.json` is what the converter validates against
+ * before uploading (`scripts/zarr/generate_zarr.py`) and what
+ * `GET /schemas/zarr-index-v3.json` serves to third parties.
+ * `shared/contract/zarr-index.ts` is what every consumer in this repo parses
+ * with. The two are hand-synced, so one can be tightened or loosened without
+ * the other: a field the converter is allowed to omit but a consumer requires
+ * is a production 500 waiting for the first index that omits it, and the
+ * reverse silently lets a document through the gate that no consumer can read.
+ *
+ * The equivalence below is driven off the SAME fixture both sides already
+ * accept, using only public APIs -- delete one key at a time and require that
+ * ajv and zod agree on whether the result is still valid. That covers
+ * required-ness exactly, names the offending field when it drifts, and needs
+ * no introspection of either library's internals.
+ *
+ * `additionalProperties: false` in the JSON Schema versus `.passthrough()` in
+ * zod is a DELIBERATE asymmetry, not drift, and is asserted as such: the
+ * producer's own gate refuses to publish a field it does not declare, while a
+ * consumer must tolerate a field a newer producer added (ADR 0005's
+ * forward-compatibility posture). So the unknown-key direction is checked to
+ * DIFFER, and would fail if someone made them agree.
+ */
+describe("zarr-index.schema.json and contract/zarr-index.ts agree on required fields", () => {
+  const ajvValid = compile(indexSchema);
+  const bothAccept = (doc: unknown) => ({
+    ajv: ajvValid(doc) as boolean,
+    zod: zarrIndexSchema.safeParse(doc).success,
+  });
+
+  test("both accept the shared fixture to begin with", () => {
+    const v = bothAccept(indexFixture);
+    expect(v).toEqual({ ajv: true, zod: true });
+  });
+
+  test("deleting any top-level key makes ajv and zod agree on validity", () => {
+    const disagreements: string[] = [];
+    for (const key of Object.keys(indexFixture as Record<string, unknown>)) {
+      const doc = structuredClone(indexFixture) as Record<string, unknown>;
+      delete doc[key];
+      const v = bothAccept(doc);
+      if (v.ajv !== v.zod) {
+        disagreements.push(
+          `${key}: schema says ${v.ajv ? "valid" : "invalid"}, zod says ${v.zod ? "valid" : "invalid"}`,
+        );
+      }
+    }
+    expect(disagreements).toEqual([]);
+  });
+
+  test("deleting any store key makes ajv and zod agree on validity", () => {
+    const disagreements: string[] = [];
+    const storeKeys = Object.keys(
+      (indexFixture as { stores: Array<Record<string, unknown>> }).stores[0],
+    );
+    for (const key of storeKeys) {
+      const doc = structuredClone(indexFixture) as { stores: Array<Record<string, unknown>> };
+      delete doc.stores[0][key];
+      const v = bothAccept(doc);
+      if (v.ajv !== v.zod) {
+        disagreements.push(
+          `stores[0].${key}: schema says ${v.ajv ? "valid" : "invalid"}, zod says ${v.zod ? "valid" : "invalid"}`,
+        );
+      }
+    }
+    expect(disagreements).toEqual([]);
+  });
+
+  test("deleting any group key makes ajv and zod agree on validity", () => {
+    const disagreements: string[] = [];
+    const groupKeys = Object.keys(
+      (indexFixture as { stores: Array<{ groups: Array<Record<string, unknown>> }> }).stores[0]
+        .groups[0],
+    );
+    for (const key of groupKeys) {
+      const doc = structuredClone(indexFixture) as {
+        stores: Array<{ groups: Array<Record<string, unknown>> }>;
+      };
+      delete doc.stores[0].groups[0][key];
+      const v = bothAccept(doc);
+      if (v.ajv !== v.zod) {
+        disagreements.push(
+          `groups[0].${key}: schema says ${v.ajv ? "valid" : "invalid"}, zod says ${v.zod ? "valid" : "invalid"}`,
+        );
+      }
+    }
+    expect(disagreements).toEqual([]);
+  });
+
+  test("an unknown field is refused by the producer's gate and tolerated by consumers", () => {
+    // The one asymmetry that is on purpose. If this test ever fails because
+    // the two now agree, decide which way deliberately rather than "fixing"
+    // it: making zod strict breaks every consumer the moment the converter
+    // adds a field, and making the schema permissive removes the producer's
+    // own typo gate.
+    const doc = structuredClone(indexFixture) as Record<string, unknown>;
+    doc.some_field_no_producer_declares = 1;
+    expect(bothAccept(doc)).toEqual({ ajv: false, zod: true });
   });
 });

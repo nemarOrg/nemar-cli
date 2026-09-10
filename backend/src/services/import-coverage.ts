@@ -59,7 +59,7 @@
  *
  * Note this is not the detection latency. The sweep runs once daily, and the
  * alarm also needs {@link COVERAGE_BACKLOG_ALARM} datasets outstanding, so the
- * real latency from a stall is days -- see ADR 0051's consequences.
+ * real latency from a stall is days -- see ADR 0053's consequences.
  */
 export const COVERAGE_DISPATCH_STALE_HOURS = 24;
 
@@ -109,7 +109,7 @@ export interface ImportCoverageVerdict {
  *
  * `neverAttempted` and `untracked` are OUTSTANDING WORK and drive the verdict.
  * `tracked` and `blocklisted` do not: a per-dataset failure issue exists for the
- * first (ADR 0050) and the retry engine owns the second, so counting them would
+ * first (ADR 0052) and the retry engine owns the second, so counting them would
  * make the alarm permanent on a set nobody intends to import -- the fastest way
  * to train an operator to ignore it.
  *
@@ -372,7 +372,7 @@ export interface CoverageReportFacts {
  * `imported` and `inFlight` for the whole duration of every import, and quarantine
  * keeps the `datasets` row -- so the report declared itself unreliable on every
  * healthy run. A balance line that cries wolf is worse than none: it teaches the
- * reader to discount the report, which is the muting failure ADR 0051 is written
+ * reader to discount the report, which is the muting failure ADR 0053 is written
  * against.
  *
  * Mirrors the scan no longer returns get their OWN row. They are drift, not a gap:

@@ -30,6 +30,7 @@ import { authOrcidRoutes } from "./routes/auth-orcid";
 import { authWebRoutes } from "./routes/auth-web";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
+import { mcpRoutes } from "./routes/mcp";
 import { openApiRoutes } from "./routes/openapi";
 import { sandboxRoutes } from "./routes/sandbox";
 import { schemaRoutes } from "./routes/schemas";
@@ -287,12 +288,27 @@ app.use("*", async (c, next) => {
   if (route === "zarr") {
     return zarrDataRoutes.fetch(c.req.raw, c.env, c.executionCtx);
   }
+  // mcp.nemar.org (or mcp-test.nemar.org in staging): the NEMAR MCP server
+  // (epic #1065 phase 2). Same reasoning as the zarr fork above -- its own
+  // self-contained sub-app (origin gate + rate-limit bridge scoped to the
+  // Streamable HTTP transport's own headers) rather than the api middleware
+  // stack.
+  if (route === "mcp") {
+    return mcpRoutes.fetch(c.req.raw, c.env, c.executionCtx);
+  }
   return next();
 });
 
 // Dev / workers.dev access to the zarr proxy (prod uses the zarr.nemar.org host
 // fork above). Must precede the catch-all api mount.
 app.route("/zarrproxy", zarrDataRoutes);
+// Dev / workers.dev access to the MCP server (prod uses the mcp.nemar.org host
+// fork above). A single-path forward (not a `.route()` sub-tree mount, unlike
+// /zarrproxy above): mcpRoutes' own routing then sees the request at exactly
+// `/mcp`, so only the Streamable HTTP transport endpoint is reachable this
+// way -- the descriptor at `/` is host-fork only. Must precede the catch-all
+// api mount.
+app.all("/mcp", (c) => mcpRoutes.fetch(c.req.raw, c.env, c.executionCtx));
 app.route("/nemar", api);
 app.route("/", api);
 
@@ -694,7 +710,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
         .bind(MAX_DELETIONS_PER_RUN)
         .all<{ dataset_id: string }>();
       // The sweep's own bookkeeping message. Declared once so the string and its
-      // ADR 0049 classification cannot drift apart: passing a hand-written `true`
+      // ADR 0051 classification cannot drift apart: passing a hand-written `true`
       // would keep claiming "generic" even if this wording later became a real
       // diagnosis. No quote escaping needed, and asserted by the const's own text.
       const STUCK_IMPORT_MESSAGE = "stuck > 6h (scheduled sweep)";
@@ -702,7 +718,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
         try {
           const upd = await db
             .prepare(
-              // A specific error is never overwritten by a generic one (ADR 0049).
+              // A specific error is never overwritten by a generic one (ADR 0051).
               // "stuck > 6h" says only that this sweep fired; a row can be in-flight
               // here yet already carry a real diagnosis (a racing finalize POST moved
               // it off `failed` before the webhook's dropped waitUntil recovery ran --
@@ -877,7 +893,7 @@ export default {
       // #1310 (epic #1306): drain the import-failure tracking issues. Closes the
       // ones whose dataset now verifies complete against S3, and retires stale
       // cause labels. Before this the tracker only accumulated -- a backlog of
-      // open issues, none ever closed (ADR 0050 has the count and the date it was
+      // open issues, none ever closed (ADR 0052 has the count and the date it was
       // measured) -- so it could not distinguish a live problem from one that
       // healed weeks ago.
       //

@@ -193,7 +193,7 @@ async function markImportStatus(
   //
   // `lastError` here is bookkeeping (`quarantined: <reason>` / `auto-rollback:
   // <reason>`), never a diagnosis, so it must not erase a specific message the
-  // failing job recorded (ADR 0049). This used to be a plain overwrite, and it
+  // failing job recorded (ADR 0051). This used to be a plain overwrite, and it
   // destroyed the `[openneuro-upstream-inaccessible]` marker that
   // IMPORT_RETRY_CANDIDATES_QUERY requires to re-select a quarantined row --
   // stranding exactly the datasets the retry engine exists to recover. The

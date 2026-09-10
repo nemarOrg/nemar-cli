@@ -334,7 +334,7 @@ const uploadProgressSchema = z.object({
   dataset_id: z.string().min(1),
   started_at: z.string(),
   updated_at: z.string(),
-  files: z.record(fileProgressSchema),
+  files: z.record(z.string(), fileProgressSchema),
   completed_steps: z.array(uploadStepSchema),
 });
 

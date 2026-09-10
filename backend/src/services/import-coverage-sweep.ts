@@ -436,13 +436,13 @@ function labelsForKind(issue: GitHubIssue | null, kind: ImportCoverageKind | nul
  * review of this phase:
  *
  *   1. **The body is rewritten, not appended to** -- the opposite of phase 2's
- *      rollup body, which is written once and never rewritten (ADR 0050). The
+ *      rollup body, which is written once and never rewritten (ADR 0052). The
  *      shapes differ because the content does: a rollup accumulates datasets, so a
  *      rewritten body would lose history, whereas coverage is a single current
  *      state whose numbers change daily. What both share is the rule underneath:
  *      never write a comment per run. Comments here are reserved for a change of
  *      `kind`.
- *   2. **The state change goes before its comment** (ADR 0050, inherited).
+ *   2. **The state change goes before its comment** (ADR 0052, inherited).
  *      `closeIssue` is idempotent and a closed issue leaves the candidate listing,
  *      so the worst case is a missing explanation rather than a permanent false
  *      claim repeated daily.

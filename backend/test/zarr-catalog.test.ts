@@ -252,7 +252,7 @@ describe("buildZarrCatalog: shape, ordering, and CSV-to-array parsing", () => {
     expect(d.zarr_verified_at).toBe("2026-08-02T00:00:00.000Z");
   });
 
-  // Issue #1068 (epic #1181 phase 8), decision 2: the catalog POPULATION is
+  // Issue #1068 (epic #1181 phase 8): the catalog POPULATION is
   // unchanged (still every has_zarr row), and the two verify fields ride
   // along per entry -- null on a fresh conversion the sweep has not reached.
   test("zarr_verify_status/zarr_verified_at are null on a fresh, unverified conversion", () => {

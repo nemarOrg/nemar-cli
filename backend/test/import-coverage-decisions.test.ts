@@ -325,10 +325,10 @@ describe("the thresholds are boundaries, and inclusive", () => {
  * COVERAGE_BACKLOG_ALARM from 5 to 1 left all 2668 backend tests green. The value
  * is the alarm's credibility -- at 1 this becomes the thing that gets muted, which
  * `COVERAGE_BACKLOG_ALARM`'s own docstring says it must not -- so it is pinned
- * literally, and moving it means visiting ADR 0051's calibration argument.
+ * literally, and moving it means visiting ADR 0053's calibration argument.
  */
 describe("the calibration is pinned, not just the shape", () => {
-  test("the thresholds are the values ADR 0051 argues for", () => {
+  test("the thresholds are the values ADR 0053 argues for", () => {
     expect(COVERAGE_BACKLOG_ALARM).toBe(5);
     expect(COVERAGE_BACKLOG_ALARM_ALONE).toBe(20);
     expect(COVERAGE_DISPATCH_STALE_HOURS).toBe(24);
@@ -548,7 +548,7 @@ describe("the issue body", () => {
    * (`POST /admin/datasets/import` writes both rows in one handler) and every
    * quarantined dataset, so the body declared itself unreliable on every healthy
    * run -- teaching the reader to discount the report, which is the muting failure
-   * ADR 0051 is written against.
+   * ADR 0053 is written against.
    */
   test("mirrors no longer in the scan are reported as drift, not as a mismatch", () => {
     const body = buildCoverageIssueBody(args);

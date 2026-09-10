@@ -63,7 +63,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0022](0022-orcid-relink-requires-post-minted-intent.md) - ORCID relink intent is minted only by an authenticated same-origin POST
 - [ADR 0023](0023-clean-zarr-rebuilds-reconcile-instead-of-wiping.md) - A `--clean` Zarr rebuild reconciles the serving copy instead of erasing it first
 - [ADR 0024](0024-deposit-attestation-is-recorded-not-assumed.md) - Deposit attestation is recorded on the dataset row, never assumed from `--yes`
-- [ADR 0025](0025-inference-compute-runs-on-device-mcp-is-a-stateless-broker.md) - Inference compute runs on the user's device; the MCP is a stateless recipe-first broker
+- [ADR 0025](0025-inference-compute-runs-on-device-mcp-is-a-stateless-broker.md) - Inference compute runs on the user's device; the MCP is a stateless recipe-first broker (**superseded**)
 - [ADR 0026](0026-mechanical-submission-minimums-hard-gate-native-publication.md) - Mechanical submission minimums hard-gate native publication; adequacy stays LLM-advisory
 - [ADR 0027](0027-zarr-dispatch-is-raw-only-derivatives-sourcedata-code-excluded.md) - The Zarr dispatch gate is raw-only; derivatives/sourcedata/code never trigger
 - [ADR 0028](0028-maxshield-meg-is-sss-filtered-before-serving-or-declined.md) - MaxShield MEG is Signal-Space Separation filtered before serving, or declined
@@ -87,10 +87,12 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0046](0046-cross-repo-parity-compares-pre-release-branches.md) - Cross-repo parity compares pre-release branches, never `main`
 - [ADR 0047](0047-cli-sign-in-is-the-device-authorization-grant.md) - CLI sign-in is the device authorization grant, layered on the web ORCID session
 - [ADR 0048](0048-account-kinds-are-explicit.md) - Account kinds are explicit: person, service, test
-- [ADR 0049](0049-a-specific-import-error-is-never-overwritten-by-a-generic-one.md) - A specific import error is never overwritten by a generic one
-- [ADR 0050](0050-a-tracking-issue-closes-on-verified-state-and-a-burst-rolls-up.md) - An import-failure tracking issue closes on verified state, and a burst rolls up
-- [ADR 0051](0051-silence-is-only-evidence-of-a-problem-when-there-was-work-to-do.md) - Silence is only evidence of a problem when there was work to do
-- [ADR 0052](0052-the-weekly-report-arrives-whether-or-not-anything-is-wrong.md) - The weekly report arrives whether or not anything is wrong, and unknown is not zero
+- [ADR 0049](0049-compute-runs-in-the-browser-osa-owns-the-runtime-only-hpc-is-gated.md) - Compute runs in the browser by default, OSA owns the execution runtime, and only HPC submission is gated
+- [ADR 0050](0050-no-wasm-in-the-worker-bundle.md) - No WebAssembly in the MCP Worker bundle, and real workerd is the only gate that proves it
+- [ADR 0051](0051-a-specific-import-error-is-never-overwritten-by-a-generic-one.md) - A specific import error is never overwritten by a generic one
+- [ADR 0052](0052-a-tracking-issue-closes-on-verified-state-and-a-burst-rolls-up.md) - An import-failure tracking issue closes on verified state, and a burst rolls up
+- [ADR 0053](0053-silence-is-only-evidence-of-a-problem-when-there-was-work-to-do.md) - Silence is only evidence of a problem when there was work to do
+- [ADR 0054](0054-the-weekly-report-arrives-whether-or-not-anything-is-wrong.md) - The weekly report arrives whether or not anything is wrong, and unknown is not zero
 
 ## Backfill note (2026-07-31)
 

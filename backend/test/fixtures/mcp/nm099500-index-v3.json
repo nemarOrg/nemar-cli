@@ -1,0 +1,57 @@
+{
+  "format": "nemar-zarr-index",
+  "format_version": 3,
+  "dataset_id": "nm099500",
+  "contract_base": "https://zarr.nemar.org/nm099500/zarr/",
+  "data_base": "https://nemar.s3.us-east-2.amazonaws.com/nm099500/zarr/",
+  "data_base_kind": "s3-public",
+  "s3_uri": "s3://nemar/nm099500/zarr/",
+  "s3_region": "us-east-2",
+  "s3_anonymous": true,
+  "source_commit": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+  "engine_version": "3",
+  "biosigio_version": "1.2.7",
+  "updated_utc": "2026-09-08T00:00:00Z",
+  "doi": null,
+  "license": null,
+  "citation": null,
+  "hed_version": null,
+  "layout": {
+    "level0": "<zarr>/<group>/0",
+    "view": "<zarr>/<group>/view/<L>",
+    "view_levels": "1..n_view_levels from the group attrs",
+    "scale_offset": "level-0 array attrs scale[] and offset[]; physical = digital * scale + offset",
+    "events": "<data_base>events.parquet"
+  },
+  "discovered_count": 1,
+  "store_count": 1,
+  "n_recordings": 1,
+  "errors": 0,
+  "failure_count": 0,
+  "pending_count": 0,
+  "stores": [
+    {
+      "path": "sub-synth/eeg/sub-synth_task-shardtest_eeg.edf",
+      "zarr": "sub-synth/eeg/sub-synth_task-shardtest_eeg.zarr",
+      "updated_utc": "2026-09-08T00:00:00Z",
+      "source_tree": "raw",
+      "derived": false,
+      "modalities": ["eeg"],
+      "groups": [
+        {
+          "name": "eeg_250hz",
+          "modality": "EEG",
+          "rate": 250.0,
+          "n_channels": 4,
+          "n_samples": 6500,
+          "duration_s": 26.0,
+          "source_rate_hz": 1000.0,
+          "chunk_samples": 1000,
+          "shard_samples": 4000
+        }
+      ]
+    }
+  ],
+  "failures": [],
+  "pending": []
+}

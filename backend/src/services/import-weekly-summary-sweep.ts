@@ -622,7 +622,7 @@ async function postWeeklySummary(
     try {
       await close(IMPORT_FAILURE_ISSUES_REPO, previous.number, pat);
       closedPrevious = previous.number;
-      // Mutate first, then comment (ADR 0050): a comment ahead of a failed close is
+      // Mutate first, then comment (ADR 0052): a comment ahead of a failed close is
       // a claim that repeats.
       await comment(
         IMPORT_FAILURE_ISSUES_REPO,

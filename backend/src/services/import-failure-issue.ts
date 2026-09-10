@@ -262,7 +262,7 @@ export async function fileImportFailureIssueIfNeeded(
   // Classified from the STORED `last_error`, never from `args.errorMessage`.
   //
   // The caller (routes/callbacks/import-state.ts) deliberately refuses to let a
-  // GENERIC incoming message overwrite a SPECIFIC stored one -- ADR 0049's rule,
+  // GENERIC incoming message overwrite a SPECIFIC stored one -- ADR 0051's rule,
   // enforced in SQL by `lastErrorAssignmentSql`. Classifying from the raw
   // incoming value applied that rule to D1 and ignored it for the issue: a second
   // `failed` callback carrying `terminal: prepare=failure copy=failure

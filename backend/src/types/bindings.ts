@@ -24,6 +24,12 @@ export interface Bindings {
   // the AE SQL API. Optional: recordLlmUsage() no-ops when absent.
   ANALYTICS_LLM?: AnalyticsEngineDataset;
 
+  // MCP server per-tool-call metrics (nemar_mcp_metrics, epic #1065 phase 2).
+  // One data point per tools/call (success or error); a dedicated dataset
+  // rather than ANALYTICS so blob positions never collide with
+  // buildAccessDataPoint's. Optional: recordMcpToolCall() no-ops when absent.
+  ANALYTICS_MCP?: AnalyticsEngineDataset;
+
   // Environment variables
   ENVIRONMENT: "production" | "development" | "staging" | "test";
   API_BASE_URL: string;
@@ -49,6 +55,11 @@ export interface Bindings {
    *  so the one dev worker answers on the -test hosts. See index.ts host fork. */
   DATA_HOSTNAME?: string;
   ZARR_HOSTNAME?: string;
+  /** Hostname that dispatches to the MCP server sub-app (epic #1065 phase 2).
+   *  Defaults to the prod literal (mcp.nemar.org) when unset, so prod behavior
+   *  is unchanged; staging sets mcp-test.nemar.org so the one dev worker
+   *  answers on the -test host. See index.ts host fork and routes/mcp.ts. */
+  MCP_HOSTNAME?: string;
   /** Base origin for data-plane bytes_url links embedded in served manifests
    *  (epic #923), no trailing slash. Defaults to https://data.nemar.org so prod
    *  output is byte-identical; staging sets https://data-test.nemar.org so

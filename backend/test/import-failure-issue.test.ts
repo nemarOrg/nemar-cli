@@ -454,7 +454,7 @@ describe("a re-failure comments, and relabels when the cause changed", () => {
    * message.
    *
    * `routes/callbacks/import-state.ts` refuses to let a GENERIC message overwrite
-   * a SPECIFIC stored one (ADR 0049's rule, in SQL). Classifying the label from
+   * a SPECIFIC stored one (ADR 0051's rule, in SQL). Classifying the label from
    * the incoming value applied that rule to D1 and ignored it for the issue: the
    * `report` job's `terminal: ...` callback -- which every issue in the incident
    * window recorded -- classified as UNKNOWN and STRIPPED the correct cause label

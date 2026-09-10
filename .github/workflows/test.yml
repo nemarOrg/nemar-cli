@@ -35,6 +35,7 @@ jobs:
       email: ${{ steps.filter.outputs.email }}
       zarr: ${{ steps.filter.outputs.zarr }}
       shared: ${{ steps.filter.outputs.shared }}
+      decisions: ${{ steps.filter.outputs.decisions }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -79,11 +80,31 @@ jobs:
               - 'backend/src/db/migrations/0017_broadcast_emails.sql'
               - 'test/auth-passwordless.test.ts'
               - '.github/workflows/test.yml'
+            # ADRs and the index that lists them. `test/adr-index.unit.test.ts`
+            # exists to validate exactly these files -- gapless numbering, every
+            # file present in README.md and vice versa, a superseded ADR naming a
+            # target that exists -- and until this filter it NEVER RAN when they
+            # changed, because .context/** matched nothing. Two ADR pull requests
+            # in a row (#1292, #1330) therefore showed a fully green check list
+            # while the one test that could have failed was skipped; both were
+            # verified by hand instead. Same shape as the `shared:` gap above,
+            # same fix.
+            decisions:
+              - '.context/decisions/**'
+              - 'test/adr-index.unit.test.ts'
+              - '.github/workflows/test.yml'
             # Zarr conversion engine (epic #1108 Phase 1 / #1109). Repatriated
             # from nemarDatasets/.github, where test-generate-zarr.yml used to
             # run these; that workflow is retired and this filter replaces it.
             zarr:
               - 'scripts/zarr/**'
+              # scripts/mcp/ rides this filter rather than getting its own: it is
+              # the repo's other operational Python, and this is the only job
+              # with uv set up. It cannot be RUN in CI (its whole purpose is to
+              # talk to a live host), but it can be linted, which is the same
+              # reasoning as the shellcheck step below -- a file in the repo that
+              # nothing checks is where an infinite loop shipped last time.
+              - 'scripts/mcp/**'
               # patch_duration.py imports generate_zarr (_run,
               # materialize_recording), so it moved here with it (#1109).
               - 'scripts/patch_duration.py'
@@ -130,6 +151,15 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           bash -n scripts/zarr/hallu-zarr.sh
           shellcheck --severity=warning scripts/zarr/hallu-zarr.sh
+
+      # scripts/mcp/verify_streamable_http.py talks to a live MCP host, so CI
+      # cannot run it. Linting it is still worth a few seconds: it shipped a
+      # default URL missing the transport path, which no test could have caught
+      # and which made the script unable to connect at all. Ruff parses the file,
+      # so this covers syntax as well as lint. The flags match the ones its own
+      # docstring records, and py312 is the version its shebang pins.
+      - name: Lint the MCP operational scripts
+        run: uvx ruff check --target-version py312 --line-length 100 --extend-select E501,I,UP,B scripts/mcp/
 
       # jsonschema + pyarrow ONLY -- deliberately not the whole requirements.txt.
       # This job is the fast, pure-Python tier: it has no biosigIO/MNE/zarr and
@@ -263,7 +293,7 @@ jobs:
     needs: changes
     # Matches unit-pure's trigger so that, as a required check, lint never
     # "skips" on a backend-only PR (a skipped required check blocks merges).
-    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true' || needs.changes.outputs.shared == 'true'
+    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true' || needs.changes.outputs.shared == 'true' || needs.changes.outputs.decisions == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

@@ -1,5 +1,5 @@
 /**
- * The one rule about `import_jobs.last_error` (epic #1306, ADR 0049).
+ * The one rule about `import_jobs.last_error` (epic #1306, ADR 0051).
  *
  *   A SPECIFIC error message must never be overwritten by a GENERIC one.
  *

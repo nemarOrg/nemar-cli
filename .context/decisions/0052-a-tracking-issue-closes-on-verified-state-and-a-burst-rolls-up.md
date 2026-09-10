@@ -1,4 +1,4 @@
-# ADR 0050: A tracking issue closes on verified state, and a burst rolls up
+# ADR 0052: A tracking issue closes on verified state, and a burst rolls up
 
 **Status:** accepted
 **Date:** 2026-09-09
@@ -18,7 +18,7 @@ A tracker that only accumulates cannot distinguish a live problem from one that 
 ago. At least four of those 29 had already recovered when this was written -- `on003104`,
 `on005691`, `on006136` and `on006159` all resolve at `api.nemar.org` today -- so roughly a
 seventh of the tracker was already stale, and no reader could tell which seventh without
-checking each dataset by hand. That is a large part of why the outage in ADR 0049 went
+checking each dataset by hand. That is a large part of why the outage in ADR 0051 went
 unnoticed: the signal was buried in noise that never drained.
 
 The other half of the problem is the arrival pattern. Import failures come in **bursts, not
@@ -126,7 +126,7 @@ rewritten -- later datasets join as comments -- so it states no running total.
 **A re-failure whose cause changed is relabelled, from the STORED error.** The cause is
 classified from `import_jobs.last_error` after the upsert, never from the raw incoming callback
 message. The callback route already refuses to let a GENERIC message overwrite a SPECIFIC
-stored one (ADR 0049's rule, enforced in SQL); classifying the label from the incoming value
+stored one (ADR 0051's rule, enforced in SQL); classifying the label from the incoming value
 applied that rule to D1 and ignored it for the issue, so the `report` job's
 `terminal: prepare=failure ...` summary classified as UNKNOWN and stripped a correct cause
 label back to `needs-triage` -- silently, and in a two-writer fight with this sweep, which
@@ -186,7 +186,7 @@ pass will not own it and will leave it in place alongside the new one.
 - **Close on `import_jobs.status = 'complete'`.** One D1 read instead of an S3 walk, and it is
   what a reader expects. Declined: the status column records what the pipeline *believes*, and
   the whole reason these issues exist is that the pipeline's own account of itself was wrong
-  (ADR 0049). The issue's own triage doc already names verification, not status, as the
+  (ADR 0051). The issue's own triage doc already names verification, not status, as the
   authority for closing.
 - **A single threshold instead of a band.** Simpler to explain, and wrong at the boundary: a
   tracker hovering at the threshold would fold failures into a rollup on one run and open
@@ -208,7 +208,7 @@ pass will not own it and will leave it in place alongside the new one.
 
 ## Receipts
 
-- Issue #1310 (phase 2 of epic #1306); the outage and the classifier are ADR 0049
+- Issue #1310 (phase 2 of epic #1306); the outage and the classifier are ADR 0051
 - Rules: `backend/src/services/import-issue-accrual.ts` (pure), applied by
   `import-issue-sweep.ts` (close/relabel) and `import-failure-issue.ts` (file/roll up)
 - Verification primitive: `verifyDatasetVersionS3`, `backend/src/services/import-integrity.ts`
@@ -218,5 +218,5 @@ pass will not own it and will leave it in place alongside the new one.
 - Operator entry point: `POST /admin/imports/issue-triage`,
   `nemar admin import-issue-triage` (dry run by default; `apply` production-only)
 - The stored-vs-incoming error rule this reuses: `isGenericImportError` /
-  `lastErrorAssignmentSql` in `backend/src/services/import-error.ts`, ADR 0049
+  `lastErrorAssignmentSql` in `backend/src/services/import-error.ts`, ADR 0051
 - Derive-rather-than-store, the reason the rotation has no cursor: ADR 0034

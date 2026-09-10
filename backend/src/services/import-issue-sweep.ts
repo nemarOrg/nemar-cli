@@ -19,7 +19,7 @@
  * would be the responsive option, but it would only ever catch recoveries that
  * pass through that webhook. A manual `nemar admin recover`, an operator's
  * forced verify, and every one of the issues that accumulated before this existed
- * (ADR 0050 records the count and the date) would all be missed. One sweep covers
+ * (ADR 0052 records the count and the date) would all be missed. One sweep covers
  * all of them through one tested path, and keeps GitHub I/O off a webhook route
  * that already carries two `waitUntil` calls. The cost is up to a day's latency
  * before a healed issue closes, which does not matter for a tracker.

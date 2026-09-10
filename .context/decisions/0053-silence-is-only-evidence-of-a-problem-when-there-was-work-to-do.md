@@ -1,4 +1,4 @@
-# ADR 0051: Silence is only evidence of a problem when there was work to do
+# ADR 0053: Silence is only evidence of a problem when there was work to do
 
 **Status:** accepted
 **Date:** 2026-09-09
@@ -7,7 +7,7 @@
 ## Context
 
 Auto-import was disabled on 2026-07-21 UTC (committed 2026-07-20 local) and stayed off for seven weeks. Every component behaved
-correctly. No component's job was to notice that **nothing was happening**. ADR 0049 and ADR 0050
+correctly. No component's job was to notice that **nothing was happening**. ADR 0051 and ADR 0052
 improved how a failure is described and how its tracking issue drains; neither would have detected
 this, because there were no failures to describe.
 
@@ -81,7 +81,7 @@ outstanding, the verdict is `dispatch-lost`. That is the most specific diagnosis
 names the two things to check, neither of which is guessable from the symptom.
 
 **Only outstanding datasets count as backlog.** A dataset with an `import_jobs` row is already
-tracked -- by its own failure issue (ADR 0050) or by the retry engine's blocklist -- so counting it
+tracked -- by its own failure issue (ADR 0052) or by the retry engine's blocklist -- so counting it
 would make the alarm permanent on a set nobody intends to import. Blocklisted is checked
 explicitly rather than through `status`, because `import-retry.ts` blocklists a row **without**
 changing its status, so a status-only partition misses every blocked row.
@@ -120,9 +120,9 @@ is worse than none, because it teaches the reader to discount the report.
 dataset, so the title is constant and is the dedup key. The body is overwritten every alarming run
 and states that it describes the present rather than a history; a comment is written **only when
 the kind changes**. A comment per run would be one notification per day forever, which is the
-accrual ADR 0050 exists to prevent, one level up. The live kind is read off the issue's own labels
+accrual ADR 0052 exists to prevent, one level up. The live kind is read off the issue's own labels
 (`coverage-backlog` / `coverage-silence` / `coverage-disabled` / `coverage-dispatch-lost`) rather
-than stored, the same observable-not-flag discipline as `rollupOpen` in ADR 0050. Clearing the kind
+than stored, the same observable-not-flag discipline as `rollupOpen` in ADR 0052. Clearing the kind
 label is also what makes the alarm-stood-down comment fire once rather than daily.
 
 ## Consequences
@@ -159,7 +159,7 @@ and a few dozen such mirrors would have latched the floor ON for good: a permane
 acknowledgement path, the monitor dark in exactly the way this phase exists to prevent, and a
 recovered pipeline unable to close its own alarm. Drift is reported on its own line instead.
 
-No per-dataset work, so there is no batch limit and no window to rotate -- unlike ADR 0050's sweep.
+No per-dataset work, so there is no batch limit and no window to rotate -- unlike ADR 0052's sweep.
 
 **No new schema.** The dispatch signal is the audit row the importer already writes. The sweep needs
 one more column than the importer's gate does -- the picked id, for the cross-check -- so it has its
@@ -205,15 +205,15 @@ about, arriving on day one. Run the dry run before the cron does and read the pa
   landed mid-outage, and the import rate is far too bursty for a rate check -- nine in six hours
   during catch-up against zero in a normal quiet week.
 - **A per-dataset issue for each never-attempted dataset.** Declined: it is one systemic problem,
-  and ADR 0050's rollup exists precisely because per-dataset filing floods a shared repo.
+  and ADR 0052's rollup exists precisely because per-dataset filing floods a shared repo.
 - **Store the last-known coverage verdict in D1** to detect transitions. Declined per ADR 0034
   (derive, don't store): the issue's own labels already carry the live kind, and a stored flag
   drifts against the document it describes.
 
 ## Receipts
 
-- Issue #1311 (phase 3 of epic #1306); the outage and the classifier are ADR 0049; the tracking
-  issue's own lifecycle is ADR 0050
+- Issue #1311 (phase 3 of epic #1306); the outage and the classifier are ADR 0051; the tracking
+  issue's own lifecycle is ADR 0052
 - Rules: `backend/src/services/import-coverage.ts` (pure), applied by `import-coverage-sweep.ts`
 - The dispatch-row gap this turns on: `if (!picked)` in `backend/src/services/auto-import.ts`,
   ahead of the `auto_import_dispatch` insert
@@ -221,7 +221,7 @@ about, arriving on day one. Run the dry run before the cron does and read the pa
   `owner_user_id != -1` guard against the 2026-06-20 stall), `diffNewDatasets`,
   `AUTO_IMPORT_GATE_QUERY`, `parseSqliteUtc`
 - Fail-open-on-the-read precedent: `backend/src/services/zarr-fidelity-sweep.ts` (issue #1068)
-- Mutate-before-comment, and the one-issue-updated-in-place rule: ADR 0050
+- Mutate-before-comment, and the one-issue-updated-in-place rule: ADR 0052
 - Counts-and-pointers report shape: ADR 0036
 - Operator entry point: `POST /admin/imports/coverage-sweep`, `nemar admin import-coverage`
   (dry run by default; `apply` production-only)

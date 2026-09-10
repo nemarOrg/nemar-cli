@@ -384,7 +384,7 @@ describe("runZarrFidelitySweep is wired into the daily cron (outside the sweep f
     const idx = allCode.indexOf(`${NAME}(env)`);
     expect(idx).toBeGreaterThanOrEqual(0);
     // A wider window than publishZarrCatalog's: this call's `.then()` builds
-    // a summary line with the failed-dataset ids (decision 3), so there is
+    // a summary line with the failed-dataset ids, so there is
     // more code between the call and its `.catch(`.
     const window = allCode.slice(idx, idx + 2000);
     expect(window).toContain(".catch(");
