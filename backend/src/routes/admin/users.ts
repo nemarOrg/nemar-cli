@@ -479,6 +479,12 @@ async function finalizeRevocation(
   // authorized it, so an unspent one had to be destroyed rather than left to
   // expire. Not best-effort: a revocation that cannot complete must fail
   // loudly, exactly as the token revoke above does.
+  //
+  // BEFORE the status write, not after, and the order is load-bearing. If this
+  // throws here, the account is still `approved` and the admin's retry re-runs
+  // the whole revocation. After the status write, a retry would hit the
+  // "User already revoked" 409 and the sessions and grants would never be
+  // reached at all -- the failure would be unrecoverable through the route.
   await db.batch([
     db
       .prepare(
