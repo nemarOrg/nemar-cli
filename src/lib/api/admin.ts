@@ -1576,6 +1576,218 @@ export async function zarrFidelitySweep(options?: {
 }
 
 // ============================================================================
+// Import-failure issue triage (#1310, epic #1306)
+// ============================================================================
+
+export interface ImportIssueTriageEntry {
+  issueNumber: number;
+  datasetId: string | null;
+  title: string;
+  kind: "close" | "relabel" | "keep";
+  reason: string;
+  labels?: string[];
+  /** The action was attempted and did not land. Excluded from the counts. */
+  failed?: boolean;
+}
+
+/** One batch of the import-failure issue triage
+ *  (`POST /admin/imports/issue-triage`). `applied` is false on a dry run, which
+ *  is the default: nothing is written to GitHub unless `--apply` is passed. */
+export interface ImportIssueTriageResponse {
+  applied: boolean;
+  /** Open per-dataset issues (rollups excluded). */
+  openIssues: number;
+  /** Aggregate filing mode across causes. Not per-cause: the filer asks the same
+   *  question of ONE cause's rollup, so inside the hysteresis band a cause with
+   *  no rollup of its own still files per-dataset. */
+  mode: "per-dataset" | "rollup";
+  /** Open per-cause rollup issues seen this run. `outcome` is set only on an
+   *  applied run that tried to release them. */
+  rollups: { number: number; title: string; outcome?: "released" | "failed" }[];
+  /** Rollups closed (or, on a dry run, that would be) because the mode released. */
+  rollupsReleased: number;
+  examined: number;
+  /** WRITES tried: non-keep entries plus rollup releases, on an applied run only.
+   *  Zero on a dry run, which attempts nothing. Decision failures are not
+   *  attempts; they appear in `errors` with `stage: "plan"`. */
+  attempted: number;
+  closed: number;
+  relabelled: number;
+  kept: number;
+  plan: ImportIssueTriageEntry[];
+  errors: {
+    issue: number;
+    dataset_id: string | null;
+    /** `comment` means the state change LANDED and only its comment failed. */
+    stage: "plan" | "apply" | "comment";
+    error: string;
+  }[];
+  /** Candidates outside this run's window; the window rotates daily. */
+  remaining: number;
+  ok: boolean;
+  /** Present when the run applied changes but its audit row could not be written.
+   *  The changes still happened -- this is not a failure of the run. */
+  audit_failed?: string;
+}
+
+/** Triage the open import-failure issues (server default 15 per run, max 30).
+ *  Dry run unless `apply` is set. */
+export async function importIssueTriage(options?: {
+  limit?: number;
+  apply?: boolean;
+}): Promise<ImportIssueTriageResponse> {
+  const params = new URLSearchParams();
+  if (options?.limit != null) params.set("limit", String(options.limit));
+  if (options?.apply) params.set("apply", "1");
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return request<ImportIssueTriageResponse>(
+    `/admin/imports/issue-triage${query}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+// ============================================================================
+// Import coverage sweep (#1311, epic #1306 phase 3)
+// ============================================================================
+
+/**
+ * One run of the import coverage sweep (`POST /admin/imports/coverage-sweep`).
+ *
+ * `status` is the verdict and the three values are genuinely different answers:
+ * `healthy` (checked, fine), `alarm` (checked, not fine), `unknown` (could not
+ * check). The third is why the route answers 502 for it -- an unreadable pipeline
+ * reported as a healthy one is the failure this sweep exists to detect.
+ */
+export interface ImportCoverageResponse {
+  applied: boolean;
+  status: "healthy" | "alarm" | "unknown";
+  kind: "backlog" | "silence" | "disabled" | "dispatch-lost" | null;
+  reason: string;
+  /** Whether `AUTO_IMPORT_ENABLED` is the exact string `"true"`. */
+  enabled: boolean;
+  lastDispatchAt: string | null;
+  dispatchAgeHours: number | null;
+  /** The dataset the last dispatch row named. */
+  lastDispatchSourceId: string | null;
+  /** The last dispatch picked a dataset that never acquired an import row: the
+   *  hand-off is failing after the audit row is written. */
+  dispatchLost: boolean;
+  /** In-scope datasets OpenNeuro reported this run. */
+  discovered: number;
+  /** Managed mirrors in D1, however many the scan still returns. */
+  imported: number;
+  /** Of `discovered`: already imported. The first term of the balance. */
+  importedInScan: number;
+  /** Mirrors the scan no longer returns: drift, not a coverage gap. */
+  importedNotInScan: number;
+  inFlight: number;
+  terminal: number;
+  /** `neverAttempted` + `untracked` is the outstanding work that drives the
+   *  verdict; `tracked` and `blocklisted` are owned by something else. The counts
+   *  balance against `discovered` -- if they do not, the read was degraded. */
+  backlog: {
+    neverAttempted: string[];
+    untracked: string[];
+    tracked: string[];
+    blocklisted: string[];
+  };
+  issue: {
+    /** null on a dry run that would create the issue. */
+    number: number | null;
+    action: "created" | "refreshed" | "relabelled" | "closed";
+    commentError?: string;
+    labelError?: string;
+  } | null;
+  errors: { stage: "discovery" | "d1" | "report" | "anomaly"; error: string }[];
+  ok: boolean;
+  audit_failed?: string;
+}
+
+/** Run the import coverage sweep. Dry run unless `apply` is set; `apply` is
+ *  refused by the backend outside production. */
+export async function importCoverageSweep(options?: {
+  apply?: boolean;
+}): Promise<ImportCoverageResponse> {
+  const query = options?.apply ? "?apply=1" : "";
+  return request<ImportCoverageResponse>(
+    `/admin/imports/coverage-sweep${query}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+// ============================================================================
+// Weekly import summary (#1312, epic #1306 phase 4)
+// ============================================================================
+
+/** One blocklisted dataset in the weekly report. `parkedDays` is null when the
+ *  anchor column is NULL -- genuinely unknown, not zero days. */
+export interface WeeklyParkedDataset {
+  datasetId: string;
+  reason: string | null;
+  parkedDays: number | null;
+}
+
+/**
+ * The weekly import summary (`POST /admin/imports/weekly-summary`).
+ *
+ * **Every count is `number | null`, and `null` means the sweep could not determine
+ * it.** Rendering an unknown as 0 is how the original incident stayed invisible, so
+ * a consumer must not coalesce these.
+ */
+export interface WeeklySummaryResponse {
+  applied: boolean;
+  /** False when the once-per-week gate refused, or on a dry run. `facts` is still
+   *  populated so the report can be read. */
+  posted: boolean;
+  gateReason: string;
+  /** NULL when the once-per-week gate refused: nothing was gathered, so this is "we
+   *  did not look", which is a different answer from "we looked and could not tell".
+   *  Do not render it as a page of unknowns. */
+  facts: {
+    week: string;
+    windowStart: string;
+    windowEnd: string;
+    importedThisWeek: number | null;
+    importedTotal: number | null;
+    coverageStatus: "healthy" | "alarm" | "unknown" | null;
+    coverageReason: string | null;
+    outstanding: number | null;
+    discovered: number | null;
+    importedNotInScan: number | null;
+    autoImportEnabled: boolean | null;
+    dispatchPhrase: string | null;
+    dispatchLost: boolean | null;
+    failuresByCause: Record<string, number> | null;
+    openFailureTotal: number | null;
+    parked: WeeklyParkedDataset[] | null;
+    issuesClosed: number | null;
+    issuesRelabelled: number | null;
+    errors: { stage: string; error: string }[];
+  } | null;
+  issue: { number: number | null; action: "created" | "would-create" | "already-filed" } | null;
+  closedPrevious: number | null;
+  /** The body exactly as it would be, or was, posted -- so a dry run can be
+   *  reviewed before it becomes an issue. */
+  renderedBody: string | null;
+  ok: boolean;
+}
+
+/** Produce the weekly import summary. Dry run unless `apply` is set; a dry run also
+ *  bypasses the once-per-week gate, since it files nothing. */
+export async function importWeeklySummary(options?: {
+  apply?: boolean;
+}): Promise<WeeklySummaryResponse> {
+  const query = options?.apply ? "?apply=1" : "";
+  return request<WeeklySummaryResponse>(
+    `/admin/imports/weekly-summary${query}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+// ============================================================================
 // Researcher-name backfill (#1255, epic #1250)
 // ============================================================================
 

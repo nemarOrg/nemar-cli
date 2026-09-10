@@ -9,8 +9,22 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
-import { sleep } from "./setup";
+import { LIVE_TARGET_BLOCKED, sleep } from "./setup";
 
+/**
+ * `test.skipIf(LIVE_TARGET_BLOCKED)` marks a case that cannot pass without a live
+ * backend. Blocked means `TEST_API_URL` is unset or names production, so the
+ * harness has pointed the run at a dead address (test/live-target.ts).
+ *
+ * These are skips rather than failures because "you have no dev backend
+ * configured" is not a defect in the code under test, and a suite that always
+ * fails locally teaches people to ignore failures. CI sets TEST_API_URL, so they
+ * all still run there.
+ *
+ * Several of them USED TO PASS by querying production directly -- an invalid key
+ * getting a real 401, a non-existent dataset getting a real 404. That is what this
+ * annotation is really recording.
+ */
 const TMP_DIR = join(import.meta.dir, ".test-datalad");
 
 function createTestContext() {
@@ -184,7 +198,7 @@ describe("datalad commands - non-dataset directory errors", () => {
 // ============================================================================
 
 describe("datalad commands - clone errors", () => {
-  test("clone fails for non-existent dataset", async () => {
+  test.skipIf(LIVE_TARGET_BLOCKED)("clone fails for non-existent dataset", async () => {
     const { stdout, exitCode } = await runCli(["dataset", "clone", "nm999999"]);
     expect(exitCode).toBe(1);
     // Error message appears via console.log fallback after spinner

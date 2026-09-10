@@ -7,14 +7,22 @@
 
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import rootPkg from "../package.json";
-import { TEST_CONFIG, sleep, testRequest } from "./setup";
+import { LIVE_TARGET_BLOCKED, TEST_CONFIG, sleep, testRequest } from "./setup";
+
+/**
+ * Every case in this file needs a live backend, so the whole file skips when the
+ * harness has blocked the live target -- which it does whenever `TEST_API_URL` is
+ * unset or names production (test/live-target.ts). Skipping is the point: these
+ * used to run with an empty key against PRODUCTION and fail with confusing 400s.
+ */
+const describeLive = describe.skipIf(LIVE_TARGET_BLOCKED);
 
 // Add delay between tests to avoid rate limiting
 beforeEach(async () => {
   await sleep(300);
 });
 
-describe("API Health", () => {
+describeLive("API Health", () => {
   test("GET /health returns status ok", async () => {
     const { status, data } = await testRequest<{ status: string; version: string }>("/health");
 
@@ -36,7 +44,7 @@ describe("API Health", () => {
   });
 });
 
-describe("Authentication API", () => {
+describeLive("Authentication API", () => {
   describe("POST /auth/login", () => {
     test("valid admin API key returns user info with admin role", async () => {
       const { status, data } = await testRequest<{
@@ -334,7 +342,7 @@ describe("Authentication API", () => {
   });
 });
 
-describe("User API", () => {
+describeLive("User API", () => {
   describe("GET /users/me", () => {
     test("authenticated user can get their info", async () => {
       const { status, data } = await testRequest<{
@@ -371,7 +379,7 @@ describe("User API", () => {
   });
 });
 
-describe("Admin API", () => {
+describeLive("Admin API", () => {
   describe("GET /admin/users", () => {
     test("admin can list all users", async () => {
       const { status, data } = await testRequest<{
@@ -467,7 +475,7 @@ describe("Admin API", () => {
   });
 });
 
-describe("Datasets API", () => {
+describeLive("Datasets API", () => {
   describe("GET /datasets", () => {
     test("public can list datasets (returns empty or datasets)", async () => {
       const { status, data } = await testRequest<{
@@ -629,7 +637,7 @@ describe("Datasets API", () => {
   });
 });
 
-describe("DOI/Zenodo API", () => {
+describeLive("DOI/Zenodo API", () => {
   describe("GET /admin/datasets/:id/doi", () => {
     test("admin can get DOI info for a dataset", async () => {
       // Use nm099999 (seeded managed dataset) directly; the list endpoint
@@ -776,7 +784,7 @@ describe("DOI/Zenodo API", () => {
   });
 });
 
-describe("Dataset Collaborators API", () => {
+describeLive("Dataset Collaborators API", () => {
   describe("POST /datasets/:id/request-access", () => {
     test("unauthenticated request returns 401", async () => {
       const { status } = await testRequest("/datasets/nm000001/request-access", {
@@ -907,7 +915,7 @@ describe("Dataset Collaborators API", () => {
   });
 });
 
-describe("Error Handling", () => {
+describeLive("Error Handling", () => {
   test("invalid JSON returns 400", async () => {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (TEST_CONFIG.bypassToken) {

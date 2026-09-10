@@ -42,6 +42,7 @@ import { archiveRetrySweep } from "./services/archive-retry";
 import { AUTO_IMPORT_CRON, autoImportTick } from "./services/auto-import";
 import { runAvailabilityReportSweepCron } from "./services/availability-report";
 import { fetchAndSyncCitationCounts } from "./services/citation-counts-sync";
+import { isNemarWebOrigin } from "./services/cors-origins";
 import { sweepLogLines } from "./services/cron-sweep-log";
 import { drainEmbeddingDirty } from "./services/dataset-search";
 import { DEV_EPHEMERAL_BAND_END, DEV_EPHEMERAL_BAND_START } from "./services/datasetId";
@@ -56,8 +57,19 @@ import {
 } from "./services/email";
 import { isNonProductionEnv } from "./services/environment";
 import { resolveHostRoute } from "./services/host-routing";
-import { OPENNEURO_UPSTREAM_MARKER, runImportRecovery } from "./services/import-recovery";
+import {
+  importCoverageSweepSummary,
+  runImportCoverageSweepCron,
+} from "./services/import-coverage-sweep";
+import { isGenericImportError, lastErrorAssignmentSql } from "./services/import-error";
+import { importIssueSweepLogLines, runImportIssueSweepCron } from "./services/import-issue-sweep";
+import { runImportRecovery } from "./services/import-recovery";
 import { sweepImportRetries } from "./services/import-retry";
+import { shouldRunWeeklySummary, weeklyHeadline } from "./services/import-weekly-summary";
+import {
+  runWeeklyImportSummaryCron,
+  weeklySummaryCronLine,
+} from "./services/import-weekly-summary-sweep";
 import { manifestIntegritySweep } from "./services/manifest-sweep";
 import { getActiveNotices } from "./services/notices";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
@@ -87,10 +99,12 @@ api.use(
       if (!origin) return null;
       try {
         const { hostname } = new URL(origin);
-        // Allow localhost for development
-        if (hostname === "localhost" || hostname === "127.0.0.1") return origin;
-        // Allow nemar.org and osc.earth domains
-        if (hostname === "nemar.org" || hostname.endsWith(".nemar.org")) return origin;
+        // The NEMAR web surfaces: nemar.org hosts, the website's Pages preview
+        // URLs (#1346), and loopback for development. Shared with the zarr
+        // fork's `allowedOrigin` so the two cannot disagree about which of our
+        // own surfaces count.
+        if (isNemarWebOrigin(hostname)) return origin;
+        // Legacy: the pre-cutover OSC properties. Api fork only.
         if (hostname === "osc.earth" || hostname.endsWith(".osc.earth")) return origin;
       } catch (err) {
         console.warn(`CORS: rejected unparseable origin: ${origin}`, err);
@@ -704,21 +718,30 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
         )
         .bind(MAX_DELETIONS_PER_RUN)
         .all<{ dataset_id: string }>();
+      // The sweep's own bookkeeping message. Declared once so the string and its
+      // ADR 0051 classification cannot drift apart: passing a hand-written `true`
+      // would keep claiming "generic" even if this wording later became a real
+      // diagnosis. No quote escaping needed, and asserted by the const's own text.
+      const STUCK_IMPORT_MESSAGE = "stuck > 6h (scheduled sweep)";
       for (const row of stuckImports.results ?? []) {
         try {
           const upd = await db
             .prepare(
-              // Preserve a sticky upstream marker (#808): a row can be in-flight
-              // here yet already carry the OpenNeuro-inaccessible marker (a racing
-              // finalize POST moved it off `failed` before the webhook's dropped
-              // waitUntil recovery ran -- the very eviction case this sweep backstops).
-              // Overwriting it would make runImportRecovery below misclassify the
-              // upstream failure as a generic stuck import. [ ] are literal in LIKE.
+              // A specific error is never overwritten by a generic one (ADR 0051).
+              // "stuck > 6h" says only that this sweep fired; a row can be in-flight
+              // here yet already carry a real diagnosis (a racing finalize POST moved
+              // it off `failed` before the webhook's dropped waitUntil recovery ran --
+              // the very eviction case this sweep backstops). Overwriting it would make
+              // runImportRecovery below misclassify a known failure as a generic stuck
+              // import, and for the OpenNeuro marker specifically would also drop the
+              // string the retry engine needs to re-select the row.
               `UPDATE import_jobs
                SET status = 'failed',
-                   last_error = CASE
-                     WHEN last_error LIKE '%${OPENNEURO_UPSTREAM_MARKER}%' THEN last_error
-                     ELSE 'stuck > 6h (scheduled sweep)' END,
+                   last_error = ${lastErrorAssignmentSql(
+                     isGenericImportError(STUCK_IMPORT_MESSAGE),
+                     "last_error",
+                     `'${STUCK_IMPORT_MESSAGE}'`,
+                   )},
                    completed_at = datetime('now'), updated_at = datetime('now')
              WHERE dataset_id = ? AND status IN ('preparing', 'copying', 'finalizing')`,
             )
@@ -876,6 +899,124 @@ export default {
           ),
         ),
       );
+      // #1310 (epic #1306): drain the import-failure tracking issues. Closes the
+      // ones whose dataset now verifies complete against S3, and retires stale
+      // cause labels. Before this the tracker only accumulated -- a backlog of
+      // open issues, none ever closed (ADR 0052 has the count and the date it was
+      // measured) -- so it could not distinguish a live problem from one that
+      // healed weeks ago.
+      //
+      // PROD-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it closes and
+      // relabels real issues on the shared nemarDatasets org, which a dev worker
+      // must never do.
+      ctx.waitUntil(
+        runImportIssueSweepCron(env)
+          .then((r) => {
+            // null means the wrapper's own guard skipped this run (non-prod);
+            // it already logged why, so there is nothing to summarise.
+            if (!r) return;
+            console.log(
+              `[import-issue-sweep] open=${r.openIssues} mode=${r.mode} examined=${r.examined} ` +
+                `attempted=${r.attempted} closed=${r.closed} relabelled=${r.relabelled} ` +
+                `kept=${r.kept} errors=${r.errors.length} remaining=${r.remaining}`,
+            );
+            // The aggregate line cannot say WHICH issues moved, which is what an
+            // operator reads this log for. Bounded by the sweep's own limit.
+            for (const line of importIssueSweepLogLines(r)) {
+              console.log(`[import-issue-sweep] ${line}`);
+            }
+            for (const e of r.errors) {
+              console.error(
+                `[import-issue-sweep] #${e.issue} (${e.dataset_id}) ${e.stage}: ${e.error}`,
+              );
+            }
+          })
+          .catch((err) =>
+            console.error(
+              "[import-issue-sweep] sweep failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
+      );
+      // #1311 (epic #1306): report the pipeline's own silence. Diffs OpenNeuro
+      // against D1 and alarms when in-scope datasets are accruing while the
+      // importer has stopped dispatching -- or is switched off and forgotten,
+      // which is what happened for seven weeks from 2026-07-20 with nothing in
+      // the system able to say so. Every other sweep here reports on work that
+      // was attempted; this one notices work that never started.
+      //
+      // PROD-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it files and
+      // closes a real issue on the shared nemarDatasets org, the same reason
+      // runImportIssueSweepCron is excluded.
+      ctx.waitUntil(
+        runImportCoverageSweepCron(env)
+          .then((r) => {
+            // null means the wrapper's own guard skipped this run (non-prod).
+            if (!r) return;
+            // Logged at error level for anything that is not healthy -- an alarm
+            // or an unreadable verdict. This is the one sweep whose whole purpose
+            // is to be noticed, and console.log would sit at the same level as
+            // every routine summary.
+            const line = `[import-coverage] ${importCoverageSweepSummary(r)}`;
+            if (r.status === "healthy") console.log(line);
+            else console.error(`${line} reason="${r.reason}"`);
+            for (const e of r.errors) {
+              console.error(`[import-coverage] ${e.stage}: ${e.error}`);
+            }
+          })
+          .catch((err) =>
+            console.error(
+              "[import-coverage] sweep failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
+      );
+      // #1312 (epic #1306): the weekly summary. Rides the DAILY tick behind a
+      // day-of-week guard rather than a new cron trigger. `event.cron` is compared
+      // against AUTO_IMPORT_CRON by exact string equality above and the daily work is
+      // the implicit else, so a third trigger would not disturb that comparison -- it
+      // would fall straight through it and re-run EVERY daily job on the new schedule. Monday UTC, matching the repo's two
+      // existing weekly Actions.
+      //
+      // The guard is a pure exported function on purpose: nothing in this repo
+      // invokes `scheduled()`, so a condition written inline here would be
+      // untestable by construction (the reason services/cron-sweep-log.ts exists).
+      //
+      // Unconditional by design -- it posts whether or not anything is wrong,
+      // because a report that only appears on breakage cannot tell a healthy week
+      // from a broken reporter. The once-per-week gate lives in the service.
+      //
+      // PROD-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it files and closes
+      // real issues on the shared nemarDatasets org.
+      if (shouldRunWeeklySummary(new Date())) {
+        ctx.waitUntil(
+          runWeeklyImportSummaryCron(env)
+            .then((r) => {
+              // null means the wrapper's own guard skipped this run (non-prod).
+              if (!r) return;
+              const line = weeklySummaryCronLine(r);
+              // At error level when the week needs attention, so it does not sit at
+              // the same level as every routine summary. `posted === false` is a
+              // gate refusal, which is routine.
+              // `facts` is null when the gate refused, i.e. nothing was gathered.
+              // Escalate on attention OR on a post that failed after the gate let it
+              // through -- an earlier version gated the escalation on `r.posted`, so
+              // a failed post logged at info level.
+              const attention = r.facts !== null && weeklyHeadline(r.facts).attention;
+              if (attention || (r.facts !== null && !r.posted)) console.error(line);
+              else console.log(line);
+              for (const e of r.facts?.errors ?? []) {
+                console.error(`[import-weekly] ${e.stage}: ${e.error}`);
+              }
+            })
+            .catch((err) =>
+              console.error(
+                "[import-weekly] summary failed:",
+                err instanceof Error ? (err.stack ?? err.message) : err,
+              ),
+            ),
+        );
+      }
       // #1041 (epic #1044): drain datasets whose per-file availability report is
       // stale. The archive-ready callback clears availability_report_at on every
       // 'ready' build, which is the enqueue; without a drain those rows would

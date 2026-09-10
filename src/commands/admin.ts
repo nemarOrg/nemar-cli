@@ -47,6 +47,8 @@ import {
   type DoctorScanResponse,
   type EmailPreferences,
   type HedSweepBatchResponse,
+  type ImportCoverageResponse,
+  type ImportIssueTriageResponse,
   type RecordingStatsSweepBatchResponse,
   type ReindexBulkOptions,
   type ReindexBulkResponse,
@@ -55,6 +57,7 @@ import {
   type ReindexResponse,
   type SignalDefaultsSweepBatchResponse,
   type SummaryVersionCoverage,
+  type WeeklySummaryResponse,
   type ZarrFidelitySweepBatchResponse,
   addCi,
   approveUser,
@@ -90,6 +93,9 @@ import {
   getUserDuplicates,
   hedSweep,
   hedSweepReset,
+  importCoverageSweep,
+  importIssueTriage,
+  importWeeklySummary,
   listKeysFor,
   listUsers,
   publishDataset,
@@ -6929,6 +6935,562 @@ backfillNamesCommand
   });
 
 adminCommand.addCommand(backfillNamesCommand);
+
+// ============================================================================
+// Import-failure issue triage (#1310, epic #1306)
+// ============================================================================
+
+/** The shape the route puts under `details` on its 502, narrowed rather than cast
+ *  so a body that drifted renders nothing instead of printing `undefined`. */
+function isTriageErrorList(
+  value: unknown,
+): value is { errors: ImportIssueTriageResponse["errors"] } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Array.isArray((value as { errors?: unknown }).errors)
+  );
+}
+
+/** The shape the coverage route puts under `details` on its 502. Narrowed rather
+ *  than cast so a drifted body renders nothing instead of `undefined`. */
+function isCoverageErrorList(
+  value: unknown,
+): value is { errors: ImportCoverageResponse["errors"] } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Array.isArray((value as { errors?: unknown }).errors)
+  );
+}
+
+const importIssueTriageCommand = new Command("import-issue-triage").description(
+  "Close recovered import-failure issues and retire stale cause labels (dry run by default)",
+);
+
+importIssueTriageCommand
+  .option("--apply", "Perform the changes (without this flag, only report what would change)")
+  .option("--limit <n>", "Issues per batch (server clamps to [1,30])", "15")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { apply?: boolean; limit?: string; json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    // Refused rather than coerced. `parseInt(...) || 15` turned `--limit abc` and
+    // `--limit 0` into 15 and `--limit -5` into a server-clamped 1, silently: the
+    // operator asked for something and got something else, on a command whose
+    // whole point is to bound how many issues it touches.
+    // `Number`, not `Number.parseInt`: parseInt stops at the first non-digit and
+    // returns what it has, so it still silently coerced `15abc` to 15, `3.9` to 3
+    // and `1e9` to 1 -- the same substitution this guard exists to refuse.
+    const limitRaw = options.limit ?? "15";
+    const limit = limitRaw.trim() === "" ? Number.NaN : Number(limitRaw);
+    if (!Number.isInteger(limit) || limit < 1) {
+      console.error(
+        chalk.red(`Invalid --limit ${JSON.stringify(limitRaw)}: expected an integer >= 1.`),
+      );
+      process.exitCode = 1;
+      return;
+    }
+
+    const apply = options.apply === true;
+    const spinner = ora(
+      apply ? "Triaging import-failure issues..." : "Checking import-failure issues...",
+    ).start();
+
+    let res: ImportIssueTriageResponse;
+    try {
+      res = await importIssueTriage({ apply, limit });
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Import-failure issue triage failed");
+      console.error(chalk.red(errorDetail(err)));
+      // The 502 "every attempt failed" body carries the per-issue causes, and the
+      // message tells the reader to see errors[] -- so dropping the body here left
+      // a count with no reasons in the one case where the reasons ARE the point.
+      // `request()` keeps the body on the error, so recover it.
+      const details = err instanceof ApiError ? err.details : undefined;
+      const errors = isTriageErrorList(details) ? details.errors : [];
+      if (options.json) {
+        // A scripted caller must still get parseable stdout on the interesting
+        // outcome; without this the --json contract holds only on success.
+        console.log(
+          JSON.stringify(
+            err instanceof ApiError ? (err.rawBody ?? { errors }) : { errors },
+            null,
+            2,
+          ),
+        );
+      } else {
+        for (const e of errors) {
+          console.error(
+            `${chalk.red("ERROR".padEnd(15))} #${e.issue} ${e.dataset_id ?? ""}  ${e.stage}: ${e.error}`,
+          );
+        }
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    // Computed before the --json branch returns so a scripted caller sees the
+    // same verdict as someone reading the summary. A per-issue error leaves
+    // that issue untouched and still a candidate; it is not fatal, but it must
+    // not read as a clean run.
+    if (res.errors.length > 0) process.exitCode = 1;
+
+    if (options.json) {
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    console.log();
+    if (!res.applied) {
+      console.log(chalk.yellow("DRY RUN \u2014 nothing was written. Re-run with --apply."));
+    }
+    for (const e of res.plan) {
+      // From the entry, not from res.applied: an applied run whose close failed
+      // must not print CLOSE as though it had happened.
+      const verb = e.failed ? "FAILED " : res.applied ? "" : "WOULD ";
+      const who = `#${e.issueNumber} ${e.datasetId ?? "(unknown)"}`;
+      if (e.kind === "close") {
+        const label = `${verb}CLOSE`.padEnd(15);
+        console.log(
+          `${e.failed ? chalk.red(label) : chalk.green(label)} ${who}  ${chalk.dim(e.reason)}`,
+        );
+      } else if (e.kind === "relabel") {
+        const label = `${verb}RELABEL`.padEnd(15);
+        console.log(
+          `${e.failed ? chalk.red(label) : chalk.yellow(label)} ${who}  ${chalk.dim(e.reason)}`,
+        );
+      } else {
+        console.log(`${chalk.dim("KEEP".padEnd(15))} ${who}  ${chalk.dim(e.reason)}`);
+      }
+    }
+    for (const r of res.rollups) {
+      // From the rollup's own outcome, not from res.applied: a release whose
+      // close failed must not print RELEASE.
+      const verb =
+        r.outcome === "failed"
+          ? "FAILED RELEASE"
+          : r.outcome === "released"
+            ? "RELEASE"
+            : res.mode === "per-dataset"
+              ? "WOULD RELEASE"
+              : "ROLLUP";
+      const label = verb.padEnd(15);
+      console.log(
+        `${r.outcome === "failed" ? chalk.red(label) : chalk.magenta(label)} #${r.number} ${chalk.dim(r.title)}`,
+      );
+    }
+    for (const e of res.errors) {
+      console.log(
+        `${chalk.red("ERROR".padEnd(15))} #${e.issue} ${e.dataset_id ?? ""}  ${e.stage}: ${e.error}`,
+      );
+    }
+
+    console.log();
+    console.log(
+      chalk.cyan(
+        `open=${res.openIssues} mode=${res.mode} examined=${res.examined} ` +
+          `attempted=${res.attempted} ` +
+          `${res.applied ? "closed" : "would_close"}=${res.closed} ` +
+          `${res.applied ? "relabelled" : "would_relabel"}=${res.relabelled} ` +
+          `kept=${res.kept} errors=${res.errors.length} remaining=${res.remaining}`,
+      ),
+    );
+    if (res.remaining > 0) {
+      console.log(
+        chalk.dim(
+          `  ${res.remaining} candidate(s) outside this run's window; the window rotates daily.`,
+        ),
+      );
+    }
+    if (res.mode === "rollup") {
+      console.log(
+        chalk.dim(
+          "  Rollup mode: new failures with a cause that already has a rollup join it instead of opening their own issue.",
+        ),
+      );
+    }
+    if (res.rollupsReleased > 0) {
+      console.log(
+        chalk.dim(
+          `  ${res.applied ? "Released" : "Would release"} ${res.rollupsReleased} rollup(s): the backlog has drained, so per-dataset filing resumes.`,
+        ),
+      );
+    }
+    if (res.audit_failed) {
+      console.log(
+        chalk.yellow(
+          `  Changes were applied but the audit row failed to write: ${res.audit_failed}`,
+        ),
+      );
+    }
+    if (!res.applied && (res.closed > 0 || res.relabelled > 0 || res.rollupsReleased > 0)) {
+      console.log(chalk.dim("  Re-run with --apply to perform these changes."));
+    }
+  });
+
+adminCommand.addCommand(importIssueTriageCommand);
+
+// ============================================================================
+// Import coverage (#1311, epic #1306 phase 3)
+// ============================================================================
+
+const importCoverageCommand = new Command("import-coverage").description(
+  "Check whether the import pipeline is keeping up with OpenNeuro (dry run by default)",
+);
+
+/**
+ * How many outstanding ids to list before falling back to a count.
+ *
+ * Must equal `MAX_LISTED_IDS` in backend/src/services/import-coverage.ts, so the
+ * CLI and the GitHub issue truncate at the same place. The CLI cannot import from
+ * backend/src, so `test/import-coverage-cli.test.ts` asserts the two are equal
+ * rather than leaving them free to drift.
+ */
+const COVERAGE_MAX_LISTED_IDS = 20;
+
+/** Actions rendered in the conditional. `would created` was ungrammatical, and a
+ *  dry run is the DEFAULT invocation, so it is the string most operators see. */
+/** Parked rows the CLI lists before falling back to a count. Fewer than the issue
+ *  body's, because a terminal is scrolled rather than searched -- but the "and N
+ *  more" line below is not optional: a report that stops at N without saying so
+ *  under-counts, and an under-count reads as good news. */
+const WEEKLY_CLI_PARKED_ROWS = 5;
+
+const COVERAGE_ACTION_VERB: Record<string, string> = {
+  created: "create",
+  refreshed: "refresh",
+  relabelled: "relabel",
+  closed: "close",
+};
+
+importCoverageCommand
+  .option("--apply", "File, update or close the tracking issue (production only)")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { apply?: boolean; json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const apply = options.apply === true;
+    const spinner = ora("Checking import coverage...").start();
+
+    let res: ImportCoverageResponse;
+    try {
+      res = await importCoverageSweep({ apply });
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Import coverage check failed");
+      console.error(chalk.red(errorDetail(err)));
+      // A 502 means the verdict is UNKNOWN, and its body carries the stage that
+      // failed. Printing "failed" with no stage would leave the operator unable to
+      // tell an OpenNeuro outage from a D1 one.
+      const details = err instanceof ApiError ? err.details : undefined;
+      const errors = isCoverageErrorList(details) ? details.errors : [];
+      if (options.json) {
+        console.log(
+          JSON.stringify(
+            err instanceof ApiError ? (err.rawBody ?? { errors }) : { errors },
+            null,
+            2,
+          ),
+        );
+      } else {
+        for (const e of errors) {
+          console.error(`${chalk.red("ERROR".padEnd(12))} ${e.stage}: ${e.error}`);
+        }
+      }
+      // 2, not 1: "could not determine" is a different answer from "not healthy",
+      // and a script polling pipeline health has to be able to tell them apart.
+      process.exitCode = err instanceof ApiError && err.statusCode === 502 ? 2 : 1;
+      return;
+    }
+
+    // Set before the --json return so both output modes agree on the verdict. An
+    // alarm is a successful RUN but an unhealthy STATE, so it is non-zero.
+    if (res.status === "unknown") process.exitCode = 2;
+    else if (res.status !== "healthy" || res.errors.length > 0) process.exitCode = 1;
+
+    if (options.json) {
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    const b = res.backlog;
+    const outstanding = b.neverAttempted.length + b.untracked.length;
+    console.log();
+    const verdict = `${res.status.toUpperCase()}${res.kind ? ` (${res.kind})` : ""}`;
+    console.log(res.status === "healthy" ? chalk.green(verdict) : chalk.red(chalk.bold(verdict)));
+    console.log(res.reason);
+    console.log();
+    console.log(
+      chalk.cyan(
+        `auto_import=${res.enabled ? "enabled" : chalk.red("DISABLED")} ` +
+          // Mirrors the backend's dispatchPhrase: a negative age is a clock anomaly,
+          // and "-10h ago" would read as freshness.
+          `last_dispatch=${
+            res.dispatchAgeHours === null
+              ? "never"
+              : res.dispatchAgeHours < 0
+                ? "dated in the future"
+                : `${res.dispatchAgeHours}h ago`
+          }` +
+          `${res.lastDispatchSourceId ? ` (${res.lastDispatchSourceId})` : ""} ` +
+          `dispatch_lost=${res.dispatchLost}`,
+      ),
+    );
+    // The counts balance against `discovered` by construction; a line that does
+    // not add up means the run did not get a complete view of the catalogue.
+    const accounted =
+      res.importedInScan +
+      res.inFlight +
+      res.terminal +
+      outstanding +
+      b.tracked.length +
+      b.blocklisted.length;
+    console.log(
+      chalk.cyan(
+        `discovered=${res.discovered} in_scan=${res.importedInScan} in_flight=${res.inFlight} ` +
+          `terminal=${res.terminal} tracked=${b.tracked.length} blocklisted=${b.blocklisted.length}`,
+      ),
+    );
+    console.log(
+      chalk.cyan(
+        `outstanding=${outstanding} (never_attempted=${b.neverAttempted.length} untracked=${b.untracked.length})`,
+      ),
+    );
+    if (res.importedNotInScan > 0) {
+      console.log(
+        chalk.dim(
+          `  ${res.importedNotInScan} of ${res.imported} mirror(s) are no longer in the scan (upstream removal, unreadable snapshot, or a modality retag). Drift, not a gap.`,
+        ),
+      );
+    }
+    if (accounted !== res.discovered) {
+      console.log(
+        chalk.yellow(
+          `  Counts do not balance (${accounted} accounted for vs ${res.discovered} discovered): this run did not get a complete view, so treat the verdict as unreliable.`,
+        ),
+      );
+    }
+    if (b.neverAttempted.length > 0) {
+      const shown = b.neverAttempted.slice(0, COVERAGE_MAX_LISTED_IDS).join(", ");
+      const extra = b.neverAttempted.length - COVERAGE_MAX_LISTED_IDS;
+      console.log(
+        chalk.dim(`  never attempted: ${shown}${extra > 0 ? ` ... and ${extra} more` : ""}`),
+      );
+    }
+    if (b.untracked.length > 0) {
+      const shown = b.untracked.slice(0, COVERAGE_MAX_LISTED_IDS).join(", ");
+      const extra = b.untracked.length - COVERAGE_MAX_LISTED_IDS;
+      console.log(
+        chalk.dim(`  stale row nothing owns: ${shown}${extra > 0 ? ` ... and ${extra} more` : ""}`),
+      );
+    }
+    for (const e of res.errors) {
+      const line = `${e.stage}: ${e.error}`;
+      console.log(
+        e.stage === "anomaly"
+          ? `${chalk.yellow("ANOMALY".padEnd(12))} ${line}`
+          : `${chalk.red("ERROR".padEnd(12))} ${line}`,
+      );
+    }
+    if (res.issue) {
+      const verb = res.applied
+        ? res.issue.action
+        : `would ${COVERAGE_ACTION_VERB[res.issue.action] ?? res.issue.action}`;
+      const where = res.issue.number === null ? "" : ` #${res.issue.number}`;
+      console.log(chalk.dim(`  Issue: ${verb}${where} on nemarDatasets/.github`));
+      if (res.issue.labelError) {
+        console.log(
+          chalk.yellow(`  The body was updated but its labels were not: ${res.issue.labelError}`),
+        );
+      }
+      if (res.issue.commentError) {
+        console.log(
+          chalk.yellow(`  The issue changed but its comment failed: ${res.issue.commentError}`),
+        );
+      }
+    }
+    if (res.audit_failed) {
+      console.log(
+        chalk.yellow(`  Changes applied but the audit row failed to write: ${res.audit_failed}`),
+      );
+    }
+    if (!res.applied && res.issue) {
+      console.log(chalk.dim("  Re-run with --apply to perform this change."));
+    }
+  });
+
+adminCommand.addCommand(importCoverageCommand);
+
+// ============================================================================
+// Weekly import summary (#1312, epic #1306 phase 4)
+// ============================================================================
+
+const importWeeklyCommand = new Command("import-weekly").description(
+  "Read this week's import summary (dry run by default; the cron posts it on Mondays)",
+);
+
+/**
+ * Render a count that may be unknown.
+ *
+ * Mirrors `count` in backend/src/services/import-weekly-summary.ts, and exists for
+ * the same reason: a zero and an unknown must never look the same. One renderer,
+ * not a ternary per field -- a per-field ternary is how one field eventually prints
+ * "0" for something nobody measured.
+ */
+/**
+ * Does this week need a person to look?
+ *
+ * Mirrors `weeklyHeadline` in backend/src/services/import-weekly-summary.ts. The CLI
+ * cannot import it, so the rule is restated -- and because a restated rule drifts,
+ * the exit-code tests assert each branch rather than only the aggregate.
+ */
+function weeklyNeedsAttention(f: NonNullable<WeeklySummaryResponse["facts"]>): boolean {
+  return (
+    f.coverageStatus === "alarm" ||
+    f.coverageStatus === "unknown" ||
+    f.autoImportEnabled === false ||
+    f.dispatchLost === true ||
+    // An absence of sweep rows is itself unknown: the crons record every run, so no
+    // rows means they did not run.
+    f.issuesClosed === null ||
+    f.errors.length > 0
+  );
+}
+
+function weeklyCount(n: number | null | undefined): string {
+  // `== null` catches an absent key as well as an explicit null: a backend that ever
+  // drops a field must not have it render as "undefined" (or, worse, coalesce to 0).
+  return n == null ? chalk.yellow("unknown") : String(n);
+}
+
+importWeeklyCommand
+  .option("--apply", "Actually file the issue (production only; the cron normally does this)")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .option("--body", "Also print the issue body exactly as it would be posted")
+  .action(async (options: { apply?: boolean; json?: boolean; body?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const apply = options.apply === true;
+    const spinner = ora("Building the weekly import summary...").start();
+
+    let res: WeeklySummaryResponse;
+    try {
+      res = await importWeeklySummary({ apply });
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Weekly import summary failed");
+      console.error(chalk.red(errorDetail(err)));
+      process.exitCode = 1;
+      return;
+    }
+
+    const f = res.facts;
+
+    // Exit codes mirror `nemar admin import-coverage`, so one rule works across the
+    // family: 2 = could not determine, 1 = determined and not healthy, 0 = healthy.
+    // An earlier version set 1 only when a section failed to READ, so a week with
+    // auto-import switched off exited 0 -- the exact condition this epic exists to
+    // detect, reported as success. Set before the --json return so both output modes
+    // agree on the verdict.
+    if (f === null)
+      process.exitCode = 0; // the gate declined; nothing was measured
+    else if (f.errors.length > 0) process.exitCode = 2;
+    else if (weeklyNeedsAttention(f)) process.exitCode = 1;
+
+    if (options.json) {
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    if (f === null) {
+      // Not "every count is unknown" -- nothing was gathered at all. Rendering the
+      // table here would be indistinguishable from a totally blind report.
+      console.log();
+      console.log(chalk.yellow(`Nothing computed: ${res.gateReason}`));
+      console.log(chalk.dim("  The report is built once a week; --apply files it."));
+      return;
+    }
+
+    console.log();
+    console.log(chalk.bold(`Import summary ${f.week}`));
+    console.log(chalk.dim(`${f.windowStart} to ${f.windowEnd} (UTC)`));
+    console.log();
+    console.log(
+      chalk.cyan(
+        `imported_this_week=${weeklyCount(f.importedThisWeek)} total=${weeklyCount(f.importedTotal)} ` +
+          `in_scope=${weeklyCount(f.discovered)} not_in_scope=${weeklyCount(f.importedNotInScan)}`,
+      ),
+    );
+    const coverage =
+      f.coverageStatus === null
+        ? chalk.yellow("unknown")
+        : f.coverageStatus === "healthy"
+          ? chalk.green(f.coverageStatus)
+          : chalk.red(f.coverageStatus);
+    console.log(chalk.cyan(`coverage=${coverage} outstanding=${weeklyCount(f.outstanding)}`));
+    console.log(
+      chalk.cyan(
+        `auto_import=${f.autoImportEnabled === null ? chalk.yellow("unknown") : f.autoImportEnabled ? "enabled" : chalk.red("DISABLED")} ` +
+          `last_dispatch=${f.dispatchPhrase ?? chalk.yellow("unknown")} ` +
+          `dispatch_lost=${f.dispatchLost === null ? chalk.yellow("unknown") : f.dispatchLost}`,
+      ),
+    );
+    console.log(
+      chalk.cyan(
+        `open_failures=${weeklyCount(f.openFailureTotal)} parked=${f.parked === null ? chalk.yellow("unknown") : f.parked.length} ` +
+          `closed_this_week=${weeklyCount(f.issuesClosed)} relabelled=${weeklyCount(f.issuesRelabelled)}`,
+      ),
+    );
+
+    if (f.failuresByCause !== null) {
+      const nonZero = Object.entries(f.failuresByCause).filter(([, n]) => n > 0);
+      for (const [label, n] of nonZero) {
+        console.log(chalk.dim(`  ${label}: ${n}`));
+      }
+    }
+    if (f.parked !== null && f.parked.length > 0) {
+      for (const p of f.parked.slice(0, WEEKLY_CLI_PARKED_ROWS)) {
+        console.log(
+          chalk.dim(
+            `  parked ${p.datasetId} (${p.reason ?? "unknown"}): ${p.parkedDays == null ? "unknown" : `${p.parkedDays} days`}`,
+          ),
+        );
+      }
+      const hiddenParked = f.parked.length - WEEKLY_CLI_PARKED_ROWS;
+      if (hiddenParked > 0) {
+        console.log(chalk.dim(`  ... and ${hiddenParked} more parked`));
+      }
+    }
+    for (const e of f.errors) {
+      console.log(`${chalk.yellow("UNKNOWN".padEnd(10))} ${e.stage}: ${e.error}`);
+    }
+
+    console.log();
+    if (!res.posted && !apply) {
+      // NOT `Not posted: ${gateReason}` -- a dry run forces past the gate, so the
+      // reason is the literal string "forced", which reads as a refusal that never
+      // happened. Nothing was attempted, so say that instead.
+      console.log(chalk.dim("Dry run: nothing was filed."));
+      console.log(chalk.dim("  Re-run with --apply to file it (production only)."));
+    } else if (!res.posted) {
+      console.log(chalk.yellow(`Not posted: ${res.gateReason}`));
+    } else {
+      console.log(
+        chalk.green(
+          `Posted${res.issue?.number ? ` #${res.issue.number}` : ""}${res.closedPrevious ? `, closed #${res.closedPrevious}` : ""}`,
+        ),
+      );
+    }
+    if (options.body) {
+      console.log();
+      console.log(chalk.dim("--- rendered issue body ---"));
+      console.log(res.renderedBody ?? chalk.yellow("(no body was rendered)"));
+    }
+  });
+
+adminCommand.addCommand(importWeeklyCommand);
 
 // ============================================================================
 // Username backfill (ADR 0042, #1253, epic #1250)

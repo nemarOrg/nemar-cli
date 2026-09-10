@@ -25,12 +25,40 @@ describe("allowedOrigin", () => {
     }
   });
 
+  test("allows the website's Pages preview URLs (#1346)", () => {
+    for (const o of [
+      "https://nemar-website.pages.dev",
+      "https://326-viewer-deep-links.nemar-website.pages.dev",
+      "https://a1b2c3d4.nemar-website.pages.dev",
+      "https://nemar-website-test.pages.dev",
+      "https://staging.nemar-website-test.pages.dev",
+    ]) {
+      expect(allowedOrigin(o)).toBe(o);
+    }
+  });
+
   test("blocks third-party origins (OpenNeuro etc.)", () => {
     for (const o of [
       "https://openneuro.org",
       "https://evil.example",
       "https://nemar.org.evil.com",
       "https://notnemar.org",
+    ]) {
+      expect(allowedOrigin(o)).toBeNull();
+    }
+  });
+
+  // The Pages allowance is scoped to our own projects, so the label before
+  // `.pages.dev` has to match exactly. Anyone can create a Cloudflare Pages
+  // project; nobody else can create one called `nemar-website`.
+  test("blocks Pages hosts outside the website projects", () => {
+    for (const o of [
+      "https://pages.dev",
+      "https://someone-else.pages.dev",
+      "https://evil-nemar-website.pages.dev",
+      "https://x.evil-nemar-website.pages.dev",
+      "https://nemar-website.pages.dev.evil.com",
+      "https://nemar-website.pages.dev.evil.example/nemar-website.pages.dev",
     ]) {
       expect(allowedOrigin(o)).toBeNull();
     }

@@ -76,7 +76,7 @@ import {
   YES_OPTION,
   confirm,
 } from "../lib/confirm.js";
-import { recordStep } from "../lib/debug-log.js";
+import { markUsageExit, recordStep } from "../lib/debug-log.js";
 import {
   type DeviceLoginOutcome,
   describeDeviceOutcome,
@@ -398,6 +398,31 @@ function printDeviceOutcomeFailure(
 export async function loginAction(
   options: { key?: string; open?: boolean } & ConfirmOptions,
 ): Promise<void> {
+  // `-k ""` is a REFUSAL, not a fall-through to the browser. `options.key || ...`
+  // treats an explicitly-passed empty key as "no key given", so `-k "$VAR"` with
+  // an unset VAR used to silently start a device sign-in against whatever backend
+  // was configured -- opening a browser and beginning an account sign-in nobody
+  // asked for. Found by test/cli.test.ts, which passes an empty TEST_ADMIN_API_KEY
+  // when test/.env.test is absent and so opened the production authorize page.
+  //
+  // The flag and the env var are deliberately treated differently: passing a flag
+  // is an intent to use THIS key, so an empty value is an error; an empty env var
+  // is conventionally the same as an unset one, and still falls through.
+  if (options.key !== undefined && options.key.trim() === "") {
+    console.log(chalk.red("--key was given but is empty."));
+    console.log(
+      chalk.dim("  Pass the key itself, or drop --key to sign in with your browser instead."),
+    );
+    // This is a usage error, so suppress the exit hook's "attach the log to a new
+    // issue" nudge (src/index.ts): inviting a bug report for someone's own typo
+    // wastes their time and ours. Commander sets this itself for the errors it
+    // raises -- `-k` with no value at all already prints no nudge -- so marking it
+    // here keeps the two spellings of the same mistake consistent.
+    markUsageExit();
+    process.exitCode = 1;
+    return;
+  }
+
   const pastedKey = options.key || process.env.NEMAR_API_KEY;
 
   // Check for existing authentication. isAuthenticated() only proves a key
@@ -1061,6 +1086,18 @@ export async function switchAction(identifier?: string): Promise<void> {
     }
   }
 
+  // Same falsy-empty class as `auth login -k ""`, found by the same review: an
+  // explicitly-passed empty identifier is falsy, so `nemar switch "$VAR"` with an
+  // unset VAR fell through to the INTERACTIVE PICKER instead of refusing -- a
+  // hanging prompt in a script, where `switch nobody` correctly says so and exits.
+  if (identifier !== undefined && identifier.trim() === "") {
+    console.log(chalk.red("Account name was given but is empty."));
+    console.log(chalk.dim("  Name an account, or run 'nemar switch' with no argument to choose."));
+    markUsageExit();
+    process.exitCode = 1;
+    return;
+  }
+
   let target: string;
 
   if (identifier) {
@@ -1100,6 +1137,11 @@ export async function switchAction(identifier?: string): Promise<void> {
     console.log(chalk.red(`Account not found: ${target}`));
     console.log(chalk.dim("  Provide a NEMAR username or GitHub username"));
     console.log(chalk.dim(`  Available: ${accounts.map((a) => a.username ?? a.key).join(", ")}`));
+    // Exit code, not just a message: a named account that does not exist is a
+    // failure, and this returning 0 meant `nemar switch "$NAME" && do-something`
+    // carried on against whichever account was already active. The empty-name guard
+    // above exits 1, so 0 here would also make the weaker mistake the louder one.
+    process.exitCode = 1;
     return;
   }
 
