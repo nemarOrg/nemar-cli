@@ -13,10 +13,7 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
-## Unreleased
-
-Pending release, currently `0.10.3-devN` on `dev`. Rename this heading to the version and
-date in the release pull request.
+## 0.10.3 - 2026-09-10
 
 ### Security
 
@@ -46,6 +43,12 @@ date in the release pull request.
 - **A documentation session could authenticate the management API.** Both credential scopes
   live in one table, and one of the two readers of it lacked the scope predicate. Caught in
   review, never deployed.
+- **The import workflow's failure reporters posted nothing at all when the log held no
+  failure marker.** Actions runs a `run:` step under `bash -e`, and the reporters add
+  `pipefail`, so a `grep` that found nothing killed the step before its named fallback: an
+  out-of-memory kill, an evicted runner or a cancellation reported the stage roll-up that
+  this work replaced. Fixed in both copies of the workflow (#1366,
+  `nemarDatasets/.github#116`).
 - **The reconcile reported "no import row" for datasets that had one.** Row existence was
   derived from the unresolved slice rather than from the table, so an issue whose import had
   since completed or rolled back was named as untracked, and the human remedy for that
