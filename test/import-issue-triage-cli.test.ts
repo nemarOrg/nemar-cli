@@ -534,3 +534,33 @@ describe("nemar admin import-issue-triage: the reconcile section (#1352)", () =>
     }
   });
 });
+
+describe("nemar admin import-issue-triage: an older backend omits the reconcile", () => {
+  /**
+   * Found by the first real production run, AFTER the merge: production had the epic
+   * but not the reconcile, so the response carried no `reconcile` key at all. The
+   * renderer tested `=== null`, `undefined` failed that, and the command died on
+   * `rec.rowsWithoutIssue` -- after printing a complete and correct triage report.
+   *
+   * The CLI ships to npm independently of the Worker, so it is routinely newer or
+   * older than the backend it talks to. A field one side adds must never be
+   * load-bearing on the other.
+   */
+  test("a response with no reconcile field renders the triage report and exits 0", async () => {
+    seedAuthenticatedConfig();
+    const { reconcile: _r, reconcileError: _e, ...withoutReconcile } = DRY_RUN;
+    const server = startCaptureServer(withoutReconcile);
+    try {
+      const r = await runCli(["admin", "import-issue-triage"], server.url);
+      // The triage half is unaffected...
+      expect(r.stdout).toContain("WOULD CLOSE");
+      expect(r.stdout).toContain("open=2");
+      // ...and the missing section reads as unknown rather than crashing.
+      expect(r.stdout).toContain("reconcile=unknown");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout + r.stderr).not.toContain("is not an object");
+    } finally {
+      server.stop();
+    }
+  });
+});

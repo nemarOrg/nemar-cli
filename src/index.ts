@@ -41,6 +41,7 @@ import {
   markUsageExit,
   primeEnvironmentSnapshot,
   shouldEnableDebug,
+  wasReportedExit,
   wasUsageExit,
   writeDebugLogSync,
 } from "./lib/debug-log.js";
@@ -126,7 +127,15 @@ const isCompletionRequest = findCompletionArgsStart(rawArgs) !== null;
 process.on("exit", (code) => {
   const exitCode = code ?? 0;
   const logPath = isCompletionRequest ? null : writeDebugLogSync(rawArgs, exitCode);
-  if (exitCode === 0 || exitCode === 130 || rawArgs.includes("--json") || wasUsageExit()) return;
+  if (
+    exitCode === 0 ||
+    exitCode === 130 ||
+    rawArgs.includes("--json") ||
+    wasUsageExit() ||
+    // A reported verdict: the exit code is the answer, so there is nothing to file.
+    wasReportedExit()
+  )
+    return;
   if (logPath) {
     process.stderr.write(`Debug log: ${logPath}\n`);
   } else if (isDebugEnabled()) {

@@ -16,6 +16,9 @@
       },
       "suspicious": {
         "noExplicitAny": "warn"
+      },
+      "correctness": {
+        "noUndeclaredVariables": "error"
       }
     }
   },
@@ -29,7 +32,19 @@
     "formatter": {
       "semicolons": "always",
       "quoteStyle": "double"
-    }
+    },
+    "globals": [
+      "Ai",
+      "AnalyticsEngineDataPoint",
+      "AnalyticsEngineDataset",
+      "Bun",
+      "D1Database",
+      "D1PreparedStatement",
+      "D1Result",
+      "ExecutionContext",
+      "ScheduledEvent",
+      "VectorizeIndex"
+    ]
   },
   "files": {
     "ignore": ["node_modules", "dist", "*.json"]
