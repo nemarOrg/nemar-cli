@@ -419,20 +419,32 @@ export async function issueSession(
 }
 
 /**
- * The account a session cookie belongs to, WITHOUT asking whether that session
- * is still usable.
+ * The account an UNREVOKED session cookie belongs to, whether or not that
+ * session is still otherwise usable.
  *
- * One caller: `/auth/logout`'s cascade into the docs credential, and only
- * because dropping the liveness predicates is the entire point. A docs session
- * runs eight hours from its mint while a non-remember app session runs 24 hours
- * from sign-in, so the two windows do not nest -- review found sign-out
- * skipping the cascade whenever the app row had already lapsed, answering `ok`
- * and clearing the cookie while the docs session and any outstanding grant
- * stayed spendable. Scope is unconstrained for the same reason: whichever of
- * this account's cookies was presented, the account asked to be signed out.
+ * One caller: `/auth/logout`'s cascade into the docs credential. Which
+ * predicates are dropped and which are kept is the whole design here, and the
+ * two halves were each found by a separate round of review:
  *
- * NEVER use this to authenticate anything. It answers "whose row is this" and
- * says nothing about whether the row may still be used.
+ * - The EXPIRY and account predicates go. A docs session runs eight hours from
+ *   its mint while a non-remember app session runs 24 hours from sign-in, so the
+ *   windows do not nest, and keying the cascade on a live session meant signing
+ *   out with a lapsed cookie answered `ok`, cleared the cookie, and left the
+ *   docs session and any outstanding grant spendable.
+ * - `revoked_at IS NULL` STAYS. Without it, a cookie value that had already been
+ *   signed out remained a working handle for tearing down whatever docs session
+ *   the account established later, and nothing prunes this table, so the handle
+ *   would never expire. A revoked credential must confer nothing, including the
+ *   power to revoke.
+ *
+ * Scope is unconstrained, which is safe rather than powerful: presenting a
+ * docs-scoped value here ends that same account's docs access and nothing else
+ * (the app session survives and can mint a new grant immediately), and the docs
+ * cookie has a different name on a different host, so it cannot arrive by
+ * accident.
+ *
+ * NEVER use this to authenticate anything. It answers "whose unrevoked row is
+ * this" and nothing about whether the row may still be used.
  */
 export async function userIdForCookieId(
   env: Bindings,
@@ -441,14 +453,6 @@ export async function userIdForCookieId(
   if (!cookieIdRaw) return null;
   const cookieHash = await hashCookieId(cookieIdRaw);
   const row = await env.DB.prepare(
-    // `revoked_at IS NULL` STAYS, and only the expiry and account predicates go.
-    // The case being fixed is a LAPSED session, which is unrevoked by
-    // definition, so keeping this costs the fix nothing -- while dropping it
-    // turned a revoked cookie into a permanent handle for tearing down that
-    // account's docs access: sign out, sign back in, replay the old value, and
-    // the NEW docs session and grant are destroyed. Nothing prunes this table,
-    // so that handle would never stop working. A revoked credential has to
-    // confer nothing, including the power to revoke.
     "SELECT user_id FROM web_sessions WHERE cookie_id_hash = ? AND revoked_at IS NULL LIMIT 1",
   )
     .bind(cookieHash)
@@ -456,16 +460,29 @@ export async function userIdForCookieId(
   return row?.user_id ?? null;
 }
 
-/** Mark the row backing this cookie as revoked. Idempotent. */
-export async function revokeSession(env: Bindings, cookieIdRaw: string | null): Promise<void> {
-  if (!cookieIdRaw) return;
+/**
+ * The (not-yet-run) statement that marks the row backing this cookie revoked.
+ * Idempotent.
+ *
+ * A statement rather than a one-shot call, for the same reason
+ * `prepareSessionInsert` is: its only caller has to put it in the SAME
+ * `db.batch()` as the writes it must not be separated from. Sign-out revokes
+ * the app row AND the account's docs sessions and grants, and doing that in two
+ * round trips means a failure between them leaves the app row revoked while the
+ * docs credential lives on -- with the app row gone, `userIdForCookieId` can no
+ * longer resolve the account, so a retry cannot finish the job either. One
+ * batch is one transaction: all of it lands or none of it does, and "none"
+ * leaves a state the retry can still act on.
+ */
+export async function revokeSessionStatement(
+  env: Bindings,
+  cookieIdRaw: string,
+): Promise<D1PreparedStatement> {
   const cookieHash = await hashCookieId(cookieIdRaw);
-  await env.DB.prepare(
+  return env.DB.prepare(
     `UPDATE web_sessions SET revoked_at = datetime('now')
       WHERE cookie_id_hash = ? AND revoked_at IS NULL`,
-  )
-    .bind(cookieHash)
-    .run();
+  ).bind(cookieHash);
 }
 
 /** If a remember-me session is in the final ${SLIDING_REFRESH_THRESHOLD_MS}

@@ -342,7 +342,10 @@ describe("DELETE /admin/users/by-id/:id cascades too", () => {
 
   test("the audit row's session count is the session count, not the grant count", async () => {
     // `sessions_revoked` is read out of the batch by index, and the new grants
-    // purge went in one slot ahead of it. Two sessions and one grant, so an
+    // purge went in one slot BEHIND it, at index 3. Nothing shifted, which is
+    // the point of pinning it: the next statement added to that batch could go
+    // either side, and only an assertion decides whether that is noticed. Two
+    // sessions and one grant, so an
     // off-by-one in either direction shows up as a wrong number.
     const userId = seedTarget();
     await signInToDocs(userId);
