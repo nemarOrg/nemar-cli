@@ -384,6 +384,16 @@ without touching the version.
 `[skip ci]` is deliberately absent from the strip commit,
 because GitHub's skip marker would also block the tag-push event that `npm-publish.yml` needs.
 
+**The generated release notes are not a changelog, so [`CHANGELOG.md`](CHANGELOG.md) is.**
+`auto-tag.yml` creates the GitHub Release with `--generate-notes`, which lists merged PR
+titles: an epic collapses into one bullet carrying the epic's name, and a fix found mid-epic
+gets no bullet at all. So `v0.10.2`'s notes never mentioned that tests had been signing in
+to production. **The release PR renames `## Unreleased` to `## X.Y.Z - YYYY-MM-DD`** and is
+where the entry gets written; `test/changelog-format.unit.test.ts` keeps the file newest-first,
+one entry per version, and never ahead of the version CI is carrying. Paste the entry into
+the GitHub Release description after the tag exists
+(`gh release edit vX.Y.Z --notes-file …`), above the generated list.
+
 **A release that carries a new migration runs `bun run migrations:d1-check` first.**
 Every migration test in this repo runs on bun:sqlite, which is more permissive than
 the SQLite build D1 ships — migration 0077 shipped a 79-character GLOB that bun:sqlite

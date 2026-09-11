@@ -151,6 +151,37 @@ const AUTH_PATHS = [
   "/auth/device/confirm",
   "/auth/device/deny",
   "/auth/keys",
+  // Docs admin gate (epic #1336 phase 0, #1338). `grant` mints a one-time code
+  // for a session that already proved itself, and `exchange` spends one; a
+  // person passes through both once per eight-hour docs session, so the strict
+  // floor is the right home for the pair.
+  //
+  // Neither is called by a browser, and they are called by DIFFERENT workers:
+  // `grant` by the website's server-side render, `exchange` by the docs site's
+  // Pages Function. Both therefore arrive from a small pool of egress addresses
+  // rather than from a person, and `grant` shares its bucket with every other
+  // visitor's `/auth/logout` and `/auth/profile`. That is a pre-existing property of this bucket rather than
+  // something these two introduce -- see the note on MAX_REQUESTS below, and
+  // issue #1354, which proposes keying Worker-originated requests on something
+  // other than the egress address. They stay here because a person passes
+  // through them once per eight-hour docs session, so they add almost nothing
+  // to the pressure; moving one route would hide the general problem rather
+  // than fix it.
+  //
+  // `/auth/docs/verify` is DELIBERATELY ABSENT, for the same reason
+  // `/auth/device/token` is. It is called once per gated page view, and the
+  // caller is a Cloudflare Pages Function, so every admin in the organization
+  // arrives from the same small pool of egress IPs and shares one per-IP
+  // bucket. One admin clicking through the dozen operations pages would sit at
+  // the strict cap on their own, and two browsing at once would trip it, which
+  // would read as "the gate is broken" rather than "you are rate limited". It
+  // rides the generic ip bucket (500/min) instead: the route mints nothing,
+  // reveals nothing beyond whether one 256-bit value is a live admin session,
+  // and cannot be brute-forced at any rate a bucket would help with. Note the
+  // comment on MAX_REQUESTS below -- shared CF egress IPs are why that bucket
+  // is 500 rather than 100 in the first place.
+  "/auth/docs/grant",
+  "/auth/docs/exchange",
   // NOT an /auth path, and deliberately in this list anyway (ADR 0042, #1253):
   // POST /users/me/upload-access/request spends a live GitHub API call on the
   // shared installation token for every attempt, and a refused one writes

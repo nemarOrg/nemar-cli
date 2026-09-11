@@ -143,6 +143,17 @@ const DRY_RUN = {
   ],
   errors: [],
   remaining: 0,
+  reconcile: {
+    rowsWithoutIssue: [],
+    issuesWithoutRow: [],
+    parked: 0,
+    quarantined: 0,
+    issueListEmpty: false,
+    rowsExamined: 2,
+    issuesExamined: 2,
+    reason: "Failures and tracking issues agree (2 unresolved import row(s) examined).",
+  },
+  reconcileError: null,
   ok: true,
 };
 
@@ -379,6 +390,175 @@ describe("nemar admin import-issue-triage: rollups are visible", () => {
       expect(result.stdout).toContain("WOULD RELEASE");
       expect(result.stdout).toContain("#900");
       expect(result.stdout).toContain("Would release 1 rollup(s)");
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("nemar admin import-issue-triage: the reconcile section (#1352)", () => {
+  test("agreement prints the counts, not silence", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer(DRY_RUN);
+    try {
+      const r = await runCli(["admin", "import-issue-triage"], server.url);
+      expect(r.stdout).toContain("rows_without_issue=0");
+      expect(r.stdout).toContain("issues_without_row=0");
+      // The denominator: "they agree over 2 rows" is a different claim from "they
+      // agree over nothing", and a reader of a clean run needs to know which.
+      expect(r.stdout).toContain("rows_examined=2");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("an untracked failure is listed with its cause", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer({
+      ...DRY_RUN,
+      reconcile: {
+        rowsWithoutIssue: [
+          {
+            datasetId: "on000777",
+            sourceId: "ds000777",
+            status: "failed",
+            stage: "prepare",
+            cause: "auth_invalid",
+            label: "auth-invalid",
+            updatedAt: "2026-09-01 03:00:00",
+          },
+        ],
+        issuesWithoutRow: [],
+        parked: 0,
+        quarantined: 0,
+        issueListEmpty: false,
+        rowsExamined: 3,
+        issuesExamined: 2,
+        reason:
+          "1 unresolved import(s) have no tracking issue, so nothing surfaces them to triage.",
+      },
+    });
+    try {
+      const r = await runCli(["admin", "import-issue-triage"], server.url);
+      expect(r.stdout).toContain("UNTRACKED");
+      expect(r.stdout).toContain("on000777 (ds000777) failed at prepare");
+      expect(r.stdout).toContain("auth_invalid");
+      // It must be obvious that reading this changed nothing.
+      expect(r.stdout).toContain("files and closes nothing");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("an issue with no import row is listed by number", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer({
+      ...DRY_RUN,
+      reconcile: {
+        rowsWithoutIssue: [],
+        issuesWithoutRow: [
+          { number: 77, datasetId: "on004148", title: "Import failure: on004148 (ds004148)" },
+        ],
+        parked: 0,
+        quarantined: 0,
+        issueListEmpty: false,
+        rowsExamined: 2,
+        issuesExamined: 3,
+        reason:
+          "1 open issue(s) have no import_jobs row, so the sweep can never verify or close them.",
+      },
+    });
+    try {
+      const r = await runCli(["admin", "import-issue-triage"], server.url);
+      expect(r.stdout).toContain("NO IMPORT ROW");
+      expect(r.stdout).toContain("#77 on004148");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a null verdict reads as unknown, never as agreement", async () => {
+    // THE property, the same one ADR 0054 turns on. "Could not compare" printed as
+    // zeros would be indistinguishable from "compared, and they agree".
+    seedAuthenticatedConfig();
+    const server = startCaptureServer({
+      ...DRY_RUN,
+      reconcile: null,
+      reconcileError: "D1 read failed: no such table: import_jobs",
+    });
+    try {
+      const r = await runCli(["admin", "import-issue-triage"], server.url);
+      expect(r.stdout).toContain("reconcile=unknown");
+      expect(r.stdout).toContain("no such table: import_jobs");
+      expect(r.stdout).not.toContain("rows_without_issue=0");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a long untracked list says how many are hidden", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer({
+      ...DRY_RUN,
+      reconcile: {
+        // 24 against a budget of 20. Deliberately expressed as budget + 4 in the
+        // assertion below rather than as a bare number, since the budget moved once
+        // already (10 -> 20, to match the backend's single cap).
+        rowsWithoutIssue: Array.from({ length: 24 }, (_, i) => ({
+          datasetId: `on${String(i).padStart(6, "0")}`,
+          sourceId: `ds${String(i).padStart(6, "0")}`,
+          status: "failed",
+          stage: "prepare",
+          cause: "unknown",
+          label: "needs-triage",
+          updatedAt: null,
+        })),
+        issuesWithoutRow: [],
+        parked: 0,
+        quarantined: 0,
+        issueListEmpty: false,
+        rowsExamined: 24,
+        issuesExamined: 2,
+        reason:
+          "14 unresolved import(s) have no tracking issue, so nothing surfaces them to triage.",
+      },
+    });
+    try {
+      const r = await runCli(["admin", "import-issue-triage"], server.url);
+      // A list that stops without saying so under-counts, and an under-count reads
+      // as good news.
+      expect(r.stdout).toContain("... and 4 more untracked");
+      expect(r.stdout).toContain("rows_without_issue=24");
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("nemar admin import-issue-triage: an older backend omits the reconcile", () => {
+  /**
+   * Found by the first real production run, AFTER the merge: production had the epic
+   * but not the reconcile, so the response carried no `reconcile` key at all. The
+   * renderer tested `=== null`, `undefined` failed that, and the command died on
+   * `rec.rowsWithoutIssue` -- after printing a complete and correct triage report.
+   *
+   * The CLI ships to npm independently of the Worker, so it is routinely newer or
+   * older than the backend it talks to. A field one side adds must never be
+   * load-bearing on the other.
+   */
+  test("a response with no reconcile field renders the triage report and exits 0", async () => {
+    seedAuthenticatedConfig();
+    const { reconcile: _r, reconcileError: _e, ...withoutReconcile } = DRY_RUN;
+    const server = startCaptureServer(withoutReconcile);
+    try {
+      const r = await runCli(["admin", "import-issue-triage"], server.url);
+      // The triage half is unaffected...
+      expect(r.stdout).toContain("WOULD CLOSE");
+      expect(r.stdout).toContain("open=2");
+      // ...and the missing section reads as unknown rather than crashing.
+      expect(r.stdout).toContain("reconcile=unknown");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout + r.stderr).not.toContain("is not an object");
     } finally {
       server.stop();
     }

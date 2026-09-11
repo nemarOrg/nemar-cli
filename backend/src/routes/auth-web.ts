@@ -65,6 +65,7 @@ import {
   nonProdCodeEchoAllowed,
   nonProdCodeRequestAllowed,
 } from "../services/auth-code";
+import { DOCS_GRANTS_PURGE_SQL, DOCS_REVOKE_ALL_SQL } from "../services/docs-auth";
 import {
   resolveEmailConfig,
   sendEmailChangeCodeEmail,
@@ -108,7 +109,8 @@ import {
   isAllowedOrigin,
   maybeSlideExpiry,
   prepareSessionInsert,
-  revokeSession,
+  revokeSessionStatement,
+  userIdForCookieId,
 } from "../services/web-session";
 import { type Bindings, type UserRole, type Variables, parseRole } from "../types/bindings";
 
@@ -734,14 +736,67 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
   }
 
   const cookieIdRaw = c.var.webSessionCookieId ?? null;
-  // Always clear the cookie client-side, even if the server-side
-  // revoke fails (D1 transient, etc.). The user asked to sign out;
-  // we honour that locally and log the server-side failure so an
-  // operator can clean up the lingering web_sessions row later.
+
+  // WHOSE ACCOUNT THIS IS, RESOLVED BEFORE ANYTHING IS REVOKED.
+  //
+  // Not from `webUser`, because that exists only while the app session is live:
+  // a docs session runs eight hours from its mint and a non-remember app session
+  // 24 hours from sign-in, so the windows do not nest, and review found sign-out
+  // with a lapsed app cookie answering `ok`, clearing the cookie, and leaving
+  // the docs session and its grants fully spendable.
+  //
+  // And before the revoke, because `userIdForCookieId` keeps `revoked_at IS
+  // NULL` -- so that a cookie value which has already been signed out confers
+  // nothing, including the power to revoke somebody's later session.
+  let userId = c.var.webUser?.id ?? null;
+  if (!userId) {
+    try {
+      userId = await userIdForCookieId(c.env, cookieIdRaw);
+    } catch (err) {
+      console.error("[auth-web] /logout: could not resolve account for docs revoke", err);
+    }
+  }
+
+  // ONE BATCH, WHICH IS ONE TRANSACTION, and that is what makes the two
+  // constraints above compatible.
+  //
+  // Signing out of nemar.org also signs the account out of the gated
+  // documentation (epic #1336 phase 0). Those sessions live on docs.nemar.org,
+  // so this response cannot clear their cookie -- revoking the rows is what
+  // makes the next page view there refuse. Without it, "sign out" would leave
+  // admin docs open for up to eight more hours, which is the exact failure the
+  // rule about revocation cascading to linked credentials exists to prevent.
+  //
+  // Two round trips instead of one looked harmless and was not: revoke the app
+  // row first and a failure in the docs half leaves docs access live with the
+  // app row already gone, so `userIdForCookieId` can no longer resolve the
+  // account and RETRYING THE SAME REQUEST is a no-op -- the same
+  // unrecoverable-by-retry shape `finalizeRevocation` orders its statements to
+  // avoid. Doing the docs half first instead opens a window where a grant minted
+  // between the two writes survives the sign-out. One transaction has neither
+  // problem: everything lands, or nothing does and the retry still resolves.
+  //
+  // Still best-effort at the response layer, deliberately: the person asked to
+  // sign out, so a D1 blip must not turn that into an error, and the cookie is
+  // cleared client-side either way.
   try {
-    await revokeSession(c.env, cookieIdRaw);
+    const statements = [];
+    if (cookieIdRaw) statements.push(await revokeSessionStatement(c.env, cookieIdRaw));
+    if (userId) {
+      statements.push(c.env.DB.prepare(DOCS_REVOKE_ALL_SQL).bind(userId));
+      // Outstanding GRANTS die too, not just live sessions. A grant is spendable
+      // for 60 seconds by whoever holds the code, and the mint deliberately
+      // re-checks the account rather than the app session that authorized it --
+      // there is nothing on the row to re-check against. So without this a code
+      // captured from the callback URL (browser history, a `Referer`, a log) was
+      // still redeemable AFTER sign-out, for a fresh eight-hour session. Signing
+      // out has to end the thing that can still create access, not only the
+      // access that already exists.
+      statements.push(c.env.DB.prepare(DOCS_GRANTS_PURGE_SQL).bind(userId));
+    }
+    if (statements.length > 0) await c.env.DB.batch(statements);
   } catch (err) {
-    console.error("[auth-web] /logout: revokeSession failed; clearing cookie anyway", err);
+    console.error("[auth-web] /logout: revoke failed; clearing cookie anyway", err);
   }
 
   c.header("Set-Cookie", buildClearedSessionCookie(c.env.WEB_SESSION_COOKIE_DOMAIN || undefined));

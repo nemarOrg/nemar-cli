@@ -41,6 +41,7 @@ export const MAX_BODY_BYTES = 2048;
 
 let debugEnabled = false;
 let usageExit = false;
+let reportedExit = false;
 let lastStep: string | undefined;
 let cachedEnvironmentSection: string | undefined;
 const httpEntries: HttpLogEntry[] = [];
@@ -88,6 +89,29 @@ export function markUsageExit(): void {
 
 export function wasUsageExit(): boolean {
   return usageExit;
+}
+
+/**
+ * Marks that this command's non-zero exit code IS its answer, not a failure.
+ *
+ * `nemar admin import-coverage` and `import-weekly` exit 1 for "unhealthy" and 2 for
+ * "could not determine": a monitoring caller reads those, and both are successful
+ * RUNS reporting an unhealthy or unknown STATE. Without this the exit hook printed
+ * "Run again with --debug and attach the log to a new issue" underneath a correct
+ * report -- observed on the first real production run of the weekly summary, whose
+ * `closed_this_week=unknown` is the designed first-week answer. Inviting a bug report
+ * for a working command teaches people to ignore the hint that matters.
+ *
+ * Deliberately separate from `markUsageExit`: that one means Commander rejected the
+ * invocation, and conflating "you typed it wrong" with "the fleet is unwell" would
+ * make both harder to read later.
+ */
+export function markReportedExit(): void {
+  reportedExit = true;
+}
+
+export function wasReportedExit(): boolean {
+  return reportedExit;
 }
 
 /** Print to stderr only when debug mode is on (mirrors lib/verbose.ts). */

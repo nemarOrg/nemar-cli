@@ -32,6 +32,7 @@ import {
   getBroadcastRecipients,
   sendBroadcast,
 } from "../../services/broadcast";
+import { DOCS_GRANTS_PURGE_SQL, DOCS_REVOKE_ALL_SQL } from "../../services/docs-auth";
 import {
   parseEmailPreferences,
   resolveEmailConfig,
@@ -463,6 +464,41 @@ async function finalizeRevocation(
     )
     .bind(user.id)
     .run();
+
+  // Browser credentials go with the API keys, both scopes, plus any
+  // outstanding docs grant.
+  //
+  // This step did not exist before the docs gate did, and its absence was
+  // survivable only by accident: `status = 'revoked'` blocks an app session at
+  // every reader, so the live row was inert -- until an admin re-approved the
+  // account, at which point the browser that still held the cookie was signed
+  // in again. Tokens make no such offer, and a credential class that a
+  // re-approval silently restores is not the same promise. The docs half is
+  // sharper still: a grant is a 60-second licence to mint a fresh eight-hour
+  // session, checked against the ACCOUNT rather than the session that
+  // authorized it, so an unspent one had to be destroyed rather than left to
+  // expire. Not best-effort: a revocation that cannot complete must fail
+  // loudly, exactly as the token revoke above does.
+  //
+  // BEFORE the status write, not after, and the order is load-bearing. If this
+  // throws here, the account is still `approved`, so the admin's retry re-enters
+  // the route and reaches this cascade again. After the status write, a retry
+  // would hit the "User already revoked" 409 and the sessions and grants would
+  // never be reached at all -- the failure would be unrecoverable through the
+  // route. (The retry is not a perfect replay of the FIRST attempt: the IAM
+  // block above nulls `aws_iam_username` even when revocation failed, so a
+  // second pass skips IAM and lands plain `revoked`, with the
+  // `iam_revocation_failures` row as the surviving signal. That is pre-existing
+  // and orthogonal; what matters here is that the credential cascade is
+  // reachable on the retry.)
+  await db.batch([
+    db
+      .prepare(
+        "UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
+      )
+      .bind(user.id),
+    db.prepare(DOCS_GRANTS_PURGE_SQL).bind(user.id),
+  ]);
 
   // Update user status
   // If IAM revocation failed, mark as revoked_iam_pending for manual cleanup
@@ -904,22 +940,38 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       // On demotion, revoke tokens to force re-authentication
       const demoted = isDemotion(oldRole, newRole);
       let tokensRevoked = 0;
+      let docsSessionsRevoked = 0;
       let tokenRevocationFailed = false;
       if (demoted) {
         try {
-          const result = await db
-            .prepare(
-              "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
-            )
-            .bind(target.id)
-            .run();
-          tokensRevoked = result.meta.changes ?? 0;
+          // The docs credential goes too, and unlike the token revoke this is
+          // not about forcing re-authentication. `/auth/docs/verify` re-reads
+          // the role on every page view, so a demoted admin is already refused
+          // -- what survived was the ROW, and a re-promotion inside the
+          // session's eight hours handed the old cookie straight back to
+          // whichever browser still held it. Same reasoning for the grant: it
+          // is checked against the account, so it becomes spendable again the
+          // moment the role does. App sessions are deliberately left alone; a
+          // demoted account is still a legitimate user, and `resolveCookieUser`
+          // re-reads its role per request.
+          const result = await db.batch([
+            db
+              .prepare(
+                "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
+              )
+              .bind(target.id),
+            db.prepare(DOCS_REVOKE_ALL_SQL).bind(target.id),
+            db.prepare(DOCS_GRANTS_PURGE_SQL).bind(target.id),
+          ]);
+          tokensRevoked = result[0]?.meta?.changes ?? 0;
+          docsSessionsRevoked = result[1]?.meta?.changes ?? 0;
         } catch (error) {
           // The id as well as the handle: a username can be renamed or nulled,
           // and this line is the record of a demoted account that may still
-          // hold a live token.
+          // hold a live token or docs session. The batch is atomic, so a failure
+          // here means NONE of the three statements landed.
           console.error(
-            `SECURITY: Failed to revoke tokens for demoted user ${username} (id=${target.id}):`,
+            `SECURITY: Failed to revoke credentials for demoted user ${username} (id=${target.id}):`,
             error,
           );
           tokenRevocationFailed = true;
@@ -938,6 +990,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
             old_role: oldRole,
             new_role: newRole,
             tokens_revoked: tokensRevoked,
+            docs_sessions_revoked: docsSessionsRevoked,
             token_revocation_failed: tokenRevocationFailed,
           }),
         }).run();
@@ -1407,6 +1460,14 @@ export function registerUsersRoutes(admin: AdminRouter): void {
           .prepare(
             "UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
           )
+          .bind(id),
+        // The session revoke above covers both scopes (no `scope` predicate, on
+        // purpose), but a docs GRANT is a separate row and a separate 60-second
+        // licence to mint a new session. `docs_grants.user_id` cascades on
+        // DELETE, and this is a tombstone rather than a delete, so nothing else
+        // reaches it.
+        db
+          .prepare(DOCS_GRANTS_PURGE_SQL)
           .bind(id),
         db.prepare("DELETE FROM dataset_collaborators WHERE user_id = ?").bind(id),
         db.prepare("DELETE FROM user_s3_permissions WHERE user_id = ?").bind(id),

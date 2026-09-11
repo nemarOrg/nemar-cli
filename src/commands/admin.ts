@@ -160,6 +160,7 @@ import {
   confirm,
   confirmWithInput,
 } from "../lib/confirm.js";
+import { markReportedExit } from "../lib/debug-log.js";
 import { CLI_LIVE_DATASETS, selectRevalidateTargets } from "../lib/fleet.js";
 import {
   cloneDataset,
@@ -6964,6 +6965,11 @@ function isCoverageErrorList(
   );
 }
 
+/** Untracked rows and row-less issues listed before truncating. One budget, matching
+ *  the backend's `RECONCILE_MAX_LISTED`: two different numbers for the same list is
+ *  how a reader learns not to trust either. */
+const RECONCILE_LISTED_ROWS = 20;
+
 const importIssueTriageCommand = new Command("import-issue-triage").description(
   "Close recovered import-failure issues and retire stale cause labels (dry run by default)",
 );
@@ -7128,6 +7134,56 @@ importIssueTriageCommand
     if (!res.applied && (res.closed > 0 || res.relabelled > 0 || res.rollupsReleased > 0)) {
       console.log(chalk.dim("  Re-run with --apply to perform these changes."));
     }
+
+    // Reconcile (#1352). Printed after the triage summary because it describes a
+    // different question -- whether the two sides agree -- and answering it changes
+    // nothing on GitHub.
+    // `== null`, so an OLDER BACKEND that omits the field entirely is handled too.
+    // `=== null` crashed against production the day this shipped: the reconcile went
+    // to dev after the release, so the response had no `reconcile` key at all,
+    // `undefined !== null` took the else branch, and the command died on
+    // `rec.rowsWithoutIssue` AFTER printing a complete, correct triage report. The
+    // CLI is published to npm independently of the Worker, so it is routinely newer
+    // or older than the backend it talks to; a field added on one side must never be
+    // load-bearing on the other.
+    if (res.reconcile == null) {
+      // Never silence: "could not compare" and "they agree" are the confusion this
+      // epic exists to remove, one level down.
+      console.log();
+      console.log(
+        chalk.yellow(`reconcile=unknown${res.reconcileError ? `: ${res.reconcileError}` : ""}`),
+      );
+    } else {
+      const rec = res.reconcile;
+      console.log();
+      console.log(
+        chalk.cyan(
+          `reconcile rows_without_issue=${rec.rowsWithoutIssue.length} ` +
+            `issues_without_row=${rec.issuesWithoutRow.length} ` +
+            `parked=${rec.parked} quarantined=${rec.quarantined} ` +
+            `rows_examined=${rec.rowsExamined} issues_examined=${rec.issuesExamined}`,
+        ),
+      );
+      for (const r of rec.rowsWithoutIssue.slice(0, RECONCILE_LISTED_ROWS)) {
+        console.log(
+          `${chalk.yellow("UNTRACKED".padEnd(15))} ${r.datasetId} (${r.sourceId}) ${r.status} at ${r.stage}  ${chalk.dim(r.cause)}`,
+        );
+      }
+      const hiddenRows = rec.rowsWithoutIssue.length - RECONCILE_LISTED_ROWS;
+      if (hiddenRows > 0) console.log(chalk.dim(`  ... and ${hiddenRows} more untracked`));
+      for (const i of rec.issuesWithoutRow.slice(0, RECONCILE_LISTED_ROWS)) {
+        console.log(`${chalk.yellow("NO IMPORT ROW".padEnd(15))} #${i.number} ${i.datasetId}`);
+      }
+      const hiddenIssues = rec.issuesWithoutRow.length - RECONCILE_LISTED_ROWS;
+      if (hiddenIssues > 0) console.log(chalk.dim(`  ... and ${hiddenIssues} more`));
+      // Always printed, not only on a disagreement: the reason is where the `parked`
+      // and `quarantined` glosses live, so a clean run otherwise showed a bare
+      // `parked=3` with nothing saying what it means or where those are reported.
+      console.log(chalk.dim(`  ${rec.reason}`));
+      if (rec.rowsWithoutIssue.length > 0 || rec.issuesWithoutRow.length > 0) {
+        console.log(chalk.dim("  Reported only: this command files and closes nothing for these."));
+      }
+    }
   });
 
 adminCommand.addCommand(importIssueTriageCommand);
@@ -7209,6 +7265,9 @@ importCoverageCommand
     // alarm is a successful RUN but an unhealthy STATE, so it is non-zero.
     if (res.status === "unknown") process.exitCode = 2;
     else if (res.status !== "healthy" || res.errors.length > 0) process.exitCode = 1;
+    // The code is the verdict, so suppress the "file a bug" nudge: an alarm is this
+    // command working, and 2 means it could not determine -- both are answers.
+    if (process.exitCode !== 0) markReportedExit();
 
     if (options.json) {
       console.log(JSON.stringify(res, null, 2));
@@ -7398,6 +7457,8 @@ importWeeklyCommand
       process.exitCode = 0; // the gate declined; nothing was measured
     else if (f.errors.length > 0) process.exitCode = 2;
     else if (weeklyNeedsAttention(f)) process.exitCode = 1;
+    // Same as import-coverage: 1 and 2 are answers, not failures to report.
+    if (process.exitCode !== 0) markReportedExit();
 
     if (options.json) {
       console.log(JSON.stringify(res, null, 2));

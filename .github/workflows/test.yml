@@ -312,6 +312,25 @@ jobs:
       - name: Lint
         run: bun run lint
 
+      # `test/` and `backend/test/` are NOT type-checked -- `tsconfig.json` includes
+      # only `src` and `shared`, and widening it is a real project rather than a flag:
+      # 82 root test files import backend sources, so the test tier needs BOTH
+      # `bun-types` and `@cloudflare/workers-types`, and those two disagree about
+      # globals like `Request`, `fetch` and `caches` (582 errors when combined).
+      #
+      # This is the cheap half of that, and it is the half that actually bit: five live
+      # suites once died at module scope with `ReferenceError: LIVE_TARGET_BLOCKED is
+      # not defined`, because a script's "already imported?" check was satisfied by a
+      # comment it had just inserted. Biome needs no type information to see an
+      # identifier that is never declared, and it names the file and the line.
+      #
+      # `--only` rather than a full `biome check` on the test dirs: those carry
+      # pre-existing style findings (non-null assertions, `delete`, string concat) that
+      # would fail the job for reasons unrelated to this guard, and fixing them is a
+      # separate change from installing the guard.
+      - name: Lint tests for undeclared identifiers
+        run: bunx biome lint --only=correctness/noUndeclaredVariables test/ backend/test/
+
   # Unit tests - runs on CLI or test changes
   # Tier 1 (REQUIRED on dev + main): pure, deterministic tests with no network.
   # Auto-classified as every non-e2e file that does NOT hit the live backend
@@ -395,12 +414,32 @@ jobs:
           sparse-checkout-cone-mode: false
           ref: staging
 
+      # The deployed copy of onboard-openneuro.yml, for the same reason and with the
+      # same shape (#1309). That workflow is authored in this repo beside the CLI it
+      # invokes, then deployed by copying it whole into nemarDatasets/.github -- and
+      # the two had already drifted by one merged PR before anyone noticed, because
+      # nothing compared them. `main`, not a pre-release branch: that repo has no
+      # release train, so what is on main is what runs.
+      #
+      # nemarDatasets/.github is PUBLIC, so no token is needed. Sparse, non-cone, one
+      # file. It lands in dataset-workflows-live/ at the repo root, which the
+      # unit-pure file glob does not reach, so it cannot be mistaken for a test file.
+      - name: Check out the deployed dataset workflow
+        uses: actions/checkout@v4
+        with:
+          repository: nemarDatasets/.github
+          path: dataset-workflows-live
+          sparse-checkout: .github/workflows/onboard-openneuro.yml
+          sparse-checkout-cone-mode: false
+          ref: main
+
       - name: Run pure unit tests (no live backend)
         env:
           # Names the checkout above. The parity test treats this as the
           # contract: a path that is not there FAILS rather than skipping, so a
           # broken checkout step cannot silently disable the check.
           NEMAR_WEBSITE_ACCOUNT_COPY: website-copy/src/lib/account-copy.ts
+          NEMAR_DATASET_WORKFLOW_LIVE: dataset-workflows-live/.github/workflows/onboard-openneuro.yml
         run: |
           # Deliberately no TEST_API_URL / secrets: these tests don't touch the
           # backend, so a misclassified file fails loudly here instead of

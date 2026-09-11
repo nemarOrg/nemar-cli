@@ -80,11 +80,22 @@ async function resolveCookieUser(c: AuthContext): Promise<CookieAuthResult> {
   try {
     const cookieHash = await hashCookieId(cookieIdRaw);
 
+    // `ws.scope = 'app'` below is load-bearing. This is the SECOND place
+    // `web_sessions` is read by cookie hash; the other is
+    // `findSessionByCookieId` in `services/web-session.ts`. Epic #1336 phase 0
+    // added a `scope` column (migration 0083) for the docs-site credential and
+    // put the predicate on that reader only, and review found the consequence
+    // here: the docs cookie authenticated every route behind this middleware,
+    // `/admin/*` included, so a read-only documentation session was an
+    // owner-grade API session. A scope column is worth nothing unless every
+    // reader names the scope it wants. A third reader needs this line too, or
+    // better, should go through `findSessionByCookieId`.
     const row = await c.env.DB.prepare(
       `SELECT u.id, u.username, u.email, u.github_username, u.role, u.orcid, u.status
          FROM web_sessions ws
          JOIN users u ON u.id = ws.user_id
         WHERE ws.cookie_id_hash = ?
+          AND ws.scope = 'app'
           AND ws.revoked_at IS NULL
           AND ws.expires_at > datetime('now')
           AND u.deleted_at IS NULL
