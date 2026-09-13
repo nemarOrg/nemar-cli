@@ -530,6 +530,54 @@ export interface ImportManifestItem {
   /** Parsed S3 source, or null if the whereis URL wasn't an S3 endpoint. */
   source: S3Ref | null;
   destUri: string;
+  /**
+   * Where this key's content comes from.
+   *
+   * `"upstream"` (the default, and what every manifest written before #1159
+   * carries implicitly) means the copy phase server-side copies it from the
+   * OpenNeuro bucket by key. `"local"` means prepare already uploaded it from
+   * the clone with `git annex copy --to nemar-s3`, because the file was a plain
+   * git blob upstream and has no upstream key to copy from (ADR 0057).
+   *
+   * The distinction is only about who transfers the bytes. Both kinds are data:
+   * finalize verifies both at the destination and registers both with
+   * git-annex, and both count against the empty-manifest publish guard.
+   */
+  origin?: "upstream" | "local";
+}
+
+/**
+ * True when prepare already uploaded this key's content, so the copy phase has
+ * nothing to transfer for it. Absent `origin` means upstream, which is what
+ * keeps a manifest written before #1159 readable.
+ */
+export function isLocallyUploaded(item: Pick<ImportManifestItem, "origin">): boolean {
+  return item.origin === "local";
+}
+
+/**
+ * The copy work one shard owes: this shard's slice of the manifest, minus the
+ * keys prepare already uploaded from the clone.
+ *
+ * Declared here rather than inline in `copyShard` so the selection is testable
+ * without AWS: the copy phase talks to S3 on its very next statement, so an
+ * inline filter could only be exercised against the real bucket.
+ */
+export function selectShardCopyItems(
+  items: ImportManifestItem[],
+  shard: { index: number; count: number },
+): { shardItems: CopyItem[]; localSkipped: number } {
+  let localSkipped = 0;
+  const shardItems: CopyItem[] = [];
+  for (const it of items) {
+    if (isLocallyUploaded(it)) {
+      localSkipped++;
+      continue;
+    }
+    if (!keyInShard(it.key, shard.index, shard.count)) continue;
+    shardItems.push({ key: it.key, source: it.source, httpUrl: it.sourceUrl, destUri: it.destUri });
+  }
+  return { shardItems, localSkipped };
 }
 
 export interface ImportManifest {

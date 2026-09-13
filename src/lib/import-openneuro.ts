@@ -37,8 +37,8 @@ import {
   markInheritedOpenNeuroRemotesIgnored,
 } from "./git-annex/s3-remote.js";
 import { batchSetKeysPresent, getAnnexWhereisAll, getRemoteUuid } from "./git-annex/transfer.js";
+import { normalizeGitattributes, normalizeUnannexedData } from "./import-normalize.js";
 import {
-  type CopyItem,
   type ImportManifest,
   type ImportManifestItem,
   batchServerSideCopy,
@@ -46,10 +46,11 @@ import {
   expectedSizesFromItems,
   filterAlreadyCopied,
   isKeyPresentAtDeclaredSize,
-  keyInShard,
+  isLocallyUploaded,
   listExistingObjects,
   parseS3Url,
   readManifestFromS3,
+  selectShardCopyItems,
   writeManifestToS3,
 } from "./s3-server-copy.js";
 import { listAnnexedPaths, listTrackedPaths } from "./upload/transfer.js";
@@ -851,18 +852,24 @@ export async function prepareImport(
     process.exit(1);
   }
 
-  // Step 1b: report data files upstream left in git that NEMAR policy would
-  // annex. Reporting only -- see findUnannexedData for why annexing them here
-  // would publish unresolvable pointers, and issue #1159 for the real fix.
+  // Step 1b: report data files upstream left in git that NEMAR policy annexes.
   // Loud on purpose: this is how ds007788 put 675 MB of motion recordings into a
   // public git repo without anyone noticing (#1158).
+  //
+  // A diagnostic, not the decision. It runs here, before the dataset record
+  // exists, so a failure later still leaves a record of what the clone carried,
+  // and it swallows its own errors for the same reason. The scan that decides runs
+  // further down, after step 4c may have reset the tree, and aborts on failure.
   try {
     const unannexed = await findUnannexedData(datasetPath);
     if (unannexed.length > 0) {
       const bytes = unannexed.reduce((sum, f) => sum + f.size, 0);
+      const fate = options.skipData
+        ? "will stay in the git repo (--skip-data)"
+        : "will be moved into the annex and uploaded to S3";
       console.log(
         chalk.yellow(
-          `  Warning: ${unannexed.length} file(s) (${(bytes / 1e6).toFixed(1)} MB) will stay in the git repo though NEMAR policy treats them as data.`,
+          `  ${unannexed.length} file(s) (${(bytes / 1e6).toFixed(1)} MB) are data under NEMAR policy but plain git blobs upstream; they ${fate}.`,
         ),
       );
       for (const f of unannexed.slice(0, 5)) {
@@ -871,12 +878,10 @@ export async function prepareImport(
       if (unannexed.length > 5) {
         console.log(chalk.dim(`    ... and ${unannexed.length - 5} more`));
       }
-      console.log(
-        chalk.dim("    They stay readable and downloadable; see issue #1159 to migrate them."),
-      );
     }
   } catch (err) {
-    // Never block an import on a diagnostic.
+    // Never block an import on a diagnostic; step 5b's own scan is the one that
+    // decides, and it does fail the import.
     console.log(
       chalk.dim(
         `  Could not check for un-annexed data: ${err instanceof Error ? err.message : String(err)}`,
@@ -1083,15 +1088,47 @@ export async function prepareImport(
   }
   // else: origin has no `main` ref yet -- the normal first-import path, no-op.
 
+  // The authoritative scan for data upstream left in git, distinct from step 1b's
+  // diagnostic in two ways that matter: it runs AFTER 4c's possible
+  // `reset --hard`, so it describes the tree that will actually be committed, and
+  // a failure here aborts the import instead of being swallowed. Step 1b cannot
+  // do this job -- it runs before the dataset record exists, and swallowing its
+  // errors is what keeps a diagnostic from blocking an import -- and if this
+  // decision read that value, a scan that threw would silently leave the data in
+  // git while reporting success (#1159).
+  let unannexedData: UnannexedDataFile[] = [];
+  if (!options.skipData) {
+    try {
+      unannexedData = await findUnannexedData(datasetPath);
+    } catch (err) {
+      console.error(
+        chalk.red(
+          `Failed to scan for un-annexed data: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+      console.error(
+        chalk.dim(
+          "  Aborting: continuing would commit data files into the git repo and report success.",
+        ),
+      );
+      process.exit(1);
+    }
+  }
+
   // Step 5: Configure the NEMAR S3 special remote. This records the nemar-s3
   // uuid in the git-annex branch so the finalize phase (a fresh clone, possibly
   // on another runner) enables the SAME remote and registers keys against the
   // SAME uuid. No data is copied here — that's the copy phase.
   let nemarUuid = "";
   let items: ImportManifestItem[] = [];
-  if (!options.skipData && keyUrlMap.size > 0) {
+  let s3Creds: S3Credentials | null = null;
+  // The remote is needed whenever bytes have to reach S3, which is no longer only
+  // when upstream keys exist: a dataset whose only data is un-annexed (every
+  // `_motion.tsv` under upstream's 1 MB bar) has an empty keyUrlMap and still
+  // needs somewhere to upload (#1159).
+  if (!options.skipData && (keyUrlMap.size > 0 || unannexedData.length > 0)) {
     const s3Spinner = ora("Setting up NEMAR S3 remote...").start();
-    const s3Creds = resolveS3Credentials();
+    s3Creds = resolveS3Credentials();
     const s3Result = await configureS3Remote(
       datasetPath,
       { name: "nemar-s3", bucket: S3_BUCKET, prefix: `${nemarId}/objects`, region: S3_REGION },
@@ -1109,12 +1146,86 @@ export async function prepareImport(
     nemarUuid = uuid;
     s3Spinner.succeed("Configured NEMAR S3 remote");
 
-    const built = buildManifestItems(keyUrlMap, nemarId);
-    items = built.items;
-    if (built.skipped > 0) {
-      console.log(chalk.yellow(`  Skipped ${built.skipped} keys (no usable source URL)`));
+    if (keyUrlMap.size > 0) {
+      const built = buildManifestItems(keyUrlMap, nemarId);
+      items = built.items;
+      if (built.skipped > 0) {
+        console.log(chalk.yellow(`  Skipped ${built.skipped} keys (no usable source URL)`));
+      }
+      console.log(chalk.dim(`  Prepared ${items.length} files for server-side copy`));
     }
-    console.log(chalk.dim(`  Prepared ${items.length} files for server-side copy`));
+  }
+
+  // Step 5b: bring the tree onto NEMAR's annex policy, in the one phase that can.
+  //
+  // Two halves, one commit (#1159, ADR 0057):
+  //   - files upstream left as git blobs are annexed and their content uploaded
+  //     from THIS clone, which is why this cannot move to the copy phase: that
+  //     phase is pure S3 and has no clone, and these keys exist nowhere upstream
+  //     to server-side copy from;
+  //   - inherited `annex.largefiles` attributes are stripped, because a
+  //     `.gitattributes` setting outranks the `git annex config` value
+  //     `configureLargefiles` writes -- leave them and every later add to this
+  //     dataset keeps following upstream's rule instead of ours.
+  //
+  // After step 4c: a re-import's `reset --hard origin/main` would otherwise throw
+  // the rewrite away. Before step 6: its pathspec-less commit would otherwise
+  // absorb these changes into the metadata commit.
+  const policySpinner = ora("Applying NEMAR annex policy to the tree...").start();
+  try {
+    const attrs = await normalizeGitattributes(datasetPath);
+    let normalized: Awaited<ReturnType<typeof normalizeUnannexedData>> | null = null;
+    if (unannexedData.length > 0) {
+      // nemarUuid is non-empty here by construction: the step 5 gate configures
+      // the remote whenever this list is non-empty, and exits if it cannot.
+      normalized = await normalizeUnannexedData({
+        datasetPath,
+        files: unannexedData,
+        remoteName: "nemar-s3",
+        bucket: S3_BUCKET,
+        nemarId,
+        credentials: s3Creds ?? undefined,
+      });
+      items.push(...normalized.items);
+    }
+
+    const notes: string[] = [];
+    if (normalized && normalized.files.length > 0) {
+      notes.push(
+        `annexed ${normalized.files.length} file(s), ${(normalized.bytes / 1e6).toFixed(1)} MB uploaded`,
+      );
+    }
+    if (attrs.changed.length > 0) {
+      notes.push(`stripped ${attrs.stripped} inherited annex.largefiles attribute(s)`);
+    }
+
+    if (notes.length === 0) {
+      policySpinner.stop();
+    } else {
+      const body = [
+        normalized && normalized.files.length > 0
+          ? `Moved ${normalized.files.length} file(s) NEMAR policy treats as data from git into the annex; content uploaded to S3.`
+          : null,
+        attrs.changed.length > 0
+          ? `Removed inherited annex.largefiles attributes from ${attrs.changed.join(", ")} so the repository's annex.largefiles configuration governs.`
+          : null,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      const commit = await runCommand(
+        ["git", "commit", "-m", "Apply NEMAR annex policy to imported tree", "-m", body],
+        { cwd: datasetPath },
+      );
+      if (commit.exitCode !== 0 && !commit.stdout.includes("nothing to commit")) {
+        throw new Error(`Failed to commit annex-policy changes: ${commit.stderr.trim()}`);
+      }
+      policySpinner.succeed(`Applied NEMAR annex policy: ${notes.join("; ")}`);
+    }
+  } catch (err) {
+    policySpinner.fail(
+      `Failed to apply NEMAR annex policy: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    process.exit(1);
   }
 
   // Step 6: Seed .nemar/metadata.json and normalize the README extension so
@@ -1131,9 +1242,10 @@ export async function prepareImport(
     process.exit(1);
   }
   // Any metadata un-annexed above (ensureRootMetadataUnannexed) is already
-  // staged as a regular blob with annex disabled and is picked up by the
-  // pathspec-less `git commit` below. It is deliberately NOT added to
-  // pathsToStage: a plain `git add` here would re-annex it per the repo's
+  // staged as a regular blob with annex disabled and is picked up by a
+  // pathspec-less `git commit` -- step 5b's, when it made one, and otherwise the
+  // one below. Either way it lands in the same push. It is deliberately NOT added
+  // to pathsToStage: a plain `git add` here would re-annex it per the repo's
   // largefiles policy, undoing the un-annex.
   const pathsToStage = [".nemar/metadata.json"];
   if (readmeOutcome.kind === "renamed") {
@@ -1185,7 +1297,13 @@ export async function prepareImport(
     await writeManifestToS3(manifest, S3_BUCKET, S3_REGION);
     console.log(chalk.dim(`  Wrote import manifest to s3://${S3_BUCKET}/${nemarId}/staging/`));
   }
-  console.log(chalk.green(`[prepare] done: ${nemarId} (${items.length} files to copy)`));
+  const localItems = items.filter((it) => isLocallyUploaded(it)).length;
+  const toCopy = items.length - localItems;
+  console.log(
+    chalk.green(
+      `[prepare] done: ${nemarId} (${toCopy} files to copy${localItems > 0 ? `, ${localItems} already uploaded` : ""})`,
+    ),
+  );
   return manifest;
 }
 
@@ -1211,9 +1329,13 @@ export async function copyShard(
     return;
   }
 
-  const shardItems: CopyItem[] = manifest.items
-    .filter((it) => keyInShard(it.key, shard.index, shard.count))
-    .map((it) => ({ key: it.key, source: it.source, httpUrl: it.sourceUrl, destUri: it.destUri }));
+  // Keys prepare uploaded from the clone have no upstream source to copy from --
+  // their bytes are already at the destination (#1159). They stay in the manifest
+  // so finalize verifies and registers them; only this phase skips them.
+  const { shardItems, localSkipped } = selectShardCopyItems(manifest.items, shard);
+  if (localSkipped > 0) {
+    console.log(chalk.dim(`[${tag}] ${localSkipped} key(s) already uploaded by prepare`));
+  }
 
   if (shardItems.length === 0) {
     console.log(chalk.dim(`[${tag}] empty shard`));
