@@ -21,10 +21,13 @@
  * value built from an expression is reported as absent rather than guessed at,
  * which is why `DOCS_SESSION_TTL_SECONDS` is compared as a computed number.
  *
- * TWO THINGS IN THIS REPOSITORY READ THESE CONSTANTS -- `routes/auth-docs.ts`
- * and, since phase 3, the CLI's `lib/docs-fetch.ts`, which sets the cookie
- * itself when retrieving a gated page without a browser. Both import this
- * module, so neither can drift from it. The website and the docs Pages Function
+ * THREE THINGS IN THIS REPOSITORY READ THESE CONSTANTS, and the most important
+ * one was missing from this sentence for two revisions: `services/docs-auth.ts`
+ * interpolates `DOCS_ADMIN_ROLES` into the WHERE clause of both mint statements,
+ * which is the single most load-bearing use of any value in this file. The other
+ * two are `routes/auth-docs.ts` and, since phase 3, the CLI's
+ * `lib/docs-fetch.ts`, which sets the cookie itself when retrieving a gated page
+ * without a browser. All three import this module, so none can drift from it. The website and the docs Pages Function
  * cannot import it, so those two tests are the only thing standing between a
  * value here and the copies they spell. That is not hypothetical: an earlier
  * version named the cookie `nemar_docs_session` while the deployed Pages
@@ -86,8 +89,9 @@ export const DOCS_SESSION_TTL_SECONDS = 8 * 60 * 60;
  *  value recovered from a log later is almost certainly dead. Renewing costs
  *  one authenticated API call, which the CLI makes anyway.
  *
- *  This constant and `DocsCliSessionResponse` below are the ONLY two things in
- *  this file that are not part of the three-party contract: they are shared
+ *  This constant, `DocsCliSessionRefusal` and `DocsCliSessionResponse` below are
+ *  the only three things in this file outside the three-party contract: they are
+ *  shared
  *  between this repository's backend and its CLI, both of which import this
  *  module directly. The website and the docs Pages Function neither know nor
  *  need them, and the drift tests on those two sides compare only the literals

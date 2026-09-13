@@ -1038,16 +1038,29 @@ describe("POST /auth/docs/cli-session", () => {
     expect(res.status).toBe(401);
   });
 
-  test("neither the credential nor the refusal may be cached", async () => {
+  test("neither the credential nor ANY refusal may be cached", async () => {
     const userId = seedUser("admin-cli-cache@nemar.test", "admin");
     await seedApiKey(userId, KEY);
     expect((await cliSession(KEY)).headers.get("Cache-Control")).toBe("no-store");
-    // The refusal path builds its response inside `resolveBearerUser`, which
-    // knows nothing about this file's cache rule, so the route has to add it --
-    // and a dropped header there would otherwise be invisible.
+    // The 401 path builds its response inside `resolveBearerUser`, which knows
+    // nothing about this file's cache rule, so the route has to add it -- and a
+    // dropped header there would otherwise be invisible.
     expect(
       (await cliSession("nk_not_a_real_key_0123456789abcdefghij")).headers.get("Cache-Control"),
     ).toBe("no-store");
+
+    // THE 404 WAS THE GAP. This test used to cover the 200 and the 401 only,
+    // i.e. the two paths that already complied, while its title claimed the
+    // file-wide invariant. Both 404s here return `notFoundResponse`, which
+    // carried no cache header at all, so the invariant was false and nothing
+    // said so. It is set in `lib/not-found.ts` now, which keeps the refusal
+    // byte-identical to a genuinely unrouted 404 (see the disguise tests below)
+    // instead of making it distinguishable by one header.
+    const memberId = seedUser("member-cli-cache@nemar.test", "member");
+    await seedApiKey(memberId, "nk_member_cache_key_0123456789abcdef");
+    const disguised = await cliSession("nk_member_cache_key_0123456789abcdef");
+    expect(disguised.status).toBe(404);
+    expect(disguised.headers.get("Cache-Control")).toBe("no-store");
   });
 
   describe("the mint statement's own gates", () => {
@@ -1093,10 +1106,13 @@ describe("POST /auth/docs/cli-session", () => {
       expect(mintDirect(userId)).toBe(0);
     });
 
-    test("cannot be made to write an app session by its bindings", () => {
-      // `scope` and `remember` are literals in the statement rather than binds,
-      // so there is no argument order that turns this into an app credential --
-      // the property the route depends on for the scope separation to hold.
+    test("writes scope=docs and remember=0 as literals, not as binds", () => {
+      // What this actually checks: the statement, run in the route's binding
+      // order, produces a docs-scoped non-remembered row, and it goes red if
+      // either literal changes. It does NOT exercise other argument orders, so
+      // it cannot support the stronger claim its name used to make -- that no
+      // bindings mistake could turn this into an app session. Reading the SQL
+      // is still the evidence for that; this is the evidence for the default.
       const userId = seedUser("stmt-scope@nemar.test", "owner");
       expect(mintDirect(userId)).toBe(1);
       const row = db
@@ -1116,5 +1132,14 @@ describe("POST /auth/docs/cli-session", () => {
     // so a worker-driven version would fail open and find no difference at all.
     const selected = __selectBucket("/auth/docs/cli-session", `Bearer ${KEY}`, "203.0.113.9");
     expect(selected.keyKind).toBe("auth-ip");
+
+    // AND UNDER THE OTHER MOUNT. `backend/src/index.ts` mounts the API at both
+    // `/` and `/nemar`, and middleware sees the full path, so asserting only the
+    // first spelling is how this route sat in the 500/min ip bucket (or, with a
+    // bearer, the 1000/min token bucket and the admin bypass past it) for
+    // anyone who typed the prefix. Every AUTH_PATHS entry had the same hole;
+    // `rate-limit-buckets.test.ts` covers the family.
+    const prefixed = __selectBucket("/nemar/auth/docs/cli-session", `Bearer ${KEY}`, "203.0.113.9");
+    expect(prefixed.keyKind).toBe("auth-ip");
   });
 });

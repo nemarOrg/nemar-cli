@@ -985,20 +985,50 @@ Pass several paths at once: they share one documentation session, which is
 both faster and easier on the rate limit than one command per page.`,
   )
   .action(async (paths: string[], options: { headers: boolean }) => {
-    if (!requireAuth()) return;
+    // NOT the shared `requireAuth()` / `handleCommandError()` pair every other
+    // command in this file uses, and the difference is the point. Both write
+    // their message with `console.log`, i.e. to STDOUT, and `requireAuth`
+    // returns false without setting an exit code. For a command whose whole
+    // contract is "the page goes to stdout", that combination is the worst
+    // available: `nemar admin docs x > page.md` with no credentials exited 0
+    // and wrote the words "Error: Not authenticated" into page.md, where the
+    // caller -- a script or an agent, by design -- would then read them as
+    // documentation. Found in review of #1384. Everything below reports to
+    // stderr and sets an exit code; stdout carries pages and nothing else.
+    if (!isAuthenticated()) {
+      console.error(chalk.red("Error: Not authenticated"));
+      console.error(chalk.dim("  Run 'nemar auth login' first"));
+      process.exitCode = 1;
+      return;
+    }
 
-    const spinner = ora(
-      paths.length === 1 ? "Fetching documentation..." : `Fetching ${paths.length} pages...`,
-    ).start();
+    const spinner = ora({
+      text: paths.length === 1 ? "Fetching documentation..." : `Fetching ${paths.length} pages...`,
+      // ora writes to stderr by default, but say so rather than rely on it:
+      // a spinner frame on stdout would land in the redirected page.
+      stream: process.stderr,
+    }).start();
+
     let results: Awaited<ReturnType<typeof fetchDocsPages>>;
     try {
       results = await fetchDocsPages(paths);
     } catch (error) {
-      handleCommandError(error, spinner, "Failed to fetch documentation", {
+      spinner.stop();
+      const hints: Record<number, string> = {
         401: "Sign in again with `nemar auth login`",
+        403: "This account cannot use the API; see the message above",
         404: "This account does not have access to the operations documentation",
         429: "Too many documentation sessions from this address; wait a minute",
-      });
+      };
+      const hint = error instanceof ApiError ? hints[error.statusCode] : undefined;
+      console.error(
+        chalk.red(
+          error instanceof ApiError
+            ? error.message
+            : `Failed to fetch documentation: ${errorDetail(error)}`,
+        ),
+      );
+      if (hint) console.error(chalk.dim(`  ${hint}`));
       process.exitCode = 1;
       return;
     }
@@ -1007,6 +1037,14 @@ both faster and easier on the rate limit than one command per page.`,
     // Bodies go to stdout and everything else to stderr, so `nemar admin docs
     // <path> > page.md` yields the page rather than the page plus banners --
     // the shape an agent or a pipeline wants.
+    //
+    // CONSEQUENCE WORTH KNOWING FOR THE MULTI-PATH CASE: redirecting several
+    // pages concatenates them with no delimiter in the file, because the banner
+    // that separates them is on stderr. That is deliberate rather than an
+    // oversight -- putting a separator on stdout would contaminate the
+    // single-page redirect, which is the common case and the one whose output
+    // should be exactly the page. Fetch one page per invocation when the caller
+    // needs them apart; the banners still name them, in order, on stderr.
     for (const result of results) {
       if (!result.ok) {
         console.error(chalk.red(`${result.path}: ${result.error}`));

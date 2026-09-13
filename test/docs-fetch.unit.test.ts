@@ -102,6 +102,8 @@ afterEach(() => {
 interface Servers {
   apiUrl: string;
   docsUrl: string;
+  /** Set before running the CLI to make the mint answer 401. */
+  refuseMint: boolean;
   mints: number;
   docsRequests: { path: string; headers: Record<string, string> }[];
   stop: () => void;
@@ -111,6 +113,7 @@ interface Servers {
 function startServers(pages: Record<string, Response | (() => Response)>): Servers {
   const state = {
     mints: 0,
+    refuseMint: false,
     docsRequests: [] as { path: string; headers: Record<string, string> }[],
   };
 
@@ -121,6 +124,9 @@ function startServers(pages: Record<string, Response | (() => Response)>): Serve
       if (url.pathname === "/notices") return Response.json({ notices: [] });
       if (url.pathname === "/datasets/facets") return Response.json({});
       if (url.pathname === "/auth/docs/cli-session") {
+        if (state.refuseMint) {
+          return Response.json({ error: "Invalid or expired API key" }, { status: 401 });
+        }
         if (req.headers.get("Authorization") !== `Bearer ${API_KEY}`) {
           return Response.json({ error: "unauthenticated" }, { status: 401 });
         }
@@ -151,6 +157,12 @@ function startServers(pages: Record<string, Response | (() => Response)>): Serve
   return {
     apiUrl: `http://localhost:${api.port}`,
     docsUrl: `http://localhost:${docs.port}`,
+    get refuseMint() {
+      return state.refuseMint;
+    },
+    set refuseMint(value: boolean) {
+      state.refuseMint = value;
+    },
     get mints() {
       return state.mints;
     },
@@ -326,13 +338,100 @@ describe("nemar admin docs", () => {
   });
 
   test("refuses to run unauthenticated, without touching either host", async () => {
+    // ASSERTS THE STREAM AND THE EXIT CODE, not `combined`. The first version
+    // checked `combined`, which is stream-agnostic by construction, and so was
+    // blind to both properties this command promises -- it passed while the
+    // command exited 0 and wrote "Error: Not authenticated" to STDOUT, which
+    // for `nemar admin docs x > page.md` means a success exit and an error
+    // message sitting in page.md where a script would parse it as the page.
     rmSync(join(configDir, "config.json"), { force: true });
     const servers = startServers({ "/cli/commands.md": markdown("# Nope\n") });
     try {
       const result = await runCli(["admin", "docs", "cli/commands"], servers);
-      expect(result.combined).toContain("Not authenticated");
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Not authenticated");
+      expect(result.stdout).toBe("");
       expect(servers.mints).toBe(0);
       expect(servers.docsRequests).toHaveLength(0);
+    } finally {
+      servers.stop();
+    }
+  });
+
+  test("a failed mint reports to stderr, exits 1, and writes nothing to stdout", async () => {
+    // The other half of the same family, and previously untested: the shared
+    // `handleCommandError` prints its hint with `console.log`, so a dead key
+    // put "Sign in again with ..." into the redirected page file.
+    const servers = startServers({});
+    servers.refuseMint = true;
+    try {
+      const result = await runCli(["admin", "docs", "cli/commands"], servers);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("Sign in again");
+      expect(servers.docsRequests).toHaveLength(0);
+    } finally {
+      servers.stop();
+    }
+  });
+
+  test("stdout carries only page bodies when a page fails alongside a good one", async () => {
+    const servers = startServers({ "/cli/commands.md": markdown("# Good\n") });
+    try {
+      const result = await runCli(["admin", "docs", "cli/commands", "admin/nope"], servers);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toContain("# Good");
+      expect(result.stdout).not.toContain("nope");
+      expect(result.stderr).toContain("/admin/nope.md");
+    } finally {
+      servers.stop();
+    }
+  });
+
+  test("--no-headers silences the stderr banner without touching stdout", async () => {
+    // The banner is on stderr, so this flag changes nothing about redirected
+    // output -- which is exactly why it needs a test saying so, rather than
+    // being assumed to control the page text.
+    const pages = {
+      "/cli/commands.md": markdown("# One\n"),
+      "/admin/commands.md": markdown("# Two\n"),
+    };
+    const withBanner = startServers(pages);
+    let plain: Awaited<ReturnType<typeof runCli>>;
+    try {
+      plain = await runCli(["admin", "docs", "cli/commands", "admin/commands"], withBanner);
+    } finally {
+      withBanner.stop();
+    }
+    const withoutBanner = startServers(pages);
+    try {
+      const quiet = await runCli(
+        ["admin", "docs", "--no-headers", "cli/commands", "admin/commands"],
+        withoutBanner,
+      );
+      expect(plain.exitCode).toBe(0);
+      expect(quiet.exitCode).toBe(0);
+      expect(plain.stderr).toContain("/cli/commands.md");
+      expect(quiet.stderr).not.toContain("/cli/commands.md");
+      // The pages themselves are byte-identical either way.
+      expect(quiet.stdout).toBe(plain.stdout);
+      expect(quiet.stdout).toContain("# One");
+      expect(quiet.stdout).toContain("# Two");
+    } finally {
+      withoutBanner.stop();
+    }
+  });
+
+  test("a call with only unusable paths spends no credential", async () => {
+    // The mint sits in the strict per-address bucket, so discovering that there
+    // was nothing to fetch must not cost one. Paths are parsed first.
+    const servers = startServers({});
+    try {
+      const result = await runCli(["admin", "docs", "https://example.com/admin/x"], servers);
+      expect(result.exitCode).toBe(1);
+      expect(servers.mints).toBe(0);
+      expect(servers.docsRequests).toHaveLength(0);
+      expect(result.stderr).toContain("example.com");
     } finally {
       servers.stop();
     }

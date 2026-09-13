@@ -36,6 +36,15 @@ export function getDocsUrl(): string {
   return process.env.NEMAR_DOCS_URL || DEFAULT_DOCS_URL;
 }
 
+/** How long one page fetch may take before it is abandoned.
+ *
+ *  Without this a hung docs host spins the spinner forever, which for the
+ *  intended caller -- a script or an agent -- means a command that never
+ *  returns rather than one that fails. Generous enough that a cold edge and a
+ *  large page are fine; the mirrors are text and the largest is well under a
+ *  megabyte. */
+export const DOCS_FETCH_TIMEOUT_MS = 20_000;
+
 /**
  * Turn what someone typed into the path of a markdown mirror.
  *
@@ -127,6 +136,24 @@ function describeRefusal(status: number, location: string | null): string {
  * of HTML that looks like a successful read.
  */
 export async function fetchDocsPages(inputs: readonly string[]): Promise<DocsPageResult[]> {
+  // PARSE BEFORE MINTING. An earlier version minted first, so a call whose
+  // paths were all malformed still spent a credential from the strict per-IP
+  // bucket to discover that it had nothing to fetch.
+  const parsed = inputs.map((input) => {
+    try {
+      return { input, path: toMirrorPath(input) };
+    } catch (error) {
+      return { input, error: (error as Error).message };
+    }
+  });
+  if (!parsed.some((entry) => entry.path)) {
+    return parsed.map((entry) => ({
+      path: entry.input,
+      ok: false,
+      error: entry.error ?? "not a usable documentation path",
+    }));
+  }
+
   const session = await mintDocsSession();
   // `request()` casts rather than validating (see `mintDocsSession`), so check
   // the one field everything below depends on instead of sending `undefined` as
@@ -139,23 +166,25 @@ export async function fetchDocsPages(inputs: readonly string[]): Promise<DocsPag
   const cookie = `${DOCS_SESSION_COOKIE_NAME}=${session.session}`;
   const results: DocsPageResult[] = [];
 
-  for (const input of inputs) {
-    let path: string;
-    try {
-      path = toMirrorPath(input);
-    } catch (error) {
-      results.push({ path: input, ok: false, error: (error as Error).message });
+  for (const entry of parsed) {
+    if (!entry.path) {
+      results.push({ path: entry.input, ok: false, error: entry.error ?? "unusable path" });
       continue;
     }
+    const path = entry.path;
 
     try {
       const response = await fetch(`${base}${path}`, {
         redirect: "manual",
+        signal: AbortSignal.timeout(DOCS_FETCH_TIMEOUT_MS),
         headers: {
           Cookie: cookie,
-          // Sent so the gate's diagnostics record a program rather than
-          // whatever the runtime defaults to. It reaches `verify` and is stored
-          // on the session row's `user_agent`.
+          // Identifies the caller to the docs edge's own logs. It does reach
+          // `/auth/docs/verify`, which the Pages Function forwards it to, but
+          // it is NOT what lands in `web_sessions.user_agent`: that column is
+          // written once, at mint time, from the User-Agent of the request to
+          // `/auth/docs/cli-session`, and the API client sets none. An earlier
+          // version of this comment claimed otherwise.
           "User-Agent": "nemar-cli",
         },
       });
@@ -169,7 +198,18 @@ export async function fetchDocsPages(inputs: readonly string[]): Promise<DocsPag
         error: describeRefusal(response.status, response.headers.get("Location")),
       });
     } catch (error) {
-      results.push({ path, ok: false, error: (error as Error).message });
+      // `AbortSignal.timeout` rejects with a TimeoutError, which reads as
+      // "The operation timed out" and says nothing about which page or how
+      // long. Name both, since the caller may be a script with no other view.
+      const name = (error as Error).name;
+      results.push({
+        path,
+        ok: false,
+        error:
+          name === "TimeoutError"
+            ? `no response within ${DOCS_FETCH_TIMEOUT_MS / 1000}s`
+            : (error as Error).message,
+      });
     }
   }
 
