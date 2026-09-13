@@ -8,7 +8,8 @@
 
 ADR 0057 decided that admin-only material becomes private at source rather than merely gated at
 serving. It did not say what counts as admin-only, and that judgment is about to be applied to
-roughly 9,900 lines of agent-facing material across four public repositories. A rule that lives in
+roughly 19,400 committed lines of agent-facing material in this repo alone, and about 23,100 across
+the public repos this epic touches (`nemar-cli`, `docs`, `website`, `nemar-observability`). A rule that lives in
 one person's head produces a different answer every time it is applied, and the two failure modes
 point in opposite directions: collect too little and the gate stays cosmetic, collect too much and
 the project stops being open for no security gain.
@@ -52,9 +53,11 @@ published separately.
 
 ## Consequences
 
-- The expected result is a **small** move. On the evidence gathered for #1339 it is the two
-  operational runbooks, the notes on the in-progress secrets migration, the backup destination
-  naming, and parts of `systems-inventory.md`. Not the 97 files under `.context/`.
+- The expected result is a **small** move. Applied to this repo it is four documents --
+  `systems-inventory.md`, `validated_workflows.md`, `research-d1-backup-655.md` and
+  `plan-923-test-staging.md` -- out of the 99 files under `.context/`. Named individually rather
+  than described, because an earlier draft of this line double-counted one file and referred to a
+  document that does not exist.
 - Classification is recorded as a destination column on `.context/README.md`, which is already the
   curated index. Destination only, with no per-file rationale: a list of destinations is not a
   target list, and the reasoning belongs here as a general rule rather than beside each file.

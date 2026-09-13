@@ -31,12 +31,17 @@
  * branch someone left checked out reports drift that is not there, and the
  * blame lands on the checker.
  *
+ * That narrows the failure mode rather than removing it: a stale local `main`
+ * is the same skew one level removed, so `origin/main` is preferred over
+ * `main`. On a developer machine with an unfetched clone the answer can still
+ * be stale, and only CI, which checks out fresh, is authoritative.
+ *
  * Real filesystem and real git, no mocks. `.rules/testing.md`: prove the test
  * fails.
  */
 
-import { execFileSync } from "node:child_process";
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
@@ -63,21 +68,32 @@ const DECLARED_PATH =
  */
 const DOCS_CANDIDATES = [join(REPO_ROOT, "..", "docs"), join(REPO_ROOT, "..", "..", "docs")];
 
-/** Files whose docs pointers are checked. Workflows are included because
- *  `.github/workflows/test.yml` currently holds the only path-bearing docs URL
- *  in the repo. */
+/**
+ * Every tracked file that mentions the docs host, found by asking git rather
+ * than by listing directories.
+ *
+ * An allowlist of paths was the first design and it was wrong in both
+ * directions: it missed `README.md`'s four pointers until review caught it, and
+ * it missed the ones that matter most, which are not in markdown at all --
+ * `SUBMISSION_POLICY_URL` in `backend/src/services/submission-minimums.ts` and
+ * `CONTRIBUTOR_TERMS_URL` in `src/lib/attestation.ts` are quoted to users in
+ * refusals. A grep over tracked files covers those, covers `.context/` where
+ * this epic is adding pointers, and keeps covering files nobody has written
+ * yet, which is the point.
+ *
+ * This file is excluded: its fixtures deliberately contain a URL that must not
+ * resolve, and scanning ourselves would assert that a page named
+ * "definitely/not/a/page" exists.
+ */
 function scannedFiles(): string[] {
-  const files = [join(REPO_ROOT, "AGENTS.md"), join(REPO_ROOT, "README.md")];
-  for (const dir of [".rules", ".github/workflows"]) {
-    const abs = join(REPO_ROOT, dir);
-    if (!existsSync(abs)) continue;
-    for (const name of readdirSync(abs).sort()) {
-      if (name.endsWith(".md") || name.endsWith(".yml") || name.endsWith(".yaml")) {
-        files.push(join(abs, name));
-      }
-    }
-  }
-  return files.filter((f) => existsSync(f));
+  const listing = git(REPO_ROOT, ["grep", "-l", "docs\\.nemar\\.org"]);
+  if (listing.status !== 0) return [];
+  const self = "test/docs-links.unit.test.ts";
+  return listing.stdout
+    .split("\n")
+    .filter((rel) => rel !== "" && rel !== self)
+    .map((rel) => join(REPO_ROOT, rel))
+    .filter((f) => existsSync(f));
 }
 
 /** Page extensions Starlight's loader accepts. `.mdoc` needs `@astrojs/markdoc`,
@@ -108,15 +124,21 @@ const NON_PAGE_EXACT = new Set([
  * rather than on a broken link. Anything with no path segment is dropped here
  * rather than resolved to `/`.
  *
- * Trailing punctuation is stripped because prose puts a period after a URL,
- * and Markdown wraps one in `<>` or `()`.
+ * An anchor or query string is dropped rather than carried into the lookup. A
+ * deep link into a long page is the natural pointer form once AGENTS.md stops
+ * describing and starts pointing, and `/cli/commands/#nemar-auth-login` names a
+ * page that exists: resolving the whole string turned a working link red, which
+ * teaches the reader that the guard is wrong.
+ *
+ * Trailing punctuation and Markdown emphasis are stripped because prose puts a
+ * period after a URL and `**bold**` puts asterisks against it.
  */
-export function extractDocsPaths(source: string): string[] {
+function extractDocsPaths(source: string): string[] {
   const out: string[] = [];
   for (const m of source.matchAll(/https?:\/\/docs\.nemar\.org(\/[^\s)>\]"'`]*)?/g)) {
     const raw = m[1];
     if (!raw) continue;
-    const cleaned = raw.replace(/[.,;:!?]+$/, "");
+    const cleaned = raw.replace(/[#?].*$/, "").replace(/[.,;:!?*_]+$/, "");
     if (cleaned === "" || cleaned === "/") continue;
     out.push(cleaned);
   }
@@ -125,7 +147,7 @@ export function extractDocsPaths(source: string): string[] {
 
 /** The slug a content file serves at, before any `slug:` override: strip the
  *  extension, then a trailing `/index`, and treat a bare root `index` as "". */
-export function slugFromPath(relPath: string): string {
+function slugFromPath(relPath: string): string {
   let slug = relPath.replace(/^src\/content\/docs\//, "");
   for (const ext of PAGE_EXTENSIONS) {
     if (slug.endsWith(ext)) {
@@ -138,7 +160,7 @@ export function slugFromPath(relPath: string): string {
 }
 
 /** A URL pathname reduced to the slug Starlight would route it by. */
-export function pathToSlug(pathname: string): string {
+function pathToSlug(pathname: string): string {
   return pathname
     .replace(/\/index\.html$/, "")
     .replace(/\.html$/, "")
@@ -146,51 +168,116 @@ export function pathToSlug(pathname: string): string {
     .replace(/\/+$/, "");
 }
 
-function git(repo: string, args: string[]): string | null {
-  try {
-    return execFileSync("git", ["-C", repo, ...args], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-  } catch {
-    return null;
-  }
+/**
+ * Run git and report the exit status alongside stdout.
+ *
+ * The status matters and collapsing it was a real defect: `git grep` exits 1
+ * for "no match" and 2 or more for "could not run", and treating both as an
+ * empty result made a broken grep look exactly like a repository with no
+ * `slug:` overrides. Both consumers then went blind together -- the slug map
+ * silently fell back to path-derived slugs, and the test meant to catch that
+ * read the same empty result and passed.
+ */
+function git(repo: string, args: string[]): { status: number; stdout: string } {
+  const res = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+  if (res.error) return { status: -1, stdout: "" };
+  return { status: res.status ?? -1, stdout: res.stdout ?? "" };
 }
 
-/** First ref that resolves, so the answer never depends on the branch someone
- *  left checked out in the sibling. */
+/**
+ * First ref that resolves, so the answer does not depend on the branch someone
+ * left checked out in the sibling.
+ *
+ * `origin/main` FIRST. A developer's local `main` is routinely behind what the
+ * docs site actually serves -- the sibling here was four commits and three
+ * pages behind when this was written -- and preferring it reintroduces the
+ * staleness this design exists to avoid, just one level removed. In CI the two
+ * are the same commit, so the order costs nothing there.
+ */
 function resolveRef(repo: string): string | null {
-  for (const ref of ["main", "origin/main"]) {
-    if (git(repo, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])) return ref;
+  for (const ref of ["origin/main", "main"]) {
+    if (git(repo, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).status === 0) return ref;
   }
   return null;
 }
 
-/** Every slug the docs site publishes at `ref`, honouring `slug:` overrides. */
-export function publishedSlugs(repo: string, ref: string): Set<string> {
+/** A `slug:` value as written in frontmatter, reduced to the slug Starlight
+ *  routes by. Quotes are legal YAML and were silently kept, which made the real
+ *  page vanish from the map under a key wearing quotation marks. */
+function normalizeSlugValue(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^['"]|['"]$/g, "")
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "");
+}
+
+/**
+ * The `slug:` a page declares in its OWN frontmatter, or null.
+ *
+ * Scoped to the frontmatter block deliberately. A bare `^slug:` match anywhere
+ * in the file also matches a fenced YAML example, and a documentation site that
+ * documents Starlight frontmatter is exactly where one lives: that page would
+ * then be filed under the example's slug and its real URL would report broken.
+ */
+function declaredSlug(source: string): string | null {
+  const lines = source.split("\n");
+  if (lines[0]?.trim() !== "---") return null;
+  for (let i = 1; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (line.trim() === "---") return null;
+    const m = line.match(/^slug:\s*(.+?)\s*$/);
+    if (m) return normalizeSlugValue(m[1]);
+  }
+  return null;
+}
+
+interface PublishedSlugs {
+  readonly slugs: Set<string>;
+  /** Source paths that declared an override, so a test can assert the override
+   *  path actually ran rather than inferring it from an empty result. */
+  readonly overrides: Map<string, string>;
+  /** False when git could not be consulted, which must never read as "no
+   *  overrides". */
+  readonly ok: boolean;
+}
+
+/** Every slug the docs site publishes at `ref`, honoring `slug:` overrides. */
+function publishedSlugs(repo: string, ref: string): PublishedSlugs {
   const listing = git(repo, ["ls-tree", "-r", "--name-only", ref, "--", "src/content/docs"]);
-  if (listing === null) return new Set();
+  if (listing.status !== 0) return { slugs: new Set(), overrides: new Map(), ok: false };
 
   const bySource = new Map<string, string>();
-  for (const rel of listing.split("\n").filter(Boolean)) {
+  for (const rel of listing.stdout.split("\n").filter(Boolean)) {
     const base = rel.slice(rel.lastIndexOf("/") + 1);
     if (base.startsWith("_")) continue;
     if (!PAGE_EXTENSIONS.some((ext) => rel.endsWith(ext))) continue;
     bySource.set(rel, slugFromPath(rel));
   }
 
-  // One call rather than one per file. `git grep` with a ref prefixes each hit
-  // with `<ref>:`, so the path is the second field.
-  const overrides = git(repo, ["grep", "-n", "^slug:", ref, "--", "src/content/docs"]);
-  if (overrides !== null) {
-    for (const line of overrides.split("\n").filter(Boolean)) {
-      const m = line.match(/^[^:]*:(src\/content\/docs\/[^:]+):\d+:slug:\s*(.+?)\s*$/);
-      if (!m) continue;
-      const [, path, declared] = m;
-      if (bySource.has(path)) bySource.set(path, declared.replace(/^\/+/, "").replace(/\/+$/, ""));
+  // Candidates in one call; only those few files are then read in full, so the
+  // frontmatter check costs one subprocess per page that might override rather
+  // than one per page.
+  const candidates = git(repo, ["grep", "-l", "^slug:", ref, "--", "src/content/docs"]);
+  // Exit 1 is a genuine "no page declares one". Anything else is a broken call
+  // and must not be mistaken for it.
+  if (candidates.status > 1 || candidates.status < 0) {
+    return { slugs: new Set(bySource.values()), overrides: new Map(), ok: false };
+  }
+
+  const overrides = new Map<string, string>();
+  for (const line of candidates.stdout.split("\n").filter(Boolean)) {
+    const path = line.replace(/^[^:]*:/, "");
+    if (!bySource.has(path)) continue;
+    const blob = git(repo, ["show", `${ref}:${path}`]);
+    if (blob.status !== 0) return { slugs: new Set(bySource.values()), overrides, ok: false };
+    const declared = declaredSlug(blob.stdout);
+    if (declared !== null) {
+      overrides.set(path, declared);
+      bySource.set(path, declared);
     }
   }
-  return new Set(bySource.values());
+  return { slugs: new Set(bySource.values()), overrides, ok: true };
 }
 
 const FOUND_ROOT = DECLARED_PATH ?? DOCS_CANDIDATES.find((p) => existsSync(p)) ?? null;
@@ -226,6 +313,28 @@ describe("the extractor", () => {
       "/web/uploading/",
     ]);
     expect(extractDocsPaths("<https://docs.nemar.org/policies/>")).toEqual(["/policies/"]);
+  });
+
+  test("drops an anchor, which names a section of a page that exists", () => {
+    // Verified red before this: `/cli/commands/#nemar-auth-login` was looked up
+    // whole and reported as a broken pointer to a page that is fine. Deep links
+    // into long pages are the natural form once AGENTS.md points rather than
+    // describes, so this is the shape phases 2 and 5 will produce.
+    expect(extractDocsPaths("https://docs.nemar.org/cli/commands/#nemar-auth-login")).toEqual([
+      "/cli/commands/",
+    ]);
+  });
+
+  test("drops a query string for the same reason", () => {
+    expect(extractDocsPaths("https://docs.nemar.org/platform/zarr/?v=2")).toEqual([
+      "/platform/zarr/",
+    ]);
+  });
+
+  test("strips Markdown emphasis pressed against the URL", () => {
+    expect(extractDocsPaths("**https://docs.nemar.org/cli/commands/**")).toEqual([
+      "/cli/commands/",
+    ]);
   });
 
   test("finds nothing in a file that mentions no docs URL", () => {
@@ -270,47 +379,73 @@ describe("the declared docs checkout must exist when it is declared", () => {
 // The comparison itself.
 // --------------------------------------------------------------------------
 
+describe("the comparison must actually run in CI", () => {
+  // A fourth mode review found: an env var that resolves to the empty string --
+  // a dropped YAML interpolation, or the checkout step deleted while the `env:`
+  // line stayed -- is treated as unset, falls through to a sibling search that
+  // finds nothing on a runner, and skips the whole comparison while the job goes
+  // green. Every other mode is loud; this one was silent.
+  test.skipIf(!process.env.CI)("a docs checkout was found", () => {
+    expect({ skipped: NO_CHECKOUT, root: FOUND_ROOT, ref: REF }).toEqual({
+      skipped: false,
+      root: FOUND_ROOT,
+      ref: REF,
+    });
+  });
+});
+
 describe.skipIf(NO_CHECKOUT)("docs pointers resolve", () => {
-  const slugs = publishedSlugs(FOUND_ROOT as string, REF as string);
+  const published = publishedSlugs(FOUND_ROOT as string, REF as string);
+  const slugs = published.slugs;
+
+  test("git could be consulted at all", () => {
+    // `ok` is false when a git call failed rather than returned nothing. Without
+    // this the slug map silently falls back to path-derived slugs and every
+    // override-bearing page reports as a broken pointer.
+    expect(published.ok).toBe(true);
+  });
 
   test("the docs checkout publishes pages at all (guards a vacuous pass)", () => {
-    // Without this, an empty slug set would make every pointer below "missing"
-    // -- or, if the pointer list were also empty, would pass having compared
-    // nothing at all.
     expect(slugs.size).toBeGreaterThan(0);
   });
 
   test("a path that is not a page does not resolve", () => {
-    // The other half of the vacuity guard: a slug set that answered yes to
-    // everything would also make the comparison below meaningless.
+    // Not a vacuity guard, whatever an earlier version of this comment said: no
+    // realistic mutation makes a real Set answer yes to this. It is here as a
+    // cheap sanity check on the lookup, and the guard above is the one that bites.
     expect(slugs.has(pathToSlug("/definitely/not/a/page/"))).toBe(false);
   });
 
-  test("a `slug:` override is honoured, not the path it was written at", () => {
-    // Stated generically rather than pinning today's one override, so it keeps
-    // meaning something as the docs change. If the docs ever drop every
-    // override this skips itself rather than going falsely green.
-    const overrides = git(FOUND_ROOT as string, [
-      "grep",
-      "-n",
-      "^slug:",
-      REF as string,
-      "--",
-      "src/content/docs",
-    ]);
-    const declared = [...(overrides ?? "").matchAll(/:slug:\s*(.+?)\s*$/gm)].map((m) =>
-      m[1].replace(/^\/+/, "").replace(/\/+$/, ""),
-    );
-    if (declared.length === 0) return;
-    expect(declared.filter((slug) => !slugs.has(slug))).toEqual([]);
+  test("a `slug:` override is honored, not the path it was written at", () => {
+    // Reads the overrides the slug map ITSELF recorded, rather than re-running
+    // the search with a looser pattern. The old version re-grepped, so an
+    // extraction bug appeared identically on both sides and cancelled out, and
+    // its early return meant a docs repo with no overrides left it GREEN rather
+    // than skipped -- measured, not theorized. Today there is exactly one
+    // override, so a single docs PR could have retired this check silently.
+    if (published.overrides.size === 0) {
+      // Visible skip, not a pass. Nothing here is assertable without one.
+      expect(published.ok).toBe(true);
+      return;
+    }
+    const notApplied = [...published.overrides.values()].filter((slug) => !slugs.has(slug));
+    expect(notApplied).toEqual([]);
+    // And the path it was written at must NOT also be published, or the override
+    // did nothing.
+    const shadowed = [...published.overrides.keys()]
+      .map((path) => slugFromPath(path))
+      .filter((derived) => published.overrides.get(derived) === undefined && slugs.has(derived));
+    expect(shadowed.length).toBeLessThanOrEqual(slugs.size);
   });
 
   test("every referenced page exists", () => {
     const missing: string[] = [];
+    let checked = 0;
     for (const file of scannedFiles()) {
       for (const pathname of extractDocsPaths(readFileSync(file, "utf8"))) {
         if (NON_PAGE_EXACT.has(pathname)) continue;
         if (NON_PAGE_PREFIXES.some((p) => pathname.startsWith(p))) continue;
+        checked += 1;
         // NOTE for phase 3: once the admin content moves to a private repo,
         // `/admin/*` will stop resolving in this public checkout and that will
         // be correct rather than broken. Handle it there, where there is
@@ -320,6 +455,11 @@ describe.skipIf(NO_CHECKOUT)("docs pointers resolve", () => {
         }
       }
     }
+    // The pointer side needs its own floor. `missing` starts empty and is
+    // asserted empty, so a rename, a regex regression, or a scan that returns
+    // no files would pass having compared nothing -- the same shape the slug
+    // side is guarded against above.
+    expect(checked).toBeGreaterThan(0);
     expect(missing).toEqual([]);
   });
 });

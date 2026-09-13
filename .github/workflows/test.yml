@@ -5,14 +5,24 @@ on:
     # Epic integration branches (epic-dev workflow) get the same push CI as dev
     # so each squash-merged phase is tested where it lands.
     branches: [main, dev, 'feature/issue-*-epic-*']
+    # NARROWED FROM '*.md' (#1339). A glob does not cross `/`, so `*.md` meant
+    # every ROOT markdown file -- AGENTS.md, CLAUDE.md, README.md -- skipped this
+    # workflow entirely, before `changes` was ever evaluated. That silently
+    # disabled the paths filter below for the exact files it names: a pull
+    # request editing only AGENTS.md ran no jobs at all. Verified on dev commit
+    # 02b42189 (CHANGELOG-only), which has no Tests run.
+    #
+    # `paths-ignore` has no exception syntax, so it cannot be patched in place --
+    # it has to name only what is genuinely inert. CHANGELOG.md is; the agent
+    # files are not, and README.md carries four of the repo's five docs pointers.
     paths-ignore:
-      - '*.md'
+      - 'CHANGELOG.md'
   pull_request:
     # Phase PRs target the epic branch, not dev; without this pattern they ran
     # with no test workflow at all (found on epic #1181, 2026-09-02).
     branches: [main, dev, 'feature/issue-*-epic-*']
     paths-ignore:
-      - '*.md'
+      - 'CHANGELOG.md'
 
 # Permissions needed for dorny/paths-filter to access PR files
 permissions:
@@ -104,6 +114,7 @@ jobs:
             agentdocs:
               - 'AGENTS.md'
               - 'CLAUDE.md'
+              - 'README.md'
               - '.rules/**'
               - 'test/docs-links.unit.test.ts'
               - '.github/workflows/test.yml'
