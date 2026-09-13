@@ -36,6 +36,7 @@ jobs:
       zarr: ${{ steps.filter.outputs.zarr }}
       shared: ${{ steps.filter.outputs.shared }}
       decisions: ${{ steps.filter.outputs.decisions }}
+      agentdocs: ${{ steps.filter.outputs.agentdocs }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -92,6 +93,19 @@ jobs:
             decisions:
               - '.context/decisions/**'
               - 'test/adr-index.unit.test.ts'
+              - '.github/workflows/test.yml'
+            # The agent-facing files and the guard that keeps their docs pointers
+            # honest (epic #1336 phase 1, ADR 0057). THIRD TIME FOR THIS GAP:
+            # nothing here matched `AGENTS.md` or `.rules/**`, so a pull request
+            # editing only those ran zero jobs and `test/docs-links.unit.test.ts`
+            # would never have run on exactly the change it exists to police --
+            # the same shape as the `shared:` and `decisions:` gaps above, both
+            # of which shipped green-and-vacuous before they were found.
+            agentdocs:
+              - 'AGENTS.md'
+              - 'CLAUDE.md'
+              - '.rules/**'
+              - 'test/docs-links.unit.test.ts'
               - '.github/workflows/test.yml'
             # Zarr conversion engine (epic #1108 Phase 1 / #1109). Repatriated
             # from nemarDatasets/.github, where test-generate-zarr.yml used to
@@ -293,7 +307,7 @@ jobs:
     needs: changes
     # Matches unit-pure's trigger so that, as a required check, lint never
     # "skips" on a backend-only PR (a skipped required check blocks merges).
-    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true' || needs.changes.outputs.shared == 'true' || needs.changes.outputs.decisions == 'true'
+    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true' || needs.changes.outputs.shared == 'true' || needs.changes.outputs.decisions == 'true' || needs.changes.outputs.agentdocs == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -345,7 +359,7 @@ jobs:
     # that runs test/*.test.ts at all -- `lint` runs tsc and biome. Adding the
     # filter to `lint` alone left the index test still skipped on an ADR-only PR,
     # which is the gap it was added to close.
-    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true' || needs.changes.outputs.shared == 'true' || needs.changes.outputs.decisions == 'true'
+    if: needs.changes.outputs.cli == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.zarr == 'true' || needs.changes.outputs.shared == 'true' || needs.changes.outputs.decisions == 'true' || needs.changes.outputs.agentdocs == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -433,6 +447,31 @@ jobs:
           sparse-checkout-cone-mode: false
           ref: main
 
+      # The docs content tree, so test/docs-links.unit.test.ts can check that
+      # every docs.nemar.org pointer in AGENTS.md and .rules/ resolves to a page
+      # that exists (epic #1336 phase 1, ADR 0057). Same reasoning as the two
+      # checkouts above: without it the test finds no checkout and skips, which
+      # would enforce the claim on developer machines and nowhere else.
+      #
+      # A DIRECTORY rather than one file, because resolution needs every page to
+      # build the slug map. Still sparse and still shallow: the test reads the
+      # object store with `git ls-tree` and `git grep` against the `main` ref
+      # rather than the working tree, so branch state cannot skew the answer.
+      # `actions/checkout` with `ref: main` creates that local branch, which is
+      # what the test resolves.
+      #
+      # nemarOrg/docs is PUBLIC, so no token. `main`, not a pre-release branch:
+      # that repo has no release train, and merging to main IS its deploy, so
+      # what is on main is what is served.
+      - name: Check out the docs content tree
+        uses: actions/checkout@v4
+        with:
+          repository: nemarOrg/docs
+          path: docs-live
+          sparse-checkout: src/content/docs
+          sparse-checkout-cone-mode: false
+          ref: main
+
       - name: Run pure unit tests (no live backend)
         env:
           # Names the checkout above. The parity test treats this as the
@@ -440,6 +479,7 @@ jobs:
           # broken checkout step cannot silently disable the check.
           NEMAR_WEBSITE_ACCOUNT_COPY: website-copy/src/lib/account-copy.ts
           NEMAR_DATASET_WORKFLOW_LIVE: dataset-workflows-live/.github/workflows/onboard-openneuro.yml
+          NEMAR_DOCS_CHECKOUT: docs-live
         run: |
           # Deliberately no TEST_API_URL / secrets: these tests don't touch the
           # backend, so a misclassified file fails loudly here instead of
