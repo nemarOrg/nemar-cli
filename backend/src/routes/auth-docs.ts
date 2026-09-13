@@ -9,8 +9,11 @@
  * WHY THIS EXISTS. `docs.nemar.org/admin/*` answered 200 to anyone. The
  * Cloudflare Access app the docs repo described covers that Pages project's
  * PREVIEW deployments only, never production. The gate is now this: NEMAR's own
- * ORCID-backed session, so `users.role` remains the single source of truth for
- * who is an admin rather than an allowlist maintained in a second place.
+ * admin-only session, so `users.role` remains the single source of truth for who
+ * is an admin rather than an allowlist maintained in a second place. It is a
+ * ROLE check: `isDocsAdmin` admits `admin` and `owner` alike, and nothing in the
+ * flow requires an ORCID link, so an admin holding a passwordless email-code
+ * session passes `verify` identically.
  *
  * WHY A HANDOFF RATHER THAN A SHARED COOKIE. The web session cookie is scoped
  * `Domain=app.nemar.org` deliberately, so it never attaches to
