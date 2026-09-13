@@ -5,7 +5,12 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { isGitPlumbingPattern, stripLargefilesAttributes } from "../src/lib/import-normalize";
+import {
+  isGitPlumbingPattern,
+  isTemporaryAccessKeyId,
+  resolveTransferCredentials,
+  stripLargefilesAttributes,
+} from "../src/lib/import-normalize";
 import { type ImportManifestItem, selectShardCopyItems } from "../src/lib/s3-server-copy";
 
 describe("stripLargefilesAttributes", () => {
@@ -186,5 +191,42 @@ describe("the manifest as it crosses S3 staging", () => {
     });
     expect(localSkipped).toBe(1);
     expect(shardItems.map((i) => i.key)).toEqual(["SHA256E-s2--b"]);
+  });
+});
+
+describe("the credentials a transfer signs with", () => {
+  test("a temporary key with no session token is refused, not attempted", () => {
+    // This is #1380, and it is what a 403 on every object looks like from the
+    // inside: git-annex caches an S3 remote's key and secret but has no slot for a
+    // session token, so a transfer that inherits the environment after an
+    // `enableremote` with STS credentials signs without one. S3 answers every
+    // request, read or write, with a bare 403 -- on objects that are anonymously
+    // readable. Refusing here costs nothing; discovering it after annexing 893
+    // files cost a migration.
+    expect(() =>
+      resolveTransferCredentials({ accessKeyId: "ASIAEXAMPLE", secretAccessKey: "s" }),
+    ).toThrow(/no session token/);
+  });
+
+  test("a temporary key with its session token is usable", () => {
+    const creds = { accessKeyId: "ASIAEXAMPLE", secretAccessKey: "s", sessionToken: "t" };
+    expect(resolveTransferCredentials(creds)).toBe(creds);
+  });
+
+  test("a long-lived key needs no session token", () => {
+    const creds = { accessKeyId: "AKIAEXAMPLE", secretAccessKey: "s" };
+    expect(resolveTransferCredentials(creds)).toBe(creds);
+  });
+
+  test('"inherit" means the subprocess is handed nothing', () => {
+    // A `type=directory` remote, and a host whose own AWS configuration is the
+    // credential source, both want exactly this -- and it must not be confused
+    // with "credentials were forgotten", which is why it is spelled.
+    expect(resolveTransferCredentials("inherit")).toBeUndefined();
+  });
+
+  test("tells STS keys from IAM user keys by their documented prefix", () => {
+    expect(isTemporaryAccessKeyId("ASIAIOSFODNN7EXAMPLE")).toBe(true);
+    expect(isTemporaryAccessKeyId("AKIAIOSFODNN7EXAMPLE")).toBe(false);
   });
 });

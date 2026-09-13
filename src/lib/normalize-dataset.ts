@@ -24,11 +24,12 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { requestUploadCredentials } from "./api/data.js";
+import { probeS3PrefixAccess } from "./aws-cli.js";
 import { cloneDataset, pushToGitHub } from "./git-annex/clone-push.js";
 import { runCommand } from "./git-annex/run-command.js";
 import { configureS3Remote, toS3Credentials } from "./git-annex/s3-remote.js";
 import { batchSetKeysPresent, getRemoteUuid } from "./git-annex/transfer.js";
-import { type UploadStrategy, normalizeImportedTree } from "./import-normalize.js";
+import { type UploadStrategy, annexCopyUpload, normalizeImportedTree } from "./import-normalize.js";
 import { findUnannexedData } from "./import-openneuro.js";
 import { isKeyPresentAtDeclaredSize, listExistingObjects } from "./s3-server-copy.js";
 
@@ -178,11 +179,32 @@ export async function normalizeDatasetRepo(
 ): Promise<NormalizeDatasetResult> {
   const remoteName = options.remoteName ?? REMOTE_NAME;
   const { datasetId, datasetPath } = plan;
-  let upload: UploadStrategy | undefined = options.upload;
+  let upload: UploadStrategy;
+  /** Set when the preflight could not prove reachability, to report rather than swallow. */
+  let preflight: string | undefined;
 
-  if (upload) {
+  if (options.upload) {
     // Supplied by the caller: neither credential path applies.
-  } else if (remoteName === REMOTE_NAME && options.credentials === "ambient") {
+    upload = options.upload;
+  } else if (plan.files.length === 0) {
+    // Nothing to move. The attribute half of the policy is a text change and a
+    // commit, so minting credentials and enabling the remote would be setup for
+    // work that does not exist -- and that is the ordinary case for #1374's fleet
+    // backfill, where 600 imported datasets need the policy and no data moved. A
+    // strategy that throws keeps "the plan found no data" checked rather than
+    // assumed: if anything does reach it, the run stops instead of quietly
+    // committing a tree naming keys nothing uploaded.
+    upload = async ({ files }) => {
+      throw new Error(
+        `${datasetId}: ${files.length} file(s) reached the upload leg although the plan found no data to move. Refusing to continue: no credentials were obtained for this run.`,
+      );
+    };
+  } else if (remoteName !== REMOTE_NAME) {
+    // A remote the caller named itself -- a `type=directory` remote in a test, or
+    // a second S3 remote an operator configured with its own credentials. Neither
+    // credential path applies; git-annex uses what it already has for that remote.
+    upload = annexCopyUpload({ credentials: "inherit" });
+  } else if (options.credentials === "ambient") {
     // No `enableremote`: that contacts S3 with git-annex's own credential handling,
     // which is the thing being bypassed. The UUID comes from the git-annex branch,
     // where the import recorded it, so keys are registered against the same remote
@@ -200,8 +222,25 @@ export async function normalizeDatasetRepo(
       remoteUuid,
       workDir: join(datasetPath, ".."),
     });
-  } else if (remoteName === REMOTE_NAME) {
+  } else {
     const creds = await requestUploadCredentials(datasetId);
+    // Ask S3 what these credentials can do before annexing anything. A refusal here
+    // is the whole of #1380's symptom, and finding it now costs one HEAD instead of
+    // an hour of annexing followed by a failed copy and a dirty clone.
+    const probe = await probeS3PrefixAccess({
+      credentials: creds.credentials,
+      bucket: creds.s3.bucket,
+      region: creds.s3.region,
+      prefix: creds.s3.prefix,
+    });
+    if (probe.outcome === "refused") {
+      throw new Error(
+        `The credentials the API minted for ${datasetId} cannot read s3://${probe.bucket}/${probe.prefix}/: ${probe.detail}. Refusing to start the migration. Check that the API's S3 identity still covers the bucket and that the session policy names this dataset; \`nemar admin s3 credential-check ${datasetId}\` reports both. \`--via-aws-cli\` moves the same content with this machine's own AWS configuration instead.`,
+      );
+    }
+    if (probe.outcome !== "reachable") {
+      preflight = `credential preflight inconclusive (${probe.outcome}${probe.detail ? `: ${probe.detail}` : ""})`;
+    }
     const configured = await configureS3Remote(
       datasetPath,
       {
@@ -221,6 +260,11 @@ export async function normalizeDatasetRepo(
         `Could not resolve the ${remoteName} UUID after enabling it. Aborting: keys registered against an unknown remote are unfindable for clones.`,
       );
     }
+    // The same credentials, handed to the transfer. `enableremote` caches the key
+    // and secret in `.git/annex/creds/<uuid>` and has nowhere to put the session
+    // token, so a copy that inherits the environment instead signs without one and
+    // every request comes back 403 (#1380).
+    upload = annexCopyUpload({ credentials: toS3Credentials(creds.credentials) });
   }
 
   const normalized = await normalizeImportedTree({
@@ -237,12 +281,18 @@ export async function normalizeDatasetRepo(
     upload,
   });
 
+  // A commit is not the only thing worth pushing: `git annex config --set` writes
+  // NEMAR's expression to the git-annex branch, which is a different branch and no
+  // commit on `main` at all. A dataset whose `.gitattributes` needed nothing but
+  // whose policy was never configured changes exactly that one branch, and leaving
+  // it unpushed would mean every clone still has no policy.
   let pushed = false;
-  if (options.push && normalized.committed) {
+  const unpushed = options.push ? await unpushedBranches(datasetPath) : [];
+  if (unpushed.length > 0) {
     const push = await pushToGitHub(datasetPath, "origin");
     if (!push.success) {
       throw new Error(
-        `Normalized and committed ${datasetId}, but the push failed: ${push.error}. The content is already in S3 and the commit is local; re-run the push from ${datasetPath} rather than redoing the upload.`,
+        `Normalized ${datasetId} (${unpushed.join(", ")} ahead of origin), but the push failed: ${push.error}. Any content is already in S3 and the work is local; re-run the push from ${datasetPath} rather than redoing the upload.`,
       );
     }
     if (push.warning) {
@@ -258,22 +308,54 @@ export async function normalizeDatasetRepo(
     keys: (normalized.data?.files ?? []).map((f) => f.key),
     committed: normalized.committed,
     pushed,
-    notes: normalized.notes,
+    notes: preflight ? [preflight, ...normalized.notes] : normalized.notes,
   };
+}
+
+/**
+ * Branches this clone holds at a different commit than `origin` does, of the two
+ * a normalization can move: `main` for the tree, `git-annex` for the policy and
+ * the location log.
+ *
+ * A branch the clone does not have is not unpushed; a branch `origin` does not
+ * have is.
+ */
+async function unpushedBranches(datasetPath: string): Promise<string[]> {
+  const unpushed: string[] = [];
+  for (const branch of ["main", "git-annex"]) {
+    const local = await runCommand(
+      ["git", "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`],
+      { cwd: datasetPath },
+    );
+    if (local.exitCode !== 0) continue;
+    const remote = await runCommand(
+      ["git", "rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`],
+      { cwd: datasetPath },
+    );
+    if (remote.exitCode !== 0 || local.stdout.trim() !== remote.stdout.trim()) {
+      unpushed.push(branch);
+    }
+  }
+  return unpushed;
 }
 
 /**
  * Which credentials move the bytes.
  *
- * `"backend"` asks the API to mint STS credentials scoped to this dataset, the way
- * an ordinary upload does. It is the right default and the wrong choice for an
- * imported dataset: those credentials are federated from the Worker's own identity,
- * which has no access to an `on######` prefix, so every request is refused (#1380).
+ * `"backend"` asks the API to mint STS credentials scoped to this dataset's
+ * `objects/` prefix, the way an ordinary upload does, and is the right default:
+ * nothing long-lived is needed on the operator's machine. Those credentials do
+ * reach an imported dataset's prefix -- the Worker's identity allows the whole
+ * bucket and the session policy is what narrows it -- which is what #1380 got
+ * wrong; what actually refused every request was this tool handing git-annex a
+ * temporary key without its session token.
  *
  * `"ambient"` uses whatever the `aws` CLI is configured with on this machine, and
- * moves the content with `aws s3 sync` instead of git-annex's S3 client. The keys
- * are then registered in the location log directly, which is exactly how the
- * import's finalize phase records a server-side copy it did not perform itself.
+ * moves the content with `aws s3 sync` instead of git-annex's S3 client. It stays
+ * because it is the faster leg for a large migration and the only one available on
+ * a host with no NEMAR credentials; the keys are then registered in the location
+ * log directly, which is exactly how the import's finalize phase records a
+ * server-side copy it did not perform itself.
  */
 export type CredentialSource = "backend" | "ambient";
 

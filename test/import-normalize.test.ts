@@ -43,6 +43,7 @@ import { buildLargefilesExpression } from "../src/lib/git-annex/policy";
 import { runCommand } from "../src/lib/git-annex/run-command";
 import { getAnnexKeysForPaths, listAnnexedKeys } from "../src/lib/git-annex/transfer";
 import {
+  annexCopyUpload,
   applyNemarAnnexPolicy,
   normalizeImportedTree,
   normalizeUnannexedData,
@@ -66,6 +67,9 @@ README* text eol=lf annex.largefiles=nothing
 `;
 
 /** Under upstream's 1 MB bar, so upstream kept it in git. A recording. */
+/** The remote these tests copy to is a local directory: no credentials to sign with. */
+const inheritUpload = annexCopyUpload({ credentials: "inherit" });
+
 const SMALL_MOTION = "sub-01/motion/sub-01_task-walk_tracksys-imu_motion.tsv";
 const SMALL_MOTION_2 = "sub-02/motion/sub-02_task-walk_tracksys-imu_motion.tsv";
 /** Over the bar, so upstream annexed it already. Must be left alone. */
@@ -191,6 +195,7 @@ function treeArgs(overrides: Partial<Parameters<typeof normalizeImportedTree>[0]
     unannexedData: [] as Array<{ path: string; size: number }>,
     upstreamKeys: new Set<string>(),
     carryOverUnaccountedKeys: false,
+    upload: inheritUpload,
     ...overrides,
   };
 }
@@ -336,6 +341,7 @@ describe("normalizeUnannexedData", () => {
       remoteName: "nemar-s3",
       bucket: "nemar",
       nemarId: "on007788",
+      upload: inheritUpload,
     });
 
     const annexed = await annexedPaths(repoDir);
@@ -356,6 +362,7 @@ describe("normalizeUnannexedData", () => {
       remoteName: "nemar-s3",
       bucket: "nemar",
       nemarId: "on007788",
+      upload: inheritUpload,
     });
     expect(result.copied).toBe(2);
 
@@ -374,6 +381,7 @@ describe("normalizeUnannexedData", () => {
       remoteName: "nemar-s3",
       bucket: "nemar",
       nemarId: "on007788",
+      upload: inheritUpload,
     });
 
     expect(result.items).toHaveLength(2);
@@ -406,6 +414,7 @@ describe("normalizeUnannexedData", () => {
         remoteName: "nemar-s3",
         bucket: "nemar",
         nemarId: "on007788",
+        upload: inheritUpload,
       }),
     ).rejects.toThrow(/upload to nemar-s3 failed/);
 
@@ -432,6 +441,7 @@ describe("normalizeUnannexedData", () => {
         remoteName: "nemar-s3",
         bucket: "nemar",
         nemarId: "on007788",
+        upload: inheritUpload,
       }),
     ).rejects.toThrow(/nemar-s3/);
 
@@ -451,6 +461,7 @@ describe("normalizeUnannexedData", () => {
       remoteName: "nemar-s3",
       bucket: "nemar",
       nemarId: "on007788",
+      upload: inheritUpload,
     });
     await run(["git", "commit", "-qm", "normalized"], repoDir);
     await run(["git", "annex", "drop", "--force", "--", SMALL_MOTION], repoDir);
@@ -462,6 +473,7 @@ describe("normalizeUnannexedData", () => {
         remoteName: "nemar-s3",
         bucket: "nemar",
         nemarId: "on007788",
+        upload: inheritUpload,
       }),
     ).rejects.toThrow(/no key for/);
   }, 120_000);
@@ -481,6 +493,7 @@ describe("normalizeUnannexedData", () => {
       remoteName: "nemar-s3",
       bucket: "nemar",
       nemarId: "on007788",
+      upload: inheritUpload,
     });
     expect(result.files).toHaveLength(1);
     expect((await annexedPaths(repoDir)).has(SMALL_MOTION)).toBe(true);
@@ -498,6 +511,7 @@ describe("normalizeUnannexedData", () => {
         remoteName: "nemar-s3",
         bucket: "nemar",
         nemarId: "on007788",
+        upload: inheritUpload,
         maxBytes: 1000,
       }),
     ).rejects.toThrow(/over the .* GiB this leg will upload/);
@@ -513,6 +527,7 @@ describe("normalizeUnannexedData", () => {
       remoteName: "nemar-s3",
       bucket: "nemar",
       nemarId: "on007788",
+      upload: inheritUpload,
     });
     expect(result).toEqual({ items: [], files: [], copied: 0, bytes: 0 });
   }, 60_000);
@@ -534,6 +549,7 @@ describe("normalizeUnannexedData", () => {
       remoteName: "nemar-s3",
       bucket: "nemar",
       nemarId: "on007788",
+      upload: inheritUpload,
     });
     expect(result.files).toHaveLength(3);
     expect(result.items).toHaveLength(2);
@@ -554,6 +570,7 @@ describe("normalizeUnannexedData", () => {
       remoteName: "nemar-s3",
       bucket: "nemar",
       nemarId: "on007788",
+      upload: inheritUpload,
     });
     expect(result.files).toHaveLength(2);
     expect((await annexedPaths(unlocked)).has(SMALL_MOTION)).toBe(true);

@@ -279,14 +279,22 @@ describe("normalizeDatasetRepo", () => {
     expect(await run(["git", "log", "--oneline"], clone)).toBe(firstLog);
   }, 240_000);
 
-  test("does not push when it had nothing to commit", async () => {
+  test("pushes a policy that only the git-annex branch carries", async () => {
     await addDirectoryRemote(clone, "stand-in");
-    // Nothing to move and no attributes to strip: a push here would be a no-op at
-    // best and a surprise at worst on a live dataset.
+    // A dataset with nothing to move and no attribute to strip is still a dataset
+    // with no annex policy configured -- the shape #1374 backfills across 600
+    // imported repositories. The expression lands in the git-annex branch and
+    // nowhere in the tree, so a push condition that waited for a commit would
+    // leave every clone of it governed by nothing.
     await run(["git", "rm", "-q", "--cached", "--", ".gitattributes"], clone);
     writeFileSync(join(clone, ".gitattributes"), "* annex.backend=SHA256E\n");
     await run(["git", "add", "--", ".gitattributes"], clone);
     await run(["git", "commit", "-qm", "plain attributes"], clone);
+    await run(["git", "push", "-q", "origin", "main"], clone);
+    // No policy at origin yet (the file may not even exist there, which reads as
+    // empty stdout rather than a throw).
+    const before = await runCommand(["git", "show", "git-annex:config.log"], { cwd: origin });
+    expect(before.stdout).not.toContain("annex.largefiles");
 
     const result = await normalizeDatasetRepo(
       {
@@ -299,8 +307,84 @@ describe("normalizeDatasetRepo", () => {
       { push: true, remoteName: "stand-in" },
     );
     expect(result.committed).toBe(false);
-    expect(result.pushed).toBe(false);
+    expect(result.pushed).toBe(true);
+
+    // Read it back where a clone would find it: the origin's git-annex branch.
+    const pushedConfig = await run(["git", "show", "git-annex:config.log"], origin);
+    expect(pushedConfig).toContain("annex.largefiles");
+    expect(pushedConfig).toContain("include=*_motion.tsv");
   }, 180_000);
+
+  test("needs no credentials at all when there is no data to move", async () => {
+    // The attributes-only case, which is what #1374's fleet backfill is: the S3 leg
+    // must not exist -- no credential mint, no `enableremote`, no transfer. Run
+    // against the REAL default remote name (`nemar-s3`, absent from this clone) and
+    // with an empty config directory, so any attempt to reach the API for
+    // credentials throws instead of quietly succeeding on the developer's own key.
+    const configDir = mkdtempSync(join(tmpdir(), "nemar-normalize-noconfig-"));
+    scratch.push(configDir);
+    const previousConfigDir = process.env.NEMAR_CONFIG_DIR;
+    process.env.NEMAR_CONFIG_DIR = configDir;
+    try {
+      const result = await normalizeDatasetRepo(
+        {
+          datasetId: "on999999",
+          datasetPath: clone,
+          files: [],
+          bytes: 0,
+          attributeFiles: [".gitattributes"],
+        },
+        { push: false },
+      );
+      expect(result.keys).toEqual([]);
+      expect(result.committed).toBe(true);
+      expect(result.notes.join(" ")).toContain("stripped");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.NEMAR_CONFIG_DIR;
+      else process.env.NEMAR_CONFIG_DIR = previousConfigDir;
+    }
+
+    // The policy is in force and upstream's rule is gone, with no S3 involvement.
+    const attrs = await run(["git", "show", "HEAD:.gitattributes"], clone);
+    expect(attrs).not.toContain("largerthan=1mb");
+    expect(attrs).toContain("**/.git* annex.largefiles=nothing");
+    const configured = await run(["git", "annex", "config", "--get", "annex.largefiles"], clone);
+    expect(configured.trim()).toContain("include=*_motion.tsv");
+  }, 180_000);
+
+  test("a second run over an already-normalized dataset pushes nothing", async () => {
+    await addDirectoryRemote(clone, "stand-in");
+    const first = await normalizeDatasetRepo(
+      {
+        datasetId: "on999999",
+        datasetPath: clone,
+        files: await findUnannexedData(clone),
+        bytes: 300_000,
+        attributeFiles: [".gitattributes"],
+      },
+      { push: true, remoteName: "stand-in" },
+    );
+    expect(first.pushed).toBe(true);
+    const afterFirst = await run(["git", "rev-parse", "main", "git-annex"], clone);
+
+    // Idempotence is what makes a fleet run resumable: re-running over a dataset
+    // that is already done must not move either branch. `git annex config --set`
+    // to a value already configured writes no commit (measured on git-annex
+    // 10.20260901), so there is nothing for the second run to push.
+    const again = await normalizeDatasetRepo(
+      {
+        datasetId: "on999999",
+        datasetPath: clone,
+        files: await findUnannexedData(clone),
+        bytes: 0,
+        attributeFiles: [],
+      },
+      { push: true, remoteName: "stand-in" },
+    );
+    expect(again.committed).toBe(false);
+    expect(again.pushed).toBe(false);
+    expect(await run(["git", "rev-parse", "main", "git-annex"], clone)).toBe(afterFirst);
+  }, 240_000);
 });
 
 describe("the upload leg is swappable", () => {

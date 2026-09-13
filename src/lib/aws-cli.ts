@@ -8,6 +8,7 @@
 
 import { existsSync } from "node:fs";
 import { spawn } from "bun";
+import { runCommand } from "./git-annex/run-command.js";
 
 /**
  * Check if the AWS CLI is installed and accessible.
@@ -178,4 +179,103 @@ export async function uploadWithAwsCli(opts: AwsCliUploadOptions): Promise<AwsCl
   }
 
   return { success: true, uploaded, failed: [] };
+}
+
+/**
+ * What a credential set can actually do with a dataset's `objects/` prefix.
+ *
+ * `reachable` means an object under the prefix was listed AND read; `empty-prefix`
+ * that the listing worked and there was nothing to read; `refused` that S3 said no;
+ * `unavailable` that this machine has no `aws` CLI to ask with.
+ */
+export interface S3AccessProbe {
+  bucket: string;
+  prefix: string;
+  /** The object the read was attempted on, when the listing found one. */
+  object: string | null;
+  outcome: "reachable" | "empty-prefix" | "refused" | "unavailable";
+  /** The AWS error, trimmed, when the outcome is `refused` or `unavailable`. */
+  detail?: string;
+}
+
+/** Everything after the last "\n" that is not blank, which is where the AWS CLI puts its error. */
+function lastMeaningfulLine(text: string): string {
+  const lines = text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return lines[lines.length - 1] ?? "";
+}
+
+/**
+ * Ask S3 whether these credentials reach this prefix, before a migration spends an
+ * hour finding out.
+ *
+ * Both calls go through the `aws` CLI, which `nemar doctor` already requires, with
+ * the credentials passed explicitly and the machine's own profile removed from the
+ * child environment -- the point is to test the credentials given, not whatever the
+ * host is configured with.
+ *
+ * A read is the whole probe: there is no harmless write to a live dataset's
+ * `objects/` prefix (the upload policy grants no DeleteObject, so a probe object
+ * could not be cleaned up with the credentials under test), and PutObject rides the
+ * same two policy statements GetObject does.
+ */
+export async function probeS3PrefixAccess(opts: {
+  credentials: { access_key_id: string; secret_access_key: string; session_token: string };
+  bucket: string;
+  region: string;
+  /** Dataset prefix without a trailing slash, e.g. `on007788/objects`. */
+  prefix: string;
+}): Promise<S3AccessProbe> {
+  const { credentials, bucket, region, prefix } = opts;
+  const base = { bucket, prefix, object: null } as const;
+  if (!(await isAwsCliAvailable())) {
+    return { ...base, outcome: "unavailable", detail: "the aws CLI is not on PATH" };
+  }
+
+  const env = {
+    AWS_ACCESS_KEY_ID: credentials.access_key_id,
+    AWS_SECRET_ACCESS_KEY: credentials.secret_access_key,
+    AWS_SESSION_TOKEN: credentials.session_token,
+    AWS_DEFAULT_REGION: region,
+  };
+  // A profile in the environment would otherwise decide which credentials the CLI
+  // signs with, and the answer would be about the machine rather than the token.
+  const unsetEnv = ["AWS_PROFILE", "AWS_DEFAULT_PROFILE"];
+
+  const listed = await runCommand(
+    [
+      "aws",
+      "s3api",
+      "list-objects-v2",
+      "--bucket",
+      bucket,
+      "--prefix",
+      `${prefix.replace(/\/$/, "")}/`,
+      "--max-keys",
+      "1",
+      "--query",
+      "Contents[0].Key",
+      "--output",
+      "text",
+    ],
+    { env, unsetEnv, timeout: 60_000 },
+  );
+  if (listed.exitCode !== 0) {
+    return { ...base, outcome: "refused", detail: lastMeaningfulLine(listed.stderr) };
+  }
+
+  const key = listed.stdout.trim();
+  if (!key || key === "None") return { ...base, outcome: "empty-prefix" };
+
+  const head = await runCommand(["aws", "s3api", "head-object", "--bucket", bucket, "--key", key], {
+    env,
+    unsetEnv,
+    timeout: 60_000,
+  });
+  if (head.exitCode !== 0) {
+    return { ...base, object: key, outcome: "refused", detail: lastMeaningfulLine(head.stderr) };
+  }
+  return { ...base, object: key, outcome: "reachable" };
 }

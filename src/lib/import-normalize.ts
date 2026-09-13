@@ -64,11 +64,18 @@ export const NORMALIZE_MAX_BYTES = 5 * 1024 ** 3;
 /**
  * How the content of freshly annexed keys reaches the remote.
  *
- * The default ({@link annexCopyUpload}) is git-annex's own S3 client, which is
- * what the import uses and what every test drives. A dataset migration can need a
- * different one: `GetFederationToken` credentials cannot reach an imported
- * dataset's prefix at all (#1380), so `normalize-dataset.ts` supplies a strategy
- * that moves the same bytes with credentials that can.
+ * {@link annexCopyUpload} is git-annex's own S3 client, which is what the import
+ * uses and what every test drives. A dataset migration can want a different one:
+ * `normalize-dataset.ts` offers an `aws s3 sync` strategy for a host whose own
+ * AWS configuration is the credential source (`--via-aws-cli`).
+ *
+ * There is NO default. The caller that obtains the credentials is the caller that
+ * states how the bytes move, because the two have to agree: git-annex caches an
+ * S3 remote's key and secret in `.git/annex/creds/<uuid>` but has no slot for a
+ * session token, so a transfer that inherits the environment after an
+ * `enableremote` with temporary credentials signs without one and S3 refuses every
+ * request with a bare 403 -- which is exactly what #1380 recorded, and what it
+ * misread as the Worker's IAM identity not reaching an `on######` prefix.
  *
  * A strategy owns transferring AND proving the transfer. It must throw, not return,
  * when it cannot prove every key arrived -- the caller commits immediately after.
@@ -78,6 +85,45 @@ export type UploadStrategy = (args: {
   files: NormalizedFile[];
   remoteName: string;
 }) => Promise<{ copied: number }>;
+
+/**
+ * What a transfer signs with, stated rather than defaulted.
+ *
+ * `"inherit"` means the subprocess gets no credentials from us and uses whatever
+ * its environment (or git-annex's own cached credentials) carries -- right for a
+ * `type=directory` remote and for a host configured with long-lived keys, wrong
+ * for anything holding STS credentials.
+ */
+export type TransferCredentials = S3Credentials | "inherit";
+
+/**
+ * True for an access key id STS issued. Temporary keys start `ASIA`, long-lived
+ * IAM user keys `AKIA`; AWS documents both prefixes as stable.
+ */
+export function isTemporaryAccessKeyId(accessKeyId: string): boolean {
+  return accessKeyId.startsWith("ASIA");
+}
+
+/**
+ * Turn a stated credential choice into the environment a transfer runs with, and
+ * refuse the one combination S3 rejects without saying why.
+ *
+ * A temporary key signs nothing without its session token: every request comes
+ * back 403 Forbidden with no body, for reads and writes alike, on objects that
+ * are anonymously readable. Measured against `nemar/on007788` -- the same minted
+ * credentials, the same object, HEAD 200 with the token and 403 without it.
+ */
+export function resolveTransferCredentials(
+  credentials: TransferCredentials,
+): S3Credentials | undefined {
+  if (credentials === "inherit") return undefined;
+  if (isTemporaryAccessKeyId(credentials.accessKeyId) && !credentials.sessionToken) {
+    throw new Error(
+      'Refusing to transfer with temporary AWS credentials that carry no session token: S3 rejects every such request with a bare 403. Pass the session token the credential response returned, or say "inherit" to use the environment\'s own credentials.',
+    );
+  }
+  return credentials;
+}
 
 export interface NormalizeDataResult {
   /** Manifest entries for the uploaded keys, marked `origin: "local"`. */
@@ -316,14 +362,12 @@ export async function normalizeUnannexedData(args: {
   remoteName: string;
   bucket: string;
   nemarId: string;
-  credentials?: S3Credentials;
-  jobs?: number;
   /** Overridable so the bound itself is testable; production uses the default. */
   maxBytes?: number;
-  /** Defaults to {@link annexCopyUpload}; see {@link UploadStrategy}. */
-  upload?: UploadStrategy;
+  /** How the bytes move, and with which credentials; see {@link UploadStrategy}. */
+  upload: UploadStrategy;
 }): Promise<NormalizeDataResult> {
-  const { datasetPath, files, remoteName, bucket, nemarId, credentials } = args;
+  const { datasetPath, files, remoteName, bucket, nemarId } = args;
   if (files.length === 0) return { items: [], files: [], copied: 0, bytes: 0 };
 
   const bytes = files.reduce((sum, f) => sum + f.size, 0);
@@ -369,8 +413,7 @@ export async function normalizeUnannexedData(args: {
     size: f.size,
   }));
 
-  const upload = args.upload ?? annexCopyUpload({ credentials, jobs: args.jobs });
-  const { copied } = await upload({ datasetPath, files: normalized, remoteName });
+  const { copied } = await args.upload({ datasetPath, files: normalized, remoteName });
 
   // Identical content shares one key, so dedupe: the manifest addresses keys,
   // and a duplicate entry would have finalize verify and register it twice.
@@ -407,9 +450,11 @@ export async function normalizeUnannexedData(args: {
  * been removed raised exactly this error rather than proceeding (measured by
  * mutating the `!copy.success` branch away).
  */
-export function annexCopyUpload(
-  options: { credentials?: S3Credentials; jobs?: number } = {},
-): UploadStrategy {
+export function annexCopyUpload(options: {
+  credentials: TransferCredentials;
+  jobs?: number;
+}): UploadStrategy {
+  const credentials = resolveTransferCredentials(options.credentials);
   return async ({ datasetPath, files, remoteName }) => {
     const paths = files.map((f) => f.path);
     const copy = await copyPathsToAnnexRemote(
@@ -417,7 +462,7 @@ export function annexCopyUpload(
       remoteName,
       paths,
       options.jobs ?? 4,
-      options.credentials,
+      credentials,
     );
     if (!copy.success) {
       throw new Error(
@@ -483,11 +528,13 @@ export async function normalizeImportedTree(args: {
   unannexedData: Array<{ path: string; size: number }>;
   upstreamKeys: Set<string>;
   carryOverUnaccountedKeys: boolean;
-  credentials?: S3Credentials;
   maxBytes?: number;
-  jobs?: number;
-  /** Defaults to {@link annexCopyUpload}; see {@link UploadStrategy}. */
-  upload?: UploadStrategy;
+  /**
+   * How the annexed content reaches `remoteName`. Required, and only consulted
+   * when there is something to move; see {@link UploadStrategy} for why there is
+   * no default.
+   */
+  upload: UploadStrategy;
 }): Promise<NormalizeImportResult> {
   const policy = await applyNemarAnnexPolicy(args.datasetPath);
 
@@ -499,9 +546,7 @@ export async function normalizeImportedTree(args: {
           remoteName: args.remoteName,
           bucket: args.bucket,
           nemarId: args.nemarId,
-          credentials: args.credentials,
           maxBytes: args.maxBytes,
-          jobs: args.jobs,
           upload: args.upload,
         })
       : null;

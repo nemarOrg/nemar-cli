@@ -37,7 +37,7 @@ import {
   markInheritedOpenNeuroRemotesIgnored,
 } from "./git-annex/s3-remote.js";
 import { batchSetKeysPresent, getAnnexWhereisAll, getRemoteUuid } from "./git-annex/transfer.js";
-import { normalizeImportedTree } from "./import-normalize.js";
+import { annexCopyUpload, normalizeImportedTree } from "./import-normalize.js";
 import {
   type ImportManifest,
   type ImportManifestItem,
@@ -1200,9 +1200,16 @@ export async function prepareImport(
   // absorb these changes into the metadata commit.
   const policySpinner = ora("Applying NEMAR annex policy to the tree...").start();
   try {
-    // nemarUuid and s3Creds are set here by construction whenever unannexedData is
-    // non-empty: the step 5 gate fires on exactly that condition and exits if the
-    // remote cannot be configured.
+    // The step 5 gate fires on exactly this condition and exits if the remote
+    // cannot be configured, so s3Creds is set here by construction whenever there
+    // is data to move. Checked rather than trusted: without credentials the copy
+    // would fall back to whatever git-annex cached, which for a temporary key means
+    // signing with no session token and 403 on every object (#1380).
+    if (unannexedData.length > 0 && !s3Creds) {
+      throw new Error(
+        `${unannexedData.length} file(s) need moving into the annex but no S3 credentials were resolved for ${nemarId}. Refusing to continue: the upload would be attempted with whatever credentials git-annex had cached.`,
+      );
+    }
     const normalized = await normalizeImportedTree({
       datasetPath,
       nemarId,
@@ -1211,7 +1218,7 @@ export async function prepareImport(
       unannexedData,
       upstreamKeys: new Set(keyUrlMap.keys()),
       carryOverUnaccountedKeys: isReimportOntoExistingMain,
-      credentials: s3Creds ?? undefined,
+      upload: annexCopyUpload({ credentials: s3Creds ?? "inherit" }),
       maxBytes: options.normalizeMaxBytes,
     });
     items.push(...normalized.items);

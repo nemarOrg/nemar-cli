@@ -41,6 +41,22 @@ earlier releases are described only by their generated notes.
   URL, so history is never rewritten and those URLs keep resolving. `--dry-run`
   reports the plan; a clone left dirty by an interrupted attempt is refused rather
   than mistaken for a dataset with nothing left to migrate.
+- **A dataset migration no longer hands git-annex a temporary key without its session
+  token** (#1380). `normalize-dataset.ts` enabled the S3 remote with credentials minted
+  for the dataset and then let the transfer inherit the environment, where there were
+  none: git-annex fell back to the key and secret `enableremote` had cached, signed
+  without the session token that makes them valid, and S3 refused every request with a
+  bare 403 -- which was mistaken for the API's S3 identity not reaching imported
+  (`on######`) prefixes. It does reach them: the identity covers the bucket and the
+  per-request session policy is what narrows it, verified by HEAD on the same object
+  with the same credentials returning 200 with the token and 403 without. The
+  credentials are now threaded to the transfer; the branch that obtains them is the
+  branch that states how the bytes move, so there is no default left to forget; a
+  temporary key with no session token is refused before any transfer is attempted; and
+  the migration probes the prefix before annexing anything, so a refusal costs one HEAD
+  rather than an hour. `nemar admin s3 credential-check <id>` reports the same probe on
+  demand. A dataset with no data to move now needs no credentials at all, and a policy
+  that changed only the git-annex branch is pushed rather than left local.
 
 ## 0.10.3 - 2026-09-10
 

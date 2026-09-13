@@ -663,6 +663,19 @@ does not change that. Add `--no-check-gitignore` as well, or an uncached path th
 dataset's own `.gitignore` matches is skipped in silence and ends up in neither
 plane.
 
+**Temporary credentials have to reach the transfer, not just the `enableremote`.**
+git-annex caches an S3 remote's key and secret in `.git/annex/creds/<uuid>` and has
+nowhere to put a session token, so a `git annex copy` that inherits the environment
+after an `enableremote` with STS credentials signs without one -- and S3 refuses every
+such request, read and write alike, on objects that are anonymously readable, with a
+bare 403 and no body. A green `enableremote` is therefore no evidence about the copy
+that follows it. Measured against `nemar/on007788`: the same minted credentials and
+the same object, HEAD 200 with the session token and 403 without it. This is what
+#1380 recorded as the API's identity not reaching an `on######` prefix; the identity
+allows the whole bucket and the per-request session policy is the narrowing.
+`nemar admin s3 credential-check <id>` mints and probes in one step when a 403 needs
+attributing.
+
 ---
 
 ## 5. Git-Annex in GitHub Actions

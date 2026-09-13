@@ -1006,6 +1006,104 @@ s3Command
     }
   });
 
+s3Command
+  .command("credential-check")
+  .description("Mint a dataset's upload credentials and ask S3 what they can actually do")
+  .argument("<dataset-id>", "Dataset ID (e.g., on007788)")
+  .addHelpText(
+    "after",
+    `
+Read-only. Mints the same STS credentials an upload would get, then lists and reads
+one object under the dataset's objects/ prefix with them, through the aws CLI.
+
+It answers the question #1380 got wrong: a 403 from a signed request does not say
+whether the identity, the session policy, or the request itself is at fault. The
+credentials NEMAR mints are temporary, and a temporary key signs nothing without
+its session token -- S3 refuses such a request with a bare 403 even on an object
+that is anonymously readable.
+
+Examples:
+  $ nemar admin s3 credential-check on007788
+  $ nemar admin s3 credential-check nm099999
+`,
+  )
+  .action(async (datasetId: string) => {
+    if (!requireAuth()) return;
+
+    const { requestUploadCredentials } = await import("../lib/api/data.js");
+    const { probeS3PrefixAccess } = await import("../lib/aws-cli.js");
+
+    const mintSpinner = ora(`Minting upload credentials for ${datasetId}...`).start();
+    let creds: Awaited<ReturnType<typeof requestUploadCredentials>>;
+    try {
+      creds = await requestUploadCredentials(datasetId);
+    } catch (error) {
+      mintSpinner.fail(`Could not mint upload credentials for ${datasetId}`);
+      console.log(chalk.dim(`  ${errorDetail(error)}`));
+      process.exit(1);
+    }
+    const temporary = creds.credentials.access_key_id.startsWith("ASIA");
+    mintSpinner.succeed(
+      `Minted ${temporary ? "temporary (STS)" : "long-lived"} credentials, expiring ${creds.credentials.expiration}`,
+    );
+    console.log(`  Scope: ${chalk.cyan(`s3://${creds.s3.bucket}/${creds.s3.prefix}/`)}`);
+    console.log(
+      chalk.dim(
+        "  The session policy names this dataset; the identity it is federated from covers the bucket.",
+      ),
+    );
+
+    const probeSpinner = ora("Asking S3 what they reach...").start();
+    const probe = await probeS3PrefixAccess({
+      credentials: creds.credentials,
+      bucket: creds.s3.bucket,
+      region: creds.s3.region,
+      prefix: creds.s3.prefix,
+    });
+
+    switch (probe.outcome) {
+      case "reachable":
+        probeSpinner.succeed(`Listed and read ${probe.object}`);
+        console.log(
+          chalk.green(`  These credentials reach s3://${probe.bucket}/${probe.prefix}/.`),
+        );
+        if (temporary) {
+          console.log(
+            chalk.dim(
+              "  A transfer must carry the session token too: git-annex caches an S3 remote's key and secret with nowhere to put it, so a copy that inherits the environment signs without one and every request comes back 403.",
+            ),
+          );
+        }
+        break;
+      case "empty-prefix":
+        probeSpinner.warn(`Listing worked; there is no object under ${probe.prefix}/ to read`);
+        console.log(
+          chalk.dim(
+            "  ListBucket is granted, so the credentials are valid. Reachability of an object is unproven because there is none.",
+          ),
+        );
+        break;
+      case "unavailable":
+        probeSpinner.warn(`Could not probe: ${probe.detail}`);
+        console.log(chalk.dim("  Install the aws CLI (nemar doctor lists it) and re-run."));
+        break;
+      case "refused":
+        probeSpinner.fail(`S3 refused: ${probe.detail}`);
+        console.log();
+        console.log("Three things can produce this, in the order worth checking:");
+        console.log(
+          "  1. the request dropped the session token (a temporary key alone is always 403)",
+        );
+        console.log(
+          `  2. the session policy does not name ${datasetId} (it is generated per dataset id)`,
+        );
+        console.log(
+          "  3. the identity the token is federated from no longer covers the bucket, so the intersection is empty",
+        );
+        process.exit(1);
+    }
+  });
+
 adminCommand.addCommand(s3Command);
 
 // Hidden alias for backward compatibility
@@ -3626,7 +3724,7 @@ adminCommand
   )
   .option(
     "--via-aws-cli",
-    "Move the content with `aws s3 sync` rather than git-annex's S3 client, using whatever the aws CLI on this machine is already configured with. Required for an imported (on######) dataset until #1380 is fixed: the API-minted credentials are federated from an identity that cannot reach those prefixes.",
+    "Move the content with `aws s3 sync` rather than git-annex's S3 client, using whatever the aws CLI on this machine is already configured with. Faster for a large migration, and the only option on a host with no NEMAR credentials; the default path mints credentials scoped to this dataset instead.",
   )
   .option("-y, --yes", "Skip the confirmation prompt")
   .addHelpText(
@@ -3724,7 +3822,9 @@ Examples:
       }
 
       const confirmResult = await confirm(
-        `Rewrite ${datasetId}'s HEAD and upload ${(plan.bytes / 1e6).toFixed(1)} MB to S3?`,
+        plan.files.length > 0
+          ? `Rewrite ${datasetId}'s HEAD and upload ${(plan.bytes / 1e6).toFixed(1)} MB to S3?`
+          : `Put NEMAR's annex policy in force on ${datasetId} (no data moves, no S3 traffic)?`,
         options,
       );
       if (confirmResult !== "confirmed") {
