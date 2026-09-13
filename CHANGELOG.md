@@ -27,9 +27,13 @@ earlier releases are described only by their generated notes.
   `.gitattributes` whose `annex.largefiles` setting **outranks** the one
   `configureLargefiles` writes, so ADR 0031's policy had no effect on any imported
   repository -- the next motion file added to one would have repeated the original bug.
-  The inherited attribute is now stripped (and only that attribute), so the configured
-  policy decides. The ~785 datasets imported before this still carry upstream's
-  attributes; backfilling them, and `on007788` itself, are tracked separately.
+  The inherited attribute is now replaced by NEMAR's own expression, which the import
+  writes and then reads back before continuing: stripping alone would have been worse
+  than leaving it, because with `annex.largefiles` set nowhere git-annex annexes
+  everything, including the metadata a clone has to be able to read. This is a forward
+  fix, so an imported repository does not shrink -- upstream's blobs stay in the
+  history it came with. The 600 imported datasets that still carry upstream's
+  attributes are tracked in #1374, and `on007788`'s own data migration in #1159.
 
 ## 0.10.3 - 2026-09-10
 

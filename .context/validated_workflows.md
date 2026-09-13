@@ -646,14 +646,22 @@ This ensures:
   over the 100 kB threshold. A small `.tsv.gz` still stays in git -- this used to be
   written as the flat claim "tsv.gz IS annexed"
 
-**On a repo cloned from elsewhere, this config line is not enough.** A
-`.gitattributes` setting outranks both `git annex config` and git config, so an
-OpenNeuro clone's `*.tsv ... annex.largefiles=largerthan=1mb` silently overrides
-everything above -- measured against git-annex 10.20260901. Strip the inherited
-attributes first (`normalizeGitattributes`, ADR 0057); the import does this in its
-prepare phase. Moving a file that is already committed as a plain blob needs
-`git rm --cached` before the add, too: `git annex add` skips an unmodified tracked
-file, and `--force-large` does not change that.
+**On a repo cloned from elsewhere, this config line is not enough, and on its own it
+is not even safe.** A `.gitattributes` setting outranks both `git annex config` and
+git config, so an OpenNeuro clone's `*.tsv ... annex.largefiles=largerthan=1mb`
+silently overrides everything above. The inherited attributes therefore have to go
+first -- but with `annex.largefiles` set nowhere git-annex annexes EVERYTHING, so
+stripping them without setting the config leaves a repo that will annex `README.md`
+and every sidecar. Do both, in order, and read the value back:
+`applyNemarAnnexPolicy` in `src/lib/import-normalize.ts` is that sequence, and the
+import runs it in its prepare phase (ADR 0057). All measured against git-annex
+10.20260901.
+
+Moving a file that is already committed as a plain blob needs `git rm --cached`
+before the add: `git annex add` skips an unmodified tracked file, and `--force-large`
+does not change that. Add `--no-check-gitignore` as well, or an uncached path the
+dataset's own `.gitignore` matches is skipped in silence and ends up in neither
+plane.
 
 ---
 

@@ -3631,6 +3631,10 @@ adminCommand
     "--shard <i/N>",
     "Copy-phase only: process shard i of N (0-indexed), e.g. 0/8. Required with --phase copy.",
   )
+  .option(
+    "--normalize-max-gb <n>",
+    "Raise the ceiling on how much data the prepare phase will annex and upload from this host (default 5 GiB). Only needed for a dataset that keeps an unusual amount of data in git; the import aborts rather than silently spending hours uploading (ADR 0057).",
+  )
   .action(
     async (
       openneuroIds: string,
@@ -3641,6 +3645,7 @@ adminCommand
         trustUpstream?: boolean;
         phase?: string;
         shard?: string;
+        normalizeMaxGb?: string;
       },
     ) => {
       if (!requireAuth()) return;
@@ -3663,6 +3668,20 @@ adminCommand
       if ((options.dir || options.skipData) && !options.local && !options.phase) {
         console.error(chalk.red("--dir and --skip-data require --local or --phase"));
         process.exit(1);
+      }
+
+      let normalizeMaxBytes: number | undefined;
+      if (options.normalizeMaxGb !== undefined) {
+        const gb = Number(options.normalizeMaxGb);
+        if (!Number.isFinite(gb) || gb <= 0) {
+          console.error(
+            chalk.red(
+              `Invalid --normalize-max-gb "${options.normalizeMaxGb}". Expected a positive number of GiB.`,
+            ),
+          );
+          process.exit(1);
+        }
+        normalizeMaxBytes = Math.floor(gb * 1024 ** 3);
       }
 
       // Single-phase execution for the sharded CI workflow (prepare/copy/finalize).
@@ -3696,6 +3715,7 @@ adminCommand
           skipData: options.skipData,
           trustUpstream: options.trustUpstream,
           persistStaging: true,
+          normalizeMaxBytes,
         };
         try {
           if (options.phase === "prepare") {
@@ -3725,6 +3745,7 @@ adminCommand
             workDir: options.dir,
             skipData: options.skipData,
             trustUpstream: options.trustUpstream,
+            normalizeMaxBytes,
           });
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);

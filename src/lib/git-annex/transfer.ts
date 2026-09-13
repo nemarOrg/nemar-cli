@@ -935,9 +935,18 @@ export async function batchSetKeysPresent(
  * `git annex find` is the oracle rather than `readlink` on the symlink: a repo
  * on an adjusted-unlock branch stores a pointer file, not a symlink, so reading
  * the link target silently finds nothing there (the same trap `findUnannexedData`
- * documents). Paths git-annex does not report -- still in plain git, or gone --
- * are simply absent from the map, which is what lets the caller notice that an
- * add did not take.
+ * documents).
+ *
+ * **Presence-filtered, deliberately.** Bare `git annex find` reports only files
+ * whose content is in the local annex, so a path is absent from the map when it
+ * is still in plain git AND when it is annexed with the content elsewhere. That
+ * makes this "annexed and held here", which is the stronger question for a caller
+ * about to upload from this clone -- it can fail closed, never open. A caller
+ * that wants every annexed path regardless of presence wants
+ * `listAnnexedPaths`, which passes `--include '*'`.
+ *
+ * A path git itself does not know is an error, not an absence: `git annex find`
+ * exits non-zero on an unmatched pathspec and this throws.
  *
  * Paths are passed in argv-safe chunks; a dataset can name thousands at once.
  */
@@ -967,17 +976,47 @@ export async function getAnnexKeysForPaths(
 }
 
 /**
+ * Every annexed working-tree path mapped to its key, whether or not the content
+ * is in this clone.
+ *
+ * The presence-independent counterpart to {@link getAnnexKeysForPaths}. `--include
+ * '*'` is what makes it presence-independent, the same way `listAnnexedPaths` does
+ * it. A re-import needs this shape: its tree is full of annexed paths whose
+ * content lives only in S3, and their keys still have to reach the manifest.
+ */
+export async function listAnnexedKeys(datasetPath: string): Promise<Map<string, string>> {
+  const { stdout, exitCode, stderr } = await runCommand(
+    ["git", "annex", "find", "--include", "*", "--format=${key}\\t${file}\\n"],
+    { cwd: datasetPath },
+  );
+  if (exitCode !== 0) {
+    throw new Error(`git annex find failed: ${stderr.trim() || `exit ${exitCode}`}`);
+  }
+  const keys = new Map<string, string>();
+  for (const line of stdout.split("\n")) {
+    if (!line) continue;
+    const tab = line.indexOf("\t");
+    if (tab <= 0) continue;
+    keys.set(line.slice(tab + 1), line.slice(0, tab));
+  }
+  return keys;
+}
+
+/**
  * Copy the annexed content of specific paths to a remote.
  *
  * The path-scoped sibling of {@link copyToAnnexRemote}, which copies the whole
  * tree. The import path needs the scoped form (#1159): its clone holds content
  * for the handful of files it just annexed and nothing else, and `copy --to .`
- * would walk every upstream pointer in the dataset to discover that, reporting
- * each absent one along the way.
+ * would walk every upstream pointer in the dataset to find that out (it skips
+ * content-absent files in silence, so the cost is the walk, not the noise).
  *
- * Returns the number of files git-annex said it copied, parsed from its own
- * output rather than assumed from the path count, so a partial copy cannot
- * report success.
+ * `filesCopied` counts the `copy <path> ok` lines git-annex printed, which means
+ * "the remote has it", not "it was transferred now" -- an already-present key
+ * prints the same line. It is a number for the operator, NOT evidence the
+ * content arrived: a path git-annex does not consider annexed is skipped
+ * silently with exit 0 and simply never appears. A caller that needs proof
+ * should ask the location log afterwards (`listAnnexedPaths(path, remote)`).
  */
 export async function copyPathsToAnnexRemote(
   datasetPath: string,

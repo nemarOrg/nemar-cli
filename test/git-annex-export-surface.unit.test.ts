@@ -111,6 +111,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getKeyHashDir",
     "getKeyHashDirs",
     "getRemoteUuid",
+    "listAnnexedKeys",
     "setKeyPresent",
   ],
   "repo-state": [
@@ -173,6 +174,7 @@ const INTERNAL_WIRING = [
   // Consumed there, never by the CLI.
   "copyPathsToAnnexRemote",
   "getAnnexKeysForPaths",
+  "listAnnexedKeys",
 ];
 
 /**

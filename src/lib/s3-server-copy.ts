@@ -531,13 +531,15 @@ export interface ImportManifestItem {
   source: S3Ref | null;
   destUri: string;
   /**
-   * Where this key's content comes from.
+   * Where this key's content comes from. **Absent means upstream**, which is the
+   * ordinary case and the only thing any manifest written before #1159 can say;
+   * nothing writes `"upstream"` explicitly, so read it through
+   * {@link isLocallyUploaded} rather than comparing to a string.
    *
-   * `"upstream"` (the default, and what every manifest written before #1159
-   * carries implicitly) means the copy phase server-side copies it from the
-   * OpenNeuro bucket by key. `"local"` means prepare already uploaded it from
-   * the clone with `git annex copy --to nemar-s3`, because the file was a plain
-   * git blob upstream and has no upstream key to copy from (ADR 0057).
+   * Upstream means the copy phase server-side copies the key from the OpenNeuro
+   * bucket. `"local"` means prepare already uploaded the content from its clone
+   * with `git annex copy --to nemar-s3`, because the file was a plain git blob
+   * upstream and no upstream KEY exists to copy from (ADR 0057).
    *
    * The distinction is only about who transfers the bytes. Both kinds are data:
    * finalize verifies both at the destination and registers both with
@@ -559,9 +561,14 @@ export function isLocallyUploaded(item: Pick<ImportManifestItem, "origin">): boo
  * The copy work one shard owes: this shard's slice of the manifest, minus the
  * keys prepare already uploaded from the clone.
  *
+ * Both numbers are about THIS shard. `localSkipped` counts only local keys that
+ * fall in this shard, so summing the shards' logs gives the manifest total once
+ * rather than once per shard.
+ *
  * Declared here rather than inline in `copyShard` so the selection is testable
- * without AWS: the copy phase talks to S3 on its very next statement, so an
- * inline filter could only be exercised against the real bucket.
+ * without AWS: past the empty-shard early return, the copy phase lists the
+ * destination bucket, so an inline filter could only be exercised against the
+ * real one.
  */
 export function selectShardCopyItems(
   items: ImportManifestItem[],
@@ -570,11 +577,11 @@ export function selectShardCopyItems(
   let localSkipped = 0;
   const shardItems: CopyItem[] = [];
   for (const it of items) {
+    if (!keyInShard(it.key, shard.index, shard.count)) continue;
     if (isLocallyUploaded(it)) {
       localSkipped++;
       continue;
     }
-    if (!keyInShard(it.key, shard.index, shard.count)) continue;
     shardItems.push({ key: it.key, source: it.source, httpUrl: it.sourceUrl, destUri: it.destUri });
   }
   return { shardItems, localSkipped };
