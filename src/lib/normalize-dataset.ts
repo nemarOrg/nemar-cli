@@ -61,7 +61,15 @@ export interface NormalizeDatasetResult {
  */
 export async function planDatasetNormalization(
   datasetId: string,
-  options: { workDir?: string } = {},
+  options: {
+    workDir?: string;
+    /**
+     * Where to clone from. Defaults to the dataset's repository in `nemarDatasets`;
+     * a caller passes this to normalize a repository that is not there yet, and the
+     * fleet tests to drive the real clone-and-push against a local origin.
+     */
+    originUrl?: string;
+  } = {},
 ): Promise<NormalizeDatasetPlan> {
   const workDir = options.workDir ?? mkdtempSync(join(tmpdir(), `nemar-normalize-${datasetId}-`));
   const datasetPath = join(workDir, datasetId);
@@ -73,8 +81,9 @@ export async function planDatasetNormalization(
     // HEAD built on someone else's outdated snapshot.
     await assertCloneMatchesOrigin(datasetPath, datasetId);
   } else {
-    const clone = await cloneDataset(`git@github.com:nemarDatasets/${datasetId}.git`, datasetPath, {
-      useGitHubToken: true,
+    const originUrl = options.originUrl ?? `git@github.com:nemarDatasets/${datasetId}.git`;
+    const clone = await cloneDataset(originUrl, datasetPath, {
+      useGitHubToken: !options.originUrl,
     });
     if (!clone.success) {
       throw new Error(`Failed to clone ${datasetId}: ${clone.error}`);

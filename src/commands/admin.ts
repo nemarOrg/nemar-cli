@@ -21,7 +21,8 @@
  * - nemar admin notify              - Send broadcast email to users
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
 import { Command } from "commander";
@@ -5250,6 +5251,302 @@ fleetCommand
       ),
     );
   });
+
+fleetCommand
+  .command("annex-policy")
+  .description(
+    "Report, and optionally fix, dataset repos that NEMAR's annex policy does not actually govern (#1374, ADR 0058)",
+  )
+  .argument("[dataset-id...]", "Specific datasets to act on (omit to sweep by prefix)")
+  .option("--prefix <prefix>", "Dataset id prefix to sweep (default on: the imported fleet)", "on")
+  .option("--limit <n>", "Act on at most this many datasets, in id order")
+  .option("--apply", "Make the change (default is a read-only report)")
+  .option("--include-data", "Also move data a repo keeps in git, which uploads to S3")
+  .option("--via-aws-cli", "With --include-data, move the bytes with this machine's aws CLI")
+  .option("--no-push", "With --apply, commit locally and push nothing (a rehearsal)")
+  .option("--dir <path>", "Where clones go while they are being fixed (default: a temp dir)")
+  .option("--keep-clones", "Do not delete each clone after its dataset is done")
+  .option("--concurrency <n>", "Parallel GitHub reads during the scan (default 4)", "4")
+  .option("--json <path>", "Write the full report as JSON")
+  .option("--force", "Include the live datasets (nm000103-107)")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .addHelpText(
+    "after",
+    `
+Two things govern what git-annex takes, and an imported dataset has neither (#1374):
+upstream's .gitattributes outranks NEMAR's configured expression, and the expression
+was never written to the git-annex branch at all. The scan reads both from GitHub
+without cloning anything, so a sweep of the fleet costs minutes.
+
+  policy           strip the inherited attributes, configure NEMAR's expression.
+                   One commit, no data moves, no S3 traffic.
+  policy-and-data  ALSO keeps recordings in git. Skipped unless --include-data:
+                   that needs credentials and an upload, which is
+                   nemar admin annex-normalize <id> with someone watching.
+
+--apply pushes to main and to the git-annex branch for every dataset it touches,
+which starts that repo's BIDS validation. Run it in batches (--limit) rather than
+across 600 repositories at once (ADR 0020).
+
+Examples:
+  $ nemar admin fleet annex-policy                       # report the imported fleet
+  $ nemar admin fleet annex-policy --prefix nm           # report the uploaded fleet
+  $ nemar admin fleet annex-policy on001810 --apply      # fix one
+  $ nemar admin fleet annex-policy --apply --limit 10    # fix a batch
+`,
+  )
+  .action(
+    async (
+      datasetIds: string[],
+      options: {
+        prefix: string;
+        limit?: string;
+        apply?: boolean;
+        includeData?: boolean;
+        viaAwsCli?: boolean;
+        push?: boolean;
+        dir?: string;
+        keepClones?: boolean;
+        concurrency: string;
+        json?: string;
+        force?: boolean;
+      } & ConfirmOptions,
+    ) => {
+      if (!requireAuth()) return;
+
+      const {
+        applyAnnexPolicyToDataset,
+        createGitHubReader,
+        labelAnnexPolicyState,
+        selectAnnexPolicyTargets,
+        sweepAnnexPolicy,
+      } = await import("../lib/fleet-annex-policy.js");
+
+      const limit = options.limit ? Number.parseInt(options.limit, 10) : undefined;
+      if (options.limit && (!Number.isFinite(limit) || (limit ?? 0) <= 0)) {
+        console.log(chalk.red(`Error: --limit must be a positive number (got ${options.limit})`));
+        process.exit(1);
+      }
+      const concurrency = Number.parseInt(options.concurrency, 10) || 4;
+
+      let reader: Awaited<ReturnType<typeof createGitHubReader>>;
+      try {
+        reader = await createGitHubReader();
+      } catch (error) {
+        console.log(chalk.red(errorDetail(error)));
+        process.exit(1);
+      }
+
+      // Targets: named datasets, or the fleet by prefix.
+      let targets: string[];
+      if (datasetIds.length > 0) {
+        targets = datasetIds;
+      } else {
+        const listSpinner = ora("Fetching dataset list...").start();
+        try {
+          const all: { dataset_id: string }[] = [];
+          for (let offset = 0; ; offset += 200) {
+            const res = await listDatasets({ limit: 200, offset });
+            all.push(...res.datasets);
+            if (res.datasets.length < 200 || all.length >= res.total_count) break;
+          }
+          targets = selectAnnexPolicyTargets(all, {
+            prefix: options.prefix,
+            exclude: CLI_LIVE_DATASETS,
+            force: options.force,
+            limit,
+          });
+          listSpinner.succeed(
+            `${targets.length} dataset(s) with prefix ${options.prefix} (of ${all.length})`,
+          );
+        } catch (error) {
+          handleCommandError(error, listSpinner, "Failed to fetch datasets");
+          return;
+        }
+      }
+      if (targets.length === 0) {
+        console.log(chalk.dim("No datasets matched."));
+        return;
+      }
+
+      // --- The read-only report, which --apply also starts from. -----------------
+      const scanSpinner = ora(
+        `Reading the annex policy of ${targets.length} dataset(s)...`,
+      ).start();
+      let scanned = 0;
+      let summary: Awaited<ReturnType<typeof sweepAnnexPolicy>>;
+      try {
+        summary = await sweepAnnexPolicy(targets, reader, {
+          concurrency,
+          onResult: () => {
+            scanned++;
+            scanSpinner.text = `Read ${scanned}/${targets.length}...`;
+          },
+        });
+      } catch (error) {
+        scanSpinner.fail(errorDetail(error));
+        process.exit(1);
+      }
+      scanSpinner.succeed(`Read ${summary.scanned} of ${targets.length}`);
+
+      const rulesToRemove = summary.states.reduce(
+        (sum, s) => sum + s.attributeFiles.reduce((n, f) => n + f.rulesRemoved, 0),
+        0,
+      );
+      const filesToRewrite = summary.states.reduce((sum, s) => sum + s.attributeFiles.length, 0);
+      const declined = summary.states.filter((s) =>
+        s.attributeFiles.some((f) => f.declined.length > 0),
+      );
+
+      console.log();
+      console.log(chalk.bold("Annex policy across the fleet"));
+      for (const [label, ids] of Object.entries(summary.byLabel)) {
+        if (ids.length === 0) continue;
+        const color = label === "compliant" ? chalk.green : chalk.yellow;
+        console.log(`  ${color(label.padEnd(18))} ${ids.length}`);
+        if (label !== "compliant") {
+          const shown = ids.slice(0, 12).join(", ");
+          console.log(
+            chalk.dim(`    ${shown}${ids.length > 12 ? ` ... +${ids.length - 12}` : ""}`),
+          );
+        }
+      }
+      console.log(
+        `  ${chalk.dim("attributes to rewrite")} ${filesToRewrite} file(s), ${rulesToRemove} rule(s)`,
+      );
+      if (summary.truncated.length > 0) {
+        console.log(
+          chalk.dim(
+            `  GitHub truncated ${summary.truncated.length} tree(s) (${summary.truncated.slice(0, 5).join(", ")}): their data counts are a lower bound, and the clone decides.`,
+          ),
+        );
+      }
+      if (declined.length > 0) {
+        console.log(
+          chalk.yellow(
+            `  ${declined.length} dataset(s) have a quoted attribute line the strip declines: ${declined.map((s) => s.datasetId).join(", ")}`,
+          ),
+        );
+      }
+      if (summary.failed.length > 0) {
+        console.log(chalk.red(`  unreadable          ${summary.failed.length}`));
+        for (const f of summary.failed.slice(0, 5)) {
+          console.log(chalk.dim(`    ${f.datasetId}: ${f.error}`));
+        }
+      }
+      console.log();
+
+      if (options.json) {
+        writeFileSync(options.json, `${JSON.stringify({ summary }, null, 2)}\n`);
+        console.log(chalk.dim(`  Report written to ${options.json}`));
+      }
+
+      if (!options.apply) {
+        console.log(chalk.dim("Read-only: nothing was changed. Add --apply to fix a batch."));
+        return;
+      }
+
+      // --- Applying. -------------------------------------------------------------
+      const fixable = summary.states
+        .filter((s) => {
+          const label = labelAnnexPolicyState(s);
+          if (label === "compliant") return false;
+          if (label === "policy") return true;
+          return Boolean(options.includeData);
+        })
+        .map((s) => s.datasetId);
+      const needsDataLeg = summary.states.filter(
+        (s) => labelAnnexPolicyState(s) !== "compliant" && !fixable.includes(s.datasetId),
+      );
+      if (needsDataLeg.length > 0) {
+        console.log(
+          chalk.dim(
+            `  ${needsDataLeg.length} dataset(s) are not in this pass because they keep data in git: ${needsDataLeg.map((s) => s.datasetId).join(", ")}. Each needs the S3 leg (nemar admin annex-normalize <id>, or --include-data here).`,
+          ),
+        );
+      }
+      if (fixable.length === 0) {
+        console.log(
+          chalk.green(
+            "Nothing to apply: every dataset read is compliant, or needs the S3 leg (--include-data).",
+          ),
+        );
+        return;
+      }
+
+      const pushing = options.push !== false;
+      const confirmResult = await confirm(
+        `${pushing ? "Push" : "Commit locally, without pushing,"} an annex-policy fix to ${fixable.length} dataset repo(s)${pushing ? ", each starting its BIDS validation" : ""}?`,
+        options,
+      );
+      if (confirmResult !== "confirmed") {
+        console.log(confirmResult === "declined" ? "Declined." : "Cancelled.");
+        return;
+      }
+
+      const workRoot = options.dir ?? mkdtempSync(join(tmpdir(), "nemar-fleet-annex-policy-"));
+      const tally = { applied: 0, compliant: 0, skipped: 0, failed: 0, unverified: 0 };
+      const outcomes: unknown[] = [];
+      let index = 0;
+      for (const datasetId of fixable) {
+        index++;
+        const prefix = chalk.dim(`[${index}/${fixable.length}]`);
+        const outcome = await applyAnnexPolicyToDataset(datasetId, reader, {
+          workRoot,
+          push: pushing,
+          includeData: options.includeData,
+          keepClone: options.keepClones,
+          credentials: options.viaAwsCli ? "ambient" : "backend",
+        });
+        outcomes.push(outcome);
+        switch (outcome.action) {
+          case "applied":
+            tally.applied++;
+            console.log(
+              `${prefix} ${chalk.green(datasetId)} ${outcome.pushed ? "pushed" : "committed locally"}${outcome.notes?.length ? chalk.dim(` (${outcome.notes.join("; ")})`) : ""}`,
+            );
+            break;
+          case "compliant":
+            tally.compliant++;
+            console.log(`${prefix} ${chalk.dim(`${datasetId} already compliant`)}`);
+            break;
+          case "skipped-has-data":
+            tally.skipped++;
+            console.log(
+              `${prefix} ${chalk.yellow(datasetId)} skipped: ${outcome.notes?.join("; ") ?? "keeps data in git"}`,
+            );
+            break;
+          case "unverified":
+            tally.unverified++;
+            console.log(
+              `${prefix} ${chalk.red(datasetId)} pushed, but GitHub still reports drift: ${
+                outcome.after?.attributeFiles.map((f) => f.path).join(", ") ||
+                "policy not configured"
+              }`,
+            );
+            break;
+          case "failed":
+            tally.failed++;
+            console.log(`${prefix} ${chalk.red(datasetId)} failed: ${outcome.error}`);
+            break;
+        }
+      }
+
+      console.log();
+      console.log(
+        `Applied ${chalk.green(String(tally.applied))}, already compliant ${tally.compliant}, skipped ${tally.skipped}, unverified ${chalk.red(String(tally.unverified))}, failed ${chalk.red(String(tally.failed))}`,
+      );
+      if (options.json) {
+        writeFileSync(options.json, `${JSON.stringify({ summary, outcomes }, null, 2)}\n`);
+        console.log(chalk.dim(`  Report written to ${options.json}`));
+      }
+      if (options.dir || options.keepClones) {
+        console.log(chalk.dim(`  Clones under ${workRoot}`));
+      }
+      if (tally.failed > 0 || tally.unverified > 0) process.exit(1);
+    },
+  );
 
 adminCommand.addCommand(fleetCommand);
 

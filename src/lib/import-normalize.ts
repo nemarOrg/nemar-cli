@@ -218,7 +218,11 @@ export function stripLargefilesAttributes(content: string): {
     // else: pattern with nothing left to say -- drop the line.
   }
 
-  const rebuilt = out.join("\n") + (hadTrailingNewline ? "\n" : "");
+  // A file whose every line was a largefiles rule is left empty rather than holding
+  // a single newline: an empty `.gitattributes` says the same thing as no file (and
+  // DataLad's `.datalad/.gitattributes` is exactly three such lines), while a stray
+  // blank line reads as content somebody deleted by hand.
+  const rebuilt = out.length === 0 ? "" : out.join("\n") + (hadTrailingNewline ? "\n" : "");
   return { content: rebuilt, stripped, skipped };
 }
 

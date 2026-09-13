@@ -663,6 +663,31 @@ does not change that. Add `--no-check-gitignore` as well, or an uncached path th
 dataset's own `.gitignore` matches is skipped in silence and ends up in neither
 plane.
 
+### Sweeping the fleet onto the policy (#1374)
+
+`nemar admin fleet annex-policy` reads what governs each dataset repository without
+cloning it: the tree listing names every tracked `.gitattributes`, their blobs say
+which rules are removable, and `config.log` on the git-annex branch says what
+`annex.largefiles` is set to. About three GitHub reads per dataset, so 600 datasets
+is a couple of minutes rather than 600 clones.
+
+Two things the listing cannot tell you, both handled rather than ignored:
+
+- **An unlocked annexed file is a plain blob**, not a symlink, and NEMAR's own upload
+  path commits them that way -- 59,696 of them across the `nm` fleet. They are told
+  from data git really holds by size (a pointer file is one `/annex/objects/<key>`
+  line), and the clone the fix makes asks git-annex itself, so a dataset the sweep
+  called policy-only that turns out to hold data is skipped rather than half-fixed.
+- **GitHub truncates a tree over about 65,000 entries** (5 of the 600 imported
+  datasets, 1 of the `nm` ones). The attribute half is still exact; the data count is
+  a lower bound, and the report says which datasets those are.
+
+Apply in batches with `--limit`: each dataset gets one commit on `main` plus a
+git-annex branch update, and the push starts that repository's BIDS validation
+(ADR 0020). `--no-push --keep-clones` rehearses the whole thing locally first. A
+second pass over an applied dataset reports it compliant and pushes nothing, because
+`git annex config --set` to a value already in force writes no commit.
+
 **Temporary credentials have to reach the transfer, not just the `enableremote`.**
 git-annex caches an S3 remote's key and secret in `.git/annex/creds/<uuid>` and has
 nowhere to put a session token, so a `git annex copy` that inherits the environment
