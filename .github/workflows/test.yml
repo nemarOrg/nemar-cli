@@ -471,9 +471,20 @@ jobs:
       # `actions/checkout` with `ref: main` creates that local branch, which is
       # what the test resolves.
       #
-      # nemarOrg/docs is PUBLIC, so no token. `main`, not a pre-release branch:
-      # that repo has no release train, and merging to main IS its deploy, so
-      # what is on main is what is served.
+      # `main`, not a pre-release branch: that repo has no release train, and
+      # merging to main IS its deploy, so what is on main is what is served.
+      #
+      # THE TOKEN FALLBACK IS WHAT SURVIVES nemarOrg/docs GOING PRIVATE.
+      # `github.token` can read a public repo, so this works today unchanged. It
+      # cannot read a private one, and the test treats a declared-but-missing
+      # checkout as a FAILURE rather than a skip -- deliberately, so a broken
+      # checkout cannot quietly disable the check. So the day that repo is made
+      # private, this job goes red unless `DOCS_READ_TOKEN` exists.
+      #
+      # Setting the secret first, and leaving this fallback in place, means the
+      # visibility change needs no coordinated workflow edit and has no window
+      # where CI is red. The secret wants read access to that repo's contents and
+      # nothing else.
       - name: Check out the docs content tree
         uses: actions/checkout@v4
         with:
@@ -482,6 +493,7 @@ jobs:
           sparse-checkout: src/content/docs
           sparse-checkout-cone-mode: false
           ref: main
+          token: ${{ secrets.DOCS_READ_TOKEN || github.token }}
 
       - name: Run pure unit tests (no live backend)
         env:
