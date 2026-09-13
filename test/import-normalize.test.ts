@@ -142,6 +142,11 @@ async function buildUpstreamClone(opts: { unlocked?: boolean } = {}): Promise<st
   const dir = mkdtempSync(join(tmpdir(), "nemar-upstream-"));
   scratch.push(dir);
   await run(["git", "init", "-q", "--initial-branch", "main", "."], dir);
+  // An identity per repository: the required CI tier configures none, and both
+  // `git commit` and `git annex init` need one. Passing here without it would be
+  // luck about the machine, not a property of the code.
+  await run(["git", "config", "user.email", "test@nemar.test"], dir);
+  await run(["git", "config", "user.name", "NEMAR Test"], dir);
   await run(["git", "annex", "init", "--quiet", "upstream"], dir);
 
   writeFileSync(join(dir, ".gitattributes"), UPSTREAM_GITATTRIBUTES);

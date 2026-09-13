@@ -80,6 +80,12 @@ async function run(args: string[], cwd: string): Promise<string> {
   return stdout;
 }
 
+/** git-annex commits to its own branch, so every fixture repo needs an author. */
+async function setIdentity(dir: string): Promise<void> {
+  await run(["git", "config", "user.email", "test@nemar.test"], dir);
+  await run(["git", "config", "user.name", "NEMAR Test"], dir);
+}
+
 async function headMode(dir: string, path: string, ref = "HEAD"): Promise<string> {
   const stdout = await run(["git", "ls-tree", ref, "--", path], dir);
   return stdout.trim().split(" ")[0] ?? "";
@@ -94,6 +100,10 @@ async function buildOriginAndClone(): Promise<{ origin: string; clone: string }>
   mkdirSync(source, { recursive: true });
 
   await run(["git", "init", "-q", "--initial-branch", "main", "."], source);
+  // An identity per repository, the way the other git-touching suites do it: the
+  // required CI tier runs with none configured, and `git annex init` commits to the
+  // git-annex branch, so without this the fixture depends on the machine.
+  await setIdentity(source);
   await run(["git", "annex", "init", "--quiet", "upstream"], source);
   writeFileSync(join(source, ".gitattributes"), UPSTREAM_GITATTRIBUTES);
   writeFileSync(join(source, "dataset_description.json"), '{"Name":"x"}');
@@ -117,13 +127,18 @@ async function buildOriginAndClone(): Promise<{ origin: string; clone: string }>
   await run(["git", "commit", "-qm", "dataset"], source);
   await run(["git", "tag", "v1.0.0"], source);
 
-  await run(["git", "init", "-q", "--bare", bare], root);
+  // `--initial-branch main` on the BARE repo too: without it the bare repo's HEAD
+  // follows the machine's `init.defaultBranch`, so on a runner that still defaults to
+  // `master` the clone below checks out nothing at all and HEAD does not resolve.
+  // The fixture passed locally only because this machine defaults to `main`.
+  await run(["git", "init", "-q", "--bare", "--initial-branch", "main", bare], root);
   await run(["git", "remote", "add", "origin", bare], source);
   await run(["git", "push", "-q", "--all", "origin"], source);
   await run(["git", "push", "-q", "--tags", "origin"], source);
 
   const cloneDir = join(root, "clone");
   await run(["git", "clone", "-q", bare, cloneDir], root);
+  await setIdentity(cloneDir);
   await run(["git", "annex", "init", "--quiet", "clone"], cloneDir);
   // The clone needs the content the way a real clone of a git-resident file does:
   // it comes down with the blobs, so nothing to fetch.
