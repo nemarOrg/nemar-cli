@@ -245,11 +245,20 @@ export function chunkAddTargets(
  * `chunking` overrides the argv chunk bounds; production callers use the
  * defaults. Exposed so tests can drive the multi-chunk loop through this
  * entry point without thousands of fixture files.
+ *
+ * `forceLarge` passes `--force-large`, which annexes every named path whatever
+ * any configuration says. It exists for the import path (#1159), where the
+ * clone carries UPSTREAM's `annex.largefiles` -- and an inherited
+ * `.gitattributes` setting beats both `git annex config` and git config, so
+ * neither `configureLargefiles` nor a `-c annex.largefiles=anything` override
+ * would move the file (verified against git-annex 10.20260901, ADR 0057).
+ * Only ever pass paths the policy in `policy.ts` already called data.
  */
 export async function gitAnnexAdd(
   path: string,
   targets: string | string[] = ".",
   chunking: { maxPaths?: number; maxBytes?: number } = {},
+  options: { forceLarge?: boolean } = {},
 ): Promise<{ success: boolean; error?: string }> {
   const chunks =
     typeof targets === "string"
@@ -259,11 +268,13 @@ export async function gitAnnexAdd(
           chunking.maxPaths ?? ADD_CHUNK_MAX_PATHS,
           chunking.maxBytes ?? ADD_CHUNK_MAX_BYTES,
         );
+  const forceArgs = options.forceLarge ? ["--force-large"] : [];
   try {
     for (const chunk of chunks) {
-      const { stderr, exitCode } = await runCommand(["git", "annex", "add", "--", ...chunk], {
-        cwd: path,
-      });
+      const { stderr, exitCode } = await runCommand(
+        ["git", "annex", "add", ...forceArgs, "--", ...chunk],
+        { cwd: path },
+      );
       if (exitCode !== 0) {
         return { success: false, error: stderr.trim() || "Failed to add files to git-annex" };
       }

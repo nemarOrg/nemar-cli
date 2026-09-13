@@ -9,6 +9,7 @@
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { chunkAddTargets } from "./init.js";
 import { shouldAnnex } from "./policy.js";
 import { runCommand } from "./run-command.js";
 import { type S3Credentials, awsCredentialEnv } from "./s3-remote.js";
@@ -926,4 +927,84 @@ export async function batchSetKeysPresent(
     }
   }
   return { success, failed };
+}
+
+/**
+ * Map each given working-tree path to the annex key holding its content.
+ *
+ * `git annex find` is the oracle rather than `readlink` on the symlink: a repo
+ * on an adjusted-unlock branch stores a pointer file, not a symlink, so reading
+ * the link target silently finds nothing there (the same trap `findUnannexedData`
+ * documents). Paths git-annex does not report -- still in plain git, or gone --
+ * are simply absent from the map, which is what lets the caller notice that an
+ * add did not take.
+ *
+ * Paths are passed in argv-safe chunks; a dataset can name thousands at once.
+ */
+export async function getAnnexKeysForPaths(
+  datasetPath: string,
+  paths: string[],
+): Promise<Map<string, string>> {
+  const keys = new Map<string, string>();
+  if (paths.length === 0) return keys;
+
+  for (const chunk of chunkAddTargets(paths)) {
+    const { stdout, exitCode, stderr } = await runCommand(
+      ["git", "annex", "find", "--format=${key}\\t${file}\\n", "--", ...chunk],
+      { cwd: datasetPath },
+    );
+    if (exitCode !== 0) {
+      throw new Error(`git annex find failed: ${stderr.trim() || `exit ${exitCode}`}`);
+    }
+    for (const line of stdout.split("\n")) {
+      if (!line) continue;
+      const tab = line.indexOf("\t");
+      if (tab <= 0) continue;
+      keys.set(line.slice(tab + 1), line.slice(0, tab));
+    }
+  }
+  return keys;
+}
+
+/**
+ * Copy the annexed content of specific paths to a remote.
+ *
+ * The path-scoped sibling of {@link copyToAnnexRemote}, which copies the whole
+ * tree. The import path needs the scoped form (#1159): its clone holds content
+ * for the handful of files it just annexed and nothing else, and `copy --to .`
+ * would walk every upstream pointer in the dataset to discover that, reporting
+ * each absent one along the way.
+ *
+ * Returns the number of files git-annex said it copied, parsed from its own
+ * output rather than assumed from the path count, so a partial copy cannot
+ * report success.
+ */
+export async function copyPathsToAnnexRemote(
+  datasetPath: string,
+  remoteName: string,
+  paths: string[],
+  jobs = 4,
+  credentials?: S3Credentials,
+): Promise<{ success: boolean; error?: string; filesCopied: number }> {
+  if (paths.length === 0) return { success: true, filesCopied: 0 };
+
+  const env = awsCredentialEnv(credentials);
+  let filesCopied = 0;
+  try {
+    for (const chunk of chunkAddTargets(paths)) {
+      const { stdout, stderr, exitCode } = await runCommand(
+        ["git", "annex", "copy", "--to", remoteName, "-J", jobs.toString(), "--", ...chunk],
+        { cwd: datasetPath, env },
+      );
+      if (exitCode !== 0) {
+        return { success: false, error: extractCopyError(stdout, stderr), filesCopied };
+      }
+      const copied = stdout.match(/^copy .+ ok$/gm);
+      filesCopied += copied ? copied.length : 0;
+    }
+    return { success: true, filesCopied };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { success: false, error: msg || "Unknown error during copy", filesCopied };
+  }
 }
