@@ -32,6 +32,7 @@ import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import {
+  DOCS_CLI_SESSION_TTL_SECONDS,
   DOCS_GRANT_TTL_SECONDS,
   DOCS_SESSION_HEADER,
   DOCS_SESSION_TTL_SECONDS,
@@ -42,7 +43,8 @@ import { authMiddleware } from "../src/middleware/auth";
 import { __selectBucket } from "../src/middleware/rateLimit";
 import { authDocsRoutes } from "../src/routes/auth-docs";
 import { authWebRoutes } from "../src/routes/auth-web";
-import { hashGrantCode } from "../src/services/docs-auth";
+import { DOCS_CLI_MINT_INSERT_SQL, hashGrantCode } from "../src/services/docs-auth";
+import { hashApiKey } from "../src/services/token";
 import { type AuthMethod, issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -82,6 +84,30 @@ function seedUser(email: string, role: "member" | "admin" | "owner" = "admin"): 
   const row = db.query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?").get(email);
   if (!row) throw new Error("seed failed");
   return row.id;
+}
+
+/** Give a seeded account a live CLI API key and return the plaintext. */
+async function seedApiKey(userId: number, apiKey: string): Promise<string> {
+  db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
+    userId,
+    await hashApiKey(apiKey),
+    apiKey.slice(0, 8),
+  );
+  return apiKey;
+}
+
+async function cliSession(apiKey?: string, extraHeaders: Record<string, string> = {}) {
+  return app.request(
+    "/auth/docs/cli-session",
+    {
+      method: "POST",
+      headers: {
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        ...extraHeaders,
+      },
+    },
+    env(),
+  );
 }
 
 async function appSession(userId: number, authMethod: AuthMethod = "orcid"): Promise<string> {
@@ -851,5 +877,244 @@ describe("the non-admin 404 is the same 404 an unrouted path gets", () => {
     expect(refused.keyKind).toBe("auth-ip");
     expect(unrouted.keyKind).toBe("ip");
     expect(refused.maxRequests).not.toBe(unrouted.maxRequests);
+  });
+});
+
+// --------------------------------------------------------------------------
+// POST /auth/docs/cli-session (epic #1336 phase 3, issue #1341)
+// --------------------------------------------------------------------------
+
+describe("POST /auth/docs/cli-session", () => {
+  const KEY = "nk_test_cli_session_key_0123456789abcdef";
+
+  test("mints a docs session for an admin holding an API key", async () => {
+    const userId = seedUser("admin-cli@nemar.test", "admin");
+    await seedApiKey(userId, KEY);
+
+    const res = await cliSession(KEY);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      session: string;
+      max_age_seconds: number;
+      username: string | null;
+    };
+    expect(typeof body.session).toBe("string");
+    expect(body.session.length).toBeGreaterThan(20);
+    expect(body.max_age_seconds).toBe(DOCS_CLI_SESSION_TTL_SECONDS);
+    expect(body.username).toBe("admin-cli");
+    expect(docsSessionCount(userId)).toBe(1);
+  });
+
+  test("the row it writes is docs-scoped, not remembered, and records the key", async () => {
+    const userId = seedUser("admin-cli-row@nemar.test", "owner");
+    await seedApiKey(userId, KEY);
+    expect((await cliSession(KEY)).status).toBe(200);
+
+    const row = db
+      .query<{ scope: string; remember: number; auth_method: string | null }, [number]>(
+        "SELECT scope, remember, auth_method FROM web_sessions WHERE user_id = ? AND scope = 'docs'",
+      )
+      .get(userId);
+    expect(row?.scope).toBe("docs");
+    expect(row?.remember).toBe(0);
+    // Not 'orcid' and not 'email_code': this session's identity was proven by a
+    // key, and the column should say so rather than inherit a browser's story.
+    expect(row?.auth_method).toBe("api_key");
+  });
+
+  test("the TTL is much shorter than the browser session's", async () => {
+    // Not a restatement of the constant: the point is the RELATION. A program's
+    // credential reaches shell histories and agent transcripts, so it must not
+    // simply inherit the eight hours a person at a keyboard gets.
+    expect(DOCS_CLI_SESSION_TTL_SECONDS).toBeLessThan(DOCS_SESSION_TTL_SECONDS);
+  });
+
+  test("the minted value passes verify and reports the role", async () => {
+    const userId = seedUser("admin-cli-verify@nemar.test", "admin");
+    await seedApiKey(userId, KEY);
+    const { session } = (await (await cliSession(KEY)).json()) as { session: string };
+
+    const res = await verify(session);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      username: "admin-cli-verify",
+      role: "admin",
+    });
+  });
+
+  test("refuses a request with no Authorization header", async () => {
+    const res = await cliSession();
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe("unauthenticated");
+  });
+
+  test("refuses a key that does not exist", async () => {
+    const res = await cliSession("nk_not_a_real_key_0123456789abcdefghij");
+    expect(res.status).toBe(401);
+  });
+
+  test("refuses a revoked key, and mints nothing", async () => {
+    const userId = seedUser("admin-cli-revoked@nemar.test", "admin");
+    await seedApiKey(userId, KEY);
+    db.run("UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ?", [userId]);
+
+    expect((await cliSession(KEY)).status).toBe(401);
+    expect(docsSessionCount(userId)).toBe(0);
+  });
+
+  test("refuses a live key on a non-admin account with 404, and mints nothing", async () => {
+    // The same disguise `grant` gives a signed-in non-admin. Asserted here
+    // because the two entrances must answer alike: one of them saying 403 would
+    // tell a caller their account was checked and found wanting. Like the
+    // demotion test below, this is a claim about the ANSWER, not about which of
+    // the two role gates produced it.
+    const userId = seedUser("member-cli@nemar.test", "member");
+    await seedApiKey(userId, KEY);
+
+    const res = await cliSession(KEY);
+    expect(res.status).toBe(404);
+    expect(docsSessionCount(userId)).toBe(0);
+  });
+
+  test("refuses a live key on an account that is not active, and mints nothing", async () => {
+    // `pending` is the case that matters: `findSessionByCookieId` admits it so a
+    // pending account can reach Settings to fix its address, and an admin-only
+    // reading surface must never be easier to enter than the API it documents.
+    const userId = seedUser("admin-cli-pending@nemar.test", "admin");
+    await seedApiKey(userId, KEY);
+    db.run("UPDATE users SET status = 'pending' WHERE id = ?", [userId]);
+
+    const res = await cliSession(KEY);
+    expect(res.status).toBe(403);
+    expect(docsSessionCount(userId)).toBe(0);
+  });
+
+  test("an account demoted after its key was issued gets nothing", async () => {
+    // Role is read per request, not carried on the token: a key minted while
+    // the account was an admin buys nothing once it is not. That is what this
+    // proves, and NOT which layer refuses -- the route's own check and the mint
+    // statement's WHERE clause each suffice on their own, so removing either
+    // alone leaves this test green (measured). The statement-level test below
+    // is what pins the redundant layer.
+    const userId = seedUser("admin-cli-demoted@nemar.test", "admin");
+    await seedApiKey(userId, KEY);
+    db.run("UPDATE users SET role = 'member' WHERE id = ?", [userId]);
+
+    expect((await cliSession(KEY)).status).toBe(404);
+    expect(docsSessionCount(userId)).toBe(0);
+  });
+
+  test("THE APP COOKIE IS NOT ACCEPTED HERE", async () => {
+    // The load-bearing one. `authMiddleware` would take either credential, and
+    // taking the cookie here would make this route a cross-site POST away from
+    // minting a docs credential from a browser's ambient session -- `grant`
+    // checks `Origin` before anything else precisely because it does accept a
+    // cookie. This route resolves the bearer itself so the cookie path is
+    // absent rather than merely discouraged.
+    const userId = seedUser("admin-cli-cookie@nemar.test", "admin");
+    const cookie = await appSession(userId);
+
+    const res = await cliSession(undefined, { Cookie: `nemar_session=${cookie}` });
+    expect(res.status).toBe(401);
+    expect(docsSessionCount(userId)).toBe(0);
+  });
+
+  test("the minted value does not authenticate the management API", async () => {
+    // The scope crossing, asserted against the real `authMiddleware` rather
+    // than `webSessionMiddleware`: testing the wrong middleware is how the
+    // original version of this hole survived a suite that claimed to cover it.
+    const userId = seedUser("admin-cli-scope@nemar.test", "admin");
+    await seedApiKey(userId, KEY);
+    const { session } = (await (await cliSession(KEY)).json()) as { session: string };
+
+    const guarded = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+    guarded.get("/protected", authMiddleware, (c) => c.json({ ok: true }));
+    const res = await guarded.request(
+      "/protected",
+      { headers: { Cookie: `nemar_session=${session}` } },
+      env(),
+    );
+    expect(res.status).toBe(401);
+  });
+
+  test("neither the credential nor the refusal may be cached", async () => {
+    const userId = seedUser("admin-cli-cache@nemar.test", "admin");
+    await seedApiKey(userId, KEY);
+    expect((await cliSession(KEY)).headers.get("Cache-Control")).toBe("no-store");
+    // The refusal path builds its response inside `resolveBearerUser`, which
+    // knows nothing about this file's cache rule, so the route has to add it --
+    // and a dropped header there would otherwise be invisible.
+    expect(
+      (await cliSession("nk_not_a_real_key_0123456789abcdefghij")).headers.get("Cache-Control"),
+    ).toBe("no-store");
+  });
+
+  describe("the mint statement's own gates", () => {
+    // RUN DIRECTLY, because through the route they cannot be observed. The
+    // route refuses a non-admin before reaching this statement, so removing the
+    // statement's role gate changes no response; removing the route's check
+    // changes none either, because the statement then refuses. Each layer hides
+    // the other, which is what defense in depth means and also why a
+    // route-level test can never pin either one. These run the SQL against the
+    // same real schema the routes use and assert the contract the constant
+    // claims for itself: it mints, or it inserts nothing.
+    //
+    // The bindings are the route's, in the route's order: cookieIdHash,
+    // ttlSeconds, userAgent, ipHash, userId.
+    function mintDirect(userId: number, cookieHash = `hash-${userId}`): number {
+      return (
+        db.query(DOCS_CLI_MINT_INSERT_SQL).run(cookieHash, 900, "test-agent", null, userId)
+          .changes ?? 0
+      );
+    }
+
+    test("inserts one row for an active admin", () => {
+      const userId = seedUser("stmt-admin@nemar.test", "admin");
+      expect(mintDirect(userId)).toBe(1);
+      expect(docsSessionCount(userId)).toBe(1);
+    });
+
+    test("inserts nothing for a member", () => {
+      const userId = seedUser("stmt-member@nemar.test", "member");
+      expect(mintDirect(userId)).toBe(0);
+      expect(docsSessionCount(userId)).toBe(0);
+    });
+
+    test("inserts nothing for an admin whose account is not active", () => {
+      const userId = seedUser("stmt-pending@nemar.test", "admin");
+      db.run("UPDATE users SET status = 'pending' WHERE id = ?", [userId]);
+      expect(mintDirect(userId)).toBe(0);
+    });
+
+    test("inserts nothing for a soft-deleted admin", () => {
+      const userId = seedUser("stmt-deleted@nemar.test", "admin");
+      db.run("UPDATE users SET deleted_at = datetime('now') WHERE id = ?", [userId]);
+      expect(mintDirect(userId)).toBe(0);
+    });
+
+    test("cannot be made to write an app session by its bindings", () => {
+      // `scope` and `remember` are literals in the statement rather than binds,
+      // so there is no argument order that turns this into an app credential --
+      // the property the route depends on for the scope separation to hold.
+      const userId = seedUser("stmt-scope@nemar.test", "owner");
+      expect(mintDirect(userId)).toBe(1);
+      const row = db
+        .query<{ scope: string; remember: number }, [number]>(
+          "SELECT scope, remember FROM web_sessions WHERE user_id = ?",
+        )
+        .get(userId);
+      expect(row?.scope).toBe("docs");
+      expect(row?.remember).toBe(0);
+    });
+  });
+
+  test("rides the strict per-IP rate-limit bucket", async () => {
+    // Per-IP is a real per-caller key for this route, unlike `grant` and
+    // `exchange`, which arrive from Worker egress addresses. Asserted through
+    // `__selectBucket` because `caches.default` does not exist under bun test,
+    // so a worker-driven version would fail open and find no difference at all.
+    const selected = __selectBucket("/auth/docs/cli-session", `Bearer ${KEY}`, "203.0.113.9");
+    expect(selected.keyKind).toBe("auth-ip");
   });
 });

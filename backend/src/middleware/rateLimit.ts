@@ -180,8 +180,17 @@ const AUTH_PATHS = [
   // and cannot be brute-forced at any rate a bucket would help with. Note the
   // comment on MAX_REQUESTS below -- shared CF egress IPs are why that bucket
   // is 500 rather than 100 in the first place.
+  //
+  // `/auth/docs/cli-session` IS here, and unlike the two above it is called by
+  // a person's own machine rather than by a Worker, so the per-IP key is a real
+  // per-caller key for once. An admin mints one session per fifteen minutes of
+  // reading, so ten a minute is far above any honest use and low enough that a
+  // stolen API key cannot be turned into a stream of docs credentials from one
+  // address. The CLI takes several paths in one invocation partly so that a
+  // reading session costs one mint rather than one per page.
   "/auth/docs/grant",
   "/auth/docs/exchange",
+  "/auth/docs/cli-session",
   // NOT an /auth path, and deliberately in this list anyway (ADR 0042, #1253):
   // POST /users/me/upload-access/request spends a live GitHub API call on the
   // shared installation token for every attempt, and a refused one writes
