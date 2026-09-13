@@ -27,8 +27,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { gitAnnexAdd } from "../src/lib/git-annex/init";
 import { runCommand } from "../src/lib/git-annex/run-command";
+import type { UploadStrategy } from "../src/lib/import-normalize";
 import { findUnannexedData } from "../src/lib/import-openneuro";
-import { normalizeDatasetRepo, planDatasetNormalization } from "../src/lib/normalize-dataset";
+import {
+  normalizeDatasetRepo,
+  planDatasetNormalization,
+  resolveSpecialRemoteUuid,
+} from "../src/lib/normalize-dataset";
 
 const UPSTREAM_GITATTRIBUTES = `* annex.backend=SHA256E
 **/.git* annex.largefiles=nothing
@@ -280,5 +285,48 @@ describe("normalizeDatasetRepo", () => {
     );
     expect(result.committed).toBe(false);
     expect(result.pushed).toBe(false);
+  }, 180_000);
+});
+
+describe("the upload leg is swappable", () => {
+  test("resolveSpecialRemoteUuid reads the UUID out of the git-annex branch", async () => {
+    // Needed by the ambient-credential path, which must NOT enable the remote (that
+    // contacts S3 with the credential handling being bypassed) yet still has to
+    // register keys against the UUID every existing clone already knows.
+    await addDirectoryRemote(clone, "stand-in");
+    const uuid = await resolveSpecialRemoteUuid(clone, "stand-in");
+    expect(uuid).toMatch(/^[0-9a-f-]{36}$/);
+
+    const fromGitAnnex = await run(["git", "config", "remote.stand-in.annex-uuid"], clone);
+    expect(uuid).toBe(fromGitAnnex.trim());
+    expect(await resolveSpecialRemoteUuid(clone, "no-such-remote")).toBeNull();
+  }, 180_000);
+
+  test("a strategy that cannot prove the upload stops the migration before the commit", async () => {
+    // The contract every strategy owes: throw rather than return when it cannot
+    // show the content arrived. A strategy that lies would be committed on top of.
+    await addDirectoryRemote(clone, "stand-in");
+    const refusing: UploadStrategy = async () => {
+      throw new Error("nothing arrived at the remote");
+    };
+
+    await expect(
+      normalizeDatasetRepo(
+        {
+          datasetId: "on999999",
+          datasetPath: clone,
+          files: await findUnannexedData(clone),
+          bytes: 300_000,
+          attributeFiles: [".gitattributes"],
+        },
+        { push: true, remoteName: "stand-in", upload: refusing },
+      ),
+    ).rejects.toThrow(/nothing arrived/);
+
+    const log = await run(["git", "log", "--oneline"], clone);
+    expect(log).not.toContain("Apply NEMAR annex policy");
+    expect(await headMode(clone, SMALL_MOTION)).toBe("100644");
+    const originMain = await run(["git", "ls-tree", "main", "--", SMALL_MOTION], origin);
+    expect(originMain.trim().split(" ")[0]).toBe("100644");
   }, 180_000);
 });

@@ -61,6 +61,24 @@ export interface NormalizedFile {
  */
 export const NORMALIZE_MAX_BYTES = 5 * 1024 ** 3;
 
+/**
+ * How the content of freshly annexed keys reaches the remote.
+ *
+ * The default ({@link annexCopyUpload}) is git-annex's own S3 client, which is
+ * what the import uses and what every test drives. A dataset migration can need a
+ * different one: `GetFederationToken` credentials cannot reach an imported
+ * dataset's prefix at all (#1380), so `normalize-dataset.ts` supplies a strategy
+ * that moves the same bytes with credentials that can.
+ *
+ * A strategy owns transferring AND proving the transfer. It must throw, not return,
+ * when it cannot prove every key arrived -- the caller commits immediately after.
+ */
+export type UploadStrategy = (args: {
+  datasetPath: string;
+  files: NormalizedFile[];
+  remoteName: string;
+}) => Promise<{ copied: number }>;
+
 export interface NormalizeDataResult {
   /** Manifest entries for the uploaded keys, marked `origin: "local"`. */
   items: ImportManifestItem[];
@@ -302,6 +320,8 @@ export async function normalizeUnannexedData(args: {
   jobs?: number;
   /** Overridable so the bound itself is testable; production uses the default. */
   maxBytes?: number;
+  /** Defaults to {@link annexCopyUpload}; see {@link UploadStrategy}. */
+  upload?: UploadStrategy;
 }): Promise<NormalizeDataResult> {
   const { datasetPath, files, remoteName, bucket, nemarId, credentials } = args;
   if (files.length === 0) return { items: [], files: [], copied: 0, bytes: 0 };
@@ -342,43 +362,15 @@ export async function normalizeUnannexedData(args: {
     );
   }
 
-  const copy = await copyPathsToAnnexRemote(
-    datasetPath,
-    remoteName,
-    paths,
-    args.jobs ?? 4,
-    credentials,
-  );
-  if (!copy.success) {
-    throw new Error(
-      `Annexed ${paths.length} data file(s) but the upload to ${remoteName} failed: ${copy.error}. Not committing: the pushed tree would name keys with no content behind them.`,
-    );
-  }
-
-  // Exit 0 is not evidence. `git annex copy --to` prints `copy <path> ok` both for
-  // a transfer and for a key the remote already held, and says nothing at all for
-  // a path it does not consider annexed -- so ask the location log which paths the
-  // remote now holds. A log read, no network.
-  //
-  // The second net behind the key check above, which is what makes the silent-skip
-  // case unreachable today; this one catches it if that check ever regresses. It
-  // does work on its own: with the copy's exit code ignored, a copy to a remote
-  // whose directory had been removed raised exactly this error rather than
-  // proceeding (measured by mutating the `!copy.success` branch away).
-  const atRemote = await listAnnexedPaths(datasetPath, remoteName);
-  const notAtRemote = paths.filter((path) => !atRemote.has(path));
-  if (notAtRemote.length > 0) {
-    throw new Error(
-      `Uploaded to ${remoteName} without error, but git-annex does not record ${notAtRemote.length} of ${paths.length} path(s) as present there (${notAtRemote.slice(0, 3).join(", ")}${notAtRemote.length > 3 ? ", ..." : ""}). Not committing: those keys would have no content behind them.`,
-    );
-  }
-
   const normalized: NormalizedFile[] = files.map((f) => ({
     path: f.path,
     // biome-ignore lint/style/noNonNullAssertion: every path is in `keys` (checked above)
     key: keys.get(f.path)!,
     size: f.size,
   }));
+
+  const upload = args.upload ?? annexCopyUpload({ credentials, jobs: args.jobs });
+  const { copied } = await upload({ datasetPath, files: normalized, remoteName });
 
   // Identical content shares one key, so dedupe: the manifest addresses keys,
   // and a duplicate entry would have finalize verify and register it twice.
@@ -396,8 +388,51 @@ export async function normalizeUnannexedData(args: {
   return {
     items: [...items.values()],
     files: normalized,
-    copied: copy.filesCopied,
+    copied,
     bytes,
+  };
+}
+
+/**
+ * The default upload: git-annex's own client, then the location log as proof.
+ *
+ * Exit 0 is not evidence on its own. `git annex copy --to` prints `copy <path> ok`
+ * both for a transfer and for a key the remote already held, and says nothing at
+ * all for a path it does not consider annexed -- so this asks the location log
+ * which paths the remote now holds. A log read, no network.
+ *
+ * That check is the second net behind `normalizeUnannexedData`'s key verification,
+ * which is what makes the silent-skip case unreachable today. It does work on its
+ * own: with the copy's exit code ignored, a copy to a remote whose directory had
+ * been removed raised exactly this error rather than proceeding (measured by
+ * mutating the `!copy.success` branch away).
+ */
+export function annexCopyUpload(
+  options: { credentials?: S3Credentials; jobs?: number } = {},
+): UploadStrategy {
+  return async ({ datasetPath, files, remoteName }) => {
+    const paths = files.map((f) => f.path);
+    const copy = await copyPathsToAnnexRemote(
+      datasetPath,
+      remoteName,
+      paths,
+      options.jobs ?? 4,
+      options.credentials,
+    );
+    if (!copy.success) {
+      throw new Error(
+        `Annexed ${paths.length} data file(s) but the upload to ${remoteName} failed: ${copy.error}. Not committing: the pushed tree would name keys with no content behind them.`,
+      );
+    }
+
+    const atRemote = await listAnnexedPaths(datasetPath, remoteName);
+    const notAtRemote = paths.filter((path) => !atRemote.has(path));
+    if (notAtRemote.length > 0) {
+      throw new Error(
+        `Uploaded to ${remoteName} without error, but git-annex does not record ${notAtRemote.length} of ${paths.length} path(s) as present there (${notAtRemote.slice(0, 3).join(", ")}${notAtRemote.length > 3 ? ", ..." : ""}). Not committing: those keys would have no content behind them.`,
+      );
+    }
+    return { copied: copy.filesCopied };
   };
 }
 
@@ -451,6 +486,8 @@ export async function normalizeImportedTree(args: {
   credentials?: S3Credentials;
   maxBytes?: number;
   jobs?: number;
+  /** Defaults to {@link annexCopyUpload}; see {@link UploadStrategy}. */
+  upload?: UploadStrategy;
 }): Promise<NormalizeImportResult> {
   const policy = await applyNemarAnnexPolicy(args.datasetPath);
 
@@ -465,6 +502,7 @@ export async function normalizeImportedTree(args: {
           credentials: args.credentials,
           maxBytes: args.maxBytes,
           jobs: args.jobs,
+          upload: args.upload,
         })
       : null;
 

@@ -3624,6 +3624,10 @@ adminCommand
     "--normalize-max-gb <n>",
     "Raise the ceiling on how much data will be uploaded from this host (default 5 GiB)",
   )
+  .option(
+    "--via-aws-cli",
+    "Move the content with `aws s3 sync` rather than git-annex's S3 client, using whatever the aws CLI on this machine is already configured with. Required for an imported (on######) dataset until #1380 is fixed: the API-minted credentials are federated from an identity that cannot reach those prefixes.",
+  )
   .option("-y, --yes", "Skip the confirmation prompt")
   .addHelpText(
     "after",
@@ -3653,6 +3657,7 @@ Examples:
         dir?: string;
         push?: boolean;
         normalizeMaxGb?: string;
+        viaAwsCli?: boolean;
         yes?: boolean;
         no?: boolean;
       },
@@ -3730,7 +3735,11 @@ Examples:
       const runSpinner = ora("Annexing and uploading...").start();
       let result: Awaited<ReturnType<typeof normalizeDatasetRepo>>;
       try {
-        result = await normalizeDatasetRepo(plan, { push: options.push !== false, maxBytes });
+        result = await normalizeDatasetRepo(plan, {
+          push: options.push !== false,
+          maxBytes,
+          credentials: options.viaAwsCli ? "ambient" : "backend",
+        });
       } catch (err) {
         runSpinner.fail(err instanceof Error ? err.message : String(err));
         process.exit(1);
@@ -3747,7 +3756,7 @@ Examples:
         console.log(chalk.green(`  Pushed main and the git-annex branch for ${datasetId}`));
       }
 
-      if (result.keys.length > 0) {
+      if (result.keys.length > 0 && !options.viaAwsCli) {
         const verifySpinner = ora("Asking the remote whether it holds the new keys...").start();
         const verified = await verifyKeysAtRemote(
           plan.datasetPath,
@@ -3766,6 +3775,12 @@ Examples:
           );
           process.exit(1);
         }
+      } else if (result.keys.length > 0) {
+        console.log(
+          chalk.dim(
+            `  ${result.keys.length} object(s) confirmed in the bucket at their declared size during upload`,
+          ),
+        );
       }
     },
   );

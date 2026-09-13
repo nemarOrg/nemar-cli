@@ -20,16 +20,17 @@
  * other than adding the new keys' content.
  */
 
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { requestUploadCredentials } from "./api/data.js";
 import { cloneDataset, pushToGitHub } from "./git-annex/clone-push.js";
 import { runCommand } from "./git-annex/run-command.js";
 import { configureS3Remote, toS3Credentials } from "./git-annex/s3-remote.js";
-import { getRemoteUuid } from "./git-annex/transfer.js";
-import { normalizeImportedTree } from "./import-normalize.js";
+import { batchSetKeysPresent, getRemoteUuid } from "./git-annex/transfer.js";
+import { type UploadStrategy, normalizeImportedTree } from "./import-normalize.js";
 import { findUnannexedData } from "./import-openneuro.js";
+import { isKeyPresentAtDeclaredSize, listExistingObjects } from "./s3-server-copy.js";
 
 const REMOTE_NAME = "nemar-s3";
 
@@ -166,14 +167,40 @@ async function listAttributeFilesWithLargefiles(datasetPath: string): Promise<st
  */
 export async function normalizeDatasetRepo(
   plan: NormalizeDatasetPlan,
-  options: { push?: boolean; maxBytes?: number; remoteName?: string } = {},
+  options: {
+    push?: boolean;
+    maxBytes?: number;
+    remoteName?: string;
+    credentials?: CredentialSource;
+    /** Override the upload leg; the tests use it to drive the contract a strategy owes. */
+    upload?: UploadStrategy;
+  } = {},
 ): Promise<NormalizeDatasetResult> {
   const remoteName = options.remoteName ?? REMOTE_NAME;
   const { datasetId, datasetPath } = plan;
+  let upload: UploadStrategy | undefined = options.upload;
 
-  // A stand-in remote (a test or a rehearsal) is configured by the caller; the real
-  // one is enabled here with credentials minted for this dataset.
-  if (remoteName === REMOTE_NAME) {
+  if (upload) {
+    // Supplied by the caller: neither credential path applies.
+  } else if (remoteName === REMOTE_NAME && options.credentials === "ambient") {
+    // No `enableremote`: that contacts S3 with git-annex's own credential handling,
+    // which is the thing being bypassed. The UUID comes from the git-annex branch,
+    // where the import recorded it, so keys are registered against the same remote
+    // every existing clone already knows.
+    const remoteUuid = await resolveSpecialRemoteUuid(datasetPath, remoteName);
+    if (!remoteUuid) {
+      throw new Error(
+        `${datasetId} has no ${remoteName} remote recorded in its git-annex branch, so there is no UUID to register keys against. Was this dataset ever uploaded?`,
+      );
+    }
+    upload = awsCliUpload({
+      bucket: "nemar",
+      datasetId,
+      region: "us-east-2",
+      remoteUuid,
+      workDir: join(datasetPath, ".."),
+    });
+  } else if (remoteName === REMOTE_NAME) {
     const creds = await requestUploadCredentials(datasetId);
     const configured = await configureS3Remote(
       datasetPath,
@@ -207,6 +234,7 @@ export async function normalizeDatasetRepo(
     upstreamKeys: new Set<string>(),
     carryOverUnaccountedKeys: false,
     maxBytes: options.maxBytes,
+    upload,
   });
 
   let pushed = false;
@@ -231,6 +259,139 @@ export async function normalizeDatasetRepo(
     committed: normalized.committed,
     pushed,
     notes: normalized.notes,
+  };
+}
+
+/**
+ * Which credentials move the bytes.
+ *
+ * `"backend"` asks the API to mint STS credentials scoped to this dataset, the way
+ * an ordinary upload does. It is the right default and the wrong choice for an
+ * imported dataset: those credentials are federated from the Worker's own identity,
+ * which has no access to an `on######` prefix, so every request is refused (#1380).
+ *
+ * `"ambient"` uses whatever the `aws` CLI is configured with on this machine, and
+ * moves the content with `aws s3 sync` instead of git-annex's S3 client. The keys
+ * are then registered in the location log directly, which is exactly how the
+ * import's finalize phase records a server-side copy it did not perform itself.
+ */
+export type CredentialSource = "backend" | "ambient";
+
+/** The UUID a special remote already has in the git-annex branch, without contacting it. */
+export async function resolveSpecialRemoteUuid(
+  datasetPath: string,
+  remoteName: string,
+): Promise<string | null> {
+  const { stdout, exitCode } = await runCommand(["git", "show", "git-annex:remote.log"], {
+    cwd: datasetPath,
+  });
+  if (exitCode !== 0) return null;
+  for (const line of stdout.split("\n")) {
+    if (!line.includes(`name=${remoteName}`)) continue;
+    const uuid = line.split(/\s+/)[0];
+    if (/^[0-9a-f-]{36}$/.test(uuid)) return uuid;
+  }
+  return null;
+}
+
+/**
+ * Move content with the `aws` CLI's own credentials, then record it in the location
+ * log and confirm it against the bucket.
+ *
+ * Three steps, and the order matters the same way it does everywhere else here:
+ *
+ * 1. Hard-link each key's annex object into a staging directory NAMED by the key,
+ *    so one `aws s3 sync` uploads the whole set in parallel and resumes by skipping
+ *    what is already there at the right size. Hard links cost no disk and no copy.
+ * 2. `setpresentkey` for each key, which is what tells clones the remote has it.
+ *    git-annex did not perform this transfer, so nothing else would say so -- this
+ *    is the same registration `finalizeImport` does after a server-side copy.
+ * 3. List the destination and require every key present AT ITS DECLARED SIZE. This
+ *    is the real proof, and it is deliberately not the location log: the log now
+ *    contains our own claim, so reading it back would only confirm we wrote it.
+ */
+export function awsCliUpload(options: {
+  bucket: string;
+  datasetId: string;
+  region: string;
+  remoteUuid: string;
+  workDir: string;
+}): UploadStrategy {
+  return async ({ datasetPath, files }) => {
+    const staging = join(options.workDir, "upload-staging");
+    rmSync(staging, { recursive: true, force: true });
+    mkdirSync(staging, { recursive: true });
+
+    try {
+      for (const file of files) {
+        const located = await runCommand(["git", "annex", "contentlocation", file.key], {
+          cwd: datasetPath,
+        });
+        if (located.exitCode !== 0 || !located.stdout.trim()) {
+          throw new Error(
+            `git-annex cannot locate the content it just took for ${file.path} (${file.key}). Not uploading: the key would be registered with nothing behind it.`,
+          );
+        }
+        const link = await runCommand(
+          ["ln", join(datasetPath, located.stdout.trim()), join(staging, file.key)],
+          {},
+        );
+        if (link.exitCode !== 0) {
+          throw new Error(`Could not stage ${file.key} for upload: ${link.stderr.trim()}`);
+        }
+      }
+
+      const destination = `s3://${options.bucket}/${options.datasetId}/objects/`;
+      const sync = await runCommand(
+        [
+          "aws",
+          "s3",
+          "sync",
+          staging,
+          destination,
+          "--region",
+          options.region,
+          "--size-only",
+          "--only-show-errors",
+        ],
+        {},
+      );
+      if (sync.exitCode !== 0) {
+        throw new Error(
+          `aws s3 sync to ${destination} failed: ${(sync.stderr || sync.stdout).trim().slice(0, 600)}. Not committing: the pushed tree would name keys with no content behind them.`,
+        );
+      }
+
+      const registered = await batchSetKeysPresent(
+        datasetPath,
+        files.map((f) => f.key),
+        options.remoteUuid,
+      );
+      if (registered.failed > 0) {
+        throw new Error(
+          `Uploaded ${files.length} object(s) but ${registered.failed} key registration(s) failed. Not committing: clones could not find content that is actually there.`,
+        );
+      }
+
+      const existing = await listExistingObjects(
+        options.bucket,
+        `${options.datasetId}/objects/`,
+        options.region,
+      );
+      const missing = files.filter((f) => !isKeyPresentAtDeclaredSize(f.key, existing));
+      if (missing.length > 0) {
+        throw new Error(
+          `${missing.length} of ${files.length} object(s) are absent from ${destination} or the wrong size (${missing
+            .slice(0, 3)
+            .map((f) => f.path)
+            .join(", ")}${missing.length > 3 ? ", ..." : ""}). Not committing.`,
+        );
+      }
+
+      return { copied: files.length };
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+    }
   };
 }
 
