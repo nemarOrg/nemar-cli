@@ -1,21 +1,32 @@
 /**
  * Contract for the docs admin gate (epic #1336 phase 0, issue #1338).
  *
- * `docs.nemar.org/admin/*` is gated by NEMAR's own ORCID-backed session, not
- * by Cloudflare Access, so `users.role` stays the single source of truth for
- * who is an admin (ADR 0056). Three parties share the literals below and none
- * of them can import each other's code: this backend, the website's authorize
- * page (`nemarOrg/website`), and a Cloudflare Pages Function in `nemarOrg/docs`.
+ * `docs.nemar.org/admin/*` is gated by NEMAR's own admin-only session, not by
+ * Cloudflare Access, so `users.role` stays the single source of truth for who
+ * is an admin (ADR 0056). It is a ROLE check and nothing in the flow requires
+ * an ORCID link: an admin holding a passwordless email-code session passes
+ * `verify` identically, so do not describe it as ORCID-backed.
  *
- * SO THIS FILE IS THE REFERENCE DECLARATION, NOT YET AN ENFORCED CONTRACT, and
- * the difference matters when reading a value here. `account-copy.ts` has a
- * drift test on each side plus a CI sparse checkout; this file has neither, and
- * neither other repo transcribes it — they spell their own copies. Epic #1336's
- * drift-guard phase owns closing that. Until it does, a value here can be
- * stale, and one already was: an earlier version named the cookie
- * `nemar_docs_session` while the deployed Pages Function set
- * `__Host-nemar_docs_session`, and nothing noticed because nothing in this
- * repository reads that constant at all.
+ * Three parties share the literals below and none of them can import each
+ * other's code: this backend, the website's authorize page
+ * (`nemarOrg/website`), and a Cloudflare Pages Function in `nemarOrg/docs`.
+ *
+ * THIS FILE IS NOW AN ENFORCED CONTRACT, on the same terms as `account-copy.ts`:
+ * a drift test on each side plus a CI sparse checkout pinned to this repo's
+ * `dev` branch (the ref pairing of ADR 0046, which exists because pinning `main`
+ * deadlocks a coordinated release symmetrically). `nemarOrg/website` compares in
+ * `test/docs-auth-contract-drift.test.ts`; `nemarOrg/docs` compares in
+ * `test/docs-auth-contract.test.ts`. Both read this file as TEXT rather than
+ * importing it, so every value below has to stay a plain literal to be seen: a
+ * value built from an expression is reported as absent rather than guessed at,
+ * which is why `DOCS_SESSION_TTL_SECONDS` is compared as a computed number.
+ *
+ * NOTHING IN THIS REPOSITORY READS THESE CONSTANTS BUT `routes/auth-docs.ts`,
+ * so those two tests are the only thing standing between a value here and the
+ * two repos that spell their own copies. That is not hypothetical: an earlier
+ * version named the cookie `nemar_docs_session` while the deployed Pages
+ * Function set `__Host-nemar_docs_session`, and nothing noticed. Change a value
+ * here and both sides go red until they follow, which is the point.
  *
  * The flow, and which party does what:
  *

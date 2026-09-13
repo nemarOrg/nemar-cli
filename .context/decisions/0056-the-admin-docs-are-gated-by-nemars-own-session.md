@@ -23,7 +23,7 @@ there means Pages Functions.
 
 ## Decision
 
-The gate is NEMAR's own ORCID-backed session with an admin-role check, and the docs host
+The gate is NEMAR's own admin-only session with a role check, and the docs host
 gets a credential of its own through a sixty-second one-time code rather than by widening
 anyone's cookie. Six decisions inside that, each of which reopens a hole if reversed:
 
@@ -57,6 +57,16 @@ the two surfaces answer the same way. That is parity, **not** non-disclosure, an
 or document may upgrade it into one: `exchange` answers 400 to a malformed body and `verify`
 401 to any caller, neither needing a session, so the route family is already public — as are
 the pages themselves, in a public repository.
+
+
+> **Wording correction (2026-09-13).** This ADR said "ORCID-backed session", and
+> the phrase spread to three repositories before anyone checked it. The gate
+> checks session scope, account status and role; nothing in the flow requires an
+> ORCID link, so an admin holding a passwordless email-code session passes
+> `verify` identically. It also admits `owner` as well as `admin`
+> (`DOCS_ADMIN_ROLES`). "NEMAR's own admin-only session" is the accurate phrase.
+> No behavior changed; the description was wrong, in a file whose job is to be
+> the record.
 
 ## Consequences
 
