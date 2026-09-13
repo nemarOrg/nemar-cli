@@ -251,7 +251,7 @@ export function chunkAddTargets(
  * clone carries UPSTREAM's `annex.largefiles` -- and an inherited
  * `.gitattributes` setting beats both `git annex config` and git config, so
  * neither `configureLargefiles` nor a `-c annex.largefiles=anything` override
- * would move the file (verified against git-annex 10.20260901, ADR 0057).
+ * would move the file (verified against git-annex 10.20260901, ADR 0058).
  * Only ever pass paths the policy in `policy.ts` already called data. Note that
  * it decides which plane a CONSIDERED file goes to, not whether the file is
  * considered: an unmodified tracked file is skipped either way.

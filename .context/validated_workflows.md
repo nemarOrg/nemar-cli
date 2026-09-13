@@ -654,7 +654,7 @@ first -- but with `annex.largefiles` set nowhere git-annex annexes EVERYTHING, s
 stripping them without setting the config leaves a repo that will annex `README.md`
 and every sidecar. Do both, in order, and read the value back:
 `applyNemarAnnexPolicy` in `src/lib/import-normalize.ts` is that sequence, and the
-import runs it in its prepare phase (ADR 0057). All measured against git-annex
+import runs it in its prepare phase (ADR 0058). All measured against git-annex
 10.20260901.
 
 Moving a file that is already committed as a plain blob needs `git rm --cached`

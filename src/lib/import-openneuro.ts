@@ -1180,7 +1180,7 @@ export async function prepareImport(
 
   // Step 5b: bring the tree onto NEMAR's annex policy, in the one phase that can.
   //
-  // Two halves, one commit (#1159, ADR 0057):
+  // Two halves, one commit (#1159, ADR 0058):
   //   - files upstream left as git blobs are annexed and their content uploaded
   //     from THIS clone, which is why this cannot move to the copy phase: that
   //     phase is pure S3 and has no clone, and no upstream KEY exists for these

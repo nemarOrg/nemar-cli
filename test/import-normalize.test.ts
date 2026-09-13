@@ -1,5 +1,5 @@
 /**
- * Bringing an imported clone onto NEMAR's annex policy (#1159, ADR 0057).
+ * Bringing an imported clone onto NEMAR's annex policy (#1159, ADR 0058).
  *
  * The fixture is built the way OpenNeuro actually builds a repo, in two respects
  * that each caught a real defect:
@@ -213,7 +213,7 @@ describe("the premise: inherited .gitattributes outranks NEMAR's policy", () => 
   }, 60_000);
 
   test("configuring NEMAR's policy does NOT move a small motion recording", async () => {
-    // The fact ADR 0057 rests on, and the reason `--force-large` exists in the
+    // The fact ADR 0058 rests on, and the reason `--force-large` exists in the
     // normalizer. If a future git-annex reverses the precedence, this fails and
     // the ADR gets revisited; it does not silently become moot.
     expect((await configureLargefiles(repoDir)).success).toBe(true);

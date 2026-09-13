@@ -13,7 +13,7 @@
  *   - {@link applyNemarAnnexPolicy} replaces the inherited `annex.largefiles`
  *     attributes with NEMAR's configured expression, because a `.gitattributes`
  *     setting beats both `git annex config` and git config, so until they are
- *     gone every later add keeps following upstream's rule. See ADR 0057.
+ *     gone every later add keeps following upstream's rule. See ADR 0058.
  *
  * {@link normalizeImportedTree} is the pair of them as the prepare phase performs
  * them, in one commit, and is what `prepareImport` calls.
@@ -330,7 +330,7 @@ export async function normalizeUnannexedData(args: {
   const maxBytes = args.maxBytes ?? NORMALIZE_MAX_BYTES;
   if (bytes > maxBytes) {
     throw new Error(
-      `${files.length} file(s) totaling ${(bytes / 1024 ** 3).toFixed(1)} GiB need annexing, over the ${(maxBytes / 1024 ** 3).toFixed(1)} GiB this leg will upload from the import host (NORMALIZE_MAX_BYTES, ADR 0010/0057). Re-run on a host that can finish the upload with --normalize-max-gb <n> to raise it deliberately, rather than discovering the size at the job timeout.`,
+      `${files.length} file(s) totaling ${(bytes / 1024 ** 3).toFixed(1)} GiB need annexing, over the ${(maxBytes / 1024 ** 3).toFixed(1)} GiB this leg will upload from the import host (NORMALIZE_MAX_BYTES, ADR 0010/0058). Re-run on a host that can finish the upload with --normalize-max-gb <n> to raise it deliberately, rather than discovering the size at the job timeout.`,
     );
   }
 

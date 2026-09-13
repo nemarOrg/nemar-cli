@@ -3615,7 +3615,7 @@ async function dispatchOpenNeuroImportWorkflow(
 adminCommand
   .command("annex-normalize <datasetId>")
   .description(
-    "Move data an existing dataset keeps in git into the annex, and put NEMAR's annex policy in force (ADR 0057)",
+    "Move data an existing dataset keeps in git into the annex, and put NEMAR's annex policy in force (ADR 0058)",
   )
   .option("--dry-run", "Clone and report what would change; touch nothing")
   .option("--dir <path>", "Working directory for the clone (reuse it to resume without re-cloning)")
@@ -3632,7 +3632,7 @@ adminCommand
   .addHelpText(
     "after",
     `
-What this does (ADR 0057, issue #1159):
+What this does (ADR 0058, issue #1159):
   1. clones the dataset (full clone -- data in git has to be present to upload)
   2. annexes every file NEMAR policy calls data that the repo keeps in git, and
      uploads the content to S3 with credentials minted for this dataset
@@ -3806,7 +3806,7 @@ adminCommand
   )
   .option(
     "--normalize-max-gb <n>",
-    "Raise the ceiling on how much data the prepare phase will annex and upload from this host (default 5 GiB). Only needed for a dataset that keeps an unusual amount of data in git; the import aborts rather than silently spending hours uploading (ADR 0057).",
+    "Raise the ceiling on how much data the prepare phase will annex and upload from this host (default 5 GiB). Only needed for a dataset that keeps an unusual amount of data in git; the import aborts rather than silently spending hours uploading (ADR 0058).",
   )
   .action(
     async (
