@@ -18,6 +18,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { Hono } from "hono";
 import {
   __limits,
+  __normalizeMountPath,
   __readBearerTokenFromHeader,
   __selectBucket,
   rateLimiter,
@@ -551,5 +552,64 @@ describe("rateLimiter end-to-end", () => {
 
     // Restore the real clock for subsequent tests.
     ourCache.getNow = () => Date.now();
+  });
+});
+
+// --------------------------------------------------------------------------
+// The /nemar mount prefix (found reviewing #1384)
+// --------------------------------------------------------------------------
+
+describe("the API is mounted twice, and both spellings must bucket alike", () => {
+  // `backend/src/index.ts` does `app.route("/nemar", api)` AND
+  // `app.route("/", api)`, and Hono gives middleware the full request path. So
+  // every path rule in rateLimit.ts saw `/nemar/auth/login` for one of the two
+  // spellings and matched none of them. This was true of EVERY `AUTH_PATHS`
+  // entry, not just the docs route whose review found it: a strict 10/min floor
+  // that one extra path segment stepped over, landing in the 500/min ip bucket
+  // or, with a bearer, the 1000/min token bucket and the admin bypass past it.
+  const IP = "203.0.113.44";
+
+  test("the prefix is stripped, and only as a whole segment", () => {
+    expect(__normalizeMountPath("/nemar/auth/login")).toBe("/auth/login");
+    expect(__normalizeMountPath("/auth/login")).toBe("/auth/login");
+    expect(__normalizeMountPath("/nemar")).toBe("/");
+    // Not a prefix match on the string: a real route that merely starts with
+    // those characters must survive intact.
+    expect(__normalizeMountPath("/nemarx/auth/login")).toBe("/nemarx/auth/login");
+  });
+
+  test.each([
+    "/auth/login",
+    "/auth/code/request",
+    "/auth/keys",
+    "/auth/device/start",
+    "/auth/docs/grant",
+    "/auth/docs/exchange",
+    "/auth/docs/cli-session",
+    "/users/me/upload-access/request",
+  ])("%s buckets identically with and without the prefix", (route) => {
+    const plain = __selectBucket(route, undefined, IP);
+    const prefixed = __selectBucket(`/nemar${route}`, undefined, IP);
+    expect(plain.keyKind).toBe("auth-ip");
+    expect(prefixed.keyKind).toBe(plain.keyKind);
+    expect(prefixed.maxRequests).toBe(plain.maxRequests);
+  });
+
+  test("a bearer does not buy the prefixed spelling a looser bucket", () => {
+    // The worst version of the hole: `token` is 1000/min AND an admin or owner
+    // token skips the limiter entirely (`isPrivilegedToken`), which is exactly
+    // the population that can mint a docs session.
+    const prefixed = __selectBucket(
+      "/nemar/auth/docs/cli-session",
+      "Bearer nk_some_admin_key_0123456789abcdef",
+      IP,
+    );
+    expect(prefixed.keyKind).toBe("auth-ip");
+    expect(prefixed.maxRequests).toBe(__limits.AUTH_MAX_REQUESTS);
+  });
+
+  test("the data and zarr planes keep their own buckets under the prefix too", () => {
+    const zarr = __selectBucket("/nemar/nm000123/zarr/index.json", undefined, IP);
+    expect(zarr.keyKind).toBe("data-ip");
   });
 });
