@@ -34,6 +34,13 @@ earlier releases are described only by their generated notes.
   fix, so an imported repository does not shrink -- upstream's blobs stay in the
   history it came with. The 600 imported datasets that still carry upstream's
   attributes are tracked in #1374, and `on007788`'s own data migration in #1159.
+- **`nemar admin annex-normalize <id>` applies the same fix to a dataset that already
+  exists**, which is how `on007788`'s 893 git-resident recordings and the imported
+  fleet get migrated. It is a forward fix by construction: a published version
+  manifest addresses a git-resident file by its tag-pinned `raw.githubusercontent.com`
+  URL, so history is never rewritten and those URLs keep resolving. `--dry-run`
+  reports the plan; a clone left dirty by an interrupted attempt is refused rather
+  than mistaken for a dataset with nothing left to migrate.
 
 ## 0.10.3 - 2026-09-10
 

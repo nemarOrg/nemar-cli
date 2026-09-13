@@ -193,6 +193,11 @@ to claim as uploaded.
   round-tripped through a real special remote
 - `test/import-normalize.unit.test.ts` - the text and selection rules
 - `src/lib/s3-server-copy.ts` - `origin`, and `selectShardCopyItems`
+- `src/lib/normalize-dataset.ts`, `test/normalize-dataset.test.ts` - the same decision
+  applied to a dataset that already exists (`nemar admin annex-normalize`), including
+  why a published dataset can only take the forward fix: `on007788`'s v1.0.0 manifest
+  addresses all 893 git-resident recordings by
+  `raw.githubusercontent.com/<repo>/v1.0.0/<path>`
 - ADR 0031 - the policy this puts in force; ADR 0015 - the policy itself
 - ADR 0010 - server-side copy for the bulk data plane, and the bound this leg keeps
 - Issue #1158 (the policy fix), issue #1159 (this), `nemarDatasets/on007788`

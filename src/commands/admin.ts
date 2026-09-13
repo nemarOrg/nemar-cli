@@ -3613,6 +3613,164 @@ async function dispatchOpenNeuroImportWorkflow(
 }
 
 adminCommand
+  .command("annex-normalize <datasetId>")
+  .description(
+    "Move data an existing dataset keeps in git into the annex, and put NEMAR's annex policy in force (ADR 0057)",
+  )
+  .option("--dry-run", "Clone and report what would change; touch nothing")
+  .option("--dir <path>", "Working directory for the clone (reuse it to resume without re-cloning)")
+  .option("--no-push", "Do everything except push, for a rehearsal")
+  .option(
+    "--normalize-max-gb <n>",
+    "Raise the ceiling on how much data will be uploaded from this host (default 5 GiB)",
+  )
+  .option("-y, --yes", "Skip the confirmation prompt")
+  .addHelpText(
+    "after",
+    `
+What this does (ADR 0057, issue #1159):
+  1. clones the dataset (full clone -- data in git has to be present to upload)
+  2. annexes every file NEMAR policy calls data that the repo keeps in git, and
+     uploads the content to S3 with credentials minted for this dataset
+  3. replaces any inherited annex.largefiles attributes with NEMAR's expression
+  4. commits both changes and pushes main plus the git-annex branch
+
+It is a FORWARD fix: history is never rewritten, so published version manifests
+that address a git-resident file by its raw.githubusercontent URL keep resolving,
+and the repository does not shrink. Tags, DOIs, archives and existing S3 objects
+are untouched.
+
+Examples:
+  $ nemar admin annex-normalize on007788 --dry-run
+  $ nemar admin annex-normalize on007788 --dir /tmp/normalize-on007788
+`,
+  )
+  .action(
+    async (
+      datasetId: string,
+      options: {
+        dryRun?: boolean;
+        dir?: string;
+        push?: boolean;
+        normalizeMaxGb?: string;
+        yes?: boolean;
+        no?: boolean;
+      },
+    ) => {
+      if (!requireAuth()) return;
+
+      let maxBytes: number | undefined;
+      if (options.normalizeMaxGb !== undefined) {
+        const gb = Number(options.normalizeMaxGb);
+        if (!Number.isFinite(gb) || gb <= 0) {
+          console.error(
+            chalk.red(
+              `Invalid --normalize-max-gb "${options.normalizeMaxGb}". Expected a positive number of GiB.`,
+            ),
+          );
+          process.exit(1);
+        }
+        maxBytes = Math.floor(gb * 1024 ** 3);
+      }
+
+      const { planDatasetNormalization, normalizeDatasetRepo, verifyKeysAtRemote } = await import(
+        "../lib/normalize-dataset.js"
+      );
+
+      const planSpinner = ora(`Cloning ${datasetId} and measuring...`).start();
+      let plan: Awaited<ReturnType<typeof planDatasetNormalization>>;
+      try {
+        plan = await planDatasetNormalization(datasetId, { workDir: options.dir });
+      } catch (err) {
+        planSpinner.fail(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+      planSpinner.succeed(`Cloned ${datasetId} to ${plan.datasetPath}`);
+
+      console.log();
+      console.log(chalk.bold(`Plan for ${datasetId}`));
+      console.log(
+        `  Data files in git: ${chalk.cyan(plan.files.length.toString())} (${chalk.cyan(`${(plan.bytes / 1e6).toFixed(1)} MB`)}) -> annex + S3`,
+      );
+      for (const f of plan.files.slice(0, 5)) {
+        console.log(chalk.dim(`    - ${f.path} (${(f.size / 1e6).toFixed(2)} MB)`));
+      }
+      if (plan.files.length > 5) {
+        console.log(chalk.dim(`    ... and ${plan.files.length - 5} more`));
+      }
+      console.log(
+        `  Inherited largefiles attributes: ${
+          plan.attributeFiles.length > 0
+            ? chalk.cyan(plan.attributeFiles.join(", "))
+            : chalk.dim("none")
+        }`,
+      );
+      console.log(chalk.dim("  History is not rewritten; tags, DOIs and archives are untouched."));
+      console.log();
+
+      if (plan.files.length === 0 && plan.attributeFiles.length === 0) {
+        console.log(chalk.green("Nothing to do: this dataset already matches NEMAR policy."));
+        return;
+      }
+
+      if (options.dryRun) {
+        console.log(chalk.dim("--dry-run: stopping before any change."));
+        return;
+      }
+
+      const confirmResult = await confirm(
+        `Rewrite ${datasetId}'s HEAD and upload ${(plan.bytes / 1e6).toFixed(1)} MB to S3?`,
+        options,
+      );
+      if (confirmResult !== "confirmed") {
+        console.log(confirmResult === "declined" ? "Declined." : "Cancelled.");
+        return;
+      }
+
+      const runSpinner = ora("Annexing and uploading...").start();
+      let result: Awaited<ReturnType<typeof normalizeDatasetRepo>>;
+      try {
+        result = await normalizeDatasetRepo(plan, { push: options.push !== false, maxBytes });
+      } catch (err) {
+        runSpinner.fail(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+      runSpinner.succeed(result.notes.length > 0 ? result.notes.join("; ") : "nothing changed");
+
+      if (result.committed && !result.pushed) {
+        console.log(
+          chalk.yellow(
+            `  Committed but NOT pushed (--no-push). The clone is at ${plan.datasetPath}.`,
+          ),
+        );
+      } else if (result.pushed) {
+        console.log(chalk.green(`  Pushed main and the git-annex branch for ${datasetId}`));
+      }
+
+      if (result.keys.length > 0) {
+        const verifySpinner = ora("Asking the remote whether it holds the new keys...").start();
+        const verified = await verifyKeysAtRemote(
+          plan.datasetPath,
+          plan.files.map((f) => f.path),
+        );
+        if (verified.ok) {
+          verifySpinner.succeed(
+            `Remote confirms the uploaded content (fsck --from nemar-s3, ${Math.min(plan.files.length, 200)} path(s) checked)`,
+          );
+        } else {
+          verifySpinner.fail(`Remote could not confirm every key: ${verified.output}`);
+          console.log(
+            chalk.yellow(
+              "  The commit and push (if any) have happened; investigate before treating this dataset as migrated.",
+            ),
+          );
+          process.exit(1);
+        }
+      }
+    },
+  );
+
+adminCommand
   .command("import-openneuro")
   .description("Import an OpenNeuro dataset into NEMAR")
   .argument("<openneuro-ids>", "OpenNeuro dataset ID(s), comma-separated (e.g., ds007262,ds007263)")
