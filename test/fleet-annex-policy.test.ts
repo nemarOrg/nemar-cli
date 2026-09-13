@@ -25,6 +25,7 @@ import {
   labelAnnexPolicyState,
   scanDatasetAnnexPolicy,
   sweepAnnexPolicy,
+  verifyAnnexPolicyLanded,
 } from "../src/lib/fleet-annex-policy";
 import { gitAnnexAdd } from "../src/lib/git-annex/init";
 import { buildLargefilesExpression } from "../src/lib/git-annex/policy";
@@ -358,6 +359,31 @@ describe("backfilling one dataset", () => {
     expect(outcome.notes?.join(" ")).toContain("annex-normalize");
     expect(await run(["git", "rev-parse", "main", "git-annex"], origin)).toBe(before);
     expect(existsSync(join(workRoot, WITH_DATA))).toBe(false);
+  }, 300_000);
+
+  test("the verification re-reads before it calls a push unlanded", async () => {
+    // GitHub is only eventually consistent after a push, so one drift reading is not
+    // evidence -- over 598 datasets that difference is the whole signal-to-noise of
+    // the run. The retry must not turn into optimism either: on a dataset that really
+    // has not been fixed it reads again and still says no.
+    const reader = await createGitHubReader({ baseUrl });
+    const origin = origins.get(POLICY_ONLY) as string;
+
+    const before = await verifyAnnexPolicyLanded(POLICY_ONLY, reader, {
+      attempts: 2,
+      delayMs: 10,
+    });
+    expect(before.landed).toBe(false);
+    expect(before.state.policyConfigured).toBe(false);
+
+    await applyAnnexPolicyToDataset(POLICY_ONLY, reader, { workRoot, originUrl: origin });
+
+    const after = await verifyAnnexPolicyLanded(POLICY_ONLY, reader, {
+      attempts: 2,
+      delayMs: 10,
+    });
+    expect(after.landed).toBe(true);
+    expect(after.remainingDeclined).toEqual([]);
   }, 300_000);
 
   test("a rehearsal commits locally and pushes nothing", async () => {

@@ -14,6 +14,7 @@ import {
   POINTER_SUSPECT_MAX_BYTES,
   classifyAnnexPolicy,
   gitattributesPaths,
+  isAnnexPolicyInForce,
   labelAnnexPolicyState,
   mapWithConcurrency,
   parseAnnexConfigLog,
@@ -192,6 +193,34 @@ describe("labelAnnexPolicyState", () => {
         gitResidentData: [{ path: MOTION, size: 300_000 }],
       }),
     ).toBe("policy-and-data");
+  });
+});
+
+describe("isAnnexPolicyInForce", () => {
+  test("a quoted line nothing will rewrite still counts as in force", () => {
+    // Otherwise such a dataset reports as a failed push forever: the strip declines
+    // the line by design, so no number of re-runs clears the finding. It is a hand
+    // fix, and the run says which file.
+    const declinedOnly = state({
+      attributeContents: new Map([
+        [".gitattributes", '"sub 01/*.tsv" annex.largefiles=largerthan=1mb\n'],
+      ]),
+      configLog: `1750000000s annex.largefiles ${buildLargefilesExpression()}`,
+    });
+    expect(declinedOnly.attributeFiles).toHaveLength(1);
+    expect(isAnnexPolicyInForce(declinedOnly)).toBe(true);
+  });
+
+  test("a removable rule left standing is not in force", () => {
+    const pending = state({
+      attributeContents: new Map([[".gitattributes", UPSTREAM_ROOT]]),
+      configLog: `1750000000s annex.largefiles ${buildLargefilesExpression()}`,
+    });
+    expect(isAnnexPolicyInForce(pending)).toBe(false);
+  });
+
+  test("clean attributes with no expression configured is not in force either", () => {
+    expect(isAnnexPolicyInForce(state())).toBe(false);
   });
 });
 

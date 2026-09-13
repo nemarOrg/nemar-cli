@@ -467,18 +467,22 @@ export async function applyAnnexPolicyToDataset(
       credentials: options.credentials,
       maxBytes: options.maxBytes,
     });
-    const after =
-      options.push === false ? undefined : await scanDatasetAnnexPolicy(datasetId, reader);
-    const landed =
-      after === undefined || (after.attributeFiles.length === 0 && after.policyConfigured);
+    const verified =
+      options.push === false ? undefined : await verifyAnnexPolicyLanded(datasetId, reader);
+    const notes = [...result.notes];
+    if (verified?.remainingDeclined.length) {
+      notes.push(
+        `left alone: ${verified.remainingDeclined.join(", ")} (a quoted pattern the strip will not split; fix by hand)`,
+      );
+    }
     return {
       datasetId,
       before,
-      action: landed ? "applied" : "unverified",
+      action: verified === undefined || verified.landed ? "applied" : "unverified",
       committed: result.committed,
       pushed: result.pushed,
-      notes: result.notes,
-      after,
+      notes,
+      after: verified?.state,
     };
   } catch (error) {
     return {
@@ -490,6 +494,49 @@ export async function applyAnnexPolicyToDataset(
   } finally {
     if (!options.keepClone) await removeAnnexClone(datasetPath);
   }
+}
+
+/**
+ * Read a dataset back after its push and decide whether the policy is in force.
+ *
+ * Two things this has to be careful about, both of which would otherwise report a
+ * dataset as broken when it is fine:
+ *
+ * - **GitHub is read-after-write consistent only eventually.** A tree read moments
+ *   after a push can still describe the previous commit, so a single drift reading is
+ *   retried before it counts. Three attempts over about six seconds; a real failure
+ *   costs those seconds once, and a 598-dataset rollout does not report false alarms.
+ * - **A quoted attribute line is never rewritten.** `stripLargefilesAttributes`
+ *   declines a line whose pattern is quoted rather than cutting it in half, so such a
+ *   file still reports a finding forever. That is a hand-fix, not a failed push: the
+ *   policy landed, and the caller is told which files were left.
+ */
+export async function verifyAnnexPolicyLanded(
+  datasetId: string,
+  reader: GitHubReader,
+  options: { attempts?: number; delayMs?: number } = {},
+): Promise<{ landed: boolean; state: AnnexPolicyState; remainingDeclined: string[] }> {
+  const attempts = options.attempts ?? 3;
+  const delayMs = options.delayMs ?? 3000;
+  let state = await scanDatasetAnnexPolicy(datasetId, reader);
+  for (let attempt = 1; attempt < attempts; attempt++) {
+    if (isAnnexPolicyInForce(state)) break;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    state = await scanDatasetAnnexPolicy(datasetId, reader);
+  }
+  return {
+    landed: isAnnexPolicyInForce(state),
+    state,
+    remainingDeclined: state.attributeFiles.filter((f) => f.declined.length > 0).map((f) => f.path),
+  };
+}
+
+/**
+ * True when nothing removable is left: the expression is configured, and every
+ * `.gitattributes` finding still standing is a quoted line nothing will rewrite.
+ */
+export function isAnnexPolicyInForce(state: AnnexPolicyState): boolean {
+  return state.policyConfigured && state.attributeFiles.every((f) => f.rulesRemoved === 0);
 }
 
 /** What a read-only sweep found, grouped the way the operator has to act on it. */
