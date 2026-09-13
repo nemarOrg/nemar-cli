@@ -161,6 +161,7 @@ import {
   confirmWithInput,
 } from "../lib/confirm.js";
 import { markReportedExit } from "../lib/debug-log.js";
+import { fetchDocsPages, getDocsUrl } from "../lib/docs-fetch.js";
 import { CLI_LIVE_DATASETS, selectRevalidateTargets } from "../lib/fleet.js";
 import {
   cloneDataset,
@@ -947,6 +948,77 @@ adminKeysCommand
   });
 
 adminCommand.addCommand(adminKeysCommand);
+
+// ============================================================================
+// Documentation retrieval
+// ============================================================================
+
+/**
+ * `nemar admin docs <path...>` (epic #1336 phase 3, issue #1341).
+ *
+ * `nemarOrg/docs` is private and `docs.nemar.org` is the retrieval surface
+ * (ADR 0057, ADR 0059), so a checkout is not how anyone reads an operations
+ * runbook any more. This is how: the stored API key buys a fifteen-minute
+ * docs-scoped session, and only that session value is sent to the docs host.
+ *
+ * THERE IS DELIBERATELY NO FORM THAT PRINTS THE SESSION VALUE. Printing it
+ * would be the convenient thing and is exactly what should not exist: the
+ * credential would land in a shell history, a CI log, or an agent's transcript,
+ * which is the whole class of exposure the short TTL is hedging against and the
+ * reason the key is traded for something weaker in the first place. The command
+ * holds the value in memory for the length of one invocation and prints only
+ * documentation.
+ */
+adminCommand
+  .command("docs")
+  .description("Fetch documentation pages from docs.nemar.org as Markdown, including gated ones")
+  .argument(
+    "<path...>",
+    "Page paths, for example admin/operations/zarr-serving (a full docs.nemar.org URL also works)",
+  )
+  .option("--no-headers", "Print only the page bodies, with no path banner")
+  .addHelpText(
+    "after",
+    `
+Every page has a Markdown mirror; ${getDocsUrl()}/llms.txt indexes them.
+Pass several paths at once: they share one documentation session, which is
+both faster and easier on the rate limit than one command per page.`,
+  )
+  .action(async (paths: string[], options: { headers: boolean }) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora(
+      paths.length === 1 ? "Fetching documentation..." : `Fetching ${paths.length} pages...`,
+    ).start();
+    let results: Awaited<ReturnType<typeof fetchDocsPages>>;
+    try {
+      results = await fetchDocsPages(paths);
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to fetch documentation", {
+        401: "Sign in again with `nemar auth login`",
+        404: "This account does not have access to the operations documentation",
+        429: "Too many documentation sessions from this address; wait a minute",
+      });
+      process.exitCode = 1;
+      return;
+    }
+    spinner.stop();
+
+    // Bodies go to stdout and everything else to stderr, so `nemar admin docs
+    // <path> > page.md` yields the page rather than the page plus banners --
+    // the shape an agent or a pipeline wants.
+    for (const result of results) {
+      if (!result.ok) {
+        console.error(chalk.red(`${result.path}: ${result.error}`));
+        process.exitCode = 1;
+        continue;
+      }
+      if (options.headers && results.length > 1) {
+        console.error(chalk.cyan(`\n# ${result.path}`));
+      }
+      console.log(result.body);
+    }
+  });
 
 // ============================================================================
 // S3 / IAM Management

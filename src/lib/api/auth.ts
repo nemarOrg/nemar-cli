@@ -5,6 +5,7 @@
  * verbatim.
  */
 
+import type { DocsCliSessionResponse } from "../../../shared/contract/docs-auth.js";
 import {
   type ApiKeyCreateResponse,
   type ApiKeyListResponse,
@@ -579,6 +580,22 @@ export async function createApiKey(name: string): Promise<ApiKeyCreateResponse> 
     true,
     apiKeyCreateResponseSchema,
   );
+}
+
+/**
+ * `POST /auth/docs/cli-session` (epic #1336 phase 3, #1341).
+ *
+ * Trades the stored API key for a short-lived, read-only, docs-scoped session
+ * value. The key itself never leaves this host: only the value returned here is
+ * sent to `docs.nemar.org`, which is the separation ADR 0056 exists for.
+ *
+ * No response schema, unlike its neighbours: `shared/contract/docs-auth.ts` is
+ * read as TEXT by drift tests in two other repositories, so it is deliberately
+ * dependency-free and declares no zod shapes. `lib/docs-fetch.ts` checks the
+ * one field it depends on instead.
+ */
+export async function mintDocsSession(): Promise<DocsCliSessionResponse> {
+  return request<DocsCliSessionResponse>("/auth/docs/cli-session", { method: "POST" }, true);
 }
 
 /** `DELETE /auth/keys/:id` or `DELETE /auth/keys/current`. */
