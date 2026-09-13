@@ -57,6 +57,14 @@ earlier releases are described only by their generated notes.
   rather than an hour. `nemar admin s3 credential-check <id>` reports the same probe on
   demand. A dataset with no data to move now needs no credentials at all, and a policy
   that changed only the git-annex branch is pushed rather than left local.
+- **The per-user IAM provisioning that STS replaced is gone from the backend** rather
+  than sitting there with no callers (#1380). `generateS3PolicyDocument`,
+  `generateAdminS3PolicyDocument`, `createIamUser`, `createAccessKey`, `putUserPolicy`
+  and `generateIamUsername` had no call site outside their own module; the two
+  generators are why #1380 was first read as an identity-policy gap, since they look
+  like the code that would write one and nothing runs them. Revocation stays: an
+  account provisioned under the old scheme still carries an `aws_iam_username` in D1
+  and an IAM user in the account, and deleting it has to take both away.
 
 ## 0.10.3 - 2026-09-10
 
