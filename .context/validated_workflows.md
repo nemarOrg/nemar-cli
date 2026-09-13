@@ -646,6 +646,15 @@ This ensures:
   over the 100 kB threshold. A small `.tsv.gz` still stays in git -- this used to be
   written as the flat claim "tsv.gz IS annexed"
 
+**On a repo cloned from elsewhere, this config line is not enough.** A
+`.gitattributes` setting outranks both `git annex config` and git config, so an
+OpenNeuro clone's `*.tsv ... annex.largefiles=largerthan=1mb` silently overrides
+everything above -- measured against git-annex 10.20260901. Strip the inherited
+attributes first (`normalizeGitattributes`, ADR 0057); the import does this in its
+prepare phase. Moving a file that is already committed as a plain blob needs
+`git rm --cached` before the add, too: `git annex add` skips an unmodified tracked
+file, and `--force-large` does not change that.
+
 ---
 
 ## 5. Git-Annex in GitHub Actions

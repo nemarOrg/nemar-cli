@@ -95,6 +95,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0054](0054-the-weekly-report-arrives-whether-or-not-anything-is-wrong.md) - The weekly report arrives whether or not anything is wrong, and unknown is not zero
 - [ADR 0055](0055-a-reconcile-reports-a-disagreement-and-files-nothing.md) - A reconcile reports a disagreement and files nothing, and coverage is looser than ownership
 - [ADR 0056](0056-the-admin-docs-are-gated-by-nemars-own-session.md) - The admin docs are gated by NEMAR's own session, handed to the docs host by a one-time code
+- [ADR 0057](0057-an-imported-tree-is-brought-onto-nemars-annex-policy-in-prepare.md) - An imported tree is brought onto NEMAR's annex policy in prepare, and inherited `.gitattributes` governance is stripped
 
 ## Backfill note (2026-07-31)
 

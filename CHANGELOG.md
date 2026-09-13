@@ -13,6 +13,24 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## Unreleased
+
+### Fixed
+
+- **An OpenNeuro import no longer leaves motion recordings in the git repository, and
+  NEMAR's annex policy now actually governs an imported dataset.** Two separate holes,
+  both closed in the import's prepare phase (#1159, ADR 0057). First, a `_motion.tsv`
+  under OpenNeuro's ~1 MB bar arrived as a plain git blob and stayed one -- 893 of them,
+  675 MB, in `ds007788` alone; those files are now annexed and their content uploaded
+  from the clone, and an import that cannot upload them fails instead of publishing a
+  pointer with nothing behind it. Second, and previously unnoticed: upstream ships a
+  `.gitattributes` whose `annex.largefiles` setting **outranks** the one
+  `configureLargefiles` writes, so ADR 0031's policy had no effect on any imported
+  repository -- the next motion file added to one would have repeated the original bug.
+  The inherited attribute is now stripped (and only that attribute), so the configured
+  policy decides. The ~785 datasets imported before this still carry upstream's
+  attributes; backfilling them, and `on007788` itself, are tracked separately.
+
 ## 0.10.3 - 2026-09-10
 
 ### Security
