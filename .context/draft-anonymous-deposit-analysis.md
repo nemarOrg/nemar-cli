@@ -88,7 +88,10 @@ and `gh pr create` runs on the depositor's machine with the depositor's token).
 ### 2.2 Verified, and working as designed
 
 **`GET /datasets/:id` serves `owner_username` and `owner_github` to anonymous callers.**
-`backend/src/routes/datasets/catalog.ts`, both the list and the detail projection.
+`backend/src/routes/datasets/catalog.ts`: `owner_github` in the detail projection,
+`owner_username` in the detail and all three list projections.
+The detail response also carries `enrichment_json` -- the whole author map, with ORCID
+identifiers and affiliations -- and `readme`.
 
 **The website falls back to the depositor's handle when the author list is empty.**
 `DatasetCard.astro:33`: `formatAuthorByline(dataset.authors) || dataset.owner_username || "NEMAR"`.
@@ -115,7 +118,15 @@ served from public S3 at `zarr.nemar.org`.
 **`.nemar/metadata.json` is committed to the repo and carries the author list plus collected co-author ORCID identifiers.**
 An ORCID iD is a permanent global identifier;
 one of them in the record de-anonymizes the entire author list in a single lookup.
-This is the highest-value leak in the set and the least visible.
+This is the highest-value leak in the set and the least visible,
+and it is not the depositor's to fix:
+the CLI actively gitignores the file (`upload/transfer.ts:69-81`),
+and it reaches the repository from the BACKEND,
+committed as `nemarAdmin` on the App token by `commitEnrichmentWithBidsignore`.
+So a depositor-side scrub cannot suppress it,
+and the enrichment service re-commits the identifiers after any scrub.
+Suppressing it is a backend change (`commitEnrichmentWithBidsignore` needs an anonymous branch),
+not a line in a checklist.
 
 **BIDS metadata names people by design.**
 `dataset_description.json` has `Authors`, `Funding`, `Acknowledgements` and `EthicsApprovals`;
@@ -131,8 +142,8 @@ Magnetoencephalography and electroencephalography toolchains ship de-identificat
 
 ### 2.4 Weak signals
 
-Dataset identifiers are assigned sequentially in reserved bands (ADR 0011),
-so deposit order is public and adjacency is informative to somebody who already knows one neighbour.
+Dataset identifiers are assigned in reserved bands (ADR 0011), gap-filling rather than
+strictly sequentially, so adjacency is weaker evidence of deposit order than it looks.
 Deposit timestamps correlate with submission deadlines.
 Neither is worth designing against on its own; both are worth one sentence in the user-facing guidance,
 because a depositor who believes the blind is perfect will behave differently from one who knows it is merely good.
@@ -217,8 +228,10 @@ but it is not a smaller feature. It is a differently shaped one.
 **A2. The GitHub control has to be suppressed, not merely hidden.**
 `ActionBar.astro` in `nemarOrg/website` reads
 `const ghCloneUrl = githubUrl ?? \`https://github.com/nemarDatasets/${ds}\``,
-so nulling `github_repo` in the API response hides the button on line 89
-while the download modal keeps offering a fabricated clone URL.
+and `dataset/[id].astro:234` fabricates the same URL BEFORE passing the prop,
+so `ActionBar.astro`'s `??` is dead as wired and the `{githubUrl && ...}` guard always passes.
+There are two fabrication sites, and nulling `github_repo` hides neither the button nor the
+clone command.
 That URL 404s for a reviewer today and resolves later, which is the worst of both.
 The website needs an explicit anonymous state, not an absent field.
 
@@ -226,7 +239,7 @@ The website needs an explicit anonymous state, not an absent field.
 It clones the repository through git-annex (`cloneDataset`, `src/lib/git-annex/clone-push.ts`),
 and the repository is private, so the command the website's own download modal advertises first
 cannot work.
-Largely answered: #1401 / PR #1402 add a plain-HTTP download path
+Proposed, not merged: #1401 / PR #1402 would add a plain-HTTP download path
 (`nemar dataset download --http`, and automatic when git-annex is missing) that reads the data
 plane's manifest and fetches over HTTPS, with the same BIDS filters.
 It was worth building on its own merits -- containers, HPC login nodes, CI runners, and anyone
@@ -240,8 +253,11 @@ and it is not really an anonymity problem, which is why it should be fixed on it
 `buildBytesUrl` in `backend/src/services/data-router.ts` documents `bytes_url` as
 "a STABLE, storable contract URL, so it is host-invariant: always the canonical
 data.nemar.org regardless of which host [...] actually served the manifest",
-and then, eight lines later, sends git-backed files to `raw.githubusercontent.com`.
-The rule is already written down; the `git:` branch is the one place that breaks it.
+and then, 37 lines later, sends git-backed files to `raw.githubusercontent.com`.
+The carve-out is documented rather than accidental (`buildBytesUrl`'s own docstring states it),
+and the host-invariance claim is itself qualified for staging.
+So this is a stated exception that has outlived its justification, not a self-contradiction;
+the rule is the one worth keeping.
 
 The correction is that the URL a client is handed is always `data.nemar.org/<id>/<version>/<path>`,
 and whether the Worker streams the bytes or redirects to a backing store
@@ -254,19 +270,24 @@ the file plane should not answer it differently.
 Three things it fixes that have nothing to do with anonymity:
 the publish-time canary in `services/manifest.ts` exists only because the manifest embeds a
 third party's URL, and can go;
-per-file access becomes countable at all, since `recordAccess` fires on one route today and
-no file download is counted on either backing store;
+per-file access becomes countable at all, since `recordAccess` fires only on the archive zip
+and the zarr store routes, and no per-file BIDS download is counted on either backing store;
 and the website's advertised
 `jq -r '.[].bytes_url' | wget` recipe stops silently depending on GitHub.
 
-**The canary is also upstream of the serving problem.**
-`verifyGitBackedFiles` HEADs a sample of `git:` entries against `raw.githubusercontent.com`
-at manifest-write time and refuses to write the manifest otherwise,
-with a failure message that already names the case:
-"the version tag may not exist on GitHub yet, the repo may be private, or the blob may have
-been removed by a retag".
-So under a private repository the manifest is never written at all.
-This is not merely a serving problem, and it is why A4 has to be phase one rather than a follow-up.
+**The canary is NOT a blocker, and an earlier draft of this document said it was.**
+`verifyGitBackedFiles` does HEAD a sample of `git:` entries against `raw.githubusercontent.com`
+and refuse to write the manifest otherwise,
+with a failure message that even names the case ("the repo may be private").
+But production runs `MANIFEST_VIA_CENTRAL_WORKFLOW = "true"`,
+so `generateManifest` and its canary are not called at publish time at all,
+and every publish-time dispatch passes `skipCanary: true` unconditionally.
+The central workflow has its own canary plus a first-class escape hatch already labelled for
+this exact case (`skip_canary: "Skip raw.githubusercontent.com canary (for private repos)"`),
+and it clones with an App installation token, so a private repo's manifest is generable today.
+A4 is a serving problem, not a manifest-write problem.
+It is still first in the order below, because nothing else works without it,
+but not for the reason the earlier draft gave.
 `buildRedirectUrl` in `backend/src/services/data-router.ts` sends git-tracked files to
 `raw.githubusercontent.com` and only annexed files to S3,
 and its own docstring names the invariant it depends on:
@@ -326,7 +347,8 @@ On the day the dataset goes public, `uuid.log` still names a machine
 and the commits still carry a personal email address.
 For double-blind that is acceptable, because by then attribution is wanted,
 but it is only acceptable if nothing went public early.
-The publish flip has to remain the single auditable moment, which is how ADR 0017 already works.
+The publish flip has to remain the single moment anything becomes visible,
+which is ADR 0001's consequence that governance is applied at publish rather than at repo creation.
 
 **A8. One link, and the product has to say so.**
 A blinded submission that carries both a review link and a repository URL is self-defeating.
@@ -371,10 +393,12 @@ The real depositor is recorded separately.
 
 **The precedent already exists in production.**
 Every OpenNeuro import is this shape:
-`on008768` serves `owner_username: nemarAdmin`, `owner_github: null`,
-and its commits are authored by `nemar-publish-bot`.
-A dataset whose public record names no human depositor is not a new concept here;
-it is most of the catalog.
+`on008768` serves `owner_username: nemarAdmin` and is owned by a service account.
+The precedent is narrower than it looks, though: `owner_github` is `"nemarAdmin"`, not null,
+and the git history carries the upstream authors' real institutional addresses alongside the
+bot's commits.
+So "a public record that names no human depositor" holds for the D1 owner field and NOT for git
+history, which is the one place this option is supposed to help.
 
 **What it solves.** The GitHub-identity family, 2.1 in full, permanently rather than by deferral,
 plus `owner_username` in 2.2.
@@ -388,7 +412,8 @@ Git metadata can already be committed server-side:
 and is used today for continuous-integration workflow files.
 What cannot move server-side is the data,
 which goes from the depositor's machine to the bucket through git-annex with per-user credentials,
-and ADR 0010 forbids routing that traffic through the Worker.
+and ADR 0002 keeps NEMAR out of the path of ordinary git operations
+(ADR 0010 is about import-time S3 copy, not this).
 The shape has to be: depositor uploads to the bucket as today,
 then the backend composes and commits the pointer tree as the bot.
 That is implementable, because annex keys are deterministic and the client already computes them,
@@ -501,7 +526,7 @@ Identity is withheld at the API, in the byline, in the search index and in the Z
 for as long as the flag is set,
 and restored, together with the repository flip and the DOI, at acceptance.
 
-Six pieces of work follow from the predicates in section 3, in dependency order:
+Nine pieces of work follow from the predicates in section 3, in dependency order:
 
 1. **A name and a representation for the state**, refusable on anything ever published.
    Readable but not published is a combination the system cannot express,
@@ -521,12 +546,32 @@ Six pieces of work follow from the predicates in section 3, in dependency order:
    `raw.githubusercontent.com` (#1403). Without this the state does not work at all:
    88 percent of a dataset's files are served from GitHub, and a private repository 404s
    every one of them.
-5. **Two predicates that use D1 visibility as a proxy for repository visibility**
+5. **Four predicates that use D1 visibility as a proxy for repository visibility**
    and stop being correct here:
-   the Zarr fidelity sweep's candidate query,
-   and the staleness candidate query that would otherwise email the depositor five times mid-review.
-6. **The identifier.** Reserved EZID status during the window, public at acceptance,
+   the Zarr fidelity sweep's candidate query;
+   the staleness candidate query, which would otherwise email the depositor five times mid-review;
+   `nemar admin fleet drift`, which reads visibility from the D1 ledger and would mark every
+   anonymous dataset `PUBLIC_UNPROTECTED` forever, with `fleet enforce` then trying to apply a
+   public-repo ruleset to a private repo;
+   and the MCP events fallback, which reads `events.tsv` through `raw.githubusercontent.com`
+   behind the same public gate.
+6. **A governance answer, not just a name.**
+   ADR 0001 gives an unpublished repository no branch ruleset at all,
+   because protection is applied at publish.
+   So for the whole review window the public would be reading `data.nemar.org`
+   while `main` stays force-pushable and retaggable by the depositor.
+   Readable-but-not-published needs to say what protects the bytes people are reading.
+7. **The website's own GitHub fetches.**
+   `Readme.astro` fetches `raw.githubusercontent.com` from the BROWSER,
+   so brokering on the Worker does not fix it and the most prominent panel on the dataset page
+   would be blank; the demographics panel degrades to "no demographics" the same way.
+   Both live in `nemarOrg/website`, not here.
+8. **The identifier.** Reserved EZID status during the window, public at acceptance,
    per predicate A6.
+9. **An ordering for de-anonymization.** Restoring attribution is a content commit to
+   `dataset_description.json`, not a flag flip, and if the repository goes public first then
+   ADR 0001 has already made `main` pull-request-only. The order of restore, flip and mint is
+   load-bearing.
 
 **The fallback, if a venue ever requires the repository itself to be open at submission.**
 Bot-authored deposit, per Option B. Not needed for the design above.
