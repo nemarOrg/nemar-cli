@@ -341,8 +341,15 @@ export async function findSessionByCookieId(
 }
 
 /** How a session was established. Stored on `web_sessions.auth_method`
- *  (0050) so /auth/me and admin tooling can distinguish the flows. */
-export type AuthMethod = "email_code" | "orcid";
+ *  (0050) so /auth/me and admin tooling can distinguish the flows.
+ *
+ *  `api_key` is written only by the CLI docs mint (`DOCS_CLI_MINT_INSERT_SQL`,
+ *  epic #1336 phase 3), which spells the literal in SQL rather than binding a
+ *  value from here. It is listed anyway: nothing surfaces this column today, so
+ *  the omission was invisible, but migration 0050 says the column exists for
+ *  "/auth/me and admin tooling", and the first reader to take that up would
+ *  type it as this union and silently fail to model a real value.  */
+export type AuthMethod = "email_code" | "orcid" | "api_key";
 
 /** The cookie a caller will set, plus the not-yet-executed INSERT that makes
  *  it valid. Split out of `issueSession` so a caller can put the session row
