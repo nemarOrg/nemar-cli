@@ -20,7 +20,16 @@ export async function help(args: string[], env: Record<string, string> = {}): Pr
     env: { ...process.env, NEMAR_NO_UPDATE_CHECK: "1", FORCE_COLOR: "0", ...env },
   });
   const stdout = await new Response(proc.stdout).text();
-  await proc.exited;
+  const stderr = await new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+  // Without this, a CLI that threw at import returns "" and every assertion
+  // that compares two help outputs compares empty to empty and passes -- which
+  // is exactly the shape `.rules/testing.md` calls a test that cannot fail.
+  if (exitCode !== 0) {
+    throw new Error(
+      `nemar ${args.join(" ")} exited ${exitCode}\n--- stderr ---\n${stderr}\n--- stdout ---\n${stdout}`,
+    );
+  }
   return stdout;
 }
 
@@ -33,19 +42,33 @@ function commandsBlock(output: string): string {
   return end === -1 ? rest : rest.slice(0, end);
 }
 
-/** Names of the subcommands rendered WITH a description (the lead block). */
+/**
+ * Names of the subcommands rendered WITH a description.
+ *
+ * Two layouts, because the formatter uses both: `  <term>  <description>` when
+ * the term fits the section's column, and the term alone on its line with the
+ * description indented underneath when it does not (see formatItem). A parser
+ * that knew only the first would silently count zero for a section full of
+ * long terms, which is a test that cannot fail rather than one that passes.
+ */
 export function describedCommands(output: string): string[] {
-  return (
-    commandsBlock(output)
-      .split("\n")
-      .slice(1)
-      // `  <term>  <description>`, where the term may itself carry spaces
-      // (`download [options] <dataset-id>`) and a wrapped description
-      // continuation line starts with far more than two spaces.
-      .map((line) => /^ {2}(\S.*?) {2,}\S/.exec(line)?.[1])
-      .filter((term): term is string => term !== undefined)
-      .map((term) => term.split(/[\s|]/)[0])
-  );
+  const lines = commandsBlock(output).split("\n").slice(1);
+  const names: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const inline = /^ {2}(\S.*?) {2,}\S/.exec(line);
+    if (inline) {
+      names.push(inline[1].split(/[\s|]/)[0]);
+      continue;
+    }
+    // Term alone: two-space indent, no trailing description, and the next line
+    // is the description indented further.
+    const alone = /^ {2}(\S[^ ].*)$/.exec(line);
+    if (alone && /^ {4,}\S/.test(lines[i + 1] ?? "")) {
+      names.push(alone[1].split(/[\s|]/)[0]);
+    }
+  }
+  return names;
 }
 
 /** Names on the comma-separated overflow line, if the group has one. */

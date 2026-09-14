@@ -24,7 +24,7 @@
  *
  * Keyed by the command path below the program name, space-separated
  * (`"dataset"`, `"admin"`, and `"dataset publish"` if a nested group ever
- * needs it). `test/help-groups.unit.test.ts` fails if a key names a group
+ * needs it). `test/help-tiers.unit.test.ts` fails if a key names a group
  * that does not exist or an entry names a subcommand that does not.
  */
 export const COMMON_COMMANDS: Readonly<Record<string, readonly string[]>> = {

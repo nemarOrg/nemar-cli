@@ -93,10 +93,50 @@ export function groupKey(cmd: Command): string {
 /** The formatHelp override for color-coded help output. */
 const colorFormatHelp = {
   formatHelp(cmd: Command, helper: Help): string {
-    const termWidth = helper.padWidth(cmd, helper);
     const helpWidth = helper.helpWidth ?? 80;
     const itemIndentWidth = 2;
     const itemSeparatorWidth = 2;
+
+    /**
+     * Commander's own `padWidth` is the maximum over EVERY visible term in the
+     * command, which is wrong for us in two ways.
+     *
+     * It counts terms we are not showing: the nine admin commands in the lead
+     * block get indented to fit the widest of all 43, most of which are folded
+     * onto the overflow line.
+     *
+     * Worse, one long term pushes the description column right for everything.
+     * Registering `download [options] <dataset-id>` at the root moved the root
+     * column from 20 to 33, and since Commander's `wrap` gives up entirely once
+     * the remaining width drops below 40 columns, root help stopped wrapping at
+     * all below roughly 75 columns -- the same defect the color fix above
+     * removes, reintroduced from the other side.
+     *
+     * So: measure the items being rendered, and when even that leaves too
+     * little room, drop the description to its own indented line rather than
+     * letting it overflow.
+     */
+    const MIN_DESCRIPTION_WIDTH = 40;
+    /**
+     * The widest term in a section, capped so the description column keeps at
+     * least MIN_DESCRIPTION_WIDTH -- below which Commander's `wrap` stops
+     * wrapping at all and lines simply overflow.
+     *
+     * Capping rather than flipping the whole section matters: `nemar admin`
+     * has 43 subcommands and one of them
+     * (`import-openneuro [options] <openneuro-ids>`) is long enough to push
+     * every other description off the right edge. Only the over-long terms pay
+     * for their length; see formatItem.
+     */
+    const padCap = Math.max(
+      8,
+      helpWidth - itemIndentWidth - itemSeparatorWidth - MIN_DESCRIPTION_WIDTH,
+    );
+    const padFor = (terms: string[]): number =>
+      Math.min(
+        padCap,
+        terms.reduce((widest, term) => Math.max(widest, term.length), 0),
+      );
 
     // Format a term+description pair.
     // Uses the plain (uncolored) term for padding calculation, but the
@@ -110,18 +150,29 @@ const colorFormatHelp = {
     // --help`). The term is always a prefix of the wrapped result and
     // wrapping never inserts anything ahead of it, so swapping the colored
     // term back in afterwards is a pure substitution.
-    function formatItem(plainTerm: string, coloredTerm: string, description: string): string {
-      if (description) {
-        const pad = " ".repeat(Math.max(0, termWidth + itemSeparatorWidth - plainTerm.length));
-        const fullText = `${plainTerm}${pad}${description}`;
-        const wrapped = helper.wrap(
-          fullText,
-          helpWidth - itemIndentWidth,
-          termWidth + itemSeparatorWidth,
-        );
-        return coloredTerm + wrapped.slice(plainTerm.length);
+    function formatItem(
+      plainTerm: string,
+      coloredTerm: string,
+      description: string,
+      termWidth: number,
+    ): string {
+      if (!description) return coloredTerm;
+
+      const column = termWidth + itemSeparatorWidth;
+      if (plainTerm.length > termWidth) {
+        // This one term is wider than the column its section settled on, so
+        // there is no room for a description beside it. Put the description
+        // underneath, indented, where it still wraps at the full width --
+        // rather than starting it past the right edge, which is what Commander
+        // does and what makes a long entry unreadable.
+        const wrapped = helper.wrap(description, helpWidth - itemIndentWidth - 4, 0);
+        return `${coloredTerm}\n${wrapped.replace(/^/gm, "    ")}`;
       }
-      return coloredTerm;
+
+      const pad = " ".repeat(Math.max(0, column - plainTerm.length));
+      const fullText = `${plainTerm}${pad}${description}`;
+      const wrapped = helper.wrap(fullText, helpWidth - itemIndentWidth, column);
+      return coloredTerm + wrapped.slice(plainTerm.length);
     }
 
     function formatList(textArray: string[]): string {
@@ -140,18 +191,22 @@ const colorFormatHelp = {
     }
 
     // Arguments
-    const argumentList = helper.visibleArguments(cmd).map((arg: Argument) => {
+    const visibleArgs = helper.visibleArguments(cmd);
+    const argPad = padFor(visibleArgs.map((arg: Argument) => helper.argumentTerm(arg)));
+    const argumentList = visibleArgs.map((arg: Argument) => {
       const plain = helper.argumentTerm(arg);
-      return formatItem(plain, chalk.blue(plain), helper.argumentDescription(arg));
+      return formatItem(plain, chalk.blue(plain), helper.argumentDescription(arg), argPad);
     });
     if (argumentList.length > 0) {
       output.push(chalk.bold("Arguments:"), formatList(argumentList), "");
     }
 
     // Options
-    const optionList = helper.visibleOptions(cmd).map((option: Option) => {
+    const visibleOpts = helper.visibleOptions(cmd);
+    const optPad = padFor(visibleOpts.map((option: Option) => helper.optionTerm(option)));
+    const optionList = visibleOpts.map((option: Option) => {
       const plain = helper.optionTerm(option);
-      return formatItem(plain, chalk.cyan(plain), helper.optionDescription(option));
+      return formatItem(plain, chalk.cyan(plain), helper.optionDescription(option), optPad);
     });
     if (optionList.length > 0) {
       output.push(chalk.bold("Options:"), formatList(optionList), "");
@@ -162,13 +217,25 @@ const colorFormatHelp = {
     // names-only line; every other group lists everything, sorted
     // alphabetically for consistent help output.
     const byName = (a: Command, b: Command): number => a.name().localeCompare(b.name());
-    const describe = (subCmd: Command): string => {
-      const plain = helper.subcommandTerm(subCmd);
-      return formatItem(plain, chalk.bold.cyan(plain), helper.subcommandDescription(subCmd));
+    const describeAll = (subs: Command[]): string[] => {
+      const pad = padFor(subs.map((sub) => helper.subcommandTerm(sub)));
+      return subs.map((sub) => {
+        const plain = helper.subcommandTerm(sub);
+        return formatItem(plain, chalk.bold.cyan(plain), helper.subcommandDescription(sub), pad);
+      });
     };
 
     const visible = helper.visibleCommands(cmd);
-    const common = HELP_ALL ? undefined : COMMON_COMMANDS[groupKey(cmd)];
+    const groupName = groupKey(cmd);
+    const common =
+      HELP_ALL || !Object.hasOwn(COMMON_COMMANDS, groupName)
+        ? undefined
+        : COMMON_COMMANDS[groupName];
+    // `lead.length === 0` means every declared name was renamed away. Falling
+    // back to the full listing keeps the docblock's "a command missing from the
+    // table is folded, never dropped" promise unconditional -- otherwise the
+    // group would render as a bare comma list with no header and no
+    // descriptions at all.
     if (common) {
       const found = new Map(visible.map((sub: Command) => [sub.name(), sub]));
       const lead = common
@@ -183,9 +250,15 @@ const colorFormatHelp = {
         .filter((sub: Command) => !leadNames.has(sub.name()) && sub.name() !== "help")
         .sort(byName);
 
-      if (lead.length > 0) {
-        output.push(chalk.bold("Commands:"), formatList(lead.map(describe)), "");
+      if (lead.length === 0) {
+        output.push(
+          chalk.bold("Commands:"),
+          formatList(describeAll([...visible].sort(byName))),
+          "",
+        );
+        return output.join("\n");
       }
+      output.push(chalk.bold("Commands:"), formatList(describeAll(lead)), "");
       if (rest.length > 0) {
         const names = rest.map((sub: Command) => sub.name()).join(", ");
         output.push(
@@ -195,7 +268,7 @@ const colorFormatHelp = {
         );
       }
     } else if (visible.length > 0) {
-      output.push(chalk.bold("Commands:"), formatList([...visible].sort(byName).map(describe)), "");
+      output.push(chalk.bold("Commands:"), formatList(describeAll([...visible].sort(byName))), "");
     }
 
     return output.join("\n");
