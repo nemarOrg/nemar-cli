@@ -28,7 +28,30 @@ earlier releases are described only by their generated notes.
   rate-limit bucket. There is deliberately no flag that prints the session value, since a
   credential on stdout is one in a shell history.
 
+- **`nemar download <id>` and `nemar upload <path>` work from the root**, alongside the
+  existing `login`/`logout`/`whoami` shortcuts. They are the same commands as
+  `nemar dataset download`/`nemar dataset upload`, built from one factory, so every flag and
+  every default is shared and the canonical two-word spellings are unchanged.
+
+### Changed
+
+- **`nemar admin --help` and `nemar dataset --help` lead with the commands people actually
+  type.** `admin` had grown to 43 subcommands and `dataset` to 21, most of them one-off
+  backfills, sweeps run from cron, or git-level escape hatches, and a flat alphabetical list
+  gave `nemar admin approve` exactly as much prominence as `nemar admin recording-stats-sweep`.
+  Plain `--help` now describes nine admin commands and six dataset commands and folds the rest
+  onto a single comma-separated line; `--help-all` still lists everything with descriptions.
+  Nothing is hidden in any other sense: a folded command still runs, still completes on TAB,
+  and still has its own `--help`. The two lists are declared in `src/lib/help-groups.ts`, and a
+  command absent from that file is folded rather than dropped.
+
 ### Fixed
+
+- **Colored `--help` no longer wraps descriptions about twenty columns early.** Commander
+  measures wrap width with `String.length`, which counts the ANSI escapes around a colored
+  command name as if they took up columns, so `nemar dataset --help` in a terminal broke every
+  description onto two or three lines while the same output piped through `cat` was fine. The
+  wrap now runs on the visible text and the color is applied afterwards.
 
 - **Rate limits now apply to the `/nemar` spelling of every route.** The API is mounted twice,
   at `/` and at `/nemar`, and the limiter matched paths against the full request path, so the
