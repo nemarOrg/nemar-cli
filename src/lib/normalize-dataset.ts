@@ -48,6 +48,17 @@ export interface NormalizeDatasetPlan {
   bytes: number;
   /** Tracked `.gitattributes` files carrying an inherited largefiles rule. */
   attributeFiles: string[];
+  /**
+   * Keys this clone has already annexed and committed, and origin does not have.
+   *
+   * A resumed run (`--dir`) measures a tree that a previous attempt already
+   * normalized, so `files` and `attributeFiles` both come back empty and the work
+   * looks done. It is not: the previous attempt stopped BEFORE pushing, which is
+   * what happens when the S3 verification fails. Reporting "already matches NEMAR
+   * policy" there would tick the dataset off with its recordings still plain blobs
+   * on `origin/main`. These keys still have to be proven present and pushed.
+   */
+  pendingKeys: string[];
 }
 
 export interface NormalizeDatasetResult {
@@ -116,7 +127,34 @@ export async function planDatasetNormalization(
     files,
     bytes: files.reduce((sum, f) => sum + f.size, 0),
     attributeFiles,
+    pendingKeys: await keysAwaitingPush(datasetPath),
   };
+}
+
+/**
+ * Keys annexed in this clone's HEAD that `origin/main` does not carry.
+ *
+ * Empty for a fresh clone, which is the ordinary case. Non-empty only when a
+ * previous attempt committed and did not push -- and the only thing that stops a
+ * push is the verification refusing, so these are exactly the keys whose presence
+ * in S3 was never established.
+ */
+async function keysAwaitingPush(datasetPath: string): Promise<string[]> {
+  const origin = await runCommand(
+    ["git", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"],
+    { cwd: datasetPath },
+  );
+  if (origin.exitCode !== 0) return [];
+  const diff = await runCommand(["git", "diff", "--name-only", "origin/main", "HEAD"], {
+    cwd: datasetPath,
+  });
+  if (diff.exitCode !== 0) return [];
+  const keys = new Set<string>();
+  for (const path of diff.stdout.split("\n").filter(Boolean)) {
+    const key = await runCommand(["git", "annex", "lookupkey", "--", path], { cwd: datasetPath });
+    if (key.exitCode === 0 && key.stdout.trim()) keys.add(key.stdout.trim());
+  }
+  return [...keys].sort();
 }
 
 /**
@@ -188,7 +226,11 @@ async function listAttributeFilesWithLargefiles(datasetPath: string): Promise<st
   for (const file of candidates) {
     const show = await runCommand(["git", "show", `HEAD:${file}`], { cwd: datasetPath });
     if (show.exitCode !== 0) continue;
-    if (stripLargefilesAttributes(show.stdout).stripped > 0) files.push(file);
+    const result = stripLargefilesAttributes(show.stdout);
+    // `skipped` counts too: a quoted `annex.largefiles` line is work outstanding,
+    // not work absent. Counting only `stripped` reported such a dataset as already
+    // matching NEMAR policy while upstream's rule still governed it.
+    if (result.stripped > 0 || result.skipped.length > 0) files.push(file);
   }
   return files;
 }
@@ -230,7 +272,7 @@ export async function normalizeDatasetRepo(
     // Supplied by the caller: neither credential path applies.
     upload = options.upload;
     verify = annexRemoteVerifier(datasetPath, remoteName);
-  } else if (plan.files.length === 0) {
+  } else if (plan.files.length === 0 && (plan.pendingKeys?.length ?? 0) === 0) {
     // Nothing to move. The attribute half of the policy is a text change and a
     // commit, so minting credentials and enabling the remote would be setup for
     // work that does not exist -- and that is the ordinary case for #1374's fleet
@@ -288,6 +330,14 @@ export async function normalizeDatasetRepo(
     if (probe.outcome === "refused") {
       throw new Error(
         `The credentials the API minted for ${datasetId} cannot read s3://${probe.bucket}/${probe.prefix}/: ${probe.detail}. Refusing to start the migration. Check that the API's S3 identity still covers the bucket and that the session policy names this dataset; \`nemar admin s3 credential-check ${datasetId}\` reports both. \`--via-aws-cli\` moves the same content with this machine's own AWS configuration instead.`,
+      );
+    }
+    if (probe.outcome === "unavailable") {
+      // The verifier for this branch is the same `aws` CLI. Annexing and uploading
+      // a whole dataset and only then discovering nothing can confirm it wastes the
+      // expensive half to learn what is already known here.
+      throw new Error(
+        `${datasetId}: ${probe.detail ?? "the aws CLI is unavailable"}, so nothing on this host can confirm the upload reached S3. Install the aws CLI (nemar doctor lists it) or run with --via-aws-cli on a host that has it.`,
       );
     }
     if (probe.outcome !== "reachable") {
@@ -349,12 +399,26 @@ export async function normalizeDatasetRepo(
   // whose content never reached S3 is exactly what stranded on003490 and on005121
   // (#1392): published, permanent DOI, and no clone able to fetch the content. The
   // clone is still here and re-runnable; a pushed lie is not so easily withdrawn.
-  const uploadedKeys = (normalized.data?.files ?? []).map((f) => f.key);
+  // Keys a previous attempt annexed and committed but never proved are verified
+  // here too: they are the whole reason that attempt did not push, and a resumed
+  // run that pushed them unchecked would be the original bug with extra steps.
+  const uploadedKeys = [
+    ...new Set([...(normalized.data?.files ?? []).map((f) => f.key), ...(plan.pendingKeys ?? [])]),
+  ];
   const verification = uploadedKeys.length > 0 ? await verify(uploadedKeys) : null;
   if (verification && verification.present.length !== uploadedKeys.length) {
-    const missing = [...verification.absent, ...verification.unconfirmed];
+    // Name the first key by the category it is actually in. Saying "first
+    // unconfirmed" about a key just counted as absent throws away the distinction
+    // the line above it just drew.
+    const firstAbsent = verification.absent[0];
+    const firstUnconfirmed = verification.unconfirmed[0];
+    const named = firstAbsent
+      ? `first absent: ${firstAbsent}`
+      : firstUnconfirmed
+        ? `first unconfirmed: ${firstUnconfirmed}`
+        : "none named";
     throw new Error(
-      `${datasetId}: the remote confirms ${verification.present.length} of ${uploadedKeys.length} uploaded key(s) (${verification.absent.length} absent, ${verification.unconfirmed.length} unconfirmed, checked by ${verification.method}). NOTHING HAS BEEN PUSHED, so no clone can see a tree naming content that is not there. First unconfirmed: ${missing[0]}${verification.detail ? ` (${verification.detail})` : ""}. The work is intact at ${datasetPath}; re-run with --dir ${datasetPath} to resume the upload rather than starting over.`,
+      `${datasetId}: the remote confirms ${verification.present.length} of ${uploadedKeys.length} uploaded key(s) (${verification.absent.length} absent, ${verification.unconfirmed.length} unconfirmed, checked by ${verification.method}). NOTHING HAS BEEN PUSHED, so no clone can see a tree naming content that is not there. ${named}${verification.detail ? ` (${verification.detail})` : ""}. The work is intact at ${datasetPath}; re-run with --dir ${datasetPath} to resume the upload rather than starting over.`,
     );
   }
 
@@ -545,7 +609,15 @@ export function awsCliUpload(options: {
     mkdirSync(staging, { recursive: true });
 
     try {
+      // By key, not by path. Two files with identical content share one key, and
+      // the staging directory is named by key -- so the second `ln` to the same
+      // target used to exit 1 ("File exists") and kill the whole migration. The
+      // annexCopyUpload path handles duplicates fine, and the two must not disagree
+      // about a case this module documents as real.
+      const staged = new Set<string>();
       for (const file of files) {
+        if (staged.has(file.key)) continue;
+        staged.add(file.key);
         const located = await runCommand(["git", "annex", "contentlocation", file.key], {
           cwd: datasetPath,
         });

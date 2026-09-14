@@ -3924,9 +3924,24 @@ Examples:
       console.log(chalk.dim("  History is not rewritten; tags, DOIs and archives are untouched."));
       console.log();
 
-      if (plan.files.length === 0 && plan.attributeFiles.length === 0) {
+      if (
+        plan.files.length === 0 &&
+        plan.attributeFiles.length === 0 &&
+        (plan.pendingKeys?.length ?? 0) === 0
+      ) {
         console.log(chalk.green("Nothing to do: this dataset already matches NEMAR policy."));
         return;
+      }
+      if (plan.files.length === 0 && (plan.pendingKeys?.length ?? 0) > 0) {
+        // A resumed clone (--dir) whose previous attempt committed and stopped. The
+        // tree looks normalized because it IS normalized -- locally. Origin still
+        // carries the recordings as plain blobs, and the keys were never proved
+        // present in S3, which is the only reason the push did not happen.
+        console.log(
+          chalk.yellow(
+            `  Resuming: ${plan.pendingKeys?.length ?? 0} key(s) are committed here and absent from origin. They will be re-verified against S3 before anything is pushed.`,
+          ),
+        );
       }
 
       if (options.dryRun) {

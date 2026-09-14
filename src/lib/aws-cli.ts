@@ -186,15 +186,17 @@ export async function uploadWithAwsCli(opts: AwsCliUploadOptions): Promise<AwsCl
  *
  * `reachable` means an object under the prefix was listed AND read; `empty-prefix`
  * that the listing worked and there was nothing to read; `refused` that S3 said no;
- * `unavailable` that this machine has no `aws` CLI to ask with.
+ * `unavailable` that this machine has no `aws` CLI to ask with; `inconclusive` that
+ * the question did not get asked -- a timeout, a DNS failure -- which is not a
+ * refusal and must not abort a migration the way one does.
  */
 export interface S3AccessProbe {
   bucket: string;
   prefix: string;
   /** The object the read was attempted on, when the listing found one. */
   object: string | null;
-  outcome: "reachable" | "empty-prefix" | "refused" | "unavailable";
-  /** The AWS error, trimmed, when the outcome is `refused` or `unavailable`. */
+  outcome: "reachable" | "empty-prefix" | "refused" | "unavailable" | "inconclusive";
+  /** The AWS error, trimmed, for any outcome that is not an answer. */
   detail?: string;
 }
 
@@ -244,38 +246,76 @@ export async function probeS3PrefixAccess(opts: {
   // signs with, and the answer would be about the machine rather than the token.
   const unsetEnv = ["AWS_PROFILE", "AWS_DEFAULT_PROFILE"];
 
-  const listed = await runCommand(
-    [
-      "aws",
-      "s3api",
-      "list-objects-v2",
-      "--bucket",
-      bucket,
-      "--prefix",
-      `${prefix.replace(/\/$/, "")}/`,
-      "--max-keys",
-      "1",
-      "--query",
-      "Contents[0].Key",
-      "--output",
-      "text",
-    ],
-    { env, unsetEnv, timeout: 60_000 },
-  );
+  let listed: Awaited<ReturnType<typeof runCommand>>;
+  try {
+    listed = await runCommand(
+      [
+        "aws",
+        "s3api",
+        "list-objects-v2",
+        "--bucket",
+        bucket,
+        "--prefix",
+        `${prefix.replace(/\/$/, "")}/`,
+        "--max-keys",
+        "1",
+        "--query",
+        "Contents[0].Key",
+        "--output",
+        "text",
+      ],
+      { env, unsetEnv, timeout: 60_000 },
+    );
+  } catch (error) {
+    return {
+      ...base,
+      outcome: "inconclusive",
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (listed.timedOut) {
+    return { ...base, outcome: "inconclusive", detail: "the listing timed out" };
+  }
   if (listed.exitCode !== 0) {
-    return { ...base, outcome: "refused", detail: lastMeaningfulLine(listed.stderr) };
+    const detail = lastMeaningfulLine(listed.stderr);
+    // Only an answer from S3 is a refusal. A resolver failure or a dropped
+    // connection is the question not arriving, and telling the operator their
+    // credentials cannot read the prefix would send them to the wrong place.
+    return /AccessDenied|InvalidAccessKeyId|ExpiredToken|SignatureDoesNotMatch|NoSuchBucket|403|404|An error occurred/i.test(
+      detail,
+    )
+      ? { ...base, outcome: "refused", detail }
+      : { ...base, outcome: "inconclusive", detail };
   }
 
   const key = listed.stdout.trim();
   if (!key || key === "None") return { ...base, outcome: "empty-prefix" };
 
-  const head = await runCommand(["aws", "s3api", "head-object", "--bucket", bucket, "--key", key], {
-    env,
-    unsetEnv,
-    timeout: 60_000,
-  });
+  let head: Awaited<ReturnType<typeof runCommand>>;
+  try {
+    head = await runCommand(["aws", "s3api", "head-object", "--bucket", bucket, "--key", key], {
+      env,
+      unsetEnv,
+      timeout: 60_000,
+    });
+  } catch (error) {
+    return {
+      ...base,
+      object: key,
+      outcome: "inconclusive",
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (head.timedOut) {
+    return { ...base, object: key, outcome: "inconclusive", detail: "the read timed out" };
+  }
   if (head.exitCode !== 0) {
-    return { ...base, object: key, outcome: "refused", detail: lastMeaningfulLine(head.stderr) };
+    const detail = lastMeaningfulLine(head.stderr);
+    return /AccessDenied|InvalidAccessKeyId|ExpiredToken|SignatureDoesNotMatch|403|404|An error occurred/i.test(
+      detail,
+    )
+      ? { ...base, object: key, outcome: "refused", detail }
+      : { ...base, object: key, outcome: "inconclusive", detail };
   }
   return { ...base, object: key, outcome: "reachable" };
 }
@@ -348,10 +388,24 @@ export async function headS3Objects(opts: {
       const index = next++;
       if (index >= keys.length) return;
       const key = keys[index];
-      const head = await runCommand(
-        ["aws", "s3api", "head-object", "--bucket", bucket, "--key", `${base}${key}`],
-        { env, unsetEnv, timeout: 60_000 },
-      );
+      // A spawn that never starts (no `aws` on this PATH) must come back as
+      // `unknown` like every other unanswered question, not as an exception that
+      // rejects the whole batch. `isAwsCliAvailable` looks it up in the ambient
+      // environment while this call uses `env`, so the two can disagree.
+      let head: Awaited<ReturnType<typeof runCommand>>;
+      try {
+        head = await runCommand(
+          ["aws", "s3api", "head-object", "--bucket", bucket, "--key", `${base}${key}`],
+          { env, unsetEnv, timeout: 60_000 },
+        );
+      } catch (error) {
+        results[index] = {
+          key,
+          outcome: "unknown",
+          detail: error instanceof Error ? error.message : String(error),
+        };
+        continue;
+      }
       if (head.exitCode === 0) {
         results[index] = { key, outcome: "present" };
         continue;

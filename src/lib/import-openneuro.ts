@@ -1217,7 +1217,12 @@ export async function prepareImport(
       remoteName: "nemar-s3",
       unannexedData,
       upstreamKeys: new Set(keyUrlMap.keys()),
-      carryOverUnaccountedKeys: isReimportOntoExistingMain,
+      // Gated on the data step having actually run. With --skip-data there is no
+      // `keyUrlMap`, so "unaccounted" would mean EVERY annexed key in the dataset,
+      // and the staging manifest would assert that prepare uploaded content it
+      // never touched -- sending finalize's remedy to re-run a phase that saw none
+      // of it.
+      carryOverUnaccountedKeys: isReimportOntoExistingMain && !options.skipData,
       upload: annexCopyUpload({ credentials: s3Creds ?? "inherit" }),
       maxBytes: options.normalizeMaxBytes,
     });

@@ -374,7 +374,7 @@ export async function normalizeUnannexedData(args: {
   const maxBytes = args.maxBytes ?? NORMALIZE_MAX_BYTES;
   if (bytes > maxBytes) {
     throw new Error(
-      `${files.length} file(s) totaling ${(bytes / 1024 ** 3).toFixed(1)} GiB need annexing, over the ${(maxBytes / 1024 ** 3).toFixed(1)} GiB this leg will upload from the import host (NORMALIZE_MAX_BYTES, ADR 0010/0058). Re-run on a host that can finish the upload with --normalize-max-gb <n> to raise it deliberately, rather than discovering the size at the job timeout.`,
+      `${files.length} file(s) totaling ${(bytes / 1024 ** 3).toFixed(1)} GiB need annexing, over the ${(maxBytes / 1024 ** 3).toFixed(1)} GiB this leg will upload from the import host (NORMALIZE_MAX_BYTES, ADR 0010/0060). Re-run on a host that can finish the upload with --normalize-max-gb <n> to raise it deliberately, rather than discovering the size at the job timeout.`,
     );
   }
 
@@ -576,6 +576,15 @@ export async function normalizeImportedTree(args: {
   }
   if (policy.changed.length > 0) {
     notes.push(`stripped ${policy.stripped} inherited annex.largefiles attribute(s)`);
+  }
+  if (policy.skipped.length > 0) {
+    // A quoted pattern the strip will not split. `prepareImport` warns about these;
+    // `normalizeDatasetRepo` prints only these notes, so without this the line is
+    // left in place and nobody is told -- and per ADR 0060 it still outranks the
+    // expression we just configured.
+    notes.push(
+      `LEFT IN PLACE, still outranking NEMAR's expression: ${policy.skipped.join("; ")} (a quoted pattern; fix by hand)`,
+    );
   }
 
   // Commit only what changed the tree. The carried-over keys are already
