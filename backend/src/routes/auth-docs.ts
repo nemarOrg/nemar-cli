@@ -2,9 +2,10 @@
  * Docs admin gate routes (epic #1336 phase 0, issue #1338), mounted under the
  * same `/auth` prefix as the other auth families.
  *
- *   POST /auth/docs/grant    - website (session): mint a one-time code
- *   POST /auth/docs/exchange - docs Pages Function: trade it for a cookie
- *   GET  /auth/docs/verify   - docs Pages Function: check that cookie
+ *   POST /auth/docs/grant       - website (session): mint a one-time code
+ *   POST /auth/docs/exchange    - docs Pages Function: trade it for a cookie
+ *   GET  /auth/docs/verify      - docs Pages Function: check that cookie
+ *   POST /auth/docs/cli-session - CLI (API key): mint the same credential direct
  *
  * WHY THIS EXISTS. `docs.nemar.org/admin/*` answered 200 to anyone. The
  * Cloudflare Access app the docs repo described covers that Pages project's
@@ -23,6 +24,22 @@
  * credential of its own, obtained once through a code that dies in sixty
  * seconds.
  *
+ * WHY THE CLI ROUTE SKIPS ALL OF THAT (epic #1336 phase 3, issue #1341). The
+ * three-hop handoff exists because a browser's proof of identity lives on one
+ * host and the credential has to be set on another. A CLI has no such split: it
+ * holds a long-lived API key, and `api.nemar.org` is the one host that can
+ * validate it. So `cli-session` is the whole handoff collapsed into a single
+ * authenticated call, with the mint-time gates intact.
+ *
+ * What it does NOT change is the separation ADR 0056 exists for: the API key
+ * never reaches `docs.nemar.org` or its logs. The caller trades it here for a
+ * short-lived, docs-scoped, read-only value and sends only that onward, as a
+ * `Cookie` header the gate already knows how to read. Nothing in the docs repo
+ * needed a change to accept it, which was worth checking rather than assuming:
+ * the Pages Function reads the credential from `Cookie` and presents it to
+ * `verify` in `X-Docs-Session`, so a client that sets the cookie header itself
+ * enters through the same door a browser does.
+ *
  * `grant` is the only route here that a browser reaches, and only via the
  * website's server-side render. `exchange` and `verify` are server-to-server
  * calls from a Cloudflare Pages Function, which is why neither reads a cookie:
@@ -37,17 +54,21 @@ import { z } from "zod";
 import {
   DOCS_ADMIN_ROLES,
   DOCS_AUTH_MESSAGES,
+  DOCS_CLI_SESSION_TTL_SECONDS,
   DOCS_GRANT_TTL_SECONDS,
   DOCS_SESSION_HEADER,
   DOCS_SESSION_TTL_SECONDS,
+  type DocsCliSessionResponse,
   type DocsExchangeResponse,
   type DocsGrantResponse,
   type DocsVerifyResponse,
 } from "../../../shared/contract/docs-auth.js";
 import { notFoundResponse } from "../lib/not-found";
+import { resolveBearerUser } from "../middleware/auth";
 import { webSessionMiddleware } from "../middleware/webSession";
 import { isActiveAccountStatus } from "../services/account-tier";
 import {
+  DOCS_CLI_MINT_INSERT_SQL,
   DOCS_GRANT_INSERT_SQL,
   DOCS_GRANT_PRUNE_SQL,
   DOCS_MINT_CONSUME_SQL,
@@ -211,6 +232,76 @@ authDocsRoutes.post(
     return c.json(responseBody, 200, NO_STORE);
   },
 );
+
+/**
+ * Mint a docs session for a CLI caller holding an admin API key.
+ *
+ * Reached by `nemar admin docs`, and by anything else that can present a key.
+ * The response body carries the credential, so it is `no-store` like every
+ * other answer in this file.
+ *
+ * BEARER ONLY, AND THE COOKIE IS DELIBERATELY NOT ACCEPTED. `authMiddleware`
+ * would take either, and taking either here would be a mistake: the app cookie
+ * is ambient in a browser, so a cookie-authenticated POST to this route is a
+ * cross-site request away from minting a docs credential for whoever is signed
+ * in. The browser already has a path to one -- `grant`, which checks `Origin`
+ * before it checks anything else. This route resolves the bearer itself rather
+ * than mounting `authMiddleware`, precisely so the cookie path is absent rather
+ * than merely discouraged.
+ */
+authDocsRoutes.post("/docs/cli-session", async (c) => {
+  const bearer = await resolveBearerUser(c);
+  if (bearer.kind === "refused") {
+    // `resolveBearerUser` builds its own refusals (malformed header, dead key,
+    // inactive account) and they are the right answers, but they are answers
+    // ABOUT a credential, so they get this file's cache rule too. Rebuilt
+    // rather than mutated: a Response's headers are not guaranteed mutable,
+    // and a silently-dropped header here would be invisible.
+    const refused = new Response(bearer.response.body, bearer.response);
+    refused.headers.set("Cache-Control", "no-store");
+    return refused;
+  }
+  if (bearer.kind === "absent") {
+    return c.json(
+      { error: "unauthenticated", message: DOCS_AUTH_MESSAGES.unauthenticated },
+      401,
+      NO_STORE,
+    );
+  }
+
+  const user = bearer.user;
+  // Same disguise `grant` gives a signed-in non-admin, for the same reason and
+  // with the same caveat: it buys parity with the other entrances, not secrecy.
+  // See the comment on `grant` before building anything on top of it.
+  if (!isDocsAdmin(user.role)) {
+    return notFoundResponse(c);
+  }
+
+  const cookieIdRaw = generateCookieId();
+  const cookieIdHash = await hashCookieId(cookieIdRaw);
+  // Unlike `exchange`, these two DO describe the caller: a CLI on someone's
+  // machine talks to this host directly, with no Pages Function in between.
+  const userAgent = c.req.header("User-Agent") ?? null;
+  const ipHash = await hashIp(clientIp(c));
+
+  const result = await c.env.DB.prepare(DOCS_CLI_MINT_INSERT_SQL)
+    .bind(cookieIdHash, DOCS_CLI_SESSION_TTL_SECONDS, userAgent, ipHash, user.id)
+    .run();
+
+  // Zero rows means the account stopped qualifying between the bearer lookup
+  // and this write. Rare, and `not_found` keeps the answer indistinguishable
+  // from the non-admin case above rather than announcing the race.
+  if ((result.meta?.changes ?? 0) === 0) {
+    return notFoundResponse(c);
+  }
+
+  const body: DocsCliSessionResponse = {
+    session: cookieIdRaw,
+    max_age_seconds: DOCS_CLI_SESSION_TTL_SECONDS,
+    username: user.username || null,
+  };
+  return c.json(body, 200, NO_STORE);
+});
 
 /**
  * Check a docs session value. Called by the Pages Function on every gated
