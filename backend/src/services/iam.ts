@@ -1,38 +1,24 @@
 /**
- * AWS IAM Service using aws4fetch
+ * Revoking the per-user IAM access NEMAR no longer provisions.
  *
- * Manages per-user IAM users and policies for scoped S3 access.
- * Regular users get an inline policy granting access only to their dataset prefixes.
- * Admin users receive a broader policy with read/write/delete access to all objects in the bucket.
+ * Every user used to get an IAM user with an inline policy over their dataset
+ * prefixes; that was replaced by per-request STS credentials the Worker federates
+ * (`services/sts.ts`), which is why `test/iam-removal.test.ts` exists. The
+ * provisioning half of this module was left behind with no call sites, including two
+ * policy generators, and #1380 spent a day suspecting an identity policy that no
+ * code here writes -- so it is gone rather than dormant.
+ *
+ * What remains is revocation, which still has work to do: accounts provisioned under
+ * the old scheme carry an `aws_iam_username` in D1 and an IAM user in the account,
+ * and revoking or deleting such an account has to take both away.
  */
 
 import { AwsClient } from "aws4fetch";
-
-/**
- * S3 object-level actions granted to users for dataset management.
- * Does not include bucket management permissions (versioning, policies, etc.)
- */
-const S3_DATASET_ACTIONS = [
-  "s3:GetObject",
-  "s3:PutObject",
-  "s3:DeleteObject",
-  "s3:GetObjectVersion",
-] as const;
 
 interface IamConfig {
   accessKeyId: string;
   secretAccessKey: string;
   region: string;
-}
-
-interface CreateUserResult {
-  username: string;
-  arn: string;
-}
-
-interface CreateAccessKeyResult {
-  accessKeyId: string;
-  secretAccessKey: string;
 }
 
 /**
@@ -46,205 +32,6 @@ function createIamClient(config: IamConfig): AwsClient {
     region: "us-east-1", // IAM is global, always use us-east-1
     service: "iam",
   });
-}
-
-/**
- * Generate IAM username from NEMAR username
- */
-export function generateIamUsername(nemarUsername: string): string {
-  return `nemar-user-${nemarUsername}`;
-}
-
-/**
- * Create an IAM user for a NEMAR user
- */
-export async function createIamUser(
-  config: IamConfig,
-  nemarUsername: string,
-): Promise<CreateUserResult> {
-  const aws = createIamClient(config);
-  const iamUsername = generateIamUsername(nemarUsername);
-
-  const params = new URLSearchParams({
-    Action: "CreateUser",
-    UserName: iamUsername,
-    Version: "2010-05-08",
-  });
-
-  const response = await aws.fetch(`https://iam.amazonaws.com/?${params.toString()}`, {
-    method: "POST",
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    // Check if user already exists
-    if (text.includes("EntityAlreadyExists")) {
-      return { username: iamUsername, arn: `arn:aws:iam::*:user/${iamUsername}` };
-    }
-    throw new Error(`Failed to create IAM user: ${text}`);
-  }
-
-  const text = await response.text();
-  // Parse ARN from response XML
-  const arnMatch = text.match(/<Arn>([^<]+)<\/Arn>/);
-  const arn = arnMatch ? arnMatch[1] : `arn:aws:iam::*:user/${iamUsername}`;
-
-  return { username: iamUsername, arn };
-}
-
-/**
- * Create access keys for an IAM user
- */
-export async function createAccessKey(
-  config: IamConfig,
-  iamUsername: string,
-): Promise<CreateAccessKeyResult> {
-  const aws = createIamClient(config);
-
-  const params = new URLSearchParams({
-    Action: "CreateAccessKey",
-    UserName: iamUsername,
-    Version: "2010-05-08",
-  });
-
-  const response = await aws.fetch(`https://iam.amazonaws.com/?${params.toString()}`, {
-    method: "POST",
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Failed to create access key: ${text}`);
-  }
-
-  const text = await response.text();
-
-  // Parse access key from response XML
-  const accessKeyIdMatch = text.match(/<AccessKeyId>([^<]+)<\/AccessKeyId>/);
-  const secretAccessKeyMatch = text.match(/<SecretAccessKey>([^<]+)<\/SecretAccessKey>/);
-
-  if (!accessKeyIdMatch || !secretAccessKeyMatch) {
-    throw new Error("Failed to parse access key response");
-  }
-
-  return {
-    accessKeyId: accessKeyIdMatch[1],
-    secretAccessKey: secretAccessKeyMatch[1],
-  };
-}
-
-/**
- * Generate S3 policy document for admin users with bucket-wide object access.
- *
- * Allows admins to:
- * - List all objects in the bucket
- * - Read, write, delete any object
- * - Access object versions
- *
- * Does NOT grant bucket management permissions (versioning config, policies, etc.)
- *
- * @param bucket - The S3 bucket name (without arn prefix)
- * @returns JSON-stringified IAM policy document ready for putUserPolicy
- * @throws Error if bucket name is empty
- */
-export function generateAdminS3PolicyDocument(bucket: string): string {
-  if (!bucket || bucket.trim() === "") {
-    throw new Error("Bucket name is required for S3 policy generation");
-  }
-
-  return JSON.stringify({
-    Version: "2012-10-17",
-    Statement: [
-      {
-        Sid: "AllowListBucket",
-        Effect: "Allow",
-        Action: ["s3:ListBucket"],
-        Resource: `arn:aws:s3:::${bucket}`,
-      },
-      {
-        Sid: "AllowFullBucketAccess",
-        Effect: "Allow",
-        Action: [...S3_DATASET_ACTIONS],
-        Resource: `arn:aws:s3:::${bucket}/*`,
-      },
-    ],
-  });
-}
-
-/**
- * Generate S3 policy document for a user's dataset prefixes
- */
-export function generateS3PolicyDocument(bucket: string, prefixes: string[]): string {
-  if (prefixes.length === 0) {
-    // Minimal policy with explicit deny - AWS requires at least one statement
-    return JSON.stringify({
-      Version: "2012-10-17",
-      Statement: [
-        {
-          Sid: "DenyAllUntilDatasetCreated",
-          Effect: "Deny",
-          Action: "s3:*",
-          Resource: "*",
-        },
-      ],
-    });
-  }
-
-  const resources = prefixes.flatMap((prefix) => [
-    `arn:aws:s3:::${bucket}/${prefix}`,
-    `arn:aws:s3:::${bucket}/${prefix}/*`,
-  ]);
-
-  return JSON.stringify({
-    Version: "2012-10-17",
-    Statement: [
-      {
-        Sid: "AllowListBucket",
-        Effect: "Allow",
-        Action: ["s3:ListBucket"],
-        Resource: `arn:aws:s3:::${bucket}`,
-        Condition: {
-          StringLike: {
-            "s3:prefix": prefixes.map((p) => `${p}/*`),
-          },
-        },
-      },
-      {
-        Sid: "AllowReadWriteDatasetPrefixes",
-        Effect: "Allow",
-        Action: [...S3_DATASET_ACTIONS],
-        Resource: resources,
-      },
-    ],
-  });
-}
-
-/**
- * Update (put) inline policy for an IAM user
- */
-export async function putUserPolicy(
-  config: IamConfig,
-  iamUsername: string,
-  policyName: string,
-  policyDocument: string,
-): Promise<void> {
-  const aws = createIamClient(config);
-
-  const params = new URLSearchParams({
-    Action: "PutUserPolicy",
-    UserName: iamUsername,
-    PolicyName: policyName,
-    PolicyDocument: policyDocument,
-    Version: "2010-05-08",
-  });
-
-  const response = await aws.fetch(`https://iam.amazonaws.com/?${params.toString()}`, {
-    method: "POST",
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Failed to put user policy: ${text}`);
-  }
 }
 
 /**
