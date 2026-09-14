@@ -485,7 +485,16 @@ jobs:
       # visibility change needs no coordinated workflow edit and has no window
       # where CI is red. The secret wants read access to that repo's contents and
       # nothing else.
+      # SKIPPED ON A FORK, and that is not a nicety. `nemarOrg/docs` is private,
+      # a fork pull request receives NO secrets, and `github.token` on a fork is
+      # scoped to the fork, so this step cannot succeed there. Without this
+      # condition an outside contributor fixing an unrelated typo gets a red
+      # REQUIRED check, failing on a repository they have nothing to do with and
+      # cannot be given access to. That is precisely the outcome ADR 0057 says
+      # must not happen: losing read access must not cost someone the ability to
+      # contribute. Found reviewing the epic that made the docs repo private.
       - name: Check out the docs content tree
+        if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
         uses: actions/checkout@v4
         with:
           repository: nemarOrg/docs
@@ -502,7 +511,12 @@ jobs:
           # broken checkout step cannot silently disable the check.
           NEMAR_WEBSITE_ACCOUNT_COPY: website-copy/src/lib/account-copy.ts
           NEMAR_DATASET_WORKFLOW_LIVE: dataset-workflows-live/.github/workflows/onboard-openneuro.yml
-          NEMAR_DOCS_CHECKOUT: docs-live
+          # Empty on a fork, where the checkout above is skipped, so the guard
+          # skips VISIBLY instead of failing on a checkout that could never have
+          # worked. On any run from this repository it is set, and a missing
+          # path there is still a hard failure -- which is the property that
+          # stops a broken checkout step from silently disabling the guard.
+          NEMAR_DOCS_CHECKOUT: ${{ (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push') && 'docs-live' || '' }}
         run: |
           # Deliberately no TEST_API_URL / secrets: these tests don't touch the
           # backend, so a misclassified file fails loudly here instead of

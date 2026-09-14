@@ -183,28 +183,28 @@ gh api repos/org/repo/collaborators/user -X PUT
 ### Prototype 1: Git-Annex Staging → Final Workflow
 **Date:** 2026-01-14
 **Status:** ✓ VALIDATED
-**Details:** See `validated_workflows.md` Section 1
+**Details:** See [validated workflows](https://docs.nemar.org/admin/operations/validated-workflows/) Section 1
 
 **Summary:** Use `git annex copy --from staging-s3 --to final-s3` instead of manual `aws s3 cp`. The native git-annex approach handles location tracking automatically and avoids `annex-uuid` conflicts.
 
 ### Prototype 2: GitHub Branch Protection
 **Date:** 2026-01-14
 **Status:** ✓ VALIDATED
-**Details:** See `validated_workflows.md` Section 2
+**Details:** See [validated workflows](https://docs.nemar.org/admin/operations/validated-workflows/) Section 2
 
 **Summary:** Branch protection with `enforce_admins=true` blocks everyone including org owners. Direct pushes blocked, PRs require approval, self-approval not allowed. Public repos required for free tier.
 
 ### Prototype 3: GitHub Actions S3 Copy
 **Date:** 2026-01-14
 **Status:** ✓ VALIDATED
-**Details:** See `validated_workflows.md` Section 3
+**Details:** See [validated workflows](https://docs.nemar.org/admin/operations/validated-workflows/) Section 3
 
 **Summary:** Use `pull_request: [closed]` trigger with `if: github.event.pull_request.merged == true/false` conditions. Two jobs: `copy-data` (on merge) and `cleanup-only` (on close without merge). Both scenarios tested and working.
 
 ### Prototype 4: Full E2E PR Workflow
 **Date:** 2026-01-14
 **Status:** ✓ VALIDATED (with caveats)
-**Details:** See `validated_workflows.md` Section 4
+**Details:** See [validated workflows](https://docs.nemar.org/admin/operations/validated-workflows/) Section 4
 
 **Summary:** Complete workflow validated. Key findings:
 1. **Largefiles config critical** - workflow files must NOT be annexed or GitHub can't read them
@@ -215,7 +215,7 @@ gh api repos/org/repo/collaborators/user -X PUT
 ### Prototype 5: Git-Annex in GitHub Actions
 **Date:** 2026-01-14
 **Status:** ✓ VALIDATED
-**Details:** See `validated_workflows.md` Section 5
+**Details:** See [validated workflows](https://docs.nemar.org/admin/operations/validated-workflows/) Section 5
 
 **Summary:** Git-annex installs and works in GitHub Actions. Key findings:
 1. **apt-get install works** - version 10.20240129 available in Ubuntu repos

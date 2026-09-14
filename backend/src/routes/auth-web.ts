@@ -250,7 +250,8 @@ authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) =
     // ("you have a NEMAR account") and littered the users table with
     // rows that could never sign in. Account creation now flows
     // through the CLI (`nemar auth signup`) exclusively; the dashboard
-    // hint points typo'd users at docs.nemar.org/installation.
+    // hint points typo'd users at
+    // https://docs.nemar.org/cli/getting-started/installation/.
     //
     // Option B from #595 (silent skip): respond with the same 200 +
     // masked_email shape whether the email is registered or not, but
