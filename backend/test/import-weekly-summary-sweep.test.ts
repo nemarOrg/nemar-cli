@@ -36,9 +36,64 @@ import {
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
-/** A Monday, so the calendar is never the thing under test here. */
-const NOW = new Date("2026-09-07T03:00:00Z");
 const WEEK_MS = 7 * 86_400_000;
+
+/**
+ * Monday 03:00 UTC of the CURRENT ISO week, the hour and weekday the cron fires.
+ *
+ * DERIVED RATHER THAN HARDCODED, and that is a fix rather than a style choice.
+ * `audit_log.timestamp` is written by SQL `datetime('now')` -- the real clock --
+ * while the once-per-week gate compares that stamp's ISO week against the `now`
+ * these tests inject. A fixed literal therefore agreed with the database only
+ * for as long as the wall clock happened to sit in the same ISO week as it.
+ * `2026-09-07T03:00:00Z` is 2026-W37: the three gate tests passed all week and
+ * then failed on every run from 2026-09-14 (2026-W38) onward, on every branch,
+ * taking the required `unit-pure` check with them. Nothing had changed but the
+ * date.
+ *
+ * Deriving Monday from today keeps the injected clock and the database's clock
+ * in the same ISO week by construction, which is the property the gate needs.
+ * It does not disturb the counting tests: every window query in
+ * `import-weekly-summary-sweep.ts` is SQL-side (`datetime('now', '-7 days')`)
+ * and `seedImported` seeds against the same real clock, so those never depended
+ * on this value.
+ *
+ * The residual is one narrow window: a run that crosses Sunday midnight UTC
+ * between the audit write and the comparison would still straddle two weeks.
+ * That is inherent in comparing two clocks and is not what broke here.
+ */
+function mondayOfCurrentIsoWeek(): Date {
+  const d = new Date();
+  const utcMidnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  // getUTCDay: 0 = Sunday. ISO counts Monday = 1 ... Sunday = 7.
+  const isoDay = d.getUTCDay() === 0 ? 7 : d.getUTCDay();
+  return new Date(utcMidnight - (isoDay - 1) * 86_400_000 + 3 * 3_600_000);
+}
+
+/** A Monday, so the calendar is never the thing under test here. */
+const NOW = mondayOfCurrentIsoWeek();
+
+describe("the injected clock agrees with the database's clock", () => {
+  // THE GUARD FOR THE BUG ABOVE. It fires the moment someone re-hardcodes NOW,
+  // rather than a week later on an unrelated pull request, which is how the
+  // original was discovered. Cheap, and it names the invariant the three gate
+  // tests silently depend on.
+  test("NOW is in the current ISO week", () => {
+    expect(isoWeekLabel(NOW)).toBe(isoWeekLabel(new Date()));
+  });
+
+  test("NOW is a Monday at 03:00 UTC, when the cron fires", () => {
+    expect(NOW.getUTCDay()).toBe(1);
+    expect(NOW.getUTCHours()).toBe(3);
+    expect(NOW.getUTCMinutes()).toBe(0);
+  });
+
+  test("NOW is never in the future", () => {
+    // The window queries are SQL-side and end at the real now, so an injected
+    // clock ahead of it would describe a window the database cannot fill.
+    expect(NOW.getTime()).toBeLessThanOrEqual(Date.now());
+  });
+});
 
 /**
  * There are TWO week notions here and conflating them is the trap.
