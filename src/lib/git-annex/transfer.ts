@@ -902,28 +902,85 @@ export async function setKeyPresent(
   return result.exitCode === 0;
 }
 
+/** What the location log says after a registration, which is the only thing that counts. */
+export interface KeyRegistrationResult {
+  /** Keys the location log now records at the remote. */
+  success: number;
+  /** Keys it does not, after asking it directly. */
+  failed: number;
+  /** Up to ten of those, for the caller's error message. */
+  missing: string[];
+}
+
+/** Keys the location log records as present at `remoteUuid`, among those the tree names. */
+async function keysRecordedAt(datasetPath: string, remoteUuid: string): Promise<Set<string>> {
+  const { stdout, exitCode } = await runCommand(
+    ["git", "annex", "find", "--include", "*", "--in", remoteUuid, "--format=${key}\n"],
+    { cwd: datasetPath },
+  );
+  if (exitCode !== 0) return new Set();
+  return new Set(stdout.split("\n").filter(Boolean));
+}
+
 /**
- * Batch mark keys as present in a remote.
- * Returns count of successful and failed registrations.
+ * Mark keys as present in a remote, and prove it from the location log.
+ *
+ * **One process, not one per key.** This used to run fifty `git annex setpresentkey`
+ * processes concurrently and count every exit-0 as a registration. They all exit 0;
+ * their writes to the shared git-annex branch journal do not all survive. An import
+ * of 117 keys reported "Registered 117 files" and recorded NONE of them, then
+ * published the dataset -- public, permanent DOI -- with content no clone could
+ * resolve from NEMAR (#1392). `setpresentkey --batch` is the interface built for
+ * this: one process, one journal, keys fed on stdin.
+ *
+ * **Then it asks the log.** An exit code says a command ran, not that a record
+ * exists, and the caller's decision to publish rests on the record. `find --in
+ * <uuid>` answers for every key the tree names; a key the tree does not name -- which
+ * `find` cannot see -- is checked individually with `whereis --key`, so an unusual
+ * caller pays per-key cost only for the keys that need it.
+ *
+ * One malformed key aborts the rest of ITS chunk (git-annex stops the batch with
+ * "Batch input parse failure"), which is why the read-back is not optional: the keys
+ * behind the bad one come back as missing and the caller stops, rather than a
+ * publish proceeding on a partial registration nobody counted.
  */
 export async function batchSetKeysPresent(
   datasetPath: string,
   keys: string[],
   remoteUuid: string,
-): Promise<{ success: number; failed: number }> {
-  let success = 0;
-  let failed = 0;
-  // Process in parallel batches
-  const batchSize = 50;
-  for (let i = 0; i < keys.length; i += batchSize) {
-    const batch = keys.slice(i, i + batchSize);
-    const results = await Promise.all(
-      batch.map((key) => setKeyPresent(datasetPath, key, remoteUuid)),
-    );
-    for (const ok of results) {
-      if (ok) success++;
-      else failed++;
+): Promise<KeyRegistrationResult> {
+  if (keys.length === 0) return { success: 0, failed: 0, missing: [] };
+
+  const CHUNK = 5000;
+  for (let i = 0; i < keys.length; i += CHUNK) {
+    const chunk = keys.slice(i, i + CHUNK);
+    const stdin = `${chunk.map((key) => `${key} ${remoteUuid} 1`).join("\n")}\n`;
+    // A non-zero exit is not the failure signal this function reports -- the log is --
+    // but it is worth surfacing, because it usually means the batch never ran at all.
+    const { exitCode, stderr } = await runCommand(["git", "annex", "setpresentkey", "--batch"], {
+      cwd: datasetPath,
+      stdin,
+    });
+    if (exitCode !== 0) {
+      console.warn(
+        `[git-annex] setpresentkey --batch exited ${exitCode} for ${chunk.length} key(s): ${stderr.trim().slice(0, 300)}`,
+      );
     }
   }
-  return { success, failed };
+
+  const recorded = await keysRecordedAt(datasetPath, remoteUuid);
+  const unseen = keys.filter((key) => !recorded.has(key));
+  const missing: string[] = [];
+  for (const key of unseen) {
+    const { stdout, exitCode } = await runCommand(["git", "annex", "whereis", "--key", key], {
+      cwd: datasetPath,
+    });
+    if (exitCode !== 0 || !stdout.includes(remoteUuid)) missing.push(key);
+  }
+
+  return {
+    success: keys.length - missing.length,
+    failed: missing.length,
+    missing: missing.slice(0, 10),
+  };
 }

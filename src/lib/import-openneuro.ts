@@ -1378,7 +1378,7 @@ export async function finalizeImport(
       // git-annex (uncloneable), so it's fatal. Finalize is idempotent — re-run
       // to retry (re-clone, re-register, re-push).
       registerSpinner.fail(
-        `${regResult.failed} of ${keys.length} git-annex key registrations failed. Aborting before publish — those blobs would be unfindable for clones. Re-run finalize to retry.`,
+        `${regResult.failed} of ${keys.length} git-annex key registrations are not in the location log (e.g. ${regResult.missing.slice(0, 3).join(", ")}). Aborting before publish — those blobs would be unfindable for clones. Re-run finalize to retry.`,
       );
       process.exit(1);
     }
