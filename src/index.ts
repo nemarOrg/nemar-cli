@@ -27,7 +27,7 @@ import {
   switchAction,
 } from "./commands/auth.js";
 import { completionCommand } from "./commands/completion.js";
-import { datasetCommand } from "./commands/dataset.js";
+import { createDownloadCommand, createUploadCommand, datasetCommand } from "./commands/dataset.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { sandboxCommand } from "./commands/sandbox.js";
 import { IS_DEV_BUILD } from "./lib/api/client.js";
@@ -239,6 +239,23 @@ signupFlags(
 signupFlags(
   program.command("register").description("Create or continue your account (alias for signup)"),
 ).action(signupAction);
+
+// The two dataset commands that dominate real use get root shortcuts too.
+// Each is a FRESH instance from the same factory, not the one already
+// attached under `dataset`: Commander gives a Command exactly one parent, so
+// re-adding the same object would move it out of `nemar dataset`. Only the
+// description differs, and the flags cannot drift because there is one
+// definition.
+program.addCommand(
+  createDownloadCommand().description(
+    "Download a dataset from NEMAR or OpenNeuro (shortcut for 'dataset download')",
+  ),
+);
+program.addCommand(
+  createUploadCommand().description(
+    "Upload a BIDS dataset to NEMAR (shortcut for 'dataset upload')",
+  ),
+);
 
 program
   .command("whoami")
