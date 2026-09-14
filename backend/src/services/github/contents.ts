@@ -14,24 +14,6 @@ import { githubFetchWithRetry } from "./transport";
 const NEMAR_COMMITTER = { name: "nemarAdmin", email: "nemarAdmin@osc.earth" };
 
 /**
- * Create or update a file in a repository, on `main` unless told otherwise.
- *
- * **The default is `main`, not "whatever GitHub calls this repository's default
- * branch", and the difference is not academic.** The Contents API writes to the
- * repository's default branch when the request carries no `branch`, and sixteen
- * dataset repositories have theirs set to `git-annex` -- git-annex's own log branch
- * -- because `createRepository` uses `auto_init: false` and GitHub adopted whichever
- * branch their first push happened to carry. The publication orchestrator's two
- * DOI writes had no branch, so on those repositories they READ `main`
- * (`getFileContent` defaults to it) and WROTE `git-annex`: fourteen public datasets
- * still advertise OpenNeuro's DOI on `main` while NEMAR's concept DOI and badge sit
- * on a branch nothing reads (#1386). This docstring used to assert that a missing
- * branch lands on `main`, which is exactly the assumption that was wrong.
- *
- * Pass `branch` for a release branch or any other non-main ref; `""` is not a way
- * to ask for the repository default, because there is no reason to want one.
- */
-/**
  * Detect a GitHub Contents-API stale-SHA conflict on an update PUT. When the
  * `sha` we sent no longer matches the current blob (a concurrent write landed
  * first), GitHub returns 409; some paths surface it as 422 with a
@@ -54,6 +36,24 @@ export function isContentsApiShaConflict(status: number, bodyText: string): bool
   return /does not match|not a fast forward/i.test(msg);
 }
 
+/**
+ * Create or update a file in a repository, on `main` unless told otherwise.
+ *
+ * **The default is `main`, not "whatever GitHub calls this repository's default
+ * branch", and the difference is not academic.** The Contents API writes to the
+ * repository's default branch when the request carries no `branch`, and sixteen
+ * dataset repositories have theirs set to `git-annex` -- git-annex's own log branch
+ * -- because `createRepository` uses `auto_init: false` and GitHub adopted whichever
+ * branch their first push happened to carry. The publication orchestrator's two
+ * DOI writes had no branch, so on those repositories they READ `main`
+ * (`getFileContent` defaults to it) and WROTE `git-annex`: fourteen public datasets
+ * still advertise OpenNeuro's DOI on `main` while NEMAR's concept DOI and badge sit
+ * on a branch nothing reads (#1386). This docstring used to assert that a missing
+ * branch lands on `main`, which is exactly the assumption that was wrong.
+ *
+ * Pass `branch` for a release branch or any other non-main ref; `""` is not a way
+ * to ask for the repository default, because there is no reason to want one.
+ */
 export async function createOrUpdateFile(
   repo: string,
   path: string,

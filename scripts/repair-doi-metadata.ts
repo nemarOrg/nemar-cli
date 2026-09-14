@@ -14,14 +14,20 @@
  * cannot drift from the thing it is repairing.
  *
  * Two independent sources have to agree on the concept DOI before anything is
- * written: NEMAR's own API (`concept_doi`, from D1) and the value already in the
- * repository. A dataset where they disagree is reported and skipped, never guessed at.
+ * written: NEMAR's own API (`concept_doi`, from D1) and the value publish actually
+ * wrote, which for these sixteen is stranded on the `git-annex` branch. A dataset
+ * where they disagree is reported and skipped, never guessed at; a dataset where
+ * the second source does not exist can only be repaired by naming it explicitly,
+ * because then D1 is the only witness and that is a judgment call, not a sweep.
  *
  * Read-only by default.
  *
  *   bun run scripts/repair-doi-metadata.ts on002720 on002721      # report
  *   bun run scripts/repair-doi-metadata.ts --scan on              # find every case
- *   bun run scripts/repair-doi-metadata.ts --apply on002720       # fix one
+ *   bun run scripts/repair-doi-metadata.ts --apply on002720       # fix named ones
+ *
+ * `--apply` refuses `--scan`: discovery is a sweep, writing to published metadata
+ * is not.
  */
 
 import {
@@ -33,8 +39,10 @@ import { createOrUpdateFile, getFileContent } from "../backend/src/services/gith
 
 const API_BASE = process.env.NEMAR_API_BASE ?? "https://api.nemar.org";
 const BRANCH = "main";
+/** Where the orchestrator's DOI writes landed for the affected repositories. */
+const STRANDED_BRANCH = "git-annex";
 
-interface DatasetVerdict {
+export interface DatasetVerdict {
   datasetId: string;
   /** What D1 says this dataset's concept DOI is. */
   conceptDoi: string | null;
@@ -42,6 +50,8 @@ interface DatasetVerdict {
   mainDoi: string | null;
   /** Whether main's README carries a badge for the concept DOI. */
   badgeOnMain: boolean;
+  /** What publish wrote on the branch its write was misdirected to, when present. */
+  strandedDoi?: string | null;
   action: "ok" | "needs-repair" | "repaired" | "skipped" | "failed";
   detail?: string;
   commits?: string[];
@@ -89,14 +99,23 @@ async function readJson(
   }
 }
 
-async function inspect(datasetId: string, pat: string): Promise<DatasetVerdict> {
+export async function inspect(datasetId: string, pat: string): Promise<DatasetVerdict> {
   const conceptDoi = await conceptDoiFromApi(datasetId);
   const onMain = await readJson(datasetId, "dataset_description.json", pat, BRANCH);
   const mainDoi = typeof onMain?.DatasetDOI === "string" ? onMain.DatasetDOI : null;
-  const readme = (await getFileContent(datasetId, "README.md", pat, BRANCH)) ?? "";
+  const readme = await getFileContent(datasetId, "README.md", pat, BRANCH);
+  // Ask the same function publish asks, rather than a looser reimplementation. A
+  // README that merely mentions the DOI in prose is not a badge, and treating it as
+  // one reported the dataset as needing nothing and left it without one.
   const badgeOnMain =
     conceptDoi !== null &&
-    (readme.includes(conceptDoi) || readme.includes(encodeURIComponent(conceptDoi)));
+    readme !== null &&
+    !planReadmeBadgeCommit({
+      readmeContent: readme,
+      doiBadge: buildDoiBadge(conceptDoi),
+      conceptDoi,
+      contentSourcePath: "README.md",
+    }).commit;
 
   const verdict: DatasetVerdict = {
     datasetId,
@@ -116,11 +135,30 @@ async function inspect(datasetId: string, pat: string): Promise<DatasetVerdict> 
     verdict.detail = "no dataset_description.json on main";
     return verdict;
   }
+
+  // The second witness: what publish actually wrote. For the sixteen repositories
+  // this script exists for, that write landed on `git-annex` because the Contents
+  // API sent it to the default branch. If it is there and it disagrees with D1,
+  // something re-minted or rolled back a DOI and a repair would confidently write
+  // the wrong one onto published metadata.
+  const stranded = await readJson(datasetId, "dataset_description.json", pat, STRANDED_BRANCH);
+  const strandedDoi = typeof stranded?.DatasetDOI === "string" ? stranded.DatasetDOI : null;
+  verdict.strandedDoi = strandedDoi;
+  if (strandedDoi && strandedDoi !== conceptDoi) {
+    verdict.action = "skipped";
+    verdict.detail = `the catalog says ${conceptDoi} and the ${STRANDED_BRANCH} branch says ${strandedDoi}; refusing to guess which is current`;
+    return verdict;
+  }
+
   if (mainDoi !== conceptDoi || !badgeOnMain) verdict.action = "needs-repair";
   return verdict;
 }
 
-async function repair(datasetId: string, pat: string, apply: boolean): Promise<DatasetVerdict> {
+export async function repair(
+  datasetId: string,
+  pat: string,
+  apply: boolean,
+): Promise<DatasetVerdict> {
   const verdict = await inspect(datasetId, pat);
   if (verdict.action !== "needs-repair") return verdict;
   const conceptDoi = verdict.conceptDoi as string;
@@ -196,44 +234,58 @@ async function datasetsWithPrefix(prefix: string): Promise<string[]> {
   return ids.filter((id) => id.startsWith(prefix)).sort();
 }
 
-const args = process.argv.slice(2);
-const apply = args.includes("--apply");
-const scanAt = args.indexOf("--scan");
-const explicit = args.filter(
-  (a) => !a.startsWith("--") && (scanAt === -1 || a !== args[scanAt + 1]),
-);
+// Exported above for the tests; run only when this file IS the program, so
+// importing it does not parse argv, ask for a token, or write to any repository.
+if (import.meta.main) {
+  const args = process.argv.slice(2);
+  const apply = args.includes("--apply");
+  const scanAt = args.indexOf("--scan");
+  const explicit = args.filter(
+    (a) => !a.startsWith("--") && (scanAt === -1 || a !== args[scanAt + 1]),
+  );
 
-const pat = await githubToken();
-const targets = scanAt !== -1 ? await datasetsWithPrefix(args[scanAt + 1] ?? "on") : explicit;
-if (targets.length === 0) {
-  console.error("Nothing to do: name datasets, or --scan <prefix>.");
-  process.exit(1);
-}
-console.log(`${apply ? "Repairing" : "Inspecting"} ${targets.length} dataset(s) on ${BRANCH}\n`);
-
-const verdicts: DatasetVerdict[] = [];
-for (const datasetId of targets) {
-  try {
-    verdicts.push(await repair(datasetId, pat, apply));
-  } catch (error) {
-    verdicts.push({
-      datasetId,
-      conceptDoi: null,
-      mainDoi: null,
-      badgeOnMain: false,
-      action: "failed",
-      detail: error instanceof Error ? error.message : String(error),
-    });
+  // `--scan` is a discovery tool and stays read-only. `--apply` writes to published
+  // dataset repositories, and `--scan on --apply` would be every imported dataset --
+  // hundreds of them, each write starting that repository's CI. Naming the datasets
+  // is the confirmation.
+  if (apply && scanAt !== -1) {
+    console.error(
+      "--apply does not take --scan. Run --scan <prefix> to find the datasets, check the report, then name them explicitly with --apply.",
+    );
+    process.exit(1);
   }
-  const v = verdicts[verdicts.length - 1];
-  if (v.action === "ok") continue;
-  console.log(`${v.datasetId}  ${v.action}${v.detail ? `: ${v.detail}` : ""}`);
-  for (const line of v.commits ?? []) console.log(`    ${line}`);
-}
+  const pat = await githubToken();
+  const targets = scanAt !== -1 ? await datasetsWithPrefix(args[scanAt + 1] ?? "on") : explicit;
+  if (targets.length === 0) {
+    console.error("Nothing to do: name datasets, or --scan <prefix>.");
+    process.exit(1);
+  }
+  console.log(`${apply ? "Repairing" : "Inspecting"} ${targets.length} dataset(s) on ${BRANCH}\n`);
 
-const tally = verdicts.reduce<Record<string, number>>((acc, v) => {
-  acc[v.action] = (acc[v.action] ?? 0) + 1;
-  return acc;
-}, {});
-console.log(`\n${JSON.stringify(tally)}`);
-if ((tally.failed ?? 0) > 0) process.exit(1);
+  const verdicts: DatasetVerdict[] = [];
+  for (const datasetId of targets) {
+    try {
+      verdicts.push(await repair(datasetId, pat, apply));
+    } catch (error) {
+      verdicts.push({
+        datasetId,
+        conceptDoi: null,
+        mainDoi: null,
+        badgeOnMain: false,
+        action: "failed",
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
+    const v = verdicts[verdicts.length - 1];
+    if (v.action === "ok") continue;
+    console.log(`${v.datasetId}  ${v.action}${v.detail ? `: ${v.detail}` : ""}`);
+    for (const line of v.commits ?? []) console.log(`    ${line}`);
+  }
+
+  const tally = verdicts.reduce<Record<string, number>>((acc, v) => {
+    acc[v.action] = (acc[v.action] ?? 0) + 1;
+    return acc;
+  }, {});
+  console.log(`\n${JSON.stringify(tally)}`);
+  if ((tally.failed ?? 0) > 0) process.exit(1);
+}

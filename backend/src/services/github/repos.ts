@@ -224,7 +224,7 @@ export async function deleteRepository(repo: string, pat: string): Promise<boole
 export async function ensureMainBranch(
   repo: string,
   pat: string,
-): Promise<{ renamed: boolean; previousBranch?: string }> {
+): Promise<{ changed: boolean; action?: "renamed" | "repointed"; previousBranch?: string }> {
   const repoResponse = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}`, {
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -242,7 +242,7 @@ export async function ensureMainBranch(
   const defaultBranch = repoData.default_branch;
 
   if (defaultBranch === "main") {
-    return { renamed: false };
+    return { changed: false };
   }
 
   // Does a real `main` already exist? Then the repository is merely pointed at the
@@ -274,8 +274,16 @@ export async function ensureMainBranch(
         `Failed to set the default branch to the existing "main" for ${repo} (was "${defaultBranch}"): ${repointResponse.status} ${errorBody}`,
       );
     }
-    return { renamed: true, previousBranch: defaultBranch };
+    // `repointed`, not `renamed`: nothing was renamed here, and an audit trail that
+    // says otherwise sends the next investigator looking for a branch rename that
+    // never happened -- the same class of misdirection that made #1386 hard to find.
+    return { changed: true, action: "repointed", previousBranch: defaultBranch };
   }
+  // A bare `fetch`, not `githubFetchWithRetry`, and deliberately: a transient 502
+  // makes this step fail loudly rather than proceed on a guess, which is the whole
+  // point of the check. Consistent with the repo GET above it. The cost is a false
+  // failure of the `main_branch` step on a one-off 5xx, which is recoverable by
+  // re-running; renaming a branch that should not be renamed is not.
   if (mainResponse.status !== 404) {
     const body = await mainResponse.text().catch(() => "");
     throw new Error(
@@ -306,7 +314,7 @@ export async function ensureMainBranch(
     );
   }
 
-  return { renamed: true, previousBranch: defaultBranch };
+  return { changed: true, action: "renamed", previousBranch: defaultBranch };
 }
 
 /**

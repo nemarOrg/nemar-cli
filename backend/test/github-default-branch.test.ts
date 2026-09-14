@@ -109,6 +109,35 @@ describe("createOrUpdateFile", () => {
     expect(put?.body?.branch).toBe("main");
   });
 
+  test("the sha it sends comes from the branch it writes to", async () => {
+    // The precise #1386 mechanism, and the one the other tests only guard
+    // indirectly: a blob that exists on `git-annex` and not on `main`. Reading the
+    // sha from one ref and PUTting it against another is how a write either
+    // clobbers the wrong branch or fails with a stale-sha conflict. The GET must
+    // ask `main`, find nothing, and the PUT must carry no sha at all.
+    repoState.defaultBranch = "git-annex";
+    repoState.branches = new Set(["main", "git-annex"]);
+    repoState.blobs.set("git-annex", "sha-on-the-annex-branch");
+
+    await createOrUpdateFile("ds", "dataset_description.json", "{}", "msg", "pat");
+
+    const get = seen.find((r) => r.method === "GET" && r.path.includes("/contents/"));
+    const put = seen.find((r) => r.method === "PUT");
+    expect(get?.query).toBe("?ref=main");
+    expect(put?.body?.branch).toBe("main");
+    expect(put?.body?.sha).toBeUndefined();
+  });
+
+  test("an existing blob on the target branch is updated with its own sha", async () => {
+    repoState.blobs.set("main", "sha-on-main");
+
+    await createOrUpdateFile("ds", "dataset_description.json", "{}", "msg", "pat");
+
+    const put = seen.find((r) => r.method === "PUT");
+    expect(put?.body?.sha).toBe("sha-on-main");
+    expect(put?.body?.branch).toBe("main");
+  });
+
   test("an explicitly named branch is still honored", async () => {
     await createOrUpdateFile("ds", "x.json", "{}", "msg", "pat", "release/1.0.0");
     const put = seen.find((r) => r.method === "PUT");
@@ -119,7 +148,7 @@ describe("createOrUpdateFile", () => {
 describe("ensureMainBranch", () => {
   test("does nothing when the default branch is already main", async () => {
     const result = await ensureMainBranch("ds", "pat");
-    expect(result).toEqual({ renamed: false });
+    expect(result).toEqual({ changed: false });
     expect(seen.filter((r) => r.method !== "GET")).toEqual([]);
   });
 
@@ -131,7 +160,9 @@ describe("ensureMainBranch", () => {
 
     const result = await ensureMainBranch("ds", "pat");
 
-    expect(result).toEqual({ renamed: true, previousBranch: "git-annex" });
+    // `repointed`, not `renamed`: this branch moves a pointer, and the audit trail
+    // consumers print this verbatim.
+    expect(result).toEqual({ changed: true, action: "repointed", previousBranch: "git-annex" });
     expect(seen.some((r) => r.path.endsWith("/rename"))).toBe(false);
     const patch = seen.find((r) => r.method === "PATCH");
     expect(patch?.body?.default_branch).toBe("main");
@@ -147,7 +178,7 @@ describe("ensureMainBranch", () => {
 
     const result = await ensureMainBranch("ds", "pat");
 
-    expect(result).toEqual({ renamed: true, previousBranch: "master" });
+    expect(result).toEqual({ changed: true, action: "renamed", previousBranch: "master" });
     expect(seen.some((r) => r.path.endsWith("/branches/master/rename"))).toBe(true);
     expect(seen.some((r) => r.method === "PATCH")).toBe(false);
   });

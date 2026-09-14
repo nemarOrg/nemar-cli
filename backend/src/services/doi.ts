@@ -448,11 +448,6 @@ export type ReadmeBadgePlan =
   | { commit: false; reason: string }
   | { commit: true; content: string; message: string };
 
-/** Decide whether the update_readme step should ship a commit.
- *
- *  Skips when the existing README.md already contains a badge whose URL
- *  encodes the *current* conceptDoi. Without the DOI match, a stale badge
- *  from a re-registered or migrated DOI would be silently kept. */
 /**
  * Put NEMAR's concept DOI into a dataset_description.json, keeping whatever DOI was
  * there before as a source.
@@ -476,9 +471,16 @@ export function applyConceptDoiToDescription(
 
   const existingDoi = next.DatasetDOI;
   if (typeof existingDoi === "string" && existingDoi && existingDoi !== conceptDoi) {
-    const sources: Array<Record<string, unknown>> = Array.isArray(next.SourceDatasets)
-      ? [...(next.SourceDatasets as Array<Record<string, unknown>>)]
-      : [];
+    // A `SourceDatasets` that is not an array is not ours to discard. BIDS says
+    // array, but an imported description can carry an object or a string, and
+    // replacing it wholesale would erase provenance on published metadata during a
+    // bulk repair. Keep it as the first entry instead.
+    const existing = next.SourceDatasets;
+    const sources: Array<Record<string, unknown>> = Array.isArray(existing)
+      ? [...(existing as Array<Record<string, unknown>>)]
+      : existing === undefined || existing === null
+        ? []
+        : [existing as Record<string, unknown>];
     const alreadyPresent = sources.some((s) => typeof s.DOI === "string" && s.DOI === existingDoi);
     if (!alreadyPresent) {
       sources.push({ DOI: existingDoi });
@@ -516,6 +518,13 @@ export function buildDoiBadge(conceptDoi: string): string {
   return `[![DOI](${badgeImg})](${doiUrl})`;
 }
 
+/**
+ * Decide whether the update_readme step should ship a commit.
+ *
+ * Skips when the existing README.md already contains a badge whose URL encodes the
+ * *current* conceptDoi. Without the DOI match, a stale badge from a re-registered or
+ * migrated DOI would be silently kept.
+ */
 export function planReadmeBadgeCommit(args: {
   readmeContent: string;
   doiBadge: string;
