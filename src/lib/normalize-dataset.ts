@@ -122,6 +122,11 @@ export async function planDatasetNormalization(
     const originUrl = options.originUrl ?? `git@github.com:nemarDatasets/${datasetId}.git`;
     const clone = await cloneDataset(originUrl, datasetPath, {
       useGitHubToken: !options.originUrl,
+      // `git annex init` COMMITS to the git-annex branch, so it needs an identity,
+      // and a host can legitimately have none -- the required CI tier is exactly
+      // that. Without this the clone fails with "Author identity unknown" and the
+      // whole migration reports a clone failure for a reason unrelated to cloning.
+      identity: { name: "NEMAR", email: "nemar-bot@nemar.org" },
     });
     if (!clone.success) {
       throw new Error(`Failed to clone ${datasetId}: ${clone.error}`);

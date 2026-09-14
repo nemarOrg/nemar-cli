@@ -267,7 +267,19 @@ export async function pushToGitHub(
 export async function cloneDataset(
   repoUrl: string,
   outputPath: string,
-  options: { useGitHubToken?: boolean } = {},
+  options: {
+    useGitHubToken?: boolean;
+    /**
+     * Committer to configure in the clone before `git annex init` runs.
+     *
+     * `git annex init` COMMITS to the git-annex branch, so on a host with no
+     * `user.email` it fails with "Author identity unknown" -- and the caller then
+     * reports a clone failure for something that has nothing to do with cloning.
+     * A CI runner is exactly such a host. Omit it where a human's own identity
+     * should be used.
+     */
+    identity?: { name: string; email: string };
+  } = {},
 ): Promise<{ success: boolean; error?: string }> {
   try {
     let cloneUrl = repoUrl;
@@ -331,6 +343,14 @@ export async function cloneDataset(
           error: `Cloned but failed to persist the credential helper (later pushes would fail to authenticate): ${cfgStderr.trim() || "git config returned non-zero"}`,
         };
       }
+    }
+
+    // Before `git annex init`, which commits.
+    if (options.identity) {
+      await runCommand(["git", "config", "user.name", options.identity.name], { cwd: outputPath });
+      await runCommand(["git", "config", "user.email", options.identity.email], {
+        cwd: outputPath,
+      });
     }
 
     // Initialize git-annex in the cloned repo
