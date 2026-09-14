@@ -1,7 +1,7 @@
 /**
  * Bringing an EXISTING dataset repository onto NEMAR's annex policy.
  *
- * The import path applies the policy to a tree on its way in (ADR 0058). This is
+ * The import path applies the policy to a tree on its way in (ADR 0060). This is
  * the same operation for a dataset that is already published: `on007788` carries
  * 893 `_motion.tsv` recordings, 675 MB, as plain git blobs because OpenNeuro
  * annexed on size alone and the import inherited that (#1158, #1159), and every

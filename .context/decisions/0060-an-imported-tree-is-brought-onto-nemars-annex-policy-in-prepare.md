@@ -1,4 +1,4 @@
-# ADR 0058: An imported tree is brought onto NEMAR's annex policy in prepare, and inherited `.gitattributes` governance is stripped
+# ADR 0060: An imported tree is brought onto NEMAR's annex policy in prepare, and inherited `.gitattributes` governance is stripped
 
 **Status:** accepted
 **Date:** 2026-09-13

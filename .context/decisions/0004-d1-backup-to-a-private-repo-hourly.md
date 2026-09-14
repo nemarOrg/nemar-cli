@@ -27,5 +27,5 @@ Back up production D1 hourly to the **private** repo `nemarOrg/nemar-db-backup` 
 
 ## Receipts
 
-- `.context/research-d1-backup-655.md` — decisions locked with user 2026-06-18
+- `https://docs.nemar.org/admin/disaster-recovery/d1-backup-research/` — decisions locked with user 2026-06-18
 - #655, epic #794; `nemarOrg/nemar-db-backup`

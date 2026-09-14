@@ -147,6 +147,65 @@ export const DOCS_MINT_INSERT_SQL = `INSERT INTO web_sessions
       AND u.deleted_at IS NULL`;
 
 /**
+ * Mint a docs session straight from an account, for the CLI. Binds:
+ * cookieIdHash, ttlSeconds, userAgent, ipHash, userId.
+ *
+ * THERE IS NO GRANT ON THIS PATH, and the reason is worth stating rather than
+ * leaving as an asymmetry someone later "fixes". The grant exists because the
+ * browser flow crosses two hosts: the website proves the session and the docs
+ * host mints the cookie, so a one-time code has to travel between them through
+ * a URL. A CLI call crosses nothing. The caller presents a long-lived API key
+ * to the one host that can validate it and gets the credential back in the same
+ * response, so there is no window to protect and nothing to put in a URL.
+ *
+ * WHAT IS NOT DROPPED is every gate the grant path applies at mint time: role,
+ * status and `deleted_at` are re-read in the statement that writes. BUT THE
+ * REASON IS WEAKER HERE THAN THERE, and the first draft of this comment claimed
+ * otherwise, so be precise. {@link DOCS_MINT_INSERT_SQL} closes a real window:
+ * a grant row is up to sixty seconds old and carries only `user_id`, so without
+ * the re-read an account demoted inside that minute still mints. On this path
+ * `resolveBearerUser` re-reads role and status from `users` in the same request,
+ * microseconds earlier, and the route refuses a non-admin before reaching this
+ * statement. So these gates close no window the caller leaves open; they are
+ * redundant by construction.
+ *
+ * They are kept anyway, for two reasons worth stating rather than leaving to be
+ * rediscovered. The statement then holds its own contract -- "mints or inserts
+ * nothing" -- independently of who runs it, so a second caller added later
+ * cannot weaken it by forgetting a check. And the two mint paths stay
+ * symmetrical, which is what makes it obvious that a rule added to one belongs
+ * in the other. Proving this layer needs a test that runs the statement
+ * DIRECTLY: removing either gate alone leaves the route's behavior unchanged,
+ * because the other layer absorbs it (measured, not assumed -- see
+ * `backend/test/docs-auth-routes.test.ts`).
+ *
+ * `auth_method` is the literal `'api_key'` rather than a value copied from
+ * somewhere, because that is the truth about this session: the identity behind
+ * it was proven by a key, not by ORCID or an email code. The column is
+ * free-text (0050, 0083) and no route surfaces it, so this widens no response
+ * shape.
+ *
+ * `scope` is hard-coded `'docs'` and `remember` is hard-coded 0, both for the
+ * same reason they are in {@link DOCS_MINT_INSERT_SQL}: a bindings mistake must
+ * not be able to turn this into an app session.
+ */
+export const DOCS_CLI_MINT_INSERT_SQL = `INSERT INTO web_sessions
+     (user_id, cookie_id_hash, remember, expires_at, user_agent, ip_hash, auth_method, scope)
+   SELECT u.id,
+          ?,
+          0,
+          datetime('now', '+' || ? || ' seconds'),
+          ?,
+          ?,
+          'api_key',
+          'docs'
+     FROM users u
+    WHERE u.id = ?
+      AND u.role IN ${DOCS_ADMIN_ROLES_SQL_LIST}
+      AND u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}
+      AND u.deleted_at IS NULL`;
+
+/**
  * Consume the grant, in the same `db.batch()` as {@link DOCS_MINT_INSERT_SQL}.
  * Binds: codeHash, cookieIdHash.
  *

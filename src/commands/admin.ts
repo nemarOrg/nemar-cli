@@ -161,6 +161,7 @@ import {
   confirmWithInput,
 } from "../lib/confirm.js";
 import { markReportedExit } from "../lib/debug-log.js";
+import { fetchDocsPages, getDocsUrl } from "../lib/docs-fetch.js";
 import { CLI_LIVE_DATASETS, selectRevalidateTargets } from "../lib/fleet.js";
 import {
   cloneDataset,
@@ -947,6 +948,118 @@ adminKeysCommand
   });
 
 adminCommand.addCommand(adminKeysCommand);
+
+// ============================================================================
+// Documentation retrieval
+// ============================================================================
+
+/**
+ * `nemar admin docs <path...>` (epic #1336 phase 3, issue #1341).
+ *
+ * `nemarOrg/docs` is private and `docs.nemar.org` is the retrieval surface
+ * (ADR 0057, ADR 0059), so a checkout is not how anyone reads an operations
+ * runbook any more. This is how: the stored API key buys a fifteen-minute
+ * docs-scoped session, and only that session value is sent to the docs host.
+ *
+ * THERE IS DELIBERATELY NO FORM THAT PRINTS THE SESSION VALUE. Printing it
+ * would be the convenient thing and is exactly what should not exist: the
+ * credential would land in a shell history, a CI log, or an agent's transcript,
+ * which is the whole class of exposure the short TTL is hedging against and the
+ * reason the key is traded for something weaker in the first place. The command
+ * holds the value in memory for the length of one invocation and prints only
+ * documentation.
+ */
+adminCommand
+  .command("docs")
+  .description("Fetch documentation pages from docs.nemar.org as Markdown, including gated ones")
+  .argument(
+    "<path...>",
+    "Page paths, for example admin/operations/zarr-serving (a full docs.nemar.org URL also works)",
+  )
+  .option("--no-headers", "Print only the page bodies, with no path banner")
+  .addHelpText(
+    "after",
+    `
+Every page has a Markdown mirror; ${getDocsUrl()}/llms.txt indexes them.
+Pass several paths at once: they share one documentation session, which is
+both faster and easier on the rate limit than one command per page.`,
+  )
+  .action(async (paths: string[], options: { headers: boolean }) => {
+    // NOT the shared `requireAuth()` / `handleCommandError()` pair every other
+    // command in this file uses, and the difference is the point. Both write
+    // their message with `console.log`, i.e. to STDOUT, and `requireAuth`
+    // returns false without setting an exit code. For a command whose whole
+    // contract is "the page goes to stdout", that combination is the worst
+    // available: `nemar admin docs x > page.md` with no credentials exited 0
+    // and wrote the words "Error: Not authenticated" into page.md, where the
+    // caller -- a script or an agent, by design -- would then read them as
+    // documentation. Found in review of #1384. Everything below reports to
+    // stderr and sets an exit code; stdout carries pages and nothing else.
+    if (!isAuthenticated()) {
+      console.error(chalk.red("Error: Not authenticated"));
+      console.error(chalk.dim("  Run 'nemar auth login' first"));
+      process.exitCode = 1;
+      return;
+    }
+
+    const spinner = ora({
+      text: paths.length === 1 ? "Fetching documentation..." : `Fetching ${paths.length} pages...`,
+      // ora writes to stderr by default, but say so rather than rely on it:
+      // a spinner frame on stdout would land in the redirected page.
+      stream: process.stderr,
+    }).start();
+
+    let results: Awaited<ReturnType<typeof fetchDocsPages>>;
+    try {
+      results = await fetchDocsPages(paths);
+    } catch (error) {
+      spinner.stop();
+      const hints: Record<number, string> = {
+        401: "Sign in again with `nemar auth login`",
+        403: "This account cannot use the API; see the message above",
+        404: "This account does not have access to the operations documentation",
+        429: "Too many documentation sessions from this address; wait a minute",
+      };
+      const hint = error instanceof ApiError ? hints[error.statusCode] : undefined;
+      console.error(
+        chalk.red(
+          error instanceof ApiError
+            ? error.message
+            : `Failed to fetch documentation: ${errorDetail(error)}`,
+        ),
+      );
+      if (hint) console.error(chalk.dim(`  ${hint}`));
+      process.exitCode = 1;
+      return;
+    }
+    spinner.stop();
+
+    // Bodies go to stdout and everything else to stderr, so `nemar admin docs
+    // <path> > page.md` yields the page rather than the page plus banners --
+    // the shape an agent or a pipeline wants. `console.log` appends a newline,
+    // so a redirected single page is the page plus a trailing newline, not
+    // byte-identical to the mirror. That is the right trade for a text file and
+    // is stated here because the sentence above used to imply otherwise.
+    //
+    // CONSEQUENCE WORTH KNOWING FOR THE MULTI-PATH CASE: redirecting several
+    // pages concatenates them with no delimiter in the file, because the banner
+    // that separates them is on stderr. That is deliberate rather than an
+    // oversight -- putting a separator on stdout would contaminate the
+    // single-page redirect, which is the common case and the one whose output
+    // should be exactly the page. Fetch one page per invocation when the caller
+    // needs them apart; the banners still name them, in order, on stderr.
+    for (const result of results) {
+      if (!result.ok) {
+        console.error(chalk.red(`${result.path}: ${result.error}`));
+        process.exitCode = 1;
+        continue;
+      }
+      if (options.headers && results.length > 1) {
+        console.error(chalk.cyan(`\n# ${result.path}`));
+      }
+      console.log(result.body);
+    }
+  });
 
 // ============================================================================
 // S3 / IAM Management
@@ -3713,7 +3826,7 @@ async function dispatchOpenNeuroImportWorkflow(
 adminCommand
   .command("annex-normalize <datasetId>")
   .description(
-    "Move data an existing dataset keeps in git into the annex, and put NEMAR's annex policy in force (ADR 0058)",
+    "Move data an existing dataset keeps in git into the annex, and put NEMAR's annex policy in force (ADR 0060)",
   )
   .option("--dry-run", "Clone and report what would change; touch nothing")
   .option("--dir <path>", "Working directory for the clone (reuse it to resume without re-cloning)")
@@ -3730,7 +3843,7 @@ adminCommand
   .addHelpText(
     "after",
     `
-What this does (ADR 0058, issue #1159):
+What this does (ADR 0060, issue #1159):
   1. clones the dataset (full clone -- data in git has to be present to upload)
   2. annexes every file NEMAR policy calls data that the repo keeps in git, and
      uploads the content to S3 with credentials minted for this dataset
@@ -3890,7 +4003,7 @@ adminCommand
   )
   .option(
     "--normalize-max-gb <n>",
-    "Raise the ceiling on how much data the prepare phase will annex and upload from this host (default 5 GiB). Only needed for a dataset that keeps an unusual amount of data in git; the import aborts rather than silently spending hours uploading (ADR 0058).",
+    "Raise the ceiling on how much data the prepare phase will annex and upload from this host (default 5 GiB). Only needed for a dataset that keeps an unusual amount of data in git; the import aborts rather than silently spending hours uploading (ADR 0060).",
   )
   .action(
     async (

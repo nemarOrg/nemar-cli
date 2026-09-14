@@ -4,7 +4,7 @@
  * ADR 0015 set the policy; this module owns its one spelling. Before it existed
  * the same rule was written out five times -- `configureLargefiles`, the manifest
  * classifier in `transfer.ts`, `isNeverAnnexedMetadata` in `import-openneuro.ts`,
- * `scripts/nemar-restore-dataset.sh`, and twice more in `.context/validated_workflows.md`
+ * `scripts/nemar-restore-dataset.sh`, and twice more in `https://docs.nemar.org/admin/operations/validated-workflows/`
  * -- in three mutually inconsistent forms. That drift is what let `_motion.tsv`
  * (issue #1158) land in git: the annex expression excluded every `*.tsv`, while
  * the manifest classifier called anything over 100 kB a data file.

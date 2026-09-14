@@ -145,9 +145,20 @@ export function redactHeaders(headers: Record<string, string>): Record<string, s
  *  `device[_-]?code` covers the device authorization grant's polling secret
  *  (epic #1272 phase 3; ADR 0047): `device_code` is the bearer of
  *  `POST /auth/device/token`, equivalent to holding the key it mints, and
- *  the CLI's own request bodies carry it verbatim on every poll. */
+ *  the CLI's own request bodies carry it verbatim on every poll.
+ *
+ *  BARE `session` IS HERE BECAUSE `session_token` WAS NOT ENOUGH. The docs
+ *  credential exchange (epic #1336 phase 3) returns its value under the key
+ *  `session` -- see `DocsCliSessionResponse` -- and this pattern matched only
+ *  the `session_token` spelling, so `--debug` wrote a live admin-docs
+ *  credential to the log file in plaintext while redacting the long-lived API
+ *  key on the line above it. The CLI tells people to re-run with `--debug` and
+ *  attach the log to an issue, so the path from "a docs page 404'd" to "a live
+ *  credential in a public issue" was two steps. Add the exact key, not a
+ *  prefix: a `*session*` wildcard would also redact `session_id` and
+ *  `expires_at`-style diagnostics that are the reason the log exists. */
 const SENSITIVE_BODY_KEY_RE =
-  /^(api[_-]?key|apikey|password|token|secret|access[_-]?key(_id)?|secret[_-]?access[_-]?key|session[_-]?token|authorization|ssh[_-]?key|private[_-]?key|device[_-]?code)$/i;
+  /^(api[_-]?key|apikey|password|token|secret|access[_-]?key(_id)?|secret[_-]?access[_-]?key|session|session[_-]?token|authorization|ssh[_-]?key|private[_-]?key|device[_-]?code)$/i;
 
 const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
 

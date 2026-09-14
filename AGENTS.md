@@ -3,17 +3,61 @@
 > Tool-agnostic project instructions for any coding agent (Codex, Cursor, Copilot, Windsurf,
 > Claude Code, ...). Claude Code reads this via `@AGENTS.md` in `CLAUDE.md`.
 
-**This file is a map, not a manual.** It names every part of the system in a line or two
-and points at the document that expands it. Read the hard rules below in full;
-follow a pointer when you are about to touch that area.
+**This file is the rules, not the reference.** What it still contains is the set of things that
+can go badly wrong in THIS checkout and are not obvious from the code: which datasets are live,
+which environment shares real users, what CI owns, and where decisions are recorded. Everything
+that merely describes the platform now lives at `docs.nemar.org` and is linked below.
 
-| If you need | Go to |
-|---|---|
-| Why something is built the way it is | [`.context/decisions/`](.context/decisions/README.md) — the ADRs |
-| Hosts, paths, crons, deploy procedures | [`.context/systems-inventory.md`](.context/systems-inventory.md) |
-| A proven recipe (git-annex, staging, branch protection) | [`.context/validated_workflows.md`](.context/validated_workflows.md) |
-| Everything else under `.context/` | [`.context/README.md`](.context/README.md) — annotated map |
-| What a CLI command does | `nemar <group> --help` (authoritative) or `docs.nemar.org` |
+**Read the hard rules in full before you edit anything.** Follow a link when you are about to
+touch that area.
+
+This file used to be 669 lines, most of it a second copy of the documentation site. Two copies
+drift, and this epic exists because they did (ADR 0057). If you are about to add a paragraph
+here explaining how part of the platform works, that paragraph belongs on `docs.nemar.org`; add
+a link here instead.
+
+---
+
+## Retrieval: how to read the linked material
+
+Public pages need nothing: fetch the URL. **Every page also has a Markdown mirror**, which is
+what to fetch if you are a program rather than a browser, and `https://docs.nemar.org/llms.txt`
+indexes them.
+
+The mirror sits at the page path with `.md` appended and **no trailing slash**: the tables below
+spell URLs as `/cli/commands/`, and the mirror of that page is `/cli/commands.md`, not
+`/cli/commands/.md`. Drop the slash before adding the extension.
+
+```bash
+curl -s https://docs.nemar.org/cli/commands.md
+```
+
+Pages under `/admin/` are gated: `nemarOrg/docs` is private at source and the gate admits the
+`admin` and `owner` roles only (ADR 0056, ADR 0059). An admin holding a CLI key reads one
+without a browser:
+
+```bash
+nemar admin docs admin/operations/systems-inventory
+nemar admin docs admin/operations/validated-workflows cli/commands   # several share one session
+```
+
+That trades the stored API key for a fifteen-minute, read-only, documentation-scoped session;
+the key itself never reaches the documentation host.
+
+---
+
+## If you cannot read something you need
+
+**Open the issue anyway.** Losing read access must not cost you the ability to report a problem
+(ADR 0057).
+
+If you hit an admin-adjacent problem, or need a runbook you cannot open, file the issue on the
+relevant repository, say plainly what you could not read and what you were trying to do, and tag
+**`@nemarOrg/admins`**. Someone with access will either answer or open the page for you.
+
+Escalation replaces read access. **Silence does not.** A blocked agent that stops without saying
+so is the failure mode this instruction exists to prevent: the problem stays real and nobody
+learns it exists.
 
 ---
 
@@ -129,6 +173,27 @@ Authentication against staging never uses production keys: use `TEST_ADMIN_API_K
 with an isolated `NEMAR_CONFIG_DIR`, so the real `~/.config/nemar` is untouched;
 `TEST_OWNER_API_KEY`, the seeded `test-owner` token, is its owner-role sibling.
 
+### Two names that look like bugs and are not
+
+**`ORG_NAME = "nemarDatasets"`** in `backend/src/services/github.ts`, and the publishing scripts
+targeting `nemarDatasets`, are correct. Two GitHub orgs is deliberate: `nemarOrg` holds tooling
+and infrastructure, `nemarDatasets` holds dataset repositories only. **Do not change these to
+`nemarOrg`.** In a two-org codebase this reads as a typo, which is exactly why the warning is
+here rather than left to the reader.
+
+**EZID is the DOI registrar, not Zenodo** (ADR 0007). `.context/research.md` describes a Zenodo
+flow and `docs.nemar.org/develop/zenodo-testing/` documents Zenodo sandbox testing; both are
+prior art and test tooling, neither is the production path. A DOI change made on the strength of
+either is wrong.
+
+### Revocation cascades, always
+
+Ending a credential has to end everything minted from it. API tokens are tied to a GitHub PAT
+and per-user S3 credentials, and an API key can now also mint a docs session
+(`POST /auth/docs/cli-session`). `services/docs-auth.ts` names the callers of
+`DOCS_REVOKE_ALL_SQL` and says a new path that ends a credential needs the line too; that count
+is load-bearing, so add yourself to it rather than assuming someone else did.
+
 ### Never hand-bump the version
 
 `package.json` version is owned by CI. Do not edit it, and do **not** run
@@ -166,173 +231,23 @@ recover with `nemar admin delete-dataset <id>` then recreate, rather than re-run
 
 ---
 
-## Project overview
+## Tooling is fixed
 
-**Purpose:** command-line interface for NEMAR (Neuroelectromagnetic Data Archive and Tools
-Resource) dataset management.
-**Stack:** TypeScript, Bun, Commander.js, DataLad, Cloudflare Workers + D1.
-**Repository:** https://github.com/nemarOrg/nemar-cli
-
-Tooling is fixed: **Bun** for JavaScript and TypeScript (never npm or npx),
-**Biome** for lint and format (never ESLint or Prettier),
-**uv** for anything Python (never pip or conda).
-
-### The parts
-
-| Part | What it is | Expanded in |
-|---|---|---|
-| CLI (`src/`) | auth, dataset lifecycle, sandbox, admin commands | `nemar --help` |
-| Backend (`backend/`) | Cloudflare Worker + D1; the API at `api.nemar.org` | [systems inventory](.context/systems-inventory.md) §1 |
-| Website | `nemar.org`, Astro SSR, in `nemarOrg/website` | [systems inventory](.context/systems-inventory.md) §1 |
-| Docs site | `docs.nemar.org`, in `nemarOrg/docs` | — |
-| Central workflows | `nemarDatasets/.github` — dataset CI, archive, manifest | [systems inventory](.context/systems-inventory.md) §2 |
-| Zarr converter | `scripts/zarr/` **in this repo**; runs on the Hallu cron, not Actions (ADR 0029) | [systems inventory](.context/systems-inventory.md) §3 |
-| Signal readers | `neuromechanist/biosigio` on PyPI — importers plus the Zarr exporter | [systems inventory](.context/systems-inventory.md) §2 |
-| Processing host | SDSC Hallu — dataset sync, QA sync, Zarr conversion | [systems inventory](.context/systems-inventory.md) §3 |
-| Test machines | `ssh mcm` (admin), `ssh mba` (regular user) | [systems inventory](.context/systems-inventory.md) §4 |
-| Backup / DR | `nemarOrg/nemar-db-backup`, hourly D1 snapshots | [systems inventory](.context/systems-inventory.md) §5 |
-
-**Two GitHub orgs, and the split is deliberate.** `nemarOrg` holds tooling and infrastructure;
-`nemarDatasets` holds dataset repos only.
-`ORG_NAME = "nemarDatasets"` in `backend/src/services/github.ts` and the publishing scripts
-target `nemarDatasets` because that is where dataset repos live. Do not change these to `nemarOrg`.
-
-**The website cutover is done: `nemar.org` IS the dataset browser.** Dataset pages live at
-`nemar.org/dataset/<id>`, versions at `?v=v<version>`, and that is the canonical DOI landing
-target (`datasetLandingUrl` in `shared/datacite-constants.ts`).
-`ww2.nemar.org` is a legacy alias for the same site, not a deployment target.
-The legacy PHP `nemar.org/dataexplorer` site is gone and its URLs 301 to `nemar.org/dataset/<id>`.
-Epic #837 had already severed the data coupling before the hostname handover:
-the outgoing datapipeline push and the incoming 4-hour catalog pull were removed,
-our `nm`/`on` records were purged from its `dataexplorer_*` tables,
-and the legacy `ds######` shadow rows were dropped from our D1.
-"The website", "the browser", or "the UI" unqualified means `nemar.org`;
-a comment contrasting ww2 with nemar.org, or calling nemar.org legacy, predates the cutover
-and is wrong.
-
-### S3 layout
-
-```
-s3://nemar/{datasetId}/
-    objects/     # git-annex content-addressed blobs
-    version/     # version manifests (v1.0.0.json)
-    archives/    # downloadable zip snapshots (v1.0.0.zip)
-    qa/          # pipeline QA artifacts, mirrored from Hallu
-s3://nemar/staging/pr-{n}/{datasetId}/objects/   # PR staging area
-```
-
-### User flow
-
-Four statuses, fixed meanings, one writer for upload access (**ADR 0040**):
-`pending` (email unverified) → `verified` (the base tier, no admin needed) →
-`approved` (an admin granted upload) → `revoked`.
-
-1. Sign up (CLI and web both: ORCID sign-in. The CLI's device flow, ADR 0047, mints the
-   account through the same browser step web signup uses; `nemar auth signup` is that flow
-   plus guided completion of whatever `profile_gaps` still names) → verify the email → `verified`
-2. `verified` needs no admin: browse, dashboard, settings, `nemar sandbox`.
-   Upload access is requested ONCE, when it is needed, from Settings
-   on nemar.org or `nemar auth request-upload-access`
-   (`POST /users/me/upload-access/request`, **ADR 0042**). The request needs a username,
-   a real name, a GitHub account that exists, a city and a country, and a sentence about
-   what is being deposited; each missing field is named in a typed refusal
-3. Admin approves the one-time upload request → `service_access` → user uploads
-   → BIDS validation → private GitHub repo + S3 upload
-4. Admin creates concept DOI → user can version with new DOIs
-
-`users.account_kind` is a separate axis from status: `person` (the default), `service`
-(operational automation: no human signs in to it directly, keys are minted only by an owner
-via `nemar admin keys create`), `test` (a human's secondary persona: signs in and uploads like
-a person, but on production may only own `xx` sandbox datasets). `service`/`test` are exempt
-from the ORCID-verification profile gap; kinds are set only by an owner
-(`nemar admin kind <username> <kind>`), never inferred (**ADR 0048**).
-
-### Web dashboard auth (#569)
-
-The CLI keeps password plus API token. The dashboard uses passwordless email codes:
-`POST /auth/code/request` (rate limited 1/min, 5/hour; returns `dev_code` only when
-`ENVIRONMENT=development|test`, never in production), `POST /auth/code/verify`
-(Origin-allow-listed, sets the `nemar_session` HttpOnly cookie), plus `/auth/logout`,
-`/auth/me`, and the settings endpoints from epic #1019 —
-`PATCH /auth/profile` (#912), `POST /auth/email/change/{request,verify}`
-(#911; codes go to the NEW address, bound to the requesting session via
-`auth_codes.user_id`, migration 0066), and ORCID re-link via
-`POST /auth/orcid/start?mode=relink` (#913, **ADR 0022** — relink intent is
-never minted on a GET).
-The cookie domain is env-driven via `WEB_SESSION_COOKIE_DOMAIN`, so the website#46 cutover
-is a config flip rather than a code change.
-Web-only signups land as `signup_source='web'`, `status='pending'`,
-with `username`/`github_username`/`password_hash` NULL until admin onboarding fills them in.
-Endpoints are defined in `backend/src/routes/auth-web.ts` (with `auth.ts` for the CLI path
-and `auth-orcid.ts` for ORCID); read those rather than trusting this summary.
-
-### CLI sign-in: device authorization (#1281, ADR 0047)
-
-`nemar auth login` obtains its API key through the device authorization grant (RFC 8628),
-the pattern `gh auth login` uses,
-because a terminal cannot receive an OAuth redirect.
-Five routes: `POST /auth/device/start` (CLI mints a device code + user code),
-`POST /auth/device/token` (CLI polls for the key),
-and `GET /auth/device/lookup`, `POST /auth/device/confirm`, `POST /auth/device/deny`
-(the browser, behind the existing web session).
-`lookup`/`confirm`/`deny` never talk to ORCID directly:
-they sit behind the same web session and identity checks every other cookie-authenticated route does (ADR 0022, 0043, 0044).
-**The key is minted only when the CLI collects it at `/token`, never when the browser confirms at `/confirm`** (ADR 0047):
-confirm records `user_id` and `status='confirmed'` only,
-so no plaintext key is ever at rest between the two steps.
-Every key is a named row for one machine (`tokens.name`),
-and a new sign-in never revokes another machine's key.
-`POST /auth/device/token` is the one route in this family deliberately OUTSIDE the strict `AUTH_PATHS` bucket:
-at a 5-second poll cadence,
-10 polls fit inside the strict bucket's 60-second window and the 11th trips it, about 50 seconds in,
-so the route rides the generic bucket instead, in practice `ip` (500/min),
-since the CLI holds no bearer until it has collected a key,
-plus its own per-row 5-second floor (`slow_down`).
-Every timestamp this flow writes or compares is SQL-side (`datetime('now', ...)`, `julianday`),
-never a JS `toISOString()` value,
-because the two compare unequally on the same day and silently break expiry.
-Named API keys (list/mint/revoke, plus the device flow's paste-key fallback) live alongside it at `GET/POST /auth/keys` and `DELETE /auth/keys/:id`.
-Three files: `backend/src/routes/auth-device.ts`, `backend/src/routes/auth-keys.ts`,
-and the shared SQL/helpers in `backend/src/services/device-auth.ts`.
-The CLI half (epic #1272 phase 3, #1283) is `src/lib/device-login.ts` plus `src/commands/auth.ts`:
-`nemar auth login`/`signup` run this flow by default (`login` alone also takes `-k`/`--key`
-to paste an existing key instead),
-a re-login on the same machine best-effort revokes its own previous device-sourced key,
-`nemar auth logout` revokes it back by default (never a pasted or password-era one),
-and `nemar auth keys` manages the whole set.
-
-### Dataset deletion
-
-`DELETE /admin/datasets/:id` or `nemar admin delete-dataset <id>`.
-Deletion cascades through the GitHub repo, S3 objects, and D1
-(`dataset_versions`, `publication_requests`, `datasets`;
-`dataset_collaborators` follows via foreign key).
-
-- Unpublished (no DOI, private): admin or owner may delete.
-- Published (has a DOI or is public): owner only, and requires `force=true`.
-
-Scheduled cleanup runs daily in production only: sandbox (`xx`) datasets after 14 days,
-and stale `nm` datasets that are private, DOI-less, without active publication requests,
-and inactive for 90 days.
-**`last_activity_at` must be updated by any endpoint that mutates a dataset**
-(uploads, version creation, publication requests), or cleanup will consider it stale early.
-See migration 0011.
-
----
-
-## Environment setup
+**Bun** for JavaScript and TypeScript, never npm or npx.
+**Biome** for lint and format, never ESLint or Prettier.
+**uv** for anything Python, never pip or conda.
 
 ```bash
-bun install                                      # dependencies
-bun run src/index.ts                             # run the CLI from source
-bun test                                         # real tests only, no mocks
-bun build src/index.ts --outdir dist --target node
+bun install                  # dependencies
+bun run src/index.ts         # run the CLI from source
+bun test                     # real tests only, no mocks (.rules/testing.md)
+bun run typecheck            # tsc for the CLI and the backend
+bun run lint                 # biome
 ```
 
-Wrangler on a dev machine runs through cfman, which holds the SCCN account token:
-`bunx cfman wrangler --account sccn <wrangler arguments>` (for example `... whoami`,
-`... d1 execute nemar-db-dev --remote --env dev -c wrangler-sccn.toml --file <sql>` from `backend/`).
-There is no plain `wrangler login` on these machines; a command that says "Not logged in" was run without cfman.
+Wrangler runs through cfman, which holds the SCCN account token:
+`bunx cfman wrangler --account sccn <arguments>`. There is no plain `wrangler login` on these
+machines, so a command reporting "Not logged in" was run without cfman.
 
 ---
 
@@ -370,303 +285,51 @@ Phase PRs squash-merge into the epic branch; the epic branch merges into `dev`.
 
 ---
 
-## Release pipeline
+## Everything else is on the documentation site
 
-**CI owns bump-and-tag so a human cannot desync `package.json`, the tag, and the npm release.**
-`dev` always carries an `X.Y.Z-devN` suffix; feature branches merge into `dev`
-without touching the version.
+`nemar <group> --help` is authoritative for command behavior. For anything else:
 
-1. Open the dev → main PR **as-is**, with the `-devN` suffix intact.
-2. On merge to main, `auto-tag.yml` strips the suffix via `bump-version.sh`,
-   commits as `nemar-bot`, pushes back to main, and tags `vX.Y.Z`.
-   A job-level author guard stops the bot's push from re-triggering the workflow.
-3. `npm-publish.yml` fires on the `v*` tag and publishes to npm.
-4. `sync-dev.yml` fires on publish success, merges main back into dev with `--no-ff`,
-   and advances dev to the next patch `-dev0`.
+| If you need | Go to |
+|---|---|
+| What a CLI command does | [CLI command reference](https://docs.nemar.org/cli/commands/) |
+| Signing in, keys, the device flow | [authentication](https://docs.nemar.org/cli/getting-started/authentication/) |
+| Account tiers, upload access, what a status means | [account and access](https://docs.nemar.org/cli/reference/account-access/) |
+| The HTTP API surface | [API reference](https://docs.nemar.org/platform/api/) |
+| Dataset download and byte-range access | [data API](https://docs.nemar.org/platform/data-api/) |
+| DOIs, versioning, what is permanent | [DOI and versioning](https://docs.nemar.org/platform/doi-and-versioning/) |
+| Which host serves what | [hosts and routes](https://docs.nemar.org/platform/hosts-and-routes/) |
+| The Zarr serving copy, end to end | [Zarr](https://docs.nemar.org/platform/zarr/) |
+| The `index.json` contract | [index contract](https://docs.nemar.org/platform/zarr/index-contract/) |
+| One store's on-disk layout | [store contract](https://docs.nemar.org/platform/zarr/store-contract/) |
+| What the Zarr format guarantees, and how that is checked | [format stability](https://docs.nemar.org/platform/zarr/format-stability/) |
+| How a version reaches npm, and when to bump by hand | [release pipeline](https://docs.nemar.org/develop/release-pipeline/) |
+| Writing and reading as an agent | [for agents](https://docs.nemar.org/platform/for-agents/) |
 
-`[skip ci]` is deliberately absent from the strip commit,
-because GitHub's skip marker would also block the tag-push event that `npm-publish.yml` needs.
+Gated, and worth knowing exist:
 
-**The generated release notes are not a changelog, so [`CHANGELOG.md`](CHANGELOG.md) is.**
-`auto-tag.yml` creates the GitHub Release with `--generate-notes`, which lists merged PR
-titles: an epic collapses into one bullet carrying the epic's name, and a fix found mid-epic
-gets no bullet at all. So `v0.10.2`'s notes never mentioned that tests had been signing in
-to production. **The release PR renames `## Unreleased` to `## X.Y.Z - YYYY-MM-DD`** and is
-where the entry gets written; `test/changelog-format.unit.test.ts` keeps the file newest-first,
-one entry per version, and never ahead of the version CI is carrying. Paste the entry into
-the GitHub Release description after the tag exists
-(`gh release edit vX.Y.Z --notes-file …`), above the generated list.
-
-**A release that carries a new migration runs `bun run migrations:d1-check` first.**
-Every migration test in this repo runs on bun:sqlite, which is more permissive than
-the SQLite build D1 ships — migration 0077 shipped a 79-character GLOB that bun:sqlite
-executes and D1 rejects (its LIKE/GLOB pattern cap is 50 characters), so every test was
-green and the deploy would have aborted mid-file.
-The script replays every migration through `wrangler d1 execute --local` and diffs the
-resulting object and column catalogue against the bun:sqlite one.
-It is not in per-PR CI because it takes about a minute.
-
-**When a manual bump does apply:** cutting a minor or major release
-(`./scripts/bump-version.sh minor-dev0` on dev, then open the PR),
-or tagging an explicit pre-release (`-rc*`, `-alpha*`, `-beta*`),
-where auto-tag skips the strip and tags the literal version.
-Read `scripts/bump-version.sh` for the exact spellings.
-Environments and pre-release checks: [`.context/release-safety-playbook.md`](.context/release-safety-playbook.md).
+| If you need | Go to |
+|---|---|
+| Hosts, paths, crons, deploy procedures | [systems inventory](https://docs.nemar.org/admin/operations/systems-inventory/) |
+| A proven recipe (git-annex, staging, branch protection) | [validated workflows](https://docs.nemar.org/admin/operations/validated-workflows/) |
+| Zarr operations, including the maintenance commands | [Zarr serving runbook](https://docs.nemar.org/admin/operations/zarr-serving/) |
+| Staging and the exemplar fleet | [staging environment](https://docs.nemar.org/admin/operations/staging-environment/) |
+| Backup and restore | [disaster recovery](https://docs.nemar.org/admin/disaster-recovery/) |
 
 ---
 
-## Core principles
-
-- **Auth and security.** API tokens are tied to a GitHub PAT and per-user S3 credentials;
-  revocation must cascade to all linked credentials.
-  Never store plaintext passwords (Argon2 or bcrypt).
-  Email verification precedes admin review.
-- **BIDS validation.** Use the bids-validator library, support per-dataset validation config,
-  and require a pass before upload proceeds.
-- **DataLad.** git-annex for large files, S3 special remote for content,
-  GitHub for metadata and history, semantic versioning for releases.
-- **DOIs.** Concept DOI is admin-only; version DOIs are user-creatable once a concept exists.
-  EZID is the registrar (ADR 0007 — not Zenodo, whatever `.context/research.md` says).
-  DOIs are permanent and require explicit confirmation.
-- **Zarr.** A derived, latest-only serving copy, not a source of truth.
-  `zarr.nemar.org` is the stable contract for it (issue #1061, epic #1181 phase 6):
-  `index.json` stays proxied, edge-cached, and D1-gated. Phase 2's `catalog.json` is a
-  SEPARATE route (no `<id>/zarr/` segment, so it can never match the redirect predicate
-  at all) that stays proxied and edge-cached too, but has no D1 gate of its own — its
-  source document only ever lists already-public datasets. A plain `GET` for a store
-  object with no allowlisted browser `Origin` — libraries, HPC jobs, agents — 302s
-  straight to the public S3 object instead of streaming through the Worker, so every
-  request is still counted without this Worker carrying the bytes (Cloudflare's terms
-  restrict proxying large files at this scale on a non-Enterprise plan). `HEAD` is
-  never redirected regardless of Origin: fsspec's `info()` and rclone's sync both probe
-  with HEAD, and rclone's HTTP backend does not follow HEAD redirects. The redirect
-  branch skips the D1 visibility gate entirely, and validates the dataset id itself
-  (`isValidDatasetId`) rather than trusting the path shape — the bucket's own
-  `NotResource` deny-list (`backend/src/services/bucket-policy.ts`) is the real
-  enforcement point, so a redirect that 403s at S3 for a private dataset leaks nothing
-  the proxied 404 does not. The rate limiter counts these hits toward the SAME shared
-  data-ip bucket a proxied request from that IP would be enforced against, without ever
-  blocking the redirect itself (`rateLimiter`'s `observeOnly` option,
-  `backend/src/middleware/rateLimit.ts`) — it logs at most one `console.warn` per
-  window, the first time the bucket crosses the point enforcement would have tripped,
-  never a per-request log.
-  The converter is `scripts/zarr/` **in this repo** and runs on the SDSC Hallu
-  cron (`scripts/zarr/hallu-zarr.sh`, hourly at `:30`), never in GitHub Actions —
-  Actions cannot finish a large dataset inside the 120-minute cap (ADR 0029).
-  **Both halves deploy themselves now**, driver and shell script alike:
-  `setup()` resets the Hallu clone to the tracked ref every run, and since #1109
-  moved `hallu-zarr.sh` into the checkout, cron invokes the clone's copy
-  (`/mnt/local/zarr-state/nemar-cli/scripts/zarr/hallu-zarr.sh`), so that reset
-  updates the script too. Hand-placement with `scp` + atomic `mv` is now only for
-  bootstrapping a node that has no clone yet — the script has to exist before the
-  clone does. The `DRIFT:` warning covers that shape: it fires when the running
-  copy is NOT the clone's copy and the two differ, and is a no-op in the normal
-  deployment where they are the same file. A stale out-of-clone copy left at the
-  old path is inert, not a fallback. Manual recovery for one dataset is
-  `hallu-zarr.sh --dataset <id>`.
-  A second, independently-stated `--test` instance
-  (own state dir, own AWS profile, `api-test.nemar.org`/`nemar-dev`)
-  converts into `nemar-dev`'s S3 zarr prefix, served at `zarr-test.nemar.org`,
-  without touching any of this
-  — see [systems inventory](.context/systems-inventory.md) §3.4.
-  "Every run" is load-bearing and used to be a lie during a backfill: a run holds
-  the lock until the queue empties, so `setup()` never re-ran and the node sat two
-  deploys behind for two days (#1129). The drain now re-checks `origin/$DRIVER_REF`
-  between datasets and stops when it moves, so the next tick redeploys.
-  Conversion streams by default above 256 MiB, so peak RAM is a read window
-  plus one channel rather than the whole recording (ADR 0030). EEGLAB `.set`
-  is the one format that cannot: MNE refuses v7.3 files that biosigIO reads,
-  and an embedded classic `.set` loads fully even with `preload=False`.
-  Discovery and dispatch are raw-only (ADR 0027):
-  nothing under `derivatives/`, `sourcedata/`, or `code/` becomes a *new* store.
-  Stores published under those trees before that landed are being deleted by
-  `scripts/zarr/purge_non_raw_stores.py`; index v3 stops republishing them at the
-  same time (see the coverage paragraph below), so the index describes what is
-  served rather than what the bucket still happens to hold mid-purge.
-  A `--clean` rebuild reconciles rather than wiping first (ADR 0023).
-  **`index.json` is format v3 and is the mandatory entry point** — anonymous
-  in-prefix ListBucket is denied, so it is how a client learns what is served.
-  Schema: `shared/zarr-index.schema.json`, validated by the converter before
-  upload and served at `GET /schemas/zarr-index-v3.json`.
-  `contract_base` is the only URL a client may hardcode; `data_base` / `s3_uri`
-  say where the bytes are today and are per-dataset so one dataset can be
-  mirrored without rewriting anyone's client.
-  `source_commit` is always a 40-hex SHA — the converter refuses to publish an
-  index without one (on008083 shipped `""`).
-  **Coverage balances by construction:**
-  `discovered_count == store_count + failure_count + pending_count`.
-  A carried-over store under `derivatives/`/`sourcedata/`/`code/` is DROPPED from
-  the index rather than republished — those stores are being deleted by
-  `purge_non_raw_stores.py`, not served — and each drop is logged with its cause
-  and counted as `non_raw_dropped` on the callback, never in the index. So
-  `source_tree` is always `raw`.
-  `failures[]` is what will not convert without a change to the data or the
-  converter, and each entry now carries a `detail` (exception class plus first
-  message line, local paths stripped) so an opaque `file_read_error` is
-  diagnosable from the public index. `pending[]` is new and is the other half:
-  recordings with no store that are still expected to convert
-  (`infra_failure` / `memory_budget` / `not_attempted`), with an `attempts`
-  count. These used to be omitted "so they retry next run" and then never did,
-  because a run that converted anything is marked `done`; `zarr_queue` now
-  re-queues such a dataset on its own. **Only the ATTEMPTED pendings
-  (`infra_failure`, `memory_budget`) drive the backoff table (1 h, 6 h, 24 h,
-  then weekly) and the 5-round exhaustion cap, after which the recording becomes
-  a typed `retry_exhausted` failure. A `not_attempted` pending is re-queued at
-  the shortest delay (1 h) and does NOT advance `retry_round`** — nothing has
-  failed for it, so a dataset merely too large to finish in one run must not burn
-  its rounds on recordings nobody has tried yet. The converter reports the split
-  as `pending_count` and `not_attempted_count` on the callback.
-  Per-store `source_key` moved OUT of the index into a sibling `manifest.json`
-  (nothing on the website read it; it was 18 percent of nm000281's 12.8 MB index).
-  The index also publishes dataset-level `doi` / `license` / `citation` /
-  `hed_version` and a `layout` object of `const` path templates, so an MCP recipe
-  (ADR 0025) is computable from `index.json` plus one array-metadata fetch with no
-  probing.
-  **Events are a third document, `<id>/zarr/events.parquet`** (#1060): one row per
-  (event, channel group) across every store, with `sample_index` computed by the
-  converter as `math.floor(onset_s * rate + 0.5)` against the group's SERVING
-  rate — ties round UP, and it is deliberately not Python's `round()`, which
-  ties to even and so disagrees on every exact half-sample onset. The serving
-  rate is the only place the resampling relation is known exactly
-  (`resample_poly` is zero-phase, so there is no delay to subtract). It exists only when the index
-  names it (`events_parquet` / `events_row_count`); publishing it is best-effort
-  like the manifest, and the per-store `n_events` / `trial_types` come from the
-  same parse as its rows.
-  **The three dataset-level documents — `index.json`, `manifest.json`,
-  `events.parquet` — share one cache rule**: the short untokened TTL in
-  `cacheControlFor` and the zarr-ready purge list, both driven by
-  `ZARR_DATASET_DOCUMENTS` (`backend/src/services/cloudflare.ts`), because they
-  are rewritten together by every conversion. Only `index.json` is always
-  proxied; the other two redirect to S3 for non-browser clients like any store
-  object.
-  Stores also carry a structured `nemar` root attribute — dataset id, DOI,
-  license, citation, source commit, source tree, derived, HED version, engine
-  version, contract URL — read once per run from `GET /datasets/<id>`, so a
-  client that has the store has the attribution.
-  Served samples carry the unit the recording's `channels.tsv` declares, on
-  BOTH conversion paths (biosigio>=1.2.7). The sidecar is resolved by BIDS
-  inheritance — the same resolution the channel-count fidelity gate uses — and
-  passed EXPLICITLY as `bids_channels`, never biosigIO's `"auto"`: the file an
-  exporter is handed is a scratch materialisation, and on the MaxShield path it
-  is the filtered copy at `work/sss_<basename>`, so sibling detection is the
-  wrong question. `units_report` on a store entry is present exactly when a
-  sidecar was applied. **Index v3 is what `ZARR_ENGINE_VERSION = "3"` carries
-  to the back catalogue**, and the units change is why that bump needed the
-  1.2.7 floor: below it the streaming exporter could not apply the sidecar at
-  all, so the two paths would have disagreed.
-  **A claim about the on-disk geometry is only as good as the command that
-  re-checks it: `bun run zarr:geometry-check`.** Phase 4 of the MCP epic
-  shipped a reader that returned signal from the wrong place in the recording
-  because a shard-index rule was measured on two stores, written into a design
-  doc, and then trusted by the code, the tests, the fixture and five reviewers
-  alike. `backend/scripts/zarr-geometry-conformance.ts` checks the invariants
-  the readers depend on against every index the catalog publishes (footer
-  entry-count divisibility, the index agreeing with the array it describes,
-  inner chunks spanning every channel, the codec chain and dtype, per-channel
-  `scale`/`offset`, and every `events.parquet` column being ZSTD). Run it when
-  the converter's chunking or events schema changes and when
-  `ZARR_ENGINE_VERSION` is bumped; it is an on-demand gate like
-  `migrations:d1-check`, not per-PR CI. A transient 5xx from the host is
-  reported separately and never counted as a violation.
-  **A widening of discovery reaches the back catalog only through the engine
-  stamp** (ADR 0033): `reconcile` re-queues on a version change, and an engine
-  upgrade bumps no version, so `zarr_queue.py`'s `ZARR_ENGINE_VERSION` is what
-  makes already-converted datasets re-convert. Bump it when discovery widens —
-  never when it narrows — and read `migrate_schema`'s note before touching how a
-  NULL stamp is interpreted.
-  **Bumping it is a two-step procedure, because merging a bump deploys it**
-  (`setup()` resets the clone every run, so the next hourly tick would run it):
-  preview with `hallu-zarr.sh --preview-engine-bump`, then arm exactly one run
-  with `touch $STATE_DIR/.zarr-engine-bump-ack` (the script consumes the file).
-  Until then a bump over `--engine-requeue-limit` (25) re-queues **nothing** and
-  every reconcile logs `ENGINE BUMP PENDING ACK`; new datasets keep converting
-  normally throughout. The cohort stranded before the stamp existed
-  (directory-format datasets converted before 2026-08-22, #1172) is recovered by
-  `hallu-zarr.sh --backfill-dir-formats`, dry-run by default.
-  **Verification is a standing sweep, not a conversion-time gate alone**
-  (issue #1068, epic #1181 phase 8): the converter's own
-  `channel_count_mismatch` check withholds an unfaithful store when it is
-  built, but `has_zarr` KEEPS ITS EXISTING MEANING (converted: `zarr_status
-  = 'ready'` with at least one store) so no caller of `?has_zarr=1` sees a
-  silently narrower result set. `has_zarr_verified` is the new, separate,
-  stricter filter: converted AND the fidelity sweep's last verdict was
-  `verified`. `backend/src/services/zarr-fidelity-sweep.ts`'s
-  `runZarrFidelitySweep` re-derives ground truth per sampled recording
-  (`channels.tsv` row count, sidecar `SamplingFrequency`/`RecordingDuration`)
-  from the dataset's own git-tracked BIDS metadata via the public,
-  credential-free `raw.githubusercontent.com` content host (never the
-  GitHub API/App/PAT, which is what makes it safe on the non-prod cron too
-  -- `DEV_CRON_ALLOWLIST` in index.ts) -- candidates are restricted to
-  `status='active' AND visibility='public'` for exactly that reason: a
-  private repo can't be read anonymously, so it would only ever produce
-  `unverifiable` noise. It FAILS OPEN ON THE ROW, never on the verdict: a
-  transient infra error (a non-2xx that isn't 404, a network throw, or
-  either fetch budget running out mid-dataset -- a sweep-wide 600 and a
-  per-dataset 90, both index plus sidecar fetches) aborts that one
-  dataset's verification for the run -- nothing is stamped, it lands in the
-  run's `errors`, and the row stays a candidate; only a clean 404 at every
-  nearest-first candidate path is real absence, and only a value that
-  actually parsed counts as checked. Stamps `zarr_verify_status`
-  (`verified` / `failed` / `unverifiable`) plus `zarr_verified_at` into
-  `sweep_stamps` (ADR 0034/0035 -- no new column); a re-conversion (a
-  changed `zarr_source_commit`) OR a stamped commit that is null (a fixed
-  fossilisation bug -- the write side now stamps `''`, never JSON `null`,
-  but the candidate predicate also re-arms on a null stamp so an
-  already-fossilised row un-sticks too) re-arms verification. A fresh
-  conversion shows `zarr_verify_status: null` until the daily sweep (plus
-  `POST /admin/datasets/zarr-fidelity-sweep`, `nemar admin
-  zarr-fidelity-sweep`) reaches it; the viewer keeps reading index.json
-  regardless (ADR 0005 -- verification is reported, never a precondition
-  for serving).
-
----
-
-## Rules and context
+## Rules and context, which stay in this repository
 
 `.rules/` holds the detailed standards: [`javascript.md`](.rules/javascript.md),
 [`git.md`](.rules/git.md), [`testing.md`](.rules/testing.md) (**NO MOCK policy**),
 [`code_review.md`](.rules/code_review.md), [`documentation.md`](.rules/documentation.md),
 [`ci_cd.md`](.rules/ci_cd.md).
 
-`.context/` holds decisions, runbooks, and research —
-start from [`.context/README.md`](.context/README.md), which marks what is current
-and what is historical. The entries worth knowing by name:
-[`decisions/`](.context/decisions/README.md) (binding),
-[`systems-inventory.md`](.context/systems-inventory.md) (hosts and deploys),
-[`validated_workflows.md`](.context/validated_workflows.md) (proven recipes, with the gotchas),
-[`plan.md`](.context/plan.md), [`ideas.md`](.context/ideas.md), [`research.md`](.context/research.md).
+`.context/` holds decisions, planning and research. Start from
+[`.context/README.md`](.context/README.md), which marks what is current and what is historical.
+The entries worth knowing by name: [`decisions/`](.context/decisions/README.md) (binding),
+[`plan.md`](.context/plan.md), [`ideas.md`](.context/ideas.md),
+[`research.md`](.context/research.md).
 
----
-
-## CLI commands
-
-`nemar --help` and `nemar <group> --help` are authoritative; this is only the shape.
-
-| Group | Covers |
-|---|---|
-| `nemar auth` | login (browser device sign-in by default, `-k`/`--key` to paste a key instead — ADR 0047), signup (browser device sign-in, no `-k`/`--key`), status/whoami, keys (list/create/revoke this account's named API keys), profile (plus `set-email`/`verify-email`, `set-github`, `set-username`, `set-name`, `set-location`, `orcid link\|relink\|unlink` — ADR 0044), request-upload-access, switch, logout, verification, SSH setup, deprecated password-era key retrieval and regeneration |
-| `nemar dataset` | validate, upload, download, status (alias: view), list, search, release, update, clone, get, commit, push, drop, ci, manifest |
-| `nemar dataset publish` | request, status, resend |
-| `nemar dataset` (access) | request-access, access, invite, collaborators |
-| `nemar sandbox` | training run, status, reset — required before uploading |
-| `nemar admin` | users (`--kind`), approve, revoke, role, kind (account kind, owner-only — ADR 0048), keys (create/list/revoke a service/test account's API keys, owner-only), notify, s3, repo, ci, doi, publish, revert, make-public, delete-dataset, bulk-delete, reindex, hed-sweep, data-integrity-sweep, recording-stats-sweep, signal-defaults-sweep, zarr-fidelity-sweep, import-issue-triage, import-coverage, import-weekly, doctor, summary, notice, email-preferences, backfill-names, backfill-usernames, duplicates, e2e-test |
-| `nemar admin import*` | OpenNeuro import, status, rollback, retry, verify, recover (issue #754, epic #967) |
-| `nemar admin fleet` | drift, enforce, revalidate — governance across dataset repos (epic #713) |
-| `nemar admin exemplar` | create, status, remint-dois — the staging exemplar fleet |
-| root shortcuts | `nemar doctor`, `login`, `logout`, `signup`, `register`, `whoami`, `switch` |
-
-`nemar doctor` checks the required external tools: git, git-annex, gh, aws, deno.
-
----
-
-## External resources
-
-- OpenNeuro CLI: https://github.com/OpenNeuroOrg/openneuro
-- BIDS Validator: https://github.com/bids-standard/bids-validator
-- DataLad: https://www.datalad.org/
-- biosigIO: https://github.com/neuromechanist/biosigio
-
----
-
-Remember: build maintainable systems. Check `.rules/` for detailed guidance,
-and `.context/decisions/` before deciding anything twice.
+**ADRs stay next to the code they bind** and are not moving to the documentation site. The
+operational runbooks that used to sit beside them did move; `.context/README.md` links them at
+their URLs.

@@ -1,6 +1,6 @@
 /**
  * The parts of the import normalization that are pure text and pure selection
- * (#1159, ADR 0058). Split from `import-normalize.test.ts` so they do not each
+ * (#1159, ADR 0060). Split from `import-normalize.test.ts` so they do not each
  * pay for a git-annex repository and a special remote in `beforeEach`.
  */
 

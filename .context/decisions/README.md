@@ -96,7 +96,9 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0055](0055-a-reconcile-reports-a-disagreement-and-files-nothing.md) - A reconcile reports a disagreement and files nothing, and coverage is looser than ownership
 - [ADR 0056](0056-the-admin-docs-are-gated-by-nemars-own-session.md) - The admin docs are gated by NEMAR's own session, handed to the docs host by a one-time code
 - [ADR 0057](0057-docs-are-the-canonical-surface-and-gated-content-is-private-at-source.md) - Docs are the canonical surface, and gated content is private at source
-- [ADR 0058](0058-an-imported-tree-is-brought-onto-nemars-annex-policy-in-prepare.md) - An imported tree is brought onto NEMAR's annex policy in prepare, and inherited `.gitattributes` governance is stripped
+- [ADR 0058](0058-what-moves-to-the-private-side.md) - What moves to the private side, and what deliberately does not
+- [ADR 0059](0059-one-docs-repo-private-at-source-public-at-the-url.md) - One docs repo, private at source, public at the URL
+- [ADR 0060](0060-an-imported-tree-is-brought-onto-nemars-annex-policy-in-prepare.md) - An imported tree is brought onto NEMAR's annex policy in prepare, and inherited `.gitattributes` governance is stripped
 
 ## Backfill note (2026-07-31)
 
