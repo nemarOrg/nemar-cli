@@ -177,6 +177,31 @@ A dataset in this state is readable but not published,
 which is a combination the system has never expressed
 and which needs a name before it gets a column.
 
+### Anonymity is available only before first publication
+
+**Owner decision, 2026-09-14.** A dataset that has ever been published cannot be made anonymous.
+The flag is offered at first deposit and refused on anything with a public history.
+
+This is not a policy preference; it is the only defensible line.
+Retracting an attribution that has already been public is theatre:
+the DataCite record is harvested and permanent (ADR 0007),
+the git history and `uuid.log` are in every clone and every fork,
+the repository has been indexed,
+and the catalog, the search index and the Zarr documents have all served the real authors.
+Hiding those fields afterwards changes what NEMAR displays and nothing about what is known,
+while telling the depositor they are anonymous.
+A feature whose guarantee is false is worse than its absence,
+because someone will rely on it.
+
+It also makes the state cheap to reason about.
+"Never published" means no concept DOI, no public repository, no catalog history,
+so there is nothing to retract and the whole of section 2 is a forward-looking
+list rather than a cleanup.
+The predicate is mechanical and belongs next to the flag:
+no `concept_doi`, no row in `dataset_versions`, and `visibility` has never been `public`.
+The first two are already columns; the third is the one that needs recording,
+because `visibility` is current state and not a history.
+
 ### Predicates
 
 **A1. Concealment is now load-bearing, and there is more of it to do.**
@@ -197,16 +222,38 @@ while the download modal keeps offering a fabricated clone URL.
 That URL 404s for a reviewer today and resolves later, which is the worst of both.
 The website needs an explicit anonymous state, not an absent field.
 
-**A3. `nemar dataset download` will not work during the window.**
+**A3. `nemar dataset download` needs a route that is not a clone.**
 It clones the repository through git-annex (`cloneDataset`, `src/lib/git-annex/clone-push.ts`),
-and the repository is private.
-That command is the first route the website's own download modal advertises.
-During the window the reviewer's routes are the HTTP file tree on `data.nemar.org`
-and the zip under `<id>/archives/`, both of which already exist and both of which are better
-for a reviewer than installing git-annex.
-The modal and the CLI both need to know the difference.
+and the repository is private, so the command the website's own download modal advertises first
+cannot work.
+Largely answered: #1401 / PR #1402 add a plain-HTTP download path
+(`nemar dataset download --http`, and automatic when git-annex is missing) that reads the data
+plane's manifest and fetches over HTTPS, with the same BIDS filters.
+It was worth building on its own merits -- containers, HPC login nodes, CI runners, and anyone
+who installed the CLI and nothing else -- so it is not a cost of this design.
+What remains is that the path is only as good as A4: today it would fetch the recordings and
+404 on the metadata.
 
-**A4. The Zarr fidelity sweep will mark every such dataset `unverifiable`.**
+**A4. The data plane serves most of a dataset FROM GitHub, so a private repository breaks it.**
+This is the blocker, and it is larger than it looks.
+`buildRedirectUrl` in `backend/src/services/data-router.ts` sends git-tracked files to
+`raw.githubusercontent.com` and only annexed files to S3,
+and its own docstring names the invariant it depends on:
+the repository must be public, or "the 302 target itself returns 404 to the user with no
+Worker-side signal".
+Measured on public `on008701`: **2,802 of 3,201 files, 88 percent, come from GitHub** --
+4.1 MB of metadata against 14.0 GB of recordings.
+That set is `dataset_description.json`, `participants.tsv`, `README`, `CHANGES`,
+and every sidecar.
+With a private repository a reader gets the recordings and none of the metadata that makes
+them interpretable, which is not a BIDS dataset and will not validate.
+The fix is to serve those files through the Worker on the App token rather than redirecting.
+It is cheap -- kilobyte files, version-pinned, immutably cacheable, nothing like the large-file
+proxying that drove the Zarr redirect design -- and it is worth doing on its own merits,
+because it replaces a documented fail-silent invariant with one the Worker can observe.
+Filed as issue #1403.
+
+**A5. The Zarr fidelity sweep will mark every such dataset `unverifiable`.**
 Its candidate predicate is `status = 'active' AND visibility = 'public'`
 (`backend/src/services/zarr-fidelity-sweep.ts`),
 and the comment above it says why:
@@ -221,7 +268,7 @@ But the dataset then fails `has_zarr_verified` for the whole review window,
 which degrades a published quality signal on exactly the datasets being shown to reviewers.
 The predicate needs to test what it actually means.
 
-**A5. The identifier has to be a reserved DOI.**
+**A6. The identifier has to be a reserved DOI.**
 Venues increasingly want an identifier in the submission,
 and you cannot have a resolving DOI and a concealed dataset at the same time.
 Three ways out, and only one is clean.
@@ -243,18 +290,18 @@ which is R4 satisfied with the identifier unchanged.
 This capability is built and unused for this purpose,
 so it is close to free.
 
-**A6. Scrubbing is deferred, not removed.**
+**A7. Scrubbing is deferred, not removed.**
 On the day the dataset goes public, `uuid.log` still names a machine
 and the commits still carry a personal email address.
 For double-blind that is acceptable, because by then attribution is wanted,
 but it is only acceptable if nothing went public early.
 The publish flip has to remain the single auditable moment, which is how ADR 0017 already works.
 
-**A7. One link, and the product has to say so.**
+**A8. One link, and the product has to say so.**
 A blinded submission that carries both a review link and a repository URL is self-defeating.
 The command should print exactly one URL and say what it is for.
 
-**A8. Scheduled cleanup will nag the depositor for the length of the review.**
+**A9. Scheduled cleanup will nag the depositor for the length of the review.**
 A private `nm` dataset with no concept DOI becomes cleanup-eligible after ninety days of inactivity,
 and a review window runs three to nine months, so every such dataset crosses the line.
 Since #662 the cron does **not** delete: it emails the owner at thirty, fourteen, seven, two and one days,
@@ -265,7 +312,7 @@ it is a depositor receiving five "your dataset will be deleted" emails during pe
 and an admin queue filling with handoffs that must not be acted on.
 Both are suppressed by one clause in the candidate predicate, and it has to be written down.
 
-**A9. The window needs a default, a cap, and a defined expiry behaviour.**
+**A10. The window needs a default, a cap, and a defined expiry behaviour.**
 Expiry must restore attribution and notify the depositor.
 It must never publish anything automatically, and it must never silently extend.
 
@@ -423,9 +470,9 @@ Identity is withheld at the API, in the byline, in the search index and in the Z
 for as long as the flag is set,
 and restored, together with the repository flip and the DOI, at acceptance.
 
-Five pieces of work follow from the predicates in section 3, in dependency order:
+Six pieces of work follow from the predicates in section 3, in dependency order:
 
-1. **A name and a representation for the state.**
+1. **A name and a representation for the state**, refusable on anything ever published.
    Readable but not published is a combination the system cannot express,
    and D1 visibility is currently welded to repository visibility and the bucket policy
    in a single transition (`applyDatasetVisibility`).
@@ -439,12 +486,16 @@ Five pieces of work follow from the predicates in section 3, in dependency order
 3. **The website state** (issue filed on `nemarOrg/website`):
    the anonymous flag on the dataset page, the grayed-out GitHub control,
    and a download modal that does not advertise a clone route that cannot work.
-4. **Two predicates that use D1 visibility as a proxy for repository visibility**
+4. **Serve git-tracked files through the Worker** rather than redirecting to
+   `raw.githubusercontent.com` (#1403). Without this the state does not work at all:
+   88 percent of a dataset's files are served from GitHub, and a private repository 404s
+   every one of them.
+5. **Two predicates that use D1 visibility as a proxy for repository visibility**
    and stop being correct here:
    the Zarr fidelity sweep's candidate query,
    and the staleness candidate query that would otherwise email the depositor five times mid-review.
-5. **The identifier.** Reserved EZID status during the window, public at acceptance,
-   per predicate A5.
+6. **The identifier.** Reserved EZID status during the window, public at acceptance,
+   per predicate A6.
 
 **The fallback, if a venue ever requires the repository itself to be open at submission.**
 Bot-authored deposit, per Option B. Not needed for the design above.
