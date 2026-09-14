@@ -59,7 +59,19 @@ earlier releases are described only by their generated notes.
   concept DOI, the OpenNeuro DOI moved to `SourceDatasets`, and the badge went to the
   top of `README.md`. Two of the sixteen are absent from the catalog and were skipped
   rather than guessed at. Each repair was confirmed by reading `main` back, and all
-  fourteen BIDS validations passed afterwards.
+  fourteen BIDS validations passed afterwards. The script requires **two** witnesses
+  to agree before it writes: NEMAR's catalog and the value publish actually wrote,
+  which for these repositories is the copy stranded on `git-annex`. A dataset where
+  they disagree is reported and skipped, because a re-minted or rolled-back DOI would
+  otherwise be written confidently onto published metadata and the post-write check,
+  comparing `main` against the same catalog value, would agree with itself. For the
+  same reason `--apply` refuses `--scan`: discovery is a sweep, and writing to
+  published metadata is done one named dataset at a time.
+  `ensureMainBranch` now reports which of the two things it did -- `repointed` when it
+  moved the default to an existing `main`, `renamed` only when it renamed -- because
+  both spellings reach an operator-facing audit trail, and one that says a branch was
+  renamed when none was is the same class of misdirection that made this bug hard to
+  find.
 
 ## 0.10.3 - 2026-09-10
 
