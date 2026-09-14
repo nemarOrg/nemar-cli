@@ -134,6 +134,29 @@ async function buildOrigin(
  * the retry cannot be tested, and the test that named it passed with the loop
  * deleted.
  */
+/**
+ * What origin actually carries: `main`'s commit, and whether NEMAR's expression is
+ * configured on the git-annex branch.
+ *
+ * Deliberately NOT the git-annex branch's SHA. git-annex pushes its own bookkeeping
+ * to a remote it can write to, and these fixtures use a local path as origin, so
+ * that ref moves for reasons that have nothing to do with the policy -- on the CI
+ * runner, though not on every developer machine. `main` and the configuration are
+ * what a dataset is actually judged by.
+ */
+async function originPolicyState(
+  origin: string,
+): Promise<{ main: string; configured: boolean; attributes: string }> {
+  const main = (await run(["git", "rev-parse", "main"], origin)).trim();
+  const config = await runCommand(["git", "show", "git-annex:config.log"], { cwd: origin });
+  const attributes = await runCommand(["git", "show", "main:.gitattributes"], { cwd: origin });
+  return {
+    main,
+    configured: config.exitCode === 0 && config.stdout.includes("_motion.tsv"),
+    attributes: attributes.exitCode === 0 ? attributes.stdout : "",
+  };
+}
+
 let staleConfigReads = 0;
 
 /**
@@ -356,7 +379,7 @@ describe("backfilling one dataset", () => {
     const reader = await createGitHubReader({ baseUrl });
     const origin = origins.get(POLICY_ONLY) as string;
     await applyAnnexPolicyToDataset(POLICY_ONLY, reader, { workRoot, originUrl: origin });
-    const settled = await run(["git", "rev-parse", "main", "git-annex"], origin);
+    const settled = await originPolicyState(origin);
 
     const again = await applyAnnexPolicyToDataset(POLICY_ONLY, reader, {
       workRoot,
@@ -364,7 +387,7 @@ describe("backfilling one dataset", () => {
     });
     expect(again.action).toBe("compliant");
     expect(again.committed).toBeUndefined();
-    expect(await run(["git", "rev-parse", "main", "git-annex"], origin)).toBe(settled);
+    expect(await originPolicyState(origin)).toEqual(settled);
   }, 300_000);
 
   test("a dataset that also keeps data in git is skipped, not half-fixed", async () => {
@@ -375,7 +398,7 @@ describe("backfilling one dataset", () => {
     // either state.
     const reader = await createGitHubReader({ baseUrl });
     const origin = origins.get(WITH_DATA) as string;
-    const before = await run(["git", "rev-parse", "main", "git-annex"], origin);
+    const before = await originPolicyState(origin);
 
     const outcome = await applyAnnexPolicyToDataset(WITH_DATA, reader, {
       workRoot,
@@ -384,7 +407,7 @@ describe("backfilling one dataset", () => {
 
     expect(outcome.action).toBe("skipped-has-data");
     expect(outcome.notes?.join(" ")).toContain("annex-normalize");
-    expect(await run(["git", "rev-parse", "main", "git-annex"], origin)).toBe(before);
+    expect(await originPolicyState(origin)).toEqual(before);
     expect(existsSync(join(workRoot, WITH_DATA))).toBe(false);
   }, 300_000);
 
@@ -432,7 +455,7 @@ describe("backfilling one dataset", () => {
     // is what prevents an S3 upload nobody asked for.
     const reader = await createGitHubReader({ baseUrl });
     const origin = origins.get(WITH_DATA) as string;
-    const before = await run(["git", "rev-parse", "main", "git-annex"], origin);
+    const before = await originPolicyState(origin);
 
     hiddenTreePaths = new Set([BIG_MOTION, SMALL_MOTION]);
     const scanned = await scanDatasetAnnexPolicy(WITH_DATA, reader);
@@ -448,7 +471,7 @@ describe("backfilling one dataset", () => {
     // ...and the clone says otherwise, which wins.
     expect(outcome.action).toBe("skipped-has-data");
     expect(outcome.notes?.join(" ")).toContain("the clone found");
-    expect(await run(["git", "rev-parse", "main", "git-annex"], origin)).toBe(before);
+    expect(await originPolicyState(origin)).toEqual(before);
   }, 300_000);
 
   test("a push whose read-back never agrees is unverified, not applied", async () => {
@@ -476,7 +499,7 @@ describe("backfilling one dataset", () => {
   test("a rehearsal commits locally and pushes nothing", async () => {
     const reader = await createGitHubReader({ baseUrl });
     const origin = origins.get(POLICY_ONLY) as string;
-    const before = await run(["git", "rev-parse", "main", "git-annex"], origin);
+    const before = await originPolicyState(origin);
 
     const outcome = await applyAnnexPolicyToDataset(POLICY_ONLY, reader, {
       workRoot,
@@ -489,7 +512,7 @@ describe("backfilling one dataset", () => {
     expect(outcome.pushed).toBe(false);
     // No re-read to verify, because there is nothing at the origin to verify yet.
     expect(outcome.after).toBeUndefined();
-    expect(await run(["git", "rev-parse", "main", "git-annex"], origin)).toBe(before);
+    expect(await originPolicyState(origin)).toEqual(before);
     // And the clone stays, so the rehearsal can be inspected.
     const clonePath = join(workRoot, POLICY_ONLY);
     expect(existsSync(clonePath)).toBe(true);
