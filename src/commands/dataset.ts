@@ -66,7 +66,7 @@ import {
 } from "../lib/api/publish.js";
 import { type DepositAttestation, resolveAttestation } from "../lib/attestation.js";
 import { isAwsCliAvailable } from "../lib/aws-cli.js";
-import { buildBidsFilterArgs, chooseGetFilter } from "../lib/bids-filter.js";
+import { type BidsFilterResult, buildBidsFilterArgs, chooseGetFilter } from "../lib/bids-filter.js";
 import {
   type BidsValidationResult,
   checkDenoInstalled,
@@ -142,6 +142,15 @@ import {
   dropUnusedAnnexObjects,
   getDatasetData,
 } from "../lib/git-annex/transfer.js";
+import {
+  type DataPlaneEntry,
+  DataPlaneUnavailableError,
+  downloadEntries,
+  fetchManifest,
+  fetchVersions,
+  printSnapshotCaveat,
+  selectEntries,
+} from "../lib/http-download.js";
 import {
   detectLicense,
   ensureLicenseFile,
@@ -936,6 +945,131 @@ async function handleOpenNeuroDownload(
   console.log();
 }
 
+/**
+ * `nemar dataset download` over plain HTTP: no git, no git-annex, no GitHub.
+ *
+ * Reached by `--http`, and automatically when git-annex is missing. Everything
+ * it needs comes from the data plane's version listing plus one manifest
+ * request; see lib/http-download.ts for why that is addressed through the
+ * configured API origin rather than data.nemar.org.
+ *
+ * The git-annex-only flags are refused rather than ignored. `--update` and
+ * `--prune` reconcile a clone against its remote, and there is no clone here;
+ * silently doing nothing would look like success and leave stale files in
+ * place. `--resume` needs no flag at all on this path, because a file already
+ * present at its declared size is always skipped.
+ */
+async function runHttpDownload(
+  datasetId: string,
+  options: {
+    output?: string;
+    jobs?: string;
+    data?: boolean;
+    update?: boolean;
+    prune?: boolean;
+    resume?: boolean;
+    requireComplete?: boolean;
+  },
+  filter: BidsFilterResult,
+): Promise<void> {
+  for (const [flag, set] of [
+    ["--update", options.update],
+    ["--prune", options.prune],
+  ] as const) {
+    if (set) {
+      console.log(
+        chalk.red(`Error: ${flag} needs a git-annex clone and is not available over HTTP.`),
+      );
+      console.log(chalk.dim("  Install git-annex, or re-download into a fresh directory."));
+      process.exit(1);
+    }
+  }
+
+  const outputPath = options.output || datasetId;
+  const absoluteOutput = resolve(outputPath);
+
+  const spinner = ora("Reading the published file list...").start();
+  let entries: DataPlaneEntry[];
+  let version: string;
+  try {
+    const listing = await fetchVersions(datasetId);
+    version = listing.latest ?? listing.versions[0];
+    entries = await fetchManifest(datasetId, version);
+  } catch (error) {
+    spinner.fail("Could not read the file list");
+    if (error instanceof DataPlaneUnavailableError) {
+      console.log(chalk.red(`  ${error.message}`));
+      process.exit(1);
+    }
+    throw error;
+  }
+
+  const selected = selectEntries(entries, filter, { metadataOnly: options.data === false });
+  const totalBytes = selected.reduce((sum, entry) => sum + (entry.size ?? 0), 0);
+  spinner.succeed(`${version}: ${entries.length} files published`);
+
+  if (selected.length === 0) {
+    console.log(chalk.yellow("Nothing matched the requested filters; nothing to download."));
+    return;
+  }
+
+  console.log();
+  console.log(chalk.bold("Download plan:"));
+  console.log(`  Dataset: ${chalk.cyan(datasetId)} ${chalk.dim(version)}`);
+  console.log(`  Output:  ${absoluteOutput}`);
+  console.log("  Method:  HTTP (no git-annex)");
+  console.log(`  Files:   ${selected.length} (${formatBytesCli(totalBytes)})`);
+  for (const line of filter.summary) {
+    console.log(chalk.dim(`  ${line}`));
+  }
+  if (options.data === false) {
+    console.log(chalk.dim("  metadata only (--no-data)"));
+  }
+  console.log();
+
+  const jobs = Number.parseInt(options.jobs || "4", 10);
+  const result = await downloadEntries(selected, absoluteOutput, {
+    concurrency: Number.isNaN(jobs) ? 4 : jobs,
+    onProgress: (filesDone, filesTotal, bytesDone) => {
+      process.stderr.write(
+        `\r${chalk.cyan(formatProgressBar(filesDone, filesTotal, bytesDone, totalBytes))}`,
+      );
+    },
+  });
+  process.stderr.write(`\r${" ".repeat(80)}\r`);
+
+  const fetched = result.filesDownloaded + result.filesSkipped;
+  if (result.errors.length > 0) {
+    console.log(
+      chalk.yellow(
+        `Downloaded ${fetched} of ${selected.length} files; ${result.errors.length} failed:`,
+      ),
+    );
+    for (const message of result.errors.slice(0, 10)) {
+      console.log(chalk.red(`  ${message}`));
+    }
+    if (result.errors.length > 10) {
+      console.log(chalk.dim(`  ... and ${result.errors.length - 10} more`));
+    }
+    console.log(chalk.dim("  Re-run the same command to retry only the missing files."));
+  } else {
+    console.log(
+      chalk.green(
+        `Downloaded ${result.filesDownloaded} files (${formatBytesCli(result.bytesDownloaded)})${result.filesSkipped > 0 ? `, ${result.filesSkipped} already present` : ""}`,
+      ),
+    );
+  }
+
+  console.log();
+  console.log(`  Location: ${chalk.cyan(absoluteOutput)}`);
+  printSnapshotCaveat(absoluteOutput);
+  console.log();
+
+  if (result.errors.length > 0 && options.requireComplete) {
+    process.exit(1);
+  }
+}
+
 // Download command
 datasetCommand
   .command("download")
@@ -956,6 +1090,10 @@ datasetCommand
   .option("--exclude <globs>", "Comma-separated exclude globs (e.g. sourcedata/**)")
   .option("--stimuli", "Include stimuli/ content (skipped by default; can be large)")
   .option("--derivatives", "Include derivatives/ content (skipped by default; can be large)")
+  .option(
+    "--http",
+    "Download over plain HTTP without git or git-annex (a file snapshot, not a repository)",
+  )
   .option(
     "--skip-port-check",
     "Skip the porting-in-progress check (use if falsely blocked on an OpenNeuro-sourced dataset)",
@@ -1046,13 +1184,25 @@ Examples:
     let spinner = ora("Checking git-annex...").start();
     const prereqs = await checkDownloadPrerequisites();
 
-    if (!prereqs.allPassed) {
-      spinner.fail("Prerequisites check failed");
-      console.log();
-      for (const error of prereqs.errors) {
-        console.log(chalk.red(`  - ${error}`));
+    // The HTTP path, either asked for (--http) or fallen back to. A missing
+    // git-annex used to be a hard exit, which is a poor answer to "I just want
+    // the files" when the data plane already serves every byte over plain
+    // HTTPS. The fallback is announced rather than silent: it produces a
+    // snapshot, not a repository, and someone who wanted a repository has to
+    // learn that they did not get one.
+    if (options.http || !prereqs.allPassed) {
+      if (options.http) {
+        spinner.stop();
+      } else {
+        spinner.warn("git-annex is not available");
+        for (const error of prereqs.errors) {
+          console.log(chalk.dim(`  ${error}`));
+        }
+        console.log(chalk.yellow("  Falling back to a plain HTTP download."));
+        console.log();
       }
-      process.exit(1);
+      await runHttpDownload(effectiveId, options, filter);
+      return;
     }
 
     spinner.succeed(`git-annex ${prereqs.gitAnnex.version}`);
