@@ -5413,6 +5413,7 @@ Examples:
       if (!requireAuth()) return;
 
       const {
+        POINTER_SUSPECT_MAX_BYTES,
         applyAnnexPolicyToDataset,
         createGitHubReader,
         labelAnnexPolicyState,
@@ -5436,9 +5437,15 @@ Examples:
       }
 
       // Targets: named datasets, or the fleet by prefix.
+      // With --apply the limit bounds the work (below); the scan stays whole, because
+      // a bounded scan can never see past the datasets it already fixed. Without
+      // --apply it bounds the report, which is what an operator asking for a sample
+      // means by it.
+      const applyLimit = options.apply ? limit : undefined;
+      const scanLimit = options.apply ? undefined : limit;
       let targets: string[];
       if (datasetIds.length > 0) {
-        targets = datasetIds;
+        targets = scanLimit === undefined ? datasetIds : datasetIds.slice(0, scanLimit);
       } else {
         const listSpinner = ora("Fetching dataset list...").start();
         try {
@@ -5452,7 +5459,7 @@ Examples:
             prefix: options.prefix,
             exclude: CLI_LIVE_DATASETS,
             force: options.force,
-            limit,
+            limit: scanLimit,
           });
           listSpinner.succeed(
             `${targets.length} dataset(s) with prefix ${options.prefix} (of ${all.length})`,
@@ -5465,6 +5472,20 @@ Examples:
       if (targets.length === 0) {
         console.log(chalk.dim("No datasets matched."));
         return;
+      }
+      // The live fence has to cover BOTH target sources. `selectAnnexPolicyTargets`
+      // drops them from a prefix sweep, where naming them was not the operator's
+      // intent; naming one explicitly is, so that refuses out loud rather than
+      // silently doing nothing. There is no backend behind this command -- it
+      // pushes straight to GitHub -- so this is the only fence there is.
+      const live = targets.filter((id) => CLI_LIVE_DATASETS.has(id));
+      if (live.length > 0 && !options.force) {
+        console.log(
+          chalk.red(
+            `Refusing to touch live dataset(s): ${live.join(", ")}. These hold real data and are not to be modified during development (AGENTS.md). Pass --force if that is genuinely what you mean.`,
+          ),
+        );
+        process.exit(1);
       }
 
       // --- The read-only report, which --apply also starts from. -----------------
@@ -5483,6 +5504,26 @@ Examples:
         });
       } catch (error) {
         scanSpinner.fail(errorDetail(error));
+        const { FleetSweepAborted } = await import("../lib/fleet-annex-policy.js");
+        if (error instanceof FleetSweepAborted) {
+          // The sweep stopped because every remaining read would fail the same way.
+          // What it had already read is still worth the operator's hour.
+          console.log(
+            chalk.yellow(
+              `  Stopped after reading ${error.partial.scanned} of ${targets.length}. That partial inventory is below${options.json ? " and in the JSON report" : ""}.`,
+            ),
+          );
+          for (const [label, ids] of Object.entries(error.partial.byLabel)) {
+            if (ids.length > 0) console.log(`  ${label.padEnd(18)} ${ids.length}`);
+          }
+          if (options.json) {
+            writeFileSync(
+              options.json,
+              `${JSON.stringify({ summary: error.partial, aborted: error.message }, null, 2)}\n`,
+            );
+            console.log(chalk.dim(`  Partial report written to ${options.json}`));
+          }
+        }
         process.exit(1);
       }
       scanSpinner.succeed(`Read ${summary.scanned} of ${targets.length}`);
@@ -5495,6 +5536,12 @@ Examples:
       const declined = summary.states.filter((s) =>
         s.attributeFiles.some((f) => f.declined.length > 0),
       );
+      // Data-shaped paths too small to be recordings, which the scan subtracts from
+      // `gitResidentData` as probable unlocked pointers. The heuristic is right
+      // almost always and silent when it is not: `shouldAnnex` annexes a 200-byte
+      // .edf at any size, so a genuinely tiny git-resident recording disappears from
+      // the report with no trace. Name the count.
+      const pointerSuspects = summary.states.reduce((sum, s) => sum + s.pointerSuspects.length, 0);
 
       console.log();
       console.log(chalk.bold("Annex policy across the fleet"));
@@ -5512,6 +5559,13 @@ Examples:
       console.log(
         `  ${chalk.dim("attributes to rewrite")} ${filesToRewrite} file(s), ${rulesToRemove} rule(s)`,
       );
+      if (pointerSuspects > 0) {
+        console.log(
+          chalk.dim(
+            `  ${pointerSuspects} data-shaped path(s) under ${POINTER_SUSPECT_MAX_BYTES} bytes read as unlocked pointers, not data. A genuinely tiny recording would look the same; the clone decides.`,
+          ),
+        );
+      }
       if (summary.truncated.length > 0) {
         console.log(
           chalk.dim(
@@ -5545,7 +5599,11 @@ Examples:
       }
 
       // --- Applying. -------------------------------------------------------------
-      const fixable = summary.states
+      // `--limit` bounds the datasets ACTED ON, not the datasets scanned. Bounding
+      // the scan meant every re-run selected the same first N ids, found them all
+      // compliant, and reported nothing to do: no number of re-runs ever reached
+      // dataset N+1, and the operator had to keep the cursor by hand.
+      const allFixable = summary.states
         .filter((s) => {
           const label = labelAnnexPolicyState(s);
           if (label === "compliant") return false;
@@ -5553,6 +5611,14 @@ Examples:
           return Boolean(options.includeData);
         })
         .map((s) => s.datasetId);
+      const fixable = applyLimit === undefined ? allFixable : allFixable.slice(0, applyLimit);
+      if (fixable.length < allFixable.length) {
+        console.log(
+          chalk.dim(
+            `  --limit ${applyLimit}: acting on ${fixable.length} of ${allFixable.length} dataset(s) that need the fix. Re-run to take the next ${applyLimit}.`,
+          ),
+        );
+      }
       const needsDataLeg = summary.states.filter(
         (s) => labelAnnexPolicyState(s) !== "compliant" && !fixable.includes(s.datasetId),
       );
@@ -5589,13 +5655,38 @@ Examples:
       for (const datasetId of fixable) {
         index++;
         const prefix = chalk.dim(`[${index}/${fixable.length}]`);
-        const outcome = await applyAnnexPolicyToDataset(datasetId, reader, {
-          workRoot,
-          push: pushing,
-          includeData: options.includeData,
-          keepClone: options.keepClones,
-          credentials: options.viaAwsCli ? "ambient" : "backend",
-        });
+        // One dataset renamed, deleted or made private between the scan and the
+        // apply must not throw away the record of the hundreds already pushed --
+        // that record is the only list of which repositories now have a new commit
+        // and a running CI job. A fatal read still stops, because every remaining
+        // dataset would fail identically.
+        let outcome: Awaited<ReturnType<typeof applyAnnexPolicyToDataset>>;
+        try {
+          outcome = await applyAnnexPolicyToDataset(datasetId, reader, {
+            workRoot,
+            push: pushing,
+            includeData: options.includeData,
+            keepClone: options.keepClones,
+            credentials: options.viaAwsCli ? "ambient" : "backend",
+          });
+        } catch (error) {
+          const { GitHubReadError } = await import("../lib/fleet-annex-policy.js");
+          if (error instanceof GitHubReadError && error.fatal) {
+            console.log();
+            console.log(
+              chalk.red(
+                `Stopped at ${datasetId} (${error.message}). ${index - 1} dataset(s) were already acted on; their outcomes follow.`,
+              ),
+            );
+            break;
+          }
+          outcome = {
+            datasetId,
+            before: undefined as never,
+            action: "failed",
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
         outcomes.push(outcome);
         switch (outcome.action) {
           case "applied":

@@ -127,6 +127,25 @@ async function buildOrigin(
  * origin. An adapter over real data, not a fabricated response: modes, sizes and
  * blob contents are whatever git says they are.
  */
+/**
+ * How many more reads of the git-annex config should answer as if the push had not
+ * landed yet. GitHub is eventually consistent after a push, and that is the whole
+ * reason `verifyAnnexPolicyLanded` retries; without a way to produce a stale read
+ * the retry cannot be tested, and the test that named it passed with the loop
+ * deleted.
+ */
+let staleConfigReads = 0;
+
+/**
+ * Paths the tree listing should pretend not to see.
+ *
+ * GitHub truncates a tree past about 65,000 entries, and an unlocked annexed file
+ * is a plain blob, so the scan can genuinely miss git-resident data that the clone
+ * then finds. That disagreement is the guard which stops an unrequested S3 upload,
+ * and it is unreachable from a fixture where the tree tells the truth.
+ */
+let hiddenTreePaths = new Set<string>();
+
 function serveGitHub(): { server: ReturnType<typeof Bun.serve>; baseUrl: string } {
   const started = Bun.serve({
     port: 0,
@@ -150,6 +169,7 @@ function serveGitHub(): { server: ReturnType<typeof Bun.serve>; baseUrl: string 
         const tree = listed.stdout
           .split("\n")
           .filter(Boolean)
+          .filter((line) => !hiddenTreePaths.has(line.split("\t")[1]))
           .map((line) => {
             const [meta, path] = line.split("\t");
             const [mode, type, sha, size] = meta.split(/\s+/);
@@ -180,6 +200,11 @@ function serveGitHub(): { server: ReturnType<typeof Bun.serve>; baseUrl: string 
       if (parts[3] === "contents") {
         const path = parts.slice(4).join("/");
         const ref = url.searchParams.get("ref") ?? "main";
+        if (staleConfigReads > 0 && path.endsWith("config.log")) {
+          staleConfigReads--;
+          // The state before the push: the file is simply not there yet.
+          return new Response('{"message":"Not Found"}', { status: 404 });
+        }
         const shown = await runCommand(["git", "show", `${ref}:${path}`], { cwd: bare });
         if (shown.exitCode !== 0) {
           return new Response('{"message":"Not Found"}', { status: 404 });
@@ -198,6 +223,8 @@ function serveGitHub(): { server: ReturnType<typeof Bun.serve>; baseUrl: string 
 }
 
 beforeEach(async () => {
+  staleConfigReads = 0;
+  hiddenTreePaths = new Set();
   root = mkdtempSync(join(tmpdir(), "nemar-fleet-"));
   scratch.push(root);
   workRoot = join(root, "work");
@@ -378,12 +405,72 @@ describe("backfilling one dataset", () => {
 
     await applyAnnexPolicyToDataset(POLICY_ONLY, reader, { workRoot, originUrl: origin });
 
+    // One stale read, then the truth: exactly the shape the retry exists for.
+    // A single attempt sees the stale one and calls the push unlanded...
+    staleConfigReads = 1;
+    const impatient = await verifyAnnexPolicyLanded(POLICY_ONLY, reader, {
+      attempts: 1,
+      delayMs: 10,
+    });
+    expect(impatient.landed).toBe(false);
+
+    // ...and a second attempt reaches the same repository's real state. Without
+    // the retry loop this assertion fails, which is what makes it a test of it.
+    staleConfigReads = 1;
     const after = await verifyAnnexPolicyLanded(POLICY_ONLY, reader, {
       attempts: 2,
       delayMs: 10,
     });
     expect(after.landed).toBe(true);
     expect(after.remainingDeclined).toEqual([]);
+  }, 300_000);
+
+  test("the clone overrides the tree when the tree missed git-resident data", async () => {
+    // The stated safety net, and until now the only untested branch of it. GitHub
+    // truncates a large tree, so the scan can report a dataset as policy-only when
+    // it actually keeps recordings in git. The clone sees them, and stopping there
+    // is what prevents an S3 upload nobody asked for.
+    const reader = await createGitHubReader({ baseUrl });
+    const origin = origins.get(WITH_DATA) as string;
+    const before = await run(["git", "rev-parse", "main", "git-annex"], origin);
+
+    hiddenTreePaths = new Set([BIG_MOTION, SMALL_MOTION]);
+    const scanned = await scanDatasetAnnexPolicy(WITH_DATA, reader);
+    // The tree agrees there is nothing to move...
+    expect(scanned.gitResidentData).toEqual([]);
+    expect(labelAnnexPolicyState(scanned)).toBe("policy");
+
+    const outcome = await applyAnnexPolicyToDataset(WITH_DATA, reader, {
+      workRoot,
+      originUrl: origin,
+    });
+
+    // ...and the clone says otherwise, which wins.
+    expect(outcome.action).toBe("skipped-has-data");
+    expect(outcome.notes?.join(" ")).toContain("the clone found");
+    expect(await run(["git", "rev-parse", "main", "git-annex"], origin)).toBe(before);
+  }, 300_000);
+
+  test("a push whose read-back never agrees is unverified, not applied", async () => {
+    // `unverified` gates the command's exit code and is what told us about the two
+    // datasets whose default branch was git-annex (#1386). It had no test at all.
+    const reader = await createGitHubReader({ baseUrl });
+    const origin = origins.get(POLICY_ONLY) as string;
+
+    // More stale reads than the verification will make attempts.
+    staleConfigReads = 10;
+    const outcome = await applyAnnexPolicyToDataset(POLICY_ONLY, reader, {
+      workRoot,
+      originUrl: origin,
+    });
+
+    expect(outcome.action).toBe("unverified");
+    // The work itself DID happen, and saying otherwise would send an operator to
+    // redo a push that already landed.
+    expect(outcome.pushed).toBe(true);
+    staleConfigReads = 0;
+    const truth = await verifyAnnexPolicyLanded(POLICY_ONLY, reader, { attempts: 1 });
+    expect(truth.landed).toBe(true);
   }, 300_000);
 
   test("a rehearsal commits locally and pushes nothing", async () => {

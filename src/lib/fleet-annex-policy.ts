@@ -88,7 +88,12 @@ export type AnnexPolicyLabel = "compliant" | "policy" | "policy-and-data" | "dat
  * leg has to run, which is `nemar admin annex-normalize` with someone watching.
  */
 export function labelAnnexPolicyState(state: AnnexPolicyState): AnnexPolicyLabel {
-  const needsPolicy = state.attributeFiles.length > 0 || !state.policyConfigured;
+  // The SAME question `isAnnexPolicyInForce` asks, so the two cannot disagree. They
+  // did: this counted any finding, that counted only removable ones, so a dataset
+  // whose single finding is a quoted line nothing will rewrite was labeled `policy`
+  // forever, re-cloned on every sweep, and reported "applied" each time having
+  // committed nothing.
+  const needsPolicy = !isAnnexPolicyInForce(state);
   const needsData = state.gitResidentData.length > 0;
   if (needsPolicy && needsData) return "policy-and-data";
   if (needsData) return "data";
@@ -158,7 +163,11 @@ export function classifyAnnexPolicy(input: {
     // A symlink is how a locked annexed file appears, and is the normal case for an
     // OpenNeuro tree. Only a plain blob can be data git itself is holding.
     if (entry.mode !== "100644" && entry.mode !== "100755") continue;
-    const size = entry.size ?? 0;
+    // An absent size is not a small file. GitHub populates `size` for blobs today,
+    // but reading a missing one as 0 would classify a multi-gigabyte recording as a
+    // pointer and drop it from the report -- and the only thing then standing
+    // between that and a half-applied policy is the clone check.
+    const size = entry.size ?? Number.POSITIVE_INFINITY;
     if (!shouldAnnex(entry.path, size)) continue;
     if (size <= POINTER_SUSPECT_MAX_BYTES) {
       pointerSuspects.push(entry.path);
@@ -239,7 +248,7 @@ export async function createGitHubReader(
     async get(path: string) {
       const url = `${baseUrl}/${path.replace(/^\//, "")}`;
       let lastError = "";
-      // Two retries, for a 5xx or a secondary rate limit. A primary rate-limit
+      // Two retries, for a 5xx or a 429. A secondary rate limit arrives as a 403 with `Retry-After` and is NOT retried here; it surfaces as an unreadable dataset. A primary rate-limit
       // exhaustion is reported rather than waited out: the caller decides whether
       // to stop the sweep or resume it after the reset.
       for (let attempt = 0; attempt < 3; attempt++) {
@@ -467,8 +476,45 @@ export async function applyAnnexPolicyToDataset(
       credentials: options.credentials,
       maxBytes: options.maxBytes,
     });
-    const verified =
-      options.push === false ? undefined : await verifyAnnexPolicyLanded(datasetId, reader);
+    if (!result.committed && !result.pushed) {
+      // The clone had nothing to change, and the clone is the authority: it read
+      // the whole tree, which the scan may not have (GitHub truncates past ~65,000
+      // entries) and which may hold only a quoted rule the strip will not split.
+      // Reporting `applied` here would claim a commit that was never made, and
+      // re-reading the same truncated tree to "verify" would prove nothing.
+      return {
+        datasetId,
+        before,
+        action: "compliant",
+        committed: false,
+        pushed: false,
+        notes: [...result.notes, "the clone found nothing to change"],
+      };
+    }
+    let verified: Awaited<ReturnType<typeof verifyAnnexPolicyLanded>> | undefined;
+    if (options.push !== false) {
+      try {
+        verified = await verifyAnnexPolicyLanded(datasetId, reader);
+      } catch (error) {
+        // The push already happened. Reporting this as `failed` would say the
+        // repository was not changed when it was, and the natural response -- re-run
+        // the failures -- would re-clone and re-push hundreds of repositories. An
+        // exhausted rate limit still stops the sweep, because every remaining
+        // verification would fail identically.
+        if (error instanceof GitHubReadError && error.fatal) throw error;
+        return {
+          datasetId,
+          before,
+          action: "unverified",
+          committed: result.committed,
+          pushed: result.pushed,
+          notes: [
+            ...result.notes,
+            `pushed, but the read-back could not be completed: ${error instanceof Error ? error.message : String(error)}. Re-run the read-only report for this dataset to confirm.`,
+          ],
+        };
+      }
+    }
     const notes = [...result.notes];
     if (verified?.remainingDeclined.length) {
       notes.push(
@@ -492,7 +538,17 @@ export async function applyAnnexPolicyToDataset(
       error: error instanceof Error ? error.message : String(error),
     };
   } finally {
-    if (!options.keepClone) await removeAnnexClone(datasetPath);
+    // Cleanup of a scratch clone must never replace the outcome the try block
+    // produced -- a throw here would discard a successful push and, because the
+    // sweep does not catch, abort the batch.
+    if (!options.keepClone) {
+      try {
+        await removeAnnexClone(datasetPath);
+      } catch {
+        // The clone is disposable and the work is already pushed; a leftover
+        // directory under the work root is not worth losing the result over.
+      }
+    }
   }
 }
 
@@ -536,6 +592,11 @@ export async function verifyAnnexPolicyLanded(
  * `.gitattributes` finding still standing is a quoted line nothing will rewrite.
  */
 export function isAnnexPolicyInForce(state: AnnexPolicyState): boolean {
+  // A truncated tree is not evidence of absence. GitHub stops listing past about
+  // 65,000 entries, and a nested `.gitattributes` beyond the cut is simply not in
+  // `entries`: it is never fetched, never classified, and would certify as "in
+  // force" on a read that never saw it. Say no, and let the clone decide.
+  if (state.treeTruncated) return false;
   return state.policyConfigured && state.attributeFiles.every((f) => f.rulesRemoved === 0);
 }
 
@@ -551,22 +612,27 @@ export interface FleetScanSummary {
 }
 
 /**
- * Read the policy state of every named dataset, in parallel, without cloning any of
- * them.
+ * Thrown when a sweep stops early, carrying what it had already read.
  *
- * A dataset that cannot be read is recorded and the sweep continues -- one renamed
- * or deleted repository must not cost the inventory of the other 599. An exhausted
- * rate limit is different and stops the sweep, because every remaining read would
- * fail the same way and be filed as a broken repository.
+ * Stopping is right when every remaining read would fail identically; throwing the
+ * partial inventory away is not. A rate limit exhausted at dataset 590 of 600 used
+ * to cost all 589 successful reads, and the operator waited an hour to repeat the
+ * same 2,400 requests.
  */
-export async function sweepAnnexPolicy(
-  targets: string[],
-  reader: GitHubReader,
-  options: {
-    concurrency?: number;
-    onResult?: (result: { datasetId: string; state?: AnnexPolicyState; error?: string }) => void;
-  } = {},
-): Promise<FleetScanSummary> {
+export class FleetSweepAborted extends Error {
+  constructor(
+    readonly cause: Error,
+    readonly partial: FleetScanSummary,
+  ) {
+    super(cause.message);
+    this.name = "FleetSweepAborted";
+  }
+}
+
+/** Group scan results the way the report and the apply step both need them. */
+function summarizeScan(
+  results: Array<{ datasetId: string; state?: AnnexPolicyState; error?: string }>,
+): FleetScanSummary {
   const byLabel: Record<AnnexPolicyLabel, string[]> = {
     compliant: [],
     policy: [],
@@ -576,20 +642,6 @@ export async function sweepAnnexPolicy(
   const failed: Array<{ datasetId: string; error: string }> = [];
   const states: AnnexPolicyState[] = [];
   const truncated: string[] = [];
-
-  const results = await mapWithConcurrency(targets, options.concurrency ?? 4, async (datasetId) => {
-    try {
-      const state = await scanDatasetAnnexPolicy(datasetId, reader);
-      options.onResult?.({ datasetId, state });
-      return { datasetId, state };
-    } catch (error) {
-      if (error instanceof GitHubReadError && error.fatal) throw error;
-      const message = error instanceof Error ? error.message : String(error);
-      options.onResult?.({ datasetId, error: message });
-      return { datasetId, error: message };
-    }
-  });
-
   for (const result of results) {
     if (result.state) {
       states.push(result.state);
@@ -599,8 +651,50 @@ export async function sweepAnnexPolicy(
       failed.push({ datasetId: result.datasetId, error: result.error });
     }
   }
-
   return { scanned: states.length, byLabel, truncated, failed, states };
+}
+
+/**
+ * Read the policy state of every named dataset, in parallel, without cloning any of
+ * them.
+ *
+ * A dataset that cannot be read is recorded and the sweep continues -- one renamed
+ * or deleted repository must not cost the inventory of the other 599. An exhausted
+ * rate limit is different and stops the sweep, because every remaining read would
+ * fail the same way and be filed as a broken repository; it throws
+ * `FleetSweepAborted`, which carries everything read up to that point.
+ */
+export async function sweepAnnexPolicy(
+  targets: string[],
+  reader: GitHubReader,
+  options: {
+    concurrency?: number;
+    onResult?: (result: { datasetId: string; state?: AnnexPolicyState; error?: string }) => void;
+  } = {},
+): Promise<FleetScanSummary> {
+  // Collected as each dataset finishes rather than from the return value, so an
+  // abort still has everything that was read before it.
+  const collected: Array<{ datasetId: string; state?: AnnexPolicyState; error?: string }> = [];
+
+  await mapWithConcurrency(targets, options.concurrency ?? 4, async (datasetId) => {
+    try {
+      const state = await scanDatasetAnnexPolicy(datasetId, reader);
+      options.onResult?.({ datasetId, state });
+      collected.push({ datasetId, state });
+    } catch (error) {
+      if (error instanceof GitHubReadError && error.fatal) {
+        throw new FleetSweepAborted(error, summarizeScan(collected));
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      options.onResult?.({ datasetId, error: message });
+      collected.push({ datasetId, error: message });
+    }
+  });
+
+  // Input order, not completion order: the report is read by dataset id.
+  const order = new Map(targets.map((id, index) => [id, index]));
+  collected.sort((a, b) => (order.get(a.datasetId) ?? 0) - (order.get(b.datasetId) ?? 0));
+  return summarizeScan(collected);
 }
 
 // =============================================================================
@@ -611,9 +705,10 @@ export async function sweepAnnexPolicy(
  * Which datasets a sweep covers, in a stable order.
  *
  * Imported (`on######`) datasets are the population #1374 is about: they are the
- * ones whose `.gitattributes` came from upstream. `nm` datasets were uploaded
- * through the CLI, which has always configured the policy, so they are not swept
- * unless asked for by prefix -- and the live five are never swept without `force`.
+ * ones whose `.gitattributes` came from upstream, so they are the default prefix.
+ * `nm` datasets are NOT exempt, only out of scope by default: 195 of 198 carried an
+ * expression written before `*_motion.tsv` joined the policy, and `--prefix nm`
+ * sweeps them. The live five are never swept without `force`.
  */
 export function selectAnnexPolicyTargets(
   datasets: Array<{ dataset_id: string }>,
