@@ -178,7 +178,7 @@ gh api repos/org/repo/collaborators/user -X PUT
 
 ## Prototype Results
 
-> **Full details in `.context/validated_workflows.md`** - that document contains the complete, tested commands and gotchas.
+> **Full details in `https://docs.nemar.org/admin/operations/validated-workflows/`** - that document contains the complete, tested commands and gotchas.
 
 ### Prototype 1: Git-Annex Staging → Final Workflow
 **Date:** 2026-01-14

@@ -377,7 +377,7 @@ done
 ```
 
 ### Full details
-See `.context/validated_workflows.md` Section 5.
+See `https://docs.nemar.org/admin/operations/validated-workflows/` Section 5.
 
 ---
 

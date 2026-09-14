@@ -158,7 +158,7 @@ anticipate: the Hallu cron's `setup()` refreshes the driver clone only at proces
 and the drain loop holds the lock until its queue empties,
 so a single run that had been going since 2026-08-12 pinned production to the pre-#98 driver
 for nine days after the merge. Merging a converter change is not deploying it.
-See `.context/systems-inventory.md` §3.3.
+See `https://docs.nemar.org/admin/operations/systems-inventory/` §3.3.
 
 **The measurement in Receipts is an undercount.** `GET /datasets` caps `limit` at 200,
 so "all 200 datasets" was 200 of 754. Re-measured across the full catalog on 2026-08-20:
