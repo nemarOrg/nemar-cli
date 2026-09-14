@@ -29,7 +29,7 @@ Two things made it invisible:
    held the annex expression; `collectFileManifest` held a *different* rule (a local
    extension set, or larger than 100 kB) used to decide which files get handed to
    `git annex add`; `isNeverAnnexedMetadata` restated the exclusions as a regex;
-   `scripts/nemar-restore-dataset.sh` held a shell copy; `.context/validated_workflows.md`
+   `scripts/nemar-restore-dataset.sh` held a shell copy; `https://docs.nemar.org/admin/operations/validated-workflows/`
    held two prose copies. Nothing checked that any of them agreed.
 
 2. **The two rules disagreed in a way that reported success.** A large

@@ -26,7 +26,7 @@ epic #1336 phase 3. Nothing has moved yet.
 | Value | Meaning |
 |---|---|
 | `public` | Stays here, in this public repo, and may be published to docs.nemar.org. |
-| `private` | Moves to the private content repo in phase 3; served gated at docs.nemar.org. |
+| `private` | Lives in `nemarOrg/docs`, which is private at source, and is served gated at docs.nemar.org. ADR 0057 originally said "a private content repo"; ADR 0059 replaced that with one docs repo, private at source and public at the URL. |
 | `stays-with-code` | Belongs next to the code it binds and is not a docs-site candidate. |
 
 `decisions/` is `stays-with-code` as a whole, as are `.rules/*` and `AGENTS.md`'s hard rules.
@@ -39,8 +39,8 @@ Trust these for how things work today.
 
 | Document | What it is | Destination |
 |---|---|---|
-| [systems-inventory.md](systems-inventory.md) | Every host and service, with paths, cron schedules, and deploy procedures. Expands the map in `AGENTS.md`. | private |
-| [validated_workflows.md](validated_workflows.md) | Workflows proven by prototype, with the gotchas. The git-annex and staging-to-final recipes live here. | private |
+| [systems-inventory.md](https://docs.nemar.org/admin/operations/systems-inventory/) | Every host and service, with paths, cron schedules, and deploy procedures. Expands the map in `AGENTS.md`. | private |
+| [validated_workflows.md](https://docs.nemar.org/admin/operations/validated-workflows/) | Workflows proven by prototype, with the gotchas. The git-annex and staging-to-final recipes live here. | private |
 | [release-safety-playbook.md](release-safety-playbook.md) | Environments, promotion path, pre-release checks. | public |
 | [recover-runbook.md](recover-runbook.md) | Recovering 0-byte imports (epic #967 Phase 5). | public |
 | [access_control.md](access_control.md) | How collaborator-based access is implemented. | public |
@@ -71,7 +71,7 @@ Measurements and investigations. Accurate as of their date; re-verify before rel
 | Document | Question it answered | Destination |
 |---|---|---|
 | [research-catalog-consolidation.md](research-catalog-consolidation.md) | How to collapse the two dataset tables (-> ADR 0003). | public |
-| [research-d1-backup-655.md](research-d1-backup-655.md) | How to back up D1 (-> ADR 0004). | private |
+| [research-d1-backup-655.md](https://docs.nemar.org/admin/disaster-recovery/d1-backup-research/) | How to back up D1 (-> ADR 0004). | private |
 | [research-submission-minimums-deskreject.md](research-submission-minimums-deskreject.md) | How many datasets would trip each proposed reject rule (-> ADR 0014). | public |
 | [research-archive-import-candidates.md](research-archive-import-candidates.md) | Survey of ~90 non-OpenNeuro archives (-> ADR 0013). | public |
 | [research-openneuro-import-forensics.md](research-openneuro-import-forensics.md) | Why a 5-dataset import batch failed. | public |
@@ -96,7 +96,7 @@ A table rather than a list, so each carries a destination like every other docum
 | [sprint_review_publication_workflow.md](sprint_review_publication_workflow.md) | public |
 | [deleted-datasets-incident.md](deleted-datasets-incident.md) | public |
 | [blast-radius-catalog-fold.md](blast-radius-catalog-fold.md) | public |
-| [plan-923-test-staging.md](plan-923-test-staging.md) | private |
+| [plan-923-test-staging.md](https://docs.nemar.org/admin/operations/staging-environment/) | private |
 | [plan-legacy-separation-793.md](plan-legacy-separation-793.md) | public |
 | [plan-import-robustness.md](plan-import-robustness.md) | public |
 | [plan-phase2-retry-engine.md](plan-phase2-retry-engine.md) | public |

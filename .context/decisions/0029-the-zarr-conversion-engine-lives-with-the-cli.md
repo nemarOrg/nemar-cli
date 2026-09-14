@@ -8,7 +8,7 @@ transition moment this decision landed in, but is stale as a description of stea
 operation: once the clone exists, cron invokes the CLONE's own copy of the script, and the
 same `git reset --hard` that redeploys the Python driver redeploys `hallu-zarr.sh` too.
 Hand-placement is only for bootstrapping a node that has no clone yet. See AGENTS.md's Zarr
-paragraph and `.context/systems-inventory.md` §3.3 for the corrected, current description;
+paragraph and `https://docs.nemar.org/admin/operations/systems-inventory/` §3.3 for the corrected, current description;
 the decision text below is left as originally written.
 **Date:** 2026-08-22
 **Owner:** Seyed Yahya Shirazi

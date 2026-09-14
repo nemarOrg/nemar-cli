@@ -10,8 +10,8 @@ follow a pointer when you are about to touch that area.
 | If you need | Go to |
 |---|---|
 | Why something is built the way it is | [`.context/decisions/`](.context/decisions/README.md) — the ADRs |
-| Hosts, paths, crons, deploy procedures | [`.context/systems-inventory.md`](.context/systems-inventory.md) |
-| A proven recipe (git-annex, staging, branch protection) | [`.context/validated_workflows.md`](.context/validated_workflows.md) |
+| Hosts, paths, crons, deploy procedures | [systems inventory](https://docs.nemar.org/admin/operations/systems-inventory/) |
+| A proven recipe (git-annex, staging, branch protection) | [validated workflows](https://docs.nemar.org/admin/operations/validated-workflows/) |
 | Everything else under `.context/` | [`.context/README.md`](.context/README.md) — annotated map |
 | What a CLI command does | `nemar <group> --help` (authoritative) or `docs.nemar.org` |
 
@@ -179,15 +179,15 @@ Tooling is fixed: **Bun** for JavaScript and TypeScript (never npm or npx),
 | Part | What it is | Expanded in |
 |---|---|---|
 | CLI (`src/`) | auth, dataset lifecycle, sandbox, admin commands | `nemar --help` |
-| Backend (`backend/`) | Cloudflare Worker + D1; the API at `api.nemar.org` | [systems inventory](.context/systems-inventory.md) §1 |
-| Website | `nemar.org`, Astro SSR, in `nemarOrg/website` | [systems inventory](.context/systems-inventory.md) §1 |
+| Backend (`backend/`) | Cloudflare Worker + D1; the API at `api.nemar.org` | [systems inventory](https://docs.nemar.org/admin/operations/systems-inventory/) §1 |
+| Website | `nemar.org`, Astro SSR, in `nemarOrg/website` | [systems inventory](https://docs.nemar.org/admin/operations/systems-inventory/) §1 |
 | Docs site | `docs.nemar.org`, in `nemarOrg/docs` | — |
-| Central workflows | `nemarDatasets/.github` — dataset CI, archive, manifest | [systems inventory](.context/systems-inventory.md) §2 |
-| Zarr converter | `scripts/zarr/` **in this repo**; runs on the Hallu cron, not Actions (ADR 0029) | [systems inventory](.context/systems-inventory.md) §3 |
-| Signal readers | `neuromechanist/biosigio` on PyPI — importers plus the Zarr exporter | [systems inventory](.context/systems-inventory.md) §2 |
-| Processing host | SDSC Hallu — dataset sync, QA sync, Zarr conversion | [systems inventory](.context/systems-inventory.md) §3 |
-| Test machines | `ssh mcm` (admin), `ssh mba` (regular user) | [systems inventory](.context/systems-inventory.md) §4 |
-| Backup / DR | `nemarOrg/nemar-db-backup`, hourly D1 snapshots | [systems inventory](.context/systems-inventory.md) §5 |
+| Central workflows | `nemarDatasets/.github` — dataset CI, archive, manifest | [systems inventory](https://docs.nemar.org/admin/operations/systems-inventory/) §2 |
+| Zarr converter | `scripts/zarr/` **in this repo**; runs on the Hallu cron, not Actions (ADR 0029) | [systems inventory](https://docs.nemar.org/admin/operations/systems-inventory/) §3 |
+| Signal readers | `neuromechanist/biosigio` on PyPI — importers plus the Zarr exporter | [systems inventory](https://docs.nemar.org/admin/operations/systems-inventory/) §2 |
+| Processing host | SDSC Hallu — dataset sync, QA sync, Zarr conversion | [systems inventory](https://docs.nemar.org/admin/operations/systems-inventory/) §3 |
+| Test machines | `ssh mcm` (admin), `ssh mba` (regular user) | [systems inventory](https://docs.nemar.org/admin/operations/systems-inventory/) §4 |
+| Backup / DR | `nemarOrg/nemar-db-backup`, hourly D1 snapshots | [systems inventory](https://docs.nemar.org/admin/operations/systems-inventory/) §5 |
 
 **Two GitHub orgs, and the split is deliberate.** `nemarOrg` holds tooling and infrastructure;
 `nemarDatasets` holds dataset repos only.
@@ -465,7 +465,7 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
   (own state dir, own AWS profile, `api-test.nemar.org`/`nemar-dev`)
   converts into `nemar-dev`'s S3 zarr prefix, served at `zarr-test.nemar.org`,
   without touching any of this
-  — see [systems inventory](.context/systems-inventory.md) §3.4.
+  — see [systems inventory](https://docs.nemar.org/admin/operations/systems-inventory/) §3.4.
   "Every run" is load-bearing and used to be a lie during a backfill: a run holds
   the lock until the queue empties, so `setup()` never re-ran and the node sat two
   deploys behind for two days (#1129). The drain now re-checks `origin/$DRIVER_REF`
@@ -629,8 +629,8 @@ Environments and pre-release checks: [`.context/release-safety-playbook.md`](.co
 start from [`.context/README.md`](.context/README.md), which marks what is current
 and what is historical. The entries worth knowing by name:
 [`decisions/`](.context/decisions/README.md) (binding),
-[`systems-inventory.md`](.context/systems-inventory.md) (hosts and deploys),
-[`validated_workflows.md`](.context/validated_workflows.md) (proven recipes, with the gotchas),
+[`systems-inventory.md`](https://docs.nemar.org/admin/operations/systems-inventory/) (hosts and deploys),
+[`validated_workflows.md`](https://docs.nemar.org/admin/operations/validated-workflows/) (proven recipes, with the gotchas),
 [`plan.md`](.context/plan.md), [`ideas.md`](.context/ideas.md), [`research.md`](.context/research.md).
 
 ---
