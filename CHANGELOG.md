@@ -13,6 +13,27 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## Unreleased
+
+### Fixed
+
+- **A dataset content write now names the branch it means, and a repository pointed at
+  the wrong branch is repaired instead of renamed** (#1386). `createOrUpdateFile` left
+  `branch` optional and omitted it from the request, so the GitHub Contents API wrote
+  to whatever GitHub calls the repository's default branch, while `getFileContent`
+  read `main`. Sixteen imported repositories have `default_branch = git-annex` --
+  `createRepository` uses `auto_init: false`, so GitHub adopted whichever branch their
+  first push happened to carry -- and on fourteen of them the publication
+  orchestrator's two DOI writes therefore read `main` and wrote `git-annex`: those
+  datasets still advertise OpenNeuro's DOI on `main` while NEMAR's concept DOI and its
+  README badge sit on a branch nothing reads. Writes now default to `main` like reads,
+  and the two publication sites name it explicitly. `ensureMainBranch` also stops
+  renaming in the one case where renaming is wrong: when `main` already exists the
+  repository is merely pointed elsewhere, so the default moves to it; renaming stays
+  for the case it was written for, a dataset branch actually called `master`.
+  Repairing the fourteen datasets' published metadata is tracked in #1386 and is a
+  separate, authorized run.
+
 ## 0.10.3 - 2026-09-10
 
 ### Security

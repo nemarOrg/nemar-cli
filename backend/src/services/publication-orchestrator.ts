@@ -967,6 +967,10 @@ async function stepUpdateMetadata(c: ApproveStepContext): Promise<RespondOutcome
         JSON.stringify(datasetDesc, null, 2),
         `Update DatasetDOI with concept DOI: ${conceptDoi} [skip ci]`,
         pat,
+        // Named, not defaulted: this write read main and used to land wherever
+        // GitHub pointed the repository, which for sixteen of them is the
+        // git-annex branch (#1386).
+        "main",
       );
 
       await updateProgress("update_metadata");
@@ -1046,7 +1050,7 @@ async function stepUpdateReadme(c: ApproveStepContext): Promise<RespondOutcome |
       if (!plan.commit) {
         console.log(`[publish] update_readme skipping commit for ${repoName}: ${plan.reason}`);
       } else {
-        await createOrUpdateFile(repoName, "README.md", plan.content, plan.message, pat);
+        await createOrUpdateFile(repoName, "README.md", plan.content, plan.message, pat, "main");
       }
 
       // Delete any non-.md README files (handles both fresh rename and resume after partial run)

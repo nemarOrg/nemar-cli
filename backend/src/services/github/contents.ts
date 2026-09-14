@@ -14,14 +14,22 @@ import { githubFetchWithRetry } from "./transport";
 const NEMAR_COMMITTER = { name: "nemarAdmin", email: "nemarAdmin@osc.earth" };
 
 /**
- * Create or update a file in a repository.
+ * Create or update a file in a repository, on `main` unless told otherwise.
  *
- * The optional `branch` argument is passed through to the Contents API
- * via the `branch` field on the GET and PUT calls so this function commits
- * to the requested ref instead of the repo default branch. Without it, a
- * caller like `commitEnrichmentWithBidsignore` that only touches one file
- * would silently land its commit on `main` regardless of the branch it
- * was invoked for.
+ * **The default is `main`, not "whatever GitHub calls this repository's default
+ * branch", and the difference is not academic.** The Contents API writes to the
+ * repository's default branch when the request carries no `branch`, and sixteen
+ * dataset repositories have theirs set to `git-annex` -- git-annex's own log branch
+ * -- because `createRepository` uses `auto_init: false` and GitHub adopted whichever
+ * branch their first push happened to carry. The publication orchestrator's two
+ * DOI writes had no branch, so on those repositories they READ `main`
+ * (`getFileContent` defaults to it) and WROTE `git-annex`: fourteen public datasets
+ * still advertise OpenNeuro's DOI on `main` while NEMAR's concept DOI and badge sit
+ * on a branch nothing reads (#1386). This docstring used to assert that a missing
+ * branch lands on `main`, which is exactly the assumption that was wrong.
+ *
+ * Pass `branch` for a release branch or any other non-main ref; `""` is not a way
+ * to ask for the repository default, because there is no reason to want one.
  */
 /**
  * Detect a GitHub Contents-API stale-SHA conflict on an update PUT. When the
@@ -52,9 +60,9 @@ export async function createOrUpdateFile(
   content: string,
   message: string,
   pat: string,
-  branch?: string,
+  branch = "main",
 ): Promise<void> {
-  const branchQuery = branch ? `?ref=${encodeURIComponent(branch)}` : "";
+  const branchQuery = `?ref=${encodeURIComponent(branch)}`;
   const encoded = btoa(
     Array.from(new TextEncoder().encode(content), (b) => String.fromCharCode(b)).join(""),
   );
@@ -107,7 +115,7 @@ export async function createOrUpdateFile(
           message,
           content: encoded,
           ...(sha ? { sha } : {}),
-          ...(branch ? { branch } : {}),
+          branch,
           committer: NEMAR_COMMITTER,
           author: NEMAR_COMMITTER,
         }),
@@ -123,7 +131,7 @@ export async function createOrUpdateFile(
     const body = await response.text().catch(() => "");
     if (isContentsApiShaConflict(response.status, body) && attempt < maxAttempts) {
       console.warn(
-        `[github] createOrUpdateFile sha conflict on ${repo}/${path}@${branch ?? "default"} (attempt ${attempt}/${maxAttempts}); refetching`,
+        `[github] createOrUpdateFile sha conflict on ${repo}/${path}@${branch} (attempt ${attempt}/${maxAttempts}); refetching`,
       );
       continue;
     }
