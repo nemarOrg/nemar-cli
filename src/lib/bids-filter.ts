@@ -12,7 +12,14 @@
  * Why pass through to git-annex instead of parsing BIDS in JS: git-annex
  * already implements glob matching efficiently. The translator just emits
  * the right flags.
+ *
+ * The same selection is also exposed as data (`includeGroups` /
+ * `excludePatterns`, matched by {@link matchesBidsFilter}) for the HTTP
+ * download path, which has no git-annex to hand the flags to. One
+ * declaration, two consumers.
  */
+
+import { Glob } from "bun";
 
 export interface BidsFilterOptions {
   /** Comma-separated subjects, e.g. "sub-01,02". Bare values are auto-prefixed. */
@@ -54,6 +61,21 @@ export interface BidsFilterResult {
   active: boolean;
   /** Human-readable summary lines for the download plan. */
   summary: string[];
+  /**
+   * The same selection as {@link BidsFilterResult.args}, as data rather than
+   * git-annex syntax: an AND of groups, each group an OR of globs relative to
+   * the dataset root. Empty means "everything".
+   *
+   * This exists so the HTTP download path (lib/http-download.ts, used when
+   * git-annex is absent) selects the SAME files as the git-annex path, from
+   * one declaration. A second, independently written matcher would drift, and
+   * the symptom would be `nemar dataset download --subjects sub-01` returning
+   * different files depending on whether git-annex happened to be installed,
+   * which is close to undebuggable from a bug report.
+   */
+  includeGroups: string[][];
+  /** Globs to drop after the include groups match. */
+  excludePatterns: string[];
 }
 
 /** Glob patterns matched against git-annex paths (relative to dataset root). */
@@ -192,7 +214,35 @@ export function buildBidsFilterArgs(opts: BidsFilterOptions): BidsFilterResult {
     summary.push(`exclude: ${userExcludes.join(", ")}`);
   }
 
-  return { args, active, summary };
+  return {
+    args,
+    active,
+    summary,
+    includeGroups: groups,
+    excludePatterns: [...defaultExcludes, ...userExcludes],
+  };
+}
+
+/**
+ * Does `path` (relative to the dataset root, forward slashes, no leading
+ * slash) survive `filter`?
+ *
+ * The glob dialect is git-annex's `--include`/`--exclude`, which Bun.Glob
+ * matches compatibly for the shapes this module emits (`sub-01/**`,
+ * `**\/eeg/**`, `**\/*_task-rest_*`). One deliberate difference: git-annex
+ * matches `--include` against the file path only, and a group with no
+ * patterns means "no constraint", which is why an empty `includeGroups`
+ * admits everything rather than nothing.
+ */
+export function matchesBidsFilter(path: string, filter: BidsFilterResult): boolean {
+  for (const pattern of filter.excludePatterns) {
+    if (new Glob(pattern).match(path)) return false;
+  }
+  for (const group of filter.includeGroups) {
+    if (group.length === 0) continue;
+    if (!group.some((pattern) => new Glob(pattern).match(path))) return false;
+  }
+  return true;
 }
 
 /**
