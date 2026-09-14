@@ -30,9 +30,24 @@ export function notFoundBody(method: string, path: string) {
 }
 
 /** The notFound handler for `api` and `app` alike, and the response any route
- *  that wants to look unrouted must return. */
+ *  that wants to look unrouted must return.
+ *
+ *  `no-store` is set HERE rather than at the one route that needs it, and that
+ *  placement is the whole point. `routes/auth-docs.ts` declares that every
+ *  answer it gives is a credential or a refusal about one and so may never sit
+ *  in a shared cache -- but its two 404s returned this response, which carried
+ *  no cache header, so the declared invariant was untrue (found reviewing
+ *  #1384). Adding the header at the call site instead would have made that
+ *  route's 404 differ from a genuinely unrouted one by exactly one header,
+ *  destroying the parity this file exists to preserve. Setting it for every 404
+ *  keeps the two byte-identical AND makes the invariant hold.
+ *
+ *  Safe as a blanket rule: a 404 is never a document worth reusing, and the
+ *  same URL is frequently a real page for the next caller, who may be an admin.
+ *  That is the identical reasoning the docs gate's own `notFound()` already
+ *  applies in `nemarOrg/docs`. */
 export function notFoundResponse(
   c: Context<{ Bindings: Bindings; Variables: Variables }>,
 ): Response {
-  return c.json(notFoundBody(c.req.method, c.req.path), 404);
+  return c.json(notFoundBody(c.req.method, c.req.path), 404, { "Cache-Control": "no-store" });
 }

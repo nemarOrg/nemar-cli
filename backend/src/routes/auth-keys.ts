@@ -48,6 +48,7 @@ import {
   normalizeMachineName,
   readDeviceAuthAccount,
 } from "../services/device-auth";
+import { DOCS_GRANTS_PURGE_SQL, DOCS_REVOKE_ALL_SQL } from "../services/docs-auth";
 import { generateApiKey, hashApiKey } from "../services/token";
 import type { Bindings, Variables } from "../types/bindings";
 
@@ -223,6 +224,41 @@ authKeysRoutes.post(
 // revoke
 // --------------------------------------------------------------------------
 
+/**
+ * End every docs session this account holds, after one of its API keys is
+ * revoked.
+ *
+ * WHY THIS IS HERE. `services/docs-auth.ts` says of `DOCS_REVOKE_ALL_SQL`:
+ * "FOUR CALLERS, and the count is the point: every path that ends or downgrades
+ * this credential runs this statement ... A fifth path that ends a credential
+ * needs this line too." Epic #1336 phase 3 added exactly that fifth path --
+ * `POST /auth/docs/cli-session` mints a docs credential FROM an API key -- and
+ * did not add the line, so revoking the key left the docs session reading
+ * `/admin/*` for the rest of its fifteen minutes.
+ *
+ * WHY IT REVOKES ALL OF THEM rather than the one that key minted: the session
+ * row records no minting token, so there is nothing to revoke precisely. Adding
+ * a column to make this surgical would buy very little -- a docs session is
+ * read-only and short-lived, and the CLI silently mints another on the next
+ * command -- so the blunt version is the right trade. The grants purge rides
+ * along for the same reason it does elsewhere: a grant is a licence to create a
+ * new session, and ending access has to end what can still create access.
+ *
+ * BEST EFFORT, DELIBERATELY. The key is already revoked by the time this runs;
+ * a failure here must not turn a successful revocation into an error, which
+ * would leave the caller believing the key still works. It is logged instead.
+ */
+async function revokeDocsCredentials(db: D1Database, userId: number): Promise<void> {
+  try {
+    await db.batch([
+      db.prepare(DOCS_REVOKE_ALL_SQL).bind(userId),
+      db.prepare(DOCS_GRANTS_PURGE_SQL).bind(userId),
+    ]);
+  } catch (err) {
+    console.error("[auth-keys] failed to cascade revocation into docs sessions", err);
+  }
+}
+
 authKeysRoutes.delete("/keys/:id", webSessionMiddleware, async (c) => {
   const resolved = await resolveKeysActor(c);
   if (!resolved.ok) return resolved.response;
@@ -255,6 +291,9 @@ authKeysRoutes.delete("/keys/:id", webSessionMiddleware, async (c) => {
     }
 
     const result = await db.prepare(KEY_REVOKE_BY_HASH_SQL).bind(hash, actor.id).run();
+    // The docs credential is minted FROM an API key, so revoking the key has to
+    // end it too (see revokeDocsCredentials).
+    await revokeDocsCredentials(db, actor.id);
     if ((result.meta?.changes ?? 0) === 0) {
       // Lost a race between the pre-read and this UPDATE (a concurrent
       // revoke of the same key landed in between) -- the caller's desired
@@ -300,6 +339,8 @@ authKeysRoutes.delete("/keys/:id", webSessionMiddleware, async (c) => {
   if ((result.meta?.changes ?? 0) === 0) {
     return keyNotFound(c);
   }
+
+  await revokeDocsCredentials(db, actor.id);
 
   const self = currentHash !== null && preRow.api_key_hash === currentHash;
   await auditLogStatement(db, {

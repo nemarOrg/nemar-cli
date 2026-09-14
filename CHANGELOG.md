@@ -13,6 +13,32 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## Unreleased
+
+### Added
+
+- **`nemar admin docs <path...>` reads documentation pages, including the gated ones, without
+  a browser.** `nemarOrg/docs` is private at source and `docs.nemar.org` is the retrieval
+  surface, so a checkout is no longer how anyone opens an operations runbook. The command
+  trades the stored API key at `POST /auth/docs/cli-session` for a fifteen-minute, read-only,
+  documentation-scoped session and sends only that onward, so the long-lived key never reaches
+  the documentation host or its logs. Pages come back as Markdown on stdout and diagnostics on
+  stderr, so `nemar admin docs cli/commands > page.md` yields the page. Pass several paths at
+  once: they share one session, which matters because the mint sits in the strict per-address
+  rate-limit bucket. There is deliberately no flag that prints the session value, since a
+  credential on stdout is one in a shell history.
+
+### Fixed
+
+- **Rate limits now apply to the `/nemar` spelling of every route.** The API is mounted twice,
+  at `/` and at `/nemar`, and the limiter matched paths against the full request path, so the
+  strict per-address floor on the authentication routes (`/auth/login`, `/auth/code/request`,
+  `/auth/keys`, the device-flow routes) matched nothing when the prefix was used and those
+  requests fell to the general bucket. Both spellings are bucketed alike now. Low impact in
+  practice, since Cloudflare's own per-address ceilings and the per-email limit on code
+  requests both still applied, and this API is read-only for anyone without a key; recorded
+  because it is a real change in how those routes are throttled.
+
 ## 0.10.3 - 2026-09-10
 
 ### Security
