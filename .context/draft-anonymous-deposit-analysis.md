@@ -1,6 +1,6 @@
 # Draft: anonymous deposit for double-blind review
 
-**Status:** analysis, no decision taken.
+**Status:** analysis. Direction chosen (section 3); the ADR is still to be written.
 **Date:** 2026-09-14
 **Owner:** Seyed Yahya Shirazi
 
@@ -10,8 +10,10 @@ both bad: keep the data out of NEMAR until the paper is accepted,
 or deposit it and break the blind.
 
 This document works out what would actually have to be true for NEMAR to serve that case.
-It takes no decision; the decision belongs in an ADR,
-and the ADR cannot be written until the collisions in section 5 are settled.
+Section 3 records the direction taken on 2026-09-14:
+the data is served publicly, the repository stays private, and the page says so.
+The remaining decision, which belongs in an ADR,
+is how that state is represented and how it answers the collisions in section 5.
 
 ---
 
@@ -29,7 +31,9 @@ Nothing reachable from the submission reveals who deposited the data.
 **R3 Reviewer concealment.**
 The authors do not learn who the reviewers are.
 Double-blind runs in both directions,
-and every access mechanism NEMAR has today violates this half.
+and every per-reviewer access mechanism NEMAR has today violates this half,
+which is the strongest argument for the design in section 3:
+it has no per-reviewer access mechanism at all.
 
 **R4 Reversibility.**
 At acceptance the record becomes the real, attributed, citable record,
@@ -135,49 +139,89 @@ because a depositor who believes the blind is perfect will behave differently fr
 
 ---
 
-## 3. Option A: keep the repository private during review
+## 3. Option A: private repository, public data surface
 
-The dataset stays `visibility=private`.
-The repository is private, the bucket policy keeps the objects unreadable,
-and D1 filters it out of every catalog surface (ADR 0017).
-At acceptance the normal publish flow runs.
+**Owner decision, 2026-09-14.** The dataset is served normally on `data.nemar.org` and on the
+website while the GitHub repository stays private, with the page carrying a visible flag that
+the dataset is temporarily anonymous and the GitHub control grayed out.
+This supersedes the tokenized review link sketched in earlier drafts of this section,
+and it is a better design for a reason worth stating plainly:
+**there is no access request, so there is nothing to conceal in the other direction.**
+R3 is satisfied by construction rather than by machinery.
+A reviewer follows a public URL like any other reader.
 
-**What it solves.** Every leak in 2.1 and 2.2 becomes unreachable, because nothing is public.
-That is most of the inventory, with no new code.
+It also deletes a whole component.
+An unguessable link would have needed a token table, an expiry, a scope, a revocation path and
+a serving path; none of that is needed if the data is simply public.
 
-**What it does not solve, and this is the whole problem.**
-Reviewers cannot read it.
-The two access mechanisms that exist today, a GitHub collaborator invitation (`nemar dataset invite`)
-and an access request (`nemar dataset request-access`),
-both require the reviewer to hold a GitHub account and a NEMAR account,
-and both tell the depositor exactly who asked.
-That violates R3.
-For a double-blind venue this is not a rough edge;
-it is worse than no anonymity at all, because the authors end up holding reviewer identities.
+### The state this creates
 
-So Option A is not a design by itself.
-It is a design only when paired with an access path that is unattributable in both directions.
+Visibility is currently one concept applied to three systems at once.
+`applyDatasetVisibility` in `backend/src/services/visibility.ts`
+flips the GitHub repository, the bucket policy and the D1 `visibility` column in one
+transaction with revert-on-failure at each stage.
+This design decouples them for the first time:
+D1 `public` (so the catalog, the website and `data.nemar.org` serve it),
+bucket policy `public`, GitHub repository `private`.
+
+The two public data surfaces already gate on exactly the D1 column and nothing else,
+which is what makes this cheap:
+`backend/src/routes/data.ts` rejects on `row.visibility !== "public"`,
+and `backend/src/routes/zarr-data.ts` on the same.
+Set the column and both serve.
+
+Note that this is a different axis from **published**.
+Published means a concept DOI exists, the repository is public,
+and the branch ruleset makes `main` pull-request-only (ADR 0001).
+A dataset in this state is readable but not published,
+which is a combination the system has never expressed
+and which needs a name before it gets a column.
 
 ### Predicates
 
-**A1. A capability link, not an invitation.**
-An unguessable token in a URL, granting read without an account,
-recording nothing the depositor can see.
-New machinery: a token row, an expiry, a scope, a revocation path, and a serving path.
+**A1. Concealment is now load-bearing, and there is more of it to do.**
+Under a private dataset the inventory in section 2.2 was unreachable.
+Here it is all reachable, so each item becomes work:
+`owner_username` and `owner_github` must be withheld from `GET /datasets/:id`,
+the website's byline fallback to `owner_username` must be suppressed rather than merely unused,
+`datasets.authors` must not carry the real author list into the search index and the `--author` facet,
+and the Zarr index and store attributes must not carry a citation.
+This is the trade for losing the token machinery, and it is the right trade,
+but it is not a smaller feature. It is a differently shaped one.
 
-**A2. The serving path cannot go through GitHub.**
-A git-annex clone needs a GitHub credential,
-and there is no way to hand a reviewer a read grant on a private repository without either
-making it public or naming an account.
-The link therefore has to be served by the Worker over presigned object URLs.
-That is exactly what `data.nemar.org` already does for published datasets
-(`backend/src/routes/data.ts`, `generatePresignedGetUrl` in `services/s3.ts`),
-so the honest shape is a token-gated mode on a router that already resolves versions,
-renders a file listing, and presigns.
-The cost to reviewers is that they browse and download over HTTP instead of cloning,
-which for review is usually an improvement, since it removes the git-annex install.
+**A2. The GitHub control has to be suppressed, not merely hidden.**
+`ActionBar.astro` in `nemarOrg/website` reads
+`const ghCloneUrl = githubUrl ?? \`https://github.com/nemarDatasets/${ds}\``,
+so nulling `github_repo` in the API response hides the button on line 89
+while the download modal keeps offering a fabricated clone URL.
+That URL 404s for a reviewer today and resolves later, which is the worst of both.
+The website needs an explicit anonymous state, not an absent field.
 
-**A3. The identifier has to be a reserved DOI.**
+**A3. `nemar dataset download` will not work during the window.**
+It clones the repository through git-annex (`cloneDataset`, `src/lib/git-annex/clone-push.ts`),
+and the repository is private.
+That command is the first route the website's own download modal advertises.
+During the window the reviewer's routes are the HTTP file tree on `data.nemar.org`
+and the zip under `<id>/archives/`, both of which already exist and both of which are better
+for a reviewer than installing git-annex.
+The modal and the CLI both need to know the difference.
+
+**A4. The Zarr fidelity sweep will mark every such dataset `unverifiable`.**
+Its candidate predicate is `status = 'active' AND visibility = 'public'`
+(`backend/src/services/zarr-fidelity-sweep.ts`),
+and the comment above it says why:
+a private repository cannot be read anonymously through `raw.githubusercontent.com`,
+so including one "would only ever produce `unverifiable` noise".
+That predicate uses D1 visibility as a proxy for "the repository is public",
+and this design is precisely the case where the proxy stops holding.
+The consequence is bounded and not a false failure:
+every sidecar fetch 404s, nothing is checked,
+and the verdict falls to `unverifiable` rather than `failed`.
+But the dataset then fails `has_zarr_verified` for the whole review window,
+which degrades a published quality signal on exactly the datasets being shown to reviewers.
+The predicate needs to test what it actually means.
+
+**A5. The identifier has to be a reserved DOI.**
 Venues increasingly want an identifier in the submission,
 and you cannot have a resolving DOI and a concealed dataset at the same time.
 Three ways out, and only one is clean.
@@ -199,34 +243,47 @@ which is R4 satisfied with the identifier unchanged.
 This capability is built and unused for this purpose,
 so it is close to free.
 
-**A4. Scrubbing is deferred, not removed.**
+**A6. Scrubbing is deferred, not removed.**
 On the day the dataset goes public, `uuid.log` still names a machine
 and the commits still carry a personal email address.
 For double-blind that is acceptable, because by then attribution is wanted,
 but it is only acceptable if nothing went public early.
 The publish flip has to remain the single auditable moment, which is how ADR 0017 already works.
 
-**A5. One link, and the product has to say so.**
+**A7. One link, and the product has to say so.**
 A blinded submission that carries both a review link and a repository URL is self-defeating.
 The command should print exactly one URL and say what it is for.
 
-**A6. Scheduled cleanup will delete a dataset that is under review.**
-Stale `nm` datasets that are private, without a DOI, without an active publication request,
-and inactive for ninety days are deleted by the daily cron (migration 0011).
-A review window runs three to nine months.
-A reserved DOI is not a `concept_doi` and a review link is not a publication request,
-so nothing in the current predicate protects such a dataset,
-and it would be deleted mid-review, silently.
-The fix is one clause in one predicate, and it has to be written down before the feature ships,
-not discovered afterwards.
+**A8. Scheduled cleanup will nag the depositor for the length of the review.**
+A private `nm` dataset with no concept DOI becomes cleanup-eligible after ninety days of inactivity,
+and a review window runs three to nine months, so every such dataset crosses the line.
+Since #662 the cron does **not** delete: it emails the owner at thirty, fourteen, seven, two and one days,
+then notifies admins once and leaves the deletion to a deliberate `nemar admin delete-dataset`
+(`backend/src/services/staleness.ts`, and the handler in `backend/src/index.ts`).
+So the hazard is not data loss;
+it is a depositor receiving five "your dataset will be deleted" emails during peer review,
+and an admin queue filling with handoffs that must not be acted on.
+Both are suppressed by one clause in the candidate predicate, and it has to be written down.
 
-**A7. The window needs a default, a cap, and a defined expiry behaviour.**
-Expiry must revert to private and notify the depositor.
-It must never publish anything automatically.
+**A9. The window needs a default, a cap, and a defined expiry behaviour.**
+Expiry must restore attribution and notify the depositor.
+It must never publish anything automatically, and it must never silently extend.
 
 ---
 
 ## 4. Option B: deposit through the NEMAR service account
+
+**Not required under the decision in section 3, and kept here as the fallback it now is.**
+The GitHub-identity family, which is the only thing this option uniquely removes,
+is already unreachable while the repository is private,
+and under the chosen design the repository stays private for the whole window.
+The case that would force this option back on the table is a venue or journal that requires the
+**repository itself** to be open at submission, not merely the data;
+that case has not been raised, and should be confirmed as real before anyone builds for it.
+The analysis below stands, and the two predicates worth carrying forward regardless
+are B2 (the annex description, which is section 7's first item)
+and B3 (where the real depositor is recorded, which this design needs anyway
+so that the attribution can be restored at acceptance).
 
 The deposit is made by NEMAR.
 `owner_user_id` points at a service account (ADR 0048),
@@ -356,18 +413,42 @@ Pass a non-identifying description to `git annex init`.
 Decide separately what to do about the repositories that already carry the default one.
 This is a live, unintended disclosure of account names, hostnames and directory paths on public repositories.
 
-**The design, if it proceeds.**
-Private dataset, reserved EZID identifier, and a tokenized expiring account-free review link
-served by the existing `data.nemar.org` router.
-That satisfies R1 through R4 and preserves R5,
-and the great majority of it is configuration of machinery that already exists.
+**The design.**
+Private repository, public data surface, per section 3:
+the dataset is served on `data.nemar.org` and on the website exactly as any public dataset is,
+the GitHub repository stays private,
+the page carries a visible flag that the dataset is temporarily anonymous,
+and the GitHub control is grayed out.
+Identity is withheld at the API, in the byline, in the search index and in the Zarr documents
+for as long as the flag is set,
+and restored, together with the repository flip and the DOI, at acceptance.
 
-**The second phase, if the case is confirmed.**
-Bot-authored deposit, per Option B.
-It is required only for a case not raised in the original framing,
-namely a venue or a journal that requires the data to be openly available at submission,
-which Option A cannot serve at all.
-Confirm that the case is real before building for it.
+Five pieces of work follow from the predicates in section 3, in dependency order:
+
+1. **A name and a representation for the state.**
+   Readable but not published is a combination the system cannot express,
+   and D1 visibility is currently welded to repository visibility and the bucket policy
+   in a single transition (`applyDatasetVisibility`).
+   This is the decision the ADR exists to take;
+   everything below is mechanical once it is taken.
+2. **Withhold identity on the public surfaces:**
+   `owner_username` and `owner_github` in `GET /datasets/:id`,
+   the byline fallback in `DatasetCard.astro`,
+   `datasets.authors` in the full-text index and the `--author` facet,
+   and `doi`/`citation` in the Zarr index and store attributes.
+3. **The website state** (issue filed on `nemarOrg/website`):
+   the anonymous flag on the dataset page, the grayed-out GitHub control,
+   and a download modal that does not advertise a clone route that cannot work.
+4. **Two predicates that use D1 visibility as a proxy for repository visibility**
+   and stop being correct here:
+   the Zarr fidelity sweep's candidate query,
+   and the staleness candidate query that would otherwise email the depositor five times mid-review.
+5. **The identifier.** Reserved EZID status during the window, public at acceptance,
+   per predicate A5.
+
+**The fallback, if a venue ever requires the repository itself to be open at submission.**
+Bot-authored deposit, per Option B. Not needed for the design above.
+Confirm the case is real before building for it.
 
 **A blind check, in the same shape as `evaluateSubmissionMinimums`.**
 The blind holds only if the deposit itself is scrubbed,
