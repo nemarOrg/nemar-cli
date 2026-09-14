@@ -21,7 +21,7 @@ Documents that record completed work carry a `STATUS: HISTORICAL` banner. They a
 ## Where each document is headed
 
 Every row below carries a **Destination**, the classification ADR 0058 assigns it, as groundwork for
-epic #1336 phase 3. Nothing has moved yet.
+epic #1336 phase 3. Four documents have moved, and the table below links them at their URLs: the systems inventory, the validated workflows, the staging plan and the D1 backup research now live in `nemarOrg/docs` under `/admin/`, private at source and served through the gate (epic #1336 phase 3).
 
 | Value | Meaning |
 |---|---|

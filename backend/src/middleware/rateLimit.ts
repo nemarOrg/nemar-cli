@@ -183,10 +183,19 @@ const AUTH_PATHS = [
   //
   // `/auth/docs/cli-session` IS here, and unlike the two above it is called by
   // a person's own machine rather than by a Worker, so the per-IP key is a real
-  // per-caller key for once. An admin mints one session per fifteen minutes of
-  // reading, so ten a minute is far above any honest use. The CLI takes several
-  // paths in one invocation partly so that a reading session costs one mint
-  // rather than one per page.
+  // per-caller key for once.
+  //
+  // "Far above any honest use" was the first version of this sentence and it
+  // overclaimed. This bucket is SHARED across every entry in this list, so an
+  // admin who reads a dozen runbook pages as a dozen separate
+  // `nemar admin docs` invocations spends the same ten-per-minute budget that
+  // `nemar auth login` needs, and can lock their own machine out of signing in.
+  // The CLI takes several paths per invocation specifically so that a reading
+  // session costs one mint rather than one per page, which keeps normal use far
+  // inside the cap -- but that is a property of how the CLI is written, not a
+  // property of the limit. Someone scripting a loop over single pages will feel
+  // it. Issue #1354 tracks keying these buckets on something better than the
+  // address; until then, do not read this cap as generous.
   //
   // The stronger claim -- that a stolen admin key cannot be turned into a
   // stream of docs credentials from one address -- was written here first and

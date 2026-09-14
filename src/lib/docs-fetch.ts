@@ -73,6 +73,11 @@ export function toMirrorPath(input: string): string {
     }
     path = url.pathname;
   }
+  // Drop a query string or fragment before touching the extension. Without
+  // this, `admin/commands#section` became `/admin/commands#section.md`, which
+  // asks the docs host for the HTML page and prints markup as documentation --
+  // and pasting an anchored URL out of the address bar is the obvious input.
+  path = path.replace(/[?#].*$/, "");
   if (!path.startsWith("/")) path = `/${path}`;
   if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
   // The site root's mirror is `/index.md`; `entry.id` for the root entry is
@@ -116,6 +121,16 @@ function describeRefusal(status: number, location: string | null): string {
   }
   if (status === 404) {
     return "not found, or it is a gated page and this account is not an admin";
+  }
+  // The gate answers 401/403 when it reached the API and got a verdict about
+  // the session rather than about the page. Named explicitly because the
+  // fall-through below says "unexpected status", which is the one phrasing
+  // this command should never use for an answer the design expects.
+  if (status === 401) {
+    return "the documentation session was rejected; it may have expired, try again";
+  }
+  if (status === 403) {
+    return "this account is no longer an admin, so the documentation session was refused";
   }
   if (status === 503) {
     return "the documentation gate could not reach the API; try again shortly";

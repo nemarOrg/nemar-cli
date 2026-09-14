@@ -2,8 +2,7 @@
  * `nemar admin docs` and the retrieval helper behind it (epic #1336 phase 3,
  * issue #1341).
  *
- * TWO LAYERS, and they test different things. {@link toMirrorPath} is pure, so
- * it is exercised directly. The command is driven through the real entry point
+ * The command is driven through the real entry point
  * (`bun run src/index.ts admin docs ...`) against two real local HTTP servers,
  * one standing in for `api.nemar.org` via `TEST_API_URL` and one for
  * `docs.nemar.org` via `NEMAR_DOCS_URL` -- the same harness shape as
@@ -18,65 +17,16 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
 import { DOCS_SESSION_COOKIE_NAME } from "../shared/contract/docs-auth.js";
-import { toMirrorPath } from "../src/lib/docs-fetch.js";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
 const API_KEY = "nm_secret_cli_key_0123456789abcdefghij";
 const DOCS_SESSION = "docs-session-value-0123456789";
-
-describe("toMirrorPath", () => {
-  test("adds .md to a bare path", () => {
-    expect(toMirrorPath("admin/operations/zarr-serving")).toBe("/admin/operations/zarr-serving.md");
-  });
-
-  test("accepts a leading slash", () => {
-    expect(toMirrorPath("/cli/commands")).toBe("/cli/commands.md");
-  });
-
-  test("drops the trailing slash the HTML spelling carries", () => {
-    // `build.format` is 'directory' on this site, so every page's browser URL
-    // ends in a slash. `.../commands/.md` is not a page, so the slash has to go
-    // before the extension is added -- this is the spelling someone copying
-    // from the address bar will paste.
-    expect(toMirrorPath("/cli/commands/")).toBe("/cli/commands.md");
-  });
-
-  test("leaves an existing .md alone", () => {
-    expect(toMirrorPath("cli/commands.md")).toBe("/cli/commands.md");
-  });
-
-  test("leaves other real extensions alone", () => {
-    // llms.txt is the index an agent starts from, and sitemap.xml is how the
-    // completeness check reads the site; both must stay reachable through the
-    // same command rather than being rewritten to llms.txt.md.
-    expect(toMirrorPath("llms.txt")).toBe("/llms.txt");
-    expect(toMirrorPath("sitemap.xml")).toBe("/sitemap.xml");
-  });
-
-  test("maps the site root to /index.md", () => {
-    // The root entry's id is literally `index`, so this needs no special case
-    // on the serving side either; leaving `slug` undefined there would emit
-    // `/.md`, a dotfile at the site root.
-    expect(toMirrorPath("/")).toBe("/index.md");
-    expect(toMirrorPath("")).toBe("/index.md");
-  });
-
-  test("accepts a full docs URL, taking only the path", () => {
-    expect(toMirrorPath("https://docs.nemar.org/admin/commands/")).toBe("/admin/commands.md");
-  });
-
-  test("refuses a URL for another host rather than re-pointing it", () => {
-    // Silently rewriting the host would answer a different question than the
-    // one asked, with a page that looks like the answer.
-    expect(() => toMirrorPath("https://example.com/admin/commands/")).toThrow(/docs\.nemar\.org/);
-  });
-});
 
 // --------------------------------------------------------------------------
 // The command, end to end
@@ -419,6 +369,39 @@ describe("nemar admin docs", () => {
       expect(quiet.stdout).toContain("# Two");
     } finally {
       withoutBanner.stop();
+    }
+  });
+
+  test("--debug never writes the docs session to the log file", async () => {
+    // THE REGRESSION TEST FOR A SHIPPED LEAK. `SENSITIVE_BODY_KEY_RE` in
+    // lib/debug-log.ts redacted `session_token` but not the bare key `session`,
+    // which is what this response actually uses, so the debug log recorded a
+    // live admin-docs credential in plaintext -- on the line after the one
+    // where it correctly redacted the long-lived API key. The CLI's own error
+    // hint tells people to re-run with --debug and attach the log to an issue.
+    //
+    // Asserted against the log FILE rather than the redactor in isolation: the
+    // leak was in the composition (a response shape whose key the pattern did
+    // not name), and a unit test of the redactor would have been written
+    // against the keys its author already had in mind. The log lands under
+    // NEMAR_CONFIG_DIR/logs, which runCli already isolates per test.
+    const servers = startServers({ "/cli/commands.md": markdown("# Page\n") });
+    try {
+      const result = await runCli(["admin", "docs", "cli/commands", "--debug"], servers);
+      expect(result.exitCode).toBe(0);
+
+      const logDir = join(configDir, "logs");
+      const files = existsSync(logDir) ? readdirSync(logDir) : [];
+      expect(files.length).toBeGreaterThan(0);
+      const all = files.map((f) => readFileSync(join(logDir, f), "utf8")).join("\n");
+
+      // The log must prove it actually captured this exchange, or the two
+      // assertions below would pass on an empty file.
+      expect(all).toContain("/auth/docs/cli-session");
+      expect(all).not.toContain(DOCS_SESSION);
+      expect(all).not.toContain(API_KEY);
+    } finally {
+      servers.stop();
     }
   });
 

@@ -20,9 +20,13 @@ a link here instead.
 
 ## Retrieval: how to read the linked material
 
-Public pages need nothing: fetch the URL. **Every page also has a Markdown mirror at the same
-path plus `.md`**, which is what to fetch if you are a program rather than a browser, and
-`https://docs.nemar.org/llms.txt` indexes them.
+Public pages need nothing: fetch the URL. **Every page also has a Markdown mirror**, which is
+what to fetch if you are a program rather than a browser, and `https://docs.nemar.org/llms.txt`
+indexes them.
+
+The mirror sits at the page path with `.md` appended and **no trailing slash**: the tables below
+spell URLs as `/cli/commands/`, and the mirror of that page is `/cli/commands.md`, not
+`/cli/commands/.md`. Drop the slash before adding the extension.
 
 ```bash
 curl -s https://docs.nemar.org/cli/commands.md
@@ -111,8 +115,6 @@ ignores them.
 
 ---
 
----
-
 ## Hard rules
 
 ### Live datasets
@@ -168,6 +170,27 @@ Authentication against staging never uses production keys: use `TEST_ADMIN_API_K
 with an isolated `NEMAR_CONFIG_DIR`, so the real `~/.config/nemar` is untouched;
 `TEST_OWNER_API_KEY`, the seeded `test-owner` token, is its owner-role sibling.
 
+### Two names that look like bugs and are not
+
+**`ORG_NAME = "nemarDatasets"`** in `backend/src/services/github.ts`, and the publishing scripts
+targeting `nemarDatasets`, are correct. Two GitHub orgs is deliberate: `nemarOrg` holds tooling
+and infrastructure, `nemarDatasets` holds dataset repositories only. **Do not change these to
+`nemarOrg`.** In a two-org codebase this reads as a typo, which is exactly why the warning is
+here rather than left to the reader.
+
+**EZID is the DOI registrar, not Zenodo** (ADR 0007). `.context/research.md` describes a Zenodo
+flow and `docs.nemar.org/develop/zenodo-testing/` documents Zenodo sandbox testing; both are
+prior art and test tooling, neither is the production path. A DOI change made on the strength of
+either is wrong.
+
+### Revocation cascades, always
+
+Ending a credential has to end everything minted from it. API tokens are tied to a GitHub PAT
+and per-user S3 credentials, and an API key can now also mint a docs session
+(`POST /auth/docs/cli-session`). `services/docs-auth.ts` names the callers of
+`DOCS_REVOKE_ALL_SQL` and says a new path that ends a credential needs the line too; that count
+is load-bearing, so add yourself to it rather than assuming someone else did.
+
 ### Never hand-bump the version
 
 `package.json` version is owned by CI. Do not edit it, and do **not** run
@@ -202,8 +225,6 @@ environment** (unlike `e2e-test.ts`, which fetches per-user S3 credentials from 
 and session credentials are short-lived, so export them immediately before each run.
 Creation is also **not retry-safe** after a partial failure (issue #955):
 recover with `nemar admin delete-dataset <id>` then recreate, rather than re-running `create`.
-
----
 
 ---
 
@@ -258,8 +279,6 @@ squash-merge cycle, and the `.claude/epic.local.md` state file that tracks `curr
 
 Never let GitHub issues/PRs and `.claude/epic.local.md` drift.
 Phase PRs squash-merge into the epic branch; the epic branch merges into `dev`.
-
----
 
 ---
 

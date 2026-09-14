@@ -135,7 +135,19 @@ const NON_PAGE_EXACT = new Set([
  */
 function extractDocsPaths(source: string): string[] {
   const out: string[] = [];
-  for (const m of source.matchAll(/https?:\/\/docs\.nemar\.org(\/[^\s)>\]"'`]*)?/g)) {
+  // SCHEME-LESS SPELLINGS COUNT TOO. Requiring `https?://` made a real broken
+  // pointer invisible: a comment in `routes/auth-web.ts` read "points typo'd
+  // users at docs.nemar.org/installation", which is not a page (the real one is
+  // /cli/getting-started/installation/). The guard opened that file, extracted
+  // nothing, and passed. The bare form is used deliberately in prose elsewhere,
+  // so it is a spelling to support rather than one to ban.
+  //
+  // The `(?<![\w/.@-])` guard is what keeps `https://example.com/docs.nemar.org`
+  // and an email at that domain from matching -- a path segment or address that
+  // merely ends in the hostname is not a pointer to it.
+  for (const m of source.matchAll(
+    /(?<![\w/.@-])(?:https?:\/\/)?docs\.nemar\.org(\/[^\s)>\]"'`]*)?/g,
+  )) {
     const raw = m[1];
     if (!raw) continue;
     const cleaned = raw.replace(/[#?].*$/, "").replace(/[.,;:!?*_]+$/, "");
