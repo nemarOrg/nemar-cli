@@ -17,6 +17,22 @@ earlier releases are described only by their generated notes.
 
 ### Added
 
+- **`nemar dataset download` no longer needs git-annex.** A missing git-annex used to be a hard
+  exit, which is a poor answer to "I just want the files" when the data plane already serves
+  every byte over plain HTTPS. The command now falls back to an HTTP download, announced rather
+  than silent, and `--http` asks for it outright. One request to
+  `<api>/data/<id>/<version>/manifest.json` returns every file's path, size, checksum and byte
+  URL; a bounded worker pool (`-j`, default 4) fetches the selection. A file already on disk at
+  its declared size is skipped, so an interrupted transfer resumes by re-running the command,
+  and widening `--subjects`/`--tasks`/`--datatypes` later only fetches what is new. The BIDS
+  filters mean exactly what they mean on the git-annex path, because both are derived from one
+  declaration in `src/lib/bids-filter.ts` rather than two matchers that could disagree; dataset
+  metadata is never filtered out, so what lands is still a readable BIDS root. What you get is a
+  file snapshot, not a repository: there is no `.git`, so `nemar dataset commit`/`push`/`update`
+  do not operate on it, and the command says so. `--update` and `--prune` are refused on this
+  path rather than silently doing nothing. Useful well beyond the missing-git-annex case:
+  containers, HPC login nodes and CI runners where installing git-annex is impractical.
+
 - **`nemar admin docs <path...>` reads documentation pages, including the gated ones, without
   a browser.** `nemarOrg/docs` is private at source and `docs.nemar.org` is the retrieval
   surface, so a checkout is no longer how anyone opens an operations runbook. The command
