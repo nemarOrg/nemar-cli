@@ -1,8 +1,8 @@
 /**
  * Bringing the imported fleet onto NEMAR's annex policy, 600 repositories at a time
- * (#1374, ADR 0058 for the per-dataset fix, ADR 0020 for the blast radius).
+ * (#1374, ADR 0060 for the per-dataset fix, ADR 0020 for the blast radius).
  *
- * Every dataset imported before ADR 0058 landed carries upstream's
+ * Every dataset imported before ADR 0060 landed carries upstream's
  * `.gitattributes` -- `*.tsv text eol=lf annex.largefiles=largerthan=1mb` and a
  * dozen similar lines -- and carries NEMAR's own expression nowhere: a sample of
  * imported repositories has no `config.log` on the git-annex branch at all. Both

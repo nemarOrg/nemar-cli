@@ -13,7 +13,7 @@
  *   - {@link applyNemarAnnexPolicy} replaces the inherited `annex.largefiles`
  *     attributes with NEMAR's configured expression, because a `.gitattributes`
  *     setting beats both `git annex config` and git config, so until they are
- *     gone every later add keeps following upstream's rule. See ADR 0058.
+ *     gone every later add keeps following upstream's rule. See ADR 0060.
  *
  * {@link normalizeImportedTree} is the pair of them as the prepare phase performs
  * them, in one commit, and is what `prepareImport` calls.

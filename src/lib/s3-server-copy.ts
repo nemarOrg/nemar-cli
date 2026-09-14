@@ -539,7 +539,7 @@ export interface ImportManifestItem {
    * Upstream means the copy phase server-side copies the key from the OpenNeuro
    * bucket. `"local"` means prepare already uploaded the content from its clone
    * with `git annex copy --to nemar-s3`, because the file was a plain git blob
-   * upstream and no upstream KEY exists to copy from (ADR 0058).
+   * upstream and no upstream KEY exists to copy from (ADR 0060).
    *
    * The distinction is only about who transfers the bytes. Both kinds are data:
    * finalize verifies both at the destination and registers both with

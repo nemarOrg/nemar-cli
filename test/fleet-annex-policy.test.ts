@@ -1,5 +1,5 @@
 /**
- * The fleet annex-policy backfill, against real repositories (#1374, ADR 0058).
+ * The fleet annex-policy backfill, against real repositories (#1374, ADR 0060).
  *
  * Two bare origins stand in for imported datasets: one shaped like the ordinary
  * case (upstream's `.gitattributes`, every recording already annexed, no policy in

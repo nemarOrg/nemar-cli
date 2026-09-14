@@ -1,5 +1,5 @@
 /**
- * Normalizing an EXISTING dataset repository (#1159 part 2, ADR 0058).
+ * Normalizing an EXISTING dataset repository (#1159 part 2, ADR 0060).
  *
  * The dataset-level path around `normalizeImportedTree`: which clones it will reuse,
  * which it refuses, what it reports, and that the published past survives it. The
