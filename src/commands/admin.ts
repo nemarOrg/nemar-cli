@@ -1036,7 +1036,10 @@ both faster and easier on the rate limit than one command per page.`,
 
     // Bodies go to stdout and everything else to stderr, so `nemar admin docs
     // <path> > page.md` yields the page rather than the page plus banners --
-    // the shape an agent or a pipeline wants.
+    // the shape an agent or a pipeline wants. `console.log` appends a newline,
+    // so a redirected single page is the page plus a trailing newline, not
+    // byte-identical to the mirror. That is the right trade for a text file and
+    // is stated here because the sentence above used to imply otherwise.
     //
     // CONSEQUENCE WORTH KNOWING FOR THE MULTI-PATH CASE: redirecting several
     // pages concatenates them with no delimiter in the file, because the banner
