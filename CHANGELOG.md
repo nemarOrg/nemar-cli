@@ -28,7 +28,32 @@ earlier releases are described only by their generated notes.
   rate-limit bucket. There is deliberately no flag that prints the session value, since a
   credential on stdout is one in a shell history.
 
+- **`nemar admin fleet key-registration`** repairs the datasets the bug above already
+  published. A fleet sweep of all 802 dataset repositories found 528 of 600 imported
+  datasets with zero keys recorded at `nemar-s3`: 720,896 keys sitting in the bucket that
+  no clone is told about. Those datasets are not broken for a user -- an imported
+  repository carries OpenNeuro's `s3-PUBLIC` remote with `autoenable=true`, so
+  `git annex get` still works -- but every clone fetches from upstream, and NEMAR's
+  independence from OpenNeuro is not real while its own copy goes unadvertised.
+  Presence is established by ONE `list-objects-v2` per dataset with credentials the API
+  mints for it, never a HEAD per key: `s3://nemar` denies anonymous ListBucket, so a
+  missing key answers 403, and 403 is equally what a private dataset, an expired session
+  or a signature with no session token returns. A dataset with any key the bucket cannot
+  account for is reported and skipped by default, because that is content which was never
+  transferred (#1396) rather than a registration that was lost, and writing the remaining
+  registrations would make it look repaired. Both rules are ADR 0061.
+
 ### Fixed
+
+- **Registering annexed keys no longer reports writes it never made** (#1392).
+  `batchSetKeysPresent` ran fifty `git annex setpresentkey` processes at once and counted
+  every exit-0 as a registration. They all exit 0; their writes to the shared git-annex
+  branch journal do not all survive. An `onboard-openneuro` finalize logged "Registered
+  117 files in git-annex", the pushed location log recorded none of them, and the dataset
+  was published with a permanent concept DOI. It is now one `setpresentkey --batch`
+  process per chunk of 5,000, and the result is read back out of the location log rather
+  than inferred from exit codes -- the callers already aborted on a non-zero failure
+  count, so they now abort on the truth, and name the keys that are missing.
 
 - **Rate limits now apply to the `/nemar` spelling of every route.** The API is mounted twice,
   at `/` and at `/nemar`, and the limiter matched paths against the full request path, so the

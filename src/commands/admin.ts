@@ -21,7 +21,7 @@
  * - nemar admin notify              - Send broadcast email to users
  */
 
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
@@ -5750,6 +5750,144 @@ Examples:
       if (tally.failed > 0 || tally.unverified > 0) process.exit(1);
     },
   );
+
+fleetCommand
+  .command("key-registration")
+  .description(
+    "Re-register annexed content NEMAR holds in S3 but never recorded in the location log (#1392)",
+  )
+  .argument("[dataset-id...]", "Specific datasets to act on (omit to sweep by prefix)")
+  .option("--prefix <prefix>", "Dataset id prefix to sweep (default on: the imported fleet)", "on")
+  .option("--limit <n>", "Act on at most this many datasets, in id order")
+  .option("--apply", "Register and push (default is a read-only report)")
+  .option("--no-push", "With --apply, register locally and push nothing (a rehearsal)")
+  .option(
+    "--include-incomplete",
+    "Also act on a dataset whose content the bucket cannot fully account for (#1396). Off by default: that is missing content, not a lost registration",
+  )
+  .option("--dir <path>", "Where clones go while a dataset is being repaired (default: a temp dir)")
+  .option("--concurrency <n>", "Datasets in flight at once (default 4)", "4")
+  .option("--json <path>", "Write the full report as JSON")
+  .option("--force", "Include the live datasets (nm000103-107)")
+  .option("-y, --yes", "Skip confirmation and proceed")
+  .addHelpText(
+    "after",
+    `
+What this repairs (#1392):
+  \`batchSetKeysPresent\` ran fifty \`setpresentkey\` processes at once and counted
+  every exit-0 as a registration. It is fixed, but 528 of 600 imported datasets
+  were already published with NEMAR's own copy of their content unadvertised:
+  720,896 keys sitting in the bucket that no clone is told about. Those clones
+  silently fetch from OpenNeuro instead.
+
+What it will not do:
+  A dataset with any annexed key that has NO object in the bucket is reported and
+  skipped. That is missing content (#1396) and needs the bytes transferred, not a
+  registration written. \`--include-incomplete\` overrides it.
+
+What "read-only" does and does not mean:
+  without --apply nothing is written to any repository or to S3. It is not free of
+  side effects though: establishing what the bucket holds needs credentials, and
+  minting them stamps last_activity_at on the dataset, which postpones the stale-
+  dataset cleanup cron for a private DOI-less one.
+
+How presence is established:
+  one \`list-objects-v2\` per dataset with credentials the API mints for it, not a
+  HEAD per key: s3://nemar denies anonymous ListBucket, so a missing key answers
+  403 and 403 also means private, expired, or signed without a session token.
+
+Examples:
+  $ nemar admin fleet key-registration --prefix on --limit 10
+  $ nemar admin fleet key-registration --prefix on --limit 10 --apply
+  $ nemar admin fleet key-registration on000246 --apply
+`,
+  )
+  .action(async (datasetIds: string[], options) => {
+    if (!requireAuth()) return;
+    const { bucketObjectSource, sweepKeyRegistration } = await import(
+      "../lib/fleet-key-registration.js"
+    );
+    const { CLI_LIVE_DATASETS } = await import("../lib/fleet.js");
+
+    let targets = datasetIds;
+    if (targets.length === 0) {
+      const spinner = ora("Fetching dataset list...").start();
+      try {
+        const ids: string[] = [];
+        for (let offset = 0; ; offset += 200) {
+          const page = await listDatasets({ limit: 200, offset });
+          ids.push(...page.datasets.map((d) => d.dataset_id));
+          // `?? Infinity`, not `?? ids.length`: an absent total would otherwise end
+          // the loop after the first page and silently sweep 200 datasets.
+          if (
+            page.datasets.length < 200 ||
+            ids.length >= (page.total_count ?? Number.POSITIVE_INFINITY)
+          )
+            break;
+        }
+        targets = ids.filter((id) => id.startsWith(options.prefix)).sort();
+        spinner.succeed(`${targets.length} dataset(s) with prefix ${options.prefix}`);
+      } catch (err) {
+        spinner.fail(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    }
+    if (!options.force) {
+      targets = targets.filter((id) => !CLI_LIVE_DATASETS.has(id));
+    }
+    if (options.limit) targets = targets.slice(0, Number(options.limit));
+    if (targets.length === 0) {
+      console.log(chalk.yellow("No datasets to act on."));
+      return;
+    }
+
+    if (options.apply && options.push !== false) {
+      // A push per repository starts that repository's CI (ADR 0020).
+      const answer = await confirm(
+        `Register keys and push the git-annex branch for ${targets.length} dataset(s)? That is ${targets.length} push(es), each starting that dataset's CI.`,
+        options,
+      );
+      if (answer !== "confirmed") {
+        console.log(chalk.yellow(`${answer}; nothing was changed.`));
+        return;
+      }
+    }
+
+    const workRoot = options.dir ?? mkdtempSync(join(tmpdir(), "nemar-key-registration-"));
+    mkdirSync(workRoot, { recursive: true });
+    console.log();
+    const sweep = await sweepKeyRegistration(targets, bucketObjectSource(), {
+      workRoot,
+      apply: Boolean(options.apply),
+      push: options.push !== false,
+      includeIncomplete: Boolean(options.includeIncomplete),
+      concurrency: Number(options.concurrency) || 4,
+      onDataset: (outcome, done, total) => {
+        const label =
+          outcome.action === "failed"
+            ? chalk.red(outcome.datasetId)
+            : outcome.action === "repaired" || outcome.action === "would-repair"
+              ? chalk.green(outcome.datasetId)
+              : chalk.dim(outcome.datasetId);
+        const detail = outcome.error ?? outcome.notes[0] ?? outcome.action;
+        console.log(`${chalk.dim(`[${done}/${total}]`)} ${label} ${chalk.dim(detail)}`);
+      },
+    });
+
+    console.log();
+    for (const [action, count] of Object.entries(sweep.tally)) {
+      if (count > 0) console.log(`  ${action.padEnd(24)} ${count}`);
+    }
+    console.log(`  ${"keys registered".padEnd(24)} ${sweep.keysRegistered}`);
+    if (options.json) {
+      writeFileSync(options.json, JSON.stringify(sweep, null, 2));
+      console.log(chalk.dim(`\n  Report written to ${options.json}`));
+    }
+    if (!options.apply) {
+      console.log(chalk.dim("\nRead-only: nothing was changed. Add --apply to repair a batch."));
+    }
+    if (sweep.tally.failed > 0) process.exitCode = 1;
+  });
 
 adminCommand.addCommand(fleetCommand);
 
