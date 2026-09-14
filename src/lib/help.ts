@@ -16,6 +16,7 @@
 
 import chalk from "chalk";
 import { type Argument, Command, type Help, type Option } from "commander";
+import { COMMON_COMMANDS } from "./help-groups.js";
 
 /**
  * True when the user passed --help-all anywhere on the command line.
@@ -76,6 +77,19 @@ Command.prototype.addHelpText = function (
 // Color help formatter
 // ============================================================================
 
+/**
+ * A command's path below the program name, space-separated, as
+ * {@link COMMON_COMMANDS} keys it: `""` for the root program, `"dataset"`,
+ * `"dataset publish"`. Walks `parent` rather than reading any private field.
+ */
+export function groupKey(cmd: Command): string {
+  const parts: string[] = [];
+  for (let node: Command | null = cmd; node?.parent; node = node.parent) {
+    parts.unshift(node.name());
+  }
+  return parts.join(" ");
+}
+
 /** The formatHelp override for color-coded help output. */
 const colorFormatHelp = {
   formatHelp(cmd: Command, helper: Help): string {
@@ -87,11 +101,25 @@ const colorFormatHelp = {
     // Format a term+description pair.
     // Uses the plain (uncolored) term for padding calculation, but the
     // colored term for display.
+    //
+    // Both the padding AND the wrap run on the plain string: Commander's
+    // `wrap` measures with `.length`, which counts the ~19 characters of
+    // ANSI escapes a colored term carries as if they occupied columns, so
+    // wrapping the colored string broke every description onto a new line
+    // about 20 columns early (visible on any colored `nemar dataset
+    // --help`). The term is always a prefix of the wrapped result and
+    // wrapping never inserts anything ahead of it, so swapping the colored
+    // term back in afterwards is a pure substitution.
     function formatItem(plainTerm: string, coloredTerm: string, description: string): string {
       if (description) {
         const pad = " ".repeat(Math.max(0, termWidth + itemSeparatorWidth - plainTerm.length));
-        const fullText = `${coloredTerm}${pad}${description}`;
-        return helper.wrap(fullText, helpWidth - itemIndentWidth, termWidth + itemSeparatorWidth);
+        const fullText = `${plainTerm}${pad}${description}`;
+        const wrapped = helper.wrap(
+          fullText,
+          helpWidth - itemIndentWidth,
+          termWidth + itemSeparatorWidth,
+        );
+        return coloredTerm + wrapped.slice(plainTerm.length);
       }
       return coloredTerm;
     }
@@ -129,16 +157,45 @@ const colorFormatHelp = {
       output.push(chalk.bold("Options:"), formatList(optionList), "");
     }
 
-    // Commands (subcommands), sorted alphabetically for consistent help output
-    const sortedCommands = helper
-      .visibleCommands(cmd)
-      .sort((a: Command, b: Command) => a.name().localeCompare(b.name()));
-    const commandList = sortedCommands.map((subCmd: Command) => {
+    // Commands (subcommands). Groups named in COMMON_COMMANDS lead with the
+    // handful of commands people actually type and fold the rest into a
+    // names-only line; every other group lists everything, sorted
+    // alphabetically for consistent help output.
+    const byName = (a: Command, b: Command): number => a.name().localeCompare(b.name());
+    const describe = (subCmd: Command): string => {
       const plain = helper.subcommandTerm(subCmd);
       return formatItem(plain, chalk.bold.cyan(plain), helper.subcommandDescription(subCmd));
-    });
-    if (commandList.length > 0) {
-      output.push(chalk.bold("Commands:"), formatList(commandList), "");
+    };
+
+    const visible = helper.visibleCommands(cmd);
+    const common = HELP_ALL ? undefined : COMMON_COMMANDS[groupKey(cmd)];
+    if (common) {
+      const found = new Map(visible.map((sub: Command) => [sub.name(), sub]));
+      const lead = common
+        .map((name) => found.get(name))
+        .filter((sub): sub is Command => sub !== undefined);
+      const leadNames = new Set(lead.map((sub) => sub.name()));
+      // Commander's built-in `help [command]` is excluded from the overflow
+      // line: it is not a command anyone is hunting for, and `-h` in the
+      // Options block above already says the same thing. `--help-all` still
+      // lists it, like every other folded command.
+      const rest = visible
+        .filter((sub: Command) => !leadNames.has(sub.name()) && sub.name() !== "help")
+        .sort(byName);
+
+      if (lead.length > 0) {
+        output.push(chalk.bold("Commands:"), formatList(lead.map(describe)), "");
+      }
+      if (rest.length > 0) {
+        const names = rest.map((sub: Command) => sub.name()).join(", ");
+        output.push(
+          chalk.bold("More commands") + chalk.dim(" (--help-all for details):"),
+          helper.wrap(names, helpWidth - itemIndentWidth, 0).replace(/^/gm, "  "),
+          "",
+        );
+      }
+    } else if (visible.length > 0) {
+      output.push(chalk.bold("Commands:"), formatList([...visible].sort(byName).map(describe)), "");
     }
 
     return output.join("\n");
