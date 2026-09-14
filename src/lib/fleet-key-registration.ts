@@ -13,7 +13,7 @@
  * every clone goes to upstream and the archive's independence from OpenNeuro is
  * not real.
  *
- * Two rules this module will not bend (ADR 0060):
+ * Two rules this module will not bend (ADR 0061):
  *
  *  1. **What the bucket holds is established by listing it, once, with
  *     credentials.** Not by a per-key anonymous HEAD: `s3://nemar` denies

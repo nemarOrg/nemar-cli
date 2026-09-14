@@ -98,7 +98,8 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0057](0057-docs-are-the-canonical-surface-and-gated-content-is-private-at-source.md) - Docs are the canonical surface, and gated content is private at source
 - [ADR 0058](0058-what-moves-to-the-private-side.md) - What moves to the private side, and what deliberately does not
 - [ADR 0059](0059-one-docs-repo-private-at-source-public-at-the-url.md) - One docs repo, private at source, public at the URL
-- [ADR 0060](0060-a-registration-is-read-back-and-an-incomplete-dataset-is-not-partly-repaired.md) - A registration is read back from the location log, and a dataset the bucket cannot account for is never partly repaired
+- [ADR 0060](0060-an-imported-tree-is-brought-onto-nemars-annex-policy-in-prepare.md) - An imported tree is brought onto NEMAR's annex policy in prepare, and inherited `.gitattributes` governance is stripped
+- [ADR 0061](0061-a-registration-is-read-back-and-an-incomplete-dataset-is-not-partly-repaired.md) - A registration is read back from the location log, and a dataset the bucket cannot account for is never partly repaired
 
 ## Backfill note (2026-07-31)
 

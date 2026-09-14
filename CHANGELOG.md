@@ -41,7 +41,7 @@ earlier releases are described only by their generated notes.
   or a signature with no session token returns. A dataset with any key the bucket cannot
   account for is reported and skipped by default, because that is content which was never
   transferred (#1396) rather than a registration that was lost, and writing the remaining
-  registrations would make it look repaired. Both rules are ADR 0060.
+  registrations would make it look repaired. Both rules are ADR 0061.
 
 ### Fixed
 
@@ -63,6 +63,123 @@ earlier releases are described only by their generated notes.
   practice, since Cloudflare's own per-address ceilings and the per-email limit on code
   requests both still applied, and this API is read-only for anyone without a key; recorded
   because it is a real change in how those routes are throttled.
+
+- **An OpenNeuro import no longer leaves motion recordings in the git repository, and
+  NEMAR's annex policy now actually governs an imported dataset.** Two separate holes,
+  both closed in the import's prepare phase (#1159, ADR 0060). First, a `_motion.tsv`
+- **A dataset content write now names the branch it means, and a repository pointed at
+  the wrong branch is repaired instead of renamed** (#1386). `createOrUpdateFile` left
+  `branch` optional and omitted it from the request, so the GitHub Contents API wrote
+  to whatever GitHub calls the repository's default branch, while `getFileContent`
+  read `main`. Sixteen imported repositories have `default_branch = git-annex` --
+  `createRepository` uses `auto_init: false`, so GitHub adopted whichever branch their
+  first push happened to carry -- and on fourteen of them the publication
+  orchestrator's two DOI writes therefore read `main` and wrote `git-annex`: those
+  datasets still advertise OpenNeuro's DOI on `main` while NEMAR's concept DOI and its
+  README badge sit on a branch nothing reads. Writes now default to `main` like reads,
+  and the two publication sites name it explicitly. `ensureMainBranch` also stops
+  renaming in the one case where renaming is wrong: when `main` already exists the
+  repository is merely pointed elsewhere, so the default moves to it; renaming stays
+  for the case it was written for, a dataset branch actually called `master`.
+  The fourteen datasets were then repaired with
+  `scripts/repair-doi-metadata.ts`, which applies the same rule against main's
+  current content rather than copying June's stranded blobs: `DatasetDOI` became the
+  concept DOI, the OpenNeuro DOI moved to `SourceDatasets`, and the badge went to the
+  top of `README.md`. Two of the sixteen are absent from the catalog and were skipped
+  rather than guessed at. Each repair was confirmed by reading `main` back, and all
+  fourteen BIDS validations passed afterwards. The script requires **two** witnesses
+  to agree before it writes: NEMAR's catalog and the value publish actually wrote,
+  which for these repositories is the copy stranded on `git-annex`. A dataset where
+  they disagree is reported and skipped, because a re-minted or rolled-back DOI would
+  otherwise be written confidently onto published metadata and the post-write check,
+  comparing `main` against the same catalog value, would agree with itself. For the
+  same reason `--apply` refuses `--scan`: discovery is a sweep, and writing to
+  published metadata is done one named dataset at a time.
+  `ensureMainBranch` now reports which of the two things it did -- `repointed` when it
+  moved the default to an existing `main`, `renamed` only when it renamed -- because
+  both spellings reach an operator-facing audit trail, and one that says a branch was
+  renamed when none was is the same class of misdirection that made this bug hard to
+  find.
+  under OpenNeuro's ~1 MB bar arrived as a plain git blob and stayed one -- 893 of them,
+  675 MB, in `ds007788` alone; those files are now annexed and their content uploaded
+  from the clone, and an import that cannot upload them fails instead of publishing a
+  pointer with nothing behind it. Second, and previously unnoticed: upstream ships a
+  `.gitattributes` whose `annex.largefiles` setting **outranks** the one
+  `configureLargefiles` writes, so ADR 0031's policy had no effect on any imported
+  repository -- the next motion file added to one would have repeated the original bug.
+  The inherited attribute is now replaced by NEMAR's own expression, which the import
+  writes and then reads back before continuing: stripping alone would have been worse
+  than leaving it, because with `annex.largefiles` set nowhere git-annex annexes
+  everything, including the metadata a clone has to be able to read. This is a forward
+  fix, so an imported repository does not shrink -- upstream's blobs stay in the
+  history it came with. The 600 imported datasets that still carry upstream's
+  attributes are tracked in #1374, and `on007788`'s own data migration in #1159.
+- **`nemar admin annex-normalize <id>` applies the same fix to a dataset that already
+  exists**, which is how `on007788`'s 893 git-resident recordings and the imported
+  fleet get migrated. It is a forward fix by construction: a published version
+  manifest addresses a git-resident file by its tag-pinned `raw.githubusercontent.com`
+  URL, so history is never rewritten and those URLs keep resolving. `--dry-run`
+  reports the plan; a clone left dirty by an interrupted attempt is refused rather
+  than mistaken for a dataset with nothing left to migrate.
+  both closed in the import's prepare phase (#1159, ADR 0058). First, a `_motion.tsv`
+- **A dataset migration no longer hands git-annex a temporary key without its session
+  token** (#1380). `normalize-dataset.ts` enabled the S3 remote with credentials minted
+  for the dataset and then let the transfer inherit the environment, where there were
+  none: git-annex fell back to the key and secret `enableremote` had cached, signed
+  without the session token that makes them valid, and S3 refused every request with a
+  bare 403 -- which was mistaken for the API's S3 identity not reaching imported
+  (`on######`) prefixes. It does reach them: the identity covers the bucket and the
+  per-request session policy is what narrows it, verified by HEAD on the same object
+  with the same credentials returning 200 with the token and 403 without. The
+  credentials are now threaded to the transfer; the branch that obtains them is the
+  branch that states how the bytes move, so there is no default left to forget; a
+  temporary key with no session token is refused before any transfer is attempted; and
+  the migration probes the prefix before annexing anything, so a refusal costs one HEAD
+  rather than an hour. `nemar admin s3 credential-check <id>` reports the same probe on
+  demand. A dataset with no data to move now needs no credentials at all, and a policy
+  that changed only the git-annex branch is pushed rather than left local.
+- **A migration is no longer declared done on a check that cannot fail meaningfully**
+  (#1380, #1392). The step that confirmed the uploaded content was
+  `git annex fsck --from nemar-s3`, which is the one question git-annex cannot answer
+  here: `enableremote` caches the key and secret with nowhere to put the session token,
+  so fsck signs without one and S3 returns 403 -- the same 403 it returns for an object
+  that is not there. A red result therefore did not mean the content was missing, and a
+  green one would not have meant it was present. `on006979`'s migration is what surfaced
+  it: the PDF was in the bucket and the location log recorded it, and the run still
+  reported `fsck: 1 failed`. The check is now a HEAD carrying the credentials that moved
+  the bytes, `absent` and `unconfirmed` are kept apart rather than collapsed, and it runs
+  **before** the push instead of after -- a tree naming keys whose content never arrived
+  is what stranded `on003490` and `on005121` behind a permanent DOI, and the clone is
+  still re-runnable right up until it is pushed. For a remote whose credentials git-annex
+  does hold in full, the verifier reads the location log after fsck has pruned it, since
+  fsck only checks claims that were already made and an upload that moved nothing makes
+  none.
+- **The per-user IAM provisioning that STS replaced is gone from the backend** rather
+  than sitting there with no callers (#1380). `generateS3PolicyDocument`,
+  `generateAdminS3PolicyDocument`, `createIamUser`, `createAccessKey`, `putUserPolicy`
+  and `generateIamUsername` had no call site outside their own module; the two
+  generators are why #1380 was first read as an identity-policy gap, since they look
+  like the code that would write one and nothing runs them. Revocation stays: an
+  account provisioned under the old scheme still carries an `aws_iam_username` in D1
+  and an IAM user in the account, and deleting it has to take both away.
+- **`nemar admin fleet annex-policy` reports, and fixes, the datasets NEMAR's annex
+  policy does not actually govern** (#1374). The sweep reads two things per repository
+  straight from GitHub, without cloning it: every tracked `.gitattributes`, and the
+  `annex.largefiles` the git-annex branch configures. Measured across the fleet on
+  2026-09-13: of 600 imported (`on######`) datasets, 599 configure **no** expression at
+  all and carry upstream's attributes instead (693 files, 6,094 rules), and one --
+  `on007788`, migrated in #1159 -- is compliant. The 198 uploaded (`nm######`) datasets
+  all configure one, but 195 configure a version written before `*_motion.tsv` joined
+  the policy, and 29 of those predate the metadata exclusions entirely. So a motion
+  recording added to almost any dataset in the fleet today would still land in git,
+  which is #1158 with a wider blast radius than #1159 closed. The fix per repository is
+  the import's own: strip the inherited attributes, write NEMAR's expression, one
+  commit, no data moved and no S3 traffic. Three datasets (`on006979`, `nm000180`,
+  `nm000228`) also keep data in git and are reported and skipped rather than
+  half-fixed: those need the upload leg, which is `nemar admin annex-normalize <id>`.
+  Read-only by default, `--apply` in batches (ADR 0020: a push per repository starts
+  that repository's BIDS validation), and every applied dataset is verified by reading
+  GitHub back.
 
 ## 0.10.3 - 2026-09-10
 

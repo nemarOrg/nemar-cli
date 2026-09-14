@@ -1,4 +1,4 @@
-# ADR 0060: A registration is read back from the location log, and a dataset the bucket cannot account for is never partly repaired
+# ADR 0061: A registration is read back from the location log, and a dataset the bucket cannot account for is never partly repaired
 
 **Status:** accepted
 **Date:** 2026-09-14

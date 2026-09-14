@@ -9,6 +9,7 @@
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { chunkAddTargets } from "./init.js";
 import { shouldAnnex } from "./policy.js";
 import { runCommand } from "./run-command.js";
 import { type S3Credentials, awsCredentialEnv } from "./s3-remote.js";
@@ -997,4 +998,123 @@ export async function batchSetKeysPresent(
     failed: missing.length,
     missing: missing.slice(0, 10),
   };
+}
+
+/**
+ * Map each given working-tree path to the annex key holding its content.
+ *
+ * `git annex find` is the oracle rather than `readlink` on the symlink: a repo
+ * on an adjusted-unlock branch stores a pointer file, not a symlink, so reading
+ * the link target silently finds nothing there (the same trap `findUnannexedData`
+ * documents).
+ *
+ * **Presence-filtered, deliberately.** Bare `git annex find` reports only files
+ * whose content is in the local annex, so a path is absent from the map when it
+ * is still in plain git AND when it is annexed with the content elsewhere. That
+ * makes this "annexed and held here", which is the stronger question for a caller
+ * about to upload from this clone -- it can fail closed, never open. A caller
+ * that wants every annexed path regardless of presence wants
+ * `listAnnexedPaths`, which passes `--include '*'`.
+ *
+ * A path git itself does not know is an error, not an absence: `git annex find`
+ * exits non-zero on an unmatched pathspec and this throws.
+ *
+ * Paths are passed in argv-safe chunks; a dataset can name thousands at once.
+ */
+export async function getAnnexKeysForPaths(
+  datasetPath: string,
+  paths: string[],
+): Promise<Map<string, string>> {
+  const keys = new Map<string, string>();
+  if (paths.length === 0) return keys;
+
+  for (const chunk of chunkAddTargets(paths)) {
+    const { stdout, exitCode, stderr } = await runCommand(
+      ["git", "annex", "find", "--format=${key}\\t${file}\\n", "--", ...chunk],
+      { cwd: datasetPath },
+    );
+    if (exitCode !== 0) {
+      throw new Error(`git annex find failed: ${stderr.trim() || `exit ${exitCode}`}`);
+    }
+    for (const line of stdout.split("\n")) {
+      if (!line) continue;
+      const tab = line.indexOf("\t");
+      if (tab <= 0) continue;
+      keys.set(line.slice(tab + 1), line.slice(0, tab));
+    }
+  }
+  return keys;
+}
+
+/**
+ * Every annexed working-tree path mapped to its key, whether or not the content
+ * is in this clone.
+ *
+ * The presence-independent counterpart to {@link getAnnexKeysForPaths}. `--include
+ * '*'` is what makes it presence-independent, the same way `listAnnexedPaths` does
+ * it. A re-import needs this shape: its tree is full of annexed paths whose
+ * content lives only in S3, and their keys still have to reach the manifest.
+ */
+export async function listAnnexedKeys(datasetPath: string): Promise<Map<string, string>> {
+  const { stdout, exitCode, stderr } = await runCommand(
+    ["git", "annex", "find", "--include", "*", "--format=${key}\\t${file}\\n"],
+    { cwd: datasetPath },
+  );
+  if (exitCode !== 0) {
+    throw new Error(`git annex find failed: ${stderr.trim() || `exit ${exitCode}`}`);
+  }
+  const keys = new Map<string, string>();
+  for (const line of stdout.split("\n")) {
+    if (!line) continue;
+    const tab = line.indexOf("\t");
+    if (tab <= 0) continue;
+    keys.set(line.slice(tab + 1), line.slice(0, tab));
+  }
+  return keys;
+}
+
+/**
+ * Copy the annexed content of specific paths to a remote.
+ *
+ * The path-scoped sibling of {@link copyToAnnexRemote}, which copies the whole
+ * tree. The import path needs the scoped form (#1159): its clone holds content
+ * for the handful of files it just annexed and nothing else, and `copy --to .`
+ * would walk every upstream pointer in the dataset to find that out (it skips
+ * content-absent files in silence, so the cost is the walk, not the noise).
+ *
+ * `filesCopied` counts the `copy <path> ok` lines git-annex printed, which means
+ * "the remote has it", not "it was transferred now" -- an already-present key
+ * prints the same line. It is a number for the operator, NOT evidence the
+ * content arrived: a path git-annex does not consider annexed is skipped
+ * silently with exit 0 and simply never appears. A caller that needs proof
+ * should ask the location log afterwards (`listAnnexedPaths(path, remote)`).
+ */
+export async function copyPathsToAnnexRemote(
+  datasetPath: string,
+  remoteName: string,
+  paths: string[],
+  jobs = 4,
+  credentials?: S3Credentials,
+): Promise<{ success: boolean; error?: string; filesCopied: number }> {
+  if (paths.length === 0) return { success: true, filesCopied: 0 };
+
+  const env = awsCredentialEnv(credentials);
+  let filesCopied = 0;
+  try {
+    for (const chunk of chunkAddTargets(paths)) {
+      const { stdout, stderr, exitCode } = await runCommand(
+        ["git", "annex", "copy", "--to", remoteName, "-J", jobs.toString(), "--", ...chunk],
+        { cwd: datasetPath, env },
+      );
+      if (exitCode !== 0) {
+        return { success: false, error: extractCopyError(stdout, stderr), filesCopied };
+      }
+      const copied = stdout.match(/^copy .+ ok$/gm);
+      filesCopied += copied ? copied.length : 0;
+    }
+    return { success: true, filesCopied };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { success: false, error: msg || "Unknown error during copy", filesCopied };
+  }
 }
