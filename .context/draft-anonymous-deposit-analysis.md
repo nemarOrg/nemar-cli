@@ -234,8 +234,39 @@ who installed the CLI and nothing else -- so it is not a cost of this design.
 What remains is that the path is only as good as A4: today it would fetch the recordings and
 404 on the metadata.
 
-**A4. The data plane serves most of a dataset FROM GitHub, so a private repository breaks it.**
-This is the blocker, and it is larger than it looks.
+**A4. The data plane hands clients a GitHub URL, against its own stated contract.**
+This is the blocker, and it is larger than it looks --
+and it is not really an anonymity problem, which is why it should be fixed on its own terms.
+`buildBytesUrl` in `backend/src/services/data-router.ts` documents `bytes_url` as
+"a STABLE, storable contract URL, so it is host-invariant: always the canonical
+data.nemar.org regardless of which host [...] actually served the manifest",
+and then, eight lines later, sends git-backed files to `raw.githubusercontent.com`.
+The rule is already written down; the `git:` branch is the one place that breaks it.
+
+The correction is that the URL a client is handed is always `data.nemar.org/<id>/<version>/<path>`,
+and whether the Worker streams the bytes or redirects to a backing store
+is a server-side decision per file class:
+stream the small git-tracked metadata, keep the redirect for the large annexed data.
+That is the rule the Zarr contract already follows
+(`contract_base` is the only URL a client may hardcode);
+the file plane should not answer it differently.
+
+Three things it fixes that have nothing to do with anonymity:
+the publish-time canary in `services/manifest.ts` exists only because the manifest embeds a
+third party's URL, and can go;
+per-file access becomes countable at all, since `recordAccess` fires on one route today and
+no file download is counted on either backing store;
+and the website's advertised
+`jq -r '.[].bytes_url' | wget` recipe stops silently depending on GitHub.
+
+**The canary is also upstream of the serving problem.**
+`verifyGitBackedFiles` HEADs a sample of `git:` entries against `raw.githubusercontent.com`
+at manifest-write time and refuses to write the manifest otherwise,
+with a failure message that already names the case:
+"the version tag may not exist on GitHub yet, the repo may be private, or the blob may have
+been removed by a retag".
+So under a private repository the manifest is never written at all.
+This is not merely a serving problem, and it is why A4 has to be phase one rather than a follow-up.
 `buildRedirectUrl` in `backend/src/services/data-router.ts` sends git-tracked files to
 `raw.githubusercontent.com` and only annexed files to S3,
 and its own docstring names the invariant it depends on:
