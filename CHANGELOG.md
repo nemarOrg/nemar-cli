@@ -41,7 +41,11 @@ earlier releases are described only by their generated notes.
 
 - **An OpenNeuro import no longer leaves motion recordings in the git repository, and
   NEMAR's annex policy now actually governs an imported dataset.** Two separate holes,
+<<<<<<< HEAD
+  both closed in the import's prepare phase (#1159, ADR 0058). First, a `_motion.tsv`
+=======
   both closed in the import's prepare phase (#1159, ADR 0060). First, a `_motion.tsv`
+>>>>>>> origin/dev
   under OpenNeuro's ~1 MB bar arrived as a plain git blob and stayed one -- 893 of them,
   675 MB, in `ds007788` alone; those files are now annexed and their content uploaded
   from the clone, and an import that cannot upload them fails instead of publishing a
@@ -63,6 +67,27 @@ earlier releases are described only by their generated notes.
   URL, so history is never rewritten and those URLs keep resolving. `--dry-run`
   reports the plan; a clone left dirty by an interrupted attempt is refused rather
   than mistaken for a dataset with nothing left to migrate.
+<<<<<<< HEAD
+- **`nemar admin fleet annex-policy` reports, and fixes, the datasets NEMAR's annex
+  policy does not actually govern** (#1374). The sweep reads two things per repository
+  straight from GitHub, without cloning it: every tracked `.gitattributes`, and the
+  `annex.largefiles` the git-annex branch configures. Measured across the fleet on
+  2026-09-13: of 600 imported (`on######`) datasets, 599 configure **no** expression at
+  all and carry upstream's attributes instead (693 files, 6,094 rules), and one --
+  `on007788`, migrated in #1159 -- is compliant. The 198 uploaded (`nm######`) datasets
+  all configure one, but 195 configure a version written before `*_motion.tsv` joined
+  the policy, and 29 of those predate the metadata exclusions entirely. So a motion
+  recording added to almost any dataset in the fleet today would still land in git,
+  which is #1158 with a wider blast radius than #1159 closed. The fix per repository is
+  the import's own: strip the inherited attributes, write NEMAR's expression, one
+  commit, no data moved and no S3 traffic. Three datasets (`on006979`, `nm000180`,
+  `nm000228`) also keep data in git and are reported and skipped rather than
+  half-fixed: those need the upload leg, which is `nemar admin annex-normalize <id>`.
+  Read-only by default, `--apply` in batches (ADR 0020: a push per repository starts
+  that repository's BIDS validation), and every applied dataset is verified by reading
+  GitHub back.
+=======
+>>>>>>> origin/dev
 - **A dataset migration no longer hands git-annex a temporary key without its session
   token** (#1380). `normalize-dataset.ts` enabled the S3 remote with credentials minted
   for the dataset and then let the transfer inherit the environment, where there were

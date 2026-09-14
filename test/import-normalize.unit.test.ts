@@ -31,6 +31,17 @@ describe("stripLargefilesAttributes", () => {
     expect(stripped).toBe(1);
   });
 
+  test("a file whose every line was a rule is left empty, not holding a blank line", () => {
+    // DataLad writes exactly this into `.datalad/.gitattributes` in every dataset it
+    // creates, so it is 169 of the fleet's files, not a hypothetical. An empty file
+    // says what no file says; one blank line reads as a hand-edit.
+    const { content, stripped } = stripLargefilesAttributes(
+      "config annex.largefiles=nothing\nmetadata/aggregate* annex.largefiles=nothing\n",
+    );
+    expect(content).toBe("");
+    expect(stripped).toBe(2);
+  });
+
   test("keeps the git-plumbing line untouched", () => {
     const input = "**/.git* annex.largefiles=nothing\n.gitattributes annex.largefiles=nothing\n";
     const { content, stripped } = stripLargefilesAttributes(input);
