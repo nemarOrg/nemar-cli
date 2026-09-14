@@ -27,15 +27,15 @@ import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import {
   type BucketPolicy,
+  MAX_BUCKET_POLICY_BYTES,
+  PUBLIC_ACCESS_SID,
   type PolicyStatement,
+  STAGING_PREFIX,
   buildPublicAccessStatement,
   derivePublicPrefixes,
-  listPrivateDatasets,
-  MAX_BUCKET_POLICY_BYTES,
-  policyByteSize,
-  PUBLIC_ACCESS_SID,
-  STAGING_PREFIX,
   isDatasetPrivate,
+  listPrivateDatasets,
+  policyByteSize,
 } from "../backend/src/services/bucket-policy.ts";
 
 const POLICY_VERSION = "2012-10-17";

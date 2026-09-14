@@ -28,7 +28,7 @@
  *   1. Wipes the local D1 state and replays every migration in order through
  *      `wrangler d1 execute --local --file`, one file at a time, so a failure
  *      names the file that broke.
- *   2. Builds the same schema with bun:sqlite and diffs the two catalogues:
+ *   2. Builds the same schema with bun:sqlite and diffs the two catalogs:
  *      the object inventory (`sqlite_master` type + name) and every table's
  *      COLUMNS (`PRAGMA table_info`).
  *
@@ -80,7 +80,7 @@ function migrationFiles(): string[] {
  *
  * INVARIANT: no migration may contain a multi-line string literal whose
  * continuation line starts with `--`. Such a line would be stripped as a
- * comment and silently corrupt the string VALUE, and the catalogue diff below
+ * comment and silently corrupt the string VALUE, and the catalog diff below
  * would not catch it -- that compares schema, not the data a migration writes.
  */
 function stripFullLineComments(sql: string): string {
@@ -129,14 +129,12 @@ function columnSignature(cols: ColumnRow[]): string {
     .join(" | ");
 }
 
-function bunSqliteCatalogue(): { objects: string[]; columns: Map<string, string> } {
+function bunSqliteCatalog(): { objects: string[]; columns: Map<string, string> } {
   const db = new Database(":memory:");
   for (const file of migrationFiles()) {
     db.exec(readFileSync(join(MIGRATIONS_DIR, file), "utf-8"));
   }
-  const master = db
-    .query<MasterRow, []>("SELECT type, name FROM sqlite_master")
-    .all();
+  const master = db.query<MasterRow, []>("SELECT type, name FROM sqlite_master").all();
   const columns = new Map<string, string>();
   for (const row of master) {
     if (row.type !== "table" || row.name.startsWith("sqlite_")) continue;
@@ -180,16 +178,7 @@ async function main(): Promise<void> {
     const stripped = stripFullLineComments(readFileSync(join(MIGRATIONS_DIR, file), "utf-8"));
     const path = join(tmp, file);
     writeFileSync(path, stripped);
-    const res = await wrangler([
-      "execute",
-      DB_NAME,
-      "-c",
-      CONFIG,
-      "--local",
-      "--file",
-      path,
-      "-y",
-    ]);
+    const res = await wrangler(["execute", DB_NAME, "-c", CONFIG, "--local", "--file", path, "-y"]);
     if (!res.ok) {
       console.error(`\nFAILED on ${file}\n`);
       console.error(res.output.trim());
@@ -206,14 +195,14 @@ async function main(): Promise<void> {
   rmSync(tmp, { recursive: true, force: true });
   console.log("\nAll migrations applied on real D1.");
 
-  // Cross-engine catalogue diff. A mismatch means the two SQLite builds
+  // Cross-engine catalog diff. A mismatch means the two SQLite builds
   // disagreed about what the same files produce.
-  const bun = bunSqliteCatalogue();
+  const bun = bunSqliteCatalog();
   const tableNames = [...bun.columns.keys()].sort();
 
   // One file: the object inventory, then `PRAGMA table_info` per table in a
   // fixed order, so the result sets can be zipped back to table names.
-  const queryPath = join(tmpdir(), "nemar-d1-catalogue.sql");
+  const queryPath = join(tmpdir(), "nemar-d1-catalog.sql");
   writeFileSync(
     queryPath,
     [
@@ -234,7 +223,7 @@ async function main(): Promise<void> {
   ]);
   rmSync(queryPath, { force: true });
   if (!dump.ok) {
-    console.error("Could not read the resulting D1 catalogue:\n", dump.output.trim());
+    console.error("Could not read the resulting D1 catalog:\n", dump.output.trim());
     process.exit(1);
   }
   const jsonStart = dump.output.indexOf("[");
@@ -272,10 +261,12 @@ async function main(): Promise<void> {
   });
 
   if (failed) {
-    console.error("\nCatalogue MISMATCH between real D1 and bun:sqlite.");
+    console.error("\nCatalog MISMATCH between real D1 and bun:sqlite.");
     process.exit(1);
   }
-  console.log(`Catalogue matches bun:sqlite (${bun.objects.length} objects, ${tableNames.length} tables). OK.`);
+  console.log(
+    `Catalog matches bun:sqlite (${bun.objects.length} objects, ${tableNames.length} tables). OK.`,
+  );
 }
 
 await main();

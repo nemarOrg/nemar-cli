@@ -552,9 +552,9 @@ export async function ensureRepoToSpec(
     const r = await ensureMainBranch(repo, pat);
     steps.main_branch = {
       status: "ok",
-      detail: r.renamed ? `renamed from ${r.previousBranch}` : "main",
+      detail: r.changed ? `${r.action} from ${r.previousBranch}` : "main",
     };
-    if (r.renamed) defaultBranch = "main";
+    if (r.changed) defaultBranch = "main";
   } catch (e) {
     steps.main_branch = { status: "failed", detail: errText(e) };
   }
