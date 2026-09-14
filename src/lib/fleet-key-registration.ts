@@ -32,7 +32,8 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { requestUploadCredentials } from "./api/data.js";
 import { listS3ObjectKeys } from "./aws-cli.js";
-import { cloneDataset, pushToGitHub } from "./git-annex/clone-push.js";
+import { pushToGitHub } from "./git-annex/clone-push.js";
+import { getGitHubToken, githubTokenCredentialHelper } from "./git-annex/github.js";
 import { runCommand } from "./git-annex/run-command.js";
 import { batchSetKeysPresent } from "./git-annex/transfer.js";
 
@@ -91,6 +92,59 @@ export function bucketObjectSource(): ObjectSource {
       prefix: creds.s3.prefix,
     });
   };
+}
+
+/**
+ * Clone a dataset for inspection, and return an error string or undefined.
+ *
+ * Deliberately not `cloneDataset`: that runs `git annex init` itself, before any
+ * identity can be configured, and git-annex init COMMITS to the git-annex branch.
+ * On a machine with no `user.email` -- which is what the required CI tier is --
+ * that fails, and the whole repair reports a clone failure for a reason that has
+ * nothing to do with cloning. Doing it here also lets the clone skip blobs, which
+ * matters when the fleet includes datasets of 60,000 keys: nothing here ever wants
+ * annexed content, only the pointers and the location log.
+ */
+async function cloneForRegistration(url: string, datasetPath: string): Promise<string | undefined> {
+  // A token is for GitHub, and only for GitHub: `originUrl` is also a local path
+  // in the tests, and some imported datasets are private, so https needs one.
+  let env: Record<string, string> | undefined;
+  if (/^https:\/\/github\.com\//.test(url)) {
+    const token = process.env.GH_TOKEN?.trim() || (await getGitHubToken()).token;
+    if (token && !/[\s']/.test(token)) {
+      // Via GIT_CONFIG_* rather than argv or the URL, so the token never lands in
+      // a process listing.
+      env = {
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "credential.https://github.com.helper",
+        GIT_CONFIG_VALUE_0: githubTokenCredentialHelper(token),
+      };
+    }
+  }
+  const clone = await runCommand(
+    ["git", "clone", "--quiet", "--filter=blob:none", url, datasetPath],
+    env ? { env } : {},
+  );
+  if (clone.exitCode !== 0) {
+    return clone.stderr.trim() || `git clone exited ${clone.exitCode}`;
+  }
+  if (env) {
+    // The clone-time helper covered only that process; the push needs it too.
+    await runCommand(
+      ["git", "config", "credential.https://github.com.helper", env.GIT_CONFIG_VALUE_0],
+      { cwd: datasetPath },
+    );
+  }
+  // An identity per clone, BEFORE git-annex init, because that commits.
+  await runCommand(["git", "config", "user.email", "nemar-bot@nemar.org"], { cwd: datasetPath });
+  await runCommand(["git", "config", "user.name", "NEMAR"], { cwd: datasetPath });
+  const init = await runCommand(["git", "annex", "init", "--quiet", "fleet-key-registration"], {
+    cwd: datasetPath,
+  });
+  if (init.exitCode !== 0) {
+    return `git annex init failed: ${init.stderr.trim() || `exit ${init.exitCode}`}`;
+  }
+  return undefined;
 }
 
 /** Distinct keys the tree names, sorted. */
@@ -201,15 +255,10 @@ export async function repairDatasetKeyRegistration(
   rmSync(datasetPath, { recursive: true, force: true });
 
   const url = options.originUrl ?? `https://github.com/nemarDatasets/${datasetId}.git`;
-  // `--filter=blob:none` keeps this cheap: the working tree is pointers and the
-  // location log is small, and no annexed content is ever wanted here.
-  const cloned = await cloneDataset(url, datasetPath, { useGitHubToken: true });
-  if (!cloned.success) {
-    return { datasetId, action: "failed", pushed: false, notes, error: cloned.error };
+  const cloned = await cloneForRegistration(url, datasetPath);
+  if (cloned) {
+    return { datasetId, action: "failed", pushed: false, notes, error: cloned };
   }
-  await runCommand(["git", "annex", "init", "--quiet", "fleet-key-registration"], {
-    cwd: datasetPath,
-  });
 
   try {
     const state = await scanDatasetKeyRegistration(datasetId, datasetPath, objects, remoteName);
