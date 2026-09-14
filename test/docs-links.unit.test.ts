@@ -159,11 +159,26 @@ function slugFromPath(relPath: string): string {
   return slug.replace(/\/index$/, "");
 }
 
-/** A URL pathname reduced to the slug Starlight would route it by. */
+/**
+ * A URL pathname reduced to the slug Starlight would route it by.
+ *
+ * `.md` IS STRIPPED, and that is not cosmetic. Epic #1336 phase 2 gave every
+ * page a Markdown mirror at its own path plus `.md`
+ * (`nemarOrg/docs`, `src/pages/[...slug].md.ts`), and those are the URLs an
+ * agent is told to fetch, so they will appear in pointers here. Without this
+ * line the mirror of a page that certainly exists is reported as a broken
+ * pointer, which is how a guard teaches people to ignore it.
+ *
+ * The mirror is generated FROM the same `getCollection('docs')` entry as the
+ * HTML, one for one, so a `.md` URL resolving is exactly equivalent to its page
+ * resolving. `llms.txt` and `sitemap.xml` are not content pages at all and are
+ * excluded before this point.
+ */
 function pathToSlug(pathname: string): string {
   return pathname
     .replace(/\/index\.html$/, "")
     .replace(/\.html$/, "")
+    .replace(/\.md$/, "")
     .replace(/^\/+/, "")
     .replace(/\/+$/, "");
 }
