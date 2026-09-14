@@ -19,6 +19,7 @@ This document contains workflows that have been **tested and validated** through
 8. [Commit Authorship for NEMAR Users](#8-commit-authorship-for-nemar-users)
 9. [Zarr Test-Instance Bootstrap (`hallu-zarr.sh --test`)](#9-zarr-test-instance-bootstrap-hallu-zarrsh---test)
 10. [Zarr Engine-Version Bump (index format v3)](#10-zarr-engine-version-bump-index-format-v3)
+11. [Auditing and Repairing Annex Key Registration](#11-auditing-and-repairing-annex-key-registration)
 
 ---
 
@@ -1337,4 +1338,67 @@ ssh hallu 'tail -f /mnt/local/zarr-state/.nm-zarr.log'
 
 ---
 
-*Last updated: 2026-01-20 (Added workflows 6, 7, 8 from S3 upload debugging)*
+---
+
+## 11. Auditing and Repairing Annex Key Registration
+
+### Key Insight
+
+**A green `git annex` command is not evidence that anything was written, and a 403 from S3 is not evidence that anything is missing.** Both of those cost a fleet-wide repair to learn (#1380, #1392, #1396).
+
+`batchSetKeysPresent` once ran fifty `setpresentkey` processes concurrently and counted every exit-0. They all exit 0; their writes to the shared git-annex branch journal do not all survive. 528 of 600 imported datasets were published with NEMAR's own copy of their content unadvertised, 720,896 keys, and nothing anywhere reported a problem.
+
+### Asking whether a key is registered
+
+```bash
+git clone --filter=blob:none https://github.com/nemarDatasets/<id>.git ds && cd ds
+git config user.email nemar-bot@nemar.org && git config user.name NEMAR   # BEFORE annex init: it commits
+git annex init --quiet audit
+
+uuid=$(git show git-annex:remote.log | awk '/name=nemar-s3/ {print $1}' | head -1)
+git annex find --include '*' --format='${key}\n' | sort -u > annexed.txt
+git annex find --include '*' --in "$uuid" --format='${key}\n' | sort -u > registered.txt
+```
+
+- `--include '*'` and NOT `--all`: `git annex find` rejects `--all` (`fsck` accepts it). Without `--include '*'`, `find` lists only content present locally, which in a fresh clone is nothing.
+- `--in` accepts a bare UUID as well as a remote name.
+- A key that no file references is invisible to `find` entirely. `git annex whereis --key <KEY>` is the only way to ask about those.
+- `git config remote.nemar-s3.annex-uuid` is **absent in a clone**: only the repository that ran `initremote`/`enableremote` has it. `remote.log` on the git-annex branch is the portable source.
+
+### Asking whether the bucket holds a key
+
+**List once with credentials. Do not HEAD per key.**
+
+```bash
+aws s3api list-objects-v2 --bucket nemar --prefix "<id>/objects/" \
+  --query 'Contents[].Key' --output text --page-size 1000
+```
+
+`s3://nemar` denies anonymous `ListBucket`, so S3 answers a **missing key with 403, not 404** — and 403 is equally what a private dataset, an expired session, or a signature with no session token returns. A per-key HEAD therefore cannot distinguish "absent" from "cannot ask", and it is slower besides (one dataset has 59,939 keys).
+
+If you must probe anonymously, **probe a control key first**: one the location log records. It must return 200. Only then does a 403 on the key under test mean absent.
+
+### Repairing
+
+```bash
+nemar admin fleet key-registration --prefix on --limit 10          # read-only report
+nemar admin fleet key-registration --prefix on --limit 10 --apply  # register and push
+```
+
+It registers with one `setpresentkey --batch` process, re-reads the location log, and **pushes only if the log records every key**. A dataset with any annexed key the bucket cannot account for is reported and skipped: that is missing content (#1396), and writing the surviving registrations would make it look repaired.
+
+### Gotchas and Warnings
+
+- **`git annex fsck --from nemar-s3` cannot verify an S3 remote enabled with STS credentials.** `enableremote` caches the key and secret in `.git/annex/creds/<uuid>` with nowhere to put the session token, so fsck signs without one and gets 403 — the same 403 a missing object gets. A red fsck means nothing, and a green one would mean nothing.
+- **`fsck` only examines claims the location log already makes.** An upload that moved nothing makes no claim, so fsck has nothing to check and exits 0. Read the log *after* fsck prunes it, never fsck alone.
+- **`git annex init` commits**, so a clone needs `user.email`/`user.name` before it runs. The required CI tier has no identity configured; `cloneDataset` runs `annex init` internally and so cannot be used where no identity exists.
+- **An unregistered key is usually still fetchable.** Imported repositories carry OpenNeuro's `s3-PUBLIC` remote with `autoenable=true`, so `git annex get` succeeds from upstream. "Not registered at nemar-s3" is not "unfetchable"; only `git annex find --include '*' --not --copies 1` (recorded nowhere at all) is.
+- **A push per repository starts that repository's CI** (ADR 0020). 529 repairs is 529 CI runs; batch it.
+
+### Test Results
+
+Fleet sweep of all 802 dataset repositories, 2026-09-14: 266 fully registered before, 785 after, 519 repaired, 629,620 keys. Verified by re-scanning independently rather than from the run's own tally; the delta matched the repaired count exactly. The 17 not repaired were 16 missing-content datasets (#1396) and one stub repository with no annexed files.
+
+---
+
+*Last updated: 2026-09-14 (Added workflow 11 from the #1392 key-registration sweep)*
