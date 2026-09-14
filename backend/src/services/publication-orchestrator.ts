@@ -23,6 +23,8 @@ import {
 import { type DataCiteEnrichment, nemarMetadataToEnrichment, parseNemarMetadata } from "./datacite";
 import {
   type DoiProvider,
+  applyConceptDoiToDescription,
+  buildDoiBadge,
   createEzidVersionDoi,
   planReadmeBadgeCommit,
   resolveEzidAuth,
@@ -931,40 +933,18 @@ async function stepUpdateMetadata(c: ApproveStepContext): Promise<RespondOutcome
       if (isRespond(descResult)) return descResult;
       const datasetDesc = descResult;
 
-      // Preserve existing DatasetDOI in SourceDatasets before overwriting
-      const existingDoi = datasetDesc.DatasetDOI;
-      if (typeof existingDoi === "string" && existingDoi && existingDoi !== conceptDoi) {
-        const sources: Array<Record<string, unknown>> = Array.isArray(datasetDesc.SourceDatasets)
-          ? [...(datasetDesc.SourceDatasets as Array<Record<string, unknown>>)]
-          : [];
-        const alreadyPresent = sources.some(
-          (s) => typeof s.DOI === "string" && s.DOI === existingDoi,
+      // The rule lives in doi.ts so the #1386 repair applies the same edit.
+      const applied = applyConceptDoiToDescription(datasetDesc, conceptDoi);
+      if (applied.preservedSourceDoi) {
+        console.log(
+          `[publish] Preserved existing DatasetDOI "${applied.preservedSourceDoi}" in SourceDatasets for ${datasetId}`,
         );
-        if (!alreadyPresent) {
-          sources.push({ DOI: existingDoi });
-          datasetDesc.SourceDatasets = sources;
-          console.log(
-            `[publish] Preserved existing DatasetDOI "${existingDoi}" in SourceDatasets for ${datasetId}`,
-          );
-        }
-      }
-
-      datasetDesc.DatasetDOI = conceptDoi;
-
-      // Set default Version if missing so create_tag doesn't need to write a
-      // separate [skip ci] commit (which would prevent the version-doi CI from
-      // triggering on the tag push).
-      if (!datasetDesc.Version) {
-        console.info(
-          `[publish] No Version in dataset_description.json for ${repoName}; defaulting to 1.0.0`,
-        );
-        datasetDesc.Version = "1.0.0";
       }
 
       await createOrUpdateFile(
         repoName,
         "dataset_description.json",
-        JSON.stringify(datasetDesc, null, 2),
+        JSON.stringify(applied.description, null, 2),
         `Update DatasetDOI with concept DOI: ${conceptDoi} [skip ci]`,
         pat,
         // Named, not defaulted: this write read main and used to land wherever
@@ -1013,11 +993,7 @@ async function stepUpdateReadme(c: ApproveStepContext): Promise<RespondOutcome |
       const doiResult = await getConceptDoi("update_readme");
       if (isRespond(doiResult)) return doiResult;
       const conceptDoi = doiResult;
-      const doiUrl = `https://doi.org/${conceptDoi}`;
-      // EZID is the sole provider (ADR 0007, #1182): always the shields.io
-      // badge; the zenodo badge form went with the doi_provider column.
-      const badgeImg = `https://img.shields.io/badge/DOI-${encodeURIComponent(conceptDoi)}-blue`;
-      const doiBadge = `[![DOI](${badgeImg})](${doiUrl})`;
+      const doiBadge = buildDoiBadge(conceptDoi);
 
       const tree = await getTreeAtRef(repoName, "main", pat);
       // Find all README variants in the repo

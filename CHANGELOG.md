@@ -31,8 +31,13 @@ earlier releases are described only by their generated notes.
   renaming in the one case where renaming is wrong: when `main` already exists the
   repository is merely pointed elsewhere, so the default moves to it; renaming stays
   for the case it was written for, a dataset branch actually called `master`.
-  Repairing the fourteen datasets' published metadata is tracked in #1386 and is a
-  separate, authorized run.
+  The fourteen datasets were then repaired with
+  `scripts/repair-doi-metadata.ts`, which applies the same rule against main's
+  current content rather than copying June's stranded blobs: `DatasetDOI` became the
+  concept DOI, the OpenNeuro DOI moved to `SourceDatasets`, and the badge went to the
+  top of `README.md`. Two of the sixteen are absent from the catalog and were skipped
+  rather than guessed at. Each repair was confirmed by reading `main` back, and all
+  fourteen BIDS validations passed afterwards.
 
 ## 0.10.3 - 2026-09-10
 

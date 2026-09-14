@@ -13,8 +13,8 @@
  * Cleanup: bun run scripts/setup-test-users.ts --cleanup
  */
 
-import { hashSync } from "bcryptjs";
 import { createHash, randomBytes } from "crypto";
+import { hashSync } from "bcryptjs";
 
 const TEST_PASSWORD = "TestPassword123!";
 const TEST_USERS = [
@@ -85,7 +85,9 @@ async function main() {
   if (isCleanup) {
     console.log("Cleanup SQL (run with wrangler d1 execute):\n");
     console.log("-- Delete test tokens");
-    console.log("DELETE FROM tokens WHERE user_id IN (SELECT id FROM users WHERE username LIKE 'test-%');");
+    console.log(
+      "DELETE FROM tokens WHERE user_id IN (SELECT id FROM users WHERE username LIKE 'test-%');",
+    );
     console.log("-- Delete test audit logs");
     console.log("DELETE FROM audit_log WHERE resource_id LIKE 'test-%';");
     console.log("-- Delete test users");
@@ -107,8 +109,12 @@ async function main() {
     const approvedAt = user.status === "approved" ? ", datetime('now')" : ", NULL";
     const revokedAt = user.status === "revoked" ? ", datetime('now')" : ", NULL";
 
-    console.log(`INSERT INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)`);
-    console.log(`VALUES ('${user.username}', '${user.email}', '${passwordHash}', '${user.github_username}', '${user.status}', '${user.role}', ${user.email_verified}${approvedAt}${revokedAt});`);
+    console.log(
+      `INSERT INTO users (username, email, password_hash, github_username, status, role, email_verified, approved_at, revoked_at)`,
+    );
+    console.log(
+      `VALUES ('${user.username}', '${user.email}', '${passwordHash}', '${user.github_username}', '${user.status}', '${user.role}', ${user.email_verified}${approvedAt}${revokedAt});`,
+    );
     console.log();
   }
 
@@ -120,7 +126,9 @@ async function main() {
       credentials[user.username] = apiKey.key;
 
       console.log(`INSERT INTO tokens (user_id, api_key_hash, api_key_prefix)`);
-      console.log(`SELECT id, '${apiKey.hash}', '${apiKey.prefix}' FROM users WHERE username = '${user.username}';`);
+      console.log(
+        `SELECT id, '${apiKey.hash}', '${apiKey.prefix}' FROM users WHERE username = '${user.username}';`,
+      );
       console.log();
     }
   }

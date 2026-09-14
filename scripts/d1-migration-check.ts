@@ -134,9 +134,7 @@ function bunSqliteCatalogue(): { objects: string[]; columns: Map<string, string>
   for (const file of migrationFiles()) {
     db.exec(readFileSync(join(MIGRATIONS_DIR, file), "utf-8"));
   }
-  const master = db
-    .query<MasterRow, []>("SELECT type, name FROM sqlite_master")
-    .all();
+  const master = db.query<MasterRow, []>("SELECT type, name FROM sqlite_master").all();
   const columns = new Map<string, string>();
   for (const row of master) {
     if (row.type !== "table" || row.name.startsWith("sqlite_")) continue;
@@ -180,16 +178,7 @@ async function main(): Promise<void> {
     const stripped = stripFullLineComments(readFileSync(join(MIGRATIONS_DIR, file), "utf-8"));
     const path = join(tmp, file);
     writeFileSync(path, stripped);
-    const res = await wrangler([
-      "execute",
-      DB_NAME,
-      "-c",
-      CONFIG,
-      "--local",
-      "--file",
-      path,
-      "-y",
-    ]);
+    const res = await wrangler(["execute", DB_NAME, "-c", CONFIG, "--local", "--file", path, "-y"]);
     if (!res.ok) {
       console.error(`\nFAILED on ${file}\n`);
       console.error(res.output.trim());
@@ -275,7 +264,9 @@ async function main(): Promise<void> {
     console.error("\nCatalogue MISMATCH between real D1 and bun:sqlite.");
     process.exit(1);
   }
-  console.log(`Catalogue matches bun:sqlite (${bun.objects.length} objects, ${tableNames.length} tables). OK.`);
+  console.log(
+    `Catalogue matches bun:sqlite (${bun.objects.length} objects, ${tableNames.length} tables). OK.`,
+  );
 }
 
 await main();
