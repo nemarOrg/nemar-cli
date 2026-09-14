@@ -1203,9 +1203,17 @@ Description:
   always downloaded.)
 
 Requirements:
-  - git-annex installed (NEMAR datasets only)
+  - git-annex installed (NEMAR datasets only), or --http for a file snapshot
   - NEMAR account (for private datasets)
   - AWS CLI recommended for OpenNeuro downloads (falls back to HTTPS)
+
+Without git-annex:
+  --http downloads over plain HTTP with no git, git-annex or GitHub account,
+  and is used automatically when git-annex is missing. It honours the same
+  filters and writes the same BIDS tree, but the result is a file snapshot,
+  not a repository: 'commit', 'push' and 'update' need a git-annex clone.
+  Re-running resumes, since a file already present at its declared size is
+  skipped.
 
 Examples:
   $ nemar dataset download nm000104              # Download NEMAR dataset (skips stimuli/derivatives)
@@ -1215,6 +1223,7 @@ Examples:
   $ nemar dataset download nm000104 --resume     # Resume partial download
   $ nemar dataset download nm000104 --update     # Pull only the version diff
   $ nemar dataset download nm000104 --update --prune  # Plus drop orphan objects
+  $ nemar dataset download nm000104 --http       # No git-annex needed (snapshot)
   $ nemar dataset download nm000104 --subjects sub-01,02      # Only these subjects
   $ nemar dataset download nm000104 --tasks rest --datatypes eeg  # Subset
   $ nemar dataset download nm000104 --stimuli                 # Also download stimuli/
