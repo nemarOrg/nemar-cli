@@ -121,7 +121,10 @@ ignores them.
 
 **`nm000103`-`nm000107` are LIVE.** Do NOT modify their visibility, S3 data, DOIs,
 or repo settings during development or testing.
-They are kept private during dev for maximum control but contain real data.
+All five are PUBLIC and carry minted DOIs (verified 2026-09-14: public on GitHub and
+`visibility: public` in the catalog). An earlier version of this line said they were kept
+private during dev; that has not been true since they were published, and it is the kind of
+stale fact that makes someone think a mistake is safe to make.
 
 For end-to-end testing use `nm099999`, created on demand via
 `POST /admin/datasets/nm099999/reset` (lazily created if missing):
