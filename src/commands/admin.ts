@@ -3776,7 +3776,7 @@ Examples:
         maxBytes = Math.floor(gb * 1024 ** 3);
       }
 
-      const { planDatasetNormalization, normalizeDatasetRepo, verifyKeysAtRemote } = await import(
+      const { planDatasetNormalization, normalizeDatasetRepo } = await import(
         "../lib/normalize-dataset.js"
       );
 
@@ -3856,29 +3856,13 @@ Examples:
         console.log(chalk.green(`  Pushed main and the git-annex branch for ${datasetId}`));
       }
 
-      if (result.keys.length > 0 && !options.viaAwsCli) {
-        const verifySpinner = ora("Asking the remote whether it holds the new keys...").start();
-        const verified = await verifyKeysAtRemote(
-          plan.datasetPath,
-          plan.files.map((f) => f.path),
-        );
-        if (verified.ok) {
-          verifySpinner.succeed(
-            `Remote confirms the uploaded content (fsck --from nemar-s3, ${Math.min(plan.files.length, 200)} path(s) checked)`,
-          );
-        } else {
-          verifySpinner.fail(`Remote could not confirm every key: ${verified.output}`);
-          console.log(
-            chalk.yellow(
-              "  The commit and push (if any) have happened; investigate before treating this dataset as migrated.",
-            ),
-          );
-          process.exit(1);
-        }
-      } else if (result.keys.length > 0) {
+      // Verification is not something the CLI can do on its own: it has to ask with
+      // the credentials that moved the bytes, so `normalizeDatasetRepo` owns it and
+      // refuses to push without it. Reaching here means it passed.
+      if (result.verification) {
         console.log(
-          chalk.dim(
-            `  ${result.keys.length} object(s) confirmed in the bucket at their declared size during upload`,
+          chalk.green(
+            `  Remote holds all ${result.verification.present.length} uploaded key(s), checked by ${result.verification.method}`,
           ),
         );
       }

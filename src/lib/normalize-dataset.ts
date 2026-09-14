@@ -24,7 +24,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { requestUploadCredentials } from "./api/data.js";
-import { probeS3PrefixAccess } from "./aws-cli.js";
+import { headS3Objects, probeS3PrefixAccess } from "./aws-cli.js";
 import { cloneDataset, pushToGitHub } from "./git-annex/clone-push.js";
 import { runCommand } from "./git-annex/run-command.js";
 import { configureS3Remote, toS3Credentials } from "./git-annex/s3-remote.js";
@@ -47,12 +47,34 @@ export interface NormalizeDatasetPlan {
 
 export interface NormalizeDatasetResult {
   plan: NormalizeDatasetPlan;
-  /** Keys whose content this run uploaded, for the verification step. */
+  /** Keys whose content this run uploaded. */
   keys: string[];
   committed: boolean;
   pushed: boolean;
   notes: string[];
+  /** What the remote said about those keys; `null` when there were none to check. */
+  verification: KeyPresenceReport | null;
 }
+
+/**
+ * What the remote holds of what this run uploaded.
+ *
+ * `unconfirmed` is deliberately separate from `absent`: a question that could not
+ * be asked is not an answer that the content is missing, and conflating the two is
+ * how #1380 was misdiagnosed for weeks.
+ */
+export interface KeyPresenceReport {
+  present: string[];
+  absent: string[];
+  unconfirmed: string[];
+  /** How the check was made, for the message the operator reads. */
+  method: string;
+  /** The first failure detail, when anything was absent or unconfirmed. */
+  detail?: string;
+}
+
+/** Asks the remote whether it holds these keys. */
+type RemoteVerifier = (keys: string[]) => Promise<KeyPresenceReport>;
 
 /**
  * Clone the dataset and report what normalizing it would change, without touching
@@ -180,12 +202,16 @@ export async function normalizeDatasetRepo(
   const remoteName = options.remoteName ?? REMOTE_NAME;
   const { datasetId, datasetPath } = plan;
   let upload: UploadStrategy;
+  // Paired with `upload`, because only the branch that chose the credentials can
+  // check the transfer with the same identity that performed it.
+  let verify: RemoteVerifier;
   /** Set when the preflight could not prove reachability, to report rather than swallow. */
   let preflight: string | undefined;
 
   if (options.upload) {
     // Supplied by the caller: neither credential path applies.
     upload = options.upload;
+    verify = annexRemoteVerifier(datasetPath, remoteName);
   } else if (plan.files.length === 0) {
     // Nothing to move. The attribute half of the policy is a text change and a
     // commit, so minting credentials and enabling the remote would be setup for
@@ -199,11 +225,13 @@ export async function normalizeDatasetRepo(
         `${datasetId}: ${files.length} file(s) reached the upload leg although the plan found no data to move. Refusing to continue: no credentials were obtained for this run.`,
       );
     };
+    verify = async () => ({ present: [], absent: [], unconfirmed: [], method: "no keys" });
   } else if (remoteName !== REMOTE_NAME) {
     // A remote the caller named itself -- a `type=directory` remote in a test, or
     // a second S3 remote an operator configured with its own credentials. Neither
     // credential path applies; git-annex uses what it already has for that remote.
     upload = annexCopyUpload({ credentials: "inherit" });
+    verify = annexRemoteVerifier(datasetPath, remoteName);
   } else if (options.credentials === "ambient") {
     // No `enableremote`: that contacts S3 with git-annex's own credential handling,
     // which is the thing being bypassed. The UUID comes from the git-annex branch,
@@ -221,6 +249,12 @@ export async function normalizeDatasetRepo(
       region: "us-east-2",
       remoteUuid,
       workDir: join(datasetPath, ".."),
+    });
+    // No credentials passed: the same ambient AWS configuration that did the sync.
+    verify = s3HeadVerifier({
+      bucket: "nemar",
+      region: "us-east-2",
+      prefix: `${datasetId}/objects`,
     });
   } else {
     const creds = await requestUploadCredentials(datasetId);
@@ -265,6 +299,18 @@ export async function normalizeDatasetRepo(
     // token, so a copy that inherits the environment instead signs without one and
     // every request comes back 403 (#1380).
     upload = annexCopyUpload({ credentials: toS3Credentials(creds.credentials) });
+    // NOT `git annex fsck --from nemar-s3`, which is what this used to do. The
+    // `enableremote` above cached the key and secret in `.git/annex/creds/<uuid>`
+    // with nowhere to put the session token (#1380), so every later git-annex
+    // request to S3 signs without one and comes back 403 -- indistinguishable from
+    // a missing object, which makes both a red fsck and a green one meaningless
+    // here. The HEAD carries the token.
+    verify = s3HeadVerifier({
+      credentials: creds.credentials,
+      bucket: creds.s3.bucket,
+      region: creds.s3.region,
+      prefix: creds.s3.prefix,
+    });
   }
 
   const normalized = await normalizeImportedTree({
@@ -280,6 +326,19 @@ export async function normalizeDatasetRepo(
     maxBytes: options.maxBytes,
     upload,
   });
+
+  // Ask the remote what it actually holds BEFORE pushing. A tree that names keys
+  // whose content never reached S3 is exactly what stranded on003490 and on005121
+  // (#1392): published, permanent DOI, and no clone able to fetch the content. The
+  // clone is still here and re-runnable; a pushed lie is not so easily withdrawn.
+  const uploadedKeys = (normalized.data?.files ?? []).map((f) => f.key);
+  const verification = uploadedKeys.length > 0 ? await verify(uploadedKeys) : null;
+  if (verification && verification.present.length !== uploadedKeys.length) {
+    const missing = [...verification.absent, ...verification.unconfirmed];
+    throw new Error(
+      `${datasetId}: the remote confirms ${verification.present.length} of ${uploadedKeys.length} uploaded key(s) (${verification.absent.length} absent, ${verification.unconfirmed.length} unconfirmed, checked by ${verification.method}). NOTHING HAS BEEN PUSHED, so no clone can see a tree naming content that is not there. First unconfirmed: ${missing[0]}${verification.detail ? ` (${verification.detail})` : ""}. The work is intact at ${datasetPath}; re-run with --dir ${datasetPath} to resume the upload rather than starting over.`,
+    );
+  }
 
   // A commit is not the only thing worth pushing: `git annex config --set` writes
   // NEMAR's expression to the git-annex branch, which is a different branch and no
@@ -305,10 +364,73 @@ export async function normalizeDatasetRepo(
 
   return {
     plan,
-    keys: (normalized.data?.files ?? []).map((f) => f.key),
+    keys: uploadedKeys,
     committed: normalized.committed,
     pushed,
     notes: preflight ? [preflight, ...normalized.notes] : normalized.notes,
+    verification,
+  };
+}
+
+/**
+ * Verify by asking S3 directly, with the credentials that moved the bytes.
+ *
+ * Omitting `credentials` signs with the machine's own AWS configuration, which is
+ * what the `--via-aws-cli` path uploaded with.
+ */
+function s3HeadVerifier(opts: {
+  credentials?: { access_key_id: string; secret_access_key: string; session_token: string };
+  bucket: string;
+  region: string;
+  prefix: string;
+}): RemoteVerifier {
+  return async (keys) => {
+    const seen = await headS3Objects({ ...opts, keys });
+    const report: KeyPresenceReport = {
+      present: seen.filter((k) => k.outcome === "present").map((k) => k.key),
+      absent: seen.filter((k) => k.outcome === "absent").map((k) => k.key),
+      unconfirmed: seen.filter((k) => k.outcome === "unknown").map((k) => k.key),
+      method: `s3 head-object on ${opts.bucket}/${opts.prefix}`,
+    };
+    report.detail = seen.find((k) => k.detail)?.detail;
+    return report;
+  };
+}
+
+/**
+ * Verify with git-annex itself, for a remote whose credentials git-annex holds in
+ * full: a `type=directory` remote in a test, or an S3 remote an operator configured
+ * with long-lived keys. It is NOT valid for a remote enabled with temporary
+ * credentials -- see the comment at the `nemar-s3` branch above.
+ *
+ * `fsck` alone is not the check. It verifies the claims the location log already
+ * makes and drops the ones that are false, so a strategy that uploaded nothing
+ * leaves no claim, gives fsck nothing to examine, and gets a clean exit. The log is
+ * what to read, and only AFTER fsck has pruned it.
+ */
+function annexRemoteVerifier(datasetPath: string, remoteName: string): RemoteVerifier {
+  return async (keys) => {
+    const method = `fsck --from ${remoteName}, then the location log`;
+    const fsck = await runCommand(
+      ["git", "annex", "fsck", "--from", remoteName, "--fast", "--quiet", "--all"],
+      { cwd: datasetPath },
+    );
+    // `--include '*'` rather than `--all`, which `find` does not accept; it walks
+    // the working tree, which is where every key this run uploaded is named.
+    const found = await runCommand(
+      ["git", "annex", "find", "--include", "*", "--in", remoteName, "--format=${key}\n"],
+      { cwd: datasetPath },
+    );
+    const recorded = new Set(found.exitCode === 0 ? found.stdout.split("\n").filter(Boolean) : []);
+    const present = keys.filter((k) => recorded.has(k));
+    const rest = keys.filter((k) => !recorded.has(k));
+    // A clean fsck means the remote was reachable and the pruned log is the answer,
+    // so a key missing from it is genuinely not there. A failed fsck means the log
+    // may never have been pruned, and absence cannot be concluded from it.
+    const detail = (fsck.stderr || fsck.stdout).trim().split("\n")[0] || undefined;
+    return fsck.exitCode === 0
+      ? { present, absent: rest, unconfirmed: [], method, detail }
+      : { present, absent: [], unconfirmed: rest, method, detail };
   };
 }
 
@@ -475,35 +597,4 @@ export function awsCliUpload(options: {
       rmSync(staging, { recursive: true, force: true });
     }
   };
-}
-
-/**
- * Ask the remote, not the location log, whether it really holds these keys.
- *
- * `git annex fsck --from <remote> --fast` checks each key's presence and size at the
- * remote itself, which is the independent half of the guarantee: the log says what
- * git-annex believes, and this says what the remote confirms. `--fast` skips
- * downloading the content back, so this is cheap for 675 MB.
- */
-export async function verifyKeysAtRemote(
-  datasetPath: string,
-  paths: string[],
-  remoteName = REMOTE_NAME,
-): Promise<{ ok: boolean; output: string }> {
-  if (paths.length === 0) return { ok: true, output: "no keys to verify" };
-  const { stdout, stderr, exitCode } = await runCommand(
-    [
-      "git",
-      "annex",
-      "fsck",
-      "--from",
-      remoteName,
-      "--fast",
-      "--quiet",
-      "--",
-      ...paths.slice(0, 200),
-    ],
-    { cwd: datasetPath },
-  );
-  return { ok: exitCode === 0, output: (stderr || stdout).trim() };
 }
