@@ -89,6 +89,7 @@ export async function planDatasetNormalization(
       throw new Error(`Failed to clone ${datasetId}: ${clone.error}`);
     }
   }
+  await checkoutMain(datasetPath, datasetId);
 
   const files = await findUnannexedData(datasetPath);
   const attributeFiles = await listAttributeFilesWithLargefiles(datasetPath);
@@ -142,6 +143,44 @@ async function assertCloneMatchesOrigin(datasetPath: string, datasetId: string):
   if (status.stdout.trim() !== "") {
     throw new Error(
       `${datasetPath} has uncommitted changes, most likely a previous attempt that stopped after annexing but before committing. Reset it (git -C ${datasetPath} reset --hard origin/main) or delete it, then re-run: continuing from here would find nothing left to move and report success without migrating anything.`,
+    );
+  }
+}
+
+/**
+ * Put the clone on `main`, whatever the repository calls its default branch.
+ *
+ * A plain `git clone` checks out the default branch, and sixteen dataset
+ * repositories have theirs set to `git-annex` -- git-annex's own internal log
+ * branch, which carries no dataset at all. On such a clone the scan finds no data and
+ * no `.gitattributes`, the policy is still configured (that is repository-wide, so it
+ * does land), and the push carries the log branch while `main` keeps upstream's
+ * attributes: a run that changes nothing and looks like it worked. Measured on
+ * `on002720` and `on002721` during the #1374 rollout, where the post-push
+ * verification is what caught it.
+ *
+ * `nemar admin fleet drift` reports these repositories as DEFAULT_BRANCH_OUTLIER
+ * (epic #713); this makes the migration immune to the condition rather than waiting
+ * for it to be fixed.
+ */
+async function checkoutMain(datasetPath: string, datasetId: string): Promise<void> {
+  const head = await runCommand(["git", "rev-parse", "--abbrev-ref", "HEAD"], {
+    cwd: datasetPath,
+  });
+  const branch = head.stdout.trim();
+  // An adjusted branch (DataLad's unlocked checkout) tracks main and is not an outlier.
+  if (branch === "main" || branch.startsWith("adjusted/main")) return;
+  // Cloning such a repository checks out git-annex's log files, and `git annex init`
+  // then writes to them (uuid.log records this new clone), so git refuses to switch
+  // away. Those files are git-annex's own bookkeeping on its own branch, derived from
+  // the branch and never ours to keep, so discard them -- and ONLY for that branch,
+  // where the working tree means nothing. Any other unexpected branch keeps the
+  // refusal, because there the changes could be somebody's work.
+  const force = branch === "git-annex" ? ["--force"] : [];
+  const checkout = await runCommand(["git", "checkout", ...force, "main"], { cwd: datasetPath });
+  if (checkout.exitCode !== 0) {
+    throw new Error(
+      `${datasetId} is checked out on "${branch}" and switching to main failed: ${checkout.stderr.trim() || `exit ${checkout.exitCode}`}. Its default branch is not main, and this migration only has meaning on main.`,
     );
   }
 }

@@ -186,6 +186,24 @@ describe("planDatasetNormalization", () => {
     expect(plan.attributeFiles).toEqual([".gitattributes"]);
   }, 180_000);
 
+  test("works on main even when the repository's default branch is not main", async () => {
+    // Sixteen dataset repositories have default_branch = git-annex, so a plain clone
+    // checks out git-annex's internal log branch: no dataset files, no
+    // .gitattributes, nothing to migrate, and a push that carries the log branch
+    // while main keeps upstream's rules. Found on on002720/on002721 during the #1374
+    // rollout. The bare origin here is pointed at its git-annex branch the same way.
+    await run(["git", "symbolic-ref", "HEAD", "refs/heads/git-annex"], origin);
+    const fresh = mkdtempSync(join(tmpdir(), "nemar-ds-defaultbranch-"));
+    scratch.push(fresh);
+
+    const plan = await planDatasetNormalization("on999999", { workDir: fresh, originUrl: origin });
+
+    expect(plan.files.map((f) => f.path)).toEqual([SMALL_MOTION]);
+    expect(plan.attributeFiles).toEqual([".gitattributes"]);
+    const head = await run(["git", "rev-parse", "--abbrev-ref", "HEAD"], plan.datasetPath);
+    expect(head.trim()).toBe("main");
+  }, 180_000);
+
   test("refuses a clone left dirty by a previous attempt", async () => {
     // The dangerous state, not the merely stale one: the data files are already
     // annexed in the index, so a scan finds nothing left to move and the run would
