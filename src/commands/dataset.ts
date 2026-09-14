@@ -143,13 +143,17 @@ import {
   getDatasetData,
 } from "../lib/git-annex/transfer.js";
 import {
-  type DataPlaneEntry,
+  type DataPlaneManifestEntry,
   DataPlaneUnavailableError,
+  MAX_CONCURRENCY,
   downloadEntries,
   fetchManifest,
   fetchVersions,
+  inspectOutputDir,
   printSnapshotCaveat,
   selectEntries,
+  writeFailureList,
+  writeSnapshotStamp,
 } from "../lib/http-download.js";
 import {
   detectLicense,
@@ -948,16 +952,18 @@ async function handleOpenNeuroDownload(
 /**
  * `nemar dataset download` over plain HTTP: no git, no git-annex, no GitHub.
  *
- * Reached by `--http`, and automatically when git-annex is missing. Everything
- * it needs comes from the data plane's version listing plus one manifest
- * request; see lib/http-download.ts for why that is addressed through the
- * configured API origin rather than data.nemar.org.
+ * Reached by `--http`, and automatically when git-annex is missing or too old.
+ * Everything it needs comes from the data plane's version listing plus one
+ * manifest request; see lib/http-download.ts for why that is addressed through
+ * the configured API origin rather than data.nemar.org.
  *
  * The git-annex-only flags are refused rather than ignored. `--update` and
  * `--prune` reconcile a clone against its remote, and there is no clone here;
  * silently doing nothing would look like success and leave stale files in
- * place. `--resume` needs no flag at all on this path, because a file already
- * present at its declared size is always skipped.
+ * place. `--resume` is refused for a sharper reason: on the annex path it runs
+ * a set of checks this path cannot make (the target is a clone of THIS dataset,
+ * the tree is clean, it is not behind upstream), so accepting the flag would
+ * imply guarantees that do not hold. Resuming needs no flag here anyway.
  */
 async function runHttpDownload(
   datasetId: string,
@@ -972,28 +978,45 @@ async function runHttpDownload(
   },
   filter: BidsFilterResult,
 ): Promise<void> {
-  for (const [flag, set] of [
-    ["--update", options.update],
-    ["--prune", options.prune],
+  for (const [flag, set, why] of [
+    ["--update", options.update, "reconciles a clone against its remote"],
+    ["--prune", options.prune, "reconciles a clone against its remote"],
+    ["--resume", options.resume, "runs clone checks this path cannot make"],
   ] as const) {
     if (set) {
-      console.log(
-        chalk.red(`Error: ${flag} needs a git-annex clone and is not available over HTTP.`),
-      );
-      console.log(chalk.dim("  Install git-annex, or re-download into a fresh directory."));
+      console.log(chalk.red(`Error: ${flag} needs a git-annex clone (it ${why}).`));
+      if (flag === "--resume") {
+        console.log(
+          chalk.dim("  An HTTP download always resumes: re-run the same command and any file"),
+        );
+        console.log(chalk.dim("  already present at its declared size is skipped."));
+      } else {
+        console.log(chalk.dim("  Install git-annex, or re-download into a fresh directory."));
+      }
       process.exit(1);
     }
+  }
+
+  const jobs = Number.parseInt(options.jobs || "4", 10);
+  if (Number.isNaN(jobs) || jobs < 1) {
+    console.log(chalk.red(`Error: --jobs must be a positive integer (got "${options.jobs}").`));
+    process.exit(1);
+  }
+  const concurrency = Math.min(jobs, MAX_CONCURRENCY);
+  if (jobs > MAX_CONCURRENCY) {
+    console.log(
+      chalk.yellow(`Note: --jobs ${jobs} capped at ${MAX_CONCURRENCY} parallel HTTP requests.`),
+    );
   }
 
   const outputPath = options.output || datasetId;
   const absoluteOutput = resolve(outputPath);
 
   const spinner = ora("Reading the published file list...").start();
-  let entries: DataPlaneEntry[];
+  let entries: DataPlaneManifestEntry[];
   let version: string;
   try {
-    const listing = await fetchVersions(datasetId);
-    version = listing.latest ?? listing.versions[0];
+    version = (await fetchVersions(datasetId)).latest;
     entries = await fetchManifest(datasetId, version);
   } catch (error) {
     spinner.fail("Could not read the file list");
@@ -1003,13 +1026,56 @@ async function runHttpDownload(
     }
     throw error;
   }
-
-  const selected = selectEntries(entries, filter, { metadataOnly: options.data === false });
-  const totalBytes = selected.reduce((sum, entry) => sum + (entry.size ?? 0), 0);
   spinner.succeed(`${version}: ${entries.length} files published`);
 
+  // What is already in the target directory decides whether writing into it is
+  // safe at all. See inspectOutputDir for why each of these corrupts silently.
+  const conflict = inspectOutputDir(absoluteOutput, datasetId, version);
+  if (conflict) {
+    console.log();
+    if (conflict.kind === "git-repo") {
+      console.log(chalk.red(`Error: ${absoluteOutput} is a git repository.`));
+      console.log(
+        chalk.dim("  Writing plain files into a git-annex clone corrupts its object store."),
+      );
+      console.log(chalk.dim("  Use a different -o directory, or 'nemar dataset get' in place."));
+    } else if (conflict.kind === "other-dataset") {
+      console.log(
+        chalk.red(`Error: ${absoluteOutput} already holds dataset ${conflict.datasetId}.`),
+      );
+      console.log(chalk.dim("  Downloading a second dataset on top of it would merge the two."));
+    } else {
+      console.log(chalk.red(`Error: ${absoluteOutput} holds ${datasetId} ${conflict.version}.`));
+      console.log(
+        chalk.dim(
+          `  Resuming into it would mix ${conflict.version} and ${version}: files whose size is`,
+        ),
+      );
+      console.log(
+        chalk.dim(
+          "  unchanged between versions are skipped, including dataset_description.json, so",
+        ),
+      );
+      console.log(chalk.dim("  the tree would misreport its own version. Use a fresh directory."));
+    }
+    process.exit(1);
+  }
+
+  const selected = selectEntries(entries, filter, { metadataOnly: options.data === false });
+  const totalBytes = selected.reduce((sum, entry) => sum + entry.size, 0);
+
   if (selected.length === 0) {
-    console.log(chalk.yellow("Nothing matched the requested filters; nothing to download."));
+    // Separate "your filters matched nothing" from "the manifest listed
+    // nothing": blaming filters the user did not pass sends them to debug the
+    // wrong thing.
+    console.log(
+      chalk.yellow(
+        filter.active || options.data === false
+          ? "Nothing matched the requested filters; nothing to download."
+          : `${datasetId} ${version} lists no files; nothing to download.`,
+      ),
+    );
+    if (options.requireComplete) process.exit(1);
     return;
   }
 
@@ -1017,7 +1083,7 @@ async function runHttpDownload(
   console.log(chalk.bold("Download plan:"));
   console.log(`  Dataset: ${chalk.cyan(datasetId)} ${chalk.dim(version)}`);
   console.log(`  Output:  ${absoluteOutput}`);
-  console.log("  Method:  HTTP (no git-annex)");
+  console.log(`  Method:  HTTP (no git-annex), ${concurrency} parallel`);
   console.log(`  Files:   ${selected.length} (${formatBytesCli(totalBytes)})`);
   for (const line of filter.summary) {
     console.log(chalk.dim(`  ${line}`));
@@ -1027,9 +1093,8 @@ async function runHttpDownload(
   }
   console.log();
 
-  const jobs = Number.parseInt(options.jobs || "4", 10);
   const result = await downloadEntries(selected, absoluteOutput, {
-    concurrency: Number.isNaN(jobs) ? 4 : jobs,
+    concurrency,
     onProgress: (filesDone, filesTotal, bytesDone) => {
       process.stderr.write(
         `\r${chalk.cyan(formatProgressBar(filesDone, filesTotal, bytesDone, totalBytes))}`,
@@ -1038,8 +1103,12 @@ async function runHttpDownload(
   });
   process.stderr.write(`\r${" ".repeat(80)}\r`);
 
-  const fetched = result.filesDownloaded + result.filesSkipped;
+  // Stamp before reporting: a partial tree still has an identity, and the next
+  // run has to be able to tell which version it holds.
+  writeSnapshotStamp(absoluteOutput, datasetId, version);
+
   if (result.errors.length > 0) {
+    const fetched = result.filesDownloaded + result.filesSkipped;
     console.log(
       chalk.yellow(
         `Downloaded ${fetched} of ${selected.length} files; ${result.errors.length} failed:`,
@@ -1048,8 +1117,15 @@ async function runHttpDownload(
     for (const message of result.errors.slice(0, 10)) {
       console.log(chalk.red(`  ${message}`));
     }
+    const listPath = writeFailureList(absoluteOutput, result.errors);
     if (result.errors.length > 10) {
-      console.log(chalk.dim(`  ... and ${result.errors.length - 10} more`));
+      console.log(
+        chalk.dim(
+          listPath
+            ? `  ... and ${result.errors.length - 10} more; the full list is at ${listPath}`
+            : `  ... and ${result.errors.length - 10} more`,
+        ),
+      );
     }
     console.log(chalk.dim("  Re-run the same command to retry only the missing files."));
   } else {
@@ -1065,7 +1141,12 @@ async function runHttpDownload(
   printSnapshotCaveat(absoluteOutput);
   console.log();
 
-  if (result.errors.length > 0 && options.requireComplete) {
+  // ADR 0005 separates "the archive does not have it" -- reportable, still a
+  // successful run -- from a transport, auth or disk fault, which is a failed
+  // run whatever the tallies say. The git-annex path draws the same line in
+  // classifyGetOutcome. Exiting 0 after a dropped connection is what turns
+  // `download && analyze` into an analysis of half a dataset.
+  if (result.hadInfrastructureFailure || (result.errors.length > 0 && options.requireComplete)) {
     process.exit(1);
   }
 }
@@ -1178,29 +1259,44 @@ Examples:
       process.exit(1);
     }
 
+    // --http is decided BEFORE any prerequisite check, because the checks are
+    // the thing it exists to skip. `COMMAND_TOOLS.download` requires the GitHub
+    // CLI, and this path needs no git, no git-annex and no GitHub account --
+    // demanding `gh` on a container or a login node would deny the flag on
+    // exactly the machines it was built for.
+    if (options.http) {
+      await runHttpDownload(effectiveId, options, filter);
+      return;
+    }
+
     // Step 1: Check prerequisites (fast, parallel checks)
     await checkPrerequisitesForCommand("download");
 
     let spinner = ora("Checking git-annex...").start();
     const prereqs = await checkDownloadPrerequisites();
 
-    // The HTTP path, either asked for (--http) or fallen back to. A missing
-    // git-annex used to be a hard exit, which is a poor answer to "I just want
-    // the files" when the data plane already serves every byte over plain
-    // HTTPS. The fallback is announced rather than silent: it produces a
-    // snapshot, not a repository, and someone who wanted a repository has to
-    // learn that they did not get one.
-    if (options.http || !prereqs.allPassed) {
-      if (options.http) {
-        spinner.stop();
-      } else {
-        spinner.warn("git-annex is not available");
-        for (const error of prereqs.errors) {
-          console.log(chalk.dim(`  ${error}`));
-        }
-        console.log(chalk.yellow("  Falling back to a plain HTTP download."));
-        console.log();
+    // Fall back rather than exit. A missing git-annex used to be a hard stop,
+    // which is a poor answer to "I just want the files" when the data plane
+    // already serves every byte over plain HTTPS. The fallback is announced
+    // rather than silent: it produces a snapshot, not a repository, and someone
+    // who wanted a repository has to learn that they did not get one.
+    if (!prereqs.allPassed) {
+      // The headline reports what actually failed. `checkDownloadPrerequisites`
+      // also fails a git-annex that is installed but too old, and telling that
+      // user it is "not available" sends them to install what they already have.
+      spinner.warn(
+        prereqs.gitAnnex.installed
+          ? `git-annex ${prereqs.gitAnnex.version} is not usable here`
+          : "git-annex is not installed",
+      );
+      for (const error of prereqs.errors) {
+        console.log(chalk.dim(`  ${error}`));
       }
+      console.log(chalk.yellow("  Falling back to a plain HTTP download (a file snapshot)."));
+      console.log(
+        chalk.dim("  Pass --http to choose this path deliberately and skip this notice."),
+      );
+      console.log();
       await runHttpDownload(effectiveId, options, filter);
       return;
     }

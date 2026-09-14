@@ -68,10 +68,18 @@ export interface BidsFilterResult {
    *
    * This exists so the HTTP download path (lib/http-download.ts, used when
    * git-annex is absent) selects the SAME files as the git-annex path, from
-   * one declaration. A second, independently written matcher would drift, and
-   * the symptom would be `nemar dataset download --subjects sub-01` returning
-   * different files depending on whether git-annex happened to be installed,
-   * which is close to undebuggable from a bug report.
+   * one declaration of WHAT to select. The symptom of getting that wrong is
+   * `nemar dataset download --subjects sub-01` returning different files
+   * depending on whether git-annex happened to be installed, which is close to
+   * undebuggable from a bug report.
+   *
+   * It removes one source of drift, not all of it. The patterns are shared;
+   * the MATCHERS are still two engines -- git-annex's glob implementation and
+   * `Bun.Glob` -- and they are not the same code. They agree on every shape
+   * this module emits, which was checked pattern by pattern against
+   * git-annex 10.20260901 rather than assumed, and
+   * `test/http-download.unit.test.ts` pins the correspondence. Adding a new
+   * pattern SHAPE here means re-checking it against both.
    */
   includeGroups: string[][];
   /** Globs to drop after the include groups match. */
@@ -235,14 +243,37 @@ export function buildBidsFilterArgs(opts: BidsFilterOptions): BidsFilterResult {
  * admits everything rather than nothing.
  */
 export function matchesBidsFilter(path: string, filter: BidsFilterResult): boolean {
-  for (const pattern of filter.excludePatterns) {
-    if (new Glob(pattern).match(path)) return false;
+  const compiled = compiledFor(filter);
+  for (const glob of compiled.excludes) {
+    if (glob.match(path)) return false;
   }
-  for (const group of filter.includeGroups) {
+  for (const group of compiled.includes) {
     if (group.length === 0) continue;
-    if (!group.some((pattern) => new Glob(pattern).match(path))) return false;
+    if (!group.some((glob) => glob.match(path))) return false;
   }
   return true;
+}
+
+/**
+ * Compiled globs for one filter, memoized per filter object.
+ *
+ * `matchesBidsFilter` runs once per manifest entry, and a large dataset has
+ * tens of thousands. Compiling the same handful of patterns per call means
+ * ~80k `new Glob()` constructions on a filtered download of a big dataset, all
+ * of them redundant. The cache is keyed on the filter object, which callers
+ * build once, and is weak so it does not outlive it.
+ */
+const compiledCache = new WeakMap<BidsFilterResult, { includes: Glob[][]; excludes: Glob[] }>();
+
+function compiledFor(filter: BidsFilterResult): { includes: Glob[][]; excludes: Glob[] } {
+  const hit = compiledCache.get(filter);
+  if (hit) return hit;
+  const compiled = {
+    includes: filter.includeGroups.map((group) => group.map((p) => new Glob(p))),
+    excludes: filter.excludePatterns.map((p) => new Glob(p)),
+  };
+  compiledCache.set(filter, compiled);
+  return compiled;
 }
 
 /**

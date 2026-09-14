@@ -32,6 +32,15 @@ earlier releases are described only by their generated notes.
   do not operate on it, and the command says so. `--update` and `--prune` are refused on this
   path rather than silently doing nothing. Useful well beyond the missing-git-annex case:
   containers, HPC login nodes and CI runners where installing git-annex is impractical.
+  Every write is checked against the manifest's declared size, so a truncated body or an
+  intercepting proxy's login page is an error rather than a file that looks fine; throttled and
+  transient responses are retried with backoff, since most manifest entries fetch from a host
+  that rate-limits by address; a transport, authentication or disk fault exits non-zero even
+  without `--require-complete`, while content genuinely absent upstream stays a reported state
+  (ADR 0005); and the target directory is refused if it is a git repository, holds a different
+  dataset, or holds a different version of the same one -- the last because
+  `dataset_description.json` is the same length across a patch bump, so resuming across versions
+  would skip it and leave a tree that misreports its own version.
 
 - **`nemar admin docs <path...>` reads documentation pages, including the gated ones, without
   a browser.** `nemarOrg/docs` is private at source and `docs.nemar.org` is the retrieval

@@ -7,19 +7,29 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "bun";
 import { buildBidsFilterArgs, matchesBidsFilter } from "../src/lib/bids-filter";
 import {
-  type DataPlaneEntry,
+  type DataPlaneManifestEntry,
   downloadEntries,
+  inspectOutputDir,
   isMetadataEntry,
   selectEntries,
+  writeSnapshotStamp,
 } from "../src/lib/http-download";
 
-function entry(path: string, over: Partial<DataPlaneEntry> = {}): DataPlaneEntry {
+function entry(path: string, over: Partial<DataPlaneManifestEntry> = {}): DataPlaneManifestEntry {
   return {
     path,
     size: 4,
@@ -162,7 +172,7 @@ describe("downloadEntries", () => {
     rmSync(workDir, { recursive: true, force: true });
   });
 
-  function remote(path: string): DataPlaneEntry {
+  function remote(path: string): DataPlaneManifestEntry {
     return {
       path,
       size: served[path]?.length ?? 0,
@@ -220,6 +230,81 @@ describe("downloadEntries", () => {
     expect(result.errors[0]).toContain("404");
   });
 
+  test("a body shorter than the declared size is an error, not a success", async () => {
+    // Bun.write returns the real byte count and does not throw on a short body,
+    // so without comparing it a captive portal's HTML login page lands as a
+    // healthy file and the run reports success in green.
+    const short = Bun.serve({ port: 0, fetch: () => new Response("tiny") });
+    try {
+      const out = join(workDir, "short");
+      const result = await downloadEntries(
+        [
+          {
+            path: "sub-01/eeg/a.set",
+            size: 9999,
+            bytes_url: `http://localhost:${short.port}/a`,
+          },
+        ],
+        out,
+        { attempts: 1 },
+      );
+      expect(result.filesDownloaded).toBe(0);
+      expect(result.errors[0]).toContain("expected 9999 bytes, received 4");
+      expect(result.hadInfrastructureFailure).toBe(true);
+      // And it must not leave the short file behind looking like a real one.
+      expect(existsSync(join(out, "sub-01/eeg/a.set"))).toBe(false);
+    } finally {
+      short.stop(true);
+    }
+  });
+
+  test("a 429 is retried and can succeed", async () => {
+    // Most manifest ENTRIES fetch from a host that throttles by address, so one
+    // 429 without a retry turns a healthy link into thousands of failures.
+    let hits = 0;
+    const flaky = Bun.serve({
+      port: 0,
+      fetch: () => {
+        hits++;
+        return hits < 3 ? new Response("slow down", { status: 429 }) : new Response("0123456789");
+      },
+    });
+    try {
+      const result = await downloadEntries(
+        [{ path: "f.bin", size: 10, bytes_url: `http://localhost:${flaky.port}/f` }],
+        join(workDir, "retry"),
+        { attempts: 3 },
+      );
+      expect(result.errors).toEqual([]);
+      expect(result.filesDownloaded).toBe(1);
+      expect(hits).toBe(3);
+    } finally {
+      flaky.stop(true);
+    }
+  });
+
+  test("a 404 is not retried and is not an infrastructure failure", async () => {
+    // ADR 0005: content genuinely absent is a reportable state, not a failed
+    // run. Only that distinction keeps the exit code meaningful.
+    const result = await downloadEntries([remote("gone.tsv")], join(workDir, "absent"), {
+      attempts: 3,
+    });
+    expect(result.errors).toHaveLength(1);
+    expect(result.hadInfrastructureFailure).toBe(false);
+  });
+
+  test("every error names the file it belongs to", async () => {
+    const dead = Bun.serve({ port: 0, fetch: () => new Response("x") });
+    const port = dead.port;
+    dead.stop(true);
+    const result = await downloadEntries(
+      [{ path: "sub-09/eeg/lost.set", size: 4, bytes_url: `http://localhost:${port}/lost` }],
+      join(workDir, "labelled"),
+      { attempts: 1 },
+    );
+    expect(result.errors[0]).toContain("sub-09/eeg/lost.set");
+  });
+
   test("a path escaping the output directory is refused", async () => {
     // The manifest is server-supplied; a `..` in it must not write elsewhere.
     const out = join(workDir, "traversal");
@@ -256,5 +341,53 @@ describe("downloadEntries", () => {
     } finally {
       slow.stop(true);
     }
+  });
+});
+
+describe("output directory identity", () => {
+  let dir: string;
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), "nemar-http-id-"));
+  });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("a fresh directory has no conflict", () => {
+    expect(inspectOutputDir(join(dir, "nope"), "nm000104", "v1.0.0")).toBeNull();
+  });
+
+  test("a git repository is refused", () => {
+    const out = join(dir, "clone");
+    mkdirSync(join(out, ".git"), { recursive: true });
+    expect(inspectOutputDir(out, "nm000104", "v1.0.0")).toEqual({ kind: "git-repo" });
+  });
+
+  test("a different dataset is refused", () => {
+    const out = join(dir, "other-ds");
+    mkdirSync(out, { recursive: true });
+    writeSnapshotStamp(out, "nm000104", "v1.0.0");
+    expect(inspectOutputDir(out, "nm000105", "v1.0.0")).toEqual({
+      kind: "other-dataset",
+      datasetId: "nm000104",
+    });
+  });
+
+  test("a different version of the same dataset is refused", () => {
+    // The failure this exists for: dataset_description.json carries
+    // DatasetVersion, and "1.0.0" -> "1.0.1" is byte-identical in length, so
+    // the resume check would skip it and the tree would misreport its version.
+    const out = join(dir, "other-ver");
+    mkdirSync(out, { recursive: true });
+    writeSnapshotStamp(out, "nm000104", "v1.0.0");
+    expect(inspectOutputDir(out, "nm000104", "v1.0.1")).toEqual({
+      kind: "other-version",
+      version: "v1.0.0",
+    });
+  });
+
+  test("the same dataset at the same version resumes", () => {
+    const out = join(dir, "same");
+    mkdirSync(out, { recursive: true });
+    writeSnapshotStamp(out, "nm000104", "v1.0.0");
+    expect(inspectOutputDir(out, "nm000104", "v1.0.0")).toBeNull();
   });
 });
