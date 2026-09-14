@@ -21,9 +21,15 @@
  * value built from an expression is reported as absent rather than guessed at,
  * which is why `DOCS_SESSION_TTL_SECONDS` is compared as a computed number.
  *
- * NOTHING IN THIS REPOSITORY READS THESE CONSTANTS BUT `routes/auth-docs.ts`,
- * so those two tests are the only thing standing between a value here and the
- * two repos that spell their own copies. That is not hypothetical: an earlier
+ * THREE THINGS IN THIS REPOSITORY READ THESE CONSTANTS, and the most important
+ * one was missing from this sentence for two revisions: `services/docs-auth.ts`
+ * interpolates `DOCS_ADMIN_ROLES` into the WHERE clause of both mint statements,
+ * which is the single most load-bearing use of any value in this file. The other
+ * two are `routes/auth-docs.ts` and, since phase 3, the CLI's
+ * `lib/docs-fetch.ts`, which sets the cookie itself when retrieving a gated page
+ * without a browser. All three import this module, so none can drift from it. The website and the docs Pages Function
+ * cannot import it, so those two tests are the only thing standing between a
+ * value here and the copies they spell. That is not hypothetical: an earlier
  * version named the cookie `nemar_docs_session` while the deployed Pages
  * Function set `__Host-nemar_docs_session`, and nothing noticed. Change a value
  * here and both sides go red until they follow, which is the point.
@@ -73,6 +79,25 @@ export const DOCS_GRANT_TTL_SECONDS = 60;
  *  tomorrow costs one redirect through a browser that is already signed in. */
 export const DOCS_SESSION_TTL_SECONDS = 8 * 60 * 60;
 
+/** Seconds a docs session minted for the CLI lasts.
+ *
+ *  MUCH SHORTER THAN THE BROWSER'S, on purpose. A browser session is held by
+ *  one person at one keyboard and costs a redirect to renew; this one is
+ *  handed to a program, and a program's credential reaches places a browser's
+ *  does not: a shell history, a CI log, an agent's transcript. Fifteen minutes
+ *  is long enough to read a set of pages in one sitting and short enough that a
+ *  value recovered from a log later is almost certainly dead. Renewing costs
+ *  one authenticated API call, which the CLI makes anyway.
+ *
+ *  This constant, `DocsCliSessionRefusal` and `DocsCliSessionResponse` below are
+ *  the only three things in this file outside the three-party contract: they are
+ *  shared
+ *  between this repository's backend and its CLI, both of which import this
+ *  module directly. The website and the docs Pages Function neither know nor
+ *  need them, and the drift tests on those two sides compare only the literals
+ *  they spell for themselves, so adding to this section cannot break them. */
+export const DOCS_CLI_SESSION_TTL_SECONDS = 15 * 60;
+
 /** Where the docs host sends an unauthenticated visitor. Path only; the app
  *  origin comes from the caller's environment. */
 export const DOCS_AUTHORIZE_PATH = "/auth/docs/authorize";
@@ -116,6 +141,26 @@ export interface DocsGrantResponse {
 export interface DocsExchangeResponse {
   /** The docs cookie value. Returned exactly once, in a response body that is
    *  never cached and never logged by the caller. */
+  readonly session: string;
+  readonly max_age_seconds: number;
+  readonly username: string | null;
+}
+
+/** `POST /auth/docs/cli-session` refusals. Both spellings already exist
+ *  above: an absent or dead API key is `unauthenticated`, and a live key whose
+ *  account is not an admin gets `not_found`, the same disguise `grant` gives a
+ *  signed-in non-admin. */
+export type DocsCliSessionRefusal = "unauthenticated" | "not_found";
+
+/** What `POST /auth/docs/cli-session` returns: the same credential the browser
+ *  exchange produces, obtained in one step instead of three because the caller
+ *  already holds a long-lived key and there is no cross-host redirect to
+ *  protect. The CLI sets it as a `Cookie` header on its own request to
+ *  `docs.nemar.org`; the gate reads that header and cannot tell, nor care,
+ *  that no browser was involved. */
+export interface DocsCliSessionResponse {
+  /** The docs session value. Returned exactly once, never cached, and never
+   *  written to disk by the CLI. */
   readonly session: string;
   readonly max_age_seconds: number;
   readonly username: string | null;

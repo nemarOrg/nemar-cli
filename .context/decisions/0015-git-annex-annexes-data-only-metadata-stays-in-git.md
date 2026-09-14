@@ -33,5 +33,5 @@ The `git-annex` branch must be pushed alongside `main` so clones can resolve rem
 
 ## Receipts
 
-- `.context/validated_workflows.md` — validated 2026-01-14
+- `https://docs.nemar.org/admin/operations/validated-workflows/` — validated 2026-01-14
 - AGENTS.md "Full E2E PR Workflow"

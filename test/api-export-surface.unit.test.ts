@@ -43,6 +43,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getSandboxStatus",
     "listApiKeys",
     "login",
+    "mintDocsSession",
     "pollDeviceToken",
     "registerSSHKey",
     "requestEmailChange",
@@ -192,6 +193,7 @@ const INTERNAL_WIRING = ["request"];
  * protection every other symbol has.
  */
 const POST_SPLIT_ADDITIONS = [
+  "mintDocsSession", // #1341, epic #1336 phase 3: POST /auth/docs/cli-session
   "NOTICE_LEVELS", // #1025, notice level vocabulary
   "approveUserById", // #1012, id-keyed approve for web/ORCID accounts
   "revokeUserById", // #1274, ADR 0040: id-keyed revoke, the approve twin's eraser

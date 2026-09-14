@@ -4,6 +4,14 @@
 **Date:** 2026-09-13
 **Owner:** Seyed Yahya Shirazi
 
+> **The MECHANISM here is superseded by [ADR 0059](0059-one-docs-repo-private-at-source-public-at-the-url.md) (2026-09-13).**
+> The decision below stands: docs are the canonical retrieval surface, and admin-only material is
+> private at source rather than gated at serving. How that is achieved changed. This ADR chose a
+> second, private content repository pulled into the docs build; `nemarOrg/docs` is instead made
+> private as a whole, which reaches the same end with no overlay, no build-time pull and no content
+> credential. The status stays `accepted` because most of this document is still in force; read
+> 0059 before acting on the alternatives section.
+
 ## Context
 
 Epic #1336 set out to move agent-facing reference material from this repo's `AGENTS.md` and
@@ -94,7 +102,10 @@ silence is not.
 
 ## Alternatives considered
 
-- **Privatize `nemarOrg/docs` entirely.** Rejected: 53 of its 66 pages are public product
+- ~~**Privatize `nemarOrg/docs` entirely.** Rejected:~~ **This is now the decision; see ADR 0059.**
+  The rejection below conflated privatizing the REPOSITORY with privatizing the DOCUMENTATION.
+  `docs.nemar.org` keeps serving every public page to anyone either way; only the source closes. The
+  original reasoning follows, wrong: 53 of its 66 pages are public product
   documentation, and it would break ADRs being linked at their public GitHub paths, which is how
   this epic decided to keep decisions in `nemar-cli` while referencing them from docs.
 - **Keep the content rule and move only what is safe to publish.** Rejected as the primary answer
