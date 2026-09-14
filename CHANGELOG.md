@@ -75,6 +75,22 @@ earlier releases are described only by their generated notes.
   rather than an hour. `nemar admin s3 credential-check <id>` reports the same probe on
   demand. A dataset with no data to move now needs no credentials at all, and a policy
   that changed only the git-annex branch is pushed rather than left local.
+- **A migration is no longer declared done on a check that cannot fail meaningfully**
+  (#1380, #1392). The step that confirmed the uploaded content was
+  `git annex fsck --from nemar-s3`, which is the one question git-annex cannot answer
+  here: `enableremote` caches the key and secret with nowhere to put the session token,
+  so fsck signs without one and S3 returns 403 -- the same 403 it returns for an object
+  that is not there. A red result therefore did not mean the content was missing, and a
+  green one would not have meant it was present. `on006979`'s migration is what surfaced
+  it: the PDF was in the bucket and the location log recorded it, and the run still
+  reported `fsck: 1 failed`. The check is now a HEAD carrying the credentials that moved
+  the bytes, `absent` and `unconfirmed` are kept apart rather than collapsed, and it runs
+  **before** the push instead of after -- a tree naming keys whose content never arrived
+  is what stranded `on003490` and `on005121` behind a permanent DOI, and the clone is
+  still re-runnable right up until it is pushed. For a remote whose credentials git-annex
+  does hold in full, the verifier reads the location log after fsck has pruned it, since
+  fsck only checks claims that were already made and an upload that moved nothing makes
+  none.
 - **The per-user IAM provisioning that STS replaced is gone from the backend** rather
   than sitting there with no callers (#1380). `generateS3PolicyDocument`,
   `generateAdminS3PolicyDocument`, `createIamUser`, `createAccessKey`, `putUserPolicy`

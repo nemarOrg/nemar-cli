@@ -218,6 +218,26 @@ describe("planDatasetNormalization", () => {
     );
   }, 180_000);
 
+  test("reports no attribute work for a repo the policy already governs", async () => {
+    // `**/.git* annex.largefiles=nothing` is part of NEMAR's policy, not inherited
+    // from upstream, so a repository the fleet sweep has already fixed still matches
+    // a grep for the string. Reporting it would tell an operator to migrate a
+    // dataset that is done -- which is what the whole fleet looked like after the
+    // sweep landed.
+    const swept = join(workDir, "on999999");
+    await run(["cp", "-R", clone, swept], workDir);
+    writeFileSync(
+      join(swept, ".gitattributes"),
+      "* annex.backend=SHA256E\n**/.git* annex.largefiles=nothing\n",
+    );
+    await run(["git", "add", ".gitattributes"], swept);
+    await run(["git", "commit", "-qm", "policy only"], swept);
+    await run(["git", "push", "-q", "origin", "main"], swept);
+
+    const plan = await planDatasetNormalization("on999999", { workDir });
+    expect(plan.attributeFiles).toEqual([]);
+  }, 180_000);
+
   test("refuses a directory that is a different repository", async () => {
     const wrong = join(workDir, "on999999");
     mkdirSync(wrong, { recursive: true });
@@ -445,5 +465,63 @@ describe("the upload leg is swappable", () => {
     expect(await headMode(clone, SMALL_MOTION)).toBe("100644");
     const originMain = await run(["git", "ls-tree", "main", "--", SMALL_MOTION], origin);
     expect(originMain.trim().split(" ")[0]).toBe("100644");
+  }, 180_000);
+
+  test("a strategy that reports success without moving the content is not pushed", async () => {
+    // The failure this gate exists for. A strategy can return cleanly and still
+    // have moved nothing -- that is how on003490 and on005121 came to be published
+    // with a permanent DOI and content no clone could fetch (#1392). Throwing is
+    // the contract, but a strategy that does not throw must not be taken at its
+    // word either, so the remote is asked before anything reaches origin.
+    await addDirectoryRemote(clone, "stand-in");
+    // Returns the shape a successful transfer returns, and moves nothing.
+    const silent: UploadStrategy = async ({ files }) => ({ copied: files.length });
+
+    await expect(
+      normalizeDatasetRepo(
+        {
+          datasetId: "on999999",
+          datasetPath: clone,
+          files: await findUnannexedData(clone),
+          bytes: 300_000,
+          attributeFiles: [".gitattributes"],
+        },
+        { push: true, remoteName: "stand-in", upload: silent },
+      ),
+    ).rejects.toThrow(/confirms 0 of \d+ uploaded key\(s\)[\s\S]*NOTHING HAS BEEN PUSHED/);
+
+    // The commit is local (it has to be: the keys are what gets verified), but
+    // origin must still be showing the pre-migration tree.
+    const originMain = await run(["git", "ls-tree", "main", "--", SMALL_MOTION], origin);
+    expect(originMain.trim().split(" ")[0]).toBe("100644");
+    const originAnnex = await run(
+      ["git", "rev-parse", "--verify", "--quiet", "refs/heads/git-annex"],
+      origin,
+    ).catch(() => "");
+    const localAnnex = await run(["git", "rev-parse", "git-annex"], clone);
+    expect(originAnnex.trim()).not.toBe(localAnnex.trim());
+  }, 180_000);
+
+  test("the real upload leg is confirmed against the remote, key by key", async () => {
+    // The other half: a transfer that did happen is reported as confirmed, and the
+    // report names how it was checked rather than asserting it abstractly.
+    await addDirectoryRemote(clone, "stand-in");
+    const result = await normalizeDatasetRepo(
+      {
+        datasetId: "on999999",
+        datasetPath: clone,
+        files: await findUnannexedData(clone),
+        bytes: 300_000,
+        attributeFiles: [".gitattributes"],
+      },
+      { push: true, remoteName: "stand-in" },
+    );
+
+    expect(result.keys.length).toBeGreaterThan(0);
+    expect(result.verification?.present).toEqual(result.keys);
+    expect(result.verification?.absent).toEqual([]);
+    expect(result.verification?.unconfirmed).toEqual([]);
+    expect(result.verification?.method).toContain("location log");
+    expect(result.pushed).toBe(true);
   }, 180_000);
 });

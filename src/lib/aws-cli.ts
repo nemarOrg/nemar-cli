@@ -279,3 +279,94 @@ export async function probeS3PrefixAccess(opts: {
   }
   return { ...base, object: key, outcome: "reachable" };
 }
+
+/**
+ * Whether the bucket holds each of these objects, asked with credentials that
+ * carry their session token.
+ *
+ * This exists because `git annex fsck --from <s3 remote>` cannot answer the
+ * question when the remote was configured with temporary credentials.
+ * `enableremote` caches the key and secret in `.git/annex/creds/<uuid>` and has
+ * nowhere to put the session token (#1380), so every later git-annex request
+ * signs without one and S3 returns 403 -- the SAME 403 it returns for an object
+ * that is not there. A failing fsck therefore does not mean the content is
+ * missing, and, worse, a passing one would not mean it is present either.
+ *
+ * So the three outcomes are kept apart: `present` and `absent` are answers,
+ * `unknown` is the honest report of a question that could not be asked.
+ */
+export interface KeyPresence {
+  key: string;
+  outcome: "present" | "absent" | "unknown";
+  /** The AWS error, trimmed, when the outcome is `unknown`. */
+  detail?: string;
+}
+
+/** How many HEADs to have in flight; the CLI spawns one process per object. */
+const HEAD_CONCURRENCY = 8;
+
+export async function headS3Objects(opts: {
+  /**
+   * Omit to sign with whatever this machine's `aws` CLI is configured with, which
+   * is what `--via-aws-cli` moved the bytes with: verifying a transfer against a
+   * different identity than performed it proves nothing about the transfer.
+   */
+  credentials?: { access_key_id: string; secret_access_key: string; session_token: string };
+  bucket: string;
+  region: string;
+  /** Dataset prefix without a trailing slash, e.g. `on007788/objects`. */
+  prefix: string;
+  keys: string[];
+}): Promise<KeyPresence[]> {
+  const { credentials, bucket, region, prefix, keys } = opts;
+  if (keys.length === 0) return [];
+  if (!(await isAwsCliAvailable())) {
+    return keys.map((key) => ({
+      key,
+      outcome: "unknown" as const,
+      detail: "the aws CLI is not on PATH",
+    }));
+  }
+
+  const env: Record<string, string> = credentials
+    ? {
+        AWS_ACCESS_KEY_ID: credentials.access_key_id,
+        AWS_SECRET_ACCESS_KEY: credentials.secret_access_key,
+        AWS_SESSION_TOKEN: credentials.session_token,
+        AWS_DEFAULT_REGION: region,
+      }
+    : { AWS_DEFAULT_REGION: region };
+  // Only when credentials were given: with none, the machine's profile IS the
+  // identity under test and removing it would leave the CLI unable to sign at all.
+  const unsetEnv = credentials ? ["AWS_PROFILE", "AWS_DEFAULT_PROFILE"] : [];
+  const base = `${prefix.replace(/\/$/, "")}/`;
+
+  const results: KeyPresence[] = new Array(keys.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (true) {
+      const index = next++;
+      if (index >= keys.length) return;
+      const key = keys[index];
+      const head = await runCommand(
+        ["aws", "s3api", "head-object", "--bucket", bucket, "--key", `${base}${key}`],
+        { env, unsetEnv, timeout: 60_000 },
+      );
+      if (head.exitCode === 0) {
+        results[index] = { key, outcome: "present" };
+        continue;
+      }
+      // The CLI reports a missing object as a 404; everything else -- a 403 from a
+      // tokenless signature, a timeout, a DNS failure -- is a question that did not
+      // get asked, and must not be recorded as an absent object.
+      const detail = lastMeaningfulLine(head.stderr);
+      results[index] = /404|Not Found/i.test(detail)
+        ? { key, outcome: "absent" }
+        : { key, outcome: "unknown", detail };
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(HEAD_CONCURRENCY, keys.length) }, () => worker()),
+  );
+  return results;
+}
