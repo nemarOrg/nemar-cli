@@ -92,9 +92,7 @@ function startBackend(options: BackendOptions = {}): FakeBackend {
       if (url.pathname === "/datasets/facets") return Response.json({});
       if (url.pathname === "/users/me") {
         const user =
-          typeof options.user === "function"
-            ? options.user(meCalls++)
-            : (options.user ?? meUser());
+          typeof options.user === "function" ? options.user(meCalls++) : (options.user ?? meUser());
         // The sentinel a test uses to revoke the key part-way through a poll.
         if ((user as { unauthorized?: boolean }).unauthorized) {
           return Response.json({ error: "Invalid or expired API key" }, { status: 401 });
@@ -251,10 +249,16 @@ describe("nemar auth profile set-email", () => {
 
 describe("nemar auth profile verify-email", () => {
   test("uses the remembered address and updates the stored account", async () => {
-    seedAuthenticatedConfig({ email: "old@example.org", pendingEmailChange: "ada@lab.example.org" });
+    seedAuthenticatedConfig({
+      email: "old@example.org",
+      pendingEmailChange: "ada@lab.example.org",
+    });
     const backend = startBackend({
       replies: {
-        "/auth/email/change/verify": { status: 200, body: { ok: true, old_address_notified: true } },
+        "/auth/email/change/verify": {
+          status: 200,
+          body: { ok: true, old_address_notified: true },
+        },
       },
       user: meUser({ email: "ada@lab.example.org" }),
     });
@@ -371,7 +375,10 @@ describe("nemar auth profile verify-email", () => {
     seedAuthenticatedConfig({ pendingEmailChange: "ada@lab.example.org" });
     const backend = startBackend({
       replies: {
-        "/auth/email/change/verify": { status: 200, body: { ok: true, old_address_notified: true } },
+        "/auth/email/change/verify": {
+          status: 200,
+          body: { ok: true, old_address_notified: true },
+        },
       },
       user: meUser({ email: "ada@lab.example.org" }),
     });
@@ -864,9 +871,12 @@ describe("nemar auth profile orcid", () => {
     const marker = join(binDir, "opened.txt");
     // Both names, so the test does not depend on which platform runs it.
     for (const name of ["open", "xdg-open"]) {
-      writeFileSync(join(binDir, name), `#!/bin/sh
+      writeFileSync(
+        join(binDir, name),
+        `#!/bin/sh
 echo "$1" >> "${marker}"
-`);
+`,
+      );
       chmodSync(join(binDir, name), 0o755);
     }
     const backend = startBackend({
@@ -898,7 +908,9 @@ echo "$1" >> "${marker}"
         backend.url,
         { allowBrowser: true, pathPrefix: binDir },
       );
-      expect(suppressed.out).toContain("https://app.nemar.org/auth/orcid/cli-handoff?t=signed-state");
+      expect(suppressed.out).toContain(
+        "https://app.nemar.org/auth/orcid/cli-handoff?t=signed-state",
+      );
       expect(suppressed.out).not.toContain("trying to open your browser");
       expect(await markerAppears()).toBe(false);
 

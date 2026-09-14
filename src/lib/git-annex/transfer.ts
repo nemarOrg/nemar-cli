@@ -889,7 +889,13 @@ export async function getRemoteUuid(
 }
 
 /**
- * Mark a git-annex key as present in a remote.
+ * Mark ONE git-annex key as present in a remote, trusting the exit code.
+ *
+ * It has no callers left, and it must not get any for bulk work: running this
+ * per key concurrently is #1392 exactly -- every process exits 0 and their writes
+ * to the shared git-annex branch journal do not all survive. `batchSetKeysPresent`
+ * is the bulk path; it uses one `setpresentkey --batch` process and then reads the
+ * location log back instead of believing the exit codes.
  */
 export async function setKeyPresent(
   datasetPath: string,
@@ -914,11 +920,19 @@ export interface KeyRegistrationResult {
 
 /** Keys the location log records as present at `remoteUuid`, among those the tree names. */
 async function keysRecordedAt(datasetPath: string, remoteUuid: string): Promise<Set<string>> {
-  const { stdout, exitCode } = await runCommand(
+  const { stdout, stderr, exitCode } = await runCommand(
     ["git", "annex", "find", "--include", "*", "--in", remoteUuid, "--format=${key}\n"],
     { cwd: datasetPath },
   );
-  if (exitCode !== 0) return new Set();
+  if (exitCode !== 0) {
+    // An empty set is not wrong here -- every key then falls through to the
+    // per-key `whereis`, which reaches the right answer -- but silently, and one
+    // process per key over a 59,939-key dataset looks like a hang. Say so.
+    console.warn(
+      `git annex find --in ${remoteUuid} failed (${stderr.trim() || `exit ${exitCode}`}); falling back to one whereis per key, which is slow on a large dataset.`,
+    );
+    return new Set();
+  }
   return new Set(stdout.split("\n").filter(Boolean));
 }
 

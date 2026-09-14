@@ -188,7 +188,9 @@ describe("nemar admin duplicates", () => {
   });
 
   test("--clear reports success and never fetches the report", async () => {
-    const server = startServer({ clear: { status: 200, body: { ok: true, id: 42, cleared: true } } });
+    const server = startServer({
+      clear: { status: 200, body: { ok: true, id: 42, cleared: true } },
+    });
     try {
       const result = await runCli(["admin", "duplicates", "--clear", "42"], server.url);
       expect(result.exitCode).toBe(0);
@@ -201,7 +203,9 @@ describe("nemar admin duplicates", () => {
   });
 
   test("--clear on an unflagged row says nothing to clear", async () => {
-    const server = startServer({ clear: { status: 200, body: { ok: true, id: 7, cleared: false } } });
+    const server = startServer({
+      clear: { status: 200, body: { ok: true, id: 7, cleared: false } },
+    });
     try {
       const result = await runCli(["admin", "duplicates", "--clear", "7"], server.url);
       expect(result.exitCode).toBe(0);
@@ -233,9 +237,7 @@ describe("nemar admin duplicates", () => {
       // The SENTENCE, not the code. Until #1266 taught the client which
       // strings in `error` are machine codes (shared/contract), this line
       // printed the literal `identity_conflict_remains` at an operator.
-      expect(`${result.stdout}${result.stderr}`).toContain(
-        "Resolve it on the other account first",
-      );
+      expect(`${result.stdout}${result.stderr}`).toContain("Resolve it on the other account first");
     } finally {
       server.stop();
     }

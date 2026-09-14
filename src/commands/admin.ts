@@ -5105,6 +5105,12 @@ What it will not do:
   skipped. That is missing content (#1396) and needs the bytes transferred, not a
   registration written. \`--include-incomplete\` overrides it.
 
+What "read-only" does and does not mean:
+  without --apply nothing is written to any repository or to S3. It is not free of
+  side effects though: establishing what the bucket holds needs credentials, and
+  minting them stamps last_activity_at on the dataset, which postpones the stale-
+  dataset cleanup cron for a private DOI-less one.
+
 How presence is established:
   one \`list-objects-v2\` per dataset with credentials the API mints for it, not a
   HEAD per key: s3://nemar denies anonymous ListBucket, so a missing key answers
@@ -5131,7 +5137,13 @@ Examples:
         for (let offset = 0; ; offset += 200) {
           const page = await listDatasets({ limit: 200, offset });
           ids.push(...page.datasets.map((d) => d.dataset_id));
-          if (page.datasets.length < 200 || ids.length >= (page.total_count ?? ids.length)) break;
+          // `?? Infinity`, not `?? ids.length`: an absent total would otherwise end
+          // the loop after the first page and silently sweep 200 datasets.
+          if (
+            page.datasets.length < 200 ||
+            ids.length >= (page.total_count ?? Number.POSITIVE_INFINITY)
+          )
+            break;
         }
         targets = ids.filter((id) => id.startsWith(options.prefix)).sort();
         spinner.succeed(`${targets.length} dataset(s) with prefix ${options.prefix}`);

@@ -13,7 +13,7 @@
  * every clone goes to upstream and the archive's independence from OpenNeuro is
  * not real.
  *
- * Two rules this module will not bend:
+ * Two rules this module will not bend (ADR 0060):
  *
  *  1. **What the bucket holds is established by listing it, once, with
  *     credentials.** Not by a per-key anonymous HEAD: `s3://nemar` denies
@@ -39,6 +39,16 @@ import { batchSetKeysPresent } from "./git-annex/transfer.js";
 
 /** The name the import gives NEMAR's own S3 special remote. */
 export const REMOTE_NAME = "nemar-s3";
+
+/**
+ * A dataset id, which is also a directory name under the work root.
+ *
+ * Checked rather than trusted because the id reaches `join(workRoot, id)` and then
+ * `rmSync`: `../something` would delete outside the work root, and an id repeated
+ * in the target list would give two workers the same clone path, each removing it
+ * while the other reads it.
+ */
+const DATASET_ID_RE = /^[a-z]{2}[0-9]{6}$/;
 
 /** What the bucket holds for a dataset, as bare keys with the prefix stripped. */
 export type ObjectSource = (datasetId: string) => Promise<Set<string>>;
@@ -79,8 +89,15 @@ export interface KeyRegistrationOutcome {
 /**
  * List a dataset's `objects/` prefix with credentials the API mints for it.
  *
- * Read-only despite the name: upload credentials are what grant access to the
- * prefix, and listing is the cheapest thing they can do.
+ * Read-only against S3 despite the endpoint's name: upload credentials are what
+ * grant access to the prefix, and listing is the cheapest thing they can do.
+ *
+ * It is NOT side-effect free against D1. `POST /datasets/:id/upload-credentials`
+ * stamps `last_activity_at` before minting, so even a report without `--apply`
+ * resets the staleness clock on every dataset it audits and postpones the 90-day
+ * cleanup cron for private DOI-less ones. The obvious alternative is closed:
+ * download credentials 400 on a public dataset, which most of the imported fleet
+ * is. The command says so in its help rather than pretending otherwise.
  */
 export function bucketObjectSource(): ObjectSource {
   return async (datasetId) => {
@@ -101,9 +118,13 @@ export function bucketObjectSource(): ObjectSource {
  * identity can be configured, and git-annex init COMMITS to the git-annex branch.
  * On a machine with no `user.email` -- which is what the required CI tier is --
  * that fails, and the whole repair reports a clone failure for a reason that has
- * nothing to do with cloning. Doing it here also lets the clone skip blobs, which
- * matters when the fleet includes datasets of 60,000 keys: nothing here ever wants
- * annexed content, only the pointers and the location log.
+ * nothing to do with cloning.
+ *
+ * The clone is `--filter=blob:none`. That is NOT what avoids fetching annexed
+ * content -- annexed content is never a git blob, and the checkout fetches every
+ * blob of HEAD regardless. What it skips is historical blobs, and it makes the
+ * git-annex branch's location logs lazily fetched, which is worth having across
+ * 800 repositories.
  */
 async function cloneForRegistration(url: string, datasetPath: string): Promise<string | undefined> {
   // A token is for GitHub, and only for GitHub: `originUrl` is also a local path
@@ -150,19 +171,33 @@ async function cloneForRegistration(url: string, datasetPath: string): Promise<s
 /** Distinct keys the tree names, sorted. */
 async function annexedKeys(datasetPath: string): Promise<string[]> {
   // `--include '*'` and not `--all`, which `find` rejects.
-  const { stdout } = await runCommand(
+  const { stdout, stderr, exitCode } = await runCommand(
     ["git", "annex", "find", "--include", "*", "--format=${key}\n"],
     { cwd: datasetPath },
   );
+  // An empty answer and a failed question look identical on stdout: `find` exits 1
+  // with no output when the repository is not annex-initialized. Treating that as
+  // "no annexed keys" would hand the operator a clean bill of health for a dataset
+  // nothing was read from.
+  if (exitCode !== 0) {
+    throw new Error(`git annex find failed: ${stderr.trim() || `exit ${exitCode}`}`);
+  }
   return [...new Set(stdout.split("\n").filter(Boolean))].sort();
 }
 
 /** Keys the location log records at this remote, sorted. */
 async function keysRecordedAt(datasetPath: string, remoteUuid: string): Promise<string[]> {
-  const { stdout } = await runCommand(
+  const { stdout, stderr, exitCode } = await runCommand(
     ["git", "annex", "find", "--include", "*", "--in", remoteUuid, "--format=${key}\n"],
     { cwd: datasetPath },
   );
+  // Same trap: `--in` exits 1 with empty stdout when the UUID cannot be resolved,
+  // which would read as "the remote holds nothing" and turn every key into work.
+  if (exitCode !== 0) {
+    throw new Error(
+      `git annex find --in ${remoteUuid} failed: ${stderr.trim() || `exit ${exitCode}`}`,
+    );
+  }
   return [...new Set(stdout.split("\n").filter(Boolean))].sort();
 }
 
@@ -176,8 +211,13 @@ export async function resolveRemoteUuid(
   });
   if (exitCode !== 0) return null;
   for (const line of stdout.split("\n")) {
-    if (!line.includes(`name=${remoteName}`)) continue;
-    const uuid = line.trim().split(/\s+/)[0];
+    const fields = line.trim().split(/\s+/);
+    // An exact field, not a substring: an exemplar repo carries both `nemar-s3`
+    // (inherited from production) and `nemar-s3-dev`, and a substring match would
+    // register production's content against the dev remote's UUID -- a false claim
+    // of exactly the kind this module exists to stop.
+    if (!fields.some((field) => field === `name=${remoteName}`)) continue;
+    const uuid = fields[0];
     if (uuid) return uuid;
   }
   return null;
@@ -250,6 +290,15 @@ export async function repairDatasetKeyRegistration(
   options: KeyRegistrationOptions,
 ): Promise<KeyRegistrationOutcome> {
   const remoteName = options.remoteName ?? REMOTE_NAME;
+  if (!DATASET_ID_RE.test(datasetId)) {
+    return {
+      datasetId,
+      action: "failed",
+      pushed: false,
+      notes: [],
+      error: `"${datasetId}" is not a dataset id, and it would become a directory this deletes`,
+    };
+  }
   const datasetPath = join(options.workRoot, datasetId);
   const notes: string[] = [];
   rmSync(datasetPath, { recursive: true, force: true });
@@ -257,6 +306,9 @@ export async function repairDatasetKeyRegistration(
   const url = options.originUrl ?? `https://github.com/nemarDatasets/${datasetId}.git`;
   const cloned = await cloneForRegistration(url, datasetPath);
   if (cloned) {
+    // Before the try, so nothing else removes it: a half-written clone left under
+    // the work root outlives the run and the next one deletes it blind.
+    rmSync(datasetPath, { recursive: true, force: true });
     return { datasetId, action: "failed", pushed: false, notes, error: cloned };
   }
 
@@ -283,6 +335,20 @@ export async function repairDatasetKeyRegistration(
       };
     }
     if (state.toRegister.length === 0) {
+      // Checked AFTER the missing-content branch, which `--include-incomplete`
+      // skips: without this, a dataset with 480 annexed keys and nothing in the
+      // bucket has an empty `toRegister` and would be tallied compliant.
+      if (state.missingContent.length > 0) {
+        return {
+          datasetId,
+          action: "skipped-missing-content",
+          state,
+          pushed: false,
+          notes: [
+            `nothing to register: the bucket holds none of the ${state.missingContent.length} key(s) still outstanding (#1396)`,
+          ],
+        };
+      }
       return { datasetId, action: "compliant", state, pushed: false, notes };
     }
     if (!options.apply) {
@@ -316,7 +382,12 @@ export async function repairDatasetKeyRegistration(
     if (options.push === false) {
       return { datasetId, action: "repaired", state, pushed: false, notes };
     }
-    const pushed = await pushToGitHub(datasetPath, "origin", "git-annex");
+    // NOT `pushToGitHub(path, "origin", "git-annex")`: naming the branch makes that
+    // helper treat it as rebasable, and the git-annex branch must never be rebased
+    // -- it is an append-only log that merges through git-annex's own union-merge.
+    // The default path pushes `main` (unchanged here, so a no-op) and then the
+    // git-annex branch with the correct fetch + `git annex merge` retry.
+    const pushed = await pushToGitHub(datasetPath, "origin");
     if (!pushed.success) {
       return {
         datasetId,
@@ -367,27 +438,26 @@ export async function sweepKeyRegistration(
     onDataset?: (outcome: KeyRegistrationOutcome, done: number, total: number) => void;
   },
 ): Promise<KeyRegistrationSweep> {
+  // Deduplicated: two workers on one id share a clone path and delete it under
+  // each other.
+  const unique = [...new Set(datasetIds)];
   let done = 0;
-  const outcomes = await mapWithConcurrency(
-    datasetIds,
-    options.concurrency ?? 4,
-    async (datasetId) => {
-      let outcome: KeyRegistrationOutcome;
-      try {
-        outcome = await repairDatasetKeyRegistration(datasetId, objects, options);
-      } catch (error) {
-        outcome = {
-          datasetId,
-          action: "failed",
-          pushed: false,
-          notes: [],
-          error: error instanceof Error ? error.message : String(error),
-        };
-      }
-      options.onDataset?.(outcome, ++done, datasetIds.length);
-      return outcome;
-    },
-  );
+  const outcomes = await mapWithConcurrency(unique, options.concurrency ?? 4, async (datasetId) => {
+    let outcome: KeyRegistrationOutcome;
+    try {
+      outcome = await repairDatasetKeyRegistration(datasetId, objects, options);
+    } catch (error) {
+      outcome = {
+        datasetId,
+        action: "failed",
+        pushed: false,
+        notes: [],
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    options.onDataset?.(outcome, ++done, unique.length);
+    return outcome;
+  });
 
   const tally = {
     compliant: 0,

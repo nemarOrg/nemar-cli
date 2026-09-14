@@ -41,7 +41,7 @@ earlier releases are described only by their generated notes.
   or a signature with no session token returns. A dataset with any key the bucket cannot
   account for is reported and skipped by default, because that is content which was never
   transferred (#1396) rather than a registration that was lost, and writing the remaining
-  registrations would make it look repaired.
+  registrations would make it look repaired. Both rules are ADR 0060.
 
 ### Fixed
 

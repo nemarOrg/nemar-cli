@@ -206,7 +206,7 @@ export async function listS3ObjectKeys(opts: {
     throw new Error("the aws CLI is not on PATH, so the bucket cannot be listed");
   }
   const base = `${prefix.replace(/\/$/, "")}/`;
-  const { stdout, stderr, exitCode } = await runCommand(
+  const { stdout, stderr, exitCode, timedOut } = await runCommand(
     [
       "aws",
       "s3api",
@@ -232,22 +232,39 @@ export async function listS3ObjectKeys(opts: {
       },
       // A profile in the environment would decide which credentials sign this,
       // and the answer would be about the machine rather than the token.
-      unsetEnv: ["AWS_PROFILE", "AWS_DEFAULT_PROFILE"],
+      unsetEnv: ["AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"],
       timeout: 600_000,
     },
   );
-  if (exitCode !== 0) {
+  if (exitCode !== 0 || timedOut) {
+    // A killed `aws` can still exit 0, and a truncated listing reads as content the
+    // bucket does not hold -- which would file a healthy dataset as missing content.
     throw new Error(
-      `listing s3://${bucket}/${base} failed: ${stderr.trim() || `exit ${exitCode}`}`,
+      `listing s3://${bucket}/${base} failed: ${
+        timedOut ? "timed out" : stderr.trim() || `exit ${exitCode}`
+      }`,
     );
   }
+  return parseS3ObjectKeys(stdout, base);
+}
+
+/**
+ * Bare keys from `aws s3api list-objects-v2 --output text`.
+ *
+ * Separated from the call so it can be tested, because this parse is where the
+ * assumptions are: keys are tab-separated within a page and newline-separated
+ * between pages, an empty result prints the literal `None`, and the prefix also
+ * holds objects that are not keys.
+ */
+export function parseS3ObjectKeys(stdout: string, prefix: string): Set<string> {
+  const base = prefix.endsWith("/") ? prefix : `${prefix}/`;
   const keys = new Set<string>();
-  // `--output text` separates keys by tabs within a page and newlines between.
   for (const token of stdout.split(/\s+/)) {
     if (!token || token === "None") continue;
     if (!token.startsWith(base)) continue;
     const key = token.slice(base.length);
-    // Skip anything nested below the prefix; an annex key is one path segment.
+    // One path segment: an annex key never contains a slash, so anything nested
+    // below the prefix is not one.
     if (key && !key.includes("/")) keys.add(key);
   }
   return keys;

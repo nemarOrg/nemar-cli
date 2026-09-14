@@ -105,8 +105,14 @@ describe("batchSetKeysPresent", () => {
 
   test("records a large batch without losing any of it", async () => {
     // The production failure was silent loss under concurrency: 117 keys reported
-    // registered, zero recorded. One process cannot lose a race with itself, and this
-    // is the size at which the old implementation started dropping writes.
+    // registered, zero recorded. One process cannot lose a race with itself.
+    //
+    // This size does NOT reproduce the old implementation's loss on a fast local
+    // disk -- re-running the fifty-way concurrent version here registers 120 of 120
+    // and 400 of 400 -- so treat this as a volume check on the batch interface, not
+    // as a regression test for the race. The tests with teeth are the ones that read
+    // the location log back: the orphan key, the refused key, and the fleet suite's
+    // assertion against a fresh clone of origin.
     const keys = await addFiles(120);
     expect(keys).toHaveLength(120);
 
