@@ -29,7 +29,12 @@ import { cloneDataset, pushToGitHub } from "./git-annex/clone-push.js";
 import { runCommand } from "./git-annex/run-command.js";
 import { configureS3Remote, toS3Credentials } from "./git-annex/s3-remote.js";
 import { batchSetKeysPresent, getRemoteUuid } from "./git-annex/transfer.js";
-import { type UploadStrategy, annexCopyUpload, normalizeImportedTree } from "./import-normalize.js";
+import {
+  type UploadStrategy,
+  annexCopyUpload,
+  normalizeImportedTree,
+  stripLargefilesAttributes,
+} from "./import-normalize.js";
 import { findUnannexedData } from "./import-openneuro.js";
 import { isKeyPresentAtDeclaredSize, listExistingObjects } from "./s3-server-copy.js";
 
@@ -169,10 +174,23 @@ async function listAttributeFilesWithLargefiles(datasetPath: string): Promise<st
   if (exitCode > 1) {
     throw new Error(`git grep failed: ${stderr.trim() || `exit ${exitCode}`}`);
   }
-  return stdout
+  const candidates = stdout
     .split("\n")
     .filter(Boolean)
     .map((line) => line.replace(/^HEAD:/, ""));
+
+  // Matching the string is not the same as having something to change. NEMAR's
+  // policy KEEPS `**/.git* annex.largefiles=nothing` -- the rule that stops
+  // git-annex swallowing git's own metadata -- so a repository the fleet sweep has
+  // already brought into compliance still matches the grep. Reporting those as work
+  // outstanding would tell an operator to migrate a dataset that is done.
+  const files: string[] = [];
+  for (const file of candidates) {
+    const show = await runCommand(["git", "show", `HEAD:${file}`], { cwd: datasetPath });
+    if (show.exitCode !== 0) continue;
+    if (stripLargefilesAttributes(show.stdout).stripped > 0) files.push(file);
+  }
+  return files;
 }
 
 /**

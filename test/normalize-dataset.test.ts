@@ -200,6 +200,26 @@ describe("planDatasetNormalization", () => {
     );
   }, 180_000);
 
+  test("reports no attribute work for a repo the policy already governs", async () => {
+    // `**/.git* annex.largefiles=nothing` is part of NEMAR's policy, not inherited
+    // from upstream, so a repository the fleet sweep has already fixed still matches
+    // a grep for the string. Reporting it would tell an operator to migrate a
+    // dataset that is done -- which is what the whole fleet looked like after the
+    // sweep landed.
+    const swept = join(workDir, "on999999");
+    await run(["cp", "-R", clone, swept], workDir);
+    writeFileSync(
+      join(swept, ".gitattributes"),
+      "* annex.backend=SHA256E\n**/.git* annex.largefiles=nothing\n",
+    );
+    await run(["git", "add", ".gitattributes"], swept);
+    await run(["git", "commit", "-qm", "policy only"], swept);
+    await run(["git", "push", "-q", "origin", "main"], swept);
+
+    const plan = await planDatasetNormalization("on999999", { workDir });
+    expect(plan.attributeFiles).toEqual([]);
+  }, 180_000);
+
   test("refuses a directory that is a different repository", async () => {
     const wrong = join(workDir, "on999999");
     mkdirSync(wrong, { recursive: true });
