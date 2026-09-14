@@ -8,6 +8,7 @@
 
 import { existsSync } from "node:fs";
 import { spawn } from "bun";
+import { runCommand } from "./git-annex/run-command.js";
 
 /**
  * Check if the AWS CLI is installed and accessible.
@@ -178,4 +179,76 @@ export async function uploadWithAwsCli(opts: AwsCliUploadOptions): Promise<AwsCl
   }
 
   return { success: true, uploaded, failed: [] };
+}
+
+/**
+ * Every object key under a dataset's prefix, with the prefix stripped.
+ *
+ * One listing answers "does the bucket hold this key?" for a whole dataset. The
+ * alternative -- a HEAD per key -- is both slower and ambiguous: `s3://nemar`
+ * denies anonymous ListBucket, so S3 answers a missing key with 403 rather than
+ * 404, and 403 is equally what a private dataset, an expired session, or a
+ * signature with no session token returns (#1380, #1392).
+ *
+ * Throws rather than returning an empty set when the listing fails. An empty set
+ * reads as "the bucket holds nothing", which would make a caller conclude every
+ * key is missing content.
+ */
+export async function listS3ObjectKeys(opts: {
+  credentials: { access_key_id: string; secret_access_key: string; session_token: string };
+  bucket: string;
+  region: string;
+  /** Dataset prefix without a trailing slash, e.g. `on007788/objects`. */
+  prefix: string;
+}): Promise<Set<string>> {
+  const { credentials, bucket, region, prefix } = opts;
+  if (!(await isAwsCliAvailable())) {
+    throw new Error("the aws CLI is not on PATH, so the bucket cannot be listed");
+  }
+  const base = `${prefix.replace(/\/$/, "")}/`;
+  const { stdout, stderr, exitCode } = await runCommand(
+    [
+      "aws",
+      "s3api",
+      "list-objects-v2",
+      "--bucket",
+      bucket,
+      "--prefix",
+      base,
+      "--query",
+      "Contents[].Key",
+      "--output",
+      "text",
+      // The CLI paginates internally; this only bounds each request.
+      "--page-size",
+      "1000",
+    ],
+    {
+      env: {
+        AWS_ACCESS_KEY_ID: credentials.access_key_id,
+        AWS_SECRET_ACCESS_KEY: credentials.secret_access_key,
+        AWS_SESSION_TOKEN: credentials.session_token,
+        AWS_DEFAULT_REGION: region,
+      },
+      // A profile in the environment would decide which credentials sign this,
+      // and the answer would be about the machine rather than the token.
+      unsetEnv: ["AWS_PROFILE", "AWS_DEFAULT_PROFILE"],
+      timeout: 600_000,
+    },
+  );
+  if (exitCode !== 0) {
+    throw new Error(
+      `listing s3://${bucket}/${base} failed: ${stderr.trim() || `exit ${exitCode}`}`,
+    );
+  }
+  const keys = new Set<string>();
+  // `--output text` separates keys by tabs within a page and newlines between.
+  for (const token of stdout.split(/\s+/)) {
+    if (!token || token === "None") continue;
+    if (!token.startsWith(base)) continue;
+    const key = token.slice(base.length);
+    // Skip anything nested below the prefix; an annex key is one path segment.
+    if (key && !key.includes("/")) keys.add(key);
+  }
+  return keys;
 }
