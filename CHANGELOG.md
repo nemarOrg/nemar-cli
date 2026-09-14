@@ -39,6 +39,71 @@ earlier releases are described only by their generated notes.
   requests both still applied, and this API is read-only for anyone without a key; recorded
   because it is a real change in how those routes are throttled.
 
+- **An OpenNeuro import no longer leaves motion recordings in the git repository, and
+  NEMAR's annex policy now actually governs an imported dataset.** Two separate holes,
+  both closed in the import's prepare phase (#1159, ADR 0060). First, a `_motion.tsv`
+  under OpenNeuro's ~1 MB bar arrived as a plain git blob and stayed one -- 893 of them,
+  675 MB, in `ds007788` alone; those files are now annexed and their content uploaded
+  from the clone, and an import that cannot upload them fails instead of publishing a
+  pointer with nothing behind it. Second, and previously unnoticed: upstream ships a
+  `.gitattributes` whose `annex.largefiles` setting **outranks** the one
+  `configureLargefiles` writes, so ADR 0031's policy had no effect on any imported
+  repository -- the next motion file added to one would have repeated the original bug.
+  The inherited attribute is now replaced by NEMAR's own expression, which the import
+  writes and then reads back before continuing: stripping alone would have been worse
+  than leaving it, because with `annex.largefiles` set nowhere git-annex annexes
+  everything, including the metadata a clone has to be able to read. This is a forward
+  fix, so an imported repository does not shrink -- upstream's blobs stay in the
+  history it came with. The 600 imported datasets that still carry upstream's
+  attributes are tracked in #1374, and `on007788`'s own data migration in #1159.
+- **`nemar admin annex-normalize <id>` applies the same fix to a dataset that already
+  exists**, which is how `on007788`'s 893 git-resident recordings and the imported
+  fleet get migrated. It is a forward fix by construction: a published version
+  manifest addresses a git-resident file by its tag-pinned `raw.githubusercontent.com`
+  URL, so history is never rewritten and those URLs keep resolving. `--dry-run`
+  reports the plan; a clone left dirty by an interrupted attempt is refused rather
+  than mistaken for a dataset with nothing left to migrate.
+- **A dataset migration no longer hands git-annex a temporary key without its session
+  token** (#1380). `normalize-dataset.ts` enabled the S3 remote with credentials minted
+  for the dataset and then let the transfer inherit the environment, where there were
+  none: git-annex fell back to the key and secret `enableremote` had cached, signed
+  without the session token that makes them valid, and S3 refused every request with a
+  bare 403 -- which was mistaken for the API's S3 identity not reaching imported
+  (`on######`) prefixes. It does reach them: the identity covers the bucket and the
+  per-request session policy is what narrows it, verified by HEAD on the same object
+  with the same credentials returning 200 with the token and 403 without. The
+  credentials are now threaded to the transfer; the branch that obtains them is the
+  branch that states how the bytes move, so there is no default left to forget; a
+  temporary key with no session token is refused before any transfer is attempted; and
+  the migration probes the prefix before annexing anything, so a refusal costs one HEAD
+  rather than an hour. `nemar admin s3 credential-check <id>` reports the same probe on
+  demand. A dataset with no data to move now needs no credentials at all, and a policy
+  that changed only the git-annex branch is pushed rather than left local.
+- **A migration is no longer declared done on a check that cannot fail meaningfully**
+  (#1380, #1392). The step that confirmed the uploaded content was
+  `git annex fsck --from nemar-s3`, which is the one question git-annex cannot answer
+  here: `enableremote` caches the key and secret with nowhere to put the session token,
+  so fsck signs without one and S3 returns 403 -- the same 403 it returns for an object
+  that is not there. A red result therefore did not mean the content was missing, and a
+  green one would not have meant it was present. `on006979`'s migration is what surfaced
+  it: the PDF was in the bucket and the location log recorded it, and the run still
+  reported `fsck: 1 failed`. The check is now a HEAD carrying the credentials that moved
+  the bytes, `absent` and `unconfirmed` are kept apart rather than collapsed, and it runs
+  **before** the push instead of after -- a tree naming keys whose content never arrived
+  is what stranded `on003490` and `on005121` behind a permanent DOI, and the clone is
+  still re-runnable right up until it is pushed. For a remote whose credentials git-annex
+  does hold in full, the verifier reads the location log after fsck has pruned it, since
+  fsck only checks claims that were already made and an upload that moved nothing makes
+  none.
+- **The per-user IAM provisioning that STS replaced is gone from the backend** rather
+  than sitting there with no callers (#1380). `generateS3PolicyDocument`,
+  `generateAdminS3PolicyDocument`, `createIamUser`, `createAccessKey`, `putUserPolicy`
+  and `generateIamUsername` had no call site outside their own module; the two
+  generators are why #1380 was first read as an identity-policy gap, since they look
+  like the code that would write one and nothing runs them. Revocation stays: an
+  account provisioned under the old scheme still carries an `aws_iam_username` in D1
+  and an IAM user in the account, and deleting it has to take both away.
+
 ## 0.10.3 - 2026-09-10
 
 ### Security

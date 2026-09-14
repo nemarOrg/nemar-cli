@@ -1119,6 +1119,104 @@ s3Command
     }
   });
 
+s3Command
+  .command("credential-check")
+  .description("Mint a dataset's upload credentials and ask S3 what they can actually do")
+  .argument("<dataset-id>", "Dataset ID (e.g., on007788)")
+  .addHelpText(
+    "after",
+    `
+Read-only. Mints the same STS credentials an upload would get, then lists and reads
+one object under the dataset's objects/ prefix with them, through the aws CLI.
+
+It answers the question #1380 got wrong: a 403 from a signed request does not say
+whether the identity, the session policy, or the request itself is at fault. The
+credentials NEMAR mints are temporary, and a temporary key signs nothing without
+its session token -- S3 refuses such a request with a bare 403 even on an object
+that is anonymously readable.
+
+Examples:
+  $ nemar admin s3 credential-check on007788
+  $ nemar admin s3 credential-check nm099999
+`,
+  )
+  .action(async (datasetId: string) => {
+    if (!requireAuth()) return;
+
+    const { requestUploadCredentials } = await import("../lib/api/data.js");
+    const { probeS3PrefixAccess } = await import("../lib/aws-cli.js");
+
+    const mintSpinner = ora(`Minting upload credentials for ${datasetId}...`).start();
+    let creds: Awaited<ReturnType<typeof requestUploadCredentials>>;
+    try {
+      creds = await requestUploadCredentials(datasetId);
+    } catch (error) {
+      mintSpinner.fail(`Could not mint upload credentials for ${datasetId}`);
+      console.log(chalk.dim(`  ${errorDetail(error)}`));
+      process.exit(1);
+    }
+    const temporary = creds.credentials.access_key_id.startsWith("ASIA");
+    mintSpinner.succeed(
+      `Minted ${temporary ? "temporary (STS)" : "long-lived"} credentials, expiring ${creds.credentials.expiration}`,
+    );
+    console.log(`  Scope: ${chalk.cyan(`s3://${creds.s3.bucket}/${creds.s3.prefix}/`)}`);
+    console.log(
+      chalk.dim(
+        "  The session policy names this dataset; the identity it is federated from covers the bucket.",
+      ),
+    );
+
+    const probeSpinner = ora("Asking S3 what they reach...").start();
+    const probe = await probeS3PrefixAccess({
+      credentials: creds.credentials,
+      bucket: creds.s3.bucket,
+      region: creds.s3.region,
+      prefix: creds.s3.prefix,
+    });
+
+    switch (probe.outcome) {
+      case "reachable":
+        probeSpinner.succeed(`Listed and read ${probe.object}`);
+        console.log(
+          chalk.green(`  These credentials reach s3://${probe.bucket}/${probe.prefix}/.`),
+        );
+        if (temporary) {
+          console.log(
+            chalk.dim(
+              "  A transfer must carry the session token too: git-annex caches an S3 remote's key and secret with nowhere to put it, so a copy that inherits the environment signs without one and every request comes back 403.",
+            ),
+          );
+        }
+        break;
+      case "empty-prefix":
+        probeSpinner.warn(`Listing worked; there is no object under ${probe.prefix}/ to read`);
+        console.log(
+          chalk.dim(
+            "  ListBucket is granted, so the credentials are valid. Reachability of an object is unproven because there is none.",
+          ),
+        );
+        break;
+      case "unavailable":
+        probeSpinner.warn(`Could not probe: ${probe.detail}`);
+        console.log(chalk.dim("  Install the aws CLI (nemar doctor lists it) and re-run."));
+        break;
+      case "refused":
+        probeSpinner.fail(`S3 refused: ${probe.detail}`);
+        console.log();
+        console.log("Three things can produce this, in the order worth checking:");
+        console.log(
+          "  1. the request dropped the session token (a temporary key alone is always 403)",
+        );
+        console.log(
+          `  2. the session policy does not name ${datasetId} (it is generated per dataset id)`,
+        );
+        console.log(
+          "  3. the identity the token is federated from no longer covers the bucket, so the intersection is empty",
+        );
+        process.exit(1);
+    }
+  });
+
 adminCommand.addCommand(s3Command);
 
 // Hidden alias for backward compatibility
@@ -3726,6 +3824,180 @@ async function dispatchOpenNeuroImportWorkflow(
 }
 
 adminCommand
+  .command("annex-normalize <datasetId>")
+  .description(
+    "Move data an existing dataset keeps in git into the annex, and put NEMAR's annex policy in force (ADR 0060)",
+  )
+  .option("--dry-run", "Clone and report what would change; touch nothing")
+  .option("--dir <path>", "Working directory for the clone (reuse it to resume without re-cloning)")
+  .option("--no-push", "Do everything except push, for a rehearsal")
+  .option(
+    "--normalize-max-gb <n>",
+    "Raise the ceiling on how much data will be uploaded from this host (default 5 GiB)",
+  )
+  .option(
+    "--via-aws-cli",
+    "Move the content with `aws s3 sync` rather than git-annex's S3 client, using whatever the aws CLI on this machine is already configured with. Faster for a large migration, and the only option on a host with no NEMAR credentials; the default path mints credentials scoped to this dataset instead.",
+  )
+  .option("-y, --yes", "Skip the confirmation prompt")
+  .addHelpText(
+    "after",
+    `
+What this does (ADR 0060, issue #1159):
+  1. clones the dataset (full clone -- data in git has to be present to upload)
+  2. annexes every file NEMAR policy calls data that the repo keeps in git, and
+     uploads the content to S3 with credentials minted for this dataset
+  3. replaces any inherited annex.largefiles attributes with NEMAR's expression
+  4. commits both changes and pushes main plus the git-annex branch
+
+It is a FORWARD fix: history is never rewritten, so published version manifests
+that address a git-resident file by its raw.githubusercontent URL keep resolving,
+and the repository does not shrink. Tags, DOIs, archives and existing S3 objects
+are untouched.
+
+Examples:
+  $ nemar admin annex-normalize on007788 --dry-run
+  $ nemar admin annex-normalize on007788 --dir /tmp/normalize-on007788
+`,
+  )
+  .action(
+    async (
+      datasetId: string,
+      options: {
+        dryRun?: boolean;
+        dir?: string;
+        push?: boolean;
+        normalizeMaxGb?: string;
+        viaAwsCli?: boolean;
+        yes?: boolean;
+        no?: boolean;
+      },
+    ) => {
+      if (!requireAuth()) return;
+
+      let maxBytes: number | undefined;
+      if (options.normalizeMaxGb !== undefined) {
+        const gb = Number(options.normalizeMaxGb);
+        if (!Number.isFinite(gb) || gb <= 0) {
+          console.error(
+            chalk.red(
+              `Invalid --normalize-max-gb "${options.normalizeMaxGb}". Expected a positive number of GiB.`,
+            ),
+          );
+          process.exit(1);
+        }
+        maxBytes = Math.floor(gb * 1024 ** 3);
+      }
+
+      const { planDatasetNormalization, normalizeDatasetRepo } = await import(
+        "../lib/normalize-dataset.js"
+      );
+
+      const planSpinner = ora(`Cloning ${datasetId} and measuring...`).start();
+      let plan: Awaited<ReturnType<typeof planDatasetNormalization>>;
+      try {
+        plan = await planDatasetNormalization(datasetId, { workDir: options.dir });
+      } catch (err) {
+        planSpinner.fail(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+      planSpinner.succeed(`Cloned ${datasetId} to ${plan.datasetPath}`);
+
+      console.log();
+      console.log(chalk.bold(`Plan for ${datasetId}`));
+      console.log(
+        `  Data files in git: ${chalk.cyan(plan.files.length.toString())} (${chalk.cyan(`${(plan.bytes / 1e6).toFixed(1)} MB`)}) -> annex + S3`,
+      );
+      for (const f of plan.files.slice(0, 5)) {
+        console.log(chalk.dim(`    - ${f.path} (${(f.size / 1e6).toFixed(2)} MB)`));
+      }
+      if (plan.files.length > 5) {
+        console.log(chalk.dim(`    ... and ${plan.files.length - 5} more`));
+      }
+      console.log(
+        `  Inherited largefiles attributes: ${
+          plan.attributeFiles.length > 0
+            ? chalk.cyan(plan.attributeFiles.join(", "))
+            : chalk.dim("none")
+        }`,
+      );
+      console.log(chalk.dim("  History is not rewritten; tags, DOIs and archives are untouched."));
+      console.log();
+
+      if (
+        plan.files.length === 0 &&
+        plan.attributeFiles.length === 0 &&
+        (plan.pendingKeys?.length ?? 0) === 0
+      ) {
+        console.log(chalk.green("Nothing to do: this dataset already matches NEMAR policy."));
+        return;
+      }
+      if (plan.files.length === 0 && (plan.pendingKeys?.length ?? 0) > 0) {
+        // A resumed clone (--dir) whose previous attempt committed and stopped. The
+        // tree looks normalized because it IS normalized -- locally. Origin still
+        // carries the recordings as plain blobs, and the keys were never proved
+        // present in S3, which is the only reason the push did not happen.
+        console.log(
+          chalk.yellow(
+            `  Resuming: ${plan.pendingKeys?.length ?? 0} key(s) are committed here and absent from origin. They will be re-verified against S3 before anything is pushed.`,
+          ),
+        );
+      }
+
+      if (options.dryRun) {
+        console.log(chalk.dim("--dry-run: stopping before any change."));
+        return;
+      }
+
+      const confirmResult = await confirm(
+        plan.files.length > 0
+          ? `Rewrite ${datasetId}'s HEAD and upload ${(plan.bytes / 1e6).toFixed(1)} MB to S3?`
+          : `Put NEMAR's annex policy in force on ${datasetId} (no data moves, no S3 traffic)?`,
+        options,
+      );
+      if (confirmResult !== "confirmed") {
+        console.log(confirmResult === "declined" ? "Declined." : "Cancelled.");
+        return;
+      }
+
+      const runSpinner = ora("Annexing and uploading...").start();
+      let result: Awaited<ReturnType<typeof normalizeDatasetRepo>>;
+      try {
+        result = await normalizeDatasetRepo(plan, {
+          push: options.push !== false,
+          maxBytes,
+          credentials: options.viaAwsCli ? "ambient" : "backend",
+        });
+      } catch (err) {
+        runSpinner.fail(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+      runSpinner.succeed(result.notes.length > 0 ? result.notes.join("; ") : "nothing changed");
+
+      if (result.committed && !result.pushed) {
+        console.log(
+          chalk.yellow(
+            `  Committed but NOT pushed (--no-push). The clone is at ${plan.datasetPath}.`,
+          ),
+        );
+      } else if (result.pushed) {
+        console.log(chalk.green(`  Pushed main and the git-annex branch for ${datasetId}`));
+      }
+
+      // Verification is not something the CLI can do on its own: it has to ask with
+      // the credentials that moved the bytes, so `normalizeDatasetRepo` owns it and
+      // refuses to push without it. Reaching here means it passed.
+      if (result.verification) {
+        console.log(
+          chalk.green(
+            `  Remote holds all ${result.verification.present.length} uploaded key(s), checked by ${result.verification.method}`,
+          ),
+        );
+      }
+    },
+  );
+
+adminCommand
   .command("import-openneuro")
   .description("Import an OpenNeuro dataset into NEMAR")
   .argument("<openneuro-ids>", "OpenNeuro dataset ID(s), comma-separated (e.g., ds007262,ds007263)")
@@ -3744,6 +4016,10 @@ adminCommand
     "--shard <i/N>",
     "Copy-phase only: process shard i of N (0-indexed), e.g. 0/8. Required with --phase copy.",
   )
+  .option(
+    "--normalize-max-gb <n>",
+    "Raise the ceiling on how much data the prepare phase will annex and upload from this host (default 5 GiB). Only needed for a dataset that keeps an unusual amount of data in git; the import aborts rather than silently spending hours uploading (ADR 0060).",
+  )
   .action(
     async (
       openneuroIds: string,
@@ -3754,6 +4030,7 @@ adminCommand
         trustUpstream?: boolean;
         phase?: string;
         shard?: string;
+        normalizeMaxGb?: string;
       },
     ) => {
       if (!requireAuth()) return;
@@ -3776,6 +4053,20 @@ adminCommand
       if ((options.dir || options.skipData) && !options.local && !options.phase) {
         console.error(chalk.red("--dir and --skip-data require --local or --phase"));
         process.exit(1);
+      }
+
+      let normalizeMaxBytes: number | undefined;
+      if (options.normalizeMaxGb !== undefined) {
+        const gb = Number(options.normalizeMaxGb);
+        if (!Number.isFinite(gb) || gb <= 0) {
+          console.error(
+            chalk.red(
+              `Invalid --normalize-max-gb "${options.normalizeMaxGb}". Expected a positive number of GiB.`,
+            ),
+          );
+          process.exit(1);
+        }
+        normalizeMaxBytes = Math.floor(gb * 1024 ** 3);
       }
 
       // Single-phase execution for the sharded CI workflow (prepare/copy/finalize).
@@ -3809,6 +4100,7 @@ adminCommand
           skipData: options.skipData,
           trustUpstream: options.trustUpstream,
           persistStaging: true,
+          normalizeMaxBytes,
         };
         try {
           if (options.phase === "prepare") {
@@ -3838,6 +4130,7 @@ adminCommand
             workDir: options.dir,
             skipData: options.skipData,
             trustUpstream: options.trustUpstream,
+            normalizeMaxBytes,
           });
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);

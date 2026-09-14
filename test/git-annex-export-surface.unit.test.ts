@@ -98,17 +98,20 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "batchSetKeysPresent",
     "classifyGetOutcome",
     "collectFileManifest",
+    "copyPathsToAnnexRemote",
     "copyToAnnexRemote",
     "countPendingDownload",
     "dropFiles",
     "dropUnusedAnnexObjects",
     "extractCopyError",
     "extractWhereisKeyUrl",
+    "getAnnexKeysForPaths",
     "getAnnexWhereisAll",
     "getDatasetData",
     "getKeyHashDir",
     "getKeyHashDirs",
     "getRemoteUuid",
+    "listAnnexedKeys",
     "setKeyPresent",
   ],
   "repo-state": [
@@ -166,6 +169,12 @@ const INTERNAL_WIRING = [
   "buildLargefilesExpression",
   "isNeverAnnexedMetadata",
   "shouldAnnex",
+  // Also post-split (#1159): the path-scoped copy and the path->key map exist for
+  // import-normalize.ts, which moves files upstream left in git into the annex.
+  // Consumed there, never by the CLI.
+  "copyPathsToAnnexRemote",
+  "getAnnexKeysForPaths",
+  "listAnnexedKeys",
 ];
 
 /**
