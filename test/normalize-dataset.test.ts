@@ -262,6 +262,7 @@ describe("normalizeDatasetRepo", () => {
         files,
         bytes: 300_000,
         attributeFiles: [".gitattributes"],
+        pendingKeys: [],
       },
       { push: true, remoteName: "stand-in" },
     );
@@ -297,6 +298,7 @@ describe("normalizeDatasetRepo", () => {
         files,
         bytes: 300_000,
         attributeFiles: [".gitattributes"],
+        pendingKeys: [],
       },
       { push: false, remoteName: "stand-in" },
     );
@@ -371,6 +373,7 @@ describe("normalizeDatasetRepo", () => {
           files: [],
           bytes: 0,
           attributeFiles: [".gitattributes"],
+          pendingKeys: [],
         },
         { push: false },
       );
@@ -399,6 +402,7 @@ describe("normalizeDatasetRepo", () => {
         files: await findUnannexedData(clone),
         bytes: 300_000,
         attributeFiles: [".gitattributes"],
+        pendingKeys: [],
       },
       { push: true, remoteName: "stand-in" },
     );
@@ -455,6 +459,7 @@ describe("the upload leg is swappable", () => {
           files: await findUnannexedData(clone),
           bytes: 300_000,
           attributeFiles: [".gitattributes"],
+          pendingKeys: [],
         },
         { push: true, remoteName: "stand-in", upload: refusing },
       ),
@@ -485,6 +490,7 @@ describe("the upload leg is swappable", () => {
           files: await findUnannexedData(clone),
           bytes: 300_000,
           attributeFiles: [".gitattributes"],
+          pendingKeys: [],
         },
         { push: true, remoteName: "stand-in", upload: silent },
       ),
@@ -502,6 +508,46 @@ describe("the upload leg is swappable", () => {
     expect(originAnnex.trim()).not.toBe(localAnnex.trim());
   }, 180_000);
 
+  test("a clone left committed-but-unpushed is not reported as already compliant", async () => {
+    // The recovery path the failure message itself advertises. Run 1 annexes,
+    // commits, fails verification and refuses to push. Run 2 with --dir measures a
+    // tree that IS normalized -- locally -- so `files` and `attributeFiles` both
+    // come back empty and the command used to print "Nothing to do: this dataset
+    // already matches NEMAR policy" while origin/main still carried the recording
+    // as a plain blob and the content was never confirmed in S3.
+    // The clone lives at workDir/on999999, because that is where a resumed run
+    // (`--dir`) looks for it.
+    const resumable = join(workDir, "on999999");
+    await run(["cp", "-R", clone, resumable], workDir);
+    await addDirectoryRemote(resumable, "stand-in");
+    const silent: UploadStrategy = async ({ files }) => ({ copied: files.length });
+
+    await expect(
+      normalizeDatasetRepo(
+        {
+          datasetId: "on999999",
+          datasetPath: resumable,
+          files: await findUnannexedData(resumable),
+          bytes: 300_000,
+          attributeFiles: [".gitattributes"],
+          pendingKeys: [],
+        },
+        { push: true, remoteName: "stand-in", upload: silent },
+      ),
+    ).rejects.toThrow(/NOTHING HAS BEEN PUSHED/);
+
+    // Origin is still pre-migration, and the clone is committed but unpushed.
+    const originMain = await run(["git", "ls-tree", "main", "--", SMALL_MOTION], origin);
+    expect(originMain.trim().split(" ")[0]).toBe("100644");
+
+    const resumed = await planDatasetNormalization("on999999", { workDir });
+    expect(resumed.files).toEqual([]);
+    expect(resumed.attributeFiles).toEqual([]);
+    // ...and the plan says so, which is the whole difference between resuming and
+    // ticking the dataset off as done.
+    expect(resumed.pendingKeys.length).toBeGreaterThan(0);
+  }, 180_000);
+
   test("the real upload leg is confirmed against the remote, key by key", async () => {
     // The other half: a transfer that did happen is reported as confirmed, and the
     // report names how it was checked rather than asserting it abstractly.
@@ -513,6 +559,7 @@ describe("the upload leg is swappable", () => {
         files: await findUnannexedData(clone),
         bytes: 300_000,
         attributeFiles: [".gitattributes"],
+        pendingKeys: [],
       },
       { push: true, remoteName: "stand-in" },
     );
