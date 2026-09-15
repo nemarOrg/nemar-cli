@@ -53,10 +53,11 @@
 **Description:** Cloudflare Workers backend with D1 database for user and token management
 
 ### Deployment Info
-- **URL:** https://api.osc.earth/nemar
+- **URL:** https://api.nemar.org (the worker is also mounted at `/nemar`; the old
+  `api.osc.earth/nemar` spelling now 404s and `src/lib/config.ts` migrates stored configs off it)
 - **Database:** D1 `nemar-db` (0a168b1a-1923-4436-9509-6e4a9b5bb7ae)
 - **Rate Limit KV:** 9afb2679c6ea4ed4acd1a5916cf291d7
-- **Email:** Resend via nemar@osc.earth
+- **Email:** Resend, sending as `noreply@nemar.org` (`DEFAULT_FROM_EMAIL`, overridable by `FROM_EMAIL`)
 
 ### Completed Tasks
 - [x] Create Cloudflare Workers project structure (`backend/`)
@@ -526,7 +527,9 @@ DOI concept creation is blocked unless `pipeline_stage` is `"validated"`. Admin 
 
 ### DOI Target URL
 
-DOI `_target` always resolves to `https://nemar.org/dataexplorer/detail?dataset_id=...` (NEMAR landing page, not GitHub).
+DOI `_target` always resolves to a NEMAR landing page, not GitHub. That page is now
+`https://nemar.org/dataset/<id>` (`datasetLandingUrl` in `shared/datacite-constants.ts`); the
+`dataexplorer/detail` URL this section was written against is gone and 301s there.
 
 ### Refactoring Target
 
