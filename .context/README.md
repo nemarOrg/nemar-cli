@@ -61,6 +61,7 @@ here, since an index that misses a document cannot classify it either.
 | [draft-zarr-inference-ecosystem-plan.md](draft-zarr-inference-ecosystem-plan.md) | Draft plan for inference over the Zarr serving copy. | public |
 | [draft-817-submission-minimums-policy.md](draft-817-submission-minimums-policy.md) | Draft submission-minimums policy. | public |
 | [draft-1036-validator-3x-evaluation.md](draft-1036-validator-3x-evaluation.md) | Evaluation of bids-validator 3.x. | public |
+| [draft-anonymous-deposit-analysis.md](draft-anonymous-deposit-analysis.md) | Pseudonymous deposit for double-blind review: the leak inventory, and what the chosen design (public data, private repository) requires. ADR still to be written. | public |
 | [draft-eegdash-zarr-issues.sh](draft-eegdash-zarr-issues.sh) | Script drafting the EEGDash Zarr issues. The one non-markdown document here, which is why a markdown-only sweep missed it. | public |
 | [plans/spec-pr1.md](plans/spec-pr1.md) | Column-budget rebuild spec (issue #1182). In `plans/`, which a top-level sweep missed. | public |
 

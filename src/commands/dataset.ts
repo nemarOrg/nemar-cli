@@ -142,6 +142,7 @@ import {
   dropUnusedAnnexObjects,
   getDatasetData,
 } from "../lib/git-annex/transfer.js";
+import { invokedAs } from "../lib/help.js";
 import {
   type DataPlaneManifestEntry,
   DataPlaneUnavailableError,
@@ -519,37 +520,39 @@ function collectPassthroughArgs(): string[] {
   return extra;
 }
 
-// Upload command
-datasetCommand
-  .command("upload")
-  .description("Upload a BIDS dataset to NEMAR")
-  .argument("<path>", "Path to BIDS dataset directory")
-  .option("-n, --name <name>", "Dataset name (defaults to BIDS Name, then directory name)")
-  .option("-d, --description <desc>", "Dataset description")
-  .option("--skip-validation", "Skip BIDS validation (not recommended)")
-  .option("--skip-orcid", "Skip co-author ORCID collection")
-  .option("--dry-run", "Show what would be uploaded without doing it")
-  .option("-j, --jobs <number>", "Parallel upload streams (default: 4)", "4")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option("--restart", "Clear upload progress and re-upload all files")
-  .option("--no", NO_DESCRIPTION) // Long form only; -n conflicts with --name
-  .option("--deposit-type <type>", "Attestation: 'owner' or 'redistribution' (non-interactive)")
-  .option("--key-status <status>", "Attestation: re-identification key 'destroyed' or 'retained'")
-  .option(
-    "--confirm-deidentified",
-    "Attestation: confirm the dataset contains no identifiable personal information",
-  )
-  .option(
-    "--affirm-no-duplicate",
-    "Attestation (redistribution only): affirm the dataset is not already archived in BIDS format",
-  )
-  .option(
-    "--upstream-source <ref>",
-    "Attestation (redistribution only): upstream release URL or accession",
-  )
-  .addHelpText(
-    "after",
-    `
+// Upload command. Built by a factory rather than attached inline because
+// `nemar upload` registers a SECOND instance of it at the root (a Command
+// belongs to exactly one parent), and the two must not drift.
+export function createUploadCommand(): Command {
+  return new Command("upload")
+    .description("Upload a BIDS dataset to NEMAR")
+    .argument("<path>", "Path to BIDS dataset directory")
+    .option("-n, --name <name>", "Dataset name (defaults to BIDS Name, then directory name)")
+    .option("-d, --description <desc>", "Dataset description")
+    .option("--skip-validation", "Skip BIDS validation (not recommended)")
+    .option("--skip-orcid", "Skip co-author ORCID collection")
+    .option("--dry-run", "Show what would be uploaded without doing it")
+    .option("-j, --jobs <number>", "Parallel upload streams (default: 4)", "4")
+    .option(YES_OPTION, YES_DESCRIPTION)
+    .option("--restart", "Clear upload progress and re-upload all files")
+    .option("--no", NO_DESCRIPTION) // Long form only; -n conflicts with --name
+    .option("--deposit-type <type>", "Attestation: 'owner' or 'redistribution' (non-interactive)")
+    .option("--key-status <status>", "Attestation: re-identification key 'destroyed' or 'retained'")
+    .option(
+      "--confirm-deidentified",
+      "Attestation: confirm the dataset contains no identifiable personal information",
+    )
+    .option(
+      "--affirm-no-duplicate",
+      "Attestation (redistribution only): affirm the dataset is not already archived in BIDS format",
+    )
+    .option(
+      "--upstream-source <ref>",
+      "Attestation (redistribution only): upstream release URL or accession",
+    )
+    .addHelpText(
+      "after",
+      ({ command }) => `
 Description:
   Upload a BIDS dataset to NEMAR. The dataset will be validated, assigned
   a unique ID (nm000XXX), and stored on GitHub (metadata) and S3 (data files).
@@ -571,183 +574,191 @@ Note:
   (private) or 'nemar dataset update' (public).
 
 Examples:
-  $ nemar dataset upload ./my-eeg-dataset
-  $ nemar dataset upload ./ds -n "My EEG Study" -d "64-channel EEG data"
-  $ nemar dataset upload ./ds --dry-run        # Preview without uploading
-  $ nemar dataset upload ./ds -j 16            # More parallel streams`,
-  )
-  .action(async (datasetPath, options) => {
-    // Get config for GitHub username
-    const config = getConfig();
+  $ ${invokedAs(command)} ./my-eeg-dataset
+  $ ${invokedAs(command)} ./ds -n "My EEG Study" -d "64-channel EEG data"
+  $ ${invokedAs(command)} ./ds --dry-run        # Preview without uploading
+  $ ${invokedAs(command)} ./ds -j 16            # More parallel streams`,
+    )
+    .action(async (datasetPath, options) => {
+      // Get config for GitHub username
+      const config = getConfig();
 
-    // Step 1: Check authentication
-    requireAuth();
+      // Step 1: Check authentication
+      requireAuth();
 
-    // Step 1b: Check sandbox training. CLI-only, and stated in the one sentence
-    // every other gap is stated in (#1268, ADR 0045) -- see describeSandboxGap.
-    //
-    // The local flag is a CACHE, not the record (#1274): it is empty on a
-    // fresh install, on a second machine and after a config reset, and reading
-    // it as a definitive "no" told people who had trained to train again. A
-    // miss asks the backend, which owns the fact.
-    const sandbox = await resolveSandboxCompletion();
-    if (sandbox.status === "not_completed") {
-      console.log(chalk.yellow(describeSandboxGap()));
+      // Step 1b: Check sandbox training. CLI-only, and stated in the one sentence
+      // every other gap is stated in (#1268, ADR 0045) -- see describeSandboxGap.
+      //
+      // The local flag is a CACHE, not the record (#1274): it is empty on a
+      // fresh install, on a second machine and after a config reset, and reading
+      // it as a definitive "no" told people who had trained to train again. A
+      // miss asks the backend, which owns the fact.
+      const sandbox = await resolveSandboxCompletion();
+      if (sandbox.status === "not_completed") {
+        console.log(chalk.yellow(describeSandboxGap()));
+        console.log();
+        console.log("It verifies your setup and familiarizes you with the workflow.");
+        process.exit(1);
+      }
+      if (sandbox.status === "unknown") {
+        // Still a stop -- unconfirmed is not confirmed, and the upload needs the
+        // setup training verifies -- but the advice is to re-check rather than
+        // to re-train, which is the wrong first move for an account that has
+        // already done it. (The upload-access step below fails OPEN because a
+        // grant it cannot read is one the SERVER will still enforce; nothing
+        // enforces sandbox training but this gate, so it fails closed.)
+        console.log(chalk.yellow(describeUncheckedSandboxGap()));
+        console.log(chalk.dim(`  ${sandbox.reason}`));
+        console.log();
+        process.exit(1);
+      }
+
+      // Step 1c: Upload access, before anything expensive runs. A missing grant
+      // is a hard stop for a real upload; --dry-run continues, since it uploads
+      // nothing and the plan is what the user asked to see.
+      if ((await checkUploadAccessStep({ dryRun: options.dryRun })).status === "fail") {
+        process.exit(1);
+      }
+
+      // Resolve path
+      const absolutePath = resolve(datasetPath);
+      if (!existsSync(absolutePath)) {
+        console.log(chalk.red(`Error: Path does not exist: ${absolutePath}`));
+        process.exit(1);
+      }
+
+      // Step 1d: Check required tools
+      await checkPrerequisitesForCommand("upload");
+
+      // Step 2: Check prerequisites
+      if ((await checkUploadPrerequisites()).status === "fail") process.exit(1);
+
+      // Step 2b: Verify gh CLI authentication
+      if ((await verifyGhCli(config)).status === "fail") process.exit(1);
+
+      // Step 3: BIDS Validation (unless skipped)
+      if ((await validateBidsStep(absolutePath, options)).status === "fail") process.exit(1);
+
+      // Step 4: Collect file manifest and show upload plan
+      const { datasetName, manifest, bidsDescription } = await analyzeDataset(
+        absolutePath,
+        options,
+      );
+
+      // Step 4b: Collect co-author ORCIDs (skip if metadata already exists from prior run)
+      const coAuthorEnrichment = await collectAuthorOrcids(absolutePath, options, bidsDescription);
+
+      // Step 4c: License detection and enforcement
+      const resolvedLicense = await resolveLicenseStep(absolutePath, options);
+
+      // Step 4d: Data provenance
+      await collectProvenance(absolutePath, options, resolvedLicense);
+
+      // Step 4e: Show plan (resume banner or fresh) and honor --dry-run
+      const planResult = showUploadPlan(absolutePath, datasetName, manifest, options);
+      if (planResult.status === "stop") return;
+      const { existingConfig } = planResult.value;
+
+      // Step 4f: Deposit attestation (contributor terms, #1077). After the
+      // --dry-run exit so previews never prompt; before the final confirm so
+      // declining costs nothing. --yes does not satisfy it (see attestation.ts).
+      let attestation: DepositAttestation;
+      try {
+        attestation = await resolveAttestation(options);
+      } catch (attestErr) {
+        console.log(chalk.red(attestErr instanceof Error ? attestErr.message : String(attestErr)));
+        process.exit(1);
+      }
+
+      // Step 5: Confirm with user
+      const confirmResult = await confirm(
+        "Proceed with upload?",
+        { yes: options.yes, no: options.no },
+        true,
+      );
+      if (confirmResult !== "confirmed") {
+        console.log(confirmResult === "declined" ? "Upload skipped." : "Upload cancelled.");
+        return;
+      }
+
       console.log();
-      console.log("It verifies your setup and familiarizes you with the workflow.");
-      process.exit(1);
-    }
-    if (sandbox.status === "unknown") {
-      // Still a stop -- unconfirmed is not confirmed, and the upload needs the
-      // setup training verifies -- but the advice is to re-check rather than
-      // to re-train, which is the wrong first move for an account that has
-      // already done it. (The upload-access step below fails OPEN because a
-      // grant it cannot read is one the SERVER will still enforce; nothing
-      // enforces sandbox training but this gate, so it fails closed.)
-      console.log(chalk.yellow(describeUncheckedSandboxGap()));
-      console.log(chalk.dim(`  ${sandbox.reason}`));
-      console.log();
-      process.exit(1);
-    }
 
-    // Step 1c: Upload access, before anything expensive runs. A missing grant
-    // is a hard stop for a real upload; --dry-run continues, since it uploads
-    // nothing and the plan is what the user asked to see.
-    if ((await checkUploadAccessStep({ dryRun: options.dryRun })).status === "fail") {
-      process.exit(1);
-    }
+      const { dataFiles, uploadProgress: loadedProgress } = prepareUploadProgress(
+        absolutePath,
+        manifest,
+        options,
+      );
 
-    // Resolve path
-    const absolutePath = resolve(datasetPath);
-    if (!existsSync(absolutePath)) {
-      console.log(chalk.red(`Error: Path does not exist: ${absolutePath}`));
-      process.exit(1);
-    }
+      // Step 6: Create new dataset or resume the existing one
+      const created = await createOrResumeDataset(
+        absolutePath,
+        options,
+        datasetName,
+        dataFiles,
+        existingConfig,
+        attestation,
+      );
+      if (created.status === "fail") process.exit(1);
+      const datasetInfo = created.value;
 
-    // Step 1d: Check required tools
-    await checkPrerequisitesForCommand("upload");
+      let uploadProgress = reconcileProgressWithDataset(
+        absolutePath,
+        loadedProgress,
+        datasetInfo.dataset_id,
+      );
 
-    // Step 2: Check prerequisites
-    if ((await checkUploadPrerequisites()).status === "fail") process.exit(1);
+      // Compute the upload list AFTER reconcile: stale progress discarded above
+      // must not keep filtering the list (#884).
+      const filesToUpload = computeFilesToUpload(uploadProgress, dataFiles);
 
-    // Step 2b: Verify gh CLI authentication
-    if ((await verifyGhCli(config)).status === "fail") process.exit(1);
+      // Step 6b: Accept GitHub invitation
+      if ((await acceptRepoInvitation(datasetInfo)).status === "fail") process.exit(1);
 
-    // Step 3: BIDS Validation (unless skipped)
-    if ((await validateBidsStep(absolutePath, options)).status === "fail") process.exit(1);
+      // Step 7: Initialize git-annex dataset
+      // Use NEMAR user identity for all commits (including initial dataset creation)
+      const author =
+        config.username && config.email
+          ? { name: config.username, email: config.email }
+          : undefined;
+      if ((await initializeAnnexDataset(absolutePath, author)).status === "fail") process.exit(1);
 
-    // Step 4: Collect file manifest and show upload plan
-    const { datasetName, manifest, bidsDescription } = await analyzeDataset(absolutePath, options);
+      // Step 8: Configure GitHub remote + ensure local branch is "main"
+      if ((await configureRemotes(absolutePath, datasetInfo, options)).status === "fail") {
+        process.exit(1);
+      }
 
-    // Step 4b: Collect co-author ORCIDs (skip if metadata already exists from prior run)
-    const coAuthorEnrichment = await collectAuthorOrcids(absolutePath, options, bidsDescription);
+      // Step 9: Upload data files to S3 via git-annex S3 special remote
+      const uploaded = await uploadDataToS3(
+        absolutePath,
+        options,
+        dataFiles,
+        filesToUpload,
+        uploadProgress,
+        datasetInfo,
+      );
+      if (uploaded.status === "fail") process.exit(1);
+      uploadProgress = uploaded.value;
 
-    // Step 4c: License detection and enforcement
-    const resolvedLicense = await resolveLicenseStep(absolutePath, options);
+      // Step 10b: Ensure .nemar metadata is on disk and .bidsignore covers it
+      writeNemarMetadata(absolutePath, coAuthorEnrichment, uploadProgress);
 
-    // Step 4d: Data provenance
-    await collectProvenance(absolutePath, options, resolvedLicense);
+      // Step 11: Save dataset changes
+      if ((await saveDatasetStep(absolutePath, author, uploadProgress)).status === "fail") {
+        process.exit(1);
+      }
 
-    // Step 4e: Show plan (resume banner or fresh) and honor --dry-run
-    const planResult = showUploadPlan(absolutePath, datasetName, manifest, options);
-    if (planResult.status === "stop") return;
-    const { existingConfig } = planResult.value;
+      // Step 12: Push metadata to GitHub
+      if ((await pushMetadata(absolutePath, uploadProgress)).status === "fail") process.exit(1);
 
-    // Step 4f: Deposit attestation (contributor terms, #1077). After the
-    // --dry-run exit so previews never prompt; before the final confirm so
-    // declining costs nothing. --yes does not satisfy it (see attestation.ts).
-    let attestation: DepositAttestation;
-    try {
-      attestation = await resolveAttestation(options);
-    } catch (attestErr) {
-      console.log(chalk.red(attestErr instanceof Error ? attestErr.message : String(attestErr)));
-      process.exit(1);
-    }
+      // Step 12b: Deploy BIDS validation CI
+      await deployCiStep(absolutePath, datasetInfo.dataset_id, uploadProgress);
 
-    // Step 5: Confirm with user
-    const confirmResult = await confirm(
-      "Proceed with upload?",
-      { yes: options.yes, no: options.no },
-      true,
-    );
-    if (confirmResult !== "confirmed") {
-      console.log(confirmResult === "declined" ? "Upload skipped." : "Upload cancelled.");
-      return;
-    }
+      // Step 13: Success!
+      printUploadSuccess(absolutePath, datasetInfo);
+    });
+}
 
-    console.log();
-
-    const { dataFiles, uploadProgress: loadedProgress } = prepareUploadProgress(
-      absolutePath,
-      manifest,
-      options,
-    );
-
-    // Step 6: Create new dataset or resume the existing one
-    const created = await createOrResumeDataset(
-      absolutePath,
-      options,
-      datasetName,
-      dataFiles,
-      existingConfig,
-      attestation,
-    );
-    if (created.status === "fail") process.exit(1);
-    const datasetInfo = created.value;
-
-    let uploadProgress = reconcileProgressWithDataset(
-      absolutePath,
-      loadedProgress,
-      datasetInfo.dataset_id,
-    );
-
-    // Compute the upload list AFTER reconcile: stale progress discarded above
-    // must not keep filtering the list (#884).
-    const filesToUpload = computeFilesToUpload(uploadProgress, dataFiles);
-
-    // Step 6b: Accept GitHub invitation
-    if ((await acceptRepoInvitation(datasetInfo)).status === "fail") process.exit(1);
-
-    // Step 7: Initialize git-annex dataset
-    // Use NEMAR user identity for all commits (including initial dataset creation)
-    const author =
-      config.username && config.email ? { name: config.username, email: config.email } : undefined;
-    if ((await initializeAnnexDataset(absolutePath, author)).status === "fail") process.exit(1);
-
-    // Step 8: Configure GitHub remote + ensure local branch is "main"
-    if ((await configureRemotes(absolutePath, datasetInfo, options)).status === "fail") {
-      process.exit(1);
-    }
-
-    // Step 9: Upload data files to S3 via git-annex S3 special remote
-    const uploaded = await uploadDataToS3(
-      absolutePath,
-      options,
-      dataFiles,
-      filesToUpload,
-      uploadProgress,
-      datasetInfo,
-    );
-    if (uploaded.status === "fail") process.exit(1);
-    uploadProgress = uploaded.value;
-
-    // Step 10b: Ensure .nemar metadata is on disk and .bidsignore covers it
-    writeNemarMetadata(absolutePath, coAuthorEnrichment, uploadProgress);
-
-    // Step 11: Save dataset changes
-    if ((await saveDatasetStep(absolutePath, author, uploadProgress)).status === "fail") {
-      process.exit(1);
-    }
-
-    // Step 12: Push metadata to GitHub
-    if ((await pushMetadata(absolutePath, uploadProgress)).status === "fail") process.exit(1);
-
-    // Step 12b: Deploy BIDS validation CI
-    await deployCiStep(absolutePath, datasetInfo.dataset_id, uploadProgress);
-
-    // Step 13: Success!
-    printUploadSuccess(absolutePath, datasetInfo);
-  });
+datasetCommand.addCommand(createUploadCommand());
 
 function formatProgressBar(
   filesDown: number,
@@ -1162,41 +1173,43 @@ async function runHttpDownload(
   }
 }
 
-// Download command
-datasetCommand
-  .command("download")
-  .description("Download a dataset from NEMAR or OpenNeuro")
-  .argument("<dataset-id>", "Dataset ID (e.g., nm000104 or OpenNeuro ds000248)")
-  .option("-o, --output <path>", "Output directory (default: ./<dataset-id>)")
-  .option("-j, --jobs <number>", "Parallel download streams (default: 4)", "4")
-  .option("--no-data", "Download metadata only (skip large data files)")
-  .option("--resume", "Resume a partial download into an existing clone")
-  .option("--update", "Pull only the version diff into an existing clone")
-  .option("--prune", "With --update, drop annex objects that no longer exist upstream")
-  .option("--subjects <list>", "Comma-separated subjects (e.g. sub-01,02)")
-  .option("--sessions <list>", "Comma-separated sessions (e.g. ses-pre,post)")
-  .option("--tasks <list>", "Comma-separated tasks (e.g. rest,nback)")
-  .option("--runs <list>", "Comma-separated runs (e.g. 1,2 — matches run-1 and run-01)")
-  .option("--datatypes <list>", "Comma-separated BIDS datatypes (e.g. eeg,emg)")
-  .option("--include <globs>", "Comma-separated extra include globs")
-  .option("--exclude <globs>", "Comma-separated exclude globs (e.g. sourcedata/**)")
-  .option("--stimuli", "Include stimuli/ content (skipped by default; can be large)")
-  .option("--derivatives", "Include derivatives/ content (skipped by default; can be large)")
-  .option(
-    "--http",
-    "Download over plain HTTP without git or git-annex (a file snapshot, not a repository)",
-  )
-  .option(
-    "--skip-port-check",
-    "Skip the porting-in-progress check (use if falsely blocked on an OpenNeuro-sourced dataset)",
-  )
-  .option(
-    "--require-complete",
-    "Exit non-zero if any file is unavailable from the archive (for strict pipelines)",
-  )
-  .addHelpText(
-    "after",
-    `
+// Download command. Built by a factory rather than attached inline because
+// `nemar download` registers a SECOND instance of it at the root (a Command
+// belongs to exactly one parent), and the two must not drift.
+export function createDownloadCommand(): Command {
+  return new Command("download")
+    .description("Download a dataset from NEMAR or OpenNeuro")
+    .argument("<dataset-id>", "Dataset ID (e.g., nm000104 or OpenNeuro ds000248)")
+    .option("-o, --output <path>", "Output directory (default: ./<dataset-id>)")
+    .option("-j, --jobs <number>", "Parallel download streams (default: 4)", "4")
+    .option("--no-data", "Download metadata only (skip large data files)")
+    .option("--resume", "Resume a partial download into an existing clone")
+    .option("--update", "Pull only the version diff into an existing clone")
+    .option("--prune", "With --update, drop annex objects that no longer exist upstream")
+    .option("--subjects <list>", "Comma-separated subjects (e.g. sub-01,02)")
+    .option("--sessions <list>", "Comma-separated sessions (e.g. ses-pre,post)")
+    .option("--tasks <list>", "Comma-separated tasks (e.g. rest,nback)")
+    .option("--runs <list>", "Comma-separated runs (e.g. 1,2 — matches run-1 and run-01)")
+    .option("--datatypes <list>", "Comma-separated BIDS datatypes (e.g. eeg,emg)")
+    .option("--include <globs>", "Comma-separated extra include globs")
+    .option("--exclude <globs>", "Comma-separated exclude globs (e.g. sourcedata/**)")
+    .option("--stimuli", "Include stimuli/ content (skipped by default; can be large)")
+    .option("--derivatives", "Include derivatives/ content (skipped by default; can be large)")
+    .option(
+      "--http",
+      "Download over plain HTTP without git or git-annex (a file snapshot, not a repository)",
+    )
+    .option(
+      "--skip-port-check",
+      "Skip the porting-in-progress check (use if falsely blocked on an OpenNeuro-sourced dataset)",
+    )
+    .option(
+      "--require-complete",
+      "Exit non-zero if any file is unavailable from the archive (for strict pipelines)",
+    )
+    .addHelpText(
+      "after",
+      ({ command }) => `
 Description:
   Download a BIDS dataset from NEMAR or OpenNeuro.
 
@@ -1227,487 +1240,496 @@ Without git-annex:
   skipped.
 
 Examples:
-  $ nemar dataset download nm000104              # Download NEMAR dataset (skips stimuli/derivatives)
-  $ nemar dataset download nm000104 -o ./data    # Custom output directory
-  $ nemar dataset download nm000104 --no-data    # Metadata only (fast)
-  $ nemar dataset download nm000104 -j 8         # More parallel streams
-  $ nemar dataset download nm000104 --resume     # Resume partial download
-  $ nemar dataset download nm000104 --update     # Pull only the version diff
-  $ nemar dataset download nm000104 --update --prune  # Plus drop orphan objects
-  $ nemar dataset download nm000104 --http       # No git-annex needed (snapshot)
-  $ nemar dataset download nm000104 --subjects sub-01,02      # Only these subjects
-  $ nemar dataset download nm000104 --tasks rest --datatypes eeg  # Subset
-  $ nemar dataset download nm000104 --stimuli                 # Also download stimuli/
-  $ nemar dataset download nm000104 --stimuli --derivatives   # Download everything
-  $ nemar dataset download ds000248              # Download from OpenNeuro`,
-  )
-  .action(async (datasetId, options) => {
-    // OpenNeuro datasets (ds######) - check for NEMAR counterpart first
-    const effectiveId = await resolveOpenNeuroId(datasetId);
-    if (!effectiveId) {
-      await handleOpenNeuroDownload(datasetId, options);
-      return;
-    }
-
-    if (options.resume && options.update) {
-      console.log(chalk.red("Error: --resume and --update are mutually exclusive."));
-      process.exit(1);
-    }
-    if (options.prune && !options.update) {
-      console.log(chalk.red("Error: --prune requires --update."));
-      process.exit(1);
-    }
-
-    const filter = buildBidsFilterArgs({
-      subjects: options.subjects,
-      sessions: options.sessions,
-      tasks: options.tasks,
-      runs: options.runs,
-      datatypes: options.datatypes,
-      include: options.include,
-      exclude: options.exclude,
-      excludeStimuli: options.stimuli !== true,
-      excludeDerivatives: options.derivatives !== true,
-    });
-
-    if (filter.active && options.data === false) {
-      console.log(
-        chalk.red(
-          "Error: --no-data cannot be combined with BIDS filters (--subjects, --tasks, etc.). Filters imply data download.",
-        ),
-      );
-      process.exit(1);
-    }
-
-    // --http is decided BEFORE any prerequisite check, because the checks are
-    // the thing it exists to skip. `COMMAND_TOOLS.download` requires the GitHub
-    // CLI, and this path needs no git, no git-annex and no GitHub account --
-    // demanding `gh` on a container or a login node would deny the flag on
-    // exactly the machines it was built for.
-    if (options.http) {
-      await runHttpDownload(effectiveId, options, filter);
-      return;
-    }
-
-    // Step 1: Check prerequisites (fast, parallel checks)
-    await checkPrerequisitesForCommand("download");
-
-    let spinner = ora("Checking git-annex...").start();
-    const prereqs = await checkDownloadPrerequisites();
-
-    // Fall back rather than exit. A missing git-annex used to be a hard stop,
-    // which is a poor answer to "I just want the files" when the data plane
-    // already serves every byte over plain HTTPS. The fallback is announced
-    // rather than silent: it produces a snapshot, not a repository, and someone
-    // who wanted a repository has to learn that they did not get one.
-    if (!prereqs.allPassed) {
-      // The headline reports what actually failed. `checkDownloadPrerequisites`
-      // also fails a git-annex that is installed but too old, and telling that
-      // user it is "not available" sends them to install what they already have.
-      spinner.warn(
-        prereqs.gitAnnex.installed
-          ? `git-annex ${prereqs.gitAnnex.version} is not usable here`
-          : "git-annex is not installed",
-      );
-      for (const error of prereqs.errors) {
-        console.log(chalk.dim(`  ${error}`));
+  $ ${invokedAs(command)} nm000104              # Download NEMAR dataset (skips stimuli/derivatives)
+  $ ${invokedAs(command)} nm000104 -o ./data    # Custom output directory
+  $ ${invokedAs(command)} nm000104 --no-data    # Metadata only (fast)
+  $ ${invokedAs(command)} nm000104 -j 8         # More parallel streams
+  $ ${invokedAs(command)} nm000104 --resume     # Resume partial download
+  $ ${invokedAs(command)} nm000104 --update     # Pull only the version diff
+  $ ${invokedAs(command)} nm000104 --update --prune  # Plus drop orphan objects
+  $ ${invokedAs(command)} nm000104 --http       # No git-annex needed (snapshot)
+  $ ${invokedAs(command)} nm000104 --subjects sub-01,02      # Only these subjects
+  $ ${invokedAs(command)} nm000104 --tasks rest --datatypes eeg  # Subset
+  $ ${invokedAs(command)} nm000104 --stimuli                 # Also download stimuli/
+  $ ${invokedAs(command)} nm000104 --stimuli --derivatives   # Download everything
+  $ ${invokedAs(command)} ds000248              # Download from OpenNeuro`,
+    )
+    .action(async (datasetId, options) => {
+      // OpenNeuro datasets (ds######) - check for NEMAR counterpart first
+      const effectiveId = await resolveOpenNeuroId(datasetId);
+      if (!effectiveId) {
+        await handleOpenNeuroDownload(datasetId, options);
+        return;
       }
-      console.log(chalk.yellow("  Falling back to a plain HTTP download (a file snapshot)."));
-      console.log(
-        chalk.dim("  Pass --http to choose this path deliberately and skip this notice."),
-      );
-      console.log();
-      await runHttpDownload(effectiveId, options, filter);
-      return;
-    }
 
-    spinner.succeed(`git-annex ${prereqs.gitAnnex.version}`);
-
-    // Step 2: Get dataset info from backend
-    spinner = ora(`Fetching dataset info for ${effectiveId}...`).start();
-
-    let datasetInfo: Dataset;
-    try {
-      datasetInfo = await getDataset(effectiveId);
-      spinner.succeed(`Found dataset: ${datasetInfo.name}`);
-    } catch (error) {
-      // Branch on the error KIND. This used to say "Dataset not found" for anything
-      // that threw, so an unreachable backend was reported as a 404: the CLI
-      // asserting a fact about the dataset from a request that never got an answer.
-      // Surfaced while fencing the test suite off from production -- the surviving
-      // output under a connection failure was "Dataset not found" immediately
-      // followed by "Network error: Could not connect".
-      spinner.fail(datasetLookupFailure(error));
-      if (error instanceof ApiError) {
-        console.log(chalk.red(`  ${error.message}`));
-      } else {
-        console.log(chalk.red(`  ${(error as Error).message}`));
+      if (options.resume && options.update) {
+        console.log(chalk.red("Error: --resume and --update are mutually exclusive."));
+        process.exit(1);
       }
-      process.exit(1);
-    }
-
-    // Step 3: Check if dataset is accessible
-    if (!datasetInfo.github_repo) {
-      console.log(chalk.red("Error: Dataset repository not available"));
-      process.exit(1);
-    }
-
-    // Determine output path
-    const outputPath = options.output || effectiveId;
-    const absoluteOutput = resolve(outputPath);
-
-    // Paths to fetch with `git annex get`. Undefined → full retrieval. Used by
-    // --update to limit the get to changed annex keys.
-    let updatePaths: string[] | undefined;
-
-    // Resume / update modes share validation: target must exist, be a git-annex
-    // clone of the requested dataset, with a clean working tree.
-    const reuseMode = options.resume ? "resume" : options.update ? "update" : null;
-
-    if (reuseMode) {
-      if (!existsSync(absoluteOutput)) {
-        console.log(chalk.red(`Error: --${reuseMode} target does not exist: ${absoluteOutput}`));
-        console.log(chalk.dim(`Drop --${reuseMode} to perform a fresh clone.`));
+      if (options.prune && !options.update) {
+        console.log(chalk.red("Error: --prune requires --update."));
         process.exit(1);
       }
 
-      spinner = ora(`Validating ${reuseMode} target...`).start();
-
-      if (!(await isGitAnnexDataset(absoluteOutput))) {
-        spinner.fail("Not a git-annex dataset");
-        console.log(chalk.red(`  ${absoluteOutput} is not a git-annex repository.`));
-        console.log(chalk.dim(`--${reuseMode} requires a previous clone of the same dataset.`));
-        process.exit(1);
-      }
-
-      const existingId = await getDatasetIdFromRemote(absoluteOutput);
-      if (existingId !== effectiveId) {
-        spinner.fail("Dataset ID mismatch");
-        console.log(
-          chalk.red(
-            `  Expected ${effectiveId}, but ${absoluteOutput} is a clone of ${existingId ?? "an unknown repo"}.`,
-          ),
-        );
-        process.exit(1);
-      }
-
-      const dirtyCheck = await isWorkingTreeDirty(absoluteOutput);
-      if (dirtyCheck.error) {
-        spinner.fail("Could not check working tree status");
-        console.log(chalk.red(`  ${dirtyCheck.error}`));
-        process.exit(1);
-      }
-      if (dirtyCheck.dirty) {
-        spinner.fail("Working tree is dirty");
-        console.log(chalk.red(`  Refusing to ${reuseMode} with uncommitted local changes.`));
-        console.log(chalk.dim("  Commit, stash, or discard them first."));
-        process.exit(1);
-      }
-
-      // Refresh remote refs so we can compare versions and (for update) merge.
-      const fetchResult = await gitFetchOrigin(absoluteOutput);
-      if (!fetchResult.success) {
-        spinner.fail("Failed to fetch remote refs");
-        console.log(chalk.red(`  ${fetchResult.error}`));
-        process.exit(1);
-      }
-
-      const localRead = readLocalDatasetVersion(absoluteOutput);
-      if (localRead.error) {
-        console.log(chalk.yellow(`  Warning: ${localRead.error}`));
-      }
-      const remoteRead = await readRemoteHeadDatasetVersion(absoluteOutput);
-      for (const w of remoteRead.warnings) {
-        console.log(chalk.yellow(`  Warning: ${w}`));
-      }
-      const localVersion = localRead.version;
-      const remoteVersion = remoteRead.version;
-
-      if (options.resume) {
-        if (localVersion && remoteVersion && localVersion !== remoteVersion) {
-          spinner.fail("Local clone is behind upstream");
-          console.log(
-            chalk.red(`  Local version: ${localVersion} | Remote HEAD: ${remoteVersion}`),
-          );
-          console.log(
-            chalk.dim("  Run `nemar dataset download <id> --update` to pull the version diff."),
-          );
-          process.exit(1);
-        }
-        spinner.succeed(`Resume target verified: ${effectiveId}`);
-      } else {
-        // --update path
-        if (localVersion && remoteVersion && localVersion === remoteVersion) {
-          spinner.succeed(`Already up to date (${localVersion})`);
-          process.exit(0);
-        }
-        spinner.succeed(`Update plan: ${localVersion ?? "unknown"} → ${remoteVersion ?? "HEAD"}`);
-
-        if (localVersion && remoteVersion) {
-          spinner = ora("Computing version diff from manifests...").start();
-          try {
-            const [fromManifest, toManifest] = await Promise.all([
-              getManifest(effectiveId, localVersion),
-              getManifest(effectiveId, remoteVersion),
-            ]);
-            const diff = diffManifests(fromManifest, toManifest);
-            spinner.succeed(
-              `Diff: +${diff.added.length} added, ~${diff.changed.length} changed, -${diff.removed.length} removed`,
-            );
-            updatePaths = [...diff.added, ...diff.changed];
-            if (updatePaths.length === 0) {
-              console.log(
-                chalk.dim("  No annex content changes between versions; metadata-only update."),
-              );
-            }
-          } catch (err) {
-            const message = (err as Error).message;
-            spinner.warn(`Manifest diff unavailable: ${message}`);
-            if (/401|403|unauthor/i.test(message)) {
-              console.log(
-                chalk.yellow("  Looks like an auth issue. Run `nemar auth status` to verify."),
-              );
-            } else if (!/404|not found/i.test(message)) {
-              console.log(
-                chalk.yellow("  Unexpected manifest error. Please report if this recurs."),
-              );
-            }
-            console.log(
-              chalk.dim("  Falling back to full git annex get (skips already-present files)."),
-            );
-            updatePaths = undefined;
-          }
-        }
-
-        // Refuse on git-annex adjusted branches: a normal git merge corrupts
-        // the adjusted view. Users on adjusted clones should run `git annex
-        // sync` (or rename their default branch) before --update.
-        const localBranch = await getCurrentBranch(absoluteOutput);
-        if (localBranch?.startsWith("adjusted/")) {
-          console.log(
-            chalk.red(
-              `  --update is not supported on git-annex adjusted branches (${localBranch}).`,
-            ),
-          );
-          console.log(
-            chalk.dim(
-              "  Run `git -C <clone> annex sync` to bring the clone onto a normal branch first.",
-            ),
-          );
-          process.exit(1);
-        }
-
-        spinner = ora("Resolving remote tracking branch...").start();
-        const upstreamRef = await resolveUpstreamRef(absoluteOutput);
-        if (!upstreamRef.ref) {
-          spinner.fail("Cannot resolve remote tracking branch");
-          console.log(chalk.red(`  ${upstreamRef.error ?? "no upstream ref found"}`));
-          process.exit(1);
-        }
-        spinner.text = `Fast-forwarding to ${upstreamRef.ref}...`;
-        const mergeResult = await gitMergeFastForward(absoluteOutput, upstreamRef.ref);
-        if (!mergeResult.success) {
-          spinner.fail("Cannot fast-forward (local has diverging commits)");
-          console.log(chalk.red(`  ${mergeResult.error}`));
-          console.log(
-            chalk.dim("  Use `nemar dataset update` (PR workflow) to push local changes first."),
-          );
-          process.exit(1);
-        }
-        spinner.succeed(`Merged ${upstreamRef.ref}`);
-      }
-    } else if (existsSync(absoluteOutput)) {
-      console.log(chalk.red(`Error: Output path already exists: ${absoluteOutput}`));
-      console.log(
-        "Remove or rename the existing directory, or pass --resume / --update to reuse it.",
-      );
-      process.exit(1);
-    }
-
-    console.log();
-    const planLabel = options.update
-      ? "Update Plan:"
-      : options.resume
-        ? "Resume Plan:"
-        : "Download Plan:";
-    console.log(chalk.bold(planLabel));
-    console.log(`  Dataset: ${datasetInfo.name} (${effectiveId})`);
-    console.log(`  Output: ${absoluteOutput}`);
-    console.log(`  Data files: ${options.data === false ? "metadata only" : "included"}`);
-    if (options.data !== false) {
-      console.log(`  Parallel jobs: ${options.jobs}`);
-    }
-    if (options.update && updatePaths && updatePaths.length > 0) {
-      console.log(`  Files to fetch: ${updatePaths.length}`);
-    }
-    if (filter.active) {
-      for (const line of filter.summary) {
-        console.log(`  Filter ${line}`);
-      }
-    }
-    console.log();
-
-    // Step 4: Clone the dataset (metadata) — skipped on resume / update.
-    if (!reuseMode) {
-      const repoUrl = `https://github.com/${datasetInfo.github_repo}.git`;
-      spinner = ora("Cloning metadata from GitHub...").start();
-
-      const cloneResult = await cloneDataset(repoUrl, absoluteOutput);
-      if (!cloneResult.success) {
-        spinner.fail("Failed to clone dataset");
-        console.log(chalk.red(`  ${cloneResult.error}`));
-        process.exit(1);
-      }
-
-      spinner.succeed("Metadata cloned");
-    }
-
-    // OpenNeuro-sourced datasets only get their git-annex S3 objects after
-    // the import workflow's final push (which carries the .nemar/metadata.json
-    // commit). If the marker commit is missing locally, the porting matrix
-    // job is still mid-flight — the subsequent `git annex get` would fail
-    // with a cryptic "remote unavailable" error. Bail early with a clear
-    // retry hint. See nemarOrg/nemar-cli#460.
-    if (!options.skipPortCheck && datasetInfo.source === "openneuro" && options.data !== false) {
-      const marker = await detectImportMarker(absoluteOutput);
-      // "unknown" = git unavailable or non-git dir; skip port check and let git-annex handle it
-      if (marker === "absent") {
-        console.log();
-        console.log(chalk.yellow("Porting still in progress."));
-        console.log(
-          chalk.dim(
-            "  This dataset is being imported from OpenNeuro. Data files are not yet available.",
-          ),
-        );
-        console.log(chalk.dim("  The metadata-only clone is already at the path above."));
-        console.log(chalk.dim("  Wait 5–30 minutes (depending on dataset size), then run:"));
-        console.log(chalk.dim(`    cd ${absoluteOutput} && nemar dataset get`));
-        console.log(chalk.dim("  Run 'nemar dataset status <id>' to track porting progress."));
-        console.log(
-          chalk.dim(
-            "  Pass --skip-port-check to bypass this check if you are certain porting is complete.",
-          ),
-        );
-        process.exit(1);
-      }
-    }
-
-    // For private datasets, fetch temporary S3 download credentials.
-    const s3Creds = await fetchPrivateDatasetCreds(effectiveId, datasetInfo.visibility);
-
-    // Enable S3 remote if available (new datasets have it; old ones use web URLs)
-    const s3Enable = await enableS3Remote(absoluteOutput, "nemar-s3", s3Creds);
-    if (s3Enable.enabled) {
-      console.log(chalk.dim("  S3 remote enabled for data downloads"));
-    } else if (!s3Enable.success) {
-      console.log(chalk.yellow(`  Warning: Could not enable S3 remote: ${s3Enable.error}`));
-    }
-
-    // Step 5: Get data files with progress (unless --no-data)
-    const skipGet =
-      options.data === false || (options.update && updatePaths && updatePaths.length === 0);
-    if (skipGet) {
-      if (options.data === false) {
-        console.log(chalk.dim("Skipping data files (--no-data flag)"));
-      }
-    } else {
-      for (const line of filter.summary) {
-        console.log(chalk.dim(`  ${line}`));
-      }
-      console.log(chalk.bold(`Downloading data files (${options.jobs} parallel streams)...`));
-
-      // Pre-count pending files+bytes so the progress bar has an authoritative
-      // denominator. Falls back to non-percent display if precount fails.
-      const matchArgs = filter.args.length > 0 ? filter.args : undefined;
-      const pending = await countPendingDownload(absoluteOutput, undefined, matchArgs);
-      const tracker = new DownloadProgressTracker(
-        pending?.fileCount ?? 0,
-        pending?.totalBytes ?? 0,
-      );
-
-      const getResult = await getDatasetData(absoluteOutput, {
-        jobs: Number.parseInt(options.jobs, 10),
-        credentials: s3Creds,
-        paths: updatePaths,
-        extraArgs: matchArgs,
-        requireComplete: Boolean(options.requireComplete),
-        onProgress: (line) => tracker.processLine(line),
+      const filter = buildBidsFilterArgs({
+        subjects: options.subjects,
+        sessions: options.sessions,
+        tasks: options.tasks,
+        runs: options.runs,
+        datatypes: options.datatypes,
+        include: options.include,
+        exclude: options.exclude,
+        excludeStimuli: options.stimuli !== true,
+        excludeDerivatives: options.derivatives !== true,
       });
 
-      if (!getResult.success) {
-        // Counts are honest on the failure arm too: --require-complete can
-        // fail a run that still landed files, and the tracker should say so.
-        tracker.finish(getResult.filesDownloaded);
-        console.log(chalk.red(`Failed to download data files: ${getResult.error}`));
-        console.log(chalk.dim("The dataset was cloned but data files are not available locally."));
-        console.log(chalk.dim(`You can try again with: cd ${absoluteOutput} && nemar dataset get`));
-        if (s3Creds) {
-          await clearAnnexCredentials(absoluteOutput);
+      if (filter.active && options.data === false) {
+        console.log(
+          chalk.red(
+            "Error: --no-data cannot be combined with BIDS filters (--subjects, --tasks, etc.). Filters imply data download.",
+          ),
+        );
+        process.exit(1);
+      }
+
+      // --http is decided BEFORE any prerequisite check, because the checks are
+      // the thing it exists to skip. `COMMAND_TOOLS.download` requires the GitHub
+      // CLI, and this path needs no git, no git-annex and no GitHub account --
+      // demanding `gh` on a container or a login node would deny the flag on
+      // exactly the machines it was built for.
+      if (options.http) {
+        await runHttpDownload(effectiveId, options, filter);
+        return;
+      }
+
+      // Step 1: Check prerequisites (fast, parallel checks)
+      await checkPrerequisitesForCommand("download");
+
+      let spinner = ora("Checking git-annex...").start();
+      const prereqs = await checkDownloadPrerequisites();
+
+      // Fall back rather than exit. A missing git-annex used to be a hard stop,
+      // which is a poor answer to "I just want the files" when the data plane
+      // already serves every byte over plain HTTPS. The fallback is announced
+      // rather than silent: it produces a snapshot, not a repository, and someone
+      // who wanted a repository has to learn that they did not get one.
+      if (!prereqs.allPassed) {
+        // The headline reports what actually failed. `checkDownloadPrerequisites`
+        // also fails a git-annex that is installed but too old, and telling that
+        // user it is "not available" sends them to install what they already have.
+        spinner.warn(
+          prereqs.gitAnnex.installed
+            ? `git-annex ${prereqs.gitAnnex.version} is not usable here`
+            : "git-annex is not installed",
+        );
+        for (const error of prereqs.errors) {
+          console.log(chalk.dim(`  ${error}`));
+        }
+        console.log(chalk.yellow("  Falling back to a plain HTTP download (a file snapshot)."));
+        console.log(
+          chalk.dim("  Pass --http to choose this path deliberately and skip this notice."),
+        );
+        console.log();
+        await runHttpDownload(effectiveId, options, filter);
+        return;
+      }
+
+      spinner.succeed(`git-annex ${prereqs.gitAnnex.version}`);
+
+      // Step 2: Get dataset info from backend
+      spinner = ora(`Fetching dataset info for ${effectiveId}...`).start();
+
+      let datasetInfo: Dataset;
+      try {
+        datasetInfo = await getDataset(effectiveId);
+        spinner.succeed(`Found dataset: ${datasetInfo.name}`);
+      } catch (error) {
+        // Branch on the error KIND. This used to say "Dataset not found" for anything
+        // that threw, so an unreachable backend was reported as a 404: the CLI
+        // asserting a fact about the dataset from a request that never got an answer.
+        // Surfaced while fencing the test suite off from production -- the surviving
+        // output under a connection failure was "Dataset not found" immediately
+        // followed by "Network error: Could not connect".
+        spinner.fail(datasetLookupFailure(error));
+        if (error instanceof ApiError) {
+          console.log(chalk.red(`  ${error.message}`));
+        } else {
+          console.log(chalk.red(`  ${(error as Error).message}`));
         }
         process.exit(1);
       }
 
-      tracker.finish(getResult.filesDownloaded);
-      if (getResult.outcome === "partial") {
-        printPartialRetrieval(getResult);
-      } else {
-        console.log(chalk.green(`Data downloaded (${getResult.filesDownloaded} files)`));
+      // Step 3: Check if dataset is accessible
+      if (!datasetInfo.github_repo) {
+        console.log(chalk.red("Error: Dataset repository not available"));
+        process.exit(1);
       }
-    }
 
-    // --prune: drop annex objects that are no longer referenced by any branch
-    // (typically files removed in the upstream version).
-    if (options.update && options.prune) {
-      spinner = ora("Pruning orphan annex objects...").start();
-      const pruneResult = await dropUnusedAnnexObjects(absoluteOutput);
-      if (pruneResult.success) {
-        spinner.succeed(`Pruned ${pruneResult.dropped ?? 0} unused annex objects`);
-      } else {
-        spinner.warn(`Prune skipped: ${pruneResult.error}`);
-      }
-    }
+      // Determine output path
+      const outputPath = options.output || effectiveId;
+      const absoluteOutput = resolve(outputPath);
 
-    // Clear cached S3 credentials so future operations request fresh tokens
-    if (s3Creds) {
-      await clearAnnexCredentials(absoluteOutput);
-    }
+      // Paths to fetch with `git annex get`. Undefined → full retrieval. Used by
+      // --update to limit the get to changed annex keys.
+      let updatePaths: string[] | undefined;
 
-    // Step 6: Show completion info
-    const localInfo = await getLocalDatasetInfo(absoluteOutput);
+      // Resume / update modes share validation: target must exist, be a git-annex
+      // clone of the requested dataset, with a clean working tree.
+      const reuseMode = options.resume ? "resume" : options.update ? "update" : null;
 
-    console.log();
-    const completionLabel = options.update
-      ? "Update complete!"
-      : options.resume
-        ? "Resume complete!"
-        : "Download complete!";
-    console.log(chalk.green.bold(completionLabel));
-    console.log();
-    console.log(`  Location: ${chalk.cyan(absoluteOutput)}`);
-    if (localInfo) {
-      console.log(`  Files: ${localInfo.files}`);
-      if (localInfo.size !== "unknown") {
-        console.log(`  Size: ${localInfo.size}`);
-      }
-      if (localInfo.missingFiles > 0) {
+      if (reuseMode) {
+        if (!existsSync(absoluteOutput)) {
+          console.log(chalk.red(`Error: --${reuseMode} target does not exist: ${absoluteOutput}`));
+          console.log(chalk.dim(`Drop --${reuseMode} to perform a fresh clone.`));
+          process.exit(1);
+        }
+
+        spinner = ora(`Validating ${reuseMode} target...`).start();
+
+        if (!(await isGitAnnexDataset(absoluteOutput))) {
+          spinner.fail("Not a git-annex dataset");
+          console.log(chalk.red(`  ${absoluteOutput} is not a git-annex repository.`));
+          console.log(chalk.dim(`--${reuseMode} requires a previous clone of the same dataset.`));
+          process.exit(1);
+        }
+
+        const existingId = await getDatasetIdFromRemote(absoluteOutput);
+        if (existingId !== effectiveId) {
+          spinner.fail("Dataset ID mismatch");
+          console.log(
+            chalk.red(
+              `  Expected ${effectiveId}, but ${absoluteOutput} is a clone of ${existingId ?? "an unknown repo"}.`,
+            ),
+          );
+          process.exit(1);
+        }
+
+        const dirtyCheck = await isWorkingTreeDirty(absoluteOutput);
+        if (dirtyCheck.error) {
+          spinner.fail("Could not check working tree status");
+          console.log(chalk.red(`  ${dirtyCheck.error}`));
+          process.exit(1);
+        }
+        if (dirtyCheck.dirty) {
+          spinner.fail("Working tree is dirty");
+          console.log(chalk.red(`  Refusing to ${reuseMode} with uncommitted local changes.`));
+          console.log(chalk.dim("  Commit, stash, or discard them first."));
+          process.exit(1);
+        }
+
+        // Refresh remote refs so we can compare versions and (for update) merge.
+        const fetchResult = await gitFetchOrigin(absoluteOutput);
+        if (!fetchResult.success) {
+          spinner.fail("Failed to fetch remote refs");
+          console.log(chalk.red(`  ${fetchResult.error}`));
+          process.exit(1);
+        }
+
+        const localRead = readLocalDatasetVersion(absoluteOutput);
+        if (localRead.error) {
+          console.log(chalk.yellow(`  Warning: ${localRead.error}`));
+        }
+        const remoteRead = await readRemoteHeadDatasetVersion(absoluteOutput);
+        for (const w of remoteRead.warnings) {
+          console.log(chalk.yellow(`  Warning: ${w}`));
+        }
+        const localVersion = localRead.version;
+        const remoteVersion = remoteRead.version;
+
+        if (options.resume) {
+          if (localVersion && remoteVersion && localVersion !== remoteVersion) {
+            spinner.fail("Local clone is behind upstream");
+            console.log(
+              chalk.red(`  Local version: ${localVersion} | Remote HEAD: ${remoteVersion}`),
+            );
+            console.log(
+              chalk.dim("  Run `nemar dataset download <id> --update` to pull the version diff."),
+            );
+            process.exit(1);
+          }
+          spinner.succeed(`Resume target verified: ${effectiveId}`);
+        } else {
+          // --update path
+          if (localVersion && remoteVersion && localVersion === remoteVersion) {
+            spinner.succeed(`Already up to date (${localVersion})`);
+            process.exit(0);
+          }
+          spinner.succeed(`Update plan: ${localVersion ?? "unknown"} → ${remoteVersion ?? "HEAD"}`);
+
+          if (localVersion && remoteVersion) {
+            spinner = ora("Computing version diff from manifests...").start();
+            try {
+              const [fromManifest, toManifest] = await Promise.all([
+                getManifest(effectiveId, localVersion),
+                getManifest(effectiveId, remoteVersion),
+              ]);
+              const diff = diffManifests(fromManifest, toManifest);
+              spinner.succeed(
+                `Diff: +${diff.added.length} added, ~${diff.changed.length} changed, -${diff.removed.length} removed`,
+              );
+              updatePaths = [...diff.added, ...diff.changed];
+              if (updatePaths.length === 0) {
+                console.log(
+                  chalk.dim("  No annex content changes between versions; metadata-only update."),
+                );
+              }
+            } catch (err) {
+              const message = (err as Error).message;
+              spinner.warn(`Manifest diff unavailable: ${message}`);
+              if (/401|403|unauthor/i.test(message)) {
+                console.log(
+                  chalk.yellow("  Looks like an auth issue. Run `nemar auth status` to verify."),
+                );
+              } else if (!/404|not found/i.test(message)) {
+                console.log(
+                  chalk.yellow("  Unexpected manifest error. Please report if this recurs."),
+                );
+              }
+              console.log(
+                chalk.dim("  Falling back to full git annex get (skips already-present files)."),
+              );
+              updatePaths = undefined;
+            }
+          }
+
+          // Refuse on git-annex adjusted branches: a normal git merge corrupts
+          // the adjusted view. Users on adjusted clones should run `git annex
+          // sync` (or rename their default branch) before --update.
+          const localBranch = await getCurrentBranch(absoluteOutput);
+          if (localBranch?.startsWith("adjusted/")) {
+            console.log(
+              chalk.red(
+                `  --update is not supported on git-annex adjusted branches (${localBranch}).`,
+              ),
+            );
+            console.log(
+              chalk.dim(
+                "  Run `git -C <clone> annex sync` to bring the clone onto a normal branch first.",
+              ),
+            );
+            process.exit(1);
+          }
+
+          spinner = ora("Resolving remote tracking branch...").start();
+          const upstreamRef = await resolveUpstreamRef(absoluteOutput);
+          if (!upstreamRef.ref) {
+            spinner.fail("Cannot resolve remote tracking branch");
+            console.log(chalk.red(`  ${upstreamRef.error ?? "no upstream ref found"}`));
+            process.exit(1);
+          }
+          spinner.text = `Fast-forwarding to ${upstreamRef.ref}...`;
+          const mergeResult = await gitMergeFastForward(absoluteOutput, upstreamRef.ref);
+          if (!mergeResult.success) {
+            spinner.fail("Cannot fast-forward (local has diverging commits)");
+            console.log(chalk.red(`  ${mergeResult.error}`));
+            console.log(
+              chalk.dim("  Use `nemar dataset update` (PR workflow) to push local changes first."),
+            );
+            process.exit(1);
+          }
+          spinner.succeed(`Merged ${upstreamRef.ref}`);
+        }
+      } else if (existsSync(absoluteOutput)) {
+        console.log(chalk.red(`Error: Output path already exists: ${absoluteOutput}`));
         console.log(
-          chalk.dim(`  Missing files: ${localInfo.missingFiles} (use 'git annex get' to download)`),
+          "Remove or rename the existing directory, or pass --resume / --update to reuse it.",
         );
+        process.exit(1);
       }
-    }
-    console.log();
-    if (options.update) {
-      console.log(
-        chalk.dim("Note: --update fetches only the version diff. If a prior version was"),
-      );
-      console.log(
-        chalk.dim("partially downloaded, run with --resume to fill any pre-existing gaps."),
-      );
+
       console.log();
-    }
-    console.log(chalk.dim("To get additional data:"));
-    console.log(chalk.dim(`  cd ${absoluteOutput} && git annex get <path>`));
-  });
+      const planLabel = options.update
+        ? "Update Plan:"
+        : options.resume
+          ? "Resume Plan:"
+          : "Download Plan:";
+      console.log(chalk.bold(planLabel));
+      console.log(`  Dataset: ${datasetInfo.name} (${effectiveId})`);
+      console.log(`  Output: ${absoluteOutput}`);
+      console.log(`  Data files: ${options.data === false ? "metadata only" : "included"}`);
+      if (options.data !== false) {
+        console.log(`  Parallel jobs: ${options.jobs}`);
+      }
+      if (options.update && updatePaths && updatePaths.length > 0) {
+        console.log(`  Files to fetch: ${updatePaths.length}`);
+      }
+      if (filter.active) {
+        for (const line of filter.summary) {
+          console.log(`  Filter ${line}`);
+        }
+      }
+      console.log();
+
+      // Step 4: Clone the dataset (metadata) — skipped on resume / update.
+      if (!reuseMode) {
+        const repoUrl = `https://github.com/${datasetInfo.github_repo}.git`;
+        spinner = ora("Cloning metadata from GitHub...").start();
+
+        const cloneResult = await cloneDataset(repoUrl, absoluteOutput);
+        if (!cloneResult.success) {
+          spinner.fail("Failed to clone dataset");
+          console.log(chalk.red(`  ${cloneResult.error}`));
+          process.exit(1);
+        }
+
+        spinner.succeed("Metadata cloned");
+      }
+
+      // OpenNeuro-sourced datasets only get their git-annex S3 objects after
+      // the import workflow's final push (which carries the .nemar/metadata.json
+      // commit). If the marker commit is missing locally, the porting matrix
+      // job is still mid-flight — the subsequent `git annex get` would fail
+      // with a cryptic "remote unavailable" error. Bail early with a clear
+      // retry hint. See nemarOrg/nemar-cli#460.
+      if (!options.skipPortCheck && datasetInfo.source === "openneuro" && options.data !== false) {
+        const marker = await detectImportMarker(absoluteOutput);
+        // "unknown" = git unavailable or non-git dir; skip port check and let git-annex handle it
+        if (marker === "absent") {
+          console.log();
+          console.log(chalk.yellow("Porting still in progress."));
+          console.log(
+            chalk.dim(
+              "  This dataset is being imported from OpenNeuro. Data files are not yet available.",
+            ),
+          );
+          console.log(chalk.dim("  The metadata-only clone is already at the path above."));
+          console.log(chalk.dim("  Wait 5–30 minutes (depending on dataset size), then run:"));
+          console.log(chalk.dim(`    cd ${absoluteOutput} && nemar dataset get`));
+          console.log(chalk.dim("  Run 'nemar dataset status <id>' to track porting progress."));
+          console.log(
+            chalk.dim(
+              "  Pass --skip-port-check to bypass this check if you are certain porting is complete.",
+            ),
+          );
+          process.exit(1);
+        }
+      }
+
+      // For private datasets, fetch temporary S3 download credentials.
+      const s3Creds = await fetchPrivateDatasetCreds(effectiveId, datasetInfo.visibility);
+
+      // Enable S3 remote if available (new datasets have it; old ones use web URLs)
+      const s3Enable = await enableS3Remote(absoluteOutput, "nemar-s3", s3Creds);
+      if (s3Enable.enabled) {
+        console.log(chalk.dim("  S3 remote enabled for data downloads"));
+      } else if (!s3Enable.success) {
+        console.log(chalk.yellow(`  Warning: Could not enable S3 remote: ${s3Enable.error}`));
+      }
+
+      // Step 5: Get data files with progress (unless --no-data)
+      const skipGet =
+        options.data === false || (options.update && updatePaths && updatePaths.length === 0);
+      if (skipGet) {
+        if (options.data === false) {
+          console.log(chalk.dim("Skipping data files (--no-data flag)"));
+        }
+      } else {
+        for (const line of filter.summary) {
+          console.log(chalk.dim(`  ${line}`));
+        }
+        console.log(chalk.bold(`Downloading data files (${options.jobs} parallel streams)...`));
+
+        // Pre-count pending files+bytes so the progress bar has an authoritative
+        // denominator. Falls back to non-percent display if precount fails.
+        const matchArgs = filter.args.length > 0 ? filter.args : undefined;
+        const pending = await countPendingDownload(absoluteOutput, undefined, matchArgs);
+        const tracker = new DownloadProgressTracker(
+          pending?.fileCount ?? 0,
+          pending?.totalBytes ?? 0,
+        );
+
+        const getResult = await getDatasetData(absoluteOutput, {
+          jobs: Number.parseInt(options.jobs, 10),
+          credentials: s3Creds,
+          paths: updatePaths,
+          extraArgs: matchArgs,
+          requireComplete: Boolean(options.requireComplete),
+          onProgress: (line) => tracker.processLine(line),
+        });
+
+        if (!getResult.success) {
+          // Counts are honest on the failure arm too: --require-complete can
+          // fail a run that still landed files, and the tracker should say so.
+          tracker.finish(getResult.filesDownloaded);
+          console.log(chalk.red(`Failed to download data files: ${getResult.error}`));
+          console.log(
+            chalk.dim("The dataset was cloned but data files are not available locally."),
+          );
+          console.log(
+            chalk.dim(`You can try again with: cd ${absoluteOutput} && nemar dataset get`),
+          );
+          if (s3Creds) {
+            await clearAnnexCredentials(absoluteOutput);
+          }
+          process.exit(1);
+        }
+
+        tracker.finish(getResult.filesDownloaded);
+        if (getResult.outcome === "partial") {
+          printPartialRetrieval(getResult);
+        } else {
+          console.log(chalk.green(`Data downloaded (${getResult.filesDownloaded} files)`));
+        }
+      }
+
+      // --prune: drop annex objects that are no longer referenced by any branch
+      // (typically files removed in the upstream version).
+      if (options.update && options.prune) {
+        spinner = ora("Pruning orphan annex objects...").start();
+        const pruneResult = await dropUnusedAnnexObjects(absoluteOutput);
+        if (pruneResult.success) {
+          spinner.succeed(`Pruned ${pruneResult.dropped ?? 0} unused annex objects`);
+        } else {
+          spinner.warn(`Prune skipped: ${pruneResult.error}`);
+        }
+      }
+
+      // Clear cached S3 credentials so future operations request fresh tokens
+      if (s3Creds) {
+        await clearAnnexCredentials(absoluteOutput);
+      }
+
+      // Step 6: Show completion info
+      const localInfo = await getLocalDatasetInfo(absoluteOutput);
+
+      console.log();
+      const completionLabel = options.update
+        ? "Update complete!"
+        : options.resume
+          ? "Resume complete!"
+          : "Download complete!";
+      console.log(chalk.green.bold(completionLabel));
+      console.log();
+      console.log(`  Location: ${chalk.cyan(absoluteOutput)}`);
+      if (localInfo) {
+        console.log(`  Files: ${localInfo.files}`);
+        if (localInfo.size !== "unknown") {
+          console.log(`  Size: ${localInfo.size}`);
+        }
+        if (localInfo.missingFiles > 0) {
+          console.log(
+            chalk.dim(
+              `  Missing files: ${localInfo.missingFiles} (use 'git annex get' to download)`,
+            ),
+          );
+        }
+      }
+      console.log();
+      if (options.update) {
+        console.log(
+          chalk.dim("Note: --update fetches only the version diff. If a prior version was"),
+        );
+        console.log(
+          chalk.dim("partially downloaded, run with --resume to fill any pre-existing gaps."),
+        );
+        console.log();
+      }
+      console.log(chalk.dim("To get additional data:"));
+      console.log(chalk.dim(`  cd ${absoluteOutput} && git annex get <path>`));
+    });
+}
+
+datasetCommand.addCommand(createDownloadCommand());
 
 // Status command
 datasetCommand
