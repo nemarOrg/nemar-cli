@@ -704,6 +704,8 @@ export async function createExemplar(opts: {
   source_id: string;
   name?: string;
   description?: string;
+  /** Create as the fleet's standing anonymous deposit (#1407). */
+  anonymous?: true;
 }): Promise<CreateExemplarResponse> {
   return request<CreateExemplarResponse>(
     "/admin/datasets/exemplar",

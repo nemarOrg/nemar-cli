@@ -16,6 +16,7 @@ import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import { auditLogStatement } from "../db/audit-log";
 import { getS3Config } from "../routes/admin/shared";
 import type { AuthUser, Bindings } from "../types/bindings";
+import { END_ANONYMITY_AT_PUBLICATION_SQL } from "./anonymity";
 import {
   isCentralManifestWorkflowEnabled,
   publishEzidVersionDoiViaCentral,
@@ -607,12 +608,36 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
         );
       }
 
-      // Update dataset visibility in database to match GitHub repo visibility
+      // Update dataset visibility in database to match GitHub repo visibility,
+      // and record the first publication of the depositor's identity in the
+      // SAME statement.
+      //
+      // Here, and not after the run completes. This is the moment the
+      // repository becomes readable by the world, so it is the moment
+      // concealment actually ends; every later step can fail and return, and
+      // a stamp at the end of the run would leave a dataset public on GitHub
+      // and anonymous in D1 with nothing to retry it. `first_published_at` is
+      // also the only durable record that a dataset has ever been public --
+      // `visibility` has no history, and `concept_doi IS NULL` is unsound
+      // because this step runs before `doi_create`, so a crashed run leaves a
+      // public dataset with no DOI.
+      //
+      // One statement because migration 0085's triggers refuse a row that is
+      // simultaneously anonymous and published, so clearing the flag and
+      // stamping the date separately would abort on whichever ran first. The
+      // publication-request route refuses a still-anonymous dataset, so
+      // `anonymous = 0` is normally already true; it is written anyway
+      // because an admin-approved run that somehow reached here must not end
+      // with a public dataset that still claims to be concealed.
       let dbUpdateResult: D1Result;
       try {
         dbUpdateResult = await db
           .prepare(
-            "UPDATE datasets SET visibility = 'public', updated_at = datetime('now') WHERE dataset_id = ?",
+            `UPDATE datasets
+             SET visibility = 'public',
+                 ${END_ANONYMITY_AT_PUBLICATION_SQL},
+                 updated_at = datetime('now')
+             WHERE dataset_id = ?`,
           )
           .bind(datasetId)
           .run();
@@ -653,7 +678,11 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
             dataset_id: datasetId,
             github_visibility: "public",
             database_visibility: "private (update failed)",
-            action_required: `Manually update database: UPDATE datasets SET visibility = 'public' WHERE dataset_id = '${datasetId}'`,
+            // The recovery statement an operator is told to run has to carry
+            // the same stamp every code path carries (#1407); without it the
+            // repaired dataset would be public with its publication
+            // unrecorded, and could then be made anonymous retroactively.
+            action_required: `Manually update database: UPDATE datasets SET visibility = 'public', ${END_ANONYMITY_AT_PUBLICATION_SQL} WHERE dataset_id = '${datasetId}'`,
             step_results: stepResults,
           },
           500,
@@ -1932,7 +1961,10 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     );
     await db
       .prepare(
-        "UPDATE datasets SET visibility = 'public', updated_at = datetime('now') WHERE dataset_id = ?",
+        // Carries the same stamp as every other path to public: this is a
+        // repair for a row that should already have been flipped, so it must
+        // not leave the dataset public with the publication unrecorded.
+        `UPDATE datasets SET visibility = 'public', ${END_ANONYMITY_AT_PUBLICATION_SQL}, updated_at = datetime('now') WHERE dataset_id = ?`,
       )
       .bind(datasetId)
       .run();

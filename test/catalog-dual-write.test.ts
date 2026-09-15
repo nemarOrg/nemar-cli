@@ -59,7 +59,11 @@ CREATE TABLE datasets (
   readme TEXT,
   bids_version TEXT,
   sessions_count INTEGER,
-  updated_at TEXT
+  updated_at TEXT,
+  -- #1407: the real writer decides whether to withhold the authors value
+  -- from this column, so the fixture table has to carry it or the statement
+  -- no longer parses. Same default as migration 0085.
+  anonymous INTEGER NOT NULL DEFAULT 0
 );`;
 
 function seededDb(): Database {

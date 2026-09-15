@@ -40,5 +40,12 @@
     "source_id": "on006394",
     "modality": "beh,eeg",
     "note": "Multi-modal exemplar (521 MB, beh+eeg, 60 zarr stores). Covers modality-array rendering and search facets, and produces a large enough archive to exercise the zip path."
+  },
+  {
+    "xx_id": "xx099907",
+    "source_id": "on008062",
+    "modality": "eeg",
+    "anonymous": true,
+    "note": "The standing ANONYMOUS deposit (#1407): public row, private repo, anonymous=1, and never published. Small (25 MB, 30 subjects) with two named authors and zarr stores, so it exercises the author blind, the .nemar/metadata.json blind, the data-plane broker serving git-tracked metadata from a private repo, and the zarr fidelity sweep's anonymous exclusion. It is the ONE exemplar that must never be published: the 0085 triggers refuse anonymous=1 once first_published_at is stamped, so minting it a DOI or publishing it destroys the fixture permanently."
   }
 ]

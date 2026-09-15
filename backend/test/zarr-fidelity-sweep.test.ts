@@ -1502,6 +1502,27 @@ describe("an always-erroring dataset does not starve the rest of the catalog", (
     const rows = db.query(ZARR_FIDELITY_SWEEP_CANDIDATE_SQL).all(10) as { dataset_id: string }[];
     expect(rows.map((r) => r.dataset_id)).toEqual([B, A]);
   });
+
+  test("an anonymous deposit is not a candidate (#1407)", () => {
+    // `visibility = 'public'` used to stand in for "the repository can be
+    // read anonymously", which is exactly what an anonymous deposit breaks:
+    // public row, private repo. Left in, every one of them would be stamped
+    // `unverifiable` -- fail-safe, but indistinguishable from a dataset whose
+    // sidecars are genuinely missing, which turns a private repository into a
+    // data quality report.
+    //
+    // Driven through the exported SQL rather than a copy of it, so deleting
+    // `AND anonymous = 0` from the real query fails here.
+    seedPair();
+    db.query("UPDATE datasets SET anonymous = 1 WHERE dataset_id = ?").run(B);
+
+    const rows = db.query(ZARR_FIDELITY_SWEEP_CANDIDATE_SQL).all(10) as { dataset_id: string }[];
+    const ids = rows.map((r) => r.dataset_id);
+    expect(ids).not.toContain(B);
+    // The control: A is seeded identically and IS a candidate, so this test
+    // cannot pass because the query returned nothing at all.
+    expect(ids).toContain(A);
+  });
 });
 
 describe("the sweep's verdict reaches every reader of it", () => {

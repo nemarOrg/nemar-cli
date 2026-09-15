@@ -29,7 +29,15 @@ describe("stale-nm cron query structure", () => {
     // Present in both the reset NOT(...) block and the candidate WHERE.
     expect(SRC).toContain("d.dataset_id LIKE 'nm%'");
     expect(SRC).toContain("concept_doi IS NULL");
-    expect(SRC).toContain("visibility = 'private'");
+    // #1407: the clause is now `(visibility = 'private' OR anonymous = 1)`,
+    // because an anonymous deposit is listed publicly while its repository
+    // stays private -- so an abandoned one would otherwise fall out of the
+    // candidate set and never get the warnings every other unpublished
+    // dataset gets. Both arms are pinned: the substring "visibility =
+    // 'private'" still matched after the widening, so this test silently
+    // stopped covering the predicate it guards.
+    expect(SRC).toContain("(d.visibility = 'private' OR d.anonymous = 1)");
+    expect(SRC).toContain("(visibility = 'private' OR anonymous = 1)");
     // No active publication request.
     expect(SRC).toMatch(/publication_requests WHERE status NOT IN \('published','denied'\)/);
     // Inactivity measured from last activity, falling back to creation.

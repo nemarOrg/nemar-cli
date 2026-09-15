@@ -15,6 +15,7 @@
  */
 
 import { licenseTier } from "../lib/license.js";
+import { ANONYMOUS_AUTHORS_LABEL } from "./anonymity.js";
 import { countSubjectDirs, extractTasks, parseParticipantsTsv } from "./bids-tree.js";
 import { detectModalitiesFromTree } from "./datacite.js";
 import type { DatasetVersionIntegrityResult } from "./import-integrity.js";
@@ -556,10 +557,18 @@ export async function writeDatasetCatalogFields(
   const licenseTierValue = fields.license != null ? licenseTier(fields.license) : null;
   const result = await db
     .prepare(
+      // `authors` is withheld for an anonymous deposit HERE, in the single
+      // UPDATE, rather than at the caller (#1407). This is the only writer of
+      // the column in the backend, and the column is fed into `datasets_fts`
+      // by a trigger with no visibility predicate -- so a filter applied
+      // anywhere else would leave the real names searchable in the index
+      // while the API dutifully hid them, and a blind applied at the caller
+      // would be a rule the next caller could forget. Deciding it in SQL from
+      // the row itself means there is no argument a caller can get wrong.
       `UPDATE datasets
        SET name = COALESCE(?, name),
            description = COALESCE(?, description),
-           authors = COALESCE(?, authors),
+           authors = CASE WHEN anonymous = 1 THEN ? ELSE COALESCE(?, authors) END,
            license = COALESCE(?, license),
            license_tier = COALESCE(?, license_tier),
            readme = COALESCE(?, readme),
@@ -571,6 +580,7 @@ export async function writeDatasetCatalogFields(
     .bind(
       fields.name ?? null,
       fields.description ?? null,
+      ANONYMOUS_AUTHORS_LABEL,
       fields.authors ?? null,
       fields.license ?? null,
       licenseTierValue,
