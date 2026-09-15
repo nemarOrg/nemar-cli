@@ -100,6 +100,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0059](0059-one-docs-repo-private-at-source-public-at-the-url.md) - One docs repo, private at source, public at the URL
 - [ADR 0060](0060-an-imported-tree-is-brought-onto-nemars-annex-policy-in-prepare.md) - An imported tree is brought onto NEMAR's annex policy in prepare, and inherited `.gitattributes` governance is stripped
 - [ADR 0061](0061-a-registration-is-read-back-and-an-incomplete-dataset-is-not-partly-repaired.md) - A registration is read back from the location log, and a dataset the bucket cannot account for is never partly repaired
+- [ADR 0062](0062-a-missing-git-annex-degrades-to-a-snapshot.md) - A missing git-annex degrades to an HTTP snapshot, and a snapshot is not a repository
 
 ## Backfill note (2026-07-31)
 
