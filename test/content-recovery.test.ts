@@ -90,6 +90,59 @@ describe("parseRmet", () => {
     ).toEqual([]);
   });
 
+  test("drops a version the log later retracts", () => {
+    // `-` is git-annex unsetting the field value, not escaping it. ds006110
+    // records five of these; reading the minus as part of the version id sent
+    // S3 an `InvalidRequest` we first read as an upstream defect.
+    expect(
+      parseRmet(
+        [
+          "1700000000s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V +gone#ds008798/x.nii",
+          "1800000000s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V -gone#ds008798/x.nii",
+        ].join("\n"),
+        REMOTES,
+      ),
+    ).toEqual([]);
+  });
+
+  test("keeps a version recorded again after being retracted", () => {
+    const pins = parseRmet(
+      [
+        "1700000000s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V +v1#ds008798/x.nii",
+        "1750000000s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V -v1#ds008798/x.nii",
+        "1800000000s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V +v1#ds008798/x.nii",
+      ].join("\n"),
+      REMOTES,
+    );
+    expect(pins.map((pin) => pin.version)).toEqual(["v1"]);
+  });
+
+  test("replays out-of-order lines by their timestamp, not their position", () => {
+    // The retraction is written first in the file and stamped later, so a
+    // position-ordered read would keep a version git-annex has given up on.
+    expect(
+      parseRmet(
+        [
+          "1800000000s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V -v1#ds008798/x.nii",
+          "1700000000s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V +v1#ds008798/x.nii",
+        ].join("\n"),
+        REMOTES,
+      ),
+    ).toEqual([]);
+  });
+
+  test("a retraction of one version leaves the others alone", () => {
+    const pins = parseRmet(
+      [
+        "1700000000s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V +keep#ds008798/x.nii",
+        "1750000000s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V +drop#ds008798/y.nii",
+        "1800000000s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V -drop#ds008798/y.nii",
+      ].join("\n"),
+      REMOTES,
+    );
+    expect(pins.map((pin) => pin.version)).toEqual(["keep"]);
+  });
+
   test("keeps every line, newest last, so the caller can take the current one", () => {
     const pins = parseRmet(
       [

@@ -111,28 +111,49 @@ export interface PinnedSource {
 }
 
 /**
- * Parse one `<key>.log.rmet` body into the pin it records, if any.
+ * Parse one `<key>.log.rmet` body into the pins it still records.
  *
- * The line is `<timestamp>s <uuid>:V +<versionId>#<object>`. The `+` is
- * git-annex's escaping marker and is not part of the version id. A key can have
- * several, one per remote and one per time the remote's copy was rewritten; the
- * last line wins, which is how git-annex reads its own append-only logs.
+ * The line is `<timestamp>s <uuid>:V <marker><versionId>#<object>`, and the
+ * marker is git-annex's set/unset for the field value, not an escape: `+` adds
+ * that version as a place the content is, `-` RETRACTS one it previously
+ * recorded. Applying the retractions is not cosmetic. `ds006110` retracts five
+ * of its versions, and reading `-d6y2...` as a version id sends S3 a literal
+ * leading minus, which comes back as a bare `InvalidRequest` that looks like an
+ * upstream defect rather than our own misparse.
+ *
+ * A key keeps several live pins, one per remote and one per time a remote's
+ * copy was rewritten; they are returned oldest first, so a caller that wants
+ * the current one takes the last.
  */
 export function parseRmet(contents: string, remotes: Map<string, RemoteRecord>): PinnedSource[] {
-  const found: PinnedSource[] = [];
+  const entries: Array<{ stamp: number; retracted: boolean; value: string; pin: PinnedSource }> =
+    [];
   for (const line of contents.split("\n")) {
-    const match = /^\S+\s+([0-9a-f-]{36}):V\s+\+?([^#\s]+)#(.+)$/.exec(line.trim());
+    const match = /^(\S+?)s?\s+([0-9a-f-]{36}):V\s+([+-])([^#\s]+)#(.+)$/.exec(line.trim());
     if (!match) continue;
-    const remote = remotes.get(match[1]);
+    const remote = remotes.get(match[2]);
     if (!remote?.bucket) continue;
-    found.push({
-      bucket: remote.bucket,
-      object: match[3],
-      version: match[2],
-      remoteName: remote.name,
+    entries.push({
+      stamp: Number.parseFloat(match[1]) || 0,
+      retracted: match[3] === "-",
+      value: `${match[4]}#${match[5]}`,
+      pin: {
+        bucket: remote.bucket,
+        object: match[5],
+        version: match[4],
+        remoteName: remote.name,
+      },
     });
   }
-  return found;
+  // Replay the log in the order it was written, so a later retraction wins over
+  // the entry that recorded the version, whatever order the lines arrive in.
+  entries.sort((a, b) => a.stamp - b.stamp);
+  const live = new Map<string, PinnedSource>();
+  for (const entry of entries) {
+    if (entry.retracted) live.delete(entry.value);
+    else live.set(entry.value, entry.pin);
+  }
+  return [...live.values()];
 }
 
 export interface UpstreamObjectVersion {
