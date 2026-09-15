@@ -204,4 +204,69 @@ describe("batchSetKeysAbsent", () => {
     });
     expect((await recordedKeys()).size).toBe(2);
   }, 120_000);
+
+  test("will not call a claim withdrawn when nothing checked and the batch aborted", async () => {
+    // The retract-side twin of "counts a key no file references", and the one
+    // that has teeth. Two real conditions line up:
+    //
+    //   1. A malformed key aborts the REST of its `setpresentkey --batch` chunk,
+    //      so the keys after it are never retracted (the assert-side test above
+    //      pins the same behavior).
+    //   2. `git annex find --include '*' --in <uuid>` exits 1 with an uncaught
+    //      exception whenever the uuid is not resolvable as a remote in this
+    //      clone -- measured on git-annex 10.20260901 -- which is an ordinary
+    //      condition in a fresh fleet clone.
+    //
+    // The oracle returning an EMPTY SET on failure used to mean "no key is
+    // unconfirmed" in the absent direction, so nothing was probed and every
+    // claim was reported withdrawn. Here that would report 3 of 3 withdrawn
+    // while the last key's claim is still standing in the log.
+    const [claimedFirst, claimedLast] = await addFiles(2);
+    const unresolvable = "11111111-2222-3333-4444-555555555555";
+    await batchSetKeysPresent(repo, [claimedFirst, claimedLast], unresolvable);
+    // Confirm both premises rather than trusting them.
+    const oracle = await runCommand(
+      ["git", "annex", "find", "--include", "*", "--in", unresolvable, "--format=${key}\n"],
+      { cwd: repo },
+    );
+    expect(oracle.exitCode).not.toBe(0);
+
+    const result = await batchSetKeysAbsent(
+      repo,
+      [claimedFirst, "not-a-valid-key", claimedLast],
+      unresolvable,
+    );
+
+    // The claim the aborted chunk never reached must be reported, not counted.
+    expect(result.failed).toBeGreaterThan(0);
+    expect(result.missing).toContain(claimedLast);
+    const stillThere = await run(["git", "annex", "whereis", "--key", claimedLast, "--json"], repo);
+    expect(stillThere).toContain(unresolvable);
+  }, 120_000);
+
+  test("reports a claim that is still standing, however the oracle answered", async () => {
+    // The half that must not be lost to the fix: when the claims genuinely
+    // survive, the per-key probe has to see them. `whereis` exits 1 for a key
+    // with zero copies, which is what a correctly retracted key looks like, so
+    // a naive exit-code check would call every real retraction a failure and a
+    // surviving claim a success. Reading --json is what separates the two.
+    const keys = await addFiles(2);
+    const unresolvable = "11111111-2222-3333-4444-555555555555";
+    await batchSetKeysPresent(repo, keys, unresolvable);
+
+    // Ask for the retraction of a key that was never claimed at this uuid, while
+    // a different uuid's claims stand: the answer has to be about THIS uuid.
+    const other = "99999999-8888-7777-6666-555555555555";
+    await batchSetKeysPresent(repo, keys, other);
+    const result = await batchSetKeysAbsent(repo, keys, unresolvable);
+
+    expect(result.failed).toBe(0);
+    for (const key of keys) {
+      const whereis = await run(["git", "annex", "whereis", "--key", key, "--json"], repo);
+      expect(whereis).not.toContain(unresolvable);
+      // Untouched, which is what "withdraws only the keys it is given" means
+      // when the oracle is blind.
+      expect(whereis).toContain(other);
+    }
+  }, 120_000);
 });

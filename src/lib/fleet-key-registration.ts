@@ -42,6 +42,29 @@ import { isKeyPresentAtDeclaredSize } from "./s3-server-copy.js";
 export const REMOTE_NAME = "nemar-s3";
 
 /**
+ * Why a push did not land, or null when it did. For work that writes ONLY the
+ * git-annex branch.
+ *
+ * `pushToGitHub` reports `{success: true, warning: "Main branch pushed, but
+ * git-annex branch failed: ..."}`, which is the right contract for a caller that
+ * also changed `main`: the content push succeeded and the location log can be
+ * caught up later. It is the wrong reading here. Registering keys and retracting
+ * claims both write the git-annex branch and nothing else, so `main` is a no-op
+ * and that warning means NOTHING WAS PUSHED. Taking `.success` at face value
+ * reported a retraction as repaired, then deleted the clone in `finally`, and
+ * the claim was still in GitHub's log. `import-openneuro` already treats the
+ * same warning as fatal for the same reason.
+ */
+function annexBranchPushFailure(pushed: {
+  success: boolean;
+  warning?: string;
+  error?: string;
+}): string | null {
+  if (!pushed.success) return pushed.error ?? "push failed";
+  return pushed.warning ?? null;
+}
+
+/**
  * A dataset id, which is also a directory name under the work root.
  *
  * Checked rather than trusted because the id reaches `join(workRoot, id)` and then
@@ -460,15 +483,17 @@ export async function repairDatasetKeyRegistration(
         };
       }
       notes.push(`withdrew ${withdrawn.success} claim(s) the bucket cannot back`);
-      const pushedRetraction = await pushToGitHub(datasetPath, "origin");
-      if (!pushedRetraction.success) {
+      const retractionPushFailure = annexBranchPushFailure(
+        await pushToGitHub(datasetPath, "origin"),
+      );
+      if (retractionPushFailure) {
         return {
           datasetId,
           action: "failed",
           state,
           pushed: false,
           notes,
-          error: pushedRetraction.error ?? "push failed",
+          error: `the retraction did not reach GitHub: ${retractionPushFailure}. The claims are still advertised; re-run to redo it.`,
         };
       }
       return { datasetId, action: "repaired", state, pushed: true, notes };
@@ -541,15 +566,15 @@ export async function repairDatasetKeyRegistration(
     // -- it is an append-only log that merges through git-annex's own union-merge.
     // The default path pushes `main` (unchanged here, so a no-op) and then the
     // git-annex branch with the correct fetch + `git annex merge` retry.
-    const pushed = await pushToGitHub(datasetPath, "origin");
-    if (!pushed.success) {
+    const pushFailure = annexBranchPushFailure(await pushToGitHub(datasetPath, "origin"));
+    if (pushFailure) {
       return {
         datasetId,
         action: "failed",
         state,
         pushed: false,
         notes,
-        error: `the git-annex branch did not push: ${pushed.error}. The registration is local only; re-run to redo it.`,
+        error: `the git-annex branch did not push: ${pushFailure}. The registration is local only; re-run to redo it.`,
       };
     }
     return { datasetId, action: "repaired", state, pushed: true, notes };
