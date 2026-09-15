@@ -107,15 +107,23 @@ earlier releases are described only by their generated notes.
   `no_source`, none of it measured per dataset. Trying every key against both routes
   OpenNeuro publishes found that six of the eleven were fetchable by the advertised route
   the whole time they sat private with tombstoned DOIs: `on004148`, `on007816`, `on007987`,
-  `on008065`, `on005516` and `on005279`, now `reason: recovered` and reinstated. Entries
-  keep `data_keys_missing` / `data_keys_total` / `data_available` so the claim is checkable,
-  and a `withdrawn: false` flag so `withdraw --all` skips a reinstated one instead of taking
-  it down again. A test asserts the two halves agree: everything still down is under the 90%
-  threshold, and everything reinstated is at or above it.
+  `on008065`, `on005516` and `on005279`, now `reason: recovered`. Five were reinstated;
+  `on007816` had never been published, so it needs a publish rather than a restore. The five
+  still-withdrawn entries carry `data_keys_missing` / `data_keys_total` / `data_available` so
+  the claim is checkable, and the reinstated ones carry `data_available` alone. A
+  `withdrawn: false` flag keeps `withdraw --all` from taking a reinstated one down again, and
+  the explicit-id path refuses one too without `--force`. The parser rejects the
+  contradictions the shape allowed: `recovered` while still withdrawn, key counts given
+  singly, missing above total, and a `data_available` that disagrees with them. A test
+  asserts the two halves agree: everything still down is under the 90% threshold, and
+  everything reinstated is at or above it.
 
-- **NEMAR lists a dataset only when at least 90% of its DATA files are available (ADR 0064,
-  partially superseding ADR 0005).** `dataAvailability` and `MIN_DATA_AVAILABILITY` put the
-  rule in one place. The denominator is data, never `total_files`: metadata is never annexed
+- **NEMAR lists a dataset only when at least 90% of its DISTINCT ANNEXED DATA KEYS are
+  available (ADR 0064, partially superseding ADR 0005).** `dataAvailability` and
+  `MIN_DATA_AVAILABILITY` put the rule in one place, next to the presence predicate its
+  numerator is defined in terms of, and the import publish gate calls it rather than
+  recomputing the ratio. Enforcement of the withdrawal itself is still the operator running
+  `nemar admin withdraw`; what ships here is the measurement, the gate, and the list. The denominator is data, never `total_files`: metadata is never annexed
   (ADR 0015), so it arrives from GitHub whether or not one recording survived and pulls every
   ratio toward 100%. `on008017` is missing 4.7% of its tracked files and 21.6% of its data,
   and `on004917` 11.8% against 25.4%, so a threshold on tracked files clears both. A
@@ -131,8 +139,11 @@ earlier releases are described only by their generated notes.
   names it (`falselyClaimed`), the skip note says how many of the missing keys are advertised
   anyway, and the flag retracts them and pushes. Off by default and deliberately: while the
   content is still recoverable the honest repair is to fetch it, which makes the claim true.
-  Used on the 200 keys across `on003574`, `on004475`, `on004917` and `on005571` whose
-  anatomical images OpenNeuro removed.
+  Used on the 230 keys across `on003574`, `on004475`, `on004917`, `on005571` and
+  `on005279` whose anatomical images OpenNeuro removed, verified afterwards by re-reading
+  each dataset's location log from a fresh clone of origin. It edits the log and leaves the
+  zero-byte objects, which are inert once nothing claims them but still read as damage to a
+  size audit.
 
 - **A presence claim NEMAR cannot honor can now be withdrawn (#1396).** `batchSetKeysAbsent`
   is the counterpart to the registration path: a failed copy leaves a zero-byte object
@@ -144,8 +155,8 @@ earlier releases are described only by their generated notes.
   would have reported every retraction as a failure.
 
 - **A multipart copy runs its parts concurrently (#1396).** Parts are independent
-  server-side copies but were issued one at a time, so a single 85 GB key copied at about
-  6 MiB/s, four hours, while eight ordinary keys in flight sustain 30 MiB/s. Eight parts now
+  server-side copies but were issued one at a time, so one oversized key copied at about
+  6 MiB/s, hours for a single key, while eight ordinary keys in flight sustain 30 MiB/s. Eight parts now
   run at once and the completed list is still assembled in part order. The byte-range
   arithmetic moved into an exported `multipartRanges`, because that is where this can
   corrupt silently: S3 stitches whatever ranges it is handed, so a gap or an overlap yields
@@ -155,8 +166,10 @@ earlier releases are described only by their generated notes.
 - **A multipart copy is now proven against its source, not just measured (#1396).** Above
   CopyObject's 5 GB limit the copy carries no SHA-256 to compare with the key, because S3
   refuses `--checksum-type FULL_OBJECT` for sha256, so such a copy passed on its size and
-  its pin alone. It offers that whole-object checksum for CRC64 instead, and OpenNeuro's
-  large objects already carry one, so the copy and the source can be compared directly: an
+  its pin alone. It offers that whole-object checksum for CRC64 instead, and the copy now
+  ASKS for one (`--checksum-algorithm CRC64NVME --checksum-type FULL_OBJECT`) rather than
+  hoping S3 attaches it; OpenNeuro's large objects already carry one, so the two can be
+  compared directly: an
   equal full-object CRC64 means the copy is the pinned version's bytes rather than any
   object of the right length. Recorded as `crc64-of-source`. It stays a fidelity check
   rather than an identity one, so an unpinned oversized source is still refused. Costs one

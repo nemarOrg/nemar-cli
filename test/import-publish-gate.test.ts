@@ -5,7 +5,13 @@
  * what the copy phase believed it transferred, so a copy that built a partial
  * manifest verified cleanly while the tree still referenced keys nothing had
  * moved -- sixteen datasets published that way, 12,039 keys with no object, each
- * one advertised to clones by the location log (ADR 0063).
+ * one advertised to clones by the location log.
+ *
+ * The rule the gate applies is ADR 0061's ("a dataset with any annexed key the
+ * bucket cannot account for is reported and skipped, not partly repaired"),
+ * moved from the fleet sweep to the one place that can still stop a DOI being
+ * minted. Not ADR 0063, which decides where a recovery copy may come from and
+ * how it is proven, and says nothing about finalize.
  *
  * So the question has to be asked of the tree. The tree side of it comes from a
  * real git-annex repository here rather than a literal list, because that is the

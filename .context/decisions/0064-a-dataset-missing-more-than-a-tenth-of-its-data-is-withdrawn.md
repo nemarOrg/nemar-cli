@@ -1,4 +1,4 @@
-# ADR 0064: A dataset missing more than a tenth of its DATA is withdrawn, and the denominator is data only
+# ADR 0064: A dataset missing more than a tenth of its DATA KEYS is withdrawn, and the denominator is data only
 
 **Status:** accepted
 **Date:** 2026-09-15
@@ -8,15 +8,19 @@ Partially supersedes [ADR 0005](0005-availability-is-reported-never-a-preconditi
 which decided that availability is reported and never a precondition for serving. That
 still governs HOW a listed dataset delivers: it omits what is missing and never fakes
 it. What it no longer does is make serving unconditional. This ADR sets the ceiling 0005
-deliberately did not have, and supersedes its ~90%-absent build floor for the serving
-question.
+deliberately did not have.
+
+0005's ~90%-absent ARCHIVE BUILD floor is untouched and still governs builds. It answers
+whether a build that read essentially nothing is a failed read path; this ADR answers
+whether a dataset is listed at all. Nothing in the fleet reaches the build floor, which is
+why a separate rule was needed.
 
 ## Context
 
 The #1396 sweep measured every one of the 600 imported datasets against both routes
-OpenNeuro publishes. After recovering everything recoverable, 17 datasets still hold
-content NEMAR cannot serve, and the spread is wide: `on004624` is missing 1 file of
-65,063, while `on008730` is missing 935 of 936.
+OpenNeuro publishes. After recovering everything recoverable, 16 datasets still hold
+content NEMAR cannot serve, and the spread is wide: `on004624` is missing a single key,
+while `on008730` is missing 935 of its 935.
 
 ADR 0005's only magnitude rule is a ~90% absent floor, and it is about whether an
 ARCHIVE BUILD fails rather than whether a dataset is served. Nothing in the fleet
@@ -34,7 +38,9 @@ reader can analyze, so it must not count toward completeness.
 
 ## Decision
 
-**NEMAR lists a dataset only when at least 90% of its DATA files are available.**
+**NEMAR lists a dataset only when at least 90% of its DISTINCT ANNEXED DATA KEYS are
+available.** "Files" is the wrong word for the rule and this ADR's own argument says why:
+an entry count runs above a key count, so a file-based denominator understates the loss.
 Below that, it is withdrawn from the catalog until the content can be served: withdrawal
 is `nemar admin withdraw`, which makes the repository private and tombstones the DOIs,
 reversed by `restore` the day the data is fetchable again.
@@ -65,15 +71,19 @@ registration sweep uses, so a zero-byte leftover counts as missing rather than p
 
 Keys, never tree entries, and the gap between them is not cosmetic. Two identical files
 share one key, so an entry count runs above a key count: `on008730` has 936 entries over
-935 keys, and `on006159` has 664 over 480, which moves its shortfall from 36.6% to
-46.2%. Worse, a `120000` count misses annexed files entirely on an adjusted or unlocked
+935 keys, and `on004078` has 9,447 over 9,223. `on006159` is the case that moved a
+verdict: re-measured against the live dataset, 222 of its 480 distinct keys have no
+object, which is **46.25% of its data missing**. The first pass reported 36.6% because it
+divided by a tree-entry count, and both halves of that ratio were wrong -- the numerator
+counts entries too. Worse, a `120000` count misses annexed files entirely on an adjusted or unlocked
 branch, where git-annex writes a `100644` pointer file whose content is the
 `/annex/objects/...` path instead of a symlink; `on008465` is all pointer files and a
 symlink count calls it 0 annexed files of 5,349. `git annex find` answers correctly for
 both shapes, which is why it is the definition here.
 
-Below the threshold, ADR 0005 is unchanged: the dataset is listed, serves what it has,
-omits what it does not, and advertises nothing it cannot deliver.
+At or above the threshold, ADR 0005 is unchanged: the dataset is listed, serves what it
+has, omits what it does not, and advertises nothing it cannot deliver. Below it, and after
+the notice period, the dataset is not listed at all, which is what this ADR adds.
 
 ## What recovering the content took, and why the threshold comes after it
 
@@ -82,18 +92,20 @@ what that took, so nobody reads a withdrawal as a first response:
 
 - **Recovery copies server-side, S3 to S3.** `CopyObject` with `--copy-source` naming an
   object in OpenNeuro's bucket, so bytes never cross the operator's machine: measured at
-  30 MiB/s into the bucket while the laptop moved 0.07 MiB/s. That is what made 623 GiB
+  30 MiB/s into the bucket while the laptop moved 0.07 MiB/s. That is what made ~620 GB
   feasible at all.
 - **A copy is proven, never assumed.** S3 is asked for the SHA-256 of what it wrote and
   it is compared to the annex key; MD5E keys verify by ETag on a single-part copy; above
   CopyObject's 5 GB limit, where no SHA-256 is available, the copy is matched against the
   source's full-object CRC64. A copy that fails verification is deleted rather than left
   looking like content (ADR 0063).
-- **What it recovered:** 2,740 keys and about 105 GiB in the first wave, then `on003645`
-  619 keys / 51.7 GiB, `on007721` 129 / 22 GiB, `on007816` 424 / 85 GiB, `on007987`
-  516 / 38.2 GiB, `on003104` 260, `on005127` 61, `on008003` 2 / 10.7 GiB, `on004148` 1.
-  Three datasets that would have been withdrawn on the previous day's numbers came back
-  whole.
+- **What it recovered:** 2,740 keys and about 105 GiB in the first wave across the wider
+  fleet, then, on the withdrawn cohort and the datasets the sweep flagged: `on008065`
+  5,173 keys / 94.3 GiB, `on003645` 619 / 51.7 GiB, `on007987` 516 / 38.2 GiB, `on007816`
+  424 / 85 GiB, `on003104` 260, `on007721` 129 / 22 GiB, `on005127` 61, `on005279` 30,
+  `on008003` 2 / 10.7 GiB, `on004148` 1, `on005516` 1. Six of the eleven withdrawn
+  datasets came back and were reinstated, and three more that would have been withdrawn
+  on the previous day's numbers never had to be.
 - **Five separate defects in our own tooling had to be fixed before the measurement could
   be trusted**, each of which had made content look unrecoverable when it was not: a
   double-encoded copy source (`%2520` for a space), no fallback when a recorded version
@@ -104,8 +116,8 @@ what that took, so nobody reads a withdrawal as a first response:
 - **What remains unrecoverable is upstream's, and was verified as such**: every key was
   tried against both routes OpenNeuro publishes, and the objects are either `403` to
   every anonymous caller, absent from the version list with no delete marker, or readable
-  and hashing to something other than the key. 10,217 keys across 18 datasets reach a
-  reader by neither route.
+  and hashing to something other than the key. 10,217 keys across those 16 datasets
+  reach a reader by neither route.
 
 Only then does the ratio mean anything. A dataset below 90% after all of that is missing
 data nobody can supply, which is what withdrawal is for.
@@ -124,14 +136,15 @@ data nobody can supply, which is what withdrawal is for.
   entirely pointer files, so it counted as 0 annexed files of 5,349 and dropped out of
   the ratio altogether when it is really 24 missing of 3,853. Symlink counts also
   over-count where files share content: `on006159` has 664 symlinks over 480 distinct
-  keys, so its shortfall is 46.2% and not the 36.6% first reported. Count keys, the way
-  `git annex find` does, and the two shapes stop mattering.
+  keys, and re-measuring it by key gives 222 of 480, a 46.25% shortfall rather than the
+  36.6% first reported. Count keys, the way `git annex find` does, and the two shapes
+  stop mattering.
 - The notice period costs something real and it is accepted: until the date passes, five
   datasets stay listed while missing more data than the policy allows. The alternative is
   tombstoning a DOI over a defect the source can clear in a day, which is worse for a
   reader who would rather cite a dataset that gets fixed than chase a tombstone.
-- The threshold is deliberately stringent. At 20% missing the count is 10 and at 50% it is 6,
-  and `on008017` at 21.6% or `on003574` at 12.2% are datasets a reader would
+- The threshold is deliberately stringent. At 20% missing the count is 10 and at 50% it
+  is 6, and `on008017` at 21.6% or `on003574` at 12.2% are datasets a reader would
   reasonably call broken. A stricter rule withdraws more, and that is the intent:
   NEMAR serves what can be fetched.
 - **A withdrawal is not a verdict on the submitter.** These gaps are upstream export
@@ -147,10 +160,13 @@ data nobody can supply, which is what withdrawal is for.
   is a sweep artifact and a recovery can make a dataset whole minutes later; the three
   datasets recovered this session (`on003645`, `on003104`, `on005127`) would each have
   been tombstoned on yesterday's numbers.
-- Retracting a false presence claim (#967) and withdrawing are different repairs and
-  both apply: the four anatomical datasets had their claims retracted first, so the
-  location log is honest, and are withdrawn second, because honest is not the same as
-  servable.
+- Retracting a false presence claim (#967) and withdrawing are different repairs, and
+  the first does not imply the second. The claims on the anatomical datasets were
+  retracted immediately -- 230 keys across `on003574`, `on004475`, `on004917`,
+  `on005571` and `on005279` -- because a log that advertises content NEMAR does not
+  hold is wrong today whatever happens in October. Withdrawal is the separate question,
+  and for the five public datasets it waits for the notice period. Honest is not the
+  same as servable, but it is owed sooner.
 
 ## Alternatives considered
 
@@ -160,8 +176,9 @@ data nobody can supply, which is what withdrawal is for.
 - **Threshold on `total_files`:** the obvious reading of "10% missing", and wrong.
   Metadata always arrives, so the ratio understates the loss and lets a dataset
   missing a fifth of its recordings pass.
-- **20% or 50%:** measured at both. 50% keeps only the three datasets that are almost
-  entirely gone, which does not describe the harm. Rejected as too permissive.
+- **20% or 50%:** measured at both. At 20% the count is 10 and at 50% it is 6, so a 50%
+  rule keeps only the datasets that are almost entirely gone and lets `on004917` at
+  25.4% stay listed. Rejected as too permissive.
 - **Weight raw above derivatives:** better for `on004212` and one more rule to
   maintain and argue. Not taken now; named above as the known cost.
 

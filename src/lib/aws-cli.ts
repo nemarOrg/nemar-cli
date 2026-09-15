@@ -425,15 +425,19 @@ export async function headS3Objects(opts: {
   return results;
 }
 /**
- * Every object key under a dataset's prefix, with the prefix stripped.
+ * Every object under a dataset's prefix as bare key -> SIZE, prefix stripped.
  *
- * One listing answers "does the bucket hold this key?" for a whole dataset. The
- * alternative -- a HEAD per key -- is both slower and ambiguous: `s3://nemar`
- * denies anonymous ListBucket, so S3 answers a missing key with 403 rather than
- * 404, and 403 is equally what a private dataset, an expired session, or a
- * signature with no session token returns (#1380, #1392).
+ * One listing answers "does the bucket hold this key, at its declared size?" for
+ * a whole dataset. The alternative -- a HEAD per key -- is both slower and
+ * ambiguous: `s3://nemar` denies anonymous ListBucket, so S3 answers a missing
+ * key with 403 rather than 404, and 403 is equally what a private dataset, an
+ * expired session, or a signature with no session token returns (#1380, #1392).
  *
- * Throws rather than returning an empty set when the listing fails. An empty set
+ * The size is half the answer, not a detail the name suggests it omits: a failed
+ * copy leaves a valid-looking zero-byte object under the right name (#967), so a
+ * listing of names alone reports content that is not there.
+ *
+ * Throws rather than returning an empty map when the listing fails. An empty map
  * reads as "the bucket holds nothing", which would make a caller conclude every
  * key is missing content.
  */
@@ -510,17 +514,28 @@ export function parseS3ObjectSizes(stdout: string, prefix: string): Map<string, 
   for (const line of stdout.split("\n")) {
     const row = line.trim();
     if (!row || row === "None") continue;
-    const [name, size] = row.split(/\s+/);
-    if (!name?.startsWith(base)) continue;
+    // Split at the LAST whitespace run, not the first. The size is the final
+    // field and the KEY CAN CONTAIN A SPACE -- this fleet has them, which is why
+    // git-annex base64-encodes such values in `.log.rmet` -- so taking token 0
+    // as the name would truncate the key and read a path fragment as its size.
+    // A mis-parsed size now means "missing content" everywhere downstream.
+    const split = row.lastIndexOf("\t") >= 0 ? row.lastIndexOf("\t") : row.lastIndexOf(" ");
+    if (split < 0) continue;
+    const name = row.slice(0, split).trimEnd();
+    const size = Number(row.slice(split + 1).trim());
+    if (!name.startsWith(base)) continue;
     const key = name.slice(base.length);
+    // A size that did not parse is not a zero-byte object; it is a row we did
+    // not understand, and calling it 0 would report real content as missing.
+    if (!Number.isFinite(size)) continue;
     // One path segment: an annex key never contains a slash, so anything nested
     // below the prefix is not one.
-    if (key && !key.includes("/")) objects.set(key, Number(size ?? 0));
+    if (key && !key.includes("/")) objects.set(key, size);
   }
   return objects;
 }
 
-/** The keys alone, for a caller that genuinely only asks whether one exists. */
-export function parseS3ObjectKeys(stdout: string, prefix: string): Set<string> {
-  return new Set(parseS3ObjectSizes(stdout, prefix).keys());
-}
+// `parseS3ObjectKeys` (names only, no sizes) was removed rather than kept for a
+// hypothetical caller. It had none, and a name-only presence check is the exact
+// mistake this module's size map exists to prevent (#967): every such check
+// called on003645 complete while 653 of its 823 objects were zero bytes.

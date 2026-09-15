@@ -1025,7 +1025,7 @@ export async function batchSetKeysPresent(
  * registration then tells every clone to fetch bytes NEMAR does not hold. When
  * the content cannot be recovered -- upstream deleted it, or never exported it
  * -- the claim cannot be made true, so the only honest repair is to retract it:
- * 200 keys across four datasets whose anatomical images OpenNeuro removed.
+ * 230 keys across five datasets whose anatomical images OpenNeuro removed.
  *
  * Retracting is not the same shape as asserting, so the read-back is inverted:
  * success is the key NO LONGER being recorded at the remote. Reusing the

@@ -5,14 +5,22 @@
 **Owner:** Seyed Yahya Shirazi
 
 Partially superseded by [ADR 0064](0064-a-dataset-missing-more-than-a-tenth-of-its-data-is-withdrawn.md),
-which sets a ceiling this ADR deliberately did not have: a dataset whose DATA files are
-less than 90% available is withdrawn from the catalog until the content can be served.
-Everything below still governs a dataset that IS listed, which is most of them: it
-delivers through every contract point, omits what is missing, and never fakes it. What
-no longer holds is the unqualified "never a precondition" in the title, and the ~90%
-absent build floor is superseded for the serving question by 0064's 10% missing-data
-withdrawal threshold. 0064 also records why the denominator must be data files and not
-`total_files`.
+which sets a ceiling this ADR deliberately did not have: a dataset whose distinct annexed
+data keys are less than 90% available is withdrawn from the catalog until the content can
+be served. Everything below still governs a dataset that IS listed, which is most of them:
+it delivers through every contract point, omits what is missing, and never fakes it. What
+no longer holds is the unqualified "never a precondition" in the title.
+
+**The ~90%-absent build floor below is NOT superseded and still governs archive builds.**
+It answers a different question -- whether a build that read essentially nothing is a
+failed read path -- and 0064 adds a separate, stricter rule about whether a dataset is
+listed at all. A dataset can now be withdrawn while remaining well above the build floor.
+0064 also records why the withdrawal denominator must be distinct annexed data keys and
+not `total_files`.
+
+One figure below has been overtaken: `on006159` is measured at 46.25% of its data keys
+missing (222 of 480), not the ~70% absent stated in the consequences, which was an
+upstream-file estimate from before the key-level sweep.
 
 ## Context
 

@@ -72,7 +72,14 @@ export const COPY_OBJECT_LIMIT = 5 * 1024 ** 3;
 /** Part size for the multipart path. 10,000 parts caps a copy at ~10 TiB. */
 const MULTIPART_PART_SIZE = 1024 ** 3;
 
-/** Parts of one object copied at once. Matches the per-key concurrency above it. */
+/**
+ * Parts of one object copied at once.
+ *
+ * Matches the per-KEY concurrency default, which lives in
+ * `ContentRecoveryOptions.concurrency` and in the CLI's `--concurrency`, not in
+ * this file. Named there rather than "above" so the reference does not rot on
+ * the first re-order.
+ */
 const MULTIPART_CONCURRENCY = 8;
 
 /** How long any one aws invocation may take. A 5 GiB server-side copy is slow. */
@@ -174,8 +181,8 @@ function decodeRmetValue(raw: string): string {
  * which returns a bare `InvalidRequest`.
  *
  * A `!` after the marker means the value is base64, which is how git-annex
- * carries a value containing a space. `ds008003`'s two objects live under
- * `derivatives/reCleaned Cluster analysis/`, so both of its pins are encoded;
+ * carries a value containing a space. `ds008003`'s two OVERSIZED objects live
+ * under `derivatives/reCleaned Cluster analysis/`, so their pins are encoded;
  * a parser that requires a literal `#` finds no pin at all and reports the key
  * as unpinned, which is what put those 11.5 GB out of reach: the >5 GB path
  * needs a pinned source, because a multipart copy cannot carry a SHA-256.
@@ -574,7 +581,7 @@ export function copySourceArgument(source: { bucket: string; object: string; ver
  * narrow: `AccessDenied` and `NoSuchVersion` are answers, not hiccups, and
  * retrying them wastes a sweep.
  */
-// Anchored on the parenthesised code AWS puts in every message, not a loose
+// Anchored on the parenthesized code AWS puts in every message, not a loose
 // word match: `\b429\b` also matches a path like `sub-503/x-429.set`, so a
 // dataset whose filenames happen to carry those digits would retry an
 // AccessDenied forever.
@@ -732,8 +739,8 @@ async function multipartCopy(opts: {
   if (!uploadId) throw new Error("create-multipart-upload returned no UploadId");
 
   // Parts are independent server-side copies, so they run together. Sequentially
-  // an 85 GB object copies at about 6 MiB/s, which is four hours for one key
-  // while eight single-part copies of ordinary keys sustain 30 MiB/s. The
+  // an oversized object copies at about 6 MiB/s, hours for a single key, while
+  // eight single-part copies of ordinary keys sustain 30 MiB/s. The
   // ordering that matters is in the completed parts list, not in the requests.
   const ranges = multipartRanges(opts.source.size, MULTIPART_PART_SIZE);
   try {

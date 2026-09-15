@@ -4,7 +4,7 @@
     "reason": "recovered",
     "withdrawn": false,
     "data_available": 1.0,
-    "note": "Recovered in full and restored 2026-09-15. The upstream_403 reason was never measured for this dataset: nothing was missing."
+    "note": "Recovered in full (1 key) and restored 2026-09-15. The upstream_403 reason was never measured for this dataset: its content was readable the whole time, and the one key that looked unrecoverable was a double-encoded copy source on a path with a space, not an upstream refusal."
   },
   {
     "dataset_id": "on007816",
@@ -77,7 +77,7 @@
     "reason": "recovered",
     "withdrawn": false,
     "data_available": 0.976,
-    "note": "Recovered to 97.6% of its data and restored 2026-09-15; the 30 anatomical images OpenNeuro deleted are gone, their false presence claims retracted."
+    "note": "Recovered to 97.6% of its data (30 keys) and restored 2026-09-15; the 30 anatomical images OpenNeuro deleted are gone, and their false presence claims were retracted as part of the 230 keys across five datasets."
   },
   {
     "dataset_id": "on005516",

@@ -3551,7 +3551,7 @@ adminCommand
     "Withdraw a broken published dataset: make it private and tombstone its EZID DOIs (concept + every version). Dry-run by default.",
   )
   .argument("[ids...]", "Dataset id(s) to withdraw (omit when using --all)")
-  .option("--all", "Target every entry in the checked-in withdrawn-datasets list")
+  .option("--all", "Target the still-withdrawn entries on the checked-in list")
   .option("--reason <reason>", "Withdrawal reason (default: the list entry's own reason)")
   .option("--execute", "Actually apply the withdrawal (default is a dry run)")
   .option("--force", "Allow a dataset id that is not on the checked-in withdrawn-datasets list")
@@ -3664,7 +3664,7 @@ adminCommand
     "Reverse a withdrawal: make a dataset public again and restore its EZID DOIs (concept + every version). Dry-run by default.",
   )
   .argument("[ids...]", "Dataset id(s) to restore (omit when using --all)")
-  .option("--all", "Target every entry in the checked-in withdrawn-datasets list")
+  .option("--all", "Target the still-withdrawn entries on the checked-in list")
   .option("--execute", "Actually apply the restore (default is a dry run)")
   .option(
     "--withdrawn-file <path>",
