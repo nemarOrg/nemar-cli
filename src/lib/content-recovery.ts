@@ -30,6 +30,7 @@
  * environment, the way `exemplar-clone` does, and says so in the command's help.
  */
 
+import { mapWithConcurrency } from "./fleet-key-registration.js";
 import { runCommand } from "./git-annex/run-command.js";
 import { annexKeyDeclaredSize } from "./s3-server-copy.js";
 
@@ -41,6 +42,9 @@ export const COPY_OBJECT_LIMIT = 5 * 1024 ** 3;
 
 /** Part size for the multipart path. 10,000 parts caps a copy at ~10 TiB. */
 const MULTIPART_PART_SIZE = 1024 ** 3;
+
+/** Parts of one object copied at once. Matches the per-key concurrency above it. */
+const MULTIPART_CONCURRENCY = 8;
 
 /** How long any one aws invocation may take. A 5 GiB server-side copy is slow. */
 const AWS_TIMEOUT_MS = 1_800_000;
@@ -527,6 +531,26 @@ export async function copyObjectServerSide(opts: {
   };
 }
 
+/**
+ * The byte ranges of a multipart copy: contiguous, inclusive, 1-indexed parts.
+ *
+ * Extracted because it is the arithmetic that can corrupt silently. S3 accepts
+ * whatever ranges it is given and stitches them in part order, so an off-by-one
+ * on `end` produces an object of the wrong length, and a gap or an overlap
+ * produces one of the right length holding the wrong bytes. Neither is visible
+ * without hashing the result, and a multipart object carries no SHA-256.
+ */
+export function multipartRanges(
+  size: number,
+  partSize: number,
+): Array<{ part: number; offset: number; end: number }> {
+  const ranges: Array<{ part: number; offset: number; end: number }> = [];
+  for (let offset = 0, part = 1; offset < size; offset += partSize, part++) {
+    ranges.push({ part, offset, end: Math.min(offset + partSize, size) - 1 });
+  }
+  return ranges;
+}
+
 /** The >5 GB path: one `upload-part-copy` per gigabyte, then complete. */
 async function multipartCopy(opts: {
   source: RecoverySource;
@@ -555,14 +579,13 @@ async function multipartCopy(opts: {
   const uploadId = (JSON.parse(created.stdout || "{}") as { UploadId?: string }).UploadId;
   if (!uploadId) throw new Error("create-multipart-upload returned no UploadId");
 
-  const parts: Array<{ ETag: string; PartNumber: number }> = [];
+  // Parts are independent server-side copies, so they run together. Sequentially
+  // an 85 GB object copies at about 6 MiB/s, which is four hours for one key
+  // while eight single-part copies of ordinary keys sustain 30 MiB/s. The
+  // ordering that matters is in the completed parts list, not in the requests.
+  const ranges = multipartRanges(opts.source.size, MULTIPART_PART_SIZE);
   try {
-    for (
-      let offset = 0, part = 1;
-      offset < opts.source.size;
-      offset += MULTIPART_PART_SIZE, part++
-    ) {
-      const end = Math.min(offset + MULTIPART_PART_SIZE, opts.source.size) - 1;
+    const parts = await mapWithConcurrency(ranges, MULTIPART_CONCURRENCY, async (range) => {
       const copied = await aws(
         [
           "s3api",
@@ -574,11 +597,11 @@ async function multipartCopy(opts: {
           "--upload-id",
           uploadId,
           "--part-number",
-          String(part),
+          String(range.part),
           "--copy-source",
           copySourceArgument(opts.source),
           "--copy-source-range",
-          `bytes=${offset}-${end}`,
+          `bytes=${range.offset}-${range.end}`,
           "--output",
           "json",
         ],
@@ -586,14 +609,14 @@ async function multipartCopy(opts: {
       );
       if (copied.exitCode !== 0) {
         throw new Error(
-          `upload-part-copy ${part} failed: ${copied.stderr.trim() || `exit ${copied.exitCode}`}`,
+          `upload-part-copy ${range.part} failed: ${copied.stderr.trim() || `exit ${copied.exitCode}`}`,
         );
       }
       const etag = (JSON.parse(copied.stdout || "{}") as { CopyPartResult?: { ETag?: string } })
         .CopyPartResult?.ETag;
-      if (!etag) throw new Error(`upload-part-copy ${part} returned no ETag`);
-      parts.push({ ETag: etag, PartNumber: part });
-    }
+      if (!etag) throw new Error(`upload-part-copy ${range.part} returned no ETag`);
+      return { ETag: etag, PartNumber: range.part };
+    });
     const completed = await aws(
       [
         "s3api",

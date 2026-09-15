@@ -102,6 +102,15 @@ earlier releases are described only by their generated notes.
 
 ### Fixed
 
+- **A multipart copy runs its parts concurrently (#1396).** Parts are independent
+  server-side copies but were issued one at a time, so a single 85 GB key copied at about
+  6 MiB/s, four hours, while eight ordinary keys in flight sustain 30 MiB/s. Eight parts now
+  run at once and the completed list is still assembled in part order. The byte-range
+  arithmetic moved into an exported `multipartRanges`, because that is where this can
+  corrupt silently: S3 stitches whatever ranges it is handed, so a gap or an overlap yields
+  an object of plausible length holding the wrong bytes, and the multipart path has no
+  SHA-256 to catch it.
+
 - **A multipart copy is now proven against its source, not just measured (#1396).** Above
   CopyObject's 5 GB limit the copy carries no SHA-256 to compare with the key, because S3
   refuses `--checksum-type FULL_OBJECT` for sha256, so such a copy passed on its size and

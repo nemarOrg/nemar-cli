@@ -12,6 +12,7 @@ import { describe, expect, test } from "bun:test";
 import {
   copySourceArgument,
   indexUpstreamVersions,
+  multipartRanges,
   parseAnnexKey,
   parseRemoteLog,
   parseRmet,
@@ -467,5 +468,41 @@ describe("indexUpstreamVersions", () => {
   test("an empty listing is empty, not a crash", () => {
     expect(indexUpstreamVersions("").size).toBe(0);
     expect(indexUpstreamVersions("null").size).toBe(0);
+  });
+});
+
+describe("multipartRanges", () => {
+  test("covers every byte exactly once, with no gap and no overlap", () => {
+    // The property that matters. S3 stitches the parts in order and accepts
+    // whatever it is handed, so a gap or an overlap yields an object of
+    // plausible length holding the wrong bytes, and a multipart object has no
+    // SHA-256 to catch it with.
+    const size = 5_769_335_038;
+    const ranges = multipartRanges(size, 1024 ** 3);
+    expect(ranges[0].offset).toBe(0);
+    expect(ranges[ranges.length - 1].end).toBe(size - 1);
+    for (let i = 1; i < ranges.length; i++) {
+      expect(ranges[i].offset).toBe(ranges[i - 1].end + 1);
+    }
+    const covered = ranges.reduce((sum, r) => sum + (r.end - r.offset + 1), 0);
+    expect(covered).toBe(size);
+  });
+
+  test("numbers parts from one, because S3 rejects a part zero", () => {
+    expect(multipartRanges(10, 4).map((r) => r.part)).toEqual([1, 2, 3]);
+  });
+
+  test("gives a last part shorter than the rest rather than reading past the end", () => {
+    expect(multipartRanges(10, 4)).toEqual([
+      { part: 1, offset: 0, end: 3 },
+      { part: 2, offset: 4, end: 7 },
+      { part: 3, offset: 8, end: 9 },
+    ]);
+  });
+
+  test("an exact multiple of the part size makes no trailing empty part", () => {
+    const ranges = multipartRanges(8, 4);
+    expect(ranges).toHaveLength(2);
+    expect(ranges[1].end).toBe(7);
   });
 });
