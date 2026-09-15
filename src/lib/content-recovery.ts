@@ -34,8 +34,37 @@ import { mapWithConcurrency } from "./fleet-key-registration.js";
 import { runCommand } from "./git-annex/run-command.js";
 import { annexKeyDeclaredSize } from "./s3-server-copy.js";
 
-/** Errors that mean "this source cannot be read", as opposed to a transfer fault. */
-const SOURCE_UNREADABLE = /AccessDenied|NoSuchVersion|NoSuchKey|NotFound|\b40[34]\b|Forbidden/i;
+/**
+ * Errors that mean "this source cannot be read", as opposed to a transfer fault.
+ *
+ * Anchored the same way `AWS_RETRYABLE` is, and for the same measured reason: a
+ * loose `\b40[34]\b` also matches a path echoed in stderr, so a dataset with a
+ * `sub-403/` or `run-404` in its tree could have a genuine transfer fault
+ * reclassified as an unreadable source and end up filed `unrecoverable`.
+ */
+const SOURCE_UNREADABLE =
+  /\((?:AccessDenied|NoSuchVersion|NoSuchKey|NotFound|Forbidden|InvalidArgument|403|404)\)/i;
+
+/**
+ * A 404 from S3: the object is genuinely not there, as opposed to unaskable.
+ * Measured against the real CLI, whose message is
+ * `An error occurred (404) when calling the HeadObject operation: Not Found`.
+ */
+const OBJECT_ABSENT = /\((?:404|NoSuchKey|NotFound)\)/i;
+
+/**
+ * Upstream answering about the object, rather than the question failing.
+ *
+ * `InvalidArgument` is in here because that is what S3 actually says for a
+ * version id it does not have -- not `NoSuchVersion`, which is what a reader
+ * would expect. Measured: a well-formed but absent version on `openneuro.org`
+ * returns `An error occurred (InvalidArgument) ... Invalid version id
+ * specified`. A recorded pin that draws it is a dead pin, which IS an answer
+ * about the source, and getting this wrong would stop the fall-through to the
+ * discovered alternative that recovered on003645.
+ */
+const UPSTREAM_REFUSAL =
+  /\((?:403|404|AccessDenied|Forbidden|NoSuchKey|NotFound|NoSuchVersion|InvalidArgument)\)/i;
 
 /** CopyObject refuses a source above this; bigger objects need a multipart copy. */
 export const COPY_OBJECT_LIMIT = 5 * 1024 ** 3;
@@ -257,27 +286,49 @@ export type RecoveryOrigin = "pinned" | "version-match";
 
 export interface RecoverySource extends PinnedSource {
   origin: RecoveryOrigin;
+  /**
+   * The size the KEY declares, not a size read from the source object.
+   *
+   * Load-bearing: `multipartRanges` computes the copy's part boundaries from it,
+   * so a source object of a different length would be copied to the wrong
+   * length. That is safe only because a candidate is admitted in the first place
+   * by matching this size (or by being pinned), and because the copy is verified
+   * afterwards.
+   */
   size: number;
 }
 
-export interface RecoveryPlanEntry {
-  key: string;
-  size: number;
-  /** Where the bytes can be copied from, or absent when nothing accounts for them. */
-  source?: RecoverySource;
-  /**
-   * Other sources to try if the first is refused.
-   *
-   * A pin can name a version the upstream has since restricted or deleted while
-   * the same bytes are still served at that path under a newer version id: for
-   * on008462 the pinned version 403s and the current one answers 200 at the same
-   * size. A pin is the best identification of a key's content, not a promise
-   * that it is still readable, so a refusal falls through rather than ending it.
-   */
-  alternatives?: RecoverySource[];
-  /** Why there is no source; the operator's evidence that it is not a bug here. */
-  reason?: string;
-}
+/**
+ * Where one key's content can be copied from, or why it cannot be.
+ *
+ * A source XOR a reason, spelled with explicit `undefined` counterparts so
+ * `entry.source` can still be read directly and `entry.reason` narrows to a
+ * `string` once it is absent. `recoverKey` used to need an `?? "no source"`
+ * fallback for a state the producer never creates.
+ */
+export type RecoveryPlanEntry = { key: string; size: number } & (
+  | {
+      source: RecoverySource;
+      /**
+       * Other sources to try if the first is refused.
+       *
+       * A pin can name a version the upstream has since restricted or deleted
+       * while the same bytes are still served at that path under a newer version
+       * id: for on008462 the pinned version 403s and the current one answers 200
+       * at the same size. A pin is the best identification of a key's content,
+       * not a promise that it is still readable, so a refusal falls through
+       * rather than ending it.
+       */
+      alternatives?: RecoverySource[];
+      reason?: undefined;
+    }
+  | {
+      source?: undefined;
+      alternatives?: undefined;
+      /** Why there is no source; the evidence that it is not a bug here. */
+      reason: string;
+    }
+);
 
 /**
  * Decide where one key's content can be copied from. Pure, and the whole rule.
@@ -293,27 +344,20 @@ export function planKeyRecovery(opts: {
 }): RecoveryPlanEntry {
   const facts = parseAnnexKey(opts.key);
   if (!facts) return { key: opts.key, size: 0, reason: "not a parseable annex key" };
-  const entry: RecoveryPlanEntry = { key: opts.key, size: facts.size };
+  const base = { key: opts.key, size: facts.size };
   const pin = opts.pins[opts.pins.length - 1];
 
   const discovered = opts.upstream ? discoverUpstreamSource(facts.size, opts) : null;
   if (pin) {
-    entry.source = { ...pin, origin: "pinned", size: facts.size };
     // Not the same object twice: a discovered candidate that IS the pin adds
     // nothing but a second identical refusal.
-    if (discovered && discovered.version !== pin.version) entry.alternatives = [discovered];
-    return entry;
+    const alternatives =
+      discovered && discovered.version !== pin.version ? [discovered] : undefined;
+    return { ...base, source: { ...pin, origin: "pinned", size: facts.size }, alternatives };
   }
-  if (!opts.upstream) {
-    entry.reason = "no upstream remote to recover from";
-    return entry;
-  }
-  if (discovered) {
-    entry.source = discovered;
-    return entry;
-  }
-  entry.reason = upstreamRefusalReason(facts.size, opts);
-  return entry;
+  if (!opts.upstream) return { ...base, reason: "no upstream remote to recover from" };
+  if (discovered) return { ...base, source: discovered };
+  return { ...base, reason: upstreamRefusalReason(facts.size, opts) };
 }
 
 /** The one distinct upstream object carrying this key's size, if there is one. */
@@ -365,10 +409,40 @@ function upstreamRefusalReason(
 
 export type VerificationMethod = "checksum" | "etag" | "crc64-of-source" | "size-and-pin";
 
-export interface VerificationVerdict {
-  ok: boolean;
-  method: VerificationMethod;
-  detail?: string;
+/**
+ * How a verification refused, which is wider than the methods that can PASS.
+ *
+ * A refusal can name a check that never ran at all -- there was no readable key
+ * to check against, or the bucket never answered -- and saying so is the whole
+ * diagnostic value of the field. Passing verdicts cannot use these.
+ */
+export type VerificationRefusal = VerificationMethod | "unparseable-key" | "unmeasured" | "size";
+
+/**
+ * The verdict, discriminated on `ok` so a pass cannot carry an excuse and a
+ * refusal cannot omit its reason. `detail` was optional and interpolated
+ * unconditionally by the caller, which rendered "undefined; the object was
+ * deleted" for any refusal that forgot one.
+ */
+export type VerificationVerdict =
+  | { ok: true; method: VerificationMethod; detail?: string }
+  | { ok: false; method: VerificationRefusal; detail: string };
+
+/**
+ * Whether this origin ties the source object to this key's content.
+ *
+ * A pin is git-annex's own record that these bytes ARE this key, so it is the
+ * one thing that licenses accepting evidence weaker than a hash: size alone
+ * below 5 GB, or a CRC64 match against the source above it. A size-matched
+ * candidate we merely found at the right path proves nothing of the sort.
+ *
+ * Named once because two conditionals 400 lines apart used to spell it out
+ * independently, and they have to agree: `verifyCopy` decides what evidence is
+ * enough, `recoverKey` decides which candidates may be copied at all. A new
+ * `RecoveryOrigin` member fails closed here, into the stricter path.
+ */
+export function pinsContentToKey(origin: RecoveryOrigin): boolean {
+  return origin === "pinned";
 }
 
 /**
@@ -376,23 +450,30 @@ export interface VerificationVerdict {
  *
  * S3 computes the SHA-256 of a `CopyObject` when asked, so a copy from a source
  * nothing pins is still provable: the destination either hashes to the key or it
- * does not. Only the multipart path cannot do this -- a multipart object's
- * checksum is over the parts, not the content -- and there the pin plus the size
- * is all there is, which is why an unpinned oversized key is refused instead.
+ * does not. The multipart path cannot do that -- a multipart object's checksum
+ * is over the parts, not the content -- so above 5 GB the copy is proven by
+ * matching the source's full-object CRC64 instead, and only for a pinned
+ * source: an unpinned oversized key is refused rather than trusted on size.
+ *
+ * Every argument is required, including the ones that are legitimately `null`.
+ * They used to be optional, and an absent `size` skipped the size comparison
+ * instead of failing it, so a pinned multipart copy whose read-back HEAD failed
+ * returned `{ok: true, method: "size-and-pin"}` with not one byte compared.
  */
 export function verifyCopy(opts: {
   key: string;
   origin: RecoveryOrigin;
-  checksumSha256?: string | null;
-  etag?: string | null;
-  size?: number | null;
+  checksumSha256: string | null;
+  etag: string | null;
+  /** Length the bucket reports, or null when it could not be asked. */
+  size: number | null;
   /** Full-object CRC64 of the copy, when S3 recorded one (the multipart path). */
-  crc64?: string | null;
+  crc64: string | null;
   /** Full-object CRC64 the source carries, for the same object. */
-  sourceCrc64?: string | null;
+  sourceCrc64: string | null;
 }): VerificationVerdict {
   const facts = parseAnnexKey(opts.key);
-  if (!facts) return { ok: false, method: "checksum", detail: "unparseable key" };
+  if (!facts) return { ok: false, method: "unparseable-key", detail: "unparseable key" };
 
   if (opts.checksumSha256 && facts.backend.startsWith("SHA256") && facts.hashHex) {
     const want = Buffer.from(facts.hashHex, "hex").toString("base64");
@@ -414,20 +495,44 @@ export function verifyCopy(opts: {
           detail: `the object's MD5 is ${etag}, the key says ${facts.hashHex}`,
         };
   }
-  if (opts.size !== null && opts.size !== undefined && opts.size !== facts.size) {
+  // A POSITIVE match, not "fail only on a mismatch". Reaching anything below
+  // this line now proves the length was actually compared, which is what makes
+  // the `size-and-pin` verdict's name true.
+  // `== null` catches undefined too. The type says `number | null`, so a
+  // production caller cannot omit it, but a missing size must degrade to the
+  // honest refusal rather than to "the object is undefined bytes".
+  if (opts.size == null) {
     return {
       ok: false,
-      method: "size-and-pin",
+      method: "unmeasured",
+      detail: "the bucket did not answer for the copy, so nothing about it was checked",
+    };
+  }
+  if (opts.size !== facts.size) {
+    return {
+      ok: false,
+      method: "size",
       detail: `the object is ${opts.size} bytes, the key says ${facts.size}`,
     };
   }
-  // Above 5 GB the copy is multipart, and a multipart object carries no
-  // SHA-256: S3 rejects `--checksum-type FULL_OBJECT` for sha256, offering it
-  // only for the CRC algorithms. But OpenNeuro's own large objects DO carry a
-  // full-object CRC64, and so does our copy of one, so the two can be compared.
-  // That does not tie the bytes to the key's hash; it proves the copy is
-  // byte-identical to the version git-annex pinned, which is what the pin is
-  // being trusted for. Size alone would pass any object of the right length.
+  // Only a pin licenses evidence weaker than a hash, and this refusal has to
+  // come BEFORE the CRC64 branch: a CRC64 match against a source we merely
+  // found at the right path proves we copied that guess faithfully, not that
+  // the bytes are this key's (ADR 0063). Ordered the other way, an unpinned
+  // oversized alternative could be copied in and reported `crc64-of-source`.
+  if (!pinsContentToKey(opts.origin)) {
+    return {
+      ok: false,
+      method: "size-and-pin",
+      detail: "only the size could be checked, and nothing pins this source to this key",
+    };
+  }
+  // A multipart object carries no SHA-256: S3 rejects `--checksum-type
+  // FULL_OBJECT` for sha256, offering it only for the CRC algorithms. But
+  // OpenNeuro's own large objects DO carry a full-object CRC64, and the copy
+  // asks for one, so the two can be compared. That does not tie the bytes to
+  // the key's hash; it proves the copy is byte-identical to the version
+  // git-annex pinned, which is what the pin is being trusted for.
   if (opts.sourceCrc64 && opts.crc64) {
     return opts.sourceCrc64 === opts.crc64
       ? { ok: true, method: "crc64-of-source" }
@@ -436,13 +541,6 @@ export function verifyCopy(opts: {
           method: "crc64-of-source",
           detail: `the copy's CRC64 is ${opts.crc64}, the source reads ${opts.sourceCrc64}`,
         };
-  }
-  if (opts.origin !== "pinned") {
-    return {
-      ok: false,
-      method: "size-and-pin",
-      detail: "only the size could be checked, and nothing pins this source to this key",
-    };
   }
   return { ok: true, method: "size-and-pin" };
 }
@@ -514,8 +612,9 @@ async function aws(args: string[], env?: Record<string, string>) {
 }
 
 export interface CopyResult {
-  checksumSha256?: string | null;
-  etag?: string | null;
+  /** null when S3 recorded none; the multipart path never has one. */
+  checksumSha256: string | null;
+  etag: string | null;
   multipart: boolean;
 }
 
@@ -566,7 +665,9 @@ export async function copyObjectServerSide(opts: {
   };
   return {
     checksumSha256: body.CopyObjectResult?.ChecksumSHA256 ?? null,
-    etag: body.CopyObjectResult?.ETag ?? null,
+    // Unquoted at the boundary, like `headObject`, so no comparison downstream
+    // has to remember to strip.
+    etag: body.CopyObjectResult?.ETag?.replace(/"/g, "") ?? null,
     multipart: false,
   };
 }
@@ -597,7 +698,7 @@ async function multipartCopy(opts: {
   destBucket: string;
   destKey: string;
   env?: Record<string, string>;
-}): Promise<{ checksumSha256?: null; etag?: string | null }> {
+}): Promise<{ checksumSha256: null; etag: string | null }> {
   const created = await aws(
     [
       "s3api",
@@ -606,6 +707,17 @@ async function multipartCopy(opts: {
       opts.destBucket,
       "--key",
       opts.destKey,
+      // ASKED FOR, not hoped for. A multipart object carries no SHA-256, so the
+      // full-object CRC64 is the only thing that can prove this copy is the
+      // bytes the pin names, and S3 attaches one only when the upload requests
+      // it. Without these two flags the verification silently degraded to
+      // size-only for every oversized key, which is the verdict this path
+      // exists to avoid. SHA256 is not an option here: S3 refuses
+      // `FULL_OBJECT` for it and offers it only for the CRC algorithms.
+      "--checksum-algorithm",
+      "CRC64NVME",
+      "--checksum-type",
+      "FULL_OBJECT",
       "--output",
       "json",
     ],
@@ -682,9 +794,15 @@ async function multipartCopy(opts: {
     const body = JSON.parse(completed.stdout || "{}") as { ETag?: string };
     return { checksumSha256: null, etag: body.ETag ?? null };
   } catch (error) {
-    // An abandoned multipart upload is billable storage nobody can see. Abort it
-    // on the way out, and let the original failure be the one that is reported.
-    await aws(
+    // An abandoned multipart upload is billable storage nobody can see: 103 of
+    // them across this bucket held 5.24 TiB before anyone looked. Abort it on
+    // the way out, and let the original failure be the one that is reported.
+    //
+    // Reached only after every in-flight part has settled: `mapWithConcurrency`
+    // waits for its siblings before rejecting, precisely so this abort cannot
+    // race a part still being written. A part that landed after the abort would
+    // resurrect the upload, and nothing would ever complete or clear it.
+    const aborted = await aws(
       [
         "s3api",
         "abort-multipart-upload",
@@ -696,23 +814,49 @@ async function multipartCopy(opts: {
         uploadId,
       ],
       opts.env,
-    ).catch(() => undefined);
+    ).catch(() => ({ exitCode: 1, stderr: "abort-multipart-upload could not be invoked" }));
+    // Never silently: an abort that failed is the billable-storage leak this
+    // block exists to prevent, and the operator needs the upload id to clear it.
+    if (aborted.exitCode !== 0) {
+      console.warn(
+        [
+          `[content-recovery] FAILED to abort multipart upload ${uploadId}`,
+          `for ${opts.destBucket}/${opts.destKey}: ${aborted.stderr.trim().slice(0, 300)}.`,
+          "It is billable storage invisible to every object listing; clear it with",
+          `aws s3api abort-multipart-upload --bucket ${opts.destBucket}`,
+          `--key ${opts.destKey} --upload-id ${uploadId}`,
+        ].join(" "),
+      );
+    }
     throw error;
   }
 }
 
-/** What the bucket says about an object, for the verification step. */
+/** An object's facts, or why the bucket could not be asked for them. */
+export interface HeadObjectAnswer {
+  object: {
+    size: number;
+    etag: string | null;
+    checksumSha256: string | null;
+    crc64: string | null;
+  } | null;
+  /** Non-null when the question itself failed, rather than the object being absent. */
+  failed: string | null;
+}
+
+/**
+ * What the bucket says about an object, for the verification step.
+ *
+ * Tri-state on purpose. This used to return `null` for both "no such object"
+ * and "the call failed", and the caller read either as "nothing to compare",
+ * which is how a copy whose read-back timed out was reported verified.
+ */
 export async function headObject(opts: {
   bucket: string;
   key: string;
   env?: Record<string, string>;
-}): Promise<{
-  size: number;
-  etag: string | null;
-  checksumSha256: string | null;
-  crc64: string | null;
-} | null> {
-  const { stdout, exitCode } = await aws(
+}): Promise<HeadObjectAnswer> {
+  const { stdout, stderr, exitCode, timedOut } = await aws(
     [
       "s3api",
       "head-object",
@@ -727,7 +871,14 @@ export async function headObject(opts: {
     ],
     opts.env,
   );
-  if (exitCode !== 0) return null;
+  if (exitCode !== 0) {
+    const why = timedOut ? "timed out" : stderr.trim() || `exit ${exitCode}`;
+    // A 404 is an answer: the object is not there. Anything else is a failed
+    // question and must never be scored as an absent object.
+    return OBJECT_ABSENT.test(stderr)
+      ? { object: null, failed: null }
+      : { object: null, failed: why };
+  }
   const body = JSON.parse(stdout || "{}") as {
     ContentLength?: number;
     ETag?: string;
@@ -736,13 +887,18 @@ export async function headObject(opts: {
     ChecksumType?: string;
   };
   return {
-    size: body.ContentLength ?? 0,
-    etag: body.ETag ?? null,
-    checksumSha256: body.ChecksumSHA256 ?? null,
-    // Only a FULL_OBJECT CRC describes the whole object. A composite one is a
-    // hash of part hashes and says nothing about two objects built from
-    // different part sizes.
-    crc64: body.ChecksumType === "FULL_OBJECT" ? (body.ChecksumCRC64NVME ?? null) : null,
+    object: {
+      size: body.ContentLength ?? 0,
+      // Unquoted here, at the boundary, so the type's value is always unquoted
+      // and no downstream comparison has to strip again to be correct.
+      etag: body.ETag?.replace(/"/g, "") ?? null,
+      checksumSha256: body.ChecksumSHA256 ?? null,
+      // Only a FULL_OBJECT CRC describes the whole object. A composite one is a
+      // hash of part hashes and says nothing about two objects built from
+      // different part sizes.
+      crc64: body.ChecksumType === "FULL_OBJECT" ? (body.ChecksumCRC64NVME ?? null) : null,
+    },
+    failed: null,
   };
 }
 
@@ -754,11 +910,18 @@ export async function headObject(opts: {
  * only copy does not serve it to anyone. Five of the sixteen datasets are the
  * second case -- the objects are listed, with sizes, and 403 to an anonymous
  * caller, so the content exists upstream and is not public.
+ *
+ * `readable: false` is NOT the same as "upstream refuses it", which is why this
+ * returns the reason too. A DNS blip, a throttle that outlived its retries, an
+ * expired session or a missing `aws` binary all produce a non-zero exit, and
+ * scoring any of them as a verdict about OpenNeuro manufactures exactly the
+ * unmeasured `upstream_403` filing that ADR 0064 exists to correct. Only a
+ * parsed 403 or 404 is an answer about the source.
  */
 export async function isUpstreamObjectReadable(
   source: { bucket: string; object: string; version?: string },
   env?: Record<string, string>,
-): Promise<boolean> {
+): Promise<{ readable: boolean; refusedByUpstream: boolean; detail: string | null }> {
   const args = [
     "s3api",
     "head-object",
@@ -769,21 +932,31 @@ export async function isUpstreamObjectReadable(
     source.object,
   ];
   if (source.version) args.push("--version-id", source.version);
-  const { exitCode } = await aws(args, env);
-  return exitCode === 0;
+  const { stderr, exitCode, timedOut } = await aws(args, env);
+  if (exitCode === 0) return { readable: true, refusedByUpstream: false, detail: null };
+  const detail = timedOut ? "timed out" : stderr.trim() || `exit ${exitCode}`;
+  return {
+    readable: false,
+    refusedByUpstream: UPSTREAM_REFUSAL.test(stderr),
+    detail,
+  };
 }
 
 /**
- * The source object's full-object CRC64, or null if it carries none.
+ * The source object's full-object CRC64, or why it could not be read.
  *
  * Asked unsigned, like every other question we put to upstream, and only when
  * the copy could not be checksummed any other way, so it costs one HEAD on the
  * >5 GB path and nothing at all elsewhere.
+ *
+ * `{crc64: null, failed: null}` means the object genuinely carries none;
+ * `failed` means we never found out, which downgrades an oversized copy's proof
+ * to size-only and so has to be reported rather than absorbed.
  */
 export async function upstreamObjectCrc64(
   source: { bucket: string; object: string; version?: string },
   env?: Record<string, string>,
-): Promise<string | null> {
+): Promise<{ crc64: string | null; failed: string | null }> {
   const args = [
     "s3api",
     "head-object",
@@ -798,25 +971,42 @@ export async function upstreamObjectCrc64(
     "json",
   ];
   if (source.version) args.push("--version-id", source.version);
-  const { stdout, exitCode } = await aws(args, env);
-  if (exitCode !== 0) return null;
+  const { stdout, stderr, exitCode, timedOut } = await aws(args, env);
+  if (exitCode !== 0) {
+    return { crc64: null, failed: timedOut ? "timed out" : stderr.trim() || `exit ${exitCode}` };
+  }
   const body = JSON.parse(stdout || "{}") as {
     ChecksumCRC64NVME?: string;
     ChecksumType?: string;
   };
-  return body.ChecksumType === "FULL_OBJECT" ? (body.ChecksumCRC64NVME ?? null) : null;
+  return {
+    crc64: body.ChecksumType === "FULL_OBJECT" ? (body.ChecksumCRC64NVME ?? null) : null,
+    failed: null,
+  };
 }
 
+/**
+ * Delete one object, and say why if it would not go.
+ *
+ * The reason matters more here than almost anywhere else in this module: this is
+ * the call that removes an object which FAILED verification, so a swallowed
+ * refusal leaves a right-size, wrong-content object under a real key's name for
+ * the next registration sweep to advertise (ADR 0063).
+ */
 export async function deleteObject(opts: {
   bucket: string;
   key: string;
   env?: Record<string, string>;
-}): Promise<boolean> {
-  const { exitCode } = await aws(
+}): Promise<{ deleted: boolean; detail: string | null }> {
+  const { stderr, exitCode, timedOut } = await aws(
     ["s3api", "delete-object", "--bucket", opts.bucket, "--key", opts.key],
     opts.env,
   );
-  return exitCode === 0;
+  if (exitCode === 0) return { deleted: true, detail: null };
+  return {
+    deleted: false,
+    detail: timedOut ? "timed out" : stderr.trim() || `exit ${exitCode}`,
+  };
 }
 
 export type RecoveryAction = "recovered" | "would-recover" | "unrecoverable" | "failed";
@@ -826,8 +1016,18 @@ export interface KeyRecoveryOutcome {
   size: number;
   action: RecoveryAction;
   origin?: RecoveryOrigin;
+  /** How a recovered copy was PROVEN. Only ever set on `recovered`. */
   verification?: VerificationMethod;
   detail?: string;
+  /**
+   * An object that failed verification and could not be deleted.
+   *
+   * The one outcome worse than not copying at all (ADR 0063): a right-size,
+   * wrong-content object under a real key's name, which the next registration
+   * sweep advertises because it checks name and size, never content. Surfaced as
+   * a field so the caller can print it rather than bury it in a detail string.
+   */
+  leftInBucket?: boolean;
 }
 
 /**
@@ -846,23 +1046,25 @@ export async function recoverKey(opts: {
 }): Promise<KeyRecoveryOutcome> {
   const { entry } = opts;
   if (!entry.source) {
-    return {
-      key: entry.key,
-      size: entry.size,
-      action: "unrecoverable",
-      detail: entry.reason ?? "no source",
-    };
+    return { key: entry.key, size: entry.size, action: "unrecoverable", detail: entry.reason };
   }
   const origin = entry.source.origin;
-  if (entry.size > COPY_OBJECT_LIMIT && origin !== "pinned") {
+  // PER CANDIDATE, not once for `entry.source`. The alternatives are tried when
+  // the pin is refused, and an alternative is `version-match` by construction,
+  // so judging the oversized rule on the primary's origin let an unpinned
+  // oversized object be copied in whenever a pinned primary happened to 403.
+  const oversized = (candidate: RecoverySource) =>
+    entry.size > COPY_OBJECT_LIMIT && !pinsContentToKey(candidate.origin);
+  const OVERSIZED_DETAIL =
+    "above CopyObject's 5 GB limit; a multipart copy cannot carry the key's SHA-256, " +
+    "and matching the source's CRC64 would only prove we faithfully copied a guess";
+  if (oversized(entry.source) && (entry.alternatives ?? []).every(oversized)) {
     return {
       key: entry.key,
       size: entry.size,
       action: "unrecoverable",
       origin,
-      detail:
-        "above CopyObject's 5 GB limit; a multipart copy cannot carry the key's SHA-256, " +
-        "and matching the source's CRC64 would only prove we faithfully copied a guess",
+      detail: OVERSIZED_DETAIL,
     };
   }
   if (!opts.apply) {
@@ -872,7 +1074,8 @@ export async function recoverKey(opts: {
     // apply recovers none. One unsigned HEAD per candidate is what the copy
     // would have found out anyway.
     for (const candidate of [entry.source, ...(entry.alternatives ?? [])]) {
-      if (await isUpstreamObjectReadable(candidate, opts.env)) {
+      if (oversized(candidate)) continue;
+      if ((await isUpstreamObjectReadable(candidate, opts.env)).readable) {
         return {
           key: entry.key,
           size: entry.size,
@@ -895,7 +1098,9 @@ export async function recoverKey(opts: {
   // still readable, and upstream rewrites and re-permissions objects under the
   // same path (on003645's recorded versions are all NoSuchVersion while the
   // right bytes sit at the same paths under newer ids).
-  const candidates = [entry.source, ...(entry.alternatives ?? [])];
+  const candidates = [entry.source, ...(entry.alternatives ?? [])].filter(
+    (candidate) => !oversized(candidate),
+  );
   const refusals: string[] = [];
   for (const source of candidates) {
     let copied: CopyResult;
@@ -923,19 +1128,28 @@ export async function recoverKey(opts: {
     // Ask the bucket rather than the copy's own answer: a multipart copy reports
     // nothing useful, and this is the same question a later sweep will ask.
     const head = await headObject({ bucket: opts.destBucket, key: opts.destKey, env: opts.env });
-    const sha = copied.checksumSha256 ?? head?.checksumSha256;
+    const sha = copied.checksumSha256 ?? head.object?.checksumSha256 ?? null;
     // One extra HEAD, and only where it buys something: with no SHA-256 to
     // compare, matching the source's full-object CRC64 is the difference
     // between proving the copy is those bytes and merely counting them.
-    const sourceCrc64 = !sha && head?.crc64 ? await upstreamObjectCrc64(source, opts.env) : null;
+    const sourceCrc64 =
+      !sha && head.object?.crc64 ? await upstreamObjectCrc64(source, opts.env) : null;
+    // A CRC64 the source was supposed to have and did not answer for is a
+    // DOWNGRADE, not a neutral absence: it silently turns an oversized copy's
+    // proof back into the size-only verdict this module refuses to rely on.
+    if (sourceCrc64?.failed) {
+      refusals.push(`could not read the source's CRC64: ${sourceCrc64.failed}`);
+    }
     const verdict = verifyCopy({
       key: entry.key,
       origin: source.origin,
       checksumSha256: sha,
-      etag: copied.etag ?? head?.etag,
-      size: head?.size,
-      crc64: head?.crc64,
-      sourceCrc64,
+      etag: copied.etag ?? head.object?.etag ?? null,
+      // null, never undefined: `verifyCopy` refuses an unknown size rather than
+      // skipping the comparison, so a failed read-back cannot pass as verified.
+      size: head.object?.size ?? null,
+      crc64: head.object?.crc64 ?? null,
+      sourceCrc64: sourceCrc64?.crc64 ?? null,
     });
     if (verdict.ok) {
       return {
@@ -955,24 +1169,44 @@ export async function recoverKey(opts: {
       key: entry.key,
       size: entry.size,
       action: "failed",
+      // The refusing check belongs in the detail, not in `verification`, which
+      // now means "and this is how it was proven". A JSON reader used to see
+      // `verification: "checksum"` on a key that FAILED its checksum.
+      detail: [
+        `refused by ${verdict.method}: ${verdict.detail}`,
+        removed.deleted
+          ? "the object was deleted"
+          : `the object was LEFT IN THE BUCKET (delete failed: ${removed.detail})`,
+      ].join("; "),
       origin: source.origin,
-      verification: verdict.method,
-      detail: `${verdict.detail}; the object was ${removed ? "deleted" : "LEFT IN THE BUCKET (delete failed)"}`,
+      leftInBucket: !removed.deleted,
     };
   }
 
-  // Every candidate refused. Ask the source anonymously: if it will not serve the
-  // object to anyone, this key is not a failure to retry, it is content upstream
-  // holds and does not publish, and a re-run gets the same answer forever.
-  const readable = await isUpstreamObjectReadable(entry.source, opts.env);
+  // Every candidate refused. Ask the source anonymously: if it will not serve
+  // the object to ANYONE, this key is not a failure to retry, it is content
+  // upstream holds and does not publish, and a re-run gets the same answer
+  // forever. A probe that merely FAILED says nothing of the kind, so only an
+  // actual refusal earns `unrecoverable`: filing a network blip as a verdict
+  // about OpenNeuro is the unmeasured `upstream_403` mistake ADR 0064 corrects.
+  const probe = await isUpstreamObjectReadable(entry.source, opts.env);
   const detail = refusals[refusals.length - 1] ?? "no candidate source could be copied";
+  if (probe.refusedByUpstream) {
+    return {
+      key: entry.key,
+      size: entry.size,
+      action: "unrecoverable",
+      origin: entry.source.origin,
+      detail: `upstream will not serve any recorded source for this key (${probe.detail}): ${detail.slice(0, 160)}`,
+    };
+  }
   return {
     key: entry.key,
     size: entry.size,
-    action: readable ? "failed" : "unrecoverable",
+    action: "failed",
     origin: entry.source.origin,
-    detail: readable
+    detail: probe.readable
       ? detail
-      : `upstream will not serve any recorded source for this key: ${detail.slice(0, 160)}`,
+      : `the source could not be probed (${probe.detail}), so whether upstream serves it is unknown: ${detail.slice(0, 160)}`,
   };
 }

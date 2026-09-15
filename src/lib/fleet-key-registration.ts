@@ -558,7 +558,22 @@ export async function repairDatasetKeyRegistration(
   }
 }
 
-/** Run `work` over `items` with at most `limit` in flight, preserving order. */
+/**
+ * Run `work` over `items` with at most `limit` in flight, preserving order.
+ *
+ * Results are written by input index, so the caller gets them in input order
+ * however they complete: the `Parts` array a multipart copy hands to
+ * `complete-multipart-upload` depends on that.
+ *
+ * **On a failure it waits for the siblings before rejecting.** There is no
+ * cancellation, so the other workers keep running whatever this does; the choice
+ * is only whether the caller learns of the failure before or after they stop.
+ * Before is worse: the multipart caller's error handler aborts the upload the
+ * still-running `upload-part-copy` calls are writing to, and a part that lands
+ * after the abort resurrects an upload nobody will ever complete, which is
+ * billable storage no object listing can see. The first rejection is still the
+ * one thrown, so the reported cause does not change.
+ */
 export async function mapWithConcurrency<T, R>(
   items: T[],
   limit: number,
@@ -566,14 +581,25 @@ export async function mapWithConcurrency<T, R>(
 ): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let next = 0;
+  // Set by the first worker to throw. The others finish the item they are on --
+  // that is what makes the wait safe -- but start no new ones, so a failure
+  // still ends the batch promptly instead of copying every remaining part.
+  let stopped = false;
   const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
-    while (true) {
+    while (!stopped) {
       const index = next++;
       if (index >= items.length) return;
-      results[index] = await work(items[index], index);
+      try {
+        results[index] = await work(items[index], index);
+      } catch (error) {
+        stopped = true;
+        throw error;
+      }
     }
   });
-  await Promise.all(workers);
+  const settled = await Promise.allSettled(workers);
+  const failed = settled.find((outcome) => outcome.status === "rejected");
+  if (failed?.status === "rejected") throw failed.reason;
   return results;
 }
 

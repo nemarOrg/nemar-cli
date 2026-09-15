@@ -429,6 +429,80 @@ describe("verifyCopy", () => {
     });
     expect(verifyCopy({ key: SHA_KEY, origin: "version-match", size: 65536 }).ok).toBe(false);
   });
+
+  test("refuses when the bucket never answered, rather than passing on a pin", () => {
+    // The hole this closes. `headObject` returns no object when the read-back
+    // call fails, and on the multipart path there is no SHA-256 and the ETag is
+    // skipped for carrying a `-`, so an absent size used to skip the comparison
+    // and fall through to the pinned pass: an 85 GB copy reported `recovered`
+    // by `size-and-pin` with not one byte compared.
+    const verdict = verifyCopy({
+      key: SHA_KEY,
+      origin: "pinned",
+      checksumSha256: null,
+      etag: "d41d8cd98f00b204e9800998ecf8427e-17",
+      size: null,
+      crc64: null,
+      sourceCrc64: null,
+    });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.method).toBe("unmeasured");
+    expect(verdict.detail).toContain("did not answer");
+  });
+
+  test("will not let a CRC64 match bless a source nothing pins", () => {
+    // ADR 0063: matching the CRC of an object we GUESSED at only proves we
+    // copied the guess faithfully. The refusal has to be evaluated before the
+    // CRC64 branch, or an oversized `version-match` alternative -- which is what
+    // `alternatives` holds whenever a pinned primary is refused -- gets copied
+    // in and reported proven.
+    const verdict = verifyCopy({
+      key: SHA_KEY,
+      origin: "version-match",
+      checksumSha256: null,
+      etag: null,
+      size: 65536,
+      crc64: "sameCrc64Value==",
+      sourceCrc64: "sameCrc64Value==",
+    });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.method).toBe("size-and-pin");
+    expect(verdict.detail).toContain("nothing pins this source");
+  });
+
+  test("verifies an MD5E key by ETag even though S3 also returns a SHA-256", () => {
+    // `copyObjectServerSide` always asks for `--checksum-algorithm SHA256`, so
+    // S3 returns a ChecksumSHA256 for EVERY copy, MD5E keys included. Without
+    // the backend guard on the checksum branch, that base64 SHA-256 would be
+    // compared against the key's hex MD5, every MD5E key would fail
+    // verification, and `recoverKey` would DELETE correctly copied content.
+    expect(
+      verifyCopy({
+        key: MD5_KEY,
+        origin: "pinned",
+        checksumSha256: SHA_B64,
+        etag: '"31e00c4f48dc4e333db21b13e967f094"',
+        size: 10203248,
+        crc64: null,
+        sourceCrc64: null,
+      }),
+    ).toEqual({ ok: true, method: "etag" });
+  });
+
+  test("names the refusing check without claiming a method that never ran", () => {
+    const verdict = verifyCopy({
+      key: "not-an-annex-key",
+      origin: "pinned",
+      checksumSha256: null,
+      etag: null,
+      size: 10,
+      crc64: null,
+      sourceCrc64: null,
+    });
+    expect(verdict.ok).toBe(false);
+    // Was `method: "checksum"` for a checksum comparison that never happened.
+    expect(verdict.method).toBe("unparseable-key");
+  });
 });
 
 describe("copySourceArgument", () => {

@@ -150,7 +150,7 @@ async function addAnnexedFile(name: string, content: string): Promise<string> {
   await git(["git", "annex", "add", "--quiet", name], origin);
   await git(["git", "commit", "-qm", `add ${name}`], origin);
   const listed = await git(
-    ["git", "annex", "find", "--include", "*", `--format=\${key} \${file}\n`],
+    ["git", "annex", "find", "--include", "*", "--format=${key} ${file}\n"],
     origin,
   );
   const line = listed.split("\n").find((l) => l.endsWith(` ${name}`));
@@ -388,13 +388,19 @@ exit 0`);
     // Five of the sixteen datasets are this: the object is listed upstream, with
     // the right size, and 403s for an anonymous caller as readily as for us.
     // Reporting that as a failure invites an operator to re-run it forever.
+    //
+    // The unsigned probe emits the real CLI's wording, which is what the
+    // classifier reads: `An error occurred (403) ... Forbidden`. A bare non-zero
+    // exit is deliberately NOT this case -- see the test below.
     await setUpPinnedDataset("content that upstream will not serve");
     installAwsShim(`
 case "$2" in
   copy-object)
     echo "aws: [ERROR]: An error occurred (AccessDenied) when calling the CopyObject operation: Access Denied" >&2
     exit 254 ;;
-  head-object) exit 254 ;;
+  head-object)
+    echo "aws: [ERROR]: An error occurred (403) when calling the HeadObject operation: Forbidden" >&2
+    exit 254 ;;
   list-object-versions) echo '[]'; exit 0 ;;
 esac
 exit 0`);
@@ -414,6 +420,38 @@ exit 0`);
         (line) => line.startsWith("s3api head-object") && line.includes("--no-sign-request"),
       ),
     ).toBe(true);
+  }, 180_000);
+
+  test("will not call a key unrecoverable when the probe itself failed", async () => {
+    // The distinction ADR 0064 exists to enforce. A probe that cannot reach S3
+    // -- a throttle outliving its retries, an expired session, a DNS blip, a
+    // missing binary -- says nothing about whether OpenNeuro serves the object,
+    // and scoring it as `unrecoverable` is exactly how nine datasets were filed
+    // `upstream_403` without anyone measuring them. Only a parsed 403/404 is an
+    // answer about the source; anything else is a failure to retry.
+    await setUpPinnedDataset("content whose availability is unknown");
+    installAwsShim(`
+case "$2" in
+  copy-object)
+    echo "aws: [ERROR]: An error occurred (AccessDenied) when calling the CopyObject operation: Access Denied" >&2
+    exit 254 ;;
+  head-object)
+    echo "Could not connect to the endpoint URL: \\"https://s3.amazonaws.com/\\"" >&2
+    exit 255 ;;
+  list-object-versions) echo '[]'; exit 0 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
+      workRoot,
+      apply: true,
+      originUrl: origin,
+    });
+
+    expect(outcome.keys[0].action).toBe("failed");
+    expect(outcome.keys[0].detail).toContain("could not be probed");
+    // And it must NOT assert the thing it never established.
+    expect(outcome.keys[0].detail).not.toContain("will not serve");
   }, 180_000);
 
   test("keeps a refused copy a failure when the source is readable without us", async () => {
