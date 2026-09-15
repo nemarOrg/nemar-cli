@@ -35,7 +35,7 @@ import { listS3ObjectKeys } from "./aws-cli.js";
 import { pushToGitHub } from "./git-annex/clone-push.js";
 import { getGitHubToken, githubTokenCredentialHelper } from "./git-annex/github.js";
 import { runCommand } from "./git-annex/run-command.js";
-import { batchSetKeysPresent } from "./git-annex/transfer.js";
+import { batchSetKeysAbsent, batchSetKeysPresent } from "./git-annex/transfer.js";
 import { isKeyPresentAtDeclaredSize } from "./s3-server-copy.js";
 
 /** The name the import gives NEMAR's own S3 special remote. */
@@ -75,6 +75,15 @@ export interface KeyRegistrationState {
   toRegister: string[];
   /** Annexed, and no object in the bucket: #1396's shape, not this one's. */
   missingContent: string[];
+  /**
+   * Claimed in the log and NOT in the bucket at its declared size.
+   *
+   * The sweep used to see the missing content and stop, never noticing that some
+   * of it was already advertised, so the false claim outlived every run. A clone
+   * reading this is told to fetch bytes NEMAR does not hold, which is worse than
+   * an unregistered key: that one merely fails to appear.
+   */
+  falselyClaimed: string[];
 }
 
 export type KeyRegistrationAction =
@@ -298,6 +307,7 @@ export async function scanDatasetKeyRegistration(
       inBucket: [],
       toRegister: [],
       missingContent: [],
+      falselyClaimed: [],
     };
   }
   const registered = await keysRecordedAt(datasetPath, remoteUuid);
@@ -315,6 +325,9 @@ export async function scanDatasetKeyRegistration(
     inBucket,
     toRegister: inBucket.filter((key) => !recorded.has(key)),
     missingContent: annexed.filter((key) => !isKeyPresentAtDeclaredSize(key, held)),
+    falselyClaimed: annexed.filter(
+      (key) => recorded.has(key) && !isKeyPresentAtDeclaredSize(key, held),
+    ),
   };
 }
 
@@ -327,6 +340,15 @@ export interface KeyRegistrationOptions {
   push?: boolean;
   /** Act even on a dataset whose content the bucket cannot fully account for. */
   includeIncomplete?: boolean;
+  /**
+   * Withdraw claims the bucket cannot back, instead of only reporting them.
+   *
+   * Off by default, because a missing object is usually a transfer still owed
+   * rather than content that is gone: recover it and the claim becomes true.
+   * Turn this on once recovery has reported the keys unrecoverable, when the
+   * claim cannot be made true and leaving it is the dishonest option.
+   */
+  retractFalseClaims?: boolean;
   /** Where to clone from; the org repository by default. */
   originUrl?: string;
   remoteName?: string;
@@ -378,6 +400,50 @@ export async function repairDatasetKeyRegistration(
         notes: [`no ${remoteName} remote in the git-annex branch; nothing to register against`],
       };
     }
+    // Withdrawing a claim comes BEFORE the missing-content bail-out, because a
+    // dataset with missing content is exactly where a false claim lives: the
+    // sweep saw it, refused to register, and left the claim standing.
+    if (options.retractFalseClaims && state.falselyClaimed.length > 0) {
+      if (!options.apply) {
+        return {
+          datasetId,
+          action: "would-repair",
+          state,
+          pushed: false,
+          notes: [
+            `${state.falselyClaimed.length} key(s) are advertised at ${remoteName} and not in the bucket; would withdraw`,
+          ],
+        };
+      }
+      const withdrawn = await batchSetKeysAbsent(
+        datasetPath,
+        state.falselyClaimed,
+        state.remoteUuid,
+      );
+      if (withdrawn.failed > 0) {
+        return {
+          datasetId,
+          action: "failed",
+          state,
+          pushed: false,
+          notes,
+          error: `${withdrawn.failed} claim(s) still stand after setpresentkey 0: ${withdrawn.missing.join(", ")}`,
+        };
+      }
+      notes.push(`withdrew ${withdrawn.success} claim(s) the bucket cannot back`);
+      const pushedRetraction = await pushToGitHub(datasetPath, "origin");
+      if (!pushedRetraction.success) {
+        return {
+          datasetId,
+          action: "failed",
+          state,
+          pushed: false,
+          notes,
+          error: pushedRetraction.error ?? "push failed",
+        };
+      }
+      return { datasetId, action: "repaired", state, pushed: true, notes };
+    }
     if (state.missingContent.length > 0 && !options.includeIncomplete) {
       return {
         datasetId,
@@ -385,7 +451,11 @@ export async function repairDatasetKeyRegistration(
         state,
         pushed: false,
         notes: [
-          `${state.missingContent.length} of ${state.annexed.length} annexed key(s) have no object in the bucket, so this is missing content (#1396) rather than a lost registration; first: ${state.missingContent[0]}`,
+          `${state.missingContent.length} of ${state.annexed.length} annexed key(s) have no object in the bucket${
+            state.falselyClaimed.length > 0
+              ? `, ${state.falselyClaimed.length} of them advertised at ${remoteName} anyway (rerun with retractFalseClaims to withdraw)`
+              : ""
+          }, so this is missing content (#1396) rather than a lost registration; first: ${state.missingContent[0]}`,
         ],
       };
     }

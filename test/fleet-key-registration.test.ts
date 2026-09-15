@@ -31,6 +31,7 @@ import {
   sweepKeyRegistration,
 } from "../src/lib/fleet-key-registration";
 import { runCommand } from "../src/lib/git-annex/run-command";
+import { batchSetKeysPresent } from "../src/lib/git-annex/transfer";
 
 /** A bucket listing in the shape `listExistingObjects` returns: key -> size. */
 function sizedObjects(keys: string[]): Map<string, number> {
@@ -184,6 +185,33 @@ describe("scanDatasetKeyRegistration", () => {
     expect(state.missingContent).toHaveLength(4);
   }, 240_000);
 
+  test("names the keys advertised at the remote that the bucket cannot back", async () => {
+    // The state the sweep used to be blind to: registered AND not in the bucket.
+    // It saw `missingContent`, refused to register, and left the claim standing,
+    // so every clone kept being told to fetch bytes NEMAR does not hold (#967).
+    const path = await cloneForScan();
+    const uuid = await uuidOf(path);
+    const all = await scanDatasetKeyRegistration("on999999", path, directoryObjectSource(store));
+    await batchSetKeysPresent(path, all.annexed, uuid);
+
+    const state = await scanDatasetKeyRegistration("on999999", path, async () => new Map());
+
+    expect(state.registered).toHaveLength(4);
+    expect(state.missingContent).toHaveLength(4);
+    expect([...state.falselyClaimed].sort()).toEqual([...all.annexed].sort());
+  }, 240_000);
+
+  test("a key the bucket holds is not a false claim", async () => {
+    const path = await cloneForScan();
+    const before = await scanDatasetKeyRegistration("on999999", path, directoryObjectSource(store));
+    await batchSetKeysPresent(path, before.annexed, await uuidOf(path));
+
+    const state = await scanDatasetKeyRegistration("on999999", path, directoryObjectSource(store));
+
+    expect(state.registered).toHaveLength(4);
+    expect(state.falselyClaimed).toEqual([]);
+  }, 240_000);
+
   test("resolveRemoteUuid reads the UUID out of the git-annex branch", async () => {
     const path = await cloneForScan();
     const uuid = await resolveRemoteUuid(path);
@@ -193,6 +221,92 @@ describe("scanDatasetKeyRegistration", () => {
     const fromLog = await run(["git", "show", "git-annex:remote.log"], path);
     expect(fromLog).toContain(`${uuid} `);
     expect(await resolveRemoteUuid(path, "no-such-remote")).toBeNull();
+  }, 240_000);
+});
+
+describe("repairDatasetKeyRegistration, withdrawing a claim", () => {
+  /** Claim all four keys, then take the bucket away, as a failed copy would. */
+  async function claimWithoutContent(): Promise<string> {
+    const path = await cloneForScan("claimed");
+    const state = await scanDatasetKeyRegistration("on999999", path, directoryObjectSource(store));
+    await batchSetKeysPresent(path, state.annexed, await uuidOf(path));
+    const pushed = await runCommand(["git", "push", "-q", "origin", "git-annex"], { cwd: path });
+    expect(pushed.exitCode).toBe(0);
+    return path;
+  }
+
+  test("withdraws the claim and a fresh clone of origin no longer sees it", async () => {
+    await claimWithoutContent();
+    const before = await cloneForScan("before");
+    expect(
+      (
+        await run(
+          ["git", "annex", "find", "--include", "*", "--in", await uuidOf(before), "--format=${key}\n"],
+          before,
+        )
+      )
+        .split("\n")
+        .filter(Boolean),
+    ).toHaveLength(4);
+
+    const outcome = await repairDatasetKeyRegistration("on999999", async () => new Map(), {
+      workRoot,
+      apply: true,
+      originUrl: origin,
+      retractFalseClaims: true,
+    });
+
+    expect(outcome.action).toBe("repaired");
+    expect(outcome.pushed).toBe(true);
+    expect(outcome.state?.falselyClaimed).toHaveLength(4);
+
+    const after = await cloneForScan("retracted");
+    const recorded = await run(
+      ["git", "annex", "find", "--include", "*", "--in", await uuidOf(after), "--format=${key}\n"],
+      after,
+    );
+    expect(recorded.split("\n").filter(Boolean)).toEqual([]);
+  }, 240_000);
+
+  test("without the option it reports the false claim and changes nothing", async () => {
+    await claimWithoutContent();
+
+    const outcome = await repairDatasetKeyRegistration("on999999", async () => new Map(), {
+      workRoot,
+      apply: true,
+      originUrl: origin,
+    });
+
+    expect(outcome.action).toBe("skipped-missing-content");
+    expect(outcome.pushed).toBe(false);
+    expect(outcome.notes.join(" ")).toContain("advertised at nemar-s3 anyway");
+
+    const after = await cloneForScan("untouched");
+    const recorded = await run(
+      ["git", "annex", "find", "--include", "*", "--in", await uuidOf(after), "--format=${key}\n"],
+      after,
+    );
+    expect(recorded.split("\n").filter(Boolean)).toHaveLength(4);
+  }, 240_000);
+
+  test("a dry run names the claims and pushes nothing", async () => {
+    await claimWithoutContent();
+
+    const outcome = await repairDatasetKeyRegistration("on999999", async () => new Map(), {
+      workRoot,
+      originUrl: origin,
+      retractFalseClaims: true,
+    });
+
+    expect(outcome.action).toBe("would-repair");
+    expect(outcome.pushed).toBe(false);
+
+    const after = await cloneForScan("dry");
+    const recorded = await run(
+      ["git", "annex", "find", "--include", "*", "--in", await uuidOf(after), "--format=${key}\n"],
+      after,
+    );
+    expect(recorded.split("\n").filter(Boolean)).toHaveLength(4);
   }, 240_000);
 });
 

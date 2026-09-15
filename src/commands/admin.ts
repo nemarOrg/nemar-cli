@@ -5776,6 +5776,10 @@ fleetCommand
     "--include-incomplete",
     "Also act on a dataset whose content the bucket cannot fully account for (#1396). Off by default: that is missing content, not a lost registration",
   )
+  .option(
+    "--retract-false-claims",
+    "Withdraw claims the bucket cannot back, rather than only reporting them. For content recovery has proven unrecoverable: it makes the log honest, it does not make the data appear",
+  )
   .option("--dir <path>", "Where clones go while a dataset is being repaired (default: a temp dir)")
   .option("--concurrency <n>", "Datasets in flight at once (default 4)", "4")
   .option("--json <path>", "Write the full report as JSON")
@@ -5796,6 +5800,16 @@ What it will not do:
   skipped. That is missing content (#1396) and needs the bytes transferred, not a
   registration written. \`--include-incomplete\` overrides it.
 
+The opposite repair, \`--retract-false-claims\`:
+  a key can be recorded at NEMAR's remote with NO object behind it, which is what
+  a failed copy leaves (#967): the object is there under the right name at zero
+  bytes, every name-only check counts it as content, and the log then tells every
+  clone to fetch bytes we do not hold. That is worse than an unregistered key,
+  which merely fails to appear. Run this only once recovery has reported those
+  keys unrecoverable, because while the content is still recoverable the honest
+  repair is to fetch it and the claim becomes true. 200 keys across on003574,
+  on004475, on004917 and on005571, whose anatomical images OpenNeuro removed.
+
 What "read-only" does and does not mean:
   without --apply nothing is written to any repository or to S3. It is not free of
   side effects though: establishing what the bucket holds needs credentials, and
@@ -5811,6 +5825,7 @@ Examples:
   $ nemar admin fleet key-registration --prefix on --limit 10
   $ nemar admin fleet key-registration --prefix on --limit 10 --apply
   $ nemar admin fleet key-registration on000246 --apply
+  $ nemar admin fleet key-registration on004917 --retract-false-claims --apply
 `,
   )
   .action(async (datasetIds: string[], options) => {
@@ -5872,6 +5887,7 @@ Examples:
       apply: Boolean(options.apply),
       push: options.push !== false,
       includeIncomplete: Boolean(options.includeIncomplete),
+      retractFalseClaims: Boolean(options.retractFalseClaims),
       concurrency: Number(options.concurrency) || 4,
       onDataset: (outcome, done, total) => {
         const label =

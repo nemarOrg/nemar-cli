@@ -102,6 +102,17 @@ earlier releases are described only by their generated notes.
 
 ### Fixed
 
+- **`nemar admin fleet key-registration --retract-false-claims` withdraws a claim the
+  bucket cannot back (#1396, #967).** The sweep could already see this state -- a key
+  recorded at NEMAR's remote with no object behind it, which is what a failed copy leaves --
+  but only ever reported the missing content and skipped the dataset, so the false claim
+  outlived every run and clones kept being told to fetch bytes we do not hold. The scan now
+  names it (`falselyClaimed`), the skip note says how many of the missing keys are advertised
+  anyway, and the flag retracts them and pushes. Off by default and deliberately: while the
+  content is still recoverable the honest repair is to fetch it, which makes the claim true.
+  Used on the 200 keys across `on003574`, `on004475`, `on004917` and `on005571` whose
+  anatomical images OpenNeuro removed.
+
 - **A presence claim NEMAR cannot honor can now be withdrawn (#1396).** `batchSetKeysAbsent`
   is the counterpart to the registration path: a failed copy leaves a zero-byte object
   under the right key name, every check that asks only whether the key exists counts it as
