@@ -17,6 +17,21 @@ earlier releases are described only by their generated notes.
 
 ### Added
 
+- **`nemar admin fleet content-recovery` copies back annexed content the bucket never
+  received, and proves every copy (#1396).** Sixteen datasets finalized an import with
+  12,039 keys, about 620 GB, for which `s3://nemar` holds no object, so the registration
+  sweep could only report them: there was nothing to register. Recovery copies the bytes
+  server-side from OpenNeuro's bucket, which means hundreds of gigabytes never pass through
+  the operator's machine. A copy is only allowed from a source git-annex itself pinned (the
+  S3 version id in `<key>.log.rmet`) or from exactly one distinct upstream object carrying
+  the key's size, deduplicated by ETag; a path alone is never a source, because upstream
+  rewrites paths and these imports are months old. S3 is asked to compute the SHA-256 of
+  what it wrote and it is compared to the key's own hash before anything is registered, and
+  an object that does not match is deleted rather than left in the bucket looking like
+  content. Recovery writes no location log: `nemar admin fleet key-registration` does that
+  afterwards, so one piece of code writes presence claims and it is the one that reads the
+  log back. See ADR 0062.
+
 - **`nemar admin docs <path...>` reads documentation pages, including the gated ones, without
   a browser.** `nemarOrg/docs` is private at source and `docs.nemar.org` is the retrieval
   surface, so a checkout is no longer how anyone opens an operations runbook. The command
@@ -61,6 +76,14 @@ earlier releases are described only by their generated notes.
   command absent from that file is folded rather than dropped.
 
 ### Fixed
+
+- **An import can no longer finalize with content it never transferred (#1396).** The publish
+  gate verified the import MANIFEST against the bucket, and a manifest is what the copy phase
+  believed it transferred, so a partial manifest verified cleanly while the tree still
+  referenced keys nothing had moved. Sixteen datasets published that way, and the location log
+  then told every clone NEMAR had those keys. Finalize now asks the question of the tree: every
+  annexed key must have an object at its declared size, or it refuses to register and says how
+  many are outstanding.
 
 - **Registering annexed keys no longer reports writes it never made** (#1392).
   `batchSetKeysPresent` ran fifty `git annex setpresentkey` processes at once and counted

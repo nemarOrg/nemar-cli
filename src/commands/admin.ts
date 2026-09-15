@@ -5889,6 +5889,134 @@ Examples:
     if (sweep.tally.failed > 0) process.exitCode = 1;
   });
 
+fleetCommand
+  .command("content-recovery")
+  .description("Copy back annexed content the bucket never received, and prove each copy (#1396)")
+  .argument("[dataset-id...]", "Datasets to act on")
+  .option("--apply", "Copy (default is a read-only report)")
+  .option("--limit <n>", "Act on at most this many keys per dataset, smallest first")
+  .option("--concurrency <n>", "Copies in flight per dataset (default 8)", "8")
+  .option("--dir <path>", "Where clones go while a dataset is worked on (default: a temp dir)")
+  .option("--json <path>", "Write the full report as JSON")
+  .option("--force", "Include the live datasets (nm000103-107)")
+  .option("-y, --yes", "Skip confirmation and proceed")
+  .addHelpText(
+    "after",
+    `
+What this repairs (#1396):
+  imports that finalized with content they never transferred. The bucket has no
+  object for those keys, so the key-registration sweep refuses them: there is
+  nothing to register. This finds the bytes upstream and copies them in.
+
+Where a copy is allowed to come from:
+  a source git-annex itself pinned -- the S3 version id in <key>.log.rmet, which
+  is the archive's own record of which bytes are this key's -- or, failing that,
+  exactly one distinct upstream object whose size matches the key's. A path alone
+  is never enough: upstream rewrites paths, and an import is months old.
+
+How a copy is proven:
+  S3 computes the SHA-256 of what it wrote and it is compared to the key's own
+  hash before anything else happens. A copy that does not match is DELETED, not
+  left in the bucket looking like content. Above CopyObject's 5 GB limit a copy
+  is multipart and cannot be checksummed that way, so there an unpinned source is
+  refused rather than trusted.
+
+Credentials:
+  the copy is server-side, so no dataset bytes pass through this machine, but it
+  needs to read the SOURCE bucket. The API's upload credentials cannot: they are
+  scoped to one dataset prefix in s3://nemar. This uses the ambient AWS
+  environment (AWS_PROFILE, AWS_ACCESS_KEY_ID, ...) for the copy, and API-minted
+  credentials only to list what the bucket already holds.
+
+Registering what it recovers:
+  this writes no location log. Run \`nemar admin fleet key-registration <id>
+  --apply\` afterwards, which lists the bucket again and records what is there.
+
+Examples:
+  $ nemar admin fleet content-recovery on008730
+  $ nemar admin fleet content-recovery on008730 --apply
+  $ nemar admin fleet content-recovery on008730 on008798 --apply --json report.json
+`,
+  )
+  .action(async (datasetIds: string[], options) => {
+    if (!requireAuth()) return;
+    const { bucketObjectSource } = await import("../lib/fleet-key-registration.js");
+    const { sweepContentRecovery } = await import("../lib/fleet-content-recovery.js");
+    const { CLI_LIVE_DATASETS } = await import("../lib/fleet.js");
+
+    const targets = datasetIds;
+    if (targets.length === 0) {
+      console.log(chalk.yellow("Name the datasets to act on."));
+      return;
+    }
+    const live = targets.filter((id) => CLI_LIVE_DATASETS.has(id));
+    if (live.length > 0 && !options.force) {
+      console.log(chalk.red(`Refusing to touch live dataset(s): ${live.join(", ")}`));
+      console.log(chalk.dim("  --force to override."));
+      process.exit(1);
+    }
+
+    if (options.apply) {
+      const answer = await confirm(
+        `Copy missing content into s3://nemar for ${targets.length} dataset(s)?`,
+        options,
+      );
+      if (answer !== "confirmed") {
+        console.log(chalk.yellow(`${answer}; nothing was changed.`));
+        return;
+      }
+    }
+
+    const workRoot = options.dir ?? mkdtempSync(join(tmpdir(), "nemar-content-recovery-"));
+    mkdirSync(workRoot, { recursive: true });
+    console.log();
+    const sweep = await sweepContentRecovery(targets, bucketObjectSource(), {
+      workRoot,
+      apply: Boolean(options.apply),
+      limit: options.limit ? Number(options.limit) : undefined,
+      concurrency: Number(options.concurrency) || 8,
+      onDataset: (outcome, done, total) => {
+        const gib = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
+        const label =
+          outcome.action === "failed"
+            ? chalk.red(outcome.datasetId)
+            : outcome.action === "recovered"
+              ? chalk.green(outcome.datasetId)
+              : chalk.dim(outcome.datasetId);
+        const detail =
+          outcome.error ??
+          `${outcome.missing} missing (${gib(outcome.missingBytes)}), ` +
+            `${outcome.recovered} recovered (${gib(outcome.recoveredBytes)}), ` +
+            `${outcome.unrecoverable} unrecoverable (${gib(outcome.unrecoverableBytes)})`;
+        console.log(`${chalk.dim(`[${done}/${total}]`)} ${label} ${chalk.dim(detail)}`);
+      },
+    });
+
+    console.log();
+    for (const [action, count] of Object.entries(sweep.tally)) {
+      if (count > 0) console.log(`  ${action.padEnd(20)} ${count}`);
+    }
+    console.log(
+      `  ${"keys recovered".padEnd(20)} ${sweep.recoveredKeys} ` +
+        `(${(sweep.recoveredBytes / 1024 ** 3).toFixed(1)} GiB)`,
+    );
+    if (options.json) {
+      writeFileSync(options.json, JSON.stringify(sweep, null, 2));
+      console.log(chalk.dim(`\n  Report written to ${options.json}`));
+    }
+    if (!options.apply) {
+      console.log(chalk.dim("\nRead-only: nothing was copied. Add --apply to recover."));
+    } else if (sweep.recoveredKeys > 0) {
+      console.log(
+        chalk.dim(
+          "\nThe location log still says nothing about these objects: run " +
+            "`nemar admin fleet key-registration <id> --apply` to record them.",
+        ),
+      );
+    }
+    if (sweep.tally.failed > 0) process.exitCode = 1;
+  });
+
 adminCommand.addCommand(fleetCommand);
 
 const reindexCommand = new Command("reindex").description(
