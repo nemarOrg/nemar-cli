@@ -102,6 +102,16 @@ earlier releases are described only by their generated notes.
 
 ### Fixed
 
+- **Content recovery reads the pins of any path containing a space (#1396).** git-annex
+  base64-encodes a metadata value it cannot write literally and marks it with `!`, which is
+  what happens to every `.log.rmet` value whose object path holds a space. The parser
+  required a literal `#` in the raw token, found none inside the base64, and reported those
+  keys as having no recorded source at all: 1,808 pins in `on004148` and 1,378 in `on008003`
+  were invisible. It mattered most above CopyObject's 5 GB limit, where an unpinned source
+  is refused because a multipart copy cannot carry a SHA-256 -- `on008003`'s two 5.8 GB
+  objects read as unrecoverable while both were sitting upstream, readable, at the version
+  their own pin named.
+
 - **Content recovery no longer treats a retracted S3 version as a place to copy from (#1396).**
   A `<key>.log.rmet` line marks its value `+` for set and `-` for unset, and the parser read
   the marker as escaping, so a retracted version reached the AWS CLI with a literal leading

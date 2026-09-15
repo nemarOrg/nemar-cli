@@ -111,15 +111,41 @@ export interface PinnedSource {
 }
 
 /**
+ * Undo git-annex's `!`-marked base64 on one metadata value.
+ *
+ * Returned unchanged when it is not marked, and when the marked payload does
+ * not round-trip: a value that merely starts with `!` is worth passing through
+ * rather than losing.
+ */
+function decodeRmetValue(raw: string): string {
+  if (!raw.startsWith("!")) return raw;
+  const encoded = raw.slice(1);
+  // Buffer.from is lenient: it ignores anything outside the alphabet rather
+  // than failing, so a value that merely begins with `!` would decode to
+  // rubbish. Re-encoding has to reproduce the input for the decode to be real.
+  const decoded = Buffer.from(encoded, "base64");
+  if (decoded.toString("base64").replace(/=+$/, "") !== encoded.replace(/=+$/, "")) return raw;
+  return decoded.toString("utf8");
+}
+
+/**
  * Parse one `<key>.log.rmet` body into the pins it still records.
  *
- * The line is `<timestamp>s <uuid>:V <marker><versionId>#<object>`, and the
- * marker is git-annex's set/unset for the field value, not an escape: `+` adds
- * that version as a place the content is, `-` RETRACTS one it previously
- * recorded. Applying the retractions is not cosmetic. `ds006110` retracts five
- * of its versions, and reading `-d6y2...` as a version id sends S3 a literal
- * leading minus, which comes back as a bare `InvalidRequest` that looks like an
- * upstream defect rather than our own misparse.
+ * The line is `<timestamp>s <uuid>:V <marker><value>`, and the value is
+ * `<versionId>#<object path>`. Two pieces of git-annex's encoding have to be
+ * honored, and both looked like upstream defects when they were not.
+ *
+ * The marker is set/unset, not an escape: `+` records that version as a place
+ * the content is, `-` RETRACTS one recorded earlier. `ds006110` retracts five,
+ * and reading `-d6y2...` as a version id sends S3 a literal leading minus,
+ * which returns a bare `InvalidRequest`.
+ *
+ * A `!` after the marker means the value is base64, which is how git-annex
+ * carries a value containing a space. `ds008003`'s two objects live under
+ * `derivatives/reCleaned Cluster analysis/`, so both of its pins are encoded;
+ * a parser that requires a literal `#` finds no pin at all and reports the key
+ * as unpinned, which is what put those 11.5 GB out of reach: the >5 GB path
+ * needs a pinned source, because a multipart copy cannot carry a SHA-256.
  *
  * A key keeps several live pins, one per remote and one per time a remote's
  * copy was rewritten; they are returned oldest first, so a caller that wants
@@ -129,18 +155,21 @@ export function parseRmet(contents: string, remotes: Map<string, RemoteRecord>):
   const entries: Array<{ stamp: number; retracted: boolean; value: string; pin: PinnedSource }> =
     [];
   for (const line of contents.split("\n")) {
-    const match = /^(\S+?)s?\s+([0-9a-f-]{36}):V\s+([+-])([^#\s]+)#(.+)$/.exec(line.trim());
+    const match = /^(\S+?)s?\s+([0-9a-f-]{36}):V\s+([+-])(\S+)$/.exec(line.trim());
     if (!match) continue;
     const remote = remotes.get(match[2]);
     if (!remote?.bucket) continue;
+    const value = decodeRmetValue(match[4]);
+    const split = value.indexOf("#");
+    if (split <= 0) continue;
     entries.push({
       stamp: Number.parseFloat(match[1]) || 0,
       retracted: match[3] === "-",
-      value: `${match[4]}#${match[5]}`,
+      value,
       pin: {
         bucket: remote.bucket,
-        object: match[5],
-        version: match[4],
+        object: value.slice(split + 1),
+        version: value.slice(0, split),
         remoteName: remote.name,
       },
     });

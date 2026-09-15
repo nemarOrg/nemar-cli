@@ -143,6 +143,66 @@ describe("parseRmet", () => {
     expect(pins.map((pin) => pin.version)).toEqual(["keep"]);
   });
 
+  test("decodes a base64 value, which is how a path with a space is carried", () => {
+    // Verbatim from ds008003, whose objects live under
+    // `derivatives/reCleaned Cluster analysis/`. Requiring a literal `#` found
+    // no pin here at all, and the >5 GB path needs one, so 11.5 GB read as
+    // unrecoverable when both objects were sitting there readable.
+    const encoded = Buffer.from(
+      "xQd89mLbWzV9Bud1ZpOzWEC58IpYeVCP#ds008798/derivatives/reCleaned Cluster analysis/a.mat",
+    ).toString("base64");
+    expect(
+      parseRmet(`1785850878s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V +!${encoded}`, REMOTES),
+    ).toEqual([
+      {
+        bucket: "openneuro.org",
+        object: "ds008798/derivatives/reCleaned Cluster analysis/a.mat",
+        version: "xQd89mLbWzV9Bud1ZpOzWEC58IpYeVCP",
+        remoteName: "s3-PUBLIC",
+      },
+    ]);
+  });
+
+  test("retracts an encoded value and leaves the other encoded one standing", () => {
+    // Asserting only that a retracted pin disappears would pass on a parser
+    // that cannot read an encoded value at all, since it finds nothing either
+    // way. The surviving pin is what makes this test discriminate.
+    const dropped = Buffer.from("v1#ds008798/a b.nii").toString("base64");
+    const kept = Buffer.from("v2#ds008798/c d.nii").toString("base64");
+    const pins = parseRmet(
+      [
+        `1700000000s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V +!${dropped}`,
+        `1750000000s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V +!${kept}`,
+        `1800000000s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V -!${dropped}`,
+      ].join("\n"),
+      REMOTES,
+    );
+    expect(pins).toEqual([
+      {
+        bucket: "openneuro.org",
+        object: "ds008798/c d.nii",
+        version: "v2",
+        remoteName: "s3-PUBLIC",
+      },
+    ]);
+  });
+
+  test("leaves a value alone when the bang is not really base64", () => {
+    // `!notbase64!` decodes to rubbish rather than throwing, so a round-trip
+    // check is what separates an encoded value from one that merely starts
+    // with the marker.
+    expect(
+      parseRmet("1700000000s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V +!v1#ds008798/x.nii", REMOTES),
+    ).toEqual([
+      {
+        bucket: "openneuro.org",
+        object: "ds008798/x.nii",
+        version: "!v1",
+        remoteName: "s3-PUBLIC",
+      },
+    ]);
+  });
+
   test("keeps every line, newest last, so the caller can take the current one", () => {
     const pins = parseRmet(
       [
