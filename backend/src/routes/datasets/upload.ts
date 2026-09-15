@@ -1024,8 +1024,10 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       // Ensure default branch is "main" (handles DataLad or legacy repos)
       try {
         const branchResult = await ensureMainBranch(datasetId, pat);
-        if (branchResult.renamed) {
-          warnings.push(`Default branch renamed from "${branchResult.previousBranch}" to "main"`);
+        if (branchResult.changed) {
+          warnings.push(
+            `Default branch ${branchResult.action} from "${branchResult.previousBranch}" to "main"`,
+          );
         }
       } catch (error) {
         console.error(`Failed to check/rename default branch for ${datasetId}:`, error);

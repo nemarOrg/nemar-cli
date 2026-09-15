@@ -424,3 +424,91 @@ export async function headS3Objects(opts: {
   );
   return results;
 }
+/**
+ * Every object key under a dataset's prefix, with the prefix stripped.
+ *
+ * One listing answers "does the bucket hold this key?" for a whole dataset. The
+ * alternative -- a HEAD per key -- is both slower and ambiguous: `s3://nemar`
+ * denies anonymous ListBucket, so S3 answers a missing key with 403 rather than
+ * 404, and 403 is equally what a private dataset, an expired session, or a
+ * signature with no session token returns (#1380, #1392).
+ *
+ * Throws rather than returning an empty set when the listing fails. An empty set
+ * reads as "the bucket holds nothing", which would make a caller conclude every
+ * key is missing content.
+ */
+export async function listS3ObjectKeys(opts: {
+  credentials: { access_key_id: string; secret_access_key: string; session_token: string };
+  bucket: string;
+  region: string;
+  /** Dataset prefix without a trailing slash, e.g. `on007788/objects`. */
+  prefix: string;
+}): Promise<Set<string>> {
+  const { credentials, bucket, region, prefix } = opts;
+  if (!(await isAwsCliAvailable())) {
+    throw new Error("the aws CLI is not on PATH, so the bucket cannot be listed");
+  }
+  const base = `${prefix.replace(/\/$/, "")}/`;
+  const { stdout, stderr, exitCode, timedOut } = await runCommand(
+    [
+      "aws",
+      "s3api",
+      "list-objects-v2",
+      "--bucket",
+      bucket,
+      "--prefix",
+      base,
+      "--query",
+      "Contents[].Key",
+      "--output",
+      "text",
+      // The CLI paginates internally; this only bounds each request.
+      "--page-size",
+      "1000",
+    ],
+    {
+      env: {
+        AWS_ACCESS_KEY_ID: credentials.access_key_id,
+        AWS_SECRET_ACCESS_KEY: credentials.secret_access_key,
+        AWS_SESSION_TOKEN: credentials.session_token,
+        AWS_DEFAULT_REGION: region,
+      },
+      // A profile in the environment would decide which credentials sign this,
+      // and the answer would be about the machine rather than the token.
+      unsetEnv: ["AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"],
+      timeout: 600_000,
+    },
+  );
+  if (exitCode !== 0 || timedOut) {
+    // A killed `aws` can still exit 0, and a truncated listing reads as content the
+    // bucket does not hold -- which would file a healthy dataset as missing content.
+    throw new Error(
+      `listing s3://${bucket}/${base} failed: ${
+        timedOut ? "timed out" : stderr.trim() || `exit ${exitCode}`
+      }`,
+    );
+  }
+  return parseS3ObjectKeys(stdout, base);
+}
+
+/**
+ * Bare keys from `aws s3api list-objects-v2 --output text`.
+ *
+ * Separated from the call so it can be tested, because this parse is where the
+ * assumptions are: keys are tab-separated within a page and newline-separated
+ * between pages, an empty result prints the literal `None`, and the prefix also
+ * holds objects that are not keys.
+ */
+export function parseS3ObjectKeys(stdout: string, prefix: string): Set<string> {
+  const base = prefix.endsWith("/") ? prefix : `${prefix}/`;
+  const keys = new Set<string>();
+  for (const token of stdout.split(/\s+/)) {
+    if (!token || token === "None") continue;
+    if (!token.startsWith(base)) continue;
+    const key = token.slice(base.length);
+    // One path segment: an annex key never contains a slash, so anything nested
+    // below the prefix is not one.
+    if (key && !key.includes("/")) keys.add(key);
+  }
+  return keys;
+}

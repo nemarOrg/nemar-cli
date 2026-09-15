@@ -82,9 +82,10 @@ function assertParity(zod3: SafeParseable, zod4: SafeParseable, input: unknown, 
   // Matches "-- rejected" anywhere after the dashes, since several labels carry
   // a parenthetical reason after it ("-- rejected (must be positive)").
   const expectRejected = /--\s*rejected/.test(label);
-  expect(r3.success, `${label}: expected the schema to ${expectRejected ? "REJECT" : "ACCEPT"}`).toBe(
-    !expectRejected,
-  );
+  expect(
+    r3.success,
+    `${label}: expected the schema to ${expectRejected ? "REJECT" : "ACCEPT"}`,
+  ).toBe(!expectRejected);
 }
 
 describe("searchDatasetsInputSchema parity", () => {

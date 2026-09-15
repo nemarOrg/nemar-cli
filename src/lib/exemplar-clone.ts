@@ -590,7 +590,7 @@ export async function finalizeExemplar(
     const registerSpinner = ora("Registering files in git-annex...").start();
     const regResult = await batchSetKeysPresent(datasetPath, copyResult.keys, nemarS3DevUuid);
     if (regResult.failed > 0) {
-      const msg = `${regResult.failed} of ${copyResult.keys.length} git-annex key registrations failed. Re-run finalize to retry.`;
+      const msg = `${regResult.failed} of ${copyResult.keys.length} git-annex key registrations are not in the location log (e.g. ${regResult.missing.slice(0, 3).join(", ")}). Re-run finalize to retry.`;
       registerSpinner.fail(msg);
       throw new Error(msg);
     }
