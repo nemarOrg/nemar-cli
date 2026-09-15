@@ -23,6 +23,13 @@ export interface PresignedUrlOptions {
   region: string;
   accessKeyId: string;
   secretAccessKey: string;
+  /**
+   * TEST-ONLY origin override, the same idiom `ZarrFidelityS3Options` and
+   * `ZarrCatalogS3Options` already use: a test points a read at a local
+   * `Bun.serve()` receiver instead of mocking `fetch`. Unset in every
+   * deployment, where the bucket's real endpoint is derived below.
+   */
+  endpointUrl?: string;
 }
 
 interface GenerateUrlsParams {
@@ -471,11 +478,15 @@ export async function getManifest(
   datasetId: string,
   version: string,
 ): Promise<string | null> {
-  const { bucket, region } = options;
+  const { bucket, region, endpointUrl } = options;
   const versionTag = version.startsWith("v") ? version : `v${version}`;
   const key = `${datasetId}/version/${versionTag}.json`;
   const encodedKey = key.split("/").map(encodeURIComponent).join("/");
-  const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
+  const origin = (endpointUrl ?? `https://${bucket}.s3.${region}.amazonaws.com`).replace(
+    /\/+$/,
+    "",
+  );
+  const url = `${origin}/${encodedKey}`;
 
   let response = await fetch(url);
   if (response.status === 403) {

@@ -7,12 +7,15 @@
  * `dataRoutes` Hono app against a real D1. Nothing is mocked; the server
  * records every request, so the assertions are about what was actually sent.
  *
- * What is NOT covered here, deliberately: a full end-to-end stream through
- * the route, because `getManifest` addresses S3 by a hardcoded
- * `<bucket>.s3.<region>.amazonaws.com` URL with no endpoint seam, so reaching
- * the streaming branch would mean either a real S3 read or a mock. That path
- * is covered against real GitHub by the live tier instead (an exemplar whose
- * repo is private), which is the only place it can be exercised honestly.
+ * The route half is DIFFERENTIAL on purpose. An earlier version asserted
+ * only that a private dataset produced no upstream request, and that assertion
+ * held for the wrong reason: the test env carried no S3 credentials, so
+ * `loadManifest` failed three steps before the gate mattered, and the same
+ * test passed for a PUBLIC dataset too. It would have stayed green with the
+ * visibility check deleted outright. So the public case now serves a real
+ * manifest (through `S3_ENDPOINT_URL`, the same origin-override idiom the
+ * zarr suites use) and MUST reach GitHub; the private one must not. Only the
+ * pair proves the ordering.
  */
 
 import type { Database } from "bun:sqlite";
@@ -193,8 +196,35 @@ describe("fetchGitTrackedFile", () => {
   });
 });
 
-describe("the visibility gate runs before anything reaches GitHub", () => {
-  function app(db: Database) {
+describe("the route: the gate, then the bytes", () => {
+  const VERSION = "v1.0.0";
+  const PATH = "dataset_description.json";
+  const manifestKey = `/nm000862/version/${VERSION}.json`;
+  const publicRawPath = `/nemarDatasets/nm000862/${VERSION}/${PATH}`;
+
+  function manifestBody(size = FILE_BODY.length): string {
+    return JSON.stringify({
+      dataset_id: "nm000862",
+      version: "1.0.0",
+      doi: null,
+      concept_doi: null,
+      created: "2026-01-01T00:00:00Z",
+      files: { [PATH]: { key: `git:${BLOB_SHA}`, size, checksum: `git:${BLOB_SHA}` } },
+    });
+  }
+
+  function seed(db: Database, id: string, visibility: "public" | "private"): void {
+    db.prepare(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox)
+       VALUES (?, ?, 1, 'active', ?, 0)`,
+    ).run(id, id, visibility);
+    db.prepare(
+      `INSERT INTO dataset_versions (dataset_id, version, doi, provider, created_at)
+       VALUES (?, '1.0.0', '10.5072/FK2test', 'ezid', datetime('now'))`,
+    ).run(id);
+  }
+
+  function app(): Hono<{ Bindings: Bindings; Variables: Variables }> {
     const hono = new Hono<{ Bindings: Bindings; Variables: Variables }>();
     hono.route("/", dataRoutes);
     return hono;
@@ -205,32 +235,131 @@ describe("the visibility gate runs before anything reaches GitHub", () => {
       DB: realD1(db),
       ENVIRONMENT: "test",
       GITHUB_RAW_BASE: base,
+      S3_ENDPOINT_URL: base,
       S3_BUCKET: "nemar",
       AWS_REGION: "us-east-2",
+      AWS_ACCESS_KEY_ID: "AKIATEST",
+      AWS_SECRET_ACCESS_KEY: "secret",
+      GITHUB_ADMIN_PAT: "test-pat",
     } as Bindings;
   }
 
-  test("a private dataset 404s without a single upstream request", async () => {
+  test("a public dataset's git file is streamed, and it DOES reach GitHub", async () => {
     const db = freshDb();
-    db.prepare(
-      `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox)
-       VALUES ('nm000860', 'private one', 1, 'active', 'private', 0)`,
-    ).run();
-    reset({ [rawPath]: () => new Response(FILE_BODY, { status: 200 }) });
+    seed(db, "nm000862", "public");
+    reset({
+      [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+      [publicRawPath]: () =>
+        new Response(FILE_BODY, {
+          status: 200,
+          headers: { "Content-Length": String(FILE_BODY.length) },
+        }),
+    });
 
-    const res = await app(db).request("/nm000860/v1.0.0/dataset_description.json", {}, env(db));
+    const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(FILE_BODY);
+    // The other half of the differential: this request MUST have gone
+    // upstream. Without it, the private case below proves nothing.
+    expect(seen.some((s) => s.path === publicRawPath)).toBe(true);
+    expect(seen.find((s) => s.path === publicRawPath)?.authorization).toBe("Bearer test-pat");
+  });
+
+  test("the streamed response carries the headers that keep it inert and cacheable-but-revocable", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "public");
+    reset({
+      [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+      [publicRawPath]: () =>
+        new Response(FILE_BODY, {
+          status: 200,
+          headers: { "Content-Length": String(FILE_BODY.length), "Content-Type": "text/plain" },
+        }),
+    });
+
+    const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+    expect(res.headers.get("Content-Type")).toBe("application/json; charset=utf-8");
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(res.headers.get("Content-Security-Policy")).toBe("default-src 'none'; sandbox");
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    // Deliberately NOT immutable: visibility can be revoked and nothing
+    // purges the edge, so the staleness bound on an authorization decision
+    // stays where the redirect had it.
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=300");
+    expect(res.headers.get("ETag")).toBe(`"git:${BLOB_SHA}"`);
+  });
+
+  test("a length that disagrees with the manifest is refused, not served", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "public");
+    reset({
+      [manifestKey]: () => new Response(manifestBody(999), { status: 200 }),
+      [publicRawPath]: () =>
+        new Response(FILE_BODY, {
+          status: 200,
+          headers: { "Content-Length": String(FILE_BODY.length) },
+        }),
+    });
+
+    const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+    expect(res.status).toBe(502);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  test("an upstream throttle is a 5xx with Retry-After, never a 404", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "public");
+    reset({
+      [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+      [publicRawPath]: () =>
+        new Response("slow down", { status: 429, headers: { "Retry-After": "30" } }),
+    });
+
+    const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("30");
+  });
+
+  test("a file that is genuinely gone is a 404", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "public");
+    reset({
+      [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+      [publicRawPath]: () => new Response("nope", { status: 404 }),
+      [`/repos/nemarDatasets/nm000862/git/blobs/${BLOB_SHA}`]: () =>
+        new Response("nope", { status: 404 }),
+    });
+
+    const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
 
     expect(res.status).toBe(404);
-    // The gate has to come first for the token never to be minted on behalf
-    // of a dataset the catalog will not serve.
+  });
+
+  test("a private dataset 404s without a single upstream request", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "private");
+    reset({
+      [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+      [publicRawPath]: () => new Response(FILE_BODY, { status: 200 }),
+    });
+
+    const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+    expect(res.status).toBe(404);
+    // Not even the manifest is read: the gate is the first thing that runs,
+    // so no token is minted and nothing about this dataset leaves the Worker.
     expect(seen).toHaveLength(0);
   });
 
   test("an unknown dataset 404s without a single upstream request", async () => {
     const db = freshDb();
-    reset({ [rawPath]: () => new Response(FILE_BODY, { status: 200 }) });
+    reset({ [manifestKey]: () => new Response(manifestBody(), { status: 200 }) });
 
-    const res = await app(db).request("/nm000861/v1.0.0/dataset_description.json", {}, env(db));
+    const res = await app().request(`/nm000863/${VERSION}/${PATH}`, {}, env(db));
 
     expect(res.status).toBe(404);
     expect(seen).toHaveLength(0);

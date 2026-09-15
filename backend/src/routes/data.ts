@@ -66,6 +66,7 @@ function s3OptionsFromEnv(env: Bindings): PresignedUrlOptions {
     region: env.AWS_REGION,
     accessKeyId: env.AWS_ACCESS_KEY_ID,
     secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+    endpointUrl: env.S3_ENDPOINT_URL,
   };
 }
 
@@ -320,6 +321,13 @@ async function loadVersionRows(env: Bindings, datasetId: string): Promise<Datase
   }
 }
 
+/**
+ * Ceiling on a git-tracked file the Worker will carry. Chosen far above any
+ * real BIDS sidecar so it is a guard against an annex-policy slip, not a
+ * working limit.
+ */
+const MAX_BROKERED_FILE_BYTES = 32 * 1024 * 1024;
+
 /** Is this manifest entry carried by git rather than git-annex (ADR 0015)? */
 export function isGitTrackedFile(file: ManifestFile): boolean {
   return file.key.startsWith("git:");
@@ -351,17 +359,52 @@ async function streamGitTrackedFile(args: {
 }): Promise<Response> {
   const { env, datasetId, version, bidsPath, file, createdIso } = args;
 
-  // Read anonymously when no credential is configured rather than failing:
-  // a public repo serves fine without one, and a local or preview deployment
-  // with no GitHub App should not lose every metadata file. A private repo
-  // then 404s upstream, which surfaces as a 404 here -- the same answer the
-  // old redirect gave, with a log line explaining it.
+  // Read anonymously when no credential is CONFIGURED: a public repo serves
+  // fine without one, and a local or preview deployment with no GitHub App
+  // should not lose every metadata file. What must not happen is the
+  // anonymous read then being mistaken for proof of absence -- GitHub answers
+  // 404, not 403, for a repo the caller cannot see -- so the broker refuses
+  // to report `absent` without a credential, and a mint FAILURE (as opposed
+  // to no credentials at all) is reported rather than downgraded: during a
+  // key rotation every git file in every dataset would otherwise 404 and log
+  // itself as a data-integrity event.
   let token: string | null = null;
   try {
     token = await getDatasetsToken(env);
   } catch (err) {
-    console.warn(
-      `[data] no GitHub credential for git-file broker dataset=${datasetId}: ${err instanceof Error ? err.message : String(err)}`,
+    const message = err instanceof Error ? err.message : String(err);
+    if (env.GITHUB_APP_ID || env.GITHUB_ADMIN_PAT) {
+      console.error(
+        `[data] git-file broker could not mint a token dataset=${datasetId}: ${message}`,
+      );
+      return new Response(
+        JSON.stringify({ error: "Upstream content host unavailable", dataset_id: datasetId }),
+        {
+          status: 503,
+          headers: { "Cache-Control": "no-store", "Content-Type": "application/json" },
+        },
+      );
+    }
+    console.warn(`[data] no GitHub credential configured dataset=${datasetId}: ${message}`);
+  }
+
+  // git is supposed to carry metadata (ADR 0015), and ADR 0031 records that
+  // the annex policy is a judgment call rather than a law of nature. One slip
+  // that commits a recording to git would otherwise make this Worker proxy a
+  // multi-gigabyte file -- the shape the zarr plane refuses on purpose. The
+  // ceiling is far above any real sidecar (the largest measured across the
+  // catalog is 283 KB) so it never fires in normal operation, and when it
+  // does it names the policy rather than timing out.
+  if (file.size > MAX_BROKERED_FILE_BYTES) {
+    console.error(
+      `[data] git-tracked file exceeds the broker ceiling dataset=${datasetId} path=${bidsPath} size=${file.size}`,
+    );
+    return new Response(
+      JSON.stringify({
+        error: "File is too large to serve from git; it should be annexed (ADR 0031)",
+        dataset_id: datasetId,
+      }),
+      { status: 502, headers: { "Cache-Control": "no-store", "Content-Type": "application/json" } },
     );
   }
 
@@ -369,7 +412,10 @@ async function streamGitTrackedFile(args: {
     repo: datasetId,
     ref: version,
     path: bidsPath,
-    blobSha: file.checksum.replace(/^git:/, ""),
+    // `key` is what `isGitTrackedFile` matched on; `checksum` carries the
+    // same value today, but taking it from the field the branch was
+    // decided by is what keeps them from drifting apart.
+    blobSha: file.key.replace(/^git:/, ""),
     token,
     // Test seam, and the same shape ORCID_API_BASE uses: unset in production,
     // where the broker's own default (the real raw host) applies.
@@ -415,6 +461,10 @@ async function streamGitTrackedFile(args: {
     });
   }
 
+  // Counted when the bytes are handed to the runtime, not when the client
+  // finishes reading them, so an aborted download still counts as a full
+  // delivery. Closer than the redirect it replaces (which could only ever
+  // record intent), and worth stating rather than overclaiming.
   recordAccess(env, {
     datasetId,
     source: "file",
@@ -424,10 +474,28 @@ async function streamGitTrackedFile(args: {
 
   const headers = new Headers(fileResponseHeaders(file, createdIso, false));
   headers.set("Content-Type", contentTypeForBidsPath(bidsPath));
-  headers.set("Content-Length", String(file.size));
-  // Version-pinned and content-addressed, so this can be cached forever;
-  // the 300s default exists for the annex 302, whose presigned target is not.
-  headers.set("Cache-Control", "public, max-age=31536000, immutable");
+  // Only claim a length upstream actually confirmed. The manifest's size is
+  // what we verified against, but if upstream sent no Content-Length the body
+  // length is unknown here, and stamping the manifest's number on an unknown
+  // body is how a truncated file arrives looking complete.
+  if (outcome.contentLength !== null) {
+    headers.set("Content-Length", String(outcome.contentLength));
+  }
+  // NOT immutable, and not a year. The content at this URL is immutable --
+  // it is version-pinned and content-addressed -- but the AUTHORIZATION is
+  // not: `applyVisibilityTransition` can take a dataset private, and it
+  // purges nothing (per-URL purge caps at 30 URLs and prefix purge is
+  // Enterprise-only, services/cloudflare.ts). A year-long `immutable` would
+  // leave every shared cache serving a withdrawn dataset's participants and
+  // sidecars to other readers, with no recovery and no revalidation. The
+  // redirect this replaces bounded that at 300s; so does this.
+  headers.set("Cache-Control", "public, max-age=300");
+  // The raw host answered `Access-Control-Allow-Origin: *` on exactly these
+  // bytes, and bytes_url invites a consumer to persist the URL. Moving the
+  // host must not quietly revoke browser access for a notebook or a viewer
+  // that is not on a nemar.org origin: this is anonymous public data and the
+  // request carries no credentials.
+  headers.set("Access-Control-Allow-Origin", "*");
   // A dataset is user-supplied content served from our own origin now. The
   // type is already an inert one from the allowlist; nosniff stops a browser
   // from deciding otherwise, and the sandbox CSP makes it inert even then.
@@ -508,10 +576,15 @@ async function fileOrIndexHandler(
   // (rclone just needs the 404). Keeps `rclone sync` cheap per file.
   if (isHead) {
     if (result.kind === "file") {
-      return new Response(null, {
-        status: 200,
-        headers: fileResponseHeaders(result.file, manifest.created, true),
-      });
+      const headers = new Headers(fileResponseHeaders(result.file, manifest.created, true));
+      // A git-tracked file's GET now answers with a content type, so its HEAD
+      // has to agree: rclone's HTTP backend probes with HEAD and then GETs,
+      // and a HEAD that describes a different response than the GET is how a
+      // sync ends up with the wrong expectations.
+      if (isGitTrackedFile(result.file)) {
+        headers.set("Content-Type", contentTypeForBidsPath(result.path));
+      }
+      return new Response(null, { status: 200, headers });
     }
     if (result.kind === "directory") {
       return new Response(null, {

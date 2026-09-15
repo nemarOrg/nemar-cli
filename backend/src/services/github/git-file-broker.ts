@@ -49,7 +49,10 @@ export type GitFileFetch =
       contentLength: number | null;
       source: GitFileSource;
     }
-  /** Both sources answered an authoritative 404. */
+  /**
+   * Both sources answered 404 while we held a credential that can see the
+   * repo, so the object really is gone.
+   */
   | { kind: "absent" }
   /** Anything that is not evidence about whether the object exists. */
   | { kind: "unavailable"; status: number; message: string; retryAfter: string | null };
@@ -70,12 +73,46 @@ export interface GitFileRequest {
   rawBase?: string;
 }
 
+/**
+ * A 2xx is not automatically bytes. A body-less success (204/205) would be
+ * served as a 200 with a length we took from the manifest, and an incident
+ * page from the host in front of GitHub is `text/html` -- neither is the
+ * object the manifest describes, and under a cacheable response either one
+ * would be pinned downstream.
+ */
+function okOrUnavailable(response: Response, source: GitFileSource, noBody: string): GitFileFetch {
+  const upstreamType = response.headers.get("Content-Type") ?? "";
+  if (upstreamType.includes("text/html")) {
+    return {
+      kind: "unavailable",
+      status: 502,
+      message: `content host returned an HTML page instead of file bytes (${upstreamType})`,
+      retryAfter: null,
+    };
+  }
+  if (!response.body) {
+    return { kind: "unavailable", status: 502, message: noBody, retryAfter: null };
+  }
+  const declared = response.headers.get("Content-Length");
+  return {
+    kind: "ok",
+    body: response.body,
+    contentLength: declared === null ? null : Number.parseInt(declared, 10),
+    source,
+  };
+}
+
 /** Map an upstream status onto what this API should answer. */
 function unavailableFrom(response: Response, what: string): GitFileFetch {
   // 401/403 is our credential, not the caller's business, and never absence:
   // answering 404 here would tell a user their file is gone because our token
   // expired. 429 keeps its Retry-After so a client can obey it.
-  const status = response.status === 429 ? 503 : 502;
+  // A GitHub secondary rate limit arrives as a 403 carrying Retry-After.
+  // Reporting it as 502 would tell a client "upstream is broken" when the
+  // honest answer is "come back in a moment".
+  const throttled =
+    response.status === 429 || (response.status === 403 && response.headers.has("Retry-After"));
+  const status = throttled ? 503 : 502;
   return {
     kind: "unavailable",
     status,
@@ -84,10 +121,60 @@ function unavailableFrom(response: Response, what: string): GitFileFetch {
   };
 }
 
+/** A 40-hex git object name, and nothing else, reaches the blobs URL. */
+const BLOB_SHA_RE = /^[0-9a-f]{40}$/;
+
+/**
+ * Isolate-local ceiling on blob-API fallbacks.
+ *
+ * The fallback is meant to be rare, and nothing makes it rare: a single
+ * retagged dataset turns every request for that path into a REST call, the
+ * 404 is `no-store`, and the data bucket allows 10,000 requests a minute from
+ * one address. That is enough to spend the org's whole hourly `core` budget
+ * in well under a minute and take publishing and imports down with it. So the
+ * fallback gets its own budget, and when it is gone the answer is "cannot
+ * say" rather than a REST call.
+ *
+ * Isolate-local like `transport.ts`'s rate-limit state, and for the same
+ * reason: there is nowhere cheaper to put it. Many isolates each get their
+ * own allowance, so this is a dampener, not a hard cap -- it turns an
+ * unbounded amplifier into a bounded one.
+ */
+const BLOB_FALLBACK_PER_WINDOW = 30;
+const BLOB_FALLBACK_WINDOW_MS = 60_000;
+let blobWindowStart = 0;
+let blobWindowCount = 0;
+
+function blobFallbackAllowed(now = Date.now()): boolean {
+  if (now - blobWindowStart > BLOB_FALLBACK_WINDOW_MS) {
+    blobWindowStart = now;
+    blobWindowCount = 0;
+  }
+  blobWindowCount++;
+  return blobWindowCount <= BLOB_FALLBACK_PER_WINDOW;
+}
+
+/** Exported for tests; production never resets it. */
+export function __resetBlobFallbackBudgetForTests(): void {
+  blobWindowStart = 0;
+  blobWindowCount = 0;
+}
+
 export async function fetchGitTrackedFile(req: GitFileRequest): Promise<GitFileFetch> {
   const { repo, ref, path, blobSha, token, rawBase = GITHUB_RAW_ORIGIN } = req;
 
-  const headers: Record<string, string> = { "User-Agent": "NEMAR-API" };
+  const headers: Record<string, string> = {
+    "User-Agent": "NEMAR-API",
+    // Identity, deliberately. The raw host gzips text by default, and then
+    // `Content-Length` describes the COMPRESSED body: 717 against a manifest
+    // that records 1353 for the same `dataset_description.json` (measured).
+    // The caller verifies the length it gets against the manifest, so an
+    // encoded length would either fail every text file or, if the runtime
+    // strips the header while decoding, quietly disable that check. Asking
+    // for identity makes the number mean what the manifest means. The edge
+    // can still compress on the way out to the client.
+    "Accept-Encoding": "identity",
+  };
   if (token) headers.Authorization = `Bearer ${token}`;
 
   // A plain fetch, and NO in-request retry. `githubFetchWithRetry` is built
@@ -113,20 +200,34 @@ export async function fetchGitTrackedFile(req: GitFileRequest): Promise<GitFileF
   }
 
   if (rawResponse.ok) {
-    const declared = rawResponse.headers.get("Content-Length");
-    return {
-      kind: "ok",
-      body: rawResponse.body,
-      contentLength: declared === null ? null : Number.parseInt(declared, 10),
-      source: "raw",
-    };
+    return okOrUnavailable(rawResponse, "raw", `content host returned no body for ${repo}/${ref}`);
   }
 
   if (rawResponse.status !== 404) {
     return unavailableFrom(rawResponse, `content host refused ${repo}/${ref}`);
   }
 
-  // The path is not at that ref. Ask for the object the manifest named.
+  // The path is not at that ref. Ask for the object the manifest named --
+  // if the SHA is well formed and the fallback budget has room.
+  if (!BLOB_SHA_RE.test(blobSha)) {
+    console.error(`[data] manifest blob sha is not a git object name repo=${repo} sha=${blobSha}`);
+    return {
+      kind: "unavailable",
+      status: 502,
+      message: `manifest recorded an unusable blob id for ${path}`,
+      retryAfter: null,
+    };
+  }
+  if (!blobFallbackAllowed()) {
+    console.warn(`[data] blob fallback budget exhausted repo=${repo} ref=${ref} path=${path}`);
+    return {
+      kind: "unavailable",
+      status: 503,
+      message: "blob fallback budget exhausted",
+      retryAfter: "60",
+    };
+  }
+
   let blobResponse: Response;
   try {
     blobResponse = await githubFetchWithRetry(
@@ -145,30 +246,48 @@ export async function fetchGitTrackedFile(req: GitFileRequest): Promise<GitFileF
       { maxAttempts: 1, kind: "interactive" },
     );
   } catch (err) {
+    // transport.ts raises HttpError(503) on the interactive pre-flight
+    // throttle; flattening that to 502 would discard the one status it went
+    // out of its way to choose.
+    const status = (err as { status?: number })?.status === 503 ? 503 : 502;
     return {
       kind: "unavailable",
-      status: 502,
+      status,
       message: `blob fetch failed: ${err instanceof Error ? err.message : String(err)}`,
       retryAfter: null,
     };
   }
 
   if (blobResponse.ok) {
-    const declared = blobResponse.headers.get("Content-Length");
     // Worth a line in the log: the manifest and the tag disagree, which means
     // a retag or a rewritten history, and the blob is only still reachable
     // because git has not garbage-collected it yet.
     console.warn(
       `[data] git file served from blob SHA after raw 404 repo=${repo} ref=${ref} path=${path}`,
     );
-    return {
-      kind: "ok",
-      body: blobResponse.body,
-      contentLength: declared === null ? null : Number.parseInt(declared, 10),
-      source: "blob",
-    };
+    return okOrUnavailable(
+      blobResponse,
+      "blob",
+      `blob response had no body for ${repo}@${blobSha}`,
+    );
   }
 
-  if (blobResponse.status === 404) return { kind: "absent" };
+  if (blobResponse.status === 404) {
+    // Only now is absence honest. GitHub answers 404 -- not 403 -- for a
+    // repo the caller cannot see, so without a credential these two 404s are
+    // indistinguishable from "the repo is private and our token failed to
+    // mint". Reporting that as absence would tell every reader their data is
+    // gone during a credential outage, which is the exact inversion of
+    // ADR 0005 this path exists to avoid.
+    if (!token) {
+      return {
+        kind: "unavailable",
+        status: 502,
+        message: `${repo}/${ref}/${path} not readable anonymously, and no credential was available to tell absence from a private repo`,
+        retryAfter: null,
+      };
+    }
+    return { kind: "absent" };
+  }
   return unavailableFrom(blobResponse, `blob fetch refused ${repo}@${blobSha}`);
 }
