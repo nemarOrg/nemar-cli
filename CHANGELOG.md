@@ -102,6 +102,16 @@ earlier releases are described only by their generated notes.
 
 ### Fixed
 
+- **A multipart copy is now proven against its source, not just measured (#1396).** Above
+  CopyObject's 5 GB limit the copy carries no SHA-256 to compare with the key, because S3
+  refuses `--checksum-type FULL_OBJECT` for sha256, so such a copy passed on its size and
+  its pin alone. It offers that whole-object checksum for CRC64 instead, and OpenNeuro's
+  large objects already carry one, so the copy and the source can be compared directly: an
+  equal full-object CRC64 means the copy is the pinned version's bytes rather than any
+  object of the right length. Recorded as `crc64-of-source`. It stays a fidelity check
+  rather than an identity one, so an unpinned oversized source is still refused. Costs one
+  extra HEAD, and only where there was nothing stronger to check.
+
 - **`nemar admin import verify` no longer reports "0/0 object(s) missing" (#1396).** The
   backend answers `complete: false` with an empty expected set when there is no published
   manifest to compare against, which is the right refusal, but the CLI rendered it as an

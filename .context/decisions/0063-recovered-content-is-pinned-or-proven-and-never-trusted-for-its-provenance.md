@@ -24,7 +24,7 @@ Measuring the sixteen also showed that the sources differ in how well they ident
 
 **An object that does not verify is deleted.** Leaving it is worse than never copying it, because the next registration sweep lists the bucket, finds an object under the key's name, and advertises it.
 
-**Above CopyObject's 5 GB limit, where a multipart copy cannot be checksummed that way, only a pinned source is accepted.** An unpinned oversized key is reported unrecoverable instead of being trusted on its size.
+**Above CopyObject's 5 GB limit, where a multipart copy cannot carry the key's SHA-256, only a pinned source is accepted.** S3 offers a whole-object checksum for a multipart upload (`--checksum-type FULL_OBJECT`) but refuses it for SHA-256, so the key's own hash cannot be recomputed on that path. What is available is a full-object CRC64, which OpenNeuro's large objects already carry: when the copy and the source agree on it, the copy is provably the pinned version's bytes rather than merely an object of the right length, and that is recorded as `crc64-of-source`. It is a check on fidelity, not on identity, so it does not rescue an unpinned source: matching the CRC of an object we guessed at only proves we copied the guess faithfully. An unpinned oversized key is still reported unrecoverable rather than trusted on its size.
 
 **Recovery writes no location log.** It puts objects in the bucket; `nemar admin fleet key-registration` then lists the bucket again and records what is there, so exactly one piece of code writes a presence claim and it is the one that reads the log back (ADR 0061).
 

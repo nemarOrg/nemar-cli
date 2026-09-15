@@ -359,7 +359,7 @@ function upstreamRefusalReason(
     : "no upstream object of this key's size at any of its paths";
 }
 
-export type VerificationMethod = "checksum" | "etag" | "size-and-pin";
+export type VerificationMethod = "checksum" | "etag" | "crc64-of-source" | "size-and-pin";
 
 export interface VerificationVerdict {
   ok: boolean;
@@ -382,6 +382,10 @@ export function verifyCopy(opts: {
   checksumSha256?: string | null;
   etag?: string | null;
   size?: number | null;
+  /** Full-object CRC64 of the copy, when S3 recorded one (the multipart path). */
+  crc64?: string | null;
+  /** Full-object CRC64 the source carries, for the same object. */
+  sourceCrc64?: string | null;
 }): VerificationVerdict {
   const facts = parseAnnexKey(opts.key);
   if (!facts) return { ok: false, method: "checksum", detail: "unparseable key" };
@@ -412,6 +416,22 @@ export function verifyCopy(opts: {
       method: "size-and-pin",
       detail: `the object is ${opts.size} bytes, the key says ${facts.size}`,
     };
+  }
+  // Above 5 GB the copy is multipart, and a multipart object carries no
+  // SHA-256: S3 rejects `--checksum-type FULL_OBJECT` for sha256, offering it
+  // only for the CRC algorithms. But OpenNeuro's own large objects DO carry a
+  // full-object CRC64, and so does our copy of one, so the two can be compared.
+  // That does not tie the bytes to the key's hash; it proves the copy is
+  // byte-identical to the version git-annex pinned, which is what the pin is
+  // being trusted for. Size alone would pass any object of the right length.
+  if (opts.sourceCrc64 && opts.crc64) {
+    return opts.sourceCrc64 === opts.crc64
+      ? { ok: true, method: "crc64-of-source" }
+      : {
+          ok: false,
+          method: "crc64-of-source",
+          detail: `the copy's CRC64 is ${opts.crc64}, the source reads ${opts.sourceCrc64}`,
+        };
   }
   if (opts.origin !== "pinned") {
     return {
@@ -623,7 +643,12 @@ export async function headObject(opts: {
   bucket: string;
   key: string;
   env?: Record<string, string>;
-}): Promise<{ size: number; etag: string | null; checksumSha256: string | null } | null> {
+}): Promise<{
+  size: number;
+  etag: string | null;
+  checksumSha256: string | null;
+  crc64: string | null;
+} | null> {
   const { stdout, exitCode } = await aws(
     [
       "s3api",
@@ -644,11 +669,17 @@ export async function headObject(opts: {
     ContentLength?: number;
     ETag?: string;
     ChecksumSHA256?: string;
+    ChecksumCRC64NVME?: string;
+    ChecksumType?: string;
   };
   return {
     size: body.ContentLength ?? 0,
     etag: body.ETag ?? null,
     checksumSha256: body.ChecksumSHA256 ?? null,
+    // Only a FULL_OBJECT CRC describes the whole object. A composite one is a
+    // hash of part hashes and says nothing about two objects built from
+    // different part sizes.
+    crc64: body.ChecksumType === "FULL_OBJECT" ? (body.ChecksumCRC64NVME ?? null) : null,
   };
 }
 
@@ -677,6 +708,40 @@ export async function isUpstreamObjectReadable(
   if (source.version) args.push("--version-id", source.version);
   const { exitCode } = await aws(args, env);
   return exitCode === 0;
+}
+
+/**
+ * The source object's full-object CRC64, or null if it carries none.
+ *
+ * Asked unsigned, like every other question we put to upstream, and only when
+ * the copy could not be checksummed any other way, so it costs one HEAD on the
+ * >5 GB path and nothing at all elsewhere.
+ */
+export async function upstreamObjectCrc64(
+  source: { bucket: string; object: string; version?: string },
+  env?: Record<string, string>,
+): Promise<string | null> {
+  const args = [
+    "s3api",
+    "head-object",
+    "--no-sign-request",
+    "--checksum-mode",
+    "ENABLED",
+    "--bucket",
+    source.bucket,
+    "--key",
+    source.object,
+    "--output",
+    "json",
+  ];
+  if (source.version) args.push("--version-id", source.version);
+  const { stdout, exitCode } = await aws(args, env);
+  if (exitCode !== 0) return null;
+  const body = JSON.parse(stdout || "{}") as {
+    ChecksumCRC64NVME?: string;
+    ChecksumType?: string;
+  };
+  return body.ChecksumType === "FULL_OBJECT" ? (body.ChecksumCRC64NVME ?? null) : null;
 }
 
 export async function deleteObject(opts: {
@@ -733,7 +798,8 @@ export async function recoverKey(opts: {
       action: "unrecoverable",
       origin,
       detail:
-        "above CopyObject's 5 GB limit, and a multipart copy cannot be checksummed, so an unpinned source cannot be proven",
+        "above CopyObject's 5 GB limit; a multipart copy cannot carry the key's SHA-256, " +
+        "and matching the source's CRC64 would only prove we faithfully copied a guess",
     };
   }
   if (!opts.apply) {
@@ -794,12 +860,19 @@ export async function recoverKey(opts: {
     // Ask the bucket rather than the copy's own answer: a multipart copy reports
     // nothing useful, and this is the same question a later sweep will ask.
     const head = await headObject({ bucket: opts.destBucket, key: opts.destKey, env: opts.env });
+    const sha = copied.checksumSha256 ?? head?.checksumSha256;
+    // One extra HEAD, and only where it buys something: with no SHA-256 to
+    // compare, matching the source's full-object CRC64 is the difference
+    // between proving the copy is those bytes and merely counting them.
+    const sourceCrc64 = !sha && head?.crc64 ? await upstreamObjectCrc64(source, opts.env) : null;
     const verdict = verifyCopy({
       key: entry.key,
       origin: source.origin,
-      checksumSha256: copied.checksumSha256 ?? head?.checksumSha256,
+      checksumSha256: sha,
       etag: copied.etag ?? head?.etag,
       size: head?.size,
+      crc64: head?.crc64,
+      sourceCrc64,
     });
     if (verdict.ok) {
       return {

@@ -370,6 +370,56 @@ describe("verifyCopy", () => {
     expect(verdict.detail).toContain("4096");
   });
 
+  test("proves a multipart copy by matching the source's full-object CRC64", () => {
+    // The >5 GB path. S3 refuses `--checksum-type FULL_OBJECT` for sha256, so a
+    // multipart copy carries no SHA-256 to compare with the key. OpenNeuro's
+    // large objects do carry a full-object CRC64 and so does our copy, and
+    // equal CRCs mean the copy is the pinned version's bytes rather than merely
+    // an object of the right length. Measured on ds008003's two 5.8 GB objects.
+    expect(
+      verifyCopy({
+        key: "SHA256E-s5769335038--bc0b3d3cbaa1e0c333d099b7deeaedc1d78556831c139173ffe853cec132b66d.mat",
+        origin: "pinned",
+        size: 5769335038,
+        crc64: "SAITOd2nxag=",
+        sourceCrc64: "SAITOd2nxag=",
+      }),
+    ).toEqual({ ok: true, method: "crc64-of-source" });
+  });
+
+  test("rejects a multipart copy whose CRC64 differs from the source", () => {
+    const verdict = verifyCopy({
+      key: "SHA256E-s5769335038--bc0b3d3cbaa1e0c333d099b7deeaedc1d78556831c139173ffe853cec132b66d.mat",
+      origin: "pinned",
+      size: 5769335038,
+      crc64: "8plWGkmxguM=",
+      sourceCrc64: "SAITOd2nxag=",
+    });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.method).toBe("crc64-of-source");
+  });
+
+  test("a CRC64 match cannot rescue an object of the wrong length", () => {
+    // Size is checked first and on its own: two objects can share a CRC64 only
+    // by being the same bytes, but a source that is itself the wrong size for
+    // the key must not pass because the copy faithfully reproduced it.
+    const verdict = verifyCopy({
+      key: SHA_KEY,
+      origin: "pinned",
+      size: 4096,
+      crc64: "SAITOd2nxag=",
+      sourceCrc64: "SAITOd2nxag=",
+    });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.detail).toContain("4096");
+  });
+
+  test("falls back to size and pin when the source carries no CRC64", () => {
+    expect(
+      verifyCopy({ key: SHA_KEY, origin: "pinned", size: 65536, crc64: "abc=", sourceCrc64: null }),
+    ).toEqual({ ok: true, method: "size-and-pin" });
+  });
+
   test("accepts size alone only when git-annex pinned the source", () => {
     expect(verifyCopy({ key: SHA_KEY, origin: "pinned", size: 65536 })).toEqual({
       ok: true,
