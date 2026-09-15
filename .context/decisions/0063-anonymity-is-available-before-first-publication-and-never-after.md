@@ -195,6 +195,16 @@ for depositors on `docs.nemar.org` (#1412), because a requirement that is waived
 direction and reversed in another is not something anyone should have to infer from a refusal
 message.
 
+**What a blinded submission cites is the landing page, never the DOI.** The identifier is
+minted at release but stays `reserved` -- registered, not advertised, and it does NOT resolve.
+So it cannot do a citation's job during review, while `nemar.org/dataset/<id>` resolves and
+states why the dataset has no authors, which is strictly more informative to a reviewer. Both
+surfaces follow from that: `nemar dataset status` marks the DOI `(reserved)` and prints a
+`Cite:` line, and the data plane serves `external_links.dataset_doi: null` while anonymous so a
+dead identifier never reaches signposting, JSON-LD or a citation widget. Reserving early is
+still worth it -- the same identifier becomes the real one at publication -- but reserving is
+not publishing, and no surface may blur the two.
+
 ## Alternatives considered
 
 - **Filter identity at read time.** The obvious design, and it leaves the real names in

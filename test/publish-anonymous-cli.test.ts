@@ -172,6 +172,7 @@ describe("nemar dataset status reports the state", () => {
         visibility: "public",
         created_at: "2026-01-01T00:00:00Z",
         github_repo: "nemarDatasets/nm000104",
+        concept_doi: "10.82901/reserved-test",
         anonymous,
       },
     });
@@ -188,6 +189,11 @@ describe("nemar dataset status reports the state", () => {
       expect(result.stdout).toMatch(/Anonymous:\s+identity withheld until publication/);
       expect(result.stdout).toContain("without --anonymous");
       expect(result.stdout).not.toContain("github.com/nemarDatasets/nm000104");
+      // The reserved identifier does not resolve, so it must not be offered as
+      // a bare link a depositor could paste into a blinded submission. The
+      // landing page is what they cite during review.
+      expect(result.stdout).toMatch(/DOI:.*\(reserved\)/);
+      expect(result.stdout).toMatch(/Cite:\s+https:\/\/\S*nemar\.org\/dataset\/nm000104/);
     } finally {
       server.stop();
     }
@@ -201,6 +207,9 @@ describe("nemar dataset status reports the state", () => {
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("github.com/nemarDatasets/nm000104");
       expect(result.stdout).not.toContain("Anonymous:");
+      // The control: a published DOI is still offered as a plain link.
+      expect(result.stdout).toContain("https://doi.org/10.82901/reserved-test");
+      expect(result.stdout).not.toContain("(reserved)");
     } finally {
       server.stop();
     }

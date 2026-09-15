@@ -1116,7 +1116,12 @@ export function buildDatasetMetadata(input: {
       publish_date: latestVersionRow?.created_at ?? null,
     },
     external_links: {
-      dataset_doi: row.concept_doi,
+      // #1408: an anonymous release's identifier is RESERVED -- registered but
+      // not advertised, and it does not resolve. Publishing it here as the
+      // dataset's DOI would put a dead identifier into signposting, JSON-LD
+      // and every citation widget that reads this document. The landing page
+      // is what resolves during review; the DOI becomes real at publication.
+      dataset_doi: row.anonymous === 1 ? null : row.concept_doi,
       // #1408: an anonymous deposit's repository is PRIVATE, so naming it here
       // would hand every reader a URL that 404s while still disclosing that a
       // repository exists under a predictable name. Withheld at the source

@@ -25,22 +25,27 @@ import { freshDb, realD1 } from "./helpers/d1";
 function seed(db: Database, id: string, anonymous: number): void {
   db.prepare(
     `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility,
-                           is_sandbox, github_repo, anonymous)
-     VALUES (?, ?, 1, 'active', 'public', 0, ?, ?)`,
-  ).run(id, id, `nemarDatasets/${id}`, anonymous);
+                           is_sandbox, github_repo, anonymous, concept_doi)
+     VALUES (?, ?, 1, 'active', 'public', 0, ?, ?, ?)`,
+  ).run(id, id, `nemarDatasets/${id}`, anonymous, "10.82901/reserved-test");
 }
 
 function env(db: Database): Bindings {
   return { DB: realD1(db), ENVIRONMENT: "test" } as Bindings;
 }
 
-async function githubUrlOf(db: Database, id: string): Promise<string | null> {
+async function externalLinksOf(
+  db: Database,
+  id: string,
+): Promise<{ github_url: string | null; dataset_doi: string | null }> {
   const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/", dataRoutes);
   const res = await app.request(`/${id}/metadata.json`, {}, env(db));
   expect(res.status).toBe(200);
-  const body = (await res.json()) as { external_links: { github_url: string | null } };
-  return body.external_links.github_url;
+  const body = (await res.json()) as {
+    external_links: { github_url: string | null; dataset_doi: string | null };
+  };
+  return body.external_links;
 }
 
 describe("the data plane withholds the repository URL while anonymous", () => {
@@ -52,7 +57,7 @@ describe("the data plane withholds the repository URL while anonymous", () => {
     // need in order to have something to react to.
     const db = freshDb();
     seed(db, "nm000860", 1);
-    expect(await githubUrlOf(db, "nm000860")).toBeNull();
+    expect((await externalLinksOf(db, "nm000860")).github_url).toBeNull();
     db.close();
   });
 
@@ -62,7 +67,29 @@ describe("the data plane withholds the repository URL while anonymous", () => {
     // everything would satisfy the assertion above.
     const db = freshDb();
     seed(db, "nm000861", 0);
-    expect(await githubUrlOf(db, "nm000861")).toBe("https://github.com/nemarDatasets/nm000861");
+    expect((await externalLinksOf(db, "nm000861")).github_url).toBe(
+      "https://github.com/nemarDatasets/nm000861",
+    );
+    db.close();
+  });
+});
+
+describe("the data plane does not advertise a reserved DOI", () => {
+  test("an anonymous release serves dataset_doi: null", async () => {
+    // The identifier exists at EZID but is `reserved`: registered, not
+    // advertised, and it does not resolve. Serving it here would put a dead
+    // DOI into signposting, JSON-LD and every citation widget reading this
+    // document -- and a depositor mid-submission would cite it.
+    const db = freshDb();
+    seed(db, "nm000862", 1);
+    expect((await externalLinksOf(db, "nm000862")).dataset_doi).toBeNull();
+    db.close();
+  });
+
+  test("an ordinary dataset still advertises its DOI", async () => {
+    const db = freshDb();
+    seed(db, "nm000863", 0);
+    expect((await externalLinksOf(db, "nm000863")).dataset_doi).toBe("10.82901/reserved-test");
     db.close();
   });
 });

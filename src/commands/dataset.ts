@@ -30,6 +30,7 @@ import {
   describeSandboxGap,
   describeUncheckedSandboxGap,
 } from "../../shared/contract/profile-gaps.js";
+import { datasetLandingUrl } from "../../shared/datacite-constants.js";
 import { LICENSE_TIERS } from "../../shared/license-tiers.js";
 import { RangeParseError } from "../../shared/range.js";
 import { addCi } from "../lib/api/admin.js";
@@ -1824,11 +1825,23 @@ Examples:
       // dataset. Printing it as a bare link invites the reader to follow it and
       // conclude the dataset is fine.
       const doiUrl = `https://doi.org/${datasetInfo.concept_doi}`;
-      console.log(
-        datasetInfo.withdrawn_at
-          ? `  DOI:         ${chalk.dim(doiUrl)} ${chalk.red("(tombstoned)")}`
-          : `  DOI:         ${doiUrl}`,
-      );
+      if (datasetInfo.anonymous === 1) {
+        // An anonymous release's identifier is RESERVED: pre-registered, not
+        // advertised, and it does not resolve. Printing it as a bare link is
+        // the same trap the withdrawn case below avoids, and worse here -- a
+        // depositor mid-submission would cite it and their reviewers would get
+        // a dead link, in the one situation this feature exists to serve. The
+        // citable thing is the landing page, which resolves and says why the
+        // dataset has no authors.
+        console.log(`  DOI:         ${chalk.dim(doiUrl)} ${chalk.yellow("(reserved)")}`);
+        console.log(`  Cite:        ${datasetLandingUrl(datasetInfo.dataset_id)}`);
+      } else {
+        console.log(
+          datasetInfo.withdrawn_at
+            ? `  DOI:         ${chalk.dim(doiUrl)} ${chalk.red("(tombstoned)")}`
+            : `  DOI:         ${doiUrl}`,
+        );
+      }
     }
 
     // #970: surface-but-visible -- only shout when data is verified incomplete;
