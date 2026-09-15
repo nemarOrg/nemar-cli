@@ -687,7 +687,28 @@ export async function recoverKey(opts: {
     };
   }
   if (!opts.apply) {
-    return { key: entry.key, size: entry.size, action: "would-recover", origin };
+    // A dry run has to ASK, not assume. A recorded source is not a readable one:
+    // on004475's keys all carry pins, and every one of those objects is gone, so
+    // a plan built from the records alone reports 30 recoverable keys and an
+    // apply recovers none. One unsigned HEAD per candidate is what the copy
+    // would have found out anyway.
+    for (const candidate of [entry.source, ...(entry.alternatives ?? [])]) {
+      if (await isUpstreamObjectReadable(candidate, opts.env)) {
+        return {
+          key: entry.key,
+          size: entry.size,
+          action: "would-recover",
+          origin: candidate.origin,
+        };
+      }
+    }
+    return {
+      key: entry.key,
+      size: entry.size,
+      action: "unrecoverable",
+      origin,
+      detail: "every recorded source for this key is unreadable",
+    };
   }
 
   // Each candidate in turn: the pin first, then whatever discovery found. A pin
