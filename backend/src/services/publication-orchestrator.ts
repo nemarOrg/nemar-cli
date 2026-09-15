@@ -21,6 +21,7 @@ import { auditLogStatement } from "../db/audit-log";
 import { getS3Config } from "../routes/admin/shared";
 import type { AuthUser, Bindings } from "../types/bindings";
 import {
+  ANONYMOUS_AUTHORS_LABEL,
   END_ANONYMITY_AT_PUBLICATION_SQL,
   FIRST_PUBLICATION_STAMP_SQL,
   expectedRepoVisibility,
@@ -621,6 +622,23 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
     try {
       await startStep("repo_public");
 
+      // Does this run have to RESTORE attribution that an earlier anonymous
+      // release withheld? Asked once, here, before any write in this step can
+      // change the answer, and asked of the request history rather than of
+      // `datasets.anonymous`: the history is durable, the flag is cleared by
+      // this step's own UPDATE and re-read fresh on every retry. Same source
+      // `c.anonymousRelease` comes from, one row older.
+      const priorAnonymous = c.anonymousRelease
+        ? null
+        : await db
+            .prepare(
+              "SELECT 1 AS found FROM publication_requests WHERE dataset_id = ? AND anonymous = 1 LIMIT 1",
+            )
+            .bind(datasetId)
+            .first<{ found: number }>();
+      const restoreAttribution =
+        !c.anonymousRelease && (isAnonymous(c.dataset) || priorAnonymous?.found === 1);
+
       const repoShouldBePrivate =
         expectedRepoVisibility({
           visibility: "public",
@@ -658,28 +676,52 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
             500,
           );
         }
-        if (marked.repoMetadataStale) {
-          // `.nemar/metadata.json` is backend-written, git-tracked and served
-          // publicly from the manifest since #1403, so it still names the
-          // depositor until a fresh enrichment rewrites it. This has to happen
-          // BEFORE the data plane serves the release, which is why it is here
-          // and not in a later step.
-          const reenriched = await runEnrichmentForDataset(c.env, datasetId);
-          if (!reenriched.ok) {
-            await updateProgress(
-              "repo_public",
-              `Failed to re-enrich after blinding: ${reenriched.error}`,
-            );
-            return c.json(
-              {
-                error: `${datasetId} was marked anonymous but its committed .nemar/metadata.json still names the depositor, and re-enrichment failed: ${reenriched.error}`,
-                step: "repo_public",
-                steps_completed: completed,
-                step_results: stepResults,
-              },
-              500,
-            );
-          }
+        // `.nemar/metadata.json` is backend-written, git-tracked and served
+        // publicly from the manifest since #1403, so it still names the
+        // depositor until a fresh enrichment rewrites it. This has to happen
+        // BEFORE the data plane serves the release, which is why it is here
+        // and not in a later step.
+        //
+        // UNCONDITIONAL, and `repoMetadataStale` is only logged. That flag is
+        // read from D1 (`enrichment_json IS NOT NULL`), which is a CACHE of
+        // the committed document, not the document: an admin revert nulls the
+        // column and leaves the repository's file in place
+        // (`routes/admin/datasets-lifecycle.ts`), as does any manual repair or
+        // half-finished reindex. When the two disagree the flag says "nothing
+        // to do" and the blind silently never reaches the repository -- a
+        // failure with no log, on the file the data plane serves. An extra
+        // enrichment pass on a dataset that did not need one costs a commit;
+        // the other direction costs the guarantee.
+        const reenriched = await runEnrichmentForDataset(c.env, datasetId);
+        if (!reenriched.ok) {
+          await updateProgress(
+            "repo_public",
+            `Failed to re-enrich after blinding: ${reenriched.error}`,
+          );
+          return c.json(
+            {
+              error: `${datasetId} was marked anonymous but its committed .nemar/metadata.json still names the depositor, and re-enrichment failed: ${reenriched.error}`,
+              step: "repo_public",
+              steps_completed: completed,
+              step_results: stepResults,
+            },
+            500,
+          );
+        }
+        if (reenriched.warnings?.length) {
+          // Logged, never `updateProgress`: that helper's second argument
+          // marks the step FAILED, and these are things the enrichment
+          // declined to do, not things that went wrong. One of them is the
+          // anonymity guard in the DOI sync refusing to touch DataCite, which
+          // is the blind working as designed.
+          console.warn(
+            `[publish] ${datasetId} blinding enrichment warnings: ${reenriched.warnings.join("; ")}`,
+          );
+        }
+        if (!marked.repoMetadataStale) {
+          console.log(
+            `[publish] ${datasetId}: no cached enrichment before blinding; re-enriched anyway so the committed metadata cannot be stale`,
+          );
         }
       }
 
@@ -745,7 +787,18 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
         // It runs HERE, before doi_create, because the mint prefers
         // `.nemar/metadata.json` over the BIDS description when that file
         // parses -- so minting first would cite an enrichment with no authors.
-        if (!c.anonymousRelease && isAnonymous(c.dataset)) {
+        //
+        // The condition is `restoreAttribution`, captured BEFORE this UPDATE
+        // and derived from the request history rather than from
+        // `c.dataset.anonymous`. Reading the row here was self-defeating: the
+        // UPDATE three lines up sets `anonymous = 0`, and the run context is
+        // re-SELECTed on every invocation, so a retry after a failed
+        // enrichment saw a non-anonymous row, skipped this block silently, and
+        // went on to mint a PERMANENT DataCite record whose creator is the
+        // blinded label -- the one outcome the comment above says the step
+        // order exists to prevent, reached by the one path an admin is most
+        // likely to take.
+        if (restoreAttribution) {
           const restored = await runEnrichmentForDataset(c.env, datasetId);
           if (!restored.ok) {
             await updateProgress(
@@ -754,12 +807,17 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
             );
             return c.json(
               {
-                error: `${datasetId} was de-anonymized but its attribution could not be restored: ${restored.error}. Publishing was stopped rather than minting a DOI with no authors.`,
+                error: `${datasetId} was de-anonymized but its attribution could not be restored: ${restored.error}. It is now PUBLIC and its publication is recorded; what is missing is the attribution. No DOI was minted. Approve the request again once the cause is cleared -- the restoration is re-attempted on every run and doi_create refuses to mint until it succeeds.`,
                 step: "repo_public",
                 steps_completed: completed,
                 step_results: stepResults,
               },
               500,
+            );
+          }
+          if (restored.warnings?.length) {
+            console.warn(
+              `[publish] ${datasetId} de-anonymization enrichment warnings: ${restored.warnings.join("; ")}`,
             );
           }
         }
@@ -787,10 +845,16 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
             github_visibility: "public",
             database_visibility: "private (update failed)",
             // The recovery statement an operator is told to run has to carry
-            // the same stamp every code path carries (#1407); without it the
-            // repaired dataset would be public with its publication
-            // unrecorded, and could then be made anonymous retroactively.
-            action_required: `Manually update database: UPDATE datasets SET visibility = 'public', ${END_ANONYMITY_AT_PUBLICATION_SQL} WHERE dataset_id = '${datasetId}'`,
+            // the same stamp the code path it is repairing carries (#1407);
+            // without it the repaired dataset would be public with its
+            // publication unrecorded, and could then be made anonymous
+            // retroactively. For an ANONYMOUS release the correct stamp is the
+            // other one: pasting END_ANONYMITY there would name the depositor
+            // as published and destroy the concealment the run was delivering,
+            // by hand, with no way back (#1408).
+            action_required: `Manually update database: UPDATE datasets SET visibility = 'public', ${
+              c.anonymousRelease ? FIRST_PUBLICATION_STAMP_SQL : END_ANONYMITY_AT_PUBLICATION_SQL
+            } WHERE dataset_id = '${datasetId}'`,
             step_results: stepResults,
           },
           500,
@@ -804,7 +868,16 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
       try {
         const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
         publishSpec = await ensureRepoToSpec(repoName, pat, {
-          visibility: "public",
+          // From the same rule the visibility flip above used, not a literal.
+          // A hardcoded "public" here took the published-repo branch for an
+          // anonymous release and locked `main` behind a pull-request ruleset
+          // on a repository that is still PRIVATE -- which breaks the
+          // documented way out of anonymity, where the depositor commits their
+          // restored Authors straight to `main` precisely because ADR 0001's
+          // PR-only rule has not bitten yet. It applied silently: a successful
+          // ruleset is not logged, and the depositor would have found out at
+          // acceptance time.
+          visibility: repoShouldBePrivate ? "private" : "public",
           collaborators: { ownerLogin, approvedWriters },
         });
         // Surface a non-green/failed protection step in the bulk-approval log,
@@ -883,6 +956,44 @@ async function stepTagProtect(c: ApproveStepContext): Promise<RespondOutcome | u
   return undefined;
 }
 
+/**
+ * Refuse to write a permanent identifier while the catalog still carries the
+ * blinded label (#1408).
+ *
+ * The ordering that makes de-anonymization work -- restore attribution, then
+ * mint -- is enforced by the step order in `stepRepoPublic`. This is the same
+ * rule stated as an INVARIANT rather than as a sequence, because the cost of
+ * the sequence being wrong is not recoverable: a DataCite record naming
+ * `ANONYMOUS_AUTHORS_LABEL` as its creator is harvested within hours and
+ * inverts ADR 0041 on the one identifier nothing can retract. A guard that
+ * reads the state cannot be defeated by a retry, a resume, or a future
+ * reordering of the steps.
+ *
+ * Reads `datasets.authors` fresh rather than trusting the run context, which
+ * was loaded before the restoration ran.
+ */
+async function blockedByUnrestoredAttribution(
+  c: ApproveStepContext,
+  step: PublicationStep,
+): Promise<RespondOutcome | undefined> {
+  if (c.anonymousRelease) return undefined;
+  const row = await c.db
+    .prepare("SELECT authors FROM datasets WHERE dataset_id = ?")
+    .bind(c.datasetId)
+    .first<{ authors: string | null }>();
+  if (row?.authors !== ANONYMOUS_AUTHORS_LABEL) return undefined;
+  await c.recorder.updateProgress(step, "Attribution is still blinded");
+  return c.json(
+    {
+      error: `${c.datasetId} still carries the anonymous-deposit author label, so a DOI minted or published now would cite "${ANONYMOUS_AUTHORS_LABEL}" permanently. Restore the real Authors in dataset_description.json and approve again.`,
+      step,
+      steps_completed: c.recorder.completed,
+      step_results: c.recorder.stepResults,
+    },
+    500,
+  );
+}
+
 async function stepDoiCreate(c: ApproveStepContext): Promise<RespondOutcome | undefined> {
   const stepsToRun = c.stepsToRun;
   const db = c.db;
@@ -899,6 +1010,8 @@ async function stepDoiCreate(c: ApproveStepContext): Promise<RespondOutcome | un
 
   // Step 6: Create concept DOI (if not exists)
   if (stepsToRun.includes("doi_create")) {
+    const blocked = await blockedByUnrestoredAttribution(c, "doi_create");
+    if (blocked) return blocked;
     try {
       await startStep("doi_create");
 
@@ -1368,6 +1481,11 @@ async function stepPublishDoi(c: ApproveStepContext): Promise<RespondOutcome | u
   // was removed in #1186 (its SQL named the dropped doi_provider column and
   // would have failed at runtime if ever re-enabled).
   if (stepsToRun.includes("publish_doi")) {
+    // Same interlock as doi_create, for the same reason one step later:
+    // `makePublic` is the transition that makes the record resolvable and
+    // harvestable, so a still-blinded author list must not reach it either.
+    const blocked = await blockedByUnrestoredAttribution(c, "publish_doi");
+    if (blocked) return blocked;
     try {
       await startStep("publish_doi");
 
@@ -1810,6 +1928,10 @@ async function stepNotifyUser(c: ApproveStepContext): Promise<RespondOutcome | u
         replyTo,
         isDev,
         c.env,
+        // #1408: the mail's whole vocabulary changes. For an anonymous release
+        // the DOI is reserved and does not resolve, so it must not be offered
+        // as "your DOI" -- the recipient is mid-submission and would cite it.
+        { anonymous: c.anonymousRelease },
       );
 
       await updateProgress("notify_user");
@@ -2085,10 +2207,15 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     );
     await db
       .prepare(
-        // Carries the same stamp as every other path to public: this is a
-        // repair for a row that should already have been flipped, so it must
-        // not leave the dataset public with the publication unrecorded.
-        `UPDATE datasets SET visibility = 'public', ${END_ANONYMITY_AT_PUBLICATION_SQL}, updated_at = datetime('now') WHERE dataset_id = ?`,
+        // Carries the same stamp as the run it is repairing: this is a fix for
+        // a row that should already have been flipped, so it must not leave
+        // the dataset public with the publication unrecorded -- and for an
+        // anonymous release it must not record a publication that did not
+        // happen. END_ANONYMITY here would have undone the entire release at
+        // the very end of the run that delivered it (#1408).
+        `UPDATE datasets SET visibility = 'public', ${
+          c.anonymousRelease ? FIRST_PUBLICATION_STAMP_SQL : END_ANONYMITY_AT_PUBLICATION_SQL
+        }, updated_at = datetime('now') WHERE dataset_id = ?`,
       )
       .bind(datasetId)
       .run();

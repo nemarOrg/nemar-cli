@@ -19,7 +19,12 @@ import { RangeParseError } from "../../../../shared/range.js";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import { parseLicenseTierFilter } from "../../lib/license";
 import { optionalAuthMiddleware } from "../../middleware/auth";
-import { OWNER_GITHUB_SQL, OWNER_USERNAME_SQL, isAnonymous } from "../../services/anonymity";
+import {
+  OWNER_GITHUB_SQL,
+  OWNER_USERNAME_SQL,
+  isAnonymous,
+  withheldWhileAnonymous,
+} from "../../services/anonymity";
 import { zarrCacheBaseUrl } from "../../services/cloudflare";
 import { getFacetVocabulary } from "../../services/dataset-facet-vocabulary";
 import {
@@ -310,8 +315,17 @@ export function parseZarrDataFailures(
  * `file_size` being selected so the degraded fallback query (which projects
  * neither field, nor zarr_status) passes through unchanged.
  */
-function toListRow<T extends Record<string, unknown>>(row: T, zarrBaseUrl: string | null): T {
-  const shaped = withCanonicalLatestVersion(row);
+function toListRow<T extends Record<string, unknown>>(
+  row: T,
+  zarrBaseUrl: string | null,
+  // #1408: false for a public reader, so an anonymous deposit's private
+  // repository and its reserved, non-resolving DOI are withheld here the same
+  // way `data-router.ts` withholds them from `external_links`. True for the
+  // owner's own listing and for an admin, whose tooling reads `github_repo`
+  // to clone and commit -- including the commit that ends the anonymity.
+  viewerMayKnowIdentifiers = false,
+): T {
+  const shaped = withheldWhileAnonymous(withCanonicalLatestVersion(row), viewerMayKnowIdentifiers);
   if (!("file_size" in shaped)) return shaped;
   return {
     ...shaped,
@@ -625,6 +639,12 @@ async function executeAndReturn(
   // the existing Promise.allSettled so a failure here can never turn a good
   // response into a 500; it just omits both fields.
   excludedUnknownQuery?: { query: string; params: (string | number)[]; keysInOrder: FacetKey[] },
+  // #1408: does THIS caller get to see an anonymous deposit's private
+  // repository and its reserved DOI? True for the `?mine` listing and for an
+  // admin; false for the public catalog, which is what every unauthenticated
+  // reader gets. Threaded in rather than derived here because this helper is
+  // shared by both branches and has no view of the request's identity.
+  viewerMayKnowIdentifiers = false,
 ) {
   const { limit, offset } = pagination;
   // #1062: computed once per request, reused for every row's derived
@@ -738,7 +758,7 @@ async function executeAndReturn(
     }
 
     const responseBody = {
-      datasets: result.results.map((row) => toListRow(row, zarrBaseUrl)),
+      datasets: result.results.map((row) => toListRow(row, zarrBaseUrl, viewerMayKnowIdentifiers)),
       count: result.results.length,
       total_count: totalCount,
       limit,
@@ -811,7 +831,9 @@ async function executeAndReturn(
           .bind(limit, offset)
           .all();
         return c.json({
-          datasets: (fallback.results || []).map((row) => toListRow(row, zarrBaseUrl)),
+          datasets: (fallback.results || []).map((row) =>
+            toListRow(row, zarrBaseUrl, viewerMayKnowIdentifiers),
+          ),
           count: fallback.results?.length || 0,
           total_count: fallback.results?.length || 0,
           limit,
@@ -1022,7 +1044,17 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       // --mine path is always authed and per-user; the no-store default
       // set at the top of the handler is the right header here. See #639
       // + the union-path Vary block below for the anonymous-shareable case.
-      return executeAndReturn(c, db, c.env, query, params, { limit, offset }, excludedUnknownQuery);
+      return executeAndReturn(
+        c,
+        db,
+        c.env,
+        query,
+        params,
+        { limit, offset },
+        excludedUnknownQuery,
+        // The `?mine` listing is scoped to the caller's own rows.
+        true,
+      );
     }
 
     // Single-table read from the `datasets` source of truth (#646). Folded legacy
@@ -1146,7 +1178,18 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
       c.header("Vary", "Authorization");
     }
-    return executeAndReturn(c, db, c.env, query, params, { limit, offset }, excludedUnknownQuery);
+    return executeAndReturn(
+      c,
+      db,
+      c.env,
+      query,
+      params,
+      { limit, offset },
+      excludedUnknownQuery,
+      // The public catalog. Only an admin sees a concealed deposit's
+      // repository and reserved DOI here.
+      hasRole(user?.role, "admin"),
+    );
   });
 
   /**
@@ -1381,7 +1424,11 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     `,
       )
       .bind(datasetId)
-      .first();
+      // `d.*` carries every column, but the row type has to SAY it carries
+      // `anonymous`: `isAnonymous` requires the field so that a projection
+      // which stops selecting it is a compile error rather than a silent "not
+      // anonymous" (#1408).
+      .first<Record<string, unknown> & { anonymous: number | null }>();
 
     if (!dataset) {
       return c.json({ error: "Dataset not found" }, 404);
@@ -1486,6 +1533,14 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       }
     });
 
-    return c.json({ dataset: detail });
+    // #1408: the same withholding the list rows and the data plane apply --
+    // a concealed deposit's repository is private and its DOI is reserved, so
+    // neither is offered to a reader who is not its owner or an admin. Applied
+    // LAST, over the assembled payload, because `SELECT d.*` puts both columns
+    // into `rest` without either being named anywhere above.
+    const viewerMayKnowIdentifiers = Boolean(
+      user && (hasRole(user.role, "admin") || user.id === dataset.owner_user_id),
+    );
+    return c.json({ dataset: withheldWhileAnonymous(detail, viewerMayKnowIdentifiers) });
   });
 }

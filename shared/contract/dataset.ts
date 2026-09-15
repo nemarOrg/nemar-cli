@@ -54,9 +54,19 @@ const catalogItemObjectSchema = z
     // browsable, downloadable -- while its depositor is withheld and its
     // repository stays private. So visibility does NOT imply the dataset is
     // attributed, and a consumer that wants to say who deposited something has
-    // to read this too. 1 while concealed, 0 otherwise; optional because the
-    // `?mine=true` branch projects a narrower row.
+    // to read this too. 1 while concealed, 0 otherwise.
+    //
+    // Optional because this schema also validates rows that predate the
+    // column and hand-built payloads in tests; every live projection selects
+    // it, the `?mine=true` branch included. A consumer that treats a missing
+    // value as "not anonymous" is making the wrong-way assumption -- treat it
+    // as unknown.
     anonymous: z.number().int().nullable().optional(),
+    // Null for an anonymous deposit unless the reader is its owner or an
+    // admin: the identifier is registered `reserved` at EZID, so it does not
+    // resolve and must not be cited. The same withholding applies to
+    // `github_repo` (not in this schema) and to `external_links` on the data
+    // plane. It becomes a real, resolving DOI when the deposit is published.
     concept_doi: z.string().nullable().optional(),
     doi: z.string().nullable().optional(),
     created_at: z.string(),

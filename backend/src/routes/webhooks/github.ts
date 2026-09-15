@@ -531,21 +531,56 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
     }
 
     if (versionDoiDecision.dispatch) {
+      // #1408: a version DOI is minted AND published in one pass
+      // (`services/doi.ts` calls `makePublic` unconditionally), so dispatching
+      // it for an anonymous deposit would put a resolving, harvested DataCite
+      // record into the world for the one dataset whose whole premise is that
+      // no identifier of it resolves yet. The publication orchestrator drops
+      // `version_doi` from an anonymous release's step set, but nothing stops
+      // the depositor from pushing a `v*` tag afterward -- `nemar dataset
+      // release` does exactly that -- and this handler would have obliged.
+      //
+      // Gated here, on the server, rather than in `shouldDispatchVersionDoi`:
+      // that function is a pure predicate over the webhook payload, and the
+      // payload cannot be trusted to say anything about anonymity. The state
+      // is read from the dataset row.
+      let anonymousDeposit = false;
       try {
-        await triggerVersionDoiRun(versionDoiDecision.datasetId, versionDoiDecision.tag, pat);
-        console.log(
-          `[github-webhook] dispatched run-version-doi for ${versionDoiDecision.datasetId}@${versionDoiDecision.tag} delivery=${deliveryId}`,
-        );
-        dispatched.version_doi = {
-          dataset_id: versionDoiDecision.datasetId,
-          tag: versionDoiDecision.tag,
-        };
+        const row = await c.env.DB.prepare("SELECT anonymous FROM datasets WHERE dataset_id = ?")
+          .bind(versionDoiDecision.datasetId)
+          .first<{ anonymous: number | null }>();
+        anonymousDeposit = row?.anonymous === 1;
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        // Unreadable state is not permission to mint. A version DOI is
+        // permanent; skipping one is a re-push away.
         console.error(
-          `[github-webhook] version-doi dispatch failed for ${versionDoiDecision.datasetId}@${versionDoiDecision.tag} delivery=${deliveryId}: ${msg}`,
+          `[github-webhook] anonymity check failed for ${versionDoiDecision.datasetId} delivery=${deliveryId}; skipping version-doi dispatch:`,
+          err instanceof Error ? err.message : err,
         );
-        errors.version_doi = msg;
+        anonymousDeposit = true;
+      }
+      if (anonymousDeposit) {
+        console.warn(
+          `[github-webhook] version-doi NOT dispatched for ${versionDoiDecision.datasetId}@${versionDoiDecision.tag} delivery=${deliveryId}: anonymous deposit (or its state was unreadable)`,
+        );
+        errors.version_doi = "anonymous_deposit";
+      } else {
+        try {
+          await triggerVersionDoiRun(versionDoiDecision.datasetId, versionDoiDecision.tag, pat);
+          console.log(
+            `[github-webhook] dispatched run-version-doi for ${versionDoiDecision.datasetId}@${versionDoiDecision.tag} delivery=${deliveryId}`,
+          );
+          dispatched.version_doi = {
+            dataset_id: versionDoiDecision.datasetId,
+            tag: versionDoiDecision.tag,
+          };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(
+            `[github-webhook] version-doi dispatch failed for ${versionDoiDecision.datasetId}@${versionDoiDecision.tag} delivery=${deliveryId}: ${msg}`,
+          );
+          errors.version_doi = msg;
+        }
       }
     }
 

@@ -81,15 +81,31 @@ export interface PageBundle {
  */
 async function loadCatalogRow(env: Bindings, datasetId: string): Promise<CatalogRow | null> {
   // #646: license/authors come from the `datasets` source of truth.
-  return env.DB.prepare(
+  //
+  // #1408: `concept_doi` and `github_repo` are WITHHELD for an anonymous
+  // deposit, on exactly the rule `buildDatasetMetadata` applies to
+  // `external_links` -- and it has to be stated twice because this row ships
+  // in the SAME response as that document. Without it one `GET /page-bundle`
+  // answered `external_links.github_url: null` and
+  // `catalog_row.github_repo: "nemarDatasets/<id>"` side by side, and served
+  // the reserved DOI that the other half withholds because it does not
+  // resolve. `authors` needs no treatment here: it is blinded by its writer
+  // (`markAnonymous`), so the stored value is already the label.
+  const row = await env.DB.prepare(
     `SELECT d.dataset_id, d.name, d.description, d.concept_doi, d.github_repo,
-            d.modalities, d.tasks, d.license, d.authors
+            d.modalities, d.tasks, d.license, d.authors, d.anonymous
        FROM datasets d
        WHERE d.dataset_id = ?
        LIMIT 1`,
   )
     .bind(datasetId)
-    .first<CatalogRow>();
+    .first<CatalogRow & { anonymous: number | null }>();
+  if (!row) return null;
+  const { anonymous, ...catalogRow } = row;
+  if (anonymous === 1) {
+    return { ...catalogRow, concept_doi: null, github_repo: null };
+  }
+  return catalogRow;
 }
 
 function s3OptionsFromEnv(env: Bindings): PresignedUrlOptions {

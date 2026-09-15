@@ -51,6 +51,20 @@ export type PublicationStep = (typeof PUBLICATION_STEPS)[number];
  *   upload_to_zenodo Zenodo's `creators` field is mandatory, so there is no
  *                    unattributed form; `createZenodoConceptDoi` refuses an
  *                    anonymous deposit outright rather than deposit a name.
+ *   update_metadata  Writes `DatasetDOI` into `dataset_description.json`,
+ *                    which is git-tracked and served publicly by the data
+ *                    plane (#1403). Advertising a reserved identifier is what
+ *                    the release exists to avoid: a reader, or the depositor
+ *                    mid-submission, would cite a DOI that does not resolve.
+ *   update_readme    Same identifier, worse placement: a DOI badge on the
+ *                    README the dataset page renders, linking to a doi.org URL
+ *                    that 404s.
+ *
+ * Those last two are DEFERRED, not dropped. `doi_create` still runs, so the
+ * identifier is reserved for the dataset from the start and the same one is
+ * activated at publication (`stepDoiCreate` is guarded by
+ * `if (!dataset.concept_doi)`); the publication that ends anonymity runs both
+ * steps then, when the DOI is real and the attribution is restored.
  *
  * `repo_public` deliberately STAYS: it is the step that flips the catalog row
  * to public, which an anonymous release needs. It keeps the GitHub repository
@@ -58,6 +72,8 @@ export type PublicationStep = (typeof PUBLICATION_STEPS)[number];
  * than what it does.
  */
 export const ANONYMOUS_RELEASE_SKIPPED_STEPS: readonly PublicationStep[] = [
+  "update_metadata",
+  "update_readme",
   "upload_to_zenodo",
   "publish_doi",
   "version_doi",

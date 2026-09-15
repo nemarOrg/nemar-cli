@@ -6,6 +6,7 @@
  * Uses fetch directly for Cloudflare Workers compatibility.
  */
 
+import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import { escapeHtml } from "../lib/escape";
 import { STALENESS_LIMIT_DAYS } from "./staleness";
 
@@ -1147,7 +1148,23 @@ export async function sendPublicationRequestEmail(
   replyTo?: string,
   isDev?: boolean,
   deliveryEnv?: EmailDeliveryEnv,
+  opts?: { anonymous?: boolean },
 ): Promise<void> {
+  // #1408: an anonymous release and a publication are different runs with
+  // different outcomes -- one keeps the repository private and the DOI
+  // reserved, the other makes both public and permanent. The admin approving
+  // it is the last human checkpoint, so the mail has to say which one it is.
+  const anonymous = opts?.anonymous === true;
+  const anonymousNotice = anonymous
+    ? `
+  <div style="background: #fef3c7; border-left: 4px solid #d97706; padding: 12px 16px; border-radius: 4px; margin: 16px 0;">
+    <strong>Anonymous release.</strong> Approving this publishes the data while
+    withholding the depositor: the GitHub repository stays private, the DOI stays
+    reserved (it will not resolve), and NEMAR names nobody. Attribution is
+    restored later, when the depositor requests publication again without
+    <code>--anonymous</code>.
+  </div>`
+    : "";
   const html = `
 <!DOCTYPE html>
 <html>
@@ -1156,9 +1173,10 @@ export async function sendPublicationRequestEmail(
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-  <h1 style="color: #2563eb;">Publication Request</h1>
+  <h1 style="color: #2563eb;">${anonymous ? "Anonymous Release Request" : "Publication Request"}</h1>
 
-  <p>User <strong>${escapeHtml(username)}</strong> has requested publication of dataset <strong>${escapeHtml(datasetId)}</strong>.</p>
+  <p>User <strong>${escapeHtml(username)}</strong> has requested ${anonymous ? "an anonymous release" : "publication"} of dataset <strong>${escapeHtml(datasetId)}</strong>.</p>
+${anonymousNotice}
 
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
   <p>Review the dataset and approve or deny the request:</p>
@@ -1185,7 +1203,7 @@ export async function sendPublicationRequestEmail(
     try {
       await sendEmail(
         adminEmail,
-        `[NEMAR] Publication request: ${datasetId} by ${username}`,
+        `[NEMAR] ${anonymous ? "Anonymous release" : "Publication"} request: ${datasetId} by ${username}`,
         html,
         resendApiKey,
         fromEmail,
@@ -1406,15 +1424,31 @@ export async function sendPublicationApprovedEmail(
   replyTo?: string,
   isDev?: boolean,
   deliveryEnv?: EmailDeliveryEnv,
+  opts?: { anonymous?: boolean },
 ): Promise<void> {
+  // #1408: an anonymous release ends here too, and almost every sentence below
+  // is wrong for it. The DOI exists but is RESERVED -- registered, not
+  // advertised, and it does not resolve -- so offering it as "your DOI" with a
+  // doi.org link is the one mistake that matters: a depositor mid-submission
+  // would paste a dead identifier into a blinded manuscript. What they cite
+  // during review is the landing page.
+  const anonymous = opts?.anonymous === true;
   const safeDoi = doi ? escapeHtml(doi) : "";
-  const doiSection = doi
-    ? `<h2 style="color: #333; font-size: 18px; margin-top: 30px;">DOI</h2>
+  const landing = escapeHtml(datasetLandingUrl(datasetId));
+  const doiSection = !doi
+    ? ""
+    : anonymous
+      ? `<h2 style="color: #333; font-size: 18px; margin-top: 30px;">Citing it during review</h2>
+       <p>Cite the dataset page. It shows the data, states that authorship is withheld, and names nobody:</p>
+       <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+         <a href="${landing}" style="color: #2563eb;">${landing}</a>
+       </div>
+       <p style="color: #666; font-size: 14px;">A DOI (<code>${safeDoi}</code>) is reserved for this dataset but is deliberately not active: a live DOI record would carry a public author list. It is activated, with your attribution, when you publish after acceptance. Do not cite it yet, it will not resolve.</p>`
+      : `<h2 style="color: #333; font-size: 18px; margin-top: 30px;">DOI</h2>
        <p>Your dataset has been assigned the following DOI:</p>
        <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
          <a href="https://doi.org/${safeDoi}" style="color: #2563eb;">${safeDoi}</a>
-       </div>`
-    : "";
+       </div>`;
 
   const html = `
 <!DOCTYPE html>
@@ -1424,14 +1458,26 @@ export async function sendPublicationApprovedEmail(
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-  <h1 style="color: #16a34a;">Dataset Published!</h1>
+  <h1 style="color: #16a34a;">${anonymous ? "Anonymous release is live" : "Dataset Published!"}</h1>
 
   <p>Hello ${escapeHtml(username)},</p>
 
-  <p>Your dataset <strong>${escapeHtml(datasetId)}</strong> has been published and is now publicly available.</p>
+  <p>${
+    anonymous
+      ? `Your dataset <strong>${escapeHtml(datasetId)}</strong> is now listed, browsable and downloadable, with your identity withheld. Its GitHub repository stays private and NEMAR names nobody.`
+      : `Your dataset <strong>${escapeHtml(datasetId)}</strong> has been published and is now publicly available.`
+  }</p>
 
   ${doiSection}
-
+${
+  anonymous
+    ? `
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">After acceptance</h2>
+  <p>Restore the real <code>Authors</code> in <code>dataset_description.json</code>, commit to <code>main</code> (your repository is still private, so you can commit directly), and request publication again <strong>without</strong> <code>--anonymous</code>. That activates the DOI with your attribution and makes the repository public.</p>
+  <p style="color: #666; font-size: 14px;">NEMAR withholds everything it derives about you. It cannot blind your own files: check the README, <code>participants.tsv</code> and any identifiers inside your recordings yourself.</p>
+`
+    : ""
+}
   <p>You can check the status of your dataset:</p>
   <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
     nemar dataset publish status ${escapeHtml(datasetId)}
@@ -1447,7 +1493,7 @@ export async function sendPublicationApprovedEmail(
 
   await sendEmail(
     to,
-    `Dataset published: ${datasetId}`,
+    anonymous ? `Anonymous release is live: ${datasetId}` : `Dataset published: ${datasetId}`,
     html,
     resendApiKey,
     fromEmail,

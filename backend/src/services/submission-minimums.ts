@@ -21,9 +21,21 @@ export const MIN_NAME_LENGTH = 25;
  * Author entries that read as "nobody": empty, n/a-style sentinels, anonymous,
  * bracketed placeholders like "[Unspecified1]" (the MOABB failure mode from
  * #817), or strings containing "unspecified"/"placeholder".
+ *
+ * "anonymous" is matched as a LEADING WORD rather than as the whole string
+ * (#1408). The bare-word form was written when this rule only ever rejected
+ * placeholders; now that an anonymous release requires them, the exact
+ * spelling matters in the opposite direction, and the anchored form refused
+ * the very label NEMAR itself publishes in place of an author list
+ * (`ANONYMOUS_AUTHORS_LABEL`, "Anonymous (withheld until publication)"). A
+ * depositor who copied the string from their own dataset page was told their
+ * blinded file "still names Anonymous (withheld until publication)". The same
+ * applies to the natural variants -- "Anonymous (blinded for review)",
+ * "Anonymous Authors". An entry that opens with the word is asserting
+ * anonymity, not naming a person.
  */
 const PLACEHOLDER_AUTHOR =
-  /^(n\/?a|none|tbd|todo|unknown|anonymous|-+)$|^\[.*\]$|unspecified|placeholder/i;
+  /^(n\/?a|none|tbd|todo|unknown|-+)$|^anonymous\b|^\[.*\]$|unspecified|placeholder/i;
 
 /**
  * Ethics statement detection in a README: any of the conventional phrasings.

@@ -126,15 +126,37 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     //
     // The body is optional: every existing caller posts no body at all, and a
     // malformed one must not turn a publication request into a 500.
+    //
+    // But ABSENT and PRESENT-BUT-NOT-`true` are different mistakes and must
+    // not collapse into the same silent answer. `{"anonymous": "true"}` from a
+    // form serializer, or `{"anonymous": 1}`, parses cleanly and would
+    // otherwise be coerced to a normal publication -- concealment asked for,
+    // attribution delivered, with output identical to a correct request. A key
+    // that is present and not a JSON boolean is refused instead.
     let anonymousRequested = false;
+    let anonymousMalformed = false;
     try {
       const raw: unknown = await c.req.json();
-      anonymousRequested =
-        typeof raw === "object" &&
-        raw !== null &&
-        (raw as { anonymous?: unknown }).anonymous === true;
+      if (typeof raw === "object" && raw !== null && "anonymous" in raw) {
+        const value = (raw as { anonymous?: unknown }).anonymous;
+        if (typeof value === "boolean") {
+          anonymousRequested = value;
+        } else {
+          anonymousMalformed = true;
+        }
+      }
     } catch {
       // No body, or not JSON. Both mean a normal publication request.
+    }
+    if (anonymousMalformed) {
+      return c.json(
+        {
+          error: "invalid_anonymous",
+          message:
+            '`anonymous` must be a JSON boolean. A depositor who asked to be concealed and was published under their own name because their client sent a string cannot be un-published, so this is refused rather than read as "no".',
+        },
+        400,
+      );
     }
 
     // The owner's name columns ride along on the dataset lookup: publication
@@ -143,8 +165,12 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     // detail discovered later at mint time.
     const dataset = await db
       .prepare(
+        // `first_published_at` is here because `hasEverBeenPublished` reads it
+        // below. It is NOT redundant with `visibility`: a dataset that was
+        // public and has since been reverted keeps the stamp, and that is
+        // exactly the row the anonymity guard has to catch.
         `SELECT d.id, d.dataset_id, d.owner_user_id, d.is_sandbox, d.is_exemplar,
-                d.github_repo, d.visibility, d.source, d.anonymous,
+                d.github_repo, d.visibility, d.source, d.anonymous, d.first_published_at,
                 u.given_name as owner_given_name, u.family_name as owner_family_name
          FROM datasets d
          JOIN users u ON d.owner_user_id = u.id
@@ -161,6 +187,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         visibility: string | null;
         source: string | null;
         anonymous: number | null;
+        first_published_at: string | null;
         owner_given_name: string | null;
         owner_family_name: string | null;
       }>();
@@ -181,8 +208,25 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       return c.json({ error: "Cannot publish sandbox datasets" }, 400);
     }
 
-    if (dataset.visibility === "public") {
+    // #1408: an anonymous release is deliberately `visibility = 'public'` while
+    // its depositor stays concealed, so "public" no longer means "published".
+    // Taking it to mean that made de-anonymization unreachable: the normal
+    // request IS how a blinded deposit gets published for real, and this guard
+    // refused exactly the command the CLI tells the depositor to run.
+    if (dataset.visibility === "public" && !isAnonymous(dataset)) {
       return c.json({ error: "Dataset is already published" }, 409);
+    }
+    if (isAnonymous(dataset) && anonymousRequested) {
+      // Already released anonymously; asking again changes nothing. Said
+      // plainly rather than queued, so the depositor is not left waiting on an
+      // admin for a no-op.
+      return c.json(
+        {
+          error: "already_released_anonymously",
+          message: `${datasetId} is already released as an anonymous deposit. To publish it for real, restore the real Authors in dataset_description.json and request publication again without --anonymous.`,
+        },
+        409,
+      );
     }
 
     // Check for existing active request (allow re-checking blocked requests)
@@ -313,8 +357,22 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     // exempt. Fail-open on a fetch error: the CI check above already proved
     // GitHub reachable, so a later hiccup is logged and left to the admin
     // review rather than adding a spurious block.
+    //
+    // #1408 inverts BOTH of those exceptions for an anonymous release, because
+    // for it this gate is the blind check, not a quality check. The rule it
+    // enforces is that `dataset_description.json` -- git-tracked, and served
+    // publicly from the data plane -- does not still name the depositor who
+    // asked to be concealed. Failing open on a GitHub hiccup would mean
+    // granting a blind nobody verified, and an upstream review (OpenNeuro, an
+    // exemplar) says a dataset was curated, never that it was blinded. So for
+    // an anonymous release the check always runs and an infrastructure failure
+    // BLOCKS.
+    const anonymousNeedsBlindCheck = anonymousRequested;
     let minReasons: string[] | null = null;
-    if (!blocked && repoName && pat && dataset.source !== "openneuro" && !dataset.is_exemplar) {
+    const runMinimums =
+      !blocked &&
+      (anonymousNeedsBlindCheck || (dataset.source !== "openneuro" && !dataset.is_exemplar));
+    if (runMinimums && repoName && pat) {
       try {
         const descriptionJson = await getFileContent(repoName, "dataset_description.json", pat);
         let readme: string | null = null;
@@ -335,10 +393,26 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         }
       } catch (err) {
         console.error(
-          `[publish-request] submission-minimums check failed for ${datasetId} (non-fatal):`,
+          `[publish-request] submission-minimums check failed for ${datasetId}` +
+            `${anonymousNeedsBlindCheck ? "" : " (non-fatal)"}:`,
           err instanceof Error ? err.message : err,
         );
+        if (anonymousNeedsBlindCheck) {
+          blocked = true;
+          blockReason = "min_requirements_failed";
+          minReasons = [
+            "NEMAR could not read dataset_description.json from your repository, so it could not confirm that the Authors field is blinded. An anonymous release is not granted on an unverified blind. This is usually a transient GitHub error; request it again.",
+          ];
+        }
       }
+    } else if (runMinimums && anonymousNeedsBlindCheck) {
+      // No repository, or no token: same verdict for the same reason. There is
+      // nothing to read, so there is nothing to certify.
+      blocked = true;
+      blockReason = "min_requirements_failed";
+      minReasons = [
+        "An anonymous release requires NEMAR to read dataset_description.json and confirm that the Authors field names nobody, and this dataset has no readable repository yet. Upload the dataset first, then request the release.",
+      ];
     }
 
     let prId: number | null = requestId ?? null;
@@ -405,6 +479,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
           block_reason: blockReason,
           message: blockMessage(blockReason),
           dataset_id: datasetId,
+          anonymous: anonymousRequested,
           ci_url: ciUrl,
           // Specific, user-facing failures from the minimums check, mirrored
           // under `details` because the CLI's ApiError only carries that field.
@@ -484,16 +559,22 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
           replyTo,
           isDev,
           c.env,
+          { anonymous: anonymousRequested },
         );
       }
     } catch (emailError) {
       console.error("Failed to send publication request notification:", emailError);
     }
 
+    // The flag is ECHOED, not assumed. A depositor whose client lost it would
+    // otherwise see a success message byte-identical to a correct request and
+    // find out at approval, when the outcome is no longer theirs to change.
+    // The CLI prints a different line for each value (`src/commands/dataset.ts`).
     return c.json({
-      message: "Publication request submitted",
+      message: anonymousRequested ? "Anonymous release requested" : "Publication request submitted",
       dataset_id: datasetId,
       status: "requested",
+      anonymous: anonymousRequested,
     });
   });
 
@@ -547,6 +628,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         current_step: string | null;
         last_error: string | null;
         updated_at: string;
+        anonymous: number | null;
         github_repo: string | null;
       }>();
 
@@ -620,6 +702,11 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         : {}),
       ...(minReasons?.length ? { reasons: minReasons, policy_url: SUBMISSION_POLICY_URL } : {}),
       ...(prescreenAdvisory ? { advisory: prescreenAdvisory } : {}),
+      // #1408: the one place a depositor can confirm, before an admin acts,
+      // that the release they asked for is the release that was recorded.
+      // Without it the flag is write-only: nothing between `--anonymous` and
+      // the published result reports which of the two runs is queued.
+      anonymous: request.anonymous === 1,
       steps_completed: JSON.parse(request.steps_completed || "[]"),
       current_step: request.current_step,
       last_error: request.last_error,
@@ -650,10 +737,13 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
 
     const request = await db
       .prepare(
-        "SELECT id, status, updated_at FROM publication_requests WHERE dataset_id = ? AND status = 'requested' ORDER BY requested_at DESC LIMIT 1",
+        // `anonymous` rides along so the reminder says the same thing the
+        // original notification did: an admin reading only the resend must
+        // not approve an anonymous release believing it is a publication.
+        "SELECT id, status, updated_at, anonymous FROM publication_requests WHERE dataset_id = ? AND status = 'requested' ORDER BY requested_at DESC LIMIT 1",
       )
       .bind(datasetId)
-      .first<{ id: number; status: string; updated_at: string }>();
+      .first<{ id: number; status: string; updated_at: string; anonymous: number | null }>();
 
     if (!request) {
       return c.json({ error: "No pending publication request found" }, 404);
@@ -686,6 +776,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
           replyTo,
           isDev,
           c.env,
+          { anonymous: request.anonymous === 1 },
         );
       }
     } catch (emailError) {
@@ -855,14 +946,27 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       );
     }
 
-    // Already public (idempotent)
-    if (dataset.visibility === "public") {
+    // Already public (idempotent). An anonymous deposit is public too, so it
+    // would take this branch and report success while its repository stayed
+    // private and its depositor concealed (#1408) -- a 200 saying "already
+    // public" to an admin who asked to publish it for real. Named instead.
+    if (dataset.visibility === "public" && !isAnonymous(dataset)) {
       return c.json(
         {
           message: "Dataset is already public",
           dataset_id: datasetId,
         },
         200,
+      );
+    }
+    if (isAnonymous(dataset)) {
+      return c.json(
+        {
+          error: "anonymous_deposit",
+          message: `${datasetId} is an anonymous deposit. Publishing it means ending anonymity, which restores attribution from the depositor's own dataset_description.json -- run it through the publication request flow so the author check and the enrichment pass both happen.`,
+          dataset_id: datasetId,
+        },
+        409,
       );
     }
 

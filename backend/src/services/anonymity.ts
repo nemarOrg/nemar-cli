@@ -8,11 +8,14 @@
  * repository can stay private without the dataset becoming unreadable. This
  * module is the concealed half.
  *
- * **Nothing sets `anonymous = 1` yet.** `markAnonymous` is the API the CLI and
- * website surfaces (#1408) will call; until that lands the state is
- * unreachable in production, and the leak closures here are for the shape the
- * system is about to have rather than one it has. That is deliberate: a
- * closure written after the route exists is written against a live leak.
+ * **`markAnonymous` is called by exactly one path**, and that is the point:
+ * `stepRepoPublic` in the publication orchestrator, at the moment an
+ * admin-approved anonymous release makes the data readable (#1408). Anonymity
+ * is asked for at publication rather than at upload, because the moment a
+ * depositor wants concealment is the moment they want their data read; those
+ * are not two decisions. The leak closures below were written before that path
+ * existed, deliberately: a closure written after the route exists is written
+ * against a live leak.
  *
  * Three rules, and the reasoning behind each is what keeps them from drifting:
  *
@@ -42,10 +45,31 @@
 
 import type { Bindings } from "../types/bindings.js";
 
-/** The columns any anonymity decision reads. */
+/**
+ * The column `isAnonymous` reads.
+ *
+ * REQUIRED, not optional, and that is the whole point of the type: an
+ * optional field is assignable from a row whose `SELECT` never asked for the
+ * column, so the predicate would quietly answer "no" and TypeScript would
+ * raise nothing. Every anonymity decision here fails in the direction the
+ * feature exists to prevent, so the compiler is the only reviewer that sees
+ * every call site.
+ */
 export interface AnonymityFields {
-  anonymous?: number | null;
-  first_published_at?: string | null;
+  anonymous: number | null;
+}
+
+/**
+ * The column `hasEverBeenPublished` reads, required for the same reason.
+ *
+ * Split from `AnonymityFields` rather than added to it because the two
+ * predicates are asked at different places: most callers know only whether a
+ * dataset is currently anonymous, and requiring a column they have no use for
+ * would push them toward `SELECT *` or a cast. A caller that asks THIS
+ * question must carry THIS column.
+ */
+export interface PublicationStampFields {
+  first_published_at: string | null;
 }
 
 /** What a write to `datasets` actually did, so a caller can tell a no-op apart. */
@@ -85,36 +109,82 @@ export function isAnonymous(row: AnonymityFields | null | undefined): boolean {
  * fails because the publish orchestrator flips visibility before it mints the
  * DOI, so a crashed run leaves a public dataset with no DOI.
  */
-export function hasEverBeenPublished(row: AnonymityFields | null | undefined): boolean {
+export function hasEverBeenPublished(row: PublicationStampFields | null | undefined): boolean {
   return Boolean(row?.first_published_at);
 }
 
 /**
  * What the catalog says in place of an author list while a deposit is blind.
  *
- * It is a label, not an interlock. What stops a still-blind deposit from
- * being published is an explicit refusal in the publication-request route
- * (`routes/datasets/publication.ts`), which reads `anonymous` directly. An
- * earlier draft of this module claimed the label was matched by ADR 0026's
- * `PLACEHOLDER_AUTHOR` and that the submission-minimums gate therefore
- * enforced the ordering for free. Both halves were wrong: that regex is
- * anchored (`^anonymous$`, so it does not match this label), and the gate
- * reads `dataset_description.json` from the repository, never this column.
- * The refusal is written out because the ordering it protects is real: the
- * depositor has to commit their attribution while the repository is still
- * private, since ADR 0001 makes `main` pull-request-only once it is public.
+ * It is a label, and it is ALSO read as one interlock, which is a distinction
+ * worth keeping straight. What orders de-anonymization before publication is
+ * the submission-minimums gate in `routes/datasets/publication.ts`, which
+ * reads the depositor's own `dataset_description.json` from the repository and
+ * refuses a publication whose `Authors` still names nobody. This column is not
+ * that gate. What it IS read by is `blockedByUnrestoredAttribution` in the
+ * publication orchestrator, which refuses to mint or publish a DOI while the
+ * catalog still carries this string -- the same ordering stated as an
+ * invariant, so a retry or a reordered step set cannot slip past it.
+ *
+ * An earlier draft of this module claimed ADR 0026's `PLACEHOLDER_AUTHOR`
+ * matched this label and that the minimums gate therefore enforced the
+ * ordering for free. Both halves were wrong at the time: the regex was
+ * anchored (`^anonymous$`), and the gate reads the repository file, never this
+ * column. The regex has since been widened to match `anonymous` as a leading
+ * word, precisely so a depositor who copies this label into their own file is
+ * not told it "names" someone; the second half is still true and is why the
+ * interlock above reads the column directly.
+ *
+ * The ordering it protects is real: the depositor has to commit their
+ * attribution while the repository is still private, since ADR 0001 makes
+ * `main` pull-request-only once it is public.
  */
 export const ANONYMOUS_AUTHORS_LABEL = "Anonymous (withheld until publication)";
 
 /**
- * `publication_requests.block_reason` for a deposit that is still blind.
+ * Why a DOI sync was skipped for a blinded deposit (`DoiSyncOutcome.reason`).
  *
- * Declared here rather than in the route because it is part of what anonymity
- * MEANS -- the state and the one thing it forbids travel together -- and
- * because the contract enum, the message table and the check must not drift
- * apart. `shared/contract/publication.ts` carries the wire value.
+ * It was ALSO a `publication_requests.block_reason` in phase 2, when an
+ * anonymous dataset could not be published at all. #1408 replaced that flat
+ * refusal with a conditional gate -- a normal request is exactly how a blinded
+ * deposit gets published for real -- so the value left the contract enum and
+ * migration 0086 clears the rows that carried it. It survives here because the
+ * enrichment pass still has a real reason to skip: minting or refreshing a
+ * DataCite record for a concealed depositor is the one write that cannot be
+ * taken back (ADR 0041).
  */
 export const ANONYMOUS_DEPOSIT_REASON = "anonymous_deposit";
+
+/**
+ * The two identifiers a concealed deposit must not advertise to the public.
+ *
+ * Neither NAMES the depositor, which is why they are handled here rather than
+ * by a writer: `github_repo` points at a repository that is private (so the
+ * URL 404s while still disclosing that a repo exists under a predictable
+ * name), and `concept_doi` is registered `reserved` at EZID, so it does not
+ * resolve and must not be cited. `data-router.ts` already withholds both from
+ * `external_links`; this is the same rule for the catalog projections, which
+ * serve the raw columns.
+ *
+ * Conditional on the VIEWER, unlike every other rule in this module, and that
+ * is deliberate: anonymity is toward the public, never toward NEMAR or toward
+ * the depositor themselves (requirement R5). `nemar dataset clone`, `commit`,
+ * `push` and `ci` all read `github_repo` from these routes, and the depositor
+ * needs exactly those commands to restore their attribution and end the
+ * anonymity. Withholding from the owner would break the documented way out.
+ */
+export function withheldWhileAnonymous<T extends Record<string, unknown>>(
+  row: T,
+  viewerMayKnow: boolean,
+): T {
+  if (viewerMayKnow || row.anonymous !== 1) return row;
+  return {
+    ...row,
+    ...("github_repo" in row ? { github_repo: null } : {}),
+    ...("concept_doi" in row ? { concept_doi: null } : {}),
+    ...("doi" in row ? { doi: null } : {}),
+  };
+}
 
 /**
  * Owner identity, as SQL.
@@ -288,24 +358,6 @@ export async function markAnonymous(
 
   const changed = result.success && result.meta.changes > 0;
   return { changed, repoMetadataStale: changed && before?.enriched === 1 };
-}
-
-/**
- * Turn anonymity off without publishing (a depositor changing their mind).
- *
- * The blinded values stay in D1 until the next enrichment re-derives them
- * from the depositor's own `dataset_description.json`, so a caller that wants
- * the catalog to name the depositor again has to run one. Clearing the flag
- * is the permission to do that, not the doing of it.
- */
-export async function clearAnonymous(
-  env: Bindings,
-  datasetId: string,
-): Promise<AnonymityWriteResult> {
-  const result = await env.DB.prepare("UPDATE datasets SET anonymous = 0 WHERE dataset_id = ?")
-    .bind(datasetId)
-    .run();
-  return { changed: result.success && result.meta.changes > 0 };
 }
 
 /**

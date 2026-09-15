@@ -15,6 +15,8 @@
 
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   OWNER_GITHUB_SQL,
   OWNER_USERNAME_SQL,
@@ -258,6 +260,24 @@ describe("predicates", () => {
   test("hasEverBeenPublished is the stamp, never a re-derivation", () => {
     expect(hasEverBeenPublished({ first_published_at: "2026-01-01 00:00:00" })).toBe(true);
     expect(hasEverBeenPublished({ first_published_at: null })).toBe(false);
-    expect(hasEverBeenPublished({})).toBe(false);
+  });
+
+  test("a row that omits the column does not compile", () => {
+    // The regression this pins: `first_published_at` used to be OPTIONAL on
+    // the shared field type, so `hasEverBeenPublished(row)` accepted a row
+    // whose SELECT never asked for the column and answered `false` -- the
+    // direction that lets an already-published dataset be concealed. The
+    // publication route did exactly that. Both predicates now require the
+    // column they read, so the omission is a type error, and this asserts on
+    // the type rather than on a runtime value because there is no runtime
+    // value left to assert on.
+    const source = readFileSync(
+      join(import.meta.dir, "..", "src", "services", "anonymity.ts"),
+      "utf8",
+    );
+    expect(source).toContain("export interface AnonymityFields {\n  anonymous: number | null;\n}");
+    expect(source).toContain(
+      "export interface PublicationStampFields {\n  first_published_at: string | null;\n}",
+    );
   });
 });

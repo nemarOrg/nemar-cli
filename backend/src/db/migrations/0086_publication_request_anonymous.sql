@@ -25,5 +25,22 @@
 
 ALTER TABLE publication_requests ADD COLUMN anonymous INTEGER NOT NULL DEFAULT 0;
 
--- No backfill. Every existing request predates the feature, so 0 is not a
--- guess -- it is the truth, and the DEFAULT already states it.
+-- No backfill of the new column. Every existing request predates the feature,
+-- so 0 is not a guess -- it is the truth, and the DEFAULT already states it.
+
+-- One row cleanup, though. Phase 2 blocked every publication request from an
+-- anonymous dataset with `block_reason = 'anonymous_deposit'`, and this phase
+-- replaces that flat refusal with a conditional gate: the normal request IS
+-- how a blinded deposit gets published for real. The reason no longer exists
+-- in the code or in `shared/contract/publication.ts`, so a surviving row would
+-- serve a value the CLI's enum does not know, on the one route a depositor
+-- checks to find out why they are stuck. Production has none (nothing set
+-- `anonymous = 1` before this epic); a staging walk-through can.
+--
+-- Re-opened rather than deleted: the request itself was legitimate, and what
+-- was wrong was the refusal.
+UPDATE publication_requests
+   SET status = 'requested',
+       block_reason = NULL,
+       updated_at = datetime('now')
+ WHERE block_reason = 'anonymous_deposit';
