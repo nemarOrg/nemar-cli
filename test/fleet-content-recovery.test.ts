@@ -31,16 +31,7 @@ import {
 } from "../src/lib/fleet-content-recovery";
 import { REMOTE_NAME } from "../src/lib/fleet-key-registration";
 import { runCommand } from "../src/lib/git-annex/run-command";
-
-/** A bucket listing in the shape `listExistingObjects` returns: key -> size. */
-function sizedObjects(keys: string[]): Map<string, number> {
-  return new Map(keys.map((key) => [key, declaredSize(key)]));
-}
-
-/** The size a key declares, which is what a real listing would agree with. */
-function declaredSize(key: string): number {
-  return Number(/-s(\d+)/.exec(key)?.[1] ?? 0);
-}
+import { annexKeyDeclaredSize } from "../src/lib/s3-server-copy";
 
 let root: string;
 let origin: string;
@@ -134,7 +125,18 @@ beforeEach(async () => {
 }, 120_000);
 
 afterEach(() => {
-  process.env.PATH = realPath;
+  // `process.env.PATH = undefined` writes the STRING "undefined" for the rest of
+  // this shared `bun test` process, which would break every later test that
+  // shells out. Delete instead, the way curl-stream-copy.unit.test.ts does.
+  // Restoring env needs the key GONE: assigning undefined stores the literal
+  // string "undefined" for the rest of this shared `bun test` process, which
+  // breaks every later test that shells out.
+  if (realPath === undefined) {
+    // biome-ignore lint/performance/noDelete: the rule targets hot-path objects, not env teardown.
+    delete process.env.PATH;
+  } else {
+    process.env.PATH = realPath;
+  }
   while (scratch.length > 0) {
     const dir = scratch.pop();
     if (!dir || !existsSync(dir)) continue;
@@ -357,7 +359,7 @@ exit 0`);
 
     const outcome = await recoverDatasetContent(
       "on000001",
-      async () => new Map([[key, declaredSize(key)]]),
+      async () => new Map([[key, annexKeyDeclaredSize(key) ?? 0]]),
       {
         workRoot,
         apply: true,

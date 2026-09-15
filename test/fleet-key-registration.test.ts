@@ -25,8 +25,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   MIN_DATA_AVAILABILITY,
-  dataAvailability,
   type ObjectSource,
+  dataAvailability,
   repairDatasetKeyRegistration,
   resolveRemoteUuid,
   scanDatasetKeyRegistration,
@@ -34,15 +34,23 @@ import {
 } from "../src/lib/fleet-key-registration";
 import { runCommand } from "../src/lib/git-annex/run-command";
 import { batchSetKeysPresent } from "../src/lib/git-annex/transfer";
+import { annexKeyDeclaredSize } from "../src/lib/s3-server-copy";
 
 /** A bucket listing in the shape `listExistingObjects` returns: key -> size. */
 function sizedObjects(keys: string[]): Map<string, number> {
   return new Map(keys.map((key) => [key, declaredSize(key)]));
 }
 
-/** The size a key declares, which is what a real listing would agree with. */
+/**
+ * The size a key declares, which is what a real listing would agree with.
+ *
+ * The production function, not a local regex. A local `/-s(\d+)/` diverges from
+ * `annexKeyDeclaredSize`'s `/-s(\d+)--/`: it returns a size for a chunked key
+ * where production returns null, so a test built on it would exercise a rule
+ * production does not have.
+ */
 function declaredSize(key: string): number {
-  return Number(/-s(\d+)/.exec(key)?.[1] ?? 0);
+  return annexKeyDeclaredSize(key) ?? 0;
 }
 
 let root: string;
@@ -243,7 +251,16 @@ describe("repairDatasetKeyRegistration, withdrawing a claim", () => {
     expect(
       (
         await run(
-          ["git", "annex", "find", "--include", "*", "--in", await uuidOf(before), "--format=${key}\n"],
+          [
+            "git",
+            "annex",
+            "find",
+            "--include",
+            "*",
+            "--in",
+            await uuidOf(before),
+            "--format=${key}\n",
+          ],
           before,
         )
       )
@@ -373,8 +390,8 @@ describe("repairDatasetKeyRegistration", () => {
   }, 240_000);
 
   test("leaves a dataset alone when the bucket cannot account for its content", async () => {
-    // on006159 has 221 of 480 keys with no object at all. Registering the other
-    // 259 would be true but would also make a dataset whose real problem is
+    // on006159 has 222 of 480 keys with no object at all. Registering the other
+    // 258 would be true but would also make a dataset whose real problem is
     // missing content look like it had been repaired.
     const partial = directoryObjectSource(store);
     const outcome = await repairDatasetKeyRegistration(
@@ -522,9 +539,18 @@ describe("dataAvailability (ADR 0064)", () => {
   });
 
   test("reproduces the measured ratios that set the threshold", () => {
-    // The five public datasets ADR 0064 withdraws, from the 2026-09-15 sweep.
+    // The five public datasets ADR 0064 puts on NOTICE, from the 2026-09-15
+    // sweep. Not withdrawn: the ADR opens a notice period to 15 October 2026
+    // rather than tombstoning on measurement day, and the five entries actually
+    // on scripts/withdrawn-datasets.json are a different five.
+    //
+    // on006159's denominator is its DISTINCT KEYS (480), re-measured against the
+    // live dataset with `nemar admin fleet key-registration on006159`, which
+    // reports "222 of 480". It read 606 here, which is neither its key count nor
+    // its tree-entry count, and pinned 36.6% -- the superseded figure the ADR
+    // exists to disown.
     const measured: Array<[string, number, number, number]> = [
-      ["on006159", 222, 606, 0.366],
+      ["on006159", 222, 480, 0.4625],
       ["on004917", 104, 410, 0.254],
       ["on004475", 30, 163, 0.184],
       ["on005571", 55, 300, 0.183],

@@ -26,7 +26,7 @@ import ora from "ora";
 import { addCi, importDataset, reindexDataset } from "./api/admin.js";
 import { getDataset, getUserCiStatus } from "./api/datasets.js";
 import { approvePublication, requestPublication } from "./api/publish.js";
-import { MIN_DATA_AVAILABILITY } from "./fleet-key-registration.js";
+
 import { cloneDataset, pushToGitHub } from "./git-annex/clone-push.js";
 import { configureGitHubRemote } from "./git-annex/github.js";
 import { isNeverAnnexedMetadata, shouldAnnex } from "./git-annex/policy.js";
@@ -47,8 +47,11 @@ import { annexCopyUpload, normalizeImportedTree } from "./import-normalize.js";
 import {
   type ImportManifest,
   type ImportManifestItem,
+  MIN_DATA_AVAILABILITY,
+  annexKeyDeclaredSize,
   batchServerSideCopy,
   cleanupStaging,
+  dataAvailability,
   expectedSizesFromItems,
   filterAlreadyCopied,
   isKeyPresentAtDeclaredSize,
@@ -1556,7 +1559,18 @@ export async function finalizeImport(
     // moved: sixteen datasets finalized that way, 12,039 keys with no object in
     // the bucket, and the location log then told every clone NEMAR had them
     // (#1396). So the gate is the TREE against the bucket, not the manifest
-    // against the bucket (ADR 0063).
+    // against the bucket, which is ADR 0061's "a dataset with any annexed key
+    // the bucket cannot account for is reported and skipped" applied at the one
+    // place that can still stop a DOI being minted.
+    //
+    // **This gate is deliberately stricter than ADR 0064's 90%, and they are not
+    // in conflict because they answer different questions.** 0064 decides
+    // whether an ALREADY IMPORTED dataset stays listed when the missing content
+    // is gone from its source; the threshold is a floor on what a reader can
+    // still use. Here nothing is gone: a key with no object means OUR copy did
+    // not finish, which is retryable, so the answer is re-run the copy rather
+    // than mint a DOI over a 9% hole. Importing to 91% and calling it listable
+    // is how #1396 happened.
     //
     // `existing` is the listing from the verify step a few lines up; nothing
     // writes to the prefix in between, and re-listing a 60,000-object dataset
@@ -1565,16 +1579,17 @@ export async function finalizeImport(
     const treeKeys = new Set((await listAnnexedKeys(datasetPath)).values());
     const unbacked = keysWithoutObjects(treeKeys, existing);
     if (unbacked.length > 0) {
-      // The ratio, not just the count, because it is what decides whether this
-      // dataset could ever be listed (ADR 0064) and because the tracking issue
-      // filed from this failure is triaged by severity: "1 of 65,063 missing" and
-      // "935 of 936 missing" are the same sentence without it. Data only, which
+      // The ratio, not just the count, because the tracking issue filed from
+      // this failure is triaged by severity: "1 of 65,063 missing" and "935 of
+      // 936 missing" are the same sentence without it. Computed by the one
+      // function that owns ADR 0064's rule, never inline here, so the zero-key
+      // case and the threshold cannot drift between the two. Data only, which
       // is what `treeKeys` already is: metadata is never annexed (ADR 0015).
-      const available = (treeKeys.size - unbacked.length) / treeKeys.size;
-      const shortfall = available < MIN_DATA_AVAILABILITY;
-      const belowThreshold = shortfall
-        ? `, below the ${(MIN_DATA_AVAILABILITY * 100).toFixed(0)}% a listed dataset must reach (ADR 0064)`
-        : "";
+      const available = dataAvailability({ annexed: [...treeKeys], missingContent: unbacked });
+      const belowThreshold =
+        available < MIN_DATA_AVAILABILITY
+          ? `, below the ${(MIN_DATA_AVAILABILITY * 100).toFixed(0)}% a listed dataset must reach (ADR 0064)`
+          : "";
       treeGateSpinner.fail(
         [
           `${unbacked.length} of ${treeKeys.size} annexed key(s) in the tree have no object in s3://${S3_BUCKET}/${nemarId}/objects/`,
@@ -1589,10 +1604,24 @@ export async function finalizeImport(
       );
       process.exit(1);
     }
-    treeGateSpinner.succeed(`Every one of ${treeKeys.size} annexed key(s) has an object`);
+    // A key whose name declares no size is accepted on its name alone, because
+    // there is no declared length to check it against (`git:` keys, and a
+    // `URL--` key from `addurl --relaxed`). That is #967's hole surviving inside
+    // #1396's fix, so it is counted and said out loud rather than folded into
+    // the reassuring total.
+    const unsized = [...treeKeys].filter((key) => annexKeyDeclaredSize(key) === null);
+    treeGateSpinner.succeed(
+      unsized.length === 0
+        ? `Every one of ${treeKeys.size} annexed key(s) has an object of its declared size`
+        : `Every one of ${treeKeys.size} annexed key(s) has an object; ${unsized.length} declare no size and were checked by name only`,
+    );
 
     const registerSpinner = ora("Registering files in git-annex...").start();
-    const keys = manifest.items.map((it) => it.key);
+    // The TREE's keys, the same set the gate just proved, not `manifest.items`.
+    // A tree key with an object but no manifest entry passed the gate and was
+    // then published unregistered: present in the bucket and invisible to every
+    // clone. Quieter than the reverse, and still a dataset that does not serve.
+    const keys = [...treeKeys];
     const regResult = await batchSetKeysPresent(datasetPath, keys, nemarUuid);
     if (regResult.failed > 0) {
       // Registration is the mechanism by which clones know a blob is in S3.
