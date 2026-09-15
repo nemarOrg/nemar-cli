@@ -90,6 +90,23 @@ export function groupKey(cmd: Command): string {
   return parts.join(" ");
 }
 
+/**
+ * How this command is actually invoked, program name included: `nemar dataset
+ * download` under the group, `nemar download` through the root shortcut.
+ *
+ * Help examples have to be built from this rather than written out, because
+ * one factory backs both spellings (`createDownloadCommand`), and a hardcoded
+ * example under the other name reads as the only form that works -- the exact
+ * confusion the shortcut exists to remove.
+ */
+export function invokedAs(cmd: Command): string {
+  const parts: string[] = [];
+  for (let node: Command | null = cmd; node; node = node.parent) {
+    parts.unshift(node.name());
+  }
+  return parts.join(" ");
+}
+
 /** The formatHelp override for color-coded help output. */
 const colorFormatHelp = {
   formatHelp(cmd: Command, helper: Help): string {

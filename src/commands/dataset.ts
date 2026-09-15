@@ -142,6 +142,7 @@ import {
   dropUnusedAnnexObjects,
   getDatasetData,
 } from "../lib/git-annex/transfer.js";
+import { invokedAs } from "../lib/help.js";
 import {
   detectLicense,
   ensureLicenseFile,
@@ -538,7 +539,7 @@ export function createUploadCommand(): Command {
     )
     .addHelpText(
       "after",
-      `
+      ({ command }) => `
 Description:
   Upload a BIDS dataset to NEMAR. The dataset will be validated, assigned
   a unique ID (nm000XXX), and stored on GitHub (metadata) and S3 (data files).
@@ -560,10 +561,10 @@ Note:
   (private) or 'nemar dataset update' (public).
 
 Examples:
-  $ nemar dataset upload ./my-eeg-dataset
-  $ nemar dataset upload ./ds -n "My EEG Study" -d "64-channel EEG data"
-  $ nemar dataset upload ./ds --dry-run        # Preview without uploading
-  $ nemar dataset upload ./ds -j 16            # More parallel streams`,
+  $ ${invokedAs(command)} ./my-eeg-dataset
+  $ ${invokedAs(command)} ./ds -n "My EEG Study" -d "64-channel EEG data"
+  $ ${invokedAs(command)} ./ds --dry-run        # Preview without uploading
+  $ ${invokedAs(command)} ./ds -j 16            # More parallel streams`,
     )
     .action(async (datasetPath, options) => {
       // Get config for GitHub username
@@ -978,7 +979,7 @@ export function createDownloadCommand(): Command {
     )
     .addHelpText(
       "after",
-      `
+      ({ command }) => `
 Description:
   Download a BIDS dataset from NEMAR or OpenNeuro.
 
@@ -1001,18 +1002,18 @@ Requirements:
   - AWS CLI recommended for OpenNeuro downloads (falls back to HTTPS)
 
 Examples:
-  $ nemar dataset download nm000104              # Download NEMAR dataset (skips stimuli/derivatives)
-  $ nemar dataset download nm000104 -o ./data    # Custom output directory
-  $ nemar dataset download nm000104 --no-data    # Metadata only (fast)
-  $ nemar dataset download nm000104 -j 8         # More parallel streams
-  $ nemar dataset download nm000104 --resume     # Resume partial download
-  $ nemar dataset download nm000104 --update     # Pull only the version diff
-  $ nemar dataset download nm000104 --update --prune  # Plus drop orphan objects
-  $ nemar dataset download nm000104 --subjects sub-01,02      # Only these subjects
-  $ nemar dataset download nm000104 --tasks rest --datatypes eeg  # Subset
-  $ nemar dataset download nm000104 --stimuli                 # Also download stimuli/
-  $ nemar dataset download nm000104 --stimuli --derivatives   # Download everything
-  $ nemar dataset download ds000248              # Download from OpenNeuro`,
+  $ ${invokedAs(command)} nm000104              # Download NEMAR dataset (skips stimuli/derivatives)
+  $ ${invokedAs(command)} nm000104 -o ./data    # Custom output directory
+  $ ${invokedAs(command)} nm000104 --no-data    # Metadata only (fast)
+  $ ${invokedAs(command)} nm000104 -j 8         # More parallel streams
+  $ ${invokedAs(command)} nm000104 --resume     # Resume partial download
+  $ ${invokedAs(command)} nm000104 --update     # Pull only the version diff
+  $ ${invokedAs(command)} nm000104 --update --prune  # Plus drop orphan objects
+  $ ${invokedAs(command)} nm000104 --subjects sub-01,02      # Only these subjects
+  $ ${invokedAs(command)} nm000104 --tasks rest --datatypes eeg  # Subset
+  $ ${invokedAs(command)} nm000104 --stimuli                 # Also download stimuli/
+  $ ${invokedAs(command)} nm000104 --stimuli --derivatives   # Download everything
+  $ ${invokedAs(command)} ds000248              # Download from OpenNeuro`,
     )
     .action(async (datasetId, options) => {
       // OpenNeuro datasets (ds######) - check for NEMAR counterpart first
