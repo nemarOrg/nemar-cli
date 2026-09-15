@@ -16,9 +16,20 @@
 
 import { readFileSync } from "node:fs";
 
-export type WithdrawalReason = "upstream_403" | "no_source";
+/**
+ * Why a dataset is on this list.
+ *
+ * `recovered` is the outcome, not a cause: the content was copied back and the
+ * dataset reinstated, and the entry stays as the record of a withdrawal that
+ * should not have happened. Six of the original eleven turned out to be this
+ * (#1396). Their filed reason was never measured per dataset -- nine said
+ * `upstream_403` and two `no_source` -- and for those six the content was
+ * fetchable by OpenNeuro's own advertised route the whole time they sat private
+ * with tombstoned DOIs.
+ */
+export type WithdrawalReason = "upstream_403" | "no_source" | "recovered";
 
-const WITHDRAWAL_REASONS: ReadonlySet<string> = new Set(["upstream_403", "no_source"]);
+const WITHDRAWAL_REASONS: ReadonlySet<string> = new Set(["upstream_403", "no_source", "recovered"]);
 
 const DATASET_ID_RE = /^(nm|xx|on)\d{6}$/;
 
@@ -26,6 +37,15 @@ export interface WithdrawnDatasetEntry {
   dataset_id: string;
   reason: WithdrawalReason;
   note: string;
+  /**
+   * Whether the dataset is still down. False for a reinstated one, which keeps
+   * its entry as a record but must not be re-targeted by `--all`.
+   */
+  withdrawn?: boolean;
+  /** Share of its DATA keys NEMAR can serve, 0 to 1 (ADR 0064). */
+  data_available?: number;
+  data_keys_missing?: number;
+  data_keys_total?: number;
 }
 
 /**
@@ -40,7 +60,15 @@ export function parseWithdrawnDatasets(raw: unknown): WithdrawnDatasetEntry[] {
     if (typeof entry !== "object" || entry === null) {
       throw new Error(`Withdrawn-datasets entry ${i} is not an object`);
     }
-    const { dataset_id, reason, note } = entry as Record<string, unknown>;
+    const {
+      dataset_id,
+      reason,
+      note,
+      withdrawn,
+      data_available,
+      data_keys_missing,
+      data_keys_total,
+    } = entry as Record<string, unknown>;
     if (typeof dataset_id !== "string" || !DATASET_ID_RE.test(dataset_id)) {
       throw new Error(`Withdrawn-datasets entry ${i}: dataset_id "${dataset_id}" is not valid`);
     }
@@ -52,7 +80,26 @@ export function parseWithdrawnDatasets(raw: unknown): WithdrawnDatasetEntry[] {
     if (typeof note !== "string" || note.length === 0) {
       throw new Error(`Withdrawn-datasets entry ${i} (${dataset_id}): note is required`);
     }
-    return { dataset_id, reason: reason as WithdrawalReason, note };
+    if (withdrawn !== undefined && typeof withdrawn !== "boolean") {
+      throw new Error(`Withdrawn-datasets entry ${i} (${dataset_id}): withdrawn must be a boolean`);
+    }
+    if (
+      data_available !== undefined &&
+      (typeof data_available !== "number" || data_available < 0 || data_available > 1)
+    ) {
+      throw new Error(
+        `Withdrawn-datasets entry ${i} (${dataset_id}): data_available must be between 0 and 1`,
+      );
+    }
+    return {
+      dataset_id,
+      reason: reason as WithdrawalReason,
+      note,
+      ...(typeof withdrawn === "boolean" ? { withdrawn } : {}),
+      ...(typeof data_available === "number" ? { data_available } : {}),
+      ...(typeof data_keys_missing === "number" ? { data_keys_missing } : {}),
+      ...(typeof data_keys_total === "number" ? { data_keys_total } : {}),
+    };
   });
 }
 
@@ -104,4 +151,16 @@ export function resolveWithdrawTargets(
     targets.push({ datasetId: id, reason });
   }
   return { targets };
+}
+
+/**
+ * The entries `--all` should act on: the ones still down.
+ *
+ * An entry with `withdrawn: false` is a record of a withdrawal that was
+ * reversed, kept so the mistake stays visible. Re-targeting it would tombstone
+ * a dataset we just reinstated, which is how a forensic list turns into a
+ * loaded gun.
+ */
+export function stillWithdrawn(entries: WithdrawnDatasetEntry[]): WithdrawnDatasetEntry[] {
+  return entries.filter((entry) => entry.withdrawn !== false);
 }

@@ -102,6 +102,17 @@ earlier releases are described only by their generated notes.
 
 ### Fixed
 
+- **The withdrawn-datasets list now records a measured reason per dataset, and six entries
+  were wrong (#1396).** It carried one filed reason each, 9 `upstream_403` and 2
+  `no_source`, none of it measured per dataset. Trying every key against both routes
+  OpenNeuro publishes found that six of the eleven were fetchable by the advertised route
+  the whole time they sat private with tombstoned DOIs: `on004148`, `on007816`, `on007987`,
+  `on008065`, `on005516` and `on005279`, now `reason: recovered` and reinstated. Entries
+  keep `data_keys_missing` / `data_keys_total` / `data_available` so the claim is checkable,
+  and a `withdrawn: false` flag so `withdraw --all` skips a reinstated one instead of taking
+  it down again. A test asserts the two halves agree: everything still down is under the 90%
+  threshold, and everything reinstated is at or above it.
+
 - **NEMAR lists a dataset only when at least 90% of its DATA files are available (ADR 0064,
   partially superseding ADR 0005).** `dataAvailability` and `MIN_DATA_AVAILABILITY` put the
   rule in one place. The denominator is data, never `total_files`: metadata is never annexed

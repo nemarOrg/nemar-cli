@@ -63,12 +63,14 @@ the registration scan already computes. The numerator is those keys with no obje
 registration sweep uses, so a zero-byte leftover counts as missing rather than present
 (#967).
 
-Keys rather than tree entries, and the two differ: two identical files share one key, so
-a key count is slightly below a `120000` entry count (936 entries against 935 keys in
-`on008730`). Keys are chosen because both halves of the ratio then measure the same
-thing, and because a key is the unit that is fetchable or not. Where a dataset is near
-the threshold the distinction is worth checking by hand rather than arguing about in the
-abstract.
+Keys, never tree entries, and the gap between them is not cosmetic. Two identical files
+share one key, so an entry count runs above a key count: `on008730` has 936 entries over
+935 keys, and `on006159` has 664 over 480, which moves its shortfall from 36.6% to
+46.2%. Worse, a `120000` count misses annexed files entirely on an adjusted or unlocked
+branch, where git-annex writes a `100644` pointer file whose content is the
+`/annex/objects/...` path instead of a symlink; `on008465` is all pointer files and a
+symlink count calls it 0 annexed files of 5,349. `git annex find` answers correctly for
+both shapes, which is why it is the definition here.
 
 Below the threshold, ADR 0005 is unchanged: the dataset is listed, serves what it has,
 omits what it does not, and advertises nothing it cannot deliver.
@@ -110,16 +112,25 @@ data nobody can supply, which is what withdrawal is for.
 
 ## Consequences
 
-- 11 datasets fall below 90% on measurement day. 5 are public and are on notice rather
-  than already down (`on006159` 36.6% of its data missing, `on004917` 25.4%,
-  `on004475` 18.4%, `on005571` 18.3%, `on003574` 12.2%); the other 6 are already
+- 14 datasets fall below 90% on measurement day. 5 are public and are on notice rather
+  than already down (`on006159` 46.2% of its data missing, `on004917` 25.4%,
+  `on004475` 18.4%, `on005571` 18.3%, `on003574` 12.2%); the other 9 are already
   private. Nothing was tombstoned on measurement day: every one of these gaps is an
   upstream export defect, so they go into the 15 October notice.
+- **The first count of these was wrong, by the mistake this ADR exists to name.** A
+  scratch script counted the denominator as `120000` tree entries, which misses the
+  other shape git-annex uses: on an adjusted or unlocked branch an annexed file is a
+  `100644` POINTER FILE whose content is the `/annex/objects/...` path. `on008465` is
+  entirely pointer files, so it counted as 0 annexed files of 5,349 and dropped out of
+  the ratio altogether when it is really 24 missing of 3,853. Symlink counts also
+  over-count where files share content: `on006159` has 664 symlinks over 480 distinct
+  keys, so its shortfall is 46.2% and not the 36.6% first reported. Count keys, the way
+  `git annex find` does, and the two shapes stop mattering.
 - The notice period costs something real and it is accepted: until the date passes, five
   datasets stay listed while missing more data than the policy allows. The alternative is
   tombstoning a DOI over a defect the source can clear in a day, which is worse for a
   reader who would rather cite a dataset that gets fixed than chase a tombstone.
-- The threshold is deliberately stringent. At 20% the count is 7 and at 50% it is 3,
+- The threshold is deliberately stringent. At 20% missing the count is 10 and at 50% it is 6,
   and `on008017` at 21.6% or `on003574` at 12.2% are datasets a reader would
   reasonably call broken. A stricter rule withdraws more, and that is the intent:
   NEMAR serves what can be fetched.

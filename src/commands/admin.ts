@@ -182,6 +182,7 @@ import {
   type WithdrawnDatasetEntry,
   loadWithdrawnDatasets,
   resolveWithdrawTargets,
+  stillWithdrawn,
 } from "../lib/withdrawn-datasets.js";
 
 /**
@@ -3593,9 +3594,13 @@ adminCommand
         process.exit(1);
       }
 
+      // `--all` acts only on entries still down. A reinstated one keeps its entry
+      // as the record of a withdrawal that should not have happened (#1396), and
+      // re-targeting it would tombstone a dataset whose content we just proved is
+      // there. An explicit id still works, with the existing force guard.
       const resolved = options.all
         ? {
-            targets: entries.map((e) => ({
+            targets: stillWithdrawn(entries).map((e) => ({
               datasetId: e.dataset_id,
               reason: options.reason || e.reason,
             })),
@@ -3693,7 +3698,9 @@ adminCommand
       if (options.all) {
         const listPath = options.withdrawnFile || defaultWithdrawnDatasetsPath();
         try {
-          targets = loadWithdrawnDatasets(listPath).map((e) => e.dataset_id);
+          // Restoring an already-restored dataset is a no-op, but listing it as a
+          // target reads as though it were still down; the list is the record.
+          targets = stillWithdrawn(loadWithdrawnDatasets(listPath)).map((e) => e.dataset_id);
         } catch (err) {
           console.error(chalk.red(`Failed to load withdrawn-datasets file: ${errorDetail(err)}`));
           process.exit(1);
