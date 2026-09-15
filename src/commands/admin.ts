@@ -4863,7 +4863,9 @@ exemplarCommand
     ) => {
       if (!requireAuth()) return;
 
-      const { cloneExemplar, loadExemplarFleet } = await import("../lib/exemplar-clone.js");
+      const { cloneExemplar, loadExemplarFleet, isDesignatedAnonymous } = await import(
+        "../lib/exemplar-clone.js"
+      );
       const fleetPath = options.fleetFile || defaultExemplarFleetPath();
       const cloneOpts = { publish: options.publish, includeDerived: options.includeDerived };
 
@@ -4918,16 +4920,19 @@ exemplarCommand
         process.exit(1);
       }
 
-      let sourceId = options.source;
-      if (!sourceId) {
-        try {
-          const entries = loadExemplarFleet(fleetPath);
-          sourceId = entries.find((e) => e.xx_id === xxId)?.source_id;
-        } catch (err) {
-          console.error(chalk.red(`Failed to load fleet file: ${errorDetail(err)}`));
-          process.exit(1);
-        }
+      // The fleet is loaded unconditionally, not only when --source is
+      // omitted: it is where the anonymous DESIGNATION lives (#1407), and that
+      // is a property of the xx id rather than of the source. Reading it only
+      // on the --source-less path would let `exemplar create xx099907
+      // --source ...` create the fixture without its flag, silently.
+      let fleetEntries: Awaited<ReturnType<typeof loadExemplarFleet>>;
+      try {
+        fleetEntries = loadExemplarFleet(fleetPath);
+      } catch (err) {
+        console.error(chalk.red(`Failed to load fleet file: ${errorDetail(err)}`));
+        process.exit(1);
       }
+      const sourceId = options.source ?? fleetEntries.find((e) => e.xx_id === xxId)?.source_id;
       if (!sourceId) {
         console.error(
           chalk.red(
@@ -4942,7 +4947,12 @@ exemplarCommand
       }
 
       try {
-        await cloneExemplar({ xxId, sourceId, ...cloneOpts });
+        await cloneExemplar({
+          xxId,
+          sourceId,
+          ...cloneOpts,
+          ...(isDesignatedAnonymous(fleetEntries, xxId) ? { anonymous: true as const } : {}),
+        });
       } catch (error) {
         console.error(chalk.red(`\nExemplar clone failed: ${errorDetail(error)}`));
         process.exit(1);

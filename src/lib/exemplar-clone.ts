@@ -174,6 +174,21 @@ export function anonymousExemplar(entries: ExemplarFleetEntry[]): ExemplarFleetE
   return entries.find((e) => e.anonymous) ?? null;
 }
 
+/**
+ * Is this xx id the fleet's designated anonymous deposit?
+ *
+ * The designation belongs to the xx id, not to the source, so this is the
+ * answer even when a caller overrode `--source`. Both create paths go through
+ * it: the `--all` loop and the single-id one. The single-id path is the one
+ * that actually matters here -- creating the fixture is a one-off, so
+ * `exemplar create xx099907` is the command that will be run, and an earlier
+ * version of this change wired only the loop, which would have silently
+ * produced a non-anonymous row under the name of the anonymous fixture.
+ */
+export function isDesignatedAnonymous(entries: ExemplarFleetEntry[], xxId: string): boolean {
+  return entries.find((e) => e.xx_id === xxId)?.anonymous === true;
+}
+
 /** Read and validate `scripts/exemplar-fleet.json` (or an equivalent path). */
 export function loadExemplarFleet(path: string): ExemplarFleetEntry[] {
   let raw: unknown;

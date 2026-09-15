@@ -12,6 +12,7 @@ import {
   anonymousExemplar,
   findMissingCopiedKeys,
   isAnnexContentKey,
+  isDesignatedAnonymous,
   parseExemplarFleet,
   planSubPrefixCopy,
   rewriteObjectKeyPrefix,
@@ -204,6 +205,22 @@ describe("parseExemplarFleet", () => {
     // is silent and permanent: the 0085 triggers refuse anonymous = 1 once
     // first_published_at is stamped, so one `--publish` ends the fixture.
     expect(designated?.note).toMatch(/never published/i);
+  });
+
+  test("the designation is keyed by xx id, so --source cannot bypass it", async () => {
+    // Creating this fixture is a one-off, so `exemplar create xx099907` is the
+    // command that will actually be run. An earlier version of this change
+    // wired only the `--all` loop, which would have produced a non-anonymous
+    // row under the name of the anonymous fixture -- silently, and only
+    // discoverable once a test that depends on it started passing for the
+    // wrong reason.
+    const entries = parseExemplarFleet([
+      { xx_id: "xx099900", source_id: "on000001", modality: "eeg" },
+      { xx_id: "xx099907", source_id: "on000002", modality: "eeg", anonymous: true },
+    ]);
+    expect(isDesignatedAnonymous(entries, "xx099907")).toBe(true);
+    expect(isDesignatedAnonymous(entries, "xx099900")).toBe(false);
+    expect(isDesignatedAnonymous(entries, "xx099999")).toBe(false);
   });
 
   test("every fleet source is a distinct real dataset id", async () => {
