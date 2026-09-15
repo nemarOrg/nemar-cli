@@ -3938,6 +3938,29 @@ Examples:
     try {
       const result = await requestPublication(datasetId, { anonymous: options.anonymous });
       spinner.succeed(result.message);
+      // Printed from the server's ECHO, not from the flag that was typed. A
+      // request whose body never arrived would otherwise succeed with a
+      // message indistinguishable from a correct one, and the depositor would
+      // find out when their name appeared on the published record.
+      if (options.anonymous && result.anonymous !== true) {
+        console.log(
+          chalk.yellow(
+            "\n  WARNING: you asked for an anonymous release, but the server did not confirm it.",
+          ),
+        );
+        console.log(
+          chalk.yellow(
+            `  Run 'nemar dataset publish status ${datasetId}' and check the Anonymous line before an admin approves it.`,
+          ),
+        );
+      } else if (result.anonymous === true) {
+        console.log(
+          chalk.dim(
+            "\n  Your identity will be withheld: the repository stays private, the DOI stays\n" +
+              "  reserved, and NEMAR names nobody until you publish without --anonymous.",
+          ),
+        );
+      }
       console.log(
         chalk.dim(
           "\n  Admins have been notified. Use 'nemar dataset publish status' to check progress.",
@@ -4032,6 +4055,20 @@ Examples:
       const statusColor = statusColors[result.status] || chalk.dim;
 
       console.log(`  Status: ${statusColor(result.status)}`);
+
+      // #1408: which of the two runs was recorded. Printed on both values,
+      // because a depositor who typed --anonymous needs to see the word before
+      // an admin approves, and one who did not needs to see that a stale flag
+      // from an earlier request is not about to conceal them.
+      if (result.anonymous === true) {
+        console.log(
+          `  Anonymous: ${chalk.yellow("yes")} ${chalk.dim("(identity withheld; repository stays private, DOI stays reserved)")}`,
+        );
+      } else if (result.anonymous === false) {
+        console.log(
+          `  Anonymous: ${chalk.dim("no")} ${chalk.dim("(published under your name, with a resolving DOI)")}`,
+        );
+      }
 
       if (result.requested_at) {
         console.log(`  Requested: ${chalk.dim(result.requested_at)}`);
