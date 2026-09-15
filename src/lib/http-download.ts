@@ -33,7 +33,7 @@
  * host serves the bytes -- those come from each entry's `bytes_url`, which
  * today names the data host for annexed files and `raw.githubusercontent.com`
  * for git-tracked ones (nemarOrg/nemar-cli#1403). The presigned `url` on each
- * entry is deliberately ignored in favour of `bytes_url`: `url` expires in
+ * entry is deliberately ignored in favor of `bytes_url`: `url` expires in
  * about an hour, which a long transfer outlives, while `bytes_url` is durable
  * by contract.
  */

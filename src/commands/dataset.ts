@@ -1233,7 +1233,7 @@ Requirements:
 
 Without git-annex:
   --http downloads over plain HTTP with no git, git-annex or GitHub account,
-  and is used automatically when git-annex is missing. It honours the same
+  and is used automatically when git-annex is missing. It honors the same
   filters and writes the same BIDS tree, but the result is a file snapshot,
   not a repository: 'commit', 'push' and 'update' need a git-annex clone.
   Re-running resumes, since a file already present at its declared size is
