@@ -5783,10 +5783,10 @@ fleetCommand
     "--include-incomplete",
     "Also act on a dataset whose content the bucket cannot fully account for (#1396). Off by default: that is missing content, not a lost registration",
   )
-  .option(
-    "--retract-false-claims",
-    "Withdraw claims the bucket cannot back, rather than only reporting them. For content recovery has proven unrecoverable: it makes the log honest, it does not make the data appear",
-  )
+  // One line, like its neighbours: the reasoning lives in the --help-all text,
+  // which is where every other "why would I use this" explanation in this file
+  // goes. A four-line option description is what the concise-help work removed.
+  .option("--retract-false-claims", "Withdraw presence claims the bucket cannot back")
   .option("--dir <path>", "Where clones go while a dataset is being repaired (default: a temp dir)")
   .option("--concurrency <n>", "Datasets in flight at once (default 4)", "4")
   .option("--json <path>", "Write the full report as JSON")
@@ -5814,8 +5814,14 @@ The opposite repair, \`--retract-false-claims\`:
   clone to fetch bytes we do not hold. That is worse than an unregistered key,
   which merely fails to appear. Run this only once recovery has reported those
   keys unrecoverable, because while the content is still recoverable the honest
-  repair is to fetch it and the claim becomes true. 200 keys across on003574,
-  on004475, on004917 and on005571, whose anatomical images OpenNeuro removed.
+  repair is to fetch it and the claim becomes true. Used on 230 keys across
+  on003574, on004475, on004917, on005571 and on005279, whose anatomical images
+  OpenNeuro deleted outright.
+
+  It edits the log and leaves the 0-byte objects in place. They are inert once
+  nothing claims them, since presence is tested at the declared size, and a later
+  recovery overwrites one; but the dataset still reads as damaged to a size audit
+  until they are removed.
 
 What "read-only" does and does not mean:
   without --apply nothing is written to any repository or to S3. It is not free of
