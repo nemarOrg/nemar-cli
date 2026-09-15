@@ -31,7 +31,7 @@ import { join } from "node:path";
 
 const MODULE_EXPORTS: Record<string, string[]> = {
   errors: ["ApiError", "MaintenanceError", "errorDetail"],
-  client: ["IS_DEV_BUILD", "checkHealth", "request"],
+  client: ["IS_DEV_BUILD", "checkHealth", "getApiUrl", "request"],
   auth: [
     "checkGitHubUsername",
     "checkOrcidName",
@@ -193,6 +193,7 @@ const INTERNAL_WIRING = ["request"];
  * protection every other symbol has.
  */
 const POST_SPLIT_ADDITIONS = [
+  "getApiUrl", // #1401: the data plane is this origin + /data (lib/http-download.ts)
   "mintDocsSession", // #1341, epic #1336 phase 3: POST /auth/docs/cli-session
   "NOTICE_LEVELS", // #1025, notice level vocabulary
   "approveUserById", // #1012, id-keyed approve for web/ORCID accounts
