@@ -26,13 +26,16 @@ beforeAll(() => {
 });
 
 describe("datasets column budget", () => {
-  test("exactly 81 columns after all migrations", () => {
+  test("exactly 83 columns after all migrations", () => {
     // 92 after 0072; 0073 collapses the 12 sweep stamps into one
-    // sweep_stamps JSON column (#1183): 92 + 1 - 12 = 81.
+    // sweep_stamps JSON column (#1183): 92 + 1 - 12 = 81. 0085 adds
+    // first_published_at and anonymous (#1407): 81 + 2 = 83. Neither is
+    // derivable at read time -- see the migration header for why the
+    // obvious substitute (concept_doi IS NULL) is unsound.
     const count = db.query("SELECT COUNT(*) AS n FROM pragma_table_info('datasets')").get() as {
       n: number;
     };
-    expect(count.n).toBe(81);
+    expect(count.n).toBe(83);
   });
 
   test("stays under the 97-column ceiling (D1 hard cap is 100)", () => {
@@ -42,7 +45,7 @@ describe("datasets column budget", () => {
     expect(count.n).toBeLessThanOrEqual(97);
   });
 
-  test("index set is exactly the 22 surviving 0073", () => {
+  test("index set is exactly the 23 surviving 0085", () => {
     const names = (
       db
         .query(
@@ -51,6 +54,7 @@ describe("datasets column budget", () => {
         .all() as { name: string }[]
     ).map((r) => r.name);
     expect(names).toEqual([
+      "idx_datasets_anonymous",
       "idx_datasets_archive_complete",
       "idx_datasets_archive_status",
       "idx_datasets_data_complete",
@@ -76,7 +80,7 @@ describe("datasets column budget", () => {
     ]);
   });
 
-  test("trigger set is exactly the 4 the rebuild recreates", () => {
+  test("trigger set is exactly the 6 after 0085", () => {
     const names = (
       db
         .query(
@@ -85,6 +89,11 @@ describe("datasets column budget", () => {
         .all() as { name: string }[]
     ).map((r) => r.name);
     expect(names).toEqual([
+      // 0085 adds the two that refuse `anonymous = 1` on a dataset that has
+      // ever been published. The invariant is in the database on purpose:
+      // a rule that lives only in a service is one a future route can forget.
+      "datasets_anonymous_unpublished_ai",
+      "datasets_anonymous_unpublished_au",
       "datasets_embed_dirty_au",
       "datasets_fts_ad",
       "datasets_fts_ai",

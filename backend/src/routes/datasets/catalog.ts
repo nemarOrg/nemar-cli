@@ -19,6 +19,7 @@ import { RangeParseError } from "../../../../shared/range.js";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import { parseLicenseTierFilter } from "../../lib/license";
 import { optionalAuthMiddleware } from "../../middleware/auth";
+import { OWNER_GITHUB_SQL, OWNER_USERNAME_SQL } from "../../services/anonymity";
 import { zarrCacheBaseUrl } from "../../services/cloudflare";
 import { getFacetVocabulary } from "../../services/dataset-facet-vocabulary";
 import {
@@ -790,7 +791,7 @@ async function executeAndReturn(
           .prepare(
             `SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
                     d.github_repo, d.concept_doi, d.created_at, d.updated_at,
-                    u.username AS owner_username,
+                    ${OWNER_USERNAME_SQL},
                     -- API contract: every list entry exposes latest_version
                     -- (null when no minted DOI version yet) so callers
                     -- (e.g. scripts/hallu-sync.sh) can rely on its presence
@@ -943,7 +944,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       const minePrefix = `
         SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
                d.github_repo, d.concept_doi, d.created_at, d.updated_at,
-               u.username AS owner_username,
+               ${OWNER_USERNAME_SQL},
                d.source, d.source_id,
                COALESCE(d.modalities, '') AS modalities,
                COALESCE(d.subject_count, 0) AS participants,
@@ -1056,7 +1057,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       const sql = `
       SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
              d.github_repo, d.concept_doi, d.concept_doi AS doi, d.created_at, d.updated_at,
-             u.username AS owner_username,
+             ${OWNER_USERNAME_SQL},
              d.source, d.source_id,
              COALESCE(d.modalities, '') AS modalities,
              COALESCE(d.subject_count, 0) AS participants,
@@ -1281,7 +1282,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     try {
       const match = await db
         .prepare(
-          `SELECT d.dataset_id, d.name, d.github_repo, u.username as owner_username
+          `SELECT d.dataset_id, d.name, d.github_repo, ${OWNER_USERNAME_SQL}
            FROM datasets d
            JOIN users u ON d.owner_user_id = u.id
            WHERE d.source_id = ? AND d.status = 'active' AND d.visibility = 'public'
@@ -1371,8 +1372,8 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
         -- surface a json_extract expression.
         json_extract(d.sweep_stamps, '${ZARR_VERIFY_STATUS_PATH}') AS zarr_verify_status,
         json_extract(d.sweep_stamps, '${ZARR_VERIFIED_AT_PATH}') AS zarr_verified_at,
-        u.username as owner_username,
-        u.github_username as owner_github
+        ${OWNER_USERNAME_SQL},
+        ${OWNER_GITHUB_SQL}
       FROM datasets d
       JOIN users u ON d.owner_user_id = u.id
       WHERE d.dataset_id = ?

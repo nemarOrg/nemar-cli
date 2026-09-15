@@ -162,9 +162,18 @@ export interface ZarrFidelityMismatchExample {
  * reproduce the fossil, and this predicate still catches any that already
  * did or ever do again).
  *
- * `status = 'active' AND visibility = 'public'` (item 5): a private repo
- * cannot be read anonymously via raw.githubusercontent.com, so including
- * one here would only ever manufacture `unverifiable` noise.
+ * `status = 'active' AND visibility = 'public' AND anonymous = 0` (item 5): a
+ * private repo cannot be read anonymously via raw.githubusercontent.com, so
+ * including one here would only ever manufacture `unverifiable` noise.
+ *
+ * `anonymous = 0` is the same rule, stated rather than inferred (#1407). An
+ * anonymous deposit is public in the catalog and private on GitHub, which is
+ * exactly the shape `visibility = 'public'` was standing in for and exactly
+ * the shape it no longer catches. Without this the sweep would re-examine
+ * every anonymous dataset on every run and stamp `unverifiable` forever --
+ * fail-safe, since an absent sidecar records no mismatch and can never
+ * produce a false `failed`, but indistinguishable in the stamps from a
+ * dataset whose sidecars are genuinely missing.
  * `github_repo IS NOT NULL` is a defensive narrowing beyond the brief's
  * literal predicate (not a change to it): a row with no repo has nothing
  * this sweep could ever fetch a sidecar from.
@@ -172,6 +181,7 @@ export interface ZarrFidelityMismatchExample {
 export const ZARR_FIDELITY_SWEEP_CANDIDATE_SQL = `SELECT dataset_id, github_repo FROM datasets
    WHERE status = 'active'
      AND visibility = 'public'
+     AND anonymous = 0
      AND zarr_status = 'ready'
      AND zarr_store_count > 0
      AND github_repo IS NOT NULL
@@ -188,6 +198,7 @@ export const ZARR_FIDELITY_SWEEP_CANDIDATE_SQL = `SELECT dataset_id, github_repo
 export const ZARR_FIDELITY_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n FROM datasets
    WHERE status = 'active'
      AND visibility = 'public'
+     AND anonymous = 0
      AND zarr_status = 'ready'
      AND zarr_store_count > 0
      AND github_repo IS NOT NULL

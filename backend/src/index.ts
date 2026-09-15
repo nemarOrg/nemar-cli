@@ -505,7 +505,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
           WHERE (staleness_warn_stage IS NOT NULL OR staleness_admin_notified_at IS NOT NULL)
             AND NOT (
               dataset_id LIKE 'nm%' AND status = 'active' AND concept_doi IS NULL
-              AND visibility = 'private'
+              AND (visibility = 'private' OR anonymous = 1)
               AND COALESCE(last_activity_at, created_at) < datetime('now', ?)
               AND dataset_id NOT IN (
                 SELECT dataset_id FROM publication_requests WHERE status NOT IN ('published','denied')
@@ -532,7 +532,12 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
            FROM datasets d
            LEFT JOIN users u ON u.id = d.owner_user_id
           WHERE d.dataset_id LIKE 'nm%' AND d.status = 'active' AND d.concept_doi IS NULL
-            AND d.visibility = 'private'
+            -- visibility = 'private' has always meant "not yet published"
+            -- here. An anonymous deposit (#1407) breaks that equivalence: it
+            -- is listed publicly while its repo stays private, so it would
+            -- fall out of this set and an abandoned one would never get the
+            -- warnings every other unpublished dataset gets.
+            AND (d.visibility = 'private' OR d.anonymous = 1)
             AND COALESCE(d.last_activity_at, d.created_at) < datetime('now', ?)
             AND d.dataset_id NOT IN (
               SELECT dataset_id FROM publication_requests WHERE status NOT IN ('published','denied')

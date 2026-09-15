@@ -69,6 +69,20 @@ export interface CreateConceptDoiOptions {
    * forget it.
    */
   uploaderRequired?: boolean;
+  /**
+   * The dataset is an anonymous deposit (#1407, epic #1406), so the record
+   * carries no DataCurator and the identifier stays `reserved` until
+   * publication.
+   *
+   * ADR 0041 is satisfied rather than bent: it says a DOI cites the uploader
+   * by real name or not at all, and this is the "not at all" branch, on an
+   * identifier that is not public and therefore not harvested. Withholding
+   * here is defense in depth -- a reserved record is only readable with our
+   * own credentials -- but the alternative is trusting that the publish-time
+   * metadata refresh always overwrites it, and a leak that depends on a later
+   * step running is not a property, it is a hope.
+   */
+  anonymousDeposit?: boolean;
   sandbox?: boolean;
 }
 
@@ -177,6 +191,9 @@ export function buildVersionIdentifier(
  * on one and not the other.
  */
 function assertUploaderPresent(options: CreateConceptDoiOptions, provider: string): void {
+  // An anonymous deposit is the one case where a missing curator is the
+  // intended state rather than an incomplete profile.
+  if (options.anonymousDeposit) return;
   if (options.uploaderRequired && !options.uploader) {
     throw new Error(
       `Refusing to mint a ${provider} DOI for ${options.datasetId}: the uploader has no researcher name on file, and a DOI must not cite a username (#1255).`,
@@ -197,9 +214,10 @@ async function createEzidConceptDoi(
   // repo content and must not be able to name the depositor (before #1255
   // review item 7 a pre-built enrichment silently won over the resolved
   // identity, so a stale file could keep citing an old name).
+  const curator = options.anonymousDeposit ? null : (options.uploader ?? null);
   const enrichment: DataCiteEnrichment = options.enrichment
-    ? { ...options.enrichment, uploader: options.uploader ?? null }
-    : buildOrcidEnrichment(options.bidsDescription, options.uploader);
+    ? { ...options.enrichment, uploader: curator }
+    : buildOrcidEnrichment(options.bidsDescription, curator);
 
   // Use enriched description if available, otherwise fall back to request/database
   if (!enrichment.description && options.datasetDescription) {

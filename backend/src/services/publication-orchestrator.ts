@@ -16,6 +16,7 @@ import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import { auditLogStatement } from "../db/audit-log";
 import { getS3Config } from "../routes/admin/shared";
 import type { AuthUser, Bindings } from "../types/bindings";
+import { recordFirstPublication } from "./anonymity";
 import {
   isCentralManifestWorkflowEnabled,
   publishEzidVersionDoiViaCentral,
@@ -1937,6 +1938,19 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
       .bind(datasetId)
       .run();
   }
+
+  // Record the first publication and end anonymity, in ONE statement.
+  //
+  // Both halves matter. `first_published_at` is the only durable record that
+  // a dataset has ever been public -- `visibility` has no history, and
+  // `concept_doi IS NULL` is unsound here because `repo_public` runs three
+  // steps before `doi_create`, so a crashed run leaves a public dataset with
+  // no DOI. And it has to be one statement because migration 0085's triggers
+  // refuse a row that is simultaneously anonymous and published, so clearing
+  // the flag and stamping the date separately would abort on whichever ran
+  // first. Anonymity ends here by construction rather than by a later cleanup
+  // that could be skipped.
+  await recordFirstPublication({ DB: db } as Bindings, datasetId);
 
   // Mark as published
   await db

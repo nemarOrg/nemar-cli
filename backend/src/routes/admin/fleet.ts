@@ -33,6 +33,24 @@ import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../service
 import { applyDatasetVisibility } from "../../services/visibility";
 import type { AdminRouter } from "./shared";
 
+/**
+ * What a dataset's GitHub repo SHOULD be, which is not always what its
+ * catalog row says.
+ *
+ * An anonymous deposit (#1407) is public in the catalog and private on
+ * GitHub: that is the state, not drift. Passing the catalog value straight
+ * through would report every anonymous deposit as `PUBLIC_UNPROTECTED`,
+ * because `classifyDatasetDrift` expects a public repo to carry a branch
+ * ruleset, and the real drift would then be buried in that noise.
+ */
+function expectedRepoVisibility(row: {
+  visibility?: string | null;
+  anonymous?: number | null;
+}): "public" | "private" {
+  if (row.anonymous === 1) return "private";
+  return row.visibility === "public" ? "public" : "private";
+}
+
 export function registerFleetRoutes(admin: AdminRouter): void {
   // ============================================================================
   // Repository Visibility
@@ -181,7 +199,7 @@ export function registerFleetRoutes(admin: AdminRouter): void {
 
     const rows = await db
       .prepare(
-        `SELECT dataset_id, github_repo, visibility FROM datasets
+        `SELECT dataset_id, github_repo, visibility, anonymous FROM datasets
         WHERE ${clauses.join(" AND ")} ORDER BY dataset_id LIMIT ?`,
       )
       .bind(...binds, limit)
@@ -195,7 +213,7 @@ export function registerFleetRoutes(admin: AdminRouter): void {
     for (const d of datasets) {
       const repoName = d.github_repo.split("/")[1];
       if (!repoName) continue;
-      const visibility = d.visibility === "public" ? "public" : "private";
+      const visibility = expectedRepoVisibility(d);
       let result: DriftBucket[];
       try {
         result = classifyDatasetDrift(await gatherRepoDriftState(repoName, visibility, pat));
@@ -240,15 +258,15 @@ export function registerFleetRoutes(admin: AdminRouter): void {
     }
 
     const dataset = await db
-      .prepare("SELECT github_repo, visibility FROM datasets WHERE dataset_id = ?")
+      .prepare("SELECT github_repo, visibility, anonymous FROM datasets WHERE dataset_id = ?")
       .bind(datasetId)
-      .first<{ github_repo: string | null; visibility: string }>();
+      .first<{ github_repo: string | null; visibility: string; anonymous: number | null }>();
     if (!dataset) return c.json({ error: "Dataset not found" }, 404);
     if (!dataset.github_repo) return c.json({ error: "Dataset has no GitHub repository" }, 400);
     const repoName = dataset.github_repo.split("/")[1];
     if (!repoName) return c.json({ error: "Invalid repository format" }, 500);
 
-    const visibility = dataset.visibility === "public" ? "public" : "private";
+    const visibility = expectedRepoVisibility(dataset);
     const pat = await getDatasetsToken(c.env);
     const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
 
@@ -411,7 +429,7 @@ export function registerFleetRoutes(admin: AdminRouter): void {
 
     const rows = await db
       .prepare(
-        `SELECT dataset_id, github_repo, visibility FROM datasets
+        `SELECT dataset_id, github_repo, visibility, anonymous FROM datasets
         WHERE ${clauses.join(" AND ")} ORDER BY dataset_id LIMIT ?`,
       )
       .bind(...binds, cap)
@@ -431,7 +449,7 @@ export function registerFleetRoutes(admin: AdminRouter): void {
         results.push({ dataset_id: d.dataset_id, error: "invalid repo format" });
         continue;
       }
-      const vis = d.visibility === "public" ? "public" : "private";
+      const vis = expectedRepoVisibility(d);
       try {
         const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, d.dataset_id);
         const spec = await ensureRepoToSpec(repoName, pat, {

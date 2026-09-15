@@ -101,6 +101,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0060](0060-an-imported-tree-is-brought-onto-nemars-annex-policy-in-prepare.md) - An imported tree is brought onto NEMAR's annex policy in prepare, and inherited `.gitattributes` governance is stripped
 - [ADR 0061](0061-a-registration-is-read-back-and-an-incomplete-dataset-is-not-partly-repaired.md) - A registration is read back from the location log, and a dataset the bucket cannot account for is never partly repaired
 - [ADR 0062](0062-a-missing-git-annex-degrades-to-a-snapshot.md) - A missing git-annex degrades to an HTTP snapshot, and a snapshot is not a repository
+- [ADR 0063](0063-anonymity-is-available-before-first-publication-and-never-after.md) - Anonymity is available before first publication and never after, and it is withheld by the writer
 
 ## Backfill note (2026-07-31)
 

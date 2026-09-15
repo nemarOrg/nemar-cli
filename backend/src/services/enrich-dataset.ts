@@ -18,6 +18,7 @@
 import { formatFileSize } from "../../../shared/bytes.js";
 import { type NemarMetadataV2, datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import type { Bindings } from "../types/bindings.js";
+import { ANONYMOUS_AUTHORS_LABEL, blindEnrichmentMetadata, isAnonymous } from "./anonymity.js";
 import { countSessionDirs } from "./bids-tree.js";
 import {
   bidsToDataCite,
@@ -317,6 +318,7 @@ export async function enrichDataset(
     // tell a researcher deposit from an OpenNeuro import.
     source: string | null;
     is_exemplar: number | null;
+    anonymous: number | null;
     owner_username: string | null;
     owner_orcid: string | null;
     owner_given_name: string | null;
@@ -325,7 +327,7 @@ export async function enrichDataset(
   try {
     dataset = await env.DB.prepare(
       `SELECT d.dataset_id, d.name, d.github_repo, d.enrichment_json,
-              d.concept_doi, d.is_sandbox, d.source, d.is_exemplar,
+              d.concept_doi, d.is_sandbox, d.source, d.is_exemplar, d.anonymous,
               u.username AS owner_username, u.orcid AS owner_orcid,
               u.given_name AS owner_given_name, u.family_name AS owner_family_name
        FROM datasets d
@@ -342,6 +344,7 @@ export async function enrichDataset(
         is_sandbox: number | null;
         source: string | null;
         is_exemplar: number | null;
+        anonymous: number | null;
         owner_username: string | null;
         owner_orcid: string | null;
         owner_given_name: string | null;
@@ -932,7 +935,15 @@ export async function enrichDataset(
 
     // Pipeline LLM work is complete. Commit results; individual failures are
     // non-fatal since the expensive LLM calls already succeeded.
-    const metadataContent = JSON.stringify(finalMetadata, null, 2);
+    // An anonymous deposit's committed metadata carries no attribution. This
+    // is the last point before the document is both committed to the repo and
+    // cached in D1, and it is a WRITER-side blind on purpose: the file is
+    // backend-authored and publicly served, so filtering it at read time
+    // would leave the names in the repo and in the manifest.
+    const documentToCommit = isAnonymous(dataset)
+      ? blindEnrichmentMetadata(finalMetadata)
+      : finalMetadata;
+    const metadataContent = JSON.stringify(documentToCommit, null, 2);
     let commitError: string | undefined;
     let bidsignoreError: string | undefined;
     let cacheError: string | undefined;
@@ -1037,7 +1048,13 @@ export async function enrichDataset(
         (typeof finalMetadata.title === "string" && finalMetadata.title) || null;
       const enrichedDescription =
         (typeof finalMetadata.description === "string" && finalMetadata.description) || null;
-      const enrichedAuthors = authorsFromEnrichment(finalMetadata);
+      // Withheld by construction rather than filtered at read time:
+      // `datasets.authors` is fed into `datasets_fts` by a trigger with no
+      // visibility predicate, so a query-time filter would hide the names
+      // from the API while leaving them searchable in the index.
+      const enrichedAuthors = isAnonymous(dataset)
+        ? ANONYMOUS_AUTHORS_LABEL
+        : authorsFromEnrichment(finalMetadata);
       const bidsVersion =
         typeof bidsDescription.BIDSVersion === "string" ? bidsDescription.BIDSVersion : null;
       // BIDS-native sessions_count from ses-* dirs (#657). 0 (no session layer)

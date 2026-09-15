@@ -1,0 +1,138 @@
+# ADR 0063: Anonymity is available before first publication and never after, and it is withheld by the writer
+
+**Status:** accepted
+**Date:** 2026-09-15
+**Owner:** Seyed Yahya Shirazi
+
+## Context
+
+Conferences that review double-blind reject a submission whose dataset names its authors, so a
+depositor today must choose between depositing and submitting. NEMAR can serve both: the data
+readable, the depositor concealed, until the paper is accepted.
+
+The analysis is `.context/draft-anonymous-deposit-analysis.md` (requirements R1-R5, a
+twelve-item leak inventory, predicates A1-A10). ADR 0062's phase made the readable half
+possible -- the data plane serves a dataset's git-tracked metadata itself, so a repository can
+stay private without the dataset becoming unreadable. This ADR is the concealed half.
+
+Four facts about the existing system shape it, and each was checked rather than assumed:
+
+- **Nothing records that a dataset has been published.** `datasets.publish_date` is written by
+  no code. `visibility` is current state with no history, and the admin visibility route leaves
+  no row-local trace at all.
+- **The obvious substitute is unsound.** `repo_public` runs three steps before `doi_create`
+  (`shared/publication-steps.ts`), so a crashed publish leaves `visibility='public'` with
+  `concept_doi IS NULL`. Any predicate of the form "no DOI means never published" is wrong for
+  exactly the datasets whose history is most confused.
+- **The leak is field-level and the machinery is row-level.** ADR 0017's rule answers "may this
+  caller see this row". Anonymity needs "this row is visible, these fields are not", and there
+  is no chokepoint: `dataset-filters.ts` governs `FROM`/`WHERE`, not `SELECT`, and the owner is
+  joined in five separate projections.
+- **`datasets.authors` reaches the full-text index through a trigger**, with no visibility
+  predicate, so a read-time filter would hide names from the API while leaving them searchable.
+
+## Decision
+
+**Anonymity is available only before a dataset's first publication, and the database enforces
+it.** Migration 0085 adds `first_published_at` and `anonymous` to `datasets`, plus two triggers
+that refuse any row which is simultaneously anonymous and published. The rule is in the schema
+rather than in a service because a service check is one a future route can forget, and this one
+protects a person who was promised concealment.
+
+Retracting an already-public attribution is theatre: DataCite is harvested, the landing page is
+indexed, and the git history is in every clone. So publication is a one-way door.
+
+**Two columns, spent deliberately.** ADR 0034 caps `datasets` and asks whether a fact can be
+derived at read time; neither of these can, as the crashed-publish case above shows.
+`first_published_at` also closes a gap that predates this feature. `anonymous` is
+authorization-adjacent and filtered in SQL, so it does not belong in the `sweep_stamps` JSON
+(ADR 0035), whose convention -- a missing key means "not yet swept" -- is precisely wrong for a
+fact whose absence must mean "not anonymous". The budget goes 81 to 83 against a ceiling of 97,
+and the pin in `datasets-column-budget.test.ts` is bumped deliberately: the tripwire working.
+
+**Identity is withheld by the WRITER, not filtered by the reader.** Wherever NEMAR writes the
+depositor's identity, the writer checks anonymity, so the public columns never hold the real
+values and no read site has to remember anything:
+
+- `enrich-dataset.ts` writes the blinded author label into `datasets.authors`, which keeps the
+  real names out of `datasets_fts` by construction, and strips attribution from
+  `.nemar/metadata.json` before committing it. That file is backend-authored, so no depositor
+  scrub can suppress it, and since ADR 0062 it is publicly served from the manifest -- verified
+  on `nm000104`, where it returns 200 and names three authors.
+- `doi.ts` omits the DataCurator while anonymous. ADR 0041 says a DOI cites the uploader by real
+  name or not at all; this is the "not at all" branch, on an identifier that stays `reserved`
+  and is therefore never harvested.
+
+**The one exception is the owner, and it gets one rule.** `owner_username` and `owner_github`
+are joined from `users` at read time and cannot be kept out of the row by a writer, so
+`OWNER_USERNAME_SQL` / `OWNER_GITHUB_SQL` in `services/anonymity.ts` are the single definition
+of when an owner is disclosed, interpolated at every projection. A source-level test fails if
+any site spells the join out instead, with an explicit allowlist for the admin and service reads
+that resolve identity on purpose -- because R5 says anonymity is toward the public and never
+toward the archive.
+
+**Anonymity is not a visibility value.** The dataset stays `visibility='public'`: listed,
+browsable, downloadable. The repository is private instead. That breaks three predicates that
+had been using "public row" as a proxy for "public repo", and all three are updated rather than
+left to rot: the zarr fidelity sweep (which would stamp `unverifiable` forever), the staleness
+candidates (which would stop nagging an abandoned anonymous deposit), and fleet drift (which
+would report every anonymous deposit as `PUBLIC_UNPROTECTED`).
+
+**De-anonymization is ordered, and an existing gate enforces it.** Restoring attribution is a
+content commit to `dataset_description.json`, not a flag flip, and it has to land while the
+repository is still private, because ADR 0001 makes `main` pull-request-only once public. NEMAR
+keeps no shadow copy of the real author list and needs none: the blinded label is a string ADR
+0026's `PLACEHOLDER_AUTHOR` matches, so a publication request from a still-blinded deposit is
+refused by a gate that already exists and is already tested. Publication then stamps
+`first_published_at` and clears `anonymous` in one statement -- one, because the triggers refuse
+the intermediate state, which makes the ordering impossible to get wrong.
+
+## Consequences
+
+Easier: a depositor can submit to a blind venue without choosing between depositing and
+reviewing. The archive keeps full knowledge throughout (R5), so the record becomes properly
+attributed at acceptance rather than being reconstructed.
+
+Harder, and worth stating plainly:
+
+- **NEMAR cannot blind the depositor's own files.** `Authors`, `Funding`, `Acknowledgements`,
+  `EthicsApprovals`, free text in README and `participants.tsv`, and identifiers inside signal
+  headers are the depositor's to scrub. The mechanical blind check that reports what still names
+  somebody is phase 4's, and until it exists the guarantee is "NEMAR adds nothing", not "nothing
+  names you".
+- **Cached responses outlive a state change.** Nothing purges the edge, per-URL purge caps at 30
+  URLs and prefix purge is Enterprise-only, so anything already fetched stays fetchable for its
+  TTL. This is why ADR 0062's brokered files are `max-age=300` rather than `immutable`, and it
+  bounds how quickly a deposit can become anonymous after it has been read.
+- **`visibility` and repository state have come apart.** Every future predicate that means
+  "readable on GitHub" must say so rather than reading `visibility`, and the three fixed here
+  are evidence the proxy was load-bearing in places nobody had listed.
+
+## Alternatives considered
+
+- **Filter identity at read time.** The obvious design, and it leaves the real names in
+  `datasets_fts` (fed by a trigger, not a query) and in `.nemar/metadata.json` (backend-written
+  and publicly served). It also inherits ADR 0017's recurring cost across eleven sites, where
+  getting one wrong exposes a person rather than a private row.
+- **Model anonymity as a third `visibility` value.** Tempting, and it would have silently
+  changed the meaning of every `visibility = 'public'` predicate in the codebase, including the
+  ones that gate the data plane and the bucket policy. The breakage would have been discovered
+  by users.
+- **A side table for anonymity state.** ADR 0034 rejected side tables for dataset attributes and
+  its reasoning holds: the catalog read path and FTS are built on one table.
+- **Keep a server-side copy of the real author list and restore it automatically.** Rejected:
+  it means storing the identity in a second place for the sole purpose of a flip that the
+  depositor has to perform anyway, and ADR 0026's gate already prevents publishing while blind.
+- **Mint a public DOI with anonymized creators.** Rejected in the analysis (A6) and reaffirmed
+  here: DataCite records are harvested and snapshotted, and it inverts ADR 0041.
+
+## Receipts
+
+- Epic #1406, issue #1407; ADR 0062 (the data-plane half this depends on)
+- ADR 0034 (the column budget this spends from), ADR 0035 (why not `sweep_stamps`),
+  ADR 0017 (row-level visibility, and why it cannot express this),
+  ADR 0026 (the placeholder-author gate that orders de-anonymization),
+  ADR 0041 (real name or not at all), ADR 0001 (`main` is pull-request-only once public)
+- Rules: `backend/src/services/anonymity.ts`, migration `0085_anonymous_deposit.sql`
+- Guards: `backend/test/anonymity.test.ts` (the invariant, and the FTS assertion with its
+  control), `backend/test/anonymity-projection.test.ts` (one owner rule)
