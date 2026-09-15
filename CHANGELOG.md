@@ -43,6 +43,23 @@ earlier releases are described only by their generated notes.
   transferred (#1396) rather than a registration that was lost, and writing the remaining
   registrations would make it look repaired. Both rules are ADR 0061.
 
+- **`nemar download <id>` and `nemar upload <path>` work from the root**, alongside the
+  existing `login`/`logout`/`whoami` shortcuts. They are the same commands as
+  `nemar dataset download`/`nemar dataset upload`, built from one factory, so every flag and
+  every default is shared and the canonical two-word spellings are unchanged.
+
+### Changed
+
+- **`nemar admin --help` and `nemar dataset --help` lead with the commands people actually
+  type.** `admin` had grown to 43 subcommands and `dataset` to 21, most of them one-off
+  backfills, sweeps run from cron, or git-level escape hatches, and a flat alphabetical list
+  gave `nemar admin approve` exactly as much prominence as `nemar admin recording-stats-sweep`.
+  Plain `--help` now describes nine admin commands and six dataset commands and folds the rest
+  onto a single comma-separated line; `--help-all` still lists everything with descriptions.
+  Nothing is hidden in any other sense: a folded command still runs, still completes on TAB,
+  and still has its own `--help`. The two lists are declared in `src/lib/help-groups.ts`, and a
+  command absent from that file is folded rather than dropped.
+
 ### Fixed
 
 - **Registering annexed keys no longer reports writes it never made** (#1392).
@@ -54,6 +71,12 @@ earlier releases are described only by their generated notes.
   process per chunk of 5,000, and the result is read back out of the location log rather
   than inferred from exit codes -- the callers already aborted on a non-zero failure
   count, so they now abort on the truth, and name the keys that are missing.
+
+- **Colored `--help` no longer wraps descriptions about twenty columns early.** Commander
+  measures wrap width with `String.length`, which counts the ANSI escapes around a colored
+  command name as if they took up columns, so `nemar dataset --help` in a terminal broke every
+  description onto two or three lines while the same output piped through `cat` was fine. The
+  wrap now runs on the visible text and the color is applied afterwards.
 
 - **Rate limits now apply to the `/nemar` spelling of every route.** The API is mounted twice,
   at `/` and at `/nemar`, and the limiter matched paths against the full request path, so the
@@ -67,6 +90,27 @@ earlier releases are described only by their generated notes.
 - **An OpenNeuro import no longer leaves motion recordings in the git repository, and
   NEMAR's annex policy now actually governs an imported dataset.** Two separate holes,
   both closed in the import's prepare phase (#1159, ADR 0060). First, a `_motion.tsv`
+  under OpenNeuro's ~1 MB bar arrived as a plain git blob and stayed one -- 893 of them,
+  675 MB, in `ds007788` alone; those files are now annexed and their content uploaded
+  from the clone, and an import that cannot upload them fails instead of publishing a
+  pointer with nothing behind it. Second, and previously unnoticed: upstream ships a
+  `.gitattributes` whose `annex.largefiles` setting **outranks** the one
+  `configureLargefiles` writes, so ADR 0031's policy had no effect on any imported
+  repository -- the next motion file added to one would have repeated the original bug.
+  The inherited attribute is now replaced by NEMAR's own expression, which the import
+  writes and then reads back before continuing: stripping alone would have been worse
+  than leaving it, because with `annex.largefiles` set nowhere git-annex annexes
+  everything, including the metadata a clone has to be able to read. This is a forward
+  fix, so an imported repository does not shrink -- upstream's blobs stay in the
+  history it came with. The 600 imported datasets that still carry upstream's
+  attributes are tracked in #1374, and `on007788`'s own data migration in #1159.
+- **`nemar admin annex-normalize <id>` applies the same fix to a dataset that already
+  exists**, which is how `on007788`'s 893 git-resident recordings and the imported
+  fleet get migrated. It is a forward fix by construction: a published version
+  manifest addresses a git-resident file by its tag-pinned `raw.githubusercontent.com`
+  URL, so history is never rewritten and those URLs keep resolving. `--dry-run`
+  reports the plan; a clone left dirty by an interrupted attempt is refused rather
+  than mistaken for a dataset with nothing left to migrate.
 - **A dataset content write now names the branch it means, and a repository pointed at
   the wrong branch is repaired instead of renamed** (#1386). `createOrUpdateFile` left
   `branch` optional and omitted it from the request, so the GitHub Contents API wrote
@@ -100,28 +144,6 @@ earlier releases are described only by their generated notes.
   both spellings reach an operator-facing audit trail, and one that says a branch was
   renamed when none was is the same class of misdirection that made this bug hard to
   find.
-  under OpenNeuro's ~1 MB bar arrived as a plain git blob and stayed one -- 893 of them,
-  675 MB, in `ds007788` alone; those files are now annexed and their content uploaded
-  from the clone, and an import that cannot upload them fails instead of publishing a
-  pointer with nothing behind it. Second, and previously unnoticed: upstream ships a
-  `.gitattributes` whose `annex.largefiles` setting **outranks** the one
-  `configureLargefiles` writes, so ADR 0031's policy had no effect on any imported
-  repository -- the next motion file added to one would have repeated the original bug.
-  The inherited attribute is now replaced by NEMAR's own expression, which the import
-  writes and then reads back before continuing: stripping alone would have been worse
-  than leaving it, because with `annex.largefiles` set nowhere git-annex annexes
-  everything, including the metadata a clone has to be able to read. This is a forward
-  fix, so an imported repository does not shrink -- upstream's blobs stay in the
-  history it came with. The 600 imported datasets that still carry upstream's
-  attributes are tracked in #1374, and `on007788`'s own data migration in #1159.
-- **`nemar admin annex-normalize <id>` applies the same fix to a dataset that already
-  exists**, which is how `on007788`'s 893 git-resident recordings and the imported
-  fleet get migrated. It is a forward fix by construction: a published version
-  manifest addresses a git-resident file by its tag-pinned `raw.githubusercontent.com`
-  URL, so history is never rewritten and those URLs keep resolving. `--dry-run`
-  reports the plan; a clone left dirty by an interrupted attempt is refused rather
-  than mistaken for a dataset with nothing left to migrate.
-  both closed in the import's prepare phase (#1159, ADR 0058). First, a `_motion.tsv`
 - **A dataset migration no longer hands git-annex a temporary key without its session
   token** (#1380). `normalize-dataset.ts` enabled the S3 remote with credentials minted
   for the dataset and then let the transfer inherit the environment, where there were
