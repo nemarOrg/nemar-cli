@@ -77,6 +77,15 @@ earlier releases are described only by their generated notes.
 
 ### Fixed
 
+- **Content recovery no longer treats a retracted S3 version as a place to copy from (#1396).**
+  A `<key>.log.rmet` line marks its value `+` for set and `-` for unset, and the parser read
+  the marker as escaping, so a retracted version reached the AWS CLI with a literal leading
+  minus. Every one of `ds006110`'s five retractions came back as a bare `InvalidRequest`,
+  which read as an upstream defect rather than our own misparse; honoring the retraction
+  turns those five into two recoveries and three honest verdicts. The log is now replayed in
+  timestamp order, so a retraction written out of position still wins over the entry it
+  cancels.
+
 - **An import can no longer finalize with content it never transferred (#1396).** The publish
   gate verified the import MANIFEST against the bucket, and a manifest is what the copy phase
   believed it transferred, so a partial manifest verified cleanly while the tree still
