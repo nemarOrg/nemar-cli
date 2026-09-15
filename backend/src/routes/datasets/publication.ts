@@ -1110,7 +1110,12 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     try {
       const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
       specEnforcement = await ensureRepoToSpec(repoName, pat, {
-        visibility: "public",
+        // From the same value the repository flip above used. This route
+        // refuses an anonymous deposit outright, so the literal was correct
+        // today -- but it is correct by a guard two hundred lines away rather
+        // than by construction, and that is the shape of the bug the
+        // orchestrator had.
+        visibility: repoShouldBePrivate ? "private" : "public",
         collaborators: { ownerLogin, approvedWriters },
       });
     } catch (specError) {

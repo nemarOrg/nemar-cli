@@ -202,6 +202,52 @@ describe("END_ANONYMITY_AT_PUBLICATION_SQL ends concealment in one statement", (
   });
 });
 
+/**
+ * An awaited CALL that can change what the world can read of a dataset's
+ * repository. `await` excludes both the declarations and the prose: the word
+ * appears in several comments, and a comment decides nothing.
+ */
+const VISIBILITY_MUTATOR = /await\s+(setRepoVisibility|ensureRepoToSpec)\s*\(/g;
+
+/**
+ * A visibility decision written as a LITERAL rather than computed.
+ *
+ * That is the whole bug class, and stating it this way is what makes the scan
+ * able to fail. An earlier draft asked whether the enclosing region MENTIONED
+ * `expectedRepoVisibility`, and a call whose own argument had been reverted to
+ * `false` still passed, because a different call twenty lines away mentioned
+ * it. A scan is only worth running if the thing it reads is the thing that
+ * decides.
+ */
+const LITERAL_VISIBILITY = /^\s*(true|false|"public"|"private"|'public'|'private')\s*$/;
+
+/**
+ * The text of the ARGUMENT that decides visibility at one call site:
+ * `setRepoVisibility(repo, <decision>, pat)`, or the `visibility:` property of
+ * `ensureRepoToSpec(repo, pat, { ... })`.
+ */
+function visibilityDecision(text: string, at: number): string {
+  const call = text.slice(at, at + 1200).replace(/^await\s+/, "");
+  if (call.startsWith("setRepoVisibility")) {
+    const args = /^setRepoVisibility\s*\(([^)]*)\)/.exec(call);
+    return args ? (args[1].split(",")[1] ?? "") : "";
+  }
+  const visibility = /\bvisibility:\s*([^\n,]*)/.exec(call);
+  return visibility ? visibility[1] : "";
+}
+
+/**
+ * Call sites that pass a literal on purpose, with the reason. Both are REVERTS
+ * to private after a failed write, and going private is always safe: it can
+ * un-publish a repository that should not have been published, never the
+ * reverse. A literal `false` or `"public"` never belongs here.
+ */
+const DELIBERATE_LITERAL_VISIBILITY: Readonly<Record<string, string>> = {
+  "routes/datasets/publication.ts:1027":
+    "reverting the repo to private after the D1 write failed",
+  "routes/datasets/publication.ts:1070": "the same revert one branch later",
+};
+
 describe("the repository does not follow the catalog row", () => {
   test("an anonymous deposit stays private on GitHub while its row is public", () => {
     expect(expectedRepoVisibility({ visibility: "public", anonymous: 1 })).toBe("private");
@@ -212,17 +258,45 @@ describe("the repository does not follow the catalog row", () => {
   });
 
   test("every mutator of repository visibility goes through the rule", () => {
-    // `setRepoVisibility` is what actually publishes a git history. A call
-    // site that computes its argument from `visibility` alone would publish
-    // an anonymous deposit's repository while the catalog kept reporting the
-    // depositor as concealed -- with a 200 and no log line.
-    const mutators = [
-      join(SRC, "services", "visibility.ts"),
-      join(SRC, "routes", "datasets", "publication.ts"),
-    ];
-    for (const file of mutators) {
-      expect(readFileSync(file, "utf8")).toContain("expectedRepoVisibility");
+    // `setRepoVisibility` is what actually publishes a git history: the commit
+    // author names and emails, and the pre-blind `.nemar/metadata.json` still
+    // in it. A call site that computes its argument from `visibility` alone
+    // publishes an anonymous deposit's repository while the catalog keeps
+    // reporting the depositor as concealed -- with a 200 and no log line, and
+    // nothing to revert, because a clone is a clone.
+    //
+    // EXHAUSTIVE, in the shape of the two scans above, and it had to become so
+    // to be worth anything: it was a hardcoded list of two files, and the call
+    // that runs during an approved anonymous release
+    // (`publication-orchestrator.ts`) was not one of them. Reverting that one
+    // argument to a literal left the whole suite green.
+    const offenders: string[] = [];
+    for (const file of sourceFiles(SRC)) {
+      const rel = file
+        .slice(SRC.length + 1)
+        .split(sep)
+        .join("/");
+      const text = readFileSync(file, "utf8");
+      for (const match of text.matchAll(VISIBILITY_MUTATOR)) {
+        const line = text.slice(0, match.index).split("\n").length;
+        const site = `${rel}:${line}`;
+        if (DELIBERATE_LITERAL_VISIBILITY[site]) continue;
+        if (!LITERAL_VISIBILITY.test(visibilityDecision(text, match.index ?? 0))) continue;
+        offenders.push(site);
+      }
     }
+    expect(offenders).toEqual([]);
+  });
+
+  test("the scan would notice: it finds the call sites it is scanning for", () => {
+    // Twelve today across four files. Without this a regex that matched
+    // nothing would pass the test above forever, which is exactly how the
+    // hardcoded list it replaced managed to miss the orchestrator.
+    let sites = 0;
+    for (const file of sourceFiles(SRC)) {
+      sites += [...readFileSync(file, "utf8").matchAll(VISIBILITY_MUTATOR)].length;
+    }
+    expect(sites).toBeGreaterThanOrEqual(10);
   });
 });
 

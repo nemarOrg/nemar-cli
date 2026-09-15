@@ -207,7 +207,14 @@ export async function applyDatasetVisibility(
   try {
     const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
     specEnforcement = await ensureRepoToSpec(repoName, pat, {
-      visibility,
+      // `isPrivate`, not `visibility`: the second is what the CATALOG ROW is
+      // becoming and the first is what the REPOSITORY is. They differ for an
+      // anonymous deposit, and passing the row's value here takes the
+      // published-repo branch -- locking `main` behind a pull-request ruleset
+      // on a private repository, which is how a depositor loses the ability to
+      // commit their restored attribution (#1408). The same literal was a bug
+      // in the publication orchestrator; an exhaustive scan found this one.
+      visibility: isPrivate ? "private" : "public",
       collaborators: { ownerLogin, approvedWriters },
     });
   } catch (specError) {

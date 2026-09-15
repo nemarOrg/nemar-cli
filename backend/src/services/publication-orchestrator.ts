@@ -773,55 +773,6 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
           .bind(datasetId)
           .first<{ visibility: string }>();
 
-        // De-anonymization (#1408). The UPDATE above already cleared the flag
-        // via END_ANONYMITY_AT_PUBLICATION_SQL, but clearing it only changes
-        // what the WRITERS will do next -- it does not rewrite what they wrote
-        // while the deposit was blind. `datasets.authors` still holds the
-        // blinded label, the cached enrichment document is stripped, and the
-        // repository's committed `.nemar/metadata.json` carries no attribution.
-        // One enrichment pass restores all three, because phase 2 put the
-        // author blind inside `writeDatasetCatalogFields` (it decides from the
-        // row) and made the DataCite sync conditional on the same flag. Both
-        // reverse themselves now that the row is no longer anonymous.
-        //
-        // It runs HERE, before doi_create, because the mint prefers
-        // `.nemar/metadata.json` over the BIDS description when that file
-        // parses -- so minting first would cite an enrichment with no authors.
-        //
-        // The condition is `restoreAttribution`, captured BEFORE this UPDATE
-        // and derived from the request history rather than from
-        // `c.dataset.anonymous`. Reading the row here was self-defeating: the
-        // UPDATE three lines up sets `anonymous = 0`, and the run context is
-        // re-SELECTed on every invocation, so a retry after a failed
-        // enrichment saw a non-anonymous row, skipped this block silently, and
-        // went on to mint a PERMANENT DataCite record whose creator is the
-        // blinded label -- the one outcome the comment above says the step
-        // order exists to prevent, reached by the one path an admin is most
-        // likely to take.
-        if (restoreAttribution) {
-          const restored = await runEnrichmentForDataset(c.env, datasetId);
-          if (!restored.ok) {
-            await updateProgress(
-              "repo_public",
-              `Failed to re-enrich after de-anonymizing: ${restored.error}`,
-            );
-            return c.json(
-              {
-                error: `${datasetId} was de-anonymized but its attribution could not be restored: ${restored.error}. It is now PUBLIC and its publication is recorded; what is missing is the attribution. No DOI was minted. Approve the request again once the cause is cleared -- the restoration is re-attempted on every run and doi_create refuses to mint until it succeeds.`,
-                step: "repo_public",
-                steps_completed: completed,
-                step_results: stepResults,
-              },
-              500,
-            );
-          }
-          if (restored.warnings?.length) {
-            console.warn(
-              `[publish] ${datasetId} de-anonymization enrichment warnings: ${restored.warnings.join("; ")}`,
-            );
-          }
-        }
-
         if (!verify || verify.visibility !== "public") {
           console.error(
             `[publish] CRITICAL: Visibility read-after-write mismatch for ${datasetId}: expected 'public', got '${verify?.visibility}'`,
@@ -859,6 +810,61 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
           },
           500,
         );
+      }
+
+      // De-anonymization (#1408). The UPDATE above already cleared the flag
+      // via END_ANONYMITY_AT_PUBLICATION_SQL, but clearing it only changes
+      // what the WRITERS will do next -- it does not rewrite what they wrote
+      // while the deposit was blind. `datasets.authors` still holds the
+      // blinded label, the cached enrichment document is stripped, and the
+      // repository's committed `.nemar/metadata.json` carries no attribution.
+      // One enrichment pass restores all three, because phase 2 put the author
+      // blind inside `writeDatasetCatalogFields` (it decides from the row) and
+      // made the DataCite sync conditional on the same flag. Both reverse
+      // themselves now that the row is no longer anonymous.
+      //
+      // It runs HERE, before doi_create, because the mint prefers
+      // `.nemar/metadata.json` over the BIDS description when that file parses
+      // -- so minting first would cite an enrichment with no authors.
+      //
+      // OUTSIDE the database try/catch above, deliberately. This makes GitHub
+      // and Claude API calls, and any throw from them landed in a handler that
+      // reports "Database update failed after making repository public" and
+      // hands the operator a visibility-repair SQL statement -- for a failure
+      // that had nothing to do with the database, on a row the statement would
+      // not fix. The visibility write is verified by the time we get here.
+      //
+      // The condition is `restoreAttribution`, captured BEFORE that UPDATE and
+      // derived from the request history rather than from
+      // `c.dataset.anonymous`. Reading the row here was self-defeating: the
+      // UPDATE sets `anonymous = 0`, and the run context is re-SELECTed on
+      // every invocation, so a retry after a failed enrichment saw a
+      // non-anonymous row, skipped this block silently, and went on to mint a
+      // PERMANENT DataCite record whose creator is the blinded label -- the
+      // one outcome the step order exists to prevent, reached by the one path
+      // an admin is most likely to take.
+      if (restoreAttribution) {
+        const restored = await runEnrichmentForDataset(c.env, datasetId);
+        if (!restored.ok) {
+          await updateProgress(
+            "repo_public",
+            `Failed to re-enrich after de-anonymizing: ${restored.error}`,
+          );
+          return c.json(
+            {
+              error: `${datasetId} was de-anonymized but its attribution could not be restored: ${restored.error}. It is now PUBLIC and its publication is recorded; what is missing is the attribution. No DOI was minted. Approve the request again once the cause is cleared -- the restoration is re-attempted on every run and doi_create refuses to mint until it succeeds.`,
+              step: "repo_public",
+              steps_completed: completed,
+              step_results: stepResults,
+            },
+            500,
+          );
+        }
+        if (restored.warnings?.length) {
+          console.warn(
+            `[publish] ${datasetId} de-anonymization enrichment warnings: ${restored.warnings.join("; ")}`,
+          );
+        }
       }
 
       // Enforce the published-repo spec (epic #713): lock main (ruleset,
