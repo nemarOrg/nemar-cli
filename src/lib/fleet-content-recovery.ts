@@ -273,13 +273,15 @@ export async function recoverDatasetContent(
     if (missingKeys.length === 0) return tally(datasetId, [], []);
 
     const pins = await readPinnedSources(datasetPath, missingKeys);
-    // The upstream listing is one call for the whole dataset and is only worth
-    // making when some key has no pin of its own.
+    // Always list upstream for an imported dataset, even when every key has a
+    // pin. A pin identifies content; it does not promise the object is still
+    // readable, and the listing is what a refused pin falls through to:
+    // on003645's recorded versions are all gone while the right bytes sit at the
+    // same paths under newer ids. One call per dataset.
     let upstream:
       | { bucket: string; prefix: string; index: Map<string, UpstreamObjectVersion[]> }
       | undefined;
-    const unpinned = missingKeys.filter((key) => !pins.has(key));
-    if (unpinned.length > 0 && datasetId.startsWith("on")) {
+    if (datasetId.startsWith("on")) {
       const prefix = `ds${datasetId.slice(2)}/`;
       upstream = {
         bucket: UPSTREAM_BUCKET,

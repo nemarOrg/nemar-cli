@@ -267,16 +267,20 @@ describe("verifyCopy", () => {
 });
 
 describe("copySourceArgument", () => {
-  test("encodes a path S3 would otherwise read as a query or a fragment", () => {
-    // Real paths in these datasets: "fine-grained pattern/._0.jpg", and one that
-    // ends in "#". Unencoded, the "#" truncates the source key silently.
+  test("passes the path through unencoded, because the CLI encodes it", () => {
+    // Measured, not assumed: `--copy-source` with `preprocessed%20data` returns
+    // NoSuchVersion for an object the same request finds with a literal space.
+    // The CLI percent-encodes the source, so encoding here sends `%2520`.
     expect(
       copySourceArgument({
         bucket: "openneuro.org",
-        object: "ds004212/sourcedata/fine-grained pattern/a#b.jpg",
-        version: "v+1",
+        object: "ds004148/derivatives/preprocessed data/sub01_02_EC.set",
+        version: "itcYgkLo.l3.tkAxcCB2nUHCNqmVtMT2",
       }),
-    ).toBe("openneuro.org/ds004212/sourcedata/fine-grained%20pattern/a%23b.jpg?versionId=v%2B1");
+    ).toBe(
+      "openneuro.org/ds004148/derivatives/preprocessed data/sub01_02_EC.set" +
+        "?versionId=itcYgkLo.l3.tkAxcCB2nUHCNqmVtMT2",
+    );
   });
 
   test("omits the version when there is none", () => {

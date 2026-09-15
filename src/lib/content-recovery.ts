@@ -373,11 +373,22 @@ export function verifyCopy(opts: {
   return { ok: true, method: "size-and-pin" };
 }
 
-/** `bucket/url-encoded/object?versionId=...`, the shape CopyObject wants. */
+/**
+ * `bucket/object?versionId=...`, the shape CopyObject wants, UNENCODED.
+ *
+ * The AWS CLI percent-encodes the copy source itself, so encoding it here sends
+ * `%2520` for a space and S3 answers `NoSuchVersion` for an object that is
+ * plainly there. OpenNeuro has directories like `preprocessed data` and
+ * `fine-grained pattern`, so this is not a corner: it silently failed every key
+ * under them (on004148).
+ *
+ * The one thing this cannot express is a key containing a literal `?`, which
+ * would be read as the start of the version parameter. S3 permits it, nothing in
+ * these archives uses it, and the alternative breaks every path with a space.
+ */
 export function copySourceArgument(source: { bucket: string; object: string; version?: string }) {
-  const encoded = source.object.split("/").map(encodeURIComponent).join("/");
-  const base = `${source.bucket}/${encoded}`;
-  return source.version ? `${base}?versionId=${encodeURIComponent(source.version)}` : base;
+  const base = `${source.bucket}/${source.object}`;
+  return source.version ? `${base}?versionId=${source.version}` : base;
 }
 
 async function aws(args: string[], env?: Record<string, string>) {
