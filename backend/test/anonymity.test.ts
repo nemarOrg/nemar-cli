@@ -262,22 +262,30 @@ describe("predicates", () => {
     expect(hasEverBeenPublished({ first_published_at: null })).toBe(false);
   });
 
-  test("a row that omits the column does not compile", () => {
+  test("neither predicate's column is optional on its row type", () => {
     // The regression this pins: `first_published_at` used to be OPTIONAL on
     // the shared field type, so `hasEverBeenPublished(row)` accepted a row
     // whose SELECT never asked for the column and answered `false` -- the
     // direction that lets an already-published dataset be concealed. The
-    // publication route did exactly that. Both predicates now require the
-    // column they read, so the omission is a type error, and this asserts on
-    // the type rather than on a runtime value because there is no runtime
-    // value left to assert on.
+    // publication route did exactly that, and tsc raised nothing.
+    //
+    // `bun run typecheck` is what ENFORCES this; the value of stating it here
+    // is that it names the reason, so a future widening back to `?:` fails
+    // against an explanation rather than against a compiler line number.
+    // Matched with a tolerant pattern rather than an exact formatted literal:
+    // the invariant is "no question mark", not any particular indentation.
     const source = readFileSync(
       join(import.meta.dir, "..", "src", "services", "anonymity.ts"),
       "utf8",
     );
-    expect(source).toContain("export interface AnonymityFields {\n  anonymous: number | null;\n}");
-    expect(source).toContain(
-      "export interface PublicationStampFields {\n  first_published_at: string | null;\n}",
-    );
+    const fieldsOf = (name: string): string => {
+      const at = source.indexOf(`export interface ${name} {`);
+      expect(at).toBeGreaterThan(-1);
+      return source.slice(at, source.indexOf("}", at));
+    };
+    expect(fieldsOf("AnonymityFields")).toMatch(/\banonymous\s*:/);
+    expect(fieldsOf("AnonymityFields")).not.toMatch(/\banonymous\s*\?/);
+    expect(fieldsOf("PublicationStampFields")).toMatch(/\bfirst_published_at\s*:/);
+    expect(fieldsOf("PublicationStampFields")).not.toMatch(/\bfirst_published_at\s*\?/);
   });
 });

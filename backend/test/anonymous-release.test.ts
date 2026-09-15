@@ -211,6 +211,22 @@ describe("the Authors rule inverts for an anonymous release", () => {
     }
   });
 
+  test("any placeholder blinds a release, not only the word Anonymous", () => {
+    // Settled deliberately rather than left as an accident of the regex: the
+    // rule for a release is "this file names nobody", and "N/A" names nobody.
+    // The refusal message for an empty field tells the depositor to use "a
+    // placeholder such as Anonymous" -- `such as`, so accepting the others is
+    // the consistent reading. The one case still refused is an EMPTY field,
+    // which is indistinguishable from a file that was never filled in.
+    for (const placeholder of ["N/A", "none", "TBD", "[Unspecified1]", "Anonymous"]) {
+      expect(
+        evaluateSubmissionMinimums(desc([placeholder]), null, { anonymousRelease: true }),
+        `${placeholder} should blind a release`,
+      ).toEqual([]);
+    }
+    expect(evaluateSubmissionMinimums(desc([]), null, { anonymousRelease: true }).length).toBe(1);
+  });
+
   test("the inversion is narrow: every other minimum still applies", () => {
     // If the rule widened to "skip the checks for anonymous", this passes.
     const shortNameNoEthics = JSON.stringify({ Name: "EEG", Authors: ["Anonymous"] });
@@ -422,6 +438,57 @@ describe("the request route, end to end", () => {
     db.close();
   });
 
+  test("re-requesting rewrites the recorded intent in both directions", async () => {
+    // A blocked row is re-used rather than replaced, and an admin CAN approve
+    // a blocked request (`runPublicationApproval` selects `status IN
+    // ('requested','approving','blocked')`). So a stale flag on that row is
+    // not inert: it decides which of the two runs an approval performs.
+    //
+    // Both directions matter and they fail differently. A stale 1 conceals a
+    // depositor who asked for an ordinary publication -- recoverable. A stale
+    // 0 publishes, under their own name, a depositor who asked to be
+    // concealed -- not recoverable, and the reason the flow must never get
+    // this wrong quietly.
+    //
+    // Driven through the UPDATE path, not the INSERT path the tests above
+    // cover: the dataset's owner has no researcher name, so every request
+    // blocks and the second one finds an existing row to rewrite.
+    const db = freshDb();
+    const { ownerId } = await seedPeople(db);
+    db.query("UPDATE users SET given_name = NULL, family_name = NULL WHERE id = ?").run(ownerId);
+    seedDataset(db, ownerId, "nm000878", { visibility: "private", anonymous: 0 });
+
+    const recorded = () =>
+      db
+        .query<{ anonymous: number }, [string]>(
+          "SELECT anonymous FROM publication_requests WHERE dataset_id = ? ORDER BY id DESC LIMIT 1",
+        )
+        .get("nm000878")?.anonymous;
+
+    expect((await publishRequest(db, "nm000878", OWNER_KEY)).status).toBe(422);
+    expect(recorded()).toBe(0);
+
+    expect((await publishRequest(db, "nm000878", OWNER_KEY, '{"anonymous":true}')).status).toBe(
+      422,
+    );
+    expect(recorded()).toBe(1);
+
+    // And back: a depositor who re-requests WITHOUT the flag is asking for an
+    // ordinary publication, and the row must say so.
+    expect((await publishRequest(db, "nm000878", OWNER_KEY)).status).toBe(422);
+    expect(recorded()).toBe(0);
+
+    // Exactly one row throughout: this is the re-use path, not three requests.
+    expect(
+      db
+        .query<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM publication_requests WHERE dataset_id = ?",
+        )
+        .get("nm000878")?.n,
+    ).toBe(1);
+    db.close();
+  });
+
   test("an ordinary public dataset is still refused a second publication", async () => {
     // The control that keeps the fix above from being a hole: relaxing the
     // already-published guard for anonymous rows must not relax it for
@@ -555,6 +622,208 @@ describe("the page bundle does not contradict itself", () => {
     // is the point: the two documents ship together.
     expect(bundle.metadata.data?.external_links.github_url).toBeNull();
     // `authors` needs no treatment here: its writer blinds it.
+    db.close();
+  });
+});
+
+describe("the list route withholds the same two identifiers", () => {
+  // `GET /datasets` is the highest-traffic endpoint in the API and the one an
+  // unauthenticated reader hits. `toListRow` takes the decision through a
+  // `viewerMayKnowIdentifiers` argument with three different values at three
+  // call sites; none of them had a test, so flipping the default served every
+  // concealed deposit's private repository and reserved DOI to the world.
+  const OWNER_KEY = "anon-list-owner-0123456789abcdef0123456789ab";
+  const ADMIN_KEY = "anon-list-admin-0123456789abcdef0123456789ab";
+
+  async function seedTwo(db: Database): Promise<void> {
+    for (const [username, role, key] of [
+      ["list-owner", "member", OWNER_KEY],
+      ["list-admin", "admin", ADMIN_KEY],
+    ] as const) {
+      db.run(
+        `INSERT INTO users (username, email, password_hash, status, role, email_verified,
+                            service_access, sandbox_completed)
+         VALUES (?, ?, 'x', 'approved', ?, 1, 1, 1)`,
+        [username, `${username}@example.org`, role],
+      );
+      const u = db
+        .query<{ id: number }, [string]>("SELECT id FROM users WHERE username = ?")
+        .get(username);
+      if (!u) throw new Error(`seed: ${username}`);
+      db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
+        u.id,
+        await hashApiKey(key),
+        key.slice(0, 8),
+      );
+    }
+    const owner = db
+      .query<{ id: number }, []>("SELECT id FROM users WHERE username='list-owner'")
+      .get();
+    if (!owner) throw new Error("seed: owner");
+    for (const [id, anonymous] of [
+      ["nm000885", 1],
+      ["nm000886", 0],
+    ] as const) {
+      db.query(
+        `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox,
+                               github_repo, anonymous, concept_doi)
+         VALUES (?, 'A sufficiently descriptive dataset title', ?, 'active', 'public', 0, ?, ?, ?)`,
+      ).run(id, owner.id, `nemarDatasets/${id}`, anonymous, "10.82901/reserved-test");
+    }
+  }
+
+  async function list(
+    db: Database,
+    query: string,
+    key?: string,
+  ): Promise<Record<string, Record<string, unknown>>> {
+    const a = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+    a.route("/datasets", datasetRoutes);
+    const res = await a.request(
+      `/datasets${query}`,
+      key ? { headers: { Authorization: `Bearer ${key}` } } : {},
+      env(db),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { datasets: Record<string, unknown>[] };
+    return Object.fromEntries(body.datasets.map((d) => [String(d.dataset_id), d]));
+  }
+
+  test("an unauthenticated reader gets neither, and the control row keeps both", async () => {
+    const db = freshDb();
+    await seedTwo(db);
+    const rows = await list(db, "");
+    expect(rows.nm000885.github_repo).toBeNull();
+    expect(rows.nm000885.concept_doi).toBeNull();
+    expect(rows.nm000885.doi).toBeNull();
+    // The state itself is still reported, so a consumer can render "withheld"
+    // rather than "missing".
+    expect(rows.nm000885.anonymous).toBe(1);
+    // The control. Without it a projection that nulled these columns for every
+    // row would satisfy the assertions above.
+    expect(rows.nm000886.github_repo).toBe("nemarDatasets/nm000886");
+    expect(rows.nm000886.concept_doi).toBe("10.82901/reserved-test");
+    db.close();
+  });
+
+  test("the owner's own listing keeps them", async () => {
+    // `?mine` is scoped to the caller's rows, and the depositor needs
+    // `github_repo` for the commit that ends the anonymity.
+    const db = freshDb();
+    await seedTwo(db);
+    const rows = await list(db, "?mine=true", OWNER_KEY);
+    expect(rows.nm000885.github_repo).toBe("nemarDatasets/nm000885");
+    db.close();
+  });
+
+  test("an admin keeps them on the public list", async () => {
+    const db = freshDb();
+    await seedTwo(db);
+    const rows = await list(db, "", ADMIN_KEY);
+    expect(rows.nm000885.github_repo).toBe("nemarDatasets/nm000885");
+    expect(rows.nm000885.concept_doi).toBe("10.82901/reserved-test");
+    db.close();
+  });
+
+  test("the PUBLIC list withholds even from the owner, and that is deliberate", async () => {
+    // Being signed in is not being entitled. The public list is one query for
+    // everybody, so it takes the conservative answer for every caller who is
+    // not an admin; an owner who wants their own identifiers asks for them
+    // where the query is scoped to them (`?mine=true`, above) or where the row
+    // is theirs by construction (`GET /datasets/:id`). Pinned because the
+    // alternative -- widening this branch to "owner sees their own" -- would
+    // mean joining owner identity into the public catalog query, which is the
+    // shape of the `?owner=` oracle this feature already had to close.
+    const db = freshDb();
+    await seedTwo(db);
+    const rows = await list(db, "", OWNER_KEY);
+    expect(rows.nm000885.github_repo).toBeNull();
+    expect(rows.nm000886.github_repo).toBe("nemarDatasets/nm000886");
+    db.close();
+  });
+});
+
+describe("the owner filter is not a confirmation oracle", () => {
+  // `?owner=<username>` matches on the real username in a WHERE clause that no
+  // projection can reach, so withholding the column is not enough: a hit
+  // confirms that this person deposited this dataset. Usernames are public on
+  // every non-anonymous dataset, so guessing one is free.
+  const ALICE_KEY = "anon-alice-key-0123456789abcdef0123456789abcd";
+  const BOB_KEY = "anon-bob-key-0123456789abcdef0123456789abcdef";
+  const ADMIN_KEY = "anon-oracle-admin-0123456789abcdef0123456789";
+
+  async function seedOracle(db: Database): Promise<void> {
+    for (const [username, role, key] of [
+      ["alice", "member", ALICE_KEY],
+      ["bob", "member", BOB_KEY],
+      ["oracle-admin", "admin", ADMIN_KEY],
+    ] as const) {
+      db.run(
+        `INSERT INTO users (username, email, password_hash, status, role, email_verified,
+                            service_access, sandbox_completed)
+         VALUES (?, ?, 'x', 'approved', ?, 1, 1, 1)`,
+        [username, `${username}@example.org`, role],
+      );
+      const u = db
+        .query<{ id: number }, [string]>("SELECT id FROM users WHERE username = ?")
+        .get(username);
+      if (!u) throw new Error(`seed: ${username}`);
+      db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
+        u.id,
+        await hashApiKey(key),
+        key.slice(0, 8),
+      );
+    }
+    const alice = db.query<{ id: number }, []>("SELECT id FROM users WHERE username='alice'").get();
+    if (!alice) throw new Error("seed: alice");
+    for (const [id, anonymous] of [
+      ["nm000887", 1],
+      ["nm000888", 0],
+    ] as const) {
+      db.query(
+        `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox,
+                               github_repo, anonymous)
+         VALUES (?, 'A sufficiently descriptive dataset title', ?, 'active', 'public', 0, ?, ?)`,
+      ).run(id, alice.id, `nemarDatasets/${id}`, anonymous);
+    }
+  }
+
+  async function byOwner(db: Database, key?: string): Promise<string[]> {
+    const a = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+    a.route("/datasets", datasetRoutes);
+    const res = await a.request(
+      "/datasets?owner=alice",
+      key ? { headers: { Authorization: `Bearer ${key}` } } : {},
+      env(db),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { datasets: { dataset_id: string }[] };
+    return body.datasets.map((d) => d.dataset_id);
+  }
+
+  test("a stranger asking for alice's datasets is not told about the concealed one", async () => {
+    const db = freshDb();
+    await seedOracle(db);
+    const ids = await byOwner(db);
+    expect(ids).not.toContain("nm000887");
+    // The control, and it is the whole point: the filter still WORKS. A
+    // predicate that returned nothing at all would satisfy the line above.
+    expect(ids).toContain("nm000888");
+    db.close();
+  });
+
+  test("another signed-in user gets the same answer", async () => {
+    const db = freshDb();
+    await seedOracle(db);
+    expect(await byOwner(db, BOB_KEY)).not.toContain("nm000887");
+    db.close();
+  });
+
+  test("alice sees her own, and so does an admin", async () => {
+    const db = freshDb();
+    await seedOracle(db);
+    expect(await byOwner(db, ALICE_KEY)).toContain("nm000887");
+    expect(await byOwner(db, ADMIN_KEY)).toContain("nm000887");
     db.close();
   });
 });

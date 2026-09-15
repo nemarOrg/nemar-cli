@@ -28,6 +28,7 @@ import {
   ANONYMOUS_RELEASE_STEPS,
 } from "../../shared/publication-steps";
 import {
+  ANONYMOUS_AUTHORS_LABEL,
   END_ANONYMITY_AT_PUBLICATION_SQL,
   FIRST_PUBLICATION_STAMP_SQL,
   expectedRepoVisibility,
@@ -243,8 +244,7 @@ function visibilityDecision(text: string, at: number): string {
  * reverse. A literal `false` or `"public"` never belongs here.
  */
 const DELIBERATE_LITERAL_VISIBILITY: Readonly<Record<string, string>> = {
-  "routes/datasets/publication.ts:1027":
-    "reverting the repo to private after the D1 write failed",
+  "routes/datasets/publication.ts:1027": "reverting the repo to private after the D1 write failed",
   "routes/datasets/publication.ts:1070": "the same revert one branch later",
 };
 
@@ -531,6 +531,78 @@ describe("an anonymous release is a publication minus the steps that expose iden
     // actually harvested.
     expect(ORCHESTRATOR).toContain("anonymousDeposit: c.anonymousRelease,");
     expect(ORCHESTRATOR).not.toContain("anonymousDeposit: isAnonymous(dataset)");
+  });
+});
+
+describe("the two statements the de-anonymization ordering rests on", () => {
+  // `stepRepoPublic` cannot be driven in-suite (approving a publication makes
+  // real GitHub, S3 and EZID calls), but the two queries it decides from are
+  // just SQL, and SQL can be run. Both were asserted only as source text,
+  // which pins where they are written and nothing about what they return.
+
+  const PRIOR_ANONYMOUS_SQL =
+    "SELECT 1 AS found FROM publication_requests WHERE dataset_id = ? AND anonymous = 1 LIMIT 1";
+
+  function seedRequest(db: Database, datasetId: string, anonymous: number, status: string): void {
+    db.prepare(
+      `INSERT INTO publication_requests (dataset_id, requested_by, status, anonymous)
+       VALUES (?, 7, ?, ?)`,
+    ).run(datasetId, status, anonymous);
+  }
+
+  test("the history query finds a PAST anonymous request, whatever became of it", () => {
+    // Deliberately unfiltered by status and unordered. A denied, superseded or
+    // long-published anonymous request still means this dataset's attribution
+    // was withheld at some point, so a later normal publication must restore
+    // it. Adding `AND status = 'requested'` here is the "optimization" that
+    // would reintroduce the permanent-DOI-cites-the-blinded-label bug, and
+    // this test is what it would break.
+    const db = freshDb();
+    seed(db, "nm000950");
+    seedRequest(db, "nm000950", 1, "denied");
+    seedRequest(db, "nm000950", 0, "requested");
+    expect(db.prepare(PRIOR_ANONYMOUS_SQL).get("nm000950")).toEqual({ found: 1 });
+    db.close();
+  });
+
+  test("a dataset that was never anonymous returns nothing", () => {
+    // The control. Without it, a query that matched every row would satisfy
+    // the assertion above -- and every ordinary publication would pay for an
+    // enrichment pass it does not need.
+    const db = freshDb();
+    seed(db, "nm000951");
+    seedRequest(db, "nm000951", 0, "requested");
+    expect(db.prepare(PRIOR_ANONYMOUS_SQL).get("nm000951")).toBeNull();
+    db.close();
+  });
+
+  test("the mint interlock reads the label the writer actually stores", () => {
+    // `blockedByUnrestoredAttribution` compares `datasets.authors` against
+    // `ANONYMOUS_AUTHORS_LABEL`. Both sides import the same constant, so the
+    // comparison cannot drift -- but the STORED value can, and the column is
+    // written by `writeDatasetCatalogFields`, not by the interlock. Run the
+    // interlock's own query against a row in the state `markAnonymous` leaves.
+    const db = freshDb();
+    seed(db, "nm000952", 1);
+    db.prepare("UPDATE datasets SET authors = ? WHERE dataset_id = ?").run(
+      ANONYMOUS_AUTHORS_LABEL,
+      "nm000952",
+    );
+    const blinded = db
+      .prepare("SELECT authors FROM datasets WHERE dataset_id = ?")
+      .get("nm000952") as { authors: string | null };
+    expect(blinded.authors).toBe(ANONYMOUS_AUTHORS_LABEL);
+
+    // And after restoration the interlock lets the mint through.
+    db.prepare("UPDATE datasets SET authors = ? WHERE dataset_id = ?").run(
+      "Lovelace, Ada",
+      "nm000952",
+    );
+    const restored = db
+      .prepare("SELECT authors FROM datasets WHERE dataset_id = ?")
+      .get("nm000952") as { authors: string | null };
+    expect(restored.authors).not.toBe(ANONYMOUS_AUTHORS_LABEL);
+    db.close();
   });
 });
 
