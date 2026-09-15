@@ -24,6 +24,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  MIN_DATA_AVAILABILITY,
+  dataAvailability,
   type ObjectSource,
   repairDatasetKeyRegistration,
   resolveRemoteUuid,
@@ -476,4 +478,66 @@ describe("sweepKeyRegistration", () => {
     expect(sweep.tally.failed).toBe(2);
     expect(sweep.outcomes[0].error).toBeTruthy();
   }, 240_000);
+});
+
+describe("dataAvailability (ADR 0064)", () => {
+  test("measures data only, so metadata cannot dilute the ratio", () => {
+    // on008017, measured: 37 keys missing of 171 data keys is 21.6% gone, while the
+    // same 37 against its 780 tracked files reads as 4.7%. A threshold on tracked
+    // files clears a dataset missing a fifth of its recordings.
+    const annexed = Array.from({ length: 171 }, (_, i) => `k${i}`);
+    const availability = dataAvailability({ annexed, missingContent: annexed.slice(0, 37) });
+    expect(availability).toBeCloseTo(0.784, 3);
+    expect(availability).toBeLessThan(MIN_DATA_AVAILABILITY);
+  });
+
+  test("a complete dataset is 1 and is not withdrawn", () => {
+    const annexed = ["a", "b", "c"];
+    expect(dataAvailability({ annexed, missingContent: [] })).toBe(1);
+  });
+
+  test("a metadata-only dataset is complete, not wholly unavailable", () => {
+    // Zero annexed keys must not divide to 0 and tombstone a dataset that is
+    // whole for its kind.
+    expect(dataAvailability({ annexed: [], missingContent: [] })).toBe(1);
+  });
+
+  test("the threshold is a floor, not a ceiling: exactly 90% available stays listed", () => {
+    const annexed = Array.from({ length: 10 }, (_, i) => `k${i}`);
+    const availability = dataAvailability({ annexed, missingContent: ["k0"] });
+    expect(availability).toBe(0.9);
+    expect(availability < MIN_DATA_AVAILABILITY).toBe(false);
+  });
+
+  test("one file more missing crosses it", () => {
+    const annexed = Array.from({ length: 10 }, (_, i) => `k${i}`);
+    expect(dataAvailability({ annexed, missingContent: ["k0", "k1"] })).toBeLessThan(
+      MIN_DATA_AVAILABILITY,
+    );
+  });
+
+  test("everything missing is 0, not a division error", () => {
+    const annexed = ["a", "b"];
+    expect(dataAvailability({ annexed, missingContent: annexed })).toBe(0);
+  });
+
+  test("reproduces the measured ratios that set the threshold", () => {
+    // The five public datasets ADR 0064 withdraws, from the 2026-09-15 sweep.
+    const measured: Array<[string, number, number, number]> = [
+      ["on006159", 222, 606, 0.366],
+      ["on004917", 104, 410, 0.254],
+      ["on004475", 30, 163, 0.184],
+      ["on005571", 55, 300, 0.183],
+      ["on003574", 11, 90, 0.122],
+    ];
+    for (const [id, missing, total, missingShare] of measured) {
+      const annexed = Array.from({ length: total }, (_, i) => `${id}-${i}`);
+      const availability = dataAvailability({
+        annexed,
+        missingContent: annexed.slice(0, missing),
+      });
+      expect(1 - availability).toBeCloseTo(missingShare, 3);
+      expect(availability).toBeLessThan(MIN_DATA_AVAILABILITY);
+    }
+  });
 });

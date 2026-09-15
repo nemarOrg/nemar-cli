@@ -102,6 +102,16 @@ earlier releases are described only by their generated notes.
 
 ### Fixed
 
+- **NEMAR lists a dataset only when at least 90% of its DATA files are available (ADR 0064,
+  partially superseding ADR 0005).** `dataAvailability` and `MIN_DATA_AVAILABILITY` put the
+  rule in one place. The denominator is data, never `total_files`: metadata is never annexed
+  (ADR 0015), so it arrives from GitHub whether or not one recording survived and pulls every
+  ratio toward 100%. `on008017` is missing 4.7% of its tracked files and 21.6% of its data,
+  and `on004917` 11.8% against 25.4%, so a threshold on tracked files clears both. A
+  metadata-only dataset measures 1 rather than dividing by zero. The threshold is applied only
+  after recovery has reported what it cannot get: three datasets recovered on 2026-09-15 were
+  below it that morning and whole by the afternoon.
+
 - **`nemar admin fleet key-registration --retract-false-claims` withdraws a claim the
   bucket cannot back (#1396, #967).** The sweep could already see this state -- a key
   recorded at NEMAR's remote with no object behind it, which is what a failed copy leaves --

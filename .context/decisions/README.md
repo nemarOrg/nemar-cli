@@ -102,6 +102,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0061](0061-a-registration-is-read-back-and-an-incomplete-dataset-is-not-partly-repaired.md) - A registration is read back from the location log, and a dataset the bucket cannot account for is never partly repaired
 - [ADR 0062](0062-a-missing-git-annex-degrades-to-a-snapshot.md) - A missing git-annex degrades to an HTTP snapshot, and a snapshot is not a repository
 - [ADR 0063](0063-recovered-content-is-pinned-or-proven-and-never-trusted-for-its-provenance.md) - Recovered content is pinned or proven, and an unproven copy is deleted rather than kept
+- [ADR 0064](0064-a-dataset-missing-more-than-a-tenth-of-its-data-is-withdrawn.md) - NEMAR lists a dataset only when at least 90% of its DATA files are available, and metadata never counts toward that (partially supersedes 0005)
 
 ## Backfill note (2026-07-31)
 

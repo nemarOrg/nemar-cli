@@ -61,6 +61,35 @@ const DATASET_ID_RE = /^[a-z]{2}[0-9]{6}$/;
  */
 export type ObjectSource = (datasetId: string) => Promise<Map<string, number>>;
 
+/**
+ * The share of a dataset's DATA a reader can actually obtain, 0 to 1 (ADR 0064).
+ *
+ * Data only. Metadata is never annexed (ADR 0015), so `.tsv`, `.json` and `README*`
+ * arrive from GitHub whether or not one recording survived, and counting them puts
+ * every dataset near 100%: `on008017` is missing 4.7% of its tracked files and 21.6%
+ * of its data. The denominator is therefore the distinct annex keys the tree names.
+ *
+ * A dataset with no annexed keys at all is 1, not 0. It is metadata-only, which is a
+ * complete dataset of its kind, and dividing by zero to call it wholly unavailable
+ * would withdraw it.
+ */
+export function dataAvailability(state: {
+  annexed: string[];
+  missingContent: string[];
+}): number {
+  if (state.annexed.length === 0) return 1;
+  return (state.annexed.length - state.missingContent.length) / state.annexed.length;
+}
+
+/**
+ * Below this share of its data available, a dataset is withdrawn (ADR 0064).
+ *
+ * Measured AFTER recovery has reported what it cannot get: three datasets recovered
+ * on 2026-09-15 were under it that morning and whole by the afternoon, so a verdict
+ * from a stale column would have tombstoned content that exists.
+ */
+export const MIN_DATA_AVAILABILITY = 0.9;
+
 export interface KeyRegistrationState {
   datasetId: string;
   /** NEMAR's remote UUID from the git-annex branch, or null when it has none. */
