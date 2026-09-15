@@ -102,6 +102,15 @@ earlier releases are described only by their generated notes.
 
 ### Fixed
 
+- **A presence claim NEMAR cannot honor can now be withdrawn (#1396).** `batchSetKeysAbsent`
+  is the counterpart to the registration path: a failed copy leaves a zero-byte object
+  under the right key name, every check that asks only whether the key exists counts it as
+  content (#967), and the registration then tells every clone to fetch bytes we do not
+  hold. Where recovery proves the content unrecoverable upstream the claim cannot be made
+  true, so the repair is to retract it. The read-back is inverted rather than reused:
+  success is the key no longer being recorded at the remote, and the assert-side check
+  would have reported every retraction as a failure.
+
 - **A multipart copy runs its parts concurrently (#1396).** Parts are independent
   server-side copies but were issued one at a time, so a single 85 GB key copied at about
   6 MiB/s, four hours, while eight ordinary keys in flight sustain 30 MiB/s. Eight parts now

@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCommand } from "../src/lib/git-annex/run-command";
-import { batchSetKeysPresent } from "../src/lib/git-annex/transfer";
+import { batchSetKeysAbsent, batchSetKeysPresent } from "../src/lib/git-annex/transfer";
 
 let repo: string;
 let remoteUuid: string;
@@ -160,4 +160,48 @@ describe("batchSetKeysPresent", () => {
       missing: [],
     });
   }, 60_000);
+});
+
+describe("batchSetKeysAbsent", () => {
+  test("withdraws a claim, and the location log stops naming the remote", async () => {
+    // The #967 repair. A zero-byte object made these keys look present, recovery
+    // proved the content unrecoverable upstream, so the claim has to go.
+    const keys = await addFiles(4);
+    await batchSetKeysPresent(repo, keys, remoteUuid);
+    expect((await recordedKeys()).size).toBe(4);
+
+    const result = await batchSetKeysAbsent(repo, keys, remoteUuid);
+
+    expect(result).toEqual({ success: 4, failed: 0, missing: [] });
+    expect((await recordedKeys()).size).toBe(0);
+  }, 120_000);
+
+  test("withdraws only the keys it is given", async () => {
+    const keys = await addFiles(5);
+    await batchSetKeysPresent(repo, keys, remoteUuid);
+
+    const result = await batchSetKeysAbsent(repo, keys.slice(0, 2), remoteUuid);
+
+    expect(result.failed).toBe(0);
+    expect([...(await recordedKeys())].sort()).toEqual([...keys.slice(2)].sort());
+  }, 120_000);
+
+  test("is idempotent on a key that was never claimed", async () => {
+    // The retry shape: a partly-finished repair is re-run over the whole list.
+    const keys = await addFiles(3);
+    const result = await batchSetKeysAbsent(repo, keys, remoteUuid);
+    expect(result).toEqual({ success: 3, failed: 0, missing: [] });
+    expect((await recordedKeys()).size).toBe(0);
+  }, 120_000);
+
+  test("an empty list is a no-op, not a claim about every key", async () => {
+    const keys = await addFiles(2);
+    await batchSetKeysPresent(repo, keys, remoteUuid);
+    expect(await batchSetKeysAbsent(repo, [], remoteUuid)).toEqual({
+      success: 0,
+      failed: 0,
+      missing: [],
+    });
+    expect((await recordedKeys()).size).toBe(2);
+  }, 120_000);
 });
