@@ -36,6 +36,7 @@ import { pushToGitHub } from "./git-annex/clone-push.js";
 import { getGitHubToken, githubTokenCredentialHelper } from "./git-annex/github.js";
 import { runCommand } from "./git-annex/run-command.js";
 import { batchSetKeysPresent } from "./git-annex/transfer.js";
+import { isKeyPresentAtDeclaredSize } from "./s3-server-copy.js";
 
 /** The name the import gives NEMAR's own S3 special remote. */
 export const REMOTE_NAME = "nemar-s3";
@@ -50,8 +51,15 @@ export const REMOTE_NAME = "nemar-s3";
  */
 const DATASET_ID_RE = /^[a-z]{2}[0-9]{6}$/;
 
-/** What the bucket holds for a dataset, as bare keys with the prefix stripped. */
-export type ObjectSource = (datasetId: string) => Promise<Set<string>>;
+/**
+ * What the bucket holds for a dataset: bare key to object size.
+ *
+ * The size is what makes this an answer rather than a guess. A failed copy
+ * leaves a zero-byte object under the right name (#967), so a set of names
+ * reports content that is not there -- on003645 has 653 such objects out of 823
+ * and every name-only check called it complete.
+ */
+export type ObjectSource = (datasetId: string) => Promise<Map<string, number>>;
 
 export interface KeyRegistrationState {
   datasetId: string;
@@ -286,7 +294,10 @@ export async function scanDatasetKeyRegistration(
   const registered = await keysRecordedAt(datasetPath, remoteUuid);
   const held = await objects(datasetId);
   const recorded = new Set(registered);
-  const inBucket = annexed.filter((key) => held.has(key));
+  // Present AT ITS DECLARED SIZE. A key whose object is truncated or zero bytes
+  // is not content, and registering it tells every clone NEMAR has something it
+  // cannot serve (ADR 0062).
+  const inBucket = annexed.filter((key) => isKeyPresentAtDeclaredSize(key, held));
   return {
     datasetId,
     remoteUuid,
@@ -294,7 +305,7 @@ export async function scanDatasetKeyRegistration(
     registered,
     inBucket,
     toRegister: inBucket.filter((key) => !recorded.has(key)),
-    missingContent: annexed.filter((key) => !held.has(key)),
+    missingContent: annexed.filter((key) => !isKeyPresentAtDeclaredSize(key, held)),
   };
 }
 

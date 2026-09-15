@@ -40,6 +40,7 @@ import {
 } from "./fleet-key-registration.js";
 import { runCommand } from "./git-annex/run-command.js";
 import { listAnnexedKeys } from "./git-annex/transfer.js";
+import { isKeyPresentAtDeclaredSize } from "./s3-server-copy.js";
 
 const DATASET_ID_RE = /^[a-z]{2}[0-9]{6}$/;
 
@@ -264,7 +265,11 @@ export async function recoverDatasetContent(
   try {
     const keyPaths = await annexedKeyPaths(datasetPath);
     const held = await objects(datasetId);
-    const missingKeys = [...keyPaths.keys()].filter((key) => !held.has(key));
+    // Not `held.has(key)`: a zero-byte object left by a failed copy carries the
+    // right name and none of the content (#967).
+    const missingKeys = [...keyPaths.keys()].filter(
+      (key) => !isKeyPresentAtDeclaredSize(key, held),
+    );
     if (missingKeys.length === 0) return tally(datasetId, [], []);
 
     const pins = await readPinnedSources(datasetPath, missingKeys);

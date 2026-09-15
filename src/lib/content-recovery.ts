@@ -208,6 +208,16 @@ export interface RecoveryPlanEntry {
   size: number;
   /** Where the bytes can be copied from, or absent when nothing accounts for them. */
   source?: RecoverySource;
+  /**
+   * Other sources to try if the first is refused.
+   *
+   * A pin can name a version the upstream has since restricted or deleted while
+   * the same bytes are still served at that path under a newer version id: for
+   * on008462 the pinned version 403s and the current one answers 200 at the same
+   * size. A pin is the best identification of a key's content, not a promise
+   * that it is still readable, so a refusal falls through rather than ending it.
+   */
+  alternatives?: RecoverySource[];
   /** Why there is no source; the operator's evidence that it is not a bug here. */
   reason?: string;
 }
@@ -227,44 +237,73 @@ export function planKeyRecovery(opts: {
   const facts = parseAnnexKey(opts.key);
   if (!facts) return { key: opts.key, size: 0, reason: "not a parseable annex key" };
   const entry: RecoveryPlanEntry = { key: opts.key, size: facts.size };
-
   const pin = opts.pins[opts.pins.length - 1];
+
+  const discovered = opts.upstream ? discoverUpstreamSource(facts.size, opts) : null;
   if (pin) {
     entry.source = { ...pin, origin: "pinned", size: facts.size };
+    // Not the same object twice: a discovered candidate that IS the pin adds
+    // nothing but a second identical refusal.
+    if (discovered && discovered.version !== pin.version) entry.alternatives = [discovered];
     return entry;
   }
   if (!opts.upstream) {
     entry.reason = "no upstream remote to recover from";
     return entry;
   }
+  if (discovered) {
+    entry.source = discovered;
+    return entry;
+  }
+  entry.reason = upstreamRefusalReason(facts.size, opts);
+  return entry;
+}
 
+/** The one distinct upstream object carrying this key's size, if there is one. */
+function discoverUpstreamSource(
+  size: number,
+  opts: {
+    paths: string[];
+    upstream?: { bucket: string; prefix: string; index: Map<string, UpstreamObjectVersion[]> };
+  },
+): RecoverySource | null {
+  const upstream = opts.upstream;
+  if (!upstream) return null;
   const candidates = opts.paths.flatMap(
-    (path) =>
-      opts.upstream?.index
-        .get(`${opts.upstream.prefix}${path}`)
-        ?.filter((v) => v.size === facts.size) ?? [],
+    (path) => upstream.index.get(`${upstream.prefix}${path}`)?.filter((v) => v.size === size) ?? [],
   );
   // One path is routinely rewritten with identical bytes, which lists as several
   // versions of one object. Identical ETags are one candidate listed twice, not
   // an ambiguity, so they are collapsed before the count is judged.
   const distinct = new Map(candidates.map((candidate) => [candidate.etag, candidate]));
-  if (distinct.size === 1) {
-    const [candidate] = distinct.values();
-    entry.source = {
-      bucket: opts.upstream.bucket,
-      object: candidate.object,
-      version: candidate.version,
-      remoteName: "upstream",
-      origin: "version-match",
-      size: facts.size,
-    };
-    return entry;
-  }
-  entry.reason =
-    distinct.size > 1
-      ? `${distinct.size} distinct upstream objects carry this key's size; refusing to guess`
-      : "no upstream object of this key's size at any of its paths";
-  return entry;
+  if (distinct.size !== 1) return null;
+  const [candidate] = distinct.values();
+  return {
+    bucket: upstream.bucket,
+    object: candidate.object,
+    version: candidate.version,
+    remoteName: "upstream",
+    origin: "version-match",
+    size,
+  };
+}
+
+function upstreamRefusalReason(
+  size: number,
+  opts: {
+    paths: string[];
+    upstream?: { bucket: string; prefix: string; index: Map<string, UpstreamObjectVersion[]> };
+  },
+): string {
+  const upstream = opts.upstream;
+  if (!upstream) return "no upstream remote to recover from";
+  const candidates = opts.paths.flatMap(
+    (path) => upstream.index.get(`${upstream.prefix}${path}`)?.filter((v) => v.size === size) ?? [],
+  );
+  const distinct = new Set(candidates.map((candidate) => candidate.etag));
+  return distinct.size > 1
+    ? `${distinct.size} distinct upstream objects carry this key's size; refusing to guess`
+    : "no upstream object of this key's size at any of its paths";
 }
 
 export type VerificationMethod = "checksum" | "etag" | "size-and-pin";

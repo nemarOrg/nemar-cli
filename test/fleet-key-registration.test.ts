@@ -12,7 +12,15 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -23,6 +31,16 @@ import {
   sweepKeyRegistration,
 } from "../src/lib/fleet-key-registration";
 import { runCommand } from "../src/lib/git-annex/run-command";
+
+/** A bucket listing in the shape `listExistingObjects` returns: key -> size. */
+function sizedObjects(keys: string[]): Map<string, number> {
+  return new Map(keys.map((key) => [key, declaredSize(key)]));
+}
+
+/** The size a key declares, which is what a real listing would agree with. */
+function declaredSize(key: string): number {
+  return Number(/-s(\d+)/.exec(key)?.[1] ?? 0);
+}
 
 let root: string;
 let origin: string;
@@ -52,17 +70,24 @@ function removeTree(dir: string): void {
  */
 function directoryObjectSource(dir: string): ObjectSource {
   return async () => {
-    const keys = new Set<string>();
+    // Key to the size of the object actually stored, not to the size the key
+    // claims: a store holding a truncated object is exactly the state the
+    // caller has to notice (#967).
+    const objects = new Map<string, number>();
     const walk = (path: string, depth: number): void => {
       if (!existsSync(path)) return;
       for (const name of readdirSync(path, { withFileTypes: true })) {
         if (!name.isDirectory()) continue;
-        if (depth === 2) keys.add(name.name);
-        else walk(join(path, name.name), depth + 1);
+        if (depth === 2) {
+          const stored = join(path, name.name, name.name);
+          objects.set(name.name, existsSync(stored) ? statSync(stored).size : 0);
+        } else {
+          walk(join(path, name.name), depth + 1);
+        }
       }
     };
     walk(dir, 0);
-    return keys;
+    return objects;
   };
 }
 
@@ -153,7 +178,7 @@ describe("scanDatasetKeyRegistration", () => {
     // the two need opposite responses: one is repaired here, the other needs the
     // content transferred.
     const path = await cloneForScan();
-    const state = await scanDatasetKeyRegistration("on999999", path, async () => new Set());
+    const state = await scanDatasetKeyRegistration("on999999", path, async () => new Map());
 
     expect(state.toRegister).toEqual([]);
     expect(state.missingContent).toHaveLength(4);
@@ -210,6 +235,27 @@ describe("repairDatasetKeyRegistration", () => {
     expect(recorded.split("\n").filter(Boolean)).toEqual([]);
   }, 240_000);
 
+  test("treats a zero-byte object as missing content, not as content", async () => {
+    // The defect this exists for: a failed copy leaves an object under the right
+    // key name with none of the bytes (#967). on003645 has 653 of those out of
+    // 823, and every check that asked only whether the key existed called the
+    // dataset complete -- including this sweep, which would then advertise all
+    // 653 to clones.
+    const held = directoryObjectSource(store);
+    const outcome = await repairDatasetKeyRegistration(
+      "on999999",
+      async (id) =>
+        new Map(
+          [...(await held(id))].map(([key], index) => [key, index === 0 ? 0 : declaredSize(key)]),
+        ),
+      { workRoot, apply: true, originUrl: origin },
+    );
+
+    expect(outcome.action).toBe("skipped-missing-content");
+    expect(outcome.state?.missingContent).toHaveLength(1);
+    expect(outcome.pushed).toBe(false);
+  }, 240_000);
+
   test("leaves a dataset alone when the bucket cannot account for its content", async () => {
     // on006159 has 221 of 480 keys with no object at all. Registering the other
     // 259 would be true but would also make a dataset whose real problem is
@@ -219,7 +265,7 @@ describe("repairDatasetKeyRegistration", () => {
       "on999999",
       async (id) => {
         const all = [...(await partial(id))];
-        return new Set(all.slice(0, 2));
+        return new Map(all.slice(0, 2));
       },
       { workRoot, apply: true, originUrl: origin },
     );

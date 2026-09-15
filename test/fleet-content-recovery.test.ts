@@ -31,6 +31,16 @@ import {
 } from "../src/lib/fleet-content-recovery";
 import { runCommand } from "../src/lib/git-annex/run-command";
 
+/** A bucket listing in the shape `listExistingObjects` returns: key -> size. */
+function sizedObjects(keys: string[]): Map<string, number> {
+  return new Map(keys.map((key) => [key, declaredSize(key)]));
+}
+
+/** The size a key declares, which is what a real listing would agree with. */
+function declaredSize(key: string): number {
+  return Number(/-s(\d+)/.exec(key)?.[1] ?? 0);
+}
+
 let root: string;
 let origin: string;
 let workRoot: string;
@@ -256,7 +266,7 @@ case "$2" in
 esac
 exit 0`);
 
-    const outcome = await recoverDatasetContent("on000001", async () => new Set(), {
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
       workRoot,
       apply: true,
       originUrl: origin,
@@ -289,7 +299,7 @@ case "$2" in
 esac
 exit 0`);
 
-    const outcome = await recoverDatasetContent("on000001", async () => new Set(), {
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
       workRoot,
       apply: true,
       originUrl: origin,
@@ -305,7 +315,7 @@ exit 0`);
     await setUpPinnedDataset("content");
     installAwsShim("case \"$2\" in list-object-versions) echo '[]'; exit 0 ;; esac\nexit 0");
 
-    const outcome = await recoverDatasetContent("on000001", async () => new Set(), {
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
       workRoot,
       apply: false,
       originUrl: origin,
@@ -319,15 +329,43 @@ exit 0`);
     const key = await setUpPinnedDataset("content");
     installAwsShim("exit 0");
 
-    const outcome = await recoverDatasetContent("on000001", async () => new Set([key]), {
+    const outcome = await recoverDatasetContent(
+      "on000001",
+      async () => new Map([[key, declaredSize(key)]]),
+      {
+        workRoot,
+        apply: true,
+        originUrl: origin,
+      },
+    );
+
+    expect(outcome.action).toBe("nothing-missing");
+    expect(outcome.missing).toBe(0);
+    expect(shimLog().some((line) => line.startsWith("s3api copy-object"))).toBe(false);
+  }, 180_000);
+
+  test("recovers a key whose object is there but empty", async () => {
+    // A zero-byte object is what a failed copy leaves behind, and it is NOT
+    // content: on003645 has 653 of them. If the bucket listing is read by name
+    // alone, this key looks present and is never repaired.
+    const content = "the real content of this recording";
+    const key = await setUpPinnedDataset(content);
+    installAwsShim(`
+case "$2" in
+  copy-object) echo '{"CopyObjectResult":{"ChecksumSHA256":"${sha256Base64(content)}"}}'; exit 0 ;;
+  head-object) echo '{"ContentLength":${content.length},"ChecksumSHA256":"${sha256Base64(content)}"}'; exit 0 ;;
+  list-object-versions) echo '[]'; exit 0 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map([[key, 0]]), {
       workRoot,
       apply: true,
       originUrl: origin,
     });
 
-    expect(outcome.action).toBe("nothing-missing");
-    expect(outcome.missing).toBe(0);
-    expect(shimLog().some((line) => line.startsWith("s3api copy-object"))).toBe(false);
+    expect(outcome.missing).toBe(1);
+    expect(outcome.keys[0]).toMatchObject({ action: "recovered", verification: "checksum" });
   }, 180_000);
 
   test("reports a key nothing accounts for rather than inventing a source", async () => {
@@ -335,7 +373,7 @@ exit 0`);
     await addAnnexedFile("sub-01/a.dat", "orphaned content");
     installAwsShim("case \"$2\" in list-object-versions) echo '[]'; exit 0 ;; esac\nexit 0");
 
-    const outcome = await recoverDatasetContent("on000001", async () => new Set(), {
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
       workRoot,
       apply: true,
       originUrl: origin,
@@ -361,7 +399,7 @@ case "$2" in
 esac
 exit 0`);
 
-    const outcome = await recoverDatasetContent("on000001", async () => new Set(), {
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
       workRoot,
       apply: true,
       originUrl: origin,
@@ -394,7 +432,7 @@ case "$2" in
 esac
 exit 0`);
 
-    const outcome = await recoverDatasetContent("on000001", async () => new Set(), {
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
       workRoot,
       apply: true,
       originUrl: origin,

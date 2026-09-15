@@ -443,7 +443,7 @@ export async function listS3ObjectKeys(opts: {
   region: string;
   /** Dataset prefix without a trailing slash, e.g. `on007788/objects`. */
   prefix: string;
-}): Promise<Set<string>> {
+}): Promise<Map<string, number>> {
   const { credentials, bucket, region, prefix } = opts;
   if (!(await isAwsCliAvailable())) {
     throw new Error("the aws CLI is not on PATH, so the bucket cannot be listed");
@@ -459,7 +459,7 @@ export async function listS3ObjectKeys(opts: {
       "--prefix",
       base,
       "--query",
-      "Contents[].Key",
+      "Contents[].[Key,Size]",
       "--output",
       "text",
       // The CLI paginates internally; this only bounds each request.
@@ -488,27 +488,39 @@ export async function listS3ObjectKeys(opts: {
       }`,
     );
   }
-  return parseS3ObjectKeys(stdout, base);
+  return parseS3ObjectSizes(stdout, base);
 }
 
 /**
- * Bare keys from `aws s3api list-objects-v2 --output text`.
+ * Bare keys and their object sizes from `aws s3api list-objects-v2 --output text`.
+ *
+ * The SIZE is not decoration. A failed copy leaves a valid-looking zero-byte
+ * object (#967), and a listing of names alone reports it as content: 653 of
+ * on003645's 823 objects are zero bytes, and every check that asked only
+ * whether the key was there called that dataset complete.
  *
  * Separated from the call so it can be tested, because this parse is where the
- * assumptions are: keys are tab-separated within a page and newline-separated
- * between pages, an empty result prints the literal `None`, and the prefix also
- * holds objects that are not keys.
+ * assumptions are: `--output text` writes one row per object as `<key>\t<size>`,
+ * rows are newline-separated, an empty result prints the literal `None`, and the
+ * prefix also holds objects that are not keys.
  */
-export function parseS3ObjectKeys(stdout: string, prefix: string): Set<string> {
+export function parseS3ObjectSizes(stdout: string, prefix: string): Map<string, number> {
   const base = prefix.endsWith("/") ? prefix : `${prefix}/`;
-  const keys = new Set<string>();
-  for (const token of stdout.split(/\s+/)) {
-    if (!token || token === "None") continue;
-    if (!token.startsWith(base)) continue;
-    const key = token.slice(base.length);
+  const objects = new Map<string, number>();
+  for (const line of stdout.split("\n")) {
+    const row = line.trim();
+    if (!row || row === "None") continue;
+    const [name, size] = row.split(/\s+/);
+    if (!name?.startsWith(base)) continue;
+    const key = name.slice(base.length);
     // One path segment: an annex key never contains a slash, so anything nested
     // below the prefix is not one.
-    if (key && !key.includes("/")) keys.add(key);
+    if (key && !key.includes("/")) objects.set(key, Number(size ?? 0));
   }
-  return keys;
+  return objects;
+}
+
+/** The keys alone, for a caller that genuinely only asks whether one exists. */
+export function parseS3ObjectKeys(stdout: string, prefix: string): Set<string> {
+  return new Set(parseS3ObjectSizes(stdout, prefix).keys());
 }
