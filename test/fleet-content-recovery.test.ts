@@ -507,4 +507,111 @@ exit 0`);
     expect(outcome.keys[0].action).toBe("failed");
     expect(outcome.keys[0].detail).toContain("Access Denied");
   }, 180_000);
+  test("falls through to a discovered alternative when the pinned version is gone", async () => {
+    // The on003645 shape, and the fall-through has no other coverage: deleting
+    // the line that attaches `alternatives` leaves every other test green.
+    // OpenNeuro's recorded versions were all refused while the same bytes sat at
+    // the same path under a newer version id, and this is what recovered 619
+    // keys there.
+    const content = "bytes that moved to a new version id";
+    const key = await setUpPinnedDataset(content);
+    const size = content.length;
+    installAwsShim(`
+case "$2" in
+  list-object-versions)
+    echo '[["ds000001/sub-01/a.dat","CURRENTVER",${size},"etag-current"]]'; exit 0 ;;
+  copy-object)
+    case "$*" in
+      *versionId=VERSIONID*)
+        echo "aws: [ERROR]: An error occurred (InvalidArgument) when calling the CopyObject operation: Invalid version id specified" >&2
+        exit 254 ;;
+    esac
+    echo '{"CopyObjectResult":{"ChecksumSHA256":"${sha256Base64(content)}"}}'; exit 0 ;;
+  head-object)
+    echo '{"ContentLength":${size},"ChecksumSHA256":"${sha256Base64(content)}"}'; exit 0 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
+      workRoot,
+      apply: true,
+      originUrl: origin,
+    });
+
+    expect(outcome.keys[0].action).toBe("recovered");
+    expect(outcome.keys[0].origin).toBe("version-match");
+    // Both were really attempted: the pin first, then the discovered version.
+    const copies = shimLog().filter((line) => line.startsWith("s3api copy-object"));
+    expect(copies).toHaveLength(2);
+    expect(copies[0]).toContain("versionId=VERSIONID");
+    expect(copies[1]).toContain("versionId=CURRENTVER");
+    expect(key).toBeTruthy();
+  }, 180_000);
+
+  test("a dry run PROBES the source rather than assuming a record is readable", async () => {
+    // ADR 0064 names "a dry run that reported would-recover without probing" as
+    // one of the five defects that made content look recoverable when it was
+    // not: on004475's keys all carry pins and every one of those objects is
+    // gone, so a plan built from the records alone promised 30 recoveries and an
+    // apply delivered none.
+    await setUpPinnedDataset("content whose pin is dead");
+    installAwsShim(`
+case "$2" in
+  head-object)
+    echo "aws: [ERROR]: An error occurred (404) when calling the HeadObject operation: Not Found" >&2
+    exit 254 ;;
+  list-object-versions) echo '[]'; exit 0 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
+      workRoot,
+      apply: false,
+      originUrl: origin,
+    });
+
+    expect(outcome.keys[0].action).toBe("unrecoverable");
+    expect(outcome.keys[0].detail).toContain("unreadable");
+    // The probe really ran, and unsigned, which is what makes it a statement
+    // about upstream rather than about our credentials.
+    expect(
+      shimLog().some(
+        (line) => line.startsWith("s3api head-object") && line.includes("--no-sign-request"),
+      ),
+    ).toBe(true);
+    // And nothing was copied, because this is a dry run.
+    expect(shimLog().some((line) => line.startsWith("s3api copy-object"))).toBe(false);
+  }, 180_000);
+
+  test("a failed upstream listing fails the dataset instead of emptying it", async () => {
+    // listUpstreamObjectVersions refuses rather than under-reporting, and this
+    // is what that buys: a partial listing would file a recoverable dataset as
+    // unrecoverable, and since ADR 0064 that feeds a withdrawal.
+    await addAnnexedFile("sub-01/a.dat", "content with no pin");
+    await writeAnnexBranchFile(
+      origin,
+      "remote.log",
+      "9e1479f6-49e0-413b-8222-a7f8000f55a6 bucket=openneuro.org name=s3-PUBLIC type=S3 versioning=yes\n",
+    );
+    installAwsShim(`
+case "$2" in
+  list-object-versions)
+    echo "aws: [ERROR]: An error occurred (AccessDenied) when calling the ListObjectVersions operation" >&2
+    exit 254 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
+      workRoot,
+      apply: true,
+      originUrl: origin,
+    });
+
+    expect(outcome.action).toBe("failed");
+    expect(outcome.error).toBeTruthy();
+    // And it must not have manufactured a verdict about the content.
+    expect(outcome.keys.some((k) => k.action === "unrecoverable")).toBe(false);
+    // Unknown is not zero: nothing was measured, so the counts are not a result.
+    expect(outcome.measured).toBe(false);
+  }, 180_000);
 });

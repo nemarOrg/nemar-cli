@@ -10,6 +10,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  COPY_OBJECT_LIMIT,
   copySourceArgument,
   indexUpstreamVersions,
   isRetryableAwsError,
@@ -629,5 +630,39 @@ describe("isRetryableAwsError", () => {
         "An error occurred (AccessDenied) when calling the CopyObject operation on ds004293/sub-503/x-429.set",
       ),
     ).toBe(false);
+  });
+});
+
+describe("the 5 GB boundary that decides how a copy is proven", () => {
+  // COPY_OBJECT_LIMIT appeared in no test, and the >5 GB refusal for an unpinned
+  // source could be deleted with the whole suite green. It is the rule that
+  // keeps a multipart copy -- which carries no SHA-256 -- from being trusted on
+  // a source nothing pins.
+  test("is 5 GiB, and the dispatch is strictly greater than", () => {
+    expect(COPY_OBJECT_LIMIT).toBe(5 * 1024 ** 3);
+    // S3's CopyObject source limit is inclusive, so exactly the limit is still a
+    // single-part copy and only one byte more needs multipart.
+    expect(multipartRanges(COPY_OBJECT_LIMIT, 1024 ** 3)).toHaveLength(5);
+    expect(multipartRanges(COPY_OBJECT_LIMIT + 1, 1024 ** 3)).toHaveLength(6);
+  });
+
+  test("the last range ends on the final byte, with no gap and no overlap", () => {
+    // An off-by-one here yields an object of the wrong length, and a gap or an
+    // overlap one of the RIGHT length holding the wrong bytes -- invisible
+    // without hashing, and the multipart path has no SHA-256 to catch it.
+    const size = COPY_OBJECT_LIMIT + 12345;
+    const ranges = multipartRanges(size, 1024 ** 3);
+    expect(ranges[0].offset).toBe(0);
+    expect(ranges[ranges.length - 1].end).toBe(size - 1);
+    for (let i = 1; i < ranges.length; i++) {
+      expect(ranges[i].offset).toBe(ranges[i - 1].end + 1);
+      expect(ranges[i].part).toBe(ranges[i - 1].part + 1);
+    }
+  });
+
+  test("an exact multiple produces no empty trailing part", () => {
+    const ranges = multipartRanges(3 * 1024 ** 3, 1024 ** 3);
+    expect(ranges).toHaveLength(3);
+    expect(ranges.every((r) => r.end >= r.offset)).toBe(true);
   });
 });
