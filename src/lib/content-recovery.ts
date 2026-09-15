@@ -465,12 +465,52 @@ export function copySourceArgument(source: { bucket: string; object: string; ver
   return source.version ? `${base}?versionId=${source.version}` : base;
 }
 
+/**
+ * Throttling and the other transients worth a second attempt.
+ *
+ * `CreateOAuth2Token ... Rate exceeded` is the one measured here: a sweep with
+ * eight copies in flight trips the credential endpoint, not S3, and it cost two
+ * of `on008065`'s 5,173 keys. Since ADR 0064 a key that fails counts as missing
+ * data, and enough of them withdraws a dataset, so a throttle that is not
+ * retried can tombstone content that is sitting there readable. Deliberately
+ * narrow: `AccessDenied` and `NoSuchVersion` are answers, not hiccups, and
+ * retrying them wastes a sweep.
+ */
+// Anchored on the parenthesised code AWS puts in every message, not a loose
+// word match: `\b429\b` also matches a path like `sub-503/x-429.set`, so a
+// dataset whose filenames happen to carry those digits would retry an
+// AccessDenied forever.
+const AWS_RETRYABLE =
+  /\((?:429|503|SlowDown|Throttling\w*|ThrottledException|RequestTimeout|RequestTimeoutException|InternalError|ServiceUnavailable)\)|Rate exceeded/i;
+
+/** Whether an `aws` failure is worth another attempt. Exported to be tested. */
+export function isRetryableAwsError(stderr: string): boolean {
+  return AWS_RETRYABLE.test(stderr);
+}
+
+/** How many extra attempts a throttled call gets, and the base backoff. */
+const AWS_RETRIES = 4;
+const AWS_RETRY_BASE_MS = 750;
+
 async function aws(args: string[], env?: Record<string, string>) {
-  return runCommand(["aws", ...args], {
+  let result = await runCommand(["aws", ...args], {
     env,
     unsetEnv: AWS_UNSET,
     timeout: AWS_TIMEOUT_MS,
   });
+  for (let attempt = 1; attempt <= AWS_RETRIES; attempt++) {
+    if (result.exitCode === 0 || !isRetryableAwsError(result.stderr)) return result;
+    // Exponential, with jitter so eight workers throttled at once do not all
+    // come back in the same instant and throttle each other again.
+    const wait = AWS_RETRY_BASE_MS * 2 ** (attempt - 1) * (1 + Math.random());
+    await new Promise((resolve) => setTimeout(resolve, wait));
+    result = await runCommand(["aws", ...args], {
+      env,
+      unsetEnv: AWS_UNSET,
+      timeout: AWS_TIMEOUT_MS,
+    });
+  }
+  return result;
 }
 
 export interface CopyResult {

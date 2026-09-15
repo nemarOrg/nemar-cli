@@ -26,6 +26,7 @@ import ora from "ora";
 import { addCi, importDataset, reindexDataset } from "./api/admin.js";
 import { getDataset, getUserCiStatus } from "./api/datasets.js";
 import { approvePublication, requestPublication } from "./api/publish.js";
+import { MIN_DATA_AVAILABILITY } from "./fleet-key-registration.js";
 import { cloneDataset, pushToGitHub } from "./git-annex/clone-push.js";
 import { configureGitHubRemote } from "./git-annex/github.js";
 import { isNeverAnnexedMetadata, shouldAnnex } from "./git-annex/policy.js";
@@ -1564,8 +1565,27 @@ export async function finalizeImport(
     const treeKeys = new Set((await listAnnexedKeys(datasetPath)).values());
     const unbacked = keysWithoutObjects(treeKeys, existing);
     if (unbacked.length > 0) {
+      // The ratio, not just the count, because it is what decides whether this
+      // dataset could ever be listed (ADR 0064) and because the tracking issue
+      // filed from this failure is triaged by severity: "1 of 65,063 missing" and
+      // "935 of 936 missing" are the same sentence without it. Data only, which
+      // is what `treeKeys` already is: metadata is never annexed (ADR 0015).
+      const available = (treeKeys.size - unbacked.length) / treeKeys.size;
+      const shortfall = available < MIN_DATA_AVAILABILITY;
+      const belowThreshold = shortfall
+        ? `, below the ${(MIN_DATA_AVAILABILITY * 100).toFixed(0)}% a listed dataset must reach (ADR 0064)`
+        : "";
       treeGateSpinner.fail(
-        `${unbacked.length} of ${treeKeys.size} annexed key(s) in the tree have no object in s3://${S3_BUCKET}/${nemarId}/objects/ (e.g. ${unbacked.slice(0, 3).join(", ")}). The manifest accounted for ${manifest.items.length}. Refusing to register: those keys would be advertised as NEMAR content that no clone can fetch. Re-run the copy phase, or prepare if the content exists only in a clone.`,
+        [
+          `${unbacked.length} of ${treeKeys.size} annexed key(s) in the tree have no object in s3://${S3_BUCKET}/${nemarId}/objects/`,
+          `(e.g. ${unbacked.slice(0, 3).join(", ")}).`,
+          `That is ${(available * 100).toFixed(1)}% of its data available${belowThreshold}.`,
+          `The manifest accounted for ${manifest.items.length}.`,
+          "Refusing to register: those keys would be advertised as NEMAR content that no clone can fetch.",
+          "Re-run the copy phase, or prepare if the content exists only in a clone.",
+          "If the copy phase cannot get them, check whether OpenNeuro still serves them before assuming a NEMAR bug:",
+          `\`nemar admin fleet content-recovery ${nemarId}\` reports, per key, whether any recorded source is readable.`,
+        ].join(" "),
       );
       process.exit(1);
     }

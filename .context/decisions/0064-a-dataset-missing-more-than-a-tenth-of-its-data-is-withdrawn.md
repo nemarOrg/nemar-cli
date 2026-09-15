@@ -43,6 +43,19 @@ reversed by `restore` the day the data is fetchable again.
 cannot get.** Withdrawal is the answer to content that is gone, never to content nobody
 has fetched yet, and the difference is not visible without trying.
 
+**Crossing the threshold opens a notice period, it does not withdraw on the spot.** Where
+the gap is an upstream defect, the source is told what is missing, what we measured, and
+the date the dataset comes down, and withdrawal follows only if the content is still
+unfetchable then. A defect an archive can fix in an afternoon should not cost a dataset
+its DOI, and most of what #1396 found is that shape: a stale version id, an untagged
+object, an export that stopped partway. For this first cohort the date is **15 October
+2026**, set in the report sent to OpenNeuro on 2026-09-15.
+
+The notice period is not open-ended and not renegotiated per dataset. If the date passes
+with the data still unavailable, the dataset is withdrawn; if it is fixed, the gap closes
+and the question does not arise. A dataset whose gap is NOT upstream's -- our own failed
+transfer -- gets no notice period, because there is nobody to notify: recover it.
+
 The denominator is data only and never `total_files`: the DISTINCT git-annex keys the
 tree names, which is what `git annex find --include '*' --format=${key}` answers and what
 the registration scan already computes. The numerator is those keys with no object in
@@ -97,9 +110,15 @@ data nobody can supply, which is what withdrawal is for.
 
 ## Consequences
 
-- 11 datasets fall below 90% on measurement day; 5 of them are public and get tombstoned
-  (`on006159` 36.6%, `on004917` 25.4%, `on004475` 18.4%, `on005571` 18.3%,
-  `on003574` 12.2%). The other 6 are already private.
+- 11 datasets fall below 90% on measurement day. 5 are public and are on notice rather
+  than already down (`on006159` 36.6% of its data missing, `on004917` 25.4%,
+  `on004475` 18.4%, `on005571` 18.3%, `on003574` 12.2%); the other 6 are already
+  private. Nothing was tombstoned on measurement day: every one of these gaps is an
+  upstream export defect, so they go into the 15 October notice.
+- The notice period costs something real and it is accepted: until the date passes, five
+  datasets stay listed while missing more data than the policy allows. The alternative is
+  tombstoning a DOI over a defect the source can clear in a day, which is worse for a
+  reader who would rather cite a dataset that gets fixed than chase a tombstone.
 - The threshold is deliberately stringent. At 20% the count is 7 and at 50% it is 3,
   and `on008017` at 21.6% or `on003574` at 12.2% are datasets a reader would
   reasonably call broken. A stricter rule withdraws more, and that is the intent:

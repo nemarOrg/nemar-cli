@@ -12,6 +12,7 @@ import { describe, expect, test } from "bun:test";
 import {
   copySourceArgument,
   indexUpstreamVersions,
+  isRetryableAwsError,
   multipartRanges,
   parseAnnexKey,
   parseRemoteLog,
@@ -504,5 +505,55 @@ describe("multipartRanges", () => {
     const ranges = multipartRanges(8, 4);
     expect(ranges).toHaveLength(2);
     expect(ranges[1].end).toBe(7);
+  });
+});
+
+describe("isRetryableAwsError", () => {
+  test("retries the throttle that cost on008065 two of its 5,173 keys", () => {
+    // Verbatim. It is the credential endpoint throttling under eight concurrent
+    // copies, not S3 refusing anything, and since ADR 0064 a key left behind by
+    // a throttle counts as missing data and can withdraw a dataset.
+    expect(
+      isRetryableAwsError(
+        "aws: [ERROR]: An error occurred (429) when calling the CreateOAuth2Token operation: Rate exceeded.",
+      ),
+    ).toBe(true);
+  });
+
+  test("retries S3's own slow-down and transient server errors", () => {
+    for (const message of [
+      "An error occurred (SlowDown) when calling the CopyObject operation",
+      "An error occurred (503) when calling the CopyObject operation",
+      "An error occurred (RequestTimeout) when calling the UploadPartCopy operation",
+      "An error occurred (InternalError) when calling the CopyObject operation",
+      "An error occurred (ThrottlingException) when calling the CopyObject operation",
+    ]) {
+      expect(isRetryableAwsError(message)).toBe(true);
+    }
+  });
+
+  test("does not retry an answer", () => {
+    // These are verdicts about the object, not hiccups. Retrying them turns a
+    // sweep over 600 datasets into a sweep that takes five times as long and
+    // reaches the same conclusion.
+    for (const message of [
+      "An error occurred (AccessDenied) when calling the CopyObject operation: Access Denied",
+      "An error occurred (NoSuchVersion) when calling the CopyObject operation: The specified version does not exist",
+      "An error occurred (NoSuchKey) when calling the CopyObject operation",
+      "An error occurred (InvalidRequest) when calling the CopyObject operation",
+      "An error occurred (404) when calling the HeadObject operation: Not Found",
+    ]) {
+      expect(isRetryableAwsError(message)).toBe(false);
+    }
+  });
+
+  test("does not mistake a 429 inside a key or path for a throttle", () => {
+    // A bare substring match would: annex keys carry sizes, and `-s429` or a
+    // subject directory can hold those digits.
+    expect(
+      isRetryableAwsError(
+        "An error occurred (AccessDenied) when calling the CopyObject operation on ds004293/sub-503/x-429.set",
+      ),
+    ).toBe(false);
   });
 });
