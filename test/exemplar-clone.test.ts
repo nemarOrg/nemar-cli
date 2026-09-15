@@ -9,6 +9,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   type ExemplarFleetEntry,
+  anonymousExemplar,
   findMissingCopiedKeys,
   isAnnexContentKey,
   parseExemplarFleet,
@@ -160,6 +161,49 @@ describe("parseExemplarFleet", () => {
     const entries: ExemplarFleetEntry[] = parseExemplarFleet(raw);
     const placeholders = entries.filter((e) => e.source_id === "nm000000");
     expect(placeholders).toEqual([]);
+  });
+
+  test("anonymous must be literally true, never false", async () => {
+    // Two states, not three. An explicit `false` reads as a deliberate
+    // statement about a row and would invite someone to interpret it as
+    // "was anonymous, is not any more" -- which is a fact the fleet file has
+    // no business carrying.
+    expect(() =>
+      parseExemplarFleet([
+        { xx_id: "xx099900", source_id: "on000001", modality: "eeg", anonymous: false },
+      ]),
+    ).toThrow(/anonymous must be omitted or literally true/);
+    const ok = parseExemplarFleet([
+      { xx_id: "xx099900", source_id: "on000001", modality: "eeg", anonymous: true },
+    ]);
+    expect(ok[0].anonymous).toBe(true);
+  });
+
+  test("at most one anonymous exemplar is declared", () => {
+    // "The anonymous exemplar" is how the runbooks, the tests and the fleet
+    // tooling all refer to it. A second one makes that phrase ambiguous, and
+    // an ambiguous referent is worse than no fixture at all.
+    expect(() =>
+      parseExemplarFleet([
+        { xx_id: "xx099900", source_id: "on000001", modality: "eeg", anonymous: true },
+        { xx_id: "xx099901", source_id: "on000002", modality: "eeg", anonymous: true },
+      ]),
+    ).toThrow(/declares 2 anonymous exemplars/);
+  });
+
+  test("the checked-in fleet designates a standing anonymous deposit", async () => {
+    // The point of designating one: anonymity is otherwise only ever exercised
+    // against rows a test just created and tore down. This is the one place
+    // the pre-publication state exists continuously on staging.
+    const raw = await Bun.file(`${import.meta.dir}/../scripts/exemplar-fleet.json`).json();
+    const entries: ExemplarFleetEntry[] = parseExemplarFleet(raw);
+    const designated = anonymousExemplar(entries);
+    expect(designated).not.toBeNull();
+    expect(designated?.xx_id).toBe("xx099907");
+    // It has to say why it must never be published, because the failure mode
+    // is silent and permanent: the 0085 triggers refuse anonymous = 1 once
+    // first_published_at is stamped, so one `--publish` ends the fixture.
+    expect(designated?.note).toMatch(/never published/i);
   });
 
   test("every fleet source is a distinct real dataset id", async () => {

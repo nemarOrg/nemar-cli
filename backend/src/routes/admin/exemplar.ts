@@ -40,6 +40,17 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
       .regex(SOURCE_ID_RE, "source_id must be an nm/on dataset id (e.g. nm000132)"),
     name: z.string().min(1).max(200).optional(),
     description: z.string().optional(),
+    /**
+     * Create this exemplar as the fleet's standing ANONYMOUS deposit (#1407).
+     *
+     * Set at INSERT rather than flipped afterwards, because this is the only
+     * moment it is unconditionally legal: the row is brand new, so
+     * `first_published_at` is NULL and migration 0085's triggers allow it. An
+     * exemplar that has been through the normal publish-and-mint flow can
+     * never be made anonymous again, which is why the fleet declares this one
+     * up front instead of borrowing an existing entry.
+     */
+    anonymous: z.literal(true).optional(),
   });
 
   /**
@@ -62,7 +73,7 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
       );
     }
 
-    const { dataset_id, source_id, name, description } = c.req.valid("json");
+    const { dataset_id, source_id, name, description, anonymous } = c.req.valid("json");
     const db = c.env.DB;
     const adminUser = c.get("user");
     const displayName = name || `[TEST COPY] ${source_id}`;
@@ -96,8 +107,8 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
     try {
       await db
         .prepare(
-          `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, is_exemplar, visibility, source, source_id, last_activity_at)
-           VALUES (?, ?, ?, ?, ?, 1, 1, 'private', 'nemar-exemplar', ?, datetime('now'))`,
+          `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, is_exemplar, visibility, anonymous, source, source_id, last_activity_at)
+           VALUES (?, ?, ?, ?, ?, 1, 1, 'private', ?, 'nemar-exemplar', ?, datetime('now'))`,
         )
         .bind(
           dataset_id,
@@ -105,6 +116,7 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
           description || null,
           adminUser.id,
           githubRepo.full_name,
+          anonymous ? 1 : 0,
           source_id,
         )
         .run();

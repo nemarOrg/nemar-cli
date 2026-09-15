@@ -165,6 +165,15 @@ Harder, and worth stating plainly:
   "readable on GitHub" must say so rather than reading `visibility`, and the three fixed here
   are evidence the proxy was load-bearing in places nobody had listed.
 
+**The staging fleet carries one standing anonymous deposit.** `xx099907` is created anonymous
+and never published, because the state is otherwise only ever exercised against rows a test
+builds and tears down in the same process. It could not be an existing exemplar: all seven are
+public with sandbox DOIs, so the 0085 backfill stamps `first_published_at` on every one and the
+triggers then refuse `anonymous = 1` -- which is the invariant working, and the reason the
+fixture had to be declared rather than borrowed. Publishing it destroys it permanently, so the
+fleet file marks it, the clone tool skips it under `--all --publish`, and the
+publication-request route refuses it.
+
 ## Alternatives considered
 
 - **Filter identity at read time.** The obvious design, and it leaves the real names in

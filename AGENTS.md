@@ -228,6 +228,16 @@ it does not depend on the registrar.
 The only thing that lapses is EZID's sandbox shoulder, which purges DOIs after about two weeks,
 so re-mint with `nemar admin exemplar remint-dois` only when a resolvable test DOI actually matters.
 
+**`xx099907` is the standing ANONYMOUS deposit (#1407) and is the one exemplar that must never
+be published.** Public row, private repo, `anonymous = 1`, no DOI. Every other exemplar is
+public with a sandbox DOI, and migration 0085's triggers refuse `anonymous = 1` once
+`first_published_at` is stamped, so publishing this one or minting it a concept DOI destroys
+the fixture permanently rather than changing it. `nemar admin exemplar create --all --publish`
+skips it by reading the `anonymous` flag in `scripts/exemplar-fleet.json`, and the
+publication-request route refuses it server-side; do not force either. It exists so anonymity
+is exercised against a dataset that has been in the pre-publication state for weeks, rather
+than only against rows a test creates and tears down.
+
 Two caveats with the clone tool: it reads `AWS_ACCESS_KEY_ID`/`SECRET` from the **ambient
 environment** (unlike `e2e-test.ts`, which fetches per-user S3 credentials from the backend),
 and session credentials are short-lived, so export them immediately before each run.

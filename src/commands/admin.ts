@@ -4889,7 +4889,14 @@ exemplarCommand
             continue;
           }
           try {
-            await cloneExemplar({ xxId: entry.xx_id, sourceId: entry.source_id, ...cloneOpts });
+            await cloneExemplar({
+              xxId: entry.xx_id,
+              sourceId: entry.source_id,
+              ...cloneOpts,
+              // The fleet file decides which entry is the anonymous deposit,
+              // so `--all --publish` cannot publish it by omission.
+              ...(entry.anonymous ? { anonymous: true as const } : {}),
+            });
           } catch (err) {
             failures++;
             console.error(chalk.red(`${entry.xx_id} failed: ${errorDetail(err)}`));
