@@ -86,7 +86,8 @@ import {
   parseRecordingDuration,
   parseSamplingFrequency,
 } from "./channel-montage.js";
-import { ORG_NAME, sampleEvenly } from "./github.js";
+import { sampleEvenly } from "./github.js";
+import { GITHUB_RAW_ORIGIN, rawContentUrl } from "./github/shared.js";
 import type { PresignedUrlOptions } from "./s3.js";
 import {
   ZARR_VERIFIED_AT_PATH,
@@ -139,13 +140,6 @@ export const ZARR_FIDELITY_SWEEP_WIDE_BUDGET = 600;
  *  the sweep-wide budget across pathological datasets). */
 export const ZARR_FIDELITY_SWEEP_DEFAULT = 25;
 export const ZARR_FIDELITY_SWEEP_MAX = 25;
-
-/** Exported for `backend/src/mcp/tools/get-events.ts` (epic #1065 phase 3,
- *  issue #1295): the `events.tsv` fallback reads the same public,
- *  credential-free content host this sweep uses (module doc's "WHY
- *  RAW.GITHUBUSERCONTENT.COM" section), rather than duplicating the origin
- *  string. Also the `McpRoutesDeps.rawGithubBase` default. */
-export const GITHUB_RAW_ORIGIN = "https://raw.githubusercontent.com";
 
 export type ZarrFidelityVerdict = "verified" | "failed" | "unverifiable";
 
@@ -466,20 +460,6 @@ type SidecarFetchOutcome =
   | { kind: "content"; body: string }
   | { kind: "absent" }
   | { kind: "error"; reason: string };
-
-/** Exported (epic #1065 phase 3, issue #1295) for `get-events.ts`'s
- *  `events.tsv` fallback, which builds the identical
- *  `<base>/<org>/<repo>/<commit>/<encoded path>` shape against the dataset
- *  id as the repo name (nemarDatasets names a dataset's repo after its own
- *  id, `https://docs.nemar.org/admin/operations/systems-inventory/`'s org layout) -- no behavior change
- *  here. */
-export function rawContentUrl(base: string, repo: string, commit: string, path: string): string {
-  const encoded = path
-    .split("/")
-    .map((seg) => encodeURIComponent(seg))
-    .join("/");
-  return `${base}/${ORG_NAME}/${repo}/${commit}/${encoded}`;
-}
 
 /**
  * One candidate fetch against the public, credential-free content host (see

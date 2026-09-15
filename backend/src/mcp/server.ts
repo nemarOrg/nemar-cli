@@ -19,8 +19,8 @@ import { type CallToolResult, McpServer } from "@modelcontextprotocol/server";
 import pkg from "../../../package.json" with { type: "json" };
 import type { McpToolName } from "../../../shared/contract/mcp.js";
 import type { CacheLike } from "../routes/zarr-data.js";
+import { GITHUB_RAW_ORIGIN } from "../services/github/shared.js";
 import { recordMcpToolCall } from "../services/mcp-metrics.js";
-import { GITHUB_RAW_ORIGIN } from "../services/zarr-fidelity-sweep.js";
 import type { Bindings } from "../types/bindings.js";
 import type { ZarrRoutesLike } from "./index-reader.js";
 import {
