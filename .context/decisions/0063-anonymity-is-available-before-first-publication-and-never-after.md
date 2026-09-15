@@ -205,6 +205,31 @@ dead identifier never reaches signposting, JSON-LD or a citation widget. Reservi
 still worth it -- the same identifier becomes the real one at publication -- but reserving is
 not publishing, and no surface may blur the two.
 
+**"No surface" is literal, and it took a review to make it true.** The reserved identifier and
+the private repository were each withheld by one surface and served raw by three others, twice
+in the SAME HTTP response: the page bundle carried `external_links.github_url: null` beside
+`catalog_row.github_repo`, and the catalog's list and detail projections served both columns
+out of `SELECT d.*`. The rule now holds wherever a reader who is neither the owner nor an
+admin can see the row. It is conditional on the VIEWER, unlike every other rule here, and that
+is deliberate: anonymity is toward the public, never toward the depositor (R5), and
+`nemar dataset clone`, `commit` and `push` read `github_repo` from these routes to perform the
+very commit that ends the anonymity. Two publication steps are deferred for the same reason --
+`update_metadata` writes `DatasetDOI` into `dataset_description.json` and `update_readme` adds
+a DOI badge to the README, both git-tracked and served publicly by the data plane, so an
+anonymous release runs neither and the publication that ends anonymity runs both. Deferred, not
+dropped: `doi_create` still reserves the identifier, so the one activated at publication is the
+same one. The version-DOI webhook is gated on the same state, because a pushed `v*` tag mints
+AND publishes in one pass, and nothing stopped a depositor from pushing one after their
+release.
+
+**And the ordering is an invariant, not a step order.** A DataCite record whose creator is the
+blinded label is harvested within hours and inverts ADR 0041 on the one identifier nothing can
+retract, so `doi_create` and `publish_doi` both read `datasets.authors` and refuse to run while
+it still carries `ANONYMOUS_AUTHORS_LABEL`. Relying on where the restoring enrichment sits in
+the step list was not enough: the condition that ran it read a row value that its own preceding
+`UPDATE` had already cleared, so a RETRY of a failed run skipped the restoration silently and
+minted the permanent identifier with no authors.
+
 ## Alternatives considered
 
 - **Filter identity at read time.** The obvious design, and it leaves the real names in
@@ -235,4 +260,7 @@ not publishing, and no surface may blur the two.
   control), `backend/test/anonymity-projection.test.ts` (one owner rule),
   `backend/test/anonymity-writers.test.ts` (the blinding, driven through `enrichDataset`
   itself rather than through a hand-written fixture),
-  `backend/test/anonymity-publication-paths.test.ts` (every path to public carries the stamp)
+  `backend/test/anonymity-publication-paths.test.ts` (every path to public carries the stamp,
+  and the step set, the mint interlock and the repo-spec visibility),
+  `backend/test/anonymous-release.test.ts` (the request route and the catalog, driven through
+  the real app on a real database, each with a control)
