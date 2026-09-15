@@ -5,7 +5,7 @@
  * what the copy phase believed it transferred, so a copy that built a partial
  * manifest verified cleanly while the tree still referenced keys nothing had
  * moved -- sixteen datasets published that way, 12,039 keys with no object, each
- * one advertised to clones by the location log (ADR 0062).
+ * one advertised to clones by the location log (ADR 0063).
  *
  * So the question has to be asked of the tree. The tree side of it comes from a
  * real git-annex repository here rather than a literal list, because that is the

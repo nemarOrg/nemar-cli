@@ -20,7 +20,7 @@
  * Nothing is trusted on the strength of where it came from. Every copy that S3
  * can checksum is checked against the key's own hash BEFORE the key is
  * registered, and an object that does not match is deleted rather than left in
- * the bucket looking like content (ADR 0062).
+ * the bucket looking like content (ADR 0063).
  *
  * The copy is server-side: `CopyObject` moves the bytes inside S3, so recovering
  * hundreds of gigabytes does not depend on the operator's connection. It does

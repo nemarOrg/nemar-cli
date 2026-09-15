@@ -12,7 +12,14 @@
  * Why pass through to git-annex instead of parsing BIDS in JS: git-annex
  * already implements glob matching efficiently. The translator just emits
  * the right flags.
+ *
+ * The same selection is also exposed as data (`includeGroups` /
+ * `excludePatterns`, matched by {@link matchesBidsFilter}) for the HTTP
+ * download path, which has no git-annex to hand the flags to. One
+ * declaration, two consumers.
  */
+
+import { Glob } from "bun";
 
 export interface BidsFilterOptions {
   /** Comma-separated subjects, e.g. "sub-01,02". Bare values are auto-prefixed. */
@@ -54,6 +61,29 @@ export interface BidsFilterResult {
   active: boolean;
   /** Human-readable summary lines for the download plan. */
   summary: string[];
+  /**
+   * The same selection as {@link BidsFilterResult.args}, as data rather than
+   * git-annex syntax: an AND of groups, each group an OR of globs relative to
+   * the dataset root. Empty means "everything".
+   *
+   * This exists so the HTTP download path (lib/http-download.ts, used when
+   * git-annex is absent) selects the SAME files as the git-annex path, from
+   * one declaration of WHAT to select. The symptom of getting that wrong is
+   * `nemar dataset download --subjects sub-01` returning different files
+   * depending on whether git-annex happened to be installed, which is close to
+   * undebuggable from a bug report.
+   *
+   * It removes one source of drift, not all of it. The patterns are shared;
+   * the MATCHERS are still two engines -- git-annex's glob implementation and
+   * `Bun.Glob` -- and they are not the same code. They agree on every shape
+   * this module emits, which was checked pattern by pattern against
+   * git-annex 10.20260901 rather than assumed, and
+   * `test/http-download.unit.test.ts` pins the correspondence. Adding a new
+   * pattern SHAPE here means re-checking it against both.
+   */
+  includeGroups: string[][];
+  /** Globs to drop after the include groups match. */
+  excludePatterns: string[];
 }
 
 /** Glob patterns matched against git-annex paths (relative to dataset root). */
@@ -192,7 +222,58 @@ export function buildBidsFilterArgs(opts: BidsFilterOptions): BidsFilterResult {
     summary.push(`exclude: ${userExcludes.join(", ")}`);
   }
 
-  return { args, active, summary };
+  return {
+    args,
+    active,
+    summary,
+    includeGroups: groups,
+    excludePatterns: [...defaultExcludes, ...userExcludes],
+  };
+}
+
+/**
+ * Does `path` (relative to the dataset root, forward slashes, no leading
+ * slash) survive `filter`?
+ *
+ * The glob dialect is git-annex's `--include`/`--exclude`, which Bun.Glob
+ * matches compatibly for the shapes this module emits (`sub-01/**`,
+ * `**\/eeg/**`, `**\/*_task-rest_*`). One deliberate difference: git-annex
+ * matches `--include` against the file path only, and a group with no
+ * patterns means "no constraint", which is why an empty `includeGroups`
+ * admits everything rather than nothing.
+ */
+export function matchesBidsFilter(path: string, filter: BidsFilterResult): boolean {
+  const compiled = compiledFor(filter);
+  for (const glob of compiled.excludes) {
+    if (glob.match(path)) return false;
+  }
+  for (const group of compiled.includes) {
+    if (group.length === 0) continue;
+    if (!group.some((glob) => glob.match(path))) return false;
+  }
+  return true;
+}
+
+/**
+ * Compiled globs for one filter, memoized per filter object.
+ *
+ * `matchesBidsFilter` runs once per manifest entry, and a large dataset has
+ * tens of thousands. Compiling the same handful of patterns per call means
+ * ~80k `new Glob()` constructions on a filtered download of a big dataset, all
+ * of them redundant. The cache is keyed on the filter object, which callers
+ * build once, and is weak so it does not outlive it.
+ */
+const compiledCache = new WeakMap<BidsFilterResult, { includes: Glob[][]; excludes: Glob[] }>();
+
+function compiledFor(filter: BidsFilterResult): { includes: Glob[][]; excludes: Glob[] } {
+  const hit = compiledCache.get(filter);
+  if (hit) return hit;
+  const compiled = {
+    includes: filter.includeGroups.map((group) => group.map((p) => new Glob(p))),
+    excludes: filter.excludePatterns.map((p) => new Glob(p)),
+  };
+  compiledCache.set(filter, compiled);
+  return compiled;
 }
 
 /**

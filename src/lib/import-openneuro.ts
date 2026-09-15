@@ -1555,7 +1555,7 @@ export async function finalizeImport(
     // moved: sixteen datasets finalized that way, 12,039 keys with no object in
     // the bucket, and the location log then told every clone NEMAR had them
     // (#1396). So the gate is the TREE against the bucket, not the manifest
-    // against the bucket (ADR 0062).
+    // against the bucket (ADR 0063).
     //
     // `existing` is the listing from the verify step a few lines up; nothing
     // writes to the prefix in between, and re-listing a 60,000-object dataset

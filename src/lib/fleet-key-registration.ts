@@ -305,7 +305,7 @@ export async function scanDatasetKeyRegistration(
   const recorded = new Set(registered);
   // Present AT ITS DECLARED SIZE. A key whose object is truncated or zero bytes
   // is not content, and registering it tells every clone NEMAR has something it
-  // cannot serve (ADR 0062).
+  // cannot serve (ADR 0063).
   const inBucket = annexed.filter((key) => isKeyPresentAtDeclaredSize(key, held));
   return {
     datasetId,

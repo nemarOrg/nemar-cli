@@ -1,4 +1,4 @@
-# ADR 0062: Recovered content is pinned or proven, and an unproven copy is deleted rather than kept
+# ADR 0063: Recovered content is pinned or proven, and an unproven copy is deleted rather than kept
 
 **Status:** accepted
 **Date:** 2026-09-15

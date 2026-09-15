@@ -101,13 +101,11 @@ ORCID-gap exemption),
 0053 (silence is only evidence of a problem when there was work to do),
 0054 (the weekly import report arrives whether or not anything is wrong, and unknown is
 never rendered as zero),
-<<<<<<< HEAD
-0058 (an imported tree is brought onto the annex policy in prepare: an inherited
-=======
 0060 (an imported tree is brought onto the annex policy in prepare: an inherited
->>>>>>> origin/dev
 `.gitattributes` outranks the configured policy, and stripping it without installing
-ours annexes everything).
+ours annexes everything),
+0062 (a missing git-annex degrades to an HTTP snapshot, and a snapshot is deliberately
+not a repository).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and

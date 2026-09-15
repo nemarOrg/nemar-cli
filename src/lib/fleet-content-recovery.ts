@@ -16,7 +16,7 @@
  * It does not treat "upstream has a file at this path" as "upstream has this
  * key's content". A path is mutable and an import is months old. Either
  * git-annex's own record pins the source version, or S3's checksum of what it
- * wrote has to match the key, or the key is reported unrecoverable (ADR 0062).
+ * wrote has to match the key, or the key is reported unrecoverable (ADR 0063).
  */
 
 import { rmSync } from "node:fs";
