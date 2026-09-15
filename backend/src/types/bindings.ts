@@ -148,6 +148,9 @@ export interface Bindings {
   // Base host for ORCID OAuth, no trailing slash. Defaults to
   // https://orcid.org in production and https://sandbox.orcid.org elsewhere.
   ORCID_API_BASE?: string;
+  /** Raw content host for the git-file broker. Unset in production, where
+   *  `GITHUB_RAW_ORIGIN` applies; tests point it at a local server. */
+  GITHUB_RAW_BASE?: string;
   // Base host for the ORCID PUBLIC record API (personal-details reads), no
   // trailing slash. Normally derived from ORCID_API_BASE
   // (pub.orcid.org / pub.sandbox.orcid.org); set explicitly only to point the

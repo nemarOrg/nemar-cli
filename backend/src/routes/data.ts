@@ -25,6 +25,7 @@ import {
   buildDatasetMetadata,
   buildLandingPayload,
   buildRedirectUrl,
+  contentTypeForBidsPath,
   diffRemovedSince,
   findLastSeenVersion,
   pickResponseFormat,
@@ -42,6 +43,8 @@ import { parseNemarMetadata } from "../services/datacite";
 import { isValidDatasetId } from "../services/datasetId";
 import { resolveDataBaseOrigin } from "../services/environment";
 import { ORG_NAME } from "../services/github";
+import { getDatasetsToken } from "../services/github-auth";
+import { fetchGitTrackedFile } from "../services/github/git-file-broker";
 import type { ManifestFile, VersionManifest } from "../services/manifest";
 import { buildPageBundle } from "../services/page-bundle";
 import {
@@ -246,14 +249,18 @@ async function manifestJsonHandler(
         checksum_algorithm: checksum.algorithm,
         checksum: checksum.value,
         bytes_url: buildBytesUrl({
-          githubOrg: ORG_NAME,
           datasetId,
           version: resolved.version,
           bidsPath: path,
-          key: file.key,
           origin: resolveDataBaseOrigin(env),
         }),
       };
+      // A git-tracked file has no presigned form: the Worker streams it from
+      // the data plane, so the immediate URL and the durable one are the same
+      // route. Annex files keep the 1h presigned S3 URL in `url`.
+      if (isGitTrackedFile(file)) {
+        return { ...base, url: base.bytes_url };
+      }
       try {
         const url = await buildRedirectUrl({
           datasetId,
@@ -261,7 +268,6 @@ async function manifestJsonHandler(
           bidsPath: path,
           file,
           s3Options,
-          githubOrg: ORG_NAME,
         });
         return { ...base, url };
       } catch (err) {
@@ -312,6 +318,122 @@ async function loadVersionRows(env: Bindings, datasetId: string): Promise<Datase
     );
     return [];
   }
+}
+
+/** Is this manifest entry carried by git rather than git-annex (ADR 0015)? */
+export function isGitTrackedFile(file: ManifestFile): boolean {
+  return file.key.startsWith("git:");
+}
+
+/**
+ * Serve a git-tracked file's bytes from the data plane itself.
+ *
+ * The visibility gate has already run in the caller, and it runs before this
+ * function is ever reached: nothing here mints a token or touches GitHub for
+ * a dataset the catalog will not serve. The two identifiers this uses are
+ * both ours rather than the caller's -- the repo is the catalog row's
+ * `dataset_id`, and the path and blob SHA come from the manifest entry the
+ * resolver matched. A request cannot name a repo, a ref or a blob.
+ *
+ * Nothing caches by blob SHA. The edge caches this response under its request
+ * URL, which is dataset- and version-scoped; a SHA-keyed entry would be
+ * content-addressed and therefore shared between datasets, so an identical
+ * `dataset_description.json` in a private dataset and a public one would be
+ * one cache entry and the gate would be bypassed for whoever asked second.
+ */
+async function streamGitTrackedFile(args: {
+  env: Bindings;
+  datasetId: string;
+  version: string;
+  bidsPath: string;
+  file: ManifestFile;
+  createdIso: string;
+}): Promise<Response> {
+  const { env, datasetId, version, bidsPath, file, createdIso } = args;
+
+  // Read anonymously when no credential is configured rather than failing:
+  // a public repo serves fine without one, and a local or preview deployment
+  // with no GitHub App should not lose every metadata file. A private repo
+  // then 404s upstream, which surfaces as a 404 here -- the same answer the
+  // old redirect gave, with a log line explaining it.
+  let token: string | null = null;
+  try {
+    token = await getDatasetsToken(env);
+  } catch (err) {
+    console.warn(
+      `[data] no GitHub credential for git-file broker dataset=${datasetId}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  const outcome = await fetchGitTrackedFile({
+    repo: datasetId,
+    ref: version,
+    path: bidsPath,
+    blobSha: file.checksum.replace(/^git:/, ""),
+    token,
+    // Test seam, and the same shape ORCID_API_BASE uses: unset in production,
+    // where the broker's own default (the real raw host) applies.
+    rawBase: env.GITHUB_RAW_BASE,
+  });
+
+  if (outcome.kind === "absent") {
+    // The manifest promised a blob GitHub does not have. That is a
+    // data-integrity event, not a routine miss, and the operator needs it
+    // named; the caller still gets an ordinary 404.
+    console.error(
+      `[data] MANIFEST DRIFT: git blob absent dataset=${datasetId} version=${version} path=${bidsPath} sha=${file.checksum}`,
+    );
+    return notFound("File not found", undefined, true);
+  }
+
+  if (outcome.kind === "unavailable") {
+    console.error(
+      `[data] git-file broker unavailable dataset=${datasetId} version=${version} path=${bidsPath}: ${outcome.message}`,
+    );
+    const headers = new Headers({
+      "Cache-Control": "no-store",
+      "Content-Type": "application/json",
+    });
+    if (outcome.retryAfter) headers.set("Retry-After", outcome.retryAfter);
+    return new Response(
+      JSON.stringify({ error: "Upstream content host unavailable", dataset_id: datasetId }),
+      { status: outcome.status, headers: headers },
+    );
+  }
+
+  // A size that disagrees with the manifest means the tag moved under us, so
+  // these are not the bytes the manifest describes. Refusing is the same rule
+  // the CLI applies to a short write (#1402): a wrong-length file that looks
+  // healthy is worse than an error.
+  if (outcome.contentLength !== null && outcome.contentLength !== file.size) {
+    console.error(
+      `[data] SIZE MISMATCH dataset=${datasetId} version=${version} path=${bidsPath} manifest=${file.size} upstream=${outcome.contentLength}`,
+    );
+    return new Response(JSON.stringify({ error: "Upstream content did not match the manifest" }), {
+      status: 502,
+      headers: { "Cache-Control": "no-store", "Content-Type": "application/json" },
+    });
+  }
+
+  recordAccess(env, {
+    datasetId,
+    source: "file",
+    detail: `git-${outcome.source}`,
+    bytes: file.size,
+  });
+
+  const headers = new Headers(fileResponseHeaders(file, createdIso, false));
+  headers.set("Content-Type", contentTypeForBidsPath(bidsPath));
+  headers.set("Content-Length", String(file.size));
+  // Version-pinned and content-addressed, so this can be cached forever;
+  // the 300s default exists for the annex 302, whose presigned target is not.
+  headers.set("Cache-Control", "public, max-age=31536000, immutable");
+  // A dataset is user-supplied content served from our own origin now. The
+  // type is already an inert one from the allowlist; nosniff stops a browser
+  // from deciding otherwise, and the sandbox CSP makes it inert even then.
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("Content-Security-Policy", "default-src 'none'; sandbox");
+  return new Response(outcome.body, { status: 200, headers });
 }
 
 /**
@@ -445,13 +567,25 @@ async function fileOrIndexHandler(
   }
 
   if (result.kind === "file") {
+    // git-tracked bytes are served from here rather than redirected to
+    // GitHub (#1403): it is the only way a dataset whose repo is private
+    // stays readable, and it is the only way we can count what we delivered.
+    if (isGitTrackedFile(result.file)) {
+      return streamGitTrackedFile({
+        env,
+        datasetId: dataset.dataset_id,
+        version: resolved.version,
+        bidsPath: result.path,
+        file: result.file,
+        createdIso: manifest.created,
+      });
+    }
     const url = await buildRedirectUrl({
       datasetId,
       version: resolved.version,
       bidsPath: result.path,
       file: result.file,
       s3Options: s3OptionsFromEnv(env),
-      githubOrg: ORG_NAME,
     });
     // Surface mtime/ETag on the 302 itself for clients that skip the
     // HEAD step (custom downloaders, conditional GET preflights).
