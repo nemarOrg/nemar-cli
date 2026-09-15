@@ -910,7 +910,18 @@ async function handleOpenNeuroDownload(
 
     console.log(chalk.bold("Downloading data files..."));
 
-    const concurrency = Number.parseInt(options.jobs || "8", 10);
+    // Same ceiling as the NEMAR HTTP path, and said out loud for the same
+    // reason: the pool clamps silently, so a -j the transfer will not honour
+    // has to be reported rather than discovered from the progress bar.
+    const requestedJobs = Number.parseInt(options.jobs || "8", 10);
+    const concurrency = Math.min(requestedJobs, MAX_CONCURRENCY);
+    if (requestedJobs > MAX_CONCURRENCY) {
+      console.log(
+        chalk.yellow(
+          `Note: --jobs ${requestedJobs} capped at ${MAX_CONCURRENCY} parallel HTTP requests.`,
+        ),
+      );
+    }
     const result = await downloadWithHttps(datasetId, absoluteOutput, objects, {
       concurrency,
       onProgress: (filesDown, filesTotal, bytesDown, bytesTotal) => {
