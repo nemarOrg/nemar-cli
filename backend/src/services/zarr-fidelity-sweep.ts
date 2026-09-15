@@ -169,11 +169,14 @@ export interface ZarrFidelityMismatchExample {
  * `anonymous = 0` is the same rule, stated rather than inferred (#1407). An
  * anonymous deposit is public in the catalog and private on GitHub, which is
  * exactly the shape `visibility = 'public'` was standing in for and exactly
- * the shape it no longer catches. Without this the sweep would re-examine
- * every anonymous dataset on every run and stamp `unverifiable` forever --
- * fail-safe, since an absent sidecar records no mismatch and can never
- * produce a false `failed`, but indistinguishable in the stamps from a
- * dataset whose sidecars are genuinely missing.
+ * the shape it no longer catches. Without this the sweep would stamp
+ * `unverifiable` on every anonymous deposit -- once per conversion, not once
+ * per run, since the stamp itself drops the row out of the candidate
+ * predicate until `zarr_source_commit` moves. Fail-safe either way: an absent
+ * sidecar records no mismatch and can never produce a false `failed`. But the
+ * stamp is indistinguishable from a dataset whose sidecars are genuinely
+ * missing, so it would quietly convert a private repository into a data
+ * quality report.
  * `github_repo IS NOT NULL` is a defensive narrowing beyond the brief's
  * literal predicate (not a change to it): a row with no repo has nothing
  * this sweep could ever fetch a sidecar from.

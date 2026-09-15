@@ -480,8 +480,10 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   // 2. Stale nm datasets: warn the owner on an escalating runway, then hand
   //    off to admins for a manual delete. The cron NEVER auto-deletes nm
   //    datasets (#662) — removing real archive data always needs a human.
-  //    Folded legacy catalog rows (#646) are excluded by the LIKE 'nm%' +
-  //    visibility='private' filters below (sentinel rows are ds*/on* + public).
+  //    Folded legacy catalog rows (#646) are excluded by the LIKE 'nm%'
+  //    filter below (sentinel rows are ds*/on*); the visibility clause no
+  //    longer does that work on its own, because #1407 widened it to
+  //    (visibility = 'private' OR anonymous = 1).
   const staleness = { warned: 0, adminNotified: 0, reset: 0 };
   // Datasets become warning candidates once within FIRST_WARNING_DAYS of the
   // 90-day deadline, i.e. inactive for at least (90 - 30) days.
@@ -532,8 +534,8 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
            FROM datasets d
            LEFT JOIN users u ON u.id = d.owner_user_id
           WHERE d.dataset_id LIKE 'nm%' AND d.status = 'active' AND d.concept_doi IS NULL
-            -- visibility = 'private' has always meant "not yet published"
-            -- here. An anonymous deposit (#1407) breaks that equivalence: it
+            -- visibility = 'private' was this query's stand-in for "not yet
+            -- published". An anonymous deposit (#1407) breaks that: it
             -- is listed publicly while its repo stays private, so it would
             -- fall out of this set and an abandoned one would never get the
             -- warnings every other unpublished dataset gets.

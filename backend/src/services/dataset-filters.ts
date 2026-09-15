@@ -259,6 +259,19 @@ export function buildPublicCatalogBase(
     // production); the owning user's username is the only owner label.
     from += " AND u.username = ?";
     prefixParams.push(owner);
+    // #1407: this clause matches on the REAL username, which no projection
+    // can reach -- OWNER_USERNAME_SQL nulls what is returned, not what is
+    // matched. An anonymous deposit is `visibility = 'public'`, so it sits
+    // inside this population, and a hit with `owner_username: null` confirms
+    // that this named person deposited it. Usernames are not secret; every
+    // non-anonymous dataset publishes one, so the oracle needs nothing but a
+    // guess. Excluded for everyone except the two callers entitled to the
+    // answer: an admin (R5 -- anonymity is toward the public, never toward
+    // the archive) and the depositor asking about their own datasets.
+    const entitled = !!user && (hasRole(user.role, "admin") || user.username === owner);
+    if (!entitled) {
+      from += " AND d.anonymous = 0";
+    }
   }
   return { from, params: prefixParams };
 }

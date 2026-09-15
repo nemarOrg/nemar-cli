@@ -45,7 +45,7 @@ describe("datasets column budget", () => {
     expect(count.n).toBeLessThanOrEqual(97);
   });
 
-  test("index set is exactly the 23 surviving 0085", () => {
+  test("index set is exactly the 23 after 0085", () => {
     const names = (
       db
         .query(

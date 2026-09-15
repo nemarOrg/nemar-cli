@@ -102,6 +102,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0061](0061-a-registration-is-read-back-and-an-incomplete-dataset-is-not-partly-repaired.md) - A registration is read back from the location log, and a dataset the bucket cannot account for is never partly repaired
 - [ADR 0062](0062-a-missing-git-annex-degrades-to-a-snapshot.md) - A missing git-annex degrades to an HTTP snapshot, and a snapshot is not a repository
 - [ADR 0063](0063-anonymity-is-available-before-first-publication-and-never-after.md) - Anonymity is available before first publication and never after, and it is withheld by the writer
+- [ADR 0064](0064-the-data-plane-brokers-git-tracked-files-under-manifest-capability.md) - The data plane brokers git-tracked files, and the manifest is the capability list
 
 ## Backfill note (2026-07-31)
 

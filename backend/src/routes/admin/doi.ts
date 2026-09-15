@@ -16,6 +16,7 @@ import {
   datasetVersionLandingUrl,
 } from "../../../../shared/datacite-constants.js";
 import { auditLogStatement } from "../../db/audit-log";
+import { blindEnrichmentMetadata, isAnonymous } from "../../services/anonymity";
 import {
   type DataCiteEnrichment,
   bidsToDataCite,
@@ -125,6 +126,8 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         is_sandbox: number | null;
         is_exemplar: number | null;
         enrichment_json: string | null;
+        // Selected by `d.*` above; declared because the mint reads it.
+        anonymous: number | null;
       }>();
 
     if (!dataset) {
@@ -329,6 +332,11 @@ export function registerDoiRoutes(admin: AdminRouter): void {
           enrichment: repoEnrichment,
           uploader,
           uploaderRequired: nameRequired,
+          // #1407: an anonymous deposit's record carries no DataCurator.
+          // Read from the row rather than from a request field, so an admin
+          // minting by hand cannot name a depositor who asked to be
+          // concealed.
+          anonymousDeposit: isAnonymous(dataset),
           sandbox: body.sandbox,
         },
         {
@@ -661,7 +669,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
     const dataset = await db
       .prepare(
         `
-      SELECT d.dataset_id, d.concept_doi, d.ezid_status,
+      SELECT d.dataset_id, d.concept_doi, d.ezid_status, d.anonymous,
              d.github_repo, d.name, d.is_sandbox, d.source, d.is_exemplar,
              u.username as owner_username, u.orcid as owner_orcid,
              u.given_name as owner_given_name, u.family_name as owner_family_name
@@ -675,6 +683,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         dataset_id: string;
         concept_doi: string | null;
         ezid_status: string | null;
+        anonymous: number | null;
         github_repo: string | null;
         name: string;
         is_sandbox: number | null;
@@ -712,6 +721,24 @@ export function registerDoiRoutes(admin: AdminRouter): void {
     } catch (err) {
       console.error("[admin] EZID auth failed:", err);
       return c.json({ error: "EZID credentials not configured" }, 500);
+    }
+
+    // #1407: this route is the shortest path from an anonymous deposit to a
+    // permanent, harvested record naming its depositor. `status: "public"`
+    // flips a reserved identifier to resolvable, and `refresh_metadata`
+    // rebuilds the whole document from `resolveOwnerIdentity` -- the real
+    // person. Neither is recallable once DataCite has harvested it, and D1
+    // would go on reporting the dataset as concealed afterwards. Both are
+    // refused while the flag is set; de-anonymizing is what unlocks them.
+    if (isAnonymous(dataset) && (body.status === "public" || body.refresh_metadata)) {
+      return c.json(
+        {
+          error: "Dataset is an anonymous deposit",
+          message: `${datasetId} conceals its depositor, so its DOI record cannot be made public or rebuilt from owner identity. De-anonymize the deposit first.`,
+          dataset_id: datasetId,
+        },
+        409,
+      );
     }
 
     try {
@@ -1101,12 +1128,15 @@ export function registerDoiRoutes(admin: AdminRouter): void {
     const db = c.env.DB;
 
     const dataset = await db
-      .prepare("SELECT dataset_id, github_repo, is_sandbox FROM datasets WHERE dataset_id = ?")
+      .prepare(
+        "SELECT dataset_id, github_repo, is_sandbox, anonymous FROM datasets WHERE dataset_id = ?",
+      )
       .bind(datasetId)
       .first<{
         dataset_id: string;
         github_repo: string | null;
         is_sandbox: number | null;
+        anonymous: number | null;
       }>();
 
     if (!dataset) {
@@ -1123,7 +1153,14 @@ export function registerDoiRoutes(admin: AdminRouter): void {
     }
 
     const pat = await getDatasetsToken(c.env);
-    const metadataContent = JSON.stringify(body, null, 2);
+    // #1407: the SECOND writer of `.nemar/metadata.json`. The enrichment
+    // pipeline blinds its own document, but this route accepts one from an
+    // admin and commits it to the same publicly-served path, so without this
+    // a single call would republish the author list the pipeline withheld.
+    // The blind is applied to what is committed AND to what is cached, so the
+    // two cannot disagree.
+    const enrichmentToWrite = isAnonymous(dataset) ? blindEnrichmentMetadata(body) : body;
+    const metadataContent = JSON.stringify(enrichmentToWrite, null, 2);
     const isV2 = body.version === "2.0";
     const metadataPath = isV2 ? ".nemar/metadata.json" : "nemar_metadata.json";
 

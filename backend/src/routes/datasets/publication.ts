@@ -11,6 +11,12 @@
 
 import type { PublicationBlockReason } from "../../../../shared/contract/publication.js";
 import { authMiddleware } from "../../middleware/auth";
+import {
+  ANONYMOUS_DEPOSIT_REASON,
+  FIRST_PUBLICATION_STAMP_SQL,
+  expectedRepoVisibility,
+  isAnonymous,
+} from "../../services/anonymity";
 import { isValidDatasetId } from "../../services/datasetId";
 import {
   getAdminEmailsForCategory,
@@ -74,6 +80,12 @@ const BLOCK_MESSAGES: Record<PublicationBlockReason, string> = {
   // given_name/family_name cannot be attributed at all. The message is the
   // one place a user is told how to supply it, so it lives with the reason.
   [OWNER_NAME_MISSING_REASON]: OWNER_NAME_MISSING_MESSAGE,
+  // #1407: the depositor asked to be concealed, so publishing now would put a
+  // dataset in the world with no attribution at all. The message names both
+  // halves of the fix because they are separate acts: the commit restores the
+  // names, clearing anonymity restores what NEMAR derives from them.
+  [ANONYMOUS_DEPOSIT_REASON]:
+    "This dataset is an anonymous deposit, so it cannot be published while the depositor is still concealed. Restore the real Authors in dataset_description.json, turn anonymity off, then re-request publication.",
 };
 
 /**
@@ -114,7 +126,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     const dataset = await db
       .prepare(
         `SELECT d.id, d.dataset_id, d.owner_user_id, d.is_sandbox, d.is_exemplar,
-                d.github_repo, d.visibility, d.source,
+                d.github_repo, d.visibility, d.source, d.anonymous,
                 u.given_name as owner_given_name, u.family_name as owner_family_name
          FROM datasets d
          JOIN users u ON d.owner_user_id = u.id
@@ -130,6 +142,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         github_repo: string | null;
         visibility: string | null;
         source: string | null;
+        anonymous: number | null;
         owner_given_name: string | null;
         owner_family_name: string | null;
       }>();
@@ -194,6 +207,26 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     if (requiresUploaderName(dataset) && !resolveOwnerIdentity(dataset)) {
       blocked = true;
       blockReason = OWNER_NAME_MISSING_REASON;
+    }
+
+    // An anonymous deposit (#1407) cannot be published while still blind, and
+    // this refusal is what enforces the ordering -- restore attribution
+    // first, publish second. It has to be a real check: an earlier draft of
+    // this feature claimed ADR 0026's placeholder-author gate below already
+    // covered it, which was wrong twice over. That gate reads
+    // `dataset_description.json` from the repository and never sees NEMAR's
+    // own blinded `datasets.authors`, and its regex is anchored on the whole
+    // entry, so the label NEMAR writes does not match it.
+    //
+    // The ordering matters beyond tidiness. De-anonymizing is a content commit
+    // to the depositor's own `dataset_description.json`, and it has to land
+    // while the repository is still private, because ADR 0001 makes `main`
+    // pull-request-only once it is public. Publishing first would leave the
+    // depositor unable to restore their own attribution without a PR against
+    // their own dataset.
+    if (isAnonymous(dataset)) {
+      blocked = true;
+      blockReason = ANONYMOUS_DEPOSIT_REASON;
     }
 
     // Resolve auth inside the try so a missing or unconfigured token blocks
@@ -735,7 +768,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     // Fetch dataset with ownership check
     const dataset = await db
       .prepare(`
-        SELECT id, dataset_id, name, owner_user_id, github_repo, visibility, is_sandbox
+        SELECT id, dataset_id, name, owner_user_id, github_repo, visibility, is_sandbox, anonymous
         FROM datasets
         WHERE dataset_id = ? AND status = 'active'
       `)
@@ -748,6 +781,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         github_repo: string | null;
         visibility: string;
         is_sandbox: number;
+        anonymous: number | null;
       }>();
 
     if (!dataset) {
@@ -805,9 +839,15 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       return c.json({ error: "Invalid GitHub repository format" }, 500);
     }
 
-    // Step 1: Update GitHub repository visibility
+    // Step 1: Update GitHub repository visibility.
+    // An anonymous deposit (#1407) is public in the catalog and private on
+    // GitHub, so this route publishes the data without publishing the
+    // repository; `expectedRepoVisibility` is the one rule that says which.
+    // De-anonymizing first is what makes the repository public.
     const pat = await getDatasetsToken(c.env);
-    const ghResult = await setRepoVisibility(repoName, false, pat);
+    const repoShouldBePrivate =
+      expectedRepoVisibility({ visibility: "public", anonymous: dataset.anonymous }) === "private";
+    const ghResult = await setRepoVisibility(repoName, repoShouldBePrivate, pat);
     if (!ghResult.ok) {
       console.error(`GitHub visibility update failed for ${datasetId}:`, ghResult.error);
       return c.json(
@@ -866,7 +906,11 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     try {
       await db
         .prepare(
-          "UPDATE datasets SET visibility = 'public', updated_at = datetime('now') WHERE id = ?",
+          // The stamp rides along with the visibility flip: the triggers
+          // refuse a row that is both anonymous and stamped, so it cannot be
+          // a second statement, and an anonymous deposit goes public without
+          // being attributed (the CASE in FIRST_PUBLICATION_STAMP_SQL).
+          `UPDATE datasets SET visibility = 'public', ${FIRST_PUBLICATION_STAMP_SQL}, updated_at = datetime('now') WHERE id = ?`,
         )
         .bind(dataset.id)
         .run();

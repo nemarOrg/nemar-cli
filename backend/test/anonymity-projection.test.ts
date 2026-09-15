@@ -9,12 +9,25 @@
  * is narrower and easier to discharge -- withhold the owner when the dataset
  * is anonymous -- but it has the same failure mode, which is a sixth query
  * added later that spells the join out by hand and quietly names a depositor
- * who paid for concealment.
+ * who paid for concealment. A runtime test cannot catch that: a new endpoint
+ * that leaks is new code, and no assertion about the existing endpoints would
+ * run against it.
  *
- * So the rule is a constant in `services/anonymity.ts`, and this test fails if
- * any site selects the raw columns instead of interpolating it. A runtime test
- * cannot catch this: a new endpoint that leaks is new code, and no assertion
- * about the existing endpoints would run against it.
+ * WHAT IS SCANNED, AND WHY NOT LESS
+ * ---------------------------------
+ * The first version of this file matched one exact alias spelling,
+ * `u.username AS owner_username`. A reviewer pointed out that
+ * `SELECT u.username, u.github_username` -- the spelling
+ * `routes/datasets/collaborators.ts` already uses -- sails straight past it,
+ * as do `u.username AS uploader` and `SELECT d.*, u.*`. So the scan now looks
+ * for any dataset-scoped SQL statement that reads a username off the `users`
+ * table, whatever it calls the result.
+ *
+ * It is scoped to statements mentioning `datasets` / `dataset_collaborators`
+ * rather than to every `u.username` in the backend, because matching them all
+ * flags twenty-odd auth and account-management files that have nothing to do
+ * with dataset projections -- an allowlist nobody would read, appended to by
+ * reflex, which is how a guard stops guarding.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -35,19 +48,24 @@ function sourceFiles(dir: string): string[] {
   return out;
 }
 
-/** `u.username AS owner_username` and friends, in any spelling SQL allows. */
-const RAW_OWNER_USERNAME = /\bu\.username\s+as\s+owner_username\b/i;
-const RAW_OWNER_GITHUB = /\bu\.github_username\s+as\s+owner_github\b/i;
+/** A SQL statement, from SELECT to whatever terminates the literal holding it. */
+const SQL_STATEMENT = /SELECT[\s\S]{0,1200}?(?=`|"\s*\)|';)/gi;
+/** Reads a username off `users`, under any alias or none. */
+const READS_OWNER = /\b(?:u|users)\.(?:username|github_username)\b/;
+/** Is this a dataset query at all? */
+const DATASET_SCOPED = /\bdatasets\b|\bdataset_collaborators\b/i;
+const USES_THE_RULE = /OWNER_USERNAME_SQL|OWNER_GITHUB_SQL/;
 
 /**
  * Sites that resolve the real owner ON PURPOSE, each with the reason.
  *
  * Requirement R5: anonymity is toward the public and never toward the
  * archive. NEMAR has to keep knowing who deposited a dataset -- to mint a DOI
- * with a real curator at publication, to email the owner, to run the
- * publication flow at all -- so an internal read of `users.username` is not a
- * leak, it is the feature. What would be a leak is an ANONYMOUS-facing
- * projection: a list, a search result, a detail payload.
+ * with a real curator at publication, to email the owner, to grant the right
+ * GitHub account access to the repository, to run the publication flow at all
+ * -- so an internal read of `users.username` is not a leak, it is the
+ * feature. What would be a leak is an ANONYMOUS-facing projection: a list, a
+ * search result, a detail payload.
  *
  * The list is explicit rather than a path heuristic so that adding a file to
  * it is a deliberate act with a justification attached, the same shape
@@ -56,30 +74,61 @@ const RAW_OWNER_GITHUB = /\bu\.github_username\s+as\s+owner_github\b/i;
  * therefore fails.
  */
 const DELIBERATE_INTERNAL_READS: Readonly<Record<string, string>> = {
-  "routes/datasets/publication.ts":
-    "publication request handling; owner-or-admin only, and the request is about the owner",
   "routes/admin/doi.ts": "admin-only DOI minting; the curator must be the real person (ADR 0041)",
   "routes/admin/exemplar.ts": "admin-only exemplar tooling, never an anonymous surface",
+  "routes/admin/user-duplicates.ts":
+    "admin-only identity reconciliation; the subject IS the user, and its dataset reference is a count",
+  "routes/admin/users.ts": "admin-only user administration; datasets appear only as a count",
+  "routes/datasets/collaborators.ts":
+    "collaborator management, owner-or-admin only; the point of the payload is who has access",
+  "routes/datasets/publication.ts":
+    "the publication request and CI-status routes; owner-or-admin only, and both authorize by comparing the real username rather than returning it",
   "services/enrich-dataset.ts":
     "resolves the uploader to build DataCite attribution; blinds at the WRITE instead",
   "services/publication-orchestrator.ts": "the publish flow itself, which is where anonymity ends",
+  "services/repo-spec.ts":
+    "resolves GitHub handles to grant repository access; a blinded handle would grant it to nobody",
 };
 
 describe("owner identity is projected through one rule", () => {
-  test("no source file spells the owner join out by hand", () => {
+  test("no dataset query reads the owner off users by hand", () => {
     const offenders: string[] = [];
     for (const file of sourceFiles(SRC)) {
-      const rel = file.slice(SRC.length + 1);
+      const rel = file
+        .slice(SRC.length + 1)
+        .split(sep)
+        .join("/");
       // The constants themselves contain the column names, by construction.
-      if (rel === join("services", "anonymity.ts")) continue;
-      if (DELIBERATE_INTERNAL_READS[rel.split(sep).join("/")]) continue;
+      if (rel === "services/anonymity.ts") continue;
+      if (DELIBERATE_INTERNAL_READS[rel]) continue;
       const text = readFileSync(file, "utf8");
-      if (RAW_OWNER_USERNAME.test(text) || RAW_OWNER_GITHUB.test(text)) {
-        offenders.push(rel);
+      for (const match of text.matchAll(SQL_STATEMENT)) {
+        const statement = match[0];
+        if (!DATASET_SCOPED.test(statement)) continue;
+        if (!READS_OWNER.test(statement)) continue;
+        if (USES_THE_RULE.test(statement)) continue;
+        offenders.push(`${rel}:${text.slice(0, match.index).split("\n").length}`);
       }
     }
 
     expect(offenders).toEqual([]);
+  });
+
+  test("the scan matches the statements it claims to match", () => {
+    // A regex that matched nothing would pass the test above forever. Every
+    // allowlisted file must actually contain a hit -- which also means an
+    // entry that stops being needed shows up as a failure rather than
+    // lingering as permission nobody re-examined.
+    for (const [rel, reason] of Object.entries(DELIBERATE_INTERNAL_READS)) {
+      const text = readFileSync(join(SRC, ...rel.split("/")), "utf8");
+      const hits = [...text.matchAll(SQL_STATEMENT)].filter(
+        (m) => DATASET_SCOPED.test(m[0]) && READS_OWNER.test(m[0]) && !USES_THE_RULE.test(m[0]),
+      );
+      expect(
+        hits.length,
+        `${rel} is allowlisted (${reason}) but has no matching statement`,
+      ).toBeGreaterThan(0);
+    }
   });
 
   test("the rule withholds only when the dataset is anonymous", () => {
@@ -103,5 +152,27 @@ describe("owner identity is projected through one rule", () => {
     const uses = catalog.match(/\$\{OWNER_USERNAME_SQL\}/g) ?? [];
     expect(uses.length).toBeGreaterThanOrEqual(5);
     expect(catalog).toContain("${OWNER_GITHUB_SQL}");
+  });
+});
+
+describe("the owner leaks that a projection rule cannot reach", () => {
+  test("the detail route withholds the raw owner FK", () => {
+    // `GET /datasets/:id` is `SELECT d.*`, so `owner_user_id` rides along
+    // beside the nulled username. It de-anonymizes in one request -- read it
+    // here, then find any other public dataset with the same value and read
+    // its disclosed owner -- and it is a stable handle linking one
+    // depositor's several anonymous deposits even with nothing to join to.
+    const catalog = readFileSync(join(SRC, "routes", "datasets", "catalog.ts"), "utf8");
+    expect(catalog).toContain("owner_user_id: isAnonymous(dataset) ? null : ownerUserIdRaw,");
+  });
+
+  test("the ?owner= filter cannot be used as a confirmation oracle", () => {
+    // The filter matches on the REAL username in a WHERE clause, which no
+    // SELECT-list rule can reach: a hit with `owner_username: null` confirms
+    // that this named person deposited it. Excluded for everyone except an
+    // admin and the depositor themselves.
+    const filters = readFileSync(join(SRC, "services", "dataset-filters.ts"), "utf8");
+    expect(filters).toContain('from += " AND d.anonymous = 0";');
+    expect(filters).toMatch(/hasRole\(user\.role, "admin"\) \|\| user\.username === owner/);
   });
 });

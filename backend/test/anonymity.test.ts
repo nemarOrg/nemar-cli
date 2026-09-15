@@ -1,21 +1,23 @@
 /**
- * Anonymous deposit as a server-side state (#1407, epic #1406).
+ * The invariant is the database's, not the service's (#1407, epic #1406).
  *
  * Real engine: bun:sqlite with every migration applied, including 0085's
- * triggers, which is what several of these assert against directly. The point
- * of most of them is not that an API field is null -- that is the easy half --
- * but that the real values are NOT PRESENT to be leaked: withheld by the
- * writer rather than filtered by the reader. The FTS assertion is the sharpest
- * one, because `datasets_fts` is fed by a trigger with no visibility
- * predicate, so a read-time filter would have hidden the names from the API
- * while leaving them searchable in the index.
+ * triggers, which is what these assert against directly. A service-level check
+ * is one a future route can forget; this one it cannot, and that is worth
+ * testing at the level where the rule actually lives.
+ *
+ * The WRITER-side blinding is tested in `anonymity-writers.test.ts`, driven
+ * through the writes themselves, and the paths to publication in
+ * `anonymity-publication-paths.test.ts`. An earlier version of this file
+ * asserted the blinding by seeding a row with the value the writer was meant
+ * to produce, which proved only that SQLite's FTS triggers work.
  */
 
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import {
-  ANONYMOUS_AUTHORS_LABEL,
-  blindEnrichmentMetadata,
+  OWNER_GITHUB_SQL,
+  OWNER_USERNAME_SQL,
   hasEverBeenPublished,
   isAnonymous,
 } from "../src/services/anonymity";
@@ -63,11 +65,48 @@ describe("the invariant is the database's, not the service's", () => {
       "UPDATE datasets SET first_published_at = '2026-01-01 00:00:00' WHERE dataset_id = 'nm000911'",
     ).run();
 
-    // The refusal comes from migration 0085's trigger. A service-level check
-    // would be a rule a future route could forget; this one it cannot.
     expect(() =>
       db.prepare("UPDATE datasets SET anonymous = 1 WHERE dataset_id = 'nm000911'").run(),
     ).toThrow(/anonymous requires first_published_at IS NULL/);
+  });
+
+  test("a row cannot be INSERTED into the forbidden state either", () => {
+    // The UPDATE trigger alone would leave a door open: an import or a
+    // restore that writes a complete row in one INSERT never issues an
+    // UPDATE. Covered separately because a test that only UPDATEs passes with
+    // the INSERT trigger's predicate broken -- which is how this gap was
+    // found.
+    const db = freshDb();
+    seedUser(db);
+
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO datasets (dataset_id, name, description, authors, owner_user_id, status,
+                                 visibility, is_sandbox, anonymous, first_published_at)
+           VALUES ('nm000918', 'n', 'd', 'a', 7, 'active', 'public', 0, 1, '2026-01-01 00:00:00')`,
+        )
+        .run(),
+    ).toThrow(/anonymous requires first_published_at IS NULL/);
+  });
+
+  test("an INSERT of a legitimately anonymous row is allowed", () => {
+    // The control for the test above: the trigger has to refuse the
+    // combination, not the flag.
+    const db = freshDb();
+    seedUser(db);
+    db.prepare(
+      `INSERT INTO datasets (dataset_id, name, description, authors, owner_user_id, status,
+                             visibility, is_sandbox, anonymous)
+       VALUES ('nm000919', 'n', 'd', 'a', 7, 'active', 'public', 0, 1)`,
+    ).run();
+    expect(
+      (
+        db.query("SELECT anonymous FROM datasets WHERE dataset_id = 'nm000919'").get() as {
+          anonymous: number;
+        }
+      ).anonymous,
+    ).toBe(1);
   });
 
   test("publishing an anonymous dataset must clear anonymity in the same statement", () => {
@@ -77,7 +116,8 @@ describe("the invariant is the database's, not the service's", () => {
     db.prepare("UPDATE datasets SET anonymous = 1 WHERE dataset_id = 'nm000912'").run();
 
     // Stamping the date alone is refused: the row would be anonymous AND
-    // published. This is why `recordFirstPublication` is one UPDATE.
+    // published. This is why END_ANONYMITY_AT_PUBLICATION_SQL is one fragment
+    // interpolated into one statement.
     expect(() =>
       db
         .prepare(
@@ -96,122 +136,96 @@ describe("the invariant is the database's, not the service's", () => {
     expect(row.anonymous).toBe(0);
     expect(row.first_published_at).toBeTruthy();
   });
+});
 
-  test("the backfill records existing public datasets as published", () => {
-    // Migration 0085 runs over rows that already exist, and every dataset
-    // that is public today has been published at least once. Without this the
-    // whole catalog would read as "never published" and could be made
-    // anonymous retroactively -- the exact thing the rule forbids.
+describe("the 0085 backfill", () => {
+  /**
+   * WHAT THIS CAN AND CANNOT TEST
+   *
+   * `freshDb()` applies every migration before any row exists, so migration
+   * 0085's `UPDATE` never runs over a row a test seeded -- it has already
+   * run, against nothing. A real backfill test would need a row inserted
+   * between migration 0084 and 0085, which the helper cannot express today.
+   *
+   * So this replays the migration's own predicate, read out of the migration
+   * file rather than retyped, against rows shaped like the pre-existing ones.
+   * Reading the file is the point: a retyped copy would keep passing after
+   * the migration changed, which is exactly the failure this pair of tests is
+   * meant to catch.
+   */
+  const MIGRATION = new URL("../src/db/migrations/0085_anonymous_deposit.sql", import.meta.url)
+    .pathname;
+
+  function backfillStatement(): string {
+    const sql = require("node:fs").readFileSync(MIGRATION, "utf8") as string;
+    const start = sql.indexOf("UPDATE datasets\nSET first_published_at");
+    const end = sql.indexOf(";", start);
+    expect(start).toBeGreaterThan(-1);
+    return sql.slice(start, end + 1);
+  }
+
+  test("a public row is recorded as published", () => {
     const db = freshDb();
     seedUser(db);
     seedDataset(db, "nm000913", { visibility: "public" });
-    // Rows seeded after migrations do not go through the backfill, so assert
-    // the backfill's PREDICATE against a row that mimics a pre-existing one.
-    db.prepare(
-      `UPDATE datasets SET first_published_at = COALESCE(first_published_at, created_at)
-       WHERE dataset_id = 'nm000913' AND visibility = 'public'`,
-    ).run();
+    db.exec(backfillStatement());
     const row = db
       .query("SELECT first_published_at FROM datasets WHERE dataset_id = 'nm000913'")
       .get() as { first_published_at: string | null };
-    expect(row.first_published_at).toBeTruthy();
     expect(hasEverBeenPublished(row)).toBe(true);
   });
-});
 
-describe("identity is withheld by the writer, not filtered by the reader", () => {
-  test("the real names never reach the full-text index", () => {
+  test("a private row with a version history is recorded too", () => {
+    // The arm that matters most: a dataset that was public, was reverted to
+    // private, and would otherwise read as never-published and so become
+    // anonymous retroactively.
     const db = freshDb();
     seedUser(db);
-    // What an enrichment run writes for an anonymous deposit: the label, not
-    // the author list. The FTS trigger then indexes the label.
-    seedDataset(db, "nm000914", { authors: ANONYMOUS_AUTHORS_LABEL });
-    db.prepare("UPDATE datasets SET anonymous = 1 WHERE dataset_id = 'nm000914'").run();
-
-    // fts5 is keyed by rowid, so join back to get the id.
-    const hits = db
-      .query(
-        `SELECT d.dataset_id FROM datasets_fts f
-         JOIN datasets d ON d.id = f.rowid
-         WHERE datasets_fts MATCH 'Lovelace'`,
-      )
-      .all() as { dataset_id: string }[];
-
-    // Not "the query filtered it out" -- the name is not in the index at all,
-    // so no future query, facet or embedding pass can surface it.
-    expect(hits).toEqual([]);
+    seedDataset(db, "nm000917", { visibility: "private" });
+    db.prepare(
+      `INSERT INTO dataset_versions (dataset_id, version, doi, created_at)
+       VALUES ('nm000917', '1.0.0', '10.5072/FK2test', '2021-05-05 00:00:00')`,
+    ).run();
+    db.exec(backfillStatement());
+    const row = db
+      .query("SELECT first_published_at FROM datasets WHERE dataset_id = 'nm000917'")
+      .get() as { first_published_at: string | null };
+    // The earliest version row, not `created_at`: the best evidence
+    // available rather than a guess.
+    expect(row.first_published_at).toBe("2021-05-05 00:00:00");
   });
 
-  test("a name that was indexed before anonymity would still be found (why the writer matters)", () => {
-    // The control for the test above: if `datasets.authors` holds the real
-    // names, FTS has them regardless of any API-level filtering. This is the
-    // failure mode that a read-time filter would have left in place.
+  test("a private, DOI-less, version-less row is left alone", () => {
+    // The control. Without it, a predicate that matched everything would
+    // satisfy both tests above and quietly make anonymity impossible for
+    // every dataset in the catalog.
     const db = freshDb();
     seedUser(db);
-    seedDataset(db, "nm000915", { authors: "Ada Lovelace; Charles Babbage" });
-    db.prepare("UPDATE datasets SET anonymous = 1 WHERE dataset_id = 'nm000915'").run();
-
-    const hits = db
-      .query(
-        `SELECT d.dataset_id FROM datasets_fts f
-         JOIN datasets d ON d.id = f.rowid
-         WHERE datasets_fts MATCH 'Lovelace'`,
-      )
-      .all() as { dataset_id: string }[];
-
-    expect(hits.map((h) => h.dataset_id)).toContain("nm000915");
-  });
-
-  test("blindEnrichmentMetadata drops attribution and keeps the description of the data", () => {
-    const blinded = blindEnrichmentMetadata({
-      title: "A study of something",
-      description: "What the recordings contain",
-      methods_description: "How they were collected",
-      authors: { "Ada Lovelace": { orcid: "0000-0002-1825-0097" } },
-      contributors: { "Charles Babbage": {} },
-      funding_references: [{ funder_name: "A named institute", award_number: "G-1" }],
-      geo_locations: [{ place: "Somewhere" }],
-    });
-
-    expect(blinded).not.toHaveProperty("authors");
-    expect(blinded).not.toHaveProperty("contributors");
-    expect(blinded).not.toHaveProperty("funding_references");
-    // The data's own description survives: blanking it would conceal the
-    // thing a reviewer is meant to read.
-    expect(blinded.title).toBe("A study of something");
-    expect(blinded.description).toBe("What the recordings contain");
-    expect(blinded.methods_description).toBe("How they were collected");
-  });
-
-  test("the serialized document carries no trace of the names", () => {
-    // `.nemar/metadata.json` is backend-written and, since #1403, publicly
-    // served from the manifest -- so what matters is the bytes, not the shape.
-    const serialized = JSON.stringify(
-      blindEnrichmentMetadata({
-        title: "t",
-        authors: { "Ada Lovelace": { orcid: "0000-0002-1825-0097" } },
-      }),
-    );
-    expect(serialized).not.toContain("Lovelace");
-    expect(serialized).not.toContain("0000-0002-1825-0097");
+    seedDataset(db, "nm000915", { visibility: "private" });
+    db.exec(backfillStatement());
+    const row = db
+      .query("SELECT first_published_at FROM datasets WHERE dataset_id = 'nm000915'")
+      .get() as { first_published_at: string | null };
+    expect(hasEverBeenPublished(row)).toBe(false);
   });
 });
 
 describe("the owner projection", () => {
-  test("SQL withholds the joined owner fields for an anonymous row", () => {
+  test("the rule withholds the joined owner fields for an anonymous row", () => {
     const db = freshDb();
     seedUser(db);
     seedDataset(db, "nm000916");
-    seedDataset(db, "nm000917");
-    db.prepare("UPDATE datasets SET anonymous = 1 WHERE dataset_id = 'nm000917'").run();
+    seedDataset(db, "nm000914");
+    db.prepare("UPDATE datasets SET anonymous = 1 WHERE dataset_id = 'nm000914'").run();
 
+    // The CONSTANTS are interpolated, not a hand-copied equivalent. A copy
+    // tests itself: inverting the real rule to always disclose the owner left
+    // an earlier version of this test passing.
     const rows = db
       .query(
-        `SELECT d.dataset_id,
-                CASE WHEN d.anonymous = 1 THEN NULL ELSE u.username END AS owner_username,
-                CASE WHEN d.anonymous = 1 THEN NULL ELSE u.github_username END AS owner_github
+        `SELECT d.dataset_id, ${OWNER_USERNAME_SQL}, ${OWNER_GITHUB_SQL}
          FROM datasets d LEFT JOIN users u ON d.owner_user_id = u.id
-         WHERE d.dataset_id IN ('nm000916','nm000917') ORDER BY d.dataset_id`,
+         WHERE d.dataset_id IN ('nm000916','nm000914') ORDER BY d.dataset_id`,
       )
       .all() as {
       dataset_id: string;
@@ -220,14 +234,14 @@ describe("the owner projection", () => {
     }[];
 
     expect(rows[0]).toEqual({
+      dataset_id: "nm000914",
+      owner_username: null,
+      owner_github: null,
+    });
+    expect(rows[1]).toEqual({
       dataset_id: "nm000916",
       owner_username: "realname",
       owner_github: "real-gh-handle",
-    });
-    expect(rows[1]).toEqual({
-      dataset_id: "nm000917",
-      owner_username: null,
-      owner_github: null,
     });
   });
 });

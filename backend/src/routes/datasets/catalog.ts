@@ -19,7 +19,7 @@ import { RangeParseError } from "../../../../shared/range.js";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import { parseLicenseTierFilter } from "../../lib/license";
 import { optionalAuthMiddleware } from "../../middleware/auth";
-import { OWNER_GITHUB_SQL, OWNER_USERNAME_SQL } from "../../services/anonymity";
+import { OWNER_GITHUB_SQL, OWNER_USERNAME_SQL, isAnonymous } from "../../services/anonymity";
 import { zarrCacheBaseUrl } from "../../services/cloudflare";
 import { getFacetVocabulary } from "../../services/dataset-facet-vocabulary";
 import {
@@ -1293,7 +1293,8 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
           dataset_id: string;
           name: string;
           github_repo: string | null;
-          owner_username: string;
+          // Null for an anonymous deposit -- OWNER_USERNAME_SQL withholds it.
+          owner_username: string | null;
         }>();
 
       if (!match) {
@@ -1437,10 +1438,21 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     const {
       attestation: attestationRaw,
       zarr_data_failures: zarrDataFailuresRaw,
+      owner_user_id: ownerUserIdRaw,
       ...rest
     } = withCanonicalLatestVersion(dataset as Record<string, unknown>);
     const detail = {
       ...rest,
+      // #1407: `SELECT d.*` carries the raw owner FK, which OWNER_USERNAME_SQL
+      // cannot reach. Left in place it would de-anonymize a deposit in one
+      // request -- fetch the anonymous dataset's owner_user_id, then find any
+      // other public dataset with the same value and read its disclosed
+      // owner_username -- and it is a stable pseudonymous handle linking a
+      // depositor's several anonymous deposits to each other even when there
+      // is no second dataset to join against. It is not in the contract
+      // (shared/contract/dataset.ts), so it is withheld rather than nulled for
+      // anonymous rows only: nothing declares a use for it.
+      owner_user_id: isAnonymous(dataset) ? null : ownerUserIdRaw,
       // #1207 review: `SELECT d.*` serves the raw numeric primary key here,
       // but the contract (shared/contract/dataset.ts) declares `id: string`
       // -- the list route's `id` is `d.dataset_id AS id`, already a string

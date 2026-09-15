@@ -12,6 +12,7 @@ import { z } from "zod";
 
 import { LIVE_DATASETS, isLiveDataset } from "../../constants";
 import { auditLogStatement } from "../../db/audit-log";
+import { expectedRepoVisibility } from "../../services/anonymity";
 import {
   type DriftBucket,
   classifyDatasetDrift,
@@ -32,24 +33,6 @@ import { getDatasetsToken } from "../../services/github-auth";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { applyDatasetVisibility } from "../../services/visibility";
 import type { AdminRouter } from "./shared";
-
-/**
- * What a dataset's GitHub repo SHOULD be, which is not always what its
- * catalog row says.
- *
- * An anonymous deposit (#1407) is public in the catalog and private on
- * GitHub: that is the state, not drift. Passing the catalog value straight
- * through would report every anonymous deposit as `PUBLIC_UNPROTECTED`,
- * because `classifyDatasetDrift` expects a public repo to carry a branch
- * ruleset, and the real drift would then be buried in that noise.
- */
-function expectedRepoVisibility(row: {
-  visibility?: string | null;
-  anonymous?: number | null;
-}): "public" | "private" {
-  if (row.anonymous === 1) return "private";
-  return row.visibility === "public" ? "public" : "private";
-}
 
 export function registerFleetRoutes(admin: AdminRouter): void {
   // ============================================================================
@@ -203,7 +186,12 @@ export function registerFleetRoutes(admin: AdminRouter): void {
         WHERE ${clauses.join(" AND ")} ORDER BY dataset_id LIMIT ?`,
       )
       .bind(...binds, limit)
-      .all<{ dataset_id: string; github_repo: string; visibility: string }>();
+      .all<{
+        dataset_id: string;
+        github_repo: string;
+        visibility: string;
+        anonymous: number | null;
+      }>();
 
     const datasets = rows.results ?? [];
     const pat = await getDatasetsToken(c.env);
@@ -433,7 +421,12 @@ export function registerFleetRoutes(admin: AdminRouter): void {
         WHERE ${clauses.join(" AND ")} ORDER BY dataset_id LIMIT ?`,
       )
       .bind(...binds, cap)
-      .all<{ dataset_id: string; github_repo: string; visibility: string }>();
+      .all<{
+        dataset_id: string;
+        github_repo: string;
+        visibility: string;
+        anonymous: number | null;
+      }>();
 
     const datasets = rows.results ?? [];
     const pat = await getDatasetsToken(c.env);

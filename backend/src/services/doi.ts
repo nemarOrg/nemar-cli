@@ -71,8 +71,11 @@ export interface CreateConceptDoiOptions {
   uploaderRequired?: boolean;
   /**
    * The dataset is an anonymous deposit (#1407, epic #1406), so the record
-   * carries no DataCurator and the identifier stays `reserved` until
-   * publication.
+   * carries no DataCurator.
+   *
+   * EZID only. Every concept mint is already `reserved` (see the `_status`
+   * this sets below), so the flag's one effect is dropping the curator; the
+   * Zenodo branch has no unattributed form at all and refuses instead.
    *
    * ADR 0041 is satisfied rather than bent: it says a DOI cites the uploader
    * by real name or not at all, and this is the "not at all" branch, on an
@@ -276,6 +279,17 @@ async function createZenodoConceptDoi(
   // the creator is a MANDATORY Zenodo field, so there is no "mint it
   // unattributed" option to fall back to even for an exempt deposit.
   assertUploaderPresent(options, "Zenodo");
+  // An anonymous deposit has no unattributed form here: `creators` is
+  // mandatory and `assertUploaderPresent` waves the anonymous case through,
+  // so without this the branch below would deposit the real name as the sole
+  // creator. Refuse instead. Unreachable today -- the route rejects every
+  // non-EZID provider -- which is exactly why it is written down rather than
+  // left for whoever re-enables Zenodo to rediscover.
+  if (options.anonymousDeposit) {
+    throw new Error(
+      `Cannot create a Zenodo deposition for ${options.datasetId}: it is an anonymous deposit, and Zenodo requires a named creator. Mint through EZID, or de-anonymize first.`,
+    );
+  }
   if (!options.uploader) {
     throw new Error(
       "Cannot create a Zenodo deposition: the uploader has no researcher name on file",
