@@ -406,7 +406,7 @@ exit 0`);
     });
 
     expect(outcome.keys[0].action).toBe("unrecoverable");
-    expect(outcome.keys[0].detail).toContain("serves it to nobody");
+    expect(outcome.keys[0].detail).toContain("will not serve any recorded source");
     // It asked without credentials, which is what makes the claim about upstream
     // rather than about our access.
     expect(

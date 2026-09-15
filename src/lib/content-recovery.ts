@@ -33,6 +33,9 @@
 import { runCommand } from "./git-annex/run-command.js";
 import { annexKeyDeclaredSize } from "./s3-server-copy.js";
 
+/** Errors that mean "this source cannot be read", as opposed to a transfer fault. */
+const SOURCE_UNREADABLE = /AccessDenied|NoSuchVersion|NoSuchKey|NotFound|\b40[34]\b|Forbidden/i;
+
 /** CopyObject refuses a source above this; bigger objects need a multipart copy. */
 export const COPY_OBJECT_LIMIT = 5 * 1024 ** 3;
 
@@ -676,46 +679,55 @@ export async function recoverKey(opts: {
     return { key: entry.key, size: entry.size, action: "would-recover", origin };
   }
 
-  let copied: CopyResult;
-  try {
-    copied = await copyObjectServerSide({
-      source: entry.source,
-      destBucket: opts.destBucket,
-      destKey: opts.destKey,
-      env: opts.env,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    // A refused copy is two different states wearing one error. Ask the source
-    // anonymously: if it will not serve the object to anyone, this key is not a
-    // failure to retry, it is content upstream holds and does not publish, and
-    // an operator re-running the sweep will get the same 403 forever.
-    if (/AccessDenied|\b403\b|Forbidden/i.test(message)) {
-      const readable = await isUpstreamObjectReadable(entry.source, opts.env);
-      if (!readable) {
-        return {
-          key: entry.key,
-          size: entry.size,
-          action: "unrecoverable",
-          origin,
-          detail: `upstream lists an object for this key but serves it to nobody: s3://${entry.source.bucket}/${entry.source.object} is 403 even unsigned`,
-        };
-      }
+  // Each candidate in turn: the pin first, then whatever discovery found. A pin
+  // is the best identification of a key's content, not a promise the object is
+  // still readable, and upstream rewrites and re-permissions objects under the
+  // same path (on003645's recorded versions are all NoSuchVersion while the
+  // right bytes sit at the same paths under newer ids).
+  const candidates = [entry.source, ...(entry.alternatives ?? [])];
+  const refusals: string[] = [];
+  for (const source of candidates) {
+    let copied: CopyResult;
+    try {
+      copied = await copyObjectServerSide({
+        source,
+        destBucket: opts.destBucket,
+        destKey: opts.destKey,
+        env: opts.env,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      refusals.push(message);
+      // Unreadable source: try the next candidate rather than ending here.
+      if (SOURCE_UNREADABLE.test(message)) continue;
+      return {
+        key: entry.key,
+        size: entry.size,
+        action: "failed",
+        origin: source.origin,
+        detail: message,
+      };
     }
-    return { key: entry.key, size: entry.size, action: "failed", origin, detail: message };
-  }
 
-  // Ask the bucket rather than the copy's own answer: a multipart copy reports
-  // nothing useful, and this is the same question a later sweep will ask.
-  const head = await headObject({ bucket: opts.destBucket, key: opts.destKey, env: opts.env });
-  const verdict = verifyCopy({
-    key: entry.key,
-    origin,
-    checksumSha256: copied.checksumSha256 ?? head?.checksumSha256,
-    etag: copied.etag ?? head?.etag,
-    size: head?.size,
-  });
-  if (!verdict.ok) {
+    // Ask the bucket rather than the copy's own answer: a multipart copy reports
+    // nothing useful, and this is the same question a later sweep will ask.
+    const head = await headObject({ bucket: opts.destBucket, key: opts.destKey, env: opts.env });
+    const verdict = verifyCopy({
+      key: entry.key,
+      origin: source.origin,
+      checksumSha256: copied.checksumSha256 ?? head?.checksumSha256,
+      etag: copied.etag ?? head?.etag,
+      size: head?.size,
+    });
+    if (verdict.ok) {
+      return {
+        key: entry.key,
+        size: entry.size,
+        action: "recovered",
+        origin: source.origin,
+        verification: verdict.method,
+      };
+    }
     const removed = await deleteObject({
       bucket: opts.destBucket,
       key: opts.destKey,
@@ -725,16 +737,24 @@ export async function recoverKey(opts: {
       key: entry.key,
       size: entry.size,
       action: "failed",
-      origin,
+      origin: source.origin,
       verification: verdict.method,
       detail: `${verdict.detail}; the object was ${removed ? "deleted" : "LEFT IN THE BUCKET (delete failed)"}`,
     };
   }
+
+  // Every candidate refused. Ask the source anonymously: if it will not serve the
+  // object to anyone, this key is not a failure to retry, it is content upstream
+  // holds and does not publish, and a re-run gets the same answer forever.
+  const readable = await isUpstreamObjectReadable(entry.source, opts.env);
+  const detail = refusals[refusals.length - 1] ?? "no candidate source could be copied";
   return {
     key: entry.key,
     size: entry.size,
-    action: "recovered",
-    origin,
-    verification: verdict.method,
+    action: readable ? "failed" : "unrecoverable",
+    origin: entry.source.origin,
+    detail: readable
+      ? detail
+      : `upstream will not serve any recorded source for this key: ${detail.slice(0, 160)}`,
   };
 }
