@@ -120,15 +120,35 @@ export function bucketObjectSource(): ObjectSource {
  * that fails, and the whole repair reports a clone failure for a reason that has
  * nothing to do with cloning.
  *
- * The clone is `--filter=blob:none`. That is NOT what avoids fetching annexed
- * content -- annexed content is never a git blob, and the checkout fetches every
- * blob of HEAD regardless. What it skips is historical blobs, and it makes the
- * git-annex branch's location logs lazily fetched, which is worth having across
- * 800 repositories.
+ * The clone is `--filter=blob:none` by default. That is NOT what avoids fetching
+ * annexed content -- annexed content is never a git blob, and the checkout
+ * fetches every blob of HEAD regardless. What it skips is historical blobs, and
+ * it makes the git-annex branch's location logs lazily fetched, which is worth
+ * having across 800 repositories and wrong for a caller that then reads those
+ * logs in bulk (`partial: false`).
  */
-async function cloneForRegistration(url: string, datasetPath: string): Promise<string | undefined> {
+export async function cloneForFleetWork(
+  url: string,
+  datasetPath: string,
+  options: {
+    /**
+     * `--filter=blob:none`, the default. Turn it off when the run reads many
+     * blobs of the git-annex branch: a partial clone fetches those one at a
+     * time on demand, which is minutes per dataset rather than seconds.
+     */
+    partial?: boolean;
+    /** What the clone calls itself in the annex's `uuid.log`. */
+    description?: string;
+  } = {},
+): Promise<string | undefined> {
   // A token is for GitHub, and only for GitHub: `originUrl` is also a local path
   // in the tests, and some imported datasets are private, so https needs one.
+  //
+  // The empty `credential.helper` in slot 0 is not redundant. Git ACCUMULATES
+  // helpers, so the operator's global one -- on a Mac, the Git Credential
+  // Manager -- still runs, and it opens a GUI dialog that `GIT_TERMINAL_PROMPT=0`
+  // does nothing about. An empty value resets the list, so a sweep over hundreds
+  // of repositories cannot sit waiting behind a window nobody is watching.
   let env: Record<string, string> | undefined;
   if (/^https:\/\/github\.com\//.test(url)) {
     const token = process.env.GH_TOKEN?.trim() || (await getGitHubToken()).token;
@@ -136,32 +156,47 @@ async function cloneForRegistration(url: string, datasetPath: string): Promise<s
       // Via GIT_CONFIG_* rather than argv or the URL, so the token never lands in
       // a process listing.
       env = {
-        GIT_CONFIG_COUNT: "1",
-        GIT_CONFIG_KEY_0: "credential.https://github.com.helper",
-        GIT_CONFIG_VALUE_0: githubTokenCredentialHelper(token),
+        GIT_CONFIG_COUNT: "2",
+        GIT_CONFIG_KEY_0: "credential.helper",
+        GIT_CONFIG_VALUE_0: "",
+        GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
+        GIT_CONFIG_VALUE_1: githubTokenCredentialHelper(token),
+        // Belt and braces for the same dialog, which GCM suppresses on this.
+        GCM_INTERACTIVE: "never",
       };
     }
   }
   const clone = await runCommand(
-    ["git", "clone", "--quiet", "--filter=blob:none", url, datasetPath],
+    [
+      "git",
+      "clone",
+      "--quiet",
+      ...(options.partial === false ? [] : ["--filter=blob:none"]),
+      url,
+      datasetPath,
+    ],
     env ? { env } : {},
   );
   if (clone.exitCode !== 0) {
     return clone.stderr.trim() || `git clone exited ${clone.exitCode}`;
   }
   if (env) {
-    // The clone-time helper covered only that process; the push needs it too.
+    // The clone-time helpers covered only that process; the push needs them too,
+    // in this order: the empty value resets whatever the global config set up,
+    // then ours is the only one left to answer.
+    await runCommand(["git", "config", "credential.helper", ""], { cwd: datasetPath });
     await runCommand(
-      ["git", "config", "credential.https://github.com.helper", env.GIT_CONFIG_VALUE_0],
+      ["git", "config", "credential.https://github.com.helper", env.GIT_CONFIG_VALUE_1],
       { cwd: datasetPath },
     );
   }
   // An identity per clone, BEFORE git-annex init, because that commits.
   await runCommand(["git", "config", "user.email", "nemar-bot@nemar.org"], { cwd: datasetPath });
   await runCommand(["git", "config", "user.name", "NEMAR"], { cwd: datasetPath });
-  const init = await runCommand(["git", "annex", "init", "--quiet", "fleet-key-registration"], {
-    cwd: datasetPath,
-  });
+  const init = await runCommand(
+    ["git", "annex", "init", "--quiet", options.description ?? "fleet-key-registration"],
+    { cwd: datasetPath },
+  );
   if (init.exitCode !== 0) {
     return `git annex init failed: ${init.stderr.trim() || `exit ${init.exitCode}`}`;
   }
@@ -304,7 +339,7 @@ export async function repairDatasetKeyRegistration(
   rmSync(datasetPath, { recursive: true, force: true });
 
   const url = options.originUrl ?? `https://github.com/nemarDatasets/${datasetId}.git`;
-  const cloned = await cloneForRegistration(url, datasetPath);
+  const cloned = await cloneForFleetWork(url, datasetPath);
   if (cloned) {
     // Before the try, so nothing else removes it: a half-written clone left under
     // the work root outlives the run and the next one deletes it blind.
