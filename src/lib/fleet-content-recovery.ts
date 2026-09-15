@@ -65,6 +65,21 @@ export async function annexedKeyPaths(datasetPath: string): Promise<Map<string, 
   return paths;
 }
 
+/**
+ * Whether `git show <ref>:<path>` failed because the PATH is not in the ref.
+ *
+ * That is an answer -- a branch with no `remote.log` has no special remotes --
+ * and it is the only failure of that command which is. Everything else (an
+ * invalid ref, a partial-clone fetch failure, a corrupt object, not a
+ * repository) is a question that did not get asked, and must not be read as an
+ * empty result. Measured against git's own wording:
+ *   missing path: `fatal: path 'remote.log' does not exist in 'git-annex'`
+ *   missing ref:  `fatal: invalid object name 'no-such-ref'.`
+ */
+function isPathAbsentFromRef(stderr: string): boolean {
+  return /does not exist in/.test(stderr);
+}
+
 /** `git cat-file --batch` over many paths, kept as bytes until each body is sliced. */
 async function catFileBatch(
   repo: string,
@@ -81,20 +96,43 @@ async function catFileBatch(
     stderr: "pipe",
   });
   const out = Buffer.from(await new Response(proc.stdout).arrayBuffer());
-  await proc.exited;
+  const errorText = await new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+  // A failed read must not look like "this key has no pin". Every consequence
+  // of a missing pin is a verdict: `planKeyRecovery` reports "no upstream object
+  // of this key's size", and an oversized key becomes `unrecoverable`. ADR 0064
+  // records that a pin-parsing bug of exactly this shape hid 3,186 pins and
+  // 11.5 GB of readable content, so this throws like `annexedKeys` does.
+  if (exitCode !== 0) {
+    throw new Error(
+      `git cat-file --batch failed over ${paths.length} record(s): ${errorText.trim() || `exit ${exitCode}`}`,
+    );
+  }
   // The stream is <sha> <type> <size>\n<size bytes>\n per request, in order. The
   // sizes are BYTE counts, so the walk has to stay on a buffer: decoding first
   // and slicing by character would drift on any non-ASCII object path.
   let cursor = 0;
   for (const path of paths) {
     const newline = out.indexOf(0x0a, cursor);
-    if (newline < 0) break;
+    // Truncated mid-stream. Silently abandoning the remaining keys leaves an
+    // arbitrary suffix of them unpinned, with the verdicts above attached.
+    if (newline < 0) {
+      throw new Error(
+        `git cat-file --batch returned ${found.size} of ${paths.length} record(s); the stream ended early`,
+      );
+    }
     const header = out.subarray(cursor, newline).toString("utf8").split(" ");
     if (header[1] === "missing") {
       cursor = newline + 1;
       continue;
     }
     const size = Number(header[2]);
+    // A header we cannot parse would set the cursor to NaN, after which
+    // `indexOf(0x0a, NaN)` restarts from offset 0 and every later key gets
+    // another key's body: wrong pins rather than missing ones.
+    if (!Number.isFinite(size) || size < 0) {
+      throw new Error(`git cat-file --batch returned an unparseable header for ${path}`);
+    }
     const start = newline + 1;
     found.set(path, out.subarray(start, start + size).toString("utf8"));
     cursor = start + size + 1;
@@ -108,14 +146,29 @@ export async function readPinnedSources(
   keys: string[],
   ref = "git-annex",
 ): Promise<Map<string, PinnedSource[]>> {
+  // Both of these THROW rather than return an empty map, for the reason
+  // `annexedKeys` does: an empty answer and a failed question look identical
+  // downstream, and here the failed question silently strips the pin from every
+  // key in the dataset. A missing ref, a partial-clone fetch failure or a
+  // corrupt object would then be reported as content upstream does not hold.
   const remoteLog = await runCommand(["git", "show", `${ref}:remote.log`], { cwd: datasetPath });
-  if (remoteLog.exitCode !== 0) return new Map();
+  if (remoteLog.exitCode !== 0 && !isPathAbsentFromRef(remoteLog.stderr)) {
+    throw new Error(
+      `could not read ${ref}:remote.log: ${remoteLog.stderr.trim() || `exit ${remoteLog.exitCode}`}`,
+    );
+  }
+  // A branch with no remote.log genuinely has no versioned remotes, so no key
+  // has a pin, and an empty map is the right answer rather than a guess.
   const remotes = parseRemoteLog(remoteLog.stdout);
 
   const listing = await runCommand(["git", "ls-tree", "-r", "--name-only", ref], {
     cwd: datasetPath,
   });
-  if (listing.exitCode !== 0) return new Map();
+  if (listing.exitCode !== 0) {
+    throw new Error(
+      `could not list ${ref}: ${listing.stderr.trim() || `exit ${listing.exitCode}`}`,
+    );
+  }
   const wanted = new Set(keys);
   const rmetPaths: Array<[string, string]> = [];
   for (const path of listing.stdout.split("\n")) {
@@ -145,13 +198,21 @@ export async function destinationPrefix(
   remoteName = REMOTE_NAME,
   ref = "git-annex",
 ): Promise<string> {
-  const { stdout, exitCode } = await runCommand(["git", "show", `${ref}:remote.log`], {
+  const { stdout, stderr, exitCode } = await runCommand(["git", "show", `${ref}:remote.log`], {
     cwd: datasetPath,
   });
-  if (exitCode === 0) {
-    for (const remote of parseRemoteLog(stdout).values()) {
-      if (remote.name === remoteName && remote.fileprefix) return remote.fileprefix;
-    }
+  // A FAILED read is not the same as a branch that names no such remote. The
+  // convention below is a reasonable default for the second; for the first it is
+  // a guess, and a wrong prefix sends hundreds of GB somewhere the annex never
+  // looks, reported `recovered`, with the next sweep still finding the content
+  // missing. Only the "asked, and it is not there" case falls back.
+  if (exitCode !== 0 && !isPathAbsentFromRef(stderr)) {
+    throw new Error(
+      `could not read ${ref}:remote.log to find ${remoteName}'s object prefix: ${stderr.trim() || `exit ${exitCode}`}`,
+    );
+  }
+  for (const remote of parseRemoteLog(stdout).values()) {
+    if (remote.name === remoteName && remote.fileprefix) return remote.fileprefix;
   }
   return `${datasetId}/objects/`;
 }
@@ -167,6 +228,17 @@ export type DatasetRecoveryAction =
 export interface DatasetRecoveryOutcome {
   datasetId: string;
   action: DatasetRecoveryAction;
+  /**
+   * Whether the counts below are a measurement at all.
+   *
+   * False when the dataset could not be examined: a clone failure, a rejected
+   * id, a listing that threw. Every count is then 0 because nothing was
+   * counted, and a reader who cannot tell that apart from a clean dataset gets
+   * the worst possible reading of the worst possible case (ADR 0054: unknown is
+   * never rendered as zero). ADR 0064 puts a withdrawal on the other end of
+   * these numbers, so it has to be legible.
+   */
+  measured: boolean;
   /** Annexed keys with no object in the bucket, before anything was done. */
   missing: number;
   missingBytes: number;
@@ -211,15 +283,21 @@ function tally(
   const unrecoverable = keys.filter((k) => k.action === "unrecoverable").length;
   const failed = keys.filter((k) => k.action === "failed").length;
   const would = keys.filter((k) => k.action === "would-recover").length;
+  // `keys` holds only the keys this run ACTED on, which `--limit` narrows,
+  // while `missing` is the whole plan. Judging completeness on `keys` alone
+  // reported 10 of 100 recovered as `recovered`, with a green line in the
+  // summary for a dataset still missing 90 keys.
+  const untouched = missing.length - keys.length;
   let action: DatasetRecoveryAction;
   if (missing.length === 0) action = "nothing-missing";
   else if (failed > 0) action = "failed";
   else if (would > 0) action = "would-recover";
-  else if (recovered > 0) action = unrecoverable > 0 ? "partial" : "recovered";
+  else if (recovered > 0) action = unrecoverable > 0 || untouched > 0 ? "partial" : "recovered";
   else action = "unrecoverable";
   return {
     datasetId,
     action,
+    measured: true,
     missing: missing.length,
     missingBytes: missing.reduce((total, entry) => total + entry.size, 0),
     recovered,
@@ -242,11 +320,12 @@ export async function recoverDatasetContent(
   objects: ObjectSource,
   options: ContentRecoveryOptions,
 ): Promise<DatasetRecoveryOutcome> {
-  const empty = tally(datasetId, [], []);
+  // `unmeasured` and not `empty`: these returns are "we could not look", and
+  // the zeros in them are the absence of a measurement, not a clean result.
+  const unmeasured = { ...tally(datasetId, [], []), measured: false, action: "failed" as const };
   if (!DATASET_ID_RE.test(datasetId)) {
     return {
-      ...empty,
-      action: "failed",
+      ...unmeasured,
       error: `"${datasetId}" is not a dataset id, and it would become a directory this deletes`,
     };
   }
@@ -259,7 +338,7 @@ export async function recoverDatasetContent(
   });
   if (cloned) {
     rmSync(datasetPath, { recursive: true, force: true });
-    return { ...empty, action: "failed", error: cloned };
+    return { ...unmeasured, error: cloned };
   }
 
   try {
@@ -323,9 +402,11 @@ export async function recoverDatasetContent(
     );
     return tally(datasetId, planned, outcomes);
   } catch (error) {
+    // Anything thrown in here -- a failed pin read, an upstream listing that
+    // refused, a truncated cat-file -- means the dataset was not measured. Its
+    // zeros must not read as "nothing missing".
     return {
-      ...empty,
-      action: "failed",
+      ...unmeasured,
       error: error instanceof Error ? error.message : String(error),
     };
   } finally {
@@ -360,6 +441,7 @@ export async function sweepContentRecovery(
     } catch (error) {
       outcome = {
         ...tally(datasetId, [], []),
+        measured: false,
         action: "failed",
         error: error instanceof Error ? error.message : String(error),
       };
@@ -367,14 +449,17 @@ export async function sweepContentRecovery(
     outcomes.push(outcome);
     options.onDataset?.(outcome, ++done, unique.length);
   }
-  const counts = {
+  // Annotated, never cast. `as` silences the one compile-time check this union
+  // buys: add a member to DatasetRecoveryAction and the cast still compiles,
+  // then `counts[action]++` increments undefined and the whole tally is NaN.
+  const counts: Record<DatasetRecoveryAction, number> = {
     "nothing-missing": 0,
     recovered: 0,
     "would-recover": 0,
     partial: 0,
     unrecoverable: 0,
     failed: 0,
-  } as Record<DatasetRecoveryAction, number>;
+  };
   let recoveredKeys = 0;
   let recoveredBytes = 0;
   for (const outcome of outcomes) {

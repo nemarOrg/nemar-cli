@@ -6007,13 +6007,26 @@ Examples:
       }
     }
 
+    // `--limit 0` and `--limit abc` used to mean NO limit: the string "0" is
+    // truthy, Number("0") is 0, and 0 is falsy where the slice is taken. With
+    // --apply that is the difference between a bounded rehearsal and a full run.
+    let limit: number | undefined;
+    if (options.limit !== undefined) {
+      limit = Number(options.limit);
+      if (!Number.isInteger(limit) || limit < 1) {
+        console.log(chalk.red(`Error: --limit must be a positive integer (got ${options.limit})`));
+        process.exit(1);
+      }
+    }
+
     const workRoot = options.dir ?? mkdtempSync(join(tmpdir(), "nemar-content-recovery-"));
     mkdirSync(workRoot, { recursive: true });
     console.log();
+    const leftInBucket: Array<{ datasetId: string; key: string }> = [];
     const sweep = await sweepContentRecovery(targets, bucketObjectSource(), {
       workRoot,
       apply: Boolean(options.apply),
-      limit: options.limit ? Number(options.limit) : undefined,
+      limit,
       concurrency: Number(options.concurrency) || 8,
       onDataset: (outcome, done, total) => {
         const gib = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
@@ -6023,11 +6036,22 @@ Examples:
             : outcome.action === "recovered"
               ? chalk.green(outcome.datasetId)
               : chalk.dim(outcome.datasetId);
-        const detail =
-          outcome.error ??
-          `${outcome.missing} missing (${gib(outcome.missingBytes)}), ` +
-            `${outcome.recovered} recovered (${gib(outcome.recoveredBytes)}), ` +
-            `${outcome.unrecoverable} unrecoverable (${gib(outcome.unrecoverableBytes)})`;
+        // An object that failed verification and would not delete is the one
+        // outcome worse than not copying at all (ADR 0063), so it is collected
+        // here and printed again at the end rather than left in a JSON detail.
+        for (const key of outcome.keys) {
+          if (key.leftInBucket) leftInBucket.push({ datasetId: outcome.datasetId, key: key.key });
+        }
+        // `failed` was missing from this line entirely, so a dataset where every
+        // key failed printed "N missing, 0 recovered, 0 unrecoverable".
+        const detail = outcome.error
+          ? outcome.error
+          : !outcome.measured
+            ? "not measured"
+            : `${outcome.missing} missing (${gib(outcome.missingBytes)}), ` +
+              `${outcome.recovered} recovered (${gib(outcome.recoveredBytes)}), ` +
+              `${outcome.unrecoverable} unrecoverable (${gib(outcome.unrecoverableBytes)}), ` +
+              `${outcome.failed} failed`;
         console.log(`${chalk.dim(`[${done}/${total}]`)} ${label} ${chalk.dim(detail)}`);
       },
     });
@@ -6040,6 +6064,28 @@ Examples:
       `  ${"keys recovered".padEnd(20)} ${sweep.recoveredKeys} ` +
         `(${(sweep.recoveredBytes / 1024 ** 3).toFixed(1)} GiB)`,
     );
+    if (leftInBucket.length > 0) {
+      // Loud, and with the command to fix it. These objects carry a real key's
+      // name at its declared size, so the next `key-registration --apply` would
+      // advertise content that is not the content (ADR 0063).
+      console.log(
+        chalk.red(
+          `\n  ${leftInBucket.length} object(s) FAILED verification and could not be deleted.`,
+        ),
+      );
+      console.log(
+        chalk.red("  They will be advertised as real content by the next registration sweep."),
+      );
+      for (const { datasetId, key } of leftInBucket.slice(0, 20)) {
+        console.log(chalk.red(`    ${datasetId}  ${key}`));
+      }
+      if (leftInBucket.length > 20) {
+        console.log(chalk.red(`    ... and ${leftInBucket.length - 20} more (see --json)`));
+      }
+      console.log(
+        chalk.dim("  Remove each with: aws s3api delete-object --bucket nemar --key ..."),
+      );
+    }
     if (options.json) {
       writeFileSync(options.json, JSON.stringify(sweep, null, 2));
       console.log(chalk.dim(`\n  Report written to ${options.json}`));

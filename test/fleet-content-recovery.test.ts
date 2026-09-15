@@ -29,6 +29,7 @@ import {
   readPinnedSources,
   recoverDatasetContent,
 } from "../src/lib/fleet-content-recovery";
+import { REMOTE_NAME } from "../src/lib/fleet-key-registration";
 import { runCommand } from "../src/lib/git-annex/run-command";
 
 /** A bucket listing in the shape `listExistingObjects` returns: key -> size. */
@@ -229,6 +230,31 @@ describe("destinationPrefix", () => {
 
   test("falls back to the conventional prefix when the branch names none", async () => {
     expect(await destinationPrefix(origin, "on000001")).toBe("on000001/objects/");
+  }, 120_000);
+
+  test("refuses to guess a prefix when the branch could not be read at all", async () => {
+    // The fallback is right for "asked, and there is no such remote". It is a
+    // guess for "could not ask", and a wrong prefix sends the copy somewhere
+    // the annex never looks: reported recovered, still missing on the next
+    // sweep. git distinguishes the two ("does not exist in" versus an invalid
+    // object name) and so must this.
+    await expect(destinationPrefix(origin, "on000001", REMOTE_NAME, "no-such-ref")).rejects.toThrow(
+      /could not read/,
+    );
+  }, 120_000);
+});
+
+describe("readPinnedSources failing loudly", () => {
+  test("throws rather than reporting every key unpinned when the ref is unreadable", async () => {
+    // ADR 0064 records a pin-parsing bug of exactly this shape that hid 3,186
+    // pins and 11.5 GB of readable content. An empty map here is not a neutral
+    // result: it makes planKeyRecovery report "no upstream object of this key's
+    // size" and turns every oversized key unrecoverable.
+    const key = await addAnnexedFile("a.dat", "content of a");
+
+    await expect(readPinnedSources(origin, [key], "no-such-ref")).rejects.toThrow(
+      /could not read|could not list/,
+    );
   }, 120_000);
 });
 
