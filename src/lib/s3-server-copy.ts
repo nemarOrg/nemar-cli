@@ -70,6 +70,22 @@ export function isKeyPresentAtDeclaredSize(key: string, existing: Map<string, nu
 }
 
 /**
+ * The keys a tree names that the bucket cannot account for (#1396).
+ *
+ * The publish gate asks this of the TREE, not of the import manifest. A manifest
+ * is what the copy phase believed it transferred, so verifying the manifest
+ * against the bucket passes whenever the manifest is the subset that worked --
+ * which is how sixteen datasets were published referencing 12,039 keys that were
+ * never transferred, with the location log advertising every one of them.
+ */
+export function keysWithoutObjects(
+  treeKeys: Iterable<string>,
+  existing: Map<string, number>,
+): string[] {
+  return [...treeKeys].filter((key) => !isKeyPresentAtDeclaredSize(key, existing));
+}
+
+/**
  * Max size (bytes) `curlStreamCopy` will buffer to the runner's local disk.
  * The curl fallback downloads the whole object locally so it can be verified
  * before upload (#967); this domain has recordings up to ~300GB, and GitHub

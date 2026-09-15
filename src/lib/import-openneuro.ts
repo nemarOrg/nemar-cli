@@ -36,7 +36,12 @@ import {
   configureS3Remote,
   markInheritedOpenNeuroRemotesIgnored,
 } from "./git-annex/s3-remote.js";
-import { batchSetKeysPresent, getAnnexWhereisAll, getRemoteUuid } from "./git-annex/transfer.js";
+import {
+  batchSetKeysPresent,
+  getAnnexWhereisAll,
+  getRemoteUuid,
+  listAnnexedKeys,
+} from "./git-annex/transfer.js";
 import { annexCopyUpload, normalizeImportedTree } from "./import-normalize.js";
 import {
   type ImportManifest,
@@ -47,6 +52,7 @@ import {
   filterAlreadyCopied,
   isKeyPresentAtDeclaredSize,
   isLocallyUploaded,
+  keysWithoutObjects,
   listExistingObjects,
   parseS3Url,
   readManifestFromS3,
@@ -1542,6 +1548,28 @@ export async function finalizeImport(
       );
       process.exit(1);
     }
+
+    // The manifest is what the copy phase BELIEVED it transferred, and the check
+    // above only asks whether those items landed. A copy phase that built a
+    // partial manifest passes it while the tree references keys nothing ever
+    // moved: sixteen datasets finalized that way, 12,039 keys with no object in
+    // the bucket, and the location log then told every clone NEMAR had them
+    // (#1396). So the gate is the TREE against the bucket, not the manifest
+    // against the bucket (ADR 0062).
+    //
+    // `existing` is the listing from the verify step a few lines up; nothing
+    // writes to the prefix in between, and re-listing a 60,000-object dataset
+    // twice per finalize is not free.
+    const treeGateSpinner = ora("Checking every annexed key has an object...").start();
+    const treeKeys = new Set((await listAnnexedKeys(datasetPath)).values());
+    const unbacked = keysWithoutObjects(treeKeys, existing);
+    if (unbacked.length > 0) {
+      treeGateSpinner.fail(
+        `${unbacked.length} of ${treeKeys.size} annexed key(s) in the tree have no object in s3://${S3_BUCKET}/${nemarId}/objects/ (e.g. ${unbacked.slice(0, 3).join(", ")}). The manifest accounted for ${manifest.items.length}. Refusing to register: those keys would be advertised as NEMAR content that no clone can fetch. Re-run the copy phase, or prepare if the content exists only in a clone.`,
+      );
+      process.exit(1);
+    }
+    treeGateSpinner.succeed(`Every one of ${treeKeys.size} annexed key(s) has an object`);
 
     const registerSpinner = ora("Registering files in git-annex...").start();
     const keys = manifest.items.map((it) => it.key);
