@@ -74,6 +74,35 @@ describe("the data plane withholds the repository URL while anonymous", () => {
   });
 });
 
+describe("the data plane states that a deposit is concealed", () => {
+  async function anonymousFlag(db: Database, id: string): Promise<boolean> {
+    const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+    app.route("/", dataRoutes);
+    const res = await app.request(`/${id}/metadata.json`, {}, env(db));
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { anonymous: boolean }).anonymous;
+  }
+
+  test("an anonymous release says so, rather than just looking empty", async () => {
+    // "Withheld" and "missing" look identical from empty authors and null
+    // links, and a reader who cannot tell them apart concludes the record is
+    // incomplete. This is the field that lets a consumer render the
+    // difference -- and it is the one signal the website cannot get wrong by
+    // a fetch failing, because the page 404s rather than degrading.
+    const db = freshDb();
+    seed(db, "nm000864", 1);
+    expect(await anonymousFlag(db, "nm000864")).toBe(true);
+    db.close();
+  });
+
+  test("an ordinary dataset reports false", async () => {
+    const db = freshDb();
+    seed(db, "nm000865", 0);
+    expect(await anonymousFlag(db, "nm000865")).toBe(false);
+    db.close();
+  });
+});
+
 describe("the data plane does not advertise a reserved DOI", () => {
   test("an anonymous release serves dataset_doi: null", async () => {
     // The identifier exists at EZID but is `reserved`: registered, not

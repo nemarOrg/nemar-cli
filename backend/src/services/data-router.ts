@@ -692,6 +692,17 @@ export interface NeuroschemaDataset {
   bids_version: string | null;
   license: string | null;
   authors: Person[];
+  /**
+   * #1408: the depositor is concealed until publication (a double-blind
+   * deposit), so `authors` is deliberately empty and `external_links` withholds
+   * the repository and the DOI.
+   *
+   * Stated as its own field rather than left to be inferred from the empty
+   * arrays, because "withheld" and "missing" look identical otherwise, and a
+   * reader who cannot tell them apart concludes the record is incomplete. Any
+   * consumer of data.nemar.org can render the difference.
+   */
+  anonymous: boolean;
   keywords: StructuredKeyword[];
   related_identifiers: RelatedIdentifierEntry[];
   contributors: ContributorEntry[];
@@ -1056,6 +1067,7 @@ export function buildDatasetMetadata(input: {
     bids_version: null,
     license,
     authors: buildPersonList(parsedEnrichment),
+    anonymous: row.anonymous === 1,
     keywords,
     related_identifiers: related,
     contributors,
