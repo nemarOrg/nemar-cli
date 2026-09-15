@@ -102,6 +102,14 @@ earlier releases are described only by their generated notes.
 
 ### Fixed
 
+- **`nemar admin import verify` no longer reports "0/0 object(s) missing" (#1396).** The
+  backend answers `complete: false` with an empty expected set when there is no published
+  manifest to compare against, which is the right refusal, but the CLI rendered it as an
+  incompleteness with a count of zero over a total of zero. `on008003` reported that with
+  759 objects sitting in its prefix. It now says the dataset is not verifiable and why, so
+  an absent expectation stops reading as a verdict on the data (ADR 0054). Same fix in
+  `admin import recover`'s per-target line.
+
 - **Content recovery reads the pins of any path containing a space (#1396).** git-annex
   base64-encodes a metadata value it cannot write literally and marks it with `!`, which is
   what happens to every `.log.rmet` value whose object path holds a space. The parser

@@ -4403,6 +4403,15 @@ importCommand
         spinner.succeed(
           `${datasetId} verified complete (${result.presentCount}/${result.expectedCount} objects present)`,
         );
+      } else if (result.expectedCount === 0) {
+        // The backend answers `complete: false` with an empty expected set when
+        // there is no published manifest to compare against, which is the right
+        // refusal but not an incompleteness: rendering it as "0/0 missing" reads
+        // as a verdict on the data when nothing was actually checked (ADR 0054).
+        spinner.warn(
+          `${datasetId} not verifiable: no published manifest to compare against ` +
+            `(${result.presentCount} object(s) in the bucket)`,
+        );
       } else {
         spinner.warn(
           `${datasetId} incomplete: ${result.missingKeys.length}/${result.expectedCount} object(s) missing${result.zeroByteKeys.length > 0 ? ` (${result.zeroByteKeys.length} zero-byte)` : ""}`,
@@ -4610,7 +4619,9 @@ Description:
             `${id} reclassified: ${
               result.complete
                 ? "already complete"
-                : `incomplete (${result.missingKeys.length}/${result.expectedCount} missing)`
+                : result.expectedCount === 0
+                  ? "not verifiable (no published manifest)"
+                  : `incomplete (${result.missingKeys.length}/${result.expectedCount} missing)`
             }`,
           );
         } catch (err) {
