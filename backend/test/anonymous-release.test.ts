@@ -67,59 +67,73 @@ describe("the data plane withholds the repository URL while anonymous", () => {
   });
 });
 
-describe("the author gate is exempted for a release and enforced for a publication", () => {
-  const BLINDED = JSON.stringify({
-    Name: "A sufficiently descriptive dataset title",
-    Authors: ["Anonymous"],
-    EthicsApprovals: ["Approved by an institutional review board"],
-  });
-  const ATTRIBUTED = JSON.stringify({
-    Name: "A sufficiently descriptive dataset title",
-    Authors: ["Ada Lovelace"],
-    EthicsApprovals: ["Approved by an institutional review board"],
-  });
-  const EMPTY_AUTHORS = JSON.stringify({
-    Name: "A sufficiently descriptive dataset title",
-    Authors: [],
-    EthicsApprovals: ["Approved by an institutional review board"],
-  });
+describe("the Authors rule inverts for an anonymous release", () => {
+  const ETHICS = ["Approved by an institutional review board"];
+  const NAME = "A sufficiently descriptive dataset title";
+  const desc = (authors: string[]) =>
+    JSON.stringify({ Name: NAME, Authors: authors, EthicsApprovals: ETHICS });
+
+  const BLINDED = desc(["Anonymous"]);
+  const ATTRIBUTED = desc(["Ada Lovelace"]);
 
   test("a blinded deposit passes an anonymous release", () => {
-    // Placeholder Authors are the intended state here: being blinded is what
-    // that field is reporting.
-    expect(evaluateSubmissionMinimums(BLINDED, null, { allowPlaceholderAuthors: true })).toEqual(
-      [],
-    );
+    expect(evaluateSubmissionMinimums(BLINDED, null, { anonymousRelease: true })).toEqual([]);
   });
 
   test("the same deposit is refused a real publication", () => {
-    // This is the interlock. One gate, two jobs: a depositor cannot publish
-    // for real while still concealed, and the refusal names the fix.
+    // The interlock: one gate, two complementary rules. A depositor cannot
+    // publish for real while still concealed, and the refusal names the fix.
     const reasons = evaluateSubmissionMinimums(BLINDED, null);
     expect(reasons.length).toBe(1);
     expect(reasons[0]).toMatch(/must name the people responsible/);
+  });
+
+  test("REAL names are refused an anonymous release, and the names are quoted back", () => {
+    // The case an earlier draft allowed, and the reason this rule inverts
+    // rather than relaxes. `dataset_description.json` is part of the dataset
+    // and is served publicly from the data plane, so a depositor who asked to
+    // be concealed and left their name in it would have been published under
+    // it by their own file -- having passed every gate.
+    const reasons = evaluateSubmissionMinimums(ATTRIBUTED, null, { anonymousRelease: true });
+    expect(reasons.length).toBe(1);
+    expect(reasons[0]).toMatch(/still names Ada Lovelace/);
+    expect(reasons[0]).toMatch(/Restore the real names when you publish/);
   });
 
   test("restoring the real authors is what unblocks the publication", () => {
     expect(evaluateSubmissionMinimums(ATTRIBUTED, null)).toEqual([]);
   });
 
-  test("the exemption accepts a placeholder, never an empty field", () => {
-    // An empty Authors array is an incomplete file, not a blinded one, and
-    // accepting it would let the exemption swallow a real defect.
-    const reasons = evaluateSubmissionMinimums(EMPTY_AUTHORS, null, {
-      allowPlaceholderAuthors: true,
-    });
-    expect(reasons.length).toBe(1);
-    expect(reasons[0]).toMatch(/must not be empty/);
+  test("an empty Authors field is refused either way", () => {
+    // Empty is an incomplete file, not a blinded one, and accepting it for a
+    // release would let the rule swallow a real defect.
+    const anon = evaluateSubmissionMinimums(desc([]), null, { anonymousRelease: true });
+    expect(anon.length).toBe(1);
+    expect(anon[0]).toMatch(/must not be empty/);
+    expect(evaluateSubmissionMinimums(desc([]), null).length).toBe(1);
   });
 
-  test("the exemption is narrow: every other minimum still applies", () => {
-    // A blinded deposit must still have a descriptive Name and an ethics
-    // statement. If the exemption widened to "skip the checks", this passes.
+  test("the two rules are exact complements over the same input", () => {
+    // Stated as a property rather than three more cases: for any Authors
+    // field, exactly one of the two submissions accepts it. That is what makes
+    // "blind to release, restore to publish" an ordering rather than advice.
+    for (const authors of [["Anonymous"], ["Ada Lovelace"], ["N/A"], ["[Unspecified1]"]]) {
+      const asRelease = evaluateSubmissionMinimums(desc(authors), null, {
+        anonymousRelease: true,
+      }).length;
+      const asPublication = evaluateSubmissionMinimums(desc(authors), null).length;
+      expect(
+        (asRelease === 0) !== (asPublication === 0),
+        `Authors ${JSON.stringify(authors)} is accepted by both or neither`,
+      ).toBe(true);
+    }
+  });
+
+  test("the inversion is narrow: every other minimum still applies", () => {
+    // If the rule widened to "skip the checks for anonymous", this passes.
     const shortNameNoEthics = JSON.stringify({ Name: "EEG", Authors: ["Anonymous"] });
     const reasons = evaluateSubmissionMinimums(shortNameNoEthics, null, {
-      allowPlaceholderAuthors: true,
+      anonymousRelease: true,
     });
     expect(reasons.length).toBe(2);
     expect(reasons.join(" ")).toMatch(/descriptive title/);

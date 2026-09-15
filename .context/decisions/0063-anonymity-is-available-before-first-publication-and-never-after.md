@@ -174,6 +174,27 @@ fixture had to be declared rather than borrowed. Publishing it destroys it perma
 fleet file marks it, the clone tool skips it under `--all --publish`, and the
 publication-request route refuses it.
 
+**A blinded deposit is submitted blinded, and that is an EXCEPTION to the submission
+standards rather than a silent special case.** NEMAR asks the depositor to anonymize their own
+`dataset_description.json` before requesting an anonymous release, exactly as a double-blind
+venue asks for a blinded manuscript, and restores attribution at acceptance. The alternative --
+accepting real names and having NEMAR conceal them -- was considered and rejected as
+unachievable: that file is git-tracked, part of the dataset, and served publicly from the data
+plane, so NEMAR cannot conceal what it says.
+
+So ADR 0026's `Authors` rule INVERTS for an anonymous release rather than relaxing. A
+publication requires at least one real name; a release requires none, and both require a
+non-empty field. The two are exact complements over the same input, which is what makes
+"blind to release, restore to publish" an enforced ordering rather than advice. Every other
+minimum -- a descriptive Name, an ethics statement -- applies unchanged.
+
+The enforcement stops at what is structured. `Authors` is checked because it is a field;
+README, `participants.tsv` and identifiers inside signal headers are the depositor's to scrub
+and are REPORTED by the blind check, never enforced at the gate. The exception set is listed
+for depositors on `docs.nemar.org` (#1412), because a requirement that is waived in one
+direction and reversed in another is not something anyone should have to infer from a refusal
+message.
+
 ## Alternatives considered
 
 - **Filter identity at read time.** The obvious design, and it leaves the real names in

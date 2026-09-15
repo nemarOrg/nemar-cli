@@ -323,10 +323,10 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
           if (readme !== null) break;
         }
         const reasons = evaluateSubmissionMinimums(descriptionJson, readme, {
-          // The whole point of a blinded deposit is that its Authors do not
-          // name anybody yet. Enforced again, unconditionally, on the normal
-          // publication request that ends anonymity.
-          allowPlaceholderAuthors: anonymousRequested,
+          // A blinded deposit must NOT name anybody in Authors; a publication
+          // must. The two rules are complements, checked by the same gate, and
+          // the second is what orders de-anonymization before publication.
+          anonymousRelease: anonymousRequested,
         });
         if (reasons.length > 0) {
           blocked = true;

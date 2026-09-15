@@ -262,11 +262,13 @@ describe("anonymity is requested at publication, not refused there", () => {
     // not. ADR 0063's first draft claimed this came for free from ADR 0026,
     // which was false twice over -- the regex is anchored and the gate reads
     // the repository file, never `datasets.authors`.
-    expect(PUBLICATION).toContain("allowPlaceholderAuthors: anonymousRequested,");
-    expect(MINIMUMS).toContain("allowPlaceholderAuthors?: boolean;");
-    // The exemption is narrow: it accepts a placeholder, never an empty field.
-    expect(MINIMUMS).toContain("? authors.length > 0");
-    expect(MINIMUMS).toContain(": realAuthors.length > 0;");
+    expect(PUBLICATION).toContain("anonymousRelease: anonymousRequested,");
+    expect(MINIMUMS).toContain("anonymousRelease?: boolean;");
+    // The rule INVERTS, it does not relax: a release refuses real names and a
+    // publication requires them. Permitting was the first draft and it let a
+    // depositor be named by their own file on a public dataset page.
+    expect(MINIMUMS).toContain("} else if (realAuthors.length > 0) {");
+    expect(MINIMUMS).toContain("} else if (realAuthors.length === 0) {");
   });
 
   test("asking for anonymity on a published dataset is refused, not blocked", () => {

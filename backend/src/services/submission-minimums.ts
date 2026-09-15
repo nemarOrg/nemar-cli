@@ -34,24 +34,33 @@ const PLACEHOLDER_AUTHOR =
 const ETHICS_IN_README =
   /\b(ethic(s|al)?\s+(approval|committee|board|review|statement|clearance|exemption)|IRB|REB|HREC|institutional\s+review\s+board|informed\s+consent|research\s+ethics)\b/i;
 
-/** How a caller narrows the check. */
+/** Which submission this is, which changes what the Authors rule demands. */
 export interface SubmissionMinimumsOptions {
   /**
-   * Accept placeholder Authors (#1408).
+   * This submission is an ANONYMOUS RELEASE (#1408), so the Authors rule
+   * INVERTS rather than relaxes.
    *
-   * Set ONLY for an anonymous release, where placeholder Authors are the
-   * intended state rather than an incomplete submission: the depositor has
-   * blinded their own `dataset_description.json` so the dataset can be read
-   * by a double-blind venue without naming them.
+   * A publication requires named authors. An anonymous release requires the
+   * opposite: `Authors` must NOT name anybody. `dataset_description.json` is
+   * part of the dataset -- git-tracked, and served publicly from the data
+   * plane -- so a real name there defeats the blind no matter what NEMAR
+   * withholds elsewhere. The depositor blinds their own file, exactly as they
+   * would blind a manuscript for a double-blind venue, and NEMAR refuses the
+   * release if they have not.
    *
-   * The exemption is deliberately narrow. Every other minimum still applies --
-   * a blinded deposit must still have a descriptive Name and an ethics
-   * statement -- and the check runs again, unexempted, on the normal
-   * publication request that ends anonymity. That second run is what makes
-   * "you cannot publish for real while still blinded" an enforced ordering
-   * rather than an instruction.
+   * Permitting rather than requiring was the first draft, and it was wrong: it
+   * let a depositor ask for an anonymous release, pass every gate, and be
+   * named by their own file on a public dataset page.
+   *
+   * NEMAR enforces this for `Authors` because the field is structured. It
+   * cannot for README, `participants.tsv`, or identifiers inside signal
+   * headers -- those are REPORTED by phase 4's blind check, never enforced
+   * here, and no copy anywhere may imply otherwise.
+   *
+   * Every other minimum still applies unchanged: a blinded deposit needs a
+   * descriptive Name and an ethics statement like any other.
    */
-  allowPlaceholderAuthors?: boolean;
+  anonymousRelease?: boolean;
 }
 
 /** Reasons are user-facing: each states the failure AND the fix. */
@@ -90,19 +99,26 @@ export function evaluateSubmissionMinimums(
       )
     : [];
   const realAuthors = authors.filter((a) => !PLACEHOLDER_AUTHOR.test(a));
-  // An anonymous release still requires SOME Authors entry -- an empty array
-  // is an incomplete file, not a blinded one -- but not a real name.
-  const authorsAcceptable = options.allowPlaceholderAuthors
-    ? authors.length > 0
-    : realAuthors.length > 0;
-  if (!authorsAcceptable) {
+  // The two rules are exact COMPLEMENTS, not a relaxation: a publication needs
+  // at least one real name, a blinded release needs none. Both need a
+  // non-empty field, because an empty Authors is an incomplete file rather
+  // than a blinded one.
+  if (options.anonymousRelease) {
+    if (authors.length === 0) {
+      reasons.push(
+        "Authors in dataset_description.json must not be empty, even for an anonymous " +
+          'release: set it to a placeholder such as "Anonymous" so the field states that ' +
+          "attribution is withheld rather than missing.",
+      );
+    } else if (realAuthors.length > 0) {
+      reasons.push(
+        `This is an anonymous release, but Authors in dataset_description.json still names ${realAuthors.join(", ")}. That file is part of the dataset and is served publicly, so NEMAR cannot conceal what it says. Replace the entries with a placeholder such as "Anonymous", commit, and request the release again. Restore the real names when you publish after acceptance.`,
+      );
+    }
+  } else if (realAuthors.length === 0) {
     reasons.push(
-      options.allowPlaceholderAuthors
-        ? "Authors in dataset_description.json must not be empty, even for an anonymous " +
-            'release: use a placeholder such as "Anonymous" so the field states that ' +
-            "attribution is withheld rather than missing."
-        : "Authors in dataset_description.json must name the people responsible for the " +
-            "dataset; anonymous submissions and placeholder entries are not accepted.",
+      "Authors in dataset_description.json must name the people responsible for the " +
+        "dataset; anonymous submissions and placeholder entries are not accepted.",
     );
   }
 
