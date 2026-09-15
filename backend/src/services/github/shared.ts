@@ -24,6 +24,39 @@ export function GITHUB_API(): string {
 // Dataset repos (nm000XXX) live in nemarDatasets org; tooling repos live in nemarOrg
 export const ORG_NAME = "nemarDatasets";
 
+/**
+ * GitHub's raw content host.
+ *
+ * A CDN, not the REST API, and the difference is load-bearing: a response from
+ * here carries no `x-ratelimit-*` header and spends none of the installation's
+ * hourly `core` budget, which publishing, imports and every sweep share. That
+ * is why the data plane's git-file broker reads through this host rather than
+ * the blobs API -- one cold dataset download is thousands of files, and
+ * through the REST API that alone would exhaust the org's quota.
+ *
+ * It serves a PRIVATE repo when the request carries an installation token
+ * (verified against `nemarDatasets/nm099999`: anonymous 404, authenticated
+ * 200), which is what lets a dataset stay readable while its repo does not.
+ */
+export const GITHUB_RAW_ORIGIN = "https://raw.githubusercontent.com";
+
+/**
+ * `<base>/<org>/<repo>/<ref>/<encoded path>` -- the one raw-content URL
+ * builder. `ref` is a tag, branch or commit SHA; `repo` is the dataset id,
+ * since nemarDatasets names each dataset's repo after its own id.
+ *
+ * Per-segment `encodeURIComponent` rather than `encodeURI`: a BIDS path
+ * segment can contain characters that are legal in a filename and meaningful
+ * in a URL.
+ */
+export function rawContentUrl(base: string, repo: string, ref: string, path: string): string {
+  const encoded = path
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+  return `${base}/${ORG_NAME}/${repo}/${ref}/${encoded}`;
+}
+
 export function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }

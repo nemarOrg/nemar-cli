@@ -42,7 +42,13 @@ export const dataPlaneManifestEntrySchema = z
     checksum_algorithm: z.string().optional(),
     /** Durable, storable contract URL for the bytes. Always present (#615). */
     bytes_url: z.string().min(1),
-    /** Short-lived presigned URL for annex-backed files; absent for git ones. */
+    /**
+     * Immediately-fetchable URL. For an annex-backed file a presigned S3 GET
+     * that expires in about an hour; for a git-tracked one the same durable
+     * data-plane URL as `bytes_url`, because the Worker serves those bytes
+     * itself rather than handing out a third-party link (#1403). Prefer
+     * `bytes_url` for anything you store.
+     */
     url: z.string().nullish(),
     /**
      * Set by the producer when it could not build `url` for this row, so a

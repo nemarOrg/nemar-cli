@@ -31,11 +31,13 @@
  * the pretty hostname does not. That fixes which ENVIRONMENT is asked, in one
  * place: whichever API the CLI is already pointed at. It does not fix which
  * host serves the bytes -- those come from each entry's `bytes_url`, which
- * today names the data host for annexed files and `raw.githubusercontent.com`
- * for git-tracked ones (nemarOrg/nemar-cli#1403). The presigned `url` on each
- * entry is deliberately ignored in favor of `bytes_url`: `url` expires in
- * about an hour, which a long transfer outlives, while `bytes_url` is durable
- * by contract.
+ * now names the data host for every entry, annexed or git-tracked
+ * (nemarOrg/nemar-cli#1403: the Worker serves git-tracked files itself
+ * instead of redirecting to raw.githubusercontent.com, which is what lets a
+ * dataset with a private repo stay readable). The presigned `url` on each
+ * entry is deliberately ignored in favor of `bytes_url`: for an annexed file
+ * `url` expires in about an hour, which a long transfer outlives, while
+ * `bytes_url` is durable by contract.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
