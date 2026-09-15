@@ -5,10 +5,9 @@
  * using AWS CLI (primary) or direct HTTPS (fallback). No authentication required.
  */
 
-import { existsSync, mkdirSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
 import { spawn } from "bun";
 import { isAwsCliAvailable } from "./aws-cli.js";
+import { type RemoteFile, downloadFiles } from "./file-download.js";
 
 const OPENNEURO_S3_BUCKET = "openneuro.org";
 const OPENNEURO_S3_REGION = "us-east-1";
@@ -234,57 +233,19 @@ export async function downloadWithAwsCli(
 }
 
 /**
- * Download a single file from OpenNeuro S3 via HTTPS.
- * Skips if file already exists with correct size (resume support).
- */
-async function downloadSingleFile(
-  key: string,
-  expectedSize: number,
-  outputDir: string,
-  datasetId: string,
-): Promise<number> {
-  const relativePath = key.substring(datasetId.length + 1);
-  const filePath = join(outputDir, relativePath);
-
-  // Guard against path traversal from malicious S3 keys
-  const resolved = resolve(filePath);
-  if (!resolved.startsWith(`${resolve(outputDir)}/`)) {
-    throw new Error(`Path traversal detected in key: ${key}`);
-  }
-
-  // Skip already-downloaded files with correct size
-  if (existsSync(filePath)) {
-    try {
-      const stat = statSync(filePath);
-      if (stat.size === expectedSize) return expectedSize;
-    } catch {
-      // stat failed, re-download
-    }
-  }
-
-  const dir = dirname(filePath);
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
-
-  const encodedKey = key
-    .split("/")
-    .map((s) => encodeURIComponent(s))
-    .join("/");
-  const url = `${OPENNEURO_S3_BASE_URL}/${encodedKey}`;
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to download ${relativePath}: HTTP ${response.status}`);
-  }
-
-  // Stream to disk (avoids loading large files into memory)
-  await Bun.write(filePath, response);
-  return expectedSize;
-}
-
-/**
- * Download an OpenNeuro dataset via direct HTTPS (fallback, slower).
- * Downloads files in parallel with a concurrency limit.
+ * Download an OpenNeuro dataset over direct HTTPS: the fallback used when the
+ * AWS CLI is not installed.
+ *
+ * Only the URL mapping is OpenNeuro's own. An S3 key is absolute
+ * (`ds000248/sub-01/...`) while the file lands at a path relative to the
+ * output directory, and each segment has to be percent-encoded for the REST
+ * endpoint. Everything after that -- the bounded pool, resume, size
+ * verification, retries -- is `downloadFiles` in `lib/file-download.ts`,
+ * shared with the NEMAR data-plane path.
+ *
+ * A file already present at its declared size is counted as downloaded rather
+ * than reported separately, because this result type has no third state and
+ * the caller's question is "is the dataset on disk".
  */
 export async function downloadWithHttps(
   datasetId: string,
@@ -301,43 +262,28 @@ export async function downloadWithHttps(
   } = {},
 ): Promise<OpenNeuroDownloadResult> {
   const { concurrency = 8, onProgress } = options;
-  const totalFiles = objects.length;
   const totalBytes = objects.reduce((sum, o) => sum + o.size, 0);
 
-  let filesProcessed = 0;
-  let filesSucceeded = 0;
-  let bytesDownloaded = 0;
-  const errors: string[] = [];
+  const files: RemoteFile[] = objects.map((obj) => ({
+    path: obj.key.substring(datasetId.length + 1),
+    url: `${OPENNEURO_S3_BASE_URL}/${obj.key
+      .split("/")
+      .map((segment) => encodeURIComponent(segment))
+      .join("/")}`,
+    size: obj.size,
+  }));
 
-  if (!existsSync(outputPath)) {
-    mkdirSync(outputPath, { recursive: true });
-  }
-
-  // Worker pool for parallel downloads (safe: JS single-threaded event loop)
-  const queue = [...objects];
-  const poolSize = Math.min(concurrency, totalFiles);
-  const workers = Array.from({ length: poolSize }, async () => {
-    while (queue.length > 0) {
-      const obj = queue.shift();
-      if (!obj) break;
-      try {
-        const bytes = await downloadSingleFile(obj.key, obj.size, outputPath, datasetId);
-        filesSucceeded++;
-        bytesDownloaded += bytes;
-      } catch (err) {
-        errors.push((err as Error).message);
-      }
-      filesProcessed++;
-      onProgress?.(filesProcessed, totalFiles, bytesDownloaded, totalBytes);
-    }
+  const result = await downloadFiles(files, outputPath, {
+    concurrency,
+    onProgress: (filesDone, filesTotal, bytesDone) =>
+      onProgress?.(filesDone, filesTotal, bytesDone, totalBytes),
   });
 
-  await Promise.all(workers);
-
+  const errors = result.errors;
   return {
     success: errors.length === 0,
-    filesDownloaded: filesSucceeded,
-    totalBytes: bytesDownloaded,
+    filesDownloaded: result.filesDownloaded + result.filesSkipped,
+    totalBytes: result.bytesDownloaded,
     method: "https",
     error:
       errors.length > 0

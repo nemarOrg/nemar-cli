@@ -38,8 +38,8 @@
  * by contract.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import chalk from "chalk";
 import {
   type DataPlaneManifestEntry,
@@ -49,12 +49,12 @@ import {
 } from "../../shared/contract/data-plane.js";
 import { getApiUrl } from "./api/client.js";
 import { type BidsFilterResult, matchesBidsFilter } from "./bids-filter.js";
+import { type FileDownloadResult, type RemoteFile, downloadFiles } from "./file-download.js";
 
 export type { DataPlaneManifestEntry } from "../../shared/contract/data-plane.js";
 export { isMetadataEntry } from "../../shared/contract/data-plane.js";
 
-/** Upper bound on in-flight requests, and what `-j` is clamped to. */
-export const MAX_CONCURRENCY = 16;
+export { MAX_CONCURRENCY } from "./file-download.js";
 
 /** Where a snapshot records what it is, so a later run can tell. */
 export const SNAPSHOT_STAMP_PATH = ".nemar/http-snapshot.json";
@@ -62,24 +62,8 @@ export const SNAPSHOT_STAMP_PATH = ".nemar/http-snapshot.json";
 /** Where a run leaves the complete list of files it could not fetch. */
 export const FAILURE_LIST_PATH = ".nemar/http-download-failures.txt";
 
-export interface HttpDownloadResult {
-  filesDownloaded: number;
-  filesSkipped: number;
-  bytesDownloaded: number;
-  /** One per file that could not be fetched, each naming the file. */
-  errors: string[];
-  /**
-   * True when at least one failure was transport, authentication or local I/O
-   * rather than evidence that the object is absent upstream.
-   *
-   * That distinction is the one `classifyGetOutcome` draws on the git-annex
-   * path, and it decides the exit code: ADR 0005 makes genuinely absent content
-   * a reportable state that still serves, while a dropped connection or a full
-   * disk is a failed run whatever the tallies say. Collapsing the two exits 0
-   * on a half-finished transfer.
-   */
-  hadInfrastructureFailure: boolean;
-}
+/** What a plain-HTTP run produced. The pool's result, verbatim. */
+export type HttpDownloadResult = FileDownloadResult;
 
 export interface VersionListing {
   latest: string;
@@ -224,150 +208,15 @@ export function selectEntries(
   });
 }
 
-/** A failure that says nothing about whether the object exists upstream. */
-function isInfrastructureFailure(status: number | null): boolean {
-  // A thrown fetch or a failed write (status null) is network, DNS or disk:
-  // never evidence of absence. Among HTTP statuses only a clean 404 is.
-  return status === null ? true : status !== 404;
-}
-
-/** Statuses worth trying again: throttling and transient server faults. */
-function isRetryableStatus(status: number): boolean {
-  return status === 408 || status === 425 || status === 429 || status >= 500;
-}
-
-interface FetchOutcome {
-  /** Bytes written, or null when the file was already present and correct. */
-  written: number | null;
-  error?: { message: string; infrastructure: boolean };
-}
-
 /**
- * Fetch one file, streaming to disk, with bounded retries.
+ * Download selected manifest entries into `outputDir`.
  *
- * Retries matter more here than for a typical client. Most of a dataset's
- * ENTRIES are git-tracked metadata whose `bytes_url` points at
- * `raw.githubusercontent.com` today, which throttles by address, so a single
- * 429 with no retry turns a 20,000-file download into thousands of permanent
- * failures on a perfectly healthy link.
- *
- * A file already on disk at its declared size is left alone and reported as
- * skipped, which is what makes an interrupted download resumable with no flag.
- * The write is then compared against that same declared size: `Bun.write`
- * returns the true byte count and does NOT throw on a short body, so without
- * this comparison a truncated response, or an intercepting proxy's HTML login
- * page, lands as a healthy file and the run reports success in green.
- *
- * Every error carries `entry.path`. A bare "The socket connection was closed
- * unexpectedly" repeated 800 times tells nobody which subtree is incomplete.
- */
-async function fetchOne(
-  entry: DataPlaneManifestEntry,
-  outputDir: string,
-  attempts: number,
-): Promise<FetchOutcome> {
-  const filePath = join(outputDir, entry.path);
-
-  // A manifest is server-supplied data; a `..` in a path must not be able to
-  // write outside the output directory.
-  const root = resolve(outputDir);
-  const resolved = resolve(filePath);
-  if (resolved !== root && !resolved.startsWith(`${root}/`)) {
-    return {
-      written: null,
-      error: {
-        message: `${entry.path}: refusing to write outside the output directory`,
-        infrastructure: true,
-      },
-    };
-  }
-
-  if (existsSync(filePath)) {
-    try {
-      if (statSync(filePath).size === entry.size) return { written: null };
-    } catch (err) {
-      // Fall through and re-fetch, but say why: the write below will fail for
-      // the same reason, and a second unexplained error is a bad bug report.
-      console.warn(
-        chalk.dim(
-          `  could not read existing ${entry.path} (${err instanceof Error ? err.message : String(err)}); re-fetching`,
-        ),
-      );
-    }
-  }
-
-  const dir = dirname(filePath);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-
-  let message = `${entry.path}: download failed`;
-  let infrastructure = true;
-
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    const backoff = (): Promise<void> => Bun.sleep(250 * 2 ** (attempt - 1));
-
-    let response: Response;
-    try {
-      response = await fetch(entry.bytes_url, { redirect: "follow" });
-    } catch (err) {
-      message = `${entry.path}: ${err instanceof Error ? err.message : String(err)}`;
-      infrastructure = isInfrastructureFailure(null);
-      if (attempt < attempts) {
-        await backoff();
-        continue;
-      }
-      break;
-    }
-
-    if (!response.ok) {
-      message = `${entry.path}: HTTP ${response.status}`;
-      infrastructure = isInfrastructureFailure(response.status);
-      if (isRetryableStatus(response.status) && attempt < attempts) {
-        await backoff();
-        continue;
-      }
-      break;
-    }
-
-    let written: number;
-    try {
-      written = await Bun.write(filePath, response);
-    } catch (err) {
-      message = `${entry.path}: ${err instanceof Error ? err.message : String(err)}`;
-      infrastructure = true;
-      break;
-    }
-
-    if (written === entry.size) return { written };
-
-    // Remove it. Leaving a wrong-sized file behind would still be re-fetched
-    // next run (the size check catches it), but it would satisfy any tool or
-    // person who reads "the file exists" as "the file is there".
-    try {
-      rmSync(filePath, { force: true });
-    } catch {
-      // Best effort; the mismatch reported below is what matters.
-    }
-    message = `${entry.path}: expected ${entry.size} bytes, received ${written}`;
-    infrastructure = true;
-    if (attempt < attempts) {
-      await backoff();
-      continue;
-    }
-    break;
-  }
-
-  return { written: null, error: { message, infrastructure } };
-}
-
-/**
- * Download a selected file list into `outputDir` with a bounded worker pool.
- *
- * Failures are collected rather than thrown: a dataset with thousands of files
- * should not lose a two-hour transfer because one object 403s, and the caller
- * decides what a partial result means. The pool is a plain queue over the
- * single-threaded event loop -- `queue.shift()` completes before the first
- * `await`, so no entry is taken twice -- and `concurrency` bounds in-flight
- * requests exactly.
+ * The transfer itself -- the bounded pool, resume, size verification, retries
+ * and the transport-versus-404 split -- is `downloadFiles` in
+ * `lib/file-download.ts`, shared with the OpenNeuro path. What is specific to
+ * the data plane, and so stays here, is which URL a manifest entry is fetched
+ * from: `bytes_url` rather than the presigned `url`, because `url` expires in
+ * about an hour and a long transfer outlives it.
  */
 export async function downloadEntries(
   entries: DataPlaneManifestEntry[],
@@ -378,43 +227,12 @@ export async function downloadEntries(
     onProgress?: (filesDone: number, filesTotal: number, bytesDone: number) => void;
   } = {},
 ): Promise<HttpDownloadResult> {
-  const concurrency = Math.max(1, Math.min(options.concurrency ?? 4, MAX_CONCURRENCY));
-  const attempts = Math.max(1, options.attempts ?? 3);
-  if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
-
-  const queue = [...entries];
-  const result: HttpDownloadResult = {
-    filesDownloaded: 0,
-    filesSkipped: 0,
-    bytesDownloaded: 0,
-    errors: [],
-    hadInfrastructureFailure: false,
-  };
-  let done = 0;
-
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const entry = queue.shift();
-      if (!entry) return;
-      const outcome = await fetchOne(entry, outputDir, attempts);
-      if (outcome.error) {
-        result.errors.push(outcome.error.message);
-        if (outcome.error.infrastructure) result.hadInfrastructureFailure = true;
-      } else if (outcome.written === null) {
-        result.filesSkipped++;
-      } else {
-        result.filesDownloaded++;
-        result.bytesDownloaded += outcome.written;
-      }
-      done++;
-      options.onProgress?.(done, entries.length, result.bytesDownloaded);
-    }
-  };
-
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, entries.length || 1) }, () => worker()),
-  );
-  return result;
+  const files: RemoteFile[] = entries.map((entry) => ({
+    path: entry.path,
+    url: entry.bytes_url,
+    size: entry.size,
+  }));
+  return downloadFiles(files, outputDir, options);
 }
 
 // ===========================================================================
