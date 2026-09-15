@@ -37,6 +37,11 @@ export async function runCommand(
     unsetEnv?: string[];
     /** Kill the process after this many milliseconds */
     timeout?: number;
+    /**
+     * Fed to the child on stdin and then closed. Needed by git-annex's `--batch`
+     * interfaces, which are the difference between one process and one per item.
+     */
+    stdin?: string;
   } = {},
 ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean }> {
   const childEnv: Record<string, string | undefined> = {
@@ -48,6 +53,9 @@ export async function runCommand(
   const proc = spawn({
     cmd,
     cwd: options.cwd,
+    ...(options.stdin === undefined
+      ? {}
+      : { stdin: new TextEncoder().encode(options.stdin) as Uint8Array }),
     stdout: "pipe",
     stderr: "pipe",
     env: childEnv,

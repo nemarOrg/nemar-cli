@@ -52,7 +52,9 @@ describe("uniqueViolationColumns", () => {
 
   test("returns nothing for an error that is not a UNIQUE violation", () => {
     expect(uniqueViolationColumns(new Error("disk I/O error"))).toEqual([]);
-    expect(uniqueViolationColumns(new Error("NOT NULL constraint failed: users.email"))).toEqual([]);
+    expect(uniqueViolationColumns(new Error("NOT NULL constraint failed: users.email"))).toEqual(
+      [],
+    );
   });
 
   test("survives a non-Error value", () => {

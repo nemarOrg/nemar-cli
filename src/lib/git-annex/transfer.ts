@@ -9,6 +9,7 @@
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { chunkAddTargets } from "./init.js";
 import { shouldAnnex } from "./policy.js";
 import { runCommand } from "./run-command.js";
 import { type S3Credentials, awsCredentialEnv } from "./s3-remote.js";
@@ -889,7 +890,13 @@ export async function getRemoteUuid(
 }
 
 /**
- * Mark a git-annex key as present in a remote.
+ * Mark ONE git-annex key as present in a remote, trusting the exit code.
+ *
+ * It has no callers left, and it must not get any for bulk work: running this
+ * per key concurrently is #1392 exactly -- every process exits 0 and their writes
+ * to the shared git-annex branch journal do not all survive. `batchSetKeysPresent`
+ * is the bulk path; it uses one `setpresentkey --batch` process and then reads the
+ * location log back instead of believing the exit codes.
  */
 export async function setKeyPresent(
   datasetPath: string,
@@ -902,28 +909,212 @@ export async function setKeyPresent(
   return result.exitCode === 0;
 }
 
+/** What the location log says after a registration, which is the only thing that counts. */
+export interface KeyRegistrationResult {
+  /** Keys the location log now records at the remote. */
+  success: number;
+  /** Keys it does not, after asking it directly. */
+  failed: number;
+  /** Up to ten of those, for the caller's error message. */
+  missing: string[];
+}
+
+/** Keys the location log records as present at `remoteUuid`, among those the tree names. */
+async function keysRecordedAt(datasetPath: string, remoteUuid: string): Promise<Set<string>> {
+  const { stdout, stderr, exitCode } = await runCommand(
+    ["git", "annex", "find", "--include", "*", "--in", remoteUuid, "--format=${key}\n"],
+    { cwd: datasetPath },
+  );
+  if (exitCode !== 0) {
+    // An empty set is not wrong here -- every key then falls through to the
+    // per-key `whereis`, which reaches the right answer -- but silently, and one
+    // process per key over a 59,939-key dataset looks like a hang. Say so.
+    console.warn(
+      `git annex find --in ${remoteUuid} failed (${stderr.trim() || `exit ${exitCode}`}); falling back to one whereis per key, which is slow on a large dataset.`,
+    );
+    return new Set();
+  }
+  return new Set(stdout.split("\n").filter(Boolean));
+}
+
 /**
- * Batch mark keys as present in a remote.
- * Returns count of successful and failed registrations.
+ * Mark keys as present in a remote, and prove it from the location log.
+ *
+ * **One process, not one per key.** This used to run fifty `git annex setpresentkey`
+ * processes concurrently and count every exit-0 as a registration. They all exit 0;
+ * their writes to the shared git-annex branch journal do not all survive. An import
+ * of 117 keys reported "Registered 117 files" and recorded NONE of them, then
+ * published the dataset -- public, permanent DOI -- with content no clone could
+ * resolve from NEMAR (#1392). `setpresentkey --batch` is the interface built for
+ * this: one process, one journal, keys fed on stdin.
+ *
+ * **Then it asks the log.** An exit code says a command ran, not that a record
+ * exists, and the caller's decision to publish rests on the record. `find --in
+ * <uuid>` answers for every key the tree names; a key the tree does not name -- which
+ * `find` cannot see -- is checked individually with `whereis --key`, so an unusual
+ * caller pays per-key cost only for the keys that need it.
+ *
+ * One malformed key aborts the rest of ITS chunk (git-annex stops the batch with
+ * "Batch input parse failure"), which is why the read-back is not optional: the keys
+ * behind the bad one come back as missing and the caller stops, rather than a
+ * publish proceeding on a partial registration nobody counted.
  */
 export async function batchSetKeysPresent(
   datasetPath: string,
   keys: string[],
   remoteUuid: string,
-): Promise<{ success: number; failed: number }> {
-  let success = 0;
-  let failed = 0;
-  // Process in parallel batches
-  const batchSize = 50;
-  for (let i = 0; i < keys.length; i += batchSize) {
-    const batch = keys.slice(i, i + batchSize);
-    const results = await Promise.all(
-      batch.map((key) => setKeyPresent(datasetPath, key, remoteUuid)),
-    );
-    for (const ok of results) {
-      if (ok) success++;
-      else failed++;
+): Promise<KeyRegistrationResult> {
+  if (keys.length === 0) return { success: 0, failed: 0, missing: [] };
+
+  const CHUNK = 5000;
+  for (let i = 0; i < keys.length; i += CHUNK) {
+    const chunk = keys.slice(i, i + CHUNK);
+    const stdin = `${chunk.map((key) => `${key} ${remoteUuid} 1`).join("\n")}\n`;
+    // A non-zero exit is not the failure signal this function reports -- the log is --
+    // but it is worth surfacing, because it usually means the batch never ran at all.
+    const { exitCode, stderr } = await runCommand(["git", "annex", "setpresentkey", "--batch"], {
+      cwd: datasetPath,
+      stdin,
+    });
+    if (exitCode !== 0) {
+      console.warn(
+        `[git-annex] setpresentkey --batch exited ${exitCode} for ${chunk.length} key(s): ${stderr.trim().slice(0, 300)}`,
+      );
     }
   }
-  return { success, failed };
+
+  const recorded = await keysRecordedAt(datasetPath, remoteUuid);
+  const unseen = keys.filter((key) => !recorded.has(key));
+  const missing: string[] = [];
+  for (const key of unseen) {
+    const { stdout, exitCode } = await runCommand(["git", "annex", "whereis", "--key", key], {
+      cwd: datasetPath,
+    });
+    if (exitCode !== 0 || !stdout.includes(remoteUuid)) missing.push(key);
+  }
+
+  return {
+    success: keys.length - missing.length,
+    failed: missing.length,
+    missing: missing.slice(0, 10),
+  };
+}
+
+/**
+ * Map each given working-tree path to the annex key holding its content.
+ *
+ * `git annex find` is the oracle rather than `readlink` on the symlink: a repo
+ * on an adjusted-unlock branch stores a pointer file, not a symlink, so reading
+ * the link target silently finds nothing there (the same trap `findUnannexedData`
+ * documents).
+ *
+ * **Presence-filtered, deliberately.** Bare `git annex find` reports only files
+ * whose content is in the local annex, so a path is absent from the map when it
+ * is still in plain git AND when it is annexed with the content elsewhere. That
+ * makes this "annexed and held here", which is the stronger question for a caller
+ * about to upload from this clone -- it can fail closed, never open. A caller
+ * that wants every annexed path regardless of presence wants
+ * `listAnnexedPaths`, which passes `--include '*'`.
+ *
+ * A path git itself does not know is an error, not an absence: `git annex find`
+ * exits non-zero on an unmatched pathspec and this throws.
+ *
+ * Paths are passed in argv-safe chunks; a dataset can name thousands at once.
+ */
+export async function getAnnexKeysForPaths(
+  datasetPath: string,
+  paths: string[],
+): Promise<Map<string, string>> {
+  const keys = new Map<string, string>();
+  if (paths.length === 0) return keys;
+
+  for (const chunk of chunkAddTargets(paths)) {
+    const { stdout, exitCode, stderr } = await runCommand(
+      ["git", "annex", "find", "--format=${key}\\t${file}\\n", "--", ...chunk],
+      { cwd: datasetPath },
+    );
+    if (exitCode !== 0) {
+      throw new Error(`git annex find failed: ${stderr.trim() || `exit ${exitCode}`}`);
+    }
+    for (const line of stdout.split("\n")) {
+      if (!line) continue;
+      const tab = line.indexOf("\t");
+      if (tab <= 0) continue;
+      keys.set(line.slice(tab + 1), line.slice(0, tab));
+    }
+  }
+  return keys;
+}
+
+/**
+ * Every annexed working-tree path mapped to its key, whether or not the content
+ * is in this clone.
+ *
+ * The presence-independent counterpart to {@link getAnnexKeysForPaths}. `--include
+ * '*'` is what makes it presence-independent, the same way `listAnnexedPaths` does
+ * it. A re-import needs this shape: its tree is full of annexed paths whose
+ * content lives only in S3, and their keys still have to reach the manifest.
+ */
+export async function listAnnexedKeys(datasetPath: string): Promise<Map<string, string>> {
+  const { stdout, exitCode, stderr } = await runCommand(
+    ["git", "annex", "find", "--include", "*", "--format=${key}\\t${file}\\n"],
+    { cwd: datasetPath },
+  );
+  if (exitCode !== 0) {
+    throw new Error(`git annex find failed: ${stderr.trim() || `exit ${exitCode}`}`);
+  }
+  const keys = new Map<string, string>();
+  for (const line of stdout.split("\n")) {
+    if (!line) continue;
+    const tab = line.indexOf("\t");
+    if (tab <= 0) continue;
+    keys.set(line.slice(tab + 1), line.slice(0, tab));
+  }
+  return keys;
+}
+
+/**
+ * Copy the annexed content of specific paths to a remote.
+ *
+ * The path-scoped sibling of {@link copyToAnnexRemote}, which copies the whole
+ * tree. The import path needs the scoped form (#1159): its clone holds content
+ * for the handful of files it just annexed and nothing else, and `copy --to .`
+ * would walk every upstream pointer in the dataset to find that out (it skips
+ * content-absent files in silence, so the cost is the walk, not the noise).
+ *
+ * `filesCopied` counts the `copy <path> ok` lines git-annex printed, which means
+ * "the remote has it", not "it was transferred now" -- an already-present key
+ * prints the same line. It is a number for the operator, NOT evidence the
+ * content arrived: a path git-annex does not consider annexed is skipped
+ * silently with exit 0 and simply never appears. A caller that needs proof
+ * should ask the location log afterwards (`listAnnexedPaths(path, remote)`).
+ */
+export async function copyPathsToAnnexRemote(
+  datasetPath: string,
+  remoteName: string,
+  paths: string[],
+  jobs = 4,
+  credentials?: S3Credentials,
+): Promise<{ success: boolean; error?: string; filesCopied: number }> {
+  if (paths.length === 0) return { success: true, filesCopied: 0 };
+
+  const env = awsCredentialEnv(credentials);
+  let filesCopied = 0;
+  try {
+    for (const chunk of chunkAddTargets(paths)) {
+      const { stdout, stderr, exitCode } = await runCommand(
+        ["git", "annex", "copy", "--to", remoteName, "-J", jobs.toString(), "--", ...chunk],
+        { cwd: datasetPath, env },
+      );
+      if (exitCode !== 0) {
+        return { success: false, error: extractCopyError(stdout, stderr), filesCopied };
+      }
+      const copied = stdout.match(/^copy .+ ok$/gm);
+      filesCopied += copied ? copied.length : 0;
+    }
+    return { success: true, filesCopied };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { success: false, error: msg || "Unknown error during copy", filesCopied };
+  }
 }

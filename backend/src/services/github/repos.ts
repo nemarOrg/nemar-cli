@@ -203,16 +203,28 @@ export async function deleteRepository(repo: string, pat: string): Promise<boole
 /**
  * Ensure a dataset repo's default branch is "main".
  *
- * Checks the repo's default branch via the GitHub API. If it is not "main",
- * renames it using the branch rename endpoint. This handles repos created
- * with DataLad (adjusted/master(unlocked)) or older git defaults (master).
+ * Two different faults wear the same symptom, and they need opposite repairs:
+ *
+ * - **The branch carrying the dataset is called something else** (`master`, or
+ *   DataLad's `adjusted/master(unlocked)`). Renaming it to `main` is the fix, and
+ *   was the only case this function knew about.
+ * - **`main` exists and the repository simply points somewhere else.** Sixteen
+ *   imported repositories have `default_branch = git-annex`, git-annex's own log
+ *   branch, because `createRepository` uses `auto_init: false` and GitHub adopts
+ *   whichever branch the first push happens to carry (#1386). Here a rename is not
+ *   merely unnecessary, it is destructive in intent: it would try to turn the annex
+ *   log branch into `main` while a real `main` already exists. Repointing the
+ *   default is the fix.
+ *
+ * So: look for `main` first. If it is there, move the pointer; only rename when
+ * `main` is the thing that is missing.
  *
  * Safe to call multiple times (no-op if already "main").
  */
 export async function ensureMainBranch(
   repo: string,
   pat: string,
-): Promise<{ renamed: boolean; previousBranch?: string }> {
+): Promise<{ changed: boolean; action?: "renamed" | "repointed"; previousBranch?: string }> {
   const repoResponse = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}`, {
     headers: {
       Authorization: `Bearer ${pat}`,
@@ -230,7 +242,53 @@ export async function ensureMainBranch(
   const defaultBranch = repoData.default_branch;
 
   if (defaultBranch === "main") {
-    return { renamed: false };
+    return { changed: false };
+  }
+
+  // Does a real `main` already exist? Then the repository is merely pointed at the
+  // wrong branch, and the pointer is what moves.
+  const mainResponse = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}/branches/main`, {
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+    },
+  });
+  if (mainResponse.ok) {
+    console.log(
+      `Repointing default branch from "${defaultBranch}" to the existing "main" for ${repo}`,
+    );
+    const repointResponse = await fetch(`${GITHUB_API()}/repos/${ORG_NAME}/${repo}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ default_branch: "main" }),
+    });
+    if (!repointResponse.ok) {
+      const errorBody = await repointResponse.text();
+      throw new Error(
+        `Failed to set the default branch to the existing "main" for ${repo} (was "${defaultBranch}"): ${repointResponse.status} ${errorBody}`,
+      );
+    }
+    // `repointed`, not `renamed`: nothing was renamed here, and an audit trail that
+    // says otherwise sends the next investigator looking for a branch rename that
+    // never happened -- the same class of misdirection that made #1386 hard to find.
+    return { changed: true, action: "repointed", previousBranch: defaultBranch };
+  }
+  // A bare `fetch`, not `githubFetchWithRetry`, and deliberately: a transient 502
+  // makes this step fail loudly rather than proceed on a guess, which is the whole
+  // point of the check. Consistent with the repo GET above it. The cost is a false
+  // failure of the `main_branch` step on a one-off 5xx, which is recoverable by
+  // re-running; renaming a branch that should not be renamed is not.
+  if (mainResponse.status !== 404) {
+    const body = await mainResponse.text().catch(() => "");
+    throw new Error(
+      `Could not determine whether ${repo} has a main branch (HTTP ${mainResponse.status}): ${body.slice(0, 300)}. Refusing to rename "${defaultBranch}" without knowing.`,
+    );
   }
 
   console.log(`Renaming default branch "${defaultBranch}" to "main" for ${repo}`);
@@ -256,7 +314,7 @@ export async function ensureMainBranch(
     );
   }
 
-  return { renamed: true, previousBranch: defaultBranch };
+  return { changed: true, action: "renamed", previousBranch: defaultBranch };
 }
 
 /**

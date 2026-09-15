@@ -57,9 +57,7 @@ async function seed(opts: SeedOpts = {}): Promise<number> {
       opts.serviceAccess ?? 1,
     ],
   );
-  const row = db
-    .query<{ id: number }, []>("SELECT id FROM users WHERE username = 'harlow'")
-    .get();
+  const row = db.query<{ id: number }, []>("SELECT id FROM users WHERE username = 'harlow'").get();
   if (!row) throw new Error("seed failed");
   db.run("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, 'nemar_te')", [
     row.id,

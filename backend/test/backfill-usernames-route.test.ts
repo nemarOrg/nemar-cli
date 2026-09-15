@@ -339,7 +339,6 @@ describe("backfill-usernames: rows it will not guess at", () => {
     expect(body.remaining).toBe(1);
   });
 
-
   test("a one-part name is reported, not derived from the email", async () => {
     // 3 of the 19 production rows are exactly this. `pemberly@nemar.test` would
     // make a perfectly plausible handle and is not this person's name.
@@ -389,7 +388,6 @@ describe("backfill-usernames: rows it will not guess at", () => {
     // Still a candidate: the next run retries it.
     expect(body.remaining).toBe(1);
   });
-
 });
 
 describe("backfill-usernames: the verify-your-email message", () => {

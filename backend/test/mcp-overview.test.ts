@@ -750,10 +750,10 @@ describe("render_overview (route)", () => {
       expect(metadata.envelope?.derived).toBe(true);
       expect(metadata.envelope?.sss?.method).toBe("maxwell_filter");
       // Null, always. `dtype` is the LEVEL-0 array's dtype from its own zarr.json,
-    // and this tool reads the view pyramid and never zarr.json. It used to send
-    // "int16" on a cache miss and null on a hit, which made one field mean three
-    // different things across the three tools that carry it.
-    expect(metadata.envelope?.dtype).toBeNull();
+      // and this tool reads the view pyramid and never zarr.json. It used to send
+      // "int16" on a cache miss and null on a hit, which made one field mean three
+      // different things across the three tools that carry it.
+      expect(metadata.envelope?.dtype).toBeNull();
     });
   });
 });

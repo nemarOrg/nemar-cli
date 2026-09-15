@@ -601,7 +601,10 @@ describe("GET /auth/profile/username-suggestion", () => {
     });
 
     test("bearer wins when a cookie is also present, matching resolveActingAccount", async () => {
-      const bearerUser = seedUser("cli-wins@example.org", { given_name: "Grace", family_name: "Hopper" });
+      const bearerUser = seedUser("cli-wins@example.org", {
+        given_name: "Grace",
+        family_name: "Hopper",
+      });
       const cookieUser = seedUser("cookie-loses@example.org");
       await issueApiKey(bearerUser, "profile-username-route-key-precedence1");
 

@@ -530,6 +530,61 @@ export interface ImportManifestItem {
   /** Parsed S3 source, or null if the whereis URL wasn't an S3 endpoint. */
   source: S3Ref | null;
   destUri: string;
+  /**
+   * Where this key's content comes from. **Absent means upstream**, which is the
+   * ordinary case and the only thing any manifest written before #1159 can say;
+   * nothing writes `"upstream"` explicitly, so read it through
+   * {@link isLocallyUploaded} rather than comparing to a string.
+   *
+   * Upstream means the copy phase server-side copies the key from the OpenNeuro
+   * bucket. `"local"` means prepare already uploaded the content from its clone
+   * with `git annex copy --to nemar-s3`, because the file was a plain git blob
+   * upstream and no upstream KEY exists to copy from (ADR 0060).
+   *
+   * The distinction is only about who transfers the bytes. Both kinds are data:
+   * finalize verifies both at the destination and registers both with
+   * git-annex, and both count against the empty-manifest publish guard.
+   */
+  origin?: "upstream" | "local";
+}
+
+/**
+ * True when prepare already uploaded this key's content, so the copy phase has
+ * nothing to transfer for it. Absent `origin` means upstream, which is what
+ * keeps a manifest written before #1159 readable.
+ */
+export function isLocallyUploaded(item: Pick<ImportManifestItem, "origin">): boolean {
+  return item.origin === "local";
+}
+
+/**
+ * The copy work one shard owes: this shard's slice of the manifest, minus the
+ * keys prepare already uploaded from the clone.
+ *
+ * Both numbers are about THIS shard. `localSkipped` counts only local keys that
+ * fall in this shard, so summing the shards' logs gives the manifest total once
+ * rather than once per shard.
+ *
+ * Declared here rather than inline in `copyShard` so the selection is testable
+ * without AWS: past the empty-shard early return, the copy phase lists the
+ * destination bucket, so an inline filter could only be exercised against the
+ * real one.
+ */
+export function selectShardCopyItems(
+  items: ImportManifestItem[],
+  shard: { index: number; count: number },
+): { shardItems: CopyItem[]; localSkipped: number } {
+  let localSkipped = 0;
+  const shardItems: CopyItem[] = [];
+  for (const it of items) {
+    if (!keyInShard(it.key, shard.index, shard.count)) continue;
+    if (isLocallyUploaded(it)) {
+      localSkipped++;
+      continue;
+    }
+    shardItems.push({ key: it.key, source: it.source, httpUrl: it.sourceUrl, destUri: it.destUri });
+  }
+  return { shardItems, localSkipped };
 }
 
 export interface ImportManifest {

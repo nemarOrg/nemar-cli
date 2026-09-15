@@ -94,10 +94,10 @@ function seedUser(email: string, opts: SeedOpts = {}): number {
 }
 
 async function seedAdminToken(userId: number): Promise<void> {
-  db.run(
-    "INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, 'nemar_te')",
-    [userId, await hashApiKey(ADMIN_KEY)],
-  );
+  db.run("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, 'nemar_te')", [
+    userId,
+    await hashApiKey(ADMIN_KEY),
+  ]);
 }
 
 function get(path: string): Promise<Response> {
@@ -204,9 +204,7 @@ describe("GET /admin/users/duplicates", () => {
       for (const account of group.accounts) {
         expect(account.canonical).toBe(flagOf(account.id) === 0);
       }
-      expect(group.canonical_user_id).toBe(
-        group.accounts.find((a) => a.canonical)?.id as number,
-      );
+      expect(group.canonical_user_id).toBe(group.accounts.find((a) => a.canonical)?.id as number);
     }
     // Named explicitly too, so a report that marked NOTHING canonical (and so
     // trivially matched a catalog where every row was flagged) still fails.
