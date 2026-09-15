@@ -159,6 +159,15 @@ export async function cloneForFleetWork(
   // of repositories cannot sit waiting behind a window nobody is watching.
   let env: Record<string, string> | undefined;
   if (/^https:\/\/github\.com\//.test(url)) {
+    // Reset the helper list even when no token is found. Otherwise the fallback
+    // is the operator's global helper, which on a Mac opens an account picker
+    // per repository and a sweep sits behind it.
+    env = {
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "credential.helper",
+      GIT_CONFIG_VALUE_0: "",
+      GCM_INTERACTIVE: "never",
+    };
     const token = process.env.GH_TOKEN?.trim() || (await getGitHubToken()).token;
     if (token && !/[\s']/.test(token)) {
       // Via GIT_CONFIG_* rather than argv or the URL, so the token never lands in
@@ -188,7 +197,7 @@ export async function cloneForFleetWork(
   if (clone.exitCode !== 0) {
     return clone.stderr.trim() || `git clone exited ${clone.exitCode}`;
   }
-  if (env) {
+  if (env?.GIT_CONFIG_VALUE_1) {
     // The clone-time helpers covered only that process; the push needs them too,
     // in this order: the empty value resets whatever the global config set up,
     // then ours is the only one left to answer.
