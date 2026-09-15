@@ -283,7 +283,10 @@ export async function downloadWithHttps(
   return {
     success: errors.length === 0,
     filesDownloaded: result.filesDownloaded + result.filesSkipped,
-    totalBytes: result.bytesDownloaded,
+    // What is on disk, not what this run fetched: the file count above says
+    // the same, and a resumed download reporting 0 B beside 1,200 files reads
+    // as a bug.
+    totalBytes: result.bytesDownloaded + result.bytesSkipped,
     method: "https",
     error:
       errors.length > 0

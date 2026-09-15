@@ -65,6 +65,14 @@ export interface FileDownloadResult {
   filesDownloaded: number;
   filesSkipped: number;
   bytesDownloaded: number;
+  /**
+   * Declared size of the files that were already present. Kept separate from
+   * `bytesDownloaded`, which counts only what this run actually transferred:
+   * a caller reporting "what is on disk" wants the sum, and one reporting
+   * "what this run fetched" wants the first. Collapsing them makes a resumed
+   * run claim it re-downloaded the dataset.
+   */
+  bytesSkipped: number;
   /** One per file that could not be fetched, each naming the file. */
   errors: string[];
   /**
@@ -230,6 +238,7 @@ export async function downloadFiles(
     filesDownloaded: 0,
     filesSkipped: 0,
     bytesDownloaded: 0,
+    bytesSkipped: 0,
     errors: [],
     hadInfrastructureFailure: false,
   };
@@ -245,6 +254,7 @@ export async function downloadFiles(
         if (outcome.error.infrastructure) result.hadInfrastructureFailure = true;
       } else if (outcome.written === null) {
         result.filesSkipped++;
+        result.bytesSkipped += file.size;
       } else {
         result.filesDownloaded++;
         result.bytesDownloaded += outcome.written;
