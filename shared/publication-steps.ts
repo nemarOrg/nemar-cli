@@ -32,3 +32,38 @@ export const PUBLICATION_STEPS = [
 ] as const;
 
 export type PublicationStep = (typeof PUBLICATION_STEPS)[number];
+
+/**
+ * Steps an ANONYMOUS release does not run (#1408, epic #1406).
+ *
+ * An anonymous release makes the DATA public while the depositor stays
+ * concealed, so it is the ordinary publication minus every step whose whole
+ * effect is to expose identity:
+ *
+ *   publish_doi      Makes the DOI public and therefore harvested. It is
+ *                    marked "permanent and irreversible" in the list above for
+ *                    good reason -- DataCite records are snapshotted, so this
+ *                    is the one step that could not be undone at acceptance.
+ *                    The identifier stays `reserved`, which is what ADR 0063's
+ *                    A6 requires and what makes the deposit citable by its
+ *                    landing page rather than by a public record.
+ *   version_doi      Mints and publishes a per-version DOI, same exposure.
+ *   upload_to_zenodo Zenodo's `creators` field is mandatory, so there is no
+ *                    unattributed form; `createZenodoConceptDoi` refuses an
+ *                    anonymous deposit outright rather than deposit a name.
+ *
+ * `repo_public` deliberately STAYS: it is the step that flips the catalog row
+ * to public, which an anonymous release needs. It keeps the GitHub repository
+ * private via `expectedRepoVisibility`, so the step's name is now narrower
+ * than what it does.
+ */
+export const ANONYMOUS_RELEASE_SKIPPED_STEPS: readonly PublicationStep[] = [
+  "upload_to_zenodo",
+  "publish_doi",
+  "version_doi",
+] as const;
+
+/** The steps an anonymous release runs, in the same order as a publication. */
+export const ANONYMOUS_RELEASE_STEPS: readonly PublicationStep[] = PUBLICATION_STEPS.filter(
+  (s) => !ANONYMOUS_RELEASE_SKIPPED_STEPS.includes(s),
+);

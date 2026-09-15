@@ -143,7 +143,7 @@ async function loadEnrichedMetadata(
   versionRows: DatasetVersionRow[],
 ): Promise<EnrichedMetadataResult> {
   const row = await env.DB.prepare(
-    `SELECT dataset_id, name, description, github_repo, concept_doi,
+    `SELECT dataset_id, name, description, github_repo, concept_doi, anonymous,
             modalities, subject_count, age_min, age_max,
             file_size, total_files, tasks, enrichment_json,
             data_complete, bytes_present,
@@ -162,6 +162,7 @@ async function loadEnrichedMetadata(
       description: string | null;
       github_repo: string | null;
       concept_doi: string | null;
+      anonymous: number | null;
       modalities: string | null;
       subject_count: number | null;
       age_min: number | null;
@@ -229,6 +230,7 @@ async function loadEnrichedMetadata(
       name: row.name ?? row.dataset_id,
       description: row.description,
       github_repo: row.github_repo,
+      anonymous: row.anonymous,
       concept_doi: row.concept_doi,
       modalities: row.modalities,
       subject_count: row.subject_count,

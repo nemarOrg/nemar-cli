@@ -56,8 +56,6 @@ export const publicationBlockReasonSchema = z.enum([
   "min_requirements_failed",
   /** #1255: the owner has no researcher name, so a DOI cannot cite them. */
   "owner_name_missing",
-  /** #1407: an anonymous deposit must restore its attribution before publishing. */
-  "anonymous_deposit",
 ]);
 export type PublicationBlockReason = z.infer<typeof publicationBlockReasonSchema>;
 

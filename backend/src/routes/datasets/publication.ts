@@ -12,9 +12,9 @@
 import type { PublicationBlockReason } from "../../../../shared/contract/publication.js";
 import { authMiddleware } from "../../middleware/auth";
 import {
-  ANONYMOUS_DEPOSIT_REASON,
   FIRST_PUBLICATION_STAMP_SQL,
   expectedRepoVisibility,
+  hasEverBeenPublished,
   isAnonymous,
 } from "../../services/anonymity";
 import { isValidDatasetId } from "../../services/datasetId";
@@ -80,12 +80,6 @@ const BLOCK_MESSAGES: Record<PublicationBlockReason, string> = {
   // given_name/family_name cannot be attributed at all. The message is the
   // one place a user is told how to supply it, so it lives with the reason.
   [OWNER_NAME_MISSING_REASON]: OWNER_NAME_MISSING_MESSAGE,
-  // #1407: the depositor asked to be concealed, so publishing now would put a
-  // dataset in the world with no attribution at all. The message names both
-  // halves of the fix because they are separate acts: the commit restores the
-  // names, clearing anonymity restores what NEMAR derives from them.
-  [ANONYMOUS_DEPOSIT_REASON]:
-    "This dataset is an anonymous deposit, so it cannot be published while the depositor is still concealed. Restore the real Authors in dataset_description.json, turn anonymity off, then re-request publication.",
 };
 
 /**
@@ -118,6 +112,30 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     const datasetId = c.req.param("id");
     const currentUser = c.get("user");
     const db = c.env.DB;
+
+    // #1408: `--anonymous` asks for a RELEASE rather than a publication. The
+    // data goes public -- listed, browsable, downloadable -- while the
+    // repository stays private, the DOI stays reserved with no curator, and
+    // the depositor is withheld everywhere NEMAR writes them.
+    //
+    // Asked for here rather than at upload because the moment a depositor
+    // wants concealment is the moment they want their data read; those are not
+    // two decisions. It also means an anonymous release passes the same gates
+    // a publication does -- BIDS validation, submission minimums, admin review
+    // -- instead of being a side door around them.
+    //
+    // The body is optional: every existing caller posts no body at all, and a
+    // malformed one must not turn a publication request into a 500.
+    let anonymousRequested = false;
+    try {
+      const raw: unknown = await c.req.json();
+      anonymousRequested =
+        typeof raw === "object" &&
+        raw !== null &&
+        (raw as { anonymous?: unknown }).anonymous === true;
+    } catch {
+      // No body, or not JSON. Both mean a normal publication request.
+    }
 
     // The owner's name columns ride along on the dataset lookup: publication
     // mints a DOI that cites the uploader by real name (#1255), so "does this
@@ -209,24 +227,35 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       blockReason = OWNER_NAME_MISSING_REASON;
     }
 
-    // An anonymous deposit (#1407) cannot be published while still blind, and
-    // this refusal is what enforces the ordering -- restore attribution
-    // first, publish second. It has to be a real check: an earlier draft of
-    // this feature claimed ADR 0026's placeholder-author gate below already
-    // covered it, which was wrong twice over. That gate reads
-    // `dataset_description.json` from the repository and never sees NEMAR's
-    // own blinded `datasets.authors`, and its regex is anchored on the whole
-    // entry, so the label NEMAR writes does not match it.
+    // #1408: anonymity is not refused here, it is REQUESTED here. Phase 2
+    // blocked every publication request from an anonymous dataset, which was
+    // too blunt in both directions: it gave a depositor no way to reach the
+    // anonymous state at all, and it made de-anonymizing impossible, since
+    // the normal request is exactly how a blinded deposit gets published for
+    // real.
     //
-    // The ordering matters beyond tidiness. De-anonymizing is a content commit
-    // to the depositor's own `dataset_description.json`, and it has to land
-    // while the repository is still private, because ADR 0001 makes `main`
-    // pull-request-only once it is public. Publishing first would leave the
-    // depositor unable to restore their own attribution without a PR against
-    // their own dataset.
-    if (isAnonymous(dataset)) {
-      blocked = true;
-      blockReason = ANONYMOUS_DEPOSIT_REASON;
+    // What enforces the ordering instead is ADR 0026's placeholder-author
+    // check below, conditioned on this flag. An anonymous release EXEMPTS it
+    // -- a blinded deposit legitimately has placeholder Authors, that is what
+    // being blinded means -- and a normal publication ENFORCES it, so a
+    // depositor cannot publish for real while still concealed. One gate, two
+    // jobs, and the refusal names the fix.
+    //
+    // The ordering matters beyond tidiness: restoring attribution is a content
+    // commit to the depositor's own `dataset_description.json`, and it has to
+    // land while the repository is still private, because ADR 0001 makes
+    // `main` pull-request-only once it is public.
+    if (anonymousRequested && hasEverBeenPublished(dataset)) {
+      // Not a block: a block invites a re-request, and this can never succeed.
+      // The database would refuse the write anyway (migration 0085's
+      // triggers); this turns that into a sentence.
+      return c.json(
+        {
+          error: "already_published",
+          message: `${datasetId} has already been published, so its depositor cannot be concealed now. Retracting an attribution that is already public is not something NEMAR can deliver.`,
+        },
+        409,
+      );
     }
 
     // Resolve auth inside the try so a missing or unconfigured token blocks
@@ -293,7 +322,12 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
           readme = await getFileContent(repoName, candidate, pat);
           if (readme !== null) break;
         }
-        const reasons = evaluateSubmissionMinimums(descriptionJson, readme);
+        const reasons = evaluateSubmissionMinimums(descriptionJson, readme, {
+          // The whole point of a blinded deposit is that its Authors do not
+          // name anybody yet. Enforced again, unconditionally, on the normal
+          // publication request that ends anonymity.
+          allowPlaceholderAuthors: anonymousRequested,
+        });
         if (reasons.length > 0) {
           blocked = true;
           blockReason = "min_requirements_failed";
@@ -317,9 +351,14 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         // overwritten either way.
         await db
           .prepare(
-            "UPDATE publication_requests SET status = 'blocked', block_reason = ?, min_requirements_reasons = ?, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE publication_requests SET status = 'blocked', block_reason = ?, min_requirements_reasons = ?, anonymous = ?, updated_at = datetime('now') WHERE id = ?",
           )
-          .bind(blockReason, minReasons ? JSON.stringify(minReasons) : null, requestId)
+          .bind(
+            blockReason,
+            minReasons ? JSON.stringify(minReasons) : null,
+            anonymousRequested ? 1 : 0,
+            requestId,
+          )
           .run();
       } else {
         // Unblock: transition to requested. Also clear any prior pre-screen
@@ -327,16 +366,20 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
         // re-request doesn't leave a stale 'failed'/nonce on a 'requested' row).
         await db
           .prepare(
-            "UPDATE publication_requests SET status = 'requested', block_reason = NULL, min_requirements_reasons = NULL, prescreen_status = NULL, prescreen_nonce = NULL, prescreen_issue_url = NULL, prescreen_reasons = NULL, updated_at = datetime('now') WHERE id = ?",
+            // `anonymous` is re-stated rather than left alone: a depositor who
+            // re-requests WITHOUT the flag is asking for a normal publication,
+            // and a stale 1 here would silently give them an anonymous release
+            // instead -- the one mistake this flow must not make quietly.
+            "UPDATE publication_requests SET status = 'requested', block_reason = NULL, min_requirements_reasons = NULL, prescreen_status = NULL, prescreen_nonce = NULL, prescreen_issue_url = NULL, prescreen_reasons = NULL, anonymous = ?, updated_at = datetime('now') WHERE id = ?",
           )
-          .bind(requestId)
+          .bind(anonymousRequested ? 1 : 0, requestId)
           .run();
       }
     } else {
       // Create new publication request
       const inserted = await db
         .prepare(
-          "INSERT INTO publication_requests (dataset_id, requested_by, status, block_reason, min_requirements_reasons) VALUES (?, ?, ?, ?, ?) RETURNING id",
+          "INSERT INTO publication_requests (dataset_id, requested_by, status, block_reason, min_requirements_reasons, anonymous) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
         )
         .bind(
           datasetId,
@@ -344,6 +387,7 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
           blocked ? "blocked" : "requested",
           blockReason,
           minReasons ? JSON.stringify(minReasons) : null,
+          anonymousRequested ? 1 : 0,
         )
         .first<{ id: number }>();
       prId = inserted?.id ?? null;

@@ -726,6 +726,8 @@ export interface DatasetRowForMetadata {
   description: string | null;
   github_repo: string | null;
   concept_doi: string | null;
+  /** #1408: 1 while the deposit conceals its depositor. Gates `github_url`. */
+  anonymous: number | null;
   modalities: string | null;
   subject_count: number | null;
   age_min: number | null;
@@ -1115,11 +1117,18 @@ export function buildDatasetMetadata(input: {
     },
     external_links: {
       dataset_doi: row.concept_doi,
-      github_url: row.github_repo
-        ? row.github_repo.startsWith("http")
-          ? row.github_repo
-          : `https://github.com/${githubOrg}/${row.dataset_id}`
-        : null,
+      // #1408: an anonymous deposit's repository is PRIVATE, so naming it here
+      // would hand every reader a URL that 404s while still disclosing that a
+      // repository exists under a predictable name. Withheld at the source
+      // rather than hidden by each consumer -- the website fabricates this URL
+      // in two places when it is absent, so a null here is what those sites
+      // need in order to have something to react to.
+      github_url:
+        row.anonymous === 1 || !row.github_repo
+          ? null
+          : row.github_repo.startsWith("http")
+            ? row.github_repo
+            : `https://github.com/${githubOrg}/${row.dataset_id}`,
     },
     extensions: {
       nemar: {

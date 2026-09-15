@@ -108,6 +108,15 @@ export interface Dataset {
    */
   withdrawn_at?: string | null;
   withdrawn_reason?: string | null;
+  /**
+   * #1408: 1 while the deposit conceals its depositor.
+   *
+   * A separate axis from `visibility`: an anonymous deposit is
+   * `visibility: "public"` -- listed, browsable, downloadable -- and still
+   * unattributed, so a reader that wants to say who deposited something has to
+   * check this too.
+   */
+  anonymous?: number | null;
   // Catalog-enriched fields (from nemar_catalog JOIN or catalog-only)
   modalities?: string;
   participants?: number;

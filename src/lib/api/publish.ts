@@ -103,13 +103,26 @@ export interface PublishApproveResponse {
 
 /**
  * Request publication of a dataset (user)
+ *
+ * `anonymous` asks for a RELEASE rather than a publication (#1408): the data
+ * goes public while the repository stays private, the DOI stays reserved with
+ * no curator, and the depositor is withheld everywhere NEMAR writes them. The
+ * body is only sent when the flag is set, so an ordinary request stays exactly
+ * the bodyless POST it has always been.
  */
 export async function requestPublication(
   datasetId: string,
+  options: { anonymous?: boolean } = {},
 ): Promise<{ message: string; dataset_id: string; status: string }> {
   return request<{ message: string; dataset_id: string; status: string }>(
     `/datasets/${datasetId}/publish/request`,
-    { method: "POST" },
+    options.anonymous
+      ? {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ anonymous: true }),
+        }
+      : { method: "POST" },
     true,
   );
 }

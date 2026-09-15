@@ -34,10 +34,31 @@ const PLACEHOLDER_AUTHOR =
 const ETHICS_IN_README =
   /\b(ethic(s|al)?\s+(approval|committee|board|review|statement|clearance|exemption)|IRB|REB|HREC|institutional\s+review\s+board|informed\s+consent|research\s+ethics)\b/i;
 
+/** How a caller narrows the check. */
+export interface SubmissionMinimumsOptions {
+  /**
+   * Accept placeholder Authors (#1408).
+   *
+   * Set ONLY for an anonymous release, where placeholder Authors are the
+   * intended state rather than an incomplete submission: the depositor has
+   * blinded their own `dataset_description.json` so the dataset can be read
+   * by a double-blind venue without naming them.
+   *
+   * The exemption is deliberately narrow. Every other minimum still applies --
+   * a blinded deposit must still have a descriptive Name and an ethics
+   * statement -- and the check runs again, unexempted, on the normal
+   * publication request that ends anonymity. That second run is what makes
+   * "you cannot publish for real while still blinded" an enforced ordering
+   * rather than an instruction.
+   */
+  allowPlaceholderAuthors?: boolean;
+}
+
 /** Reasons are user-facing: each states the failure AND the fix. */
 export function evaluateSubmissionMinimums(
   descriptionJson: string | null,
   readme: string | null,
+  options: SubmissionMinimumsOptions = {},
 ): string[] {
   if (descriptionJson === null) {
     return ["dataset_description.json was not found at the dataset root."];
@@ -69,10 +90,19 @@ export function evaluateSubmissionMinimums(
       )
     : [];
   const realAuthors = authors.filter((a) => !PLACEHOLDER_AUTHOR.test(a));
-  if (realAuthors.length === 0) {
+  // An anonymous release still requires SOME Authors entry -- an empty array
+  // is an incomplete file, not a blinded one -- but not a real name.
+  const authorsAcceptable = options.allowPlaceholderAuthors
+    ? authors.length > 0
+    : realAuthors.length > 0;
+  if (!authorsAcceptable) {
     reasons.push(
-      "Authors in dataset_description.json must name the people responsible for the " +
-        "dataset; anonymous submissions and placeholder entries are not accepted.",
+      options.allowPlaceholderAuthors
+        ? "Authors in dataset_description.json must not be empty, even for an anonymous " +
+            'release: use a placeholder such as "Anonymous" so the field states that ' +
+            "attribution is withheld rather than missing."
+        : "Authors in dataset_description.json must name the people responsible for the " +
+            "dataset; anonymous submissions and placeholder entries are not accepted.",
     );
   }
 

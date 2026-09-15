@@ -50,6 +50,13 @@ const catalogItemObjectSchema = z
     description: z.string().nullable().optional(),
     status: z.string(),
     visibility: z.string(),
+    // #1408: an anonymous deposit is `visibility: "public"` -- listed,
+    // browsable, downloadable -- while its depositor is withheld and its
+    // repository stays private. So visibility does NOT imply the dataset is
+    // attributed, and a consumer that wants to say who deposited something has
+    // to read this too. 1 while concealed, 0 otherwise; optional because the
+    // `?mine=true` branch projects a narrower row.
+    anonymous: z.number().int().nullable().optional(),
     concept_doi: z.string().nullable().optional(),
     doi: z.string().nullable().optional(),
     created_at: z.string(),

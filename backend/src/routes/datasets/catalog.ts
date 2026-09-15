@@ -789,7 +789,7 @@ async function executeAndReturn(
       try {
         const fallback = await db
           .prepare(
-            `SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
+            `SELECT d.dataset_id, d.name, d.description, d.status, d.visibility, d.anonymous,
                     d.github_repo, d.concept_doi, d.created_at, d.updated_at,
                     ${OWNER_USERNAME_SQL},
                     -- API contract: every list entry exposes latest_version
@@ -942,7 +942,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
         WHERE d.status = ? AND d.owner_user_id = ?
       `;
       const minePrefix = `
-        SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
+        SELECT d.dataset_id, d.name, d.description, d.status, d.visibility, d.anonymous,
                d.github_repo, d.concept_doi, d.created_at, d.updated_at,
                ${OWNER_USERNAME_SQL},
                d.source, d.source_id,
@@ -1055,7 +1055,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     const buildPublicPrefix = (): { sql: string; params: (string | number)[] } => {
       const { from, params: prefixParams } = buildPublicBase();
       const sql = `
-      SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
+      SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility, d.anonymous,
              d.github_repo, d.concept_doi, d.concept_doi AS doi, d.created_at, d.updated_at,
              ${OWNER_USERNAME_SQL},
              d.source, d.source_id,

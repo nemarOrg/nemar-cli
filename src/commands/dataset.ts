@@ -1792,13 +1792,30 @@ Examples:
         `  Withdrawn:   ${chalk.red(new Date(datasetInfo.withdrawn_at).toLocaleDateString())}${reason}`,
       );
     }
+    // #1408: a separate axis from `status`, printed for the same reason
+    // `Withdrawn:` is -- a reader who sees `public` and no authors would
+    // otherwise conclude the record is incomplete rather than deliberately
+    // blinded. The second line says what ends it, because that is the thing a
+    // depositor actually needs to know next.
+    if (datasetInfo.anonymous === 1) {
+      console.log(`  Anonymous:   ${chalk.yellow("identity withheld until publication")}`);
+      console.log(
+        chalk.dim(
+          "               Restore the real Authors in dataset_description.json," +
+            " then 'nemar dataset publish request' without --anonymous.",
+        ),
+      );
+    }
     console.log(`  Created:     ${new Date(datasetInfo.created_at).toLocaleDateString()}`);
 
     if (datasetInfo.description) {
       console.log(`  Description: ${datasetInfo.description}`);
     }
 
-    if (datasetInfo.github_repo) {
+    // An anonymous deposit's repository is private, so printing its URL offers
+    // a link that 404s and discloses that a repo exists under a predictable
+    // name. The Anonymous line above already explains the absence.
+    if (datasetInfo.github_repo && datasetInfo.anonymous !== 1) {
       console.log(`  GitHub:      https://github.com/${datasetInfo.github_repo}`);
     }
 
@@ -3876,17 +3893,37 @@ Description:
 Status Flow:
   requested → approving → published (or denied)
 
+Anonymous deposit (--anonymous):
+  For submission to a double-blind venue. The data is released exactly as any
+  public dataset is -- listed, browsable and downloadable -- while your identity
+  is withheld: the repository stays private, the DOI stays reserved, and nothing
+  NEMAR publishes names you. Reviewers follow the ordinary dataset URL.
+
+  Blind your own dataset_description.json first (Authors: ["Anonymous"]); NEMAR
+  cannot scrub the files you wrote. When the paper is accepted, restore the real
+  Authors and request publication again WITHOUT the flag: that is what ends
+  anonymity and publishes the record for real.
+
+  Only available before a dataset has ever been published. Retracting an
+  attribution that is already public is not something NEMAR can deliver.
+
 Examples:
   $ nemar dataset publish request nm000104
+  $ nemar dataset publish request nm000104 --anonymous   # blind, for review
   $ nemar dataset publish status nm000104     # Check request status`,
   )
-  .action(async (datasetId) => {
+  .option("--anonymous", "Release the data with your identity withheld until publication")
+  .action(async (datasetId, options: { anonymous?: boolean }) => {
     requireAuth();
 
-    const spinner = ora(`Requesting publication for ${datasetId}...`).start();
+    const spinner = ora(
+      options.anonymous
+        ? `Requesting anonymous release for ${datasetId}...`
+        : `Requesting publication for ${datasetId}...`,
+    ).start();
 
     try {
-      const result = await requestPublication(datasetId);
+      const result = await requestPublication(datasetId, { anonymous: options.anonymous });
       spinner.succeed(result.message);
       console.log(
         chalk.dim(

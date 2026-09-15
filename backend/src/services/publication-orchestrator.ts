@@ -10,18 +10,29 @@
  */
 
 import { z } from "zod";
-import { PUBLICATION_STEPS, type PublicationStep } from "../../../shared/publication-steps.js";
+import {
+  ANONYMOUS_RELEASE_STEPS,
+  PUBLICATION_STEPS,
+  type PublicationStep,
+} from "../../../shared/publication-steps.js";
 
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import { auditLogStatement } from "../db/audit-log";
 import { getS3Config } from "../routes/admin/shared";
 import type { AuthUser, Bindings } from "../types/bindings";
-import { END_ANONYMITY_AT_PUBLICATION_SQL } from "./anonymity";
+import {
+  END_ANONYMITY_AT_PUBLICATION_SQL,
+  FIRST_PUBLICATION_STAMP_SQL,
+  expectedRepoVisibility,
+  isAnonymous,
+  markAnonymous,
+} from "./anonymity";
 import {
   isCentralManifestWorkflowEnabled,
   publishEzidVersionDoiViaCentral,
 } from "./central-manifest";
 import { type DataCiteEnrichment, nemarMetadataToEnrichment, parseNemarMetadata } from "./datacite";
+import { runEnrichmentForDataset } from "./dataset-reindex";
 import {
   type DoiProvider,
   applyConceptDoiToDescription,
@@ -246,6 +257,13 @@ export interface ApproveDataset {
   is_sandbox: number | null;
   is_exemplar: number | null;
   source: string | null;
+  /**
+   * #1408: 1 when the dataset is currently a blinded deposit. Selected by the
+   * `SELECT d.*` that builds this row. Declared rather than left implicit,
+   * because the de-anonymization branch reads it and an omission would
+   * silently publish a blinded dataset with its attribution never restored.
+   */
+  anonymous: number | null;
   owner_username: string;
   owner_email: string;
   owner_orcid: string | null;
@@ -286,6 +304,8 @@ export interface ApproveStepContext {
   pat: string;
   dataset: ApproveDataset;
   stepsToRun: readonly PublicationStep[];
+  /** #1408: this run releases the data while concealing the depositor. */
+  anonymousRelease: boolean;
   recorder: ProgressRecorder;
   helpers: ApproveHelpers;
   // Cross-step slots read by the finalize block. Captured at the end of the
@@ -590,11 +610,23 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
 
   // Make the repository public (runs after the S3 public flip; the two are
   // independent, S3 goes first for propagation lead time).
+  //
+  // #1408: for an ANONYMOUS release this step still runs, because it is what
+  // flips the catalog row to public -- which is the whole point of the release
+  // -- but the repository stays private. The step's name is now narrower than
+  // what it does. `expectedRepoVisibility` is the one rule that decides, shared
+  // with the drift report and the visibility service, so the three cannot
+  // disagree about what an anonymous deposit's repository should be.
   if (stepsToRun.includes("repo_public")) {
     try {
       await startStep("repo_public");
 
-      const result = await setRepoVisibility(repoName, false, pat);
+      const repoShouldBePrivate =
+        expectedRepoVisibility({
+          visibility: "public",
+          anonymous: c.anonymousRelease ? 1 : 0,
+        }) === "private";
+      const result = await setRepoVisibility(repoName, repoShouldBePrivate, pat);
       if (!result.ok) {
         await updateProgress("repo_public", `Failed to make repo public: ${result.error}`);
         return c.json(
@@ -606,6 +638,49 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
           },
           500,
         );
+      }
+
+      // Turn the flag on at the same point the data becomes readable, and
+      // scrub what an earlier enrichment already wrote. `markAnonymous` does
+      // the D1 half atomically -- `datasets.authors`, the cached enrichment
+      // document -- and reports the half it cannot reach.
+      if (c.anonymousRelease) {
+        const marked = await markAnonymous(c.env, datasetId);
+        if (!marked.changed) {
+          await updateProgress("repo_public", "Failed to mark dataset anonymous");
+          return c.json(
+            {
+              error: `Failed to mark ${datasetId} anonymous; the release was stopped rather than published under the depositor's name`,
+              step: "repo_public",
+              steps_completed: completed,
+              step_results: stepResults,
+            },
+            500,
+          );
+        }
+        if (marked.repoMetadataStale) {
+          // `.nemar/metadata.json` is backend-written, git-tracked and served
+          // publicly from the manifest since #1403, so it still names the
+          // depositor until a fresh enrichment rewrites it. This has to happen
+          // BEFORE the data plane serves the release, which is why it is here
+          // and not in a later step.
+          const reenriched = await runEnrichmentForDataset(c.env, datasetId);
+          if (!reenriched.ok) {
+            await updateProgress(
+              "repo_public",
+              `Failed to re-enrich after blinding: ${reenriched.error}`,
+            );
+            return c.json(
+              {
+                error: `${datasetId} was marked anonymous but its committed .nemar/metadata.json still names the depositor, and re-enrichment failed: ${reenriched.error}`,
+                step: "repo_public",
+                steps_completed: completed,
+                step_results: stepResults,
+              },
+              500,
+            );
+          }
+        }
       }
 
       // Update dataset visibility in database to match GitHub repo visibility,
@@ -635,7 +710,7 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
           .prepare(
             `UPDATE datasets
              SET visibility = 'public',
-                 ${END_ANONYMITY_AT_PUBLICATION_SQL},
+                 ${c.anonymousRelease ? FIRST_PUBLICATION_STAMP_SQL : END_ANONYMITY_AT_PUBLICATION_SQL},
                  updated_at = datetime('now')
              WHERE dataset_id = ?`,
           )
@@ -655,6 +730,39 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
           .prepare("SELECT visibility FROM datasets WHERE dataset_id = ?")
           .bind(datasetId)
           .first<{ visibility: string }>();
+
+        // De-anonymization (#1408). The UPDATE above already cleared the flag
+        // via END_ANONYMITY_AT_PUBLICATION_SQL, but clearing it only changes
+        // what the WRITERS will do next -- it does not rewrite what they wrote
+        // while the deposit was blind. `datasets.authors` still holds the
+        // blinded label, the cached enrichment document is stripped, and the
+        // repository's committed `.nemar/metadata.json` carries no attribution.
+        // One enrichment pass restores all three, because phase 2 put the
+        // author blind inside `writeDatasetCatalogFields` (it decides from the
+        // row) and made the DataCite sync conditional on the same flag. Both
+        // reverse themselves now that the row is no longer anonymous.
+        //
+        // It runs HERE, before doi_create, because the mint prefers
+        // `.nemar/metadata.json` over the BIDS description when that file
+        // parses -- so minting first would cite an enrichment with no authors.
+        if (!c.anonymousRelease && isAnonymous(c.dataset)) {
+          const restored = await runEnrichmentForDataset(c.env, datasetId);
+          if (!restored.ok) {
+            await updateProgress(
+              "repo_public",
+              `Failed to re-enrich after de-anonymizing: ${restored.error}`,
+            );
+            return c.json(
+              {
+                error: `${datasetId} was de-anonymized but its attribution could not be restored: ${restored.error}. Publishing was stopped rather than minting a DOI with no authors.`,
+                step: "repo_public",
+                steps_completed: completed,
+                step_results: stepResults,
+              },
+              500,
+            );
+          }
+        }
 
         if (!verify || verify.visibility !== "public") {
           console.error(
@@ -884,6 +992,13 @@ async function stepDoiCreate(c: ApproveStepContext): Promise<RespondOutcome | un
               // future caller of this step cannot skip the rule (#1255).
               uploader: resolveOwnerIdentity(dataset),
               uploaderRequired: requiresUploaderName(dataset),
+              // #1408: an anonymous release mints a reserved identifier with no
+              // DataCurator. Read from THIS RUN's intent rather than from the
+              // dataset row: on a normal publication of a formerly blinded
+              // deposit the row was still anonymous moments ago, and reading it
+              // would mint the real, permanent DOI with no attribution at all --
+              // inverting ADR 0041 on the one identifier that gets harvested.
+              anonymousDeposit: c.anonymousRelease,
               sandbox,
             },
             {
@@ -1801,10 +1916,10 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // Find the publication request
   const request = await db
     .prepare(
-      "SELECT id, status, steps_completed FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving', 'blocked') ORDER BY requested_at DESC LIMIT 1",
+      "SELECT id, status, steps_completed, anonymous FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving', 'blocked') ORDER BY requested_at DESC LIMIT 1",
     )
     .bind(datasetId)
-    .first<{ id: number; status: string; steps_completed: string }>();
+    .first<{ id: number; status: string; steps_completed: string; anonymous: number | null }>();
 
   if (!request) {
     return c.json({ error: "No active publication request found" }, 404);
@@ -1813,7 +1928,14 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   const stepsCompleted: PublicationStep[] = resume
     ? JSON.parse(request.steps_completed || "[]")
     : [];
-  const allSteps: readonly PublicationStep[] = PUBLICATION_STEPS;
+  // #1408: an anonymous release is the ordinary publication minus the steps
+  // whose whole effect is to expose identity. The set is declared next to
+  // PUBLICATION_STEPS itself so the two cannot drift, and the reason each step
+  // is skipped is recorded there.
+  const anonymousRelease = request.anonymous === 1;
+  const allSteps: readonly PublicationStep[] = anonymousRelease
+    ? ANONYMOUS_RELEASE_STEPS
+    : PUBLICATION_STEPS;
   const stepsToRun = allSteps.filter((s) => !stepsCompleted.includes(s));
 
   if (stepsToRun.length === 0) {
@@ -1859,6 +1981,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
       owner_orcid: string | null;
       owner_given_name: string | null;
       owner_family_name: string | null;
+      anonymous: number | null;
     }>();
 
   if (!dataset) {
@@ -1942,6 +2065,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   c.pat = pat;
   c.dataset = dataset;
   c.stepsToRun = stepsToRun;
+  c.anonymousRelease = anonymousRelease;
   c.recorder = recorder;
   c.helpers = createApproveHelpers(c);
 

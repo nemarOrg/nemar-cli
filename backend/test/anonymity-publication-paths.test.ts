@@ -24,6 +24,10 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 import {
+  ANONYMOUS_RELEASE_SKIPPED_STEPS,
+  ANONYMOUS_RELEASE_STEPS,
+} from "../../shared/publication-steps";
+import {
   END_ANONYMITY_AT_PUBLICATION_SQL,
   FIRST_PUBLICATION_STAMP_SQL,
   expectedRepoVisibility,
@@ -222,32 +226,116 @@ describe("the repository does not follow the catalog row", () => {
   });
 });
 
-describe("a still-blind deposit cannot be published", () => {
+describe("anonymity is requested at publication, not refused there", () => {
   const PUBLICATION = readFileSync(join(SRC, "routes", "datasets", "publication.ts"), "utf8");
+  const MINIMUMS = readFileSync(join(SRC, "services", "submission-minimums.ts"), "utf8");
 
-  test("the request route blocks on anonymity", () => {
-    expect(PUBLICATION).toContain("if (isAnonymous(dataset)) {");
-    expect(PUBLICATION).toContain("blockReason = ANONYMOUS_DEPOSIT_REASON;");
+  test("the request route reads an --anonymous intent off the body", () => {
+    // Phase 2 blocked every publication request from an anonymous dataset.
+    // That was too blunt in BOTH directions: a depositor could never reach the
+    // anonymous state, and a blinded deposit could never be published for real,
+    // because the normal request is exactly how de-anonymization happens.
+    expect(PUBLICATION).toContain("let anonymousRequested = false;");
+    expect(PUBLICATION).not.toContain("blockReason = ANONYMOUS_DEPOSIT_REASON;");
   });
 
-  test("the block is decided before the expensive checks, so it always wins", () => {
-    // The CI and submission-minimums checks also set `blocked`, and they run
-    // GitHub calls to do it. Anonymity is a column read and is definitive, so
-    // it goes first -- and a later check must not overwrite its reason with a
-    // vaguer one.
-    const anonymityAt = PUBLICATION.indexOf("blockReason = ANONYMOUS_DEPOSIT_REASON;");
-    const ciAt = PUBLICATION.indexOf('blockReason = "bids_validation_pending";');
-    const minimumsAt = PUBLICATION.indexOf('blockReason = "min_requirements_failed";');
-    expect(anonymityAt).toBeGreaterThan(-1);
-    expect(anonymityAt).toBeLessThan(ciAt);
-    expect(anonymityAt).toBeLessThan(minimumsAt);
+  test("the intent is persisted, because approval runs a different publication", () => {
+    // At request time the dataset is not anonymous yet -- asking is what makes
+    // it so, later. So the approval step cannot re-derive this from the row.
+    expect(PUBLICATION).toMatch(/INSERT INTO publication_requests[^`"]*anonymous\)/);
+    expect(PUBLICATION).toContain("anonymousRequested ? 1 : 0");
   });
 
-  test("the reason carries a message telling the depositor both halves of the fix", () => {
-    // Restoring the names and clearing the flag are separate acts, and a
-    // message naming only one leaves the other to be guessed.
-    expect(PUBLICATION).toContain("[ANONYMOUS_DEPOSIT_REASON]:");
-    expect(PUBLICATION).toMatch(/Restore the real Authors in dataset_description\.json/);
+  test("a re-request without the flag cannot inherit a stale anonymous intent", () => {
+    // The unblock path rewrites the row. If it left `anonymous` alone, a
+    // depositor re-requesting a NORMAL publication would silently get an
+    // anonymous release instead -- the one mistake this flow must not make
+    // quietly.
+    const unblock = PUBLICATION.indexOf("SET status = 'requested', block_reason = NULL");
+    expect(unblock).toBeGreaterThan(-1);
+    expect(PUBLICATION.slice(unblock, unblock + 400)).toContain("anonymous = ?");
+  });
+
+  test("the placeholder-author gate is exempted for a release and enforced for a publication", () => {
+    // This is the interlock, and it is one gate doing two jobs. A blinded
+    // deposit legitimately has placeholder Authors; a real publication must
+    // not. ADR 0063's first draft claimed this came for free from ADR 0026,
+    // which was false twice over -- the regex is anchored and the gate reads
+    // the repository file, never `datasets.authors`.
+    expect(PUBLICATION).toContain("allowPlaceholderAuthors: anonymousRequested,");
+    expect(MINIMUMS).toContain("allowPlaceholderAuthors?: boolean;");
+    // The exemption is narrow: it accepts a placeholder, never an empty field.
+    expect(MINIMUMS).toContain("? authors.length > 0");
+    expect(MINIMUMS).toContain(": realAuthors.length > 0;");
+  });
+
+  test("asking for anonymity on a published dataset is refused, not blocked", () => {
+    // A block invites a re-request; this can never succeed, because the
+    // triggers refuse it and no amount of retrying changes that.
+    expect(PUBLICATION).toContain("if (anonymousRequested && hasEverBeenPublished(dataset)) {");
+    expect(PUBLICATION).toContain('error: "already_published",');
+  });
+});
+
+describe("an anonymous release is a publication minus the steps that expose identity", () => {
+  const ORCHESTRATOR = readFileSync(join(SRC, "services", "publication-orchestrator.ts"), "utf8");
+
+  test("the skipped set is exactly the identity-exposing steps", () => {
+    // Driven through the real exported constant rather than a copy: a step
+    // added to the skip list without a reason, or removed from it, changes
+    // what an anonymous release does in the world.
+    expect([...ANONYMOUS_RELEASE_SKIPPED_STEPS].sort()).toEqual([
+      "publish_doi",
+      "upload_to_zenodo",
+      "version_doi",
+    ]);
+  });
+
+  test("repo_public still runs, because it is what releases the data", () => {
+    // The step's name is now narrower than what it does: it flips the catalog
+    // row public while `expectedRepoVisibility` keeps the repository private.
+    expect(ANONYMOUS_RELEASE_STEPS).toContain("repo_public");
+    expect(ANONYMOUS_RELEASE_STEPS).toContain("s3_public_read");
+    // The gates are not skipped either: an anonymous release is validated and
+    // reviewed exactly like a publication.
+    expect(ANONYMOUS_RELEASE_STEPS).toContain("ci_check");
+  });
+
+  test("the run picks its step set from the request, not from the dataset row", () => {
+    expect(ORCHESTRATOR).toContain("const anonymousRelease = request.anonymous === 1;");
+    expect(ORCHESTRATOR).toContain("? ANONYMOUS_RELEASE_STEPS");
+  });
+
+  test("the release blinds before the data plane can serve the repository's file", () => {
+    // `.nemar/metadata.json` is backend-written and publicly served from the
+    // manifest, and enrichment has already run by this point, so the committed
+    // copy still names the depositor until a fresh pass rewrites it.
+    const markAt = ORCHESTRATOR.indexOf("const marked = await markAnonymous(c.env, datasetId);");
+    const reenrichAt = ORCHESTRATOR.indexOf("if (marked.repoMetadataStale) {");
+    expect(markAt).toBeGreaterThan(-1);
+    expect(reenrichAt).toBeGreaterThan(markAt);
+    // A failure to blind stops the release rather than publishing under the
+    // depositor's name.
+    expect(ORCHESTRATOR).toContain("the release was stopped rather than published under");
+  });
+
+  test("publishing a formerly blinded deposit restores attribution before the mint", () => {
+    // doi_create prefers `.nemar/metadata.json` over the BIDS description, so
+    // minting before the restoring pass would cite an enrichment with no
+    // authors on a permanent, harvested identifier.
+    const restoreAt = ORCHESTRATOR.indexOf("if (!c.anonymousRelease && isAnonymous(c.dataset)) {");
+    const mintAt = ORCHESTRATOR.indexOf("anonymousDeposit: c.anonymousRelease,");
+    expect(restoreAt).toBeGreaterThan(-1);
+    expect(mintAt).toBeGreaterThan(restoreAt);
+  });
+
+  test("the mint reads THIS RUN's intent, never the dataset row", () => {
+    // On a normal publication of a formerly blinded deposit the row was
+    // anonymous moments earlier. Reading it would mint the real, permanent DOI
+    // with no curator -- inverting ADR 0041 on the one identifier that is
+    // actually harvested.
+    expect(ORCHESTRATOR).toContain("anonymousDeposit: c.anonymousRelease,");
+    expect(ORCHESTRATOR).not.toContain("anonymousDeposit: isAnonymous(dataset)");
   });
 });
 
