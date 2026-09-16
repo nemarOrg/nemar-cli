@@ -61,11 +61,27 @@ export const EXEMPLAR_SOURCE_ID_RE = /^(nm|on)\d{6}$/;
  * real dataset, and drop `DatasetDOI` (the exemplar mints its own sandbox DOI
  * and must never carry the source's real, resolvable DOI). Pure — the caller
  * is responsible for reading/writing the file.
+ *
+ * `anonymous` additionally blinds `Authors` (#1423). NEMAR deliberately does
+ * not scrub a depositor's own files -- it tells them to blind
+ * `dataset_description.json` themselves, and the publication request REFUSES
+ * an anonymous release whose Authors still names anybody
+ * (`evaluateSubmissionMinimums`, `anonymousRelease: true`). A fixture has no
+ * depositor to follow that instruction, so without this the fleet's anonymous
+ * exemplar copies the SOURCE dataset's real author names and is then blocked
+ * from the release that gives it its shape, forever. The placeholder is the
+ * one `isPlaceholderAuthor` accepts, so the clone and the gate cannot disagree
+ * about what counts as blinded.
  */
-export function scrubDatasetDescription(desc: Record<string, unknown>): Record<string, unknown> {
+export function scrubDatasetDescription(
+  desc: Record<string, unknown>,
+  options: { anonymous?: boolean } = {},
+): Record<string, unknown> {
   const originalName = typeof desc.Name === "string" ? desc.Name : "";
   const { DatasetDOI: _omit, ...rest } = desc;
-  return { ...rest, Name: `[TEST COPY] ${originalName}` };
+  const scrubbed: Record<string, unknown> = { ...rest, Name: `[TEST COPY] ${originalName}` };
+  if (options.anonymous) scrubbed.Authors = ["Anonymous"];
+  return scrubbed;
 }
 
 /**
@@ -425,7 +441,7 @@ export async function prepareExemplar(
   // DatasetDOI removed) and commit. `.nemar/metadata.json` is left as-is.
   const scrubSpinner = ora("Scrubbing dataset_description.json...").start();
   const originalDesc = readDatasetDescription(datasetPath);
-  const scrubbedDesc = scrubDatasetDescription(originalDesc);
+  const scrubbedDesc = scrubDatasetDescription(originalDesc, { anonymous: options.anonymous });
   writeFileSync(
     join(datasetPath, "dataset_description.json"),
     `${JSON.stringify(scrubbedDesc, null, 2)}\n`,

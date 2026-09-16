@@ -132,6 +132,32 @@ because the triggers refuse the intermediate state, and at that step rather than
 the run because every later step can fail and return, which would otherwise leave a dataset
 public in the world and anonymous in D1 forever.
 
+**Amendment 2026-09-16 (#1423): `anonymous = 1` is not evidence that a release happened, and
+the exemplar gate now asks which direction the caller means.** Building the fleet's standing
+anonymous deposit found two guards that read a row's anonymity as a history rather than as a
+state. Both are true of a depositor's deposit, where `anonymous` and `public` arrive together
+at the release, and false of a row CREATED anonymous -- which `POST /admin/datasets/exemplar`
+does, and which the decision above deliberately permits ("set at INSERT rather than flipped
+afterwards, because this is the only moment it is unconditionally legal").
+
+- `isExemplarPublishAllowed` refused every publication request for an anonymous exemplar. Its
+  reasoning -- the approve path stamps `first_published_at` and the triggers then refuse
+  `anonymous = 1` forever -- is about an attribution-ending publish. An anonymous release
+  cannot do it: the orchestrator picks `FIRST_PUBLICATION_STAMP_SQL`, which leaves an
+  anonymous row unstamped on purpose. It now takes the request's own intent, so the
+  destructive direction stays refused and the safe one goes through.
+- The request route answered `already_released_anonymously` to any anonymous row. It now also
+  requires `visibility = 'public'`, because the release is what makes a row public.
+
+The cost of the first was not a fixture inconvenience: the anonymous release is the only path
+that runs `repo_public` and `create_tag`, so the fixture could only ever be a private row that
+the data plane refuses to serve, and every public-facing anonymity surface it exists to
+exercise was unreachable from it while AGENTS.md described it as "public row, private repo".
+
+`scrubDatasetDescription` also blinds the copied `Authors` for that one entry. NEMAR does not
+scrub a depositor's files -- it refuses an anonymous release whose Authors names anybody and
+tells them to fix it -- and a fixture has no depositor to act on that.
+
 ## Consequences
 
 Easier: a depositor can submit to a blind venue without choosing between depositing and
