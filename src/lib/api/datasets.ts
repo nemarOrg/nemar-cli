@@ -117,6 +117,16 @@ export interface Dataset {
    * check this too.
    */
   anonymous?: number | null;
+  /**
+   * The last anonymity verdict (#1409), served only to the owner and to an
+   * admin; every other reader gets nulls, because "this deposit has findings"
+   * is itself a fact about the person being concealed. `anonymity_findings`
+   * and `anonymity_unchecked` are JSON arrays as stored.
+   */
+  anonymity_status?: "verified" | "findings" | "unverifiable" | null;
+  anonymity_checked_at?: string | null;
+  anonymity_findings?: string | null;
+  anonymity_unchecked?: string | null;
   // Catalog-enriched fields (from nemar_catalog JOIN or catalog-only)
   modalities?: string;
   participants?: number;

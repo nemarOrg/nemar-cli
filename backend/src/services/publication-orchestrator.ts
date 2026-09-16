@@ -72,6 +72,7 @@ import {
   uploadManifest,
   waitForPublicPropagation,
 } from "./s3";
+import { ZARR_REQUEUE_AT_PATH } from "./sweep-stamps";
 import {
   OWNER_NAME_MISSING_MESSAGE,
   OWNER_NAME_MISSING_REASON,
@@ -865,6 +866,11 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
             `[publish] ${datasetId} de-anonymization enrichment warnings: ${restored.warnings.join("; ")}`,
           );
         }
+
+        // The Zarr rebuild this de-anonymization needs is requested at the END
+        // of the run (`stampZarrRequeue`), not here: a rebuild that raced this
+        // point would bake the restored attribution WITHOUT the DOI, which is
+        // not yet minted, and spend the one request doing it.
       }
 
       // Enforce the published-repo spec (epic #713): lock main (ruleset,
@@ -2005,6 +2011,69 @@ export interface ApproveRunArgs {
  * finalize block, moved verbatim from the route handler. Returns the exact
  * JSON body + status the route should emit.
  */
+/**
+ * Request one dataset's Zarr stores be rebuilt after de-anonymization.
+ *
+ * Returns a warning string when the request could not be recorded, rather than
+ * swallowing it. There is no safety net behind this write: the anonymity sweep
+ * selects `anonymous = 1`, and by this point the row is `anonymous = 0`, so a
+ * dataset that misses its stamp has left the only pool that would have
+ * re-checked it. Silence here is a public dataset serving a blinded citation
+ * forever, with one line in a Worker log to show for it.
+ *
+ * Not fatal: the dataset IS correctly published, and what is stale is a derived
+ * serving copy (ADR 0005). So it is reported to the approving admin and written
+ * to `audit_log`, not raised.
+ */
+export async function stampZarrRequeue(
+  db: D1Database,
+  datasetId: string,
+  anonymousRelease: boolean,
+): Promise<string | undefined> {
+  // An anonymous RELEASE is the blinded state arriving, not leaving: its stores
+  // should carry the blinded label, so it asks for nothing.
+  if (anonymousRelease) return undefined;
+  const priorAnonymous = await db
+    .prepare(
+      "SELECT 1 AS found FROM publication_requests WHERE dataset_id = ? AND anonymous = 1 LIMIT 1",
+    )
+    .bind(datasetId)
+    .first<{ found: number }>()
+    .catch(() => null);
+  if (priorAnonymous?.found !== 1) return undefined;
+
+  try {
+    await db
+      .prepare(
+        `UPDATE datasets
+           SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '${ZARR_REQUEUE_AT_PATH}', datetime('now'))
+         WHERE dataset_id = ?`,
+      )
+      .bind(datasetId)
+      .run();
+    return undefined;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[publish] ${datasetId}: could not request a Zarr rebuild after de-anonymizing:`,
+      message,
+    );
+    try {
+      await auditLogStatement(db, {
+        userId: null,
+        action: "zarr_requeue_request_failed",
+        resourceType: "dataset",
+        resourceId: datasetId,
+        details: JSON.stringify({ error: message }),
+      }).run();
+    } catch {
+      // The warning below is then the only record, which is why it is returned
+      // to the caller rather than logged.
+    }
+    return `${datasetId} was de-anonymized but its Zarr rebuild could not be requested: ${message}. Its viewer keeps the blinded citation until this is re-run; nothing else re-checks it.`;
+  }
+}
+
 export async function runPublicationApproval(args: ApproveRunArgs): Promise<RespondOutcome> {
   const { db, env, waitUntil, datasetId, adminUser, body } = args;
   const { resume } = body;
@@ -2227,6 +2296,21 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
       .run();
   }
 
+  // Ask for the Zarr stores to be rebuilt, now that attribution AND the DOI
+  // both exist (#1409).
+  //
+  // The converter bakes the catalog row's attribution into `index.json`'s
+  // `citation` and into every store's `nemar` root attribute, and an anonymous
+  // deposit is `visibility = 'public'`, so it has been converting all along --
+  // with the blinded label and no DOI. Re-conversion is otherwise triggered
+  // only by a `latest_version` change or a GLOBAL `ZARR_ENGINE_VERSION` bump,
+  // and de-anonymizing causes neither: the tag comes from the depositor's own
+  // `Version` field, `createTag` treats an existing ref as success, and the
+  // `dataset_versions` row is written by callbacks the anonymous release never
+  // reaches. Without this stamp a published, attributed dataset keeps serving
+  // "Anonymous (withheld until publication)" from zarr.nemar.org indefinitely.
+  const zarrRequeueWarning = await stampZarrRequeue(db, datasetId, anonymousRelease);
+
   // Mark as published
   await db
     .prepare(
@@ -2265,7 +2349,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   const auditWarning = auditLogFailed
     ? `Audit log write failed: ${auditLogError}. Publication succeeded but was not logged for compliance.`
     : undefined;
-  const responseWarnings = [auditWarning, c.notifyUserWarning].filter(Boolean);
+  const responseWarnings = [auditWarning, c.notifyUserWarning, zarrRequeueWarning].filter(Boolean);
 
   return c.json({
     message: "Dataset published successfully",

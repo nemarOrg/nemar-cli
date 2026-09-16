@@ -41,7 +41,15 @@ import {
 } from "../../services/dataset-filters";
 import { DEFAULT_MIN_SCORE, executeDatasetSearch } from "../../services/dataset-search";
 import { isValidDatasetId } from "../../services/datasetId";
-import { ZARR_VERIFIED_AT_PATH, ZARR_VERIFY_STATUS_PATH } from "../../services/sweep-stamps";
+import {
+  ANONYMITY_CHECKED_AT_PATH,
+  ANONYMITY_FINDINGS_PATH,
+  ANONYMITY_STATUS_PATH,
+  ANONYMITY_UNCHECKED_PATH,
+  ZARR_REQUEUE_AT_PATH,
+  ZARR_VERIFIED_AT_PATH,
+  ZARR_VERIFY_STATUS_PATH,
+} from "../../services/sweep-stamps";
 import { type Bindings, hasRole } from "../../types/bindings";
 import type { DatasetsRouter } from "./shared";
 
@@ -95,6 +103,13 @@ const FACET_PROJECTION_COLUMNS = `d.subject_count,
                -- Null until the sweep reaches this dataset.
                json_extract(d.sweep_stamps, '${ZARR_VERIFY_STATUS_PATH}') AS zarr_verify_status,
                json_extract(d.sweep_stamps, '${ZARR_VERIFIED_AT_PATH}') AS zarr_verified_at,
+               -- Issue #1409 (epic #1406): when the archive last asked for
+               -- this dataset's stores to be rebuilt. Read by
+               -- scripts/zarr/zarr_queue.py off this row, because the
+               -- conversion queue lives in SQLite on Hallu and there was no
+               -- other way for the backend to say "re-convert this one".
+               -- Same derived-field pattern, same reason: no new column.
+               json_extract(d.sweep_stamps, '${ZARR_REQUEUE_AT_PATH}') AS zarr_requeue_at,
                d.total_recording_duration,
                d.recording_duration_min,
                d.recording_duration_max,
@@ -1416,6 +1431,14 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
         -- surface a json_extract expression.
         json_extract(d.sweep_stamps, '${ZARR_VERIFY_STATUS_PATH}') AS zarr_verify_status,
         json_extract(d.sweep_stamps, '${ZARR_VERIFIED_AT_PATH}') AS zarr_verified_at,
+        -- #1409: the anonymity verdict, so the depositor can read back what the
+        -- sweep found without waiting for mail they may have deleted. Withheld
+        -- from everyone but the owner and an admin below, because "this deposit
+        -- has findings" is itself information about the concealed person.
+        json_extract(d.sweep_stamps, '${ANONYMITY_STATUS_PATH}') AS anonymity_status,
+        json_extract(d.sweep_stamps, '${ANONYMITY_CHECKED_AT_PATH}') AS anonymity_checked_at,
+        json_extract(d.sweep_stamps, '${ANONYMITY_FINDINGS_PATH}') AS anonymity_findings,
+        json_extract(d.sweep_stamps, '${ANONYMITY_UNCHECKED_PATH}') AS anonymity_unchecked,
         ${OWNER_USERNAME_SQL},
         ${OWNER_GITHUB_SQL}
       FROM datasets d
@@ -1541,6 +1564,17 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     const viewerMayKnowIdentifiers = Boolean(
       user && (hasRole(user.role, "admin") || user.id === dataset.owner_user_id),
     );
-    return c.json({ dataset: withheldWhileAnonymous(detail, viewerMayKnowIdentifiers) });
+    // The verdict rides the same gate as the identifiers: a reader who may not
+    // know WHO deposited this must not be told that the concealment is leaking.
+    const shaped: Record<string, unknown> = {
+      ...withheldWhileAnonymous(detail, viewerMayKnowIdentifiers),
+    };
+    if (!viewerMayKnowIdentifiers) {
+      shaped.anonymity_status = null;
+      shaped.anonymity_checked_at = null;
+      shaped.anonymity_findings = null;
+      shaped.anonymity_unchecked = null;
+    }
+    return c.json({ dataset: shaped });
   });
 }

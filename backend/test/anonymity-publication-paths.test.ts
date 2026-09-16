@@ -486,6 +486,27 @@ describe("an anonymous release is a publication minus the steps that expose iden
     expect(ORCHESTRATOR).not.toContain("if (!c.anonymousRelease && isAnonymous(c.dataset)) {");
   });
 
+  test("de-anonymizing asks for the Zarr stores to be rebuilt, AFTER the DOI exists", () => {
+    // The stores carry the catalog row's attribution, an anonymous deposit is
+    // public so it has been converting all along with the blinded label, and
+    // publishing for real changes neither the dataset version nor the global
+    // engine stamp -- the only two triggers the conversion queue had. Without
+    // this stamp the published, attributed dataset keeps serving
+    // "Anonymous (withheld until publication)" from zarr.nemar.org forever.
+    //
+    // The stamp is written at the END of the run, not inside the restoration
+    // block: `doi_create` runs after `repo_public`, so a rebuild that raced an
+    // earlier stamp would bake the restored attribution with NO DOI and spend
+    // the one request doing it. This is a source-order check only; the write
+    // itself is exercised behaviorally in `zarr-requeue-flip.test.ts`.
+    const restoreAt = ORCHESTRATOR.indexOf("if (restoreAttribution) {");
+    const doiAt = ORCHESTRATOR.indexOf('stepsToRun.includes("doi_create")');
+    const requeueAt = ORCHESTRATOR.indexOf("const zarrRequeueWarning = await stampZarrRequeue(");
+    expect(restoreAt).toBeGreaterThan(-1);
+    expect(doiAt).toBeGreaterThan(restoreAt);
+    expect(requeueAt).toBeGreaterThan(doiAt);
+  });
+
   test("a blinded author list is an interlock on the mint, not only a step order", () => {
     // The ordering above is enforced by where the steps sit. This is the same
     // rule as a state check, so a retry, a resume or a future reordering
@@ -664,5 +685,51 @@ describe("enrichment does not un-blind what it just blinded", () => {
     expect(blindAt).toBeGreaterThan(-1);
     expect(serializeAt).toBeGreaterThan(blindAt);
     expect(cacheAt).toBeGreaterThan(serializeAt);
+  });
+});
+
+describe("every DOI mint asks whether the deposit is anonymous", () => {
+  // A mint is the shortest path from a concealed deposit to a PERMANENT
+  // DataCite record naming its depositor, and `resolveOwnerIdentity` reads the
+  // real name, ORCID and username straight off the joined `users` row. The
+  // exemplar re-mint route (`nemar admin exemplar remint-dois`) did not pass
+  // `anonymousDeposit`, and it is the documented maintenance command for the
+  // fleet that contains the standing anonymous exemplar -- so running it would
+  // have de-anonymized exactly the dataset the fleet keeps concealed.
+  const MINT_CALL = /createConceptDoi|dispatchCreateConceptDoi/;
+
+  test("no call site mints without deciding the anonymity question", () => {
+    const offenders: string[] = [];
+    for (const file of sourceFiles(SRC)) {
+      const rel = file
+        .slice(SRC.length + 1)
+        .split(sep)
+        .join("/");
+      const text = readFileSync(file, "utf8");
+      // Only call sites, not the declaration or the import.
+      for (const match of text.matchAll(
+        /await\s+(dispatchCreateConceptDoi|createConceptDoi)\s*\(/g,
+      )) {
+        const after = text.slice(match.index, (match.index ?? 0) + 2500);
+        if (after.includes("anonymousDeposit")) continue;
+        offenders.push(`${rel}:${text.slice(0, match.index).split("\n").length}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test("the scan would notice: it finds the mint call sites it scans", () => {
+    // Without this a regex matching nothing would pass forever. Two today:
+    // the concept-DOI route and the exemplar re-mint.
+    let sites = 0;
+    for (const file of sourceFiles(SRC)) {
+      sites += [
+        ...readFileSync(file, "utf8").matchAll(
+          /await\s+(dispatchCreateConceptDoi|createConceptDoi)\s*\(/g,
+        ),
+      ].length;
+    }
+    expect(sites).toBeGreaterThanOrEqual(2);
+    expect(MINT_CALL.test("dispatchCreateConceptDoi")).toBe(true);
   });
 });

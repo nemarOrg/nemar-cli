@@ -1621,6 +1621,8 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     user_approval: z.boolean().optional(),
     publication_request: z.boolean().optional(),
     announcements: z.boolean().optional(),
+    /** #1409: findings from the anonymity sweep on an anonymous deposit. */
+    dataset_anonymity: z.boolean().optional(),
   });
 
   /**
@@ -1669,6 +1671,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       user_approval: body.user_approval ?? current.user_approval,
       publication_request: body.publication_request ?? current.publication_request,
       announcements: body.announcements ?? current.announcements,
+      dataset_anonymity: body.dataset_anonymity ?? current.dataset_anonymity,
     };
 
     await db

@@ -142,6 +142,24 @@ const catalogItemObjectSchema = z
     // two fields itself.
     zarr_verify_status: z.enum(["verified", "failed", "unverifiable"]).nullable().optional(),
     zarr_verified_at: z.string().nullable().optional(),
+    // #1409: when the ARCHIVE last asked for this dataset's stores to be
+    // rebuilt, which is a different question from when they were last
+    // verified. The only consumer is `scripts/zarr/zarr_queue.py`: the
+    // conversion queue's state lives in SQLite on the Hallu node, so this row
+    // is the one channel the backend has for "re-convert this one dataset".
+    // It exists because de-anonymizing a deposit changes neither the dataset
+    // version nor the global engine stamp, which were the only two triggers.
+    zarr_requeue_at: z.string().nullable().optional(),
+    // #1409: the last anonymity verdict, on the DETAIL route only and only for
+    // the owner or an admin. A depositor who deleted the notification mail
+    // reads it back with `nemar dataset status`; everyone else is served null,
+    // because "this deposit has findings" is itself a fact about the person
+    // being concealed.
+    anonymity_status: z.enum(["verified", "findings", "unverifiable"]).nullable().optional(),
+    anonymity_checked_at: z.string().nullable().optional(),
+    /** JSON array as stored; the CLI parses it for display. */
+    anonymity_findings: z.string().nullable().optional(),
+    anonymity_unchecked: z.string().nullable().optional(),
     total_recording_duration: z.number().nullable().optional(),
     recording_duration_min: z.number().nullable().optional(),
     recording_duration_max: z.number().nullable().optional(),

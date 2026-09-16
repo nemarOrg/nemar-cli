@@ -103,6 +103,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0062](0062-a-missing-git-annex-degrades-to-a-snapshot.md) - A missing git-annex degrades to an HTTP snapshot, and a snapshot is not a repository
 - [ADR 0063](0063-anonymity-is-available-before-first-publication-and-never-after.md) - Anonymity is available before first publication and never after, and it is withheld by the writer
 - [ADR 0064](0064-the-data-plane-brokers-git-tracked-files-under-manifest-capability.md) - The data plane brokers git-tracked files, and the manifest is the capability list
+- [ADR 0065](0065-anonymity-is-verified-on-a-schedule-and-reported-never-repaired.md) - Anonymity is verified on a schedule, and reported, never repaired
 
 ## Backfill note (2026-07-31)
 
