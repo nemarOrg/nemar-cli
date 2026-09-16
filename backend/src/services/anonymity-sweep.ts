@@ -121,6 +121,31 @@ export type AnonymityVerdict = "verified" | "findings" | "unverifiable";
 /** Whose problem a finding is. */
 export type AnonymitySeverity = "invariant" | "deposit";
 
+/**
+ * Scope limits this sweep DECLARES rather than measures.
+ *
+ * Both are permanent statements about what was never in scope, not reports of
+ * something that went wrong on this run, so they appear in `unchecked` on a
+ * clean dataset and do not withhold `verified`. Everything else in `unchecked`
+ * is a gap that opened on this run, and any one of them makes the verdict
+ * `unverifiable`.
+ *
+ * Keeping them in `unchecked` rather than dropping them is the point: a reader
+ * of a `verified` verdict is told, every time, the two things it does not
+ * cover.
+ */
+export const ANONYMITY_DECLARED_SCOPE_LIMITS: readonly string[] = [
+  // Identity inside the recordings themselves: EDF/BDF recording-identification
+  // fields, EEGLAB `EEG.comments`, FIFF subject blocks. Annexed binaries, and a
+  // Worker will not pull gigabytes to read them.
+  "signal_headers",
+  // Sub-directory sidecars. Thousands per dataset, acquisition parameters
+  // rather than prose. Deliberately out of scope, which is a different
+  // statement from "the 40-file budget ran out" -- that one is
+  // `deposit_files_beyond_budget`, and it IS a gap.
+  "deposit_subdirectory_files",
+];
+
 export interface AnonymityFinding {
   /** Stable id, so a reader can branch on it without parsing prose. */
   check: string;
@@ -159,6 +184,14 @@ export interface AnonymitySweepResult {
   /** Candidates still owing a pass, or null when the count query itself failed. */
   remaining: number | null;
   budget_exhausted: boolean;
+  /**
+   * Notifications that did not reach someone.
+   *
+   * For a finding, the mail IS the depositor's copy, so a delivery failure is
+   * a result of the run and not a detail of it: the CLI exits non-zero on a
+   * non-empty list, and the admin route reports it.
+   */
+  mail_failures: { dataset_id: string; recipient: string; error: string }[];
 }
 
 /**
@@ -195,7 +228,8 @@ export const ANONYMITY_SWEEP_CANDIDATE_SQL = `SELECT d.dataset_id, d.github_repo
           d.enrichment_json, d.first_published_at, d.concept_doi, d.is_sandbox,
           u.username AS owner_username, u.github_username AS owner_github,
           u.given_name AS owner_given_name, u.family_name AS owner_family_name,
-          u.email AS owner_email, u.orcid AS owner_orcid
+          u.email AS owner_email, u.orcid AS owner_orcid,
+          json_extract(d.sweep_stamps, '${ANONYMITY_FINDINGS_PATH}') AS previous_findings
      FROM datasets d
      JOIN users u ON d.owner_user_id = u.id
     WHERE d.status = 'active'
@@ -209,9 +243,17 @@ export const ANONYMITY_SWEEP_CANDIDATE_SQL = `SELECT d.dataset_id, d.github_repo
              d.dataset_id
     LIMIT ?`;
 
-/** The same predicate as a count, so a caller can page a batch loop. */
+/**
+ * The same predicate as a count, so a caller can page a batch loop.
+ *
+ * The `JOIN users` is load-bearing and not decoration: the candidate query has
+ * it, so a dataset whose owner row is missing is never RETURNED. Counting it
+ * anyway would leave `remaining` permanently above zero and a batch loop
+ * driven by it would not terminate.
+ */
 export const ANONYMITY_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n
      FROM datasets d
+     JOIN users u ON d.owner_user_id = u.id
     WHERE d.status = 'active'
       AND d.anonymous = 1
       AND (
@@ -238,7 +280,7 @@ export const ANONYMITY_SWEEP_STAMP_SQL = `UPDATE datasets
      '${ANONYMITY_FINDINGS_PATH}', json(?),
      '${ANONYMITY_UNCHECKED_PATH}', json(?)
    )
-   WHERE dataset_id = ?`;
+   WHERE dataset_id = ? AND anonymous = 1`;
 
 /** Stamped on every outcome, including the ones that reach no verdict. */
 export const ANONYMITY_SWEEP_ATTEMPT_SQL = `UPDATE datasets
@@ -281,6 +323,8 @@ interface AnonymityCandidate {
   owner_family_name: string | null;
   owner_email: string | null;
   owner_orcid: string | null;
+  /** Last run's findings, so an unchanged set is not re-mailed every day. */
+  previous_findings: string | null;
 }
 
 /**
@@ -293,10 +337,13 @@ interface AnonymityCandidate {
  * becomes a scanning one if someone strips `^`/`$`, and that is a change to
  * what the CONTRACT accepts.
  */
-const ORCID_IN_TEXT = /\b\d{4}-\d{4}-\d{4}-\d{3}[\dX]\b/;
+const ORCID_IN_TEXT = /\b\d{4}-\d{4}-\d{4}-\d{3}[\dXx]\b/;
 
 /** An email address in free text. Deliberately loose; a false positive here costs a sentence. */
 const EMAIL_IN_TEXT = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
+
+/** A git-annex pointer file's body: the key, not the content it stands for. */
+const ANNEX_POINTER_BODY = /^\s*\/annex\/objects\//;
 
 /**
  * Shortest owner token this will search for.
@@ -331,6 +378,27 @@ const PRIORITY_DEPOSIT_FILES = [
   ".nemar/metadata.json",
 ];
 
+/** The one file in the list above that NEMAR writes rather than the depositor. */
+const NEMAR_METADATA_PATH = ".nemar/metadata.json";
+
+/**
+ * Which withheld fields a parsed metadata document still carries.
+ *
+ * One rule, two documents: the D1 enrichment cache and the repository's
+ * committed `.nemar/metadata.json` are written by the same pipeline and blinded
+ * by the same list, so they are judged by the same function rather than by two
+ * copies that can drift.
+ */
+function presentBlindedKeys(document: Record<string, unknown>): string[] {
+  return BLINDED_METADATA_KEYS.filter((key) => {
+    const value = document[key];
+    if (value === undefined || value === null) return false;
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === "object") return Object.keys(value as object).length > 0;
+    return true;
+  });
+}
+
 /** Extensions this will read as text. Anything else is bytes we cannot judge. */
 const TEXTUAL_EXTENSIONS = [".json", ".tsv", ".txt", ".md", ".rst", ".csv", ".bib", ".cff"];
 
@@ -346,7 +414,7 @@ function isTextualPath(path: string): boolean {
  * Exported for its own test: the ordering IS the guarantee that a budget of 40
  * still reads `dataset_description.json` on a dataset with 3,000 files.
  */
-export function selectDepositFiles(paths: readonly string[], limit: number): string[] {
+export function inScopeDepositFiles(paths: readonly string[]): string[] {
   const available = new Set(paths);
   const chosen: string[] = [];
   for (const candidate of PRIORITY_DEPOSIT_FILES) {
@@ -355,11 +423,11 @@ export function selectDepositFiles(paths: readonly string[], limit: number): str
   const rest = paths
     .filter((p) => !chosen.includes(p) && !p.includes("/") && isTextualPath(p))
     .sort();
-  for (const path of rest) {
-    if (chosen.length >= limit) break;
-    chosen.push(path);
-  }
-  return chosen.slice(0, limit);
+  return [...chosen, ...rest];
+}
+
+export function selectDepositFiles(paths: readonly string[], limit: number): string[] {
+  return inScopeDepositFiles(paths).slice(0, limit);
 }
 
 /**
@@ -418,8 +486,9 @@ export function checkRowInvariants(row: {
   authors: string | null;
   enrichment_json: string | null;
   first_published_at: string | null;
-}): AnonymityFinding[] {
+}): { findings: AnonymityFinding[]; unchecked: string[] } {
   const findings: AnonymityFinding[] = [];
+  const unchecked: string[] = [];
 
   // The catalog's author list. NULL is fine -- it names nobody, which is the
   // property under test; enrichment simply may not have run. What is NOT fine
@@ -444,18 +513,17 @@ export function checkRowInvariants(row: {
       parsed =
         typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
     } catch {
-      // Unparseable is not a leak; it is a different bug, and one the
-      // enrichment path already reports. Nothing to say here.
+      // A document this sweep cannot parse is a document it cannot clear. The
+      // question is not whether the JSON is well formed -- it is whether the
+      // bytes `GET /datasets/:id` serves still name the depositor, and a
+      // truncated or trailing-comma'd blob can carry the name perfectly well.
+      // Reporting nothing here would answer "clean" about the one cached
+      // document NEMAR itself owns.
       parsed = null;
+      unchecked.push("enrichment_not_blinded");
     }
     if (parsed) {
-      const present = BLINDED_METADATA_KEYS.filter((key) => {
-        const value = parsed?.[key];
-        if (value === undefined || value === null) return false;
-        if (Array.isArray(value)) return value.length > 0;
-        if (typeof value === "object") return Object.keys(value as object).length > 0;
-        return true;
-      });
+      const present = presentBlindedKeys(parsed);
       if (present.length > 0) {
         findings.push({
           check: "enrichment_not_blinded",
@@ -477,7 +545,7 @@ export function checkRowInvariants(row: {
     });
   }
 
-  return findings;
+  return { findings, unchecked };
 }
 
 /**
@@ -492,18 +560,33 @@ export const ANONYMITY_OWNER_PROJECTION_SQL = `SELECT ${OWNER_USERNAME_SQL}, ${O
    FROM datasets d JOIN users u ON d.owner_user_id = u.id
    WHERE d.dataset_id = ?`;
 
-/** Non-placeholder entries in a `dataset_description.json` person field. */
+/**
+ * Non-placeholder entries in a `dataset_description.json` person field.
+ *
+ * `readable` is the difference between "this field names nobody" and "this
+ * field is in a shape I could not interpret". Both used to return an empty
+ * array, which reads as clean; the second is a gap, and BIDS files in the wild
+ * carry both of the shapes that produce it -- a bare string (`"Authors": "Jane
+ * Coauthor"`) and an array of objects (`[{"name": "Jane Coauthor"}]`). The
+ * bare string is interpretable, so it is read as a single entry rather than
+ * discarded; anything else is reported.
+ */
 export function namedEntriesIn(
   description: Record<string, unknown>,
   field: string,
   isPlaceholder: (value: string) => boolean,
-): string[] {
+): { named: string[]; readable: boolean } {
   const raw = description[field];
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+  if (raw === undefined || raw === null) return { named: [], readable: true };
+  const entries = typeof raw === "string" ? [raw] : raw;
+  if (!Array.isArray(entries)) return { named: [], readable: false };
+  const strings = entries.filter((v): v is string => typeof v === "string");
+  const readable = strings.length === entries.length;
+  const named = strings
     .map((v) => v.trim())
+    .filter((v) => v.length > 0)
     .filter((v) => !isPlaceholder(v));
+  return { named, readable };
 }
 
 /**
@@ -518,25 +601,49 @@ export function scanDepositFile(
   text: string,
   owner: OwnerIdentity,
   isPlaceholder: (value: string) => boolean,
-): AnonymityFinding[] {
+): { findings: AnonymityFinding[]; unchecked: string[] } {
   const findings: AnonymityFinding[] = [];
+  const unchecked: string[] = [];
 
-  if (path === "dataset_description.json") {
-    let description: Record<string, unknown> | null = null;
+  if (path === "dataset_description.json" || path === NEMAR_METADATA_PATH) {
+    let document: Record<string, unknown> | null = null;
     try {
       const value: unknown = JSON.parse(text);
-      description =
+      document =
         typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
     } catch {
-      description = null;
+      document = null;
     }
-    if (description) {
+    if (!document) {
+      // A hand-edited BIDS file with a trailing comma is ordinary, and the
+      // free-text checks below still run over the raw bytes. What is lost is
+      // the structured one: a CO-AUTHOR's name, which no free-text rule can
+      // find because the sweep only knows the depositor's own identity.
+      unchecked.push(`description_structured:${path}`);
+    } else if (path === NEMAR_METADATA_PATH) {
+      // NEMAR writes and blinds this file, so a withheld key surviving here is
+      // NEMAR's bug, not the depositor's -- same rule and same severity as the
+      // cached enrichment document in `checkRowInvariants`.
+      const present = presentBlindedKeys(document);
+      if (present.length > 0) {
+        findings.push({
+          check: "repo_metadata_not_blinded",
+          severity: "invariant",
+          file: path,
+          detail: `The repository's committed .nemar/metadata.json still carries ${present.length} withheld field(s) (${present.join(", ")}). NEMAR writes this file, so a fresh enrichment commit is what replaces it.`,
+        });
+      }
+    } else {
       // Authors is the field the publication gate already enforces at request
       // time. Re-checked here because the gate runs ONCE, at the request, and
       // a depositor can commit to `main` freely while their repository is still
       // private -- which is exactly the window this deposit lives in.
       for (const field of ["Authors", "Funding", "Acknowledgements"]) {
-        const named = namedEntriesIn(description, field, isPlaceholder);
+        const { named, readable } = namedEntriesIn(document, field, isPlaceholder);
+        if (!readable) {
+          unchecked.push(`description_field:${field}`);
+          continue;
+        }
         if (named.length > 0) {
           findings.push({
             check: `description_${field.toLowerCase()}_named`,
@@ -576,7 +683,7 @@ export function scanDepositFile(
     });
   }
 
-  return findings;
+  return { findings, unchecked };
 }
 
 /** The network boundaries, as one object, so a test substitutes them all at once. */
@@ -591,7 +698,21 @@ export interface AnonymitySweepSeams {
   rawBase?: string;
   /** Reads the EZID record. Substituted rather than pointed at a base URL,
    *  because `ezid.ts` resolves its host from a module-level global. */
-  getIdentifierImpl?: (identifier: string) => Promise<{ status: string; dataciteXml?: string }>;
+  getIdentifierImpl?: (
+    identifier: string,
+    isSandbox: boolean,
+  ) => Promise<{ status: string; dataciteXml?: string }>;
+  /**
+   * The owner-withholding SQL to re-run, overriding
+   * `ANONYMITY_OWNER_PROJECTION_SQL`.
+   *
+   * A seam because the real projection blinds on `d.anonymous = 1`, which IS
+   * the candidate predicate -- so no seedable row can make it leak, and the
+   * check had no positive case at all. A test supplies a deliberately
+   * un-blinded projection to prove the finding fires, and one that matches no
+   * row to prove a failed check reports `unchecked` rather than a disclosure.
+   */
+  ownerProjectionSql?: string;
   /** Reads a published Zarr index; `null` means the dataset has none. */
   fetchZarrIndexImpl?: (datasetId: string) => Promise<string | null>;
   /**
@@ -609,7 +730,7 @@ export interface AnonymitySweepSeams {
    */
   listGitFilesImpl?: (
     repo: string,
-  ) => Promise<{ path: string; sha: string; size?: number }[] | null>;
+  ) => Promise<{ path: string; sha: string; size?: number; mode?: string }[] | null>;
 }
 
 /**
@@ -656,18 +777,26 @@ async function scanDataset(
   isPlaceholder: (value: string) => boolean,
   budget: { remaining: number },
 ): Promise<Scan> {
-  const findings: AnonymityFinding[] = [...checkRowInvariants(row)];
+  const rowCheck = checkRowInvariants(row);
+  const findings: AnonymityFinding[] = [...rowCheck.findings];
   // ALWAYS present, on every run, for every dataset: identity inside the
   // recordings themselves is in annexed binaries this sweep does not read.
-  const unchecked = ["signal_headers"];
+  const unchecked = ["signal_headers", ...rowCheck.unchecked];
   const owner = ownerIdentityOf(row);
 
   // --- the projections, re-run rather than trusted -------------------------
   try {
-    const projected = await env.DB.prepare(ANONYMITY_OWNER_PROJECTION_SQL)
+    const projected = await env.DB.prepare(
+      seams.ownerProjectionSql ?? ANONYMITY_OWNER_PROJECTION_SQL,
+    )
       .bind(row.dataset_id)
       .first<{ owner_username: string | null; owner_github: string | null }>();
-    if (projected?.owner_username !== null || projected?.owner_github !== null) {
+    if (!projected) {
+      // No row means the question could not be asked, not that it was answered
+      // badly. Raising the finding here would mail the depositor and every
+      // admin an urgent "your identity is exposed" for a check that never ran.
+      unchecked.push("owner_projected");
+    } else if (projected.owner_username !== null || projected.owner_github !== null) {
       findings.push({
         check: "owner_projected",
         severity: "invariant",
@@ -705,7 +834,7 @@ async function scanDataset(
     unchecked.push("doi_reserved");
   } else {
     try {
-      const record = await seams.getIdentifierImpl(row.concept_doi);
+      const record = await seams.getIdentifierImpl(row.concept_doi, row.is_sandbox === 1);
       if (record.status !== "reserved") {
         findings.push({
           check: "doi_not_reserved",
@@ -751,17 +880,34 @@ async function scanDataset(
   let filesListed = 0;
   const listing =
     repo && token && seams.listGitFilesImpl
-      ? await seams.listGitFilesImpl(repo).catch(() => null)
+      ? await seams.listGitFilesImpl(repo).catch((err) => {
+          // Logged rather than only counted: `deposit_files` says the tree
+          // could not be listed, and the reason (401 vs 404 vs rate limit vs
+          // network) is the only thing that tells an operator whether to fix a
+          // token or wait.
+          console.error(
+            `[anonymity-sweep] ${row.dataset_id}: could not list the repository tree:`,
+            err instanceof Error ? err.message : err,
+          );
+          return null;
+        })
       : null;
-  if (!listing || !repo || !token) {
+  // An empty array is NOT an empty repository. Every dataset repository has at
+  // least `dataset_description.json`, so a zero-entry listing means the listing
+  // failed in a way that did not throw -- a tree response with no `tree` key, a
+  // token scoped so the tree comes back empty, or a future refactor returning
+  // `[]` instead of raising. Treating it as "nothing to check" would stamp
+  // `verified` on a repository nobody read.
+  if (!listing || listing.length === 0 || !repo || !token) {
     unchecked.push("deposit_files");
   } else {
     const bySha = new Map(listing.map((f) => [f.path, f]));
     filesListed = listing.length;
-    const selected = selectDepositFiles(
-      listing.map((f) => f.path),
-      ANONYMITY_MAX_DEPOSIT_FILES,
-    );
+    const inScope = inScopeDepositFiles(listing.map((f) => f.path));
+    const selected = inScope.slice(0, ANONYMITY_MAX_DEPOSIT_FILES);
+    if (inScope.length < filesListed) {
+      unchecked.push("deposit_subdirectory_files");
+    }
     for (const path of selected) {
       if (budget.remaining <= 0) {
         unchecked.push("deposit_files_budget");
@@ -769,8 +915,19 @@ async function scanDataset(
       }
       const entry = bySha.get(path);
       const blobSha = entry?.sha ?? "";
-      if ((entry?.size ?? 0) > ANONYMITY_MAX_FILE_BYTES) {
+      // A missing size is unknown, not zero: reading it anyway would let one
+      // tree entry with no `size` pull an unbounded body into a Worker.
+      if (entry?.size === undefined || entry.size > ANONYMITY_MAX_FILE_BYTES) {
         unchecked.push(`deposit_file_too_large:${path}`);
+        continue;
+      }
+      // A git-annex pointer is a symlink (mode 120000) or a small file whose
+      // body is an `/annex/objects/...` key, not the content. Scanning it finds
+      // nothing and would count as a clean read of a file nobody looked inside
+      // -- ADR 0060's inherited-`.gitattributes` case puts ordinary BIDS
+      // metadata in exactly this shape.
+      if (entry.mode === "120000") {
+        unchecked.push(`deposit_file_annexed:${path}`);
         continue;
       }
       budget.remaining -= 1;
@@ -801,10 +958,32 @@ async function scanDataset(
         unchecked.push(`deposit_file_unreadable:${path}`);
         continue;
       }
+      if (ANNEX_POINTER_BODY.test(text)) {
+        unchecked.push(`deposit_file_annexed:${path}`);
+        continue;
+      }
       filesScanned += 1;
-      findings.push(...scanDepositFile(path, text, owner, isPlaceholder));
+      try {
+        const scanned = scanDepositFile(path, text, owner, isPlaceholder);
+        findings.push(...scanned.findings);
+        unchecked.push(...scanned.unchecked);
+      } catch (err) {
+        // One pathological file must not discard the findings already collected
+        // for this dataset, including the invariant ones from the row and the
+        // repository checks. Report the file and keep going.
+        console.error(
+          `[anonymity-sweep] ${row.dataset_id}: scanning ${path} threw:`,
+          err instanceof Error ? err.message : err,
+        );
+        unchecked.push(`deposit_file_unreadable:${path}`);
+      }
     }
-    if (filesListed > selected.length) {
+    // Compares like with like: the in-scope set against what the budget let
+    // through. Comparing against `filesListed` counted every blob in the tree,
+    // so any dataset with a sub-directory -- that is, every BIDS dataset --
+    // reported a budget overrun it had not had and could never reach
+    // `verified`.
+    if (inScope.length > selected.length) {
       unchecked.push("deposit_files_beyond_budget");
     }
   }
@@ -815,8 +994,11 @@ async function scanDataset(
 /**
  * Run one bounded pass.
  *
- * Throws only if the candidate query itself fails; a per-dataset failure lands
- * in `errors` and leaves the row completely untouched, so it stays a candidate.
+ * Throws only if the candidate query itself fails. A per-dataset failure lands
+ * in `errors` and stamps NO verdict, but the row is not untouched: the attempt
+ * stamp is written before the scan begins, deliberately, so a dataset that
+ * fails every time costs one slot per cycle instead of holding the front of
+ * the queue forever. It becomes a candidate again when that stamp ages out.
  *
  * `seams` is the test-only dependency injection every real caller omits, in the
  * idiom `runZarrFidelitySweep` established (`fetchIndexImpl` / `endpointUrl`):
@@ -866,6 +1048,7 @@ export async function runAnonymitySweep(
   let budgetExhausted = false;
   const results: AnonymityDatasetResult[] = [];
   const errors: { dataset_id: string; error: string }[] = [];
+  const mailFailures: { dataset_id: string; recipient: string; error: string }[] = [];
 
   for (const row of candidates) {
     if (budget.remaining <= 0) {
@@ -878,7 +1061,15 @@ export async function runAnonymitySweep(
     try {
       await env.DB.prepare(ANONYMITY_SWEEP_ATTEMPT_SQL).bind(row.dataset_id).run();
     } catch (err) {
+      // Not just logged: without this stamp the row sorts never-attempted-first
+      // again next cycle and permanently starves everything behind it, which is
+      // the exact failure the stamp was introduced to prevent. Reporting it in
+      // `errors` is what makes the run non-zero rather than quietly degenerate.
       console.error(`[anonymity-sweep] attempt stamp failed for ${row.dataset_id}:`, err);
+      errors.push({
+        dataset_id: row.dataset_id,
+        error: `attempt stamp failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
     }
 
     let scan: Scan;
@@ -897,7 +1088,9 @@ export async function runAnonymitySweep(
     // when there are none AND something beyond the always-unchecked signal
     // headers was missed. Reporting "verified" while a check was skipped is the
     // exact failure ADR 0054 names.
-    const missedSomethingCheckable = scan.unchecked.some((u) => u !== "signal_headers");
+    const missedSomethingCheckable = scan.unchecked.some(
+      (u) => !ANONYMITY_DECLARED_SCOPE_LIMITS.includes(u),
+    );
     const status: AnonymityVerdict =
       scan.findings.length > 0
         ? "findings"
@@ -931,18 +1124,44 @@ export async function runAnonymitySweep(
     });
 
     if (status === "findings") {
-      await recordAndAnnounce(env, row, scan).catch((err) => {
+      const announced = await recordAndAnnounce(
+        env,
+        row,
+        scan,
+        parsePreviousFindings(row.previous_findings),
+      ).catch((err) => {
         // The verdict is already durable in `sweep_stamps`; losing the audit
         // row or the mail must not undo it.
         console.error(`[anonymity-sweep] announcement failed for ${row.dataset_id}:`, err);
+        return {
+          recipients: 0,
+          mailFailures: [
+            { recipient: "all", error: err instanceof Error ? err.message : String(err) },
+          ],
+        };
       });
+      for (const failure of announced.mailFailures) {
+        mailFailures.push({ dataset_id: row.dataset_id, ...failure });
+      }
+    } else if (status === "unverifiable") {
+      // Named, not just counted. A dataset that is unverifiable every day --
+      // a broken App token, unset EZID credentials, an index behind a
+      // permanent 403 -- is "NEMAR cannot confirm this person is concealed",
+      // and an aggregate count never says which person.
+      console.error(
+        `[anonymity-sweep] ${row.dataset_id}: unverifiable; could not check ${scan.unchecked
+          .filter((u) => !ANONYMITY_DECLARED_SCOPE_LIMITS.includes(u))
+          .join(", ")}`,
+      );
     }
   }
 
   let remaining: number | null = null;
   try {
     const row = await env.DB.prepare(ANONYMITY_SWEEP_REMAINING_SQL).first<{ n: number }>();
-    remaining = row?.n ?? 0;
+    // `null` is reserved for "the query failed" and a caller pages on it, so a
+    // successful query with no row must not borrow that meaning.
+    remaining = row ? row.n : 0;
   } catch (err) {
     console.error("[anonymity-sweep] remaining count failed:", err);
   }
@@ -956,6 +1175,7 @@ export async function runAnonymitySweep(
     errors,
     remaining,
     budget_exhausted: budgetExhausted,
+    mail_failures: mailFailures,
   };
 }
 
@@ -985,11 +1205,13 @@ async function defaultIdentifierReader(
 ): Promise<AnonymitySweepSeams["getIdentifierImpl"]> {
   const { getIdentifier, conceptEzidIdentifier } = await import("./ezid.js");
   const { resolveEzidAuth } = await import("./doi.js");
-  return async (conceptDoi: string) => {
-    // Sandbox and production shoulders have different credentials; an
-    // anonymous deposit is `is_sandbox = 0` by the time it reaches a DOI, and
-    // `resolveEzidAuth` throws when the pair it needs is unset -- which the
-    // caller turns into `unchecked`, correctly.
+  return async (conceptDoi: string, isSandbox: boolean) => {
+    // Sandbox and production shoulders have different credentials, and the row
+    // says which one this DOI was minted on. Hardcoding production made every
+    // exemplar-fleet dataset permanently `unverifiable` on staging -- where the
+    // admin route is deliberately reachable -- because its sandbox DOI was
+    // queried with production credentials. `resolveEzidAuth` throws when the
+    // pair it needs is unset, which the caller turns into `unchecked`.
     const auth = resolveEzidAuth(
       {
         EZID_USERNAME: env.EZID_USERNAME,
@@ -997,7 +1219,7 @@ async function defaultIdentifierReader(
         EZID_SANDBOX_USERNAME: env.EZID_SANDBOX_USERNAME,
         EZID_SANDBOX_PASSWORD: env.EZID_SANDBOX_PASSWORD,
       },
-      false,
+      isSandbox,
     );
     const record = await getIdentifier(auth, conceptEzidIdentifier(conceptDoi));
     return { status: record.status, dataciteXml: record.dataciteXml };
@@ -1013,11 +1235,17 @@ function defaultZarrIndexReader(env: Bindings): AnonymitySweepSeams["fetchZarrIn
     //
     // Unsigned, because an anonymous deposit is `visibility = 'public'` and its
     // index is served publicly at zarr.nemar.org -- which is precisely why it
-    // is worth checking. A 403 or 404 means no readable index; that is a
-    // determined fact, not a gap, so it returns `null` rather than throwing.
+    // is worth checking.
+    //
+    // 404 and 403 are NOT the same answer. The bucket denies anonymous
+    // ListBucket, so a 403 covers "no such key", "present but not public", "a
+    // bucket-policy change in flight" and "the anonymous principal cannot see
+    // it" -- and one of those is an index that exists, names the depositor, and
+    // could not be read. Only 404 is absence; 403 is a gap, and the caller
+    // turns a throw into `unchecked`.
     const origin = `https://${env.S3_BUCKET}.s3.${env.AWS_REGION}.amazonaws.com`;
     const res = await fetch(`${origin}/${encodeURIComponent(datasetId)}/zarr/index.json`);
-    if (res.status === 404 || res.status === 403) return null;
+    if (res.status === 404) return null;
     if (!res.ok) throw new Error(`zarr index GET ${res.status}`);
     return await res.text();
   };
@@ -1040,7 +1268,7 @@ function defaultZarrIndexReader(env: Bindings): AnonymitySweepSeams["fetchZarrIn
  * clean deposit it never looked at.
  *
  * A truncated tree (GitHub's cap, ~100k entries) is not distinguished here.
- * Every file this scan prioritises is at the repository root, and a recursive
+ * Every file this scan prioritizes is at the repository root, and a recursive
  * tree lists the root first, so truncation cannot hide one.
  */
 function defaultGitFileLister(token: string | null): AnonymitySweepSeams["listGitFilesImpl"] {
@@ -1048,7 +1276,18 @@ function defaultGitFileLister(token: string | null): AnonymitySweepSeams["listGi
     if (!token) return null;
     const { getTreeAtRef } = await import("./github/contents.js");
     const tree = await getTreeAtRef(repo, "main", token);
-    return tree.map((entry) => ({ path: entry.path, sha: entry.sha, size: entry.size }));
+    // Blobs only: `getTreeAtRef` returns directory entries too, and counting
+    // those as files would inflate the listed total against which scope is
+    // judged. `mode` is carried because 120000 is a git-annex symlink, whose
+    // body is a pointer rather than the content.
+    return tree
+      .filter((entry) => entry.type === "blob")
+      .map((entry) => ({
+        path: entry.path,
+        sha: entry.sha,
+        size: entry.size,
+        mode: entry.mode,
+      }));
   };
 }
 
@@ -1062,11 +1301,24 @@ function defaultGitFileLister(token: string | null): AnonymitySweepSeams["listGi
  * Neither the row nor the mail carries the matched text. `AnonymityFinding`
  * already refuses to hold it; this is the reason why.
  */
+/** Last run's findings off the stamp. Unreadable means "treat as changed". */
+function parsePreviousFindings(raw: string | null): AnonymityFinding[] | null {
+  if (!raw) return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    return Array.isArray(value) ? (value as AnonymityFinding[]) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function recordAndAnnounce(
   env: Bindings,
   row: AnonymityCandidate,
   scan: Scan,
-): Promise<void> {
+  previous: AnonymityFinding[] | null,
+): Promise<{ recipients: number; mailFailures: { recipient: string; error: string }[] }> {
+  const mailFailures: { recipient: string; error: string }[] = [];
   try {
     await auditLogStatement(env.DB, {
       userId: null,
@@ -1088,19 +1340,32 @@ async function recordAndAnnounce(
     console.error(`[anonymity-sweep] audit write failed for ${row.dataset_id}:`, err);
   }
 
-  if (!env.RESEND_API_KEY) return;
+  // Unchanged findings are not re-mailed. A deposit finding stays true until
+  // the depositor edits their own file, so mailing it daily would train both
+  // audiences to ignore the one that is new. The audit row above is written on
+  // every run regardless, so the durable record stays complete.
+  if (previous && sameFindings(previous, scan.findings)) {
+    return { recipients: 0, mailFailures };
+  }
+
+  if (!env.RESEND_API_KEY) {
+    console.error(
+      `[anonymity-sweep] ${row.dataset_id}: findings were recorded but RESEND_API_KEY is unset, so nobody was told.`,
+    );
+    return { recipients: 0, mailFailures };
+  }
   const { getAdminEmailsForCategory, resolveEmailConfig, sendAnonymityFindingsEmail } =
     await import("./email.js");
   const { fromEmail, replyTo, isDev } = resolveEmailConfig(env);
+  let recipients = 0;
 
   // The depositor first: the deposit findings are theirs to fix, and they are
-  // the person whose concealment is at stake.
-  const owner = await env.DB.prepare("SELECT email FROM users WHERE username = ?")
-    .bind(row.owner_username ?? "")
-    .first<{ email: string | null }>();
-  if (owner?.email) {
-    await sendAnonymityFindingsEmail(
-      [owner.email],
+  // the person whose concealment is at stake. The address comes off the
+  // candidate row, which already joined `users`; re-deriving it from the
+  // mutable `username` silently mailed nobody when that column was NULL.
+  if (row.owner_email) {
+    const sent = await sendAnonymityFindingsEmail(
+      [row.owner_email],
       row.dataset_id,
       scan.findings,
       scan.unchecked,
@@ -1110,12 +1375,27 @@ async function recordAndAnnounce(
       replyTo,
       isDev,
       env,
-    ).catch((err: unknown) => console.error("[anonymity-sweep] depositor mail failed:", err));
+    ).catch((err: unknown) => {
+      console.error("[anonymity-sweep] depositor mail failed:", err);
+      return {
+        delivered: [] as string[],
+        failed: [
+          { recipient: "depositor", error: err instanceof Error ? err.message : String(err) },
+        ],
+      };
+    });
+    recipients += sent.delivered.length;
+    mailFailures.push(...sent.failed);
+  } else {
+    console.error(
+      `[anonymity-sweep] ${row.dataset_id}: the owner row carries no email address, so the depositor was not told.`,
+    );
+    mailFailures.push({ recipient: "depositor", error: "no address on the owner row" });
   }
 
   const adminEmails = await getAdminEmailsForCategory(env.DB, "dataset_anonymity", env);
   if (adminEmails.length > 0) {
-    await sendAnonymityFindingsEmail(
+    const sent = await sendAnonymityFindingsEmail(
       adminEmails,
       row.dataset_id,
       scan.findings,
@@ -1126,6 +1406,24 @@ async function recordAndAnnounce(
       replyTo,
       isDev,
       env,
-    ).catch((err: unknown) => console.error("[anonymity-sweep] admin mail failed:", err));
+    ).catch((err: unknown) => {
+      console.error("[anonymity-sweep] admin mail failed:", err);
+      return {
+        delivered: [] as string[],
+        failed: [{ recipient: "admins", error: err instanceof Error ? err.message : String(err) }],
+      };
+    });
+    recipients += sent.delivered.length;
+    mailFailures.push(...sent.failed);
   }
+
+  return { recipients, mailFailures };
+}
+
+/** Same set of findings, by the fields that identify one. Order-insensitive. */
+export function sameFindings(a: AnonymityFinding[], b: AnonymityFinding[]): boolean {
+  const key = (f: AnonymityFinding) => `${f.check}|${f.severity}|${f.file ?? ""}`;
+  const left = a.map(key).sort();
+  const right = b.map(key).sort();
+  return left.length === right.length && left.every((v, i) => v === right[i]);
 }
