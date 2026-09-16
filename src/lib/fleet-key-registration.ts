@@ -157,6 +157,49 @@ export function bucketObjectSource(): ObjectSource {
 }
 
 /**
+ * Git environment for a fleet clone, and the SLOT ORDER is the whole point.
+ *
+ * Extracted so the ordering is testable without a network: every test clones
+ * from a local path, so the GitHub branch never runs, and if the post-clone
+ * config wrote slot 0 (the empty reset) instead of slot 1 (the token helper),
+ * every fleet push against GitHub would fail authentication with no test
+ * failing. That is the path that pushes a retraction.
+ *
+ * Returns undefined for a non-GitHub url: a token is for GitHub and only for
+ * GitHub, and `originUrl` is a local path in the tests.
+ *
+ * Slot 0 resets the helper list EVEN WITH NO TOKEN, and that is not redundant.
+ * Git accumulates helpers, so the operator's global one -- on a Mac, the Git
+ * Credential Manager -- still runs, and it opens a GUI dialog that
+ * `GIT_TERMINAL_PROMPT=0` does nothing about; a sweep over hundreds of
+ * repositories would sit behind a window nobody is watching. Slot 1 is then the
+ * only helper left to answer.
+ *
+ * The token travels via `GIT_CONFIG_*` rather than argv or the URL so it never
+ * lands in a process listing, and a token containing whitespace or a quote is
+ * refused rather than embedded in a shell-quoted helper string.
+ */
+export function fleetCloneEnv(
+  url: string,
+  token?: string | null,
+): Record<string, string> | undefined {
+  if (!/^https:\/\/github\.com\//.test(url)) return undefined;
+  const base = {
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "credential.helper",
+    GIT_CONFIG_VALUE_0: "",
+    GCM_INTERACTIVE: "never",
+  };
+  if (!token || /[\s']/.test(token)) return base;
+  return {
+    ...base,
+    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
+    GIT_CONFIG_VALUE_1: githubTokenCredentialHelper(token),
+  };
+}
+
+/**
  * Clone a dataset for inspection, and return an error string or undefined.
  *
  * Deliberately not `cloneDataset`: that runs `git annex init` itself, before any
@@ -196,29 +239,8 @@ export async function cloneForFleetWork(
   // of repositories cannot sit waiting behind a window nobody is watching.
   let env: Record<string, string> | undefined;
   if (/^https:\/\/github\.com\//.test(url)) {
-    // Reset the helper list even when no token is found. Otherwise the fallback
-    // is the operator's global helper, which on a Mac opens an account picker
-    // per repository and a sweep sits behind it.
-    env = {
-      GIT_CONFIG_COUNT: "1",
-      GIT_CONFIG_KEY_0: "credential.helper",
-      GIT_CONFIG_VALUE_0: "",
-      GCM_INTERACTIVE: "never",
-    };
     const token = process.env.GH_TOKEN?.trim() || (await getGitHubToken()).token;
-    if (token && !/[\s']/.test(token)) {
-      // Via GIT_CONFIG_* rather than argv or the URL, so the token never lands in
-      // a process listing.
-      env = {
-        GIT_CONFIG_COUNT: "2",
-        GIT_CONFIG_KEY_0: "credential.helper",
-        GIT_CONFIG_VALUE_0: "",
-        GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
-        GIT_CONFIG_VALUE_1: githubTokenCredentialHelper(token),
-        // Belt and braces for the same dialog, which GCM suppresses on this.
-        GCM_INTERACTIVE: "never",
-      };
-    }
+    env = fleetCloneEnv(url, token);
   }
   const clone = await runCommand(
     [

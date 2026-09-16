@@ -28,6 +28,7 @@ import {
   destinationPrefix,
   readPinnedSources,
   recoverDatasetContent,
+  sweepContentRecovery,
 } from "../src/lib/fleet-content-recovery";
 import { REMOTE_NAME } from "../src/lib/fleet-key-registration";
 import { runCommand } from "../src/lib/git-annex/run-command";
@@ -161,6 +162,28 @@ async function addAnnexedFile(name: string, content: string): Promise<string> {
   return line.slice(0, line.length - name.length - 1);
 }
 
+const sha256Base64 = (content: string) =>
+  Buffer.from(new Bun.CryptoHasher("sha256").update(content).digest()).toString("base64");
+
+async function setUpPinnedDataset(content: string): Promise<string> {
+  const key = await addAnnexedFile("sub-01/a.dat", content);
+  await writeAnnexBranchFile(
+    origin,
+    "remote.log",
+    [
+      "9e1479f6-49e0-413b-8222-a7f8000f55a6 bucket=openneuro.org name=s3-PUBLIC type=S3 versioning=yes",
+      "ca4da2fe-2a4c-49b1-abd6-00fc9ec1ff30 bucket=nemar fileprefix=on000001/objects/ name=nemar-s3 type=S3",
+      "",
+    ].join("\n"),
+  );
+  await writeAnnexBranchFile(
+    origin,
+    `${await hashDir(origin, key)}${key}.log.rmet`,
+    "1789149471s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V +VERSIONID#ds000001/sub-01/a.dat\n",
+  );
+  return key;
+}
+
 describe("annexedKeyPaths", () => {
   test("reports every path that references a key, not just one", async () => {
     // An upstream lookup is by path, and a key stored under two names has two
@@ -261,28 +284,6 @@ describe("readPinnedSources failing loudly", () => {
 });
 
 describe("recoverDatasetContent", () => {
-  const sha256Base64 = (content: string) =>
-    Buffer.from(new Bun.CryptoHasher("sha256").update(content).digest()).toString("base64");
-
-  async function setUpPinnedDataset(content: string): Promise<string> {
-    const key = await addAnnexedFile("sub-01/a.dat", content);
-    await writeAnnexBranchFile(
-      origin,
-      "remote.log",
-      [
-        "9e1479f6-49e0-413b-8222-a7f8000f55a6 bucket=openneuro.org name=s3-PUBLIC type=S3 versioning=yes",
-        "ca4da2fe-2a4c-49b1-abd6-00fc9ec1ff30 bucket=nemar fileprefix=on000001/objects/ name=nemar-s3 type=S3",
-        "",
-      ].join("\n"),
-    );
-    await writeAnnexBranchFile(
-      origin,
-      `${await hashDir(origin, key)}${key}.log.rmet`,
-      "1789149471s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V +VERSIONID#ds000001/sub-01/a.dat\n",
-    );
-    return key;
-  }
-
   test("copies a pinned key in and reports the checksum that proved it", async () => {
     const content = "the real content of this recording";
     const key = await setUpPinnedDataset(content);
@@ -682,5 +683,63 @@ exit 0`);
     expect(outcome.keys.some((k) => k.action === "unrecoverable")).toBe(false);
     // Unknown is not zero: nothing was measured, so the counts are not a result.
     expect(outcome.measured).toBe(false);
+  }, 180_000);
+});
+
+describe("sweepContentRecovery", () => {
+  test("refuses an id that would escape the work root, and deletes nothing", async () => {
+    // The id reaches `join(workRoot, id)` and then `rmSync(..., {recursive: true,
+    // force: true})`, so `../something` would delete outside the work root. No
+    // test fed it a bad id.
+    const canary = join(workRoot, "canary.txt");
+    writeFileSync(canary, "must survive");
+
+    const sweep = await sweepContentRecovery(
+      ["../canary-target", "on000001/../.."],
+      async () => new Map(),
+      {
+        workRoot,
+        apply: true,
+        originUrl: origin,
+      },
+    );
+
+    expect(sweep.outcomes).toHaveLength(2);
+    for (const outcome of sweep.outcomes) {
+      expect(outcome.action).toBe("failed");
+      expect(outcome.error).toContain("not a dataset id");
+      // And the zeros must not read as a measurement.
+      expect(outcome.measured).toBe(false);
+    }
+    expect(existsSync(canary)).toBe(true);
+  }, 180_000);
+
+  test("rolls the per-dataset outcomes up without double-counting a repeated id", async () => {
+    // The tally, the dedupe and the recovered totals had no test at all, and the
+    // tally is what an operator reads at the end of a sweep.
+    const content = "content for the rollup";
+    await setUpPinnedDataset(content);
+    installAwsShim(`
+case "$2" in
+  copy-object) echo '{"CopyObjectResult":{"ChecksumSHA256":"${sha256Base64(content)}"}}'; exit 0 ;;
+  head-object) echo '{"ContentLength":${content.length},"ChecksumSHA256":"${sha256Base64(content)}"}'; exit 0 ;;
+  list-object-versions) echo '[]'; exit 0 ;;
+esac
+exit 0`);
+
+    const sweep = await sweepContentRecovery(["on000001", "on000001"], async () => new Map(), {
+      workRoot,
+      apply: true,
+      originUrl: origin,
+    });
+
+    // One clone path per id, so a repeated id would have two workers removing
+    // each other's clone; it is deduped before anything runs.
+    expect(sweep.outcomes).toHaveLength(1);
+    expect(sweep.tally.recovered).toBe(1);
+    expect(sweep.recoveredKeys).toBe(1);
+    expect(sweep.recoveredBytes).toBe(content.length);
+    // Every action is a key of the tally, so a new member cannot tally as NaN.
+    expect(Object.values(sweep.tally).every((count) => Number.isInteger(count))).toBe(true);
   }, 180_000);
 });

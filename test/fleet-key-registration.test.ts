@@ -27,6 +27,7 @@ import {
   MIN_DATA_AVAILABILITY,
   type ObjectSource,
   dataAvailability,
+  fleetCloneEnv,
   repairDatasetKeyRegistration,
   resolveRemoteUuid,
   scanDatasetKeyRegistration,
@@ -565,5 +566,59 @@ describe("dataAvailability (ADR 0064)", () => {
       expect(1 - availability).toBeCloseTo(missingShare, 3);
       expect(availability).toBeLessThan(MIN_DATA_AVAILABILITY);
     }
+  });
+});
+
+describe("fleetCloneEnv (the slot order a GitHub push depends on)", () => {
+  // Every other test in this file clones from a local path, so the GitHub branch
+  // never runs. If the post-clone config wrote slot 0 -- the empty reset --
+  // instead of slot 1, every fleet push against GitHub would fail authentication
+  // and nothing here would go red. That is the path that pushes a retraction.
+  const HELPER_URL = "https://github.com/nemarDatasets/on000001.git";
+
+  test("gives a non-GitHub url no credential environment at all", () => {
+    // A token is for GitHub and only for GitHub, and originUrl is a local path
+    // throughout these tests.
+    expect(fleetCloneEnv("/tmp/some/local/origin", "ghp_token")).toBeUndefined();
+    expect(fleetCloneEnv("git@github.com:nemarDatasets/on000001.git", "ghp_token")).toBeUndefined();
+  });
+
+  test("resets the helper list even when there is no token", () => {
+    // Not redundant: git ACCUMULATES helpers, so the operator's global one (the
+    // Git Credential Manager on a Mac) still runs and opens a GUI dialog that
+    // GIT_TERMINAL_PROMPT=0 does nothing about. A sweep would sit behind it.
+    const env = fleetCloneEnv(HELPER_URL, undefined);
+    expect(env).toEqual({
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "credential.helper",
+      GIT_CONFIG_VALUE_0: "",
+      GCM_INTERACTIVE: "never",
+    });
+  });
+
+  test("puts the token helper in slot 1, after the reset in slot 0", () => {
+    const env = fleetCloneEnv(HELPER_URL, "ghp_exampletoken");
+    expect(env?.GIT_CONFIG_COUNT).toBe("2");
+    // Slot 0 clears, slot 1 answers. Swapping them leaves no helper at all.
+    expect(env?.GIT_CONFIG_KEY_0).toBe("credential.helper");
+    expect(env?.GIT_CONFIG_VALUE_0).toBe("");
+    expect(env?.GIT_CONFIG_KEY_1).toBe("credential.https://github.com.helper");
+    expect(env?.GIT_CONFIG_VALUE_1).toContain("ghp_exampletoken");
+  });
+
+  test("refuses a token carrying whitespace or a quote rather than embedding it", () => {
+    // The helper value is a shell-quoted string, so either character would break
+    // out of it. Falling back to the reset-only env is the safe direction.
+    for (const bad of ["tok en", "tok'en", "tok\nen"]) {
+      expect(fleetCloneEnv(HELPER_URL, bad)?.GIT_CONFIG_COUNT).toBe("1");
+      expect(fleetCloneEnv(HELPER_URL, bad)?.GIT_CONFIG_VALUE_1).toBeUndefined();
+    }
+  });
+
+  test("never puts the token anywhere a process listing would show it", () => {
+    // Via GIT_CONFIG_* only: not in argv, not in the url.
+    const env = fleetCloneEnv(HELPER_URL, "ghp_exampletoken");
+    const slots = Object.entries(env ?? {}).filter(([key]) => key.startsWith("GIT_CONFIG_VALUE"));
+    expect(slots.filter(([, value]) => value.includes("ghp_exampletoken"))).toHaveLength(1);
   });
 });
