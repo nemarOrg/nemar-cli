@@ -36,6 +36,7 @@ import {
   isAccountKind,
 } from "../../shared/contract/index.js";
 import {
+  type AnonymitySweepBatchResponse,
   type AvailabilityReport,
   type AvailabilityReportResult,
   type AvailabilityReportSweepBatchResponse,
@@ -61,6 +62,8 @@ import {
   type WeeklySummaryResponse,
   type ZarrFidelitySweepBatchResponse,
   addCi,
+  anonymitySweep,
+  anonymitySweepReset,
   approveUser,
   approveUserById,
   availabilityReport,
@@ -6876,6 +6879,92 @@ zarrFidelitySweepCommand
 adminCommand.addCommand(zarrFidelitySweepCommand);
 
 // ============================================================================
+// Anonymity verification sweep (issue #1409, epic #1406)
+// ============================================================================
+
+const anonymitySweepCommand = new Command("anonymity-sweep").description(
+  "Re-check anonymous deposits against the identity-leak inventory (#1409)",
+);
+
+anonymitySweepCommand
+  .option("--limit <n>", "Datasets per batch (server clamps to [1,25])", "10")
+  .option("--reset", "Re-arm every anonymous deposit, then exit")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { limit?: string; reset?: boolean; json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    if (options.reset) {
+      const spinner = ora("Re-arming anonymous deposits...").start();
+      try {
+        const res = await anonymitySweepReset();
+        spinner.succeed(`Re-armed ${res.reset} anonymous deposit(s).`);
+      } catch (err) {
+        spinner.fail("Reset failed");
+        console.error(chalk.red(errorDetail(err)));
+        process.exit(1);
+      }
+      return;
+    }
+
+    const limit = Number.parseInt(options.limit ?? "10", 10) || 10;
+    const spinner = ora("Checking anonymous deposits...").start();
+
+    let res: AnonymitySweepBatchResponse;
+    try {
+      res = await anonymitySweep({ limit });
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Anonymity sweep failed");
+      console.error(chalk.red(errorDetail(err)));
+      process.exit(1);
+      return;
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(res, null, 2));
+    } else {
+      console.log();
+      console.log(
+        chalk.cyan(
+          `processed=${res.processed} verified=${res.verified} findings=${res.with_findings} unverifiable=${res.unverifiable} errors=${res.errors.length} remaining=${res.remaining ?? "unknown"}${res.budget_exhausted ? " budget_exhausted=true" : ""}`,
+        ),
+      );
+      for (const r of res.results) {
+        const color =
+          r.status === "verified"
+            ? chalk.green
+            : r.status === "findings"
+              ? chalk.red
+              : chalk.yellow;
+        console.log(
+          `  ${color(r.status.padEnd(13))} ${r.dataset_id}  (files ${r.files_scanned}/${r.files_listed})`,
+        );
+        for (const f of r.findings) {
+          const tag = f.severity === "invariant" ? chalk.red("NEMAR") : chalk.yellow("deposit");
+          console.log(`      ${tag} ${f.check}: ${f.detail}`);
+        }
+        // Printed for EVERY dataset, including a verified one. "Verified" here
+        // means "everything this sweep can check is fine", and a reader who is
+        // not told what it cannot check will hear something stronger.
+        if (r.unchecked.length > 0) {
+          console.log(`      ${chalk.dim(`not checked: ${r.unchecked.join(", ")}`)}`);
+        }
+      }
+      for (const e of res.errors) {
+        console.log(`  ${chalk.red("error")}         ${e.dataset_id}: ${e.error}`);
+      }
+    }
+    // Same convention as the fidelity sweep: a non-zero exit means the RUN was
+    // partial or uncertain, never that it found something. A findings verdict
+    // is the sweep working.
+    if (res.errors.length > 0 || res.remaining === null || res.budget_exhausted) {
+      process.exit(1);
+    }
+  });
+
+adminCommand.addCommand(anonymitySweepCommand);
+
+// ============================================================================
 // Doctor: diagnostic checks + remediation (#1130)
 // ============================================================================
 
@@ -7170,6 +7259,7 @@ emailPrefsCommand
         { key: "user_approval", label: "User approval notifications" },
         { key: "publication_request", label: "Publication request notifications" },
         { key: "announcements", label: "Announcement emails" },
+        { key: "dataset_anonymity", label: "Anonymity sweep findings" },
       ];
 
       for (const cat of categories) {
@@ -7192,6 +7282,7 @@ emailPrefsCommand
   .option("--user-approval <bool>", "Enable/disable user approval notifications")
   .option("--publication-request <bool>", "Enable/disable publication request notifications")
   .option("--announcements <bool>", "Enable/disable announcement emails")
+  .option("--dataset-anonymity <bool>", "Enable/disable anonymity sweep findings")
   .option("--all <bool>", "Enable/disable all notifications")
   .option("--user <username>", "(owner only) update another user's preferences")
   .action(
@@ -7199,6 +7290,7 @@ emailPrefsCommand
       userApproval?: string;
       publicationRequest?: string;
       announcements?: string;
+      datasetAnonymity?: string;
       all?: string;
       user?: string;
     }) => {
@@ -7225,16 +7317,19 @@ emailPrefsCommand
         updates.user_approval = val;
         updates.publication_request = val;
         updates.announcements = val;
+        updates.dataset_anonymity = val;
       } else {
         const ua = parseBool(options.userApproval);
         const pr = parseBool(options.publicationRequest);
         const ann = parseBool(options.announcements);
+        const anon = parseBool(options.datasetAnonymity);
 
-        if (ua === undefined && pr === undefined && ann === undefined) {
+        if (ua === undefined && pr === undefined && ann === undefined && anon === undefined) {
           console.error(chalk.red("No preferences specified."));
           console.log("  --user-approval <bool>        User approval notifications");
           console.log("  --publication-request <bool>   Publication request notifications");
           console.log("  --announcements <bool>         Announcement emails");
+          console.log("  --dataset-anonymity <bool>     Anonymity sweep findings");
           console.log("  --all <bool>                   All notifications");
           process.exit(1);
         }
@@ -7242,6 +7337,7 @@ emailPrefsCommand
         if (ua !== undefined) updates.user_approval = ua;
         if (pr !== undefined) updates.publication_request = pr;
         if (ann !== undefined) updates.announcements = ann;
+        if (anon !== undefined) updates.dataset_anonymity = anon;
       }
 
       const spinner = ora("Updating email preferences...").start();

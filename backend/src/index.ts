@@ -39,6 +39,7 @@ import { schemaRoutes } from "./routes/schemas";
 import { userRoutes } from "./routes/users";
 import webhooks from "./routes/webhooks";
 import { zarrDataRoutes } from "./routes/zarr-data";
+import { runAnonymitySweepCron } from "./services/anonymity-sweep";
 import { archiveRetrySweep } from "./services/archive-retry";
 import { AUTO_IMPORT_CRON, autoImportTick } from "./services/auto-import";
 import { runAvailabilityReportSweepCron } from "./services/availability-report";
@@ -1164,6 +1165,45 @@ export default {
           .catch((err) =>
             console.error(
               "[signal-defaults-sweep] sweep failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
+      );
+
+      // #1409 (epic #1406): re-check every anonymous deposit against the leak
+      // inventory. PRODUCTION-ONLY, and the reason is the rule stated at the
+      // top of this block rather than a judgment call: it mints a GitHub App
+      // token to read PRIVATE dataset repositories in the shared
+      // `nemarDatasets` org, and it emails a real depositor when it finds
+      // something. Either one on its own disqualifies it from
+      // DEV_CRON_ALLOWLIST. The sweep function itself is unguarded so the
+      // admin route still works on staging; runAnonymitySweepCron carries the
+      // fence, same split as runSignalDefaultsSweepCron above.
+      ctx.waitUntil(
+        runAnonymitySweepCron(env)
+          .then((r) => {
+            const lines = sweepLogLines(
+              "anonymity-sweep",
+              r,
+              (r) =>
+                `[anonymity-sweep] processed=${r.processed} verified=${r.verified} findings=${r.with_findings} unverifiable=${r.unverifiable} errors=${r.errors.length} remaining=${r.remaining ?? "?"}`,
+            );
+            // Findings are logged at error level even though the sweep
+            // succeeded: the run is fine and the dataset is not, and a line
+            // that reads as routine is one nobody looks at.
+            if (lines.info) console.log(lines.info);
+            for (const e of lines.errors) console.error(e);
+            for (const d of r?.results ?? []) {
+              if (d.status === "findings") {
+                console.error(
+                  `[anonymity-sweep] ${d.dataset_id}: ${d.findings.length} finding(s) -- ${d.findings.map((f) => f.check).join(", ")}`,
+                );
+              }
+            }
+          })
+          .catch((err) =>
+            console.error(
+              "[anonymity-sweep] sweep failed:",
               err instanceof Error ? (err.stack ?? err.message) : err,
             ),
           ),

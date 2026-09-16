@@ -1269,6 +1269,8 @@ export interface EmailPreferences {
   user_approval: boolean;
   publication_request: boolean;
   announcements: boolean;
+  /** #1409: findings from the anonymity sweep on an anonymous deposit. */
+  dataset_anonymity: boolean;
 }
 
 /** Preferences plus whose they are (the backend echoes the resolved username). */
@@ -1977,5 +1979,76 @@ export async function clearIdentityConflict(id: number): Promise<ClearIdentityCo
     { method: "POST" },
     true,
     clearIdentityConflictResponseSchema,
+  );
+}
+
+// ============================================================================
+// Anonymity verification sweep (issue #1409, epic #1406)
+// ============================================================================
+
+/** One thing the sweep found. Never carries the matched text (#1409). */
+export interface AnonymityFinding {
+  /** Stable id, so a caller can branch without parsing prose. */
+  check: string;
+  /**
+   * `invariant` is a NEMAR guarantee that stopped holding; `deposit` is
+   * something the depositor left in their own files. Only the first is a bug,
+   * and only the second is the depositor's to fix.
+   */
+  severity: "invariant" | "deposit";
+  detail: string;
+  file?: string;
+}
+
+/** Per-dataset outcome for every candidate the sweep reached a verdict for. */
+export interface AnonymityDatasetResult {
+  dataset_id: string;
+  /** `findings` rather than `failed`: not every finding is NEMAR's bug. */
+  status: "verified" | "findings" | "unverifiable";
+  findings: AnonymityFinding[];
+  /**
+   * Check ids this run could not evaluate. NEVER empty: identity inside the
+   * recordings themselves is always in here, because a Worker does not pull
+   * annexed gigabytes to read an EDF header. A caller that renders "no
+   * findings" without this is claiming more than the sweep did.
+   */
+  unchecked: string[];
+  files_scanned: number;
+  files_listed: number;
+}
+
+/** One batch of the anonymity sweep (`POST /admin/datasets/anonymity-sweep`). */
+export interface AnonymitySweepBatchResponse {
+  processed: number;
+  verified: number;
+  with_findings: number;
+  unverifiable: number;
+  results: AnonymityDatasetResult[];
+  errors: { dataset_id: string; error: string }[];
+  /** Candidates still owing a pass; null if the count query failed. */
+  remaining: number | null;
+  budget_exhausted: boolean;
+}
+
+/** Run one bounded anonymity sweep batch (server default 10, max 25). */
+export async function anonymitySweep(options?: {
+  limit?: number;
+}): Promise<AnonymitySweepBatchResponse> {
+  const params = new URLSearchParams();
+  if (options?.limit != null) params.set("limit", String(options.limit));
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return request<AnonymitySweepBatchResponse>(
+    `/admin/datasets/anonymity-sweep${query}`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
+  );
+}
+
+/** Re-arm every anonymous deposit for the next pass (verdict AND attempt stamp). */
+export async function anonymitySweepReset(): Promise<{ reset: number }> {
+  return request<{ reset: number }>(
+    "/admin/datasets/anonymity-sweep?reset=1",
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    true,
   );
 }

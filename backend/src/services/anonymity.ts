@@ -293,14 +293,23 @@ export function blindEnrichmentMetadata<T extends object>(metadata: T): T {
   return rest as T;
 }
 
-/** The JSON paths `blindEnrichmentMetadata` removes, for the D1-side scrub below. */
-const BLINDED_METADATA_PATHS = [
-  "$.authors",
-  "$.contributors",
-  "$.funding_references",
-  "$.geo_locations",
-  "$.related_identifiers",
+/**
+ * The top-level enrichment keys `blindEnrichmentMetadata` removes.
+ *
+ * Exported because the anonymity sweep (#1409) re-checks them: the blind is a
+ * claim about what the cache and the committed document hold, and a claim
+ * nothing re-reads is a claim that stops being true quietly.
+ */
+export const BLINDED_METADATA_KEYS = [
+  "authors",
+  "contributors",
+  "funding_references",
+  "geo_locations",
+  "related_identifiers",
 ] as const;
+
+/** The same keys as JSON paths, for the D1-side scrub below. */
+const BLINDED_METADATA_PATHS = BLINDED_METADATA_KEYS.map((key) => `$.${key}`);
 
 /**
  * Turn anonymity on, and scrub what a previous enrichment already published.

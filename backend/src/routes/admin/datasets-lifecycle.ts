@@ -14,6 +14,11 @@ import { z } from "zod";
 
 import { auditLogStatement } from "../../db/audit-log";
 import { SYSTEM_USER_ID } from "../../lib/constants";
+import {
+  ANONYMITY_SWEEP_DEFAULT,
+  ANONYMITY_SWEEP_RESET_SQL,
+  runAnonymitySweep,
+} from "../../services/anonymity-sweep";
 import { shouldSkipArchive } from "../../services/archive-policy";
 import {
   AVAILABILITY_REPORT_SWEEP_MAX,
@@ -601,6 +606,52 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       console.error("[signal-defaults-sweep] candidate query failed:", err);
       return c.json(
         { error: "Failed to query sweep candidates (are migrations 0072/0073 applied?)" },
+        500,
+      );
+    }
+  });
+
+  /**
+   * POST /admin/datasets/anonymity-sweep?limit=N — re-check anonymous deposits
+   * against the identity-leak inventory (#1409, epic #1406).
+   *
+   * Reports; never repairs. A dataset that has already been disclosed cannot be
+   * un-disclosed by flipping a flag, and an automatic fix would destroy the
+   * evidence that the guarantee failed. Findings land in `sweep_stamps`, in an
+   * `audit_log` row, and in mail to the depositor and the admins.
+   *
+   * `?reset=1` re-arms every anonymous deposit, clearing the ATTEMPT stamp as
+   * well as the verdict — leaving the attempt would hold the row outside the
+   * candidate window for another 20 hours, which is not a reset.
+   *
+   * Unguarded on purpose so an operator can run it against staging; the daily
+   * cron goes through `runAnonymitySweepCron`, which is production-only because
+   * this mints a GitHub App token against the shared org and emails a real
+   * depositor.
+   */
+  admin.post("/datasets/anonymity-sweep", async (c) => {
+    const db = c.env.DB;
+
+    if (c.req.query("reset") === "1") {
+      try {
+        const res = await db.prepare(ANONYMITY_SWEEP_RESET_SQL).run();
+        return c.json({ reset: res.meta?.changes ?? 0 });
+      } catch (err) {
+        console.error("[anonymity-sweep] reset failed:", err);
+        return c.json({ error: "Failed to reset anonymity verdicts" }, 500);
+      }
+    }
+
+    const limitRaw = Number.parseInt(c.req.query("limit") || String(ANONYMITY_SWEEP_DEFAULT), 10);
+    const limit = Number.isFinite(limitRaw) ? limitRaw : ANONYMITY_SWEEP_DEFAULT;
+
+    try {
+      const result = await runAnonymitySweep(c.env, { limit });
+      return c.json(result);
+    } catch (err) {
+      console.error("[anonymity-sweep] candidate query failed:", err);
+      return c.json(
+        { error: "Failed to query sweep candidates (is migration 0085 applied?)" },
         500,
       );
     }

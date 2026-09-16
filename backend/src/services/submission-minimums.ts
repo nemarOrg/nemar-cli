@@ -75,6 +75,19 @@ export interface SubmissionMinimumsOptions {
   anonymousRelease?: boolean;
 }
 
+/**
+ * Does this Authors-style entry name nobody?
+ *
+ * Exported so the anonymity sweep (#1409) asks the SAME question this gate
+ * asks. The two run at different moments -- the gate once, at the publication
+ * request; the sweep on a schedule, over a deposit whose files keep changing
+ * while its repository is private -- and they must not be able to disagree
+ * about what counts as a placeholder.
+ */
+export function isPlaceholderAuthor(entry: string): boolean {
+  return PLACEHOLDER_AUTHOR.test(entry.trim());
+}
+
 /** Reasons are user-facing: each states the failure AND the fix. */
 export function evaluateSubmissionMinimums(
   descriptionJson: string | null,
@@ -110,7 +123,7 @@ export function evaluateSubmissionMinimums(
         (a) => a.trim(),
       )
     : [];
-  const realAuthors = authors.filter((a) => !PLACEHOLDER_AUTHOR.test(a));
+  const realAuthors = authors.filter((a) => !isPlaceholderAuthor(a));
   // The two rules are exact COMPLEMENTS, not a relaxation: a publication needs
   // at least one real name, a blinded release needs none. Both need a
   // non-empty field, because an empty Authors is an incomplete file rather
